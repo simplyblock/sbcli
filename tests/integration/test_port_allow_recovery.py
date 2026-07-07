@@ -1,56 +1,76 @@
 # coding=utf-8
 """
-test_port_allow_recovery.py — unit tests for
-``tasks_runner_port_allow.exec_port_allow_task``.
+test_port_allow_recovery.py — tests for
+``tasks_runner_port_allow.exec_port_allow_task`` (network-outage recovery).
 
-Invariants covered:
+Reworked 2026-07-07 after the 2026-07-06 failback incident: the management
+plane prepares redirection and then steps away. Invariants covered:
 
-  1. **Cluster map sent before unblock.** Before the recovering node's
-     port is unblocked, the full cluster map must be pushed via
-     ``distr_controller.send_cluster_map_to_node`` so every distrib on
-     the recovering node has fresh per-device state. Otherwise the
-     first IO through the unblocked port hits
-     ``status_device=48 / is_device_available_read=0`` and raises a
-     DISTRIBD "Unable to read stripe" error.
+  1. **No port is ever blocked by this runner.** The 2026-07-06 design
+     fenced a DOWN follower's redirect-listener ports at first contact and
+     port-blocked the acting leader during failback; blocking LVS ports
+     mid-IO severed redirect chains (DISTRIBD n_unavail_read) and JC paths
+     (history_append n_success=0 -> node abort). The runner's ONLY
+     ``port_block.set_port`` call is the final unblock of the recovering
+     node's own port.
 
-  2. **Fenced leadership failback.** When a peer holds LVS leadership at
-     port_allow time (it became acting leader during the outage), the
-     runner must fail leadership back to the recovering primary BEFORE
-     the node's port is unblocked: block the peer's port, drain
-     in-flight IO (bounded), demote the peer
-     (``bdev_lvol_set_leader(leader=False, bs_nonleadership=True)`` +
-     ``bdev_distrib_force_to_non_leader``), take leadership on the
-     primary, re-commit the peer's follower role, and only then unblock
-     the peer's port and allow the node's port.
+  2. **Device-state refresh before unblock** (replaces the old full
+     ``send_cluster_map_to_node`` push, which is GONE): re-admit the
+     recovering node's non-ONLINE/non-REMOVED/non-JM/non-NEW devices via
+     ``device_set_online(cause=CAUSE_NODE_RECOVERY)`` (passes the stale
+     re-online guard while the node is still DOWN), broadcast the node's
+     local device status to ALL nodes, and send every other node's device
+     status to the recovering node only — all BEFORE the port opens, so no
+     distrib works from a stale device view on the first IO (2026-07-06
+     18:23: 3 of 4 sids online=0, "Failed to find available location").
 
-     Background: an unfenced force-failback here caused incident
-     2026-05-02 (k8s_native_failover_ha-20260502-101452) — it demoted
-     the legitimately-elected new leader with unverified hublvols and
-     no drain, cutting client IO. It was removed; but leaving
-     leadership on the peer turned out equally wrong: nothing on the
-     no-restart recovery path reconciles the ex-leader afterwards, its
-     redirect stays broken and the monitor flips it DOWN. The failback
-     is therefore reinstated WITH fencing: it runs only after the peer
-     hublvol gate has proven every online follower can redirect.
+  3. **Minimal leadership failback.** When a peer holds LVS leadership at
+     port_allow time: quiesce + ``jc_disable_replication`` on the acting
+     leader (retried in a bounded LOCAL loop, not via task suspension),
+     verified-open hublvols from every reachable peer to the primary, then
+     exactly ONE plain ``bdev_lvol_set_leader(leader=False)`` demote of the
+     acting leader. The CP never assigns leadership — a management-forced
+     ``leader=True`` skips the primary's LVS update and serves stale blob
+     metadata (2026-07-06 18:23 extent-metadata corruption); the primary
+     takes leadership itself on the first redirected IO. If NO peer leads,
+     the runner does nothing leadership-wise. No port blocks, no in-flight
+     drain window anywhere.
 
-  3. **Own follower-side hublvols wired before unblock.** The recovering
-     node's hublvol connections for lvstores it serves as secondary /
-     tertiary (reverse refs ``lvstore_stack_secondary`` /
-     ``lvstore_stack_tertiary``) — outbound to the primary, plus the
-     inbound secondary-hublvol exposure the tertiary multipaths to —
-     must be (re)established before the port opens; the periodic health
-     loop repaired them only after.
+  4. **Own follower-side hublvols wired before unblock.** Outbound to
+     ONLINE primaries, inbound secondary-hublvol NQN exposure, the
+     tertiary->secondary hublvol HARD GATE when the primary is out, and
+     the tertiary re-wired to the acting secondary. No ANA calls inside
+     the hublvol wiring.
 
-  4. **The recovering node's port is firewall-allowed exactly once**, on
-     the requested port number, as the last step.
+  5. **The recovering node's port is firewall-allowed exactly once**, on
+     the requested port number — the runner's only firewall action.
+
+  6. **Deferred ANA promotion, strictly POST-unblock.** A secondary
+     recovering while its primary is OFFLINE returns with non-optimized
+     listeners (trigger_ana_failover_for_node skipped it while the node
+     wasn't ONLINE). After the port opens, the runner promotes this
+     node's listeners for the primary's lvols to "optimized" per-lvol
+     via ``storage_node_ops._set_lvol_ana_on_node`` — best-effort and
+     non-gating, so IO drains back from the tertiary gradually. No
+     promotion when the primary is ONLINE (or merely DOWN).
 """
 
 import unittest
 from unittest.mock import MagicMock, patch
 
+from simplyblock_core.controllers import device_controller
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.nvme_device import NVMeDevice
+from simplyblock_core.models.lvol_model import LVol
+
+
+def _make_lvol(uuid, status=None):
+    lv = LVol()
+    lv.uuid = uuid
+    lv.status = status or LVol.STATUS_ONLINE
+    lv.nqn = f"nqn.test:lvol:{uuid}"
+    return lv
 
 
 def _make_device(uuid, status, io_error=False, retries_exhausted=False, order=0):
@@ -114,25 +134,29 @@ class _BasePortAllowTest(unittest.TestCase):
         self.node_rpc = MagicMock(name="node_rpc")
         self.sec_rpc = MagicMock(name="sec_rpc")
         # Default scenario: the secondary became acting leader during the
-        # outage; the recovering primary reads back leadership after the
-        # failback's take (poll on bdev_lvol_get_lvstores).
+        # outage. The recovering primary does NOT lead — and never will
+        # through this runner: it promotes itself on the first redirected
+        # IO after running its LVS update.
         self.sec_rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": True}]
         self.sec_rpc.jc_compression_get_status.return_value = False
-        self.sec_rpc.jc_disable_replication.return_value = True
-        self.sec_rpc.bdev_distrib_check_inflight_io.return_value = False
-        self.node_rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": True}]
+        self.node_rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": False}]
 
         self.node.rpc_client = MagicMock(return_value=self.node_rpc)
         self.sec.rpc_client = MagicMock(return_value=self.sec_rpc)
         self.sec.wait_for_jm_rep_tasks_to_finish = MagicMock(return_value=True)
-        # Follower re-commit after the demote drives connect_to_hublvol on
-        # the ex-leader (set_lvs_opts + connect_hublvol re-commit).
         self.sec.connect_to_hublvol = MagicMock(return_value=True)
 
         self.node.get_lvol_subsys_port = MagicMock(return_value=self.port)
         self.sec.get_lvol_subsys_port = MagicMock(return_value=self.port)
 
         self.calls = []
+
+        # jc_disable_replication is the failback's quiesce gate; record it
+        # so ordering assertions can see it.
+        def _jc_disable_side(vuid):
+            self.calls.append(("jc_disable_replication", "sec", vuid))
+            return True
+        self.sec_rpc.jc_disable_replication.side_effect = _jc_disable_side
 
         # Record any RPC that represents leadership manipulation, with its
         # kwargs so tests can distinguish demote from promote.
@@ -148,9 +172,7 @@ class _BasePortAllowTest(unittest.TestCase):
                     return _side
                 getattr(rpc, method).side_effect = _make_side()
 
-        # port_block.set_port spy. Port (un)blocking moved off the
-        # directly-imported FirewallClient onto port_block.set_port(node,
-        # port, block=...). Record each call in the legacy
+        # port_block.set_port spy. Record each call in the legacy
         # ("firewall_set_port", target_uuid, port, action) shape so the
         # assertions below keep working unchanged.
         def _set_port_side_effect(node, port, block, *a, **kw):
@@ -161,9 +183,30 @@ class _BasePortAllowTest(unittest.TestCase):
         self.db_mock = MagicMock(
             get_task_by_id=MagicMock(return_value=self.task),
             get_storage_node_by_id=MagicMock(side_effect=self._get_node),
+            get_storage_nodes_by_cluster_id=MagicMock(
+                side_effect=lambda cluster_id: self._cluster_nodes()),
             get_lvols_by_node_id=MagicMock(return_value=[]),
             kv_store=MagicMock(),
         )
+
+        # Spy for the REMOVED full-cluster-map push: the targeted
+        # device-state refresh replaced it and the runner must never call
+        # it again.
+        self.cluster_map_push = MagicMock(name="send_cluster_map_to_node")
+
+        def _dev_event_side(dev, status, target_node=None):
+            self.calls.append((
+                "send_dev_status_event", dev.get_id(), status,
+                target_node.uuid if target_node is not None else None))
+            return True
+
+        def _dev_set_online_side(dev_id, *a, **kw):
+            self.calls.append(("device_set_online", dev_id, kw.get("cause")))
+            return True
+
+        def _check_sec_hublvol_side(peer_node, auto_fix=True, primary_node_id=None):
+            self.calls.append(("check_sec_hublvol", peer_node.uuid, primary_node_id))
+            return True
 
         self._patches = [
             patch(
@@ -184,10 +227,15 @@ class _BasePortAllowTest(unittest.TestCase):
             ),
             patch(
                 "simplyblock_core.services.tasks_runner_port_allow.distr_controller.send_cluster_map_to_node",
-                side_effect=self._send_cluster_map,
+                self.cluster_map_push,
             ),
             patch(
                 "simplyblock_core.services.tasks_runner_port_allow.distr_controller.send_dev_status_event",
+                side_effect=_dev_event_side,
+            ),
+            patch(
+                "simplyblock_core.services.tasks_runner_port_allow.device_controller.device_set_online",
+                side_effect=_dev_set_online_side,
             ),
             patch(
                 "simplyblock_core.services.tasks_runner_port_allow.health_controller._check_node_lvstore",
@@ -199,7 +247,7 @@ class _BasePortAllowTest(unittest.TestCase):
             ),
             patch(
                 "simplyblock_core.services.tasks_runner_port_allow.health_controller._check_sec_node_hublvol",
-                return_value=True,
+                side_effect=_check_sec_hublvol_side,
             ),
             patch(
                 "simplyblock_core.services.tasks_runner_port_allow.tasks_controller.get_lvol_sync_del_task",
@@ -212,23 +260,6 @@ class _BasePortAllowTest(unittest.TestCase):
             patch(
                 "simplyblock_core.port_block.set_port",
                 side_effect=_set_port_side_effect,
-            ),
-            patch(
-                "simplyblock_core.port_block.is_port_blocked",
-                return_value=False,
-            ),
-            patch(
-                "simplyblock_core.services.tasks_runner_port_allow.storage_node_ops._failback_primary_ana",
-                side_effect=lambda n: self.calls.append(("ana_failback", n.uuid)),
-            ),
-            patch(
-                "simplyblock_core.services.tasks_runner_port_allow.storage_node_ops._set_lvol_ana_on_node",
-                side_effect=lambda lvol, n, ana: self.calls.append(
-                    ("ana_set", lvol.nqn, n.uuid, ana)),
-            ),
-            patch(
-                "simplyblock_core.services.tasks_runner_port_allow.tcp_ports_events.port_deny",
-                side_effect=lambda n, p: self.calls.append(("port_deny", n.uuid, p)),
             ),
             patch(
                 "simplyblock_core.services.tasks_runner_port_allow.tcp_ports_events.port_allowed",
@@ -253,52 +284,131 @@ class _BasePortAllowTest(unittest.TestCase):
             return self.sec
         raise KeyError(uuid)
 
-    def _send_cluster_map(self, n):
-        self.calls.append(("send_cluster_map_to_node", n.uuid))
-        return True
+    def _cluster_nodes(self):
+        """Nodes returned by get_storage_nodes_by_cluster_id (the targeted
+        device-event loop iterates it)."""
+        return [self.node, self.sec]
 
+    def _idx(self, pred):
+        return next(i for i, c in enumerate(self.calls) if pred(c))
 
-class TestClusterMapBeforeUnblock(_BasePortAllowTest):
-    """Cluster map must reach the recovering node before the firewall
-    allow, so distribs see fresh per-device state on the first IO."""
-
-    def test_cluster_map_sent_before_port_allow(self):
-        from simplyblock_core.services.tasks_runner_port_allow import exec_port_allow_task
-        exec_port_allow_task(self.task)
-
-        map_send_idx = next(
-            i for i, c in enumerate(self.calls) if c[0] == "send_cluster_map_to_node"
-        )
-        node_allow_idx = next(
-            i for i, c in enumerate(self.calls)
-            if c[0] == "firewall_set_port" and c[1] == self.node.uuid and c[3] == "allow"
-        )
-        self.assertLess(
-            map_send_idx, node_allow_idx,
-            "send_cluster_map_to_node must fire BEFORE the recovering node's "
-            "firewall allow; otherwise distribs have stale remote-device state.",
-        )
-
-    def test_cluster_map_failure_suspends_task(self):
-        from simplyblock_core.services.tasks_runner_port_allow import exec_port_allow_task
-
-        # Stop the side-effect-recording patch and re-patch with a failing
-        # send_cluster_map_to_node.
-        self._patches[4].stop()  # the send_cluster_map patch
-        with patch(
-            "simplyblock_core.services.tasks_runner_port_allow.distr_controller.send_cluster_map_to_node",
-            return_value=False,
-        ):
-            exec_port_allow_task(self.task)
-
-        # Task suspended, no firewall allow on the node.
-        self.assertEqual(self.task.status, JobSchedule.STATUS_SUSPENDED)
-        node_allow = [
+    def _node_allows(self):
+        return [
             c for c in self.calls
             if c[0] == "firewall_set_port" and c[1] == self.node.uuid and c[3] == "allow"
         ]
-        self.assertEqual(node_allow, [],
-                         "no firewall allow may fire when cluster map push failed")
+
+
+class TestDeviceRefreshBeforeUnblock(_BasePortAllowTest):
+    """The targeted device-state refresh (which REPLACED the full
+    ``send_cluster_map_to_node`` push) must complete before the firewall
+    allow: (a) re-admit the recovering node's non-ONLINE devices in FDB
+    with CAUSE_NODE_RECOVERY, (b) broadcast the node's local device status
+    to all nodes, (c) send the other nodes' device status to the
+    recovering node only. Otherwise the first IO through the unblocked
+    port works from a stale device view (2026-07-06 18:23 incident:
+    3 of 4 sids online=0, "Failed to find available location")."""
+
+    def setUp(self):
+        super().setUp()
+        self.dev_unavail = _make_device(
+            "dev-a-unavail", NVMeDevice.STATUS_UNAVAILABLE, order=0)
+        self.dev_online = _make_device(
+            "dev-a-online", NVMeDevice.STATUS_ONLINE, order=1)
+        self.dev_jm = _make_device("dev-a-jm", NVMeDevice.STATUS_JM, order=2)
+        self.node.nvme_devices = [self.dev_unavail, self.dev_online, self.dev_jm]
+        self.sec_dev = _make_device("dev-b-1", NVMeDevice.STATUS_ONLINE, order=0)
+        self.sec.nvme_devices = [self.sec_dev]
+
+    def _run(self):
+        from simplyblock_core.services.tasks_runner_port_allow import exec_port_allow_task
+        exec_port_allow_task(self.task)
+
+    def test_full_cluster_map_push_is_gone(self):
+        self._run()
+        self.cluster_map_push.assert_not_called()
+        self.assertEqual(self.task.status, JobSchedule.STATUS_DONE)
+
+    def test_readmit_uses_node_recovery_cause_and_precedes_unblock(self):
+        self._run()
+        readmits = [c for c in self.calls
+                    if c[0] == "device_set_online"
+                    and c[2] == device_controller.CAUSE_NODE_RECOVERY]
+        self.assertEqual(
+            [c[1] for c in readmits], ["dev-a-unavail"],
+            "only non-ONLINE/non-REMOVED/non-JM/non-NEW devices are "
+            "re-admitted before the unblock, with the node-recovery cause "
+            "(it passes the stale re-online guard while the node is DOWN)")
+        i_readmit = self._idx(
+            lambda c: c[0] == "device_set_online"
+            and c[2] == device_controller.CAUSE_NODE_RECOVERY)
+        i_allow = self._idx(
+            lambda c: c[0] == "firewall_set_port" and c[1] == self.node.uuid
+            and c[3] == "allow")
+        self.assertLess(i_readmit, i_allow,
+                        "the FDB re-admit must land before the port opens")
+
+    def test_local_broadcast_then_targeted_events_before_unblock(self):
+        self._run()
+        broadcasts = [c for c in self.calls
+                      if c[0] == "send_dev_status_event" and c[3] is None]
+        self.assertEqual(
+            sorted(c[1] for c in broadcasts), ["dev-a-online", "dev-a-unavail"],
+            "ALL local non-JM/non-NEW devices are broadcast (no target) — "
+            "including the ones that stayed ONLINE through the outage; "
+            "JM devices are skipped")
+        targeted = [c for c in self.calls
+                    if c[0] == "send_dev_status_event" and c[3] is not None]
+        self.assertEqual(
+            [(c[1], c[3]) for c in targeted],
+            [("dev-b-1", self.node.uuid)],
+            "other nodes' devices are sent to the recovering node only "
+            "(targeted events, not a full cluster-map push)")
+        i_readmit = self._idx(
+            lambda c: c[0] == "device_set_online"
+            and c[2] == device_controller.CAUSE_NODE_RECOVERY)
+        i_bcast = self._idx(
+            lambda c: c[0] == "send_dev_status_event" and c[3] is None)
+        i_targeted = self._idx(
+            lambda c: c[0] == "send_dev_status_event" and c[3] is not None)
+        i_allow = self._idx(
+            lambda c: c[0] == "firewall_set_port" and c[1] == self.node.uuid
+            and c[3] == "allow")
+        self.assertLess(i_readmit, i_bcast,
+                        "FDB re-admit before the local broadcast")
+        self.assertLess(i_bcast, i_targeted,
+                        "local broadcast before the targeted refresh")
+        self.assertLess(i_targeted, i_allow,
+                        "every device event lands before the port opens")
+
+    def test_readmit_refused_suspends_task(self):
+        from simplyblock_core.services.tasks_runner_port_allow import exec_port_allow_task
+        with patch(
+            "simplyblock_core.services.tasks_runner_port_allow."
+            "device_controller.device_set_online",
+            return_value=False,
+        ):
+            exec_port_allow_task(self.task)
+        self.assertEqual(self.task.status, JobSchedule.STATUS_SUSPENDED)
+        self.assertEqual(self._node_allows(), [],
+                         "no firewall allow when the pre-unblock re-admit "
+                         "was refused")
+        events = [c for c in self.calls if c[0] == "send_dev_status_event"]
+        self.assertEqual(events, [],
+                         "no device events are sent when the re-admit failed")
+
+    def test_broadcast_failure_suspends_task(self):
+        from simplyblock_core.services.tasks_runner_port_allow import exec_port_allow_task
+        with patch(
+            "simplyblock_core.services.tasks_runner_port_allow."
+            "distr_controller.send_dev_status_event",
+            side_effect=Exception("distrib send failed"),
+        ):
+            exec_port_allow_task(self.task)
+        self.assertEqual(self.task.status, JobSchedule.STATUS_SUSPENDED)
+        self.assertEqual(self._node_allows(), [],
+                         "no firewall allow when the device-status refresh "
+                         "failed")
 
 
 class TestDataNicGate(_BasePortAllowTest):
@@ -352,69 +462,91 @@ class TestDataNicGate(_BasePortAllowTest):
 
 
 class TestLeadershipFailback(_BasePortAllowTest):
-    """Fenced leadership failback (reinstated 2026-07-06): when a peer is
-    acting leader at port_allow time, demote it and hand leadership back
-    to the recovering primary BEFORE the node's port opens — with the
-    port-block window, bounded drain, follower re-commit, and
-    zero-leader protection that the pre-2026-05-02 version lacked."""
+    """MINIMAL leadership failback (2026-07-07 design, after the 2026-07-06
+    failback incident): when a peer is acting leader at port_allow time the
+    CP prepares redirection and steps away — quiesce + jc_disable_replication
+    on the acting leader (bounded LOCAL retry loop), verified-open hublvols
+    from every reachable peer to the primary, then exactly ONE plain demote
+    (``bdev_lvol_set_leader(leader=False)``). The primary takes leadership
+    itself on the first redirected IO; the CP never assigns it, never blocks
+    a port, never drains in a blocked window."""
 
     def _run(self):
         from simplyblock_core.services.tasks_runner_port_allow import exec_port_allow_task
         exec_port_allow_task(self.task)
 
-    def _idx(self, pred):
-        return next(i for i, c in enumerate(self.calls) if pred(c))
-
-    def test_peer_leader_demoted_and_primary_takes_over(self):
+    def test_acting_leader_demoted_exactly_once_and_plain(self):
         self._run()
         sec_demotes = [
             c for c in self.calls
             if c[0] == "bdev_lvol_set_leader" and c[1] == "sec"
-            and c[2].get("leader") is False and c[2].get("bs_nonleadership") is True
         ]
-        self.assertEqual(len(sec_demotes), 1, f"expected one peer demote; calls={self.calls}")
+        self.assertEqual(len(sec_demotes), 1,
+                         f"expected exactly one peer demote; calls={self.calls}")
+        kw = sec_demotes[0][2]
+        self.assertIs(kw.get("leader"), False)
+        self.assertNotIn(
+            "bs_nonleadership", kw,
+            "the failback demote is a PLAIN leader=False — no bs_nonleadership")
         force_calls = [
             c for c in self.calls
-            if c[0] == "bdev_distrib_force_to_non_leader" and c[1] == "sec"
+            if c[0] == "bdev_distrib_force_to_non_leader"
         ]
-        self.assertEqual(len(force_calls), 1)
-        node_takes = [
+        self.assertEqual(force_calls, [],
+                         "no force_to_non_leader in the minimal failback")
+
+    def test_primary_never_takes_leadership(self):
+        self._run()
+        takes = [
+            c for c in self.calls
+            if c[0] == "bdev_lvol_set_leader" and c[2].get("leader") is True
+        ]
+        self.assertEqual(
+            takes, [],
+            "the runner must NEVER set leader=True: a management-forced take "
+            "skips the primary's LVS update and serves stale blob metadata "
+            "(2026-07-06 18:23 extent-metadata corruption)")
+        node_side = [
             c for c in self.calls
             if c[0] == "bdev_lvol_set_leader" and c[1] == "node"
-            and c[2].get("leader") is True
         ]
-        self.assertEqual(len(node_takes), 1, "recovering primary must take leadership back")
+        self.assertEqual(node_side, [],
+                         "no leadership mutation on the recovering primary at all")
 
-    def test_failback_ordering_block_drain_demote_recommit_unblock_allow(self):
+    def test_failback_order_quiesce_verify_demote_unblock(self):
         self._run()
-        i_block_sec = self._idx(
-            lambda c: c[0] == "firewall_set_port" and c[1] == self.sec.uuid and c[3] == "block")
+        i_jc = self._idx(lambda c: c[0] == "jc_disable_replication")
         i_demote = self._idx(
             lambda c: c[0] == "bdev_lvol_set_leader" and c[1] == "sec"
             and c[2].get("leader") is False)
-        i_take = self._idx(
-            lambda c: c[0] == "bdev_lvol_set_leader" and c[1] == "node"
-            and c[2].get("leader") is True)
-        i_unblock_sec = self._idx(
-            lambda c: c[0] == "firewall_set_port" and c[1] == self.sec.uuid and c[3] == "allow")
-        i_allow_node = self._idx(
-            lambda c: c[0] == "firewall_set_port" and c[1] == self.node.uuid and c[3] == "allow")
-        self.assertLess(i_block_sec, i_demote,
-                        "peer port must be blocked before the demote")
-        self.assertLess(i_demote, i_take, "demote precedes the primary's take")
-        self.assertLess(i_take, i_unblock_sec,
-                        "the peer's port reopens only after leadership moved "
-                        "and the follower role was re-committed")
-        self.assertLess(i_unblock_sec, i_allow_node,
-                        "the recovering node's port opens last")
-        # Follower re-commit happened before the peer port reopened.
-        self.sec.connect_to_hublvol.assert_called()
+        i_allow = self._idx(
+            lambda c: c[0] == "firewall_set_port" and c[1] == self.node.uuid
+            and c[3] == "allow")
+        self.assertLess(i_jc, i_demote,
+                        "journal replication is suspended before the demote")
+        verifies_between = [
+            c for c in self.calls[i_jc:i_demote]
+            if c[0] == "check_sec_hublvol" and c[1] == self.sec.uuid
+        ]
+        self.assertTrue(
+            verifies_between,
+            "the acting leader's hublvol to the primary must be verified "
+            "between the quiesce and the demote — leadership can only move "
+            "if the demoted leader can redirect")
+        self.assertLess(i_demote, i_allow,
+                        "the recovering node's port opens only after the demote")
+        self.sec.wait_for_jm_rep_tasks_to_finish.assert_called()
 
-    def test_ana_failback_fired_for_secondary_only(self):
+    def test_no_port_blocks_and_no_drain_window(self):
         self._run()
-        self.assertIn(("ana_failback", self.node.uuid), self.calls,
-                      "successful failback must reconcile the secondary's ANA "
-                      "listeners back to non_optimized")
+        blocks = [c for c in self.calls
+                  if c[0] == "firewall_set_port" and c[3] == "block"]
+        self.assertEqual(
+            blocks, [],
+            "the failback must NOT port-block the acting leader or any peer: "
+            "LVS ports carry hublvol/redirect and journal traffic; blocking "
+            "them mid-IO severed redirect chains and JC paths (2026-07-06)")
+        self.sec_rpc.bdev_distrib_check_inflight_io.assert_not_called()
 
     def test_no_failback_when_no_peer_leader(self):
         self.sec_rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": False}]
@@ -424,106 +556,213 @@ class TestLeadershipFailback(_BasePortAllowTest):
             if c[0] in ("bdev_lvol_set_leader", "bdev_distrib_force_to_non_leader")
         ]
         self.assertEqual(leadership_calls, [],
-                         "no demote and no take when the primary already leads")
-        sec_blocks = [
-            c for c in self.calls
-            if c[0] == "firewall_set_port" and c[1] == self.sec.uuid and c[3] == "block"
-        ]
-        self.assertEqual(sec_blocks, [], "no peer port-block without a failback")
-        node_allows = [
-            c for c in self.calls
-            if c[0] == "firewall_set_port" and c[1] == self.node.uuid and c[3] == "allow"
-        ]
-        self.assertEqual(len(node_allows), 1)
+                         "no leadership action when no peer holds leadership")
+        jc_calls = [c for c in self.calls if c[0] == "jc_disable_replication"]
+        self.assertEqual(jc_calls, [], "no quiesce without an acting leader")
+        self.assertEqual(len(self._node_allows()), 1)
+        self.assertEqual(self.task.status, JobSchedule.STATUS_DONE)
 
-    def test_zero_leader_is_healed_by_taking_leadership(self):
-        # Nobody holds leadership (no-abort outage aftermath): the primary
-        # must take it before the port opens.
+    def test_zero_leader_left_alone(self):
+        # Nobody holds leadership (no-abort outage aftermath): the runner
+        # does NOTHING leadership-wise — the primary promotes itself on the
+        # first arriving IO, after running its LVS update. The old
+        # _take_leadership_on_primary healing is gone (it caused the
+        # 2026-07-06 stale-metadata corruption).
         self.sec_rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": False}]
         self.node_rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": False}]
+        self._run()
+        leader_calls = [c for c in self.calls if c[0] == "bdev_lvol_set_leader"]
+        self.assertEqual(leader_calls, [],
+                         "a zero-leader LVS is left for the primary's "
+                         "promotion-on-first-IO — no CP-side healing")
+        self.assertEqual(len(self._node_allows()), 1)
+        self.assertEqual(self.task.status, JobSchedule.STATUS_DONE)
 
-        # Once set_leader(leader=True) fires on the node, leadership reads True.
-        def _set_leader_side(*a, **kw):
-            self.calls.append(("bdev_lvol_set_leader", "node", kw))
-            self.node_rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": True}]
-            return True
-        self.node_rpc.bdev_lvol_set_leader.side_effect = _set_leader_side
+    def test_quiesce_loop_retries_locally_then_succeeds(self):
+        # jc_disable_replication False = active replication -> re-quiesce
+        # and retry IN the loop (not via task suspension).
+        results = iter([False, True])
+
+        def _jc(vuid):
+            self.calls.append(("jc_disable_replication", "sec", vuid))
+            return next(results)
+        self.sec_rpc.jc_disable_replication.side_effect = _jc
 
         self._run()
-        node_takes = [
-            c for c in self.calls
-            if c[0] == "bdev_lvol_set_leader" and c[1] == "node" and c[2].get("leader") is True
-        ]
-        self.assertEqual(len(node_takes), 1,
-                         "zero-leader LVS must be healed by the primary taking leadership")
-        node_allows = [
-            c for c in self.calls
-            if c[0] == "firewall_set_port" and c[1] == self.node.uuid and c[3] == "allow"
-        ]
-        self.assertEqual(len(node_allows), 1)
+        jc_calls = [c for c in self.calls if c[0] == "jc_disable_replication"]
+        self.assertEqual(len(jc_calls), 2,
+                         "the disable retries locally inside the failback")
+        self.assertEqual(self.sec.wait_for_jm_rep_tasks_to_finish.call_count, 2,
+                         "each retry re-quiesces first")
+        demotes = [c for c in self.calls
+                   if c[0] == "bdev_lvol_set_leader" and c[1] == "sec"]
+        self.assertEqual(len(demotes), 1)
+        self.assertEqual(self.task.status, JobSchedule.STATUS_DONE)
 
-    def test_drain_timeout_suspends_and_releases_peer(self):
-        self.sec_rpc.bdev_distrib_check_inflight_io.return_value = True
+    def test_quiesce_loop_exhaustion_suspends(self):
+        from simplyblock_core.services.tasks_runner_port_allow import (
+            _REPL_SUSPEND_MAX_ATTEMPTS,
+        )
+
+        def _jc(vuid):
+            self.calls.append(("jc_disable_replication", "sec", vuid))
+            return False
+        self.sec_rpc.jc_disable_replication.side_effect = _jc
+
+        self._run()
+        jc_calls = [c for c in self.calls if c[0] == "jc_disable_replication"]
+        self.assertEqual(len(jc_calls), _REPL_SUSPEND_MAX_ATTEMPTS,
+                         "the quiesce+disable loop is bounded locally")
+        self.assertEqual(self.task.status, JobSchedule.STATUS_SUSPENDED)
+        demotes = [c for c in self.calls if c[0] == "bdev_lvol_set_leader"]
+        self.assertEqual(demotes, [],
+                         "no demote against active journal replication")
+        self.assertEqual(self._node_allows(), [],
+                         "the port stays blocked on quiesce exhaustion")
+
+    def test_jc_disable_raise_suspends(self):
+        self.sec_rpc.jc_disable_replication.side_effect = Exception("jc rpc timeout")
+        self._run()
+        self.assertEqual(self.task.status, JobSchedule.STATUS_SUSPENDED)
+        demotes = [c for c in self.calls if c[0] == "bdev_lvol_set_leader"]
+        self.assertEqual(demotes, [])
+        self.assertEqual(self._node_allows(), [])
+
+    def test_down_acting_leader_hublvol_is_still_a_hard_gate(self):
+        # The acting leader was flipped DOWN during the outage: the peer
+        # hublvol gate skips non-ONLINE peers, but the failback must still
+        # re-verify the acting leader's hublvol — leadership can only move
+        # if the demoted leader can redirect its in-flight IO.
+        self.sec.status = StorageNode.STATUS_DOWN
         with patch(
-            "simplyblock_core.services.tasks_runner_port_allow._FAILBACK_DRAIN_BOUND_SEC",
-            0.05,
+            "simplyblock_core.services.tasks_runner_port_allow."
+            "_verify_or_reconnect_peer_hublvol",
+            return_value=False,
         ):
             self._run()
         self.assertEqual(self.task.status, JobSchedule.STATUS_SUSPENDED)
-        demotes = [
-            c for c in self.calls
-            if c[0] == "bdev_lvol_set_leader" and c[1] == "sec"
-        ]
+        demotes = [c for c in self.calls if c[0] == "bdev_lvol_set_leader"]
         self.assertEqual(demotes, [],
-                         "no demote may fire against a non-drained distrib pipeline")
-        # The peer's port must have been released again.
-        i_block = self._idx(
-            lambda c: c[0] == "firewall_set_port" and c[1] == self.sec.uuid and c[3] == "block")
-        i_release = self._idx(
-            lambda c: c[0] == "firewall_set_port" and c[1] == self.sec.uuid and c[3] == "allow")
-        self.assertLess(i_block, i_release)
-        node_allows = [
-            c for c in self.calls
-            if c[0] == "firewall_set_port" and c[1] == self.node.uuid and c[3] == "allow"
-        ]
-        self.assertEqual(node_allows, [], "node port must stay blocked on drain failure")
+                         "no demote while the acting leader's hublvol to the "
+                         "primary is not verified-open")
+        self.assertEqual(self._node_allows(), [])
 
-    def test_failed_take_repromotes_old_leader(self):
-        # The primary never reads back leadership after take.
-        self.node_rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": False}]
+
+class TestLeadershipFailbackTertiaryActingLeader(_BasePortAllowTest):
+    """Failback when the TERTIARY (not the secondary) is the acting leader
+    at port_allow time: leader detection probes [secondary, tertiary]; the
+    quiesce + jc_disable_replication and the single plain demote must land
+    on the tertiary — never on the secondary or the recovering primary —
+    and every reachable peer's hublvol to the primary is verified between
+    the quiesce and the demote."""
+
+    def setUp(self):
+        super().setUp()
+        self.tert = _make_node("node-c", "10.0.0.16")
+        self.node.tertiary_node_id = self.tert.uuid
+        self.tert_rpc = MagicMock(name="tert_rpc")
+        self.tert.rpc_client = MagicMock(return_value=self.tert_rpc)
+        self.tert.wait_for_jm_rep_tasks_to_finish = MagicMock(return_value=True)
+        self.tert.connect_to_hublvol = MagicMock(return_value=True)
+        self.tert.get_lvol_subsys_port = MagicMock(return_value=self.port)
+        # The secondary does NOT lead; the tertiary took over during the
+        # outage (e.g. the secondary was also briefly out).
+        self.sec_rpc.bdev_lvol_get_lvstores.return_value = [
+            {"lvs leadership": False}]
+        self.tert_rpc.bdev_lvol_get_lvstores.return_value = [
+            {"lvs leadership": True}]
+        self.tert_rpc.jc_compression_get_status.return_value = False
+
+        def _jc_disable_tert(vuid):
+            self.calls.append(("jc_disable_replication", "tert", vuid))
+            return True
+        self.tert_rpc.jc_disable_replication.side_effect = _jc_disable_tert
+
+        for method in ("bdev_lvol_set_leader",
+                       "bdev_distrib_force_to_non_leader"):
+            def _make_side(name=method):
+                def _side(*a, **kw):
+                    self.calls.append((name, "tert", kw))
+                    return True
+                return _side
+            getattr(self.tert_rpc, method).side_effect = _make_side()
+
+    def _get_node(self, uuid):
+        if uuid == self.tert.uuid:
+            return self.tert
+        return super()._get_node(uuid)
+
+    def _cluster_nodes(self):
+        return [self.node, self.sec, self.tert]
+
+    def _run(self):
+        from simplyblock_core.services.tasks_runner_port_allow import exec_port_allow_task
+        exec_port_allow_task(self.task)
+
+    def test_demote_lands_on_tertiary_only_and_is_plain(self):
         self._run()
-        self.assertEqual(self.task.status, JobSchedule.STATUS_SUSPENDED)
-        # Old leader was demoted, then re-promoted (leader=True on sec).
-        i_demote = self._idx(
-            lambda c: c[0] == "bdev_lvol_set_leader" and c[1] == "sec"
-            and c[2].get("leader") is False)
-        i_repromote = self._idx(
-            lambda c: c[0] == "bdev_lvol_set_leader" and c[1] == "sec"
-            and c[2].get("leader") is True)
-        self.assertLess(i_demote, i_repromote,
-                        "a failed take must re-promote the old leader — the LVS "
-                        "may never be left with zero leaders")
-        node_allows = [
+        tert_demotes = [c for c in self.calls
+                        if c[0] == "bdev_lvol_set_leader" and c[1] == "tert"]
+        self.assertEqual(len(tert_demotes), 1,
+                         f"exactly one demote, on the tertiary acting "
+                         f"leader; calls={self.calls}")
+        kw = tert_demotes[0][2]
+        self.assertIs(kw.get("leader"), False)
+        self.assertNotIn("bs_nonleadership", kw,
+                         "the failback demote is a PLAIN leader=False")
+        other_leader_calls = [
             c for c in self.calls
-            if c[0] == "firewall_set_port" and c[1] == self.node.uuid and c[3] == "allow"
-        ]
-        self.assertEqual(node_allows, [])
+            if c[0] in ("bdev_lvol_set_leader",
+                        "bdev_distrib_force_to_non_leader")
+            and c[1] != "tert"]
+        self.assertEqual(other_leader_calls, [],
+                         "no leadership mutation on the secondary or the "
+                         "recovering primary")
+        forces = [c for c in self.calls
+                  if c[0] == "bdev_distrib_force_to_non_leader"]
+        self.assertEqual(forces, [],
+                         "no force_to_non_leader in the minimal failback")
+        self.assertEqual(self.task.status, JobSchedule.STATUS_DONE)
+
+    def test_quiesce_verify_demote_order_with_tertiary_leader(self):
+        self._run()
+        i_jc = self._idx(lambda c: c[0] == "jc_disable_replication"
+                         and c[1] == "tert")
+        i_demote = self._idx(lambda c: c[0] == "bdev_lvol_set_leader"
+                             and c[1] == "tert")
+        i_allow = self._idx(lambda c: c[0] == "firewall_set_port"
+                            and c[1] == self.node.uuid and c[3] == "allow")
+        self.assertLess(i_jc, i_demote,
+                        "journal replication suspended on the TERTIARY "
+                        "before its demote")
+        self.assertLess(i_demote, i_allow,
+                        "the recovering node's port opens only after the "
+                        "tertiary is demoted")
+        verified_between = {
+            c[1] for c in self.calls[i_jc:i_demote]
+            if c[0] == "check_sec_hublvol"}
+        self.assertEqual(
+            verified_between, {self.sec.uuid, self.tert.uuid},
+            "BOTH reachable peers' hublvols to the primary are verified "
+            "between the quiesce and the demote")
+        self.tert.wait_for_jm_rep_tasks_to_finish.assert_called()
+        # No jc quiesce landed on the non-leading secondary.
+        jc_on_sec = [c for c in self.calls
+                     if c[0] == "jc_disable_replication" and c[1] == "sec"]
+        self.assertEqual(jc_on_sec, [])
+        self.assertEqual(len(self._node_allows()), 1)
 
 
 class TestOnlyNodePortAllowed(_BasePortAllowTest):
     """The recovering node's own port is allowed exactly once, as the last
-    step; ports may only ever be blocked on peers (the failback window),
-    never on the recovering node, and every peer block is paired with a
-    release."""
+    step — and NO port is ever blocked by this runner, on any node: peer
+    port-block windows and follower fencing were removed on 2026-07-07."""
 
     def test_exactly_one_allow_on_recovering_node_and_it_is_last(self):
         from simplyblock_core.services.tasks_runner_port_allow import exec_port_allow_task
         exec_port_allow_task(self.task)
 
-        node_allows = [
-            c for c in self.calls
-            if c[0] == "firewall_set_port" and c[1] == self.node.uuid and c[3] == "allow"
-        ]
+        node_allows = self._node_allows()
         self.assertEqual(
             len(node_allows), 1,
             f"expected exactly 1 allow on the recovering node; got {node_allows}",
@@ -532,28 +771,22 @@ class TestOnlyNodePortAllowed(_BasePortAllowTest):
         fw_calls = [c for c in self.calls if c[0] == "firewall_set_port"]
         self.assertEqual(fw_calls[-1][1], self.node.uuid)
         self.assertEqual(fw_calls[-1][3], "allow")
+        # The unblock is the ONLY firewall action of the whole run.
+        self.assertEqual(len(fw_calls), 1)
 
-    def test_recovering_node_never_blocked_and_peer_blocks_released(self):
+    def test_no_port_is_ever_blocked(self):
         from simplyblock_core.services.tasks_runner_port_allow import exec_port_allow_task
         exec_port_allow_task(self.task)
 
-        node_blocks = [
-            c for c in self.calls
-            if c[0] == "firewall_set_port" and c[1] == self.node.uuid and c[3] == "block"
-        ]
-        self.assertEqual(node_blocks, [],
-                         "the recovering node's own port must never be blocked here")
-        for c in [c for c in self.calls
-                  if c[0] == "firewall_set_port" and c[3] == "block"]:
-            releases = [
-                r for r in self.calls
-                if r[0] == "firewall_set_port" and r[1] == c[1]
-                and r[2] == c[2] and r[3] == "allow"
-            ]
-            self.assertTrue(
-                releases,
-                f"peer block {c} has no matching release — a failback must "
-                f"never leave a peer port permanently blocked on success")
+        blocks = [c for c in self.calls
+                  if c[0] == "firewall_set_port" and c[3] == "block"]
+        self.assertEqual(
+            blocks, [],
+            "the runner must NEVER call port_block.set_port with block=True — "
+            "on any node, any port, any phase. LVS ports carry hublvol/"
+            "redirect and journal traffic; blocking them mid-IO produced "
+            "DISTRIBD n_unavail_read errors and JC history_append failures "
+            "(incident 2026-07-06)")
 
 
 class TestSourceShape(unittest.TestCase):
@@ -570,18 +803,22 @@ class TestSourceShape(unittest.TestCase):
         with open(path, "r") as f:
             cls.src = f.read()
 
+    def _failback_fn(self):
+        start = self.src.find("def _failback_leadership_to_primary")
+        self.assertGreater(start, 0, "the minimal failback helper must exist")
+        end = self.src.find("\ndef ", start + 1)
+        return self.src[start:end]
+
     def test_no_get_lvs_leader_helper(self):
         # The old pre-2026-05-02 helper stays gone; leader detection lives
         # inline in exec_port_allow_task with explicit failure handling.
         self.assertNotIn("def _get_lvs_leader", self.src)
 
-    def test_fenced_failback_present_and_ordered(self):
-        # The failback is reinstated WITH fencing: helper present, demote
-        # semantics present, and — in exec — the failback call sits after
-        # the peer hublvol gate and before the node's port unblock.
+    def test_failback_present_and_ordered(self):
+        # The minimal failback: helper present, and — in exec — the failback
+        # call sits after the peer hublvol gate and before the node's port
+        # unblock.
         self.assertIn("def _failback_leadership_to_primary", self.src)
-        self.assertIn("bs_nonleadership=True", self.src)
-        self.assertIn("bdev_distrib_force_to_non_leader", self.src)
         i_gate = self.src.find("_verify_or_reconnect_peer_hublvol(sec_node, node)")
         i_failback_call = self.src.find(
             "failback_ok, failback_msg = _failback_leadership_to_primary(")
@@ -593,29 +830,102 @@ class TestSourceShape(unittest.TestCase):
         self.assertGreater(i_unblock, i_failback_call,
                            "the node's port opens only after the failback")
 
-    def test_zero_leader_protection_present(self):
-        # A failed take must re-promote the old leader, and a zero-leader
-        # LVS must be healed by the primary taking leadership.
-        self.assertIn("def _take_leadership_on_primary", self.src)
-        self.assertIn("re-promote", self.src)
+    def test_failback_is_minimal(self):
+        # Inside _failback_leadership_to_primary: no port blocks, no drain
+        # poll, no bs_nonleadership / force_to_non_leader — exactly one
+        # plain demote of the acting leader.
+        fn = self._failback_fn()
+        self.assertNotIn("block=True", fn)
+        self.assertNotIn("bdev_distrib_check_inflight_io", fn)
+        self.assertNotIn("bs_nonleadership", fn)
+        self.assertNotIn("bdev_distrib_force_to_non_leader", fn)
+        self.assertEqual(
+            fn.count(".bdev_lvol_set_leader("), 1,
+            "exactly one leadership mutation in the failback: the plain "
+            "demote of the acting leader")
+        # Order: quiesce/disable -> hublvol verify -> demote.
+        i_jc = fn.find(".jc_disable_replication(")
+        i_hub = fn.find("_verify_or_reconnect_peer_hublvol(")
+        i_demote = fn.find(".bdev_lvol_set_leader(")
+        self.assertTrue(
+            0 < i_jc < i_hub < i_demote,
+            f"failback order must be jc_disable -> hublvol verify -> demote "
+            f"(got jc={i_jc}, hub={i_hub}, demote={i_demote})")
+        # The quiesce loop is bounded locally, not via task suspension.
+        self.assertIn("_REPL_SUSPEND_MAX_ATTEMPTS", fn)
 
-    def test_no_unconditional_secondary_loop(self):
-        # The old loop iterated `for sid in sec_ids` and called
-        # firewall_set_port(..., "block", ...) on every secondary
-        # unconditionally. Peer blocks now exist only inside the fenced
-        # failback helper (with paired releases), never in a bare sec_ids
-        # loop.
+    def test_runner_never_takes_leadership_and_never_blocks(self):
+        # A management-forced leader=True caused the 2026-07-06
+        # stale-blob-metadata corruption; _take_leadership_on_primary is
+        # deleted. And the runner never blocks any port: exactly one
+        # port_block.set_port callsite, the final block=False unblock.
+        self.assertNotIn("def _take_leadership_on_primary", self.src)
+        self.assertNotIn("leader=True)", self.src)
+        self.assertNotIn("block=True", self.src)
         import re
-        for m in re.finditer(r"for sid in [\w_]+", self.src):
-            window = self.src[m.start():m.start() + 1500]
+        set_port_calls = re.findall(r"port_block\.set_port\(", self.src)
+        self.assertEqual(len(set_port_calls), 1,
+                         "exactly one set_port callsite: the final unblock")
+        self.assertIn("port_block.set_port(node, port_number, block=False", self.src)
+
+    def test_fencing_recommit_and_map_push_are_gone(self):
+        for gone in (
+            "_fence_follower_ports_on_first_contact",
+            "_release_fenced_ports",
+            "_recommit_follower_and_unblock",
+            "_recommit_followers_for_leader",
+            "send_cluster_map_to_node",
+            "_failback_primary_ana",
+        ):
             self.assertNotIn(
-                'firewall_set_port(port_number, sn_port_type, "block"',
-                window,
-                "no firewall block may appear inside any sec_ids loop",
-            )
+                gone, self.src,
+                f"{gone} was removed in the 2026-07-07 rework and must not "
+                f"be silently reintroduced")
+
+    def test_deferred_ana_promotion_is_post_unblock_and_offline_gated(self):
+        # The ONLY ANA call left in the runner is the deferred promotion of
+        # a recovered secondary whose primary is OFFLINE — it must sit AFTER
+        # the unblock (non-gating, gradual drain-back) and behind the
+        # primary-OFFLINE check. No ANA anywhere before the port opens.
+        self.assertEqual(
+            self.src.count("_set_lvol_ana_on_node"), 1,
+            "exactly one ANA callsite in the runner: the deferred "
+            "post-unblock promotion")
+        i_unblock = self.src.find(
+            "port_block.set_port(node, port_number, block=False")
+        i_event = self.src.find("tcp_ports_events.port_allowed")
+        i_gate = self.src.find("ana_primary.status == StorageNode.STATUS_OFFLINE")
+        i_ana = self.src.find("storage_node_ops._set_lvol_ana_on_node(")
+        self.assertGreater(i_ana, i_unblock,
+                           "the deferred ANA promotion runs only after the "
+                           "port unblock — it must never gate the recovery")
+        self.assertGreater(i_ana, i_event,
+                           "the promotion runs after the port_allowed event")
+        self.assertTrue(i_unblock < i_gate < i_ana,
+                        "the promotion is gated on the primary being OFFLINE")
+        self.assertIn('_set_lvol_ana_on_node(lvol, node, "optimized")', self.src,
+                      "the recovered secondary's listeners are promoted to "
+                      "optimized, per-lvol")
+
+    def test_device_refresh_present_and_ordered(self):
+        # Re-admit (CAUSE_NODE_RECOVERY) -> local broadcast -> targeted
+        # events to the recovering node -> unblock.
+        i_readmit = self.src.find("cause=device_controller.CAUSE_NODE_RECOVERY")
+        i_broadcast = self.src.find("distr_controller.send_dev_status_event(")
+        i_targeted = self.src.find("target_node=node")
+        i_unblock = self.src.find(
+            "port_block.set_port(node, port_number, block=False")
+        self.assertGreater(i_readmit, 0)
+        self.assertGreater(i_broadcast, i_readmit,
+                           "FDB re-admit before the broadcast")
+        self.assertGreater(i_targeted, i_broadcast,
+                           "local broadcast before the targeted refresh")
+        self.assertGreater(i_unblock, i_targeted,
+                           "device refresh completes before the unblock")
 
     def test_rationale_documented_in_source(self):
-        self.assertIn("incident 2026-05-02", self.src)
+        self.assertIn("2026-05-02", self.src)
+        self.assertIn("2026-07-06", self.src)
         self.assertIn("verified-open", self.src)
 
 
@@ -639,9 +949,8 @@ class _StrictGateBase(_BasePortAllowTest):
         hub.bdev_name = "LVS_TEST/hublvol"
         self.node.hublvol = hub
         # Keep these tests focused on the strict gate: no peer holds
-        # leadership and the primary already does, so the leadership
-        # failback block is a no-op (its own coverage lives in
-        # TestLeadershipFailback).
+        # leadership, so the leadership failback block is a no-op (its own
+        # coverage lives in TestLeadershipFailback).
         self.sec_rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": False}]
 
 
@@ -839,8 +1148,7 @@ class TestSourceShapeStrictGate(unittest.TestCase):
         i_abort = self.src.find("_abort_recovering_node(node, reason)")
         i_done = self.src.find("STATUS_DONE", i_abort)
         i_return = self.src.find("return", i_done)
-        # port_allowed also appears earlier in the failback helpers (peer
-        # port releases); the invariant here is about the occurrence in
+        # The invariant is about the port_allowed occurrence in
         # exec_port_allow_task AFTER the abort path's return.
         i_allow_event = self.src.find("tcp_ports_events.port_allowed", i_abort)
         self.assertGreater(i_abort, 0)
@@ -853,25 +1161,29 @@ class TestSourceShapeStrictGate(unittest.TestCase):
 
 
 class TestDeviceReadmitOnPortAllow(_BasePortAllowTest):
-    """Regression: the device re-admit at the end of port_allow must NOT be
-    gated on ``node.status == ONLINE``.
+    """The device re-admit around port_allow must NOT be gated on
+    ``node.status == ONLINE``.
 
     port_allow runs as the last step of node recovery and completes a couple of
     seconds BEFORE the storage-node monitor flips the node's status to ONLINE.
-    The original self-heal guarded on ``node.status == ONLINE``, so it was False
+    An earlier self-heal guarded on ``node.status == ONLINE``, so it was False
     every time and the re-admit was skipped -- a device the remote-IO quorum had
     force-marked UNAVAILABLE during the outage stayed down with no other recovery
     path (device_monitor auto-restart only touches io_error devices), leaving a
     phantom offline-device baseline that a later node outage turned into a cluster
     suspension.
 
-    The re-admit must run regardless of node status and regardless of prior device
-    state; REMOVED is the one terminal state we never resurrect.
+    Since the 2026-07-07 rework there are two re-admit sites: the HARD pre-unblock
+    re-admit (cause=CAUSE_NODE_RECOVERY, refusal suspends the task) and the
+    best-effort post-unblock epilogue (kept as a safety net; refusal is logged,
+    the node-online clear in storage_node_monitor owns that re-admit). Both run
+    regardless of node status and prior device state; REMOVED is the one terminal
+    state we never resurrect.
     """
 
     def setUp(self):
         super().setUp()
-        # The node is NOT yet ONLINE when port_allow runs -- this is the bug.
+        # The node is NOT yet ONLINE when port_allow runs -- by design.
         self.node.status = StorageNode.STATUS_DOWN
         self.dev_unavail = _make_device(
             "dev-unavail", NVMeDevice.STATUS_UNAVAILABLE, order=0)
@@ -885,9 +1197,11 @@ class TestDeviceReadmitOnPortAllow(_BasePortAllowTest):
             self.dev_unavail, self.dev_ioerr, self.dev_removed, self.dev_online]
 
         self.readmitted = []
+        self.readmit_calls = []
 
         def _record(dev_id, *a, **kw):
             self.readmitted.append(dev_id)
+            self.readmit_calls.append((dev_id, kw.get("cause")))
             return True
 
         self._readmit_patch = patch(
@@ -927,17 +1241,50 @@ class TestDeviceReadmitOnPortAllow(_BasePortAllowTest):
             "dev-online", self.readmitted,
             "an already-ONLINE device needs no re-admit")
 
-    def test_refused_readmit_is_logged_and_does_not_fail_task(self):
-        # device_set_state refuses ONLINE while the node is not ONLINE and
-        # returns False (it does not raise). The 2026-07-02 suspend series
-        # went unnoticed for five iterations because this refusal was silent:
-        # port_allow logged "Re-admitting …" and moved on. It must now warn
-        # loudly and still complete the task (the monitor's node-ONLINE clear
-        # owns the actual re-admit). Nested patch overrides the recording one.
+    def test_pre_unblock_readmit_uses_node_recovery_cause(self):
+        self._run()
+        self.assertIn(
+            ("dev-unavail", device_controller.CAUSE_NODE_RECOVERY),
+            self.readmit_calls,
+            "the pre-unblock re-admit must pass CAUSE_NODE_RECOVERY so "
+            "device_set_state's stale re-online guard admits the device "
+            "while the node is still DOWN")
+
+    def test_pre_unblock_refusal_suspends_task(self):
+        # Before the unblock, a refused re-admit is a HARD gate: the port
+        # must not open against a stale device view — suspend and retry.
         with patch(
             "simplyblock_core.services.tasks_runner_port_allow."
             "device_controller.device_set_online",
             return_value=False,
+        ):
+            self._run()
+        self.assertEqual(self.task.status, JobSchedule.STATUS_SUSPENDED)
+        node_allows = [
+            c for c in self.calls
+            if c[0] == "firewall_set_port" and c[1] == self.node.uuid
+            and c[3] == "allow"
+        ]
+        self.assertEqual(node_allows, [],
+                         "the port must not open when the pre-unblock "
+                         "re-admit was refused")
+
+    def test_epilogue_refusal_is_best_effort_and_logged(self):
+        # The post-unblock epilogue re-admit (kept as a safety net) stays
+        # best-effort: device_set_state may still refuse ONLINE while the
+        # monitor hasn't flipped the node yet; the node-online clear in
+        # storage_node_monitor owns that re-admit. It must warn loudly
+        # (the 2026-07-02 suspend series went unnoticed for five iterations
+        # because the refusal was silent) and still complete the task.
+        def _refuse_epilogue(dev_id, *a, **kw):
+            # pre-unblock re-admit (node-recovery cause) passes; the
+            # epilogue call (no cause) is refused.
+            return kw.get("cause") == device_controller.CAUSE_NODE_RECOVERY
+
+        with patch(
+            "simplyblock_core.services.tasks_runner_port_allow."
+            "device_controller.device_set_online",
+            side_effect=_refuse_epilogue,
         ):
             with self.assertLogs(level="WARNING") as logs:
                 self._run()
@@ -985,6 +1332,9 @@ class _SecRoleReconnectBase(_BasePortAllowTest):
         if uuid == self.tert.uuid:
             return self.tert
         return super()._get_node(uuid)
+
+    def _cluster_nodes(self):
+        return [self.node, self.sec, self.prim, self.tert]
 
     def _run_with_verify(self, verify_side_effect):
         from simplyblock_core.services.tasks_runner_port_allow import exec_port_allow_task
@@ -1078,6 +1428,43 @@ class TestOwnSecTertHublvolReconnect(_SecRoleReconnectBase):
                          "its own recovery path re-drives that leg")
         self.assertEqual(self.task.status, JobSchedule.STATUS_DONE)
 
+    def test_follower_recovery_is_hublvol_wiring_only(self):
+        # Scenario (iv): the recovering node is a plain follower of an
+        # ONLINE, leading primary. Its recovery is hublvol wiring only —
+        # no leadership mutation anywhere, no ANA call, one final unblock.
+        self.node_rpc.subsystem_list.return_value = [{"nqn": "nqn-p-hub"}]
+        with patch(
+            "simplyblock_core.services.tasks_runner_port_allow."
+            "storage_node_ops._set_lvol_ana_on_node",
+        ) as ana_mock:
+            self._run_with_verify(lambda *a: True)
+        leadership_calls = [
+            c for c in self.calls
+            if c[0] in ("bdev_lvol_set_leader",
+                        "bdev_distrib_force_to_non_leader")
+        ]
+        self.assertEqual(leadership_calls, [],
+                         "a follower recovering under a leading primary "
+                         "triggers no leadership action at all")
+        ana_mock.assert_not_called()
+        self.assertEqual(len(self._node_allows()), 1)
+        self.assertEqual(self.task.status, JobSchedule.STATUS_DONE)
+
+    def test_no_ana_promotion_when_primary_online(self):
+        # The deferred post-unblock ANA promotion is gated on the primary
+        # being OFFLINE. With the primary ONLINE the recovered secondary's
+        # listeners stay untouched even though the primary has lvols.
+        self.db_mock.get_lvols_by_node_id.side_effect = (
+            lambda nid: [_make_lvol("lv-on")] if nid == self.prim.uuid else [])
+        self.node_rpc.subsystem_list.return_value = [{"nqn": "nqn-p-hub"}]
+        with patch(
+            "simplyblock_core.services.tasks_runner_port_allow."
+            "storage_node_ops._set_lvol_ana_on_node",
+        ) as ana_mock:
+            self._run_with_verify(lambda *a: True)
+        ana_mock.assert_not_called()
+        self.assertEqual(self.task.status, JobSchedule.STATUS_DONE)
+
 
 class TestStaleLeaderConvergence(_SecRoleReconnectBase):
     """Gap-B fix: a recovering follower that still claims leadership for a
@@ -1160,208 +1547,188 @@ class TestStaleLeaderConvergence(_SecRoleReconnectBase):
         self.assertEqual(self.task.status, JobSchedule.STATUS_DONE)
 
 
-class TestFenceOnFirstContact(_SecRoleReconnectBase):
-    """Gap-C fix: a DOWN node's follower redirect-listener ports must be
-    nvmf-blocked at first contact (before any reconnect work) and released
-    only after every gate passed, strictly before the node's own client
-    port opens. Ports blocked by someone else are never claimed."""
+class TestNoFollowerPortFencing(_SecRoleReconnectBase):
+    """The 2026-07-06 design fenced a DOWN node's follower redirect-listener
+    ports at first contact and released them after the gates; the 2026-07-07
+    rework REMOVED that fencing entirely — blocking LVS ports severs the
+    hublvol/redirect and journal traffic that rides on them. The runner must
+    never block any port, on any node, in any phase, and never write a
+    fence record into the task params."""
 
     def setUp(self):
         super().setUp()
         self.node.status = StorageNode.STATUS_DOWN
-        self.fport = 4444
-        self.prim.get_lvol_subsys_port = MagicMock(return_value=self.fport)
+        self.prim.get_lvol_subsys_port = MagicMock(return_value=4444)
         self.node_rpc.subsystem_list.return_value = [{"nqn": "nqn-p-hub"}]
 
-    def _fence_blocks(self):
+    def _blocks(self):
         return [c for c in self.calls
-                if c[0] == "firewall_set_port" and c[1] == self.node.uuid
-                and c[2] == self.fport and c[3] == "block"]
+                if c[0] == "firewall_set_port" and c[3] == "block"]
 
-    def _fence_releases(self):
-        return [c for c in self.calls
-                if c[0] == "firewall_set_port" and c[1] == self.node.uuid
-                and c[2] == self.fport and c[3] == "allow"]
-
-    def test_fenced_before_work_released_before_own_port(self):
-        def _record(peer, primary):
-            self.calls.append(("verify_hublvol", peer.uuid, primary.uuid))
-            return True
-        self._run_with_verify(_record)
-
-        i_fence = next(i for i, c in enumerate(self.calls)
-                       if c[0] == "firewall_set_port" and c[1] == self.node.uuid
-                       and c[2] == self.fport and c[3] == "block")
-        i_work = next(i for i, c in enumerate(self.calls)
-                      if c[0] == "verify_hublvol")
-        i_release = next(i for i, c in enumerate(self.calls)
-                         if c[0] == "firewall_set_port" and c[1] == self.node.uuid
-                         and c[2] == self.fport and c[3] == "allow")
-        i_own = next(i for i, c in enumerate(self.calls)
-                     if c[0] == "firewall_set_port" and c[1] == self.node.uuid
-                     and c[2] == self.port and c[3] == "allow")
-        self.assertLess(i_fence, i_work,
-                        "follower port must be fenced before any reconnect work")
-        self.assertLess(i_release, i_own,
-                        "fenced ports release before the node's own client port")
-        self.assertEqual(self.task.function_params.get("fenced_ports"), [],
-                         "the fence record must be cleared after release")
-
-    def test_online_node_not_fenced(self):
-        self.node.status = StorageNode.STATUS_ONLINE
+    def test_down_follower_never_fenced(self):
         self._run_with_verify(lambda *a: True)
-        self.assertEqual(self._fence_blocks(), [],
-                         "an ONLINE node's serving listeners must never be fenced")
+        self.assertEqual(
+            self._blocks(), [],
+            "a DOWN follower's redirect-listener ports must NOT be fenced "
+            "at first contact — the fencing was removed on 2026-07-07")
+        self.assertNotIn("fenced_ports", self.task.function_params,
+                         "no fence record is ever written into the task")
+        self.assertEqual(self.task.status, JobSchedule.STATUS_DONE)
 
-    def test_preblocked_port_not_claimed(self):
-        with patch("simplyblock_core.port_block.is_port_blocked", return_value=True):
-            self._run_with_verify(lambda *a: True)
-        self.assertEqual(self._fence_blocks(), [])
-        self.assertEqual(self._fence_releases(), [],
-                         "a port blocked by another flow must not be released here")
-
-    def test_suspension_keeps_the_fence(self):
+    def test_suspension_leaves_no_block_behind(self):
         def _fail_own(peer, primary):
             return not (peer is self.node and primary is self.prim)
         self._run_with_verify(_fail_own)
         self.assertEqual(self.task.status, JobSchedule.STATUS_SUSPENDED)
-        self.assertEqual(len(self._fence_blocks()), 1)
-        self.assertEqual(self._fence_releases(), [],
-                         "a suspended task keeps its fence — the safe state")
-        self.assertEqual(self.task.function_params.get("fenced_ports"), [self.fport],
-                         "the fence record must survive for the retry pass")
+        self.assertEqual(
+            self._blocks(), [],
+            "a suspended recovery must not leave any port blocked — the "
+            "runner never blocked one in the first place")
+
+    @unittest.skip("pending design call 2026-07: follower-port fencing at "
+                   "first contact (removed 2026-07-07 with the port-allow "
+                   "rework — blocking LVS ports severed redirect/journal "
+                   "traffic; an alternative quiet-window mechanism is TBD)")
+    def test_fence_window_semantics(self):
+        raise NotImplementedError
 
 
-class TestOfflinePrimarySwitchback(_SecRoleReconnectBase):
+class TestOfflinePrimaryTertiaryGate(_SecRoleReconnectBase):
     """Primary went OFFLINE while the secondary was partitioned: the
-    tertiary is acting leader and the secondary's ANA promotion was
-    skipped (trigger_ana_failover_for_node requires first_sec ONLINE).
-    The recovering secondary's port_allow must complete the deferred
-    failover — tertiary->secondary hublvol FIRST (hard gate), THEN
-    promote the secondary's listeners to optimized — so clients switch
-    back from the tertiary. Tertiary ANA is never touched."""
+    tertiary is the acting leader for that lvstore, and clients may land
+    on the recovering secondary the moment its port opens. The
+    tertiary->secondary hublvol path is therefore a HARD GATE while the
+    primary is out — the tertiary must be able to redirect here first, or
+    a dual-writer window opens. The ANA switch-back for this scenario is
+    DEFERRED: strictly after the unblock, the runner promotes this
+    secondary's listeners for the primary's lvols to optimized, per-lvol
+    and best-effort (see the ANA tests below)."""
 
     def setUp(self):
         super().setUp()
         self.prim.status = StorageNode.STATUS_OFFLINE
         self.node_rpc.subsystem_list.return_value = [{"nqn": "nqn-p-hub"}]
-        self.lvol = MagicMock(name="lvol")
-        self.lvol.nqn = "nqn-lvol-1"
-        from simplyblock_core.models.lvol_model import LVol
-        self.lvol.status = LVol.STATUS_ONLINE
-        self.db_mock.get_lvols_by_node_id.return_value = [self.lvol]
 
         def _tert_path(primary, failover):
             self.calls.append(("tert_path", primary.uuid, failover.uuid))
             return True
         self.tert.add_hublvol_failover_path = MagicMock(side_effect=_tert_path)
 
-    def test_tertiary_path_gated_then_ana_promoted_then_allow(self):
+    def test_tertiary_path_gated_before_allow(self):
         self._run_with_verify(lambda *a: True)
         i_tert_path = next(
             i for i, c in enumerate(self.calls)
             if c[0] == "tert_path" and c[1] == self.prim.uuid and c[2] == self.node.uuid)
-        i_promote = next(
-            i for i, c in enumerate(self.calls)
-            if c[0] == "ana_set" and c[1] == self.lvol.nqn
-            and c[2] == self.node.uuid and c[3] == "optimized")
         i_allow = next(
             i for i, c in enumerate(self.calls)
             if c[0] == "firewall_set_port" and c[1] == self.node.uuid and c[3] == "allow")
-        self.assertLess(i_tert_path, i_promote,
+        self.assertLess(i_tert_path, i_allow,
                         "the tertiary->secondary hublvol must be connected "
-                        "BEFORE the ANA switch-back moves clients here")
-        self.assertLess(i_promote, i_allow,
-                        "the promotion happens before the port opens so clients "
-                        "switch back the moment it is allowed")
+                        "BEFORE the port opens — the tertiary is the acting "
+                        "leader and must be able to redirect here")
         self.assertEqual(self.task.status, JobSchedule.STATUS_DONE)
 
-    def test_tertiary_path_failure_blocks_switchback(self):
+    def test_tertiary_path_failure_suspends(self):
         self.tert.add_hublvol_failover_path = MagicMock(return_value=False)
         self._run_with_verify(lambda *a: True)
         self.assertEqual(self.task.status, JobSchedule.STATUS_SUSPENDED)
-        promotes = [c for c in self.calls if c[0] == "ana_set"]
-        self.assertEqual(promotes, [],
-                         "no ANA switch-back while the tertiary cannot redirect "
-                         "to this node — that would open a dual-writer window")
         node_allows = [
             c for c in self.calls
             if c[0] == "firewall_set_port" and c[1] == self.node.uuid and c[3] == "allow"
         ]
-        self.assertEqual(node_allows, [])
+        self.assertEqual(node_allows, [],
+                         "the port must not open while the acting-leader "
+                         "tertiary cannot redirect to this node — that would "
+                         "open a dual-writer window")
 
-    def test_down_primary_gates_tertiary_path_but_no_promote(self):
-        # DOWN is not OFFLINE: the primary may still be serving, so the
-        # deferred ANA failover must NOT fire (dual-optimized risk); the
-        # tertiary path is still a hard gate while the primary is out.
+    def test_down_primary_also_gates_tertiary_path(self):
+        # DOWN is not OFFLINE, but either way the primary is out: the
+        # tertiary path stays a hard gate.
         self.prim.status = StorageNode.STATUS_DOWN
         self._run_with_verify(lambda *a: True)
-        promotes = [c for c in self.calls if c[0] == "ana_set"]
-        self.assertEqual(promotes, [],
-                         "ANA promotion is tied to primary OFFLINE only")
+        tert_paths = [c for c in self.calls if c[0] == "tert_path"]
+        self.assertEqual(len(tert_paths), 1)
         self.assertEqual(self.task.status, JobSchedule.STATUS_DONE)
 
+    # --- deferred post-unblock ANA promotion (primary OFFLINE) ----------
 
-class TestDeferredAnaFailback(_SecRoleReconnectBase):
-    """Gap-A fix: a secondary that missed the primary's failback while
-    partitioned returns with its listeners still optimized. Once the
-    ONLINE primary provably leads, the recovering secondary demotes its
-    own listeners for that lvstore back to non_optimized (idempotent in
-    the normal case, best-effort on RPC failure). Tertiary ANA is never
-    touched."""
+    def _with_prim_lvols(self):
+        self.lvol_ok = _make_lvol("lv-ok")
+        self.lvol_deleting = _make_lvol("lv-del", status=LVol.STATUS_IN_DELETION)
+        self.db_mock.get_lvols_by_node_id.side_effect = (
+            lambda nid: [self.lvol_ok, self.lvol_deleting]
+            if nid == self.prim.uuid else [])
 
-    def setUp(self):
-        super().setUp()
-        self.node_rpc.subsystem_list.return_value = [{"nqn": "nqn-p-hub"}]
-        self.lvol = MagicMock(name="lvol")
-        self.lvol.nqn = "nqn-lvol-p1"
-        from simplyblock_core.models.lvol_model import LVol
-        self.lvol.status = LVol.STATUS_ONLINE
-        self.db_mock.get_lvols_by_node_id.return_value = [self.lvol]
-
-    def _run(self):
-        from simplyblock_core.services.tasks_runner_port_allow import exec_port_allow_task
-        with patch(
-            "simplyblock_core.services.tasks_runner_port_allow._verify_or_reconnect_peer_hublvol",
-            return_value=True,
-        ):
-            exec_port_allow_task(self.task)
-
-    def _demotes(self):
-        return [c for c in self.calls
-                if c[0] == "ana_set" and c[1] == self.lvol.nqn
-                and c[2] == self.node.uuid and c[3] == "non_optimized"]
-
-    def test_demoted_when_primary_leads(self):
-        self._run()
-        self.assertEqual(len(self._demotes()), 1,
-                         f"expected the deferred ANA failback; calls={self.calls}")
-        # Only this node's listeners; nothing for the tertiary.
-        others = [c for c in self.calls if c[0] == "ana_set" and c[2] != self.node.uuid]
-        self.assertEqual(others, [])
-        self.assertEqual(self.task.status, JobSchedule.STATUS_DONE)
-
-    def test_not_demoted_when_primary_not_leading(self):
-        self.prim_rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": False}]
-        self._run()
-        self.assertEqual(self._demotes(), [],
-                         "no ANA demote unless the primary provably leads")
-        self.assertEqual(self.task.status, JobSchedule.STATUS_DONE)
-
-    def test_ana_failure_is_best_effort(self):
+    def _run_with_ana(self, ana_side=None):
+        def _record_ana(lvol, target, state):
+            self.calls.append(("ana_set", lvol.uuid, target.uuid, state))
+            return True
         with patch(
             "simplyblock_core.services.tasks_runner_port_allow."
             "storage_node_ops._set_lvol_ana_on_node",
-            side_effect=Exception("rpc down"),
-        ):
-            self._run()
-        self.assertEqual(self.task.status, JobSchedule.STATUS_DONE,
-                         "a failed ANA demote must not wedge recovery")
-        node_allows = [
-            c for c in self.calls
-            if c[0] == "firewall_set_port" and c[1] == self.node.uuid and c[3] == "allow"
-        ]
-        self.assertEqual(len(node_allows), 1)
+            side_effect=ana_side or _record_ana,
+        ) as ana_mock:
+            self._run_with_verify(lambda *a: True)
+        return ana_mock
+
+    def test_ana_switchback_promotes_secondary_listeners_post_unblock(self):
+        # Primary OFFLINE: after (and only after) the port opens, this
+        # recovered secondary's listeners for the primary's serviceable
+        # lvols are promoted to optimized — per-lvol, so IO drains back
+        # from the tertiary gradually. Lvols in terminal/transitional
+        # states are skipped.
+        self._with_prim_lvols()
+        self._run_with_ana()
+        ana_calls = [c for c in self.calls if c[0] == "ana_set"]
+        self.assertEqual(
+            ana_calls, [("ana_set", "lv-ok", self.node.uuid, "optimized")],
+            "only ONLINE/OFFLINE lvols of the offline primary are promoted, "
+            "on the recovering secondary, to optimized")
+        i_allow = self._idx(
+            lambda c: c[0] == "firewall_set_port" and c[1] == self.node.uuid
+            and c[3] == "allow")
+        i_event = self._idx(lambda c: c[0] == "port_allowed")
+        i_ana = self._idx(lambda c: c[0] == "ana_set")
+        self.assertLess(i_allow, i_ana,
+                        "the ANA promotion is strictly POST-unblock — it "
+                        "must never gate the recovery")
+        self.assertLess(i_event, i_ana,
+                        "the promotion runs after the port_allowed event")
+        self.assertEqual(self.task.status, JobSchedule.STATUS_DONE)
+
+    def test_ana_promotion_failure_is_best_effort(self):
+        # A failing per-lvol promotion must not fail the (already
+        # completed) recovery: the port stays open and the task completes.
+        self._with_prim_lvols()
+
+        def _boom(lvol, target, state):
+            self.calls.append(("ana_set", lvol.uuid, target.uuid, state))
+            raise Exception("listener set-ana rpc failed")
+        self._run_with_ana(ana_side=_boom)
+        self.assertEqual(len(self._node_allows()), 1)
+        self.assertEqual(self.task.status, JobSchedule.STATUS_DONE)
+
+
+@unittest.skip("pending design call 2026-07: deferred ANA DEMOTE (a "
+               "recovering secondary's still-optimized listeners once its "
+               "ONLINE primary provably leads) — the 2026-07-07 rework kept "
+               "only the post-unblock PROMOTION for the offline-primary "
+               "case (covered in TestOfflinePrimaryTertiaryGate); the "
+               "demote direction has no owner in the runner yet")
+class TestDeferredAnaFailback(unittest.TestCase):
+    """Placeholder keeping the coverage gap visible.
+
+    Pre-2026-07-07 behavior (Gap-A fix): a secondary that missed the
+    primary's failback while partitioned returned with its listeners still
+    optimized; once the ONLINE primary provably led, the recovering
+    secondary demoted its own listeners for that lvstore back to
+    non_optimized via storage_node_ops._set_lvol_ana_on_node. The rework
+    kept only the reverse direction (post-unblock promotion when the
+    primary is OFFLINE); whether (and where) the deferred demote belongs
+    now is an open design question."""
+
+    def test_demoted_when_primary_leads(self):
+        raise NotImplementedError
 
 
 class TestTertiaryFollowsActingLeader(_BasePortAllowTest):

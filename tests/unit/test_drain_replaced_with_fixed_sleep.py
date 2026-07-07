@@ -176,44 +176,72 @@ class NonLeaderPath_KeepsFixedSleep(unittest.TestCase):
         )
 
 
-class PortAllowPath_BoundedFailbackDrain(unittest.TestCase):
-    """tasks_runner_port_allow's leadership failback (reinstated 2026-07-06
-    with fencing) drains in-flight IO with a HARD BOUND before demoting the
-    acting leader, inside the port-blocked window.
+class PortAllowPath_MinimalFailback(unittest.TestCase):
+    """tasks_runner_port_allow's network-outage failback follows the
+    data-plane recovery design (2026-07-07, after the 2026-07-06 failback
+    incident): the CP prepares redirection and steps away —
 
-    The original 10s-drain regression was on the
-    recreate_lvstore_on_non_leader path (the blocked node runs data
-    migration, so the poll never settles). The port_allow failback blocks a
-    secondary/tertiary acting leader — migration never runs there, so the
-    drain genuinely settles — but it must stay bounded so a slow JM/distrib
-    completion cannot hold the leader's port blocked beyond client
-    max_latency.
+      1. jc_disable_replication on the acting leader,
+      2. verified hublvols from the followers to the primary,
+      3. demote the acting leader (leader=False),
+      4. unblock the recovering node's port.
+
+    It must NOT: port-block any peer (the LVS ports carry hublvol/redirect
+    and journal traffic — blocking them mid-IO severs redirect chains and
+    JC paths), drain in-flight IO in a blocked window, or assign
+    leadership to the primary (leader=True skips the primary's
+    update-on-first-IO and serves stale blob metadata — the 2026-07-06
+    18:23 extent-metadata corruption).
     """
 
-    def test_drain_present_and_bounded(self):
-        src = _read("simplyblock_core/services/tasks_runner_port_allow.py")
-        self.assertIn(
-            ".bdev_distrib_check_inflight_io(", src,
-            "the failback must drain in-flight IO before the demote "
-            "(incident 2026-05-02: 123 state-9 IOs in flight at "
-            "set_leader=False -> ENODEV + qpair floods)")
-        self.assertIn(
-            "_FAILBACK_DRAIN_BOUND_SEC = 2.0", src,
-            "the drain must carry the same 2s hard bound as recreate_lvstore")
+    @classmethod
+    def setUpClass(cls):
+        cls.src = _read("simplyblock_core/services/tasks_runner_port_allow.py")
+        fn_start = cls.src.find("def _failback_leadership_to_primary")
+        fn_end = cls.src.find("\ndef ", fn_start + 1)
+        assert fn_start > 0
+        cls.fn = cls.src[fn_start:fn_end]
 
-    def test_drain_runs_inside_block_window_before_demote(self):
-        src = _read("simplyblock_core/services/tasks_runner_port_allow.py")
-        fn_start = src.find("def _failback_leadership_to_primary")
-        fn_end = src.find("def _recommit_follower_and_unblock")
-        self.assertGreater(fn_start, 0)
-        fn = src[fn_start:fn_end]
-        i_block = fn.find("block=True")
-        i_drain = fn.find("leader_rpc.bdev_distrib_check_inflight_io")
-        i_demote = fn.find("leader_rpc.bdev_lvol_set_leader")
+    def test_failback_order_jc_then_hublvols_then_demote(self):
+        i_jc = self.fn.find(".jc_disable_replication(")
+        i_hub = self.fn.find("_verify_or_reconnect_peer_hublvol(")
+        i_demote = self.fn.find(".bdev_lvol_set_leader(")
         self.assertTrue(
-            0 < i_block < i_drain < i_demote,
-            "failback order must be: block leader port -> bounded drain -> "
-            f"demote (got block={i_block}, drain={i_drain}, demote={i_demote})")
+            0 < i_jc < i_hub < i_demote,
+            "failback order must be: jc_disable_replication -> hublvol "
+            f"verify -> demote (got jc={i_jc}, hub={i_hub}, demote={i_demote})")
+
+    def test_failback_never_blocks_ports(self):
+        self.assertNotIn(
+            "block=True", self.fn,
+            "the failback must NOT port-block the acting leader or peers: "
+            "the LVS ports carry hublvol/redirect and journal traffic; "
+            "blocking them mid-IO produced DISTRIBD n_unavail_read errors "
+            "and JC history_append failures (incident 2026-07-06)")
+
+    def test_runner_never_takes_leadership(self):
+        self.assertNotIn(
+            "leader=True)", self.src,
+            "the port-allow runner must NEVER assign leadership: the "
+            "primary takes it itself on the first redirected IO, after "
+            "running the LVS update process. A management-forced "
+            "leader=True skips that update and the primary serves stale "
+            "blob metadata (2026-07-06 extent-metadata corruption)")
+
+    def test_runner_has_no_drain_window(self):
+        self.assertNotIn(
+            ".bdev_distrib_check_inflight_io(", self.src,
+            "no blocked-window drain in the port-allow runner: with "
+            "hublvols verified before the demote, the demoted leader "
+            "redirects its in-flight IO to the primary")
+
+    def test_demote_targets_acting_leader_only(self):
+        # Exactly one set_leader call in the failback, on the current leader.
+        self.assertEqual(
+            self.fn.count(".bdev_lvol_set_leader("), 1,
+            "exactly one leadership mutation in the failback: the demote "
+            "of the acting leader")
+        self.assertIn("current_leader.rpc_client().bdev_lvol_set_leader", self.fn)
 
 
 if __name__ == "__main__":

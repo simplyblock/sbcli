@@ -8,9 +8,9 @@ from simplyblock_core.controllers import (
 )
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.cluster import Cluster
-from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.nvme_device import NVMeDevice
+from simplyblock_core.models.lvol_model import LVol
 
 logger = utils.get_logger(__name__)
 
@@ -244,17 +244,15 @@ def _reconnect_own_sec_tert_hublvols(node):
         matters at the NEXT failover, while suspending this task would
         keep the cluster degraded NOW.
 
-      OFFLINE-PRIMARY SWITCH-BACK (secondary role) — if the primary went
+      OFFLINE-PRIMARY HARD GATE (secondary role) — if the primary went
         OFFLINE while this node was partitioned, the tertiary is the
-        acting leader and this node's ANA promotion was skipped
-        (trigger_ana_failover_for_node requires first_sec ONLINE). In
-        that case, strictly in this order: (1) the tertiary->secondary
-        hublvol path becomes a HARD GATE, then (2) this node's listeners
-        for the primary's lvols are promoted to optimized — so the moment
-        the port opens, clients switch back from the tertiary to the
-        secondary, and the tertiary can redirect its in-flight IO here
-        when leadership follows. The tertiary's ANA is never touched (it
-        stays permanently non_optimized).
+        acting leader: the tertiary->secondary hublvol path becomes a
+        HARD GATE here (the tertiary must be able to redirect to this
+        node before any client can land on it). The ANA promotion of this
+        node's listeners is deliberately NOT done here — it runs in
+        exec_port_allow_task strictly AFTER the port release, per-lvol,
+        so IO drains back from the tertiary gradually. The tertiary's
+        ANA is never touched (it stays permanently non_optimized).
 
       ACTING-LEADER FOLLOW (tertiary role) — if the primary is out and
         the secondary is the acting leader, re-wire this tertiary's
@@ -376,10 +374,9 @@ def _reconnect_own_sec_tert_hublvols(node):
             # tertiary -> secondary hublvol path. With the primary ONLINE this
             # is a best-effort multipath top-up (only matters at the NEXT
             # failover). With the primary OUT it is a HARD GATE: the tertiary
-            # is the acting leader right now, and the ANA switch-back below
-            # must not move clients to this node until the tertiary can
-            # redirect to it — otherwise the switch-back opens a dual-writer
-            # window between this node and the tertiary.
+            # is the acting leader right now and clients may land on this
+            # node the moment its port opens — the tertiary must be able to
+            # redirect to it first, or a dual-writer window opens.
             tert = None
             if primary.tertiary_node_id:
                 try:
@@ -409,51 +406,8 @@ def _reconnect_own_sec_tert_hublvols(node):
                 else:
                     return False, (
                         f"tertiary {tert.get_id()[:8]} -> secondary hublvol for "
-                        f"{primary.lvstore} not connected; refusing ANA "
-                        f"switch-back until it is")
-
-            # Deferred ANA FAILBACK — the mirror of the deferred failover
-            # below: if the primary failed back while this secondary was
-            # partitioned, both _failback_primary_ana (requires first_sec
-            # ONLINE) and recreate_lvstore step 11 (skips disconnected_peers)
-            # missed it, so it returns with its listeners still optimized —
-            # dual-optimized with the primary, stealing the client path.
-            # Demote back to non_optimized once the primary provably leads.
-            # Best-effort: dual-optimized is functional (the redirect works),
-            # so a failed ANA RPC must not wedge recovery — the health loop
-            # and the primary's next failback re-assert it.
-            if primary_online and _read_lvs_leadership(primary, primary.lvstore):
-                for lvol in db.get_lvols_by_node_id(primary.get_id()):
-                    if lvol.status not in (LVol.STATUS_ONLINE, LVol.STATUS_OFFLINE):
-                        continue
-                    try:
-                        storage_node_ops._set_lvol_ana_on_node(
-                            lvol, node, "non_optimized")
-                    except Exception as e:
-                        logger.warning(
-                            "Deferred ANA failback of %s on %s failed: %s",
-                            lvol.nqn, node.get_id()[:8], e)
-
-            # Deferred ANA failover: the primary went OFFLINE while this node
-            # was unreachable, so trigger_ana_failover_for_node skipped the
-            # promotion (it requires first_sec to be ONLINE). Complete it now,
-            # BEFORE the port opens: the moment the port is allowed, clients
-            # switch back from the (permanently non_optimized) tertiary to
-            # this secondary. The tertiary's ANA is never touched.
-            if primary.status == StorageNode.STATUS_OFFLINE:
-                logger.info(
-                    "Primary %s is OFFLINE; completing deferred ANA failover — "
-                    "promoting %s to optimized for %s lvols",
-                    pid[:8], node.get_id()[:8], primary.lvstore)
-                for lvol in db.get_lvols_by_node_id(primary.get_id()):
-                    if lvol.status not in (LVol.STATUS_ONLINE, LVol.STATUS_OFFLINE):
-                        continue
-                    try:
-                        storage_node_ops._set_lvol_ana_on_node(lvol, node, "optimized")
-                    except Exception as e:
-                        logger.warning(
-                            "Deferred ANA promotion of %s on %s failed: %s",
-                            lvol.nqn, node.get_id()[:8], e)
+                        f"{primary.lvstore} not connected; refusing to open "
+                        f"the port until it is")
 
         elif not primary_online and primary.secondary_node_id:
             # Tertiary role with the primary out: the acting leader is the
@@ -485,292 +439,96 @@ def _reconnect_own_sec_tert_hublvols(node):
     return True, ""
 
 
-# Bounded in-flight-IO drain before dropping leadership on the acting
-# leader, mirroring recreate_lvstore's drain (see the incident record
-# there: 2026-05-02 worker1, 123 state-9 IOs in flight at set_leader=False
-# -> ENODEV on the hublvol open + qpair floods). The drain runs while the
-# leader's LVS port is blocked, so it must stay short.
-_FAILBACK_DRAIN_BOUND_SEC = 2.0
-_FAILBACK_DRAIN_POLL_SEC = 0.05
-
-
-def _take_leadership_on_primary(node):
-    """``bdev_lvol_set_leader(leader=True)`` on the recovering primary and
-    poll until ``lvs leadership`` reads back True. Returns bool."""
-    try:
-        node_rpc = node.rpc_client()
-        node_rpc.bdev_lvol_set_leader(node.lvstore, leader=True)
-        for _ in range(10):
-            try:
-                ret = node_rpc.bdev_lvol_get_lvstores(node.lvstore)
-                if ret and len(ret) > 0 and ret[0].get("lvs leadership"):
-                    return True
-            except Exception:
-                pass
-            time.sleep(0.2)
-    except Exception as e:
-        logger.error("Taking leadership for %s on %s raised: %s",
-                     node.lvstore, node.get_id()[:8], e)
-    return False
+_REPL_SUSPEND_MAX_ATTEMPTS = 10
 
 
 def _failback_leadership_to_primary(node, current_leader, other_peers):
-    """Move LVS leadership back from ``current_leader`` (a secondary or
-    tertiary that became acting leader during the outage) to ``node`` (the
-    recovering configured primary), BEFORE node's port is unblocked.
+    """Network-outage failback for the recovering configured primary, per the
+    data-plane recovery design (2026-07-07, after the 2026-07-06 failback
+    incident): the management plane prepares redirection and then steps AWAY —
+    it never assigns leadership and never blocks serving ports.
 
-    This reinstates the force-failback that was removed from this task
-    after incident 2026-05-02 (k8s_native_failover_ha-20260502-101452),
-    but with the fencing whose absence caused that incident: it runs only
-    AFTER every online peer's hublvol to the recovering primary is
-    verified-open (the peer gate in ``exec_port_allow_task``), so the
-    demoted leader can redirect its in-flight clients to the primary the
-    moment leadership moves. The sequence mirrors ``recreate_lvstore``
-    steps 4-8c:
+    Sequence (all BEFORE the recovering node's port is unblocked):
 
-      1. wait for JM replication tasks on the acting leader (advisory);
-      2. block the acting leader's LVS port (its ``lvstore_status`` is set
-         to ``in_creation`` for the window so the storage-node monitor's
-         port check does not flip it DOWN over our deliberate block);
-      3. suspend journal replication on the acting leader;
-      4. block the remaining online peers' LVS ports (IO leaking to the
-         tertiary mid-flap produces writer conflicts);
-      5. bounded in-flight-IO drain on the acting leader;
-      6. demote: ``bdev_lvol_set_leader(leader=False, bs_nonleadership=True)``
-         + ``bdev_distrib_force_to_non_leader``;
-      7. take leadership on the recovering primary and poll it back;
-      8. re-commit the follower role on each blocked peer
-         (``connect_to_hublvol`` -> set_lvs_opts + connect_hublvol) BEFORE
-         unblocking its port — otherwise the first client IO arriving on
-         the ex-leader re-promotes it via
-         ``spdk_lvs_trigger_leadership_switch`` (writer conflict);
-      9. ANA failback: demote the secondary's lvol listeners back to
-         non_optimized (idempotent no-op unless the outage escalated the
-         primary to OFFLINE and ANA failover fired; the tertiary's ANA is
-         never touched).
+      1. ``jc_disable_replication`` on the acting leader;
+      2. verified-open hublvol from the secondary AND the tertiary to the
+         primary (the peer gate already drove this for ONLINE peers; the
+         acting leader is re-verified here even when it has been flipped
+         DOWN, since leadership can only move if it can redirect);
+      3. demote the acting leader: ``bdev_lvol_set_leader(leader=False)``.
+         Leadership is NOT taken on the primary by the CP — the first
+         redirected IO triggers the primary's LVS update process (blob md
+         reload) which then takes leadership itself. A management-forced
+         ``leader=True`` skips that update and the primary serves stale
+         blob metadata (extent-metadata corruption, incident 2026-07-06
+         18:23 on LVS 13).
 
-    On any failure the blocked ports are re-opened, ``lvstore_status`` is
-    restored, and — if the demote already happened — the old leader is
-    re-promoted so the LVS is never left with zero leaders. Returns
-    ``(ok, msg)``; the caller suspends the task on failure.
+    Deliberately absent (root causes of the 2026-07-06 cascade):
+      - NO port blocking of the acting leader or any peer: the LVS ports
+        carry the peer hublvol/redirect and journal traffic; blocking them
+        mid-IO severs redirect chains (DISTRIBD n_unavail_read) and JC
+        paths (history_append n_success=0 → node abort).
+      - NO in-flight drain window: with hublvols verified first, the
+        demoted leader redirects its in-flight IO to the primary, whose
+        promotion-on-first-IO handles it.
+      - NO ANA manipulation here.
+
+    Returns ``(ok, msg)``; the caller suspends the task on failure.
     """
     lvs_name = node.lvstore
     lvs_jm_vuid = node.jm_vuid
-    lvs_port = node.get_lvol_subsys_port(lvs_name)
 
-    blocked: list[StorageNode] = []
-
-    def _release_blocked_peers():
-        for peer in blocked:
-            try:
-                port_block.set_port(peer, lvs_port, block=False, timeout=5, retry=2)
-                tcp_ports_events.port_allowed(peer, lvs_port)
-            except Exception:
-                logger.exception(
-                    "Failed to unblock port %s on peer %s during failback",
-                    lvs_port, peer.get_id()[:8])
-            try:
-                fresh = db.get_storage_node_by_id(peer.get_id())
-                if fresh.lvstore_status == "in_creation":
-                    fresh.lvstore_status = "ready"
-                    fresh.write_to_db()
-            except Exception:
-                logger.exception(
-                    "Failed to restore lvstore_status on peer %s during failback",
-                    peer.get_id()[:8])
-
-    # The peer gate only covers ONLINE peers. If the acting leader has
-    # meanwhile been flipped DOWN (the very symptom this failback cures),
-    # its hublvol to the primary was not verified yet — verify/reconnect
-    # it now; moving leadership to a primary the ex-leader cannot redirect
-    # to would strand its clients.
-    if current_leader.status != StorageNode.STATUS_ONLINE:
-        if not _verify_or_reconnect_peer_hublvol(current_leader, node):
-            return False, (
-                f"acting leader {current_leader.get_id()[:8]} ({current_leader.status}) "
-                f"has no verified-open hublvol to the primary")
-
-    # 1- replication quiesce (advisory, mirrors recreate_lvstore)
-    try:
-        if not current_leader.wait_for_jm_rep_tasks_to_finish(lvs_jm_vuid):
+    # 1- quiesce, then suspend journal replication on the acting leader.
+    # wait_for_jm_rep_tasks_to_finish loops internally (10x20s) and is
+    # advisory (warn-and-proceed, as in recreate_lvstore); the disable is
+    # the gate: False = active replication -> re-quiesce and retry HERE,
+    # bounded — the wait must happen in this loop, not via task retry.
+    repl_suspended = False
+    for _attempt in range(_REPL_SUSPEND_MAX_ATTEMPTS):
+        try:
+            if not current_leader.wait_for_jm_rep_tasks_to_finish(lvs_jm_vuid):
+                logger.warning(
+                    "JM replication tasks still reported on acting leader %s "
+                    "for jm %s (attempt %d/%d); attempting disable anyway",
+                    current_leader.get_id()[:8], lvs_jm_vuid,
+                    _attempt + 1, _REPL_SUSPEND_MAX_ATTEMPTS)
+            if current_leader.rpc_client().jc_disable_replication(lvs_jm_vuid):
+                repl_suspended = True
+                break
             logger.warning(
-                "JM replication tasks still reported on acting leader %s for jm "
-                "%s; proceeding as recreate_lvstore does",
-                current_leader.get_id()[:8], lvs_jm_vuid)
-    except Exception as e:
-        return False, f"replication-wait on acting leader failed: {e}"
+                "jc_disable_replication reports active replication on acting "
+                "leader %s (attempt %d/%d); re-quiescing",
+                current_leader.get_id()[:8], _attempt + 1,
+                _REPL_SUSPEND_MAX_ATTEMPTS)
+        except Exception as e:
+            return False, f"jc_disable_replication on acting leader failed: {e}"
+    if not repl_suspended:
+        return False, (
+            f"could not suspend journal replication on acting leader after "
+            f"{_REPL_SUSPEND_MAX_ATTEMPTS} attempts")
 
-    # 2- block the acting leader's LVS port
-    try:
-        fresh_leader = db.get_storage_node_by_id(current_leader.get_id())
-        fresh_leader.lvstore_status = "in_creation"
-        fresh_leader.write_to_db()
-        port_block.set_port(current_leader, lvs_port, block=True, timeout=5, retry=2)
-        tcp_ports_events.port_deny(current_leader, lvs_port)
-        blocked.append(current_leader)
-    except Exception as e:
-        _release_blocked_peers()
-        return False, f"failed to port-block acting leader: {e}"
-
-    # 3- suspend journal replication while the port is blocked
-    try:
-        if not current_leader.rpc_client().jc_disable_replication(lvs_jm_vuid):
-            _release_blocked_peers()
-            return False, "active journal replication on acting leader"
-    except Exception as e:
-        _release_blocked_peers()
-        return False, f"jc_disable_replication on acting leader failed: {e}"
-
-    # 4- block the remaining online peers
-    for peer in other_peers:
+    # 2- every reachable follower needs a verified-open hublvol to the
+    # primary before leadership can be dropped anywhere (idempotent for the
+    # peers the gate already verified).
+    for peer in [current_leader] + list(other_peers):
         if peer.status not in (StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN):
             continue
-        try:
-            port_block.set_port(peer, lvs_port, block=True, timeout=5, retry=2)
-            tcp_ports_events.port_deny(peer, lvs_port)
-            blocked.append(peer)
-        except Exception as e:
-            _release_blocked_peers()
-            return False, f"failed to port-block peer {peer.get_id()[:8]}: {e}"
+        if not _verify_or_reconnect_peer_hublvol(peer, node):
+            return False, (
+                f"hublvol from {peer.get_id()[:8]} to the primary not "
+                f"verified-open; refusing to demote the acting leader")
 
-    # --- inside the port-blocked window: short RPC budget ---
-    leader_rpc = current_leader.rpc_client(timeout=0.2, retry=0)
-
-    # 5- bounded drain
-    deadline = time.time() + _FAILBACK_DRAIN_BOUND_SEC
-    drained = False
-    while time.time() < deadline:
-        try:
-            if not leader_rpc.bdev_distrib_check_inflight_io(lvs_jm_vuid):
-                drained = True
-                break
-        except Exception as e:
-            logger.warning(
-                "bdev_distrib_check_inflight_io poll failed on %s: %s",
-                current_leader.get_id()[:8], e)
-            break
-        time.sleep(_FAILBACK_DRAIN_POLL_SEC)
-    if not drained:
-        _release_blocked_peers()
-        return False, (
-            f"in-flight IO did not drain on acting leader within "
-            f"{_FAILBACK_DRAIN_BOUND_SEC}s")
-
-    # 6- demote the acting leader
+    # 3- demote the acting leader; the primary promotes itself (and runs
+    # the LVS update) on the first redirected IO.
     try:
-        leader_rpc.bdev_lvol_set_leader(lvs_name, leader=False, bs_nonleadership=True)
-        leader_rpc.bdev_distrib_force_to_non_leader(lvs_jm_vuid)
+        current_leader.rpc_client().bdev_lvol_set_leader(lvs_name, leader=False)
     except Exception as e:
-        _release_blocked_peers()
         return False, f"failed to demote acting leader: {e}"
 
-    # 7- take leadership on the recovering primary
-    if not _take_leadership_on_primary(node):
-        # Never leave the LVS with zero leaders: re-promote the old leader.
-        try:
-            current_leader.rpc_client().bdev_lvol_set_leader(lvs_name, leader=True)
-            logger.error(
-                "Failback aborted: primary %s did not take leadership; "
-                "re-promoted %s", node.get_id()[:8], current_leader.get_id()[:8])
-        except Exception:
-            logger.exception(
-                "CRITICAL: could not re-promote old leader %s after failed "
-                "failback of %s — LVS may have no leader",
-                current_leader.get_id()[:8], lvs_name)
-        _release_blocked_peers()
-        return False, "recovering primary did not take leadership"
-
-    # 8- re-commit the follower role on each blocked peer, unblocking each
-    # port only after ITS re-commit succeeded (mirrors recreate_lvstore 8c).
-    # A peer whose re-commit fails stays port-blocked — the safe state: no
-    # client IO can arrive and re-promote it. The task suspends; the retry
-    # pass (see _recommit_followers_for_leader in exec_port_allow_task)
-    # finds node already leading and re-drives only the still-blocked peers.
-    failed_peers = []
-    for peer in blocked:
-        if _recommit_follower_and_unblock(node, peer, lvs_port):
-            continue
-        failed_peers.append(peer.get_id()[:8])
-    if failed_peers:
-        return False, (
-            f"follower re-commit failed on {', '.join(failed_peers)}; "
-            f"their ports stay blocked until the retry pass converges them")
-
-    # 9- ANA failback (secondary listeners -> non_optimized; tertiary untouched)
-    try:
-        storage_node_ops._failback_primary_ana(node)
-    except Exception as e:
-        logger.warning("ANA failback after leadership failback failed: %s", e)
-
-    logger.info("Leadership for %s failed back from %s to primary %s",
-                lvs_name, current_leader.get_id()[:8], node.get_id()[:8])
-    return True, ""
-
-
-def _recommit_follower_and_unblock(node, peer, lvs_port):
-    """Re-commit ``peer``'s follower role toward leader ``node``
-    (``connect_to_hublvol`` -> set_lvs_opts + connect_hublvol; the NVMe
-    attach itself is already verified by the gates) and, only on success,
-    unblock the peer's LVS port and restore its ``lvstore_status``.
-
-    Unblocking before the follower role is committed lets the first
-    arriving client IO re-promote the ex-leader via
-    ``spdk_lvs_trigger_leadership_switch`` — the writer-conflict class the
-    port-blocked window exists to prevent. Returns bool.
-    """
-    if not _reconnect_peer_hublvol_once(peer, node):
-        logger.error(
-            "Follower re-commit failed on %s for %s; leaving its port blocked",
-            peer.get_id()[:8], node.lvstore)
-        return False
-    try:
-        port_block.set_port(peer, lvs_port, block=False, timeout=5, retry=2)
-        tcp_ports_events.port_allowed(peer, lvs_port)
-    except Exception as e:
-        logger.error(
-            "Failed to unblock port %s on peer %s after follower re-commit: %s",
-            lvs_port, peer.get_id()[:8], e)
-        return False
-    try:
-        fresh = db.get_storage_node_by_id(peer.get_id())
-        if fresh.lvstore_status == "in_creation":
-            fresh.lvstore_status = "ready"
-            fresh.write_to_db()
-    except Exception:
-        logger.exception(
-            "Failed to restore lvstore_status on peer %s after follower re-commit",
-            peer.get_id()[:8])
-    return True
-
-
-def _recommit_followers_for_leader(node, peers):
-    """Convergence pass for a retry after a partially-completed failback:
-    ``node`` already holds leadership, but one or more peers may still be
-    port-blocked with an uncommitted follower role (step 8 failed on a
-    prior pass, or the runner died mid-failback). Re-drive exactly those
-    peers. Returns ``(ok, msg)``.
-    """
-    lvs_port = node.get_lvol_subsys_port(node.lvstore)
-    failed_peers = []
-    for peer in peers:
-        if peer.status not in (StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN):
-            continue
-        try:
-            peer_blocked = port_block.is_port_blocked(peer, lvs_port)
-        except Exception as e:
-            logger.warning(
-                "Could not read port-block state on %s: %s", peer.get_id()[:8], e)
-            continue
-        if not peer_blocked and peer.lvstore_status != "in_creation":
-            continue
-        logger.info(
-            "Converging peer %s after partial failback of %s (port_blocked=%s, "
-            "lvstore_status=%s)", peer.get_id()[:8], node.lvstore, peer_blocked,
-            peer.lvstore_status)
-        if not _recommit_follower_and_unblock(node, peer, lvs_port):
-            failed_peers.append(peer.get_id()[:8])
-    if failed_peers:
-        return False, f"follower re-commit still failing on {', '.join(failed_peers)}"
+    logger.info(
+        "Acting leader %s demoted for %s; primary %s will take leadership "
+        "on first redirected IO (post-update)",
+        current_leader.get_id()[:8], lvs_name, node.get_id()[:8])
     return True, ""
 
 
@@ -790,91 +548,6 @@ def _read_lvs_leadership(target_node, lvs_name):
         logger.warning("Leadership read for %s on %s failed: %s",
                        lvs_name, target_node.get_id()[:8], e)
         return None
-
-
-def _fence_follower_ports_on_first_contact(node, task):
-    """Fence-on-first-contact: nvmf-block the recovering node's follower
-    redirect-listener ports the moment the CP can reach its SPDK again.
-
-    A follower's redirect-listener port for an lvstore whose primary is
-    not ONLINE is never health-checked (and a partitioned node cannot be
-    port-denied at outage time anyway), so at NIC-heal that listener
-    starts serving client IO against a stale hublvol/leadership state
-    until this task converges it. Blocking those ports here — right after
-    the mgmt + data-NIC gates, before any reconnect work — closes that
-    window for the rest of the recovery; the epilogue unblocks exactly
-    the ports this task fenced.
-
-    Rules:
-      - Only for a DOWN node (an ONLINE node's listeners are serving
-        legitimately; fencing them would cut client IO).
-      - A port that is ALREADY blocked is not claimed — a peer's restart
-        flow or a failback may own it, and unblocking someone else's
-        fence re-opens the very window it guards.
-      - The fenced set is persisted in ``task.function_params`` BEFORE
-        each block RPC, so a runner crash or task retry still knows what
-        to release (an unblock of a never-blocked port is harmless; a
-        blocked port with no record is a leak).
-
-    Returns ``(ok, msg)``; failure suspends the task (the ports already
-    fenced stay fenced — the safe state — and the retry pass continues).
-    """
-    if node.status != StorageNode.STATUS_DOWN:
-        return True, ""
-
-    fenced = list(task.function_params.get("fenced_ports") or [])
-    for pid in [node.lvstore_stack_secondary, node.lvstore_stack_tertiary]:
-        if not pid:
-            continue
-        try:
-            primary = db.get_storage_node_by_id(pid)
-        except KeyError:
-            continue
-        if not primary.lvstore or primary.lvstore_status != "ready":
-            continue
-        port = primary.get_lvol_subsys_port(primary.lvstore)
-        if not port or port in fenced:
-            continue
-        try:
-            if port_block.is_port_blocked(node, port):
-                logger.info(
-                    "Follower port %s on %s already blocked (owned by another "
-                    "flow); not claiming it", port, node.get_id()[:8])
-                continue
-            fenced.append(port)
-            task.function_params["fenced_ports"] = fenced
-            task.write_to_db(db.kv_store)
-            port_block.set_port(node, port, block=True, timeout=5, retry=2)
-            tcp_ports_events.port_deny(node, port)
-            logger.info(
-                "Fenced follower port %s on recovering node %s for %s",
-                port, node.get_id()[:8], primary.lvstore)
-        except Exception as e:
-            return False, f"fencing follower port {port} failed: {e}"
-    return True, ""
-
-
-def _release_fenced_ports(node, task):
-    """Unblock the ports this task fenced. Returns True when the record
-    is empty afterwards; ports that fail to unblock stay recorded so the
-    retry pass releases them (leaving them silently blocked would keep
-    the node DOWN forever with no owner)."""
-    fenced = list(task.function_params.get("fenced_ports") or [])
-    if not fenced:
-        return True
-    still_fenced = []
-    for fport in fenced:
-        try:
-            port_block.set_port(node, fport, block=False, timeout=5, retry=2)
-            tcp_ports_events.port_allowed(node, fport)
-        except Exception as e:
-            logger.error(
-                "Failed to release fenced follower port %s on %s: %s",
-                fport, node.get_id()[:8], e)
-            still_fenced.append(fport)
-    task.function_params["fenced_ports"] = still_fenced
-    task.write_to_db(db.kv_store)
-    return not still_fenced
 
 
 def _abort_recovering_node(node, reason):
@@ -916,13 +589,6 @@ def exec_port_allow_task(task):
     task = db.get_task_by_id(task.uuid)
 
     if task.canceled:
-        # Best-effort release of any follower ports a prior pass fenced —
-        # a canceled task must not leave ownerless blocked ports behind.
-        if task.function_params.get("fenced_ports"):
-            try:
-                _release_fenced_ports(db.get_storage_node_by_id(task.node_id), task)
-            except KeyError:
-                pass
         task.function_result = "canceled"
         task.status = JobSchedule.STATUS_DONE
         task.write_to_db(db.kv_store)
@@ -989,17 +655,6 @@ def exec_port_allow_task(task):
         task.write_to_db(db.kv_store)
         return
 
-    # First contact with a reachable SPDK: fence the follower listener
-    # ports BEFORE any reconnect work (see helper docstring).
-    fence_ok, fence_msg = _fence_follower_ports_on_first_contact(node, task)
-    if not fence_ok:
-        msg = f"Follower-port fencing failed: {fence_msg}, retry task"
-        logger.warning(msg)
-        task.function_result = msg
-        task.status = JobSchedule.STATUS_SUSPENDED
-        task.write_to_db(db.kv_store)
-        return
-
     logger.info("connect to remote devices")
     # connect to remote devs
     try:
@@ -1052,22 +707,78 @@ def exec_port_allow_task(task):
         task.write_to_db(db.kv_store)
         return
 
-    # After a network outage, every distrib on the recovering node has a
-    # stale view of remote devices (status_device=48 / is_device_available_read=0),
-    # which causes DISTRIBD "Unable to read stripe" errors as soon as the
-    # port is unblocked. Push the full cluster map now (covers all nodes'
-    # devices, including our own) so the distribs have up-to-date status
-    # before any IO is allowed through.
-    logger.info("Sending full cluster map to recovering node")
-    if not distr_controller.send_cluster_map_to_node(node):
-        msg = "Failed to send cluster map to recovering node, retry task"
-        logger.warning(msg)
-        task.function_result = msg
-        task.status = JobSchedule.STATUS_SUSPENDED
-        task.write_to_db(db.kv_store)
-        return
+    # After a network outage every distrib in the cluster is working from a
+    # stale device view: the recovering node's distribs have stale REMOTE
+    # state (they were partitioned), and every peer's distribs still carry
+    # this node's devices as UNAVAILABLE (marked during the outage). Both
+    # must be refreshed BEFORE the failback and the port unblock, or the
+    # first IO fails placement/reads (2026-07-06 18:23 incident: 3 of 4
+    # sids online=0, "Failed to find available location",
+    # n_unavail_read > 2).
+    #
+    # Order (runs only now, after the inbound/outbound device + JM
+    # connections with the recovering node are re-established above):
+    #   1- re-admit this node's devices in FDB (CAUSE_NODE_RECOVERY passes
+    #      the stale re-online guard — the node's FDB status flips ONLINE
+    #      only after the unblock, by design);
+    #   2- send an update of the LOCAL devices of the recovering node to
+    #      ALL nodes (including the recovering node itself) — also covers
+    #      devices that stayed ONLINE in FDB through the outage;
+    #   3- send an update of all OTHER nodes' devices to the recovering
+    #      node only (targeted events, not a full cluster map push).
+    node = db.get_storage_node_by_id(task.node_id)
+    for dev in node.nvme_devices:
+        if dev.status in (NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_REMOVED,
+                          NVMeDevice.STATUS_JM, NVMeDevice.STATUS_NEW):
+            continue
+        logger.info(
+            f"Re-admitting device {dev.get_id()} (was {dev.status}) before "
+            f"port allow on {node.get_id()}")
+        if not device_controller.device_set_online(
+                dev.get_id(), cause=device_controller.CAUSE_NODE_RECOVERY):
+            msg = f"Device {dev.get_id()} re-admit refused, retry task"
+            logger.warning(msg)
+            task.function_result = msg
+            task.status = JobSchedule.STATUS_SUSPENDED
+            task.write_to_db(db.kv_store)
+            return
 
-    logger.info("Cluster map sent; waiting 5s for JMs to connect")
+    logger.info("Broadcasting local device status of recovering node to all nodes")
+    node = db.get_storage_node_by_id(task.node_id)
+    for dev in node.nvme_devices:
+        if dev.status in (NVMeDevice.STATUS_JM, NVMeDevice.STATUS_NEW):
+            continue
+        try:
+            distr_controller.send_dev_status_event(dev, dev.status)
+        except Exception as e:
+            msg = (f"Local device status broadcast for {dev.get_id()} "
+                   f"failed: {e}, retry task")
+            logger.warning(msg)
+            task.function_result = msg
+            task.status = JobSchedule.STATUS_SUSPENDED
+            task.write_to_db(db.kv_store)
+            return
+
+    logger.info("Sending other nodes' device status events to recovering node")
+    for cluster_node in db.get_storage_nodes_by_cluster_id(task.cluster_id):
+        if cluster_node.get_id() == node.get_id():
+            continue
+        for dev in cluster_node.nvme_devices:
+            if dev.status in (NVMeDevice.STATUS_JM, NVMeDevice.STATUS_NEW):
+                continue
+            try:
+                distr_controller.send_dev_status_event(
+                    dev, dev.status, target_node=node)
+            except Exception as e:
+                msg = (f"Device status event for {dev.get_id()} to recovering "
+                       f"node failed: {e}, retry task")
+                logger.warning(msg)
+                task.function_result = msg
+                task.status = JobSchedule.STATUS_SUSPENDED
+                task.write_to_db(db.kv_store)
+                return
+
+    logger.info("Device events sent; waiting 5s for JMs to connect")
     time.sleep(5)
 
     # The recovering node's OWN follower-side hublvols — the lvstores it
@@ -1260,25 +971,12 @@ def exec_port_allow_task(task):
                 node, current_leader,
                 [p for p in failback_peers if p is not current_leader])
         else:
-            # No peer holds leadership. Ensure the primary itself does
-            # (a no-abort outage can leave the LVS with ZERO leaders —
-            # the state the manual restore_lvs*_primary_leader.py script
-            # existed for), then converge any peer left port-blocked by a
-            # partially-completed failback on a prior pass.
-            node_is_leader = False
-            try:
-                ret = node.rpc_client().bdev_lvol_get_lvstores(node.lvstore)
-                node_is_leader = bool(ret and len(ret) > 0 and ret[0].get("lvs leadership"))
-            except Exception as e:
-                logger.warning("Leadership read on recovering primary failed: %s", e)
-            if not node_is_leader and not _take_leadership_on_primary(node):
-                msg = "Recovering primary could not take leadership, retry task"
-                logger.warning(msg)
-                task.function_result = msg
-                task.status = JobSchedule.STATUS_SUSPENDED
-                task.write_to_db(db.kv_store)
-                return
-            failback_ok, failback_msg = _recommit_followers_for_leader(node, failback_peers)
+            # No peer holds leadership. The CP does NOT assign it: the
+            # primary promotes itself on the first arriving IO, which also
+            # runs the LVS update process first (management-forced
+            # leader=True skips that update — 2026-07-06 stale-metadata
+            # corruption). Nothing to converge here.
+            failback_ok, failback_msg = True, ""
 
         if not failback_ok:
             msg = f"Leadership failback incomplete: {failback_msg}, retry task"
@@ -1288,21 +986,39 @@ def exec_port_allow_task(task):
             task.write_to_db(db.kv_store)
             return
 
-    # Release the follower ports fenced at first contact — every gate has
-    # passed, so the follower-side hublvols/leadership for those lvstores
-    # are converged. Released strictly BEFORE the node's own client port
-    # so redirects are reachable the moment client IO returns.
-    if not _release_fenced_ports(node, task):
-        msg = "Failed to release fenced follower port(s), retry task"
-        logger.warning(msg)
-        task.function_result = msg
-        task.status = JobSchedule.STATUS_SUSPENDED
-        task.write_to_db(db.kv_store)
-        return
-
     logger.info(f"Allow port {port_number} on node {node.get_id()}")
     port_block.set_port(node, port_number, block=False, timeout=5, retry=2)
     tcp_ports_events.port_allowed(node, port_number)
+
+    # Deferred ANA failover, AFTER the port release: a secondary recovering
+    # while its primary is OFFLINE returns with non-optimized listeners
+    # (trigger_ana_failover_for_node skipped the promotion because this node
+    # wasn't ONLINE at the time). Promote its subsystems to optimized now —
+    # deliberately post-unblock and per-lvol, so IO drains back from the
+    # tertiary to this secondary gradually rather than gating the recovery.
+    # The tertiary→secondary hublvol hard gate above already guaranteed the
+    # tertiary can redirect here before any client lands on this node.
+    if node.lvstore_stack_secondary:
+        try:
+            # reverse ref holds the primary's node id (str at runtime despite
+            # the model's List[dict] annotation — see field-semantics note)
+            ana_primary = db.get_storage_node_by_id(str(node.lvstore_stack_secondary))
+        except KeyError:
+            ana_primary = None
+        if ana_primary and ana_primary.status == StorageNode.STATUS_OFFLINE:
+            logger.info(
+                "Primary %s is OFFLINE; promoting recovered secondary %s to "
+                "optimized for %s lvols (post-unblock, gradual)",
+                ana_primary.get_id()[:8], node.get_id()[:8], ana_primary.lvstore)
+            for lvol in db.get_lvols_by_node_id(ana_primary.get_id()):
+                if lvol.status not in (LVol.STATUS_ONLINE, LVol.STATUS_OFFLINE):
+                    continue
+                try:
+                    storage_node_ops._set_lvol_ana_on_node(lvol, node, "optimized")
+                except Exception as e:
+                    logger.warning(
+                        "Deferred ANA promotion of %s on %s failed: %s",
+                        lvol.nqn, node.get_id()[:8], e)
 
     # Self-heal devices that went UNAVAILABLE while this node was fenced/partitioned
     # (e.g. forced globally UNAVAILABLE by the remote-IO quorum in

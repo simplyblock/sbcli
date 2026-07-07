@@ -965,21 +965,26 @@ class TestSequentialFailbackScenario(unittest.TestCase):
 # TasksRunnerPortAllow Tests
 # ===========================================================================
 
-class TestPortAllowFencedFailback(unittest.TestCase):
+class TestPortAllowMinimalFailback(unittest.TestCase):
     """Source guards for port_allow's leadership failback.
 
     History: an unfenced force-failback caused incident 2026-05-02
     (k8s_native_failover_ha-20260502-101452) — it demoted the
     legitimately-elected new leader with unverified hublvols and no
-    drain, cutting client IO. Commit 59d51049 removed it entirely; but
-    leaving leadership on the peer proved equally wrong: nothing on the
-    no-restart recovery path reconciled the ex-leader's redirect state
-    afterwards, so it went DOWN unable to redirect IO to the primary.
+    drain, cutting client IO. Commit 59d51049 removed it entirely; the
+    2026-07-06 reinstatement added fencing (peer port-block window,
+    bounded drain, forced leader=True take) — and caused the 2026-07-06
+    cascade: the port blocks severed hublvol/redirect and journal traffic
+    (DISTRIBD n_unavail_read, JC history_append n_success=0), and the
+    management-forced leader=True skipped the primary's LVS update and
+    served stale blob metadata (18:23 extent-metadata corruption on LVS 13).
 
-    The failback is reinstated (2026-07-06) WITH fencing. Pin the fencing,
-    not the absence: the demote must sit behind the hublvol gates, inside
-    a port-blocked window with a bounded drain, and the node's port opens
-    only after.
+    The 2026-07-07 rework made the failback MINIMAL: quiesce +
+    jc_disable_replication on the acting leader (bounded local loop),
+    verified-open hublvols from every reachable peer to the primary, then
+    exactly one plain ``bdev_lvol_set_leader(leader=False)`` demote. The CP
+    never assigns leadership and never blocks a port; the primary promotes
+    itself on the first redirected IO.
     """
 
     def _read_source(self):
@@ -989,6 +994,12 @@ class TestPortAllowFencedFailback(unittest.TestCase):
             "simplyblock_core", "services", "tasks_runner_port_allow.py")
         with open(src_path, "r") as f:
             return f.read()
+
+    def _failback_fn(self, src):
+        fn_start = src.find("def _failback_leadership_to_primary")
+        self.assertGreater(fn_start, 0, "the minimal failback helper must exist")
+        fn_end = src.find("\ndef ", fn_start + 1)
+        return src[fn_start:fn_end]
 
     def test_failback_sits_behind_the_gates_and_before_unblock(self):
         src = self._read_source()
@@ -1007,24 +1018,45 @@ class TestPortAllowFencedFailback(unittest.TestCase):
             i_unblock, i_failback,
             "the recovering node's port opens only after the failback")
 
-    def test_demote_is_drained_and_port_blocked(self):
+    def test_demote_is_minimal_no_blocks_no_drain(self):
         src = self._read_source()
-        fn_start = src.find("def _failback_leadership_to_primary")
-        self.assertGreater(fn_start, 0)
-        fn = src[fn_start:src.find("def _recommit_follower_and_unblock")]
-        i_block = fn.find("block=True")
-        i_drain = fn.find("leader_rpc.bdev_distrib_check_inflight_io")
-        i_demote = fn.find("leader_rpc.bdev_lvol_set_leader")
+        fn = self._failback_fn(src)
+        self.assertNotIn(
+            "block=True", fn,
+            "the failback must NOT port-block the acting leader or peers — "
+            "LVS ports carry hublvol/redirect and journal traffic (2026-07-06)")
+        self.assertNotIn(
+            "bdev_distrib_check_inflight_io", fn,
+            "no blocked-window drain: with hublvols verified first, the "
+            "demoted leader redirects its in-flight IO to the primary")
+        self.assertNotIn("bs_nonleadership", fn)
+        self.assertNotIn("bdev_distrib_force_to_non_leader", fn)
+        self.assertEqual(
+            fn.count(".bdev_lvol_set_leader("), 1,
+            "exactly one leadership mutation in the failback: the plain "
+            "demote of the acting leader")
+        i_jc = fn.find(".jc_disable_replication(")
+        i_hub = fn.find("_verify_or_reconnect_peer_hublvol(")
+        i_demote = fn.find(".bdev_lvol_set_leader(")
         self.assertTrue(
-            0 < i_block < i_drain < i_demote,
-            "demote must run inside the port-blocked window, after the drain")
-
-    def test_failed_take_repromotes_old_leader(self):
-        src = self._read_source()
+            0 < i_jc < i_hub < i_demote,
+            f"failback order must be jc_disable_replication -> hublvol "
+            f"verify -> demote (got jc={i_jc}, hub={i_hub}, demote={i_demote})")
         self.assertIn(
-            "re-promote", src,
-            "a failed leadership take must re-promote the old leader — the "
-            "LVS may never be left with zero leaders")
+            "_REPL_SUSPEND_MAX_ATTEMPTS", fn,
+            "the quiesce+disable loop is bounded locally (re-quiesce and "
+            "retry in the loop, not via task suspension)")
+
+    def test_runner_never_assigns_leadership(self):
+        src = self._read_source()
+        self.assertNotIn(
+            "leader=True)", src,
+            "the port-allow runner must NEVER assign leadership: a "
+            "management-forced leader=True skips the primary's LVS update "
+            "and serves stale blob metadata (2026-07-06 corruption)")
+        self.assertNotIn("def _take_leadership_on_primary", src)
+        self.assertNotIn("_recommit_follower_and_unblock", src)
+        self.assertNotIn("_recommit_followers_for_leader", src)
 
 
 # ===========================================================================
