@@ -344,19 +344,10 @@ def _def_create_device_stack(device_obj, snode, force=False, clear_data=False):
 
     rpc_client = snode.rpc_client(timeout=600)
 
-    bdev_names = []
-    bdevs = rpc_client.get_bdevs()
-    if bdevs is None:
-        # None is an RPC failure (timeout / non-200), not an empty bdev list;
-        # fail loudly instead of crashing on a None iteration below.
-        raise Exception(f"get_bdevs failed on node {snode.get_id()}")
-    for dev in bdevs:
-        bdev_names.append(dev['name'])
-
     nvme_bdev = device_obj.nvme_bdev
     if snode.enable_test_device:
         test_name = f"{device_obj.nvme_bdev}_test"
-        if test_name not in bdev_names:
+        if not rpc_client.get_bdevs(test_name):
             # create testing bdev
             ret = rpc_client.bdev_passtest_create(test_name, device_obj.nvme_bdev)
             if not ret:
@@ -375,7 +366,7 @@ def _def_create_device_stack(device_obj, snode, force=False, clear_data=False):
         # device can be made to "hang" on demand (chaos testing). Created with zero
         # latency; arm via device_controller.set_device_hang / bdev_delay_update_latency.
         hang_name = f"{device_obj.nvme_bdev}_hang"
-        if hang_name not in bdev_names:
+        if not rpc_client.get_bdevs(hang_name):
             ret = rpc_client.bdev_delay_create(hang_name, nvme_bdev)
             if not ret:
                 logger.error(f"Failed to create hang bdev: {hang_name}")
@@ -388,7 +379,7 @@ def _def_create_device_stack(device_obj, snode, force=False, clear_data=False):
 
     alceml_id = device_obj.get_id()
     alceml_name = get_alceml_name(alceml_id)
-    if alceml_name not in bdev_names:
+    if not rpc_client.get_bdevs(alceml_name):
         ret = snode.create_alceml(
             alceml_name, nvme_bdev, alceml_id,
             pba_init_mode=3 if clear_data else 2,
@@ -406,7 +397,7 @@ def _def_create_device_stack(device_obj, snode, force=False, clear_data=False):
 
     # add pass through
     pt_name = f"{alceml_name}_PT"
-    if pt_name not in bdev_names:
+    if not rpc_client.get_bdevs(pt_name):
         ret = rpc_client.bdev_PT_NoExcl_create(pt_name, alceml_name)
         if not ret:
             logger.error(f"Failed to create pt noexcl bdev: {pt_name}")
@@ -721,13 +712,6 @@ def device_remove(device_id, force=True, cause=CAUSE_OTHER):
 
     logger.info("Removing device fabric")
     rpc_client = snode.rpc_client()
-    node_bdev = {}
-    ret = rpc_client.get_bdevs()
-    if ret:
-        for b in ret:
-            node_bdev[b['name']] = b
-            for al in b['aliases']:
-                node_bdev[al] = b
 
     if rpc_client.subsystem_list(device.nvmf_nqn):
         logger.info("Removing device subsystem")
@@ -737,7 +721,7 @@ def device_remove(device_id, force=True, cause=CAUSE_OTHER):
             if not force:
                 return False
 
-    if f"{device.alceml_bdev}_PT" in node_bdev or force:
+    if  rpc_client.get_bdevs(f"{device.alceml_bdev}_PT") or force:
         logger.info("Removing device PT")
         ret = rpc_client.bdev_PT_NoExcl_delete(f"{device.alceml_bdev}_PT")
         if not ret:
@@ -745,21 +729,21 @@ def device_remove(device_id, force=True, cause=CAUSE_OTHER):
             if not force:
                 return False
 
-    if device.alceml_bdev in node_bdev or force:
+    if  rpc_client.get_bdevs(device.alceml_bdev ) or force:
         ret = rpc_client.bdev_alceml_delete(device.alceml_bdev)
         if not ret:
             logger.error(f"Failed to remove bdev: {device.alceml_bdev}")
             if not force:
                 return False
 
-    if device.qos_bdev in node_bdev or force:
+    if  rpc_client.get_bdevs(device.qos_bdev) or force:
         ret = rpc_client.qos_vbdev_delete(device.qos_bdev)
         if not ret:
             logger.error(f"Failed to remove bdev: {device.qos_bdev}")
             if not force:
                 return False
 
-    if snode.enable_test_device and device.testing_bdev in node_bdev or force:
+    if snode.enable_test_device and (rpc_client.get_bdevs(device.testing_bdev) or force):
         ret = rpc_client.bdev_passtest_delete(device.testing_bdev)
         if not ret:
             logger.error(f"Failed to remove bdev: {device.testing_bdev}")
@@ -1201,16 +1185,12 @@ def restart_jm_device(device_id, force=False, format_alceml=False):
     if snode.jm_device:
         rpc_client = snode.rpc_client()
         if snode.jm_device.raid_bdev:
-            bdevs = rpc_client.get_bdevs()
-            if bdevs is None:
-                raise Exception(f"get_bdevs failed on node {snode.get_id()}")
-            bdevs_names = [d['name'] for d in bdevs]
             jm_nvme_bdevs = []
             for dev in snode.nvme_devices:
                 if dev.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_NEW]:
                     continue
                 dev_part = f"{dev.nvme_bdev[:-2]}p1"
-                if dev_part in bdevs_names:
+                if rpc_client.get_bdevs(dev_part):
                     if dev_part not in jm_nvme_bdevs:
                         jm_nvme_bdevs.append(dev_part)
 
@@ -1228,13 +1208,6 @@ def restart_jm_device(device_id, force=False, format_alceml=False):
                     set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
         else:
             nvme_bdev = jm_device.nvme_bdev
-            # if snode.enable_test_device:
-            #     ret = rpc_client.bdev_passtest_create(jm_device.testing_bdev, jm_device.nvme_bdev)
-            #     if not ret:
-            #         logger.error(f"Failed to create passtest bdev {jm_device.testing_bdev}")
-            #         # return False
-            #     nvme_bdev = jm_device.testing_bdev
-            #
             cluster = db_controller.get_cluster_by_id(snode.cluster_id)
             ret = snode.create_alceml(
                 jm_device.alceml_bdev, nvme_bdev, jm_device.get_id(),

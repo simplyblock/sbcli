@@ -1317,17 +1317,10 @@ def _connect_to_remote_devs(
     return remote_devices
 
 
-def sync_remote_devices_from_spdk(this_node: StorageNode, node_bdev_names=None):
+def sync_remote_devices_from_spdk(this_node: StorageNode):
     """Persist remote data bdevs that already exist in SPDK for this node."""
     db_controller = DBController()
-    # if node_bdev_names is None:
-    #     rpc_client = this_node.rpc_client(timeout=5, retry=1)
-    #     node_bdevs = rpc_client.get_bdevs()
-    #     node_bdev_names = [b["name"] for b in node_bdevs] if node_bdevs else []
-    # elif isinstance(node_bdev_names, dict):
-    #     node_bdev_names = list(node_bdev_names.keys())
-    #
-    # node_bdev_names = set(node_bdev_names)
+    rpc_client = this_node.rpc_client(timeout=5, retry=1)
     fresh_node = db_controller.get_storage_node_by_id(this_node.get_id())
     remote_by_id = {dev.get_id(): dev for dev in fresh_node.remote_devices}
     changed = False
@@ -1345,7 +1338,7 @@ def sync_remote_devices_from_spdk(this_node: StorageNode, node_bdev_names=None):
             ]:
                 continue
             expected_bdev = f"remote_{dev.alceml_bdev}n1"
-            if expected_bdev not in node_bdev_names:
+            if not rpc_client.get_bdevs(expected_bdev):
                 continue
             remote_dev = remote_by_id.get(dev.get_id())
             if remote_dev:
@@ -1371,7 +1364,7 @@ def sync_remote_devices_from_spdk(this_node: StorageNode, node_bdev_names=None):
     return changed
 
 
-def reconnect_dropped_remote_devs(this_node: StorageNode, node_bdev_names=None):
+def reconnect_dropped_remote_devs(this_node: StorageNode):
     """Topology-driven repair for remote data-device connections.
 
     ``node.remote_devices`` is rebuilt as "whatever was reachable at that
@@ -1403,11 +1396,6 @@ def reconnect_dropped_remote_devs(this_node: StorageNode, node_bdev_names=None):
     connected.
     """
     db_controller = DBController()
-    if node_bdev_names is None:
-        node_bdevs = this_node.rpc_client(timeout=5, retry=1).get_bdevs()
-        node_bdev_names = [b["name"] for b in node_bdevs] if node_bdevs else []
-    elif isinstance(node_bdev_names, dict):
-        node_bdev_names = list(node_bdev_names.keys())
 
     fresh_node = db_controller.get_storage_node_by_id(this_node.get_id())
     known_ids = {dev.get_id() for dev in fresh_node.remote_devices}
@@ -1435,7 +1423,7 @@ def reconnect_dropped_remote_devs(this_node: StorageNode, node_bdev_names=None):
             try:
                 remote_bdev = connect_device(
                     f"remote_{dev.alceml_bdev}", dev, fresh_node,
-                    bdev_names=node_bdev_names, reattach=False)
+                    bdev_names=[], reattach=False)
             except Exception as e:
                 logger.error(
                     "Failed to reconnect dropped remote device %s on peer %s: %s",
@@ -4458,89 +4446,6 @@ def get_ctrl_secret(node_id):
     return node.ctrl_secret.get_secret_value()
 
 
-def health_check(node_id):
-    db_controller = DBController()
-    try:
-        snode = db_controller.get_storage_node_by_id(node_id)
-    except KeyError:
-        logger.error("node not found")
-        return False
-
-    try:
-
-        res = utils.ping_host(snode.mgmt_ip)
-        if res:
-            logger.info(f"Ping host: {snode.mgmt_ip}... OK")
-        else:
-            logger.error(f"Ping host: {snode.mgmt_ip}... Failed")
-
-        # node_docker = docker.DockerClient(base_url=f"tcp://{snode.mgmt_ip}:2375", version="auto")
-        # containers_list = node_docker.containers.list(all=True)
-        # for cont in containers_list:
-        #     name = cont.attrs['Name']
-        #     state = cont.attrs['State']
-        #
-        #     if name in ['/spdk', '/spdk_proxy', '/SNodeAPI'] or name.startswith("/app_"):
-        #         logger.debug(state)
-        #         since = ""
-        #         try:
-        #             start = datetime.datetime.fromisoformat(state['StartedAt'].split('.')[0])
-        #             since = str(datetime.datetime.now() - start).split('.')[0]
-        #         except Exception:
-        #             pass
-        #         clean_name = name.split(".")[0].replace("/", "")
-        #         logger.info(f"Container: {clean_name}, Status: {state['Status']}, Since: {since}")
-
-    except Exception as e:
-        logger.error(f"Failed to connect to node's docker: {e}")
-
-    try:
-        logger.info("Connecting to node's SPDK")
-        rpc_client = snode.rpc_client(timeout=3, retry=1)
-
-        ret = rpc_client.get_version()
-        logger.info(f"SPDK version: {ret['version']}")
-
-        ret = rpc_client.get_bdevs()
-        logger.info(f"SPDK BDevs count: {len(ret)}")
-        # for bdev in ret:
-        #     name = bdev['name']
-        #     product_name = bdev['product_name']
-        #     driver = ""
-        #     for d in bdev['driver_specific']:
-        #         driver = d
-        #         break
-        #     # logger.info(f"name: {name}, product_name: {product_name}, driver: {driver}")
-
-        logger.info("getting device bdevs")
-        # for dev in snode.nvme_devices:
-        #     nvme_bdev = rpc_client.get_bdevs(dev.nvme_bdev)
-        #     if snode.enable_test_device:
-        #         testing_bdev = rpc_client.get_bdevs(dev.testing_bdev)
-        #     alceml_bdev = rpc_client.get_bdevs(dev.alceml_bdev)
-        #     pt_bdev = rpc_client.get_bdevs(dev.pt_bdev)
-
-        #     subsystem = rpc_client.subsystem_list(dev.nvmf_nqn)
-
-        # dev.testing_bdev = test_name
-        # dev.alceml_bdev = alceml_name
-        # dev.pt_bdev = pt_name
-        # # nvme.nvmf_nqn = subsystem_nqn
-        # # nvme.nvmf_ip = IP
-        # # nvme.nvmf_port = 4420
-
-    except Exception as e:
-        logger.error(f"Failed to connect to node's SPDK: {e}")
-
-    try:
-        logger.info("Connecting to node's API")
-        node_info, _ = snode.client().info()
-        logger.info(f"Node info: {node_info['hostname']}")
-
-    except Exception as e:
-        logger.error(f"Failed to connect to node's SPDK: {e}")
-
-
 def get_info(node_id):
     db_controller = DBController()
 
@@ -7546,18 +7451,12 @@ def _create_bdev_stack(snode, lvstore_stack=None, primary_node=None):
     else:
         stack = lvstore_stack
 
-    node_bdevs = rpc_client.get_bdevs()
-    if node_bdevs:
-        node_bdev_names = [b['name'] for b in node_bdevs]
-    else:
-        node_bdev_names = []
-
     thread_list = []
     for bdev in stack:
         type = bdev['type']
         name = bdev['name']
         params = bdev['params']
-        if name in node_bdev_names:
+        if rpc_client.get_bdevs(name):
             continue
 
         elif type == "bdev_distr":

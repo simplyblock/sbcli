@@ -229,23 +229,8 @@ def _check_node_hublvol(node: StorageNode, node_bdev_names=None, node_lvols_nqns
     try:
         rpc_client = node.rpc_client(timeout=8, retry=1)
 
-        if not node_bdev_names:
-            node_bdev_names = {}
-            ret = rpc_client.get_bdevs()
-            if ret:
-                for b in ret:
-                    node_bdev_names[b['name']] = b
-                    for al in b['aliases']:
-                        node_bdev_names[al] = b
-
-        if not node_lvols_nqns:
-            node_lvols_nqns = {}
-            ret = rpc_client.subsystem_list(node.hublvol.nqn)
-            for sub in ret:
-                node_lvols_nqns[sub['nqn']] = sub
-
-        passed &= check_bdev(node.hublvol.bdev_name, bdev_names=node_bdev_names)
-        passed &= check_subsystem(node.hublvol.nqn, nqns=node_lvols_nqns)
+        passed &= check_bdev(node.hublvol.bdev_name, rpc_client=rpc_client)
+        passed &= check_subsystem(node.hublvol.nqn, rpc_client=rpc_client)
 
         try:
             cl = db_controller.get_cluster_by_id(node.cluster_id)
@@ -286,7 +271,7 @@ def _check_node_hublvol(node: StorageNode, node_bdev_names=None, node_lvols_nqns
     return passed
 
 
-def _check_sec_node_hublvol(node: StorageNode, node_bdev=None, node_lvols_nqns=None, auto_fix=False, primary_node_id=None) -> bool:
+def _check_sec_node_hublvol(node: StorageNode, node_bdevssss=None, node_lvols_nqnsddd=None, auto_fix=False, primary_node_id=None) -> bool:
     db_controller = DBController()
     # If a specific primary is given, use it; otherwise resolve from back-references
     if not primary_node_id:
@@ -309,17 +294,6 @@ def _check_sec_node_hublvol(node: StorageNode, node_bdev=None, node_lvols_nqns=N
     passed = True
     try:
         rpc_client = node.rpc_client(timeout=8, retry=1)
-
-        if not node_bdev:
-            node_bdev = {}
-            ret = rpc_client.get_bdevs()
-            if ret:
-                for b in ret:
-                    node_bdev[b['name']] = b
-                    for al in b['aliases']:
-                        node_bdev[al]= b
-            else:
-                node_bdev = []
 
         ret = rpc_client.bdev_nvme_controller_list(primary_node.hublvol.bdev_name)
         passed = bool(ret)
@@ -362,16 +336,6 @@ def _check_sec_node_hublvol(node: StorageNode, node_bdev=None, node_lvols_nqns=N
                                            node.get_id())
                 except Exception as e:
                     logger.error("Error adding secondary hublvol path: %s", e)
-
-            node_bdev = {}
-            ret = rpc_client.get_bdevs()
-            if ret:
-                for b in ret:
-                    node_bdev[b['name']] = b
-                    for al in b['aliases']:
-                        node_bdev[al]= b
-            else:
-                node_bdev = []
 
         # Repair degraded multipath on hublvol controller: each NIC should
         # contribute one path. If a NIC went down and came back, the path may
@@ -427,7 +391,7 @@ def _check_sec_node_hublvol(node: StorageNode, node_bdev=None, node_lvols_nqns=N
                             "Failed to reconcile hublvol on %s: %s",
                             node.get_id(), e)
 
-        passed &= check_bdev(primary_node.hublvol.get_remote_bdev_name(), bdev_names=node_bdev)
+        passed &= check_bdev(primary_node.hublvol.get_remote_bdev_name(), rpc_client=rpc_client)
         if not passed:
             return False
 
@@ -474,7 +438,7 @@ def _check_sec_node_hublvol(node: StorageNode, node_bdev=None, node_lvols_nqns=N
 
 
 def _check_node_lvstore(
-        lvstore_stack, node, auto_fix=False, node_bdev_names=None, stack_src_node=None) -> bool:
+        lvstore_stack, node, auto_fix=False, node_bdev_namesss=None, stack_src_node=None) -> bool:
     db_controller = DBController()
     logger.info(f"Checking distr stack on node : {node.get_id()}")
 
@@ -499,18 +463,6 @@ def _check_node_lvstore(
         if type == "bdev_raid":
             node_distribs_list = bdev["distribs_list"]
 
-    if not node_bdev_names:
-        try:
-            ret = node.rpc_client().get_bdevs()
-        except Exception as e:
-            logger.info(e)
-            return False
-
-        if ret:
-            node_bdev_names = [b['name'] for b in ret]
-        else:
-            node_bdev_names = []
-
     nodes = {}
     devices = {}
     for n in db_controller.get_storage_nodes():
@@ -519,7 +471,7 @@ def _check_node_lvstore(
             devices[dev.get_id()] = dev
 
     for distr in distribs_list:
-        if distr in node_bdev_names:
+        if node.rpc_client().get_bdevs(distr):
             logger.info(f"Checking distr bdev : {distr} ... ok")
             logger.info("Checking distr JM names:")
             if distr in node_distribs_list:
@@ -562,7 +514,7 @@ def _check_node_lvstore(
                                             try:
                                                 remote_bdev = storage_node_ops.connect_device(
                                                     f"remote_{dev.alceml_bdev}", dev, node,
-                                                    bdev_names=node_bdev_names, reattach=False)
+                                                    bdev_names=[], reattach=False)
                                                 if remote_bdev:
                                                     remote_device = RemoteDevice()
                                                     remote_device.uuid = dev.uuid
@@ -619,7 +571,7 @@ def _check_node_lvstore(
             logger.info(f"Checking distr bdev : {distr} ... not found")
             return False
     if raid:
-        if raid in node_bdev_names:
+        if node.rpc_client().get_bdevs(raid):
             logger.info(f"Checking raid bdev: {raid} ... ok")
         else:
             logger.info(f"Checking raid bdev: {raid} ... not found")

@@ -658,16 +658,6 @@ def exec_port_allow_task(task):
     logger.info("connect to remote devices")
     # connect to remote devs
     try:
-        node_bdevs = node.rpc_client().get_bdevs()
-        logger.debug(node_bdevs)
-        if node_bdevs:
-            node_bdev_names = {}
-            for b in node_bdevs:
-                node_bdev_names[b['name']] = b
-                for al in b['aliases']:
-                    node_bdev_names[al] = b
-        else:
-            node_bdev_names = {}
         remote_devices = storage_node_ops._connect_to_remote_devs(node, reattach=False)
         if not remote_devices:
             msg = "Node unable to connect to remote devs, retry task"

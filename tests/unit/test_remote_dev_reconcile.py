@@ -99,7 +99,7 @@ class TestReconnectDroppedRemoteDevs(unittest.TestCase):
 
     def _run(self):
         return storage_node_ops.reconnect_dropped_remote_devs(
-            self.this_node, node_bdev_names=[])
+            self.this_node)
 
     def test_missing_device_on_online_peer_is_reconnected(self):
         peer = _make_node("node-b")

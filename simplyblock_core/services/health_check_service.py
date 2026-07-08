@@ -161,7 +161,7 @@ def check_node(snode):
             if device.status == NVMeDevice.STATUS_ONLINE:
                 node_devices_check &= passed
 
-        if storage_node_ops.sync_remote_devices_from_spdk(snode, node_bdev_names=node_bdev_names):
+        if storage_node_ops.sync_remote_devices_from_spdk(snode):
             snode = db.get_storage_node_by_id(snode.get_id())
 
         # Reconcile against cluster topology. node.remote_devices is rebuilt
@@ -173,8 +173,7 @@ def check_node(snode):
         # remote-JM rebuild below, to stay out of activation's way.
         if cluster is not None and cluster.status in [
                 Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
-            reconnected, reconcile_ok = storage_node_ops.reconnect_dropped_remote_devs(
-                snode, node_bdev_names=node_bdev_names)
+            reconnected, reconcile_ok = storage_node_ops.reconnect_dropped_remote_devs(snode)
             if reconnected:
                 snode = db.get_storage_node_by_id(snode.get_id())
             node_remote_devices_check &= reconcile_ok
@@ -218,7 +217,7 @@ def check_node(snode):
         if snode.jm_device and snode.jm_device.get_id():
             jm_device = snode.jm_device
             logger.info(f"Node JM: {jm_device.get_id()}")
-            if jm_device.jm_bdev in node_bdev_names:
+            if rpc_client.get_bdevs(jm_device.jm_bdev):
                 logger.info(f"Checking jm bdev: {jm_device.jm_bdev} ... ok")
                 connected_jms.append(jm_device.get_id())
             else:
