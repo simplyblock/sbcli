@@ -876,18 +876,19 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
                 self.ssh_obj.format_disk(
                     node=client, device=device, fs_type="ext4"
                 )
-                mount_path = f"/mnt/mcd_{label}_{i}"
+                safe_label = label.replace(" ", "_")
+                mount_path = f"/mnt/mcd_{safe_label}_{i}"
                 self.ssh_obj.mount_path(
                     node=client, device=device, mount_path=mount_path
                 )
-                log_file = f"/tmp/fio_{label}_{i}.log"
+                log_file = f"/tmp/fio_{safe_label}_{i}.log"
                 randseed = random.randint(1, 2**63)
                 fio_thread = threading.Thread(
                     target=self.ssh_obj.run_fio_test,
                     args=(client, None, mount_path, log_file),
                     kwargs={
                         "size": self.FIO_SIZE,
-                        "name": f"mcd_{label}_{i}_fio",
+                        "name": f"mcd_{safe_label}_{i}_fio",
                         "rw": "randrw",
                         "bs": "4K",
                         "iodepth": self.FIO_IODEPTH,
@@ -949,18 +950,19 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
         Returns the FIO thread (already started).
         """
         self.ssh_obj.format_disk(node=client, device=device, fs_type="ext4")
-        mount_path = f"/mnt/mcd_fallback_{label}"
+        safe_label = label.replace(" ", "_")
+        mount_path = f"/mnt/mcd_fallback_{safe_label}"
         self.ssh_obj.mount_path(
             node=client, device=device, mount_path=mount_path
         )
-        log_file = f"/tmp/fio_fallback_{label}.log"
+        log_file = f"/tmp/fio_fallback_{safe_label}.log"
         randseed = random.randint(1, 2**63)
         fio_thread = threading.Thread(
             target=self.ssh_obj.run_fio_test,
             args=(client, None, mount_path, log_file),
             kwargs={
                 "size": self.FIO_SIZE,
-                "name": f"mcd_fallback_{label}_fio",
+                "name": f"mcd_fallback_{safe_label}_fio",
                 "rw": "randrw",
                 "bs": "4K",
                 "iodepth": self.FIO_IODEPTH,
