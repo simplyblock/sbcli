@@ -1740,20 +1740,20 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
             return
 
         self.logger.info(
-            f"=== Phase 5: Create clones from {len(snap_list)} snapshots "
-            f"(until subsystem limit) ==="
+            f"=== Phase 5: Create 1 clone per snapshot "
+            f"({len(snap_list)} clones) ==="
         )
 
-        # Fire-first: create clones in batches until limit hit
+        # Create exactly 1 clone per snapshot (capped at snapshot count)
         clone_names_fired = []
         clone_idx = [0]
         hit_limit = [False]
         lock = threading.Lock()
 
-        def _fire_create_clone(_):
+        def _fire_create_clone(snap_item):
             if hit_limit[0]:
                 return
-            snap_name, snap_id = random.choice(snap_list)
+            snap_name, snap_id = snap_item
             with lock:
                 idx = clone_idx[0]
                 clone_idx[0] += 1
@@ -1775,11 +1775,13 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
                     return
                 raise
 
-        # Submit clones in batches until limit
+        # Submit 1 clone per snapshot in batches
         deadline = time.time() + self.CLONE_PHASE_TIMEOUT
-        batch_num = 0
-        while not hit_limit[0] and time.time() < deadline:
-            batch = list(range(self.BATCH_SIZE))
+        for batch_start in range(0, len(snap_list), self.BATCH_SIZE):
+            if hit_limit[0] or time.time() > deadline:
+                break
+            batch = snap_list[batch_start:batch_start + self.BATCH_SIZE]
+            batch_num = batch_start // self.BATCH_SIZE
             ok, fail = self._batch_exec(
                 batch,
                 _fire_create_clone,
@@ -1788,9 +1790,6 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
                 stop_on_max_lvols=False,
                 max_failures=self.BATCH_SIZE,
             )
-            batch_num += 1
-            if fail >= self.BATCH_SIZE:
-                break
             self.logger.info(
                 f"[Phase 5] {len(clone_names_fired)} clones fired so far"
             )
@@ -1822,7 +1821,40 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
             self.logger.info("[Phase 6] No clones — skipping")
             return
 
-        all_clone_names = list(self._clone_registry.keys())
+        # Filter to only online clones — skip in_deletion / failed clones
+        # to avoid infinite retry loops in connect/delete paths.
+        try:
+            lvol_data = self.sbcli_utils.get_request(api_url="/lvol")
+            lvol_status = {
+                r["lvol_name"]: r.get("status", "")
+                for r in lvol_data.get("results", [])
+            }
+        except Exception as exc:
+            self.logger.warning(
+                f"[Phase 6] Could not query lvol status: {exc}, "
+                f"proceeding with all clones"
+            )
+            lvol_status = {}
+
+        if lvol_status:
+            online_clones = [
+                name for name in self._clone_registry
+                if lvol_status.get(name, "") == "online"
+            ]
+            skipped = len(self._clone_registry) - len(online_clones)
+            if skipped:
+                self.logger.warning(
+                    f"[Phase 6] Skipping {skipped} non-online clones "
+                    f"(in_deletion/failed/missing)"
+                )
+            all_clone_names = online_clones
+        else:
+            all_clone_names = list(self._clone_registry.keys())
+
+        if not all_clone_names:
+            self.logger.warning("[Phase 6] No online clones to connect")
+            return
+
         sample_size = min(
             max(1, math.ceil(
                 len(all_clone_names) * self.FIO_SAMPLE_PERCENT / 100
@@ -1830,7 +1862,7 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
             self.FIO_SAMPLE_MAX,
         )
         self.logger.info(
-            f"=== Phase 6: Connect all {len(all_clone_names)} clones, "
+            f"=== Phase 6: Connect {len(all_clone_names)} online clones, "
             f"then FIO on {sample_size} ==="
         )
 
