@@ -2468,12 +2468,23 @@ class TestBackupDeleteAndRestore(BackupTestBase):
             f"TC-BCK-081: {len(backups_retained)} backups after 5 snaps "
             f"(policy versions=3 — oldest 2 should be merged)")
 
-        # Restore each backup that still appears in the list; all must yield correct checksums
-        visible_ids = {
-            b.get("id") or b.get("ID") or b.get("uuid") or ""
-            for b in backups_retained
-            if lvol_name in " ".join(str(v) for v in b.values())
-        }
+        # Restore each backup that still appears in the list; all must yield correct checksums.
+        # If any backup has status=failed/error, that indicates the retention policy
+        # deleted a snapshot while its backup was still in-flight — fail the test.
+        visible_ids = set()
+        for b in backups_retained:
+            if lvol_name not in " ".join(str(v) for v in b.values()):
+                continue
+            bk_id = b.get("id") or b.get("ID") or b.get("uuid") or ""
+            if not bk_id:
+                continue
+            status = (b.get("status") or b.get("Status") or "").lower()
+            assert status not in ("failed", "error"), (
+                f"TC-BCK-081: backup {bk_id} has status={status} — "
+                f"retention policy likely deleted snapshot while "
+                f"backup was still in-flight. Entry: {b}")
+            visible_ids.add(bk_id)
+
         assert visible_ids, "TC-BCK-081: expected at least 1 retained backup after policy merge"
         for bk_id in visible_ids:
             rst_name = f"ret_rst_{_rand_suffix()}"
@@ -4322,87 +4333,181 @@ class TestBackupRestoreEdgeCases(BackupTestBase):
         # TC-BCK-181: restore with max-length name (31 chars)
         self.logger.info("TC-BCK-181: Restoring with max-length lvol name …")
         long_name = ("a" * 31)  # sbcli typically supports up to 63, use 31 to stay safe
-        out, err = self._sbcli(
-            f"-d backup restore {bk_id} --lvol {long_name} --pool {self.pool_name}"
-            f" --cluster-id {self.cluster_id}")
-        if not (err and "error" in err.lower()):
-            self._wait_for_restore(long_name)
-            self.created_lvols.append(long_name)
-            self.logger.info("TC-BCK-181: Long name restore PASSED")
+        if self.k8s_test:
+            try:
+                restored = self._restore_backup(bk_id, long_name, pool_name=self.pool_name)
+                self._wait_for_restore(restored)
+                self.logger.info("TC-BCK-181: Long name restore PASSED")
+            except Exception as exc:
+                self.logger.info(
+                    f"TC-BCK-181: Long name rejected (expected): {exc!r} PASSED")
         else:
-            self.logger.info(f"TC-BCK-181: Long name rejected (expected): {err!r} PASSED")
+            out, err = self._sbcli(
+                f"-d backup restore {bk_id} --lvol {long_name} --pool {self.pool_name}"
+                f" --cluster-id {self.cluster_id}")
+            if not (err and "error" in err.lower()):
+                self._wait_for_restore(long_name)
+                self.created_lvols.append(long_name)
+                self.logger.info("TC-BCK-181: Long name restore PASSED")
+            else:
+                self.logger.info(f"TC-BCK-181: Long name rejected (expected): {err!r} PASSED")
 
-        # TC-BCK-182: restore without --pool
+        # TC-BCK-182: restore without --pool (should use source pool)
         self.logger.info("TC-BCK-182: Restoring without --pool …")
         nopool_name = f"rstnopool{_rand_suffix()}"
-        out, err = self._sbcli(
-            f"-d backup restore {bk_id} --lvol {nopool_name}"
-            f" --cluster-id {self.cluster_id}")
-        if not (err and "error" in err.lower()):
-            self._wait_for_restore(nopool_name)
-            self.created_lvols.append(nopool_name)
-            self.logger.info("TC-BCK-182: No-pool restore PASSED")
+        if self.k8s_test:
+            try:
+                # In K8s mode, omit target_pool to test default pool behaviour
+                restored = self._restore_backup(bk_id, nopool_name, pool_name=None)
+                self._wait_for_restore(restored)
+                self.logger.info("TC-BCK-182: No-pool restore PASSED")
+            except Exception as exc:
+                self.logger.info(f"TC-BCK-182: No-pool restore rejected: {exc!r}")
         else:
-            self.logger.info(f"TC-BCK-182: No-pool restore rejected: {err!r}")
+            out, err = self._sbcli(
+                f"-d backup restore {bk_id} --lvol {nopool_name}"
+                f" --cluster-id {self.cluster_id}")
+            if not (err and "error" in err.lower()):
+                self._wait_for_restore(nopool_name)
+                self.created_lvols.append(nopool_name)
+                self.logger.info("TC-BCK-182: No-pool restore PASSED")
+            else:
+                self.logger.info(f"TC-BCK-182: No-pool restore rejected: {err!r}")
 
         # TC-BCK-183: restore to same name as deleted source
         self.logger.info("TC-BCK-183: Restore to name of deleted lvol …")
         deleted_lvol_name = lvol_name
         self._delete_lvol(lvol_name, skip_error=False)
         sleep_n_sec(3)
-        out, err = self._sbcli(
-            f"-d backup restore {bk_id} --lvol {deleted_lvol_name} --pool {self.pool_name}"
-            f" --cluster-id {self.cluster_id}")
-        if not (err and "error" in err.lower()):
-            self._wait_for_restore(deleted_lvol_name)
-            self.created_lvols.append(deleted_lvol_name)
-            self.logger.info("TC-BCK-183: Restore to deleted-name PASSED")
+        if self.k8s_test:
+            try:
+                restored = self._restore_backup(
+                    bk_id, deleted_lvol_name, pool_name=self.pool_name)
+                self._wait_for_restore(restored)
+                self.logger.info("TC-BCK-183: Restore to deleted-name PASSED")
+            except Exception as exc:
+                self.logger.info(
+                    f"TC-BCK-183: Rejected (acceptable): {exc!r} PASSED")
         else:
-            self.logger.info(f"TC-BCK-183: Rejected (acceptable): {err!r} PASSED")
+            out, err = self._sbcli(
+                f"-d backup restore {bk_id} --lvol {deleted_lvol_name} --pool {self.pool_name}"
+                f" --cluster-id {self.cluster_id}")
+            if not (err and "error" in err.lower()):
+                self._wait_for_restore(deleted_lvol_name)
+                self.created_lvols.append(deleted_lvol_name)
+                self.logger.info("TC-BCK-183: Restore to deleted-name PASSED")
+            else:
+                self.logger.info(f"TC-BCK-183: Rejected (acceptable): {err!r} PASSED")
 
         # TC-BCK-184: restore with duplicate name (already exists) → expect error
         self.logger.info("TC-BCK-184: Restoring with duplicate name …")
         lvol_dup, lvol_dup_id = self._create_lvol()
-        out, err = self._sbcli(
-            f"-d backup restore {bk_id} --lvol {lvol_dup} --pool {self.pool_name}"
-            f" --cluster-id {self.cluster_id}")
-        has_error = bool(err and "error" in err.lower()) or \
-                    ("already exists" in (out or "").lower()) or \
-                    ("duplicate" in (out or "").lower())
-        self.logger.info(f"TC-BCK-184: Duplicate name result: has_error={has_error} PASSED")
+        if self.k8s_test:
+            k8s = self._ensure_k8s_utils()
+            pvc_name = self._k8s_normalize_name(lvol_dup)
+            restore_name = f"rst-dup-{_rand_suffix()}"
+            pvc_size = self.lvol_size
+            if "Gi" not in pvc_size:
+                pvc_size = pvc_size.replace("G", "Gi")
+            k8s.create_backup_restore(
+                name=restore_name,
+                backup_ref_name=bk_id,
+                pvc_name=pvc_name,
+                pvc_size=pvc_size,
+                cluster_name=self._cluster_name,
+                target_pool=self.pool_name,
+            )
+            self.created_backup_restores.append(restore_name)
+            sleep_n_sec(30)
+            try:
+                k8s.wait_backup_restore_done(restore_name, timeout=60)
+                self.logger.info("TC-BCK-184: Duplicate name was accepted (product allowed it)")
+            except Exception:
+                self.logger.info("TC-BCK-184: Duplicate name rejected PASSED")
+            finally:
+                try:
+                    k8s.delete_backup_restore(restore_name)
+                except Exception:
+                    pass
+        else:
+            out, err = self._sbcli(
+                f"-d backup restore {bk_id} --lvol {lvol_dup} --pool {self.pool_name}"
+                f" --cluster-id {self.cluster_id}")
+            has_error = bool(err and "error" in err.lower()) or \
+                        ("already exists" in (out or "").lower()) or \
+                        ("duplicate" in (out or "").lower())
+            self.logger.info(f"TC-BCK-184: Duplicate name result: has_error={has_error} PASSED")
 
         # TC-BCK-185: restore from non-existent backup_id → expect error
         self.logger.info("TC-BCK-185: Restoring from non-existent backup_id …")
         fake_bk_id = "00000000-0000-0000-0000-000000000099"
-        out, err = self._sbcli(
-            f"-d backup restore {fake_bk_id} --lvol rstfake{_rand_suffix()} --pool {self.pool_name}"
-            f" --cluster-id {self.cluster_id}")
-        has_error = bool(err and "error" in err.lower()) or \
-                    ("not found" in (out or "").lower()) or \
-                    ("invalid" in (out or "").lower())
-        assert has_error, \
-            f"Restore from non-existent backup_id should fail; out={out!r} err={err!r}"
-        self.logger.info("TC-BCK-185: Non-existent backup_id rejected PASSED")
+        if self.k8s_test:
+            k8s = self._ensure_k8s_utils()
+            restore_name = f"rst-fakebk-{_rand_suffix()}"
+            fake_pvc = f"pvc-fakebk-{_rand_suffix()}"
+            pvc_size = self.lvol_size
+            if "Gi" not in pvc_size:
+                pvc_size = pvc_size.replace("G", "Gi")
+            k8s.create_backup_restore(
+                name=restore_name,
+                backup_ref_name=fake_bk_id,
+                pvc_name=fake_pvc,
+                pvc_size=pvc_size,
+                cluster_name=self._cluster_name,
+            )
+            self.created_backup_restores.append(restore_name)
+            sleep_n_sec(30)
+            try:
+                k8s.wait_backup_restore_done(restore_name, timeout=60)
+                assert False, \
+                    "TC-BCK-185: non-existent backup_id should not succeed"
+            except AssertionError:
+                raise
+            except Exception:
+                self.logger.info("TC-BCK-185: Non-existent backup_id rejected PASSED")
+            finally:
+                try:
+                    k8s.delete_backup_restore(restore_name)
+                except Exception:
+                    pass
+        else:
+            out, err = self._sbcli(
+                f"-d backup restore {fake_bk_id} --lvol rstfake{_rand_suffix()} --pool {self.pool_name}"
+                f" --cluster-id {self.cluster_id}")
+            has_error = bool(err and "error" in err.lower()) or \
+                        ("not found" in (out or "").lower()) or \
+                        ("invalid" in (out or "").lower())
+            assert has_error, \
+                f"Restore from non-existent backup_id should fail; out={out!r} err={err!r}"
+            self.logger.info("TC-BCK-185: Non-existent backup_id rejected PASSED")
 
         # TC-BCK-191: restore without --cluster-id → expect error
-        self.logger.info("TC-BCK-191: Restoring without --cluster-id …")
-        out, err = self._sbcli(
-            f"-d backup restore {bk_id} --lvol rstnocluster{_rand_suffix()} --pool {self.pool_name}")
-        has_error = bool(err and "error" in err.lower()) or ("error" in (out or "").lower())
-        assert has_error, \
-            f"Restore without --cluster-id should fail; out={out!r} err={err!r}"
-        self.logger.info("TC-BCK-191: No cluster-id rejected PASSED")
+        # In K8s mode clusterName is a CRD field (tested by TC-BCK-193), not a CLI flag
+        if self.k8s_test:
+            self.logger.info("TC-BCK-191: SKIPPED (CLI --cluster-id flag not applicable in K8s mode)")
+        else:
+            self.logger.info("TC-BCK-191: Restoring without --cluster-id …")
+            out, err = self._sbcli(
+                f"-d backup restore {bk_id} --lvol rstnocluster{_rand_suffix()} --pool {self.pool_name}")
+            has_error = bool(err and "error" in err.lower()) or ("error" in (out or "").lower())
+            assert has_error, \
+                f"Restore without --cluster-id should fail; out={out!r} err={err!r}"
+            self.logger.info("TC-BCK-191: No cluster-id rejected PASSED")
 
         # TC-BCK-192: restore with invalid --cluster-id → expect error
-        self.logger.info("TC-BCK-192: Restoring with invalid --cluster-id …")
-        fake_cluster = "00000000-0000-0000-0000-000000000000"
-        out, err = self._sbcli(
-            f"-d backup restore {bk_id} --lvol rstbadcluster{_rand_suffix()} --pool {self.pool_name}"
-            f" --cluster-id {fake_cluster}")
-        has_error = bool(err and "error" in err.lower()) or ("error" in (out or "").lower())
-        assert has_error, \
-            f"Restore with invalid cluster-id should fail; out={out!r} err={err!r}"
-        self.logger.info("TC-BCK-192: Invalid cluster-id rejected PASSED")
+        # In K8s mode the equivalent is wrong clusterName (tested by TC-BCK-193)
+        if self.k8s_test:
+            self.logger.info("TC-BCK-192: SKIPPED (CLI --cluster-id flag not applicable in K8s mode)")
+        else:
+            self.logger.info("TC-BCK-192: Restoring with invalid --cluster-id …")
+            fake_cluster = "00000000-0000-0000-0000-000000000000"
+            out, err = self._sbcli(
+                f"-d backup restore {bk_id} --lvol rstbadcluster{_rand_suffix()} --pool {self.pool_name}"
+                f" --cluster-id {fake_cluster}")
+            has_error = bool(err and "error" in err.lower()) or ("error" in (out or "").lower())
+            assert has_error, \
+                f"Restore with invalid cluster-id should fail; out={out!r} err={err!r}"
+            self.logger.info("TC-BCK-192: Invalid cluster-id rejected PASSED")
 
         # TC-BCK-193: (K8s only) restore with wrong clusterName → expect failure
         if self.k8s_test:
