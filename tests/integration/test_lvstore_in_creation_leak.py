@@ -101,6 +101,8 @@ class TestBoundedInCreationSkip(unittest.TestCase):
         db = MagicMock()
         db.get_storage_node_by_id.return_value = node
         with patch.object(self.mod, "db", db), \
+             patch.object(self.mod.health_controller,
+                          "_check_node_ping", return_value=False), \
              patch.object(self.mod.tasks_controller,
                           "get_active_node_restart_task",
                           return_value=active_task):
