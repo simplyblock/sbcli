@@ -1,3 +1,4 @@
+import time
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from http import HTTPStatus
@@ -514,16 +515,26 @@ class SbcliUtils:
 
         lvols = self.list_lvols()
         attempt = 0
+        deadline = time.time() + 15 * 60  # hard 15-minute wallclock timeout
         while True:
             if lvol_name not in list(lvols.keys()):
                 self.logger.info(f"Lvol {lvol_name} deleted successfully!!")
                 return True
+            if time.time() > deadline:
+                elapsed = 15
+                msg = f"Lvol {lvol_name} not deleted after {elapsed} min wallclock timeout"
+                if skip_error:
+                    self.logger.warning(msg)
+                    return False
+                raise Exception(msg)
             if attempt % 12 == 0:
                 try:
                     cur_state = self.get_lvol_details(lvol_id=lvol_id)[0]["status"]
                 except Exception as _:
                     self.logger.info(f"Lvol {lvol_name} is not in the lvol list as error. Checking again!")
                     lvols = self.list_lvols()
+                    attempt += 1
+                    sleep_n_sec(5)
                     continue
                 if cur_state in ("online", "in_deletion"):
                     self.logger.info(f"Lvol {lvol_name} in {cur_state} state. Retrying Delete!")
