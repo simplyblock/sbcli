@@ -295,13 +295,36 @@ def add_node_to_auto_restart(node):
                               Cluster.STATUS_READONLY, Cluster.STATUS_UNREADY, Cluster.STATUS_SUSPENDED]:
         logger.warning(f"Cluster is not active, skip node auto restart, status: {cluster.status}")
         return False
-    offline_nodes = 0
-    for sn in db.get_storage_nodes_by_cluster_id(node.cluster_id):
-        if node.get_id() != sn.get_id() and sn.status != StorageNode.STATUS_ONLINE and node.mgmt_ip != sn.mgmt_ip:
-            offline_nodes += 1
-    if offline_nodes > cluster.distr_npcs and cluster.status != Cluster.STATUS_SUSPENDED:
-        logger.info("Node found that is not online, skip node auto restart")
-        return False
+    # Past-fault-tolerance guard: don't auto-restart nodes one-by-one when
+    # more than the cluster can tolerate is already offline — that churn is
+    # what wedged the cluster before (stale ONLINE peers / stuck lvstore
+    # in_creation), and the SUSPENDED-drain path (above) owns that case.
+    #
+    # BUT this raw ``offline_nodes > distr_npcs`` count is failure-domain
+    # blind. On a failure-domain cluster a WHOLE domain going offline (e.g.
+    # a 1+1 cluster losing all 16 nodes of one domain) is the *tolerated*
+    # case: the FD-aware status logic keeps the cluster DEGRADED (never
+    # SUSPENDED), so `offline_nodes(15) > npcs(1)` trips and, because it is
+    # not SUSPENDED, blocks auto-restart for every node in the domain —
+    # permanently, since nothing will ever move it to SUSPENDED. Result:
+    # the whole rebooted domain never restarts (incident 2026-07-08,
+    # 32-node/2-domain/1+1 whole-domain reboot soak).
+    #
+    # For a failure-domain cluster the cluster STATUS already encodes
+    # tolerance (the FD-aware get_next_cluster_status returns DEGRADED when
+    # the loss is within the domain budget, SUSPENDED when it exceeds it).
+    # So when enable_failure_domain is set, trust the status: ACTIVE/DEGRADED
+    # means "tolerated, go ahead and restart"; the SUSPENDED-not-drained case
+    # is already held by is_auto_restart_paused above. Only apply the flat
+    # node-count guard to non-FD clusters.
+    if not cluster.enable_failure_domain:
+        offline_nodes = 0
+        for sn in db.get_storage_nodes_by_cluster_id(node.cluster_id):
+            if node.get_id() != sn.get_id() and sn.status != StorageNode.STATUS_ONLINE and node.mgmt_ip != sn.mgmt_ip:
+                offline_nodes += 1
+        if offline_nodes > cluster.distr_npcs and cluster.status != Cluster.STATUS_SUSPENDED:
+            logger.info("Node found that is not online, skip node auto restart")
+            return False
     return _add_task(JobSchedule.FN_NODE_RESTART, node.cluster_id, node.get_id(), "", max_retry=11)
 
 
