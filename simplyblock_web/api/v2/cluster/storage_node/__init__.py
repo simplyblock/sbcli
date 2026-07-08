@@ -53,7 +53,7 @@ class StorageNodeParams(BaseModel):
     format_4k: bool = Field(False)
     spdk_proxy_image: Optional[str] = None
     spdk_sys_mem: Optional[str] = None
-    failure_domain: Optional[int] = Field(None)
+    failure_domain: Optional[int] = None
 
 
 @api.post('/', name='clusters:storage-nodes:create', status_code=201, responses={201: {"content": None}})
