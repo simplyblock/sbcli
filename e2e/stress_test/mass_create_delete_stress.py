@@ -1668,6 +1668,42 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
         self._wait_lvols_deleted(lvol_names, "lvols")
         self._metrics["lvols_deleted"] = ok
 
+        # Disconnect stale NVMe subsystems on clients so Phase 5/6 starts clean
+        self._disconnect_all_lvol_subsystems()
+
+    def _disconnect_all_lvol_subsystems(self):
+        """Disconnect all lvol-related NVMe subsystems on every client."""
+        for client in self.fio_node:
+            try:
+                subsystems = self.ssh_obj.get_nvme_subsystems(
+                    node=client, nqn_filter="lvol"
+                )
+                for nqn in subsystems:
+                    try:
+                        self.ssh_obj.disconnect_nvme(node=client, nqn_grep=nqn)
+                    except Exception as exc:
+                        self.logger.warning(
+                            f"[disconnect] {nqn} on {client}: {exc}"
+                        )
+                if subsystems:
+                    self.logger.info(
+                        f"[disconnect] Disconnected {len(subsystems)} "
+                        f"subsystems on {client}"
+                    )
+            except Exception as exc:
+                self.logger.warning(
+                    f"[disconnect] Failed to list subsystems on {client}: "
+                    f"{exc}"
+                )
+        # Clear connection tracking so Phase 6 starts fresh
+        self._connected_lvols.clear()
+        for pinfo in self._parent_registry.values():
+            pinfo["ctrl_dev"] = None
+            pinfo["nqn"] = None
+            pinfo["devices"] = []
+            pinfo["client"] = None
+        self._fallback_devices_used.clear()
+
     # ── Phase 5: Mass-create clones from snapshots ─────────────────────
 
     def _phase_5_create_clones(self):
@@ -1867,6 +1903,9 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
         # Wait for clones to actually disappear
         self._wait_lvols_deleted(clone_names, "clones")
         self._metrics["clones_deleted"] = ok
+
+        # Disconnect stale NVMe subsystems on clients after clone deletion
+        self._disconnect_all_lvol_subsystems()
 
     def _fire_delete_lvol(self, lvol_name: str):
         """Issue DELETE request for an lvol without polling for completion.
