@@ -1990,12 +1990,20 @@ def _rename_migrated_bdevs(migration, tgt_node, tgt_rpc, tgt_sec_rpc=None, tgt_t
 
     target = _rename_with_fallback(current_lvol_short, current_lvol_short)
     if target:
+        old_composite = f"{lvstore}/{current_lvol_short}"
         lvol.lvol_bdev = target
         lvol.top_bdev = f"{lvstore}/{target}"
         for entry in lvol.bdev_stack:
             if (entry.get('type') == 'bdev_lvol'
                     and entry.get('params', {}).get('name') == current_lvol_short):
                 entry['params']['name'] = target
+            elif entry.get('name') == old_composite:
+                # bdev_lvol_clone (and any other type) stores the composite bdev
+                # path in 'name'; keep it in sync with the renamed bdev so that
+                # _remove_bdev_stack sends the delete to the correct bdev name.
+                entry['name'] = lvol.top_bdev
+                if entry.get('params', {}).get('clone_name') == current_lvol_short:
+                    entry['params']['clone_name'] = target
         lvol.write_to_db(db.kv_store)
 
 
