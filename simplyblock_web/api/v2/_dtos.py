@@ -110,6 +110,7 @@ class ClusterDTO(BaseModel):
     provisioned_capacity_warning: util.Unsigned
     node_affinity: bool
     anti_affinity: bool
+    enable_failure_domain: bool
     secret: SecretStr
     tls_enabled: bool
     max_fault_tolerance: int
@@ -138,6 +139,7 @@ class ClusterDTO(BaseModel):
             provisioned_capacity_critical=model.prov_cap_crit,
             node_affinity=model.enable_node_affinity,
             anti_affinity=model.strict_node_anti_affinity,
+            enable_failure_domain=model.enable_failure_domain,
             secret=model.secret,
             tls_enabled=model.tls,
             max_fault_tolerance=model.max_fault_tolerance,
@@ -319,6 +321,7 @@ class StorageNodeDTO(BaseModel):
     health_check: Optional[bool]
     device_count: int
     online_device_count: int
+    failure_domain: int
     capacity: CapacityStatDTO
 
     @staticmethod
@@ -348,6 +351,7 @@ class StorageNodeDTO(BaseModel):
             health_check=model.health_check,
             device_count=len(model.nvme_devices),
             online_device_count=len([device for device in model.nvme_devices if device.status == "online" ]),
+            failure_domain=model.failure_domain,
             capacity=CapacityStatDTO.from_model(
                 stat_obj if stat_obj else StatsObject()
             ),

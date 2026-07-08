@@ -85,6 +85,7 @@ class ClusterParams(BaseModel):
     snode_api_port: int = 50001
     backup_config: Optional[BackupConfigParams] = None
     hashicorp_vault_settings: Optional[HashicorpVaultSettings] = None
+    enable_failure_domain: bool = False
 
 
 @api.get('/', name='clusters:list')
