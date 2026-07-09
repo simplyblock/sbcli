@@ -19,10 +19,9 @@ import random
 import time
 import pytest
 
-from simplyblock_core.controllers import migration_controller
 from simplyblock_core.models.lvol_migration import LVolMigration
 
-from tests.integration.migration.conftest import run_migration_task
+from tests.integration.migration.conftest import run_migration_task, start_migration
 from tests.integration.migration.topology_loader import TestContext, load_topology
 
 # ---------------------------------------------------------------------------
@@ -262,7 +261,7 @@ class TestScalability:
 
         for vol_sym in vol_syms:
             lvol_uuid = ctx.lvol_uuid(vol_sym)
-            mig_id, err = migration_controller.start_migration(
+            mig_id, err = start_migration(
                 lvol_uuid, tgt.uuid, max_retries=30)
             assert err is None, f"start_migration({vol_sym}) failed: {err}"
 
@@ -302,7 +301,7 @@ class TestScalability:
 
         for i, vol_sym in enumerate(group_vols):
             lvol_uuid = ctx.lvol_uuid(vol_sym)
-            mig_id, err = migration_controller.start_migration(
+            mig_id, err = start_migration(
                 lvol_uuid, tgt.uuid, max_retries=30)
             assert err is None, f"start_migration({vol_sym}) failed: {err}"
 
@@ -347,7 +346,7 @@ class TestScalability:
                 break
 
         # Migrate it
-        mig_id, err = migration_controller.start_migration(
+        mig_id, err = start_migration(
             vol_with_many_snaps, tgt.uuid, max_retries=30)
         assert err is None
         m = run_migration_task(mig_id, max_steps=3000, step_sleep=0.01)
@@ -361,7 +360,7 @@ class TestScalability:
                 other_vol = sym
                 break
 
-        mig_id2, err2 = migration_controller.start_migration(
+        mig_id2, err2 = start_migration(
             ctx.lvol_uuid(other_vol), tgt.uuid, max_retries=30)
         assert err2 is None
         m2 = run_migration_task(mig_id2, max_steps=3000, step_sleep=0.01)
@@ -381,7 +380,7 @@ class TestScalability:
         t0 = time.time()
         for vol_sym in vol_syms:
             lvol_uuid = ctx.lvol_uuid(vol_sym)
-            mig_id, err = migration_controller.start_migration(
+            mig_id, err = start_migration(
                 lvol_uuid, tgt.uuid, max_retries=30)
             assert err is None, f"start_migration({vol_sym}) failed: {err}"
 
@@ -511,7 +510,7 @@ class TestLargeVolumeMigration:
         tgt = ctx.node("tgt")
 
         lvol_uuid = ctx.lvol_uuid("bigvol")
-        mig_id, err = migration_controller.start_migration(
+        mig_id, err = start_migration(
             lvol_uuid, tgt.uuid, max_retries=30)
         assert err is None, f"start_migration failed: {err}"
 
@@ -538,8 +537,12 @@ class TestLargeVolumeMigration:
         assert lvol.node_id == tgt.uuid, "node_id not updated"
         assert lvol.hostname == tgt.hostname, "hostname not updated"
 
-        # All snapshots should have updated snap_bdev prefix
+        # All snapshots should have updated snap_bdev prefix. Intermediate
+        # snapshots are removed from FDB during cleanup, so skip those.
+        intermediate_uuids = set(m.intermediate_snaps)
         for snap_uuid in m.snaps_migrated:
+            if snap_uuid in intermediate_uuids:
+                continue
             snap = db.get_snapshot_by_id(snap_uuid)
             if snap and snap.snap_bdev and '/' in snap.snap_bdev:
                 assert snap.snap_bdev.startswith(tgt.lvstore + "/"), (

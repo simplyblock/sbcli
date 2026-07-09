@@ -238,6 +238,20 @@ CLIENT_QPAIR_COUNT=3
 NVME_TIMEOUT_US=8000000
 PCIE_TIMEOUT_US=2000000
 
+# Max concurrent per-node workers during cluster_activate passes (recreate of
+# primary/non-leader LVS, hublvol wiring, ANA flips). Sequential activation is
+# O(nodes) at ~40 s/node — 22 min on a 32-node cluster (2026-07-08) — which
+# starved the activation watchdog and every observer. Bounded so the mgmt node
+# and the FDB layer are not overwhelmed by 32 parallel RPC fan-outs.
+CLUSTER_ACTIVATION_MAX_PARALLEL_NODES=8
+
+# Max concurrent node-restart tasks while the cluster is SUSPENDED (recovery
+# after full-cluster outage/shutdown: every node offline, no client IO — so
+# parallel restarts cannot violate FTT). One node restart is ~70 s; strictly
+# sequential recovery of a 32-node cluster took ~38 min (2026-07-08). Online
+# clusters keep one-restart-at-a-time semantics regardless of this value.
+NODE_RESTART_MAX_PARALLEL_SUSPENDED=8
+
 NVMF_MAX_SUBSYSTEMS=50000
 KATO=5000
 # transport_ack_timeout exponent: server tears down a client qpair if it

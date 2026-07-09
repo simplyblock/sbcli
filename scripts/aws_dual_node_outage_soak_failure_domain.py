@@ -12,6 +12,7 @@ import subprocess
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -92,13 +93,17 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description=(
             "Run a long fio soak against a FAILURE-DOMAIN AWS cluster while "
-            "cycling failure-domain-aware host-reboot outages. Two scenario "
-            "types only: (a) reboot every host in one failure domain, then wait "
-            "for cluster rebalancing to complete; (b) reboot one random node in "
-            "each failure domain, then settle 60s. fio is kept running across "
-            "outages; in parallel, a background thread randomly churns one "
-            "volume at a time (stop fio -> unmount -> disconnect -> delete -> "
-            "recreate -> connect -> format -> mount -> restart fio)."
+            "alternating whole-domain host-reboot outages. Default test (the "
+            "32-node 2x16 1+1 spec): reboot EVERY host in one failure domain "
+            "in parallel (overlapping reboots), wait until all nodes are back "
+            "online AND the cluster has fully rebalanced, then repeat with the "
+            "next failure domain — cycling until --cycles is exhausted. One "
+            "volume per storage node with fio (numjobs=4, iodepth=8) kept "
+            "running across every outage. --include-mixed-scenarios restores "
+            "the additional one-node-per-domain / domain-plus-one scenarios; "
+            "--churn enables the background volume churn thread (both off by "
+            "default: with a 1+1 layout, taking one node from EACH domain "
+            "simultaneously can lose both copies of a stripe)."
         )
     )
     parser.add_argument("--metadata", default=str(default_metadata), help="Path to cluster metadata JSON.")
@@ -287,9 +292,25 @@ def parse_args():
         help="Maximum delay between volume churn cycles (seconds). Default 1200 (20 min).",
     )
     parser.add_argument(
-        "--no-churn",
+        "--churn",
         action="store_true",
-        help="Disable the background volume churn thread (run plain mixed soak with fio kept running across outages).",
+        help=(
+            "Enable the background volume churn thread (stop fio -> unmount -> "
+            "disconnect -> delete -> recreate -> connect -> format -> mount -> "
+            "restart fio on one random volume at a time). Disabled by default: "
+            "the whole-domain 1+1 test spec runs pure fio."
+        ),
+    )
+    parser.add_argument(
+        "--include-mixed-scenarios",
+        action="store_true",
+        help=(
+            "Also run the one-node-per-domain and (with >=4 domains) "
+            "domain-plus-one scenarios. Disabled by default: the whole-domain "
+            "alternation is the test spec, and with a 1+1 layout taking one "
+            "node from EACH domain simultaneously can lose both copies of a "
+            "stripe."
+        ),
     )
     args = parser.parse_args()
     methods = [m.strip() for m in args.methods.split(",") if m.strip()]
@@ -1227,7 +1248,7 @@ class SoakRunner:
                 f"cd {shlex.quote(volume['mount_point'])} && "
                 f"fio --name={fio_name} --directory={shlex.quote(volume['mount_point'])} "
                 "--direct=1 --rw=randrw --bs=4K --group_reporting --time_based "
-                f"--numjobs={FIO_NUMJOBS} --iodepth=4 --size=40G --runtime={self.args.runtime} "
+                f"--numjobs={FIO_NUMJOBS} --iodepth=8 --size=40G --runtime={self.args.runtime} "
                 "--ioengine=aiolib --max_latency=20s --exitall_on_error=1 "
                 f"--output={shlex.quote(volume['fio_log'])}; "
                 "rc=$?; "
@@ -1720,7 +1741,7 @@ class SoakRunner:
                 return
 
     def start_churn_thread(self):
-        if self.args.no_churn:
+        if not self.args.churn:
             self.logger.log("churn thread disabled (--no-churn)")
             return
         self.churn_stop_event.clear()
@@ -2415,6 +2436,19 @@ class SoakRunner:
             )
             return [{"type": "fd_plus_one"}]
         scenarios = [{"type": "same_fd", "fd": fd} for fd in fds]
+        if not self.args.include_mixed_scenarios:
+            # Default (whole-domain test spec): strictly alternate whole-domain
+            # reboots — every host of domain N rebooted in parallel, wait for
+            # all-online + full rebalance, then the next domain. The mixed
+            # scenarios are opt-in: with a 1+1 layout, one_per_fd takes one
+            # node from EACH domain simultaneously, which can lose both copies
+            # of any stripe shared by exactly that node pair.
+            self.logger.log(
+                f"Built {len(scenarios)} whole-domain reboot scenarios "
+                f"(domains {fds}, alternating; mixed scenarios disabled — "
+                f"pass --include-mixed-scenarios to add them)"
+            )
+            return scenarios
         scenarios.append({"type": "one_per_fd"})
         extra = ""
         if len(fds) >= 4:
@@ -2530,13 +2564,48 @@ class SoakRunner:
 
         # Apply graceful first (its shutdown must land while peers are still
         # online, before any auto-recover method flips one to RESTARTING and
-        # trips the concurrent-shutdown guard); the rest follow back-to-back so
-        # the hosts go down together.
+        # trips the concurrent-shutdown guard). Everything else is issued IN
+        # PARALLEL so a whole-domain reboot is genuinely overlapping — with 16
+        # hosts per domain, sequential SSH reboots would stagger the outage
+        # by tens of seconds and the first hosts could be back before the
+        # last ones went down.
         ordered = sorted(
             targets, key=lambda n: 0 if methods[n] == "graceful" else 1
         )
-        for node_id in ordered:
+        gracefuls = [n for n in ordered if methods[n] == "graceful"]
+        parallel_targets = [n for n in ordered if methods[n] != "graceful"]
+
+        for node_id in gracefuls:
             self._apply_outage(node_id, methods[node_id])
+
+        if parallel_targets:
+            # Prefetch the per-node SSH clients sequentially so the parallel
+            # phase never mutates the shared node_hosts cache concurrently.
+            for node_id in parallel_targets:
+                try:
+                    self._node_host(node_id)
+                except Exception as e:
+                    self.logger.log(
+                        f"WARN: pre-connect to {node_id[:8]} failed ({e}); "
+                        f"the parallel outage call will retry")
+            self.logger.log(
+                f"Issuing {len(parallel_targets)} outage command(s) in parallel")
+            with ThreadPoolExecutor(
+                    max_workers=min(16, len(parallel_targets))) as executor:
+                futures = {
+                    executor.submit(self._apply_outage, n, methods[n]): n
+                    for n in parallel_targets
+                }
+                errors = []
+                for future, node_id in futures.items():
+                    try:
+                        future.result()
+                    except Exception as e:
+                        errors.append(f"{node_id[:8]}: {e}")
+                if errors:
+                    raise TestRunError(
+                        "Parallel outage application failed on "
+                        + "; ".join(errors))
 
         # Manually restart nodes the CP won't auto-recover (graceful / forced).
         for node_id in ordered:

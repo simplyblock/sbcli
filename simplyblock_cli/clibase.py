@@ -542,6 +542,14 @@ class CLIWrapperBase:
         cluster_ops.cluster_grace_shutdown(args.cluster_id)
         return True
 
+    def cluster__restart(self, sub_command, args):
+        try:
+            cluster_ops.cluster_restart(args.cluster_id)
+        except Exception as e:
+            print(f"Error restarting cluster: {e}")
+            return False
+        return True
+
     def cluster__graceful_startup(self, sub_command, args):
         cluster_ops.cluster_grace_startup(args.cluster_id, args.clear_data, args.spdk_image)
         return True

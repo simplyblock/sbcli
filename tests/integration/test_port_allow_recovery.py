@@ -823,7 +823,7 @@ class TestSourceShape(unittest.TestCase):
         i_failback_call = self.src.find(
             "failback_ok, failback_msg = _failback_leadership_to_primary(")
         i_unblock = self.src.find(
-            "port_block.set_port(node, port_number, block=False")
+            "port_block.set_port(node, p, block=False")
         self.assertGreater(i_gate, 0)
         self.assertGreater(i_failback_call, i_gate,
                            "failback must run only after the peer hublvol gate")
@@ -866,7 +866,7 @@ class TestSourceShape(unittest.TestCase):
         set_port_calls = re.findall(r"port_block\.set_port\(", self.src)
         self.assertEqual(len(set_port_calls), 1,
                          "exactly one set_port callsite: the final unblock")
-        self.assertIn("port_block.set_port(node, port_number, block=False", self.src)
+        self.assertIn("port_block.set_port(node, p, block=False", self.src)
 
     def test_fencing_recommit_and_map_push_are_gone(self):
         for gone in (
@@ -892,7 +892,7 @@ class TestSourceShape(unittest.TestCase):
             "exactly one ANA callsite in the runner: the deferred "
             "post-unblock promotion")
         i_unblock = self.src.find(
-            "port_block.set_port(node, port_number, block=False")
+            "port_block.set_port(node, p, block=False")
         i_event = self.src.find("tcp_ports_events.port_allowed")
         i_gate = self.src.find("ana_primary.status == StorageNode.STATUS_OFFLINE")
         i_ana = self.src.find("storage_node_ops._set_lvol_ana_on_node(")
@@ -914,7 +914,7 @@ class TestSourceShape(unittest.TestCase):
         i_broadcast = self.src.find("distr_controller.send_dev_status_event(")
         i_targeted = self.src.find("target_node=node")
         i_unblock = self.src.find(
-            "port_block.set_port(node, port_number, block=False")
+            "port_block.set_port(node, p, block=False")
         self.assertGreater(i_readmit, 0)
         self.assertGreater(i_broadcast, i_readmit,
                            "FDB re-admit before the broadcast")
@@ -1390,8 +1390,12 @@ class TestOwnSecTertHublvolReconnect(_SecRoleReconnectBase):
         self.assertIs(args[0], self.prim)
         self.assertIs(args[1], self.node)
 
-    def test_tertiary_path_failure_is_best_effort(self):
-        # A failed tertiary top-up must not gate the node's recovery.
+    def test_tertiary_path_failure_is_a_hard_gate(self):
+        # A reachable tertiary whose inbound redirect path to this recovering
+        # secondary cannot be connected is a HARD gate: reopening the secondary
+        # listener with no tertiary redirect is a dual-writer risk once
+        # leadership sits on the tertiary. The task suspends and the port stays
+        # closed (ce892407: split inbound/outbound hublvols, inbound is gating).
         self.node_rpc.subsystem_list.return_value = [{"nqn": "nqn-p-hub"}]
         self.tert.add_hublvol_failover_path = MagicMock(return_value=False)
         self._run_with_verify(lambda *a: True)
@@ -1399,8 +1403,9 @@ class TestOwnSecTertHublvolReconnect(_SecRoleReconnectBase):
             c for c in self.calls
             if c[0] == "firewall_set_port" and c[1] == self.node.uuid and c[3] == "allow"
         ]
-        self.assertEqual(len(node_allows), 1)
-        self.assertEqual(self.task.status, JobSchedule.STATUS_DONE)
+        self.assertEqual(node_allows, [],
+                         "the port must not open with a broken tertiary redirect")
+        self.assertEqual(self.task.status, JobSchedule.STATUS_SUSPENDED)
 
     def test_outbound_failure_suspends_task(self):
         def _fail_only_own(peer, primary):
@@ -1467,12 +1472,15 @@ class TestOwnSecTertHublvolReconnect(_SecRoleReconnectBase):
 
 
 class TestStaleLeaderConvergence(_SecRoleReconnectBase):
-    """Gap-B fix: a recovering follower that still claims leadership for a
-    lvstore whose ONLINE primary actually leads (the primary failed back
-    while this node was partitioned) must be demoted (leader=False,
-    bs_nonleadership) + follower-re-committed before the port opens —
-    covering the short-blip case where the surviving hublvol controller
-    lets the verify pass without a re-commit."""
+    """After the 2026-07-07 rework (f98a73cb / ce892407) the port-allow runner
+    NEVER assigns or mutates leadership for a lvstore where the recovering node
+    is a follower: a management-forced leader flip skips the LVS
+    update-on-first-IO and serves stale blob metadata (2026-07-06 corruption).
+    The node-side stale-claim demote + follower-re-commit machinery of the
+    earlier Gap-B fix was removed (documented open item — the takeover case is
+    reconciled by the primary's own recovery, not here). These tests pin that
+    the runner leaves a recovering follower's stale leadership claim alone and
+    still opens the port."""
 
     def setUp(self):
         super().setUp()
@@ -1506,14 +1514,19 @@ class TestStaleLeaderConvergence(_SecRoleReconnectBase):
                 and c[2].get("leader") is False
                 and c[2].get("bs_nonleadership") is True]
 
-    def test_stale_claim_demoted_and_recommitted(self):
-        recommit_mock = self._run()
-        self.assertEqual(len(self._node_demotes()), 1,
-                         f"expected one stale-leader demote; calls={self.calls}")
+    def test_stale_claim_not_converged_by_runner(self):
+        # The recovering follower still claims LVS_P while the ONLINE primary
+        # leads it. The runner does NOT demote the node (no leader mutation,
+        # no bs_nonleadership force) — that reconciliation is a documented open
+        # item owned by the primary's own recovery. The port still opens.
+        self._run()
+        self.assertEqual(self._node_demotes(), [],
+                         f"the runner must not demote a recovering follower; "
+                         f"calls={self.calls}")
         forces = [c for c in self.calls
                   if c[0] == "bdev_distrib_force_to_non_leader" and c[1] == "node"]
-        self.assertEqual(len(forces), 1)
-        recommit_mock.assert_called_once()
+        self.assertEqual(forces, [])
+        self.assertEqual(len(self._node_allows()), 1)
         self.assertEqual(self.task.status, JobSchedule.STATUS_DONE)
 
     def test_no_demote_when_primary_not_leading(self):
@@ -1524,21 +1537,6 @@ class TestStaleLeaderConvergence(_SecRoleReconnectBase):
         self._run()
         self.assertEqual(self._node_demotes(), [])
         self.assertEqual(self.task.status, JobSchedule.STATUS_DONE)
-
-    def test_persisting_claim_suspends(self):
-        # Demote RPC "succeeds" but the claim does not clear -> the port
-        # must not open on a contested writer.
-        def _set_leader_noop(lvs, *a, **kw):
-            self.calls.append(("bdev_lvol_set_leader", "node", kw))
-            return True
-        self.node_rpc.bdev_lvol_set_leader.side_effect = _set_leader_noop
-        self._run()
-        self.assertEqual(self.task.status, JobSchedule.STATUS_SUSPENDED)
-        node_allows = [
-            c for c in self.calls
-            if c[0] == "firewall_set_port" and c[1] == self.node.uuid and c[3] == "allow"
-        ]
-        self.assertEqual(node_allows, [])
 
     def test_no_action_without_stale_claim(self):
         self.lvs_leadership_on_node["LVS_P"] = False

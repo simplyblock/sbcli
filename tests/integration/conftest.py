@@ -182,16 +182,23 @@ def fdb_cluster():
     yield os.environ.get("FDB_CLUSTER_FILE")
 
 
-@pytest.fixture(scope="module", autouse=True)
+@pytest.fixture(autouse=True)
 def _clean_fdb_keyspace(fdb_cluster):
-    """Wipe the FoundationDB keyspace once at the start of each test module.
+    """Wipe the FoundationDB keyspace before every test.
 
-    The integration tier shares one cluster for the whole run. Top-level flow
-    tests seed their own state but rarely tear down everything the control
-    plane writes (events, stats, locks, hublvols, orphaned nodes, …), so the
-    keyspace would otherwise grow and leak state between modules. Clearing
-    per-module keeps the dataset bounded and gives each module a clean slate,
-    without the write load of clearing before every single test. System keys
+    The integration tier shares one cluster for the whole run. Tests seed their
+    own state but rarely tear down everything the control plane writes (events,
+    stats, locks, hublvols, orphaned nodes, suspended migrations/tasks, …), so
+    without a clean slate that residue leaks *between tests* and produces
+    order-dependent flakiness (a later test trips over a random-UUID orphan node
+    or a stale migration left by an earlier one). Wiping per-test — not merely
+    per-module — is what gives each test true isolation.
+
+    Function-scoped and autouse, so it runs before the per-test state-building
+    fixtures (``ensure_cluster``, the ``topology_*`` fixtures, ``ftt2_env``,
+    ``cluster_env``); those are all function-scoped too and recreate their own
+    state each test, so nothing depends on cross-test persistence. A single
+    range-clear per test is cheap relative to the tests themselves. System keys
     (``\\xff`` prefix) are left untouched; no-op when FDB is unavailable.
     """
     from simplyblock_core.db_controller import DBController

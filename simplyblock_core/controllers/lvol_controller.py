@@ -2789,7 +2789,7 @@ def replicate_lvol_on_target_cluster(lvol_id):
     if conn_err:
         logger.warning(f"Fail-over lvol created but connection-string build failed: {conn_err}")
     else:
-        connection_strings = [c.model_dump() for c in conn]
+        connection_strings = [c.model_dump(by_alias=True) for c in conn]
 
     return {
         "lvol_id": new_lvol.uuid,

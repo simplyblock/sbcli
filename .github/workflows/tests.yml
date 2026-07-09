@@ -28,12 +28,14 @@ jobs:
       - name: Install tox
         run: pip install tox
       - name: Run unit tests
-        run: tox run -e unit -- -v
+        run: tox run -e unit
+        env:
+          PYTEST_ADDOPTS: -v
 
   integration:
     name: Integration tests
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -47,4 +49,27 @@ jobs:
       - name: Install tox
         run: pip install tox
       - name: Run integration tests
-        run: tox run -e integration -- -v
+        run: tox run -e integration
+        env:
+          PYTEST_ADDOPTS: -v
+
+  integration-slow:
+    name: Integration tests (slow)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: 'pip'
+      - name: Install FoundationDB client library
+        run: |
+          curl -fsSL https://github.com/apple/foundationdb/releases/download/7.3.63/foundationdb-clients_7.3.63-1_amd64.deb -o /tmp/fdb-clients.deb
+          sudo dpkg -i /tmp/fdb-clients.deb
+      - name: Install tox
+        run: pip install tox
+      - name: Run slow integration tests
+        run: tox run -e integration-slow
+        env:
+          PYTEST_ADDOPTS: -v
