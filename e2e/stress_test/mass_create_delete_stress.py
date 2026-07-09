@@ -2057,29 +2057,56 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
             self.logger.info("[Phase 8] No snapshots — skipping")
             return
 
+        snap_names = list(self._snapshot_registry.keys())
         self.logger.info(
-            f"=== Phase 8: Delete {len(self._snapshot_registry)} "
-            f"snapshots ==="
+            f"=== Phase 8: Delete {len(snap_names)} snapshots ==="
         )
 
-        snap_names = list(self._snapshot_registry.keys())
+        # Fire-and-forget: issue DELETE for all snapshots without polling
         ok, fail = self._batch_exec(
             snap_names,
-            self._delete_single_snapshot,
-            "delete_snapshots",
+            self._fire_delete_snapshot,
+            "delete_snapshots_fire",
             max_workers=self.DELETE_MAX_WORKERS,
-            batch_size=self.SNAPSHOT_BATCH_SIZE,
             max_failures=len(snap_names),
+        )
+        self.logger.info(
+            f"[Phase 8] DELETE issued for {ok} snapshots "
+            f"({fail} failed to issue)"
+        )
+
+        # Bulk-wait: poll list_snapshots() every 30s until all are gone
+        self.sbcli_utils.wait_snapshots_deleted(
+            snap_names, timeout=1800,
         )
         self._metrics["snapshots_deleted"] = ok
 
-    def _delete_single_snapshot(self, snap_name: str):
+    def _fire_delete_snapshot(self, snap_name: str):
+        """Issue DELETE for a snapshot without polling for completion."""
+        info = self._snapshot_registry.get(snap_name)
+        snap_id = info.get("snap_id") if info else None
+
+        if not snap_id:
+            try:
+                snap_id = self.sbcli_utils.get_snapshot_id(snap_name)
+            except Exception:
+                pass
+
+        if not snap_id:
+            self.logger.warning(
+                f"[fire_delete_snap] {snap_name}: no ID found, skipping"
+            )
+            return
+
         try:
-            self.sbcli_utils.delete_snapshot(
-                snap_name=snap_name, skip_error=True, max_attempt=30
+            self.sbcli_utils.delete_request(
+                api_url=f"/snapshot/{snap_id}",
+                treat_404_as_success=True,
             )
         except Exception as exc:
-            self.logger.warning(f"[delete_snap] {snap_name}: {exc}")
+            self.logger.warning(
+                f"[fire_delete_snap] {snap_name} ({snap_id}): {exc}"
+            )
 
     # ── Cleanup safety net ─────────────────────────────────────────────────
 
