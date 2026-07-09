@@ -1872,23 +1872,33 @@ def _rename_migrated_bdevs(migration, tgt_node, tgt_rpc, tgt_sec_rpc=None, tgt_t
 
     def _do_rename(old_composite, new_short, label):
         """Rename on prim + sec + ter.  Returns 'EXISTS' if the target name is
-        already taken (SPDK returns JSON-RPC error -32602 'File exists' -> None),
-        True on success.  new_short must be the short name only (no lvstore prefix)."""
+        already taken on the PRIMARY (SPDK returns JSON-RPC error -32602 'File
+        exists' -> None), True on success.  new_short must be the short name only
+        (no lvstore prefix).
+
+        Secondary/tertiary conflicts are non-fatal: an overlap node may already
+        carry the bdev at the canonical name, so a None return there must not
+        mask a successful primary rename.
+        """
         ret = tgt_rpc.bdev_lvol_rename(old_composite, new_short)
         logger.debug(f"_do_rename prim: {old_composite!r} -> {new_short!r}: ret={ret!r}")
-        # SPDK returns None on name collision (-32602 "File exists"); treat any falsy as collision.
-        exists = (not ret) or (ret == _EXISTS)
+        # SPDK returns None on name collision (-32602 "File exists"); only the
+        # primary result determines whether we should try the fallback name.
+        prim_exists = (not ret) or (ret == _EXISTS)
         for role, rpc in [("sec", tgt_sec_rpc), ("ter", tgt_ter_rpc)]:
             if rpc:
                 try:
                     r = rpc.bdev_lvol_rename(old_composite, new_short)
                     logger.debug(f"_do_rename {role}: {old_composite!r} -> {new_short!r}: ret={r!r}")
                     if (not r) or r == _EXISTS:
-                        exists = True
+                        logger.warning(
+                            f"_rename_migrated_bdevs: {role} rename {label} "
+                            f"{old_composite!r} -> {new_short!r}: non-fatal "
+                            f"({role} may already have bdev at target name)")
                 except Exception as exc:
                     logger.warning(
                         f"_rename_migrated_bdevs: {role} rename {label} (non-fatal): {exc}")
-        if exists:
+        if prim_exists:
             return _EXISTS
         return True
 
