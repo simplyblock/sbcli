@@ -2174,9 +2174,19 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
 
         rpc_client.log_set_print_level("DEBUG")
 
-        if snode.lvol_poller_mask:
+        # The lvstore-create poller group is created exactly ONCE per SPDK
+        # process lifetime: here, right after framework init (add-node; the
+        # restart path has the same call). Nothing else may call
+        # bdev_lvol_create_poller_group later — a second call with a different
+        # mask (the old create_s3_bdev path did this with app_thread_mask)
+        # either fails or lands the pollers on the wrong core. It must run on
+        # the same thread/core as the JC singleton, so the JC mask wins;
+        # lvol_poller_mask is the fallback for configs without a dedicated JC
+        # core.
+        poller_group_mask = snode.jc_singleton_mask or snode.lvol_poller_mask
+        if poller_group_mask:
             try:
-                rpc_client.bdev_lvol_create_poller_group(snode.lvol_poller_mask)
+                rpc_client.bdev_lvol_create_poller_group(poller_group_mask)
             except RPCException:
                 logger.error("Failed to set pollers mask")
                 return False
@@ -3036,9 +3046,12 @@ def _restart_storage_node_impl(
 
     rpc_client.log_set_print_level("DEBUG")
 
-    if snode.lvol_poller_mask:
+    # ONCE per SPDK process lifetime, on the JC singleton's thread/core —
+    # see the add-node twin of this call for the full rationale.
+    poller_group_mask = snode.jc_singleton_mask or snode.lvol_poller_mask
+    if poller_group_mask:
         try:
-            rpc_client.bdev_lvol_create_poller_group(snode.lvol_poller_mask)
+            rpc_client.bdev_lvol_create_poller_group(poller_group_mask)
         except RPCException:
             logger.error("Failed to set pollers mask")
             return False
