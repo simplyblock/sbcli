@@ -832,10 +832,28 @@ def _post_process_snap(snap: SnapShot, tgt_node: StorageNode, tgt_rpc: RPCClient
 
         try:
             pred_snap = db.get_snapshot_by_id(pred_uuid)
-            # Predecessor was created on target with the migration suffix — build
-            # composite from the source short name + suffix, not from snap_bdev
-            # (which still holds the source path until apply_migration_to_db runs).
-            pred_composite = f"{tgt_node.lvstore}/{_snap_tgt_short_name(pred_snap)}"
+            # For predecessors migrated as part of THIS migration, the bdev was
+            # created with the migration suffix (_m) and not yet renamed — build
+            # the composite from source short name + suffix.
+            # For predecessors already on TGT from a PRIOR migration (preexisting),
+            # the bdev has already been renamed to its canonical name; look up the
+            # actual name from the TGT instance rather than computing suffix name.
+            if pred_uuid in (migration.snaps_preexisting_on_target or []):
+                pred_short = None
+                for _inst in pred_snap.instances:
+                    if _inst.get('lvol', {}).get('node_id') == tgt_node.get_id():
+                        _inst_bdev = _inst.get('snap_bdev', '')
+                        if _inst_bdev.startswith(tgt_node.lvstore + '/'):
+                            pred_short = _inst_bdev.split('/', 1)[1]
+                            break
+                if not pred_short:
+                    pred_short = _snap_tgt_short_name(pred_snap)
+                    logger.warning(
+                        f"bdev_lvol_add_clone: no TGT instance found for preexisting "
+                        f"predecessor {pred_uuid}; using computed name {pred_short!r}")
+            else:
+                pred_short = _snap_tgt_short_name(pred_snap)
+            pred_composite = f"{tgt_node.lvstore}/{pred_short}"
             ret = tgt_rpc.bdev_lvol_add_clone(tgt_composite, pred_composite)
             if not ret:
                 return False, f"bdev_lvol_add_clone failed for {snap_uuid}"
