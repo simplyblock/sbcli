@@ -1585,7 +1585,7 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=None):
                 f"remote_{org_dev.jm_bdev}", org_dev, this_node,
                 bdev_names=None, reattach=True,
                 attach_timeout=1,
-            )
+            ))
         except RuntimeError:
             logger.error(f'Failed to connect to {org_dev.get_id()}')
         for _ in range(10):
