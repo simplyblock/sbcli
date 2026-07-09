@@ -1310,8 +1310,7 @@ class RPCClient:
         return self._request("bdev_lvol_get_lvstores", params)
 
     def bdev_lvol_rename(self, old_name, new_name):
-        params = {"old_name": old_name, "new_name": new_name}
-        return self._request("bdev_lvol_rename", params)
+        return self._request3("bdev_lvol_rename", old_name=old_name, new_name=new_name)
 
     def bdev_lvol_resize(self, name, size_in_mib):
         params = {
