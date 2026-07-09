@@ -218,6 +218,37 @@ def add_device_to_auto_restart(device):
     return _add_task(JobSchedule.FN_DEV_RESTART, device.cluster_id, device.node_id, device.get_id())
 
 
+def is_suspension_operator_caused(cluster):
+    """True when the cluster's SUSPENDED state is explained by deliberate
+    operator node shutdowns (``auto_restart_disabled`` markers, set by
+    ``sn shutdown``): without those nodes, the remaining not-online nodes
+    alone would still be within the cluster's fault tolerance.
+
+    In that case the automated suspend recovery (drain force-shutdown of the
+    surviving nodes + full parallel restart + reactivation) must NOT run — it
+    would fight an intentional shutdown by killing and restarting the healthy
+    nodes. Recovery is the operator's call: restart the stopped nodes, or run
+    ``cluster restart`` (which clears the markers and re-arms recovery).
+
+    A suspension where the non-deliberate outages already exceed FTT is a
+    genuine failure regardless of any deliberate shutdowns, and auto recovery
+    proceeds."""
+    if cluster.status != Cluster.STATUS_SUSPENDED:
+        return False
+    deliberate_down = 0
+    other_not_online = 0
+    for node in db.get_storage_nodes_by_cluster_id(cluster.get_id()):
+        if node.status in (StorageNode.STATUS_ONLINE, StorageNode.STATUS_REMOVED):
+            continue
+        if node.auto_restart_disabled:
+            deliberate_down += 1
+        else:
+            other_not_online += 1
+    ftt = cluster.max_fault_tolerance if isinstance(cluster.max_fault_tolerance, int) \
+        and cluster.max_fault_tolerance >= 1 else 1
+    return deliberate_down > 0 and other_not_online <= ftt
+
+
 def is_auto_restart_paused(cluster):
     """Auto-restart is paused while a SUSPENDED cluster is still being drained
     to a clean all-offline slate by the suspend-recovery auto-shutdown
@@ -227,9 +258,16 @@ def is_auto_restart_paused(cluster):
     health-checked). So we hold every restart until the drain is complete
     (cluster.suspend_drain_complete), then let the existing auto-restart bring
     the nodes back from offline. Used by both the queue chokepoint
-    (add_node_to_auto_restart) and the restart task runner."""
+    (add_node_to_auto_restart) and the restart task runner.
+
+    Exception: an operator-caused suspension (see
+    ``is_suspension_operator_caused``) never drains, so the drain marker would
+    pause restarts forever. The surviving nodes are still up in that state —
+    restarting a genuinely-failed node one-by-one onto up peers is the normal
+    restart path, not the strand-prone post-drain path — so don't pause."""
     return (cluster.status == Cluster.STATUS_SUSPENDED
-            and not cluster.suspend_drain_complete)
+            and not cluster.suspend_drain_complete
+            and not is_suspension_operator_caused(cluster))
 
 
 def add_node_to_auto_restart(node):

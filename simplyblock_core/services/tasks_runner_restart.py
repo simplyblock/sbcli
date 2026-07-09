@@ -1,8 +1,10 @@
 # coding=utf-8
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from simplyblock_core import constants, db_controller, storage_node_ops, utils
 from simplyblock_core.controllers import device_controller, health_controller, tasks_controller
+from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
@@ -358,17 +360,27 @@ def task_runner_node(task):
     # will sleep with exponential backoff and re-call us. Once the peer
     # finishes its transition, this check passes and we proceed with a
     # fresh budget.
-    for peer in db.get_storage_nodes_by_cluster_id(node.cluster_id):
-        if peer.get_id() == node.get_id():
-            continue
-        if peer.status in (StorageNode.STATUS_RESTARTING,
-                           StorageNode.STATUS_IN_SHUTDOWN):
-            msg = (f"Peer {peer.get_id()[:8]} is {peer.status}; "
-                   f"deferring (no retry consumed)")
-            logger.info(msg)
-            task.function_result = msg
-            task.write_to_db(db.kv_store)
-            return False
+    #
+    # Skipped only for a SUSPENDED **and drained** cluster: recovery restarts
+    # run in parallel then (see the dispatch loop below) so peers in
+    # RESTARTING / IN_SHUTDOWN are expected, not a conflict. The FDB guard in
+    # restart_storage_node is relaxed the same way (allow_concurrent_peers).
+    # An operator-caused suspension never drains — its survivors still serve
+    # IO — so it keeps the full pre-check.
+    cluster_obj = db.get_cluster_by_id(node.cluster_id)
+    if not (cluster_obj.status == Cluster.STATUS_SUSPENDED
+            and cluster_obj.suspend_drain_complete):
+        for peer in db.get_storage_nodes_by_cluster_id(node.cluster_id):
+            if peer.get_id() == node.get_id():
+                continue
+            if peer.status in (StorageNode.STATUS_RESTARTING,
+                               StorageNode.STATUS_IN_SHUTDOWN):
+                msg = (f"Peer {peer.get_id()[:8]} is {peer.status}; "
+                       f"deferring (no retry consumed)")
+                logger.info(msg)
+                task.function_result = msg
+                task.write_to_db(db.kv_store)
+                return False
 
     # is node reachable?
     ping_check = health_controller._check_node_ping(node.mgmt_ip)
@@ -488,6 +500,65 @@ def _restart_backoff_seconds(retry):
     return min(exp, constants.RESTART_TASK_EXEC_INTERVAL_MAX_SEC)
 
 
+# Parallel restart execution for SUSPENDED clusters: during full-cluster
+# recovery every node is offline and no client IO flows, so node restarts
+# cannot violate FTT and are fanned out on this pool (~70 s each; strictly
+# sequential recovery of a 32-node cluster took ~38 min, 2026-07-08). The
+# per-primary consistency of the cross-node connect section is preserved by
+# storage_node_ops._remote_connect_gate, and the peer-exclusion guards
+# (task_runner_node pre-check + try_set_node_restarting) are relaxed only
+# while the cluster is SUSPENDED. Online clusters never dispatch here.
+_restart_pool = ThreadPoolExecutor(
+    max_workers=constants.NODE_RESTART_MAX_PARALLEL_SUSPENDED,
+    thread_name_prefix="node-restart")
+_restart_inflight: dict = {}  # task uuid -> Future
+
+
+def _process_restart_task(task_uuid):
+    """Claim and drive one restart task, including the per-task backoff
+    bookkeeping. Runs inline (serialized) normally, or on the
+    suspended-cluster parallel pool. Never raises: a crash in one task must
+    not kill recovery of every other node."""
+    try:
+        # Re-read (it may have been canceled / changed concurrently).
+        task = db.get_task_by_id(task_uuid)
+        if task.status == JobSchedule.STATUS_DONE:
+            _restart_next_attempt.pop(task_uuid, None)
+            return
+        # Lease gate: do not drive a task another live runner host
+        # already owns (prevents a second replica issuing a
+        # concurrent shutdown/restart).
+        if not tasks_controller.claim_task(task):
+            logger.info(f"Restart task {task_uuid} owned by another runner host; skipping")
+            return
+        retry_before = task.retry
+        res = task_runner(task)
+        task = db.get_task_by_id(task_uuid)
+        if res or task.status == JobSchedule.STATUS_DONE:
+            _restart_next_attempt.pop(task_uuid, None)
+        elif task.retry > retry_before:
+            # Genuine failure (retry consumed): 1-min lead-in, then
+            # exponential backoff.
+            _restart_next_attempt[task_uuid] = (
+                time.time() + _restart_backoff_seconds(task.retry))
+        else:
+            # Defer (peer-restart mutual exclusion; retry NOT
+            # consumed): not a failure — do not back off. Re-poll on
+            # the next short pass so this picks up immediately once
+            # the blocking restart finishes.
+            _restart_next_attempt[task_uuid] = (
+                time.time() + constants.RESTART_TASK_EXEC_INTERVAL_SEC)
+    except Exception as e:
+        logger.error(f"Restart task {task_uuid} processing crashed: {e}")
+        logger.exception(e)
+        try:
+            retry = db.get_task_by_id(task_uuid).retry
+        except Exception:
+            retry = 0
+        _restart_next_attempt[task_uuid] = (
+            time.time() + _restart_backoff_seconds(retry))
+
+
 logger.info("Starting Tasks runner...")
 while True:
     try:
@@ -507,6 +578,7 @@ while True:
                     continue
                 if task.status == JobSchedule.STATUS_DONE:
                     _restart_next_attempt.pop(task.uuid, None)
+                    _restart_inflight.pop(task.uuid, None)
                     continue
                 # Round-robin: skip a task that is not yet due so a waiting task
                 # (deferred on a concurrent peer restart, or in failure backoff)
@@ -520,6 +592,7 @@ while True:
                 # half-restarted state we are fixing. Re-poll soon without
                 # consuming a retry; the task runs once the drain completes
                 # (suspend_drain_complete).
+                dispatch_parallel = False
                 if task.function_name == JobSchedule.FN_NODE_RESTART:
                     cl_fresh = db.get_cluster_by_id(cl.get_id())
                     if tasks_controller.is_auto_restart_paused(cl_fresh):
@@ -529,41 +602,27 @@ while True:
                         _restart_next_attempt[task.uuid] = (
                             time.time() + constants.RESTART_TASK_EXEC_INTERVAL_SEC)
                         continue
-                # Per-task isolation: a crash in task_runner must not escape to
-                # the outer `while True` and kill recovery of every other node.
-                try:
-                    # Re-read (it may have been canceled / changed concurrently).
-                    task = db.get_task_by_id(task.uuid)
-                    if task.status == JobSchedule.STATUS_DONE:
-                        _restart_next_attempt.pop(task.uuid, None)
+                    # SUSPENDED and drained: full-cluster recovery — fan node
+                    # restarts out on the pool (see _restart_pool). Online
+                    # clusters stay strictly sequential. suspend_drain_complete
+                    # is required: it certifies every (non operator-stopped)
+                    # node went OFFLINE, i.e. no client IO — an operator-caused
+                    # suspension never drains, its survivors are still serving,
+                    # and its restarts must stay sequential with full guards.
+                    dispatch_parallel = (cl_fresh.status == Cluster.STATUS_SUSPENDED
+                                         and cl_fresh.suspend_drain_complete)
+
+                if dispatch_parallel:
+                    inflight = _restart_inflight.get(task.uuid)
+                    if inflight is not None and not inflight.done():
                         continue
-                    # Lease gate: do not drive a task another live runner host
-                    # already owns (prevents a second replica issuing a
-                    # concurrent shutdown/restart).
-                    if not tasks_controller.claim_task(task):
-                        logger.info(f"Restart task {task.uuid} owned by another runner host; skipping")
-                        continue
-                    retry_before = task.retry
-                    res = task_runner(task)
-                    task = db.get_task_by_id(task.uuid)
-                    if res or task.status == JobSchedule.STATUS_DONE:
-                        _restart_next_attempt.pop(task.uuid, None)
-                    elif task.retry > retry_before:
-                        # Genuine failure (retry consumed): 1-min lead-in, then
-                        # exponential backoff.
-                        _restart_next_attempt[task.uuid] = (
-                            time.time() + _restart_backoff_seconds(task.retry))
-                    else:
-                        # Defer (peer-restart mutual exclusion; retry NOT
-                        # consumed): not a failure — do not back off. Re-poll on
-                        # the next short pass so this picks up immediately once
-                        # the blocking restart finishes.
-                        _restart_next_attempt[task.uuid] = (
-                            time.time() + constants.RESTART_TASK_EXEC_INTERVAL_SEC)
-                except Exception as e:
-                    logger.error(f"Restart task {task.uuid} processing crashed: {e}")
-                    logger.exception(e)
-                    _restart_next_attempt[task.uuid] = (
-                        time.time() + _restart_backoff_seconds(task.retry))
+                    _restart_inflight[task.uuid] = _restart_pool.submit(
+                        _process_restart_task, task.uuid)
+                    continue
+
+                # Inline (serialized) execution; _process_restart_task never
+                # raises, so a crash in one task cannot escape to the outer
+                # `while True` and kill recovery of every other node.
+                _process_restart_task(task.uuid)
 
     time.sleep(constants.TASK_EXEC_INTERVAL_SEC)

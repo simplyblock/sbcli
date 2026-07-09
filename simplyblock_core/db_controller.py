@@ -871,23 +871,29 @@ class DBController(metaclass=Singleton):
 
     # ---- Pre-Restart Guard (Single FDB Transaction) ----
 
-    def _try_set_node_restarting_tx(self, tr, cluster_id, node_id):
+    def _try_set_node_restarting_tx(self, tr, cluster_id, node_id, allow_concurrent_peers=False):
         """Pre-restart check as a single FDB transaction.
 
         Opens transaction, queries status of all nodes in the cluster.
         If any node is in restart or shutdown, returns False.
         Otherwise sets this node to in_restart and commits.
 
+        ``allow_concurrent_peers=True`` skips the peer-exclusion predicate
+        (this node is still flipped to RESTARTING atomically). Used for
+        suspended-cluster recovery, where every node is offline, no client
+        IO flows, and restarts deliberately run in parallel.
+
         Returns (True, None) on success, or (False, reason) if blocked.
         """
         all_nodes = StorageNode().read_from_db(tr)
-        for n in all_nodes:
-            if n.cluster_id != cluster_id:
-                continue
-            if n.get_id() == node_id:
-                continue
-            if n.status in [StorageNode.STATUS_RESTARTING, StorageNode.STATUS_IN_SHUTDOWN]:
-                return False, f"Node {n.get_id()} is {n.status}"
+        if not allow_concurrent_peers:
+            for n in all_nodes:
+                if n.cluster_id != cluster_id:
+                    continue
+                if n.get_id() == node_id:
+                    continue
+                if n.status in [StorageNode.STATUS_RESTARTING, StorageNode.STATUS_IN_SHUTDOWN]:
+                    return False, f"Node {n.get_id()} is {n.status}"
 
         # Set this node to in_restart atomically within the same transaction
         target = None
@@ -903,12 +909,14 @@ class DBController(metaclass=Singleton):
 
         return True, None
 
-    def try_set_node_restarting(self, cluster_id, node_id):
+    def try_set_node_restarting(self, cluster_id, node_id, allow_concurrent_peers=False):
         """Pre-restart check: single FDB transaction.
 
         Opens FDB transaction, queries status of all nodes.
         If any node is in restart or shutdown, returns False.
         Sets node to in_restart and commits transaction.
+        ``allow_concurrent_peers=True`` skips the peer-exclusion predicate
+        (suspended-cluster parallel recovery).
 
         On successful acquisition the status-change event and peer
         notification are emitted AFTER the commit. The FDB tx itself
@@ -936,7 +944,7 @@ class DBController(metaclass=Singleton):
             pass
 
         transactional = fdb.transactional(DBController._try_set_node_restarting_tx)
-        acquired, reason = transactional(self, self.kv_store, cluster_id, node_id)
+        acquired, reason = transactional(self, self.kv_store, cluster_id, node_id, allow_concurrent_peers)
 
         if acquired:
             # Emit the status-change event and peer notification AFTER commit.

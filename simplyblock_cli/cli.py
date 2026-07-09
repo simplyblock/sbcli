@@ -381,6 +381,7 @@ class CLIWrapper(CLIWrapperBase):
         self.init_cluster__check(subparser)
         self.init_cluster__update(subparser)
         self.init_cluster__graceful_shutdown(subparser)
+        self.init_cluster__restart(subparser)
         self.init_cluster__graceful_startup(subparser)
         self.init_cluster__list_tasks(subparser)
         self.init_cluster__cancel_task(subparser)
@@ -552,6 +553,10 @@ class CLIWrapper(CLIWrapperBase):
 
     def init_cluster__graceful_shutdown(self, subparser):
         subcommand = self.add_sub_command(subparser, 'graceful-shutdown', 'Initiates a graceful shutdown of a cluster\'s storage nodes.')
+        subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
+
+    def init_cluster__restart(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'restart', 'Performs a full cluster restart: shuts down every node that is not offline, restarts all nodes in parallel and reactivates the cluster.')
         subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
 
     def init_cluster__graceful_startup(self, subparser):
@@ -1316,6 +1321,8 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.cluster__update(sub_command, args)
                 elif sub_command in ['graceful-shutdown']:
                     ret = self.cluster__graceful_shutdown(sub_command, args)
+                elif sub_command in ['restart']:
+                    ret = self.cluster__restart(sub_command, args)
                 elif sub_command in ['graceful-startup']:
                     ret = self.cluster__graceful_startup(sub_command, args)
                 elif sub_command in ['list-tasks']:
