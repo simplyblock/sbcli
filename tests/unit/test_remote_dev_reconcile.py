@@ -91,7 +91,7 @@ class TestReconnectDroppedRemoteDevs(unittest.TestCase):
         self.mock_connect = patcher_connect.start()
         self.addCleanup(patcher_connect.stop)
         self.mock_connect.side_effect = (
-            lambda name, dev, node, bdev_names, reattach: f"{name}n1")
+            lambda name, dev, node: f"{name}n1")
 
     def _set_cluster(self, *peers):
         self.mock_db.get_storage_nodes_by_cluster_id.return_value = [
@@ -201,7 +201,7 @@ class TestReconnectDroppedRemoteDevs(unittest.TestCase):
         peer.nvme_devices = [good, bad]
         self._set_cluster(peer)
 
-        def connect(name, dev, node, bdev_names, reattach):
+        def connect(name, dev, node):
             if dev.get_id() == "dev-bad":
                 raise RuntimeError("connect failed")
             return f"{name}n1"
