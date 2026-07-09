@@ -542,6 +542,14 @@ class CLIWrapperBase:
         cluster_ops.cluster_grace_shutdown(args.cluster_id)
         return True
 
+    def cluster__restart(self, sub_command, args):
+        try:
+            cluster_ops.cluster_restart(args.cluster_id)
+        except Exception as e:
+            print(f"Error restarting cluster: {e}")
+            return False
+        return True
+
     def cluster__graceful_startup(self, sub_command, args):
         cluster_ops.cluster_grace_startup(args.cluster_id, args.clear_data, args.spdk_image)
         return True
@@ -724,13 +732,36 @@ class CLIWrapperBase:
         return lvol_controller.inflate_lvol(args.volume_id)
 
     def volume__replication_start(self, sub_command, args):
-        return lvol_controller.replication_start(args.lvol_id, args.replication_cluster_id)
+        return lvol_controller.replication_start(
+            args.lvol_id, args.replication_cluster_id,
+            mode=getattr(args, 'mode', None), interval_min=getattr(args, 'interval_min', None))
+
+    def volume__replication_commit(self, sub_command, args):
+        return lvol_controller.replication_commit(args.lvol_id)
+
+    def volume__replication_failback(self, sub_command, args):
+        return lvol_controller.replication_failback(
+            args.lvol_id, source_cluster_id=getattr(args, 'source_cluster_id', None))
 
     def volume__replication_stop(self, sub_command, args):
         return lvol_controller.replication_stop(args.lvol_id)
 
     def volume__replication_status(self, sub_command, args):
         return snapshot_controller.list_replication_tasks(args.cluster_id)
+
+    def volume__replication_info(self, sub_command, args):
+        info = lvol_controller.get_replication_info(args.volume_id)
+        if not info:
+            return False
+        return utils.print_table([
+            {"Last Snapshot": info["last_snapshot_id"],
+             "Last Replication": info["last_replication_time"],
+             "Last Duration": info["last_replication_duration"],
+             "Replicated Count": info["replicated_count"],
+             "Time Lag": info["lag"] or "-",
+             "Outstanding": info["outstanding"],
+             "Outstanding Count": info["outstanding_count"]},
+        ])
 
     def volume__replication_trigger(self, sub_command, args):
         return lvol_controller.replication_trigger(args.lvol_id)
@@ -933,7 +964,7 @@ class CLIWrapperBase:
     def backup__restore(self, sub_command, args):
         result, error = backup_controller.restore_backup(
             args.backup_id, args.lvol_name, args.pool,
-            cluster_id=getattr(args, 'cluster_id', None),
+            cluster_id=args.cluster_id,
             target_node_id=getattr(args, 'node', None))
         if error:
             print(f"Error: {error}")

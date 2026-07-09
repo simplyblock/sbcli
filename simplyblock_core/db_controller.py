@@ -212,6 +212,12 @@ class DBController(metaclass=Singleton):
         ret = LVolReplication().read_from_db(self.kv_store)
         return sorted(ret, key=lambda x: x.create_dt)
 
+    def get_lvol_replication_by_id(self, uuid) -> LVolReplication:
+        ret = LVolReplication().read_from_db(self.kv_store, uuid)
+        if not ret:
+            raise KeyError(f'LVolReplication {uuid} not found')
+        return ret[0]
+
     def get_lvol_by_name(self, lvol_name: str) -> LVol:
         lvol = single_or_none(lvol for lvol in self.get_lvols() if lvol.lvol_name == lvol_name)
         if lvol is None:
@@ -602,6 +608,25 @@ class DBController(metaclass=Singleton):
         transactional = fdb.transactional(DBController._release_lvstore_lock_tx)
         transactional(self, self.kv_store, cluster_id, lvs_name, owner)
 
+    def watch_lvstore_lock(self, cluster_id, lvs_name):
+        """Return an FDB watch future that fires when the lock key changes
+        (release, reclaim, heartbeat), or None when no DB connection exists.
+
+        Lets lock waiters block on the actual release instead of sleeping a
+        fixed poll interval: the future's ``is_ready()`` is a local check (no
+        FDB round-trip), so waiters can spin on it cheaply and re-attempt the
+        acquire the moment the holder releases."""
+        if not self.kv_store:
+            return None
+        lock = LVStoreMutationLock()
+        lock.cluster_id = cluster_id
+        lock.lvs_name = lvs_name
+        key = lock.get_db_id().encode()
+        tr = self.kv_store.create_transaction()
+        watch = tr.watch(key)
+        tr.commit().wait()
+        return watch
+
     # ---- Node-add port reservation (Single FDB Transaction) ----
 
     def _reserve_next_nvmf_port_tx(self, tr, cluster_id, base_port, node_used, owner, now):
@@ -846,23 +871,29 @@ class DBController(metaclass=Singleton):
 
     # ---- Pre-Restart Guard (Single FDB Transaction) ----
 
-    def _try_set_node_restarting_tx(self, tr, cluster_id, node_id):
+    def _try_set_node_restarting_tx(self, tr, cluster_id, node_id, allow_concurrent_peers=False):
         """Pre-restart check as a single FDB transaction.
 
         Opens transaction, queries status of all nodes in the cluster.
         If any node is in restart or shutdown, returns False.
         Otherwise sets this node to in_restart and commits.
 
+        ``allow_concurrent_peers=True`` skips the peer-exclusion predicate
+        (this node is still flipped to RESTARTING atomically). Used for
+        suspended-cluster recovery, where every node is offline, no client
+        IO flows, and restarts deliberately run in parallel.
+
         Returns (True, None) on success, or (False, reason) if blocked.
         """
         all_nodes = StorageNode().read_from_db(tr)
-        for n in all_nodes:
-            if n.cluster_id != cluster_id:
-                continue
-            if n.get_id() == node_id:
-                continue
-            if n.status in [StorageNode.STATUS_RESTARTING, StorageNode.STATUS_IN_SHUTDOWN]:
-                return False, f"Node {n.get_id()} is {n.status}"
+        if not allow_concurrent_peers:
+            for n in all_nodes:
+                if n.cluster_id != cluster_id:
+                    continue
+                if n.get_id() == node_id:
+                    continue
+                if n.status in [StorageNode.STATUS_RESTARTING, StorageNode.STATUS_IN_SHUTDOWN]:
+                    return False, f"Node {n.get_id()} is {n.status}"
 
         # Set this node to in_restart atomically within the same transaction
         target = None
@@ -878,12 +909,14 @@ class DBController(metaclass=Singleton):
 
         return True, None
 
-    def try_set_node_restarting(self, cluster_id, node_id):
+    def try_set_node_restarting(self, cluster_id, node_id, allow_concurrent_peers=False):
         """Pre-restart check: single FDB transaction.
 
         Opens FDB transaction, queries status of all nodes.
         If any node is in restart or shutdown, returns False.
         Sets node to in_restart and commits transaction.
+        ``allow_concurrent_peers=True`` skips the peer-exclusion predicate
+        (suspended-cluster parallel recovery).
 
         On successful acquisition the status-change event and peer
         notification are emitted AFTER the commit. The FDB tx itself
@@ -911,7 +944,7 @@ class DBController(metaclass=Singleton):
             pass
 
         transactional = fdb.transactional(DBController._try_set_node_restarting_tx)
-        acquired, reason = transactional(self, self.kv_store, cluster_id, node_id)
+        acquired, reason = transactional(self, self.kv_store, cluster_id, node_id, allow_concurrent_peers)
 
         if acquired:
             # Emit the status-change event and peer notification AFTER commit.

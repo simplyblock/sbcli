@@ -44,7 +44,9 @@ class _CreateParams(BaseModel):
     npcs: util.Unsigned = 0
     allowed_hosts: Optional[List[str]] = None
     fabric: str = "tcp"
-    max_namespace_per_subsys: int = 1
+    # None → resolved by add_lvol_ha: a shareable default for namespaced
+    # volumes, 1 otherwise.
+    max_namespace_per_subsys: Optional[int] = None
     do_replicate: bool = False
     replication_cluster_id: Optional[str] = None
     encrypt: bool = False
@@ -312,6 +314,20 @@ def create_snapshot(
 @instance_api.post('/replicate_lvol', name='clusters:storage-pools:volumes:replicate_lvol')
 def replicate_lvol_on_target_cluster(cluster: Cluster, pool: StoragePool, volume: Volume):
     return lvol_controller.replicate_lvol_on_target_cluster(volume.get_id())
+
+
+@instance_api.post('/replication_commit', name='clusters:storage-pools:volumes:replication_commit')
+def replication_commit(cluster: Cluster, pool: StoragePool, volume: Volume):
+    return lvol_controller.replication_commit(volume.get_id())
+
+
+class FailbackParams(BaseModel):
+    source_cluster_id: Optional[str] = None
+
+
+@instance_api.post('/replication_failback', name='clusters:storage-pools:volumes:replication_failback')
+def replication_failback(cluster: Cluster, pool: StoragePool, volume: Volume, body: FailbackParams):
+    return lvol_controller.replication_failback(volume.get_id(), source_cluster_id=body.source_cluster_id)
 
 
 @instance_api.get('/list_replication_tasks', name='clusters:storage-pools:volumes:list_replication_tasks')

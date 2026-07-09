@@ -2045,7 +2045,7 @@ def format_device_with_4k(pci_device):
         logger.error(f"Failed to format device with 4K {e}")
 
 
-_HUGEPAGES_BASELINE_DIR = "/tmp/simplyblock"
+_HUGEPAGES_BASELINE_DIR = "/var/run/simplyblock"
 
 
 def _get_user_hugepages_baseline(node, current_hugepages):
@@ -2053,8 +2053,8 @@ def _get_user_hugepages_baseline(node, current_hugepages):
 
     On first call for a given NUMA node (no baseline file), the current allocatable
     hugepage count is the user's reservation — simplyblock hasn't touched it yet.
-    That value is written to /tmp/simplyblock/hugepages_baseline_node{N}.
-    On subsequent calls the file is read directly; /tmp/simplyblock is cleared on
+    That value is written to /var/run/simplyblock/hugepages_baseline_node{N}.
+    On subsequent calls the file is read directly; /var/run/simplyblock is cleared on
     reboot (host tmpfs / Docker/K8s hostPath volume) so the baseline is always
     fresh after a reboot.
     """
@@ -2081,8 +2081,45 @@ def _get_user_hugepages_baseline(node, current_hugepages):
     return current_hugepages
 
 
+def _get_sb_hugepages_allocation(node):
+    """Return the simplyblock hugepage allocation stored from the previous deploy, or None."""
+    sb_file = os.path.join(_HUGEPAGES_BASELINE_DIR, f"hugepages_sb_node{node}")
+    if os.path.exists(sb_file):
+        try:
+            with open(sb_file) as f:
+                val = int(f.read().strip())
+            logger.debug(f"Node {node}: previous simplyblock hugepage allocation from cache: {val}")
+            return val
+        except Exception as e:
+            logger.warning(f"Node {node}: could not read sb allocation file {sb_file}: {e}")
+    return None
+
+
+def _save_sb_hugepages_allocation(node, hugepages_needed) -> bool:
+    sb_file = os.path.join(_HUGEPAGES_BASELINE_DIR, f"hugepages_sb_node{node}")
+    try:
+        os.makedirs(_HUGEPAGES_BASELINE_DIR, exist_ok=True)
+        with open(sb_file, "w") as f:
+            f.write(str(hugepages_needed))
+        return True
+    except Exception as e:
+        logger.warning(f"Node {node}: could not save sb allocation to {sb_file}: {e}")
+        return False
+
+
+def _save_user_hugepages_baseline(node, baseline):
+    baseline_file = os.path.join(_HUGEPAGES_BASELINE_DIR, f"hugepages_baseline_node{node}")
+    try:
+        os.makedirs(_HUGEPAGES_BASELINE_DIR, exist_ok=True)
+        with open(baseline_file, "w") as f:
+            f.write(str(baseline))
+        logger.debug(f"Node {node}: saved updated hugepage baseline: {baseline} -> {baseline_file}")
+    except Exception as e:
+        logger.warning(f"Node {node}: could not save hugepage baseline to {baseline_file}: {e}")
+
+
 def set_hugepages_if_needed(node, hugepages_needed, page_size_kb=2048):
-    """Set hugepages for a specific NUMA node if current number is less than needed."""
+    """Set hugepages for a specific NUMA node, adjusting up or down based on previous allocation."""
     hugepage_path = f"/sys/devices/system/node/node{node}/hugepages/hugepages-{page_size_kb}kB/nr_hugepages"
 
     try:
@@ -2090,16 +2127,56 @@ def set_hugepages_if_needed(node, hugepages_needed, page_size_kb=2048):
             current_hugepages = int(f.read().strip())
 
         user_baseline = _get_user_hugepages_baseline(node, current_hugepages)
-        required = user_baseline + hugepages_needed
+        prev_sb = _get_sb_hugepages_allocation(node)
 
-        if current_hugepages >= required:
-            logger.debug(f"Node {node}: already has {current_hugepages} hugepages >= required {required}, no change needed.")
+        if prev_sb is not None:
+            # prev_sb is the adjusted total last written to the kernel, so the
+            # delta from that value captures manual user changes since the last
+            # deploy (rounding overhead is not mistaken for user additions).
+            user_delta = current_hugepages - prev_sb
+            if user_delta > 0:
+                # nr_hugepages grew beyond what we last set — the user added
+                # hugepages. Absorb it into the baseline so it persists across
+                # every future restart, not just the next one.
+                current_user = user_baseline + user_delta
+                _save_user_hugepages_baseline(node, current_user)
+                logger.info(f"Node {node}: user hugepage baseline updated {user_baseline} -> {current_user} (delta={user_delta:+d})")
+            else:
+                # user_delta <= 0: nr_hugepages is at or BELOW what we last
+                # wrote. This is almost always a reset (a reboot zeroes the
+                # runtime allocation while the persisted prev_sb survives), NOT
+                # a deliberate user removal. Treating it as a removal drove the
+                # user baseline negative and produced a negative nr_hugepages
+                # write that failed with "Invalid argument", looping forever
+                # (observed 2026-07-07: baseline 0 -> -7168 -> -14336 -> ...).
+                # Keep the established user baseline and simply re-apply.
+                current_user = user_baseline
+                if user_delta < 0:
+                    logger.info(f"Node {node}: nr_hugepages ({current_hugepages}) below last-set ({prev_sb}); "
+                                f"treating as reset, keeping user baseline {user_baseline}")
         else:
-            required = adjust_hugepages(required)
-            logger.debug(f"Node {node}: setting to {required} (user baseline={user_baseline} + simplyblock={hugepages_needed})...")
+            # First deploy: use the captured pre-deploy baseline
+            current_user = user_baseline
+
+        # Never write a negative or below-requirement value: the user baseline
+        # is clamped to >= 0, and the final total can never drop below what
+        # simplyblock itself needs.
+        current_user = max(current_user, 0)
+        required = adjust_hugepages(current_user + hugepages_needed)
+        required = max(required, hugepages_needed)
+        logger.debug(f"Node {node}: setting to {required} (user={current_user} + simplyblock={hugepages_needed})")
+
+        if current_hugepages != required:
             cmd = f"echo {required} | sudo tee /sys/devices/system/node/node{node}/hugepages/hugepages-2048kB/nr_hugepages"
             subprocess.run(cmd, shell=True, check=True)
             logger.debug(f"Node {node}: hugepages updated to {required}.")
+        else:
+            logger.debug(f"Node {node}: already has {current_hugepages} hugepages == required {required}, no change needed.")
+
+        # Store the adjusted total (what was actually written to the kernel) so
+        # the next deploy computes user_delta = current - prev_total correctly.
+        if not _save_sb_hugepages_allocation(node, required):
+            logger.error(f"Node {node}: failed to persist hugepage allocation — delta tracking will be incorrect on next restart")
 
     except FileNotFoundError:
         logger.error(f"Node {node}: Hugepage path not found. Is hugepage support enabled?")

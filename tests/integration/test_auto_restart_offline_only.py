@@ -34,10 +34,15 @@ from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.cluster import Cluster
 
 
-def _make_cluster(status=Cluster.STATUS_ACTIVE, distr_npcs=2):
+def _make_cluster(status=Cluster.STATUS_ACTIVE, distr_npcs=2,
+                  enable_failure_domain=False):
     c = MagicMock(spec=Cluster)
     c.status = status
     c.distr_npcs = distr_npcs
+    # Must be an explicit bool: the guard branches on
+    # `not cluster.enable_failure_domain`, and a bare MagicMock attribute is
+    # truthy — which would silently skip the flat offline-peer-count guard.
+    c.enable_failure_domain = enable_failure_domain
     return c
 
 
@@ -186,6 +191,42 @@ class TestAddNodeToAutoRestartGuard(unittest.TestCase):
         peers.append(node)
         cluster = _make_cluster(status=Cluster.STATUS_ACTIVE, distr_npcs=2)
         result, add_task = self._call(node, peers=peers, cluster=cluster)
+        self.assertFalse(result)
+        add_task.assert_not_called()
+
+    def test_FD_cluster_allows_restart_when_whole_domain_offline(self):
+        # Failure-domain regression (incident 2026-07-08): a 1+1 FD cluster
+        # loses a whole domain (15 other peers offline). The FD-aware status
+        # logic keeps it DEGRADED (never SUSPENDED), so the flat
+        # offline_nodes(15) > npcs(1) guard would permanently block
+        # auto-restart. With enable_failure_domain the count guard must be
+        # skipped and the restart enqueued — otherwise the rebooted domain
+        # never comes back online.
+        node = _make_node(StorageNode.STATUS_OFFLINE, uuid="self",
+                          mgmt_ip="10.0.0.1")
+        peers = [
+            _make_node(StorageNode.STATUS_OFFLINE,
+                       uuid=f"peer-{i}", mgmt_ip=f"10.0.0.{i + 2}")
+            for i in range(15)
+        ]
+        peers.append(node)
+        cluster = _make_cluster(status=Cluster.STATUS_DEGRADED, distr_npcs=1,
+                                enable_failure_domain=True)
+        result, add_task = self._call(node, peers=peers, cluster=cluster)
+        self.assertEqual(result, "task-uuid")
+        add_task.assert_called_once()
+
+    def test_FD_cluster_still_paused_when_suspended_not_drained(self):
+        # The SUSPENDED-not-drained pause (is_auto_restart_paused) still wins
+        # over the FD short-circuit — genuinely past-tolerance loss must wait
+        # for the drain regardless of failure domains.
+        from simplyblock_core.controllers import tasks_controller
+        node = _make_node(StorageNode.STATUS_OFFLINE, uuid="self")
+        cluster = _make_cluster(status=Cluster.STATUS_SUSPENDED, distr_npcs=1,
+                                enable_failure_domain=True)
+        with patch.object(tasks_controller, "is_auto_restart_paused",
+                          return_value=True):
+            result, add_task = self._call(node, cluster=cluster)
         self.assertFalse(result)
         add_task.assert_not_called()
 

@@ -131,6 +131,13 @@ def _populate_sim_for_primary(sim: RpcServerSim, node, primary_lvstore_stack: Li
     # Lvstore bdev
     if node.lvstore:
         sim.bdevs[node.lvstore] = BdevSim(name=node.lvstore, type="bdev_lvstore")
+        # Seed the cluster-wide superblock registry so a newcomer that builds
+        # this primary's replica stack and examines ``node.raid`` rediscovers
+        # the lvstore — the sim equivalent of the on-disk superblock a real
+        # cluster_activate would have written. ``node.raid`` matches the raid
+        # name in ``lvstore_stack`` (see build_4_node_ftt1_baseline).
+        if node.raid and sim.cluster_sim is not None:
+            sim.cluster_sim.lvstore_by_base[node.raid] = node.lvstore
     # Reflect the lvstore_stack entries as bdevs of their declared type.
     for bdev_dict in primary_lvstore_stack:
         name = bdev_dict.get("name")
@@ -213,6 +220,10 @@ def build_4_node_ftt1_baseline(cluster_sim: ClusterSim, db) -> Tuple[str, List[s
              "distribs_list": [distrib_name]},
             {"type": "bdev_lvstore", "name": f"LVS_{nid}", "params": {}},
         ]
+        # The recreate path examines ``primary_node.raid`` to resurface the
+        # lvstore on a non-leader, so the node's raid name must match the
+        # raid entry in its lvstore_stack (not the _make_node_record default).
+        n.raid = raid_name
         n.write_to_db(db)
         nodes_by_id[nid] = n
 

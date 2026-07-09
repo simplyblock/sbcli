@@ -380,6 +380,7 @@ class CLIWrapper(CLIWrapperBase):
         self.init_cluster__check(subparser)
         self.init_cluster__update(subparser)
         self.init_cluster__graceful_shutdown(subparser)
+        self.init_cluster__restart(subparser)
         self.init_cluster__graceful_startup(subparser)
         self.init_cluster__list_tasks(subparser)
         self.init_cluster__cancel_task(subparser)
@@ -553,6 +554,10 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'graceful-shutdown', 'Initiates a graceful shutdown of a cluster\'s storage nodes.')
         subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
 
+    def init_cluster__restart(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'restart', 'Performs a full cluster restart: shuts down every node that is not offline, restarts all nodes in parallel and reactivates the cluster.')
+        subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
+
     def init_cluster__graceful_startup(self, subparser):
         subcommand = self.add_sub_command(subparser, 'graceful-startup', 'Initiates a graceful startup of a cluster\'s storage nodes.')
         subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
@@ -619,8 +624,11 @@ class CLIWrapper(CLIWrapperBase):
         self.init_volume__check(subparser)
         self.init_volume__inflate(subparser)
         self.init_volume__replication_start(subparser)
+        self.init_volume__replication_commit(subparser)
+        self.init_volume__replication_failback(subparser)
         self.init_volume__replication_stop(subparser)
         self.init_volume__replication_status(subparser)
+        self.init_volume__replication_info(subparser)
         self.init_volume__replication_trigger(subparser)
         self.init_volume__suspend(subparser)
         self.init_volume__resume(subparser)
@@ -742,6 +750,17 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'replication-start', 'Start snapshot replication taken from lvol')
         subcommand.add_argument('lvol_id', help='Logical volume id', type=str)
         subcommand.add_argument('--replication-cluster-id', help='Cluster ID of the replication target cluster', type=str, dest='replication_cluster_id')
+        subcommand.add_argument('--mode', help='Replication mode: \'failover\' (async DR, default) or \'migration\' (planned cutover)', type=str, dest='mode', choices=['failover','migration',])
+        subcommand.add_argument('--interval-min', help='Interval in minutes for automatic internal snapshots (0 = none)', type=int, dest='interval_min')
+
+    def init_volume__replication_commit(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'replication-commit', 'Commit a migration/fail-back cutover: minimize delta then fail the client over to the target')
+        subcommand.add_argument('lvol_id', help='Logical volume id', type=str)
+
+    def init_volume__replication_failback(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'replication-failback', 'Configure fail-back of a failed-over volume to a source cluster (recovered = delta only; fresh = full). Cut over with replication-commit.')
+        subcommand.add_argument('lvol_id', help='Failed-over logical volume id (currently on the target cluster)', type=str)
+        subcommand.add_argument('--source-cluster-id', help='Fresh source cluster id. Omit to fail back (delta) to the recovered original source.', type=str, dest='source_cluster_id')
 
     def init_volume__replication_stop(self, subparser):
         subcommand = self.add_sub_command(subparser, 'replication-stop', 'Stop snapshot replication taken from lvol')
@@ -750,6 +769,10 @@ class CLIWrapper(CLIWrapperBase):
     def init_volume__replication_status(self, subparser):
         subcommand = self.add_sub_command(subparser, 'replication-status', 'Lists replication status')
         subcommand.add_argument('cluster_id', help='Cluster UUID', type=str)
+
+    def init_volume__replication_info(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'replication-info', 'Show replication progress (time lag and outstanding data) for a volume')
+        subcommand.add_argument('volume_id', help='Logical volume id or name', type=str)
 
     def init_volume__replication_trigger(self, subparser):
         subcommand = self.add_sub_command(subparser, 'replication-trigger', 'Start replication for lvol')
@@ -996,7 +1019,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--lvol', help='The new logical volume name.', type=str, dest='lvol_name', required=True)
         subcommand.add_argument('--pool', help='The target pool name or id.', type=str, dest='pool', required=True)
         subcommand.add_argument('--node', help='The target storage node id.', type=str, dest='node')
-        subcommand.add_argument('--cluster-id', help='The cluster id.', type=str, dest='cluster_id')
+        subcommand.add_argument('--cluster-id', help='The target cluster id.', type=str, dest='cluster_id', required=True)
 
     def init_backup__export(self, subparser):
         subcommand = self.add_sub_command(subparser, 'export', 'Export backup metadata to a JSON file for cross-cluster restore.')
@@ -1297,6 +1320,8 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.cluster__update(sub_command, args)
                 elif sub_command in ['graceful-shutdown']:
                     ret = self.cluster__graceful_shutdown(sub_command, args)
+                elif sub_command in ['restart']:
+                    ret = self.cluster__restart(sub_command, args)
                 elif sub_command in ['graceful-startup']:
                     ret = self.cluster__graceful_startup(sub_command, args)
                 elif sub_command in ['list-tasks']:
@@ -1365,10 +1390,16 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.volume__inflate(sub_command, args)
                 elif sub_command in ['replication-start']:
                     ret = self.volume__replication_start(sub_command, args)
+                elif sub_command in ['replication-commit']:
+                    ret = self.volume__replication_commit(sub_command, args)
+                elif sub_command in ['replication-failback']:
+                    ret = self.volume__replication_failback(sub_command, args)
                 elif sub_command in ['replication-stop']:
                     ret = self.volume__replication_stop(sub_command, args)
                 elif sub_command in ['replication-status']:
                     ret = self.volume__replication_status(sub_command, args)
+                elif sub_command in ['replication-info']:
+                    ret = self.volume__replication_info(sub_command, args)
                 elif sub_command in ['replication-trigger']:
                     ret = self.volume__replication_trigger(sub_command, args)
                 elif sub_command in ['suspend']:

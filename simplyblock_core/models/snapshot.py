@@ -11,6 +11,13 @@ class SnapShot(BaseModel):
     STATUS_IN_DELETION = 'in_deletion'
     STATUS_IN_REPLICATION = 'in_replication'
 
+    # User-created snapshots are kept indefinitely on the replication target.
+    # Internal snapshots are taken automatically at a fixed interval purely to
+    # drive replication; only the most recent successfully-replicated internal
+    # snapshot is retained on the target (older ones are pruned).
+    TYPE_USER = 'user'
+    TYPE_INTERNAL = 'internal'
+
     base_bdev: str = ""
     blobid: int = 0
     cluster_id: str = ""
@@ -31,6 +38,7 @@ class SnapShot(BaseModel):
     fabric: str = "tcp"
     target_replicated_snap_uuid: str = ""
     source_replicated_snap_uuid: str = ""
+    snap_type: str = "user"
     next_snap_uuid: str = ""
     prev_snap_uuid: str = ""
     instances: list[dict] = []
@@ -66,6 +74,7 @@ class SnapShotMini(BaseModel):
     vuid: int = 0
     created_at: int = 0
     used_size: int = 0
+    snap_type: str = "user"
 
     def from_snapshot(self, snapshot: SnapShot):
         self.uuid = snapshot.uuid
@@ -81,4 +90,5 @@ class SnapShotMini(BaseModel):
         self.vuid = snapshot.vuid
         self.created_at = snapshot.created_at
         self.used_size = snapshot.used_size
+        self.snap_type = snapshot.snap_type
         return self
