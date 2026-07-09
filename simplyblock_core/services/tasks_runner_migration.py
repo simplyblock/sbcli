@@ -19,7 +19,7 @@ def _cluster_unavailable_state(cluster_id):
     for node in db.get_storage_nodes_by_cluster_id(cluster_id):
         if node.status in [StorageNode.STATUS_IN_CREATION, StorageNode.STATUS_REMOVED]:
             continue
-        if node.status != StorageNode.STATUS_ONLINE:
+        if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:
             unavailable.append(f"node:{node.get_id()}")
         for dev in node.nvme_devices:
             if dev.status in [NVMeDevice.STATUS_REMOVED, NVMeDevice.STATUS_FAILED_AND_MIGRATED]:
