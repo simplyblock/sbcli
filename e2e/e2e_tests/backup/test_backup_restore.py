@@ -41,6 +41,7 @@ Test class map
   TestBackupNegative               – TC-BCK-030..040
   TestBackupCryptoLvol             – TC-BCK-050..055
   TestBackupCustomGeometry         – TC-BCK-060..063
+  TestBackupRetentionMergeAfterDelete – TC-BCK-200..205
   TestBackupDeleteAndRestore       – TC-BCK-077..081
   TestBackupConcurrentIO           – TC-BCK-100..103
   TestBackupMultipleRestores       – TC-BCK-104..107
@@ -2345,6 +2346,280 @@ class TestBackupCustomGeometry(BackupTestBase):
             self.logger.info(f"TC-BCK-060: ndcs={ndcs} npcs={npcs} ✓")
 
         self.logger.info("=== TestBackupCustomGeometry PASSED ===")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Test – Retention merge after backup delete (regression)
+#
+#  Validates that restoring from a backup chain that was built AFTER a
+#  previous set of backups was deleted yields the correct data.
+#
+#  Root cause (found in production):
+#    1. Backups B1..B3 are created (contain base filesystem data).
+#    2. All backups are deleted (status → merged/deleted, S3 data lingers).
+#    3. New backups B4..B8 are taken WITHOUT writing new data → they are
+#       empty incremental diffs (0 extent pages) because the blobstore
+#       hasn't changed.
+#    4. Retention policy (versions=3) merges the two oldest of B4..B8,
+#       but since they are empty diffs the merged result is also empty.
+#    5. Restore from B8 walks the chain B8→B7→...→merged-base, misses the
+#       actual data from B1..B3, and produces an empty (corrupt) lvol.
+#
+#  This test MUST run first (before other backup tests) so it operates on a
+#  clean S3 bucket with no leftover backup chains from prior tests.
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestBackupRetentionMergeAfterDelete(BackupTestBase):
+    """
+    TC-BCK-200..206 — retention merge after backup delete (regression).
+
+    Ensures that older deleted backups do not corrupt the chain for new
+    backups.  Specifically, after deleting all backups for an lvol and
+    taking fresh ones, a retention merge followed by restore must still
+    yield the original data.
+
+    Steps:
+      TC-BCK-200  Create lvol, write data, take 2 backups
+      TC-BCK-201  Delete all backups for the lvol
+      TC-BCK-202  Take 5 new backups (no new data written — incremental diffs)
+      TC-BCK-203  Apply retention policy (versions=3), restore latest, verify checksums
+      TC-BCK-204  Delete all, write NEW data, take 5 backups, retention merge, restore — verify new data
+      TC-BCK-205  Delete-backup-delete-backup cycle: two rounds of delete → backup → restore
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.test_name = "backup_retention_merge_after_delete"
+
+    def run(self):
+        self.logger.info("=== TestBackupRetentionMergeAfterDelete START ===")
+        self.fio_node = self.fio_node[0]
+        self._ensure_pool_and_sc()
+
+        # ── TC-BCK-200: create lvol, write data, build 2 initial backups ──
+        self.logger.info("TC-BCK-200: create lvol, write data, build 2-backup chain")
+        lvol_name, lvol_id = self._create_lvol()
+        _, mount = self._connect_and_mount(lvol_name, lvol_id)
+        self._run_fio(mount, runtime=30)
+
+        original_checksums = self._get_checksums(self.fio_node, mount)
+        assert original_checksums, "TC-BCK-200: no checksums captured — FIO may not have written data"
+        self.logger.info(f"TC-BCK-200: {len(original_checksums)} checksum(s) captured")
+
+        initial_bk_ids = []
+        for i in range(2):
+            sn = f"rmd_init_{i}_{_rand_suffix()}"
+            self._create_snapshot(lvol_id, sn, backup=True)
+            bk_id = self._wait_for_backup_by_snap(sn, f"TC-BCK-200[{i}]")
+            initial_bk_ids.append(bk_id)
+            self.logger.info(f"TC-BCK-200[{i}]: backup {bk_id} complete")
+
+        self.logger.info(f"TC-BCK-200: {len(initial_bk_ids)} initial backups built")
+
+        # ── TC-BCK-201: delete all backups for this lvol ──────────────────
+        self.logger.info(f"TC-BCK-201: deleting all backups for {lvol_id}")
+        self._delete_backups(lvol_id)
+        sleep_n_sec(10)
+
+        backups_after = self._list_backups()
+        lvol_backups = [
+            b for b in backups_after
+            if lvol_name in " ".join(str(v) for v in b.values())
+        ]
+        assert len(lvol_backups) == 0, (
+            f"TC-BCK-201: expected 0 backups for {lvol_name} after delete, "
+            f"got {len(lvol_backups)}: {lvol_backups}"
+        )
+        self.logger.info("TC-BCK-201: all backups deleted")
+
+        # ── TC-BCK-202: take 5 new backups WITHOUT writing new data ───────
+        # These will be incremental diffs with 0 extent pages since the
+        # blobstore hasn't changed since the original FIO.
+        self.logger.info("TC-BCK-202: taking 5 new backups (no new data written)")
+        new_bk_ids = []
+        for i in range(5):
+            sn = f"rmd_new_{i}_{_rand_suffix()}"
+            self._create_snapshot(lvol_id, sn, backup=True)
+            bk_id = self._wait_for_backup_by_snap(sn, f"TC-BCK-202[{i}]")
+            new_bk_ids.append(bk_id)
+            self.logger.info(f"TC-BCK-202[{i}]: backup {bk_id} complete")
+            sleep_n_sec(3)
+
+        self.logger.info(f"TC-BCK-202: {len(new_bk_ids)} new backups created after delete")
+
+        # ── TC-BCK-203: apply retention policy, restore latest, verify ────
+        self.logger.info("TC-BCK-203: retention merge — policy versions=3 on 5 backups")
+        policy_name = f"rmd_pol_{_rand_suffix()}"
+        policy_id = self._add_policy(policy_name, versions=3, age="1d")
+        self._attach_policy(policy_id, "lvol", lvol_id)
+
+        # Allow retention merge to process
+        sleep_n_sec(30)
+
+        backups_retained = self._list_backups()
+        retained_for_lvol = [
+            b for b in backups_retained
+            if lvol_name in " ".join(str(v) for v in b.values())
+        ]
+        self.logger.info(
+            f"TC-BCK-203: {len(retained_for_lvol)} backups retained after policy merge"
+        )
+
+        # Find the latest backup that is still active (not merged/deleted)
+        latest_bk_id = None
+        for bk_id in reversed(new_bk_ids):
+            for b in retained_for_lvol:
+                bid = b.get("id") or b.get("ID") or b.get("uuid") or ""
+                status = (b.get("status") or b.get("Status") or "").lower()
+                if bid == bk_id and status not in ("merged", "deleted", "failed", "error"):
+                    latest_bk_id = bk_id
+                    break
+            if latest_bk_id:
+                break
+
+        assert latest_bk_id, (
+            f"TC-BCK-203: no active backup found for restore. "
+            f"Retained backups: {retained_for_lvol}"
+        )
+        self.logger.info(f"TC-BCK-203: restoring from latest active backup {latest_bk_id}")
+
+        # Disconnect source before restoring (XFS UUID safety)
+        self._unmount_and_disconnect(self.fio_node, mount, lvol_id)
+
+        rst_name = f"rmd_rst_{_rand_suffix()}"
+        self._restore_backup(latest_bk_id, rst_name)
+        self._wait_for_restore(rst_name)
+        rst_id = self._get_lvol_id(rst_name)
+        _, rst_mount = self._connect_and_mount(
+            rst_name, rst_id,
+            mount=f"{self.mount_path}/rmd_{_rand_suffix()}",
+            format_disk=False)
+
+        self._verify_checksums(self.fio_node, rst_mount, original_checksums)
+        self.logger.info("TC-BCK-203: restored data checksums match original")
+
+        # Clean up restored lvol
+        self._unmount_and_disconnect(self.fio_node, rst_mount, rst_id)
+
+        # Detach policy before next phase
+        self._detach_policy(policy_id, "lvol", lvol_id)
+
+        # ── TC-BCK-204: delete all, write NEW data, backup, merge, restore ─
+        # After deleting backups the next backup must capture a full base,
+        # not an empty diff referencing the deleted chain.
+        self.logger.info("TC-BCK-204: delete all, write NEW data, backup, retention merge, restore")
+        self._delete_backups(lvol_id)
+        sleep_n_sec(10)
+
+        # Reconnect source lvol and write new data
+        _, mount2 = self._connect_and_mount(lvol_name, lvol_id)
+        self._run_fio(mount2, runtime=30, rw="write")
+        new_checksums = self._get_checksums(self.fio_node, mount2)
+        assert new_checksums, "TC-BCK-204: no checksums after writing new data"
+        self.logger.info(f"TC-BCK-204: {len(new_checksums)} new checksum(s) captured")
+
+        new2_bk_ids = []
+        for i in range(5):
+            sn = f"rmd2_snap_{i}_{_rand_suffix()}"
+            self._create_snapshot(lvol_id, sn, backup=True)
+            bk_id = self._wait_for_backup_by_snap(sn, f"TC-BCK-204[{i}]")
+            new2_bk_ids.append(bk_id)
+            self.logger.info(f"TC-BCK-204[{i}]: backup {bk_id} complete")
+            sleep_n_sec(3)
+
+        pol2_name = f"rmd2_pol_{_rand_suffix()}"
+        pol2_id = self._add_policy(pol2_name, versions=3, age="1d")
+        self._attach_policy(pol2_id, "lvol", lvol_id)
+        sleep_n_sec(30)
+
+        # Find latest active backup
+        backups2 = self._list_backups()
+        retained2 = [
+            b for b in backups2
+            if lvol_name in " ".join(str(v) for v in b.values())
+        ]
+        latest2_bk_id = None
+        for bk_id in reversed(new2_bk_ids):
+            for b in retained2:
+                bid = b.get("id") or b.get("ID") or b.get("uuid") or ""
+                status = (b.get("status") or b.get("Status") or "").lower()
+                if bid == bk_id and status not in ("merged", "deleted", "failed", "error"):
+                    latest2_bk_id = bk_id
+                    break
+            if latest2_bk_id:
+                break
+
+        assert latest2_bk_id, (
+            f"TC-BCK-204: no active backup found. Retained: {retained2}"
+        )
+
+        self._unmount_and_disconnect(self.fio_node, mount2, lvol_id)
+
+        rst2_name = f"rmd2_rst_{_rand_suffix()}"
+        self._restore_backup(latest2_bk_id, rst2_name)
+        self._wait_for_restore(rst2_name)
+        rst2_id = self._get_lvol_id(rst2_name)
+        _, rst2_mount = self._connect_and_mount(
+            rst2_name, rst2_id,
+            mount=f"{self.mount_path}/rmd2_{_rand_suffix()}",
+            format_disk=False)
+
+        self._verify_checksums(self.fio_node, rst2_mount, new_checksums)
+        self.logger.info("TC-BCK-204: restored data matches NEW data (not old)")
+        self._unmount_and_disconnect(self.fio_node, rst2_mount, rst2_id)
+        self._detach_policy(pol2_id, "lvol", lvol_id)
+
+        # ── TC-BCK-205: delete → backup → delete → backup → restore ──────
+        # Two rounds of delete + re-backup.  The second round's restore must
+        # succeed even though there are two layers of deleted chains.
+        self.logger.info("TC-BCK-205: double delete-backup cycle")
+
+        # Round 1: backup
+        self._delete_backups(lvol_id)
+        sleep_n_sec(10)
+
+        _, mount3 = self._connect_and_mount(lvol_name, lvol_id)
+        self._run_fio(mount3, runtime=20, rw="write")
+
+        sn_r1 = f"rmd3_r1_{_rand_suffix()}"
+        self._create_snapshot(lvol_id, sn_r1, backup=True)
+        r1_bk_id = self._wait_for_backup_by_snap(sn_r1, "TC-BCK-205[r1]")
+        self.logger.info(f"TC-BCK-205: round 1 backup {r1_bk_id} complete")
+
+        # Round 2: delete round 1, write different data, backup again
+        self._delete_backups(lvol_id)
+        sleep_n_sec(10)
+
+        self._run_fio(mount3, runtime=20, rw="write")
+        round2_checksums = self._get_checksums(self.fio_node, mount3)
+
+        r2_bk_ids = []
+        for i in range(3):
+            sn_r2 = f"rmd3_r2_{i}_{_rand_suffix()}"
+            self._create_snapshot(lvol_id, sn_r2, backup=True)
+            bk_id = self._wait_for_backup_by_snap(sn_r2, f"TC-BCK-205[r2.{i}]")
+            r2_bk_ids.append(bk_id)
+            self.logger.info(f"TC-BCK-205[r2.{i}]: backup {bk_id} complete")
+            sleep_n_sec(3)
+
+        # Restore from the latest round 2 backup
+        self._unmount_and_disconnect(self.fio_node, mount3, lvol_id)
+
+        rst3_name = f"rmd3_rst_{_rand_suffix()}"
+        self._restore_backup(r2_bk_ids[-1], rst3_name)
+        self._wait_for_restore(rst3_name)
+        rst3_id = self._get_lvol_id(rst3_name)
+        _, rst3_mount = self._connect_and_mount(
+            rst3_name, rst3_id,
+            mount=f"{self.mount_path}/rmd3_{_rand_suffix()}",
+            format_disk=False)
+
+        self._verify_checksums(self.fio_node, rst3_mount, round2_checksums)
+        self.logger.info("TC-BCK-205: double-cycle restore matches round 2 data")
+        self._unmount_and_disconnect(self.fio_node, rst3_mount, rst3_id)
+
+        self.logger.info("=== TestBackupRetentionMergeAfterDelete PASSED ===")
 
 
 # ═══════════════════════════════════════════════════════════════════════════

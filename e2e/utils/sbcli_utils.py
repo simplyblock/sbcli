@@ -1093,11 +1093,16 @@ class SbcliUtils:
         """
         return self.list_snapshots().get(snap_name)
 
-    def delete_snapshot(self, snap_name: str = None, snap_id: str = None, max_attempt: int = 60, skip_error: bool = False):
+    def delete_snapshot(self, snap_name: str = None, snap_id: str = None,
+                        max_attempt: int = 60, skip_error: bool = False,
+                        wait: bool = True):
         """
         Delete snapshot by name or id (API).
         Endpoint: DELETE /snapshot/{snap_id}
-        Also waits until snapshot disappears from list.
+
+        If *wait* is True (default), polls until the snapshot disappears.
+        If *wait* is False, issues the DELETE and returns immediately
+        (fire-and-forget mode for bulk deletion).
         """
         if not snap_id:
             if not snap_name:
@@ -1112,6 +1117,9 @@ class SbcliUtils:
 
         resp = self.delete_request(api_url=f"/snapshot/{snap_id}", treat_404_as_success=True)
         self.logger.info(f"Delete snapshot resp: {resp}")
+
+        if not wait:
+            return
 
         # wait for removal
         attempt = 0
@@ -1134,7 +1142,8 @@ class SbcliUtils:
 
     def delete_all_snapshots(self, max_workers=10):
         """
-        Convenience cleanup via API — parallel deletion.
+        Convenience cleanup via API — fire-and-forget parallel deletion
+        followed by a single bulk-wait loop.
         """
         snaps = self.list_snapshots()
         snap_names = list(snaps.keys())
@@ -1142,16 +1151,85 @@ class SbcliUtils:
             return
         self.logger.info(f"Deleting {len(snap_names)} snapshots (max_workers={max_workers})")
 
-        def _del(name):
+        # Phase A: fire DELETE for every snapshot without waiting
+        def _fire(name):
             try:
-                self.delete_snapshot(snap_name=name, skip_error=True)
+                sid = snaps.get(name)
+                self.delete_snapshot(snap_id=sid, skip_error=True, wait=False)
             except Exception as e:
                 self.logger.info(f"Snapshot delete failed (continuing): {name}, err={e}")
 
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            futs = {pool.submit(_del, n): n for n in snap_names}
+            futs = {pool.submit(_fire, n): n for n in snap_names}
             for f in as_completed(futs):
                 f.result()
+
+        # Phase B: bulk-wait until all snapshots disappear
+        self.wait_snapshots_deleted(snap_names, timeout=1800)
+
+    def wait_snapshots_deleted(
+        self, names: list, timeout: int = 1800, re_delete_interval: int = 120,
+    ):
+        """Wait for snapshots to disappear from the API.
+
+        Polls list_snapshots() every 30s (single call, not per-snapshot)
+        and re-issues DELETE for stuck items periodically.
+        """
+        deadline = time.time() + timeout
+        remaining = set(names)
+        last_re_delete = time.time()
+
+        self.logger.info(
+            f"[snap_wait] Waiting for {len(remaining)} snapshots "
+            f"to be deleted (timeout={timeout}s)"
+        )
+
+        while remaining and time.time() < deadline:
+            try:
+                current = self.list_snapshots()
+            except Exception as exc:
+                self.logger.warning(f"[snap_wait] list_snapshots failed: {exc}")
+                sleep_n_sec(10)
+                continue
+
+            still_present = remaining & set(current.keys())
+            just_deleted = remaining - still_present
+            if just_deleted:
+                self.logger.info(
+                    f"[snap_wait] {len(just_deleted)} more deleted, "
+                    f"{len(still_present)} remaining"
+                )
+            remaining = still_present
+
+            if not remaining:
+                break
+
+            # Re-issue DELETE for stuck items
+            now = time.time()
+            if now - last_re_delete >= re_delete_interval:
+                self.logger.info(
+                    f"[snap_wait] Re-issuing DELETE for "
+                    f"{len(remaining)} stuck snapshots"
+                )
+                for name in list(remaining)[:200]:
+                    sid = current.get(name)
+                    if sid:
+                        try:
+                            self.delete_request(
+                                api_url=f"/snapshot/{sid}",
+                                treat_404_as_success=True,
+                            )
+                        except Exception:
+                            pass
+                last_re_delete = time.time()
+
+            sleep_n_sec(30)
+
+        if remaining:
+            self.logger.warning(
+                f"[snap_wait] Timed out with {len(remaining)} "
+                f"snapshots still present"
+            )
 
     # ── Pool-level host management (DHCHAP) ─────────────────────────────────
 

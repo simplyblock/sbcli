@@ -224,6 +224,7 @@ from e2e_tests.backup.test_backup_restore import (
     TestBackupNegative,
     TestBackupCryptoLvol,
     TestBackupCustomGeometry,
+    TestBackupRetentionMergeAfterDelete,
     TestBackupDeleteAndRestore,
     TestBackupCrossClusterRestore,  # NOT in get_backup_tests(); run explicitly only
     # Extra coverage tests (TC-BCK-100..148)
@@ -323,6 +324,7 @@ ALL_TESTS = [
     RandomRDMAFailoverTest,
     RandomRDMAMultiFailoverTest,
     # Backup E2E tests
+    TestBackupRetentionMergeAfterDelete,
     TestBackupBasicPositive,
     TestBackupRestoreDataIntegrity,
     TestBackupPolicy,
@@ -737,6 +739,8 @@ def get_monitoring_tests():
 
 def get_backup_tests():
     return [
+        # Regression: retention merge after delete must run first (clean S3 bucket)
+        TestBackupRetentionMergeAfterDelete,
         # E2E backup tests
         TestBackupBasicPositive,
         TestBackupRestoreDataIntegrity,
