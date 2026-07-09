@@ -510,12 +510,7 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names:
                     name, still_missing, len(now_attached), len(expected_ips))
 
     device.release_device_connection()
-    # Return the bdev name if it exists; otherwise hint with the canonical
-    # ``<name>n1`` so callers (e.g. _connect_to_remote_jm_devs) can poll for
-    # it via get_bdevs.
-    for bdev in bdev_names:
-        if bdev.startswith(name):
-            return bdev
+
     if rpc_client.get_bdevs(bdev_name):
         return bdev_name
     return None
