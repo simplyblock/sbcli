@@ -27,6 +27,19 @@ from tests.integration.migration.topology_loader import (
 
 logger = logging.getLogger(__name__)
 
+_MIGRATION_DIR = os.path.dirname(__file__)
+
+
+def pytest_collection_modifyitems(items):
+    """Tag every migration test as ``slow`` so the default integration run can
+    deselect them (see ``-m "not slow"`` in tox.ini). Applied here rather than
+    on each of the ~138 test functions so new migration tests inherit it
+    automatically."""
+    for item in items:
+        if str(item.fspath).startswith(_MIGRATION_DIR):
+            item.add_marker(pytest.mark.slow)
+
+
 # ---------------------------------------------------------------------------
 # Cluster bootstrap
 # ---------------------------------------------------------------------------
