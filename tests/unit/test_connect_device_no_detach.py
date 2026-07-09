@@ -40,9 +40,14 @@ def _make_rpc(controller_states):
             return []
         return [{"ctrlrs": [{"state": state}]}]
 
+    def _get_bdevs(name):
+        if name == "remote_jm_xn1":
+            return []
+        return [{"name": "ctrl-bdev"}]
+
     rpc.bdev_nvme_controller_list.side_effect = _list
     rpc.bdev_nvme_attach_controller.return_value = ["ctrl-bdev"]
-    rpc.get_bdevs.return_value = [{"name": "ctrl-bdev"}]
+    rpc.get_bdevs.side_effect = _get_bdevs
     return rpc
 
 
@@ -91,6 +96,7 @@ class TestConnectDeviceNoDetach(unittest.TestCase):
         # failed -> enabled (reset succeeded): controller reused, bdev
         # returned via get_bdevs, still no detach and no re-attach.
         rpc = _make_rpc(["failed", "enabled", "enabled"])
+        rpc.get_bdevs.side_effect = None
         rpc.get_bdevs.return_value = [{"name": "remote_jm_xn1"}]
         bdev = self._connect(rpc)
         rpc.bdev_nvme_detach_controller.assert_not_called()
