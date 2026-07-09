@@ -260,8 +260,7 @@ def _apply_migration_to_db(migration, tgt_lvol_uuid=None, tgt_lvol_bdev=None):
             if src_lvstore == tgt_node.lvstore:
                 tgt_short = src_short  # already updated by a previous call — idempotent
             else:
-                base = src_short[:-len(_MIGRATION_BDEV_SUFFIX)] if src_short.endswith(_MIGRATION_BDEV_SUFFIX) else src_short
-                tgt_short = base + _MIGRATION_BDEV_SUFFIX
+                tgt_short = _snap_tgt_short_name(snap)
             snap.snap_bdev = f"{tgt_node.lvstore}/{tgt_short}"
 
         if tgt_short and tgt_short in spdk_info:
@@ -429,14 +428,10 @@ def _delete_bdev_blocking(bdev_name, primary_rpc, secondary_rpc=None, tertiary_r
     """
     ret, _ = primary_rpc.delete_lvol(bdev_name, del_async=False, special_delete=True)
     if not ret:
-        logger.warning(f"delete bdev {bdev_name}: initiation failed (continuing)")
-        return
+        raise RuntimeError(f"delete bdev {bdev_name}: initiation failed")
 
     deadline = time.monotonic() + timeout_s
-    while True:
-        status = primary_rpc.bdev_lvol_get_lvol_delete_status(bdev_name)
-        if status != 1:
-            break
+    while primary_rpc.bdev_lvol_get_lvol_delete_status(bdev_name) == 1:
         if time.monotonic() > deadline:
             if not primary_rpc.get_bdevs(bdev_name):
                 logger.warning(
@@ -1641,8 +1636,8 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                 try:
                     _swap_namespace(tgt['rpc'], nqn, tgt_ns_bdev,
                                     lvol.uuid, lvol.guid, tgt['node_id'][:8])
-                except Exception as e:
-                    logger.error(f"Namespace swap on {tgt['node_id'][:8]} failed: {e}")
+                except Exception:
+                    raise
 
         # Step 5: all TGT paths → correct ANA state at TGT port.
         # Primary required; secondaries best-effort.
@@ -1764,7 +1759,8 @@ def _delete_intermediate_snaps_on_target(migration, tgt_rpc, tgt_sec_rpc=None, t
                 # Phase 1: initiate coalescing delete on primary (sync=False)
                 ret, _ = tgt_rpc.delete_lvol(tgt_composite, del_async=False, special_delete=False)
                 if not ret:
-                    logger.warning(f"Coalescing delete initiation of {tgt_composite} on primary failed")
+                    raise RuntimeError(
+                        f"Coalescing delete initiation of {tgt_composite} on primary failed")
                 else:
                     # Phase 2: finalize on all nodes (sync=True)
                     for label, rpc in [("primary", tgt_rpc),
@@ -1912,11 +1908,7 @@ def _rename_migrated_bdevs(migration, tgt_node, tgt_rpc, tgt_sec_rpc=None, tgt_t
         if snap.lvol.uuid != migration.lvol_id:
             continue  # ancestor snap — handled below
 
-        try:
-            target = _rename_with_fallback(current_short, current_short)
-        except Exception as exc:
-            logger.warning(f"_rename_migrated_bdevs: snap {current_short} failed: {exc}")
-            continue
+        target = _rename_with_fallback(current_short, current_short)
         if target:
             snap.snap_bdev = f"{lvstore}/{target}"
             snap.write_to_db(db.kv_store)
@@ -2006,11 +1998,7 @@ def _rename_migrated_bdevs(migration, tgt_node, tgt_rpc, tgt_sec_rpc=None, tgt_t
     if not current_lvol_short.endswith(_MIGRATION_BDEV_SUFFIX):
         return
 
-    try:
-        target = _rename_with_fallback(current_lvol_short, current_lvol_short)
-    except Exception as exc:
-        logger.warning(f"_rename_migrated_bdevs: lvol rename failed: {exc}")
-        return
+    target = _rename_with_fallback(current_lvol_short, current_lvol_short)
     if target:
         lvol.lvol_bdev = target
         lvol.top_bdev = f"{lvstore}/{target}"
@@ -2044,9 +2032,12 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
         _tgt_sec_rpc = _get_secondary_rpc(tgt_node)
         _tgt_ter = _get_target_tertiary_node(tgt_node)[0]
         _tgt_ter_rpc = _make_rpc(_tgt_ter) if _tgt_ter else None
-        if migration.intermediate_snaps and not _SKIP_INTERMEDIATE_SNAP_DELETE:
-            _delete_intermediate_snaps_on_target(migration, tgt_rpc, _tgt_sec_rpc, _tgt_ter_rpc)
-        _rename_migrated_bdevs(migration, tgt_node, tgt_rpc, _tgt_sec_rpc, _tgt_ter_rpc)
+        try:
+            if migration.intermediate_snaps and not _SKIP_INTERMEDIATE_SNAP_DELETE:
+                _delete_intermediate_snaps_on_target(migration, tgt_rpc, _tgt_sec_rpc, _tgt_ter_rpc)
+            _rename_migrated_bdevs(migration, tgt_node, tgt_rpc, _tgt_sec_rpc, _tgt_ter_rpc)
+        except Exception as e:
+            return False, False, str(e)
         return True, False, None
 
     ctx = migration.transfer_context or {}
@@ -2201,10 +2192,12 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
     # Delete intermediate (shrink) snapshots from the target — they are migration
     # artifacts and do not need to be preserved. No migration flag so SPDK
     # coalesces and frees their clusters into the child bdev.
-    if migration.intermediate_snaps and not _SKIP_INTERMEDIATE_SNAP_DELETE:
-        _delete_intermediate_snaps_on_target(migration, tgt_rpc, tgt_sec_rpc, tgt_ter_rpc)
-
-    _rename_migrated_bdevs(migration, tgt_node, tgt_rpc, tgt_sec_rpc, tgt_ter_rpc)
+    try:
+        if migration.intermediate_snaps and not _SKIP_INTERMEDIATE_SNAP_DELETE:
+            _delete_intermediate_snaps_on_target(migration, tgt_rpc, tgt_sec_rpc, tgt_ter_rpc)
+        _rename_migrated_bdevs(migration, tgt_node, tgt_rpc, tgt_sec_rpc, tgt_ter_rpc)
+    except Exception as e:
+        return False, False, str(e)
 
     return True, False, None
 
@@ -2242,7 +2235,7 @@ def _handle_cleanup_target(migration, tgt_node, tgt_rpc, src_rpc=None):
         _pre_nqn: Optional[str] = None
         try:
             _lvol = db.get_lvol_by_id(migration.lvol_id)
-            _pre_bdev = f"{tgt_node.lvstore}/{_lvol.lvol_bdev}{_MIGRATION_BDEV_SUFFIX}"
+            _pre_bdev = f"{tgt_node.lvstore}/{_lvol_tgt_bdev_name(_lvol.lvol_bdev)}"
             _pre_nqn  = _lvol.nqn
         except Exception:
             _pre_bdev = None

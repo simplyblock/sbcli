@@ -529,7 +529,7 @@ def get_snaps_to_delete_on_target(migration):
         if lvol.uuid == migration.lvol_id:
             continue
         if lvol.cloned_from_snap:
-            _collect_snap_ancestry(lvol.cloned_from_snap, protected)
+            protected |= _collect_snap_ancestry(lvol.cloned_from_snap)
 
     return [
         uid for uid in migration.snaps_migrated
@@ -537,32 +537,23 @@ def get_snaps_to_delete_on_target(migration):
     ]
 
 
+def _collect_snap_ancestry(snap_uuid) -> set:
+    """Return the set of *snap_uuid* and all its ancestors."""
+    result: set = set()
+    current = snap_uuid
+    while current and current not in result:
+        result.add(current)
+        try:
+            snap = db.get_snapshot_by_id(current)
+            current = snap.snap_ref_id or snap.prev_snap_uuid
+        except KeyError:
+            break
+    return result
+
+
 def _protect_snap_and_ancestors(snap_uuid, candidate_set):
     """Remove *snap_uuid* and all its ancestors from *candidate_set*."""
-    current = snap_uuid
-    visited = set()
-    while current and current not in visited:
-        visited.add(current)
-        candidate_set.discard(current)
-        try:
-            snap = db.get_snapshot_by_id(current)
-            current = snap.snap_ref_id or snap.prev_snap_uuid
-        except KeyError:
-            break
-
-
-def _collect_snap_ancestry(snap_uuid, out_set):
-    """Add *snap_uuid* and all its ancestors to *out_set*."""
-    current = snap_uuid
-    visited = set()
-    while current and current not in visited:
-        visited.add(current)
-        out_set.add(current)
-        try:
-            snap = db.get_snapshot_by_id(current)
-            current = snap.snap_ref_id or snap.prev_snap_uuid
-        except KeyError:
-            break
+    candidate_set -= _collect_snap_ancestry(snap_uuid)
 
 
 # ---------------------------------------------------------------------------
