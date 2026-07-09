@@ -205,9 +205,7 @@ def check_node(snode):
 
                 try:
                     storage_node_ops.connect_device(
-                        f"remote_{org_dev.alceml_bdev}", org_dev, snode,
-                        bdev_names=[], reattach=False,
-                    )
+                        f"remote_{org_dev.alceml_bdev}", org_dev, snode)
                     connected_devices.append(org_dev.get_id())
                 except RuntimeError:
                     logger.error(f"Failed to connect to device: {org_dev.get_id()}")

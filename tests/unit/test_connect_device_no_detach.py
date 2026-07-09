@@ -80,8 +80,7 @@ class TestConnectDeviceNoDetach(unittest.TestCase):
 
     def _connect(self, rpc):
         self.node.rpc_client.return_value = rpc
-        return storage_node_ops.connect_device(
-            "remote_jm_x", self.device, self.node, bdev_names=[], reattach=True)
+        return storage_node_ops.connect_device("remote_jm_x", self.device, self.node)
 
     def test_transient_failed_waits_then_attaches_without_detach(self):
         # failed -> failed -> gone (the module destructed it on its own) ->

@@ -316,8 +316,7 @@ def _collect_attached_ips(ctrlr_list):
     return attached
 
 
-def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names: Optional[List[str]], reattach: bool,
-                   attach_timeout: Optional[float] = None):
+def connect_device(name: str, device: NVMeDevice, node: StorageNode, attach_timeout: Optional[float] = None):
     """Connect snode to device
 
     This only performs the actual operation between both involved SPDK instances,
@@ -353,16 +352,10 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names:
     # O(cluster size): remote alceml/JM controllers to every peer), so hot
     # paths must not dump the whole table to check one name.
     if not is_multipath:
-        if bdev_names:
-            for bdev in bdev_names:
-                if bdev.startswith(name):
-                    logger.debug(f"Already connected, bdev found in bdev_names: {bdev}")
-                    return bdev
-        else:
-            bdev_name = f"{name}n1"
-            if rpc_client.get_bdevs(bdev_name):
-                logger.debug(f"Already connected, bdev found in bdev_get_bdevs: {bdev_name}")
-                return bdev_name
+        bdev_name = f"{name}n1"
+        if rpc_client.get_bdevs(bdev_name):
+            logger.debug(f"Already connected, bdev found in bdev_get_bdevs: {bdev_name}")
+            return bdev_name
 
     if attach_timeout is None or attach_timeout > _ATTACH_CONTROLLER_MAX_TIMEOUT_SEC:
         attach_timeout = _ATTACH_CONTROLLER_MAX_TIMEOUT_SEC
@@ -1270,7 +1263,7 @@ def _connect_to_remote_devs(
             devices_to_connect.append(dev)
             t = threading.Thread(
                 target=connect_device,
-                args=(f"remote_{dev.alceml_bdev}", dev, this_node, None, reattach,))
+                args=(f"remote_{dev.alceml_bdev}", dev, this_node,))
             connect_threads.append(t)
             t.start()
 
@@ -1444,8 +1437,7 @@ def reconnect_dropped_remote_devs(this_node: StorageNode):
                 dev.get_id(), peer.get_id())
             try:
                 remote_bdev = connect_device(
-                    f"remote_{dev.alceml_bdev}", dev, fresh_node,
-                    bdev_names=[], reattach=False)
+                    f"remote_{dev.alceml_bdev}", dev, fresh_node)
             except Exception as e:
                 logger.error(
                     "Failed to reconnect dropped remote device %s on peer %s: %s",
@@ -1583,7 +1575,6 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=None):
         try:
             remote_device.remote_bdev = str(connect_device(
                 f"remote_{org_dev.jm_bdev}", org_dev, this_node,
-                bdev_names=None, reattach=True,
                 attach_timeout=1,
             ))
         except RuntimeError:

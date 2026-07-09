@@ -217,7 +217,7 @@ def _check_ping_from_node(ip, ifname, node):
         return None
 
 
-def _check_node_hublvol(node: StorageNode, node_bdev_names=None, node_lvols_nqns=None) -> bool:
+def _check_node_hublvol(node: StorageNode) -> bool:
     if not node.hublvol:
         logger.error(f"Node {node.get_id()} does not have a hublvol")
         return False
@@ -271,7 +271,7 @@ def _check_node_hublvol(node: StorageNode, node_bdev_names=None, node_lvols_nqns
     return passed
 
 
-def _check_sec_node_hublvol(node: StorageNode, node_bdevssss=None, node_lvols_nqnsddd=None, auto_fix=False, primary_node_id=None) -> bool:
+def _check_sec_node_hublvol(node: StorageNode, auto_fix=False, primary_node_id=None) -> bool:
     db_controller = DBController()
     # If a specific primary is given, use it; otherwise resolve from back-references
     if not primary_node_id:
@@ -513,8 +513,7 @@ def _check_node_lvstore(
                                             StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN, StorageNode.STATUS_UNREACHABLE]:
                                             try:
                                                 remote_bdev = storage_node_ops.connect_device(
-                                                    f"remote_{dev.alceml_bdev}", dev, node,
-                                                    bdev_names=[], reattach=False)
+                                                    f"remote_{dev.alceml_bdev}", dev, node)
                                                 if remote_bdev:
                                                     remote_device = RemoteDevice()
                                                     remote_device.uuid = dev.uuid
