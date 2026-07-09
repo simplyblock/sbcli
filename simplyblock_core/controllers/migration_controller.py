@@ -482,18 +482,29 @@ def get_snaps_safe_to_delete_on_source(migration):
     """
     candidates = set(migration.intermediate_snaps)  # always owned by migrating lvol
 
-    # Only include plan entries that are actually owned by the migrating volume
+    # Build the set of lvol UUIDs still on the source node so we can distinguish
+    # "owner still on SRC" (must protect) from "owner already migrated" (safe to clean up).
+    source_lvols = db.get_lvols_by_node_id(migration.source_node_id)
+    source_lvol_ids = {lv.uuid for lv in source_lvols}
+
     for snap_uuid in migration.snap_migration_plan:
         try:
             snap = db.get_snapshot_by_id(snap_uuid)
             if snap.lvol.uuid == migration.lvol_id:
+                # Owned by the migrating volume itself — always a candidate.
                 candidates.add(snap_uuid)
-            # else: belongs to another volume's chain – leave it on source
+            elif snap.lvol.uuid not in source_lvol_ids:
+                # Ancestor snap owned by a volume that has already migrated away
+                # from SRC (e.g. snap_a1/a2/a3 owned by lvol_a after lvol_a
+                # migrated in a prior round).  Nothing on SRC owns them any more
+                # so they are eligible for cleanup here; Rule 2 below will still
+                # protect them if any remaining source lvol references them.
+                candidates.add(snap_uuid)
+            # else: owned by a volume still on SRC — leave it there.
         except KeyError:
             pass  # already gone
 
     # Rule 2: protect snapshots still referenced by other source lvols
-    source_lvols = db.get_lvols_by_node_id(migration.source_node_id)
     for lvol in source_lvols:
         if lvol.uuid == migration.lvol_id:
             continue

@@ -324,6 +324,47 @@ def _apply_migration_to_db(migration, tgt_lvol_uuid=None, tgt_lvol_bdev=None):
             f"_apply_migration_to_db: updated snapshot {snap_uuid} "
             f"snap_bdev={snap.snap_bdev}")
 
+    # Update DB location for snaps already on TGT from a prior migration.
+    # Their bdev is already canonical (renamed when the prior migration cleaned up),
+    # so only the location fields need updating — no bdev suffix manipulation.
+    for snap_uuid in (migration.snaps_preexisting_on_target or []):
+        try:
+            snap = db.get_snapshot_by_id(snap_uuid)
+        except KeyError:
+            logger.warning(
+                f"_apply_migration_to_db: preexisting snap not found: {snap_uuid}")
+            continue
+        # Only update the primary record for snaps owned by the migrating lvol.
+        # Ancestor snaps owned by a different lvol already had their primary record
+        # updated when that other lvol was migrated; we must not overwrite it here.
+        if snap.lvol.uuid != migration.lvol_id:
+            continue
+        if snap.snap_bdev and '/' in snap.snap_bdev:
+            src_lvstore, src_short = snap.snap_bdev.split('/', 1)
+            if src_lvstore != tgt_node.lvstore:
+                # Strip any leftover migration suffix (defensive)
+                base = (src_short[:-len(_MIGRATION_BDEV_SUFFIX)]
+                        if src_short.endswith(_MIGRATION_BDEV_SUFFIX) else src_short)
+                snap.snap_bdev = f"{tgt_node.lvstore}/{base}"
+        tgt_short = snap.snap_bdev.split('/', 1)[1] if '/' in snap.snap_bdev else None
+        if tgt_short and tgt_short in spdk_info:
+            snap.snap_uuid = spdk_info[tgt_short]['uuid']
+            snap.blobid = spdk_info[tgt_short]['blobid']
+        snap.lvol.node_id = tgt_node.get_id()
+        snap.lvol.hostname = tgt_node.hostname
+        snap.lvol.lvs_name = tgt_node.lvstore
+        if tgt_lvol_bdev:
+            snap.lvol.lvol_bdev = tgt_lvol_bdev
+        snap.lvol.top_bdev = f"{tgt_node.lvstore}/{snap.lvol.lvol_bdev}"
+        snap.lvol.nodes = list(lvol.nodes)
+        snap.lvol.subsys_port = tgt_subsys_port
+        if tgt_lvol_uuid:
+            snap.lvol.lvol_uuid = tgt_lvol_uuid
+        snap.write_to_db(db.kv_store)
+        logger.debug(
+            f"_apply_migration_to_db: updated preexisting snap {snap_uuid} "
+            f"snap_bdev={snap.snap_bdev}")
+
     return True
 
 
