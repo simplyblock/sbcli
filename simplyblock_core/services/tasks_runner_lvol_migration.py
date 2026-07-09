@@ -836,20 +836,28 @@ def _post_process_snap(snap: SnapShot, tgt_node: StorageNode, tgt_rpc: RPCClient
             # created with the migration suffix (_m) and not yet renamed — build
             # the composite from source short name + suffix.
             # For predecessors already on TGT from a PRIOR migration (preexisting),
-            # the bdev has already been renamed to its canonical name; look up the
-            # actual name from the TGT instance rather than computing suffix name.
+            # the bdev carries its canonical name (no suffix).  Two sub-cases:
+            #   a) TGT is the snap's home node → snap.snap_bdev already has the
+            #      correct lvstore prefix and canonical name (e.g. round-trip back).
+            #   b) TGT is a non-home node → canonical name is in snap.instances.
             if pred_uuid in (migration.snaps_preexisting_on_target or []):
                 pred_short = None
-                for _inst in pred_snap.instances:
-                    if _inst.get('lvol', {}).get('node_id') == tgt_node.get_id():
+                _lvstore_prefix = tgt_node.lvstore + '/'
+                # (a) home-node case: snap_bdev already has TGT lvstore
+                _snap_bdev = pred_snap.snap_bdev or ''
+                if _snap_bdev.startswith(_lvstore_prefix):
+                    pred_short = _snap_bdev.split('/', 1)[1]
+                else:
+                    # (b) non-home: look for a TGT instance entry
+                    for _inst in pred_snap.instances:
                         _inst_bdev = _inst.get('snap_bdev', '')
-                        if _inst_bdev.startswith(tgt_node.lvstore + '/'):
+                        if _inst_bdev.startswith(_lvstore_prefix):
                             pred_short = _inst_bdev.split('/', 1)[1]
                             break
                 if not pred_short:
                     pred_short = _snap_tgt_short_name(pred_snap)
                     logger.warning(
-                        f"bdev_lvol_add_clone: no TGT instance found for preexisting "
+                        f"bdev_lvol_add_clone: no TGT bdev found for preexisting "
                         f"predecessor {pred_uuid}; using computed name {pred_short!r}")
             else:
                 pred_short = _snap_tgt_short_name(pred_snap)
