@@ -219,6 +219,7 @@ class K8sNativeNodeMigrationTest(TestClusterBase):
 
     def run(self):
         self.logger.info("Starting Test: K8s Native Node Migration During FIO")
+        self.start_nvme_iostat_monitor()
 
         assert self.migrate_to_worker, (
             "migrate_to_worker is required — provide --migrate_to_worker <k8s-node-name>"

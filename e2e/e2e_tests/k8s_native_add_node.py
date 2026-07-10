@@ -224,6 +224,7 @@ class K8sNativeAddNodeTest(TestClusterBase):
 
     def run(self):
         self.logger.info("Starting Test: K8s Native Add Node During FIO")
+        self.start_nvme_iostat_monitor()
 
         assert len(self.new_worker_nodes) >= 1, (
             "At least 1 new worker node required"

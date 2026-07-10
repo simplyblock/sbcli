@@ -41,7 +41,7 @@ Test class map
   TestBackupNegative               – TC-BCK-030..040
   TestBackupCryptoLvol             – TC-BCK-050..055
   TestBackupCustomGeometry         – TC-BCK-060..063
-  TestBackupRetentionMergeAfterDelete – TC-BCK-200..205
+  TestBackupRetentionMergeAfterDelete – TC-BCK-200..208
   TestBackupDeleteAndRestore       – TC-BCK-077..081
   TestBackupConcurrentIO           – TC-BCK-100..103
   TestBackupMultipleRestores       – TC-BCK-104..107
@@ -2372,7 +2372,7 @@ class TestBackupCustomGeometry(BackupTestBase):
 
 class TestBackupRetentionMergeAfterDelete(BackupTestBase):
     """
-    TC-BCK-200..206 — retention merge after backup delete (regression).
+    TC-BCK-200..208 — retention merge after backup delete (regression).
 
     Ensures that older deleted backups do not corrupt the chain for new
     backups.  Specifically, after deleting all backups for an lvol and
@@ -2386,6 +2386,9 @@ class TestBackupRetentionMergeAfterDelete(BackupTestBase):
       TC-BCK-203  Apply retention policy (versions=3), restore latest, verify checksums
       TC-BCK-204  Delete all, write NEW data, take 5 backups, retention merge, restore — verify new data
       TC-BCK-205  Delete-backup-delete-backup cycle: two rounds of delete → backup → restore
+      TC-BCK-206  Single backup after full delete — no merge, just verify restore works
+      TC-BCK-207  Restore OLDEST retained backup after retention merge (most vulnerable position)
+      TC-BCK-208  Two-lvol isolation: delete lvol1 backups, verify lvol2 restore unaffected
     """
 
     def __init__(self, **kwargs):
@@ -2618,6 +2621,160 @@ class TestBackupRetentionMergeAfterDelete(BackupTestBase):
         self._verify_checksums(self.fio_node, rst3_mount, round2_checksums)
         self.logger.info("TC-BCK-205: double-cycle restore matches round 2 data")
         self._unmount_and_disconnect(self.fio_node, rst3_mount, rst3_id)
+
+        # ── TC-BCK-206: single backup after full delete → restore ─────────
+        # Simplest regression: delete all → take exactly 1 backup → restore.
+        # No retention merge involved.  If this fails, the backup system
+        # cannot produce a standalone base backup after a delete.
+        self.logger.info("TC-BCK-206: single backup after full delete — no merge")
+        self._delete_backups(lvol_id)
+        sleep_n_sec(10)
+
+        _, mount4 = self._connect_and_mount(lvol_name, lvol_id)
+        self._run_fio(mount4, runtime=20, rw="write")
+        single_checksums = self._get_checksums(self.fio_node, mount4)
+        assert single_checksums, "TC-BCK-206: no checksums captured"
+
+        sn_single = f"rmd4_single_{_rand_suffix()}"
+        self._create_snapshot(lvol_id, sn_single, backup=True)
+        single_bk_id = self._wait_for_backup_by_snap(sn_single, "TC-BCK-206")
+        self.logger.info(f"TC-BCK-206: single backup {single_bk_id} complete")
+
+        self._unmount_and_disconnect(self.fio_node, mount4, lvol_id)
+
+        rst4_name = f"rmd4_rst_{_rand_suffix()}"
+        self._restore_backup(single_bk_id, rst4_name)
+        self._wait_for_restore(rst4_name)
+        rst4_id = self._get_lvol_id(rst4_name)
+        _, rst4_mount = self._connect_and_mount(
+            rst4_name, rst4_id,
+            mount=f"{self.mount_path}/rmd4_{_rand_suffix()}",
+            format_disk=False)
+
+        self._verify_checksums(self.fio_node, rst4_mount, single_checksums)
+        self.logger.info("TC-BCK-206: single post-delete backup restore OK")
+        self._unmount_and_disconnect(self.fio_node, rst4_mount, rst4_id)
+
+        # ── TC-BCK-207: restore OLDEST retained backup after merge ────────
+        # After retention merge with versions=3 on 5 backups, restore the
+        # OLDEST retained backup (not the latest).  The oldest position sits
+        # right at the merge boundary and is the most vulnerable to missing
+        # base data.
+        self.logger.info("TC-BCK-207: restore oldest retained backup after merge")
+        self._delete_backups(lvol_id)
+        sleep_n_sec(10)
+
+        _, mount5 = self._connect_and_mount(lvol_name, lvol_id)
+        self._run_fio(mount5, runtime=20, rw="write")
+        oldest_checksums = self._get_checksums(self.fio_node, mount5)
+        assert oldest_checksums, "TC-BCK-207: no checksums captured"
+
+        old_bk_ids = []
+        for i in range(5):
+            sn_old = f"rmd5_snap_{i}_{_rand_suffix()}"
+            self._create_snapshot(lvol_id, sn_old, backup=True)
+            bk_id = self._wait_for_backup_by_snap(sn_old, f"TC-BCK-207[{i}]")
+            old_bk_ids.append(bk_id)
+            self.logger.info(f"TC-BCK-207[{i}]: backup {bk_id} complete")
+            sleep_n_sec(3)
+
+        pol5_name = f"rmd5_pol_{_rand_suffix()}"
+        pol5_id = self._add_policy(pol5_name, versions=3, age="1d")
+        self._attach_policy(pol5_id, "lvol", lvol_id)
+        sleep_n_sec(30)
+
+        # Find the OLDEST active backup
+        backups5 = self._list_backups()
+        retained5 = [
+            b for b in backups5
+            if lvol_name in " ".join(str(v) for v in b.values())
+        ]
+        oldest_bk_id = None
+        for bk_id in old_bk_ids:
+            for b in retained5:
+                bid = b.get("id") or b.get("ID") or b.get("uuid") or ""
+                status = (b.get("status") or b.get("Status") or "").lower()
+                if bid == bk_id and status not in ("merged", "deleted", "failed", "error"):
+                    oldest_bk_id = bk_id
+                    break
+            if oldest_bk_id:
+                break
+
+        assert oldest_bk_id, (
+            f"TC-BCK-207: no active backup found. Retained: {retained5}"
+        )
+        self.logger.info(f"TC-BCK-207: restoring OLDEST retained backup {oldest_bk_id}")
+
+        self._unmount_and_disconnect(self.fio_node, mount5, lvol_id)
+
+        rst5_name = f"rmd5_rst_{_rand_suffix()}"
+        self._restore_backup(oldest_bk_id, rst5_name)
+        self._wait_for_restore(rst5_name)
+        rst5_id = self._get_lvol_id(rst5_name)
+        _, rst5_mount = self._connect_and_mount(
+            rst5_name, rst5_id,
+            mount=f"{self.mount_path}/rmd5_{_rand_suffix()}",
+            format_disk=False)
+
+        self._verify_checksums(self.fio_node, rst5_mount, oldest_checksums)
+        self.logger.info("TC-BCK-207: oldest retained backup restore OK")
+        self._unmount_and_disconnect(self.fio_node, rst5_mount, rst5_id)
+        self._detach_policy(pol5_id, "lvol", lvol_id)
+
+        # ── TC-BCK-208: two-lvol isolation — delete one, verify other ─────
+        # Create two lvols with backups.  Delete lvol1's backups.  Verify
+        # that lvol2's backup chain is unaffected and restores correctly.
+        # (The s3_id counter is shared, so gaps from deleted backups must
+        # not break the surviving lvol's chain.)
+        self.logger.info("TC-BCK-208: two-lvol isolation after backup delete")
+
+        # lvol1 — will be deleted
+        lvol1_name, lvol1_id = self._create_lvol(name=f"rmd_iso1_{_rand_suffix()}")
+        _, mount_iso1 = self._connect_and_mount(lvol1_name, lvol1_id)
+        self._run_fio(mount_iso1, runtime=20)
+
+        for i in range(2):
+            sn_iso1 = f"rmd_iso1_snap_{i}_{_rand_suffix()}"
+            self._create_snapshot(lvol1_id, sn_iso1, backup=True)
+            self._wait_for_backup_by_snap(sn_iso1, f"TC-BCK-208[iso1.{i}]")
+        self.logger.info("TC-BCK-208: lvol1 has 2 backups")
+
+        # lvol2 — must survive
+        lvol2_name, lvol2_id = self._create_lvol(name=f"rmd_iso2_{_rand_suffix()}")
+        _, mount_iso2 = self._connect_and_mount(lvol2_name, lvol2_id)
+        self._run_fio(mount_iso2, runtime=20)
+        iso2_checksums = self._get_checksums(self.fio_node, mount_iso2)
+        assert iso2_checksums, "TC-BCK-208: no checksums for lvol2"
+
+        iso2_bk_ids = []
+        for i in range(3):
+            sn_iso2 = f"rmd_iso2_snap_{i}_{_rand_suffix()}"
+            self._create_snapshot(lvol2_id, sn_iso2, backup=True)
+            bk_id = self._wait_for_backup_by_snap(sn_iso2, f"TC-BCK-208[iso2.{i}]")
+            iso2_bk_ids.append(bk_id)
+        self.logger.info("TC-BCK-208: lvol2 has 3 backups")
+
+        # Delete lvol1's backups (this creates gaps in the s3_id sequence)
+        self._delete_backups(lvol1_id)
+        sleep_n_sec(10)
+        self.logger.info("TC-BCK-208: lvol1 backups deleted")
+
+        # Restore lvol2's latest backup — must be unaffected
+        self._unmount_and_disconnect(self.fio_node, mount_iso1, lvol1_id)
+        self._unmount_and_disconnect(self.fio_node, mount_iso2, lvol2_id)
+
+        rst_iso2_name = f"rmd_iso2_rst_{_rand_suffix()}"
+        self._restore_backup(iso2_bk_ids[-1], rst_iso2_name)
+        self._wait_for_restore(rst_iso2_name)
+        rst_iso2_id = self._get_lvol_id(rst_iso2_name)
+        _, rst_iso2_mount = self._connect_and_mount(
+            rst_iso2_name, rst_iso2_id,
+            mount=f"{self.mount_path}/rmd_iso2_{_rand_suffix()}",
+            format_disk=False)
+
+        self._verify_checksums(self.fio_node, rst_iso2_mount, iso2_checksums)
+        self.logger.info("TC-BCK-208: lvol2 restore unaffected by lvol1 backup delete")
+        self._unmount_and_disconnect(self.fio_node, rst_iso2_mount, rst_iso2_id)
 
         self.logger.info("=== TestBackupRetentionMergeAfterDelete PASSED ===")
 

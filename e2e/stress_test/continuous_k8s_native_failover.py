@@ -3179,6 +3179,7 @@ class K8sNativeFailoverTest(TestClusterBase):
     def run(self):
         self._ensure_k8s_utils()
         self._initialize_outage_log()
+        self.start_nvme_iostat_monitor()
         self.logger.info("=== Starting K8sNativeFailoverTest ===")
 
         # Read cluster config
@@ -3587,6 +3588,7 @@ class K8sNativeBasicFailoverTest(K8sNativeFailoverTest):
         """Simplified run loop: create once, then loop outages only."""
         self._ensure_k8s_utils()
         self._initialize_outage_log()
+        self.start_nvme_iostat_monitor()
         self.logger.info("=== Starting K8sNativeBasicFailoverTest ===")
 
         # Read cluster config
@@ -4659,6 +4661,7 @@ class K8sNativeResilientFailoverTest(K8sNativeFailoverTest):
         post-recovery."""
         self._ensure_k8s_utils()
         self._initialize_outage_log()
+        self.start_nvme_iostat_monitor()
         self.logger.info(
             "=== Starting K8sNativeResilientFailoverTest ==="
         )
@@ -5026,6 +5029,7 @@ class K8sNativeQuickFailoverTest(K8sNativeBasicFailoverTest):
         """Run the basic failover test with a capped iteration count."""
         self._ensure_k8s_utils()
         self._initialize_outage_log()
+        self.start_nvme_iostat_monitor()
         self.logger.info(
             f"=== Starting K8sNativeQuickFailoverTest "
             f"(max {self.max_iterations} iterations) ==="

@@ -262,6 +262,9 @@ from stress_test.continuous_backup_stress import (
     BackupStressPolicyRetention,
     BackupStressRestoreConcurrent,
     BackupStressMarathon,
+    BackupStressLargeScale,
+    BackupStressFilesystemSecurityMix,
+    BackupStressRetentionMergeCycles,
 )
 
 
@@ -786,6 +789,9 @@ def get_backup_stress_tests():
         BackupStressPolicyRetention,
         BackupStressRestoreConcurrent,
         BackupStressMarathon,
+        BackupStressLargeScale,
+        BackupStressFilesystemSecurityMix,
+        BackupStressRetentionMergeCycles,
     ]
 
 
