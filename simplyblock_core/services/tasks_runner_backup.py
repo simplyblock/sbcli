@@ -278,10 +278,8 @@ def _run_restore(task):
                 task.retry += 1
                 task.status = JobSchedule.STATUS_SUSPENDED
             task.write_to_db(db.kv_store)
-        elif state == "No process" and recovery_started:
-            # "No process" may mean the transfer hasn't registered yet or
-            # completed and was cleaned up.  Keep polling — the data plane
-            # returns "Failed" on actual failures.
+        elif state == "No process":
+            task.function_params["recovery_started"] = False
             task.status = JobSchedule.STATUS_SUSPENDED
             task.write_to_db(db.kv_store)
         else:
