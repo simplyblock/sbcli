@@ -393,7 +393,14 @@ class TestAttachControllerTimeoutCap(unittest.TestCase):
         # to force the attach path.
         node_rpc = MagicMock()
         node_rpc.bdev_nvme_controller_list.return_value = None
-        node_rpc.get_bdevs.return_value = [{"name": "remote-fake-n1"}]
+        # Since SFAM-2774 connect_device has no bdev_names snapshot param; it
+        # probes get_bdevs("<name>n1") as the already-connected fast path. That
+        # probe must MISS ("remote-faken1") to force the attach path this test
+        # exercises, while the post-attach verification of the bdev the attach
+        # returned ("remote-fake-n1") must HIT.
+        node_rpc.get_bdevs.side_effect = (
+            lambda name=None, *a, **kw:
+            [] if name == "remote-faken1" else [{"name": "remote-fake-n1"}])
         def _rpc_client(*_args, **kwargs):
             if "timeout" in kwargs:
                 return attach_rpc
