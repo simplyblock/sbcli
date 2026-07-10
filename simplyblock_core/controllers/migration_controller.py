@@ -406,21 +406,21 @@ def get_snapshot_chain(lvol_id, source_node_id=None):
 
 
 def _is_snap_on_node(snap_id, node_id):
-    """Return True if *snap_id* already resides on *node_id*.
+    """Return True if *snap_id* already has a copy on *node_id*.
 
-    Checks two sources:
-    - snap.lvol.node_id: set to the current node by apply_migration_to_db after
-      a local migration — this is the primary signal for re-migrations.
-    - snap.instances: cross-cluster replicated copies (populated for remote snapshots).
+    Checks both the canonical location (``snap.lvol.node_id`` — set when the
+    snapshot's own owning lvol has migrated directly, without going through
+    the ``.instances`` bookkeeping) and the ``.instances`` list (set when a
+    *different* lvol's migration deposited a copy while sharing this
+    snapshot's ancestry, e.g. via ``cloned_from_snap`` or an inherited chain).
     """
     try:
         snap = db.get_snapshot_by_id(snap_id)
     except KeyError:
         return False
-    # Local migration: parent lvol was moved to this node
+    # snap.lvol defaults to None (SnapShot.lvol) — guard before dereferencing.
     if snap.lvol and snap.lvol.node_id == node_id:
         return True
-    # Cross-cluster replica
     return any(
         inst.get('lvol', {}).get('node_id') == node_id
         for inst in (snap.instances or [])

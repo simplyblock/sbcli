@@ -218,6 +218,37 @@ def add_device_to_auto_restart(device):
     return _add_task(JobSchedule.FN_DEV_RESTART, device.cluster_id, device.node_id, device.get_id())
 
 
+def is_suspension_operator_caused(cluster):
+    """True when the cluster's SUSPENDED state is explained by deliberate
+    operator node shutdowns (``auto_restart_disabled`` markers, set by
+    ``sn shutdown``): without those nodes, the remaining not-online nodes
+    alone would still be within the cluster's fault tolerance.
+
+    In that case the automated suspend recovery (drain force-shutdown of the
+    surviving nodes + full parallel restart + reactivation) must NOT run — it
+    would fight an intentional shutdown by killing and restarting the healthy
+    nodes. Recovery is the operator's call: restart the stopped nodes, or run
+    ``cluster restart`` (which clears the markers and re-arms recovery).
+
+    A suspension where the non-deliberate outages already exceed FTT is a
+    genuine failure regardless of any deliberate shutdowns, and auto recovery
+    proceeds."""
+    if cluster.status != Cluster.STATUS_SUSPENDED:
+        return False
+    deliberate_down = 0
+    other_not_online = 0
+    for node in db.get_storage_nodes_by_cluster_id(cluster.get_id()):
+        if node.status in (StorageNode.STATUS_ONLINE, StorageNode.STATUS_REMOVED):
+            continue
+        if node.auto_restart_disabled:
+            deliberate_down += 1
+        else:
+            other_not_online += 1
+    ftt = cluster.max_fault_tolerance if isinstance(cluster.max_fault_tolerance, int) \
+        and cluster.max_fault_tolerance >= 1 else 1
+    return deliberate_down > 0 and other_not_online <= ftt
+
+
 def is_auto_restart_paused(cluster):
     """Auto-restart is paused while a SUSPENDED cluster is still being drained
     to a clean all-offline slate by the suspend-recovery auto-shutdown
@@ -227,9 +258,16 @@ def is_auto_restart_paused(cluster):
     health-checked). So we hold every restart until the drain is complete
     (cluster.suspend_drain_complete), then let the existing auto-restart bring
     the nodes back from offline. Used by both the queue chokepoint
-    (add_node_to_auto_restart) and the restart task runner."""
+    (add_node_to_auto_restart) and the restart task runner.
+
+    Exception: an operator-caused suspension (see
+    ``is_suspension_operator_caused``) never drains, so the drain marker would
+    pause restarts forever. The surviving nodes are still up in that state —
+    restarting a genuinely-failed node one-by-one onto up peers is the normal
+    restart path, not the strand-prone post-drain path — so don't pause."""
     return (cluster.status == Cluster.STATUS_SUSPENDED
-            and not cluster.suspend_drain_complete)
+            and not cluster.suspend_drain_complete
+            and not is_suspension_operator_caused(cluster))
 
 
 def add_node_to_auto_restart(node):
@@ -295,13 +333,36 @@ def add_node_to_auto_restart(node):
                               Cluster.STATUS_READONLY, Cluster.STATUS_UNREADY, Cluster.STATUS_SUSPENDED]:
         logger.warning(f"Cluster is not active, skip node auto restart, status: {cluster.status}")
         return False
-    offline_nodes = 0
-    for sn in db.get_storage_nodes_by_cluster_id(node.cluster_id):
-        if node.get_id() != sn.get_id() and sn.status != StorageNode.STATUS_ONLINE and node.mgmt_ip != sn.mgmt_ip:
-            offline_nodes += 1
-    if offline_nodes > cluster.distr_npcs and cluster.status != Cluster.STATUS_SUSPENDED:
-        logger.info("Node found that is not online, skip node auto restart")
-        return False
+    # Past-fault-tolerance guard: don't auto-restart nodes one-by-one when
+    # more than the cluster can tolerate is already offline — that churn is
+    # what wedged the cluster before (stale ONLINE peers / stuck lvstore
+    # in_creation), and the SUSPENDED-drain path (above) owns that case.
+    #
+    # BUT this raw ``offline_nodes > distr_npcs`` count is failure-domain
+    # blind. On a failure-domain cluster a WHOLE domain going offline (e.g.
+    # a 1+1 cluster losing all 16 nodes of one domain) is the *tolerated*
+    # case: the FD-aware status logic keeps the cluster DEGRADED (never
+    # SUSPENDED), so `offline_nodes(15) > npcs(1)` trips and, because it is
+    # not SUSPENDED, blocks auto-restart for every node in the domain —
+    # permanently, since nothing will ever move it to SUSPENDED. Result:
+    # the whole rebooted domain never restarts (incident 2026-07-08,
+    # 32-node/2-domain/1+1 whole-domain reboot soak).
+    #
+    # For a failure-domain cluster the cluster STATUS already encodes
+    # tolerance (the FD-aware get_next_cluster_status returns DEGRADED when
+    # the loss is within the domain budget, SUSPENDED when it exceeds it).
+    # So when enable_failure_domain is set, trust the status: ACTIVE/DEGRADED
+    # means "tolerated, go ahead and restart"; the SUSPENDED-not-drained case
+    # is already held by is_auto_restart_paused above. Only apply the flat
+    # node-count guard to non-FD clusters.
+    if not cluster.enable_failure_domain:
+        offline_nodes = 0
+        for sn in db.get_storage_nodes_by_cluster_id(node.cluster_id):
+            if node.get_id() != sn.get_id() and sn.status != StorageNode.STATUS_ONLINE and node.mgmt_ip != sn.mgmt_ip:
+                offline_nodes += 1
+        if offline_nodes > cluster.distr_npcs and cluster.status != Cluster.STATUS_SUSPENDED:
+            logger.info("Node found that is not online, skip node auto restart")
+            return False
     return _add_task(JobSchedule.FN_NODE_RESTART, node.cluster_id, node.get_id(), "", max_retry=11)
 
 

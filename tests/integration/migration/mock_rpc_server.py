@@ -13,7 +13,7 @@ Each MockRpcServer instance:
 
 Async-operation simulation
 --------------------------
-`delete_lvol(sync=False)` and `bdev_lvol_transfer` / `bdev_lvol_final_migration`
+`delete_lvol(sync=False)` and `bdev_lvol_transfer` / `bdev_lvol_transfer_final_step`
 are modelled as asynchronous: they record a ``complete_at`` timestamp drawn from an
 exponential distribution centred around 0.2 s (λ = 5), clipped to [0.1, 100] s.
 Subsequent poll calls (`bdev_lvol_get_lvol_delete_status`,
@@ -64,6 +64,10 @@ class NodeState:
         self.subsystems: Dict[str, dict] = {}
         # ctrl_name → {nqn, traddr, trsvcid, trtype}
         self.nvme_controllers: Dict[str, dict] = {}
+        # remote bdev name (e.g. "<ctrl_name>n1") → {name, controller} — mirrors
+        # the local bdev(s) real SPDK creates when bdev_nvme_attach_controller
+        # succeeds, so get_bdevs()-based "already attached" checks work.
+        self.nvme_bdevs: Dict[str, dict] = {}
         # async-delete: composite_name → complete_at float
         self.delete_ops: Dict[str, float] = {}
         # async-transfer: composite_name → {complete_at, state}
@@ -74,6 +78,7 @@ class NodeState:
         self.nvme_options: Dict[str, Any] = {}
 
         self._blobid_counter = 1000
+        self._map_id_counter = 1
         self._nsid_counter: Dict[str, int] = {}  # nqn → next nsid
         self.lock = threading.Lock()
 
@@ -83,6 +88,11 @@ class NodeState:
         bid = self._blobid_counter
         self._blobid_counter += 1
         return bid
+
+    def next_map_id(self) -> int:
+        mid = self._map_id_counter
+        self._map_id_counter += 1
+        return mid
 
     def next_nsid(self, nqn: str) -> int:
         self._nsid_counter.setdefault(nqn, 1)
@@ -99,6 +109,9 @@ class NodeState:
         return composite
 
     def all_bdevs(self) -> Dict[str, dict]:
+        """Lvol-store bdevs only (lvols + snapshots) — excludes NVMe-attached
+        remote bdevs, which have a different shape and are looked up separately
+        (see ``_bdev_get_bdevs``)."""
         return {**self.lvols, **self.snapshots}
 
 
@@ -207,7 +220,7 @@ _METHOD_ERROR_CODES: Dict[str, list] = {
     "bdev_lvol_add_clone":           [-1, -22, -2],
     "bdev_lvol_convert":             [-1, -22],
     "bdev_lvol_get_lvols":           [-1],
-    "bdev_lvol_final_migration":     [-1, -22, -2],
+    "bdev_lvol_transfer_final_step": [-1, -22, -2],
     "bdev_lvol_register":            [-1, -22, -17],
     "bdev_lvol_snapshot_register":   [-1, -22],
     "bdev_get_bdevs":                [-1],
@@ -254,12 +267,14 @@ def _bdev_lvol_create(s: NodeState, p: dict):
     if composite in s.lvols or composite in s.snapshots:
         raise _RpcError(-17, f"bdev {composite} already exists")
     blobid = s.next_blobid()
+    map_id = s.next_map_id()
     obj_uuid = p.get('uuid') or str(_uuid_mod.uuid4())
     s.lvols[composite] = {
         'name': name,
         'composite': composite,
         'uuid': obj_uuid,
         'blobid': blobid,
+        'map_id': map_id,
         'size_mib': size_mib,
         'migration_flag': False,
         'driver_specific': {
@@ -336,6 +351,7 @@ def _bdev_lvol_snapshot(s: NodeState, p: dict):
         raise _RpcError(-17, f"snapshot {composite_snap} already exists")
     src = s.lvols[composite_src]
     blobid = s.next_blobid()
+    map_id = s.next_map_id()
     snap_uuid = str(_uuid_mod.uuid4())
     src_size_mib = src.get('size_mib', 1024)
     s.snapshots[composite_snap] = {
@@ -343,6 +359,7 @@ def _bdev_lvol_snapshot(s: NodeState, p: dict):
         'composite': composite_snap,
         'uuid': snap_uuid,
         'blobid': blobid,
+        'map_id': map_id,
         'size_mib': src_size_mib,
         'driver_specific': {
             'lvol': {
@@ -370,6 +387,7 @@ def _bdev_lvol_clone(s: NodeState, p: dict):
     if composite_clone in s.lvols:
         raise _RpcError(-17, f"clone {composite_clone} already exists")
     blobid = s.next_blobid()
+    map_id = s.next_map_id()
     clone_uuid = str(_uuid_mod.uuid4())
     snap_size_mib = s.snapshots[composite_snap].get('size_mib', 1024)
     s.lvols[composite_clone] = {
@@ -377,6 +395,7 @@ def _bdev_lvol_clone(s: NodeState, p: dict):
         'composite': composite_clone,
         'uuid': clone_uuid,
         'blobid': blobid,
+        'map_id': map_id,
         'size_mib': snap_size_mib,
         'migration_flag': False,
         'driver_specific': {
@@ -437,6 +456,7 @@ def _bdev_lvol_register(s: NodeState, p: dict):
         'composite': composite,
         'uuid': registered_uuid,
         'blobid': blobid,
+        'map_id': s.next_map_id(),
         'migration_flag': False,
         'driver_specific': {'lvol': {'blobid': blobid, 'lvs_name': lvs_name,
                                      'base_snapshot': None, 'clone': False, 'snapshot': False,
@@ -459,6 +479,7 @@ def _bdev_lvol_snapshot_register(s: NodeState, p: dict):
         'composite': composite,
         'uuid': registered_uuid,
         'blobid': blobid,
+        'map_id': s.next_map_id(),
         'driver_specific': {'lvol': {'blobid': blobid, 'lvs_name': s.lvstore,
                                      'base_snapshot': lvol_name, 'clone': False, 'snapshot': True,
                                      'num_allocated_clusters': 1024}}
@@ -470,7 +491,7 @@ def _bdev_lvol_snapshot_register(s: NodeState, p: dict):
 
 def _bdev_get_bdevs(s: NodeState, p: dict):
     name: Optional[str] = p.get('name')
-    all_bdevs = s.all_bdevs()
+    all_bdevs = {**s.all_bdevs(), **s.nvme_bdevs}
     if name:
         composite = name if name in all_bdevs else s.composite(name)
         entry = all_bdevs.get(composite)
@@ -490,6 +511,7 @@ def _bdev_lvol_get_lvols(s: NodeState, p: dict):
             'lvol_name': entry['name'],
             'uuid': entry['uuid'],
             'blobid': entry['blobid'],
+            'map_id': entry.get('map_id'),
         })
     return result
 
@@ -536,8 +558,12 @@ def _bdev_lvol_transfer_stat(s: NodeState, p: dict):
     return {'transfer_state': op['state'], 'offset': 0}
 
 
-def _bdev_lvol_final_migration(s: NodeState, p: dict):
-    """Start async final-migration (source lvol → target blobstore)."""
+def _bdev_lvol_transfer_final_step(s: NodeState, p: dict):
+    """Start async final-migration (source lvol → target blobstore).
+
+    Wire name for ``RPCClient.bdev_lvol_final_migration`` (a deprecated alias
+    for ``bdev_lvol_transfer_final_step``).
+    """
     lvol_name = _req(p, 'lvol_name')
     composite = lvol_name if lvol_name in s.lvols else s.composite(lvol_name)
     if composite not in s.lvols:
@@ -546,7 +572,7 @@ def _bdev_lvol_final_migration(s: NodeState, p: dict):
         'complete_at': time.time() + _async_delay(),
         'state': 'In progress',
     }
-    logger.debug("mock bdev_lvol_final_migration started for %s", composite)
+    logger.debug("mock bdev_lvol_transfer_final_step started for %s", composite)
     return True
 
 
@@ -702,8 +728,12 @@ def _bdev_nvme_set_options(s: NodeState, p: dict):
 
 def _bdev_nvme_attach_controller(s: NodeState, p: dict):
     name = _req(p, 'name')
+    remote_bdev = f"{name}n1"
     if name in s.nvme_controllers:
-        raise _RpcError(-17, f"controller {name} already attached")
+        # Idempotent: real SPDK keeps the existing controller (and its bdev)
+        # when the same name/subnqn is re-attached, rather than erroring.
+        logger.debug("mock attach_controller %s already attached — idempotent", name)
+        return [remote_bdev]
     s.nvme_controllers[name] = {
         'name': name,
         'nqn': _req(p, 'subnqn'),
@@ -711,15 +741,28 @@ def _bdev_nvme_attach_controller(s: NodeState, p: dict):
         'trsvcid': p.get('trsvcid', ''),
         'trtype': p.get('trtype', 'TCP'),
     }
+    # Real SPDK exposes the attached controller's namespaces as local bdevs
+    # (convention: ctrlname + "n1"); mirror that so get_bdevs()-based
+    # "already attached" checks in the migration hub logic can find it.
+    s.nvme_bdevs[remote_bdev] = {'name': remote_bdev, 'composite': remote_bdev, 'controller': name}
     logger.debug("mock attach_controller %s → %s", name, p.get('subnqn'))
-    # Return list of remote bdev names (convention: ctrlname + "n1")
-    return [f"{name}n1"]
+    return [remote_bdev]
 
 
 def _bdev_nvme_detach_controller(s: NodeState, p: dict):
     name = _req(p, 'name')
     s.nvme_controllers.pop(name, None)
+    s.nvme_bdevs.pop(f"{name}n1", None)
     return True
+
+
+def _bdev_nvme_controller_list(s: NodeState, p: dict):
+    """Return controller entries matching ``name`` (or all, if omitted)."""
+    name = p.get('name')
+    if name:
+        entry = s.nvme_controllers.get(name)
+        return [entry] if entry else []
+    return list(s.nvme_controllers.values())
 
 
 # ---- misc / version ----
@@ -749,7 +792,7 @@ _DISPATCH = {
     'ultra21_lvol_set':                      _ultra21_lvol_set,
     'bdev_lvol_transfer':                    _bdev_lvol_transfer,
     'bdev_lvol_transfer_stat':               _bdev_lvol_transfer_stat,
-    'bdev_lvol_final_migration':             _bdev_lvol_final_migration,
+    'bdev_lvol_transfer_final_step':         _bdev_lvol_transfer_final_step,
     'nvmf_create_subsystem':                 _nvmf_create_subsystem,
     'nvmf_delete_subsystem':                 _nvmf_delete_subsystem,
     'nvmf_get_subsystems':                   _nvmf_get_subsystems,
@@ -762,6 +805,7 @@ _DISPATCH = {
     'bdev_nvme_set_options':                 _bdev_nvme_set_options,
     'bdev_nvme_attach_controller':           _bdev_nvme_attach_controller,
     'bdev_nvme_detach_controller':           _bdev_nvme_detach_controller,
+    'bdev_nvme_controller_list':              _bdev_nvme_controller_list,
 }
 
 

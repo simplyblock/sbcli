@@ -4,9 +4,11 @@ import json
 import os
 import socket
 import subprocess
+import threading
 import time
 import uuid
 import typing as t
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import docker
 from kubernetes import client as k8s_client
@@ -732,7 +734,16 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                 sec_node_2.write_to_db()
                 used_nodes_as_tertiary.append(snode.tertiary_node_id)
 
+    # Pass 1: bring up the primary LVS on every online primary node.
+    #
+    # Re-activation (recreate_lvstore, activation_mode=True) only touches the
+    # node being recreated plus RPCs to its peers, and every worker operates on
+    # a distinct node — safe to fan out (bounded pool). A fresh create_lvstore
+    # additionally writes to the node's secondary record, which can be shared
+    # between primaries, so creates stay sequential.
     snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
+    pass1_recreate_ids: t.List[str] = []
+    pass1_create_ids: t.List[str] = []
     for snode in snodes:
         if snode.is_secondary_node:  # pass
             continue
@@ -742,24 +753,12 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
         # (previous create_lvstore calls may have modified this node as a secondary)
         snode = db_controller.get_storage_node_by_id(snode.get_id())
         if snode.lvstore and force_lvstore_create is False:
-            logger.warning(f"Node {snode.get_id()} already has lvstore {snode.lvstore}")
-            try:
-                ret = storage_node_ops.recreate_lvstore(snode, activation_mode=True)
-            except storage_node_ops.LVSRestartRequiredError as e:
-                logger.error(e)
-                set_cluster_status(cl_id, ols_status)
-                raise ValueError(
-                    f"Failed to activate cluster: node {e.node_id} holds "
-                    f"partial state for LVS {e.lvs_name} that examine could "
-                    f"not recover. Restart node {e.node_id} before activating.")
-            except Exception as e:
-                logger.error(e)
-                set_cluster_status(cl_id, ols_status)
-                raise ValueError("Failed to activate cluster")
+            pass1_recreate_ids.append(snode.get_id())
         else:
-            ret = storage_node_ops.create_lvstore(snode, cluster.distr_ndcs, cluster.distr_npcs, cluster.distr_bs,
-                                              cluster.distr_chunk_bs, cluster.page_size_in_blocks, max_size)
-        snode = db_controller.get_storage_node_by_id(snode.get_id())
+            pass1_create_ids.append(snode.get_id())
+
+    def _finish_pass1_node(node_id, ret) -> None:
+        snode = db_controller.get_storage_node_by_id(node_id)
         if ret:
             snode.lvstore_status = "ready"
             snode.write_to_db()
@@ -771,9 +770,45 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
         else:
             snode.lvstore_status = "failed"
             snode.write_to_db()
-            logger.error(f"Failed to restore lvstore on node {snode.get_id()}")
+            logger.error(f"Failed to restore lvstore on node {node_id}")
             set_cluster_status(cl_id, ols_status)
             raise ValueError("Failed to activate cluster")
+
+    def _recreate_primary_lvs(node_id):
+        snode = db_controller.get_storage_node_by_id(node_id)
+        logger.warning(f"Node {node_id} already has lvstore {snode.lvstore}")
+        return storage_node_ops.recreate_lvstore(snode, activation_mode=True)
+
+    if pass1_recreate_ids:
+        pass1_results: t.Dict[str, t.Any] = {}
+        pass1_errors: t.List[ValueError] = []
+        workers = min(constants.CLUSTER_ACTIVATION_MAX_PARALLEL_NODES, len(pass1_recreate_ids))
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="activate-p1") as pool:
+            futures = {pool.submit(_recreate_primary_lvs, nid): nid for nid in pass1_recreate_ids}
+            for future in as_completed(futures):
+                node_id = futures[future]
+                try:
+                    pass1_results[node_id] = future.result()
+                except storage_node_ops.LVSRestartRequiredError as e:
+                    logger.error(e)
+                    pass1_errors.append(ValueError(
+                        f"Failed to activate cluster: node {e.node_id} holds "
+                        f"partial state for LVS {e.lvs_name} that examine could "
+                        f"not recover. Restart node {e.node_id} before activating."))
+                except Exception as e:
+                    logger.error(e)
+                    pass1_errors.append(ValueError("Failed to activate cluster"))
+        if pass1_errors:
+            set_cluster_status(cl_id, ols_status)
+            raise pass1_errors[0]
+        for node_id in pass1_recreate_ids:
+            _finish_pass1_node(node_id, pass1_results.get(node_id))
+
+    for node_id in pass1_create_ids:
+        snode = db_controller.get_storage_node_by_id(node_id)
+        ret = storage_node_ops.create_lvstore(snode, cluster.distr_ndcs, cluster.distr_npcs, cluster.distr_bs,
+                                          cluster.distr_chunk_bs, cluster.page_size_in_blocks, max_size)
+        _finish_pass1_node(node_id, ret)
 
     # Pass 2: Recreate secondary/tertiary LVS on every node that participates
     # as a non-leader for another node's LVS. In a ring topology (FTT=2 with
@@ -781,96 +816,134 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     # is_secondary_node filter only matched dedicated secondary-only nodes,
     # skipping the ring participants entirely.
     snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
+    pass2_ids: t.List[str] = []
     for snode in snodes:
         if snode.status != StorageNode.STATUS_ONLINE:
             continue
+        if db_controller.get_primary_storage_nodes_by_secondary_node_id(snode.get_id()):
+            pass2_ids.append(snode.get_id())
 
-        primary_nodes = db_controller.get_primary_storage_nodes_by_secondary_node_id(snode.get_id())
-        if not primary_nodes:
-            continue
+    # Workers fan out per non-leader node, but work on the SAME primary must
+    # never interleave: with FTT=2 a primary's LVS is recreated on both its
+    # secondary and tertiary, and the leader port-block plus the
+    # lvstore_status writes on that primary are not concurrency-safe.
+    # Pre-created per-primary locks serialize exactly that, nothing more.
+    pass2_primary_locks: t.Dict[str, threading.Lock] = {}
+    for node_id in pass2_ids:
+        for p in db_controller.get_primary_storage_nodes_by_secondary_node_id(node_id):
+            pass2_primary_locks.setdefault(p.get_id(), threading.Lock())
 
-        snode = db_controller.get_storage_node_by_id(snode.get_id())
-        logger.info(f"recreating secondary/tertiary LVS on node {snode.get_id()}")
+    def _recreate_non_leader_lvs(node_id) -> bool:
+        snode = db_controller.get_storage_node_by_id(node_id)
+        primary_nodes = db_controller.get_primary_storage_nodes_by_secondary_node_id(node_id)
+        logger.info(f"recreating secondary/tertiary LVS on node {node_id}")
         ret = True
         for primary_node in primary_nodes:
-            primary_node.lvstore_status = "in_creation"
-            primary_node.write_to_db()
+            with pass2_primary_locks[primary_node.get_id()]:
+                # Re-read under the lock: a peer worker (the other non-leader of
+                # this primary) may have written lvstore_status meanwhile.
+                primary_node = db_controller.get_storage_node_by_id(primary_node.get_id())
+                primary_node.lvstore_status = "in_creation"
+                primary_node.write_to_db()
 
-            # On re-activation the primary's LVS is still alive and serving
-            # client I/O — snode's examine of its non-leader raid0 will race
-            # the leader's blob-metadata writes unless we quiesce the leader
-            # first. We do this with a firewall-only port-block on the leader:
-            # it has no effect on a peer whose service isn't listening (per
-            # design, safe even when peer stacks aren't fully built yet) but
-            # it stops the live leader from issuing writes that race the
-            # examine. We deliberately do NOT switch the helper out of
-            # activation_mode here: that would enable peer leader/distrib/
-            # lvstore/hublvol RPCs which presume the peer's full stack is up.
-            leader_blocked = False
-            leader_port = None
-            if not is_fresh_activation and primary_node.status == StorageNode.STATUS_ONLINE:
-                try:
-                    leader_port = primary_node.get_lvol_subsys_port(primary_node.lvstore)
-                    port_block.set_port(primary_node, leader_port, block=True, timeout=3, retry=1)
-                    tcp_ports_events.port_deny(primary_node, leader_port)
-                    leader_blocked = True
-                    time.sleep(0.5)
-                except Exception as e:
-                    logger.warning(
-                        "Re-activation: port-block on leader %s for %s failed: %s — "
-                        "proceeding without block (secondary examine may race live leader writes)",
-                        primary_node.get_id(), primary_node.lvstore, e)
-
-            try:
-                try:
-                    r = storage_node_ops.recreate_lvstore_on_non_leader(
-                        snode, primary_node, primary_node, activation_mode=True)
-                except storage_node_ops.LVSRestartRequiredError as e:
-                    logger.error(e)
-                    set_cluster_status(cl_id, ols_status)
-                    raise ValueError(
-                        f"Failed to activate cluster: node {e.node_id} holds "
-                        f"partial state for LVS {e.lvs_name} (non-leader). "
-                        f"Restart node {e.node_id} before activating.")
-            finally:
-                if leader_blocked:
+                # On re-activation the primary's LVS is still alive and serving
+                # client I/O — snode's examine of its non-leader raid0 will race
+                # the leader's blob-metadata writes unless we quiesce the leader
+                # first. We do this with a firewall-only port-block on the leader:
+                # it has no effect on a peer whose service isn't listening (per
+                # design, safe even when peer stacks aren't fully built yet) but
+                # it stops the live leader from issuing writes that race the
+                # examine. We deliberately do NOT switch the helper out of
+                # activation_mode here: that would enable peer leader/distrib/
+                # lvstore/hublvol RPCs which presume the peer's full stack is up.
+                leader_blocked = False
+                leader_port = None
+                if not is_fresh_activation and primary_node.status == StorageNode.STATUS_ONLINE:
                     try:
-                        port_block.set_port(primary_node, leader_port, block=False, timeout=3, retry=1)
-                        tcp_ports_events.port_allowed(primary_node, leader_port)
-                    except Exception as ue:
-                        logger.error(
-                            "Failed to unblock leader %s:%s after non-leader recreate: %s — scheduling port_allow",
-                            primary_node.get_id(), leader_port, ue)
+                        leader_port = primary_node.get_lvol_subsys_port(primary_node.lvstore)
+                        port_block.set_port(primary_node, leader_port, block=True, timeout=3, retry=1)
+                        tcp_ports_events.port_deny(primary_node, leader_port)
+                        leader_blocked = True
+                        time.sleep(0.5)
+                    except Exception as e:
+                        logger.warning(
+                            "Re-activation: port-block on leader %s for %s failed: %s — "
+                            "proceeding without block (secondary examine may race live leader writes)",
+                            primary_node.get_id(), primary_node.lvstore, e)
+
+                try:
+                    try:
+                        r = storage_node_ops.recreate_lvstore_on_non_leader(
+                            snode, primary_node, primary_node, activation_mode=True)
+                    except storage_node_ops.LVSRestartRequiredError as e:
+                        logger.error(e)
+                        raise ValueError(
+                            f"Failed to activate cluster: node {e.node_id} holds "
+                            f"partial state for LVS {e.lvs_name} (non-leader). "
+                            f"Restart node {e.node_id} before activating.")
+                finally:
+                    if leader_blocked:
                         try:
-                            tasks_controller.add_port_allow_task(
-                                primary_node.cluster_id, primary_node.get_id(), leader_port)
-                        except Exception as se:
-                            logger.error("Failed to schedule port_allow fallback: %s", se)
+                            port_block.set_port(primary_node, leader_port, block=False, timeout=3, retry=1)
+                            tcp_ports_events.port_allowed(primary_node, leader_port)
+                        except Exception as ue:
+                            logger.error(
+                                "Failed to unblock leader %s:%s after non-leader recreate: %s — scheduling port_allow",
+                                primary_node.get_id(), leader_port, ue)
+                            try:
+                                tasks_controller.add_port_allow_task(
+                                    primary_node.cluster_id, primary_node.get_id(), leader_port)
+                            except Exception as se:
+                                logger.error("Failed to schedule port_allow fallback: %s", se)
             if not r:
                 ret = False
 
-        snode = db_controller.get_storage_node_by_id(snode.get_id())
+        snode = db_controller.get_storage_node_by_id(node_id)
         if ret:
             snode.lvstore_status = "ready"
             snode.write_to_db()
         else:
             snode.lvstore_status = "failed"
             snode.write_to_db()
-            logger.error(f"Failed to restore lvstore on node {snode.get_id()}")
-            set_cluster_status(cl_id, ols_status)
+            logger.error(f"Failed to restore lvstore on node {node_id}")
             raise ValueError("Failed to activate cluster")
+        return True
+
+    if pass2_ids:
+        pass2_errors: t.List[ValueError] = []
+        workers = min(constants.CLUSTER_ACTIVATION_MAX_PARALLEL_NODES, len(pass2_ids))
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="activate-p2") as pool:
+            futures = {pool.submit(_recreate_non_leader_lvs, nid): nid for nid in pass2_ids}
+            for future in as_completed(futures):
+                try:
+                    future.result()
+                except ValueError as e:
+                    pass2_errors.append(e)
+                except Exception as e:
+                    logger.error(e)
+                    pass2_errors.append(ValueError("Failed to activate cluster"))
+        if pass2_errors:
+            set_cluster_status(cl_id, ols_status)
+            raise pass2_errors[0]
 
     # --- Pass 3: Create hublvols and cross-connections ---
     # All lvstores (primary + secondary/tertiary) are now up. Safe to create
     # hublvols and connect peers. This mirrors the logic in create_lvstore()
     # lines 5350-5379 and must tolerate offline nodes (FTT=1 or FTT=2).
     snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
-    for snode in snodes:
-        if snode.is_secondary_node:
-            continue
-        if snode.status != StorageNode.STATUS_ONLINE:
-            continue
-        snode = db_controller.get_storage_node_by_id(snode.get_id())
+    pass3_ids = [n.get_id() for n in snodes
+                 if not n.is_secondary_node and n.status == StorageNode.STATUS_ONLINE]
+
+    # Workers fan out per primary, but a node may serve as secondary/tertiary
+    # for several primaries: hublvol create/connect mutates DB state on both
+    # the primary and its peers, so each worker holds the locks of every node
+    # it touches. Locks are pre-created and acquired in sorted-id order so two
+    # workers sharing a peer cannot deadlock.
+    pass3_node_locks: t.Dict[str, threading.Lock] = {
+        n.get_id(): threading.Lock() for n in snodes}
+
+    def _wire_hublvols(node_id) -> None:
+        snode = db_controller.get_storage_node_by_id(node_id)
 
         secondary_ids = []
         if snode.secondary_node_id:
@@ -879,36 +952,57 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
             secondary_ids.append(snode.tertiary_node_id)
 
         if not secondary_ids:
-            continue
+            return
 
-        # Create hublvol on primary
+        held: t.List[threading.Lock] = []
         try:
-            if not snode.recreate_hublvol():
-                logger.error("Failed to recreate hublvol on %s", snode.get_id())
-        except Exception as e:
-            logger.error("Error creating hublvol on %s: %s", snode.get_id(), e)
+            for nid in sorted({node_id, *secondary_ids}):
+                lock = pass3_node_locks.setdefault(nid, threading.Lock())
+                lock.acquire()
+                held.append(lock)
 
-        # Create secondary hublvol on sec_1 (for tertiary multipath failover)
-        sec1 = db_controller.get_storage_node_by_id(secondary_ids[0])
-        if sec1 and sec1.status == StorageNode.STATUS_ONLINE:
+            # Create hublvol on primary
             try:
-                snode = db_controller.get_storage_node_by_id(snode.get_id())
-                sec1.create_secondary_hublvol(snode, cluster.nqn)
+                if not snode.recreate_hublvol():
+                    logger.error("Failed to recreate hublvol on %s", node_id)
             except Exception as e:
-                logger.error("Error creating secondary hublvol on sec_1 %s: %s", sec1.get_id(), e)
+                logger.error("Error creating hublvol on %s: %s", node_id, e)
 
-        # Connect each secondary/tertiary to primary's hublvol
-        for i, sec_node_id in enumerate(secondary_ids):
-            sec_node = db_controller.get_storage_node_by_id(sec_node_id)
-            if sec_node.status != StorageNode.STATUS_ONLINE:
-                continue
-            try:
-                time.sleep(1)
-                failover_node = sec1 if i >= 1 and sec1 and sec1.status == StorageNode.STATUS_ONLINE else None
-                sec_role = "tertiary" if i >= 1 else "secondary"
-                sec_node.connect_to_hublvol(snode, failover_node=failover_node, role=sec_role)
-            except Exception as e:
-                logger.error("Error connecting %s to hublvol on %s: %s", sec_node.get_id(), snode.get_id(), e)
+            # Create secondary hublvol on sec_1 (for tertiary multipath failover)
+            sec1 = db_controller.get_storage_node_by_id(secondary_ids[0])
+            if sec1 and sec1.status == StorageNode.STATUS_ONLINE:
+                try:
+                    snode = db_controller.get_storage_node_by_id(node_id)
+                    sec1.create_secondary_hublvol(snode, cluster.nqn)
+                except Exception as e:
+                    logger.error("Error creating secondary hublvol on sec_1 %s: %s", sec1.get_id(), e)
+
+            # Connect each secondary/tertiary to primary's hublvol
+            for i, sec_node_id in enumerate(secondary_ids):
+                sec_node = db_controller.get_storage_node_by_id(sec_node_id)
+                if sec_node.status != StorageNode.STATUS_ONLINE:
+                    continue
+                try:
+                    time.sleep(1)
+                    failover_node = sec1 if i >= 1 and sec1 and sec1.status == StorageNode.STATUS_ONLINE else None
+                    sec_role = "tertiary" if i >= 1 else "secondary"
+                    sec_node.connect_to_hublvol(snode, failover_node=failover_node, role=sec_role)
+                except Exception as e:
+                    logger.error("Error connecting %s to hublvol on %s: %s", sec_node.get_id(), node_id, e)
+        finally:
+            for lock in reversed(held):
+                lock.release()
+
+    if pass3_ids:
+        workers = min(constants.CLUSTER_ACTIVATION_MAX_PARALLEL_NODES, len(pass3_ids))
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="activate-p3") as pool:
+            for future in as_completed({pool.submit(_wire_hublvols, nid) for nid in pass3_ids}):
+                try:
+                    future.result()
+                except Exception as e:
+                    # Same tolerance as the sequential loop: hublvol wiring
+                    # errors are logged, not fatal to activation.
+                    logger.error("Pass 3 hublvol wiring worker failed: %s", e)
 
     # reorder qos classes ids
     qos_classes = db_controller.get_qos(cl_id)
@@ -954,23 +1048,19 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     # we set the cluster ACTIVE — so clients never resume IO against a primary
     # whose redirect to its peers isn't established (which is what produced the
     # mid-activation writer-conflict / EIO).
-    for snode in db_controller.get_storage_nodes_by_cluster_id(cl_id):
-        if snode.is_secondary_node:
-            continue
-        if snode.status != StorageNode.STATUS_ONLINE:
-            continue
-        snode = db_controller.get_storage_node_by_id(snode.get_id())
-        node_lvols = [lv for lv in db_controller.get_lvols_by_node_id(snode.get_id())
+    def _set_node_ana(node_id) -> None:
+        snode = db_controller.get_storage_node_by_id(node_id)
+        node_lvols = [lv for lv in db_controller.get_lvols_by_node_id(node_id)
                       if lv.status not in [LVol.STATUS_IN_DELETION, LVol.STATUS_IN_CREATION]]
         if not node_lvols:
-            continue
+            return
         # primary path -> optimized
         for lv in node_lvols:
             try:
                 storage_node_ops._set_lvol_ana_on_node(lv, snode, "optimized")
             except Exception as e:
                 logger.error("Pass 4: set optimized ANA on primary %s for %s failed: %s",
-                             snode.get_id(), lv.nqn, e)
+                             node_id, lv.nqn, e)
         # secondary/tertiary paths -> non_optimized
         for sec_id in [snode.secondary_node_id, snode.tertiary_node_id]:
             if not sec_id:
@@ -984,6 +1074,20 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                 except Exception as e:
                     logger.error("Pass 4: set non_optimized ANA on %s for %s failed: %s",
                                  sec_node.get_id(), lv.nqn, e)
+
+    # ANA flips are RPC-only (no DB writes) so the per-primary workers need no
+    # locks; different primaries touch different subsystems even when they
+    # share a secondary node.
+    pass4_ids = [n.get_id() for n in db_controller.get_storage_nodes_by_cluster_id(cl_id)
+                 if not n.is_secondary_node and n.status == StorageNode.STATUS_ONLINE]
+    if pass4_ids:
+        workers = min(constants.CLUSTER_ACTIVATION_MAX_PARALLEL_NODES, len(pass4_ids))
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="activate-p4") as pool:
+            for future in as_completed({pool.submit(_set_node_ana, nid) for nid in pass4_ids}):
+                try:
+                    future.result()
+                except Exception as e:
+                    logger.error("Pass 4 ANA worker failed: %s", e)
 
     set_cluster_status(cl_id, Cluster.STATUS_ACTIVE)
     logger.info("Cluster activated successfully")
@@ -1912,6 +2016,53 @@ def cluster_grace_shutdown(cl_id) -> None:
         storage_node_ops.suspend_storage_node(node.get_id(), force=True)
         logger.info(f"Shutting down node: {node.get_id()}")
         storage_node_ops.shutdown_storage_node(node.get_id(), force=True)
+
+
+def cluster_restart(cl_id) -> None:
+    """Operator-requested full-cluster restart: force-shutdown every node that
+    is not already offline, restart all nodes, then reactivate.
+
+    Implemented by arming the suspend-recovery machinery instead of
+    duplicating it: clear the deliberate-shutdown markers (so nodes an
+    operator stopped earlier are restarted too, and the operator-caused-
+    suspension suppression in the monitor disarms), reset the drain marker,
+    and flip the cluster to SUSPENDED. The storage-node monitor then drives
+    the full sequence: drain (parallel force-shutdown of every non-offline
+    node), parallel auto-restart of all nodes, and the gated
+    ``cluster_activate`` once every node is back ONLINE.
+
+    Works from any steady state — ACTIVE/DEGRADED/READONLY (planned restart)
+    or SUSPENDED (e.g. recover from a manual-shutdown-caused suspension).
+    Returns immediately; progress is observable via ``cluster show`` /
+    ``cluster get-logs`` (suspended -> in_activation -> active).
+    """
+    cluster = db_controller.get_cluster_by_id(cl_id)
+    if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED,
+                              Cluster.STATUS_READONLY, Cluster.STATUS_SUSPENDED]:
+        raise ValueError(
+            f"Cluster restart requires a steady cluster state "
+            f"(active/degraded/read_only/suspended), current: {cluster.status}")
+
+    # Re-arm auto recovery for operator-stopped nodes: an explicit cluster
+    # restart overrides the per-node "stay down" intent.
+    for node in db_controller.get_storage_nodes_by_cluster_id(cl_id):
+        if node.auto_restart_disabled:
+            logger.info("Clearing deliberate-shutdown marker on node %s", node.get_id())
+            db_controller.atomic_update(
+                node, lambda n: setattr(n, "auto_restart_disabled", False))
+
+    set_cluster_status(cl_id, Cluster.STATUS_SUSPENDED)
+
+    # Reset the drain marker AFTER the status flip: set_cluster_status clears
+    # it only when leaving suspension, and a marker left True (cluster already
+    # SUSPENDED with a completed earlier drain) would make the drain a no-op.
+    cluster = db_controller.get_cluster_by_id(cl_id)
+    db_controller.atomic_update(
+        cluster, lambda c: setattr(c, "suspend_drain_complete", False))
+
+    logger.info(
+        "Cluster %s restart initiated: monitor will drain all nodes, restart "
+        "them in parallel and reactivate the cluster", cl_id)
 
 
 def delete_cluster(cl_id) -> None:

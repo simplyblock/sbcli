@@ -53,6 +53,7 @@ class StorageNodeParams(BaseModel):
     format_4k: bool = Field(False)
     spdk_proxy_image: Optional[str] = None
     spdk_sys_mem: Optional[str] = None
+    failure_domain: Optional[int] = None
 
 
 @api.post('/', name='clusters:storage-nodes:create', status_code=201, responses={201: {"content": None}})
@@ -82,6 +83,7 @@ def add(request: Request, cluster: Cluster, parameters: StorageNodeParams, respo
             "format_4k": parameters.format_4k,
             "spdk_proxy_image": parameters.spdk_proxy_image,
             "spdk_sys_mem": parameters.spdk_sys_mem,
+            "failure_domain": parameters.failure_domain,
         }
     )
     if not task_id_or_false:

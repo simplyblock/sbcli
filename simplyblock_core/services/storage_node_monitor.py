@@ -27,9 +27,27 @@ node_rpc_timeout_threads: dict[str, threading.Thread] = {}
 # and add_node_to_auto_restart refuses to queue restarts while the cluster is
 # not SUSPENDED, so the cluster can never recover on its own (incident
 # 2026-06-25: ~2h11m hang). If the cluster has been IN_ACTIVATION longer than
-# this, revert it to SUSPENDED so the gated activation + auto-restart re-queue
-# paths run again. A healthy activation completes in well under a minute.
+# the budget, revert it to SUSPENDED so the gated activation + auto-restart
+# re-queue paths run again.
+#
+# The budget MUST scale with cluster size: activation runs sequential per-node
+# passes, so a legitimate activation takes minutes-per-node at scale (observed
+# 2026-07-08: 22 min for 32 nodes — a flat 600 s watchdog would have declared
+# it wedged at the 10-minute mark and kicked the cluster back to SUSPENDED,
+# triggering a full drain + restart + re-activation lap, forever). Flat base
+# covers small clusters and mgmt overhead; the per-node term covers the
+# sequential recreate/hublvol/ANA work.
 CLUSTER_ACTIVATION_WATCHDOG_SEC = 600
+CLUSTER_ACTIVATION_WATCHDOG_PER_NODE_SEC = 60
+
+
+def _activation_watchdog_budget_sec(cluster):
+    """Activation watchdog budget scaled by storage-node count."""
+    try:
+        n_nodes = len(db.get_storage_nodes_by_cluster_id(cluster.get_id()))
+    except Exception:
+        n_nodes = 0
+    return CLUSTER_ACTIVATION_WATCHDOG_SEC + CLUSTER_ACTIVATION_WATCHDOG_PER_NODE_SEC * n_nodes
 
 # In-flight suspend-recovery force-shutdowns, keyed by node_id. A force shutdown
 # (kill + ANA failover) can take many seconds; this keeps the monitor tick from
@@ -379,12 +397,12 @@ def _requeue_stuck_auto_restarts(cluster_id):
     try:
         # While a suspended cluster is still draining to all-offline, auto-restart
         # is paused (add_node_to_auto_restart would refuse anyway); skip the scan
-        # so it does not log a misleading "re-queuing" line every tick. Mirrors
-        # tasks_controller.is_auto_restart_paused; inlined here to avoid coupling
-        # the scan to that import.
+        # so it does not log a misleading "re-queuing" line every tick. Uses
+        # tasks_controller.is_auto_restart_paused so the operator-caused-
+        # suspension exception (which never drains but must still allow
+        # per-node restarts of genuinely-failed nodes) stays in one place.
         cluster = db.get_cluster_by_id(cluster_id)
-        if (cluster.status == Cluster.STATUS_SUSPENDED
-                and not cluster.suspend_drain_complete):
+        if tasks_controller.is_auto_restart_paused(cluster):
             return
         for node in db.get_storage_nodes_by_cluster_id(cluster_id):
             if node.status not in (StorageNode.STATUS_OFFLINE,
@@ -473,9 +491,10 @@ def _watchdog_stuck_activation(cluster):
     stays IN_ACTIVATION, every later tick early-returns, and
     ``add_node_to_auto_restart`` refuses to queue restarts while the cluster
     is not SUSPENDED — a deadlock that never clears on its own (incident
-    2026-06-25). After ``CLUSTER_ACTIVATION_WATCHDOG_SEC`` with no completion,
-    flip back to SUSPENDED so the gated activation and the auto-restart
-    re-queue scan run again.
+    2026-06-25). After the node-count-scaled budget (see
+    ``_activation_watchdog_budget_sec``) with no completion, flip back to
+    SUSPENDED so the gated activation and the auto-restart re-queue scan run
+    again.
     """
     since = getattr(cluster, "in_activation_since", "")
     if not since:
@@ -484,12 +503,13 @@ def _watchdog_stuck_activation(cluster):
         elapsed = (datetime.now(timezone.utc) - datetime.fromisoformat(since)).total_seconds()
     except (ValueError, TypeError):
         return
-    if elapsed < CLUSTER_ACTIVATION_WATCHDOG_SEC:
+    budget = _activation_watchdog_budget_sec(cluster)
+    if elapsed < budget:
         return
     logger.error(
-        "Cluster %s stuck in IN_ACTIVATION for %.0fs (> %ds); reverting to SUSPENDED so "
-        "activation re-gates and auto-restart can re-queue",
-        cluster.get_id(), elapsed, CLUSTER_ACTIVATION_WATCHDOG_SEC)
+        "Cluster %s stuck in IN_ACTIVATION for %.0fs (> %ds budget for this node count); "
+        "reverting to SUSPENDED so activation re-gates and auto-restart can re-queue",
+        cluster.get_id(), elapsed, budget)
     cluster_ops.set_cluster_status(cluster.get_id(), Cluster.STATUS_SUSPENDED)
 
 
@@ -629,11 +649,24 @@ def update_cluster_status(cluster_id):
     # Suspend recovery: while the cluster is SUSPENDED, first drain every node
     # to OFFLINE (auto-restart is paused until then), so recovery restarts from
     # a clean slate instead of one-by-one onto stale/half-initialized peers.
+    #
+    # NOT when the suspension is operator-caused (deliberate `sn shutdown`s
+    # pushed the cluster over FTT): auto recovery would force-shutdown and
+    # restart the surviving healthy nodes to "fix" an intentional state.
+    # Recovery is the operator's call — restart the stopped nodes, or run
+    # `cluster restart` (clears the deliberate-shutdown markers, which
+    # re-arms this path).
     if current_cluster_status == Cluster.STATUS_SUSPENDED:
-        try:
-            _drive_suspend_recovery(cluster)
-        except Exception:
-            logger.exception("Suspend-recovery drive failed for cluster %s", cluster_id)
+        if tasks_controller.is_suspension_operator_caused(cluster):
+            logger.info(
+                "Cluster %s suspension is operator-caused (deliberate node "
+                "shutdowns); auto drain/restart suppressed — restart the "
+                "stopped nodes or run `cluster restart`", cluster_id)
+        else:
+            try:
+                _drive_suspend_recovery(cluster)
+            except Exception:
+                logger.exception("Suspend-recovery drive failed for cluster %s", cluster_id)
 
     # One-shot auto-migration to shared (per-chunk) data placement.
     # Armed (shared_placement_migration_pending) by exactly two events:

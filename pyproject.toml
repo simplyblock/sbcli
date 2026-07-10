@@ -13,3 +13,14 @@ follow_untyped_imports = true
 pythonpath = "."
 testpaths = ['simplyblock_core/test', 'tests']
 norecursedirs = ['tests/perf']
+markers = [
+    "slow: long-running integration tests (e.g. live migration); excluded from the default integration run, opt in with -m slow",
+]
+# Safety net against hung tests: a genuinely stuck test fails with a stack dump
+# instead of hanging until an external SIGKILL (which silently masks every other
+# failure in the run). 900s is ~3x the slowest legitimate test (the scalability
+# throughput migration, ~280s) so it never trips on normal — even unlucky — runs.
+# "signal" (SIGALRM, main thread) fails just the offending test and lets the rest
+# of the session continue; "thread" would hard-exit the whole process.
+timeout = 900
+timeout_method = "signal"

@@ -2131,21 +2131,39 @@ def set_hugepages_if_needed(node, hugepages_needed, page_size_kb=2048):
 
         if prev_sb is not None:
             # prev_sb is the adjusted total last written to the kernel, so the
-            # delta from that value captures only manual user changes since the
-            # last deploy (rounding overhead is not mistaken for user additions).
+            # delta from that value captures manual user changes since the last
+            # deploy (rounding overhead is not mistaken for user additions).
             user_delta = current_hugepages - prev_sb
-            current_user = user_baseline + user_delta
-            if user_delta != 0:
-                # User added or removed hugepages since the last deploy — absorb
-                # the delta into the baseline so it persists across every future
-                # restart, not just the next one.
+            if user_delta > 0:
+                # nr_hugepages grew beyond what we last set — the user added
+                # hugepages. Absorb it into the baseline so it persists across
+                # every future restart, not just the next one.
+                current_user = user_baseline + user_delta
                 _save_user_hugepages_baseline(node, current_user)
                 logger.info(f"Node {node}: user hugepage baseline updated {user_baseline} -> {current_user} (delta={user_delta:+d})")
+            else:
+                # user_delta <= 0: nr_hugepages is at or BELOW what we last
+                # wrote. This is almost always a reset (a reboot zeroes the
+                # runtime allocation while the persisted prev_sb survives), NOT
+                # a deliberate user removal. Treating it as a removal drove the
+                # user baseline negative and produced a negative nr_hugepages
+                # write that failed with "Invalid argument", looping forever
+                # (observed 2026-07-07: baseline 0 -> -7168 -> -14336 -> ...).
+                # Keep the established user baseline and simply re-apply.
+                current_user = user_baseline
+                if user_delta < 0:
+                    logger.info(f"Node {node}: nr_hugepages ({current_hugepages}) below last-set ({prev_sb}); "
+                                f"treating as reset, keeping user baseline {user_baseline}")
         else:
             # First deploy: use the captured pre-deploy baseline
             current_user = user_baseline
 
+        # Never write a negative or below-requirement value: the user baseline
+        # is clamped to >= 0, and the final total can never drop below what
+        # simplyblock itself needs.
+        current_user = max(current_user, 0)
         required = adjust_hugepages(current_user + hugepages_needed)
+        required = max(required, hugepages_needed)
         logger.debug(f"Node {node}: setting to {required} (user={current_user} + simplyblock={hugepages_needed})")
 
         if current_hugepages != required:

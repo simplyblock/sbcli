@@ -1007,7 +1007,7 @@ class TestPortAllowMinimalFailback(unittest.TestCase):
         i_own_gate = src.find("_reconnect_own_sec_tert_hublvols(node)")
         i_failback = src.find(
             "failback_ok, failback_msg = _failback_leadership_to_primary(")
-        i_unblock = src.find("port_block.set_port(node, port_number, block=False")
+        i_unblock = src.find("port_block.set_port(node, p, block=False")
         self.assertGreater(i_own_gate, 0, "own-hublvol gate must exist")
         self.assertGreater(i_peer_gate, 0, "peer hublvol gate must exist")
         self.assertGreater(
