@@ -2067,6 +2067,13 @@ def task_runner(task):
         return _suspend_task(
             task, migration, f"cluster not active (status={cluster.status})")
 
+    # Expansion-first ordering: defer while a cluster expansion is open —
+    # even between the expand task's retries, when the cluster status is
+    # momentarily ACTIVE (see tasks_controller.defer_task_for_expansion).
+    if tasks_controller.get_active_cluster_expand_task(task.cluster_id):
+        return _suspend_task(
+            task, migration, "cluster expansion in progress, deferring")
+
     # --- Transition NEW/SUSPENDED → RUNNING ---
     if task.status in (JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED):
         task.status = JobSchedule.STATUS_RUNNING

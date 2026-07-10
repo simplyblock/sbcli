@@ -688,7 +688,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     if ha_type == "ha":
         from simplyblock_core.storage_node_ops import (
             find_leader_with_failover, check_non_leader_for_operation,
-            queue_for_restart_drain, execute_on_leader_with_failover,
+            execute_on_leader_with_failover,
         )
 
         # Build nodes list
@@ -726,11 +726,14 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
             elif action == "proceed":
                 secondary_nodes.append(nl)
             elif action == "queue":
-                queue_for_restart_drain(
-                    nl.get_id(), lvol.lvs_name,
-                    lambda c=nl, idx=len(secondary_nodes): add_lvol_on_node(
-                        lvol, c, is_primary=False, secondary_index=idx),
-                    f"register create lvol {lvol.uuid} on {nl.get_id()[:8]}")
+                # DB-backed deferral (NOT the in-memory drain queue: that is
+                # per-process and dies with it — incident 2026-07-10 lost a
+                # tertiary registration this way). The sync-op runner applies
+                # the registration once the node is serviceable and the lvol
+                # has settled ONLINE on the leader.
+                tasks_controller.add_lvol_sync_op_task(
+                    host_node.cluster_id, nl.get_id(), lvol.get_id(),
+                    "register", secondary_index=_lvol_secondary_index(lvol, nl))
             # "skip" — disconnected or pre_block, skip
 
         # Step 2: Execute on leader (with failover on failure)
@@ -759,30 +762,44 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         # (and then with leader_op_completed=True, which unlocks the
         # kill_and_wait handling the second pass exists for).
         stale_precheck = (time.time() - precheck_started) > 30
-        for sec_idx, sec in enumerate(secondary_nodes):
+        for sec in secondary_nodes:
+            reg_index = _lvol_secondary_index(lvol, sec)
             action = "proceed" if not stale_precheck else check_non_leader_for_operation(
                 sec.get_id(), lvol.lvs_name, operation_type="create",
                 leader_op_completed=True, all_nodes=all_nodes)
             if action == "proceed":
-                lvol_bdev, error = add_lvol_on_node(lvol, sec, is_primary=False, secondary_index=sec_idx)
+                try:
+                    lvol_bdev, error = add_lvol_on_node(
+                        lvol, sec, is_primary=False, secondary_index=reg_index)
+                except Exception as e:
+                    # e.g. PreconditionError from the per-node lvstore lock —
+                    # the node can die while this op WAITS for the lock (the
+                    # holder is stuck RPC-ing the same dead node).
+                    lvol_bdev, error = None, str(e)
                 if error:
-                    logger.error(error)
-                    ret = delete_lvol_from_node(lvol.get_id(), actual_leader.get_id())
-                    if not ret:
-                        logger.error("")
-                    lvol.remove(db_controller.kv_store)
-                    return False, error
+                    # Node-attributable failure between the pre-check and now
+                    # (died mid-registration or while waiting on its per-node
+                    # lock). Do NOT roll the whole create back: the leader op
+                    # succeeded and the remaining replicas (e.g. the tertiary)
+                    # must still be registered. Defer this node's registration
+                    # to the durable sync-op task and CONTINUE — the volume
+                    # converges to full redundancy when the node returns.
+                    logger.error(
+                        "Registration of lvol %s on non-leader %s failed (%s); "
+                        "deferring to sync-op task and continuing with the "
+                        "remaining replicas", lvol.get_id(), sec.get_id()[:8], error)
+                    tasks_controller.add_lvol_sync_op_task(
+                        host_node.cluster_id, sec.get_id(), lvol.get_id(),
+                        "register", secondary_index=reg_index)
             elif action == "kill_and_wait":
                 logger.warning("Non-leader %s needs kill+restart for lvol create", sec.get_id()[:8])
-                queue_for_restart_drain(
-                    sec.get_id(), lvol.lvs_name,
-                    lambda c=sec, si=sec_idx: add_lvol_on_node(lvol, c, is_primary=False, secondary_index=si),
-                    f"register create lvol {lvol.uuid} on {sec.get_id()[:8]} (after kill)")
+                tasks_controller.add_lvol_sync_op_task(
+                    host_node.cluster_id, sec.get_id(), lvol.get_id(),
+                    "register", secondary_index=reg_index)
             elif action == "queue":
-                queue_for_restart_drain(
-                    sec.get_id(), lvol.lvs_name,
-                    lambda c=sec, si=sec_idx: add_lvol_on_node(lvol, c, is_primary=False, secondary_index=si),
-                    f"register create lvol {lvol.uuid} on {sec.get_id()[:8]}")
+                tasks_controller.add_lvol_sync_op_task(
+                    host_node.cluster_id, sec.get_id(), lvol.get_id(),
+                    "register", secondary_index=reg_index)
             # "skip", "reject" at this stage → already handled or skip
 
     lvol.status = LVol.STATUS_ONLINE
@@ -896,6 +913,16 @@ def _fail_after_bdev(lvol, rpc_client, msg):
     except Exception:
         logger.exception("rollback of bdev stack failed for %s", lvol.get_id())
     return False, msg
+
+
+def _lvol_secondary_index(lvol, node):
+    """Position of ``node`` among the lvol's non-leaders (0 = secondary,
+    1 = tertiary) — determines the subsystem cntlid range (1000/2000).
+    Falls back to 0 when the node is not in ``lvol.nodes`` yet."""
+    try:
+        return max(lvol.nodes.index(node.get_id()) - 1, 0)
+    except (ValueError, AttributeError):
+        return 0
 
 
 def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
@@ -1255,7 +1282,7 @@ def delete_lvol_from_node(lvol_id, node_id, clear_data=True, del_async=False, fo
         return True
 
     # Per design: gate sync deletes on non-leader nodes.
-    from simplyblock_core.storage_node_ops import check_non_leader_for_operation, queue_for_restart_drain
+    from simplyblock_core.storage_node_ops import check_non_leader_for_operation
     if not force:
         action = check_non_leader_for_operation(node_id, lvol.lvs_name, operation_type="delete")
         if action == "skip":
@@ -1263,17 +1290,12 @@ def delete_lvol_from_node(lvol_id, node_id, clear_data=True, del_async=False, fo
             lvol.deletion_status = node_id
             lvol.write_to_db(db_controller.kv_store)
             return True
-        elif action == "queue":
-            queue_for_restart_drain(
-                node_id, lvol.lvs_name,
-                lambda: delete_lvol_from_node(lvol_id, node_id, clear_data, del_async),
-                f"sync delete lvol {lvol_id}")
-            return True
-        elif action == "retry":
-            queue_for_restart_drain(
-                node_id, lvol.lvs_name,
-                lambda: delete_lvol_from_node(lvol_id, node_id, clear_data, del_async),
-                f"retry sync delete lvol {lvol_id}")
+        elif action in ("queue", "retry"):
+            # Durable deferral (DB task) — the in-memory drain queue is
+            # per-process and lossy (incident 2026-07-10).
+            tasks_controller.add_lvol_sync_del_task(
+                snode.cluster_id, node_id,
+                f"{lvol.lvs_name}/{lvol.lvol_bdev}", lvol.node_id)
             return True
     # action == "proceed" — execute now
 
@@ -1352,7 +1374,6 @@ def _delete_lvol_from_all_nodes(lvol, snode, force_delete, lock=True) -> None:
         from simplyblock_core.storage_node_ops import (
             check_non_leader_for_operation,
             execute_on_leader_with_failover,
-            queue_for_restart_drain,
         )
 
         host_node = db_controller.get_storage_node_by_id(snode.get_id())
@@ -1439,26 +1460,25 @@ def _delete_lvol_from_all_nodes(lvol, snode, force_delete, lock=True) -> None:
             if action == "skip":
                 continue
             elif action in ("queue", "kill_and_wait"):
-                queue_for_restart_drain(
-                    nl.get_id(), lvol.lvs_name,
-                    lambda c=nl: delete_lvol_from_node(lvol.get_id(), c.get_id()),
-                    f"sync delete lvol {lvol.get_id()} on {nl.get_id()[:8]}")
+                # Durable deferral (DB task) — the in-memory drain queue is
+                # per-process and lossy (incident 2026-07-10).
+                tasks_controller.add_lvol_sync_del_task(
+                    snode.cluster_id, nl.get_id(),
+                    f"{lvol.lvs_name}/{lvol.lvol_bdev}", lvol.node_id)
             elif action == "proceed":
                 try:
                     with snapshot_controller.lvstore_op_lock(
                             snode.cluster_id, lvol.lvs_name, node_id=nl.get_id(), enabled=_inner):
                         _remove_lvol_subsys_from_node(lvol, nl.rpc_client())
                 except Exception as e:
+                    # Includes a per-node lock acquisition timeout: the node
+                    # can die while this op WAITS for the lock. Never abort
+                    # the loop — the remaining non-leaders must still be
+                    # processed; this node's delete is deferred durably.
                     logger.warning(f"Failed sync delete on {nl.get_id()}: {e}")
-                    # Post-leader-op: check if we should kill or queue
-                    post_action = check_non_leader_for_operation(
-                        nl.get_id(), lvol.lvs_name, operation_type="delete",
-                        leader_op_completed=True, all_nodes=all_nodes)
-                    if post_action in ("queue", "kill_and_wait"):
-                        queue_for_restart_drain(
-                            nl.get_id(), lvol.lvs_name,
-                            lambda c=nl: delete_lvol_from_node(lvol.get_id(), c.get_id()),
-                            f"retry sync delete lvol {lvol.get_id()} on {nl.get_id()[:8]}")
+                    tasks_controller.add_lvol_sync_del_task(
+                        snode.cluster_id, nl.get_id(),
+                        f"{lvol.lvs_name}/{lvol.lvol_bdev}", lvol.node_id)
 
 
 def delete_lvol(lvol: LVol, *, force_delete: bool = False, lock: bool = True) -> None:
@@ -2037,7 +2057,7 @@ def _resize_lvol_on_all_nodes(lvol, snode, size_in_mib, lock=True) -> None:
             except KeyError:
                 pass
 
-        from simplyblock_core.storage_node_ops import check_non_leader_for_operation, queue_for_restart_drain
+        from simplyblock_core.storage_node_ops import check_non_leader_for_operation
 
         # Detect current leader via RPC (no status checks)
         all_nodes = [host_node] + all_sec_nodes
@@ -2062,11 +2082,11 @@ def _resize_lvol_on_all_nodes(lvol, snode, size_in_mib, lock=True) -> None:
             elif action == "proceed":
                 secondary_nodes.append(candidate)
             elif action == "queue":
-                queue_for_restart_drain(
-                    candidate.get_id(), lvol.lvs_name,
-                    lambda c=candidate: c.rpc_client().bdev_lvol_resize(
-                            f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib),
-                        f"resize lvol {lvol.uuid} on {candidate.get_id()[:8]}")
+                # Durable deferral (DB task) — the in-memory drain queue is
+                # per-process and lossy (incident 2026-07-10). The task
+                # converges the node to the lvol's CURRENT DB size.
+                tasks_controller.add_lvol_sync_op_task(
+                    snode.cluster_id, candidate.get_id(), lvol.get_id(), "resize")
             # "skip" — disconnected or pre_block, skip
 
         if primary_node:
@@ -2080,12 +2100,28 @@ def _resize_lvol_on_all_nodes(lvol, snode, size_in_mib, lock=True) -> None:
 
         for sec in secondary_nodes:
             logger.info(f"Resizing LVol: {lvol.get_id()} on node: {sec.get_id()}")
-            sec_rpc_client = sec.rpc_client()
-            with snapshot_controller.lvstore_op_lock(snode.cluster_id, lvol.lvs_name,
-                                                     node_id=sec.get_id(), enabled=lock):
-                ret = sec_rpc_client.bdev_lvol_resize(f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib)
+            try:
+                sec_rpc_client = sec.rpc_client()
+                with snapshot_controller.lvstore_op_lock(snode.cluster_id, lvol.lvs_name,
+                                                         node_id=sec.get_id(), enabled=lock):
+                    ret = sec_rpc_client.bdev_lvol_resize(f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib)
+            except Exception as e:
+                # Includes a per-node lock acquisition timeout: the node can
+                # die while this op WAITS for the lock (the lock holder is
+                # typically stuck RPC-ing the same dead node).
+                ret = False
+                logger.warning(f"Resize on non-leader {sec.get_id()} raised: {e}")
             if not ret:
-                raise RuntimeError(f"Error resizing lvol on node: {sec.get_id()}")
+                # The leader already resized — aborting here would leave the
+                # replicas diverged AND skip the remaining non-leaders (the
+                # tertiary must still be resized). Defer this node durably
+                # and continue; resize_lvol persists the new size after this
+                # returns, so the task converges to the right target.
+                logger.error(
+                    f"Error resizing lvol on non-leader {sec.get_id()}; "
+                    f"deferring to sync-op task and continuing")
+                tasks_controller.add_lvol_sync_op_task(
+                    snode.cluster_id, sec.get_id(), lvol.get_id(), "resize")
 
 
 def resize_lvol(id, new_size, lock=True) -> None:

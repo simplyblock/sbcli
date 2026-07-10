@@ -33,6 +33,12 @@ from simplyblock_core.controllers.cluster_expansion.planner import (
     RoleMove,
     compute_role_diff,
     is_expand_in_progress,
+    pending_moves,
+)
+from simplyblock_core.controllers.cluster_expansion.preconditions import (
+    affected_primary_node_ids,
+    check_expansion_preconditions,
+    impacted_donor_node_ids,
 )
 from simplyblock_core.models.storage_node import StorageNode
 
@@ -188,6 +194,32 @@ class SpdkMoveExecutor(MoveExecutor):
                 f"re-home {move.role} for LVS@{primary.get_id()}: recipient "
                 f"{recipient.get_id()} status is {recipient.status!r}, expected ONLINE")
 
+        # Lock (d): gate create/delete/resize registrations targeting this
+        # LVS on the donor for the duration of the move. Reuses the restart
+        # phase machinery: check_non_leader_for_operation returns "delay"
+        # for any non-empty phase and the ops are queued. The clear path
+        # walks BLOCKED -> POST_UNBLOCK -> "" because those are the two
+        # transitions that drain the queue (a direct clear would strand
+        # queued ops).
+        storage_node_ops._set_restart_phase(
+            donor, primary.lvstore, StorageNode.RESTART_PHASE_BLOCKED, db)
+
+        try:
+            self._rehome_sec_moves(move, slot, primary_ptr_attr,
+                                   donor, recipient, primary, db)
+        finally:
+            donor = db.get_storage_node_by_id(move.from_node_id)
+            storage_node_ops._set_restart_phase(
+                donor, primary.lvstore,
+                StorageNode.RESTART_PHASE_POST_UNBLOCK, db)
+            donor = db.get_storage_node_by_id(move.from_node_id)
+            storage_node_ops._set_restart_phase(donor, primary.lvstore, "", db)
+
+    def _rehome_sec_moves(self, move: RoleMove, slot: str,
+                          primary_ptr_attr: str,
+                          donor, recipient, primary, db) -> None:
+        from simplyblock_core import storage_node_ops
+
         # 1. Update DB so recreate_lvstore_on_sec(recipient) will pick this
         #    primary up in its iteration. Set the recipient back-ref before
         #    flipping the primary's pointer so a crash between the two
@@ -251,6 +283,37 @@ class SpdkMoveExecutor(MoveExecutor):
                         f"(will be re-established when the sibling restarts)")
 
 
+def _disconnect_donor_outbound_hublvols(moves, db_controller):
+    """Lock (e): detach each donor's outbound hublvol controller for the
+    LVS whose sec/tert role it is about to lose, before any move executes.
+
+    The donor's redirect path to the leader must be gone before its stack
+    is re-wired; doing it up-front for BOTH re-homed LVS (secondary donor
+    and tertiary donor) means no half-expanded state where one donor still
+    redirects through a topology the plan is changing.
+    ``teardown_non_leader_lvstore`` detaches again per-move — that second
+    detach is a no-op ("already detached").
+    """
+    for move in moves:
+        if move.is_create or not move.from_node_id:
+            continue
+        donor = db_controller.get_storage_node_by_id(move.from_node_id)
+        primary = db_controller.get_storage_node_by_id(move.lvs_primary_node_id)
+        if not (primary.hublvol and primary.hublvol.bdev_name):
+            continue
+        try:
+            donor.rpc_client().bdev_nvme_detach_controller(
+                primary.hublvol.bdev_name)
+            logger.info(
+                f"expansion pre-lock: detached outbound hublvol "
+                f"{primary.hublvol.bdev_name} on donor {donor.get_id()} "
+                f"(LVS@{primary.get_id()}, role={move.role})")
+        except Exception as e:
+            logger.debug(
+                f"expansion pre-lock: hublvol detach on donor "
+                f"{donor.get_id()} raised {e} (likely already detached)")
+
+
 def integrate_new_node_into_cluster(cluster, new_snode, executor=None,
                                     db_controller=None,
                                     manage_cluster_status=False):
@@ -299,6 +362,46 @@ def integrate_new_node_into_cluster(cluster, new_snode, executor=None,
         executor = SpdkMoveExecutor(cluster=cluster,
                                     db_controller=db_controller)
 
+    # Plan (or recover the persisted plan) FIRST — the preconditions need
+    # the impacted donor nodes and affected primaries, which only the move
+    # list can name. Planning is pure (no side effects).
+    resume = is_expand_in_progress(cluster.expand_state or {})
+    if resume:
+        moves_for_checks = pending_moves(cluster.expand_state)
+        planned_moves = None  # orchestrator refuses planned_moves on resume
+    else:
+        # Build the rotation from existing primaries (excluding the
+        # newcomer itself, which has just joined and has no lvstore yet).
+        snodes = db_controller.get_storage_nodes_by_cluster_id(
+            cluster.get_id())
+        existing = [n.get_id() for n in snodes
+                    if n.lvstore
+                    and n.status == StorageNode.STATUS_ONLINE
+                    and n.get_id() != new_snode.get_id()]
+
+        planned_moves = compute_role_diff(
+            existing, new_snode.get_id(), cluster.max_fault_tolerance)
+        moves_for_checks = planned_moves
+
+        logger.info(
+            f"integrate_new_node_into_cluster: planned {len(planned_moves)} "
+            f"moves to integrate {new_snode.get_id()} into rotation of "
+            f"{len(existing)} existing primaries (FTT="
+            f"{cluster.max_fault_tolerance})")
+
+    # Full precondition sweep against the planned moves: cluster ACTIVE,
+    # all nodes ONLINE, no open migration / restart / backup task anywhere,
+    # no delete in flight on the impacted donors. Raising here suspends the
+    # cluster-expand task, which retries once the cluster is quiescent.
+    ok, reason = check_expansion_preconditions(
+        cluster, db_controller,
+        impacted_node_ids=impacted_donor_node_ids(moves_for_checks),
+        affected_primary_ids=affected_primary_node_ids(moves_for_checks),
+        resume=resume)
+    if not ok:
+        raise RuntimeError(
+            f"expansion preconditions not met: {reason}")
+
     old_status = cluster.status
     if manage_cluster_status:
         from simplyblock_core import cluster_ops
@@ -307,36 +410,22 @@ def integrate_new_node_into_cluster(cluster, new_snode, executor=None,
             cluster.get_id(), Cluster.STATUS_IN_EXPANSION)
 
     try:
-        # Resume takes priority. The orchestrator's own contract refuses
-        # planned_moves on resume, so we don't pass them here.
-        if is_expand_in_progress(cluster.expand_state or {}):
+        # Lock (e): with IN_EXPANSION now blocking new migrations, lvol
+        # migrations and shutdowns, drop the donors' outbound hublvol
+        # connections for the LVS being re-homed — before any move runs.
+        # Idempotent, so safe on resume as well.
+        _disconnect_donor_outbound_hublvols(moves_for_checks, db_controller)
+
+        if resume:
             logger.info(
                 f"integrate_new_node_into_cluster: resuming in-progress plan "
                 f"(new_snode={new_snode.get_id()} ignored until current "
                 f"plan completes)")
             execute_expand_plan(cluster, executor)
         else:
-            # Build the rotation from existing primaries (excluding the
-            # newcomer itself, which has just joined and has no lvstore yet).
-            snodes = db_controller.get_storage_nodes_by_cluster_id(
-                cluster.get_id())
-            existing = [n.get_id() for n in snodes
-                        if n.lvstore
-                        and n.status == StorageNode.STATUS_ONLINE
-                        and n.get_id() != new_snode.get_id()]
-
-            moves = compute_role_diff(
-                existing, new_snode.get_id(), cluster.max_fault_tolerance)
-
-            logger.info(
-                f"integrate_new_node_into_cluster: planned {len(moves)} "
-                f"moves to integrate {new_snode.get_id()} into rotation of "
-                f"{len(existing)} existing primaries (FTT="
-                f"{cluster.max_fault_tolerance})")
-
             execute_expand_plan(
                 cluster, executor,
-                planned_moves=moves, new_node_id=new_snode.get_id())
+                planned_moves=planned_moves, new_node_id=new_snode.get_id())
     except Exception:
         if manage_cluster_status:
             from simplyblock_core import cluster_ops

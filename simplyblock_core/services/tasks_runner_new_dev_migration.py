@@ -43,6 +43,26 @@ def task_runner(task):
         task.write_to_db(db.kv_store)
         return False
 
+    # Expansion-first ordering: defer while a cluster expansion is open
+    # (see tasks_controller.defer_task_for_expansion).
+    if tasks_controller.defer_task_for_expansion(task):
+        return False
+
+    # Recovery-before-expansion priority: the expansion migration (this
+    # task family, queued when the role rebalance completes) must not run
+    # while any outage-recovery data migration is open — an unexpected
+    # node outage during the expansion queues those, and the required
+    # order is: expansion completes -> outage device migration drains ->
+    # expansion migration runs. Deferral, not failure: no retry consumed.
+    for t in db.get_job_tasks(task.cluster_id):
+        if t.function_name in (JobSchedule.FN_DEV_MIG, JobSchedule.FN_FAILED_DEV_MIG) \
+                and t.status != JobSchedule.STATUS_DONE and t.canceled is False:
+            task.function_result = (
+                f"deferring: recovery migration {t.uuid} ({t.function_name}) is open")
+            task.status = JobSchedule.STATUS_SUSPENDED
+            task.write_to_db(db.kv_store)
+            return False
+
     if task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED]:
         for node in db.get_storage_nodes_by_cluster_id(task.cluster_id):
             if node.is_secondary_node:  # pass
