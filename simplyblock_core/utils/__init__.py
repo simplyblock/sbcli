@@ -2492,6 +2492,58 @@ def load_kube_config_with_fallback():
         config.load_kube_config()
 
 
+def set_storage_mcp_max_unavailable(cluster_id: str, max_unavailable: int) -> bool:
+    """Set spec.maxUnavailable on the cluster's storage MachineConfigPool.
+
+    This controls how many storage nodes MCO reboots at once for a
+    MachineConfig / KubeletConfig rollout (the CPU-topology apply). It is
+    flipped between two phases:
+
+      * During initial node-add (cluster not yet active, nodes carry no data):
+        a WIDE value (= the parallel-add count) so the first-time topology
+        reboots happen in one wave instead of a serialized, one-at-a-time
+        queue — a node added early is otherwise stuck behind every other
+        node's reboot before its own.
+      * After cluster activation (nodes now serve IO): NARROWED to the
+        cluster's fault tolerance, so any later rollout never reboots more
+        storage nodes at once than the data plane can absorb.
+
+    OpenShift-only: MachineConfigPool is an OCP CRD, so this is a no-op on k3s
+    or when CPU topology was never applied (pool absent). Never raises — this
+    is rollout pacing, not business logic, and must not crash activation or
+    node-add. Returns True on success, False otherwise.
+    """
+    # maxUnavailable=0 wedges the pool (MCO can never take a node), so floor
+    # at 1. The MCP name mirrors the CPU-topology job template
+    # (storage-<first-6-of-cluster-id>).
+    value = max(int(max_unavailable), 1)
+    mcp_name = f"storage-{first_six_chars(cluster_id)}"
+    try:
+        load_kube_config_with_fallback()
+        api = client.CustomObjectsApi()
+        api.patch_cluster_custom_object(
+            group="machineconfiguration.openshift.io",
+            version="v1",
+            plural="machineconfigpools",
+            name=mcp_name,
+            body={"spec": {"maxUnavailable": value}},
+        )
+        logger.info(f"Set MachineConfigPool {mcp_name} maxUnavailable={value}")
+        return True
+    except ApiException as e:
+        if e.status == 404:
+            logger.info(f"MachineConfigPool {mcp_name} not found "
+                        f"(non-OpenShift or CPU topology not applied); "
+                        f"skipping maxUnavailable update")
+        else:
+            logger.warning(f"Failed to set maxUnavailable on MCP {mcp_name}: "
+                           f"{e.reason} {e.body}")
+        return False
+    except Exception as e:
+        logger.warning(f"Failed to set maxUnavailable on MCP {mcp_name}: {e}")
+        return False
+
+
 def patch_cr_status(
         *,
         group: str,
