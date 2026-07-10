@@ -183,13 +183,13 @@ def create_s3_bdev(node, backup_config) -> None:
 
     bdb_lcpu_mask, s3_lcpu_mask = _compute_s3_cpu_masks(node)
 
-    cpu_mask = node.app_thread_mask if node.app_thread_mask else "0x1"
-    try:
-        rpc_client.bdev_lvol_create_poller_group(cpu_mask)
-        logger.info(f"S3 poller group created with mask {cpu_mask} on node {node.get_id()}")
-    except RPCException as e:
-        # May fail if already created — not fatal
-        logger.warning(f"Poller group creation returned error (may already exist): {e}")
+    # NO bdev_lvol_create_poller_group here: the lvstore-create poller group
+    # is created exactly ONCE per SPDK process lifetime — right after
+    # framework init in the add-node / restart-node flows, on the JC
+    # singleton's thread/core. This function used to re-call it with
+    # app_thread_mask (fix f0fed785, which predates the bring-up call from
+    # #938): a second creation with a different mask that either failed
+    # noisily on every activate or put the pollers on the wrong core.
 
     try:
         rpc_client.bdev_s3_create(

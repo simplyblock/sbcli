@@ -6,7 +6,7 @@ from datetime import datetime
 from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.controllers import (
-    health_controller, snapshot_events, snapshot_controller, tasks_controller)
+    snapshot_events, snapshot_controller, tasks_controller)
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
@@ -350,51 +350,11 @@ def main():
 
             all_snaps = db.get_snapshots(cluster.get_id())
             for snode in db.get_storage_nodes_by_cluster_id(cluster.get_id()):
-                node_bdev_names = []
-                sec_node_bdev_names = {}
-                sec_node = None
-
-                if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
-                    rpc_client = snode.rpc_client()
-                    try:
-                        node_bdevs = rpc_client.get_bdevs()
-                    except Exception as e:
-                        logger.error(e)
-                        continue
-                    if node_bdevs:
-                        node_bdev_names = [b['name'] for b in node_bdevs]
-                        for bdev in node_bdevs:
-                            if "aliases" in bdev and bdev["aliases"]:
-                                node_bdev_names.extend(bdev['aliases'])
-
-                for peer_id in [snode.secondary_node_id, snode.tertiary_node_id]:
-                    if not peer_id:
-                        continue
-                    try:
-                        sec_node = db.get_storage_node_by_id(peer_id)
-                    except KeyError:
-                        continue
-                    if sec_node and sec_node.status in [
-                        StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
-                        sec_rpc_client = sec_node.rpc_client()
-                        try:
-                            ret = sec_rpc_client.get_bdevs()
-                        except Exception as e:
-                            logger.error(e)
-                            continue
-                        if ret:
-                            for bdev in ret:
-                                sec_node_bdev_names[bdev['name']] = bdev
 
                 for snap in all_snaps:
                     if snap.lvol.node_id != snode.get_id():
                         continue
-                    if snap.status == SnapShot.STATUS_ONLINE:
-                        present = health_controller.check_bdev(snap.snap_bdev, bdev_names=node_bdev_names)
-                        if snode.lvstore_status == "ready":
-                            set_snapshot_health_check(snap, present)
-
-                    elif snap.status == SnapShot.STATUS_IN_DELETION:
+                    if snap.status == SnapShot.STATUS_IN_DELETION:
                         try:
                             process_snap_delete(snap, snode)
                         except Exception as e:

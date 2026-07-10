@@ -5,7 +5,7 @@ test_migration_flow.py – integration tests for the live volume migration featu
 Each test:
 1. Populates FDB via db_setup helpers.
 2. Seeds the source mock server with the expected in-memory bdev state.
-3. Calls migration_controller.start_migration() to create the LVolMigration
+3. Calls start_migration() to create the LVolMigration
    record and its backing JobSchedule task.
 4. Drives the task runner to completion via conftest.run_migration_task().
 5. Asserts on the final DB state and on the mock server's in-memory state.
@@ -19,11 +19,12 @@ import threading
 import time
 import pytest
 
+from simplyblock_core import constants
 from simplyblock_core.controllers import migration_controller
 from simplyblock_core.models.lvol_migration import LVolMigration
 from simplyblock_core.models.storage_node import StorageNode
 
-from tests.integration.migration.conftest import run_migration_task, set_node_status
+from tests.integration.migration.conftest import run_migration_task, set_node_status, start_migration
 from tests.integration.migration.topology_loader import TestContext
 
 # Lazily initialised so the module can be imported without FDB installed.
@@ -142,7 +143,7 @@ class TestBasicMigration:
         # Seed source mock with bdev state matching the FDB records
         _seed_all(mock_src_server, ctx, "src")
 
-        mig_id, err = migration_controller.start_migration(lvol.uuid, tgt_node.uuid)
+        mig_id, err = start_migration(lvol.uuid, tgt_node.uuid)
         assert err is None, f"start_migration failed: {err}"
         assert mig_id
 
@@ -192,14 +193,14 @@ class TestBasicMigration:
         _seed_all(mock_src_server, ctx, "src")
 
         # Migrate l1 first
-        mig1_id, err = migration_controller.start_migration(
+        mig1_id, err = start_migration(
             ctx.lvol_uuid("l1"), tgt_node.uuid)
         assert err is None
         run_migration_task(mig1_id, max_steps=500, step_sleep=0.02)
         _assert_migration_done(mig1_id)
 
         # Migrate l2 (l1 is done; same-source constraint lifted)
-        mig2_id, err = migration_controller.start_migration(
+        mig2_id, err = start_migration(
             ctx.lvol_uuid("l2"), tgt_node.uuid)
         assert err is None
         run_migration_task(mig2_id, max_steps=500, step_sleep=0.02)
@@ -233,7 +234,7 @@ class TestSharedSnapshotChain:
 
         _seed_all(mock_src_server, ctx, "src")
 
-        mig_id, err = migration_controller.start_migration(
+        mig_id, err = start_migration(
             ctx.lvol_uuid("c1"), tgt_node.uuid)
         assert err is None, err
         run_migration_task(mig_id, max_steps=500, step_sleep=0.02)
@@ -260,14 +261,14 @@ class TestSharedSnapshotChain:
         _seed_all(mock_src_server, ctx, "src")
 
         # Migrate c1 first → s1 + s2 land on target
-        mig1_id, err = migration_controller.start_migration(
+        mig1_id, err = start_migration(
             ctx.lvol_uuid("c1"), tgt_node.uuid)
         assert err is None
         run_migration_task(mig1_id, max_steps=500, step_sleep=0.02)
         _assert_migration_done(mig1_id)
 
         # Migrate l1 now
-        mig2_id, err = migration_controller.start_migration(
+        mig2_id, err = start_migration(
             ctx.lvol_uuid("l1"), tgt_node.uuid)
         assert err is None
         run_migration_task(mig2_id, max_steps=500, step_sleep=0.02)
@@ -287,18 +288,17 @@ class TestSharedSnapshotChain:
         """
         ctx = topology_clone_chain
         tgt_node = ctx.node("tgt")
-        tgt_lvstore = tgt_node.lvstore
 
         _seed_all(mock_src_server, ctx, "src")
 
         # Migrate c1 first to deposit s1, s2 on target
-        mig1_id, err = migration_controller.start_migration(
+        mig1_id, err = start_migration(
             ctx.lvol_uuid("c1"), tgt_node.uuid)
         assert err is None
         run_migration_task(mig1_id, max_steps=500, step_sleep=0.02)
         _assert_migration_done(mig1_id)
 
-        mig2_id, err = migration_controller.start_migration(
+        mig2_id, err = start_migration(
             ctx.lvol_uuid("l1"), tgt_node.uuid)
         assert err is None
 
@@ -309,11 +309,19 @@ class TestSharedSnapshotChain:
 
         _assert_migration_failed(mig2_id)
 
-        # s1 and s2 must still be on target
+        # s1 and s2 must still be on target. s1/s2 are owned by l1, not c1, so
+        # c1's migration recorded its target-side copy as an ``instances``
+        # entry rather than mutating the canonical (still source-side)
+        # snap_bdev — look up that instance's bdev, which carries the
+        # migration suffix (e.g. SNAP_xxxm).
         for snap_sym in ["s1", "s2"]:
-            snap = ctx.snap(snap_sym)
-            short = snap.snap_bdev.split('/', 1)[1] if '/' in snap.snap_bdev else snap.snap_bdev
-            tgt_composite = f"{tgt_lvstore}/{short}"
+            snap = db.get_snapshot_by_id(ctx.snap_uuid(snap_sym))
+            instance = next(
+                (i for i in snap.instances if i.get('lvol', {}).get('node_id') == tgt_node.uuid),
+                None)
+            assert instance is not None, \
+                f"No target-side instance recorded for pre-existing snap {snap.snap_name}"
+            tgt_composite = instance['snap_bdev']
             with mock_tgt_server.state.lock:
                 assert tgt_composite in mock_tgt_server.state.snapshots, \
                     f"Pre-existing snap {snap.snap_name} was incorrectly deleted from target"
@@ -329,7 +337,7 @@ class TestPreconditions:
         ctx = topology_two_node
         src_uuid = ctx.node_uuid("src")
         set_node_status(src_uuid, StorageNode.STATUS_OFFLINE)
-        mig_id, err = migration_controller.start_migration(
+        mig_id, err = start_migration(
             ctx.lvol_uuid("l1"), ctx.node_uuid("tgt"))
         assert mig_id is False
         assert "Source node is not online" in err
@@ -337,13 +345,18 @@ class TestPreconditions:
 
     def test_reject_same_source_and_target(self, topology_two_node):
         ctx = topology_two_node
-        mig_id, err = migration_controller.start_migration(
+        mig_id, err = start_migration(
             ctx.lvol_uuid("l1"), ctx.node_uuid("src"))
         assert mig_id is False
-        assert "different" in err.lower()
+        assert "same node" in err.lower()
 
-    def test_reject_duplicate_active_migration_on_node(
+    def test_second_migration_from_same_source_node_is_allowed(
             self, custom_topology, mock_src_server, mock_tgt_server):
+        """
+        Migration is only serialized per-lvol (``create_migration`` checks
+        ``get_active_migration_for_lvol``), not per-source-node — a second,
+        distinct lvol on the same source may migrate concurrently.
+        """
         spec = {
             "cluster": {},
             "nodes": [
@@ -367,15 +380,15 @@ class TestPreconditions:
         ctx = custom_topology(spec)
         _seed_all(mock_src_server, ctx, "src")
 
-        mig1_id, err = migration_controller.start_migration(
+        mig1_id, err = start_migration(
             ctx.lvol_uuid("l1"), ctx.node_uuid("tgt"))
         assert err is None
 
-        # Second migration from same source node must fail
-        mig2_id, err2 = migration_controller.start_migration(
+        # Second migration for a different lvol on the same source node succeeds.
+        mig2_id, err2 = start_migration(
             ctx.lvol_uuid("l2"), ctx.node_uuid("tgt"))
-        assert mig2_id is False
-        assert "active on source node" in err2
+        assert err2 is None
+        assert mig2_id
 
 
 # ---------------------------------------------------------------------------
@@ -392,24 +405,30 @@ class TestCancellation:
 
         _seed_all(mock_src_server, ctx, "src")
 
-        mig_id, err = migration_controller.start_migration(
+        mig_id, err = start_migration(
             ctx.lvol_uuid("l1"), tgt_node.uuid)
         assert err is None
 
-        # Run a few steps, then cancel
+        # Force failures so the migration cannot race to completion before
+        # we cancel it — with a single snapshot it can otherwise finish
+        # within a handful of task_runner() calls.
+        mock_tgt_server.set_failure_rate(1.0, timeout_seconds=0.1)
+
         from simplyblock_core.services.tasks_runner_lvol_migration import task_runner
         from tests.integration.migration.conftest import _find_migration_task
         task = _find_migration_task(db, mig_id)
         for _ in range(5):
             task = db.get_task_by_id(task.uuid)
-            done = task_runner(task)
-            if done:
-                break
+            task_runner(task)
             time.sleep(0.02)
 
+        mock_tgt_server.set_failure_rate(0.0)
+
+        m = db.get_migration_by_id(mig_id)
+        assert m.is_active(), f"Migration should still be active, got {m.status}"
+
         # Cancel
-        ok, cerr = migration_controller.cancel_migration(mig_id)
-        assert ok, f"cancel_migration failed: {cerr}"
+        migration_controller.cancel_migration(mig_id)
 
         # Run to completion
         run_migration_task(mig_id, max_steps=300, step_sleep=0.02)
@@ -437,13 +456,16 @@ class TestRandomFailureMode:
 
         _seed_all(mock_src_server, ctx, "src")
 
-        # Enable failure injection
-        mock_src_server.set_failure_rate(failure_rate, timeout_seconds=0.05)
-        mock_tgt_server.set_failure_rate(failure_rate, timeout_seconds=0.05)
-
-        mig_id, err = migration_controller.start_migration(
+        # create_migration()/start_migration() perform synchronous target
+        # setup RPCs with no retry of their own, so failure injection starts
+        # only once the migration exists — exercising the task runner's own
+        # retry logic, which is what "retries carry it through" means here.
+        mig_id, err = start_migration(
             ctx.lvol_uuid("l1"), tgt_node.uuid)
         assert err is None
+
+        mock_src_server.set_failure_rate(failure_rate, timeout_seconds=0.05)
+        mock_tgt_server.set_failure_rate(failure_rate, timeout_seconds=0.05)
 
         run_migration_task(mig_id, max_steps=2000, step_sleep=0.01)
 
@@ -464,12 +486,16 @@ class TestRandomFailureMode:
 
         _seed_all(mock_src_server, ctx, "src")
 
-        mock_src_server.set_failure_rate(1.0, timeout_seconds=0.05)
-        mock_tgt_server.set_failure_rate(1.0, timeout_seconds=0.05)
-
-        mig_id, err = migration_controller.start_migration(
+        # create_migration()/start_migration() perform synchronous target
+        # setup RPCs with no retry of their own, so the failure rate is only
+        # injected once the migration exists — exercising the task runner's
+        # own retry-then-give-up behavior instead of the one-shot setup call.
+        mig_id, err = start_migration(
             ctx.lvol_uuid("l1"), tgt_node.uuid)
         assert err is None
+
+        mock_src_server.set_failure_rate(1.0, timeout_seconds=0.05)
+        mock_tgt_server.set_failure_rate(1.0, timeout_seconds=0.05)
 
         run_migration_task(mig_id, max_steps=500, step_sleep=0.01)
 
@@ -501,14 +527,15 @@ class TestHASecondaryRegistration:
         lvol = ctx.lvol("l1")
         snap = ctx.snap("s1")
 
-        mig_id, err = migration_controller.start_migration(lvol.uuid, tgt_node.uuid)
+        mig_id, err = start_migration(lvol.uuid, tgt_node.uuid)
         assert err is None
         run_migration_task(mig_id, max_steps=500, step_sleep=0.02)
         _assert_migration_done(mig_id)
 
-        # The secondary mock should have a snapshot registered
+        # The secondary mock should have a snapshot registered. Target bdevs
+        # carry the migration suffix (e.g. SNAP_xxxm).
         short = snap.snap_bdev.split('/', 1)[1] if '/' in snap.snap_bdev else snap.snap_bdev
-        sec_composite = f"{ctx.node('tgt-sec').lvstore}/{short}"
+        sec_composite = f"{ctx.node('tgt-sec').lvstore}/{short}{constants.LVOL_MIG_BDEV_SUFFIX}"
         with mock_sec_server.state.lock:
             assert sec_composite in mock_sec_server.state.snapshots, \
                 f"Snapshot not registered on secondary: {sec_composite}"
@@ -527,7 +554,7 @@ class TestHASecondaryRegistration:
         lvol = ctx.lvol("l1")
         ctx.snap("s1")
 
-        mig_id, err = migration_controller.start_migration(lvol.uuid, tgt_node.uuid)
+        mig_id, err = start_migration(lvol.uuid, tgt_node.uuid)
         assert err is None
         run_migration_task(mig_id, max_steps=500, step_sleep=0.02)
         _assert_migration_done(mig_id)
@@ -558,7 +585,7 @@ class TestHASecondaryRegistration:
         # Put secondary into a bad state (not online and not offline)
         set_node_status(sec_uuid, "in_restart")
 
-        mig_id, err = migration_controller.start_migration(lvol.uuid, tgt_node.uuid)
+        mig_id, err = start_migration(lvol.uuid, tgt_node.uuid)
         assert err is None
 
         from simplyblock_core.services.tasks_runner_lvol_migration import task_runner
@@ -609,7 +636,7 @@ class TestFourNodeFourSnapshotMigration:
         # Seed source mock with bdev state matching FDB records
         _seed_all(mock_src_server, ctx, "n1")
 
-        mig_id, err = migration_controller.start_migration(lvol.uuid, tgt_node.uuid)
+        mig_id, err = start_migration(lvol.uuid, tgt_node.uuid)
         assert err is None, f"start_migration failed: {err}"
         assert mig_id
 
@@ -636,7 +663,7 @@ class TestFourNodeFourSnapshotMigration:
 
         _seed_all(mock_src_server, ctx, "n1")
 
-        mig_id, err = migration_controller.start_migration(lvol.uuid, tgt_node.uuid)
+        mig_id, err = start_migration(lvol.uuid, tgt_node.uuid)
         assert err is None
         run_migration_task(mig_id, max_steps=1000, step_sleep=0.02)
         _assert_migration_done(mig_id)
@@ -649,7 +676,8 @@ class TestFourNodeFourSnapshotMigration:
             snap = ctx.snap(snap_sym)
             short = snap.snap_bdev.split('/', 1)[1] if '/' in snap.snap_bdev \
                 else snap.snap_bdev
-            composite = f"{tgt_lvstore}/{short}"
+            # Target bdevs carry the migration suffix (e.g. SNAP_xxxm).
+            composite = f"{tgt_lvstore}/{short}{constants.LVOL_MIG_BDEV_SUFFIX}"
             assert composite in tgt_snaps, (
                 f"Snapshot {snap.snap_name} ({composite}) missing from target")
 
@@ -665,7 +693,7 @@ class TestFourNodeFourSnapshotMigration:
 
         _seed_all(mock_src_server, ctx, "n1")
 
-        mig_id, err = migration_controller.start_migration(lvol.uuid, tgt_node.uuid)
+        mig_id, err = start_migration(lvol.uuid, tgt_node.uuid)
         assert err is None
         run_migration_task(mig_id, max_steps=1000, step_sleep=0.02)
         _assert_migration_done(mig_id)
@@ -693,7 +721,7 @@ class TestFourNodeFourSnapshotMigration:
 
         _seed_all(mock_src_server, ctx, "n1")
 
-        mig_id, err = migration_controller.start_migration(lvol.uuid, tgt_node.uuid)
+        mig_id, err = start_migration(lvol.uuid, tgt_node.uuid)
         assert err is None
         run_migration_task(mig_id, max_steps=1000, step_sleep=0.02)
         _assert_migration_done(mig_id)
@@ -717,7 +745,7 @@ class TestFourNodeFourSnapshotMigration:
 
         _seed_all(mock_src_server, ctx, "n1")
 
-        mig_id, err = migration_controller.start_migration(lvol.uuid, tgt_node.uuid)
+        mig_id, err = start_migration(lvol.uuid, tgt_node.uuid)
         assert err is None
         run_migration_task(mig_id, max_steps=1000, step_sleep=0.02)
         _assert_migration_done(mig_id)
@@ -760,7 +788,7 @@ class TestFourNodeFourSnapshotMigration:
         offline_sym = random.choice(["n1", "n2", "n3", "n4"])
         offline_uuid = ctx.node_uuid(offline_sym)
 
-        mig_id, err = migration_controller.start_migration(lvol.uuid, tgt_node.uuid)
+        mig_id, err = start_migration(lvol.uuid, tgt_node.uuid)
         assert err is None, f"start_migration failed: {err}"
 
         # Background thread: wait 0.3 s (let migration get started), take the

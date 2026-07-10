@@ -127,24 +127,6 @@ def check_node(snode):
         rpc_client = snode.rpc_client(timeout=3, retry=2)
         connected_devices = []
 
-        node_bdevs = rpc_client.get_bdevs()
-        if node_bdevs:
-            # node_bdev_names = [b['name'] for b in node_bdevs]
-            node_bdev_names = {}
-            for b in node_bdevs:
-                node_bdev_names[b['name']] = b
-                for al in b['aliases']:
-                    node_bdev_names[al] = b
-        else:
-            node_bdev_names = {}
-
-        subsystem_list = rpc_client.subsystem_list() or []
-        subsystems = {
-            subsystem['nqn']: subsystem
-            for subsystem
-            in subsystem_list
-        }
-
         for device in snode.nvme_devices:
             passed = True
 
@@ -167,19 +149,19 @@ def check_node(snode):
                 if not bdev:
                     continue
 
-                if not health_controller.check_bdev(bdev, bdev_names=node_bdev_names):
+                if not health_controller.check_bdev(bdev, rpc_client=rpc_client):
                     problems += 1
                     passed = False
 
             logger.info(f"Checking Device's BDevs ... ({(len(bdevs_stack) - problems)}/{len(bdevs_stack)})")
 
-            passed &= health_controller.check_subsystem(device.nvmf_nqn, nqns=subsystems)
+            passed &= health_controller.check_subsystem(device.nvmf_nqn, rpc_client=rpc_client)
 
             set_device_health_check(snode.cluster_id, device, passed if report_health else None)
             if device.status == NVMeDevice.STATUS_ONLINE:
                 node_devices_check &= passed
 
-        if storage_node_ops.sync_remote_devices_from_spdk(snode, node_bdev_names=node_bdev_names):
+        if storage_node_ops.sync_remote_devices_from_spdk(snode):
             snode = db.get_storage_node_by_id(snode.get_id())
 
         # Reconcile against cluster topology. node.remote_devices is rebuilt
@@ -191,8 +173,7 @@ def check_node(snode):
         # remote-JM rebuild below, to stay out of activation's way.
         if cluster is not None and cluster.status in [
                 Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
-            reconnected, reconcile_ok = storage_node_ops.reconnect_dropped_remote_devs(
-                snode, node_bdev_names=node_bdev_names)
+            reconnected, reconcile_ok = storage_node_ops.reconnect_dropped_remote_devs(snode)
             if reconnected:
                 snode = db.get_storage_node_by_id(snode.get_id())
             node_remote_devices_check &= reconcile_ok
@@ -206,7 +187,7 @@ def check_node(snode):
             # is ONLINE/DOWN/UNREACHABLE. If the owner is mid-transition (restart,
             # shutdown, ...) the connection is expected to be gone — skip it.
             if org_dev.status == NVMeDevice.STATUS_ONLINE and health_controller._peer_connections_relevant(org_node):
-                if health_controller.check_bdev(remote_device.remote_bdev, bdev_names=node_bdev_names):
+                if health_controller.check_bdev(remote_device.remote_bdev, rpc_client=rpc_client):
                     # Bdev exists but multipath may be degraded — repair missing paths
                     if org_dev.nvmf_multipath:
                         ctrl_name = f"remote_{org_dev.alceml_bdev}" if org_dev.alceml_bdev else None
@@ -224,9 +205,7 @@ def check_node(snode):
 
                 try:
                     storage_node_ops.connect_device(
-                        f"remote_{org_dev.alceml_bdev}", org_dev, snode,
-                        bdev_names=list(node_bdev_names), reattach=False,
-                    )
+                        f"remote_{org_dev.alceml_bdev}", org_dev, snode)
                     connected_devices.append(org_dev.get_id())
                 except RuntimeError:
                     logger.error(f"Failed to connect to device: {org_dev.get_id()}")
@@ -236,7 +215,7 @@ def check_node(snode):
         if snode.jm_device and snode.jm_device.get_id():
             jm_device = snode.jm_device
             logger.info(f"Node JM: {jm_device.get_id()}")
-            if jm_device.jm_bdev in node_bdev_names:
+            if rpc_client.get_bdevs(jm_device.jm_bdev):
                 logger.info(f"Checking jm bdev: {jm_device.jm_bdev} ... ok")
                 connected_jms.append(jm_device.get_id())
             else:
@@ -246,7 +225,7 @@ def check_node(snode):
             logger.info(f"Node remote JMs: {len(snode.remote_jm_devices)}")
             for remote_device in snode.remote_jm_devices:
                 if remote_device.remote_bdev:
-                    check = health_controller.check_bdev(remote_device.remote_bdev, bdev_names=node_bdev_names)
+                    check = health_controller.check_bdev(remote_device.remote_bdev, rpc_client=rpc_client)
                     if check:
                         # JM bdev exists but multipath may be degraded — repair missing paths.
                         # repair_multipath_controller needs nvmf_ip / nvmf_nqn / nvmf_port
@@ -330,7 +309,7 @@ def check_node(snode):
 
             lvstore_stack = snode.lvstore_stack
             lvstore_check &= health_controller._check_node_lvstore(
-                lvstore_stack, snode, auto_fix=True, node_bdev_names=node_bdev_names)
+                lvstore_stack, snode, auto_fix=True)
 
             sec_ids_to_check = []
             if snode.secondary_node_id:
@@ -340,8 +319,7 @@ def check_node(snode):
 
             if sec_ids_to_check:
 
-                lvstore_check &= health_controller._check_node_hublvol(
-                    snode, node_bdev_names=node_bdev_names, node_lvols_nqns=subsystems)
+                lvstore_check &= health_controller._check_node_hublvol(snode)
 
                 for sec_id in sec_ids_to_check:
                     sec_node = db.get_storage_node_by_id(sec_id)

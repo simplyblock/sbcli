@@ -27,22 +27,40 @@ from tests.integration.migration.topology_loader import (
 
 logger = logging.getLogger(__name__)
 
+_MIGRATION_DIR = os.path.dirname(__file__)
+
+
+def pytest_collection_modifyitems(items):
+    """Tag every migration test as ``slow`` so the default integration run can
+    deselect them (see ``-m "not slow"`` in tox.ini). Applied here rather than
+    on each of the ~138 test functions so new migration tests inherit it
+    automatically."""
+    for item in items:
+        if str(item.fspath).startswith(_MIGRATION_DIR):
+            item.add_marker(pytest.mark.slow)
+
+
 # ---------------------------------------------------------------------------
 # Cluster bootstrap
 # ---------------------------------------------------------------------------
 
-@pytest.fixture(scope="session")
+@pytest.fixture()
 def ensure_cluster():
     """
-    Guarantee that at least one Cluster record exists in FDB before any test
+    Guarantee that at least one Cluster record exists in FDB before a test
     runs.  This covers two scenarios:
 
     1. **Real control-plane deployment** – a cluster was already created by
        ``sbcli cluster create``.  This fixture detects it and does nothing.
 
     2. **Standalone dev / CI** – only FDB is running, no control-plane setup.
-       The fixture creates a minimal cluster record for the test session and
-       removes it afterward.
+       The fixture creates a minimal cluster record for the test and removes
+       it afterward.
+
+    Function-scoped (not session-scoped) because ``tests/integration/conftest.py``
+    wipes the FDB keyspace once per test module; a session-scoped cluster
+    created before the first module's wipe would vanish for every module
+    after the first.
 
     Either way, topology fixtures always find an existing cluster to attach to.
     """
@@ -59,7 +77,7 @@ def ensure_cluster():
         yield
         return
 
-    # No cluster found – create a minimal one for this test session.
+    # No cluster found – create a minimal one for this test.
     cluster = Cluster()
     cluster.uuid = f"test-session-{_uuid_mod.uuid4().hex[:12]}"
     cluster.status = Cluster.STATUS_ACTIVE
@@ -71,7 +89,7 @@ def ensure_cluster():
     cluster.distr_chunk_bs = 4096
     cluster.nqn = f"nqn.2023-02.io.simplyblock:{cluster.uuid[:8]}"
     cluster.write_to_db(db.kv_store)
-    logger.info(f"Created test cluster {cluster.uuid} for this session")
+    logger.info(f"Created test cluster {cluster.uuid}")
 
     yield
 
@@ -89,6 +107,7 @@ def ensure_cluster():
 _BASE_PORT_SRC = 9901
 _BASE_PORT_TGT = 9902
 _BASE_PORT_SEC = 9903
+_BASE_PORT_SRC_SEC = 9904
 
 
 def _worker_port_offset() -> int:
@@ -132,11 +151,38 @@ def mock_tgt_server():
 
 @pytest.fixture(scope="session")
 def mock_sec_server():
-    """Mock RPC server for the target secondary node (HA tests)."""
+    """Mock RPC server for the target secondary node (HA tests).
+
+    Shares the primary target's lvstore name ("lvs_tgt"): the migration
+    runner always builds secondary-bound composites from ``tgt_node.lvstore``
+    (the primary's), never the secondary's own lvstore field, matching the
+    real-world convention that HA peers mirror the same lvstore name.
+    """
     offset = _worker_port_offset()
     srv = MockRpcServer(
         host="127.0.0.1", port=_BASE_PORT_SEC + offset,
-        lvstore="lvs_tgt_sec", node_id="tgt-sec",
+        lvstore="lvs_tgt", node_id="tgt-sec",
+    )
+    srv.start()
+    yield srv
+    srv.stop()
+
+
+@pytest.fixture(scope="session")
+def mock_src_sec_server():
+    """Mock RPC server for the source node's own HA secondary.
+
+    Some data-plane operations against an ha_type="ha" lvol (e.g. taking an
+    intermediate snapshot mid-migration) unconditionally resolve the current
+    host node's secondary/tertiary peers. The source node needs a real,
+    resolvable secondary for those code paths — sharing the source's own
+    lvstore name ("lvs_src"), per the same HA-peer-naming convention as
+    ``mock_sec_server``.
+    """
+    offset = _worker_port_offset()
+    srv = MockRpcServer(
+        host="127.0.0.1", port=_BASE_PORT_SRC_SEC + offset,
+        lvstore="lvs_src", node_id="src-sec",
     )
     srv.start()
     yield srv
@@ -181,9 +227,10 @@ def topology_two_node(ensure_cluster, mock_src_server, mock_tgt_server):
 
 
 @pytest.fixture()
-def topology_two_node_ha(ensure_cluster, mock_src_server, mock_tgt_server, mock_sec_server):
-    """Two-node HA topology (primary + secondary on target)."""
-    _reset_servers(mock_src_server, mock_tgt_server, mock_sec_server)
+def topology_two_node_ha(ensure_cluster, mock_src_server, mock_tgt_server, mock_sec_server,
+                         mock_src_sec_server):
+    """Two-node HA topology (primary + secondary on both source and target)."""
+    _reset_servers(mock_src_server, mock_tgt_server, mock_sec_server, mock_src_sec_server)
 
     spec = _load_spec("two_node_ha.json")
 
@@ -195,6 +242,8 @@ def topology_two_node_ha(ensure_cluster, mock_src_server, mock_tgt_server, mock_
             node["rpc_port"] = _BASE_PORT_TGT + offset
         elif node["id"] == "tgt-sec":
             node["rpc_port"] = _BASE_PORT_SEC + offset
+        elif node["id"] == "src-sec":
+            node["rpc_port"] = _BASE_PORT_SRC_SEC + offset
 
     ctx = load_topology(spec)
     yield ctx
@@ -291,6 +340,53 @@ def custom_topology(ensure_cluster, mock_src_server, mock_tgt_server, mock_sec_s
 
     for ctx in created:
         ctx.teardown()
+
+
+# ---------------------------------------------------------------------------
+# start_migration adapter
+# ---------------------------------------------------------------------------
+
+def start_migration(lvol_id, target_node_id, max_retries=None, deadline_seconds=None,
+                    ctrl_loss_tmo=None, host_nqn=None):
+    """
+    Test-only adapter over the real two-step migration API.
+
+    ``migration_controller`` split the old single-call ``start_migration(lvol_id,
+    target_node_id)`` into ``create_migration(lvol_id, target_node_id)`` (sets up
+    target infra, returns a PHASE_PRE_CREATED migration_id) followed by
+    ``start_migration(migration_id)`` (validates preconditions and launches the
+    task runner). This suite's tests were written against the old single-call,
+    ``(migration_id, error)``-tuple shape, so this adapter composes the two real
+    calls and reports the first failure either one raises.
+    """
+    from simplyblock_core.controllers import migration_controller
+    from simplyblock_core.exceptions import MigrationConflictError, PreconditionError
+    from simplyblock_core.rpc_client import RPCException
+
+    create_kwargs = {}
+    if ctrl_loss_tmo is not None:
+        create_kwargs["ctrl_loss_tmo"] = ctrl_loss_tmo
+    if host_nqn is not None:
+        create_kwargs["host_nqn"] = host_nqn
+
+    try:
+        migration_id, _connect_strings = migration_controller.create_migration(
+            lvol_id, target_node_id, **create_kwargs)
+    except (ValueError, MigrationConflictError, PreconditionError, RPCException) as e:
+        return False, str(e)
+
+    start_kwargs = {}
+    if max_retries is not None:
+        start_kwargs["max_retries"] = max_retries
+    if deadline_seconds is not None:
+        start_kwargs["deadline_seconds"] = deadline_seconds
+
+    try:
+        migration_controller.start_migration(migration_id, **start_kwargs)
+    except (ValueError, RPCException) as e:
+        return False, str(e)
+
+    return migration_id, None
 
 
 # ---------------------------------------------------------------------------

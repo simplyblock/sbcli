@@ -209,45 +209,6 @@ def process_lvol_delete_try_again(lvol):
 
 
 def check_node(snode, all_lvols):
-    node_bdev_names = []
-    node_lvols_nqns = {}
-    sec_node_bdev_names = {}
-    sec_node_lvols_nqns = {}
-    sec_node = None
-
-    if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
-        node_bdevs = snode.rpc_client().get_bdevs()
-        if node_bdevs:
-            node_bdev_names = [b['name'] for b in node_bdevs]
-            for bdev in node_bdevs:
-                if "aliases" in bdev and bdev["aliases"]:
-                    node_bdev_names.extend(bdev['aliases'])
-        ret = snode.rpc_client().subsystem_list()
-        if ret:
-            for sub in ret:
-                node_lvols_nqns[sub['nqn']] = sub
-
-    sec_ids_for_check = []
-    if snode.secondary_node_id:
-        sec_ids_for_check.append(snode.secondary_node_id)
-    if snode.tertiary_node_id:
-        sec_ids_for_check.append(snode.tertiary_node_id)
-    first_sec_node = None
-    for sec_id in sec_ids_for_check:
-        sec_node = db.get_storage_node_by_id(sec_id)
-        if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
-            if first_sec_node is None:
-                first_sec_node = sec_node
-            sec_rpc_client = sec_node.rpc_client()
-            ret = sec_rpc_client.get_bdevs()
-            if ret:
-                for bdev in ret:
-                    sec_node_bdev_names[bdev['name']] = bdev
-
-            ret = sec_rpc_client.subsystem_list()
-            if ret:
-                for sub in ret:
-                    sec_node_lvols_nqns[sub['nqn']] = sub
 
     for lvol in all_lvols:
         if lvol.node_id != snode.get_id():
@@ -404,12 +365,13 @@ def check_node(snode, all_lvols):
 
             continue
 
+
+        if snode.lvstore_status != "ready":
+            continue
+
         passed = True
         try:
-            ret = health_controller.check_lvol_on_node(
-                lvol.get_id(), lvol.node_id, node_bdev_names, node_lvols_nqns)
-            if not ret:
-                passed = False
+            passed &= health_controller.check_subsystem(lvol.nqn, rpc_client=snode.rpc_client(), ns_uuid=lvol.uuid)
         except Exception as e:
             logger.error(f"Failed to check lvol:{lvol.get_id()} on node: {lvol.node_id}")
             logger.error(e)
@@ -422,22 +384,16 @@ def check_node(snode, all_lvols):
                     continue
                 if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
                     try:
-                        ret = health_controller.check_lvol_on_node(
-                            lvol.get_id(), sec_id, sec_node_bdev_names, sec_node_lvols_nqns)
-                        if not ret:
-                            passed = False
-                        else:
-                            passed = True
+                        passed &= health_controller.check_subsystem(
+                            lvol.nqn, rpc_client=sec_node.rpc_client(), ns_uuid=lvol.uuid)
                     except Exception as e:
                         logger.error(f"Failed to check lvol: {lvol.get_id()} on node: {sec_id}")
                         logger.error(e)
 
-        if snode.lvstore_status == "ready":
-
-            logger.info(f"LVol: {lvol.get_id()}, is healthy: {passed}")
-            set_lvol_health_check(lvol, passed)
-            if passed:
-                set_lvol_status(lvol, LVol.STATUS_ONLINE)
+        logger.info(f"LVol: {lvol.get_id()}, is healthy: {passed}")
+        set_lvol_health_check(lvol, passed)
+        if passed:
+            set_lvol_status(lvol, LVol.STATUS_ONLINE)
 
 
 
