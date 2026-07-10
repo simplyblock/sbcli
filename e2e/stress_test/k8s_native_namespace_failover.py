@@ -585,6 +585,7 @@ class K8sNativeNamespacedFailoverTest(K8sNativeFailoverTest):
         """Create namespace-aware StorageClasses, then delegate to parent loop."""
         self._ensure_k8s_utils()
         self._initialize_outage_log()
+        self.start_nvme_iostat_monitor()
         self.logger.info(
             f"=== Starting K8sNativeNamespacedFailoverTest "
             f"(max_namespace_per_subsys={self.max_namespace_per_subsys}) ==="
@@ -949,6 +950,7 @@ class K8sNativeRapidLifecycleTest(K8sNativeFailoverTest):
     def run(self):
         """Rapid lifecycle test: ramp → churn → validate."""
         self._ensure_k8s_utils()
+        self.start_nvme_iostat_monitor()
         self.logger.info("=== Starting K8sNativeRapidLifecycleTest ===")
 
         # Setup: clean + create pool + StorageClass
