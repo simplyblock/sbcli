@@ -102,7 +102,11 @@ spec:
                       operator: In
                       values:
                         - $HOSTNAME
-                maxUnavailable: 1
+                # Wide during initial node-add so first-time CPU-topology
+                # reboots roll in parallel (nodes are empty pre-activation);
+                # cluster_activate narrows this to the fault tolerance once the
+                # cluster serves IO.
+                maxUnavailable: {{ MCP_MAX_UNAVAILABLE }}
               MCPEOF
               fi
 

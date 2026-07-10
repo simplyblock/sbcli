@@ -288,6 +288,13 @@ def spdk_process_start(body: SPDKParams):
     if isinstance(skip_kubelet_configuration, str):
        skip_kubelet_configuration = skip_kubelet_configuration.strip().lower() in ("true")
     reserved_system_cpus = os.environ.get("RESERVED_SYSTEM_CPUS", "0,1")
+    # How many storage nodes MCO may reboot at once when the MCP is first
+    # created for CPU-topology apply. Defaults to 1 (conservative, one-at-a-time
+    # — current behavior). Set to the parallel-add count so the initial
+    # (pre-activation, data-less) first-time reboots roll in one wave instead of
+    # a one-at-a-time queue; cluster_activate later narrows the pool to the
+    # cluster's fault tolerance for safe steady-state rollouts.
+    mcp_max_unavailable = os.environ.get("PARALLEL_ADD_NUMBER", "1")
     openshift_mcp = os.environ.get("OPENSHIFT_MCP")
 
     node_prepration_core_name = "snode-spdk-core-isolate-"
@@ -330,6 +337,7 @@ def spdk_process_start(body: SPDKParams):
             'FW_PORT': body.firewall_port,
             'CPU_TOPOLOGY_ENABLED': cpu_topology_enabled,
             'RESERVED_SYSTEM_CPUS': reserved_system_cpus,
+            'MCP_MAX_UNAVAILABLE': mcp_max_unavailable,
             'OPENSHIFT_MCP': openshift_mcp,
             'TLS_SERVE': settings.tls_serve,
             'TLS_CONNECT': settings.tls_connect,
