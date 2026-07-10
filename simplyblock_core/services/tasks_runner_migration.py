@@ -75,7 +75,7 @@ def task_runner(task):
         task.write_to_db(db.kv_store)
         return True
 
-    if snode.status != StorageNode.STATUS_ONLINE:
+    if snode.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:
         task.function_result = "node is not online, retrying"
         task.status = JobSchedule.STATUS_SUSPENDED
         unavailable = _cluster_unavailable_state(task.cluster_id)
@@ -301,7 +301,7 @@ while True:
                             logger.info("no task found on same node, resuming compression")
                             node = db.get_storage_node_by_id(task.node_id)
                             for n in db.get_storage_nodes_by_cluster_id(node.cluster_id):
-                                if n.status != StorageNode.STATUS_ONLINE:
+                                if n.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:
                                     logger.warning("Not all nodes are online, can not resume JC compression")
                                     continue
                             rpc_client = node.rpc_client(timeout=5, retry=2)
