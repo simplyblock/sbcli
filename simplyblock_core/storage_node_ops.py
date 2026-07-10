@@ -1239,7 +1239,7 @@ def _connect_to_remote_devs(
     remote_devices = []
     existing_remote_devices = {dev.get_id(): dev for dev in this_node.remote_devices}
 
-    allowed_node_statuses = [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]
+    allowed_node_statuses = [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN, StorageNode.STATUS_SUSPENDED]
     allowed_dev_statuses = [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY, NVMeDevice.STATUS_CANNOT_ALLOCATE]
 
     if force_connect_restarting_nodes:
