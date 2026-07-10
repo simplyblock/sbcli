@@ -65,14 +65,14 @@ class RandomMultiClientMultiFailoverAllNodesTest(RandomMultiClientMultiFailoverT
         self.outage_types = [
             "graceful_shutdown",
             "forced_shutdown",
-            "interface_full_network_interrupt",
+            # "interface_full_network_interrupt",  # disabled for no-n/w-outage run
         ]
         self.outage_types2 = [
             "container_stop",
             "graceful_shutdown",
             "forced_shutdown",
             "storage_node_reboot",
-            "interface_full_network_interrupt",
+            # "interface_full_network_interrupt",  # disabled for no-n/w-outage run
         ]
         self.multipath_outage_types = [
             "container_stop",
@@ -124,21 +124,22 @@ class RandomMultiClientMultiFailoverAllNodesTest(RandomMultiClientMultiFailoverT
           Phase 2: trigger all outages simultaneously (parallel threads)
         """
         # ── Multipath: optionally disable one data NIC on ALL nodes ──────
+        # Disabled for no-n/w-outage run
         use_multipath_outage = False
-        if self._is_multipath_enabled() and random.random() < 0.5:
-            self.logger.info("Multipath detected and selected — disabling one data NIC on all nodes")
-            self.multipath_nic_disabled = True
-            nic_plans = self._disconnect_single_data_nic_all_nodes()
-            self.log_outage_event(
-                "ALL_NODES", "multipath_single_nic_down",
-                f"Disabled 1 data NIC on {len(nic_plans)} nodes (until recovery)"
-            )
-            self.logger.info("Waiting 30s for multipath failover to settle...")
-            time.sleep(30)
-            use_multipath_outage = True
-        else:
-            self.multipath_nic_disabled = False
-            self.log_outage_event("ALL_NODES", "multipath_nic_outage", "SKIPPED (not enabled or not selected)")
+        # if self._is_multipath_enabled() and random.random() < 0.5:
+        #     self.logger.info("Multipath detected and selected — disabling one data NIC on all nodes")
+        #     self.multipath_nic_disabled = True
+        #     nic_plans = self._disconnect_single_data_nic_all_nodes()
+        #     self.log_outage_event(
+        #         "ALL_NODES", "multipath_single_nic_down",
+        #         f"Disabled 1 data NIC on {len(nic_plans)} nodes (until recovery)"
+        #     )
+        #     self.logger.info("Waiting 30s for multipath failover to settle...")
+        #     time.sleep(30)
+        #     use_multipath_outage = True
+        # else:
+        self.multipath_nic_disabled = False
+        self.log_outage_event("ALL_NODES", "multipath_nic_outage", "SKIPPED (disabled for no-n/w-outage run)")
 
         all_nodes = list(self.sn_nodes_with_sec)
         self.current_outage_nodes = []
