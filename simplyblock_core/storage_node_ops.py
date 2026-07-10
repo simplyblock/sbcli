@@ -2622,6 +2622,12 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
 
         if not spdk_proxy_image:
             spdk_proxy_image = cluster.container_image_prefix + constants.SIMPLY_BLOCK_DOCKER_IMAGE
+        # Initial storage-MCP maxUnavailable for the first-time CPU-topology
+        # reboots = the configured parallel-add count (StorageNodeSet
+        # spec.maxParallelNodeAdds), read straight from the CR. cluster_activate
+        # later narrows the pool to the cluster's fault tolerance.
+        mcp_max_unavailable = utils.get_max_parallel_node_adds_from_cr(
+            cr_name, cr_namespace, cr_plural)
         try:
             results, err = snode_api.spdk_process_start(
                 l_cores, minimum_hp_memory, spdk_image, spdk_debug, cluster_ip, fdb_connection,
@@ -2629,7 +2635,8 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 multi_threading_enabled=constants.SPDK_PROXY_MULTI_THREADING_ENABLED,
                 timeout=constants.SPDK_PROXY_TIMEOUT,
                 ssd_pcie=ssd_pcie, total_mem=total_mem, system_mem=minimum_sys_memory, cluster_mode=cluster.mode,
-                socket=node_socket, cluster_id=cluster_id, spdk_proxy_image=spdk_proxy_image)
+                socket=node_socket, cluster_id=cluster_id, spdk_proxy_image=spdk_proxy_image,
+                mcp_max_unavailable=mcp_max_unavailable)
             time.sleep(5)
 
         except Exception as e:

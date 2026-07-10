@@ -228,6 +228,7 @@ class SPDKParams(BaseModel):
     socket: Optional[int] = Field(None, ge=0)
     firewall_port: Optional[int] = Field(constants.FW_PORT_START)
     cluster_id: str
+    mcp_max_unavailable: Optional[int] = Field(None)
 
 
 @api.post('/spdk_process_start', responses={
@@ -288,13 +289,18 @@ def spdk_process_start(body: SPDKParams):
     if isinstance(skip_kubelet_configuration, str):
        skip_kubelet_configuration = skip_kubelet_configuration.strip().lower() in ("true")
     reserved_system_cpus = os.environ.get("RESERVED_SYSTEM_CPUS", "0,1")
-    # How many storage nodes MCO may reboot at once when the MCP is first
-    # created for CPU-topology apply. Defaults to 1 (conservative, one-at-a-time
-    # — current behavior). Set to the parallel-add count so the initial
-    # (pre-activation, data-less) first-time reboots roll in one wave instead of
-    # a one-at-a-time queue; cluster_activate later narrows the pool to the
-    # cluster's fault tolerance for safe steady-state rollouts.
-    mcp_max_unavailable = os.environ.get("PARALLEL_ADD_NUMBER", "1")
+    # Initial storage-MCP maxUnavailable when it's first created for CPU-topology
+    # apply = the configured parallel-add count, so the first-time,
+    # pre-activation reboots roll in one wave instead of a one-at-a-time queue.
+    # Source order: the value the control plane read from the StorageNodeSet CR
+    # (spec.maxParallelNodeAdds) and passed in; then the MAX_PARALLEL_NODE_ADDS
+    # env (if an operator injects it); then constants.NODE_ADD_MAX_PARALLEL.
+    # cluster_activate later narrows the pool to the cluster's fault tolerance.
+    mcp_max_unavailable = (
+        body.mcp_max_unavailable
+        or os.environ.get("MAX_PARALLEL_NODE_ADDS")
+        or str(constants.NODE_ADD_MAX_PARALLEL)
+    )
     openshift_mcp = os.environ.get("OPENSHIFT_MCP")
 
     node_prepration_core_name = "snode-spdk-core-isolate-"
