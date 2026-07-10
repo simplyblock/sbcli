@@ -817,19 +817,26 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
         else:
             pass1_create_ids.append(snode.get_id())
 
+    def _set_lvstore_status(node_id, value) -> None:
+        # Atomic: full-object writes of node records race concurrent
+        # parallel-pass workers AND phase transitions on the same record —
+        # a stale copy written back resurrects a just-cleared restart phase
+        # (observed twice on fresh activation, 2026-07-10 20:22 soak run).
+        node = db_controller.get_storage_node_by_id(node_id)
+        db_controller.atomic_update(
+            node, lambda n, v=value: setattr(n, "lvstore_status", v))
+
     def _finish_pass1_node(node_id, ret) -> None:
-        snode = db_controller.get_storage_node_by_id(node_id)
         if ret:
-            snode.lvstore_status = "ready"
-            snode.write_to_db()
+            _set_lvstore_status(node_id, "ready")
 
             # Create S3 bdev for backup support (only if backup is configured)
             if cluster.backup_config:
+                snode = db_controller.get_storage_node_by_id(node_id)
                 backup_controller.create_s3_bdev(snode, cluster.backup_config)
 
         else:
-            snode.lvstore_status = "failed"
-            snode.write_to_db()
+            _set_lvstore_status(node_id, "failed")
             logger.error(f"Failed to restore lvstore on node {node_id}")
             set_cluster_status(cl_id, ols_status)
             raise ValueError("Failed to activate cluster")
@@ -902,9 +909,14 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
             with pass2_primary_locks[primary_node.get_id()]:
                 # Re-read under the lock: a peer worker (the other non-leader of
                 # this primary) may have written lvstore_status meanwhile.
+                # Atomic: a full-object write here races the primary's OWN
+                # pass-2 worker transitioning restart phases on the same
+                # record — writing a stale copy back resurrects a cleared
+                # phase (stale-phase generator, 2026-07-10).
                 primary_node = db_controller.get_storage_node_by_id(primary_node.get_id())
-                primary_node.lvstore_status = "in_creation"
-                primary_node.write_to_db()
+                db_controller.atomic_update(
+                    primary_node,
+                    lambda n: setattr(n, "lvstore_status", "in_creation"))
 
                 # On re-activation the primary's LVS is still alive and serving
                 # client I/O — snode's examine of its non-leader raid0 will race
@@ -958,13 +970,10 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
             if not r:
                 ret = False
 
-        snode = db_controller.get_storage_node_by_id(node_id)
         if ret:
-            snode.lvstore_status = "ready"
-            snode.write_to_db()
+            _set_lvstore_status(node_id, "ready")
         else:
-            snode.lvstore_status = "failed"
-            snode.write_to_db()
+            _set_lvstore_status(node_id, "failed")
             logger.error(f"Failed to restore lvstore on node {node_id}")
             raise ValueError("Failed to activate cluster")
         return True

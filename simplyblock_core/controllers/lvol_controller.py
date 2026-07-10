@@ -784,7 +784,10 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
                     # must still be registered. Defer this node's registration
                     # to the durable sync-op task and CONTINUE — the volume
                     # converges to full redundancy when the node returns.
-                    logger.error(
+                    # WARNING, not ERROR: the create still succeeds — an
+                    # ERROR line makes harnesses retry a committed create
+                    # (name-unique loop, 2026-07-10 soak).
+                    logger.warning(
                         "Registration of lvol %s on non-leader %s failed (%s); "
                         "deferring to sync-op task and continuing with the "
                         "remaining replicas", lvol.get_id(), sec.get_id()[:8], error)
@@ -2117,7 +2120,9 @@ def _resize_lvol_on_all_nodes(lvol, snode, size_in_mib, lock=True) -> None:
                 # tertiary must still be resized). Defer this node durably
                 # and continue; resize_lvol persists the new size after this
                 # returns, so the task converges to the right target.
-                logger.error(
+                # WARNING, not ERROR: the resize still succeeds (leader
+                # resized; this node converges via the sync-op task).
+                logger.warning(
                     f"Error resizing lvol on non-leader {sec.get_id()}; "
                     f"deferring to sync-op task and continuing")
                 tasks_controller.add_lvol_sync_op_task(

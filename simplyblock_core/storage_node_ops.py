@@ -1692,13 +1692,24 @@ def _reconnect_peers_to_restarted_node(snode: StorageNode):
             try:
                 # Fresh read per attempt to avoid overwriting concurrent changes
                 node = db_controller.get_storage_node_by_id(peer_id)
-                node.remote_devices = _connect_to_remote_devs(
+                remote_devices = _connect_to_remote_devs(
                     node, force_connect_restarting_nodes=True,
                     only_node_id=snode.get_id())
+                remote_jm_devices = None
                 if node.enable_ha_jm:
-                    node.remote_jm_devices = _connect_to_remote_jm_devs(
+                    remote_jm_devices = _connect_to_remote_jm_devs(
                         node, only_node_id=snode.get_id())
-                node.write_to_db()
+
+                # Atomic: a full-object write of the PEER's record here races
+                # the peer's own flows (its restart phase transitions, status
+                # writes). A stale copy written back resurrects a just-cleared
+                # restart phase — the stale-phase generator behind the
+                # 2026-07-10 lost-registration incidents.
+                def _apply(n, rd=remote_devices, rjd=remote_jm_devices):
+                    n.remote_devices = rd
+                    if rjd is not None:
+                        n.remote_jm_devices = rjd
+                db_controller.atomic_update(node, _apply)
                 return
             except (RPCException, RuntimeError) as e:
                 logger.warning(
@@ -3361,13 +3372,17 @@ def _restart_storage_node_impl(
                 try:
                     # Re-read node from DB to avoid overwriting concurrent changes
                     node = db_controller.get_storage_node_by_id(node.get_id())
-                    node.remote_devices = _connect_to_remote_devs(
+                    remote_devices = _connect_to_remote_devs(
                         node, reattach=True, force_connect_restarting_nodes=True,
                         only_node_id=snode.get_id())
                 except RuntimeError:
                     logger.error('Failed to connect to remote devices')
                     return False
-                node.write_to_db()
+                # Atomic: never full-object-write a PEER's record — a stale
+                # copy resurrects a just-cleared restart phase on that peer
+                # (2026-07-10 stale-phase generator).
+                db_controller.atomic_update(
+                    node, lambda n, rd=remote_devices: setattr(n, "remote_devices", rd))
 
         logger.info("Sending device status event")
         snode = db_controller.get_storage_node_by_id(snode.get_id())
@@ -3453,9 +3468,7 @@ def _restart_storage_node_impl(
             # bdev stack from this attempt (e.g. raid0_<vuid> created via
             # auto-examine) and the next retry fails on "Duplicate bdev
             # name". 10:58:11 in the AWS soak run hit exactly this gap.
-            snode = db_controller.get_storage_node_by_id(snode.get_id())
-            snode.lvstore_status = "failed"
-            snode.write_to_db()
+            _set_lvstore_status_atomic(snode.get_id(), "failed", db_controller)
             _abort_restart("recreate_all_lvstores returned False")
             return False
 
@@ -4861,6 +4874,21 @@ def _set_restart_phase(snode, lvs_name, phase, db_controller):
         drain_restart_queue(node_id, lvs_name)
 
 
+
+def _set_lvstore_status_atomic(node_id, value, db_controller):
+    """Set a node's lvstore_status via atomic_update. Full-object writes of
+    node records race concurrent flows (parallel activation/restart workers)
+    AND phase transitions on the same record — a stale copy written back
+    resurrects a just-cleared restart phase (stale-phase generator behind
+    the 2026-07-10 lost-registration incidents)."""
+    try:
+        node = db_controller.get_storage_node_by_id(node_id)
+    except KeyError:
+        return
+    db_controller.atomic_update(
+        node, lambda n, v=value: setattr(n, "lvstore_status", v))
+
+
 def get_restart_phase(node_id, lvs_name):
     """Get the current restart phase for a node/LVS. Used by other services.
 
@@ -4897,7 +4925,12 @@ def get_restart_phase(node_id, lvs_name):
                 return phase
         except KeyError:
             pass
-        logger.error(
+        # WARNING, not ERROR: this is a successful self-repair on an
+        # otherwise-successful operation. CLI/test harnesses treat "ERROR:"
+        # in a create's output as "the create did not commit" and retry —
+        # an ERROR here made the soak loop on 'LVol name must be unique'
+        # after a create that actually succeeded (2026-07-10 20:22 run).
+        logger.warning(
             "Stale restart phase %r for %s on %s: node is %s, no restart/"
             "activation/expansion owns this LVS — clearing it so operations "
             "proceed instead of queueing into a dead drain queue",
@@ -5131,6 +5164,59 @@ def find_leader_with_failover(all_nodes, lvs_name):
             return leader, non_leaders
     except Exception:
         pass
+
+    # Leaderless-but-healthy recovery: the guessed leader answers RPC fine yet
+    # reports leadership=False — and so did every other candidate in the scan.
+    # This is not "leader down": the LVS has NO leader at all (e.g. a forced
+    # restart proceeded after its take-leadership step failed — soak
+    # 2026-07-10 21:52, LVS_7: primary+sec+tert all leadership=False, all
+    # healthy). The forced-handoff below cannot repair it: the signal only
+    # asks a leader to DROP leadership, nobody holds it, and the JC never
+    # elects while the primary is alive — so every operation against the LVS
+    # live-locked in signal/verify/refuse cycles. Recovery: instruct the
+    # configured primary to TAKE leadership and verify it took.
+    if _is_node_rpc_responsive(leader, lvs_name):
+        # Last-moment sweep: abort the grant if anyone became leader meanwhile.
+        for node in all_nodes:
+            try:
+                if is_node_leader(node, lvs_name):
+                    leader_cache.put(cache_key, node.get_id())
+                    return node, [n for n in all_nodes
+                                  if n.get_id() != node.get_id()]
+            except Exception:
+                continue
+        # Prefer the configured primary of this LVS as the taker; fall back
+        # to the responsive guess.
+        taker = next((n for n in all_nodes if n.lvstore == lvs_name), leader)
+        if taker.get_id() != leader.get_id() and not (
+                _is_fabric_connected(taker)
+                and _is_node_rpc_responsive(taker, lvs_name)):
+            taker = leader
+        logger.warning(
+            "LVS %s has no leader on any node but all are healthy — "
+            "instructing %s to take leadership", lvs_name, taker.get_id())
+        try:
+            taker.rpc_client(timeout=5, retry=2).bdev_lvol_set_leader(
+                lvs_name, leader=True)
+        except Exception as e:
+            logger.error("take-leadership RPC on %s for %s failed: %s",
+                         taker.get_id(), lvs_name, e)
+        else:
+            for _ in range(5):
+                try:
+                    if is_node_leader(taker, lvs_name):
+                        logger.info("Leadership for %s restored on %s",
+                                    lvs_name, taker.get_id())
+                        leader_cache.put(cache_key, taker.get_id())
+                        return taker, [n for n in all_nodes
+                                       if n.get_id() != taker.get_id()]
+                except Exception:
+                    pass
+                time.sleep(1)
+            logger.error(
+                "take-leadership on %s for %s did not take effect — "
+                "refusing to route", taker.get_id(), lvs_name)
+        return None, []
 
     # Leader unconfirmed — check if fabric is healthy
     if not _is_fabric_connected(leader):
@@ -5599,8 +5685,7 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
         # tertiary after the partner dac5725c was force-shut-down). Mark it
         # "failed" and propagate so the restart is retried instead — once the
         # missing peer returns, the retry rebuilds the replica cleanly.
-        primary_node.lvstore_status = "failed"
-        primary_node.write_to_db()
+        _set_lvstore_status_atomic(primary_node.get_id(), "failed", db_controller)
         return False
 
     # Expansion/activate (activation_mode=True) skips the port-blocked
@@ -6108,9 +6193,7 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
     # Clear restart phase for this LVS
     _set_restart_phase(snode, primary_node.lvstore, "", db_controller)
 
-    primary_node = db_controller.get_storage_node_by_id(primary_node.get_id())
-    primary_node.lvstore_status = "ready"
-    primary_node.write_to_db()
+    _set_lvstore_status_atomic(primary_node.get_id(), "ready", db_controller)
 
     return True
 
@@ -6171,8 +6254,8 @@ def _restore_peer_lvstore_status_ready(node_id, db_controller):
         logger.warning(
             "Restoring lvstore_status of peer %s to 'ready' after failed "
             "replica-rebuild phase (was left 'in_creation')", node_id)
-        fresh.lvstore_status = "ready"
-        fresh.write_to_db()
+        db_controller.atomic_update(
+            fresh, lambda n: setattr(n, "lvstore_status", "ready"))
 
 
 def recreate_all_lvstores(snode, force=False):
@@ -7046,16 +7129,12 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
         ### finish
         for sec_node in sec_nodes:
             if sec_node.get_id() not in disconnected_peers:
-                sec_node = db_controller.get_storage_node_by_id(sec_node.get_id())
-                sec_node.lvstore_status = "ready"
-                sec_node.write_to_db()
+                _set_lvstore_status_atomic(sec_node.get_id(), "ready", db_controller)
 
     # Clear restart phase for this LVS
     _set_restart_phase(snode, lvs_name, "", db_controller)
 
-    lvs_node = db_controller.get_storage_node_by_id(lvs_node.get_id())
-    lvs_node.lvstore_status = "ready"
-    lvs_node.write_to_db()
+    _set_lvstore_status_atomic(lvs_node.get_id(), "ready", db_controller)
 
     # reset snapshot delete status (only for own primary LVS)
     if not is_takeover:
