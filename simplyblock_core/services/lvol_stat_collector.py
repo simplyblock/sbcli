@@ -219,78 +219,9 @@ while True:
 
         if not lvol_list:
             continue
-        all_node_bdev_names: dict[str, dict[str, dict]] = {}
-        all_node_lvols_nqns: dict[str, dict[str, str]] = {}
-        all_node_lvols_stats: dict[str, dict] = {}
 
         pools_lvols_stats: dict[str, list[LVolStatObject]] = {}
         for snode in db.get_storage_nodes_by_cluster_id(cluster.get_id()):
-
-            if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
-                try:
-                    rpc_client = snode.rpc_client(timeout=3, retry=2)
-                    if snode.get_id() in all_node_bdev_names and all_node_bdev_names[snode.get_id()]:
-                        node_bdev_names = all_node_bdev_names[snode.get_id()]
-                    else:
-                        node_bdevs = rpc_client.get_bdevs()
-                        if node_bdevs:
-                            node_bdev_names = {b['name']: b for b in node_bdevs}
-                            all_node_bdev_names[snode.get_id()] = node_bdev_names
-
-                    if snode.get_id() in all_node_lvols_nqns and all_node_lvols_nqns[snode.get_id()]:
-                        node_lvols_nqns = all_node_lvols_nqns[snode.get_id()]
-                    else:
-                        ret = rpc_client.subsystem_list()
-                        if ret:
-                            node_lvols_nqns = {}
-                            for sub in ret:
-                                node_lvols_nqns[sub['nqn']] = sub
-                            all_node_lvols_nqns[snode.get_id()] = node_lvols_nqns
-
-                    if snode.get_id() in all_node_lvols_stats and all_node_lvols_stats[snode.get_id()]:
-                        node_lvols_stats = all_node_lvols_stats[snode.get_id()]
-                    else:
-                        ret = rpc_client.get_lvol_stats()
-                        if ret:
-                            node_lvols_stats = {}
-                            for st in ret['bdevs']:
-                                node_lvols_stats[st['name']] = st
-                            all_node_lvols_stats[snode.get_id()] = node_lvols_stats
-                except Exception as e:
-                    logger.error(e)
-
-            for peer_id in [snode.secondary_node_id, snode.tertiary_node_id]:
-                if not peer_id:
-                    continue
-                try:
-                    sec_node = db.get_storage_node_by_id(peer_id)
-                except KeyError:
-                    continue
-                if sec_node and sec_node.status==StorageNode.STATUS_ONLINE:
-                    try:
-                        sec_rpc_client = sec_node.rpc_client(timeout=3, retry=2)
-                        if sec_node.get_id() not in all_node_bdev_names or not all_node_bdev_names[sec_node.get_id()]:
-                                ret = sec_rpc_client.get_bdevs()
-                                if ret:
-                                    node_bdev_names = {b['name']: b for b in ret}
-                                    all_node_bdev_names[sec_node.get_id()] = node_bdev_names
-                        if sec_node.get_id() not in all_node_lvols_nqns or not all_node_lvols_nqns[sec_node.get_id()]:
-                            ret = sec_rpc_client.subsystem_list()
-                            if ret:
-                                node_lvols_nqns = {}
-                                for sub in ret:
-                                    node_lvols_nqns[sub['nqn']] = sub
-                                all_node_lvols_nqns[sec_node.get_id()] = node_lvols_nqns
-
-                        if sec_node.get_id() not in all_node_lvols_stats or not all_node_lvols_stats[sec_node.get_id()]:
-                            ret = sec_rpc_client.get_lvol_stats()
-                            if ret:
-                                sec_node_lvols_stats = {}
-                                for st in ret['bdevs']:
-                                    sec_node_lvols_stats[st['name']] = st
-                                all_node_lvols_stats[sec_node.get_id()] = sec_node_lvols_stats
-                    except Exception as e:
-                        logger.error(e)
 
             for lvol in lvol_list:
                 if lvol.status in [LVol.STATUS_IN_CREATION, LVol.STATUS_IN_DELETION]:
@@ -300,12 +231,15 @@ while True:
 
                 capacity_dict = {}
                 stats = []
-                logger.info("Getting lVol stats: %s from node: %s", lvol.uuid, snode.get_id())
-                if snode.get_id() in all_node_lvols_stats and lvol.lvol_uuid in all_node_lvols_stats[snode.get_id()]:
-                    stats.append(all_node_lvols_stats[snode.get_id()][lvol.lvol_uuid])
-
-                if snode.get_id() in all_node_bdev_names and lvol.lvol_uuid in all_node_bdev_names[snode.get_id()]:
-                    capacity_dict = all_node_bdev_names[snode.get_id()][lvol.lvol_uuid]
+                if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
+                    logger.info("Getting lVol stats: %s from node: %s", lvol.uuid, snode.get_id())
+                    rpc_client = snode.rpc_client(timeout=3, retry=2)
+                    ret = rpc_client.get_lvol_stats(lvol.lvol_uuid)
+                    if ret:
+                        stats.append(ret["bdevs"][0])
+                    ret = rpc_client.get_bdevs(lvol.lvol_uuid)
+                    if ret:
+                        capacity_dict = ret[0]
 
                 if lvol.ha_type == "ha":
                     for sec_id in lvol.nodes[1:]:
@@ -315,12 +249,14 @@ while True:
                             continue
                         if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
                             logger.info("Getting lVol stats: %s from node: %s", lvol.uuid, sec_node.get_id())
-                            if sec_node.get_id() in all_node_lvols_stats and lvol.lvol_uuid in all_node_lvols_stats[sec_node.get_id()]:
-                                stats.append(all_node_lvols_stats[sec_node.get_id()][lvol.lvol_uuid])
-
-                        if not capacity_dict and sec_node.get_id() in all_node_bdev_names \
-                                and lvol.lvol_uuid in all_node_bdev_names[sec_node.get_id()]:
-                            capacity_dict = all_node_bdev_names[sec_node.get_id()][lvol.lvol_uuid]
+                            sec_rpc_client = sec_node.rpc_client(timeout=3, retry=2)
+                            ret = sec_rpc_client.get_lvol_stats(lvol.lvol_uuid)
+                            if ret:
+                                stats.append(ret["bdevs"][0])
+                            if not capacity_dict:
+                                ret = sec_rpc_client.get_bdevs(lvol.lvol_uuid)
+                                if ret:
+                                    capacity_dict = ret[0]
 
                 record = add_lvol_stats(cluster, lvol, stats, capacity_dict)
                 if record:

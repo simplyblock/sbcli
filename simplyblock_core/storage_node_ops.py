@@ -316,8 +316,7 @@ def _collect_attached_ips(ctrlr_list):
     return attached
 
 
-def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names: Optional[List[str]], reattach: bool,
-                   attach_timeout: Optional[float] = None):
+def connect_device(name: str, device: NVMeDevice, node: StorageNode, attach_timeout: Optional[float] = None):
     """Connect snode to device
 
     This only performs the actual operation between both involved SPDK instances,
@@ -336,6 +335,7 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names:
 
     expected_ips = [ip.strip() for ip in (device.nvmf_ip or "").split(",") if ip.strip()]
     is_multipath = bool(device.nvmf_multipath) and len(expected_ips) >= 2
+    rpc_client = node.rpc_client()
 
     # Fast path: bdev already present. Only safe for single-path devices — for
     # multipath the bdev can survive while one of its paths has been destructed
@@ -352,21 +352,11 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names:
     # O(cluster size): remote alceml/JM controllers to every peer), so hot
     # paths must not dump the whole table to check one name.
     if not is_multipath:
-        if bdev_names is None:
-            expected = f"{name}n1"
-            try:
-                if node.rpc_client().get_bdevs(expected):
-                    logger.debug(f"Already connected, bdev found by filtered probe: {expected}")
-                    return expected
-            except Exception:
-                pass  # treat probe failure as "not connected"; the attach path follows
-        else:
-            for bdev in bdev_names:
-                if bdev.startswith(name):
-                    logger.debug(f"Already connected, bdev found in bdev_get_bdevs: {bdev}")
-                    return bdev
+        bdev_name = f"{name}n1"
+        if rpc_client.get_bdevs(bdev_name):
+            logger.debug(f"Already connected, bdev found in bdev_get_bdevs: {bdev_name}")
+            return bdev_name
 
-    rpc_client = node.rpc_client()
     if attach_timeout is None or attach_timeout > _ATTACH_CONTROLLER_MAX_TIMEOUT_SEC:
         attach_timeout = _ATTACH_CONTROLLER_MAX_TIMEOUT_SEC
     attach_rpc_client = node.rpc_client(timeout=attach_timeout, retry=0)
@@ -438,7 +428,7 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names:
     final = rpc_client.bdev_nvme_controller_list(name)
     if not final:
         # Controller is fully gone — do a full multi-path attach.
-        bdev_name = None
+        bdev_name = ""
         for ip in (expected_ips or [device.nvmf_ip]):
             try:
                 resp = attach_rpc_client.bdev_nvme_attach_controller(
@@ -510,12 +500,7 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names:
                     name, still_missing, len(now_attached), len(expected_ips))
 
     device.release_device_connection()
-    # Return the bdev name if it exists; otherwise hint with the canonical
-    # ``<name>n1`` so callers (e.g. _connect_to_remote_jm_devs) can poll for
-    # it via get_bdevs.
-    for bdev in bdev_names:
-        if bdev.startswith(name):
-            return bdev
+
     if rpc_client.get_bdevs(bdev_name):
         return bdev_name
     return None
@@ -711,6 +696,7 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
 
     pt_name = ""
     subsystem_nqn = ""
+    pt_spdk_uuid = ""
     ip_list = []
     if snode.enable_ha_jm:
         # add pass through
@@ -720,6 +706,7 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
             logger.error(f"Failed to create pt noexcl bdev: {pt_name}")
             return False
 
+        pt_spdk_uuid = rpc_client.get_bdevs(pt_name)[0]["aliases"][0]
         subsystem_nqn = snode.subsystem + ":dev:" + jm_bdev
         logger.info("creating subsystem %s", subsystem_nqn)
         ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', jm_bdev)
@@ -761,6 +748,7 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
         'nvmf_port': snode.nvmf_port,
         'nvmf_multipath': multipath,
         'node_id': snode.get_id(),
+        'pt_bdev_uuid': pt_spdk_uuid,
     })
 
 
@@ -801,6 +789,7 @@ def _create_jm_stack_on_device(rpc_client, nvme, snode, after_restart):
 
     pt_name = ""
     subsystem_nqn = ""
+    pt_spdk_uuid = ""
     ip_list = []
     if snode.enable_ha_jm:
         # add pass through
@@ -809,7 +798,7 @@ def _create_jm_stack_on_device(rpc_client, nvme, snode, after_restart):
         if not ret:
             logger.error(f"Failed to create pt noexcl bdev: {pt_name}")
             return False
-
+        pt_spdk_uuid = rpc_client.get_bdevs(pt_name)[0]["aliases"][0]
         subsystem_nqn = snode.subsystem + ":dev:" + jm_bdev
         logger.info("creating subsystem %s", subsystem_nqn)
         ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', jm_bdev)
@@ -850,6 +839,7 @@ def _create_jm_stack_on_device(rpc_client, nvme, snode, after_restart):
         'nvmf_port': snode.nvmf_port,
         'nvmf_multipath': multipath,
         'node_id': snode.get_id(),
+        'pt_bdev_uuid': pt_spdk_uuid,
     })
 
 
@@ -888,6 +878,7 @@ def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
         logger.error(f"Failed to create pt noexcl bdev: {pt_name}")
         return None
 
+    pt_spdk_uuid = rpc_client.get_bdevs(pt_name)[0]["aliases"][0]
     subsystem_nqn = snode.subsystem + ":dev:" + alceml_id
     logger.info("creating subsystem %s", subsystem_nqn)
     ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', alceml_id)
@@ -919,6 +910,7 @@ def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
     nvme.nvmf_port = snode.nvmf_port
     nvme.io_error = False
     nvme.nvmf_multipath = multipath
+    nvme.pt_spdk_uuid = pt_spdk_uuid
     # if nvme.status != NVMeDevice.STATUS_NEW:
     #     nvme.status = NVMeDevice.STATUS_ONLINE
     return nvme
@@ -1207,7 +1199,8 @@ def _prepare_cluster_devices_on_restart(snode, clear_data=False):
                 logger.error(f"Failed to create pt noexcl bdev: {pt_name}")
                 return False
 
-            cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+            pt_spdk_uuid = rpc_client.get_bdevs(pt_name)[0]["aliases"][0]
+            jm_device.pt_bdev_uuid = pt_spdk_uuid
             subsystem_nqn = snode.subsystem + ":dev:" + jm_bdev
             logger.info("creating subsystem %s", subsystem_nqn)
             ret = rpc_client.subsystem_create(subsystem_nqn, 'sbcli-cn', jm_bdev)
@@ -1270,7 +1263,7 @@ def _connect_to_remote_devs(
             devices_to_connect.append(dev)
             t = threading.Thread(
                 target=connect_device,
-                args=(f"remote_{dev.alceml_bdev}", dev, this_node, None, reattach,))
+                args=(f"remote_{dev.alceml_bdev}", dev, this_node,))
             connect_threads.append(t)
             t.start()
 
@@ -1278,11 +1271,10 @@ def _connect_to_remote_devs(
         t.join()
 
     def _find_remote_bdev(dev):
-        expected = f"remote_{dev.alceml_bdev}n1"
-        try:
-            return expected if rpc_client.get_bdevs(expected) else ""
-        except Exception:
-            return ""
+        ret = rpc_client.get_bdevs(dev.pt_bdev_uuid)
+        if ret:
+            return ret[0]["name"]
+        return ""
 
     remote_device_ids = set()
     for dev in devices_to_connect:
@@ -1340,17 +1332,10 @@ def _connect_to_remote_devs(
     return remote_devices
 
 
-def sync_remote_devices_from_spdk(this_node: StorageNode, node_bdev_names=None):
+def sync_remote_devices_from_spdk(this_node: StorageNode):
     """Persist remote data bdevs that already exist in SPDK for this node."""
     db_controller = DBController()
-    if node_bdev_names is None:
-        rpc_client = this_node.rpc_client(timeout=5, retry=1)
-        node_bdevs = rpc_client.get_bdevs()
-        node_bdev_names = [b["name"] for b in node_bdevs] if node_bdevs else []
-    elif isinstance(node_bdev_names, dict):
-        node_bdev_names = list(node_bdev_names.keys())
-
-    node_bdev_names = set(node_bdev_names)
+    rpc_client = this_node.rpc_client(timeout=5, retry=1)
     fresh_node = db_controller.get_storage_node_by_id(this_node.get_id())
     remote_by_id = {dev.get_id(): dev for dev in fresh_node.remote_devices}
     changed = False
@@ -1368,7 +1353,7 @@ def sync_remote_devices_from_spdk(this_node: StorageNode, node_bdev_names=None):
             ]:
                 continue
             expected_bdev = f"remote_{dev.alceml_bdev}n1"
-            if expected_bdev not in node_bdev_names:
+            if not rpc_client.get_bdevs(expected_bdev):
                 continue
             remote_dev = remote_by_id.get(dev.get_id())
             if remote_dev:
@@ -1394,7 +1379,7 @@ def sync_remote_devices_from_spdk(this_node: StorageNode, node_bdev_names=None):
     return changed
 
 
-def reconnect_dropped_remote_devs(this_node: StorageNode, node_bdev_names=None):
+def reconnect_dropped_remote_devs(this_node: StorageNode):
     """Topology-driven repair for remote data-device connections.
 
     ``node.remote_devices`` is rebuilt as "whatever was reachable at that
@@ -1426,11 +1411,6 @@ def reconnect_dropped_remote_devs(this_node: StorageNode, node_bdev_names=None):
     connected.
     """
     db_controller = DBController()
-    if node_bdev_names is None:
-        node_bdevs = this_node.rpc_client(timeout=5, retry=1).get_bdevs()
-        node_bdev_names = [b["name"] for b in node_bdevs] if node_bdevs else []
-    elif isinstance(node_bdev_names, dict):
-        node_bdev_names = list(node_bdev_names.keys())
 
     fresh_node = db_controller.get_storage_node_by_id(this_node.get_id())
     known_ids = {dev.get_id() for dev in fresh_node.remote_devices}
@@ -1457,8 +1437,7 @@ def reconnect_dropped_remote_devs(this_node: StorageNode, node_bdev_names=None):
                 dev.get_id(), peer.get_id())
             try:
                 remote_bdev = connect_device(
-                    f"remote_{dev.alceml_bdev}", dev, fresh_node,
-                    bdev_names=node_bdev_names, reattach=False)
+                    f"remote_{dev.alceml_bdev}", dev, fresh_node)
             except Exception as e:
                 logger.error(
                     "Failed to reconnect dropped remote device %s on peer %s: %s",
@@ -1594,11 +1573,10 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=None):
         remote_device.nvmf_multipath = org_dev.nvmf_multipath
         expected_bdev = f"remote_{org_dev.jm_bdev}n1"
         try:
-            remote_device.remote_bdev = connect_device(
+            remote_device.remote_bdev = str(connect_device(
                 f"remote_{org_dev.jm_bdev}", org_dev, this_node,
-                bdev_names=None, reattach=True,
                 attach_timeout=1,
-            )
+            ))
         except RuntimeError:
             logger.error(f'Failed to connect to {org_dev.get_id()}')
         for _ in range(10):
@@ -4513,89 +4491,6 @@ def get_ctrl_secret(node_id):
         return False
 
     return node.ctrl_secret.get_secret_value()
-
-
-def health_check(node_id):
-    db_controller = DBController()
-    try:
-        snode = db_controller.get_storage_node_by_id(node_id)
-    except KeyError:
-        logger.error("node not found")
-        return False
-
-    try:
-
-        res = utils.ping_host(snode.mgmt_ip)
-        if res:
-            logger.info(f"Ping host: {snode.mgmt_ip}... OK")
-        else:
-            logger.error(f"Ping host: {snode.mgmt_ip}... Failed")
-
-        # node_docker = docker.DockerClient(base_url=f"tcp://{snode.mgmt_ip}:2375", version="auto")
-        # containers_list = node_docker.containers.list(all=True)
-        # for cont in containers_list:
-        #     name = cont.attrs['Name']
-        #     state = cont.attrs['State']
-        #
-        #     if name in ['/spdk', '/spdk_proxy', '/SNodeAPI'] or name.startswith("/app_"):
-        #         logger.debug(state)
-        #         since = ""
-        #         try:
-        #             start = datetime.datetime.fromisoformat(state['StartedAt'].split('.')[0])
-        #             since = str(datetime.datetime.now() - start).split('.')[0]
-        #         except Exception:
-        #             pass
-        #         clean_name = name.split(".")[0].replace("/", "")
-        #         logger.info(f"Container: {clean_name}, Status: {state['Status']}, Since: {since}")
-
-    except Exception as e:
-        logger.error(f"Failed to connect to node's docker: {e}")
-
-    try:
-        logger.info("Connecting to node's SPDK")
-        rpc_client = snode.rpc_client(timeout=3, retry=1)
-
-        ret = rpc_client.get_version()
-        logger.info(f"SPDK version: {ret['version']}")
-
-        ret = rpc_client.get_bdevs()
-        logger.info(f"SPDK BDevs count: {len(ret)}")
-        # for bdev in ret:
-        #     name = bdev['name']
-        #     product_name = bdev['product_name']
-        #     driver = ""
-        #     for d in bdev['driver_specific']:
-        #         driver = d
-        #         break
-        #     # logger.info(f"name: {name}, product_name: {product_name}, driver: {driver}")
-
-        logger.info("getting device bdevs")
-        # for dev in snode.nvme_devices:
-        #     nvme_bdev = rpc_client.get_bdevs(dev.nvme_bdev)
-        #     if snode.enable_test_device:
-        #         testing_bdev = rpc_client.get_bdevs(dev.testing_bdev)
-        #     alceml_bdev = rpc_client.get_bdevs(dev.alceml_bdev)
-        #     pt_bdev = rpc_client.get_bdevs(dev.pt_bdev)
-
-        #     subsystem = rpc_client.subsystem_list(dev.nvmf_nqn)
-
-        # dev.testing_bdev = test_name
-        # dev.alceml_bdev = alceml_name
-        # dev.pt_bdev = pt_name
-        # # nvme.nvmf_nqn = subsystem_nqn
-        # # nvme.nvmf_ip = IP
-        # # nvme.nvmf_port = 4420
-
-    except Exception as e:
-        logger.error(f"Failed to connect to node's SPDK: {e}")
-
-    try:
-        logger.info("Connecting to node's API")
-        node_info, _ = snode.client().info()
-        logger.info(f"Node info: {node_info['hostname']}")
-
-    except Exception as e:
-        logger.error(f"Failed to connect to node's SPDK: {e}")
 
 
 def get_info(node_id):
