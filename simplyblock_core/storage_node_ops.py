@@ -1271,10 +1271,30 @@ def _connect_to_remote_devs(
         t.join()
 
     def _find_remote_bdev(dev):
-        ret = rpc_client.get_bdevs(dev.pt_bdev_uuid)
-        if ret:
-            return ret[0]["name"]
-        return ""
+        # UUID lookup requires a populated pt_bdev_uuid. An empty string makes
+        # get_bdevs return the WHOLE bdev table and ret[0] is whatever bdev
+        # happens to be first (a raw local partition like nvme_1fn1) — that
+        # name then gets persisted as remote_bdev for every device, poisoning
+        # every cluster map and failing raid-on-distrib creation cluster-wide
+        # (2026-07-10 activation regression, all deploys after SFAM-2774).
+        # Devices without the new field fall back to the name-based probe.
+        if dev.pt_bdev_uuid:
+            ret = rpc_client.get_bdevs(dev.pt_bdev_uuid)
+            if ret:
+                name = ret[0]["name"]
+                # A remote attach must resolve to the attached nvme bdev,
+                # never to a local base bdev that shares the table.
+                if name.startswith("remote_"):
+                    return name
+                logger.warning(
+                    "pt_bdev_uuid %s of device %s resolved to non-remote bdev "
+                    "%s on node %s; falling back to name probe",
+                    dev.pt_bdev_uuid, dev.get_id(), name, this_node.get_id())
+        expected = f"remote_{dev.alceml_bdev}n1"
+        try:
+            return expected if rpc_client.get_bdevs(expected) else ""
+        except Exception:
+            return ""
 
     remote_device_ids = set()
     for dev in devices_to_connect:
