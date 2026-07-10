@@ -3886,7 +3886,7 @@ def list_storage_nodes(cluster_id=None):
             "Status": node.status,
             # Health is only meaningful for ONLINE/DOWN nodes; otherwise N/A.
             "Health": node.health_check if node.status in (
-                StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN) else "-",
+                StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN, StorageNode.STATUS_SUSPENDED) else "-",
             "Up time": utils.strfdelta(uptime) if (uptime := node.uptime()) is not None else "",
             "CPU": f"{len(utils.hexa_to_cpu_list(node.spdk_cpu_mask))}",
             "MEM": utils.humanbytes(node.spdk_mem),
@@ -3934,7 +3934,7 @@ def list_storage_devices(node_id):
             "IO Err": device.io_error,
             # Device health is only meaningful when its node is ONLINE/DOWN.
             "Health": device.health_check if snode.status in (
-                StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN) else "-"
+                StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN, StorageNode.STATUS_SUSPENDED) else "-"
         })
 
     for bdev in snode.lvstore_stack:
@@ -3963,7 +3963,7 @@ def list_storage_devices(node_id):
             "Status": snode.jm_device.status,
             "IO Err": snode.jm_device.io_error,
             "Health": snode.jm_device.health_check if snode.status in (
-                StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN) else "-"
+                StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN, StorageNode.STATUS_SUSPENDED) else "-"
         })
 
     for remote_device in snode.remote_devices:
