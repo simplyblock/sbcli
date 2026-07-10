@@ -1110,6 +1110,18 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                 except Exception as e:
                     logger.error("Pass 4 ANA worker failed: %s", e)
 
+    # The cluster is now active and about to serve IO. During node-add the
+    # storage MCP was created wide (= parallel-add count) so the first-time
+    # CPU-topology reboots happened in one parallel wave rather than a
+    # serialized queue. Now narrow it to the cluster's fault tolerance so any
+    # future MachineConfig/KubeletConfig rollout never reboots more storage
+    # nodes at once than the data plane can absorb. Done here (success path,
+    # before flipping to ACTIVE) so a failed/aborted activation leaves the
+    # cluster non-serving with the wide value — harmless, since no data is at
+    # risk until it goes ACTIVE. (Use max_fault_tolerance - 1 instead if you
+    # want headroom for an unplanned failure concurrent with a rollout.)
+    utils.set_storage_mcp_max_unavailable(cl_id, cluster.max_fault_tolerance)
+
     set_cluster_status(cl_id, Cluster.STATUS_ACTIVE)
     logger.info("Cluster activated successfully")
 
