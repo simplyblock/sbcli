@@ -2944,6 +2944,38 @@ def restart_storage_node(
         logger.warning(f"Could not read pre-call status for {node_id}; "
                        f"skipping orphan-RESTARTING cleanup as a precaution")
 
+    # Transferable ownership: ensure a persistent NODE_RESTART task exists,
+    # claim its lease for this host, and heartbeat it while this process
+    # drives the restart. If this process dies mid-restart (pod evicted while
+    # its host drains, CLI killed), the lease goes stale within
+    # TASK_LEASE_TTL_SEC and a live tasks-runner claims the task and resumes
+    # the restart — instead of the node staying orphaned in RESTARTING and
+    # deadlocking node drains (2026-07-04 MCO rollout incident). On success
+    # the ONLINE transition auto-cancels the task. Pre-status RESTARTING /
+    # IN_SHUTDOWN means another caller owns the transition — don't touch
+    # its task, and don't add our own.
+    _hb_stop = threading.Event()
+    if pre_status not in (StorageNode.STATUS_RESTARTING, StorageNode.STATUS_IN_SHUTDOWN, None):
+        try:
+            from simplyblock_core.controllers import tasks_controller
+            _snode_pre = db_ctrl.get_storage_node_by_id(node_id)
+            _task_id = tasks_controller.ensure_node_restart_task(_snode_pre)
+            _hb_task = db_ctrl.get_task_by_id(_task_id) if _task_id else None
+            if _hb_task and tasks_controller.claim_task(_hb_task):
+                def _lease_heartbeat():
+                    while not _hb_stop.wait(constants.TASK_LEASE_HEARTBEAT_SEC):
+                        try:
+                            if not tasks_controller.refresh_task_lease(_hb_task):
+                                # Lost the lease (another host took over) —
+                                # stop heartbeating; the node-status lock
+                                # still serializes the actual restart work.
+                                return
+                        except Exception as hb_e:
+                            logger.debug(f"Restart lease heartbeat failed for {node_id}: {hb_e}")
+                threading.Thread(target=_lease_heartbeat, daemon=True).start()
+        except Exception as e:
+            logger.warning(f"Could not set up transferable restart ownership for {node_id}: {e}")
+
     result = False
     try:
         result = _restart_storage_node_impl(
@@ -2960,6 +2992,7 @@ def restart_storage_node(
         # is also down) undiagnosable from the logs.
         logger.error("restart_storage_node raised unexpectedly", exc_info=True)
     finally:
+        _hb_stop.set()
         # Trust the DB. If the impl raised after the ONLINE write was
         # already committed, the node IS factually online — peers see
         # ONLINE, IO is being served — and the only thing that "failed"
@@ -3776,6 +3809,17 @@ def _restart_storage_node_impl(
         except Exception as ana_e:
             logger.error("ANA failback during restart of %s failed: %s", snode.get_id(), ana_e)
 
+        # Start data migration
+        online_devices_list = []
+        for dev in snode.nvme_devices:
+            if dev.status in [NVMeDevice.STATUS_ONLINE,
+                              NVMeDevice.STATUS_CANNOT_ALLOCATE,
+                              NVMeDevice.STATUS_FAILED_AND_MIGRATED]:
+                online_devices_list.append(dev.get_id())
+        if online_devices_list:
+            logger.info(f"Starting migration task for node {snode.get_id()}")
+            tasks_controller.add_device_mig_task_for_node(snode.get_id())
+
         logger.info("Setting node status to Online")
         if not set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE, caused_by="restart"):
             # See twin call site above (single-leader restart path) for
@@ -3798,16 +3842,6 @@ def _restart_storage_node_impl(
         lvol_list = db_controller.get_lvols_by_node_id(snode.get_id())
         logger.info(f"Found {len(lvol_list)} lvols")
 
-        # Phase 10: start data migration, set node online
-        online_devices_list = []
-        for dev in snode.nvme_devices:
-            if dev.status in [NVMeDevice.STATUS_ONLINE,
-                              NVMeDevice.STATUS_CANNOT_ALLOCATE,
-                              NVMeDevice.STATUS_FAILED_AND_MIGRATED]:
-                online_devices_list.append(dev.get_id())
-        if online_devices_list:
-            logger.info(f"Starting migration task for node {snode.get_id()}")
-            tasks_controller.add_device_mig_task_for_node(snode.get_id())
         return True
 
 
