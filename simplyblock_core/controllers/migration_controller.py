@@ -54,7 +54,7 @@ from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.nvme_connect import NvmeConnectEntry
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.utils import convert_size
+from simplyblock_core.utils import convert_size, lvol_tgt_bdev_name
 
 # Note: JobSchedule is not imported directly here; task creation is delegated to
 # tasks_controller.add_lvol_mig_task() which handles event logging consistently.
@@ -216,8 +216,7 @@ def _cleanup_created(migration):
         return
 
     nqn = lvol.nqn
-    _lvol_base = lvol.lvol_bdev[:-len(_MIGRATION_BDEV_SUFFIX)] if lvol.lvol_bdev.endswith(_MIGRATION_BDEV_SUFFIX) else lvol.lvol_bdev
-    bdev_short = _lvol_base + _MIGRATION_BDEV_SUFFIX
+    bdev_short = lvol_tgt_bdev_name(lvol.lvol_bdev)
     composite = f"{tgt_node.lvstore}/{bdev_short}"
 
     # Compute overlap: nodes shared between SRC and TGT paths.
@@ -499,7 +498,7 @@ def get_snaps_safe_to_delete_on_source(migration):
         if lvol.uuid == migration.lvol_id:
             continue
         if lvol.cloned_from_snap and lvol.cloned_from_snap in candidates:
-            _protect_snap_and_ancestors(lvol.cloned_from_snap, candidates)
+            candidates -= _collect_snap_ancestry(lvol.cloned_from_snap)
 
     return candidates
 
@@ -551,16 +550,9 @@ def _collect_snap_ancestry(snap_uuid) -> set:
     return result
 
 
-def _protect_snap_and_ancestors(snap_uuid, candidate_set):
-    """Remove *snap_uuid* and all its ancestors from *candidate_set*."""
-    candidate_set -= _collect_snap_ancestry(snap_uuid)
-
-
 # ---------------------------------------------------------------------------
 # Post-migration DB updates
 # ---------------------------------------------------------------------------
-
-_MIGRATION_BDEV_SUFFIX = constants.LVOL_MIG_BDEV_SUFFIX
 
 
 def _build_connect_entries(node, port, lvol, nqn, ctrl_loss_tmo, cluster, host_entry, host_nqn):
@@ -670,8 +662,7 @@ def create_migration(lvol_id, target_node_id,
     cluster = db.get_cluster_by_id(tgt_node.cluster_id)
     tgt_rpc = tgt_node.rpc_client()
     nqn = lvol.nqn
-    _lvol_base = lvol.lvol_bdev[:-len(_MIGRATION_BDEV_SUFFIX)] if lvol.lvol_bdev.endswith(_MIGRATION_BDEV_SUFFIX) else lvol.lvol_bdev
-    bdev_short = _lvol_base + _MIGRATION_BDEV_SUFFIX
+    bdev_short = lvol_tgt_bdev_name(lvol.lvol_bdev)
     composite = f"{tgt_node.lvstore}/{bdev_short}"
     size_in_mib = convert_size(lvol.size, 'MiB')
     tgt_port = tgt_node.get_lvol_subsys_port(tgt_node.lvstore)

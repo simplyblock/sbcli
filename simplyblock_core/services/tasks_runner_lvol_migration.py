@@ -349,13 +349,10 @@ def _snap_tgt_short_name(snap):
 def _lvol_tgt_bdev_name(lvol_bdev: str) -> str:
     """Return the migration-target bdev short name for a writable lvol.
 
-    Same strip-then-add logic as _snap_tgt_short_name: prevents 'LVOL_Xmm'
-    accumulation on back-to-back migrations where lvol_bdev already ends in
-    the suffix from the previous run.
+    Thin wrapper around the shared utils.lvol_tgt_bdev_name so existing
+    call-sites in this module don't need to change.
     """
-    if lvol_bdev.endswith(_MIGRATION_BDEV_SUFFIX):
-        lvol_bdev = lvol_bdev[:-len(_MIGRATION_BDEV_SUFFIX)]
-    return lvol_bdev + _MIGRATION_BDEV_SUFFIX
+    return utils.lvol_tgt_bdev_name(lvol_bdev)
 
 
 def _snap_composite(lvstore, snap):
