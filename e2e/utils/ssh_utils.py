@@ -843,15 +843,87 @@ class SshUtils:
                 self.exec_command(node, command)
         except Exception as e:
             self.logger.info(e)
-        
+
         time.sleep(3)
 
         self.make_directory(node=node, dir_name=mount_path)
-        
+
         time.sleep(3)
 
         command = f"sudo mount {device} {mount_path}"
         self.exec_command(node, command)
+
+    def is_mountpoint(self, node, path):
+        """Check if *path* is an active mount point on *node*.
+
+        Returns True only when the path is a mount point backed by a
+        real block device (not just a directory on the root filesystem).
+        """
+        out, _ = self.exec_command(
+            node,
+            f"mountpoint -q {path} && echo MOUNTED || echo NOT_MOUNTED",
+            max_retries=2,
+        )
+        return "MOUNTED" in (out or "")
+
+    def is_block_device(self, node, device):
+        """Return True if *device* exists as a block device on *node*."""
+        out, _ = self.exec_command(
+            node,
+            f"test -b {device} && echo EXISTS || echo MISSING",
+            max_retries=1,
+        )
+        return "EXISTS" in (out or "")
+
+    def wait_for_block_device(self, node, device, timeout=30, interval=3):
+        """Wait up to *timeout* seconds for *device* to appear as a block device.
+
+        Useful when an NVMe namespace was just added and the kernel
+        needs time to register the block device, especially when the
+        primary multipath controller is reconnecting and the device
+        needs to appear through an alternate live path.
+
+        Returns True if the device appeared, False if timed out.
+        """
+        elapsed = 0
+        while elapsed < timeout:
+            if self.is_block_device(node, device):
+                return True
+            time.sleep(interval)
+            elapsed += interval
+        return False
+
+    def rescan_live_nvme_controllers(self, node):
+        """Run ns-rescan only on NVMe controllers in 'live' state.
+
+        Controllers in 'connecting' or 'resetting' state are skipped
+        since they cannot discover new namespaces reliably.
+
+        Returns the list of controllers that were rescanned.
+        """
+        # Get controller states from sysfs
+        cmd = (
+            "for c in /sys/class/nvme/nvme*; do "
+            "  name=$(basename $c); "
+            "  state=$(cat $c/state 2>/dev/null || echo unknown); "
+            "  echo \"$name $state\"; "
+            "done"
+        )
+        out, _ = self.exec_command(node, cmd, supress_logs=True)
+        rescanned = []
+        for line in (out or "").strip().splitlines():
+            parts = line.strip().split()
+            if len(parts) < 2:
+                continue
+            ctrl_name, state = parts[0], parts[1]
+            if state == "live":
+                self.exec_command(
+                    node,
+                    f"sudo nvme ns-rescan /dev/{ctrl_name}",
+                    supress_logs=True,
+                )
+                rescanned.append(ctrl_name)
+        return rescanned
 
     def unmount_path(self, node, device):
         """Unmount device to given path on given node
@@ -1643,10 +1715,23 @@ class SshUtils:
         reduced so that ``new_size * numjobs`` fits within 80 % of the
         available space (leaving headroom for FS metadata).
 
+        Raises ``RuntimeError`` if *mount_point* is not an active mount —
+        this prevents FIO from writing to the root filesystem when the
+        NVMe block device has disappeared during a failover.
+
         Returns:
             The (possibly reduced) FIO ``--size`` value as a string, e.g.
             ``"5G"`` or ``"2G"``.
         """
+        # Guard: ensure the path is a real mount, not a bare directory on
+        # the root FS.  Without this check, ``df`` returns root-FS stats
+        # and FIO fills the root partition instead of the NVMe volume.
+        if not self.is_mountpoint(node, mount_point):
+            raise RuntimeError(
+                f"[space_check] {node}:{mount_point} is NOT a mount point — "
+                f"block device may have disappeared; refusing to start FIO"
+            )
+
         size_gb = self._parse_size_to_gb(fio_size_str)
         needed_gb = size_gb * numjobs
 

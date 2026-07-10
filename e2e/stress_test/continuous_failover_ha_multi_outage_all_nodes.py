@@ -493,6 +493,19 @@ class RandomMultiClientMultiFailoverAllNodesTest(RandomMultiClientMultiFailoverT
         self.ssh_obj.format_disk(node=client_node, device=lvol_device, fs_type=fs_type)
         mount_point = f"{self.mount_path}/{lvol_name}"
         self.ssh_obj.mount_path(node=client_node, device=lvol_device, mount_path=mount_point)
+
+        # Verify mount succeeded — if the block device disappeared
+        # (e.g. during a failover), mount silently fails and FIO
+        # would write to the root FS, causing ENOSPC.
+        if not self.ssh_obj.is_mountpoint(client_node, mount_point):
+            self.logger.warning(
+                f"[create_lvol] Mount FAILED for {lvol_name}: "
+                f"{lvol_device} -> {mount_point} is not a mount point. "
+                f"Skipping FIO for this lvol."
+            )
+            self.lvol_mount_details[lvol_name]["Mount"] = None
+            return
+
         self.lvol_mount_details[lvol_name]["Mount"] = mount_point
 
         sleep_n_sec(10)
