@@ -92,7 +92,7 @@ def check_node(snode):
     if snode.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_UNREACHABLE,
                             StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
         logger.info(f"Node status is: {snode.status}, health check not applicable")
-        set_node_hxealth_check(snode, None)
+        set_node_health_check(snode, None)
         for device in snode.nvme_devices:
             set_device_health_check(snode.cluster_id, device, None)
         return
