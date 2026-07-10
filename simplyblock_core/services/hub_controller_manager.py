@@ -32,9 +32,6 @@ Public API (called by tasks_runner_lvol_migration)
       → attach (or reuse) the controller, refresh the idle timer
       → returns (ctrl_name, hub_bdev, error)
 
-  hub_manager.release(src_node_id, tgt_node_id)
-      → no-op kept for call-site compatibility; idle timer is driven by acquire()
-
   hub_manager.detach_now(src_node_id, tgt_node_id, src_rpc=None)
       → immediate detach (failure / cancel path), records detach timestamp
 """
