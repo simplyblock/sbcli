@@ -22,7 +22,7 @@ db = db_controller.DBController()
 # node into the cluster mesh — is guarded per cluster by ClusterAddNodeLock
 # inside storage_node_ops.add_node. We cap concurrency so a large
 # cluster-create / expansion fan-out can't exhaust the runner host.
-MAX_CONCURRENT_NODE_ADDS = 8
+MAX_CONCURRENT_NODE_ADDS = constants.NODE_ADD_MAX_PARALLEL
 
 # uuids of node-add tasks a worker on THIS host is currently driving, so the
 # dispatch loop never hands the same task to two workers. (Cross-host

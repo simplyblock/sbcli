@@ -2544,6 +2544,49 @@ def set_storage_mcp_max_unavailable(cluster_id: str, max_unavailable: int) -> bo
         return False
 
 
+def get_max_parallel_node_adds_from_cr(cr_name, cr_namespace, cr_plural="storagenodesets"):
+    """Read spec.maxParallelNodeAdds from the node's StorageNodeSet CR.
+
+    This is the operator-facing knob for how many storage nodes are added — and
+    thus rebooted for the first-time CPU-topology apply — in parallel. We use it
+    to seed the storage MCP's initial maxUnavailable so those reboots roll in
+    one wave instead of a serialized, one-at-a-time queue (cluster_activate
+    later narrows the pool to the cluster's fault tolerance).
+
+    Read directly from the CR rather than via an operator-injected env, so it
+    works without any operator/deployment change. Returns None when the CR
+    reference is missing, the field is unset, or on any error, so callers fall
+    back to constants.NODE_ADD_MAX_PARALLEL. Never raises.
+    """
+    if not cr_name or not cr_namespace:
+        return None
+    try:
+        load_kube_config_with_fallback()
+        api = client.CustomObjectsApi()
+        cr = api.get_namespaced_custom_object(
+            group="storage.simplyblock.io",
+            version="v1alpha1",
+            namespace=cr_namespace,
+            plural=cr_plural or "storagenodesets",
+            name=cr_name,
+        )
+        value = (cr.get("spec") or {}).get("maxParallelNodeAdds")
+        if value is None:
+            return None
+        return max(int(value), 1)
+    except ApiException as e:
+        if e.status == 404:
+            logger.info(f"StorageNodeSet {cr_name} not found in {cr_namespace} "
+                        f"(non-OpenShift or CR absent); using default parallel-add")
+        else:
+            logger.warning(f"Failed to read maxParallelNodeAdds from CR "
+                           f"{cr_name}: {e.reason} {e.body}")
+        return None
+    except Exception as e:
+        logger.warning(f"Failed to read maxParallelNodeAdds from CR {cr_name}: {e}")
+        return None
+
+
 def patch_cr_status(
         *,
         group: str,

@@ -252,6 +252,13 @@ PCIE_TIMEOUT_US=2000000
 # and the FDB layer are not overwhelmed by 32 parallel RPC fan-outs.
 CLUSTER_ACTIVATION_MAX_PARALLEL_NODES=8
 
+# Number of node-add tasks the runner processes concurrently. Single source of
+# truth for "parallel add": also used as the initial storage-MCP maxUnavailable
+# during bring-up, so up to this many nodes can reboot for CPU-topology at once
+# (matching how many are being added in parallel) instead of a one-at-a-time
+# queue. cluster_activate later narrows the pool to the cluster's fault tolerance.
+NODE_ADD_MAX_PARALLEL=8
+
 # Max concurrent node-restart tasks while the cluster is SUSPENDED (recovery
 # after full-cluster outage/shutdown: every node offline, no client IO — so
 # parallel restarts cannot violate FTT). One node restart is ~70 s; strictly
