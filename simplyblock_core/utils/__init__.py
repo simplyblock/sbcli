@@ -2422,6 +2422,11 @@ def get_k8s_batch_client():
     return client.BatchV1Api()
 
 
+def get_k8s_custom_objects_client():
+    config.load_incluster_config()
+    return client.CustomObjectsApi()
+
+
 def get_storage_node_api_log_type(mgmt_ip, name):
     try:
         node_docker = docker.DockerClient(base_url=f"tcp://{mgmt_ip}:2375", version="auto", timeout=60 * 5)
