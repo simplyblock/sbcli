@@ -464,14 +464,70 @@ def spdk_process_start(body: SPDKParams):
             logger.info(f"Job deleted: '{core_resp.metadata.name}' in namespace '{namespace}")
 
         k8s_core_v1 = core_utils.get_k8s_core_client()
-        for attempt in range(56):
-            node_obj = k8s_core_v1.read_node(node_name)
-            if not node_obj.spec.unschedulable:
-                break
-            if attempt == 55:
-                return utils.get_response(False, f"Node '{node_name}' remained cordoned after 6 minutes")
-            logger.info(f"Node '{node_name}' is cordoned, waiting for uncordon... attempt {attempt + 1}/36")
-            time.sleep(10)
+        if cpu_topology_enabled and not skip_kubelet_configuration and openshift:
+            # Gate SPDK on the CPU-topology reboot ACTUALLY landing on this node.
+            # The topology Job completing is not proof of that: MCO cordons/reboots
+            # asynchronously (queued by the MCP maxUnavailable), so when the Job
+            # returns the node often isn't even cordoned yet. Starting SPDK then
+            # brings it up before cpuManagerPolicy=static is in effect (unpinned),
+            # only to be killed by the reboot moments later.
+            #
+            # Converge check compares the rendered-config CONTENT HASH
+            # (rendered-<pool>-<hash>), not the full name: a node still under an
+            # older pool (e.g. a previous cluster id) with byte-identical config
+            # has a different name but the same hash and must pass immediately —
+            # no false wait, no needless pool migration/reboot.
+            mcp_name = f"storage-{first_six_cluster_id}"
+
+            def _cfg_hash(name):
+                return name.rsplit("-", 1)[-1] if name else None
+
+            co = core_utils.get_k8s_custom_objects_client()
+            for attempt in range(240):  # ~40 min: reboots queue under MCP maxUnavailable
+                try:
+                    mcp = co.get_cluster_custom_object(
+                        group="machineconfiguration.openshift.io", version="v1",
+                        plural="machineconfigpools", name=mcp_name)
+                except ApiException as e:
+                    if e.status == 404:
+                        # No MCP to gate on (should not happen once the Job ensures
+                        # membership). Degrade to the old behaviour rather than hang:
+                        # proceed as soon as the node is uncordoned.
+                        logger.warning(f"MCP '{mcp_name}' not found; cannot gate on "
+                                       f"topology rollout — proceeding once uncordoned")
+                        node_obj = k8s_core_v1.read_node(node_name)
+                        if not node_obj.spec.unschedulable:
+                            break
+                        time.sleep(10)
+                        continue
+                    raise
+                target = (mcp.get("status", {}).get("configuration", {}) or {}).get("name")
+                node_obj = k8s_core_v1.read_node(node_name)
+                ann = node_obj.metadata.annotations or {}
+                cur = ann.get("machineconfiguration.openshift.io/currentConfig")
+                state = ann.get("machineconfiguration.openshift.io/state")
+                if (target and state == "Done" and not node_obj.spec.unschedulable
+                        and _cfg_hash(cur) and _cfg_hash(cur) == _cfg_hash(target)):
+                    logger.info(f"Node '{node_name}' carries MCP '{mcp_name}' config "
+                                f"(hash {_cfg_hash(cur)}), reboot done — starting SPDK")
+                    break
+                logger.info(f"Waiting for '{node_name}' to converge on MCP '{mcp_name}' "
+                            f"(cur={cur} target={target} state={state} "
+                            f"cordoned={node_obj.spec.unschedulable})... {attempt + 1}/240")
+                time.sleep(10)
+            else:
+                return utils.get_response(
+                    False, f"Node '{node_name}' did not converge on MCP '{mcp_name}' config in time")
+        else:
+            # Non-topology / non-OpenShift: keep the original uncordon wait.
+            for attempt in range(56):
+                node_obj = k8s_core_v1.read_node(node_name)
+                if not node_obj.spec.unschedulable:
+                    break
+                if attempt == 55:
+                    return utils.get_response(False, f"Node '{node_name}' remained cordoned after 6 minutes")
+                logger.info(f"Node '{node_name}' is cordoned, waiting for uncordon... attempt {attempt + 1}/36")
+                time.sleep(10)
 
         env = Environment(loader=PackageLoader('simplyblock_web', 'templates'), trim_blocks=True, lstrip_blocks=True)
         template = env.get_template('storage_deploy_spdk.yaml.j2')
