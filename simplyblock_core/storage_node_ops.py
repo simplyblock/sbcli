@@ -1929,9 +1929,20 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         # double-counts the orphan's hugepages. This matches on
         # api_endpoint+socket — unlike the SSD-overlap cleanup above, which
         # misses an attempt interrupted before SSD assignment (empty ssd_pcie).
+        # A storage node's identity is (api_endpoint, socket, cpu_mask): with
+        # nodesPerSocket>1 several nodes share the same host AND socket and are
+        # distinguished only by their CPU core group (cpu_mask), so matching on
+        # socket alone would wrongly conflate legitimate co-socket siblings. The
+        # record is persisted only after spdk_cpu_mask is set (below), so a
+        # persisted IN_CREATION orphan always carries its mask and a
+        # deterministic config re-gen reproduces the same value on retry.
+        incoming_cpu_mask = node_config.get("cpu_mask")
+        existing_healthy = None
         for n in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
-            if (n.api_endpoint == node_addr and n.socket == node_socket
-                    and n.status == StorageNode.STATUS_IN_CREATION):
+            if not (n.api_endpoint == node_addr and n.socket == node_socket
+                    and n.spdk_cpu_mask == incoming_cpu_mask):
+                continue
+            if n.status == StorageNode.STATUS_IN_CREATION:
                 logger.warning(
                     f"Found stale IN_CREATION node {n.get_id()} for {node_addr} "
                     f"socket {node_socket} from an interrupted add; cleaning up before retry")
@@ -1944,6 +1955,25 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 except Exception:
                     logger.warning("snode_delete event failed for stale node", exc_info=True)
                 n.remove(db_controller.kv_store)
+            else:
+                # A healthy node already occupies this (host, socket) slot, so this
+                # add is a redundant DUPLICATE — e.g. the operator re-posted the add
+                # after its pod was recreated (a CPU-topology reboot evicted it), or
+                # an interrupted add whose first attempt has since gone ONLINE. Only
+                # one storage node exists per (api_endpoint, socket, cpu_mask) — a
+                # co-socket sibling (nodesPerSocket>1) has a different mask and does
+                # not match here, so it is never mistaken for a duplicate; the earlier
+                # guard above cleans up a prior attempt still stuck IN_CREATION, but
+                # once that attempt is ONLINE it no longer matches, so a second add
+                # would build a node that can never come up (the socket's cores and
+                # hugepages are already owned) and strand it IN_CREATION (observed on
+                # worker-1, 2026-07-10). Record it and abort as an idempotent no-op.
+                existing_healthy = n
+        if existing_healthy is not None:
+            logger.warning(
+                f"Storage node {existing_healthy.get_id()} already present for {node_addr} "
+                f"socket {node_socket} (status {existing_healthy.status}); skipping duplicate add")
+            return "Success"
 
         total_mem = minimum_hp_memory
         for n in db_controller.get_storage_nodes_by_cluster_id(cluster_id):

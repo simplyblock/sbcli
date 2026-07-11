@@ -34,27 +34,6 @@ spec:
             - |
               set -e
               MARKER="/var/simplyblock/.cpu_topology_applied"
-              if [ -f "$MARKER" ]; then
-                  echo "[INFO] Node already configured. Waiting for NUMA plugin pod to be ready..."
-                  RETRIES=0
-                  while [ $RETRIES -lt 36 ]; do
-                    PLUGIN_READY=$(kubectl get pod -n kube-system \
-                      --field-selector spec.nodeName={{ HOSTNAME }} \
-                      -l app=simplyblock-numa-resource-plugin \
-                      -o jsonpath='{.items[0].status.containerStatuses[0].ready}' 2>/dev/null || true)
-                    NUMA_ALLOC=$(kubectl get node "{{ HOSTNAME }}" \
-                      -o jsonpath='{.status.allocatable.numa-align/numa-{{ NSOCKET }}}' 2>/dev/null || true)
-                    if [ "$PLUGIN_READY" = "true" ] && [ "$NUMA_ALLOC" = "100" ]; then
-                      echo "[INFO] NUMA plugin is ready and numa-align/numa-{{ NSOCKET }} is available (100)"
-                      exit 0
-                    fi
-                    RETRIES=$((RETRIES + 1))
-                    echo "[INFO] Waiting for NUMA readiness (plugin=$PLUGIN_READY, allocatable=$NUMA_ALLOC), retry $RETRIES/36 in 10s..."
-                    sleep 10
-                  done
-                  echo "[ERROR] NUMA plugin did not become ready after 6 minutes"
-                  exit 1
-              fi
 
               # Resource names — one MCP/MC/KC shared across all storage nodes in the cluster.
               # The MCP nodeSelector grows as new nodes are added (In operator).
@@ -150,6 +129,35 @@ spec:
                   topologyManagerPolicy: single-numa-node
                   reservedSystemCPUs: {{ RESERVED_SYSTEM_CPUS }}
               KCEOF
+              fi
+
+              # MCP membership + MC + KubeletConfig are ensured on every run above,
+              # so a stale marker can never leave this node off the pool config.
+              # The marker only records that this node has already been through the
+              # first-time flow: if present, skip the reboot wait and just confirm
+              # NUMA-plugin readiness. SPDK start is gated separately by the agent
+              # (it waits for the MCO reboot to actually land), so correctness no
+              # longer depends on this marker being in sync.
+              if [ -f "$MARKER" ]; then
+                  echo "[INFO] Node already configured. Waiting for NUMA plugin pod to be ready..."
+                  RETRIES=0
+                  while [ $RETRIES -lt 36 ]; do
+                    PLUGIN_READY=$(kubectl get pod -n kube-system \
+                      --field-selector spec.nodeName={{ HOSTNAME }} \
+                      -l app=simplyblock-numa-resource-plugin \
+                      -o jsonpath='{.items[0].status.containerStatuses[0].ready}' 2>/dev/null || true)
+                    NUMA_ALLOC=$(kubectl get node "{{ HOSTNAME }}" \
+                      -o jsonpath='{.status.allocatable.numa-align/numa-{{ NSOCKET }}}' 2>/dev/null || true)
+                    if [ "$PLUGIN_READY" = "true" ] && [ "$NUMA_ALLOC" = "100" ]; then
+                      echo "[INFO] NUMA plugin is ready and numa-align/numa-{{ NSOCKET }} is available (100)"
+                      exit 0
+                    fi
+                    RETRIES=$((RETRIES + 1))
+                    echo "[INFO] Waiting for NUMA readiness (plugin=$PLUGIN_READY, allocatable=$NUMA_ALLOC), retry $RETRIES/36 in 10s..."
+                    sleep 10
+                  done
+                  echo "[ERROR] NUMA plugin did not become ready after 6 minutes"
+                  exit 1
               fi
 
               echo "[INFO] Marking node as configured."
