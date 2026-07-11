@@ -513,7 +513,12 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, bdev_names:
     # Return the bdev name if it exists; otherwise hint with the canonical
     # ``<name>n1`` so callers (e.g. _connect_to_remote_jm_devs) can poll for
     # it via get_bdevs.
-    for bdev in bdev_names:
+    # ``bdev_names`` is None whenever the caller took no full bdev snapshot
+    # (remote JM / remote alceml connects pass bdev_names=None, and multipath
+    # devices skip the early fast-path guard above). Guard the iteration — an
+    # unguarded ``for bdev in None`` crashed cluster activation with
+    # "'NoneType' object is not iterable" (2026-07-11).
+    for bdev in (bdev_names or []):
         if bdev.startswith(name):
             return bdev
     if rpc_client.get_bdevs(bdev_name):
