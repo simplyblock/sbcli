@@ -148,6 +148,12 @@ class K8sNativeNodeMigrationTest(TestClusterBase):
         self.k8s_utils.cleanup_stale_fio_resources()
         sleep_n_sec(5)
 
+        # Capture pre-test cluster state for comparison with post-test diagnostics
+        try:
+            self.collect_management_details(suffix="_pre_test")
+        except Exception as e:
+            self.logger.warning(f"Pre-test diagnostics collection failed: {e}")
+
     # ── FIO config ────────────────────────────────────────────────────────────
 
     def _build_fio_config(self, name: str) -> tuple[str, str]:
