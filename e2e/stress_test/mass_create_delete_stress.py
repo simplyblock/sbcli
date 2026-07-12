@@ -483,6 +483,12 @@ class _MassCreateDeleteMixin:
             if hasattr(self, '_verify_snapshots_ready'):
                 self._verify_snapshots_ready()
 
+            # Verify backend: wait for snapshots to appear in sbctl
+            if hasattr(self, '_verify_backend_snapshot_count'):
+                self._verify_backend_snapshot_count(
+                    len(self._snapshot_registry)
+                )
+
             verified_snaps = len(self._snapshot_registry)
             self._metrics["snapshots_created"] = verified_snaps
             self.logger.info(
@@ -2617,6 +2623,56 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
                 "id": pvc_name, "parent_name": None,
             }
 
+        # Verify backend: wait until sbctl lvol list count matches Bound PVCs.
+        # PVC Bound only means the K8s object is bound — the backend may still
+        # be processing the volume creation.  Without this check, Phase 3
+        # (snapshot creation) can hit the web API while it is still finishing
+        # Phase 1 volume creates, causing 500 errors and CSI restarts.
+        self._verify_backend_lvol_count(len(bound_names), label="Phase 1")
+
+    def _verify_backend_lvol_count(self, expected, timeout=600,
+                                   poll_interval=30, label="Phase 1"):
+        """Poll ``sbctl lvol list`` until at least *expected* lvols exist.
+
+        Mirrors the Docker variant's ``_bulk_verify_created`` but uses a
+        count-based check because K8s PVC names don't match sbctl lvol
+        names (which are UUIDs).
+        """
+        self.logger.info(
+            f"[{label}] Verifying backend: waiting for {expected} lvols "
+            f"in sbctl lvol list (timeout={timeout}s)"
+        )
+        deadline = time.time() + timeout
+        last_count = 0
+
+        while time.time() < deadline:
+            try:
+                lvols = self.k8s_utils.list_lvols()
+                last_count = len(lvols)
+            except Exception as exc:
+                self.logger.warning(
+                    f"[{label}] sbctl lvol list failed: {exc}, retrying..."
+                )
+                time.sleep(poll_interval)
+                continue
+
+            self.logger.info(
+                f"[{label}] Backend lvol count: {last_count}/{expected}"
+            )
+            if last_count >= expected:
+                self.logger.info(
+                    f"[{label}] Backend verification done: "
+                    f"{last_count} lvols confirmed in sbctl"
+                )
+                return
+
+            time.sleep(poll_interval)
+
+        self.logger.warning(
+            f"[{label}] Backend verification timed out: "
+            f"{last_count}/{expected} lvols after {timeout}s"
+        )
+
     # ── Phase 2: FIO on 10% of PVCs ──────────────────────────────────────
 
     def _phase_2_fio_on_lvols(self):
@@ -2728,7 +2784,7 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
         }
         self._snap_pvc_map[vs_name] = pvc_name
 
-    def _verify_snapshots_ready(self, timeout: int = 900,
+    def _verify_snapshots_ready(self, timeout: int = 0,
                                 poll_interval: int = 30):
         """Verify snapshots actually reach readyToUse=true after fire-and-forget creation.
 
@@ -2736,11 +2792,19 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
         the entire registry, polling until all are ready or timeout.
         Prunes _snapshot_registry to only contain verified-ready snapshots
         so downstream phases (clone creation) work with real data.
+
+        The default timeout scales with the number of snapshots because
+        the CSI snapshot sidecar processes CreateSnapshot GRPC calls
+        sequentially (~2-3s each).
         """
         if not self._snapshot_registry:
             return
 
         submitted = len(self._snapshot_registry)
+        if timeout <= 0:
+            # CSI snapshotter processes serially at ~2-3s each; allow 5s
+            # per snapshot with a 900s floor to avoid premature timeouts.
+            timeout = max(900, submitted * 5)
         ns = self.k8s_utils.namespace
         self.logger.info(
             f"[Phase 3] Verifying {submitted} snapshots reach "
@@ -2811,6 +2875,51 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
                 f"[Phase 3] All {len(ready_names)} snapshots verified "
                 f"readyToUse=true"
             )
+
+    def _verify_backend_snapshot_count(self, expected, timeout=600,
+                                       poll_interval=30):
+        """Poll ``sbctl snapshot list`` until at least *expected* snapshots exist.
+
+        Mirrors the Docker variant's ``_bulk_verify_created`` for snapshots
+        but uses a count-based check because K8s VolumeSnapshot names
+        don't match sbctl snapshot names.
+        """
+        if expected <= 0:
+            return
+        self.logger.info(
+            f"[Phase 3] Verifying backend: waiting for {expected} snapshots "
+            f"in sbctl snapshot list (timeout={timeout}s)"
+        )
+        deadline = time.time() + timeout
+        last_count = 0
+
+        while time.time() < deadline:
+            try:
+                snaps = self.k8s_utils.list_snapshots()
+                last_count = len(snaps)
+            except Exception as exc:
+                self.logger.warning(
+                    f"[Phase 3] sbctl snapshot list failed: {exc}, retrying..."
+                )
+                time.sleep(poll_interval)
+                continue
+
+            self.logger.info(
+                f"[Phase 3] Backend snapshot count: {last_count}/{expected}"
+            )
+            if last_count >= expected:
+                self.logger.info(
+                    f"[Phase 3] Backend verification done: "
+                    f"{last_count} snapshots confirmed in sbctl"
+                )
+                return
+
+            time.sleep(poll_interval)
+
+        self.logger.warning(
+            f"[Phase 3] Backend verification timed out: "
+            f"{last_count}/{expected} snapshots after {timeout}s"
+        )
 
     # ── Phase 4: Delete PVCs (free subsystem slots for clones) ──────────
 
@@ -2951,6 +3060,14 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
                 "clone_id": clone_pvc, "snap_name": vs_name,
             }
             self._clone_pvc_registry[clone_pvc] = {"vs_name": vs_name}
+
+        # Verify backend: wait until clone lvols appear in sbctl.
+        # This prevents Phase 6 FIO from starting before the backend
+        # has fully processed clone provisioning.
+        if bound_names:
+            self._verify_backend_lvol_count(
+                len(bound_names), label="Phase 5"
+            )
 
     # ── Phase 6: FIO on 10% of clone PVCs ─────────────────────────────────
 
