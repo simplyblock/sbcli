@@ -588,62 +588,66 @@ def _process_restart_task(task_uuid):
             time.time() + _restart_backoff_seconds(retry))
 
 
-logger.info("Starting Tasks runner...")
-while True:
-    try:
-        db.get_clusters()
-    except Exception as e:
-        logger.error(f"Failed to get clusters: {e}")
-        time.sleep(3)
-        continue
-    clusters = db.get_clusters()
-    if not clusters:
-        logger.error("No clusters found!")
-    else:
-        for cl in clusters:
-            tasks = db.get_job_tasks(cl.get_id(), reverse=False)
-            for task in tasks:
-                if task.function_name not in [JobSchedule.FN_DEV_RESTART, JobSchedule.FN_NODE_RESTART]:
-                    continue
-                if task.status == JobSchedule.STATUS_DONE:
-                    _restart_next_attempt.pop(task.uuid, None)
-                    _restart_inflight.pop(task.uuid, None)
-                    continue
-                # Round-robin: skip a task that is not yet due so a waiting task
-                # (deferred on a concurrent peer restart, or in failure backoff)
-                # does NOT block the other pending restart tasks behind it. The
-                # outer loop revisits every task each pass (TASK_EXEC_INTERVAL_SEC).
-                if time.time() < _restart_next_attempt.get(task.uuid, 0):
-                    continue
-                # Suspend recovery: while a SUSPENDED cluster is still being
-                # drained to all-offline, pause node restarts. Executing one now
-                # would fight the auto-shutdown and re-create the wedged
-                # half-restarted state we are fixing. Re-poll soon without
-                # consuming a retry; the task runs once the drain completes
-                # (suspend_drain_complete).
-                dispatch_parallel = False
-                if task.function_name == JobSchedule.FN_NODE_RESTART:
-                    cl_fresh = db.get_cluster_by_id(cl.get_id())
-                    if tasks_controller.is_auto_restart_paused(cl_fresh):
-                        logger.info(
-                            "Cluster %s suspended and draining; deferring "
-                            "node-restart task %s", cl.get_id(), task.uuid)
-                        _restart_next_attempt[task.uuid] = (
-                            time.time() + constants.RESTART_TASK_EXEC_INTERVAL_SEC)
+def main():
+    logger.info("Starting Tasks runner...")
+    while True:
+        try:
+            db.get_clusters()
+        except Exception as e:
+            logger.error(f"Failed to get clusters: {e}")
+            time.sleep(3)
+            continue
+        clusters = db.get_clusters()
+        if not clusters:
+            logger.error("No clusters found!")
+        else:
+            for cl in clusters:
+                tasks = db.get_job_tasks(cl.get_id(), reverse=False)
+                for task in tasks:
+                    if task.function_name not in [JobSchedule.FN_DEV_RESTART, JobSchedule.FN_NODE_RESTART]:
                         continue
-                    # SUSPENDED and drained: full-cluster recovery — fan node
-                    # restarts out on the pool (see _restart_pool). Online
-                    # clusters stay strictly sequential. suspend_drain_complete
-                    # is required: it certifies every (non operator-stopped)
-                    # node went OFFLINE, i.e. no client IO — an operator-caused
-                    # suspension never drains, its survivors are still serving,
-                    # and its restarts must stay sequential with full guards.
-                    dispatch_parallel = (cl_fresh.status == Cluster.STATUS_SUSPENDED
-                                         and cl_fresh.suspend_drain_complete)
+                    if task.status == JobSchedule.STATUS_DONE:
+                        _restart_next_attempt.pop(task.uuid, None)
+                        _restart_inflight.pop(task.uuid, None)
+                        continue
+                    # Round-robin: skip a task that is not yet due so a waiting task
+                    # (deferred on a concurrent peer restart, or in failure backoff)
+                    # does NOT block the other pending restart tasks behind it. The
+                    # outer loop revisits every task each pass (TASK_EXEC_INTERVAL_SEC).
+                    if time.time() < _restart_next_attempt.get(task.uuid, 0):
+                        continue
+                    # Suspend recovery: while a SUSPENDED cluster is still being
+                    # drained to all-offline, pause node restarts. Executing one now
+                    # would fight the auto-shutdown and re-create the wedged
+                    # half-restarted state we are fixing. Re-poll soon without
+                    # consuming a retry; the task runs once the drain completes
+                    # (suspend_drain_complete).
+                    dispatch_parallel = False
+                    if task.function_name == JobSchedule.FN_NODE_RESTART:
+                        cl_fresh = db.get_cluster_by_id(cl.get_id())
+                        if tasks_controller.is_auto_restart_paused(cl_fresh):
+                            logger.info(
+                                "Cluster %s suspended and draining; deferring "
+                                "node-restart task %s", cl.get_id(), task.uuid)
+                            _restart_next_attempt[task.uuid] = (
+                                time.time() + constants.RESTART_TASK_EXEC_INTERVAL_SEC)
+                            continue
+                        # SUSPENDED and drained: full-cluster recovery — fan node
+                        # restarts out on the pool (see _restart_pool). Online
+                        # clusters stay strictly sequential. suspend_drain_complete
+                        # is required: it certifies every (non operator-stopped)
+                        # node went OFFLINE, i.e. no client IO — an operator-caused
+                        # suspension never drains, its survivors are still serving,
+                        # and its restarts must stay sequential with full guards.
+                        dispatch_parallel = (cl_fresh.status == Cluster.STATUS_SUSPENDED
+                                             and cl_fresh.suspend_drain_complete)
 
-                if dispatch_parallel:
-                    inflight = _restart_inflight.get(task.uuid)
-                    if inflight is not None and not inflight.done():
+                    if dispatch_parallel:
+                        inflight = _restart_inflight.get(task.uuid)
+                        if inflight is not None and not inflight.done():
+                            continue
+                        _restart_inflight[task.uuid] = _restart_pool.submit(
+                            _process_restart_task, task.uuid)
                         continue
                     # Per-node exclusion: never run two restart tasks for the
                     # same node concurrently (see _node_inflight above). The
@@ -660,9 +664,13 @@ while True:
                         _node_inflight[task.node_id] = fut
                     continue
 
-                # Inline (serialized) execution; _process_restart_task never
-                # raises, so a crash in one task cannot escape to the outer
-                # `while True` and kill recovery of every other node.
-                _process_restart_task(task.uuid)
+                    # Inline (serialized) execution; _process_restart_task never
+                    # raises, so a crash in one task cannot escape to the outer
+                    # `while True` and kill recovery of every other node.
+                    _process_restart_task(task.uuid)
 
-    time.sleep(constants.TASK_EXEC_INTERVAL_SEC)
+        time.sleep(constants.TASK_EXEC_INTERVAL_SEC)
+
+
+if __name__ == "__main__":
+    main()

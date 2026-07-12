@@ -112,34 +112,39 @@ def _run_task(task_uuid, cluster_id):
             _inflight.discard(task_uuid)
 
 
-logger.info("Starting Tasks runner node add...")
+def main():
+    logger.info("Starting Tasks runner node add...")
 
-executor = ThreadPoolExecutor(max_workers=MAX_CONCURRENT_NODE_ADDS)
+    executor = ThreadPoolExecutor(max_workers=MAX_CONCURRENT_NODE_ADDS)
 
-while True:
-    try:
-        clusters = db.get_clusters()
-    except Exception as e:
-        logger.error(f"Failed to get clusters: {e}")
-        time.sleep(3)
-        continue
-    if not clusters:
-        logger.error("No clusters found!")
-    else:
-        for cl in clusters:
-            tasks = db.get_job_tasks(cl.get_id(), reverse=False)
-            for task in tasks:
-                if task.function_name != JobSchedule.FN_NODE_ADD:
-                    continue
-                if task.status == JobSchedule.STATUS_DONE:
-                    continue
-                # Dispatch to a worker once; skip if a worker on this host is
-                # already driving it. Excess tasks queue in the executor and
-                # run as workers free up.
-                with _inflight_lock:
-                    if task.uuid in _inflight:
+    while True:
+        try:
+            clusters = db.get_clusters()
+        except Exception as e:
+            logger.error(f"Failed to get clusters: {e}")
+            time.sleep(3)
+            continue
+        if not clusters:
+            logger.error("No clusters found!")
+        else:
+            for cl in clusters:
+                tasks = db.get_job_tasks(cl.get_id(), reverse=False)
+                for task in tasks:
+                    if task.function_name != JobSchedule.FN_NODE_ADD:
                         continue
-                    _inflight.add(task.uuid)
-                executor.submit(_run_task, task.uuid, cl.get_id())
+                    if task.status == JobSchedule.STATUS_DONE:
+                        continue
+                    # Dispatch to a worker once; skip if a worker on this host is
+                    # already driving it. Excess tasks queue in the executor and
+                    # run as workers free up.
+                    with _inflight_lock:
+                        if task.uuid in _inflight:
+                            continue
+                        _inflight.add(task.uuid)
+                    executor.submit(_run_task, task.uuid, cl.get_id())
 
-    time.sleep(constants.TASK_EXEC_INTERVAL_SEC)
+        time.sleep(constants.TASK_EXEC_INTERVAL_SEC)
+
+
+if __name__ == "__main__":
+    main()

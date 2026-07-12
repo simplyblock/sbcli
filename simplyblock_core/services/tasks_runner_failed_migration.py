@@ -132,32 +132,39 @@ logger = utils.get_logger(__name__)
 
 # get DB controller
 db = db_controller.DBController()
-logger.info("Starting Tasks runner...")
-while True:
-    try:
-        db.get_clusters()
-    except Exception as e:
-        logger.error(f"Failed to get clusters: {e}")
+
+
+def main():
+    logger.info("Starting Tasks runner...")
+    while True:
+        try:
+            db.get_clusters()
+        except Exception as e:
+            logger.error(f"Failed to get clusters: {e}")
+            time.sleep(3)
+            continue
         time.sleep(3)
-        continue
-    time.sleep(3)
-    clusters = db.get_clusters()
-    if not clusters:
-        logger.error("No clusters found!")
-    else:
-        for cl in clusters:
-            tasks = db.get_job_tasks(cl.get_id(), reverse=False)
-            for task in tasks:
-                if task.function_name == JobSchedule.FN_FAILED_DEV_MIG:
-                    if task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED]:
-                        active_task = tasks_controller.get_active_node_mig_task(
-                            task.cluster_id, task.node_id, task.function_params["distr_name"])
-                        if active_task:
-                            logger.info("task found on same node, retry")
-                            continue
-                    if task.status != JobSchedule.STATUS_DONE:
-                        # get new task object because it could be changed from cancel task
-                        task = db.get_task_by_id(task.uuid)
-                        res = task_runner(task)
-                        if not res:
-                            time.sleep(3)
+        clusters = db.get_clusters()
+        if not clusters:
+            logger.error("No clusters found!")
+        else:
+            for cl in clusters:
+                tasks = db.get_job_tasks(cl.get_id(), reverse=False)
+                for task in tasks:
+                    if task.function_name == JobSchedule.FN_FAILED_DEV_MIG:
+                        if task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED]:
+                            active_task = tasks_controller.get_active_node_mig_task(
+                                task.cluster_id, task.node_id, task.function_params["distr_name"])
+                            if active_task:
+                                logger.info("task found on same node, retry")
+                                continue
+                        if task.status != JobSchedule.STATUS_DONE:
+                            # get new task object because it could be changed from cancel task
+                            task = db.get_task_by_id(task.uuid)
+                            res = task_runner(task)
+                            if not res:
+                                time.sleep(3)
+
+
+if __name__ == "__main__":
+    main()
