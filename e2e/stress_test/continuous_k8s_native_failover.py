@@ -5233,3 +5233,430 @@ class K8sNativeQuickFailoverTest(K8sNativeBasicFailoverTest):
                 raise AssertionError("Quick failover test failed — see errors above")
             else:
                 self._cleanup_all_k8s_resources()
+
+
+class K8sNativeScaleBreakTest(K8sNativeFailoverTest):
+    """Scale-out breaking-point test: double pod count each iteration until failure.
+
+    Iteration 1: 4 pods with FIO → single node outage (7.5 min) → validate
+    Iteration 2: 8 pods  → outage → validate
+    Iteration 3: 16 pods → outage → validate
+    ...continues until PVC provisioning, FIO, or cluster health fails.
+
+    FIO parameters (per requirement):
+      - block size: random 4K-128K
+      - r/w mix: 70/30
+      - iodepth: 32
+      - numjobs: 4
+      - max_latency: 20s
+      - runtime: 15 min per iteration
+      - no verify (scale test, not integrity test)
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.test_name = "k8s_native_scale_break"
+
+        # PVC sizing: small PVCs since we may create 256+
+        self.pvc_size = "20Gi"
+        self.int_pvc_size = 20
+
+        # FIO: fixed runtime, aggressive params
+        self.fio_num_jobs = 4
+        self.FIO_RUNTIME = 900          # 15 min, fixed
+        self.fio_size = "8G"            # default; _compute_fio_size scales it
+
+        # Scale parameters
+        self.initial_pod_count = int(
+            os.environ.get("SCALE_BREAK_INITIAL_PODS", "4")
+        )
+
+        # Outage: single node, 7.5 min offline
+        self.npcs = 1
+        self.OUTAGE_DURATION = 450      # 7.5 min
+
+        # Only graceful_shutdown for now — safe for FIO pods on same worker
+        # (shuts down storage node process, not K8s worker itself)
+        self.outage_types = ["graceful_shutdown"]
+        self.outage_types2 = ["graceful_shutdown"]
+        # TODO: Add "container_stop" and "interface_full_network_interrupt"
+        #       when running on OpenShift (separated compute/storage workers).
+        #       Network outage on a worker kills FIO pods there → false failure.
+
+        # No lvol cap — we WANT to push to breaking
+        self.MAX_TOTAL_LVOLS = 9999
+
+        # Per-iteration results tracking
+        self.iteration_results: list[dict] = []
+
+    # ── FIO config ────────────────────────────────────────────────────────
+
+    def _build_fio_config(self, name: str) -> tuple[str, str | None]:
+        """Build FIO config for scale-break test.
+
+        Key differences from parent:
+          - rwmixread=70 (parent: 50)
+          - iodepth=32  (parent: 1)
+          - max_latency=20s (parent: 40s)
+          - No verify, no warmup
+        """
+        bs = f"{2 ** random.randint(2, 7)}k"
+        run_id = _rand_seq(6)
+
+        main_config = (
+            f"[global]\n"
+            f"name={name}-fio\n"
+            f"filename_format=/spdkvol/fio-{run_id}.$jobnum\n"
+            f"rw=randrw\n"
+            f"rwmixread=70\n"
+            f"bs={bs}\n"
+            f"iodepth=32\n"
+            f"direct=1\n"
+            f"ioengine=libaio\n"
+            f"size={self.fio_size}\n"
+            f"numjobs={self.fio_num_jobs}\n"
+            f"time_based\n"
+            f"runtime={self.FIO_RUNTIME}\n"
+            f"group_reporting\n"
+            f"max_latency=20s\n"
+            f"write_iolog=/spdkvol/{name}-iolog.log\n"
+            f"log_avg_msec=1000\n"
+            f"write_bw_log=/spdkvol/{name}-fio\n"
+            f"write_lat_log=/spdkvol/{name}-fio\n"
+            f"write_iops_log=/spdkvol/{name}-fio\n"
+            f"\n"
+            f"[job1]\n"
+        )
+
+        # No warmup: no verify headers to pre-fill
+        return main_config, None
+
+    def _compute_fio_size(self, extra_jobs: int = 0) -> str:
+        """Compute fio_size dynamically but keep FIO_RUNTIME fixed at 900s."""
+        saved_runtime = self.FIO_RUNTIME
+        result = super()._compute_fio_size(extra_jobs)
+        self.FIO_RUNTIME = saved_runtime
+        return result
+
+    # ── Outage helpers ────────────────────────────────────────────────────
+
+    def _perform_single_outage(self) -> tuple[str, str]:
+        """Pick one random storage node and trigger a graceful shutdown.
+
+        Returns (node_uuid, outage_type).
+        """
+        node = random.choice(list(self.sn_nodes))
+        outage_type = random.choice(self.outage_types2)
+
+        self.current_outage_node = node
+        self.current_outage_nodes = [node]
+
+        self.logger.info(
+            f"[scale_break] Triggering {outage_type} on node {node}"
+        )
+        self.collect_outage_diagnostics(f"pre_outage_{node[:8]}")
+        self.outage_start_time = int(datetime.now().timestamp())
+
+        self._graceful_shutdown_node(node)
+        self.log_outage_event(node, outage_type, "Outage started")
+
+        return node, outage_type
+
+    def _recover_node(self, node: str, outage_type: str):
+        """Recover node after the outage duration has elapsed."""
+        self.logger.info(
+            f"[scale_break] Recovering node {node} from {outage_type}"
+        )
+        self.restart_nodes_after_failover(outage_type)
+
+        try:
+            self.sbcli_utils.wait_for_health_status(node, True, timeout=300)
+        except Exception as exc:
+            self.logger.warning(
+                f"[scale_break] Health check did not pass for {node}: {exc}"
+            )
+
+        self.outage_end_time = int(datetime.now().timestamp())
+        self.collect_outage_diagnostics("post_recovery")
+
+    # ── Summary ───────────────────────────────────────────────────────────
+
+    def _log_scale_break_summary(self, break_reason: str | None):
+        """Log a formatted summary table of all iterations."""
+        self.logger.info("=" * 70)
+        self.logger.info("SCALE BREAK TEST SUMMARY")
+        self.logger.info("=" * 70)
+        self.logger.info(
+            f"{'Iter':<6} {'Pods':<8} {'Status':<8} {'Duration':<12} Reason"
+        )
+        self.logger.info("-" * 70)
+        for r in self.iteration_results:
+            self.logger.info(
+                f"{r['iteration']:<6} {r['pod_count']:<8} {r['status']:<8} "
+                f"{r['duration_s']}s{'':<7} {r['reason']}"
+            )
+        self.logger.info("-" * 70)
+        if break_reason:
+            self.logger.info(f"BREAKING POINT: {break_reason}")
+        else:
+            self.logger.info(
+                "Test did not reach a breaking point (manual stop?)"
+            )
+        self.logger.info("=" * 70)
+
+    # ── Main loop ─────────────────────────────────────────────────────────
+
+    def run(self):
+        self._ensure_k8s_utils()
+        self._initialize_outage_log()
+        self.start_nvme_iostat_monitor()
+        self.logger.info("=== Starting K8sNativeScaleBreakTest ===")
+
+        # ── Cluster config ──
+        cluster_details = self.sbcli_utils.get_cluster_details()
+        self.max_fault_tolerance = cluster_details.get(
+            "max_fault_tolerance", 1
+        )
+        self.logger.info(
+            f"Cluster max_fault_tolerance: {self.max_fault_tolerance}"
+        )
+
+        # ── Clean slate ──
+        for cleanup_fn in (
+            self.sbcli_utils.delete_all_clones,
+            self.sbcli_utils.delete_all_snapshots,
+            self.sbcli_utils.delete_all_lvols,
+        ):
+            try:
+                cleanup_fn()
+            except Exception:
+                pass
+        try:
+            self.sbcli_utils.delete_storage_pool(self.pool_name)
+        except Exception:
+            pass
+        pool_test = self.sbcli_utils.add_storage_pool(
+            pool_name=self.pool_name
+        )
+        if pool_test and pool_test != self.pool_name:
+            self.pool_name = pool_test
+
+        cluster_id = self.cluster_id or ""
+        self.k8s_utils.create_storage_class(
+            name=self.STORAGE_CLASS_NAME,
+            cluster_id=cluster_id,
+            pool_name=self.pool_name,
+            ndcs=self.ndcs,
+            npcs=self.npcs,
+        )
+        self.k8s_utils.create_storage_class(
+            name=self.XFS_STORAGE_CLASS_NAME,
+            cluster_id=cluster_id,
+            pool_name=self.pool_name,
+            ndcs=self.ndcs,
+            npcs=self.npcs,
+            fs_type="xfs",
+        )
+        if self.tls_enabled:
+            self.sbcli_utils.ensure_pool_exists(
+                self.CRYPTO_POOL_NAME,
+                cluster_id=self.cluster_id,
+                encryption=True,
+            )
+            self.k8s_utils.create_storage_class(
+                name=self.CRYPTO_STORAGE_CLASS_NAME,
+                cluster_id=cluster_id,
+                pool_name=self.CRYPTO_POOL_NAME,
+                ndcs=self.ndcs,
+                npcs=self.npcs,
+                encryption=True,
+            )
+        sleep_n_sec(5)
+
+        # Populate storage node maps
+        storage_nodes = self.sbcli_utils.get_storage_nodes()
+        for result in storage_nodes["results"]:
+            self.sn_nodes.append(result["uuid"])
+            self.sn_nodes_with_sec.append(result["uuid"])
+            self.sn_primary_secondary_map[result["uuid"]] = (
+                result["secondary_node_id"]
+            )
+        self.logger.info(
+            f"Storage nodes: {len(self.sn_nodes)}, "
+            f"secondary map: {self.sn_primary_secondary_map}"
+        )
+
+        # ── Scale-break iteration loop ──
+        iteration = 1
+        target_pods = self.initial_pod_count
+        test_failed = False
+        break_reason = None
+
+        try:
+            while True:
+                iter_start = time.time()
+                self.logger.info(
+                    f"=== Iteration {iteration}: target {target_pods} pods ==="
+                )
+
+                # ── Phase 1: Scale up PVCs ──
+                current_count = len(self.pvc_details)
+                new_count = target_pods - current_count
+                if new_count > 0:
+                    self.logger.info(
+                        f"[scale_break] Creating {new_count} new PVCs "
+                        f"({current_count} existing + {new_count} = "
+                        f"{target_pods} target)"
+                    )
+                    self._compute_fio_size(extra_jobs=new_count)
+                    try:
+                        self.create_pvcs_with_fio(new_count)
+                    except Exception as exc:
+                        break_reason = (
+                            f"PVC creation failed at {target_pods} pods: "
+                            f"{exc}"
+                        )
+                        self.logger.error(
+                            f"[scale_break] BREAK: {break_reason}"
+                        )
+                        test_failed = True
+                        break
+
+                actual_count = len(self.pvc_details)
+                if actual_count < target_pods:
+                    break_reason = (
+                        f"PVC provisioning shortfall: "
+                        f"{actual_count}/{target_pods} PVCs created"
+                    )
+                    self.logger.error(
+                        f"[scale_break] BREAK: {break_reason}"
+                    )
+                    test_failed = True
+                    break
+
+                # Restart FIO on ALL PVCs for synchronized start
+                if iteration > 1:
+                    self._compute_fio_size()
+                    self.restart_fio(iteration=iteration)
+
+                self.logger.info(
+                    f"[scale_break] {actual_count} PVCs with FIO running "
+                    f"(fio_size={self.fio_size}, "
+                    f"runtime={self.FIO_RUNTIME}s)"
+                )
+                sleep_n_sec(30)
+
+                # ── Phase 2: Trigger single node outage ──
+                node, outage_type = self._perform_single_outage()
+
+                # ── Phase 3: Node offline for 7.5 min ──
+                self.logger.info(
+                    f"[scale_break] Sleeping {self.OUTAGE_DURATION}s "
+                    f"during outage..."
+                )
+                sleep_n_sec(self.OUTAGE_DURATION)
+
+                # ── Phase 4: Recover node ──
+                self._recover_node(node, outage_type)
+
+                # ── Phase 5: Wait for FIO completion ──
+                fio_timeout = self.FIO_RUNTIME + 600
+                try:
+                    self.wait_for_fio_complete(timeout=fio_timeout)
+                except Exception as exc:
+                    break_reason = (
+                        f"FIO wait timed out at {target_pods} pods: {exc}"
+                    )
+                    self.logger.error(
+                        f"[scale_break] BREAK: {break_reason}"
+                    )
+                    test_failed = True
+                    break
+
+                # ── Phase 6: Validate ──
+                fio_failed = False
+                try:
+                    self.validate_fio_jobs()
+                except (RuntimeError, AssertionError) as exc:
+                    break_reason = (
+                        f"FIO validation failed at {target_pods} pods: "
+                        f"{exc}"
+                    )
+                    self.logger.error(
+                        f"[scale_break] BREAK: {break_reason}"
+                    )
+                    fio_failed = True
+                    test_failed = True
+
+                try:
+                    self.check_core_dump()
+                except Exception as exc:
+                    if not break_reason:
+                        break_reason = (
+                            f"Core dump at {target_pods} pods: {exc}"
+                        )
+                    self.logger.error(
+                        f"[scale_break] Core dump at "
+                        f"{target_pods}: {exc}"
+                    )
+                    test_failed = True
+
+                if self.outage_start_time and self.outage_end_time:
+                    time_duration = (
+                        self.common_utils.calculate_time_duration(
+                            start_timestamp=self.outage_start_time,
+                            end_timestamp=self.outage_end_time,
+                        )
+                    )
+                    try:
+                        self.common_utils.validate_io_stats(
+                            cluster_id=self.cluster_id,
+                            start_timestamp=self.outage_start_time,
+                            end_timestamp=self.outage_end_time,
+                            time_duration=time_duration,
+                            warn_only=True,
+                        )
+                    except AssertionError as exc:
+                        self.logger.warning(
+                            f"[scale_break] IO stats warning at "
+                            f"{target_pods}: {exc}"
+                        )
+
+                iter_duration = int(time.time() - iter_start)
+                self.iteration_results.append({
+                    "iteration": iteration,
+                    "pod_count": target_pods,
+                    "status": (
+                        "FAIL" if (fio_failed or test_failed) else "PASS"
+                    ),
+                    "duration_s": iter_duration,
+                    "reason": break_reason or "OK",
+                })
+
+                self.logger.info(
+                    f"=== Iteration {iteration} complete: "
+                    f"{target_pods} pods, "
+                    f"{'FAIL' if test_failed else 'PASS'}, "
+                    f"{iter_duration}s ==="
+                )
+                self.collect_outage_diagnostics(
+                    f"end_iteration_{iteration}_{target_pods}pods"
+                )
+
+                if test_failed:
+                    break
+
+                # Double for next iteration
+                iteration += 1
+                target_pods *= 2
+
+        except Exception as exc:
+            if not break_reason:
+                break_reason = f"Unhandled exception: {exc}"
+            test_failed = True
+            self.logger.error(f"[scale_break] Unhandled: {exc}")
+            traceback.print_exc()
+        finally:
+            self._log_scale_break_summary(break_reason)
+            if not test_failed:
+                self._cleanup_all_k8s_resources()
