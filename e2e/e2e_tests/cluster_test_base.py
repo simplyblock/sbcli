@@ -1108,6 +1108,16 @@ class TestClusterBase:
              f"kubectl get volumesnapshot -n {ns} -o yaml 2>/dev/null || true"),
             (f"pvc_list{suffix}.txt",
              f"kubectl get pvc -n {ns} -o wide 2>/dev/null || true"),
+            (f"pods_all_namespaces{suffix}.txt",
+             "kubectl get pods -A -o wide"),
+            (f"nodes{suffix}.txt",
+             "kubectl get nodes -o wide"),
+            (f"node_resources{suffix}.txt",
+             "kubectl top nodes 2>/dev/null || echo 'metrics-server not available'"),
+            (f"node_describe{suffix}.txt",
+             "kubectl describe nodes"),
+            (f"pod_resources{suffix}.txt",
+             "kubectl top pods -A 2>/dev/null || echo 'metrics-server not available'"),
         ]
         for filename, cmd in kubectl_diag:
             try:

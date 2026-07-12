@@ -538,8 +538,17 @@ class SbcliUtils:
                     continue
                 if cur_state in ("online", "in_deletion"):
                     self.logger.info(f"Lvol {lvol_name} in {cur_state} state. Retrying Delete!")
-                    data = self.delete_request(api_url=f"/lvol/{lvol_id}", treat_404_as_success=True)
-                    self.logger.info(f"Delete lvol resp: {data}")
+                    try:
+                        data = self.delete_request(api_url=f"/lvol/{lvol_id}", treat_404_as_success=True)
+                        self.logger.info(f"Delete lvol resp: {data}")
+                    except Exception as e:
+                        if skip_error:
+                            self.logger.warning(
+                                f"delete_lvol retry DELETE for {lvol_name} ({lvol_id}) failed: {e}. "
+                                f"Continuing with skip_error=True"
+                            )
+                        else:
+                            raise
             if attempt > max_attempt:
                 if skip_error:
                     return False

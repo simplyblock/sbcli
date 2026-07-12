@@ -326,6 +326,11 @@ jobs:
           echo "=== Phase 9: Reset hugepages and restart kubelet on worker nodes ==="
           CLUSTER_ENV="${{ github.event.inputs.cluster_environment || 'local' }}"
           IFS=',' read -ra NODES <<< "${{ github.event.inputs.worker_nodes }}"
+          # Include the migration target node in cleanup
+          MIGRATE_NODE="${{ github.event.inputs.migrate_to_worker }}"
+          if [ -n "$MIGRATE_NODE" ]; then
+            NODES+=("$MIGRATE_NODE")
+          fi
           for NODE in "${NODES[@]}"; do
             echo "Resetting hugepages to 0 on $NODE..."
             if [[ "$CLUSTER_ENV" == *"openshift"* ]]; then
