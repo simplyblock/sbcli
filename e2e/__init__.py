@@ -65,7 +65,7 @@ from stress_test.continuous_failover_ha_2node import RandomMultiClient2NodeFailo
 from stress_test.continuous_failover_ha_rdma import RandomRDMAFailoverTest
 from stress_test.continuous_failover_ha_rdma_multi_outage import RandomRDMAMultiFailoverTest
 from stress_test.continuous_failover_ha_k8s import RandomK8sMultiOutageFailoverTest
-from stress_test.continuous_k8s_native_failover import K8sNativeFailoverTest, K8sNativeBasicFailoverTest, K8sNativeResilientFailoverTest, K8sNativeQuickFailoverTest
+from stress_test.continuous_k8s_native_failover import K8sNativeFailoverTest, K8sNativeBasicFailoverTest, K8sNativeResilientFailoverTest, K8sNativeQuickFailoverTest, K8sNativeScaleBreakTest
 from stress_test.continuous_failover_ha_multi_client_quick_outage import (
     RandomRapidFailoverNoGap,
     RandomRapidFailoverNoGapV2WithMigration,
@@ -103,6 +103,7 @@ from stress_test.mass_create_delete_stress import (
     MassCreateDeletePersistent_1x500_Docker,
     MassCreateDeletePersistent_30x100_Docker,
     MassCreateDeletePersistent_300x10_Docker,
+    MassCreateDeletePersistent_300x10_20Snap_Docker,
     MassCreateDeletePersistent_500x1_Docker,
     MassCreateDeletePersistent_3000x1_Docker,
     MassCreateDeletePersistent_1x500_K8s,
@@ -377,6 +378,7 @@ ALL_TESTS = [
     K8sNativeNamespacedFailoverTest,
     K8sNativeRapidLifecycleTest,
     K8sNativeMountVerifiedFailoverTest,
+    K8sNativeScaleBreakTest,
     TestParallelNamespaceLvolDocker,
     TestParallelNamespaceLvolK8s,
     BulkLvolDeleteDocker,
@@ -398,6 +400,7 @@ ALL_TESTS = [
     MassCreateDeletePersistent_1x500_Docker,
     MassCreateDeletePersistent_30x100_Docker,
     MassCreateDeletePersistent_300x10_Docker,
+    MassCreateDeletePersistent_300x10_20Snap_Docker,
     MassCreateDeletePersistent_500x1_Docker,
     MassCreateDeletePersistent_3000x1_Docker,
     MassCreateDeletePersistent_1x500_K8s,
@@ -645,6 +648,7 @@ def get_stress_tests():
         K8sNativeNamespacedFailoverTest,
         K8sNativeRapidLifecycleTest,
         K8sNativeMountVerifiedFailoverTest,
+        K8sNativeScaleBreakTest,
         TestParallelNamespaceLvolDocker,
         TestParallelNamespaceLvolK8s,
         BulkLvolDeleteDocker,
@@ -666,6 +670,7 @@ def get_stress_tests():
         MassCreateDeletePersistent_1x500_Docker,
         MassCreateDeletePersistent_30x100_Docker,
         MassCreateDeletePersistent_300x10_Docker,
+        MassCreateDeletePersistent_300x10_20Snap_Docker,
         MassCreateDeletePersistent_500x1_Docker,
         MassCreateDeletePersistent_3000x1_Docker,
         MassCreateDeletePersistent_1x500_K8s,
@@ -715,6 +720,7 @@ def get_monitoring_tests():
         MassCreateDeletePersistent_1x500_Docker,
         MassCreateDeletePersistent_30x100_Docker,
         MassCreateDeletePersistent_300x10_Docker,
+        MassCreateDeletePersistent_300x10_20Snap_Docker,
         MassCreateDeletePersistent_500x1_Docker,
         MassCreateDeletePersistent_3000x1_Docker,
         MassCreateDeletePersistent_1x500_K8s,
