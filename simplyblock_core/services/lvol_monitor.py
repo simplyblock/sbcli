@@ -118,7 +118,7 @@ def resume_comp(lvol):
         tasks_controller.add_jc_comp_resume_task(node.cluster_id, node.get_id(), node.jm_vuid)
 
 
-def post_lvol_delete_rebalance(lvol):
+def post_lvol_delete_rebalance(cluster, lvol):
     global lvol_del_start_time
     diff = time.time() - lvol_del_start_time
     if diff > 0:
@@ -137,7 +137,7 @@ def post_lvol_delete_rebalance(lvol):
             resume_comp(lvol)
 
 
-def process_lvol_delete_finish(lvol):
+def process_lvol_delete_finish(cluster, lvol):
     logger.info(f"LVol deleted successfully, id: {lvol.get_id()}")
 
     # check leadership
@@ -229,7 +229,7 @@ def process_lvol_delete_finish(lvol):
         logger.info("All devices are full, starting expansion migrations")
         for dev_id in full_devs_ids:
             tasks_controller.add_new_device_mig_task(dev_id)
-    post_lvol_delete_rebalance(lvol)
+    post_lvol_delete_rebalance(cluster, lvol)
 
 
 def process_lvol_delete_try_again(lvol):
@@ -237,7 +237,7 @@ def process_lvol_delete_try_again(lvol):
                      lambda x: setattr(x, "deletion_status", ""))
 
 
-def check_node(snode, all_lvols):
+def check_node(cluster, snode, all_lvols):
 
     for lvol in all_lvols:
         if lvol.node_id != snode.get_id():
@@ -315,7 +315,7 @@ def check_node(snode, all_lvols):
                 break
 
             if ret == 0 or ret == 2:  # Lvol may have already been deleted (not found) or delete completed
-                process_lvol_delete_finish(lvol)
+                process_lvol_delete_finish(cluster, lvol)
 
             elif ret == 1:  # Async lvol deletion is in progress or queued
                 logger.info(f"LVol deletion in progress, id: {lvol.get_id()}")
@@ -351,7 +351,7 @@ def check_node(snode, all_lvols):
             elif ret == -2:  # No such file or directory
                 logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
                 logger.error("No such file or directory")
-                process_lvol_delete_finish(lvol)
+                process_lvol_delete_finish(cluster, lvol)
 
             elif ret == -5:  # I/O error
                 logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
@@ -376,7 +376,7 @@ def check_node(snode, all_lvols):
             elif ret == -19:  # No such device
                 logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
                 logger.error("Finishing lvol delete")
-                process_lvol_delete_finish(lvol)
+                process_lvol_delete_finish(cluster, lvol)
 
             elif ret == -35:  # Leadership changed
                 logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
@@ -442,24 +442,30 @@ def check_node(snode, all_lvols):
 # get DB controller
 db = db_controller.DBController()
 
-logger.info("Starting LVol monitor...")
-while True:
-    try:
-        db.get_clusters()
-    except Exception as e:
-        logger.error(f"Failed to get clusters: {e}")
-        time.sleep(3)
-        continue
-    for cluster in db.get_clusters():
 
-        if cluster.status in [Cluster.STATUS_INACTIVE, Cluster.STATUS_UNREADY, Cluster.STATUS_IN_ACTIVATION]:
-            logger.warning(f"Cluster {cluster.get_id()} is in {cluster.status} state, skipping")
+def main():
+    logger.info("Starting LVol monitor...")
+    while True:
+        try:
+            db.get_clusters()
+        except Exception as e:
+            logger.error(f"Failed to get clusters: {e}")
+            time.sleep(3)
             continue
-        all_lvols = db.get_all_lvols()
-        for snode in db.get_storage_nodes_by_cluster_id(cluster.get_id()):
-            try:
-                check_node(snode, all_lvols)
-            except Exception as e:
-                logger.error(e)
+        for cluster in db.get_clusters():
 
-    time.sleep(constants.LVOL_MONITOR_INTERVAL_SEC)
+            if cluster.status in [Cluster.STATUS_INACTIVE, Cluster.STATUS_UNREADY, Cluster.STATUS_IN_ACTIVATION]:
+                logger.warning(f"Cluster {cluster.get_id()} is in {cluster.status} state, skipping")
+                continue
+            all_lvols = db.get_all_lvols()
+            for snode in db.get_storage_nodes_by_cluster_id(cluster.get_id()):
+                try:
+                    check_node(cluster, snode, all_lvols)
+                except Exception as e:
+                    logger.error(e)
+
+        time.sleep(constants.LVOL_MONITOR_INTERVAL_SEC)
+
+
+if __name__ == "__main__":
+    main()
