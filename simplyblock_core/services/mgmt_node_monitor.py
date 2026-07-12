@@ -56,20 +56,6 @@ class K8sNodeBackend(NodeBackend):
         return reachable
 
 
-# ----- Backend Selection -----
-
-backend_type = os.getenv("BACKEND_TYPE", "docker").lower()
-backend: NodeBackend
-
-if backend_type == "docker":
-    backend = DockerNodeBackend()
-elif backend_type == "k8s":
-    backend = K8sNodeBackend()
-else:
-    raise ValueError(f"Unsupported BACKEND_TYPE '{backend_type}', use 'docker' or 'k8s'")
-
-logger.info(f"Using backend: {backend_type}")
-
 def _set_mgmt_node_status(node, from_status, to_status):
     # Atomic compare-and-set so a full read-modify-write never clobbers a
     # concurrent change to another field of the mgmt node row (the same
@@ -102,53 +88,69 @@ def set_node_offline(node):
     _set_mgmt_node_status(node, MgmtNode.STATUS_ONLINE, MgmtNode.STATUS_UNREACHABLE)
 
 
-logger.info("Starting Mgmt node monitor")
+def main():
+    logger.info("Starting Mgmt node monitor")
 
+    backend_type = os.getenv("BACKEND_TYPE", "docker").lower()
+    backend: NodeBackend
 
-while True:
-    try:
-        db.get_clusters()
-    except Exception as e:
-        logger.error(f"Failed to get clusters: {e}")
-        time.sleep(3)
-        continue
+    if backend_type == "docker":
+        backend = DockerNodeBackend()
+    elif backend_type == "k8s":
+        backend = K8sNodeBackend()
+    else:
+        raise ValueError(f"Unsupported BACKEND_TYPE '{backend_type}', use 'docker' or 'k8s'")
 
-    try:
-        nodes = db.get_mgmt_nodes()
-        reachable_ips = set(backend.get_reachable_nodes())
-    except Exception as e:
-        logger.error(f"Failed to enumerate mgmt nodes / reachable IPs: {e}")
-        time.sleep(3)
-        continue
+    logger.info(f"Using backend: {backend_type}")
 
-    for node in nodes:
-        # Per-node isolation: a failure on one mgmt node must not abort the
-        # sweep over the remaining nodes for this tick.
+    while True:
         try:
-            if node.status not in [MgmtNode.STATUS_ONLINE, MgmtNode.STATUS_UNREACHABLE]:
-                logger.info(f"Node status is: {node.status}, skipping")
-                continue
-
-            # 1- check node ping
-            ping_check = health_controller._check_node_ping(node.mgmt_ip)
-            logger.info(f"Check: ping mgmt ip {node.mgmt_ip} ... {ping_check}")
-            if not ping_check:
-                time.sleep(1)
-                ping_check = health_controller._check_node_ping(node.mgmt_ip)
-                logger.info(f"Check 2: ping mgmt ip {node.mgmt_ip} ... {ping_check}")
-
-            if not ping_check:
-                logger.info(f"Node {node.hostname} is offline")
-                set_node_offline(node)
-                continue
-
-            if node.mgmt_ip in reachable_ips:
-                set_node_online(node)
-            else:
-                set_node_offline(node)
+            db.get_clusters()
         except Exception as e:
-            logger.error(f"Mgmt node monitor failed for node {node.get_id()}: {e}")
-            logger.exception(e)
+            logger.error(f"Failed to get clusters: {e}")
+            time.sleep(3)
+            continue
 
-    logger.info(f"Sleeping for {constants.NODE_MONITOR_INTERVAL_SEC} seconds")
-    time.sleep(constants.NODE_MONITOR_INTERVAL_SEC)
+        try:
+            nodes = db.get_mgmt_nodes()
+            reachable_ips = set(backend.get_reachable_nodes())
+        except Exception as e:
+            logger.error(f"Failed to enumerate mgmt nodes / reachable IPs: {e}")
+            time.sleep(3)
+            continue
+
+        for node in nodes:
+            # Per-node isolation: a failure on one mgmt node must not abort the
+            # sweep over the remaining nodes for this tick.
+            try:
+                if node.status not in [MgmtNode.STATUS_ONLINE, MgmtNode.STATUS_UNREACHABLE]:
+                    logger.info(f"Node status is: {node.status}, skipping")
+                    continue
+
+                # 1- check node ping
+                ping_check = health_controller._check_node_ping(node.mgmt_ip)
+                logger.info(f"Check: ping mgmt ip {node.mgmt_ip} ... {ping_check}")
+                if not ping_check:
+                    time.sleep(1)
+                    ping_check = health_controller._check_node_ping(node.mgmt_ip)
+                    logger.info(f"Check 2: ping mgmt ip {node.mgmt_ip} ... {ping_check}")
+
+                if not ping_check:
+                    logger.info(f"Node {node.hostname} is offline")
+                    set_node_offline(node)
+                    continue
+
+                if node.mgmt_ip in reachable_ips:
+                    set_node_online(node)
+                else:
+                    set_node_offline(node)
+            except Exception as e:
+                logger.error(f"Mgmt node monitor failed for node {node.get_id()}: {e}")
+                logger.exception(e)
+
+        logger.info(f"Sleeping for {constants.NODE_MONITOR_INTERVAL_SEC} seconds")
+        time.sleep(constants.NODE_MONITOR_INTERVAL_SEC)
+
+
+if __name__ == "__main__":
+    main()
