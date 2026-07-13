@@ -1866,11 +1866,27 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                                 logger.warning(
                                     f"Node {node.get_id()} is in_creation status with SSD {ssd}, "
                                     f"removing and deleting it")
-                                try:
-                                    stale_api = node.client(timeout=20)
-                                    stale_api.spdk_process_kill(node.rpc_port, node.cluster_id)
-                                except Exception:
-                                    logger.warning("Failed to kill SPDK process for stale in_creation node", exc_info=True)
+                                # Kill the SPDK pod first and only drop the record
+                                # once it's confirmed dead — a failed kill followed
+                                # by record removal orphans the pod (holds
+                                # CPU/hugepages, blocks the retry). Retry; keep the
+                                # record and fail the add if it won't die.
+                                killed = False
+                                for attempt in range(6):
+                                    try:
+                                        node.client(timeout=20).spdk_process_kill(node.rpc_port, node.cluster_id)
+                                        killed = True
+                                        break
+                                    except Exception:
+                                        logger.warning(
+                                            f"Failed to kill SPDK for stale in_creation node "
+                                            f"{node.get_id()} (attempt {attempt + 1}/6)", exc_info=True)
+                                        time.sleep(5)
+                                if not killed:
+                                    logger.error(
+                                        f"Could not kill SPDK for stale in_creation node {node.get_id()}; "
+                                        f"keeping its DB record to avoid orphaning the pod — failing add for retry")
+                                    return False
                                 storage_events.snode_delete(node)
                                 node.remove(db_controller.kv_store)
                                 break
@@ -1951,10 +1967,31 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 logger.warning(
                     f"Found stale IN_CREATION node {n.get_id()} for {node_addr} "
                     f"socket {node_socket} from an interrupted add; cleaning up before retry")
-                try:
-                    n.client(timeout=20).spdk_process_kill(n.rpc_port, n.cluster_id)
-                except Exception:
-                    logger.warning("Failed to kill SPDK for stale in_creation node", exc_info=True)
+                # Invariant: a running SPDK pod MUST keep its DB record. Kill the
+                # SPDK pod FIRST and only drop the record once it's confirmed
+                # dead. Previously the kill was best-effort and the record was
+                # removed regardless, so a kill that failed (agent briefly
+                # unreachable during the topology reboot) left the pod ORPHANED —
+                # holding the node's CPU/hugepages and blocking the retry's SPDK
+                # pod (Pending, node stuck in in_creation; worker-3, 2026-07-13).
+                # Retry the kill; if it never succeeds, keep the record and fail
+                # the add so a later attempt cleans the pair rather than orphaning.
+                killed = False
+                for attempt in range(6):
+                    try:
+                        n.client(timeout=20).spdk_process_kill(n.rpc_port, n.cluster_id)
+                        killed = True
+                        break
+                    except Exception:
+                        logger.warning(
+                            f"Failed to kill SPDK for stale in_creation node "
+                            f"{n.get_id()} (attempt {attempt + 1}/6)", exc_info=True)
+                        time.sleep(5)
+                if not killed:
+                    logger.error(
+                        f"Could not kill SPDK for stale in_creation node {n.get_id()}; "
+                        f"keeping its DB record to avoid orphaning the pod — failing add for retry")
+                    return False
                 try:
                     storage_events.snode_delete(n)
                 except Exception:
