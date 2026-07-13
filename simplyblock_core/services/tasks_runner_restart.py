@@ -646,23 +646,20 @@ def main():
                         inflight = _restart_inflight.get(task.uuid)
                         if inflight is not None and not inflight.done():
                             continue
-                        _restart_inflight[task.uuid] = _restart_pool.submit(
-                            _process_restart_task, task.uuid)
+                        # Per-node exclusion: never run two restart tasks for the
+                        # same node concurrently (see _node_inflight above). The
+                        # duplicate task re-polls next pass; by then the winner
+                        # has usually completed and marked it obsolete.
+                        node_inflight = _node_inflight.get(task.node_id)
+                        if node_inflight is not None and not node_inflight.done():
+                            _restart_next_attempt[task.uuid] = (
+                                time.time() + constants.RESTART_TASK_EXEC_INTERVAL_SEC)
+                            continue
+                        fut = _restart_pool.submit(_process_restart_task, task.uuid)
+                        _restart_inflight[task.uuid] = fut
+                        if task.node_id:
+                            _node_inflight[task.node_id] = fut
                         continue
-                    # Per-node exclusion: never run two restart tasks for the
-                    # same node concurrently (see _node_inflight above). The
-                    # duplicate task re-polls next pass; by then the winner
-                    # has usually completed and marked it obsolete.
-                    node_inflight = _node_inflight.get(task.node_id)
-                    if node_inflight is not None and not node_inflight.done():
-                        _restart_next_attempt[task.uuid] = (
-                            time.time() + constants.RESTART_TASK_EXEC_INTERVAL_SEC)
-                        continue
-                    fut = _restart_pool.submit(_process_restart_task, task.uuid)
-                    _restart_inflight[task.uuid] = fut
-                    if task.node_id:
-                        _node_inflight[task.node_id] = fut
-                    continue
 
                     # Inline (serialized) execution; _process_restart_task never
                     # raises, so a crash in one task cannot escape to the outer
