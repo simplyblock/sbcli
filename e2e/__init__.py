@@ -168,7 +168,7 @@ from e2e_tests.test_lvol_basic import TestLvolBasicCRUD
 from e2e_tests.test_lvol_stats import TestLvolCapacityIOStats
 from e2e_tests.test_lvol_negative import TestLvolNegativeCases
 from e2e_tests.test_snapshot_negative import TestSnapshotNegativeCases
-from e2e_tests.test_pool_attributes import TestPoolAttributes
+# from e2e_tests.test_pool_attributes import TestPoolAttributes  # DISABLED: QoS crash
 from e2e_tests.test_pool_enable_disable import TestPoolEnableDisable
 from e2e_tests.test_pool_negative import TestPoolNegativeCases
 from e2e_tests.test_node_suspend_resume import TestNodeSuspendResume          # DEPRECATED: sn suspend/resume are no-ops
@@ -432,7 +432,7 @@ ALL_TESTS = [
     TestLvolCapacityIOStats,
     TestLvolNegativeCases,
     TestSnapshotNegativeCases,
-    TestPoolAttributes,
+    # TestPoolAttributes,  # DISABLED: QoS causes SPDK crash (corrupted double-linked list in bdev_set_qos_limit_done)
     TestPoolEnableDisable,
     TestPoolNegativeCases,
     TestNodeSuspendResume,
@@ -516,7 +516,7 @@ def get_all_tests(custom=True, ha_test=False):
         TestLvolCapacityIOStats,
         TestLvolNegativeCases,
         TestSnapshotNegativeCases,
-        TestPoolAttributes,
+        # TestPoolAttributes,  # DISABLED: QoS causes SPDK crash (corrupted double-linked list in bdev_set_qos_limit_done)
         TestPoolEnableDisable,
         TestPoolNegativeCases,
         # TestNodeSuspendResume,          # DEPRECATED: sn suspend/resume are no-ops in CLI

@@ -3,7 +3,7 @@ import threading
 import time
 import boto3
 from utils.sbcli_utils import SbcliUtils
-from utils.ssh_utils import SshUtils, RunnerK8sLog
+from utils.ssh_utils import SshUtils, RunnerK8sLog, _compress_and_cleanup_old_dumps
 from utils.k8s_utils import K8sUtils, K8sSbcliUtils
 from utils.common_utils import CommonUtils
 from logger_config import setup_logger, start_log_flusher
@@ -62,6 +62,7 @@ class TestClusterBase:
         self.common_utils = CommonUtils(self.sbcli_utils, self.ssh_obj)
         self.mgmt_nodes = None
         self.storage_nodes = None
+        self.sn_nodes = []
         self.fio_node = None
         self.ndcs = kwargs.get("ndcs", 1)
         self.npcs = kwargs.get("npcs", 1)
@@ -156,6 +157,12 @@ class TestClusterBase:
                     raise e
                 self.logger.info(f"Retrying Base APIs before starting tests. Attempt: {30 - retry + 1}")
         self._validate_storage_node_health()
+        # Populate sn_nodes with storage node UUIDs for tests that need them
+        try:
+            sn_data = self.sbcli_utils.get_storage_nodes()
+            self.sn_nodes = [n["uuid"] for n in sn_data.get("results", [])]
+        except Exception as e:
+            self.logger.warning(f"Could not populate sn_nodes: {e}")
         if not self.k8s_test:
             for node in self.mgmt_nodes:
                 self.logger.info(f"**Connecting to management nodes** - {node}")
@@ -925,6 +932,14 @@ class TestClusterBase:
             self._collect_all_node_dumps_parallel(tag)
         except Exception as e:
             self.logger.warning(f"[diagnostics] _collect_all_node_dumps_parallel failed: {e}")
+
+        # 3. Compress old dump files & delete aged-out compressed dumps in background
+        dump_dir = os.path.join(self.docker_logs_path, f"node_dumps{tag}")
+        threading.Thread(
+            target=_compress_and_cleanup_old_dumps,
+            args=(self.docker_logs_path, dump_dir, self.logger),
+            daemon=True,
+        ).start()
 
         self.logger.info(f"[diagnostics] === Completed outage diagnostics: {label} at {timestamp} ===")
 
