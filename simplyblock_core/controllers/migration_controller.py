@@ -1367,3 +1367,22 @@ def cancel_batch_migration(group_id):
             logger.warning(f"cancel_batch_migration: could not mark worker "
                            f"{rec['migration_id']} cancelled: {e}")
     logger.info(f"cancel_batch_migration: marked all workers cancelled: {group_id}")
+
+
+def list_batch_migrations(cluster_id=None):
+    """Return all LVolMigrationGroup records, optionally filtered by cluster_id."""
+    groups = db.get_migration_groups(cluster_id=cluster_id)
+    result = []
+    for g in groups:
+        result.append({
+            "group_id":       g.uuid,
+            "cluster_id":     g.cluster_id,
+            "source_node_id": g.source_node_id,
+            "target_node_id": g.target_node_id,
+            "target_nqn":     g.target_nqn,
+            "phase":          g.phase,
+            "status":         g.status,
+            "member_count":   g.member_count(),
+            "error_message":  g.error_message,
+        })
+    return result

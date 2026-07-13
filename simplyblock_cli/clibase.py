@@ -781,6 +781,21 @@ class CLIWrapperBase:
         return lvol_controller.clone_lvol(args.volume_id, args.clone_name)
 
     def volume__migrate(self, sub_command, args):
+        if getattr(args, 'batch', False):
+            try:
+                group_id, connect_strings = migration_controller.create_batch_migration(
+                    args.volume_id,
+                    args.target_node_id,
+                    ctrl_loss_tmo=args.ctrl_loss_tmo,
+                    host_nqn=getattr(args, 'host_nqn', None),
+                )
+            except (MigrationConflictError, PreconditionError, ValueError) as e:
+                print(f"Error: {e}")
+                return False
+            print(f"Migration Group ID: {group_id}")
+            if connect_strings:
+                return "\n".join(c.connect for c in connect_strings)
+            return True
         try:
             migration_id, connect_strings = migration_controller.create_migration(
                 args.volume_id,
@@ -797,6 +812,18 @@ class CLIWrapperBase:
         return True
 
     def volume__migrate_continue(self, sub_command, args):
+        if getattr(args, 'batch', False):
+            try:
+                group_id = migration_controller.start_batch_migration(
+                    group_id=args.migration_id,
+                    max_retries=args.max_retries,
+                    deadline_seconds=args.deadline_seconds,
+                )
+            except ValueError as e:
+                print(f"Error: {e}")
+                return False
+            print(f"Batch migration started: {group_id}")
+            return True
         try:
             migration_id = migration_controller.start_migration(
                 migration_id=args.migration_id,
@@ -813,6 +840,14 @@ class CLIWrapperBase:
         return _format_result(migration_controller.list_migrations(cluster_id=args.cluster_id), json=args.json)
 
     def volume__migrate_cancel(self, sub_command, args):
+        if getattr(args, 'batch', False):
+            try:
+                migration_controller.cancel_batch_migration(args.migration_id)
+            except ValueError as e:
+                print(f"Error: {e}")
+                return False
+            print(f"Migration group {args.migration_id} cancelled")
+            return True
         try:
             migration_controller.cancel_migration(args.migration_id)
         except ValueError as e:
@@ -845,6 +880,9 @@ class CLIWrapperBase:
         if not deleted and not errs:
             print("Nothing left to clean up on target.")
         return not errs
+
+    def volume__migrate_group_list(self, sub_command, args):
+        return _format_result(migration_controller.list_batch_migrations(cluster_id=args.cluster_id), json=args.json)
 
     def control_plane__add(self, sub_command, args):
         cluster_id = args.cluster_id

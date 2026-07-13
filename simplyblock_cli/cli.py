@@ -650,6 +650,8 @@ class CLIWrapper(CLIWrapperBase):
             self.init_volume__migrate_cancel(subparser)
         if self.developer_mode:
             self.init_volume__migrate_cleanup(subparser)
+        if self.developer_mode:
+            self.init_volume__migrate_group_list(subparser)
 
 
     def init_volume__add(self, subparser):
@@ -801,17 +803,19 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('clone_name', help='The new logical volume clone name.', type=str)
 
     def init_volume__migrate(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'migrate', 'Pre-create the target NVMe-oF subsystem for a volume migration. Returns a migration ID and NVMe connect strings (inaccessible ANA state). Connect the client, then run migrate-continue.')
-        subcommand.add_argument('volume_id', help='The volume ID to migrate.', type=str)
+        subcommand = self.add_sub_command(subparser, 'migrate', 'Pre-create the target NVMe-oF subsystem for a volume migration. Returns a migration ID (or group ID with --batch) and NVMe connect strings (inaccessible ANA state). Connect the client, then run migrate-continue.')
+        subcommand.add_argument('volume_id', help='The volume ID to migrate. With --batch, any member of the shared-namespace subsystem.', type=str)
         subcommand.add_argument('target_node_id', help='The target storage node ID.', type=str)
         subcommand.add_argument('--ctrl-loss-tmo', help='NVMe ctrl-loss-tmo in seconds. Default: `3600`.', type=int, default=3600, dest='ctrl_loss_tmo')
         subcommand.add_argument('--host-nqn', help='Host NQN for DH-HMAC-CHAP authentication (required when volume has allowed hosts).', type=str, dest='host_nqn')
+        subcommand.add_argument('--batch', help='Migrate all lvols sharing the same NVMe-oF subsystem as a coordinated group.', dest='batch', action='store_true')
 
     def init_volume__migrate_continue(self, subparser):
         subcommand = self.add_sub_command(subparser, 'migrate-continue', 'Advance a pre-created migration to the snapshot-copy phase and launch the task runner.')
-        subcommand.add_argument('migration_id', help='The migration ID returned by migrate.', type=str)
+        subcommand.add_argument('migration_id', help='The migration ID returned by migrate (or group ID with --batch).', type=str)
         subcommand.add_argument('--max-retries', help='Maximum retry attempts before aborting. Default: `10`.', type=int, default=10, dest='max_retries')
         subcommand.add_argument('--deadline', help='Migration deadline in seconds (0 = no deadline). Default: `14400`.', type=int, default=14400, dest='deadline_seconds')
+        subcommand.add_argument('--batch', help='ID is a batch migration group ID.', dest='batch', action='store_true')
 
     def init_volume__migrate_list(self, subparser):
         subcommand = self.add_sub_command(subparser, 'migrate-list', 'List volume migrations.')
@@ -820,11 +824,17 @@ class CLIWrapper(CLIWrapperBase):
 
     def init_volume__migrate_cancel(self, subparser):
         subcommand = self.add_sub_command(subparser, 'migrate-cancel', 'Cancel an active volume migration.')
-        subcommand.add_argument('migration_id', help='The migration id.', type=str)
+        subcommand.add_argument('migration_id', help='The migration id (or group ID with --batch).', type=str)
+        subcommand.add_argument('--batch', help='ID is a batch migration group ID.', dest='batch', action='store_true')
 
     def init_volume__migrate_cleanup(self, subparser):
         subcommand = self.add_sub_command(subparser, 'migrate-cleanup', 'Idempotently remove all objects a migration created on the target. Safe to run at any time; already-removed objects are reported as not_found.')
         subcommand.add_argument('migration_id', help='The migration id.', type=str)
+
+    def init_volume__migrate_group_list(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'migrate-group-list', 'List batch (shared-namespace) migration groups.')
+        subcommand.add_argument('--cluster-id', help='Filter by cluster ID.', type=str, dest='cluster_id')
+        subcommand.add_argument('--json', help='Print output in JSON format.', dest='json', action='store_true')
 
 
     def init_control_plane(self):
