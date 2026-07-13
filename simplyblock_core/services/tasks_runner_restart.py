@@ -402,21 +402,42 @@ def task_runner_node(task):
         return False
 
 
-    shutdown_succeeded = False
+    # Cleanup shutdown before the restart — but only when there is something
+    # to clean: a node that is already OFFLINE had SPDK confirmed gone (that
+    # is what put it in OFFLINE), so force-shutting it down again only walks
+    # it through a pointless offline -> in_shutdown -> offline cycle. And run
+    # it at most ONCE per task: re-running the full shutdown on every retry
+    # multiplied the state churn during whole-cluster recovery (2026-07-13:
+    # every FDB-contention retry replayed in_shutdown -> offline -> in_restart
+    # on all 32 nodes). The once-flag is persisted on the task so it survives
+    # runner restarts. A node stuck in a non-OFFLINE state from a dead
+    # attempt (e.g. RESTARTING) still gets exactly one cleanup shutdown.
+    shutdown_needed = (node.status != StorageNode.STATUS_OFFLINE
+                       and not task.function_params.get("cleanup_shutdown_done"))
+    shutdown_succeeded = not shutdown_needed
     try:
-        try:
-            # shutting down node
-            logger.info(f"Shutdown node {node.get_id()}")
-            ret = storage_node_ops.shutdown_storage_node(node.get_id(), force=True)
-            if ret:
-                logger.info("Node shutdown succeeded")
-                shutdown_succeeded = True
-            else:
-                logger.error("Node shutdown returned False; will retry after reset")
-            time.sleep(3)
-        except Exception as e:
-            logger.error(e)
-            return False
+        if shutdown_needed:
+            try:
+                # shutting down node
+                logger.info(f"Shutdown node {node.get_id()}")
+                ret = storage_node_ops.shutdown_storage_node(node.get_id(), force=True)
+                if ret:
+                    logger.info("Node shutdown succeeded")
+                    shutdown_succeeded = True
+                    task.function_params = dict(task.function_params)
+                    task.function_params["cleanup_shutdown_done"] = True
+                    task.write_to_db(db.kv_store)
+                else:
+                    logger.error("Node shutdown returned False; will retry after reset")
+                time.sleep(3)
+            except Exception as e:
+                logger.error(e)
+                return False
+        else:
+            logger.info(
+                f"Skipping cleanup shutdown for {node.get_id()}: "
+                f"status={node.status}, "
+                f"already_done={bool(task.function_params.get('cleanup_shutdown_done'))}")
 
         # Skip the restart step if shutdown did not succeed — restarting on top
         # of a half-shutdown node produced the in_restart hang we're guarding

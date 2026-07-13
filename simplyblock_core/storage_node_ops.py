@@ -1633,6 +1633,7 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=None, only_node_id=None):
         remote_device.status = NVMeDevice.STATUS_ONLINE
         remote_device.nvmf_multipath = org_dev.nvmf_multipath
         expected_bdev = f"remote_{org_dev.jm_bdev}n1"
+        connect_failed = False
         try:
             remote_device.remote_bdev = str(connect_device(
                 f"remote_{org_dev.jm_bdev}", org_dev, this_node,
@@ -1648,7 +1649,13 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=None, only_node_id=None):
             # restart of this node (observed 2026-07-10: aborted restarts
             # looping offline<->in_restart for 10+ minutes).
             logger.error(f'Failed to connect to {org_dev.get_id()}')
-        for _ in range(10):
+            connect_failed = True
+        # When the connect raised, no new attach is in flight — poll once to
+        # pick up a bdev left by an earlier attach, but don't wait the full
+        # 5s for one that can never appear. During whole-cluster recovery the
+        # 10x0.5s wait ran per dead peer JM (~30 of them), adding minutes to
+        # every restart attempt (2026-07-13).
+        for _ in range(1 if connect_failed else 10):
             if remote_device.remote_bdev and rpc_client.get_bdevs(remote_device.remote_bdev):
                 break
             if rpc_client.get_bdevs(expected_bdev):

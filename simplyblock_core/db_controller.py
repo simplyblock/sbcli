@@ -885,8 +885,19 @@ class DBController(metaclass=Singleton):
 
         Returns (True, None) on success, or (False, reason) if blocked.
         """
-        all_nodes = StorageNode().read_from_db(tr)
-        if not allow_concurrent_peers:
+        if allow_concurrent_peers:
+            # Parallel suspended-recovery: the peer-exclusion predicate is
+            # skipped, so a full-table read here would only create an
+            # O(cluster) read-conflict range — with 20+ concurrent
+            # acquisitions plus monitor status writes every commit collides
+            # (FDB 1020 conflict storms / 1031 tx timeouts, whole-cluster
+            # reboot 2026-07-13). Point-read just the target row: the write
+            # set is that same single key, so acquisitions for different
+            # nodes no longer conflict with each other.
+            rows = StorageNode().read_from_db(tr, id=node_id)
+            target = rows[0] if rows else None
+        else:
+            all_nodes = StorageNode().read_from_db(tr)
             for n in all_nodes:
                 if n.cluster_id != cluster_id:
                     continue
@@ -895,12 +906,12 @@ class DBController(metaclass=Singleton):
                 if n.status in [StorageNode.STATUS_RESTARTING, StorageNode.STATUS_IN_SHUTDOWN]:
                     return False, f"Node {n.get_id()} is {n.status}"
 
-        # Set this node to in_restart atomically within the same transaction
-        target = None
-        for n in all_nodes:
-            if n.get_id() == node_id:
-                target = n
-                break
+            # Set this node to in_restart atomically within the same transaction
+            target = None
+            for n in all_nodes:
+                if n.get_id() == node_id:
+                    target = n
+                    break
         if target:
             target.status = StorageNode.STATUS_RESTARTING
             prefix = target.get_db_id()
@@ -944,7 +955,18 @@ class DBController(metaclass=Singleton):
             pass
 
         transactional = fdb.transactional(DBController._try_set_node_restarting_tx)
-        acquired, reason = transactional(self, self.kv_store, cluster_id, node_id, allow_concurrent_peers)
+        try:
+            acquired, reason = transactional(self, self.kv_store, cluster_id, node_id, allow_concurrent_peers)
+        except fdb.FDBError as e:  # type: ignore[attr-defined]  # injected by fdb.api_version()
+            # Residual contention (conflict retries exhausted / tx timeout)
+            # is a transient lock-acquisition failure, not a restart failure:
+            # surface it as "not acquired" so the restart task defers and
+            # re-tries instead of burning an attempt on
+            # "restart_storage_node raised unexpectedly".
+            logger.warning(
+                "try_set_node_restarting for %s hit FDB contention: %s",
+                node_id, e)
+            return False, f"FDB contention acquiring restart lock: {e}"
 
         if acquired:
             # Emit the status-change event and peer notification AFTER commit.
