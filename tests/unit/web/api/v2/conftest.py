@@ -96,7 +96,7 @@ def db(monkeypatch):
     return mock
 
 
-@pytest.fixture()
+@pytest.fixture(scope='session')
 def app():
     app = FastAPI()
     app.include_router(v2.api, prefix='/api/v2')
@@ -104,7 +104,7 @@ def app():
     return app
 
 
-@pytest.fixture()
+@pytest.fixture(scope='session')
 def client(app):
     return TestClient(app)
 
