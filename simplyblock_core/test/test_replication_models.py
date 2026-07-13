@@ -79,7 +79,7 @@ def test_final_migration_alias_delegates_identically():
     client = _make_client()
     client._request = lambda method, params: captured.update(method=method, params=params)
 
-    client.bdev_lvol_final_migration("lvs/LVOL_1", 42, "lvs/SNAP_1", 2, "hub_bdev")
+    client.bdev_lvol_transfer_final_step("lvs/LVOL_1", 42, "lvs/SNAP_1", 2, "hub_bdev", "migrate")
 
     assert captured["method"] == "bdev_lvol_transfer_final_step"
     assert captured["params"]["operation"] == "migrate"

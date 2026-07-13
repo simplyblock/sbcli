@@ -130,6 +130,16 @@ class LVolMigration(BaseModel):
     max_retries: int = constants.LVOL_MIG_MAX_RETRIES
     canceled: bool = False
 
+    # Set when this migration is part of a batch (shared-namespace) migration.
+    # References an LVolMigrationGroup.uuid.  Empty for standalone migrations.
+    migration_group_id: str = ""
+
+    # Snaps whose raw data has been transferred to the target in group/worker
+    # mode but whose add_clone + convert have NOT yet been performed (the main
+    # orchestrator reconstructs the tree after all workers reach snap_copy_done).
+    # Unused for standalone migrations.
+    snaps_transferred_group: List[str] = []
+
     def get_id(self):
         # Prefix with cluster_id so that FDB range queries can filter by cluster.
         return "%s/%s" % (self.cluster_id, self.uuid)

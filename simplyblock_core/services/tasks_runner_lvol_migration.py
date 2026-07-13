@@ -94,6 +94,7 @@ from simplyblock_core.controllers import (
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_migration import LVolMigration
+from simplyblock_core.models.lvol_migration_group import LVolMigrationGroup
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.rpc_client import RPCException, RPCClient
@@ -1630,8 +1631,8 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         logger.info(
             f"[IO-FREEZE] {_now_ms()} bdev_lvol_final_migration starting: "
             f"lvol={lvol.uuid} src={src_lvol_composite} tgt_snap={tgt_snap_composite}")
-        ret = src_rpc.bdev_lvol_final_migration(
-            src_lvol_composite, tgt_map_id, tgt_snap_composite, 2, hub_bdev)
+        ret = src_rpc.bdev_lvol_transfer_final_step(
+            src_lvol_composite, tgt_map_id, tgt_snap_composite, 2, hub_bdev, "migrate")
         if ret is None:
             # Connection timeout or SPDK error (e.g. "File exists" = already in progress).
             # SPDK may have completed the migration while the RPC connection dropped.
@@ -2480,6 +2481,10 @@ def task_runner(task):
     error = None
 
     try:
+        if migration.migration_group_id:
+            return _group_worker_phase_dispatch(
+                task, migration, phase, src_node, tgt_node, src_rpc, tgt_rpc)
+
         if phase == LVolMigration.PHASE_SNAP_COPY:
             done, suspend, error = _handle_snap_copy(
                 migration, src_node, tgt_node, src_rpc, tgt_rpc)
@@ -2582,6 +2587,432 @@ def task_runner(task):
     migration.write_to_db(db.kv_store)
     task.write_to_db(db.kv_store)
     return False
+
+
+# ---------------------------------------------------------------------------
+# Group worker (batch migration) helpers
+# ---------------------------------------------------------------------------
+
+def _post_process_snap_group(snap, migration):
+    """
+    Lightweight post-processing for a group worker's snap transfer.
+
+    Unlike ``_post_process_snap`` for standalone migrations, this skips
+    ``bdev_lvol_add_clone`` and ``bdev_lvol_convert`` — the main orchestrator
+    reconstructs the full ancestry tree for all workers together after the
+    snap_copy barrier.  The transferred bdev stays writable on the target
+    until the orchestrator calls add_clone + convert.
+
+    Tracks the snap in ``migration.snaps_transferred_group`` (raw data on
+    target, pending tree reconstruction) rather than ``snaps_migrated``
+    (which implies the snapshot is fully committed as immutable).
+    """
+    snap_uuid = snap.uuid
+    if snap_uuid not in migration.snaps_transferred_group:
+        migration.snaps_transferred_group.append(snap_uuid)
+    migration_events.migration_snap_copied(migration, snap_uuid)
+    logger.info(f"Group worker: snap {snap_uuid} raw-transferred (pending tree reconstruction)")
+    return True, None
+
+
+def _handle_group_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
+    """
+    SNAP_COPY phase for a group worker.
+
+    Transfers all owned snapshots (``migration.snap_migration_plan``) to the
+    target, skipping the add_clone/convert tree-building steps.  The main
+    orchestrator will reconstruct the full ancestry tree after all workers
+    reach the snap_copy_done barrier.
+
+    Returns (done: bool, suspend: bool, error: str|None).
+    """
+    plan = migration.snap_migration_plan
+    trtype, _ = _get_migration_nic(tgt_node)
+    ctx = migration.transfer_context or {}
+
+    try:
+        _lvol_for_size = db.get_lvol_by_id(migration.lvol_id)
+        _snap_lvol_size_mib = _bytes_to_mib(_lvol_for_size.size)
+    except KeyError:
+        _snap_lvol_size_mib = None
+
+    # Determine which snaps still need transferring (owned, not yet transferred).
+    already_done = set(migration.snaps_transferred_group) | set(migration.snaps_preexisting_on_target)
+    remaining = [u for u in plan if u not in already_done]
+
+    if not remaining and ctx.get('stage') != 'parallel_transfer':
+        return True, False, None  # all owned snaps transferred
+
+    # Launch / resume one snap at a time (SPDK only supports one per poller group).
+    if ctx.get('stage') != 'parallel_transfer' and remaining:
+        snap_uuid = remaining[0]
+        try:
+            snap = db.get_snapshot_by_id(snap_uuid)
+        except KeyError:
+            return False, True, f"Snapshot {snap_uuid} not found in DB"
+
+        snap_short_tgt = _snap_tgt_short_name(snap)
+        src_composite = _snap_composite(src_node.lvstore, snap)
+        tgt_composite = f"{tgt_node.lvstore}/{snap_short_tgt}"
+
+        existing_stat = src_rpc.bdev_lvol_transfer_stat(src_composite)
+        if (existing_stat is not None
+                and existing_stat.get('transfer_state') == 'In progress'):
+            migration.transfer_context = {
+                'stage': 'parallel_transfer',
+                'transfers': [{'snap_uuid': snap_uuid, 'snap_short': snap_short_tgt,
+                               'snap_index': plan.index(snap_uuid),
+                               'transfer_done': False, 'post_done': False}],
+            }
+            migration.write_to_db(db.kv_store)
+            return False, False, None
+
+        if tgt_rpc.get_bdevs(tgt_composite):
+            try:
+                _delete_bdev_blocking(tgt_composite, tgt_rpc)
+            except Exception as e:
+                logger.warning(f"Group worker: pre-cleanup of {tgt_composite} failed: {e}")
+
+        t, err = _setup_snap_transfer(
+            snap, plan.index(snap_uuid), src_node, tgt_node,
+            src_rpc, tgt_rpc, trtype,
+            lvol_size_mib=_snap_lvol_size_mib)
+        if t is None:
+            return False, True, err
+
+        migration.transfer_context = {
+            'stage': 'parallel_transfer',
+            'transfers': [t],
+        }
+        migration.write_to_db(db.kv_store)
+        return False, False, None
+
+    # Poll the in-flight transfer.
+    if ctx.get('stage') == 'parallel_transfer':
+        transfers = ctx['transfers']
+        for t in transfers:
+            snap_uuid = t['snap_uuid']
+            if t.get('post_done'):
+                continue
+            try:
+                snap = db.get_snapshot_by_id(snap_uuid)
+            except KeyError:
+                migration.transfer_context = {}
+                migration.write_to_db(db.kv_store)
+                return False, True, f"Snapshot {snap_uuid} disappeared during transfer"
+
+            src_composite = _snap_composite(src_node.lvstore, snap)
+            if not t['transfer_done']:
+                result = src_rpc.bdev_lvol_transfer_stat(src_composite)
+                if result is None:
+                    migration.transfer_context = {}
+                    migration.write_to_db(db.kv_store)
+                    return False, True, f"bdev_lvol_transfer_stat returned None for {snap_uuid}"
+                state = result.get('transfer_state', 'No process')
+                if state == 'In progress':
+                    migration.transfer_context = ctx
+                    migration.write_to_db(db.kv_store)
+                    return False, False, None
+                if state in ('Failed', 'No process'):
+                    migration.transfer_context = {}
+                    migration.write_to_db(db.kv_store)
+                    return False, True, f"Snapshot transfer {state} for {snap_uuid}"
+                t['transfer_done'] = True
+
+            # Transfer done — record without add_clone/convert.
+            ok, err = _post_process_snap_group(snap, migration)
+            if not ok:
+                migration.transfer_context = {}
+                migration.write_to_db(db.kv_store)
+                return False, True, err
+            t['post_done'] = True
+            migration.transfer_context = {}
+            migration.write_to_db(db.kv_store)
+
+        # Check if more snaps remain after this one.
+        already_done = set(migration.snaps_transferred_group) | set(migration.snaps_preexisting_on_target)
+        remaining = [u for u in plan if u not in already_done]
+        if remaining:
+            return False, False, None  # come back for the next snap
+        return True, False, None  # all done
+
+    return True, False, None
+
+
+def _handle_group_intermediate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
+    """
+    INTERMEDIATE phase for a group worker.
+
+    Takes exactly one intermediate ("shrink") snapshot and transfers it to the
+    target, skipping add_clone/convert (same as snap_copy).  After this the
+    worker signals intermediates_done to the group and waits for batch_result.
+
+    Returns (done: bool, suspend: bool, error: str|None).
+    """
+    trtype, _ = _get_migration_nic(tgt_node)
+    ctx = migration.transfer_context or {}
+
+    # If we already took and transferred the intermediate snap, we're done.
+    if ctx.get('stage') == 'intermediate_done':
+        return True, False, None
+
+    # Take the intermediate snapshot if not already in flight.
+    if ctx.get('stage') != 'intermediate_transfer':
+        _take_intermediate_snapshot(migration)
+        plan = migration.snap_migration_plan
+        if not plan:
+            return False, True, "Group intermediate: _take_intermediate_snapshot failed"
+        snap_uuid = plan[-1]
+        snap_index = len(plan) - 1
+
+        try:
+            snap = db.get_snapshot_by_id(snap_uuid)
+        except KeyError:
+            return False, True, f"Intermediate snapshot {snap_uuid} not found"
+
+        snap_short_tgt = _snap_tgt_short_name(snap)
+        tgt_composite = f"{tgt_node.lvstore}/{snap_short_tgt}"
+
+        try:
+            _lvol_for_size = db.get_lvol_by_id(migration.lvol_id)
+            _snap_lvol_size_mib = _bytes_to_mib(_lvol_for_size.size)
+        except KeyError:
+            _snap_lvol_size_mib = None
+
+        if tgt_rpc.get_bdevs(tgt_composite):
+            try:
+                _delete_bdev_blocking(tgt_composite, tgt_rpc)
+            except Exception as e:
+                logger.warning(f"Group intermediate: pre-cleanup of {tgt_composite} failed: {e}")
+
+        t, err = _setup_snap_transfer(
+            snap, snap_index, src_node, tgt_node,
+            src_rpc, tgt_rpc, trtype,
+            lvol_size_mib=_snap_lvol_size_mib)
+        if t is None:
+            return False, True, err
+
+        migration.transfer_context = {
+            'stage': 'intermediate_transfer',
+            'transfer': t,
+        }
+        migration.write_to_db(db.kv_store)
+        return False, False, None
+
+    # Poll the intermediate transfer.
+    t = ctx['transfer']
+    snap_uuid = t['snap_uuid']
+    try:
+        snap = db.get_snapshot_by_id(snap_uuid)
+    except KeyError:
+        migration.transfer_context = {}
+        migration.write_to_db(db.kv_store)
+        return False, True, f"Intermediate snap {snap_uuid} disappeared"
+
+    src_composite = _snap_composite(src_node.lvstore, snap)
+    if not t.get('transfer_done'):
+        result = src_rpc.bdev_lvol_transfer_stat(src_composite)
+        if result is None:
+            migration.transfer_context = {}
+            migration.write_to_db(db.kv_store)
+            return False, True, f"bdev_lvol_transfer_stat returned None for {snap_uuid}"
+        state = result.get('transfer_state', 'No process')
+        if state == 'In progress':
+            return False, False, None
+        if state in ('Failed', 'No process'):
+            migration.transfer_context = {}
+            migration.write_to_db(db.kv_store)
+            return False, True, f"Intermediate transfer {state} for {snap_uuid}"
+        t['transfer_done'] = True
+
+    # Convert intermediate snap to immutable — no add_clone needed (it's a
+    # fresh root-level snap, not part of the old ancestry chain).
+    # The orchestrator's bdev_lvol_batch_final_step needs an immutable base.
+    snap_short_tgt = _snap_tgt_short_name(snap)
+    tgt_composite = f"{tgt_node.lvstore}/{snap_short_tgt}"
+    if not tgt_rpc.bdev_lvol_convert(tgt_composite):
+        migration.transfer_context = {}
+        migration.write_to_db(db.kv_store)
+        return False, True, f"bdev_lvol_convert failed for intermediate {snap_uuid}"
+    if snap_uuid not in migration.snaps_migrated:
+        migration.snaps_migrated.append(snap_uuid)
+    migration.transfer_context = {'stage': 'intermediate_done'}
+    migration.write_to_db(db.kv_store)
+    return True, False, None
+
+
+def _group_worker_phase_dispatch(task, migration, phase, src_node, tgt_node, src_rpc, tgt_rpc):
+    """
+    Complete phase dispatcher for FN_LVOL_MIG tasks that belong to a batch
+    migration group (``migration.migration_group_id`` is set).
+
+    Manages the group worker state machine:
+      SNAP_COPY   → transfer owned snaps (no add_clone/convert)
+                  → signal snap_copy_done to group → wait for INTERMEDIATE
+      LVOL_MIGRATE (repurposed as the single-intermediate phase for workers)
+                  → take + transfer 1 intermediate snap
+                  → signal intermediates_done → wait for batch_result
+      CLEANUP_SOURCE → normal source cleanup + signal cleanup_source_done
+      CLEANUP_TARGET → normal target rollback
+
+    Returns True if the task reached a terminal state, False otherwise.
+    """
+    group_id = migration.migration_group_id
+    migration_id = migration.uuid
+
+    try:
+        group = db.get_migration_group_by_id(group_id)
+    except KeyError:
+        return _fail_task(task, migration, f"LVolMigrationGroup {group_id} not found")
+
+    # --- SNAP_COPY ---
+    if phase == LVolMigration.PHASE_SNAP_COPY:
+        if migration_id not in group.snap_copy_done:
+            # Still transferring owned snaps.
+            done, suspend, error = _handle_group_snap_copy(
+                migration, src_node, tgt_node, src_rpc, tgt_rpc)
+            if error and error is not _WAIT:
+                return _suspend_task(task, migration, error)
+            if error is _WAIT or suspend:
+                return _suspend_task(task, migration, migration.error_message or "waiting")
+            if done:
+                # Signal snap_copy_done to group.
+                group = db.get_migration_group_by_id(group_id)
+                if migration_id not in group.snap_copy_done:
+                    group.snap_copy_done.append(migration_id)
+                    group.write_to_db(db.kv_store)
+                    logger.info(
+                        f"Group worker {migration_id[:8]}: signalled snap_copy_done "
+                        f"({len(group.snap_copy_done)}/{group.member_count()})")
+            # Wait for orchestrator to advance group to INTERMEDIATE.
+            migration.write_to_db(db.kv_store)
+            task.write_to_db(db.kv_store)
+            return False
+
+        # snap_copy_done already signalled — check if group has advanced.
+        group = db.get_migration_group_by_id(group_id)
+        if group.phase == LVolMigrationGroup.PHASE_INTERMEDIATE:
+            migration.phase = LVolMigration.PHASE_LVOL_MIGRATE
+            migration.transfer_context = {}
+            migration.write_to_db(db.kv_store)
+            migration_events.migration_phase_changed(migration)
+            return _group_worker_phase_dispatch(
+                task, migration, LVolMigration.PHASE_LVOL_MIGRATE,
+                src_node, tgt_node, src_rpc, tgt_rpc)
+        if group.phase == LVolMigrationGroup.PHASE_CLEANUP_TARGET:
+            migration.phase = LVolMigration.PHASE_CLEANUP_TARGET
+            migration.write_to_db(db.kv_store)
+            return _group_worker_phase_dispatch(
+                task, migration, LVolMigration.PHASE_CLEANUP_TARGET,
+                src_node, tgt_node, src_rpc, tgt_rpc)
+        # Still waiting for other workers.
+        task.write_to_db(db.kv_store)
+        return False
+
+    # --- LVOL_MIGRATE (group worker: take 1 intermediate + wait for batch_result) ---
+    if phase == LVolMigration.PHASE_LVOL_MIGRATE:
+        if migration_id not in group.intermediates_done:
+            done, suspend, error = _handle_group_intermediate(
+                migration, src_node, tgt_node, src_rpc, tgt_rpc)
+            if error and error is not _WAIT:
+                return _suspend_task(task, migration, error)
+            if error is _WAIT or suspend:
+                return _suspend_task(task, migration, migration.error_message or "waiting")
+            if done:
+                group = db.get_migration_group_by_id(group_id)
+                if migration_id not in group.intermediates_done:
+                    group.intermediates_done.append(migration_id)
+                    group.write_to_db(db.kv_store)
+                    logger.info(
+                        f"Group worker {migration_id[:8]}: signalled intermediates_done "
+                        f"({len(group.intermediates_done)}/{group.member_count()})")
+            migration.write_to_db(db.kv_store)
+            task.write_to_db(db.kv_store)
+            return False
+
+        # intermediates_done signalled — wait for batch_result.
+        group = db.get_migration_group_by_id(group_id)
+        if group.batch_result is True:
+            migration.phase = LVolMigration.PHASE_CLEANUP_SOURCE
+            migration.transfer_context = {}
+            migration.write_to_db(db.kv_store)
+            migration_events.migration_phase_changed(migration)
+            return _group_worker_phase_dispatch(
+                task, migration, LVolMigration.PHASE_CLEANUP_SOURCE,
+                src_node, tgt_node, src_rpc, tgt_rpc)
+        if group.batch_result is False:
+            migration.phase = LVolMigration.PHASE_CLEANUP_TARGET
+            migration.transfer_context = {}
+            migration.write_to_db(db.kv_store)
+            migration_events.migration_phase_changed(migration)
+            return _group_worker_phase_dispatch(
+                task, migration, LVolMigration.PHASE_CLEANUP_TARGET,
+                src_node, tgt_node, src_rpc, tgt_rpc)
+        task.write_to_db(db.kv_store)
+        return False
+
+    # --- CLEANUP_SOURCE ---
+    if phase == LVolMigration.PHASE_CLEANUP_SOURCE:
+        try:
+            done, suspend, error = _handle_cleanup_source(
+                migration, src_node, src_rpc, tgt_node, tgt_rpc)
+        except RPCException as exc:
+            return _suspend_task(task, migration, str(exc))
+
+        if error and error is not _WAIT:
+            return _suspend_task(task, migration, error)
+        if error is _WAIT or suspend:
+            return _suspend_task(task, migration, migration.error_message or "waiting")
+        if done:
+            # Signal cleanup_source_done to group.
+            group = db.get_migration_group_by_id(group_id)
+            if migration_id not in group.cleanup_source_done:
+                group.cleanup_source_done.append(migration_id)
+                group.write_to_db(db.kv_store)
+            migration.phase = LVolMigration.PHASE_COMPLETED
+            migration.status = LVolMigration.STATUS_DONE
+            migration.completed_at = int(time.time())
+            migration.write_to_db(db.kv_store)
+            task.status = JobSchedule.STATUS_DONE
+            task.function_result = "Group worker migration completed successfully"
+            task.write_to_db(db.kv_store)
+            tasks_events.task_updated(task)
+            migration_events.migration_completed(migration)
+            logger.info(f"Group worker {migration_id[:8]}: CLEANUP_SOURCE done → COMPLETED")
+            return True
+        migration.write_to_db(db.kv_store)
+        task.write_to_db(db.kv_store)
+        return False
+
+    # --- CLEANUP_TARGET ---
+    if phase == LVolMigration.PHASE_CLEANUP_TARGET:
+        try:
+            done, suspend, error = _handle_cleanup_target(
+                migration, tgt_node, tgt_rpc, src_rpc=src_rpc)
+        except RPCException as exc:
+            return _suspend_task(task, migration, str(exc))
+
+        if error and error is not _WAIT:
+            return _suspend_task(task, migration, error)
+        if error is _WAIT or suspend:
+            return _suspend_task(task, migration, migration.error_message or "waiting")
+        if done:
+            migration.status = (LVolMigration.STATUS_CANCELLED if migration.canceled
+                                else LVolMigration.STATUS_FAILED)
+            migration.completed_at = int(time.time())
+            migration.write_to_db(db.kv_store)
+            task.status = JobSchedule.STATUS_DONE
+            task.function_result = migration.error_message or "Group worker rolled back"
+            task.write_to_db(db.kv_store)
+            tasks_events.task_updated(task)
+            migration_events.migration_failed(migration, migration.error_message)
+            logger.info(f"Group worker {migration_id[:8]}: CLEANUP_TARGET done → FAILED/CANCELLED")
+            return True
+        migration.write_to_db(db.kv_store)
+        task.write_to_db(db.kv_store)
+        return False
+
+    return _fail_task(task, migration, f"Group worker: unknown phase {phase}")
 
 
 # ---------------------------------------------------------------------------

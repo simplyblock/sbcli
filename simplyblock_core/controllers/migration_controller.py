@@ -50,6 +50,7 @@ from simplyblock_core.controllers.host_auth import _reapply_allowed_hosts
 from simplyblock_core.kms import create_kms_connection, lvol_dek_path, pool_kek_name
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.lvol_migration import LVolMigration
+from simplyblock_core.models.lvol_migration_group import LVolMigrationGroup
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.nvme_connect import NvmeConnectEntry
 from simplyblock_core.models.snapshot import SnapShot
@@ -731,9 +732,45 @@ def _build_connect_entries(node, port, lvol, nqn, ctrl_loss_tmo, cluster, host_e
     return entries
 
 
+def _get_shared_subsystem_members(lvol, cluster_id):
+    """
+    Return all LVol records that share the same NQN as *lvol*, sorted by ns_id
+    ascending.  Includes *lvol* itself.  Returns an empty list if the lvol is
+    not part of a shared subsystem (i.e. max_namespace_per_subsys == 1).
+    """
+    if lvol.max_namespace_per_subsys <= 1:
+        return []
+    nqn = lvol.nqn
+    members = [l for l in db.get_lvols(cluster_id) if l.nqn == nqn]
+    return sorted(members, key=lambda l: l.ns_id)
+
+
+def _compute_snap_owners(members, source_node_id):
+    """
+    Compute static snap ownership for a batch migration group.
+
+    Each snapshot UUID in any member's chain is assigned to the member with the
+    lowest ns_id that references it.  Workers only transfer their owned snaps;
+    non-owned snaps are immediately marked as snaps_preexisting_on_target.
+
+    Returns dict: snap_uuid → migration_id (populated after migration records
+    are created — callers must pass the migration_id separately; here we return
+    snap_uuid → lvol_uuid as an intermediate and the caller remaps to
+    migration_id after record creation).
+    """
+    snap_owner_lvol = {}  # snap_uuid → lvol_uuid of lowest-ns_id owner
+    for lvol in members:  # already sorted by ns_id ascending
+        chain = get_snapshot_chain(lvol.uuid, source_node_id)
+        for snap_uuid in chain:
+            if snap_uuid not in snap_owner_lvol:
+                snap_owner_lvol[snap_uuid] = lvol.uuid
+    return snap_owner_lvol
+
+
 def create_migration(lvol_id, target_node_id,
                          ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO,
-                         host_nqn=None):
+                         host_nqn=None,
+                         batch=False):
     """
     Pre-create the target NVMe-oF infrastructure for a future migration of
     *lvol_id* to *target_node_id*.
@@ -765,6 +802,15 @@ def create_migration(lvol_id, target_node_id,
 
     if not tgt_node.lvstore:
         raise ValueError(f"Target node {target_node_id} has no lvstore")
+
+    # ── Shared-namespace detection ───────────────────────────────────────────
+    shared_members = _get_shared_subsystem_members(lvol, tgt_node.cluster_id)
+    if shared_members and not batch:
+        raise ValueError(
+            f"LVol {lvol_id} belongs to a shared NVMe-oF subsystem with "
+            f"{len(shared_members)} member(s) (NQN={lvol.nqn}). "
+            f"Use --batch to migrate the whole subsystem together."
+        )
 
     existing_migration = get_active_migration_for_lvol(lvol_id, tgt_node.cluster_id)
     if existing_migration:
@@ -1082,3 +1128,242 @@ def create_migration(lvol_id, target_node_id,
     return migration.uuid, out
 
 
+# ---------------------------------------------------------------------------
+# Batch (shared-namespace) migration
+# ---------------------------------------------------------------------------
+
+def create_batch_migration(lvol_id, target_node_id,
+                           ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO,
+                           host_nqn=None):
+    """
+    Pre-create infrastructure for migrating all lvols that share an NVMe-oF
+    subsystem with *lvol_id* to *target_node_id*.
+
+    Steps:
+      1. Validate that *lvol_id* belongs to a shared subsystem.
+      2. Create one LVolMigration record per member (via create_migration with
+         batch=True) — each gets target bdev + subsystem listeners.
+      3. Compute static snap_owners across all members.
+      4. Create and persist an LVolMigrationGroup record linking them all.
+
+    Returns (group_id, connect_strings).  connect_strings are derived from the
+    master lvol (ns_id=1) since all members share the NQN.
+    """
+    db_inst = DBController()
+
+    try:
+        lvol = db_inst.get_lvol_by_id(lvol_id)
+    except KeyError:
+        raise ValueError(f"LVol {lvol_id} not found")
+
+    try:
+        tgt_node = db_inst.get_storage_node_by_id(target_node_id)
+    except KeyError:
+        raise ValueError(f"Target node {target_node_id} not found")
+
+    members = _get_shared_subsystem_members(lvol, tgt_node.cluster_id)
+    if not members:
+        raise ValueError(
+            f"LVol {lvol_id} is not part of a shared subsystem "
+            f"(max_namespace_per_subsys={lvol.max_namespace_per_subsys}). "
+            f"Use create_migration instead."
+        )
+
+    # Check for an existing active group for this NQN on this target.
+    existing_groups = db_inst.get_migration_groups(tgt_node.cluster_id)
+    for g in existing_groups:
+        if g.target_node_id == target_node_id and g.status not in (
+            LVolMigrationGroup.STATUS_DONE,
+            LVolMigrationGroup.STATUS_FAILED,
+            LVolMigrationGroup.STATUS_CANCELLED,
+        ):
+            # Check NQN overlap via target_nqn
+            if g.target_nqn == lvol.nqn:
+                raise ValueError(
+                    f"An active batch migration group ({g.uuid}) already exists "
+                    f"for NQN {lvol.nqn} targeting {target_node_id}."
+                )
+
+    source_node_id = lvol.node_id
+
+    # Pre-create individual migration records for each member.
+    # connect_strings come from the master (ns_id=1) since the NQN is shared.
+    member_records = []   # list of (ns_id, migration_id)
+    master_connect_strings = []
+    for member in members:
+        migration_id, connect_strings = create_migration(
+            member.uuid, target_node_id,
+            ctrl_loss_tmo=ctrl_loss_tmo,
+            host_nqn=host_nqn,
+            batch=True,
+        )
+        member_records.append({"ns_id": member.ns_id, "migration_id": migration_id})
+        if member.ns_id == 1:
+            master_connect_strings = connect_strings
+
+    # Compute snap ownership: snap_uuid → lvol_uuid, then remap to migration_id.
+    lvol_uuid_to_migration_id = {
+        member.uuid: rec["migration_id"]
+        for member, rec in zip(members, member_records)
+    }
+    snap_owner_lvol = _compute_snap_owners(members, source_node_id)
+    snap_owners = {
+        snap_uuid: lvol_uuid_to_migration_id[lvol_uuid]
+        for snap_uuid, lvol_uuid in snap_owner_lvol.items()
+        if lvol_uuid in lvol_uuid_to_migration_id
+    }
+
+    # Stamp migration_group_id on each worker record.
+    group = LVolMigrationGroup()
+    group.uuid = str(uuid.uuid4())
+    group.cluster_id = tgt_node.cluster_id
+    group.source_node_id = source_node_id
+    group.target_node_id = target_node_id
+    group.target_nqn = lvol.nqn
+    group.members = member_records
+    group.snap_owners = snap_owners
+    group.phase = LVolMigrationGroup.PHASE_PRECREATE
+    group.status = LVolMigrationGroup.STATUS_RUNNING
+    group.create_dt = str(datetime.now())
+    group.write_to_db(db_inst.kv_store)
+
+    for rec in member_records:
+        try:
+            worker = db_inst.get_migration_by_id(rec["migration_id"])
+            worker.migration_group_id = group.uuid
+            worker.write_to_db(db_inst.kv_store)
+        except KeyError:
+            logger.warning(
+                f"create_batch_migration: could not stamp group_id on "
+                f"migration {rec['migration_id']}")
+
+    logger.info(
+        f"create_batch_migration: group={group.uuid} nqn={lvol.nqn} "
+        f"members={len(member_records)} src={source_node_id} tgt={target_node_id}")
+    return group.uuid, master_connect_strings
+
+
+def start_batch_migration(group_id,
+                          max_retries=constants.LVOL_MIG_MAX_RETRIES,
+                          deadline_seconds=constants.LVOL_MIG_DEADLINE_SEC):
+    """
+    Promote a PHASE_PRECREATE group to PHASE_SNAP_COPY and launch worker tasks
+    for each member plus the main orchestrator task.
+
+    Returns group_uuid on success; raises ValueError on failure.
+    """
+    try:
+        group = db.get_migration_group_by_id(group_id)
+    except KeyError:
+        raise ValueError(f"LVolMigrationGroup {group_id} not found")
+
+    if group.phase != LVolMigrationGroup.PHASE_PRECREATE:
+        raise ValueError(
+            f"Group {group_id} is not in PHASE_PRECREATE (phase={group.phase})"
+        )
+
+    now = int(time.time())
+    deadline = now + deadline_seconds if deadline_seconds else 0
+
+    # Promote each worker migration to PHASE_SNAP_COPY.
+    for rec in group.members:
+        migration_id = rec["migration_id"]
+        try:
+            migration = db.get_migration_by_id(migration_id)
+        except KeyError:
+            raise ValueError(f"Worker migration {migration_id} not found in group {group_id}")
+
+        lvol_id = migration.lvol_id
+        try:
+            lvol = db.get_lvol_by_id(lvol_id)
+        except KeyError:
+            raise ValueError(f"LVol {lvol_id} not found for worker {migration_id}")
+
+        snap_plan = get_snapshot_chain(lvol_id, migration.source_node_id)
+        snaps_on_target = [s for s in snap_plan if _is_snap_on_node(s, migration.target_node_id)]
+        owned_snaps = [s for s in snap_plan
+                       if s not in snaps_on_target
+                       and group.snap_owners.get(s) == migration_id]
+        non_owned_preexisting = [s for s in snap_plan
+                                 if s not in snaps_on_target
+                                 and group.snap_owners.get(s) != migration_id]
+
+        migration.source_node_id = lvol.node_id
+        migration.phase = LVolMigration.PHASE_SNAP_COPY
+        migration.snap_migration_plan = owned_snaps
+        migration.snaps_migrated = []
+        migration.snaps_preexisting_on_target = snaps_on_target + non_owned_preexisting
+        migration.intermediate_snaps = []
+        migration.next_snap_index = 0
+        migration.intermediate_snap_rounds = 0
+        migration.started_at = now
+        migration.deadline = deadline
+        migration.max_retries = max_retries
+        migration.status = LVolMigration.STATUS_NEW
+        migration.write_to_db(db.kv_store)
+
+        task_uuid = tasks_controller.add_lvol_mig_task(migration)
+        if not task_uuid:
+            raise ValueError(f"Failed to create worker task for migration {migration_id}")
+        logger.info(
+            f"start_batch_migration: worker started migration={migration_id} "
+            f"lvol={lvol_id} owned_snaps={len(owned_snaps)}")
+
+    # Advance group to SNAP_COPY and launch the main orchestrator task.
+    group.phase = LVolMigrationGroup.PHASE_SNAP_COPY
+    group.write_to_db(db.kv_store)
+
+    task_uuid = tasks_controller.add_batch_mig_task(group)
+    if not task_uuid:
+        raise ValueError(f"Failed to create orchestrator task for group {group_id}")
+
+    logger.info(
+        f"start_batch_migration: orchestrator started group={group_id} "
+        f"members={len(group.members)}")
+    return group.uuid
+
+
+def cancel_batch_migration(group_id):
+    """
+    Cancel an active batch migration group.
+
+    For PHASE_PRECREATE groups (no tasks launched yet), cleans up all worker
+    migration records inline.  For all other phases, sets canceled=True on each
+    worker migration so the task runners pick it up.
+
+    Raises ValueError on failure.
+    """
+    try:
+        group = db.get_migration_group_by_id(group_id)
+    except KeyError:
+        raise ValueError(f"LVolMigrationGroup {group_id} not found")
+
+    if group.status in (
+        LVolMigrationGroup.STATUS_DONE,
+        LVolMigrationGroup.STATUS_FAILED,
+        LVolMigrationGroup.STATUS_CANCELLED,
+    ):
+        raise ValueError(f"Group {group_id} is not active (status={group.status})")
+
+    if group.phase == LVolMigrationGroup.PHASE_PRECREATE:
+        for rec in group.members:
+            try:
+                cancel_migration(rec["migration_id"])
+            except Exception as e:
+                logger.warning(f"cancel_batch_migration: could not cancel worker "
+                               f"{rec['migration_id']}: {e}")
+        group.status = LVolMigrationGroup.STATUS_CANCELLED
+        group.write_to_db(db.kv_store)
+        logger.info(f"cancel_batch_migration: pre-create group cancelled: {group_id}")
+        return
+
+    for rec in group.members:
+        try:
+            migration = db.get_migration_by_id(rec["migration_id"])
+            if migration.is_active():
+                migration.canceled = True
+                migration.write_to_db(db.kv_store)
+        except Exception as e:
+            logger.warning(f"cancel_batch_migration: could not mark worker "
+                           f"{rec['migration_id']} cancelled: {e}")
+    logger.info(f"cancel_batch_migration: marked all workers cancelled: {group_id}")

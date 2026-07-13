@@ -18,6 +18,7 @@ from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.port_stat import PortStat
 from simplyblock_core.models.backup import Backup, BackupChainLock, BackupPolicy, BackupPolicyAttachment
 from simplyblock_core.models.lvol_migration import LVolMigration
+from simplyblock_core.models.lvol_migration_group import LVolMigrationGroup
 from simplyblock_core.models.qos import QOSClass
 from simplyblock_core.models.snapshot import SnapShot, SnapShotMini
 from simplyblock_core.models.stats import DeviceStatObject, NodeStatObject, ClusterStatObject, LVolStatObject, \
@@ -392,6 +393,25 @@ class DBController(metaclass=Singleton):
         return single_or_none(
             m for m in self.get_migrations() if m.lvol_id == lvol_id and m.is_active()
         )
+
+    def get_migration_groups(self, cluster_id: Optional[str] = None) -> List[LVolMigrationGroup]:
+        """Return all LVolMigrationGroup records, optionally filtered by cluster."""
+        prefix = cluster_id if cluster_id else " "
+        return LVolMigrationGroup().read_from_db(self.kv_store, id=prefix)
+
+    def get_migration_group_by_id(self, group_id: str) -> LVolMigrationGroup:
+        group = single_or_none(g for g in self.get_migration_groups() if g.uuid == group_id)
+        if group is None:
+            raise KeyError(f'LVolMigrationGroup {group_id} not found')
+        return group
+
+    def get_active_batch_migration_tasks(self, cluster_id: str) -> List[JobSchedule]:
+        """Return all non-done FN_LVOL_BATCH_MIG tasks for the given cluster."""
+        return [
+            t for t in self.get_job_tasks(cluster_id, reverse=False)
+            if t.function_name == JobSchedule.FN_LVOL_BATCH_MIG
+            and t.status != JobSchedule.STATUS_DONE
+        ]
 
     def get_lvol_del_lock(self, node_id: str) -> Optional[NodeLVolDelLock]:
         return single_or_none(NodeLVolDelLock().read_from_db(self.kv_store, id=node_id))

@@ -1700,7 +1700,7 @@ class RPCClient:
         """
         return self._request("bdev_lvol_get_lvols", {"lvs_name": lvs_name})
 
-    def bdev_lvol_transfer_final_step(self, lvol_name, lvol_id, snapshot_name, batch_size, gateway, operation="migrate"):
+    def bdev_lvol_transfer_final_step(self, lvol_name, lvol_id, snapshot_name, batch_size, gateway, operation):
         """
         Start the final (live) transfer of a writable lvol from source to target.
         The source I/O is frozen for the brief delta transfer, then resumed.
@@ -1728,14 +1728,36 @@ class RPCClient:
             "operation": operation,
         })
 
-    def bdev_lvol_final_migration(self, lvol_name, lvol_id, snapshot_name, batch_size, bdev_name, operation="migrate"):
-        """Deprecated alias for :meth:`bdev_lvol_transfer_final_step`.
-
-        Retained for the intra-cluster migration runner; new replication code
-        should call ``bdev_lvol_transfer_final_step`` directly.
+    def bdev_lvol_batch_final_step(self, lvol_names, lvol_ids, snapshot_names, batch_size, gateway, operation):
         """
-        return self.bdev_lvol_transfer_final_step(
-            lvol_name, lvol_id, snapshot_name, batch_size, bdev_name, operation)
+        Start the final transfer step for a batch of lvols simultaneously.
+
+        Intended for shared-namespace subsystems where multiple lvols must be
+        frozen, transferred, and resumed together to keep their namespace IDs
+        consistent across source and target.  Each list argument must have the
+        same length; position N in each list describes one lvol.
+
+        Args:
+            lvol_names:     list of source lvol composite bdev names
+            lvol_ids:       list of map_ids of the corresponding target lvols
+                            (from :meth:`bdev_lvol_get_lvols`)
+            snapshot_names: list of composite names of the last transferred
+                            snapshot for each lvol on the target
+            batch_size:     cluster batch size – pass ``2`` for the final step
+            gateway:        target hub lvol bdev name (NVMe-oF attached on source);
+                            shared across all lvols in the batch
+            operation:      ``"migrate"`` or ``"replicate"``
+
+        Poll per-lvol progress with :meth:`bdev_lvol_transfer_stat` using
+        the corresponding entry from *lvol_names*.
+        """
+        return self._request3("bdev_lvol_batch_final_step",
+                              lvol_names=lvol_names,
+                              lvol_ids=lvol_ids,
+                              snapshot_names=snapshot_names,
+                              cluster_batch=batch_size,
+                              gateway=gateway,
+                              operation=operation)
 
     # ---- S3 Backup RPCs ----
 
