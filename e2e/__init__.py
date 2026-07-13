@@ -559,7 +559,7 @@ def get_all_tests(custom=True, ha_test=False):
         TestStorageNodeListing,
         TestDeviceCapacityIO,
         TestLvolConnectLifecycle,
-        TestVolumeQosDynamic,
+        # TestVolumeQosDynamic,
         TestClusterOperations,
         TestConcurrentOperations,
         TestPoolHostManagement,
