@@ -614,6 +614,57 @@ def set_name(cl_id, name) -> Cluster:
     return cluster
 
 
+def _wait_for_full_device_connectivity(cl_id, timeout_sec=300, poll_sec=10):
+    """Block until every ONLINE primary node holds a connected remote-device
+    record for every ONLINE device of every OTHER online node, or raise.
+
+    Activation's first create_lvstore builds distribs that immediately
+    read/write across ALL cluster devices. A single missing cross-node
+    connection fails that create ~12 s in with an opaque distrib
+    ``error_read`` and aborts the whole activation (incident 2026-07-10
+    14:12: the deploy retried two node-adds via delete+re-add, producing
+    four fresh device records in the final 3 minutes, and activation
+    started 70 s after the last join — before peers had attached to the
+    re-added nodes' devices). Node records converge as the add/health
+    flows finish attaching, so waiting here is both sufficient and
+    bounded; on timeout the error names the exact missing links instead
+    of a distrib read error.
+    """
+    deadline = time.time() + timeout_sec
+    while True:
+        snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
+        online = [n for n in snodes
+                  if not n.is_secondary_node and n.status == StorageNode.STATUS_ONLINE]
+        expected = {}  # device uuid -> owner node id
+        for node in online:
+            for dev in node.nvme_devices:
+                if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY,
+                                  NVMeDevice.STATUS_CANNOT_ALLOCATE]:
+                    expected[dev.get_id()] = node.get_id()
+        missing = []
+        for node in online:
+            have = {rd.get_id() for rd in node.remote_devices if rd.remote_bdev}
+            for dev_id, owner in expected.items():
+                if owner != node.get_id() and dev_id not in have:
+                    missing.append((node.get_id()[:8], owner[:8], dev_id[:8]))
+        if not missing:
+            logger.info("Pre-activation connectivity check passed: %d nodes fully meshed "
+                        "over %d devices", len(online), len(expected))
+            return
+        if time.time() >= deadline:
+            sample = ", ".join(f"{n}->{o}/dev {d}" for n, o, d in missing[:8])
+            raise ValueError(
+                f"Failed to activate cluster: {len(missing)} cross-node device "
+                f"connection(s) still missing after {timeout_sec}s "
+                f"(node->device-owner/device): {sample}. Nodes are still "
+                f"attaching to recently (re-)added peers — retry activation "
+                f"once node health checks pass.")
+        logger.warning("Pre-activation connectivity check: %d cross-node device "
+                       "connection(s) missing; waiting %ds (%.0fs left)",
+                       len(missing), poll_sec, deadline - time.time())
+        time.sleep(poll_sec)
+
+
 def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     cluster = db_controller.get_cluster_by_id(cl_id)
     prev_status = cluster.status
@@ -681,6 +732,15 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     if dev_count < minimum_devices:
         set_cluster_status(cl_id, ols_status)
         raise ValueError(f"Failed to activate cluster, No enough online device.. Minimum is {minimum_devices}")
+
+    # The distribs created below span every online device — require the full
+    # cross-node connectivity mesh before building on top of it (see
+    # _wait_for_full_device_connectivity for the incident this prevents).
+    try:
+        _wait_for_full_device_connectivity(cl_id)
+    except ValueError:
+        set_cluster_status(cl_id, ols_status)
+        raise
 
     # Failure-domain coverage check (best-effort: warn, don't block). To
     # survive losing a whole failure domain we need at least npcs+1 distinct
@@ -778,19 +838,26 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
         else:
             pass1_create_ids.append(snode.get_id())
 
+    def _set_lvstore_status(node_id, value) -> None:
+        # Atomic: full-object writes of node records race concurrent
+        # parallel-pass workers AND phase transitions on the same record —
+        # a stale copy written back resurrects a just-cleared restart phase
+        # (observed twice on fresh activation, 2026-07-10 20:22 soak run).
+        node = db_controller.get_storage_node_by_id(node_id)
+        db_controller.atomic_update(
+            node, lambda n, v=value: setattr(n, "lvstore_status", v))
+
     def _finish_pass1_node(node_id, ret) -> None:
-        snode = db_controller.get_storage_node_by_id(node_id)
         if ret:
-            snode.lvstore_status = "ready"
-            snode.write_to_db()
+            _set_lvstore_status(node_id, "ready")
 
             # Create S3 bdev for backup support (only if backup is configured)
             if cluster.backup_config:
+                snode = db_controller.get_storage_node_by_id(node_id)
                 backup_controller.create_s3_bdev(snode, cluster.backup_config)
 
         else:
-            snode.lvstore_status = "failed"
-            snode.write_to_db()
+            _set_lvstore_status(node_id, "failed")
             logger.error(f"Failed to restore lvstore on node {node_id}")
             set_cluster_status(cl_id, ols_status)
             raise ValueError("Failed to activate cluster")
@@ -863,9 +930,14 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
             with pass2_primary_locks[primary_node.get_id()]:
                 # Re-read under the lock: a peer worker (the other non-leader of
                 # this primary) may have written lvstore_status meanwhile.
+                # Atomic: a full-object write here races the primary's OWN
+                # pass-2 worker transitioning restart phases on the same
+                # record — writing a stale copy back resurrects a cleared
+                # phase (stale-phase generator, 2026-07-10).
                 primary_node = db_controller.get_storage_node_by_id(primary_node.get_id())
-                primary_node.lvstore_status = "in_creation"
-                primary_node.write_to_db()
+                db_controller.atomic_update(
+                    primary_node,
+                    lambda n: setattr(n, "lvstore_status", "in_creation"))
 
                 # On re-activation the primary's LVS is still alive and serving
                 # client I/O — snode's examine of its non-leader raid0 will race
@@ -919,13 +991,10 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
             if not r:
                 ret = False
 
-        snode = db_controller.get_storage_node_by_id(node_id)
         if ret:
-            snode.lvstore_status = "ready"
-            snode.write_to_db()
+            _set_lvstore_status(node_id, "ready")
         else:
-            snode.lvstore_status = "failed"
-            snode.write_to_db()
+            _set_lvstore_status(node_id, "failed")
             logger.error(f"Failed to restore lvstore on node {node_id}")
             raise ValueError("Failed to activate cluster")
         return True

@@ -29,7 +29,10 @@ def process_task(task):
         task.write_to_db(db.kv_store)
         return False
 
-    if task.retry >= task.max_retry:
+    # max_retry < 0 means never give up (the plan must complete — an
+    # abandoned half-moved topology strands stale sec/tert pointers);
+    # cancel the task to stop it deliberately.
+    if 0 <= task.max_retry <= task.retry:
         task.function_result = "max retry reached"
         task.status = JobSchedule.STATUS_DONE
         task.write_to_db(db.kv_store)

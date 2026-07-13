@@ -14,6 +14,35 @@ logger = utils.get_logger(__name__)
 
 utils.init_sentry_sdk(__name__)
 
+
+def try_repair_lvol_on_non_leader(lvol, sec_node, secondary_index):
+    """Self-heal a missing/incomplete lvol registration on an ONLINE
+    non-leader (secondary/tertiary).
+
+    A create-time registration can be lost: the create path queues the
+    non-leader registration when the node's LVS is gated (restart phase),
+    and that queue is in-memory per process — a stale/resurrected phase
+    turns the deferral into a permanent loss (incident 2026-07-10: lvol
+    cef09c39's tertiary subsystem was never created, the volume served
+    2/3 paths and a dual outage within FTT killed all IO). The monitor
+    already detects the miss via check_lvol_on_node — this converts the
+    detection into a repair: create the subsystem if absent (mirrors the
+    restart flow's idempotent registration loop) and re-run the
+    idempotent ns+listener registration.
+
+    Returns True when the registration was repaired."""
+    from simplyblock_core import storage_node_ops
+
+    ok, err = storage_node_ops.repair_lvol_registration_on_non_leader(
+        lvol, sec_node, secondary_index)
+    if not ok:
+        logger.error("Repair of lvol %s registration on %s failed: %s",
+                     lvol.get_id(), sec_node.get_id(), err)
+        return False
+    logger.info("Repaired lvol %s registration on non-leader %s",
+                lvol.get_id(), sec_node.get_id())
+    return True
+
 def set_lvol_status(lvol, status):
     # Atomic compare-and-set: a full read-modify-write would clobber a concurrent
     # change to another LVol field (e.g. lvol_stat_collector clearing io_error,
@@ -377,15 +406,28 @@ def check_node(snode, all_lvols):
             logger.error(e)
 
         if lvol.ha_type == "ha":
-            for sec_id in lvol.nodes[1:]:
+            for sec_index, sec_id in enumerate(lvol.nodes[1:]):
                 try:
                     sec_node = db.get_storage_node_by_id(sec_id)
                 except KeyError:
                     continue
                 if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
                     try:
-                        passed &= health_controller.check_subsystem(
+                        ret = health_controller.check_subsystem(
                             lvol.nqn, rpc_client=sec_node.rpc_client(), ns_uuid=lvol.uuid)
+                        if not ret:
+                            passed = False
+                            # Self-heal: a missing registration on an online
+                            # non-leader never fixes itself (the create-time
+                            # deferral queue is lossy) — re-register now. The
+                            # next monitor cycle re-checks and restores
+                            # health_check once the repair sticks.
+                            try:
+                                try_repair_lvol_on_non_leader(lvol, sec_node, sec_index)
+                            except Exception as re:
+                                logger.error(
+                                    f"Repair attempt for lvol {lvol.get_id()} "
+                                    f"on node {sec_id} raised: {re}")
                     except Exception as e:
                         logger.error(f"Failed to check lvol: {lvol.get_id()} on node: {sec_id}")
                         logger.error(e)

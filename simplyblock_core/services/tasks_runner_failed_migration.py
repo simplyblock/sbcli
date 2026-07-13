@@ -29,6 +29,11 @@ def task_runner(task):
         task.write_to_db(db.kv_store)
         return False
 
+    # Expansion-first ordering: defer while a cluster expansion is open
+    # (see tasks_controller.defer_task_for_expansion).
+    if tasks_controller.defer_task_for_expansion(task):
+        return False
+
     if task.canceled:
         task.function_result = "canceled"
         task.status = JobSchedule.STATUS_DONE

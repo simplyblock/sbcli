@@ -4,6 +4,7 @@ import time
 from typing import Optional
 
 from simplyblock_core import db_controller, utils
+from simplyblock_core.controllers import tasks_controller
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.storage_node import StorageNode
@@ -62,6 +63,18 @@ while True:
 
             tasks = db.get_job_tasks(cl.get_id(), reverse=False)
             for task in tasks:
+
+                if task.function_name == JobSchedule.FN_LVOL_SYNC_OP:
+                    if task.status != JobSchedule.STATUS_DONE:
+                        # Re-read (it may have been canceled concurrently).
+                        task = db.get_task_by_id(task.uuid)
+                        if task.status == JobSchedule.STATUS_DONE:
+                            continue
+                        try:
+                            tasks_controller.run_lvol_sync_op_task(task)
+                        except Exception as e:
+                            logger.error(f"lvol sync-op task {task.uuid} crashed: {e}")
+                    continue
 
                 if task.function_name == JobSchedule.FN_LVOL_SYNC_DEL:
                     if task.status != JobSchedule.STATUS_DONE:

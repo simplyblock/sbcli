@@ -94,6 +94,12 @@ def task_runner(task):
         task.write_to_db(db.kv_store)
         return False
 
+    # Expansion-first ordering: no data migration runs while a cluster
+    # expansion is open — even between the expand task's retries, when the
+    # cluster status is momentarily ACTIVE (see defer_task_for_expansion).
+    if tasks_controller.defer_task_for_expansion(task):
+        return False
+
     if task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED]:
         current_online_devices = 0
         unavailable = _cluster_unavailable_state(task.cluster_id)

@@ -182,11 +182,90 @@ def _fd_aware_cluster_status(cluster, snodes, affected_ips, n, k, jm_replication
     return Cluster.STATUS_SUSPENDED
 
 
+from simplyblock_core.utils.ttl_cache import TTLCache
+
+# RPC-dependent signals feeding get_next_cluster_status, cached briefly so a
+# burst of update_cluster_status calls (every escalation triggers one) does
+# not re-probe the same nodes with 10s-class timeouts.
+_status_probe_cache = TTLCache()
+_JM_REPL_PROBE_TTL_SEC = 10
+_DP_QUORUM_PROBE_TTL_SEC = 8
+
+
+def _probe_jm_replication(node):
+    """Does ``node`` report an active JM replication task? RPC-backed."""
+    try:
+        if node.rpc_client(timeout=10).bdev_lvol_get_lvstores(node.lvstore):
+            ret = node.rpc_client(timeout=8).jc_get_jm_status(node.jm_vuid)
+            for jm in ret:
+                if ret[jm] is False:  # jm not ready (active replication task)
+                    return True
+        return False
+    except Exception:
+        logger.warning("Failed to get replication task!")
+        return False
+
+
+def _collect_status_probes(snodes):
+    """Gather every RPC-dependent signal for get_next_cluster_status —
+    in parallel across nodes, TTL-cached per node.
+
+    These probes carry 8-10 s timeouts each; running them inline and
+    sequentially inside the status computation made one verdict take
+    minutes during a mass outage (2026-07-10: 32-host reboot reported
+    ACTIVE for ~2 extra minutes because verdicts were computed from
+    snapshots taken before the escalations they overlapped). Probing
+    first, in parallel, keeps the verdict pass pure DB state.
+
+    Returns (jm_replication_by_node_id, dp_disconnected_by_node_id).
+    """
+    jm_repl: dict = {}
+    dp_quorum: dict = {}
+
+    def _jm(n):
+        jm_repl[n.get_id()] = bool(_status_probe_cache.get_or_compute(
+            ("jm_repl", n.get_id()), _JM_REPL_PROBE_TTL_SEC,
+            lambda: _probe_jm_replication(n)))
+
+    def _q(n):
+        dp_quorum[n.get_id()] = bool(_status_probe_cache.get_or_compute(
+            ("dp_quorum", n.get_id()), _DP_QUORUM_PROBE_TTL_SEC,
+            lambda: is_node_data_plane_disconnected_quorum(n)))
+
+    threads = []
+    for node in snodes:
+        if node.status == StorageNode.STATUS_ONLINE:
+            target = _jm
+        elif node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_REMOVED,
+                                 StorageNode.STATUS_DOWN, StorageNode.STATUS_OFFLINE,
+                                 StorageNode.STATUS_IN_CREATION, StorageNode.STATUS_SUSPENDED]:
+            # Transient states (UNREACHABLE / SCHEDULABLE / ...) may need the
+            # data-plane quorum answer in the verdict pass below.
+            target = _q
+        else:
+            continue
+        t = threading.Thread(target=target, args=(node,),
+                             name=f"status-probe-{node.get_id()[:8]}")
+        t.start()
+        threads.append(t)
+    for t in threads:
+        t.join()
+    return jm_repl, dp_quorum
+
+
 def get_next_cluster_status(cluster_id):
     logger.info(f"get_next_cluster_status for cluster_id: {cluster_id}")
     cluster = db.get_cluster_by_id(cluster_id)
     if cluster.status == cluster.STATUS_UNREADY:
         return Cluster.STATUS_UNREADY
+
+    # Phase 1: slow, RPC-dependent signals on a throwaway snapshot.
+    probe_snapshot = db.get_primary_storage_nodes_by_cluster_id(cluster_id)
+    jm_repl_by_node, dp_quorum_by_node = _collect_status_probes(probe_snapshot)
+
+    # Phase 2: the verdict, computed from a FRESH snapshot with no RPCs —
+    # milliseconds, so the returned status describes the cluster as it is
+    # NOW, not as it was when a slow probe pass started.
     snodes = db.get_primary_storage_nodes_by_cluster_id(cluster_id)
 
     online_nodes = 0
@@ -210,17 +289,12 @@ def get_next_cluster_status(cluster_id):
             if is_new_migrated_node(cluster_id, node):
                 continue
             online_nodes += 1
-            try:
-                # check for jm rep tasks:
-                if node.rpc_client(timeout=10).bdev_lvol_get_lvstores(node.lvstore):
-                    ret = node.rpc_client(timeout=8).jc_get_jm_status(node.jm_vuid)
-                    for jm in ret:
-                        if ret[jm] is False: # jm is not ready (has active replication task)
-                            jm_replication_tasks = True
-                            logger.warning("Replication task found!")
-                            break
-            except Exception:
-                logger.warning("Failed to get replication task!")
+            # JM-replication signal precomputed by _collect_status_probes;
+            # a node that turned ONLINE after the probe pass defaults to
+            # False and is picked up by the next (now fast) tick.
+            if jm_repl_by_node.get(node.get_id()):
+                jm_replication_tasks = True
+                logger.warning("Replication task found!")
         elif node.status == StorageNode.STATUS_REMOVED:
             pass
         else:
@@ -272,8 +346,12 @@ def get_next_cluster_status(cluster_id):
             # (set_node_down flips node status only). Recovery is a port-unblock,
             # not a destructive restart, so a DOWN node must not tip the cluster
             # toward SUSPENDED.
+            # Quorum verdict precomputed by _collect_status_probes; a node
+            # that entered a transient state after the probe pass defaults
+            # to "connected" (don't count) — same conservative bias as the
+            # inline probe had, and the next fast tick re-evaluates it.
             if (node.mgmt_ip not in affected_physical_nodes
-                    and is_node_data_plane_disconnected_quorum(node)):
+                    and dp_quorum_by_node.get(node.get_id(), False)):
                 affected_physical_nodes.append(node.mgmt_ip)
 
         online_devices += node_online_devices

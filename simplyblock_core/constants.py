@@ -257,7 +257,11 @@ CLUSTER_ACTIVATION_MAX_PARALLEL_NODES=8
 # parallel restarts cannot violate FTT). One node restart is ~70 s; strictly
 # sequential recovery of a 32-node cluster took ~38 min (2026-07-08). Online
 # clusters keep one-restart-at-a-time semantics regardless of this value.
-NODE_RESTART_MAX_PARALLEL_SUSPENDED=8
+# 32: all nodes of a suspended cluster may restart together — the critical
+# bi-directional interconnection phase is serialized by
+# storage_node_ops._remote_connect_gate regardless of this fan-out, and
+# per-node exclusivity is enforced by the dispatch _node_inflight map.
+NODE_RESTART_MAX_PARALLEL_SUSPENDED=32
 
 NVMF_MAX_SUBSYSTEMS=50000
 KATO=5000
