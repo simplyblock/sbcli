@@ -8217,7 +8217,7 @@ def teardown_non_leader_lvstore(donor_node, primary_node, slot=None):
         # of the dicts so we don't accidentally persist 'deleted' markers
         # back into primary_node.lvstore_stack on subsequent writes.
         stack_copy = [dict(b) for b in primary_node.lvstore_stack]
-        _remove_bdev_stack(stack_copy, rpc_client)
+        _remove_bdev_stack(stack_copy, rpc_client, remove_distr_only=True)
 
 
     # 4. Clear the back-reference on the donor and persist. Re-fetch so we
