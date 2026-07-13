@@ -1498,6 +1498,12 @@ class CLIWrapper(CLIWrapperBase):
                         ret = False
                     else:
                         ret = self.volume__migrate_cleanup(sub_command, args)
+                elif sub_command in ['migrate-group-list']:
+                    if not self.developer_mode:
+                        print("This command is private.")
+                        ret = False
+                    else:
+                        ret = self.volume__migrate_group_list(sub_command, args)
                 else:
                     self.parser.print_help()
 
