@@ -1359,6 +1359,14 @@ def _connect_to_remote_devs(
     for node in nodes:
         if node.get_id() == this_node.get_id() or node.status not in allowed_node_statuses:
             continue
+        if only_node_id and node.get_id() != only_node_id:
+            # DELTA mode: records for every other node were carried over
+            # untouched above — probing their bdevs anyway made each delta
+            # call O(cluster devices) get_bdevs, which dominated the
+            # pre-activation repair (measured 38 links/min over 1116 links,
+            # ~25 min, 2026-07-13 validation run). Verify only the delta
+            # owner's devices.
+            continue
         for dev in node.nvme_devices:
             if dev.get_id() in remote_device_ids:
                 continue

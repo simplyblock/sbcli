@@ -718,10 +718,15 @@ def _wait_for_full_device_connectivity(cl_id, timeout_sec=300, poll_sec=10):
         for t in repair_threads:
             t.join()
 
-        # Progress-aware deadline: as long as repairs keep closing links,
-        # keep going — only a stall (no reduction across a full repair
-        # round) is allowed to run the clock out.
-        if prev_missing is not None and len(missing) < prev_missing:
+        # Progress-aware deadline. The FIRST completed repair round counts as
+        # progress unconditionally: the round itself may consume the whole
+        # initial budget (2026-07-13 validation run: 1116 links repaired at
+        # ~38/min = 25+ min in round 1), and without this the already-expired
+        # deadline forced a pointless abort lap on the re-check even though
+        # the mesh was nearly healed. After that, extend only while the
+        # missing count keeps shrinking — a stalled repair (no reduction
+        # across a full round) still runs the clock out.
+        if prev_missing is None or len(missing) < prev_missing:
             deadline = max(deadline, time.time() + timeout_sec / 2)
         prev_missing = len(missing)
         time.sleep(poll_sec)
