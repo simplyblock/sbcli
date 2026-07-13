@@ -1,8 +1,12 @@
-
 ssh -i c:/ssh/mtes01.pem ec2-user@13.221.42.20 
 python scripts/upload_to_mgmt.py 13.221.42.20 --key C:\ssh\mtes01.pem --user ec2-user
 sudo python3 ~/scripts/stop_cluster_run.py ~/perf/cluster_metadata_mp.json --key ~/.ssh/mtes01.pem --client-mode reboot
-sudo python3 ~/scripts/stop_cluster_run.py ~/perf/cluster_metadata_base.json --key ~/.ssh/mtes01.pem --client-mode reboot
+tmux kill-session -t soak
+sudo python3 ~/scripts/stop_cluster_run.py ~/perf/cluster_metadata_base.json --key ~/.ssh/mtes01.pem --client-mode reboot 
+
+tmux kill-session -t soak
+sudo python3 ~/scripts/stop_cluster_run.py ~/perf/cluster_metadata_failure_domain.json --key ~/.ssh/mtes01.pem --client-mode reboot 
+
 sudo python3 ~/perf/aws_dual_node_outage_soak_mixed.py --metadata ~/perf/cluster_metadata_mp.json --run-on-mgmt --ssh-key ~/.ssh/mtes01.pem  > soak_$(date +%Y%m%d_%H%M%S).out 2>&1 &
 sudo python3 ~/perf/aws_dual_node_outage_soak_mixed.py --metadata ~/perf/cluster_metadata_base.json --run-on-mgmt --ssh-key ~/.ssh/mtes01.pem  > soak_$(date +%Y%m%d_%H%M%S).out 2>&1 &
 
@@ -10,10 +14,26 @@ pgrep -c '^fio$'        # only exact name "fio"
 pgrep -af fio | wc -l   # all with "fio" anywhere in full cmdline
 
 sudo dnf install -y tmux
-tmux kill-session -t soak
-  tmux new -s soak -d "sudo python3 ~/perf/aws_dual_node_outage_soak_mixed.py \
-      --metadata ~/perf/cluster_metadata_base.json \
+  tmux new -s soak -d "sudo python3 ~/perf/aws_dual_node_outage_soak_mixed_churn.py \
+      --metadata ~/perf/cluster_metadata_failure_domain.json \
       --run-on-mgmt \
       --ssh-key ~/.ssh/mtes01.pem 2>&1 | tee ~/soak_$(date +%Y%m%d_%H%M%S).out"
-	  
+
+tmux new -s soak -d "sudo python3 ~/perf/aws_dual_node_outage_soak_failure_domain.py \
+      --metadata ~/perf/cluster_metadata_failure_domain.json \
+      --run-on-mgmt \
+      --combo-only --cycles 0 \
+      --combo-methods container_kill,graceful,host_reboot \
+      --expected-node-count 8 \
+      --ssh-key ~/.ssh/mtes01.pem 2>&1 | tee ~/soak_$(date +%Y%m%d_%H%M%S).out"
+
+sudo dnf install -y tmux
+tmux new -s snapclone -d 'sudo python3 ~/perf/snapshot_clone_namespace_scale.py \
+    --metadata ~/perf/cluster_metadata_base.json \
+    --run-on-mgmt --start-at 8\
+    --ssh-key ~/.ssh/mtes01.pem \
+    2>&1 | tee ~/snapclone_$(date +%Y%m%d_%H%M%S).out'
+
+python3 collect_logs.py "2026-06-01T07:40:00" 120 --use-opensearch 
+      
 sudo pkill -KILL -f 'fio --name=aws_dual_soak_'
