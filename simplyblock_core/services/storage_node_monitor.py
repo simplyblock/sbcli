@@ -60,7 +60,12 @@ def _activation_watchdog_budget_sec(cluster):
 recovery_shutdown_threads: dict[str, threading.Thread] = {}
 
 
-def is_new_migrated_node(cluster_id, node):
+def is_new_migrated_node(cluster_id, node, tasks=None):
+    """``tasks`` lets the caller pass an already-fetched job-task list.
+    get_next_cluster_status calls this once per ONLINE node — fetching the
+    full per-cluster task table inside that loop made a single status verdict
+    O(n·T), amplified further by concurrent update_cluster_status callers
+    (2026-07-13 audit)."""
     dev_lst = []
     for dev in node.nvme_devices:
         if dev.status == NVMeDevice.STATUS_ONLINE:
@@ -72,7 +77,7 @@ def is_new_migrated_node(cluster_id, node):
             distr_names.append(item["name"])
 
     if dev_lst:
-        tasks = db.get_job_tasks(cluster_id)
+        tasks = tasks if tasks is not None else db.get_job_tasks(cluster_id)
         for task in tasks:
             if task.function_name == JobSchedule.FN_NEW_DEV_MIG and task.node_id == node.get_id():
                 if task.device_id not in dev_lst:
@@ -280,6 +285,11 @@ def get_next_cluster_status(cluster_id):
 
     affected_physical_nodes = []
 
+    # One task-table fetch for the whole verdict: is_new_migrated_node runs
+    # once per ONLINE node below and used to re-fetch the full per-cluster
+    # task list each time (O(n·T) per verdict).
+    cluster_tasks = db.get_job_tasks(cluster_id)
+
     for node in snodes:
 
         node_online_devices = 0
@@ -289,7 +299,7 @@ def get_next_cluster_status(cluster_id):
             continue
 
         if node.status == StorageNode.STATUS_ONLINE:
-            if is_new_migrated_node(cluster_id, node):
+            if is_new_migrated_node(cluster_id, node, tasks=cluster_tasks):
                 continue
             online_nodes += 1
             # JM-replication signal precomputed by _collect_status_probes;
@@ -709,7 +719,39 @@ def _drive_suspend_recovery(cluster):
                 "unpaused", cluster.get_id())
 
 
+# Debounce state for update_cluster_status: during a mass outage every
+# per-node thread re-enters it synchronously on each status flip — up to n
+# concurrent full recomputes of the same cluster verdict (each doing
+# full-table scans, job-task scans and probe fan-outs): O(n²) DB pressure at
+# the worst possible moment (2026-07-13 audit, 32-node whole-cluster reboot).
+# All callers want the same thing — "recompute the verdict, something
+# changed" — so one thread computes while contemporaries just mark the
+# cluster dirty; the computing thread re-runs while dirty, so no caller's
+# change is ever missed, and the n-way recompute collapses to at most two
+# sequential passes.
+_ucs_state_lock = threading.Lock()
+_ucs_running: dict = {}
+_ucs_pending: dict = {}
+
+
 def update_cluster_status(cluster_id):
+    with _ucs_state_lock:
+        if _ucs_running.get(cluster_id):
+            _ucs_pending[cluster_id] = True
+            return
+        _ucs_running[cluster_id] = True
+    try:
+        while True:
+            _update_cluster_status_impl(cluster_id)
+            with _ucs_state_lock:
+                if not _ucs_pending.pop(cluster_id, False):
+                    break
+    finally:
+        with _ucs_state_lock:
+            _ucs_running[cluster_id] = False
+
+
+def _update_cluster_status_impl(cluster_id):
     # Run the re-queue scan FIRST, before any of the transition branches
     # that may early-return. Otherwise OFFLINE/SCHEDULABLE nodes can stay
     # stranded whenever the cluster takes a recovery path (e.g.
@@ -1493,6 +1535,7 @@ def readmit_devices_after_node_online(node_id):
     """
     try:
         fresh = db.get_storage_node_by_id(node_id)
+        readmitted = 0
         for dev in fresh.nvme_devices:
             if dev.status in (NVMeDevice.STATUS_ONLINE,
                               NVMeDevice.STATUS_REMOVED,
@@ -1501,10 +1544,19 @@ def readmit_devices_after_node_online(node_id):
             logger.info(
                 f"Re-admitting device {dev.get_id()} (was {dev.status}) "
                 f"after node {fresh.get_id()} cleared to ONLINE")
-            if not device_controller.device_set_online(dev.get_id()):
+            # connect_peers=False: the peer fan-out reconnects every ONLINE
+            # peer to THIS node's devices, and all of them flip within this
+            # loop — running it per device repeats the identical delta
+            # reconcile d times. Coalesce to one fan-out after the loop.
+            if not device_controller.device_set_online(dev.get_id(),
+                                                       connect_peers=False):
                 logger.error(
                     f"Re-admit of device {dev.get_id()} after node "
                     f"{fresh.get_id()} cleared to ONLINE was refused")
+            else:
+                readmitted += 1
+        if readmitted:
+            device_controller.connect_peers_to_node_devices(fresh)
     except Exception as e:
         logger.error(f"Device re-admit after node clear to ONLINE failed: {e}")
 

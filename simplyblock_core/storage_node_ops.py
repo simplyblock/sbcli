@@ -288,6 +288,13 @@ _ATTACH_CONTROLLER_MAX_TIMEOUT_SEC = 1
 #: restarts are driven by the single restart task-runner process.
 _remote_connect_gate = threading.Lock()
 
+#: Serializes lvstore port allocation + persistence in create_lvstore.
+#: get_next_lvstore_ports has no reservation step, so concurrent creates
+#: (parallel activation Pass 1) would allocate colliding ports without this.
+#: Process-local is sufficient — all Pass-1 creates run in the single
+#: activation driver process.
+_lvstore_port_alloc_lock = threading.Lock()
+
 
 def _collect_attached_ips(ctrlr_list):
     """Aggregate the set of currently-attached traddrs across every ctrlr entry.
@@ -7555,7 +7562,6 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
     strip_size_kb = utils.nearest_upper_power_of_2(strip_size_kb)
     jm_vuid = 1
     jm_ids = []
-    lvol_subsys_port, hublvol_port = utils.get_next_lvstore_ports(snode.cluster_id)
     if snode.enable_ha_jm:
         jm_vuid = utils.get_random_vuid()
         jm_ids = get_sorted_ha_jms(snode)
@@ -7645,17 +7651,24 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
     snode.lvstore = lvs_name
     snode.lvstore_stack = lvstore_stack
     snode.raid = raid_device
-    snode.lvol_subsys_port = lvol_subsys_port
-    # Re-read lvstore_ports from DB to preserve ports propagated by other
-    # nodes' create_lvstore calls (the in-memory snode may be stale).
-    fresh = db_controller.get_storage_node_by_id(snode.get_id())
-    snode.lvstore_ports = fresh.lvstore_ports if fresh.lvstore_ports else {}
-    snode.lvstore_ports[lvs_name] = {
-        "lvol_subsys_port": lvol_subsys_port,
-        "hublvol_port": hublvol_port,
-    }
-    snode.lvstore_status = "in_creation"
-    snode.write_to_db()
+    # Allocate the lvstore ports and persist them under one lock:
+    # get_next_lvstore_ports is a read-allocate with no reservation, so two
+    # concurrent create_lvstore calls (parallel activation Pass 1) would pick
+    # the same ports. The lock spans allocation -> write_to_db so the next
+    # allocator's used-port scan already sees these ports taken.
+    with _lvstore_port_alloc_lock:
+        lvol_subsys_port, hublvol_port = utils.get_next_lvstore_ports(snode.cluster_id)
+        snode.lvol_subsys_port = lvol_subsys_port
+        # Re-read lvstore_ports from DB to preserve ports propagated by other
+        # nodes' create_lvstore calls (the in-memory snode may be stale).
+        fresh = db_controller.get_storage_node_by_id(snode.get_id())
+        snode.lvstore_ports = fresh.lvstore_ports if fresh.lvstore_ports else {}
+        snode.lvstore_ports[lvs_name] = {
+            "lvol_subsys_port": lvol_subsys_port,
+            "hublvol_port": hublvol_port,
+        }
+        snode.lvstore_status = "in_creation"
+        snode.write_to_db()
 
     ret, err = _create_bdev_stack(snode, lvstore_stack)
     if err:

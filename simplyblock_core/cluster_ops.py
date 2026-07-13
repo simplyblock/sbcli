@@ -895,8 +895,15 @@ def _cluster_activate_impl(cl_id, force=False, force_lvstore_create=False) -> No
     # Re-activation (recreate_lvstore, activation_mode=True) only touches the
     # node being recreated plus RPCs to its peers, and every worker operates on
     # a distinct node — safe to fan out (bounded pool). A fresh create_lvstore
-    # additionally writes to the node's secondary record, which can be shared
-    # between primaries, so creates stay sequential.
+    # additionally writes its secondary/tertiary records (full-object
+    # read-modify-write), and in a cross-pair layout the same record is
+    # written both as "own" by its create and as "sec" by its partner's —
+    # so creates fan out on the pool too, serializing only creates whose
+    # touched-record sets intersect (per-node locks taken in sorted order,
+    # the Pass 3 pattern). The old fully-serial loop cost ~40s x n — 22 min
+    # at n=32, the dominant cost of a fresh activation (2026-07-13 audit).
+    # Port allocation inside create_lvstore is separately serialized by
+    # storage_node_ops._lvstore_port_alloc_lock.
     snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     pass1_recreate_ids: t.List[str] = []
     pass1_create_ids: t.List[str] = []
@@ -967,11 +974,54 @@ def _cluster_activate_impl(cl_id, force=False, force_lvstore_create=False) -> No
         for node_id in pass1_recreate_ids:
             _finish_pass1_node(node_id, pass1_results.get(node_id))
 
-    for node_id in pass1_create_ids:
-        snode = db_controller.get_storage_node_by_id(node_id)
-        ret = storage_node_ops.create_lvstore(snode, cluster.distr_ndcs, cluster.distr_npcs, cluster.distr_bs,
-                                          cluster.distr_chunk_bs, cluster.page_size_in_blocks, max_size)
-        _finish_pass1_node(node_id, ret)
+    if pass1_create_ids:
+        # Lock set per create = the records create_lvstore writes: the node
+        # itself plus its secondary/tertiary. Locks are acquired in sorted-id
+        # order so two creates with intersecting sets serialize deadlock-free
+        # while disjoint pairs run concurrently.
+        pass1_create_lock_ids: t.Dict[str, t.List[str]] = {}
+        pass1_create_locks: t.Dict[str, threading.Lock] = {}
+        for nid in pass1_create_ids:
+            n = db_controller.get_storage_node_by_id(nid)
+            touched = {nid}
+            if n.secondary_node_id:
+                touched.add(n.secondary_node_id)
+            if n.tertiary_node_id:
+                touched.add(n.tertiary_node_id)
+            pass1_create_lock_ids[nid] = sorted(touched)
+            for lid in pass1_create_lock_ids[nid]:
+                pass1_create_locks.setdefault(lid, threading.Lock())
+
+        def _create_primary_lvs(node_id):
+            locks = [pass1_create_locks[lid] for lid in pass1_create_lock_ids[node_id]]
+            for lk in locks:
+                lk.acquire()
+            try:
+                snode = db_controller.get_storage_node_by_id(node_id)
+                return storage_node_ops.create_lvstore(
+                    snode, cluster.distr_ndcs, cluster.distr_npcs, cluster.distr_bs,
+                    cluster.distr_chunk_bs, cluster.page_size_in_blocks, max_size)
+            finally:
+                for lk in reversed(locks):
+                    lk.release()
+
+        create_results: t.Dict[str, t.Any] = {}
+        create_errors: t.List[ValueError] = []
+        workers = min(constants.CLUSTER_ACTIVATION_MAX_PARALLEL_NODES, len(pass1_create_ids))
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="activate-p1c") as pool:
+            futures = {pool.submit(_create_primary_lvs, nid): nid for nid in pass1_create_ids}
+            for future in as_completed(futures):
+                node_id = futures[future]
+                try:
+                    create_results[node_id] = future.result()
+                except Exception as e:
+                    logger.error(e)
+                    create_errors.append(ValueError("Failed to activate cluster"))
+        if create_errors:
+            set_cluster_status(cl_id, ols_status)
+            raise create_errors[0]
+        for node_id in pass1_create_ids:
+            _finish_pass1_node(node_id, create_results.get(node_id))
 
     # Pass 2: Recreate secondary/tertiary LVS on every node that participates
     # as a non-leader for another node's LVS. In a ring topology (FTT=2 with
