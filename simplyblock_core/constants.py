@@ -243,7 +243,11 @@ PCIE_TIMEOUT_US=2000000
 # O(nodes) at ~40 s/node — 22 min on a 32-node cluster (2026-07-08) — which
 # starved the activation watchdog and every observer. Bounded so the mgmt node
 # and the FDB layer are not overwhelmed by 32 parallel RPC fan-outs.
-CLUSTER_ACTIVATION_MAX_PARALLEL_NODES=8
+# Raised 8 -> 16 (2026-07-13): at 8 the passes ran 4 serial waves on a
+# 32-node cluster (~13 min of lvstore passes in the validation run) while
+# per-worker time is dominated by waiting on the target node's own SPDK
+# (examine), not by mgmt/FDB load.
+CLUSTER_ACTIVATION_MAX_PARALLEL_NODES=16
 
 # Max concurrent node-restart tasks while the cluster is SUSPENDED (recovery
 # after full-cluster outage/shutdown: every node offline, no client IO — so

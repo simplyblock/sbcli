@@ -288,6 +288,24 @@ _ATTACH_CONTROLLER_MAX_TIMEOUT_SEC = 1
 #: restarts are driven by the single restart task-runner process.
 _remote_connect_gate = threading.Lock()
 
+#: Per-record successor to _remote_connect_gate for the restart connect
+#: sections: what actually needs mutual exclusion is the read-compute-write
+#: of ONE node record's remote_devices (the computed list is built outside
+#: the FDB tx, so two concurrent writers to the same record lose updates
+#: even via atomic_update). A global gate serialized ALL 32 parallel
+#: suspended-recovery restarts through their most expensive section
+#: (measured: dominant share of a 19-min restart phase, 2026-07-13).
+#: Per-node-id locks serialize only writers of the SAME record; work on
+#: distinct records proceeds concurrently. Process-local is sufficient —
+#: all parallel restarts run in the single restart task-runner process.
+_remote_connect_locks_guard = threading.Lock()
+_remote_connect_locks: dict = {}
+
+
+def _remote_connect_lock(node_id):
+    with _remote_connect_locks_guard:
+        return _remote_connect_locks.setdefault(node_id, threading.Lock())
+
 #: Serializes lvstore port allocation + persistence in create_lvstore.
 #: get_next_lvstore_ports has no reservation step, so concurrent creates
 #: (parallel activation Pass 1) would allocate colliding ports without this.
@@ -1763,11 +1781,28 @@ def _refresh_cluster_maps_after_node_recovery(snode: StorageNode):
     # remain on stale per-device availability derived from transient reconnect state.
     distr_controller.send_cluster_map_to_node(snode)
 
+    # Per-target maps are independent (each build is target-specific) — send
+    # them in parallel. The serial loop cost n sequential O(n·d) builds +
+    # 10s-timeout RPCs per recovering node, ~1024 sends across a
+    # whole-cluster recovery (2026-07-13 audit).
+    def _send_one(node):
+        try:
+            distr_controller.send_cluster_map_to_node(node)
+        except Exception as e:
+            logger.warning("Cluster-map push to %s failed (best-effort): %s",
+                           node.get_id(), e)
+
+    map_threads = []
     for node in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
         if node.get_id() == snode.get_id():
             continue
         if node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
-            distr_controller.send_cluster_map_to_node(node)
+            t = threading.Thread(target=_send_one, args=(node,),
+                                 name=f"map-push-{node.get_id()[:8]}")
+            t.start()
+            map_threads.append(t)
+    for t in map_threads:
+        t.join()
 
 
 def ifc_is_tcp(nic):
@@ -3352,9 +3387,11 @@ def _restart_storage_node_impl(
             return False
 
     logger.info("Connecting to remote devices")
-    # Gated: see _remote_connect_gate — parallel suspended-recovery restarts
-    # must not interleave the cross-node connection re-establishment.
-    with _remote_connect_gate:
+    # Locked per-record: this section full-object-writes THIS node's record;
+    # concurrent peers' connect-back loops write the same record (as their
+    # peer) under the same per-node lock, so the two never interleave. Other
+    # nodes' restarts no longer serialize behind us (see _remote_connect_lock).
+    with _remote_connect_lock(snode.get_id()):
         try:
             snode.remote_devices = _connect_to_remote_devs(snode)
         except RuntimeError:
@@ -3382,29 +3419,46 @@ def _restart_storage_node_impl(
     if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
 
         # make other nodes connect to the new devices
-        # Gated: full-object writes of OTHER nodes' records — parallel
-        # suspended-recovery restarts running this loop concurrently would
-        # lose updates (see _remote_connect_gate).
+        # Per-peer locks + parallel workers replace the old global gate +
+        # serial loop: each worker re-reads its peer FRESH inside that peer's
+        # lock (the computed remote_devices list is built outside the FDB tx,
+        # so lock-then-read is what makes the write safe), and per-peer
+        # failure is best-effort — a struggling peer must not fail this
+        # node's restart (its links are re-covered by the peer's own health
+        # fixups and the pre-activation connectivity repair).
         logger.info("Make other nodes connect to the node devices")
-        with _remote_connect_gate:
-            snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
-            for node in snodes:
-                if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
-                    continue
-                try:
-                    # Re-read node from DB to avoid overwriting concurrent changes
-                    node = db_controller.get_storage_node_by_id(node.get_id())
+        snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
+
+        def _connect_back_one_peer(peer_id):
+            try:
+                with _remote_connect_lock(peer_id):
+                    peer = db_controller.get_storage_node_by_id(peer_id)
+                    if peer.status != StorageNode.STATUS_ONLINE:
+                        return
                     remote_devices = _connect_to_remote_devs(
-                        node, reattach=True, force_connect_restarting_nodes=True,
+                        peer, reattach=True, force_connect_restarting_nodes=True,
                         only_node_id=snode.get_id())
-                except RuntimeError:
-                    logger.error('Failed to connect to remote devices')
-                    return False
-                # Atomic: never full-object-write a PEER's record — a stale
-                # copy resurrects a just-cleared restart phase on that peer
-                # (2026-07-10 stale-phase generator).
-                db_controller.atomic_update(
-                    node, lambda n, rd=remote_devices: setattr(n, "remote_devices", rd))
+                    # Atomic: never full-object-write a PEER's record — a stale
+                    # copy resurrects a just-cleared restart phase on that peer
+                    # (2026-07-10 stale-phase generator).
+                    db_controller.atomic_update(
+                        peer, lambda n, rd=remote_devices: setattr(n, "remote_devices", rd))
+            except Exception as e:
+                logger.error(
+                    f"Peer {peer_id} connect-back to {snode.get_id()} "
+                    f"failed (best-effort): {e}")
+
+        connect_back_threads = []
+        for node in snodes:
+            if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
+                continue
+            t = threading.Thread(
+                target=_connect_back_one_peer, args=(node.get_id(),),
+                name=f"connect-back-{node.get_id()[:8]}")
+            t.start()
+            connect_back_threads.append(t)
+        for t in connect_back_threads:
+            t.join()
 
         logger.info("Sending device status event")
         snode = db_controller.get_storage_node_by_id(snode.get_id())
@@ -7756,7 +7810,9 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
             sec_node = db_controller.get_storage_node_by_id(sec_node_id)
             if sec_node.status == StorageNode.STATUS_ONLINE:
                 try:
-                    time.sleep(1)
+                    # Brief settle beat; connect_to_hublvol retries via the
+                    # reconnect coordinator, the old 1s was serial latency.
+                    time.sleep(0.2)
                     # tertiary gets multipath failover to sec_1
                     failover_node = sec1 if i >= 1 and sec1 and sec1.status == StorageNode.STATUS_ONLINE else None
                     sec_role = "tertiary" if i >= 1 else "secondary"

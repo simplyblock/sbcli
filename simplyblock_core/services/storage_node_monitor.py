@@ -1027,7 +1027,21 @@ def _count_data_plane_votes(node):
     perpetually votes "connected" and the quorum gets stuck.
 
     Returns (disconnected_count, total_peers_checked).
+
+    Peers are probed IN PARALLEL and the whole vote is TTL-cached per target
+    node: the previous serial loop cost up to ~16s per down peer (two 8s
+    RPCs) — ~8 minutes at 31 peers — inside EVERY unreachable-node thread,
+    each recomputing the identical vote (2026-07-13 audit). The cache
+    collapses the N concurrent escalation threads onto one computation;
+    parallelism bounds it to the slowest single peer.
     """
+    node_id = node.get_id()
+    return _status_probe_cache.get_or_compute(
+        ("dp_votes", node_id), _DP_QUORUM_PROBE_TTL_SEC,
+        lambda: _count_data_plane_votes_uncached(node))
+
+
+def _count_data_plane_votes_uncached(node):
     node_id = node.get_id()
     cluster_nodes = db.get_storage_nodes_by_cluster_id(node.cluster_id)
 
@@ -1044,10 +1058,10 @@ def _count_data_plane_votes(node):
 
     ctrl_name = f"remote_jm_{node_id}"
     bdev_name = f"{ctrl_name}n1"
-    disconnected = 0
-    total = 0
+    # Vote per peer: True = disconnected, False = connected, None = abstain.
+    votes: dict = {}
 
-    for peer in online_peers:
+    def _vote_one_peer(peer):
         peer_rpc = peer.rpc_client(timeout=8, retry=1)
 
         # Fast path: does the namespace bdev still exist on the peer?
@@ -1061,7 +1075,7 @@ def _count_data_plane_votes(node):
             bdevs = peer_rpc.get_bdevs(bdev_name)
         except Exception as e:
             logger.debug("get_bdevs(%s) on peer %s failed: %s", bdev_name, peer.get_id(), e)
-            continue
+            return
 
         if not bdevs:
             # If the peer never had a topology link to this node, it never
@@ -1071,7 +1085,7 @@ def _count_data_plane_votes(node):
             # place to assert "this peer SHOULD have seen it".
             logger.debug("Data-plane check: peer %s has no %s bdev; abstaining",
                          peer.get_id(), bdev_name)
-            continue
+            return
 
         # Bdev exists -> controller must exist too. Now check its state.
         try:
@@ -1079,26 +1093,37 @@ def _count_data_plane_votes(node):
         except Exception as e:
             logger.debug("bdev_nvme_controller_list(%s) on peer %s failed: %s",
                          ctrl_name, peer.get_id(), e)
-            continue
+            return
 
-        total += 1
         if not ret:
             logger.info("Data-plane check: peer %s has %s bdev but no controller -> disconnected",
                         peer.get_id(), bdev_name)
-            disconnected += 1
-            continue
+            votes[peer.get_id()] = True
+            return
 
         paths = ret[0].get("ctrlrs") or []
         enabled = any((p.get("state") == "enabled") for p in paths)
         if enabled:
             logger.info("Data-plane check: peer %s sees %s controller enabled",
                         peer.get_id(), node_id)
+            votes[peer.get_id()] = False
         else:
             states = [p.get("state") for p in paths] or ["no-paths"]
             logger.info("Data-plane check: peer %s reports %s controller state=%s -> disconnected",
                         peer.get_id(), node_id, states)
-            disconnected += 1
+            votes[peer.get_id()] = True
 
+    vote_threads = []
+    for peer in online_peers:
+        t = threading.Thread(target=_vote_one_peer, args=(peer,),
+                             name=f"dp-vote-{peer.get_id()[:8]}")
+        t.start()
+        vote_threads.append(t)
+    for t in vote_threads:
+        t.join()
+
+    disconnected = sum(1 for v in votes.values() if v)
+    total = len(votes)
     logger.info("Data-plane check for %s: %d/%d peers report disconnected", node_id, disconnected, total)
     return disconnected, total
 
@@ -1251,7 +1276,7 @@ def node_port_check_fun(snode):
 # read its result. The probe started in parallel with the liveness checks, so
 # by the time we collect it it has usually completed; if not, we treat it as
 # inconclusive for this cycle rather than blocking node-status evaluation.
-PORT_CHECK_JOIN_TIMEOUT_SEC = 8
+PORT_CHECK_JOIN_TIMEOUT_SEC = 5
 
 
 def _spawn_port_check(snode):
@@ -1423,7 +1448,7 @@ def check_node(snode):
         # rebooting stops accepting connections, and retrying with backoff only
         # delays flipping it not-online (incident 2026-06-25: ~21s of detection
         # latency on a host_reboot came from stacked SnodeAPI retries/timeouts).
-        snode_api = snode.client(timeout=8, retry=1, connect_retry=0)
+        snode_api = snode.client(timeout=5, retry=1, connect_retry=0)
         ret, _ = snode_api.is_live()
         logger.info(f"Check: node API {snode.mgmt_ip}:5000 ... {ret}")
         if not ret:

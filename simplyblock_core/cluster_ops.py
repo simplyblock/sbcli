@@ -1203,7 +1203,10 @@ def _cluster_activate_impl(cl_id, force=False, force_lvstore_create=False) -> No
                 if sec_node.status != StorageNode.STATUS_ONLINE:
                     continue
                 try:
-                    time.sleep(1)
+                    # Brief settle beat before the connect; connect_to_hublvol
+                    # itself retries via the reconnect coordinator, so a full
+                    # 1s per edge was pure serial latency across the pass.
+                    time.sleep(0.2)
                     failover_node = sec1 if i >= 1 and sec1 and sec1.status == StorageNode.STATUS_ONLINE else None
                     sec_role = "tertiary" if i >= 1 else "secondary"
                     sec_node.connect_to_hublvol(snode, failover_node=failover_node, role=sec_role)
