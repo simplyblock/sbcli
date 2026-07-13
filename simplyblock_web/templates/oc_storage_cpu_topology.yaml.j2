@@ -89,6 +89,41 @@ spec:
               MCPEOF
               fi
 
+              # ---- Enforce single storage-pool membership -------------------
+              # A node belongs to exactly ONE storage MCP. A previous cluster
+              # (different UUID -> different pool name) may still list this node
+              # in its storage-<oldid> pool; matching two custom pools makes MCO
+              # refuse the node ("belongs to 2 custom roles") and freeze its
+              # rollout. We just added the node to our pool ABOVE, so now drop it
+              # from every OTHER storage-* pool. Add-before-remove is deliberate:
+              # the node is never in zero custom pools, so it never falls back to
+              # the worker pool and never eats an extra reboot. We only edit
+              # nodeSelectors (never delete the old pool or its render), so the
+              # node just moves between identical-content renders — no reboot —
+              # and the stale pool harmlessly shrinks toward empty.
+              for OTHER in $(kubectl get mcp -o name | sed 's#.*/##' | grep '^storage-' | grep -v "^${MCP_NAME}$"); do
+                RETRY=0
+                # Retry: sibling node-add jobs may patch the same stale pool
+                # concurrently; each job loops until ITS hostname is gone, which
+                # converges under last-write-wins for the small parallel-add fan-out.
+                while [ $RETRY -lt 15 ]; do
+                  if ! kubectl get machineconfigpool "$OTHER" \
+                       -o jsonpath='{range .spec.nodeSelector.matchExpressions[0].values[*]}{@}{"\n"}{end}' 2>/dev/null \
+                       | grep -qx "$HOSTNAME"; then
+                    break
+                  fi
+                  NEWVALS=$(kubectl get machineconfigpool "$OTHER" \
+                    -o jsonpath='{range .spec.nodeSelector.matchExpressions[0].values[*]}{@}{"\n"}{end}' 2>/dev/null \
+                    | grep -vx "$HOSTNAME" \
+                    | awk 'BEGIN{printf "["} {printf "%s\"%s\"", (NR>1?",":""), $0} END{printf "]"}')
+                  echo "[INFO] Removing $HOSTNAME from stale storage pool $OTHER (values -> $NEWVALS)"
+                  kubectl patch machineconfigpool "$OTHER" --type=merge \
+                    -p "{\"spec\":{\"nodeSelector\":{\"matchExpressions\":[{\"key\":\"kubernetes.io/hostname\",\"operator\":\"In\",\"values\":$NEWVALS}]}}}" || true
+                  RETRY=$((RETRY + 1))
+                  sleep 2
+                done
+              done
+
               # ---- MachineConfig --------------------------------------------
               # Role matches MCP name so MCO-generated KubeletConfig MC is also picked up.
               if kubectl get machineconfig "$MC_NAME" > /dev/null 2>&1; then
