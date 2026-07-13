@@ -116,6 +116,16 @@ spec:
                     -o jsonpath='{range .spec.nodeSelector.matchExpressions[0].values[*]}{@}{"\n"}{end}' 2>/dev/null \
                     | grep -vx "$HOSTNAME" \
                     | awk 'BEGIN{printf "["} {printf "%s\"%s\"", (NR>1?",":""), $0} END{printf "]"}')
+                  # An In-operator selector with EMPTY values is invalid
+                  # ("values set can't be empty") and makes MCO degrade EVERY
+                  # node cluster-wide, freezing any node still migrating off this
+                  # pool's render. When removing the pool's last node, retire it
+                  # with a sentinel that matches no host instead of emptying it;
+                  # the pool becomes inert (0 nodes) but stays a valid object, so
+                  # nodes on its identical render migrate to their new pool.
+                  if [ "$NEWVALS" = "[]" ]; then
+                    NEWVALS='["retired-empty-storage-pool"]'
+                  fi
                   echo "[INFO] Removing $HOSTNAME from stale storage pool $OTHER (values -> $NEWVALS)"
                   kubectl patch machineconfigpool "$OTHER" --type=merge \
                     -p "{\"spec\":{\"nodeSelector\":{\"matchExpressions\":[{\"key\":\"kubernetes.io/hostname\",\"operator\":\"In\",\"values\":$NEWVALS}]}}}" || true
