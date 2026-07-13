@@ -631,6 +631,7 @@ def _wait_for_full_device_connectivity(cl_id, timeout_sec=300, poll_sec=10):
     of a distrib read error.
     """
     deadline = time.time() + timeout_sec
+    prev_missing = None
     while True:
         snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
         online = [n for n in snodes
@@ -646,13 +647,13 @@ def _wait_for_full_device_connectivity(cl_id, timeout_sec=300, poll_sec=10):
             have = {rd.get_id() for rd in node.remote_devices if rd.remote_bdev}
             for dev_id, owner in expected.items():
                 if owner != node.get_id() and dev_id not in have:
-                    missing.append((node.get_id()[:8], owner[:8], dev_id[:8]))
+                    missing.append((node.get_id(), owner, dev_id))
         if not missing:
             logger.info("Pre-activation connectivity check passed: %d nodes fully meshed "
                         "over %d devices", len(online), len(expected))
             return
         if time.time() >= deadline:
-            sample = ", ".join(f"{n}->{o}/dev {d}" for n, o, d in missing[:8])
+            sample = ", ".join(f"{n[:8]}->{o[:8]}/dev {d[:8]}" for n, o, d in missing[:8])
             raise ValueError(
                 f"Failed to activate cluster: {len(missing)} cross-node device "
                 f"connection(s) still missing after {timeout_sec}s "
@@ -660,12 +661,107 @@ def _wait_for_full_device_connectivity(cl_id, timeout_sec=300, poll_sec=10):
                 f"attaching to recently (re-)added peers — retry activation "
                 f"once node health checks pass.")
         logger.warning("Pre-activation connectivity check: %d cross-node device "
-                       "connection(s) missing; waiting %ds (%.0fs left)",
-                       len(missing), poll_sec, deadline - time.time())
+                       "connection(s) missing; repairing, then waiting %ds "
+                       "(%.0fs left)", len(missing), poll_sec,
+                       deadline - time.time())
+
+        # Actively REPAIR the missing links instead of only waiting for them.
+        # Waiting is sufficient after node-add (the add/health flows are still
+        # attaching), but after a whole-cluster parallel recovery nothing else
+        # drives these: each restart's peer reconnect is best-effort and skips
+        # peers that are mid-restart at that moment, and once the last restart
+        # finishes no reconciliation sweeps the leftovers — a bare wait
+        # livelocks activation (2026-07-13: 382 links static across repeated
+        # in_activation -> suspended -> in_activation cycles). Repair mirrors
+        # _reconnect_peers_to_restarted_node: per-node worker threads, DELTA
+        # reconnect per missing owner, atomic_update so we never clobber the
+        # node's concurrent flows. Best-effort — the re-check above is the
+        # only pass/fail authority.
+        # NB: a plain ``set()`` here would resolve to this module's ``set``
+        # function (it shadows the builtin).
+        by_node: dict = {}
+        for n_id, owner_id, _ in missing:
+            if n_id not in by_node:
+                by_node[n_id] = {owner_id}
+            else:
+                by_node[n_id].add(owner_id)
+
+        def _repair_node(node_id, owner_ids):
+            for owner_id in sorted(owner_ids):
+                try:
+                    node = db_controller.get_storage_node_by_id(node_id)
+                    remote_devices = storage_node_ops._connect_to_remote_devs(
+                        node, force_connect_restarting_nodes=True,
+                        only_node_id=owner_id)
+                    remote_jm_devices = None
+                    if node.enable_ha_jm:
+                        remote_jm_devices = storage_node_ops._connect_to_remote_jm_devs(
+                            node, only_node_id=owner_id)
+
+                    def _apply(n, rd=remote_devices, rjd=remote_jm_devices):
+                        n.remote_devices = rd
+                        if rjd is not None:
+                            n.remote_jm_devices = rjd
+                    db_controller.atomic_update(node, _apply)
+                except Exception as e:
+                    logger.warning(
+                        "Pre-activation repair of %s -> %s failed: %s",
+                        node_id[:8], owner_id[:8], e)
+
+        repair_threads = []
+        for node_id, owner_ids in by_node.items():
+            t = threading.Thread(
+                target=_repair_node, args=(node_id, owner_ids),
+                name=f"preact-repair-{node_id[:8]}")
+            t.start()
+            repair_threads.append(t)
+        for t in repair_threads:
+            t.join()
+
+        # Progress-aware deadline: as long as repairs keep closing links,
+        # keep going — only a stall (no reduction across a full repair
+        # round) is allowed to run the clock out.
+        if prev_missing is not None and len(missing) < prev_missing:
+            deadline = max(deadline, time.time() + timeout_sec / 2)
+        prev_missing = len(missing)
         time.sleep(poll_sec)
 
 
 def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
+    """Wrapper around the activation body that keeps ``activation_heartbeat``
+    fresh for its whole duration. The storage_node_monitor watchdog uses a
+    stale heartbeat to tell a DEAD activation (driver process/container gone)
+    from a merely long one: without it, a wedged IN_ACTIVATION sat for the
+    full node-scaled budget — 42 minutes on a 32-node cluster — before the
+    revert (incident 2026-07-13, monitor container replaced mid-activation).
+    """
+    stop_beat = threading.Event()
+
+    def _beat():
+        while not stop_beat.wait(60):
+            try:
+                fresh = db_controller.get_cluster_by_id(cl_id)
+                if fresh.status != Cluster.STATUS_IN_ACTIVATION:
+                    continue
+                now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                db_controller.atomic_update(
+                    fresh, lambda c, v=now_iso: setattr(c, "activation_heartbeat", v))
+            except Exception:
+                # Never let heartbeat trouble touch the activation itself; a
+                # missed beat only means the watchdog waits for the next one.
+                pass
+
+    beat_thread = threading.Thread(
+        target=_beat, daemon=True, name=f"activation-heartbeat-{cl_id[:8]}")
+    beat_thread.start()
+    try:
+        _cluster_activate_impl(
+            cl_id, force=force, force_lvstore_create=force_lvstore_create)
+    finally:
+        stop_beat.set()
+
+
+def _cluster_activate_impl(cl_id, force=False, force_lvstore_create=False) -> None:
     cluster = db_controller.get_cluster_by_id(cl_id)
 
     if cluster.status == Cluster.STATUS_ACTIVE:
@@ -1284,8 +1380,10 @@ def set_cluster_status(cl_id, status) -> None:
         # atomically with the status flip.
         if status == Cluster.STATUS_IN_ACTIVATION:
             fresh.in_activation_since = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            fresh.activation_heartbeat = fresh.in_activation_since
         elif captured['old'] == Cluster.STATUS_IN_ACTIVATION:
             fresh.in_activation_since = ""
+            fresh.activation_heartbeat = ""
         # Leaving suspension for a healthy status closes the current
         # suspend-recovery episode: clear the drain marker so the next
         # suspension starts a fresh drain (auto-restart paused -> drain ->

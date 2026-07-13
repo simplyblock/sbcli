@@ -10,6 +10,7 @@ from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.utils.ttl_cache import TTLCache
 
 logger = utils.get_logger(__name__)
 
@@ -39,6 +40,10 @@ node_rpc_timeout_threads: dict[str, threading.Thread] = {}
 # sequential recreate/hublvol/ANA work.
 CLUSTER_ACTIVATION_WATCHDOG_SEC = 600
 CLUSTER_ACTIVATION_WATCHDOG_PER_NODE_SEC = 60
+# A live cluster_activate stamps Cluster.activation_heartbeat every ~60s.
+# Older than this => the activation driver is dead; revert immediately
+# instead of waiting out the node-scaled budget above.
+ACTIVATION_HEARTBEAT_STALE_SEC = 300
 
 
 def _activation_watchdog_budget_sec(cluster):
@@ -181,8 +186,6 @@ def _fd_aware_cluster_status(cluster, snodes, affected_ips, n, k, jm_replication
     # domain) than the contract permits.
     return Cluster.STATUS_SUSPENDED
 
-
-from simplyblock_core.utils.ttl_cache import TTLCache
 
 # RPC-dependent signals feeding get_next_cluster_status, cached briefly so a
 # burst of update_cluster_status calls (every escalation triggers one) does
@@ -579,6 +582,32 @@ def _watchdog_stuck_activation(cluster):
         elapsed = (datetime.now(timezone.utc) - datetime.fromisoformat(since)).total_seconds()
     except (ValueError, TypeError):
         return
+
+    # Fast path: cluster_activate heartbeats every ~60s for its whole
+    # duration (cluster_ops wrapper). A stale heartbeat means the driving
+    # process/container is GONE (e.g. monitor replaced mid-activation) — no
+    # point waiting out the node-scaled budget (42 min at 32 nodes,
+    # incident 2026-07-13); revert after a few missed beats. A fresh
+    # heartbeat means the activation is alive: leave it alone until the
+    # absolute budget below, which stays as the backstop for a live-but-
+    # stuck activation (and for pre-heartbeat records, where the field is
+    # empty and only the budget applies).
+    heartbeat = getattr(cluster, "activation_heartbeat", "")
+    if heartbeat:
+        try:
+            hb_age = (datetime.now(timezone.utc)
+                      - datetime.fromisoformat(heartbeat)).total_seconds()
+        except (ValueError, TypeError):
+            hb_age = None
+        if hb_age is not None and hb_age >= ACTIVATION_HEARTBEAT_STALE_SEC:
+            logger.error(
+                "Cluster %s IN_ACTIVATION but activation heartbeat is %.0fs old "
+                "(> %ds): the activation driver is gone; reverting to SUSPENDED "
+                "so activation re-gates and auto-restart can re-queue",
+                cluster.get_id(), hb_age, ACTIVATION_HEARTBEAT_STALE_SEC)
+            cluster_ops.set_cluster_status(cluster.get_id(), Cluster.STATUS_SUSPENDED)
+            return
+
     budget = _activation_watchdog_budget_sec(cluster)
     if elapsed < budget:
         return
