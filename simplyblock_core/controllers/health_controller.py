@@ -154,7 +154,7 @@ def _check_node_api(node):
         # Liveness probe: short timeout, fail fast on connect errors (a
         # rebooting host refuses connections; retrying with backoff only delays
         # detection). 90s was wildly oversized for an is_live() ping.
-        snode_api = node.client(timeout=5, retry=1, connect_retry=0)
+        snode_api = node.client(timeout=8, retry=1, connect_retry=0)
         logger.debug(f"Node API={node.api_endpoint}")
         ret, _ = snode_api.is_live()
         logger.debug(f"snode is alive: {ret}")
@@ -207,7 +207,7 @@ def _check_ping_from_node(ip, ifname, node):
     # node DOWN on that; the caller ignores None and re-evaluates next cycle.
     # (The previous mgmt-side ICMP fallback pinged the data IP from mgmt, which
     # is typically off the data VLAN -> always False -> spurious node-down.)
-    snodeapi = node.client(timeout=3, retry=1, connect_retry=0)
+    snodeapi = node.client(timeout=8, retry=1, connect_retry=0)
     try:
         ret, _ = snodeapi.ping_ip(ip, ifname)
         return bool(ret)

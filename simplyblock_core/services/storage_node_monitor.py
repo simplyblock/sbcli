@@ -1251,7 +1251,7 @@ def node_port_check_fun(snode):
 # read its result. The probe started in parallel with the liveness checks, so
 # by the time we collect it it has usually completed; if not, we treat it as
 # inconclusive for this cycle rather than blocking node-status evaluation.
-PORT_CHECK_JOIN_TIMEOUT_SEC = 5
+PORT_CHECK_JOIN_TIMEOUT_SEC = 8
 
 
 def _spawn_port_check(snode):
@@ -1423,7 +1423,7 @@ def check_node(snode):
         # rebooting stops accepting connections, and retrying with backoff only
         # delays flipping it not-online (incident 2026-06-25: ~21s of detection
         # latency on a host_reboot came from stacked SnodeAPI retries/timeouts).
-        snode_api = snode.client(timeout=5, retry=1, connect_retry=0)
+        snode_api = snode.client(timeout=8, retry=1, connect_retry=0)
         ret, _ = snode_api.is_live()
         logger.info(f"Check: node API {snode.mgmt_ip}:5000 ... {ret}")
         if not ret:
