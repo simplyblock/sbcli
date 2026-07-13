@@ -2,7 +2,9 @@ import time
 import paramiko
 # paramiko.common.logging.basicConfig(level=paramiko.common.DEBUG)
 import os
+import gzip
 import json
+import shutil
 import paramiko.buffered_pipe
 import paramiko.ssh_exception
 from logger_config import setup_logger
@@ -4081,6 +4083,92 @@ class SshUtils:
         self.logger.info(
             f"[get_lvol_host_secret] {lvol_id} {host_nqn}: out={out!r}, err={err!r}")
         return out, err
+
+
+def _compress_and_cleanup_old_dumps(log_dir, current_dump_dir, logger):
+    """Compress placement/lvstore dump files and delete old compressed dumps.
+
+    Only targets files inside ``node_dumps_*`` directories (placement dumps
+    like ``distrib_*_map_*.txt`` and lvstore dumps like ``LVS_dump_*.txt``).
+    Skips the *current* dump directory (just created, may still be validated).
+
+    Called in a background thread after collect_outage_diagnostics() to keep
+    NFS disk usage manageable during long stress tests.
+
+    1. Gzip .txt files in old node_dumps_* dirs (the large placement/lvstore dumps).
+    2. Delete .gz files older than 3 hours.
+
+    Args:
+        log_dir: Base NFS test log directory (docker_logs_path).
+        current_dump_dir: The node_dumps_* directory just created (skip it).
+        logger: Logger instance.
+    """
+    if not log_dir or not os.path.isdir(log_dir):
+        return
+    cutoff_time = time.time() - (3 * 3600)
+
+    compressed_count = 0
+    freed_bytes = 0
+    deleted_count = 0
+    deleted_bytes = 0
+
+    # Find all node_dumps_* directories in the base log dir
+    try:
+        entries = os.listdir(log_dir)
+    except OSError as exc:
+        logger.warning(f"[dump-compress] cannot list {log_dir}: {exc}")
+        return
+
+    current_abs = os.path.abspath(current_dump_dir) if current_dump_dir else None
+
+    for entry in entries:
+        if not entry.startswith("node_dumps_"):
+            continue
+        dump_path = os.path.join(log_dir, entry)
+        if not os.path.isdir(dump_path):
+            continue
+        # Skip the directory we just created
+        if current_abs and os.path.abspath(dump_path) == current_abs:
+            continue
+
+        for root, _dirs, files in os.walk(dump_path):
+            for fname in files:
+                fpath = os.path.join(root, fname)
+
+                # Phase 1: Compress .txt dump files (placement + lvstore dumps)
+                if fname.endswith('.txt') and not fname.endswith('.gz'):
+                    try:
+                        size = os.path.getsize(fpath)
+                        if size == 0:
+                            continue
+                        with open(fpath, 'rb') as f_in:
+                            with gzip.open(fpath + '.gz', 'wb', compresslevel=6) as f_out:
+                                shutil.copyfileobj(f_in, f_out)
+                        os.remove(fpath)
+                        compressed_count += 1
+                        freed_bytes += size
+                    except Exception as exc:
+                        logger.warning(f"[dump-compress] compress failed {fpath}: {exc}")
+
+                # Phase 2: Delete old compressed dumps
+                elif fname.endswith('.gz'):
+                    try:
+                        mtime = os.path.getmtime(fpath)
+                        if mtime < cutoff_time:
+                            size = os.path.getsize(fpath)
+                            os.remove(fpath)
+                            deleted_count += 1
+                            deleted_bytes += size
+                    except Exception as exc:
+                        logger.warning(f"[dump-compress] delete failed {fpath}: {exc}")
+
+    if compressed_count or deleted_count:
+        logger.info(
+            f"[dump-compress] Compressed {compressed_count} dump files "
+            f"({freed_bytes / (1024**3):.2f} GB), "
+            f"deleted {deleted_count} old .gz dumps "
+            f"({deleted_bytes / (1024**3):.2f} GB)"
+        )
 
 
 class RunnerK8sLog:
