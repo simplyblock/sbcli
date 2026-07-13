@@ -293,10 +293,61 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
     if hub_err:
         return None, hub_err
 
+    # Convert each member's intermediate snap to immutable while the hub is
+    # explicitly held. Workers skipped this step so the hub NVMe qpair stays
+    # alive; doing it here, under hub lock, ensures the connection outlives
+    # bdev_lvol_batch_final_step.
+    tgt_sec, _ = _get_target_secondary_node(tgt_node)
+    sec_rpc = _make_rpc(tgt_sec) if tgt_sec else None
+    tgt_ter, _ = _get_target_tertiary_node(tgt_node)
+    ter_rpc = _make_rpc(tgt_ter) if tgt_ter else None
+
+    mid_map = {m.uuid: m for m in member_migrations}
+    for rec in sorted(group.members, key=lambda r: r['ns_id']):
+        m = mid_map.get(rec['migration_id'])
+        if not m or not m.snaps_migrated:
+            try:
+                src_rpc.bdev_nvme_detach_controller(ctrl_name)
+            except Exception:
+                pass
+            return False, f"No snaps_migrated for member {rec['migration_id']}"
+        snap_uuid = m.snaps_migrated[-1]
+        try:
+            snap = db.get_snapshot_by_id(snap_uuid)
+        except KeyError:
+            try:
+                src_rpc.bdev_nvme_detach_controller(ctrl_name)
+            except Exception:
+                pass
+            return False, f"Intermediate snap {snap_uuid} not in DB"
+        tgt_composite = f"{tgt_node.lvstore}/{_snap_tgt_short_name(snap)}"
+        if not tgt_rpc.bdev_lvol_convert(tgt_composite):
+            try:
+                src_rpc.bdev_nvme_detach_controller(ctrl_name)
+            except Exception:
+                pass
+            return False, f"bdev_lvol_convert failed for {snap_uuid} (primary)"
+        if sec_rpc and not sec_rpc.bdev_lvol_convert(tgt_composite):
+            try:
+                src_rpc.bdev_nvme_detach_controller(ctrl_name)
+            except Exception:
+                pass
+            return False, f"bdev_lvol_convert failed for {snap_uuid} (secondary)"
+        if ter_rpc and not ter_rpc.bdev_lvol_convert(tgt_composite):
+            try:
+                src_rpc.bdev_nvme_detach_controller(ctrl_name)
+            except Exception:
+                pass
+            return False, f"bdev_lvol_convert failed for {snap_uuid} (tertiary)"
+
     try:
         lvol_names, lvol_ids, snapshot_names = _build_batch_final_args(
             group, member_migrations, src_node, tgt_node, tgt_rpc)
     except (ValueError, KeyError) as e:
+        try:
+            src_rpc.bdev_nvme_detach_controller(ctrl_name)
+        except Exception:
+            pass
         return None, str(e)
 
     logger.info(

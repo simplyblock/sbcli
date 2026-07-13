@@ -2825,15 +2825,10 @@ def _handle_group_intermediate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             return False, True, f"Intermediate transfer {state} for {snap_uuid}"
         t['transfer_done'] = True
 
-    # Convert intermediate snap to immutable — no add_clone needed (it's a
-    # fresh root-level snap, not part of the old ancestry chain).
-    # The orchestrator's bdev_lvol_batch_final_step needs an immutable base.
-    snap_short_tgt = _snap_tgt_short_name(snap)
-    tgt_composite = f"{tgt_node.lvstore}/{snap_short_tgt}"
-    if not tgt_rpc.bdev_lvol_convert(tgt_composite):
-        migration.transfer_context = {}
-        migration.write_to_db(db.kv_store)
-        return False, True, f"bdev_lvol_convert failed for intermediate {snap_uuid}"
+    # Record the intermediate snap — the orchestrator will call bdev_lvol_convert
+    # for all members at once under the hub lock, immediately before
+    # bdev_lvol_batch_final_step. Converting here would drop the hub NVMe
+    # connection before the orchestrator can use it.
     if snap_uuid not in migration.snaps_migrated:
         migration.snaps_migrated.append(snap_uuid)
     migration.transfer_context = {'stage': 'intermediate_done'}
