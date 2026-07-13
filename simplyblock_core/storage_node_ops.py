@@ -1336,6 +1336,15 @@ def _connect_to_remote_devs(
             return ""
 
     remote_device_ids = set()
+    # Shared surface-poll over the whole pending set: the old per-device
+    # ``for _ in range(10): sleep(0.5)`` serialized the waits — up to 5s PER
+    # not-yet-surfaced device (measured as the dominant slice of the ~67s
+    # full reconcile on a 32-node/64-device cluster, 2026-07-13). One tick
+    # now re-probes every still-pending device, so total wait is bounded by
+    # the SLOWEST device (max ~5s), not the sum. Probes stay name-filtered —
+    # no unfiltered bdev dump, which is O(all bdevs incl. lvols) of SPDK
+    # app-thread time (see the comment at the top of this function).
+    pending = {}
     for dev in devices_to_connect:
         remote_bdev = RemoteDevice()
         remote_bdev.uuid = dev.uuid
@@ -1345,11 +1354,17 @@ def _connect_to_remote_devs(
         remote_bdev.status = NVMeDevice.STATUS_ONLINE
         remote_bdev.nvmf_multipath = dev.nvmf_multipath
         remote_bdev.remote_bdev = _find_remote_bdev(dev)
-        for _ in range(10):
-            if remote_bdev.remote_bdev:
-                break
-            time.sleep(0.5)
-            remote_bdev.remote_bdev = _find_remote_bdev(dev)
+        pending[dev.get_id()] = (dev, remote_bdev)
+
+    for _ in range(10):
+        if all(rb.remote_bdev for _, rb in pending.values()):
+            break
+        time.sleep(0.5)
+        for dev, remote_bdev in pending.values():
+            if not remote_bdev.remote_bdev:
+                remote_bdev.remote_bdev = _find_remote_bdev(dev)
+
+    for dev, remote_bdev in pending.values():
         if not remote_bdev.remote_bdev and dev.get_id() in existing_remote_devices:
             existing_remote_device = existing_remote_devices[dev.get_id()]
             if existing_remote_device.remote_bdev and rpc_client.get_bdevs(existing_remote_device.remote_bdev):
@@ -1619,17 +1634,19 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=None, only_node_id=None):
 
     new_devs = []
     existing_remote_jm_devices = {dev.get_id(): dev for dev in this_node.remote_jm_devices}
+    # Index JM owners once: the previous per-JM full get_storage_nodes()
+    # scan cost O(JMs x nodes) FDB reads per call (called several times per
+    # restart / create).
+    jm_owner_by_id = {}
+    for node in db_controller.get_storage_nodes():
+        if node.jm_device:
+            jm_owner_by_id[node.jm_device.get_id()] = node
     for jm_dev in remote_devices:
         if not jm_dev.jm_bdev:
             continue
 
-        org_dev = None
-        org_dev_node = None
-        for node in db_controller.get_storage_nodes():
-            if node.jm_device and node.jm_device.get_id() == jm_dev.get_id():
-                org_dev = node.jm_device
-                org_dev_node = node
-                break
+        org_dev_node = jm_owner_by_id.get(jm_dev.get_id())
+        org_dev = org_dev_node.jm_device if org_dev_node is not None else None
 
         if not org_dev or org_dev in new_devs or org_dev_node and org_dev_node.get_id() == this_node.get_id():
             continue
@@ -3408,13 +3425,35 @@ def _restart_storage_node_impl(
     # peer) under the same per-node lock, so the two never interleave. Other
     # nodes' restarts no longer serialize behind us (see _remote_connect_lock).
     with _remote_connect_lock(snode.get_id()):
+        # Device and JM reconciles touch disjoint bdev sets — run them
+        # concurrently (they were back-to-back, ~sum of two RPC-bound
+        # phases per restart).
+        jm_result: dict = {}
+
+        def _jm_reconcile():
+            try:
+                jm_result["devices"] = _connect_to_remote_jm_devs(snode)
+            except Exception as e:
+                jm_result["error"] = e
+
+        jm_thread = None
+        if snode.enable_ha_jm:
+            jm_thread = threading.Thread(target=_jm_reconcile,
+                                         name=f"jm-reconcile-{snode.get_id()[:8]}")
+            jm_thread.start()
         try:
             snode.remote_devices = _connect_to_remote_devs(snode)
         except RuntimeError:
             logger.error('Failed to connect to remote devices')
+            if jm_thread:
+                jm_thread.join()
             return False
-        if snode.enable_ha_jm:
-            snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
+        if jm_thread:
+            jm_thread.join()
+            if "error" in jm_result:
+                logger.error(f"Failed to connect to remote JM devices: {jm_result['error']}")
+            elif "devices" in jm_result:
+                snode.remote_jm_devices = jm_result["devices"]
         snode.lvstore_status = ""
         snode.write_to_db(db_controller.kv_store)
 
