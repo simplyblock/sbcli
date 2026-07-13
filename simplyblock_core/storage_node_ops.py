@@ -2941,8 +2941,24 @@ def _restart_storage_node_impl(
     # survivors still serve IO — keep strict one-restart-at-a-time semantics.
     allow_concurrent_peers = (cluster.status == Cluster.STATUS_SUSPENDED
                               and cluster.suspend_drain_complete)
+    # Failure-domain clusters: a whole-domain outage keeps the cluster
+    # DEGRADED (the surviving domain serves IO), so the SUSPENDED parallel
+    # path above never engages and the dead domain recovered strictly
+    # one-node-at-a-time — measured 16 nodes x ~4.2 min = ~67 min
+    # (2026-07-13 domain-reboot test). Same-domain concurrency is safe:
+    # secondaries are placed cross-domain, so co-restarting nodes of ONE
+    # domain never takes both sides of a pair down. Placement is
+    # best-effort though, so the tx predicate additionally refuses
+    # concurrency with a peer that IS this node's pair partner (see
+    # _try_set_node_restarting_tx same_fd_of).
+    same_fd_of = None
+    _node_fd = snode.failure_domain
+    if (not allow_concurrent_peers and cluster.enable_failure_domain
+            and isinstance(_node_fd, int) and _node_fd >= 0):
+        same_fd_of = _node_fd
     acquired, reason = db_controller.try_set_node_restarting(
-        snode.cluster_id, node_id, allow_concurrent_peers=allow_concurrent_peers)
+        snode.cluster_id, node_id, allow_concurrent_peers=allow_concurrent_peers,
+        same_fd_of=same_fd_of)
     if not acquired:
         logger.error(f"Cannot restart {node_id}: {reason}")
         return False

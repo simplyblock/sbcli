@@ -871,7 +871,8 @@ class DBController(metaclass=Singleton):
 
     # ---- Pre-Restart Guard (Single FDB Transaction) ----
 
-    def _try_set_node_restarting_tx(self, tr, cluster_id, node_id, allow_concurrent_peers=False):
+    def _try_set_node_restarting_tx(self, tr, cluster_id, node_id, allow_concurrent_peers=False,
+                                    same_fd_of=None):
         """Pre-restart check as a single FDB transaction.
 
         Opens transaction, queries status of all nodes in the cluster.
@@ -882,6 +883,16 @@ class DBController(metaclass=Singleton):
         (this node is still flipped to RESTARTING atomically). Used for
         suspended-cluster recovery, where every node is offline, no client
         IO flows, and restarts deliberately run in parallel.
+
+        ``same_fd_of`` (failure-domain id) relaxes the predicate for
+        failure-domain clusters: a peer mid-restart/shutdown is tolerated
+        when it belongs to the SAME failure domain AND is not this node's
+        secondary/tertiary pair partner (nor names this node as its own) —
+        cross-domain placement means same-domain co-restarts never take both
+        sides of a pair down, and the pair check covers best-effort
+        placements that landed a partner in-domain. Enables parallel
+        recovery of a fully-rebooted domain on a DEGRADED cluster
+        (previously strictly sequential: 16 nodes x ~4.2 min, 2026-07-13).
 
         Returns (True, None) on success, or (False, reason) if blocked.
         """
@@ -898,20 +909,27 @@ class DBController(metaclass=Singleton):
             target = rows[0] if rows else None
         else:
             all_nodes = StorageNode().read_from_db(tr)
+            target = None
+            for n in all_nodes:
+                if n.get_id() == node_id:
+                    target = n
+                    break
             for n in all_nodes:
                 if n.cluster_id != cluster_id:
                     continue
                 if n.get_id() == node_id:
                     continue
                 if n.status in [StorageNode.STATUS_RESTARTING, StorageNode.STATUS_IN_SHUTDOWN]:
+                    if (same_fd_of is not None and target is not None
+                            and getattr(n, "failure_domain", -1) == same_fd_of
+                            and n.get_id() not in (target.secondary_node_id,
+                                                   target.tertiary_node_id)
+                            and node_id not in (n.secondary_node_id,
+                                                n.tertiary_node_id)):
+                        # Same failure domain, not our pair partner —
+                        # concurrent restart tolerated.
+                        continue
                     return False, f"Node {n.get_id()} is {n.status}"
-
-            # Set this node to in_restart atomically within the same transaction
-            target = None
-            for n in all_nodes:
-                if n.get_id() == node_id:
-                    target = n
-                    break
         if target:
             target.status = StorageNode.STATUS_RESTARTING
             prefix = target.get_db_id()
@@ -920,14 +938,17 @@ class DBController(metaclass=Singleton):
 
         return True, None
 
-    def try_set_node_restarting(self, cluster_id, node_id, allow_concurrent_peers=False):
+    def try_set_node_restarting(self, cluster_id, node_id, allow_concurrent_peers=False,
+                                same_fd_of=None):
         """Pre-restart check: single FDB transaction.
 
         Opens FDB transaction, queries status of all nodes.
         If any node is in restart or shutdown, returns False.
         Sets node to in_restart and commits transaction.
         ``allow_concurrent_peers=True`` skips the peer-exclusion predicate
-        (suspended-cluster parallel recovery).
+        (suspended-cluster parallel recovery). ``same_fd_of`` relaxes it to
+        same-failure-domain non-pair peers (whole-domain recovery on a
+        DEGRADED cluster) — see _try_set_node_restarting_tx.
 
         On successful acquisition the status-change event and peer
         notification are emitted AFTER the commit. The FDB tx itself
@@ -956,7 +977,8 @@ class DBController(metaclass=Singleton):
 
         transactional = fdb.transactional(DBController._try_set_node_restarting_tx)
         try:
-            acquired, reason = transactional(self, self.kv_store, cluster_id, node_id, allow_concurrent_peers)
+            acquired, reason = transactional(self, self.kv_store, cluster_id, node_id,
+                                             allow_concurrent_peers, same_fd_of)
         except fdb.FDBError as e:  # type: ignore[attr-defined]  # injected by fdb.api_version()
             # Residual contention (conflict retries exhausted / tx timeout)
             # is a transient lock-acquisition failure, not a restart failure:

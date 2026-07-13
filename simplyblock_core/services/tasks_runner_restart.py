@@ -370,11 +370,26 @@ def task_runner_node(task):
     cluster_obj = db.get_cluster_by_id(node.cluster_id)
     if not (cluster_obj.status == Cluster.STATUS_SUSPENDED
             and cluster_obj.suspend_drain_complete):
+        # Failure-domain clusters additionally tolerate a mid-restart peer in
+        # the SAME failure domain that is not this node's pair partner —
+        # whole-domain recovery on a DEGRADED cluster runs those in parallel
+        # (mirrors the same_fd_of relaxation in try_set_node_restarting;
+        # previously strictly sequential: 16 nodes x ~4.2 min = ~67 min,
+        # 2026-07-13 domain-reboot test).
+        node_fd = node.failure_domain
+        fd_ok = (cluster_obj.enable_failure_domain
+                 and isinstance(node_fd, int) and node_fd >= 0)
         for peer in db.get_storage_nodes_by_cluster_id(node.cluster_id):
             if peer.get_id() == node.get_id():
                 continue
             if peer.status in (StorageNode.STATUS_RESTARTING,
                                StorageNode.STATUS_IN_SHUTDOWN):
+                if (fd_ok and peer.failure_domain == node.failure_domain
+                        and peer.get_id() not in (node.secondary_node_id,
+                                                  node.tertiary_node_id)
+                        and node.get_id() not in (peer.secondary_node_id,
+                                                  peer.tertiary_node_id)):
+                    continue
                 msg = (f"Peer {peer.get_id()[:8]} is {peer.status}; "
                        f"deferring (no retry consumed)")
                 logger.info(msg)
@@ -641,6 +656,20 @@ def main():
                         # and its restarts must stay sequential with full guards.
                         dispatch_parallel = (cl_fresh.status == Cluster.STATUS_SUSPENDED
                                              and cl_fresh.suspend_drain_complete)
+                        # Failure-domain clusters also dispatch on the pool:
+                        # same-domain non-pair restarts may run concurrently
+                        # (whole-domain recovery on a DEGRADED cluster). The
+                        # FDB predicate (same_fd_of) and the runner pre-check
+                        # remain the authority on which pairs actually
+                        # interleave — a task that cannot acquire simply
+                        # defers, so pool dispatch is safe.
+                        if not dispatch_parallel and cl_fresh.enable_failure_domain:
+                            try:
+                                task_node = db.get_storage_node_by_id(task.node_id)
+                                fd = task_node.failure_domain
+                                dispatch_parallel = isinstance(fd, int) and fd >= 0
+                            except KeyError:
+                                pass
 
                     if dispatch_parallel:
                         inflight = _restart_inflight.get(task.uuid)
