@@ -1,8 +1,6 @@
 # coding=utf-8
-"""
-test_rpc_client_cache.py – unit tests for the RPCClient read-only wrappers
-get_bdevs / subsystem_list / subsystem_get.
-"""
+"""Unit tests for RPCClient wrapper methods (e.g. get_bdevs, subsystem_list,
+subsystem_get). Coverage is partial — add cases here as wrappers grow."""
 
 import unittest
 from unittest.mock import patch
