@@ -293,15 +293,11 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
     if hub_err:
         return None, hub_err
 
-    # Convert each member's intermediate snap to immutable while the hub is
-    # explicitly held. Workers skipped this step so the hub NVMe qpair stays
-    # alive; doing it here, under hub lock, ensures the connection outlives
-    # bdev_lvol_batch_final_step.
-    tgt_sec, _ = _get_target_secondary_node(tgt_node)
-    sec_rpc = _make_rpc(tgt_sec) if tgt_sec else None
-    tgt_ter, _ = _get_target_tertiary_node(tgt_node)
-    ter_rpc = _make_rpc(tgt_ter) if tgt_ter else None
-
+    # Convert each member's intermediate snap to immutable on the primary target
+    # while the hub is explicitly held. Workers skipped this step so the hub
+    # NVMe qpair stays alive. Secondary/tertiary are intentionally skipped:
+    # _setup_snap_transfer for intermediate snaps runs without secondary params,
+    # so the bdev only exists on the primary target node.
     mid_map = {m.uuid: m for m in member_migrations}
     for rec in sorted(group.members, key=lambda r: r['ns_id']):
         m = mid_map.get(rec['migration_id'])
@@ -327,18 +323,6 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
             except Exception:
                 pass
             return False, f"bdev_lvol_convert failed for {snap_uuid} (primary)"
-        if sec_rpc and not sec_rpc.bdev_lvol_convert(tgt_composite):
-            try:
-                src_rpc.bdev_nvme_detach_controller(ctrl_name)
-            except Exception:
-                pass
-            return False, f"bdev_lvol_convert failed for {snap_uuid} (secondary)"
-        if ter_rpc and not ter_rpc.bdev_lvol_convert(tgt_composite):
-            try:
-                src_rpc.bdev_nvme_detach_controller(ctrl_name)
-            except Exception:
-                pass
-            return False, f"bdev_lvol_convert failed for {snap_uuid} (tertiary)"
 
     try:
         lvol_names, lvol_ids, snapshot_names = _build_batch_final_args(

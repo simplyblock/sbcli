@@ -804,8 +804,11 @@ def create_migration(lvol_id, target_node_id,
         raise ValueError(f"Target node {target_node_id} has no lvstore")
 
     # ── Shared-namespace detection ───────────────────────────────────────────
+    # _get_shared_subsystem_members includes lvol itself, so a subsystem that
+    # merely *can* hold multiple namespaces (max_namespace_per_subsys > 1) but
+    # currently has no other lvol in it must not be treated as shared.
     shared_members = _get_shared_subsystem_members(lvol, tgt_node.cluster_id)
-    if shared_members and not batch:
+    if len(shared_members) > 1 and not batch:
         raise ValueError(
             f"LVol {lvol_id} belongs to a shared NVMe-oF subsystem with "
             f"{len(shared_members)} member(s) (NQN={lvol.nqn}). "
