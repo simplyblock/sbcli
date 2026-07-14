@@ -4,8 +4,8 @@ run-name: "K8s Native E2E - Add Node | ${{ inputs.cluster_environment || 'local'
 on:
   workflow_dispatch:
     inputs:
-      helm_charts_branch:
-        description: 'Branch for helm-charts'
+      operator_repo_branch:
+        description: 'Branch for simplyblock-operator repo'
         required: true
         default: 'main'
       simplyblock_image:
@@ -125,11 +125,11 @@ jobs:
         uses: actions/checkout@v4
 
       - uses: actions/checkout@master
-        name: Checkout helm-charts
+        name: Checkout simplyblock-operator
         with:
-          repository: simplyblock/helm-charts
-          ref: ${{ github.event.inputs.helm_charts_branch || 'main' }}
-          path: 'helm-charts'
+          repository: simplyblock/simplyblock-operator
+          ref: ${{ github.event.inputs.operator_repo_branch || 'main' }}
+          path: 'simplyblock-operator'
 
       - name: Resolve KEY_PATH and validate key exists
         shell: bash
@@ -314,7 +314,7 @@ jobs:
             done
             kubectl patch crd "$crd_name" --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
           done
-          kubectl delete -f $GITHUB_WORKSPACE/helm-charts/charts/simplyblock-operator/crds/ --ignore-not-found --timeout=60s 2>/dev/null || true
+          kubectl delete -f $GITHUB_WORKSPACE/simplyblock-operator/helm-charts/charts/simplyblock-operator/crds/ --ignore-not-found --timeout=60s 2>/dev/null || true
           # Force-delete any CRDs that survived the timeout
           for crd in $(kubectl get crd -o name 2>/dev/null | grep simplyblock); do
             crd_name="${crd#customresourcedefinition.apiextensions.k8s.io/}"
@@ -458,7 +458,7 @@ jobs:
       - name: Install Helm Chart for simplyblock-operator
         if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
         run: |
-          cd $GITHUB_WORKSPACE/helm-charts/charts/simplyblock-operator/
+          cd $GITHUB_WORKSPACE/simplyblock-operator/helm-charts/charts/simplyblock-operator/
 
           TLS_FLAGS=""
           if [ "${{ github.event.inputs.tls_enabled }}" = "true" ]; then
@@ -617,7 +617,7 @@ jobs:
           echo "Using StorageClass for KMS: $STORAGE_CLASS"
 
           export STORAGE_CLASS
-          UNSEAL_KEYS_FILE=./openbao-init.txt bash $GITHUB_WORKSPACE/helm-charts/scripts/setup-kms.sh
+          UNSEAL_KEYS_FILE=./openbao-init.txt bash $GITHUB_WORKSPACE/simplyblock-operator/helm-charts/scripts/setup-kms.sh
 
           echo "Waiting for vault pods to be ready..."
           kubectl wait --for=condition=Ready pods -l app.kubernetes.io/name=openbao -n vault --timeout=300s || true
@@ -1198,7 +1198,7 @@ jobs:
             echo "- **Test class:** \`K8sNativeAddNodeTest\`"
             echo "- **Cluster ID:** \`${CLUSTER_ID}\`"
             echo "- **Branch:** \`${{ github.ref_name }}\`"
-            echo "- **Helm Charts Branch:** \`${{ github.event.inputs.helm_charts_branch }}\`"
+            echo "- **Operator Repo Branch:** \`${{ github.event.inputs.operator_repo_branch }}\`"
             echo "- **NDCS/NPCS:** \`${NDCS}/${NPCS}\`"
             echo "- **BS/Chunk BS:** \`${BS}/${CHUNK_BS}\`"
             echo "- **Initial Workers:** \`${{ github.event.inputs.worker_nodes }}\`"

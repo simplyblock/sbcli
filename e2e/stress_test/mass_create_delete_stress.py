@@ -434,13 +434,32 @@ class _MassCreateDeleteMixin:
     def _run_mass_create_delete_test(self):
         total = self.NUM_SUBSYSTEMS * self.NS_PER_SUBSYSTEM
         self._init_mixin_state()
+        max_dur = getattr(self, 'MAX_TEST_DURATION', 6 * 3600)
+        max_dur_h = round(max_dur / 3600, 1)
         self.logger.info(
             f"=== Starting {self.__class__.__name__}: "
             f"{self.NUM_SUBSYSTEMS} subsystems x "
             f"{self.NS_PER_SUBSYSTEM} ns/sub = {total} lvols | "
             f"snapshots_per_lvol={self.SNAPSHOTS_PER_LVOL} | "
-            f"fio_sample={self.FIO_SAMPLE_PERCENT}% ==="
+            f"fio_sample={self.FIO_SAMPLE_PERCENT}% | "
+            f"max_duration={max_dur_h}h ==="
         )
+        test_start = time.time()
+        test_deadline = test_start + max_dur
+
+        def _check_deadline(phase_name):
+            elapsed = time.time() - test_start
+            remaining = test_deadline - time.time()
+            if remaining <= 0:
+                raise RuntimeError(
+                    f"MAX_TEST_DURATION ({max_dur_h}h) exceeded after "
+                    f"{phase_name} — elapsed {round(elapsed/3600,1)}h"
+                )
+            self.logger.info(
+                f"[Deadline] After {phase_name}: "
+                f"elapsed={round(elapsed/60,0)}min, "
+                f"remaining={round(remaining/60,0)}min"
+            )
 
         try:
             # Phase 1: Mass-create lvols
@@ -455,6 +474,7 @@ class _MassCreateDeleteMixin:
 
             if not self._lvol_registry:
                 raise RuntimeError("No lvols created — cannot proceed")
+            _check_deadline("Phase 1")
 
             # Phase 2: FIO on 10% of lvols
             t0 = time.time()
@@ -465,12 +485,17 @@ class _MassCreateDeleteMixin:
                 f"{self._metrics['fio_lvol_started']} lvols"
             )
 
+            _check_deadline("Phase 2")
+
+            # Catch-up: pick up PVCs that bound while Phase 2 was running
+            if hasattr(self, '_catchup_newly_bound_pvcs'):
+                self._catchup_newly_bound_pvcs(label="pre-Phase 3 catch-up")
+
             # Phase 3: Create snapshots
             t0 = time.time()
             self._phase_3_create_snapshots()
-            self._phase_durations["3_create_snapshots"] = round(
-                time.time() - t0, 1
-            )
+            t_fire = time.time()
+            self._phase_durations["3_create_snapshots"] = round(t_fire - t0, 1)
             submitted_snaps = len(self._snapshot_registry)
             self.logger.info(
                 f"[Phase 3] kubectl apply done: {submitted_snaps} "
@@ -489,17 +514,25 @@ class _MassCreateDeleteMixin:
                     len(self._snapshot_registry)
                 )
 
+            t_ready = time.time()
             verified_snaps = len(self._snapshot_registry)
             self._metrics["snapshots_created"] = verified_snaps
+            self._phase_durations["3_ready_wait"] = round(t_ready - t_fire, 1)
             self.logger.info(
                 f"[Phase 3] Verified: {verified_snaps}/{submitted_snaps} "
                 f"snapshots readyToUse"
+            )
+            self.logger.info(
+                f"[Phase 3] TIMING: fire={self._phase_durations['3_create_snapshots']}s, "
+                f"ready_wait={self._phase_durations['3_ready_wait']}s, "
+                f"total={round(t_ready - t0, 1)}s"
             )
             self._check_count(
                 verified_snaps,
                 total * self.SNAPSHOTS_PER_LVOL,
                 "snapshots",
             )
+            _check_deadline("Phase 3")
 
             # Phase 4: Delete lvols to free subsystem slots for clones.
             # Lvols can be deleted even with snapshots — orphaned
@@ -513,6 +546,7 @@ class _MassCreateDeleteMixin:
                 f"[Phase 4] Lvols deleted "
                 f"in {self._phase_durations['4_delete_lvols']}s"
             )
+            _check_deadline("Phase 4")
 
             # Phase 5: Mass-create clones from (orphaned) snapshots
             t0 = time.time()
@@ -528,6 +562,7 @@ class _MassCreateDeleteMixin:
             self._check_count(
                 len(self._clone_registry), total, "clones",
             )
+            _check_deadline("Phase 5")
 
             # Phase 6: FIO on 10% of clones
             t0 = time.time()
@@ -539,6 +574,7 @@ class _MassCreateDeleteMixin:
                 f"[Phase 6] FIO started on "
                 f"{self._metrics['fio_clone_started']} clones"
             )
+            _check_deadline("Phase 6")
 
             # Phase 7: Mass-delete all clones
             t0 = time.time()
@@ -2152,12 +2188,18 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
     SNAPSHOT_CLASS_NAME = "mcd-snapshotclass"
 
     # ── Batched fire-and-monitor config ─────────────────────────────────
-    CREATE_CONCURRENT = 20      # concurrent fire-and-forget per batch
-    CREATE_BATCH_PAUSE = 30     # seconds between creation batches
-    DELETE_CONCURRENT = 20      # concurrent deletes per batch
-    DELETE_BATCH_PAUSE = 30     # seconds between deletion batches
+    CREATE_BATCH_SIZE = 50      # PVCs per batch
+    CREATE_MAX_WORKERS = 10     # concurrent threads within each batch
+    CREATE_BATCH_PAUSE = 60     # seconds between creation batches
+    DELETE_BATCH_SIZE = 50      # PVCs per delete batch
+    DELETE_MAX_WORKERS_K8S = 10 # concurrent threads within each delete batch
+    DELETE_BATCH_PAUSE = 60     # seconds between deletion batches
     MONITOR_INTERVAL = 30       # seconds between background count polls
-    BOUND_WAIT_TIMEOUT = 1800   # max seconds to wait for PVCs to bind
+    BOUND_WAIT_TIMEOUT = 7200   # 2h hard cap for PVC bound wait
+    BOUND_STALL_TIMEOUT = 300   # stop early if no new PVCs bind for 5 min
+
+    # ── Max test duration ─────────────────────────────────────────────────
+    MAX_TEST_DURATION = 6 * 3600  # 6 hours hard cap for entire test
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -2257,12 +2299,12 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
             return 0
 
     def _fire_in_batches(self, items, fire_fn, label,
-                         concurrent=20, pause=30, phase_timeout=14400,
-                         stop_on_capacity=False):
-        """Fire items in concurrent batches (fire-and-forget).
+                         concurrent=50, pause=60, phase_timeout=14400,
+                         stop_on_capacity=False, max_workers=10):
+        """Fire items in batches (fire-and-forget).
 
-        Fires *concurrent* items at a time, waits *pause* seconds
-        between batches.
+        Fires batches of *concurrent* items using *max_workers* parallel
+        threads, waits *pause* seconds between batches.
 
         When *stop_on_capacity* is True, stops early once a full batch
         of capacity/terminal errors is detected (the system has hit its
@@ -2285,9 +2327,9 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
 
             batch = items[batch_start:batch_start + concurrent]
             batch_capacity_errors = 0
-            with ThreadPoolExecutor(max_workers=concurrent) as pool:
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
                 futures = {pool.submit(fire_fn, item): item for item in batch}
-                for f in as_completed(futures, timeout=120):
+                for f in as_completed(futures, timeout=300):
                     item = futures[f]
                     try:
                         f.result(timeout=60)
@@ -2327,15 +2369,27 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
         return fired_items, errors, capacity_errors
 
     def _bulk_wait_pvcs_bound(self, pvc_names, label="PVCs",
-                               timeout=1800, poll_interval=30):
+                               timeout=None, poll_interval=30,
+                               stall_timeout=None):
         """Wait for PVCs to reach Bound state via bulk kubectl query.
+
+        Uses stall detection: stops when no new PVCs bind for
+        *stall_timeout* seconds (default BOUND_STALL_TIMEOUT).
+        Also respects a hard *timeout* cap (default BOUND_WAIT_TIMEOUT).
 
         Returns the set of PVC names that became Bound.
         """
+        if timeout is None:
+            timeout = self.BOUND_WAIT_TIMEOUT
+        if stall_timeout is None:
+            stall_timeout = self.BOUND_STALL_TIMEOUT
+
         ns = self.k8s_utils.namespace
         deadline = time.time() + timeout
         target = set(pvc_names)
         bound = set()
+        last_progress_time = time.time()
+        last_bound_count = 0
 
         while time.time() < deadline and len(bound) < len(target):
             try:
@@ -2356,12 +2410,29 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
                     f"[{label}] Bulk PVC query failed: {exc}"
                 )
 
-            pending = len(target) - len(bound)
+            current_count = len(bound)
+            pending = len(target) - current_count
+
+            if current_count > last_bound_count:
+                last_progress_time = time.time()
+                last_bound_count = current_count
+
             if pending > 0:
+                stall_elapsed = round(time.time() - last_progress_time)
                 self.logger.info(
-                    f"[{label}] Bound wait: {len(bound)}/{len(target)} "
-                    f"Bound, {pending} pending"
+                    f"[{label}] Bound wait: {current_count}/{len(target)} "
+                    f"Bound, {pending} pending "
+                    f"(stall={stall_elapsed}s/{stall_timeout}s)"
                 )
+
+                # Stall detection: no new PVCs bound for stall_timeout
+                if stall_elapsed >= stall_timeout:
+                    self.logger.warning(
+                        f"[{label}] Binding stalled — no new PVCs bound "
+                        f"for {stall_elapsed}s, stopping wait"
+                    )
+                    break
+
                 time.sleep(poll_interval)
 
         self.logger.info(
@@ -2560,7 +2631,8 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
         total = self.NUM_SUBSYSTEMS * self.NS_PER_SUBSYSTEM
         self.logger.info(
             f"=== Phase 1: Create {total} PVCs "
-            f"(batch={self.CREATE_CONCURRENT}, "
+            f"(batch_size={self.CREATE_BATCH_SIZE}, "
+            f"workers={self.CREATE_MAX_WORKERS}, "
             f"pause={self.CREATE_BATCH_PAUSE}s) ==="
         )
 
@@ -2576,45 +2648,63 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
         )
 
         try:
-            # Fire all PVCs (fire-and-forget kubectl apply, no per-PVC wait)
+            # Fire all PVCs in batches of CREATE_BATCH_SIZE with
+            # CREATE_MAX_WORKERS concurrent threads per batch
+            t_fire_start = time.time()
             fired_items, errors, _ = self._fire_in_batches(
                 pvc_names,
                 lambda name: self.k8s_utils.create_pvc(
                     name, self.PVC_SIZE, self.STORAGE_CLASS_NAME,
                 ),
                 "Phase 1",
-                concurrent=self.CREATE_CONCURRENT,
+                concurrent=self.CREATE_BATCH_SIZE,
+                max_workers=self.CREATE_MAX_WORKERS,
                 pause=self.CREATE_BATCH_PAUSE,
                 phase_timeout=self.PERSISTENT_PHASE_TIMEOUT,
             )
-
-            # Bulk wait for PVCs to reach Bound
+            t_fire_end = time.time()
+            fire_duration = round(t_fire_end - t_fire_start, 1)
             self.logger.info(
-                f"[Phase 1] {len(fired_items)} PVCs fired, "
-                f"waiting for Bound..."
+                f"[Phase 1] All {len(fired_items)} PVCs fired in "
+                f"{fire_duration}s, waiting for Bound..."
             )
+
+            # Bulk wait for PVCs to reach Bound (stall-based detection)
             bound_names = self._bulk_wait_pvcs_bound(
                 fired_items, label="Phase 1",
-                timeout=self.BOUND_WAIT_TIMEOUT,
             )
+            t_bound_end = time.time()
+            bound_duration = round(t_bound_end - t_fire_start, 1)
         finally:
             stop_mon.set()
 
         self._time_series["phase_1_pvcs"] = series
         self._log_time_series("Phase 1", series)
 
-        # Report any unbound PVCs and check for capacity errors
+        # Timing summary
+        self._phase_durations["1_fire"] = fire_duration
+        self._phase_durations["1_bound"] = round(
+            t_bound_end - t_fire_end, 1
+        )
         unbound = len(fired_items) - len(bound_names)
         self.logger.info(
             f"[Phase 1] PVC creation summary: target={total}, "
             f"fired={len(fired_items)}, apply_errors={errors}, "
             f"bound={len(bound_names)}, unbound={unbound}"
         )
+        self.logger.info(
+            f"[Phase 1] TIMING: fire={fire_duration}s, "
+            f"bound_wait={self._phase_durations['1_bound']}s, "
+            f"total={bound_duration}s"
+        )
         if unbound > 0:
             self._check_unbound_pvc_events(
                 [n for n in fired_items if n not in bound_names],
                 "Phase 1",
             )
+
+        # Remember all fired PVC names for catch-up scans in later phases
+        self._all_fired_pvcs = set(fired_items)
 
         # Populate registries with only Bound PVCs
         for pvc_name in bound_names:
@@ -2624,11 +2714,59 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
             }
 
         # Verify backend: wait until sbctl lvol list count matches Bound PVCs.
-        # PVC Bound only means the K8s object is bound — the backend may still
-        # be processing the volume creation.  Without this check, Phase 3
-        # (snapshot creation) can hit the web API while it is still finishing
-        # Phase 1 volume creates, causing 500 errors and CSI restarts.
         self._verify_backend_lvol_count(len(bound_names), label="Phase 1")
+
+    def _catchup_newly_bound_pvcs(self, label="catch-up"):
+        """Re-scan for PVCs that bound after Phase 1's wait expired.
+
+        The K8s operator continues binding PVCs in the background even
+        after the test moves on to Phase 2/3.  This method picks up
+        any newly-bound PVCs and adds them to the registries so that
+        Phase 3 creates snapshots for them too.
+        """
+        if not hasattr(self, '_all_fired_pvcs') or not self._all_fired_pvcs:
+            return
+
+        already_known = set(self._pvc_registry.keys())
+        candidates = self._all_fired_pvcs - already_known
+        if not candidates:
+            return
+
+        self.logger.info(
+            f"[{label}] Scanning {len(candidates)} previously-unbound PVCs "
+            f"for newly Bound..."
+        )
+        ns = self.k8s_utils.namespace
+        newly_bound = set()
+        try:
+            out, _ = self.k8s_utils._exec_kubectl(
+                f"kubectl get pvc -n {ns} --no-headers "
+                f"-o custom-columns=NAME:.metadata.name,"
+                f"STATUS:.status.phase "
+                f"2>/dev/null || true",
+                supress_logs=True,
+            )
+            for line in (out or "").strip().splitlines():
+                parts = line.split()
+                if (len(parts) >= 2 and parts[1] == "Bound"
+                        and parts[0] in candidates):
+                    newly_bound.add(parts[0])
+        except Exception as exc:
+            self.logger.warning(f"[{label}] Catch-up scan failed: {exc}")
+            return
+
+        if newly_bound:
+            for pvc_name in newly_bound:
+                self._pvc_registry[pvc_name] = {"bound": True}
+                self._lvol_registry[pvc_name] = {
+                    "id": pvc_name, "parent_name": None,
+                }
+            self.logger.info(
+                f"[{label}] Picked up {len(newly_bound)} newly-bound PVCs "
+                f"(total now {len(self._pvc_registry)})"
+            )
+        else:
+            self.logger.info(f"[{label}] No new PVCs bound since Phase 1")
 
     def _verify_backend_lvol_count(self, expected, timeout=600,
                                    poll_interval=30, label="Phase 1"):
@@ -2638,17 +2776,25 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
         count-based check because K8s PVC names don't match sbctl lvol
         names (which are UUIDs).
         """
+        stall_timeout = getattr(self, 'BOUND_STALL_TIMEOUT', 300)
         self.logger.info(
             f"[{label}] Verifying backend: waiting for {expected} lvols "
-            f"in sbctl lvol list (timeout={timeout}s)"
+            f"in sbctl lvol list (timeout={timeout}s, stall={stall_timeout}s)"
         )
         deadline = time.time() + timeout
         last_count = 0
+        last_progress_count = 0
+        last_progress_time = time.time()
 
         while time.time() < deadline:
             try:
                 lvols = self.k8s_utils.list_lvols()
                 last_count = len(lvols)
+            except AttributeError as exc:
+                self.logger.warning(
+                    f"[{label}] sbctl lvol list failed (non-retryable): {exc}"
+                )
+                break
             except Exception as exc:
                 self.logger.warning(
                     f"[{label}] sbctl lvol list failed: {exc}, retrying..."
@@ -2656,8 +2802,14 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
                 time.sleep(poll_interval)
                 continue
 
+            if last_count > last_progress_count:
+                last_progress_time = time.time()
+                last_progress_count = last_count
+
+            stall_elapsed = time.time() - last_progress_time
             self.logger.info(
-                f"[{label}] Backend lvol count: {last_count}/{expected}"
+                f"[{label}] Backend lvol count: {last_count}/{expected} "
+                f"(stall={round(stall_elapsed)}s/{stall_timeout}s)"
             )
             if last_count >= expected:
                 self.logger.info(
@@ -2665,6 +2817,13 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
                     f"{last_count} lvols confirmed in sbctl"
                 )
                 return
+
+            if stall_elapsed >= stall_timeout:
+                self.logger.warning(
+                    f"[{label}] Backend verification stalled: no progress "
+                    f"for {round(stall_elapsed)}s at {last_count}/{expected}"
+                )
+                break
 
             time.sleep(poll_interval)
 
@@ -2750,9 +2909,12 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
 
         expected_snaps = len(snap_items)
         self.logger.info(
-            f"=== Phase 3: Create {expected_snaps} VolumeSnapshots ==="
+            f"=== Phase 3: Create {expected_snaps} VolumeSnapshots "
+            f"(batch_size={self.SNAPSHOT_BATCH_SIZE}, "
+            f"workers={self.DELETE_MAX_WORKERS}) ==="
         )
 
+        t_fire_start = time.time()
         if self.PERSISTENT_RETRY:
             self.logger.info(
                 f"[Phase 3] Persistent retry mode: will retry until "
@@ -2771,6 +2933,13 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
                 stop_on_max_lvols=True,
                 max_failures=snap_max_failures,
             )
+        t_fire_end = time.time()
+        fire_duration = round(t_fire_end - t_fire_start, 1)
+        self._phase_durations["3_fire"] = fire_duration
+        self.logger.info(
+            f"[Phase 3] TIMING: {ok} snapshots fired in {fire_duration}s "
+            f"({fail} failures)"
+        )
 
     def _create_single_vs(self, params: dict):
         vs_name = params["vs_name"]
@@ -2812,7 +2981,10 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
         )
 
         deadline = time.time() + timeout
+        stall_timeout = getattr(self, 'BOUND_STALL_TIMEOUT', 300)
         ready_names = set()
+        last_ready_count = 0
+        last_progress_time = time.time()
 
         while time.time() < deadline:
             # Bulk query: get all snapshots that are readyToUse=true
@@ -2834,16 +3006,29 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
                     f"[Phase 3] Bulk snapshot query failed: {exc}"
                 )
 
+            current_count = len(ready_names)
+            if current_count > last_ready_count:
+                last_progress_time = time.time()
+                last_ready_count = current_count
+
+            stall_elapsed = time.time() - last_progress_time
             self.logger.info(
-                f"[Phase 3] Snapshot readiness: {len(ready_names)}/{submitted} "
-                f"readyToUse=true"
+                f"[Phase 3] Snapshot readiness: {current_count}/{submitted} "
+                f"readyToUse=true (stall={round(stall_elapsed)}s/{stall_timeout}s)"
             )
 
-            if len(ready_names) >= submitted:
+            if current_count >= submitted:
                 break
 
-            # Check if progress is stalling — if no new snapshots became
-            # ready in the last poll, check snapshot-controller health
+            # Stall detection: stop if no new snapshots became ready
+            if stall_elapsed >= stall_timeout:
+                self.logger.warning(
+                    f"[Phase 3] Snapshot readiness stalled: no progress "
+                    f"for {round(stall_elapsed)}s, stopping at "
+                    f"{current_count}/{submitted}"
+                )
+                break
+
             time.sleep(poll_interval)
 
         # Prune registry to only verified-ready snapshots
@@ -2886,12 +3071,15 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
         """
         if expected <= 0:
             return
+        stall_timeout = getattr(self, 'BOUND_STALL_TIMEOUT', 300)
         self.logger.info(
             f"[Phase 3] Verifying backend: waiting for {expected} snapshots "
-            f"in sbctl snapshot list (timeout={timeout}s)"
+            f"in sbctl snapshot list (timeout={timeout}s, stall={stall_timeout}s)"
         )
         deadline = time.time() + timeout
         last_count = 0
+        last_progress_count = 0
+        last_progress_time = time.time()
 
         while time.time() < deadline:
             try:
@@ -2904,8 +3092,14 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
                 time.sleep(poll_interval)
                 continue
 
+            if last_count > last_progress_count:
+                last_progress_time = time.time()
+                last_progress_count = last_count
+
+            stall_elapsed = time.time() - last_progress_time
             self.logger.info(
-                f"[Phase 3] Backend snapshot count: {last_count}/{expected}"
+                f"[Phase 3] Backend snapshot count: {last_count}/{expected} "
+                f"(stall={round(stall_elapsed)}s/{stall_timeout}s)"
             )
             if last_count >= expected:
                 self.logger.info(
@@ -2913,6 +3107,14 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
                     f"{last_count} snapshots confirmed in sbctl"
                 )
                 return
+
+            if stall_elapsed >= stall_timeout:
+                self.logger.warning(
+                    f"[Phase 3] Backend snapshot verification stalled: "
+                    f"no progress for {round(stall_elapsed)}s at "
+                    f"{last_count}/{expected}"
+                )
+                break
 
             time.sleep(poll_interval)
 
@@ -2940,7 +3142,8 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
         initial_count = len(pvc_names)
         self.logger.info(
             f"=== Phase 4: Delete {initial_count} PVCs "
-            f"(batch={self.DELETE_CONCURRENT}, "
+            f"(batch={self.DELETE_BATCH_SIZE}, "
+            f"workers={self.DELETE_MAX_WORKERS_K8S}, "
             f"pause={self.DELETE_BATCH_PAUSE}s) ==="
         )
 
@@ -2956,9 +3159,10 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
                 pvc_names,
                 self._delete_single_pvc,
                 "Phase 4",
-                concurrent=self.DELETE_CONCURRENT,
+                concurrent=self.DELETE_BATCH_SIZE,
                 pause=self.DELETE_BATCH_PAUSE,
                 phase_timeout=self.DELETE_PHASE_TIMEOUT,
+                max_workers=self.DELETE_MAX_WORKERS_K8S,
             )
         finally:
             stop_mon.set()
@@ -2984,7 +3188,8 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
             f"=== Phase 5: Create {target_clones} clones from "
             f"{len(snap_list)} snapshots "
             f"(capacity={cluster_capacity}, overflow={overflow}, "
-            f"batch={self.CREATE_CONCURRENT}, "
+            f"batch_size={self.CREATE_BATCH_SIZE}, "
+            f"workers={self.CREATE_MAX_WORKERS}, "
             f"pause={self.CREATE_BATCH_PAUSE}s) ==="
         )
 
@@ -3002,8 +3207,8 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
         )
 
         try:
-            # Fire clone PVCs past capacity — kubectl apply always
-            # succeeds; overflow is detected as PVCs stuck in Pending.
+            # Fire clone PVCs past capacity
+            t_fire_start = time.time()
             fired_items, errors, _ = self._fire_in_batches(
                 clone_items,
                 lambda params: self.k8s_utils.create_clone_pvc(
@@ -3011,26 +3216,40 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
                     self.STORAGE_CLASS_NAME, params["vs_name"],
                 ),
                 "Phase 5",
-                concurrent=self.CREATE_CONCURRENT,
+                concurrent=self.CREATE_BATCH_SIZE,
+                max_workers=self.CREATE_MAX_WORKERS,
                 pause=self.CREATE_BATCH_PAUSE,
                 phase_timeout=self.CLONE_PHASE_TIMEOUT,
             )
+            t_fire_end = time.time()
+            fire_duration = round(t_fire_end - t_fire_start, 1)
 
             # Bulk wait for clone PVCs to reach Bound
             fired_names = [p["clone_pvc"] for p in fired_items]
             self.logger.info(
-                f"[Phase 5] {len(fired_names)} clone PVCs fired "
-                f"({errors} create errors), waiting for Bound..."
+                f"[Phase 5] {len(fired_names)} clone PVCs fired in "
+                f"{fire_duration}s ({errors} create errors), "
+                f"waiting for Bound..."
             )
             bound_names = self._bulk_wait_pvcs_bound(
                 fired_names, label="Phase 5",
-                timeout=self.BOUND_WAIT_TIMEOUT,
             )
+            t_bound_end = time.time()
         finally:
             stop_mon.set()
 
         self._time_series["phase_5_clones"] = series
         self._log_time_series("Phase 5", series)
+
+        # Timing
+        bound_wait = round(t_bound_end - t_fire_end, 1)
+        total_duration = round(t_bound_end - t_fire_start, 1)
+        self._phase_durations["5_fire"] = fire_duration
+        self._phase_durations["5_bound"] = bound_wait
+        self.logger.info(
+            f"[Phase 5] TIMING: fire={fire_duration}s, "
+            f"bound_wait={bound_wait}s, total={total_duration}s"
+        )
 
         # Report overflow behavior — in K8s, capacity overflow shows up
         # as PVCs stuck in Pending (kubectl apply always succeeds, the
@@ -3175,7 +3394,8 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
         clone_names = list(self._clone_registry.keys())
         self.logger.info(
             f"=== Phase 7: Delete {len(clone_names)} clone PVCs "
-            f"(batch={self.DELETE_CONCURRENT}, "
+            f"(batch={self.DELETE_BATCH_SIZE}, "
+            f"workers={self.DELETE_MAX_WORKERS_K8S}, "
             f"pause={self.DELETE_BATCH_PAUSE}s) ==="
         )
 
@@ -3191,9 +3411,10 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
                 clone_names,
                 self._delete_single_pvc,
                 "Phase 7",
-                concurrent=self.DELETE_CONCURRENT,
+                concurrent=self.DELETE_BATCH_SIZE,
                 pause=self.DELETE_BATCH_PAUSE,
                 phase_timeout=self.DELETE_PHASE_TIMEOUT,
+                max_workers=self.DELETE_MAX_WORKERS_K8S,
             )
         finally:
             stop_mon.set()
@@ -3243,9 +3464,14 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
 
     # ── Cleanup safety net ─────────────────────────────────────────────────
 
+    CLEANUP_TIMEOUT = 1800  # 30 min max for entire cleanup phase
+
     def _phase_cleanup(self):
         self.logger.info("=== Cleanup ===")
+        cleanup_deadline = time.time() + self.CLEANUP_TIMEOUT
         ns = self.k8s_utils.namespace
+
+        # 1. Delete FIO jobs
         try:
             self.k8s_utils._exec_kubectl(
                 f"kubectl delete jobs -n {ns} "
@@ -3254,36 +3480,169 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
             )
         except Exception:
             pass
+
+        # 2. Delete clone lvols via API (with retry)
         try:
             self.sbcli_utils.delete_all_clones()
         except Exception as exc:
             self.logger.warning(f"[cleanup] delete_all_clones: {exc}")
-        try:
-            self.k8s_utils._exec_kubectl(
-                f"kubectl delete volumesnapshots --all -n {ns} "
-                f"2>/dev/null || true"
-            )
-        except Exception:
-            pass
+
+        # 3. Delete VolumeSnapshots in batches with progress monitoring
+        self._cleanup_delete_volumesnapshots_batched(ns, cleanup_deadline)
+
+        # 4. Delete backend snapshots via API
         try:
             self.sbcli_utils.delete_all_snapshots()
         except Exception as exc:
             self.logger.warning(f"[cleanup] delete_all_snapshots: {exc}")
+
+        # 5. Delete backend lvols via API
         try:
             self.sbcli_utils.delete_all_lvols()
         except Exception as exc:
             self.logger.warning(f"[cleanup] delete_all_lvols: {exc}")
-        try:
-            self.k8s_utils._exec_kubectl(
-                f"kubectl delete pvc --all -n {ns} "
-                f"2>/dev/null || true"
-            )
-        except Exception:
-            pass
+
+        # 6. Delete remaining PVCs in batches with timeout
+        self._cleanup_delete_pvcs_batched(ns, cleanup_deadline)
+
+        # 7. Delete storage pools
         try:
             self.sbcli_utils.delete_all_storage_pools()
         except Exception as exc:
             self.logger.warning(f"[cleanup] delete_all_storage_pools: {exc}")
+
+    def _cleanup_delete_volumesnapshots_batched(self, ns, deadline):
+        """Delete VolumeSnapshots in batches instead of --all to avoid hanging."""
+        try:
+            out, _ = self.k8s_utils._exec_kubectl(
+                f"kubectl get volumesnapshots -n {ns} --no-headers "
+                f"-o custom-columns=:metadata.name 2>/dev/null",
+                supress_logs=True,
+            )
+            vs_names = [n.strip() for n in out.strip().split("\n") if n.strip()]
+        except Exception as exc:
+            self.logger.warning(f"[cleanup] list volumesnapshots failed: {exc}")
+            return
+
+        if not vs_names:
+            self.logger.info("[cleanup] No volumesnapshots to delete")
+            return
+
+        total = len(vs_names)
+        self.logger.info(f"[cleanup] Deleting {total} volumesnapshots in batches")
+        batch_size = 50
+        deleted = 0
+
+        for i in range(0, total, batch_size):
+            if time.time() > deadline:
+                self.logger.warning(
+                    f"[cleanup] Snapshot deletion timeout reached after "
+                    f"{deleted}/{total} deleted"
+                )
+                # Force-delete remaining with --all and a kubectl timeout
+                try:
+                    self.k8s_utils._exec_kubectl(
+                        f"timeout 120 kubectl delete volumesnapshots --all "
+                        f"-n {ns} --timeout=60s 2>/dev/null || true"
+                    )
+                except Exception:
+                    pass
+                return
+
+            batch = vs_names[i:i + batch_size]
+            names_str = " ".join(batch)
+            try:
+                self.k8s_utils._exec_kubectl(
+                    f"kubectl delete volumesnapshot {names_str} -n {ns} "
+                    f"--ignore-not-found=true --timeout=120s 2>/dev/null || true",
+                    supress_logs=True,
+                )
+                deleted += len(batch)
+            except Exception as exc:
+                self.logger.warning(
+                    f"[cleanup] Snapshot batch delete failed: {exc}"
+                )
+                deleted += len(batch)  # count as attempted
+
+            # Log progress with remaining snapshot count
+            try:
+                remaining_out, _ = self.k8s_utils._exec_kubectl(
+                    f"kubectl get volumesnapshots -n {ns} --no-headers 2>/dev/null | wc -l",
+                    supress_logs=True,
+                )
+                remaining = int(remaining_out.strip())
+            except Exception:
+                remaining = total - deleted
+            self.logger.info(
+                f"[cleanup] Snapshot progress: {deleted}/{total} attempted, "
+                f"{remaining} remaining in cluster"
+            )
+
+    def _cleanup_delete_pvcs_batched(self, ns, deadline):
+        """Delete PVCs in batches instead of --all to avoid hanging."""
+        try:
+            out, _ = self.k8s_utils._exec_kubectl(
+                f"kubectl get pvc -n {ns} --no-headers "
+                f"-o custom-columns=:metadata.name 2>/dev/null",
+                supress_logs=True,
+            )
+            pvc_names = [n.strip() for n in out.strip().split("\n") if n.strip()]
+        except Exception as exc:
+            self.logger.warning(f"[cleanup] list PVCs failed: {exc}")
+            return
+
+        if not pvc_names:
+            self.logger.info("[cleanup] No PVCs to delete")
+            return
+
+        total = len(pvc_names)
+        self.logger.info(f"[cleanup] Deleting {total} PVCs in batches")
+        batch_size = 50
+        deleted = 0
+
+        for i in range(0, total, batch_size):
+            if time.time() > deadline:
+                self.logger.warning(
+                    f"[cleanup] PVC deletion timeout reached after "
+                    f"{deleted}/{total} deleted"
+                )
+                try:
+                    self.k8s_utils._exec_kubectl(
+                        f"timeout 120 kubectl delete pvc --all "
+                        f"-n {ns} --timeout=60s 2>/dev/null || true"
+                    )
+                except Exception:
+                    pass
+                return
+
+            batch = pvc_names[i:i + batch_size]
+            names_str = " ".join(batch)
+            try:
+                self.k8s_utils._exec_kubectl(
+                    f"kubectl delete pvc {names_str} -n {ns} "
+                    f"--ignore-not-found=true --timeout=120s 2>/dev/null || true",
+                    supress_logs=True,
+                )
+                deleted += len(batch)
+            except Exception as exc:
+                self.logger.warning(
+                    f"[cleanup] PVC batch delete failed: {exc}"
+                )
+                deleted += len(batch)
+
+            if (deleted // batch_size) % 4 == 0:
+                try:
+                    remaining_out, _ = self.k8s_utils._exec_kubectl(
+                        f"kubectl get pvc -n {ns} --no-headers 2>/dev/null | wc -l",
+                        supress_logs=True,
+                    )
+                    remaining = int(remaining_out.strip())
+                except Exception:
+                    remaining = total - deleted
+                self.logger.info(
+                    f"[cleanup] PVC progress: {deleted}/{total} attempted, "
+                    f"{remaining} remaining in cluster"
+                )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -61,15 +61,28 @@ class K8sUtils:
 
     # ── kubectl dispatch ─────────────────────────────────────────────────────
 
-    def _exec_kubectl(self, cmd: str, supress_logs: bool = False):
+    def _exec_kubectl(self, cmd: str, supress_logs: bool = False,
+                      timeout: int = 300):
         """
         Execute *cmd* either locally via subprocess (when use_local_kubectl=True)
         or via SSH to mgmt_node.  Returns (stdout, stderr) strings.
+
+        *timeout* caps subprocess execution (default 300s / 5 min).
         """
         if self.use_local_kubectl:
             if not supress_logs:
                 self.logger.info(f"[K8sUtils] local: {cmd}")
-            result = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
+            try:
+                result = subprocess.run(
+                    ["bash", "-c", cmd],
+                    capture_output=True, text=True,
+                    timeout=timeout,
+                )
+            except subprocess.TimeoutExpired:
+                msg = f"[K8sUtils] subprocess timed out after {timeout}s: {cmd[:120]}"
+                if not supress_logs:
+                    self.logger.warning(msg)
+                return "", msg
             if not supress_logs:
                 if result.stdout.strip():
                     self.logger.info(f"[K8sUtils] stdout: {result.stdout.strip()}")
