@@ -87,12 +87,12 @@ def _make_node(uuid, status=StorageNode.STATUS_ONLINE,
     # Default: subsystem exists with one namespace whose uuid matches the
     # lvol -> _remove_lvol_subsys_from_node removes the ns, the list then
     # becomes empty, and the whole subsystem is deleted (subsystem_delete
-    # path). The namespace dict mirrors the real subsystem_list shape
+    # path). The namespace dict mirrors the real subsystem_get shape
     # (nsid + bdev_name + uuid) that the production code now matches on.
-    rpc_mock.subsystem_list.side_effect = [
-        [{"namespaces": [{"nsid": 1, "bdev_name": "LVOL_1",
-                          "uuid": "lvol-uuid-1"}]}],
-        [{"namespaces": []}],
+    rpc_mock.subsystem_get.side_effect = [
+        {"namespaces": [{"nsid": 1, "bdev_name": "LVOL_1",
+                         "uuid": "lvol-uuid-1"}]},
+        {"namespaces": []},
     ]
     rpc_mock.subsystem_delete.return_value = True
     rpc_mock.nvmf_subsystem_remove_ns.return_value = True

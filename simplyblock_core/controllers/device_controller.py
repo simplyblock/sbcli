@@ -445,11 +445,11 @@ def _def_create_device_stack(device_obj, snode, force=False, clear_data=False):
     subsystem_nqn = snode.subsystem + ":dev:" + alceml_id
     namespace_found = False
     subsys_found = False
-    ret = rpc_client.subsystem_list(subsystem_nqn)
+    ret = rpc_client.subsystem_get(subsystem_nqn)
     if ret :
         subsys_found = True
-        if ret[0]["namespaces"]:
-            for ns in ret[0]["namespaces"]:
+        if ret["namespaces"]:
+            for ns in ret["namespaces"]:
                 if ns['name'] == pt_name:
                     namespace_found = True
                     break
@@ -535,7 +535,7 @@ def restart_device(device_id, force=False):
     teardown_errors = []
     if device_obj.nvmf_nqn:
         try:
-            if teardown_client.subsystem_list(device_obj.nvmf_nqn):
+            if teardown_client.subsystem_get(device_obj.nvmf_nqn):
                 logger.info(f"Tearing down subsystem {device_obj.nvmf_nqn}")
                 teardown_client.subsystem_delete(device_obj.nvmf_nqn)
         except Exception as e:
@@ -749,7 +749,7 @@ def device_remove(device_id, force=True, cause=CAUSE_OTHER):
     logger.info("Removing device fabric")
     rpc_client = snode.rpc_client()
 
-    if rpc_client.subsystem_list(device.nvmf_nqn):
+    if rpc_client.subsystem_get(device.nvmf_nqn):
         logger.info("Removing device subsystem")
         ret = rpc_client.subsystem_delete(device.nvmf_nqn)
         if not ret:

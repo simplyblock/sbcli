@@ -40,12 +40,12 @@ class TestAddNsIdempotent(unittest.TestCase):
         bdev = "LVS_345/LVOL_8403"
         uuid = "26cf808c-3c2e-472d-912f-b1da28d05350"
 
-        with patch.object(c, "subsystem_list", return_value=[{
+        with patch.object(c, "subsystem_get", return_value={
                 "nqn": nqn,
                 "namespaces": [{
                     "nsid": 1, "bdev_name": bdev, "uuid": uuid,
                 }],
-            }]) as mock_list, \
+            }) as mock_get, \
              patch.object(c, "_request2", return_value=(None, _DUP_ERR)) as mock_req:
             ret = c.nvmf_subsystem_add_ns(nqn, bdev, uuid=uuid, nsid=1)
 
@@ -53,7 +53,7 @@ class TestAddNsIdempotent(unittest.TestCase):
         # The add fires first; the probe runs only after the rejection.
         mock_req.assert_called_once()
         self.assertEqual(mock_req.call_args.args[0], "nvmf_subsystem_add_ns")
-        mock_list.assert_called_once_with(nqn_name=nqn)
+        mock_get.assert_called_once_with(nqn)
 
     def test_successful_add_never_probes(self):
         """The happy path pays no nvmf_get_subsystems dump at all."""

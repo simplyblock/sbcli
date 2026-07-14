@@ -66,21 +66,13 @@ class LVSRestartRequiredError(Exception):
         super().__init__(msg)
 
 
-def _rpc_subsystem_exists(rpc_client, nqn):
-    """True iff a subsystem with the given NQN exists in SPDK."""
-    try:
-        return bool(rpc_client.subsystem_list(nqn_name=nqn))
-    except Exception:
-        return False
-
-
 def _rpc_subsystem_has_ns(rpc_client, nqn, nsid=None, bdev_name=None):
     """True iff the subsystem has a namespace matching nsid and/or bdev_name."""
     try:
-        subs = rpc_client.subsystem_list(nqn_name=nqn)
-        if not subs:
+        subsystem = rpc_client.subsystem_get(nqn)
+        if subsystem is None:
             return False
-        for ns in subs[0].get('namespaces', []) or []:
+        for ns in subsystem.get('namespaces', []) or []:
             if nsid is not None and ns.get('nsid') != nsid:
                 continue
             if bdev_name is not None and ns.get('bdev_name') != bdev_name:
@@ -94,10 +86,10 @@ def _rpc_subsystem_has_ns(rpc_client, nqn, nsid=None, bdev_name=None):
 def _rpc_subsystem_has_listener(rpc_client, nqn, trtype, traddr, trsvcid):
     """True iff the subsystem already has a matching listener."""
     try:
-        subs = rpc_client.subsystem_list(nqn_name=nqn)
-        if not subs:
+        subsystem = rpc_client.subsystem_get(nqn)
+        if subsystem is None:
             return False
-        for la in subs[0].get('listen_addresses', []) or []:
+        for la in subsystem.get('listen_addresses', []) or []:
             if (la.get('trtype', '').upper() == trtype.upper()
                     and la.get('traddr') == traddr
                     and str(la.get('trsvcid')) == str(trsvcid)):
@@ -5842,7 +5834,7 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
     min_cntlid = 2000 if is_tertiary else 1000
     for lvol in lvol_list:
         allow_any = not bool(lvol.allowed_hosts)
-        if _rpc_subsystem_exists(snode_rpc_client, lvol.nqn):
+        if snode_rpc_client.subsystem_get(lvol.nqn):
             logger.info("subsystem %s already exists on %s, skipping create",
                         lvol.nqn, snode.get_id())
         else:
@@ -6690,7 +6682,7 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
         if lvol.nqn in created_subsystems:
             continue
         allow_any = not bool(lvol.allowed_hosts)
-        if _rpc_subsystem_exists(rpc_client, lvol.nqn):
+        if rpc_client.subsystem_get(lvol.nqn) is not None:
             logger.info("subsystem %s already exists on %s, skipping create",
                         lvol.nqn, snode.get_id())
             created_subsystems.append(lvol.nqn)
@@ -7353,7 +7345,7 @@ def repair_lvol_registration_on_non_leader(lvol, sec_node, secondary_index):
                        f"by a restart/activation/expansion")
 
     rpc_client = sec_node.rpc_client(timeout=10, retry=2)
-    if not _rpc_subsystem_exists(rpc_client, lvol.nqn):
+    if rpc_client.subsystem_get(lvol.nqn) is None:
         min_cntlid = 1000 * (secondary_index + 1)
         allow_any = not bool(lvol.allowed_hosts)
         logger.warning(

@@ -165,17 +165,9 @@ class TestGetBdevsUsesCache(unittest.TestCase):
         self.assertEqual(mock_req.call_count, 2)
 
 
-class TestSubsystemListUsesCache(unittest.TestCase):
+class TestSubsystem(unittest.TestCase):
 
-    def setUp(self):
-        with _rpc_cache_lock:
-            _rpc_cache.clear()
-
-    def tearDown(self):
-        with _rpc_cache_lock:
-            _rpc_cache.clear()
-
-    @patch.object(RPCClient, "_request")
+    @patch.object(RPCClient, "_request3")
     def test_subsystem_list_calls_request_each_time(self, mock_req):
         mock_req.return_value = [{"nqn": "nqn.test", "namespaces": []}]
         client = _make_client()
@@ -183,29 +175,24 @@ class TestSubsystemListUsesCache(unittest.TestCase):
         r1 = client.subsystem_list()
         r2 = client.subsystem_list()
 
-        # subsystem_list uses _request directly (no caching)
+        # subsystem_list uses _request3 directly (no caching)
         self.assertEqual(mock_req.call_count, 2)
         self.assertEqual(r1, r2)
 
-    @patch.object(RPCClient, "_request")
-    def test_subsystem_list_filters_by_nqn(self, mock_req):
+    @patch.object(RPCClient, "_request3")
+    def test_subsystem_get_filters_by_nqn(self, mock_req):
         mock_req.return_value = [
             {"nqn": "nqn.a", "namespaces": []},
             {"nqn": "nqn.b", "namespaces": []},
         ]
         client = _make_client()
+        self.assertEqual(client.subsystem_get("nqn.b")["nqn"], "nqn.b")
 
-        result = client.subsystem_list(nqn_name="nqn.b")
-        self.assertEqual(len(result), 1)
-        self.assertEqual(result[0]["nqn"], "nqn.b")
-
-    @patch.object(RPCClient, "_request")
-    def test_subsystem_list_filter_miss_returns_empty(self, mock_req):
+    @patch.object(RPCClient, "_request3")
+    def test_subsystem_get_filter_miss_returns_empty(self, mock_req):
         mock_req.return_value = [{"nqn": "nqn.a", "namespaces": []}]
         client = _make_client()
-
-        result = client.subsystem_list(nqn_name="nqn.nonexistent")
-        self.assertEqual(result, [])
+        self.assertIsNone(client.subsystem_get("nqn.nonexistent"))
 
 
 if __name__ == "__main__":
