@@ -542,6 +542,10 @@ jobs:
             kubectl patch serviceaccount "$sa" -n simplyblock \
               --patch '{"imagePullSecrets": [{"name": "regcred"}]}'
           done
+          for deploy in $(kubectl get deployments -n simplyblock --no-headers -o custom-columns=:metadata.name 2>/dev/null); do
+            kubectl patch deployment "$deploy" -n simplyblock \
+              --type=merge -p '{"spec":{"template":{"spec":{"imagePullSecrets":[{"name":"regcred"}]}}}}' || true
+          done
 
       - name: Delete ImagePullBackOff pods and wait for Running (pre-CRD)
         if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
@@ -826,6 +830,10 @@ jobs:
             kubectl patch serviceaccount "$sa" -n simplyblock \
               --patch '{"imagePullSecrets": [{"name": "regcred"}]}'
           done
+          for deploy in $(kubectl get deployments -n simplyblock --no-headers -o custom-columns=:metadata.name 2>/dev/null); do
+            kubectl patch deployment "$deploy" -n simplyblock \
+              --type=merge -p '{"spec":{"template":{"spec":{"imagePullSecrets":[{"name":"regcred"}]}}}}' || true
+          done
 
       - name: Delete ImagePullBackOff pods and wait for Running (post-CRD)
         if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
@@ -861,10 +869,14 @@ jobs:
             sleep 10
           done
 
-          echo "Patching service accounts with imagePullSecrets..."
+          echo "Patching service accounts and deployments with imagePullSecrets..."
           for sa in $(kubectl get serviceaccounts -n $NAMESPACE --no-headers | awk '{print $1}'); do
             kubectl patch serviceaccount "$sa" -n $NAMESPACE \
               --patch '{"imagePullSecrets": [{"name": "regcred"}]}'
+          done
+          for deploy in $(kubectl get deployments -n $NAMESPACE --no-headers -o custom-columns=:metadata.name 2>/dev/null); do
+            kubectl patch deployment "$deploy" -n $NAMESPACE \
+              --type=merge -p '{"spec":{"template":{"spec":{"imagePullSecrets":[{"name":"regcred"}]}}}}' || true
           done
 
           if [ "$CLUSTER_ENV" = "aws-openshift" ] || [ "$CLUSTER_ENV" = "openshift-local" ]; then
