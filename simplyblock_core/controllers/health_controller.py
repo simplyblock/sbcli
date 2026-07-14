@@ -63,7 +63,7 @@ def check_bdev(name, *, rpc_client=None, bdev_names=None) -> bool:
 
 def check_subsystem(nqn, *, rpc_client=None, nqns=None, ns_uuid=None) -> bool:
     if rpc_client:
-        subsystem = subsystems[0] if (subsystems := rpc_client.subsystem_list(nqn)) is not None else None
+        subsystem = subsystems[0] if (subsystems := rpc_client.subsystem_list(nqn)) else None
     elif nqns:
         subsystem = nqns.get(nqn)
     else:

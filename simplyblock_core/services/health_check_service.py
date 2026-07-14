@@ -128,6 +128,10 @@ def check_node(snode):
         connected_devices = []
 
         for device in snode.nvme_devices:
+            if device.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_UNAVAILABLE]:
+                logger.info(f"Device skipped: {device.get_id()} status: {device.status}")
+                continue
+
             passed = True
 
             if device.io_error:
