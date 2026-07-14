@@ -306,14 +306,18 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
     logger.info(
         f"Group {group.uuid[:8]}: batch_final_step "
         f"lvols={len(lvol_names)} hub={hub_bdev}")
+    batch_ok = False
+    batch_err = None
     try:
-        src_rpc_ref = src_rpc
-        ret = src_rpc_ref.bdev_lvol_batch_final_step(
+        ret = src_rpc.bdev_lvol_batch_final_step(
             lvol_names, lvol_ids, snapshot_names, 2, hub_bdev, "migrate")
-        batch_ok = bool(ret)
+        # Synchronous call: _request3 raises RPCException on any JSONRPC error.
+        # A null/void return (ret is None) means success.
+        logger.info(f"Group {group.uuid[:8]}: bdev_lvol_batch_final_step returned {ret!r} (success)")
+        batch_ok = True
     except Exception as e:
         logger.error(f"Group {group.uuid[:8]}: bdev_lvol_batch_final_step failed: {e}")
-        batch_ok = False
+        batch_err = str(e)
 
     try:
         src_rpc.bdev_nvme_detach_controller(ctrl_name)
@@ -323,7 +327,7 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
     if batch_ok:
         _flip_ana_to_optimized(group, tgt_node, tgt_rpc)
 
-    return batch_ok, None
+    return batch_ok, batch_err
 
 
 def _all_workers_terminal(group):
