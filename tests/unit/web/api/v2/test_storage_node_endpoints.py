@@ -135,6 +135,22 @@ class TestStorageNodeLifecycle:
             force=True,
             node_address='10.0.0.11:5000',
             reattach_volume=False,
+            new_ssd_pcie=[],
+        )
+
+    def test_restart_passes_new_ssd_pcie(self, client, storage_node, storage_node_ops):
+        response = client.post(
+            f'{BASE}/{STORAGE_NODE_ID}/restart',
+            json={'new_ssd_pcie': ['0000:00:1e.0', '0000:00:1f.0']},
+        )
+
+        assert response.status_code == 202
+        storage_node_ops.restart_storage_node.assert_called_once_with(
+            node_id=STORAGE_NODE_ID,
+            force=False,
+            node_address=None,
+            reattach_volume=False,
+            new_ssd_pcie=['0000:00:1e.0', '0000:00:1f.0'],
         )
 
 
