@@ -117,6 +117,12 @@ class TestStorageNodeLifecycle:
         assert response.status_code == 204
         storage_node_ops.resume_storage_node.assert_called_once_with(STORAGE_NODE_ID)
 
+    def test_promote(self, client, storage_node, storage_node_ops):
+        response = client.post(f'{BASE}/{STORAGE_NODE_ID}/promote')
+
+        assert response.status_code == 204
+        storage_node_ops.make_sec_new_primary.assert_called_once_with(STORAGE_NODE_ID)
+
     def test_forced_shutdown(self, client, storage_node, storage_node_ops):
         response = client.post(f'{BASE}/{STORAGE_NODE_ID}/shutdown', params={'force': True})
 
