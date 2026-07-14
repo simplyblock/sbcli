@@ -39,9 +39,9 @@ on:
         required: false
         default: ''
 
-      # ── Helm chart branches (base,target — e.g. "main,main" or "release-25,main") ──
-      helm_charts_branches:
-        description: 'Helm chart branches: base_branch,target_branch (e.g. main,main)'
+      # ── Operator repo branches (base,target — e.g. "main,main" or "release-25,main") ──
+      operator_repo_branches:
+        description: 'Operator repo branches: base_branch,target_branch (e.g. main,main)'
         required: true
         default: 'main,main'
 
@@ -157,8 +157,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Parse helm_charts_branches (format: "base_branch,target_branch")
-          IFS=',' read -r BASE_HELM TARGET_HELM <<< "${{ github.event.inputs.helm_charts_branches || 'main,main' }}"
+          # Parse operator_repo_branches (format: "base_branch,target_branch")
+          IFS=',' read -r BASE_HELM TARGET_HELM <<< "${{ github.event.inputs.operator_repo_branches || 'main,main' }}"
           TARGET_HELM="${TARGET_HELM:-$BASE_HELM}"
           echo "BASE_HELM_BRANCH=${BASE_HELM}" >> "$GITHUB_ENV"
           echo "TARGET_HELM_BRANCH=${TARGET_HELM}" >> "$GITHUB_ENV"
@@ -185,21 +185,21 @@ jobs:
             echo "CSI_TAG=" >> "$GITHUB_ENV"
           fi
 
-      # Checkout helm charts for BASE version (initial deployment)
+      # Checkout simplyblock-operator for BASE version (initial deployment)
       - uses: actions/checkout@master
-        name: Checkout helm-charts (base version)
+        name: Checkout simplyblock-operator (base version)
         with:
-          repository: simplyblock/helm-charts
+          repository: simplyblock/simplyblock-operator
           ref: ${{ env.BASE_HELM_BRANCH }}
-          path: 'helm-charts'
+          path: 'simplyblock-operator'
 
-      # Checkout helm charts for TARGET version (for helm upgrade)
+      # Checkout simplyblock-operator for TARGET version (for helm upgrade)
       - uses: actions/checkout@master
-        name: Checkout helm-charts (target version)
+        name: Checkout simplyblock-operator (target version)
         with:
-          repository: simplyblock/helm-charts
+          repository: simplyblock/simplyblock-operator
           ref: ${{ env.TARGET_HELM_BRANCH }}
-          path: 'helm-charts-target'
+          path: 'simplyblock-operator-target'
 
       # Checkout sbcli R25 charts (r25-to-r2x only)
       - uses: actions/checkout@v4
@@ -209,14 +209,8 @@ jobs:
           ref: ${{ env.R25_SBCLI_BRANCH }}
           path: 'sbcli-r25'
 
-      # Checkout simplyblock-csi repo for R25 CSI helm chart (r25-to-r2x only)
-      - uses: actions/checkout@master
-        name: Checkout simplyblock-csi (R25 CSI chart)
-        if: ${{ github.event.inputs.upgrade_type == 'r25-to-r2x' }}
-        with:
-          repository: simplyblock/simplyblock-csi
-          ref: ${{ env.R25_CSI_REF }}
-          path: 'simplyblock-csi'
+      # R25 CSI chart is now in the simplyblock-operator mono-repo under csi-driver/
+      # The base simplyblock-operator checkout above already contains it
 
       - name: Resolve KEY_PATH and validate key exists
         shell: bash
@@ -299,7 +293,7 @@ jobs:
       - name: Install Helm Chart for simplyblock-operator (BASE version)
         if: ${{ github.event.inputs.use_existing_cluster != 'true' && github.event.inputs.upgrade_type != 'r25-to-r2x' }}
         run: |
-          cd $GITHUB_WORKSPACE/helm-charts/charts/simplyblock-operator/
+          cd $GITHUB_WORKSPACE/simplyblock-operator/helm-charts/charts/simplyblock-operator/
 
           TLS_FLAGS=""
           if [ "${{ github.event.inputs.tls_enabled }}" = "true" ]; then
@@ -538,7 +532,7 @@ jobs:
       # ── CSI-based bootstrap (r25-to-r2x upgrade, R25 base) ──
       # R25 uses two separate Helm charts:
       #   1. sbcli chart (from sbcli repo p2p-migration branch) — control plane
-      #   2. spdk-csi chart (from simplyblock-csi repo) — storage nodes + CSI driver
+      #   2. spdk-csi chart (from simplyblock-operator mono-repo csi-driver/) — storage nodes + CSI driver
 
       - name: Install sbcli control plane chart (R25)
         if: ${{ github.event.inputs.use_existing_cluster != 'true' && github.event.inputs.upgrade_type == 'r25-to-r2x' }}
@@ -658,7 +652,7 @@ jobs:
           NAMESPACE=simplyblock
 
           echo "=== Installing R25 spdk-csi chart ==="
-          cd $GITHUB_WORKSPACE/simplyblock-csi/charts/spdk-csi/latest/spdk-csi/
+          cd $GITHUB_WORKSPACE/simplyblock-operator/csi-driver/charts/spdk-csi/latest/spdk-csi/
 
           helm install -n $NAMESPACE spdk-csi ./ \
             --set csiConfig.simplybk.uuid="${CLUSTER_ID}" \
@@ -909,7 +903,7 @@ jobs:
           export OPERATOR_TAG="${OPERATOR_TAG:-$TARGET_SB_IMAGE}"
           export SIMPLYBLOCK_REPO="${SIMPLYBLOCK_REPO}"
           export OPERATOR_REPO="${OPERATOR_REPO}"
-          export HELM_CHART_PATH="$GITHUB_WORKSPACE/helm-charts-target/charts/simplyblock-operator/"
+          export HELM_CHART_PATH="$GITHUB_WORKSPACE/simplyblock-operator-target/helm-charts/charts/simplyblock-operator/"
           export TLS_ENABLED="${TLS_ENABLED}"
           export CSI_REPOSITORY="${CSI_REPOSITORY}"
           export CSI_TAG="${CSI_TAG}"

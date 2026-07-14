@@ -565,7 +565,19 @@ class SbcliUtils:
         Must be called BEFORE delete_all_snapshots, because SPDK refuses
         to delete a snapshot that still has clones.
         """
-        data = self.get_request(api_url="/lvol")
+        data = None
+        for attempt in range(3):
+            try:
+                data = self.get_request(api_url="/lvol")
+                break
+            except Exception as e:
+                self.logger.warning(
+                    f"delete_all_clones: /lvol list attempt {attempt+1} failed: {e}"
+                )
+                time.sleep(5)
+        if data is None:
+            self.logger.warning("delete_all_clones: could not list lvols after 3 attempts, skipping")
+            return
         clone_names = [
             lvol_info.get("lvol_name")
             for lvol_info in data.get("results", [])

@@ -8,8 +8,8 @@ on:
         description: 'Branch for simplyBlockDeploy'
         required: true
         default: 'main'
-      helm_charts_branch:
-        description: 'Branch for helm-charts'
+      operator_repo_branch:
+        description: 'Branch for simplyblock-operator repo'
         required: true
         default: 'main'
       testname:
@@ -94,11 +94,11 @@ jobs:
           token: ${{ secrets.GH_ACCESS_KEY_ID_RAUNAK }}
 
       - uses: actions/checkout@master
-        name: Checkout helm-charts
+        name: Checkout simplyblock-operator
         with:
-          repository: simplyblock/helm-charts
-          ref: refs/heads/${{ github.event.inputs.helm_charts_branch || 'main'}}
-          path: 'helm-charts'
+          repository: simplyblock/simplyblock-operator
+          ref: refs/heads/${{ github.event.inputs.operator_repo_branch || 'main'}}
+          path: 'simplyblock-operator'
           token: ${{ secrets.GH_ACCESS_KEY_ID_RAUNAK }}
 
       - name: Setup Terraform
@@ -208,7 +208,7 @@ jobs:
 
       - name: Install Helm Chart for simplyblock-operator
         run: |
-          cd $GITHUB_WORKSPACE/helm-charts/charts/simplyblock-operator/
+          cd $GITHUB_WORKSPACE/simplyblock-operator/helm-charts/charts/simplyblock-operator/
           echo "Sleeping for 30 seconds before helm install"
           sleep 30
           helm install spdk-csi ./ \
