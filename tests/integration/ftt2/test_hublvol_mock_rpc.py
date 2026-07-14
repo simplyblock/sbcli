@@ -26,7 +26,6 @@ from pydantic import SecretStr
 from simplyblock_core.models.hublvol import HubLVol
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core import rpc_client as _rpc_client_mod
 
 from tests.integration.ftt2.conftest import _worker_port_offset, _BASE_PORT
 from tests.integration.ftt2.mock_cluster import FTT2MockRpcServer
@@ -71,12 +70,6 @@ def _make_node(ip: str, lvstore: str, port: int, jm_vuid: int) -> StorageNode:
     return n
 
 
-def _clear_rpc_cache():
-    """Clear the module-level RPC response cache between tests."""
-    with _rpc_client_mod._rpc_cache_lock:
-        _rpc_client_mod._rpc_cache.clear()
-
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -113,7 +106,6 @@ def env(mock_servers):
             'lvs_secondary': False, 'lvs_redirect': False,
             'remote_bdev': '', 'connect_state': False,
         }
-    _clear_rpc_cache()
 
     base_port = mock_servers[0].port
     n0 = _make_node("10.0.0.1", _LVS, base_port,     jm_vuid=100)

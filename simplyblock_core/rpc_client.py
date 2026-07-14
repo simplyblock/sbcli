@@ -1,6 +1,4 @@
 import json
-import threading
-import time
 from json import JSONDecodeError
 from typing import Any, Optional
 
@@ -17,12 +15,6 @@ from requests.adapters import HTTPAdapter
 from urllib3 import Retry
 
 logger = utils.get_logger()
-
-# Shared per-node cache for expensive read-only RPCs (e.g. bdev_get_bdevs, nvmf_get_subsystems).
-# Key: (host, port, method_name), Value: (timestamp, result)
-_rpc_cache: dict[tuple, tuple[float, Any]] = {}
-_rpc_cache_lock = threading.Lock()
-RPC_CACHE_TTL_SEC = 15  # cached results are valid for this many seconds
 
 
 _response_schema = {
@@ -126,22 +118,6 @@ class RPCClient:
         self.session.mount("https://", HTTPAdapter(max_retries=retries))
         if settings.tls_connect == "authenticated":
             self.session.cert = (str(settings.tls_certificate), str(settings.tls_key))
-
-    def _request_cached(self, method, params=None, cache_ttl=RPC_CACHE_TTL_SEC):
-        """Like _request but returns a cached result if one exists within cache_ttl seconds."""
-        cache_key = (self.host, self.port, method, json.dumps(params, sort_keys=True) if params else None)
-        now = time.monotonic()
-        with _rpc_cache_lock:
-            if cache_key in _rpc_cache:
-                ts, cached_result = _rpc_cache[cache_key]
-                if now - ts < cache_ttl:
-                    logger.debug("Cache hit for %s on %s:%s", method, self.host, self.port)
-                    return cached_result
-        result = self._request(method, params)
-        if result is not None:
-            with _rpc_cache_lock:
-                _rpc_cache[cache_key] = (now, result)
-        return result
 
     def _request(self, method, params=None, request_timeout=None):
         ret, _ = self._request2(method, params, request_timeout=request_timeout)
