@@ -248,5 +248,11 @@ def restart(cluster: Cluster, storage_node: StorageNode, parameters: _RestartPar
     return Response(status_code=202)  # FIXME: Provide URL for checking task status
 
 
+@instance_api.post('/promote', name='clusters:storage-nodes:start', status_code=204, responses={204: {"content": None}})
+def promote(cluster: Cluster, storage_node: StorageNode) -> Response:
+    storage_node_ops.make_sec_new_primary(storage_node.uuid)
+    return Response(status_code=204)
+
+
 instance_api.include_router(device_api, prefix='/devices')
 api.include_router(instance_api)
