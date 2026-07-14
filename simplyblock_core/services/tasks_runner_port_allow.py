@@ -451,7 +451,7 @@ def _reconnect_inbound_hublvols(node):
     try:
         cluster = db.get_cluster_by_id(node.cluster_id)
         rpc = node.rpc_client(timeout=5, retry=1)
-        if not rpc.subsystem_list(primary.hublvol.nqn):
+        if not rpc.subsystem_get(primary.hublvol.nqn):
             logger.info("Re-exposing secondary hublvol on %s for %s",
                         node.get_id()[:8], primary.lvstore)
             node.create_secondary_hublvol(primary, cluster.nqn)

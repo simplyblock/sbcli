@@ -251,9 +251,9 @@ def _apply_migration_to_db(migration, tgt_lvol_uuid=None, tgt_lvol_bdev=None):
         logger.info(
             f"_apply_migration_to_db: queried {len(spdk_info)} bdevs "
             f"from target lvstore {tgt_node.lvstore}")
-        subsys = tgt_rpc.subsystem_list(lvol.nqn)
+        subsys = tgt_rpc.subsystem_get(lvol.nqn)
         if subsys:
-            for ns in subsys[0].get('namespaces'):
+            for ns in subsys.get('namespaces'):
                 if ns['uuid'] == lvol.uuid:
                     lvol.ns_id = ns['nsid']
                     break
@@ -640,8 +640,7 @@ def _swap_namespace(rpc, nqn, new_bdev, uuid, guid, label):
 
     Discovers the current nsid dynamically rather than assuming nsid=1.
     """
-    sub = rpc.subsystem_list(nqn)
-    s = (sub[0] if isinstance(sub, list) else sub) if sub else None
+    s = rpc.subsystem_get(nqn)
     ns_list = s.get('namespaces', []) if s else []
     nsid = ns_list[0]['nsid'] if ns_list else 1
     try:
@@ -1637,11 +1636,10 @@ def _cleanup_subsystem_or_ns(nqn, ns_id, subsystem_was_created_by_migration, rpc
     present before we attached our namespace, so we never delete it—we only
     remove our namespace entry.
     """
-    sub_list = rpc.subsystem_list(nqn)
-    if not sub_list:
+    sub = rpc.subsystem_get(nqn)
+    if not sub:
         return  # already gone
 
-    sub = sub_list[0] if isinstance(sub_list, list) else sub_list
     ns_count = len(sub.get('namespaces', []))
 
     if ns_count > 1 or not subsystem_was_created_by_migration:

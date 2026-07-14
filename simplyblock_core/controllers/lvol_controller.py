@@ -1336,20 +1336,20 @@ def _remove_lvol_subsys_from_node(lvol, rpc_client):
     False if an RPC returned a non-success result. Exceptions are NOT
     caught here — the caller decides whether a slow/hung node is fatal.
     """
-    subsystem = rpc_client.subsystem_list(lvol.nqn)
+    subsystem = rpc_client.subsystem_get(lvol.nqn)
     if not subsystem:
         return True
 
-    for ns in subsystem[0]["namespaces"]:
+    for ns in subsystem["namespaces"]:
         if ns["uuid"] == lvol.uuid:
             logger.info("Removing namespace %s from subsystem %s", ns["uuid"], lvol.nqn)
             ret = bool(rpc_client.nvmf_subsystem_remove_ns(lvol.nqn, ns['nsid']))
             if not ret:
                 logger.error(f"Failed to remove namespace {ns['nsid']} from subsystem {lvol.nqn}")
-            subsystem = rpc_client.subsystem_list(lvol.nqn)
+            subsystem = rpc_client.subsystem_get(lvol.nqn)
             break
 
-    if len(subsystem[0]["namespaces"]) == 0:
+    if not subsystem or len(subsystem["namespaces"]) == 0:
         logger.info(f"Removing subsystem {lvol.nqn}")
         return bool(rpc_client.subsystem_delete(lvol.nqn))
 

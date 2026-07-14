@@ -229,15 +229,16 @@ class RPCClient:
     def get_version(self):
         return self._request("spdk_get_version")
 
-    def subsystem_list(self, nqn_name=None):
-        data = self._request("nvmf_get_subsystems")
-        if data and nqn_name:
-            for d in data:
-                if d['nqn'] == nqn_name:
-                    return [d]
-            return []
-        else:
-            return data
+    def subsystem_list(self) -> list[dict]:
+        return self._request3("nvmf_get_subsystems")
+
+    def subsystem_get(self, nqn: str) -> Optional[dict]:
+        return next((
+            subsystem
+            for subsystem
+            in self.subsystem_list()
+            if subsystem["nqn"] == nqn
+        ), None)
 
     def subsystem_delete(self, nqn):
         return self._request("nvmf_delete_subsystem", params={'nqn': nqn})
@@ -475,24 +476,22 @@ class RPCClient:
         ret, err = self._request2("nvmf_subsystem_add_ns", params)
         if err and idempotent:
             try:
-                subs = self.subsystem_list(nqn_name=nqn) or []
-                if subs:
-                    for ns in subs[0].get("namespaces", []) or []:
-                        if ns.get("bdev_name") != dev_name:
-                            continue
-                        if nsid is not None and ns.get("nsid") != nsid:
-                            continue
-                        if uuid is not None and ns.get("uuid") and ns.get("uuid") != uuid:
-                            # Same bdev at a different nsid is fine to no-op,
-                            # but a mismatched uuid on the same bdev is a real
-                            # conflict — keep the original error.
-                            continue
-                        existing_nsid = ns.get("nsid")
-                        logger.info(
-                            "nvmf_subsystem_add_ns: %s already has %s at nsid=%s, "
-                            "treating rejected duplicate add as success",
-                            nqn, dev_name, existing_nsid)
-                        return existing_nsid, None
+                for ns in (self.subsystem_get(nqn) or {}).get("namespaces", []):
+                    if ns.get("bdev_name") != dev_name:
+                        continue
+                    if nsid is not None and ns.get("nsid") != nsid:
+                        continue
+                    if uuid is not None and ns.get("uuid") and ns.get("uuid") != uuid:
+                        # Same bdev at a different nsid is fine to no-op,
+                        # but a mismatched uuid on the same bdev is a real
+                        # conflict — keep the original error.
+                        continue
+                    existing_nsid = ns.get("nsid")
+                    logger.info(
+                        "nvmf_subsystem_add_ns: %s already has %s at nsid=%s, "
+                        "treating rejected duplicate add as success",
+                        nqn, dev_name, existing_nsid)
+                    return existing_nsid, None
             except Exception as e:
                 # Don't let the idempotency probe mask the original error.
                 logger.debug(
