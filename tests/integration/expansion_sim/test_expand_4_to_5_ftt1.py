@@ -89,3 +89,12 @@ def test_4_to_5_ftt1_happy_path(fdb_clean, db_controller_singleton_reset,
     n5_sim = patched_rpc_router.get_by_node_id("n5")
     assert any(b.type == "bdev_lvstore" for b in n5_sim.bdevs.values()), \
         f"n5 sim has no lvstore bdev; bdevs={list(n5_sim.bdevs)}"
+
+    # 6. DATA-LOSS GUARD: no node may have issued bdev_lvol_delete_lvstore
+    # during the expansion. Re-homing a sec/tert role tears down the raid0
+    # backing the LVS and the distribs below it — deleting the lvstore
+    # itself wipes the shared blobstore metadata for every replica.
+    assert not patched_rpc_router.destroyed_lvstores, (
+        f"expansion destroyed lvstore(s) "
+        f"{sorted(patched_rpc_router.destroyed_lvstores)} — "
+        f"bdev_lvol_delete_lvstore must never run during role re-homing")

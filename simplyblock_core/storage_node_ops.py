@@ -8053,7 +8053,13 @@ def _remove_bdev_stack(bdev_stack, rpc_client, remove_distr_only=False):
             ret = rpc_client.bdev_distrib_delete(name)
         elif type == "bdev_raid":
             ret = rpc_client.bdev_raid_delete(name)
-        elif type == "bdev_lvstore" and not remove_distr_only:
+        elif type == "bdev_lvstore":
+            if remove_distr_only:
+                # Non-leader teardown: bdev_lvol_delete_lvstore destroys the
+                # blobstore metadata on the shared backing storage — data loss
+                # for every replica. Deleting the raid below hot-removes the
+                # examined lvstore bdev from this node without touching disk.
+                continue
             ret = rpc_client.bdev_lvol_delete_lvstore(name)
         elif type == "bdev_ptnonexcl":
             ret = rpc_client.bdev_PT_NoExcl_delete(name)
@@ -8164,9 +8170,14 @@ def teardown_non_leader_lvstore(donor_node, primary_node, slot=None):
     Steps performed:
       1. Delete per-lvol nvmf subsystems on the donor for every lvol owned
          by ``primary_node``.
-      2. Remove the donor's bdev stack (distrib + raid + lvstore + ptnonexcl)
-         via ``_remove_bdev_stack`` using ``primary_node.lvstore_stack`` as
-         the structural template.
+      2. Remove the donor's bdev stack starting from the raid0 that backs
+         the LVS, then the distribs below (+ ptnonexcl), via
+         ``_remove_bdev_stack(remove_distr_only=True)`` using
+         ``primary_node.lvstore_stack`` as the structural template. The
+         lvstore bdev itself is NEVER deleted: it was only *examined* on the
+         donor, and ``bdev_lvol_delete_lvstore`` would destroy the shared
+         on-disk blobstore metadata — data loss for every replica. Deleting
+         the raid hot-removes the examined lvstore bdev cleanly.
       3. Detach the hublvol nvme controller on the donor (best-effort —
          may already be gone if the controller was never attached).
       4. Clear the corresponding back-reference field
@@ -8235,6 +8246,10 @@ def teardown_non_leader_lvstore(donor_node, primary_node, slot=None):
     # 3. Remove the bdev stack. The donor instantiated the stack from
     #    primary_node.lvstore_stack; we use the same list as the structural
     #    template so _remove_bdev_stack walks it in the right order.
+    #    remove_distr_only=True: the lvstore itself must NEVER be deleted on
+    #    a non-leader — it was only examined here, and bdev_lvol_delete_lvstore
+    #    wipes the blobstore metadata on the shared backing storage (data loss
+    #    for all replicas). Deleting the raid hot-removes the lvstore bdev.
     if primary_node.lvstore_stack:
         # _remove_bdev_stack mutates 'status' fields — work on a shallow copy
         # of the dicts so we don't accidentally persist 'deleted' markers
