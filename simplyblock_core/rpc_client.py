@@ -141,9 +141,11 @@ class RPCClient:
             # instead of the proxy-global timeout. Prevents an abandoned/stuck
             # RPC from squatting a proxy slot for minutes and starving other RPCs.
             wire_payload = unwrap_secrets_for_send(payload)
+            logger.debug("Wire payload: %s", wire_payload)
             response = self.session.post(
                 self.url, data=json.dumps(wire_payload), timeout=effective_timeout,
                 headers={"X-RPC-Timeout": str(effective_timeout)})
+            logger.debug("Response: status_code: %s, content: %s", response.status_code, response.content, response)
         except Exception:
             raise RPCException("connection error")
 

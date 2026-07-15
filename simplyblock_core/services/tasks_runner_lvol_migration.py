@@ -1857,8 +1857,6 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             f"lvol={lvol.uuid} src={src_lvol_composite} tgt_snap={tgt_snap_composite}")
         ret = src_rpc.bdev_lvol_transfer_final_step(
             src_lvol_composite, tgt_map_id, tgt_snap_composite, 2, hub_bdev, "migrate")
-        logger.info("logged bdev_lvol_transfer_final_step return value:")
-        logger.info(ret)
         if ret is None:
             # Connection timeout or SPDK error (e.g. "File exists" = already in progress).
             # SPDK may have completed the migration while the RPC connection dropped.
