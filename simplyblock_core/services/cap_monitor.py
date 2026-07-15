@@ -19,7 +19,7 @@ def create_fdb_backup_if_needed(cluster):
     if not tasks:
         fdb_backup_controller.add_backup_task(cluster.get_id())
         return
-
+    tasks.reverse()
     last_backup_task = tasks[0]
     if last_backup_task and last_backup_task.status == JobSchedule.STATUS_DONE:
         if last_backup_task.date + cluster.backup_frequency_seconds < time.time():
