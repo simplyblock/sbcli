@@ -16,9 +16,10 @@ class BaseModel(object):
 
     _STATUS_CODE_MAP: dict = {}
 
-    # When True, write_to_db()/remove() atomically bump watch_seq/<ClassName>
-    # in the same FDB transaction so watchers (SSE API) wake up. Plain class
-    # attribute, not an annotation: must stay out of get_attrs_map()/to_dict().
+    # When True, write_to_db()/remove() atomically maintain the watch_index/
+    # version index (rollup + per-entity version keyed by watch_scope()) in the
+    # same FDB transaction so watchers (SSE API) wake up. Plain class attribute,
+    # not an annotation: must stay out of get_attrs_map()/to_dict().
     _WATCHED = False
 
     id: str = ""
@@ -246,15 +247,26 @@ class BaseModel(object):
             return objects[0]
         return None
 
-    @staticmethod
-    def _write_tx(tr, key, value, counter_key):
-        tr.set(key, value)
-        tr.add(counter_key, watches.ONE_LE64)
+    def watch_scope(self):
+        """Parent-id path locating this entity in the watch index.
+
+        Watched subclasses override to return their ancestor ids (e.g.
+        ``(self.pool_uuid,)``); the default empty tuple places the entity
+        directly under its class (a root, e.g. Cluster).
+        """
+        return ()
 
     @staticmethod
-    def _remove_tx(tr, key, counter_key):
+    def _write_tx(tr, key, value, rollup_key, version_key):
+        tr.set(key, value)
+        tr.add(rollup_key, watches.ONE_LE64)
+        tr.add(version_key, watches.ONE_LE64)
+
+    @staticmethod
+    def _remove_tx(tr, key, rollup_key, version_key):
         tr.clear(key)
-        tr.add(counter_key, watches.ONE_LE64)
+        tr.add(rollup_key, watches.ONE_LE64)
+        tr.clear(version_key)
 
     def write_to_db(self, kv_store=None):
         if not kv_store:
@@ -265,8 +277,11 @@ class BaseModel(object):
             value = json.dumps(self.to_dict(unwrap_secrets=True)).encode()
             if self._WATCHED:
                 import fdb
+                scope = self.watch_scope()
                 fdb.transactional(BaseModel._write_tx)(
-                    kv_store, key, value, watches.watch_counter_key(type(self)))
+                    kv_store, key, value,
+                    watches.watch_index_rollup_key(type(self), scope),
+                    watches.watch_index_version_key(type(self), scope, self.get_id()))
             else:
                 kv_store.set(key, value)
             return True
@@ -280,8 +295,11 @@ class BaseModel(object):
         if not self._WATCHED:
             return kv_store.clear(key)
         import fdb
+        scope = self.watch_scope()
         return fdb.transactional(BaseModel._remove_tx)(
-            kv_store, key, watches.watch_counter_key(type(self)))
+            kv_store, key,
+            watches.watch_index_rollup_key(type(self), scope),
+            watches.watch_index_version_key(type(self), scope, self.get_id()))
 
     def keys(self):
         return self.get_attrs_map().keys()

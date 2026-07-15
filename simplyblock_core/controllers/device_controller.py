@@ -33,12 +33,12 @@ def _explode_devices(nodes, node_id):
 
 
 async def watch_devices(cluster_id, node_id):
-    """Stream device changes for one storage node."""
+    """Stream device changes for one storage node (a device change is a node write)."""
     db = DBController()
     async for batch in db.watch(
-            StorageNode,
+            StorageNode, scope=(cluster_id,), entity_id=node_id,
             select=lambda nodes: _explode_devices(nodes, node_id),
-            ancestors=[(Cluster, cluster_id), (StorageNode, node_id)]):
+            ancestors=[(Cluster, (), cluster_id), (StorageNode, (cluster_id,), node_id)]):
         yield batch
 
 
@@ -46,12 +46,12 @@ async def watch_device(cluster_id, node_id, device_id):
     """Stream changes for a single device."""
     db = DBController()
     async for batch in db.watch(
-            StorageNode,
+            StorageNode, scope=(cluster_id,), entity_id=node_id,
             select=lambda nodes: [
                 device for device in _explode_devices(nodes, node_id)
                 if device.get_id() == device_id
             ],
-            ancestors=[(Cluster, cluster_id), (StorageNode, node_id)]):
+            ancestors=[(Cluster, (), cluster_id), (StorageNode, (cluster_id,), node_id)]):
         yield batch
 
 

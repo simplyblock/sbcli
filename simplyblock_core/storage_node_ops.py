@@ -51,9 +51,9 @@ async def watch_storage_nodes(cluster_id):
     get_storage_nodes_by_cluster_id)."""
     db = DBController()
     async for batch in db.watch(
-            StorageNode,
+            StorageNode, scope=(cluster_id,),
             select=lambda models: db.get_storage_nodes_by_cluster_id(cluster_id, source=models),
-            ancestors=[(Cluster, cluster_id)]):
+            ancestors=[(Cluster, (), cluster_id)]):
         yield batch
 
 
@@ -61,9 +61,8 @@ async def watch_storage_node(cluster_id, node_id):
     """Stream changes for a single storage node."""
     db = DBController()
     async for batch in db.watch(
-            StorageNode,
-            select=lambda models: [node for node in models if node.get_id() == node_id],
-            ancestors=[(Cluster, cluster_id)]):
+            StorageNode, scope=(cluster_id,), entity_id=node_id,
+            ancestors=[(Cluster, (), cluster_id)]):
         yield batch
 
 

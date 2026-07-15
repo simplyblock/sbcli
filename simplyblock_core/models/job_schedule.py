@@ -57,6 +57,9 @@ class JobSchedule(BaseModel):
     # goes stale (see constants.TASK_LEASE_TTL_SEC). See tasks_controller.claim_task.
     owner: str = ""
 
+    def watch_scope(self):
+        return (self.cluster_id,)
+
     def write_to_db(self, kv_store=None):
         self.updated_at = str(datetime.datetime.now(datetime.timezone.utc))
         super().write_to_db(kv_store)

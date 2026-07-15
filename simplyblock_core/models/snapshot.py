@@ -50,6 +50,9 @@ class SnapShot(BaseModel):
     # This value can be used to identify the same snapshot on other nodes
     data_uuid: str = ""
 
+    def watch_scope(self):
+        return (self.pool_uuid,)
+
     def write_to_db(self, kv_store=None):
         super().write_to_db(kv_store)
         snap_mini = SnapShotMini().from_snapshot(self)

@@ -43,6 +43,9 @@ class Pool(BaseModel):
     dhchap: bool = False
     dhchap_key: SecretStr = SecretStr("")
     dhchap_ctrlr_key: SecretStr = SecretStr("")
+
+    def watch_scope(self):
+        return (self.cluster_id,)
     allowed_hosts: List[str] = []
 
 

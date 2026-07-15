@@ -1,31 +1,26 @@
 # coding=utf-8
-"""Generic entity-watch primitive for streaming state changes.
+"""Generic entity-watch primitive for streaming state changes (version index).
 
-Change signal: every write/remove of a watched model class atomically bumps
-``watch_seq/<ClassName>`` in the same FDB transaction as the entity mutation
-(see :mod:`simplyblock_core.watches`). One shared :class:`WatchHub` per model
-class owns a single FDB watch on that counter key; when it fires, the hub
-re-reads the class's entity range once and fans the parsed models out to every
-subscriber. Scoping (e.g. volumes of one pool) happens per subscription via a
-``select`` callable, so N scoped subscribers cost one watch and one shared range
-read per change.
+Change signal: every write/remove of a watched model class atomically maintains a
+hierarchical version index in the same FDB transaction as the mutation (see
+:mod:`simplyblock_core.watches`): a per-scope ``rollup`` counter and a per-entity
+``version`` counter, keyed by the model's ``watch_scope()`` path.
 
-The hub registers the watch *before* reading the range: any write not visible to
-the range read has a commit version at or after the watch's read version and
-therefore fires it, so no update is lost. A reconcile timeout re-reads the range
-even without a watch fire, bounding staleness for writes from pre-upgrade
-components that don't bump counters.
+A subscription watches a single FDB key — the scope's rollup key (a *list*) or an
+entity's version key (a *detail*). When it fires, one shared :class:`ScopeWatch`
+per watch key reads that scope's version subtree, diffs versions against the
+previous read to learn exactly which entities changed, point-reads only those, and
+fans the resulting scope entity list out to every subscriber. Unrelated scopes do
+not wake the watch, and only changed entities are re-read.
 
 This module owns the *mechanism* only. It emits typed :class:`ChangeEvent`
 batches (``created``/``updated``/``deleted`` over model objects); building wire
-DTOs and framing them as SSE is the web layer's concern (``_sse.py``). Keeping
-the change-detection here — behind the ``ChangeEvent`` interface — means the
-counter-and-re-read backend can later be swapped for a version-index or
-change-log backend without touching controllers or the API.
+DTOs and framing them as SSE is the web layer's concern (``_sse.py``). The
+``ChangeEvent`` interface is what lets this version-index backend replace the
+earlier counter+full-re-read backend without touching controllers or the API.
 """
 
 import asyncio
-import json
 import logging
 import threading
 from dataclasses import dataclass
@@ -37,16 +32,17 @@ from simplyblock_core import watches
 
 logger = logging.getLogger(__name__)
 
-# Upper bound on staleness for entity writes that don't bump the change counter
-# (processes from before the counter was introduced).
+# Upper bound on staleness / insurance against a missed watch: re-scan the scope
+# index even without a watch fire (the version-map diff makes a no-op re-scan cheap
+# — it publishes nothing when nothing changed).
 WATCH_RECONCILE_SEC = 30.0
 
 _FDB_RETRY_BACKOFF_SEC = (1.0, 2.0, 4.0)
 
 _UNSET: Any = object()
 
-# Filters the shared full model list down to one subscription's scope. Returns
-# model objects (typically by reusing a DBController getter with ``source=``).
+# Filters the shared scope entity list down to a subscription's presentation set.
+# Returns model objects (typically by reusing a DBController getter with ``source=``).
 Select = Callable[[List[Any]], List[Any]]
 
 
@@ -97,7 +93,7 @@ def diff_by_id(
 
 
 class _Subscription:
-    """Coalescing mailbox: written by the hub thread, read by one stream."""
+    """Coalescing mailbox: written by the watch thread, read by one stream."""
 
     def __init__(self, loop: asyncio.AbstractEventLoop, notify: asyncio.Event) -> None:
         self._loop = loop
@@ -115,10 +111,10 @@ class _Subscription:
         self.failed = True
         self._notify.set()
 
-    def deliver(self, state: Any) -> None:  # hub thread
+    def deliver(self, state: Any) -> None:  # watch thread
         self._loop.call_soon_threadsafe(self._deliver, state)
 
-    def fail(self) -> None:  # hub thread
+    def fail(self) -> None:  # watch thread
         self._loop.call_soon_threadsafe(self._fail)
 
     def take(self) -> Any:
@@ -133,30 +129,40 @@ def _watch_tx(tr: Any, key: bytes) -> Any:
     return tr.watch(key)
 
 
-class WatchHub:
-    """Single FDB watch + shared range re-read for one watched model class.
+class ScopeWatch:
+    """Single FDB watch on one key + version-diff read for one watched scope.
 
-    Delivers ``List[model]`` (the full current class range) to subscribers.
-    Change detection compares the *raw* parsed records (cheap) so the reconcile
-    re-read only republishes on a real change; models are constructed only when
-    something changed and shared across all subscribers.
+    Delivers ``List[model]`` — the current entity set of the scope — to
+    subscribers, exactly as the old class-wide hub delivered the full class list,
+    so ``watch()``/``diff_by_id``/``select`` are unchanged. A list watch targets
+    the scope's rollup key and reads its version subtree; a detail watch
+    (``entity_id`` given) targets that entity's version key and reads it alone.
+    Change is detected by diffing the version map, so a reconcile re-scan that
+    finds nothing changed publishes nothing; only changed entities are re-read.
     """
 
-    def __init__(self, model_cls: Type[Any]) -> None:
-        instance = model_cls()
+    def __init__(self, model_cls: Type[Any], scope: Sequence[Any], entity_id: Optional[str]) -> None:
         self._model_cls = model_cls
-        self._name = model_cls.__name__
-        # Built from parts rather than get_db_id(): a fresh JobSchedule's
-        # compound get_id() is not empty, which would corrupt the prefix.
-        self._prefix = f'{instance.object_type}/{instance.name}/'.encode()
-        self._counter_key = watches.watch_counter_key(model_cls)
+        self._scope = tuple(scope)
+        self._entity_id = entity_id
+        if entity_id is not None:
+            self._detail = True
+            self._watch_key = watches.watch_index_version_key(model_cls, self._scope, entity_id)
+        else:
+            self._detail = False
+            self._watch_key = watches.watch_index_rollup_key(model_cls, self._scope)
+            self._version_prefix = watches.watch_index_version_prefix(model_cls, self._scope)
+        self._name = f'{model_cls.__name__}/{"/".join(map(str, self._scope))}/{entity_id or "*"}'
         self._lock = threading.Lock()
         self._subs: set = set()
-        self._cache: Any = _UNSET   # last published List[model] (for late joiners)
-        self._raw: Any = _UNSET     # last raw dict[key, dict] (for change detection)
+        self._cache: Any = _UNSET       # last delivered List[model]
         self._stop = threading.Event()
         self._wake = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        # Reader state (owned by the watch thread):
+        self._prev_versions: Dict[str, int] = {}
+        self._entities: Dict[str, Any] = {}  # leaf (get_id) -> model
+        self._started = False
 
     def subscribe(self, loop: asyncio.AbstractEventLoop, notify: asyncio.Event) -> _Subscription:
         sub = _Subscription(loop, notify)
@@ -164,7 +170,9 @@ class WatchHub:
             alive = self._thread is not None and self._thread.is_alive() and not self._stop.is_set()
             if not alive:
                 self._cache = _UNSET
-                self._raw = _UNSET
+                self._prev_versions = {}
+                self._entities = {}
+                self._started = False
                 self._stop = threading.Event()
                 self._wake = threading.Event()
                 self._thread = threading.Thread(
@@ -189,13 +197,12 @@ class WatchHub:
         with self._lock:
             return len(self._subs)
 
-    def _publish(self, raw: Dict[Any, dict], models: List[Any]) -> None:
+    def _publish(self, entities: List[Any]) -> None:
         with self._lock:
-            self._raw = raw
-            self._cache = models
+            self._cache = entities
             subs = list(self._subs)
         for sub in subs:
-            sub.deliver(models)
+            sub.deliver(entities)
 
     def _fail_all(self) -> None:
         with self._lock:
@@ -203,17 +210,36 @@ class WatchHub:
         for sub in subs:
             sub.fail()
 
-    def _read_raw(self, kv_store: Any) -> Dict[Any, dict]:
-        state: Dict[Any, dict] = {}
-        for k, v in kv_store.get_range_startswith(self._prefix):
-            try:
-                state[bytes(k)] = json.loads(v)
-            except ValueError:
-                logger.warning('Skipping unparsable record %s', bytes(k))
-        return state
+    def _read(self, kv_store: Any) -> Tuple[List[Any], bool]:
+        """Return (current scope entity list, changed?) via a version-map diff."""
+        cur: Dict[str, int] = {}
+        if self._detail:
+            for _k, v in kv_store.get_range_startswith(self._watch_key):
+                cur[str(self._entity_id)] = watches.unpack_counter(v)
+        else:
+            plen = len(self._version_prefix)
+            for k, v in kv_store.get_range_startswith(self._version_prefix):
+                leaf = bytes(k)[plen:].decode()
+                cur[leaf] = watches.unpack_counter(v)
 
-    def _to_models(self, raw: Dict[Any, dict]) -> List[Any]:
-        return [self._model_cls().from_dict(d) for d in raw.values()]
+        changed = [leaf for leaf, ver in cur.items() if self._prev_versions.get(leaf) != ver]
+        removed = [leaf for leaf in self._prev_versions if leaf not in cur]
+        if self._started and not changed and not removed:
+            return list(self._entities.values()), False
+
+        for leaf in changed:
+            # Point-read only the changed entity; leaf is its get_id() (object-key
+            # suffix), so read_from_db(id=leaf) resolves the exact object key.
+            rows = self._model_cls().read_from_db(kv_store, id=leaf)
+            if rows:
+                self._entities[leaf] = rows[0]
+            else:
+                self._entities.pop(leaf, None)  # raced away between index and read
+        for leaf in removed:
+            self._entities.pop(leaf, None)
+        self._prev_versions = cur
+        self._started = True
+        return list(self._entities.values()), True
 
     def _run(self, stop: threading.Event, wake: threading.Event) -> None:
         from simplyblock_core.db_controller import DBController
@@ -223,21 +249,19 @@ class WatchHub:
         while not stop.is_set():
             watch = None
             try:
-                # Watch first, then read: see module docstring.
-                watch = set_watch(kv_store, self._counter_key)
-                raw = self._read_raw(kv_store)
+                # Watch first, then read: any write not visible to the read has a
+                # commit version at or after the watch's read version, so it fires.
+                watch = set_watch(kv_store, self._watch_key)
+                entities, changed = self._read(kv_store)
                 failures = 0
-                with self._lock:
-                    changed = self._raw is _UNSET or raw != self._raw
-                if changed:
-                    self._publish(raw, self._to_models(raw))
+                if changed or self._cache is _UNSET:
+                    self._publish(entities)
                 wake.clear()
-                # Runs on the FDB network thread: must only set the event,
-                # never block or call back into fdb.
+                # Runs on the FDB network thread: must only set the event.
                 watch.on_ready(lambda _f: wake.set())
                 wake.wait(timeout=WATCH_RECONCILE_SEC)
             except Exception:
-                logger.exception('Watch hub for %s failed', self._name)
+                logger.exception('Watch for %s failed', self._name)
                 failures += 1
                 if failures > len(_FDB_RETRY_BACKOFF_SEC):
                     self._fail_all()
@@ -248,21 +272,26 @@ class WatchHub:
                     try:
                         watch.cancel()
                     except Exception:
-                        # Best-effort cleanup: cancellation failures should not
-                        # mask the main loop error/retry behavior.
                         logger.debug('Ignoring watch cancellation failure for %s', self._name, exc_info=True)
 
 
-_hubs: Dict[type, WatchHub] = {}
-_hubs_lock = threading.Lock()
+_scope_watches: Dict[bytes, ScopeWatch] = {}
+_scope_watches_lock = threading.Lock()
 
 
-def get_hub(model_cls: Type[Any]) -> WatchHub:
-    with _hubs_lock:
-        hub = _hubs.get(model_cls)
-        if hub is None:
-            hub = _hubs[model_cls] = WatchHub(model_cls)
-        return hub
+def get_scope_watch(model_cls: Type[Any], scope: Sequence[Any] = (), entity_id: Optional[str] = None) -> ScopeWatch:
+    """Shared :class:`ScopeWatch` for one watch key (rollup for a list, version
+    key for a detail). Subscribers of the same scope share one FDB watch + read."""
+    scope = tuple(scope)
+    if entity_id is not None:
+        key = watches.watch_index_version_key(model_cls, scope, entity_id)
+    else:
+        key = watches.watch_index_rollup_key(model_cls, scope)
+    with _scope_watches_lock:
+        sw = _scope_watches.get(key)
+        if sw is None:
+            sw = _scope_watches[key] = ScopeWatch(model_cls, scope, entity_id)
+        return sw
 
 
 def backend_available() -> bool:
@@ -274,26 +303,31 @@ def backend_available() -> bool:
 async def watch(
         model_cls: Type[Any],
         *,
+        scope: Sequence[Any] = (),
+        entity_id: Optional[str] = None,
         select: Optional[Select] = None,
-        ancestors: Sequence[Tuple[Type[Any], str]] = (),
+        ancestors: Sequence[Tuple[Type[Any], Sequence[Any], str]] = (),
 ):
-    """Async stream of :class:`ChangeEvent` batches for one watched class.
+    """Async stream of :class:`ChangeEvent` batches for one watched scope.
 
-    ``select`` filters the shared full model list to this subscription's scope
-    (reuse a DBController getter with ``source=`` so the filter is defined once);
-    the diff runs on its output, so entities entering/leaving the scoped set emit
-    ``created``/``deleted``. ``ancestors`` are ``(model_cls, id)`` pairs whose
-    disappearance closes the stream (a reconnect then hits the endpoint's regular
-    404). The first yielded batch is the initial state (all ``created``).
+    ``scope`` is the parent-id path (e.g. ``(pool_id,)`` for a pool's volumes,
+    ``()`` for clusters); ``entity_id`` narrows to a single entity's version key
+    (detail). ``select`` filters the shared scope entity list to this
+    subscription's presentation set (reuse a DBController getter with ``source=``
+    so the filter is defined once); the diff runs on its output. ``ancestors`` are
+    ``(ParentClass, parent_scope, parent_id)`` triples whose disappearance closes
+    the stream (a reconnect then hits the endpoint's regular 404). The first
+    yielded batch is the initial state (all ``created``).
 
     Raises :class:`WatchUnavailable` if the backend fails irrecoverably.
     """
     loop = asyncio.get_running_loop()
     notify = asyncio.Event()
-    main_sub = get_hub(model_cls).subscribe(loop, notify)
+    main_sub = get_scope_watch(model_cls, scope, entity_id).subscribe(loop, notify)
+    ancestor_specs = [(pcls, tuple(pscope), str(pid)) for pcls, pscope, pid in ancestors]
     ancestor_subs = [
-        (get_hub(cls).subscribe(loop, notify), cls, str(ancestor_id))
-        for cls, ancestor_id in ancestors
+        (get_scope_watch(pcls, pscope, pid).subscribe(loop, notify), pcls, pscope, pid)
+        for pcls, pscope, pid in ancestor_specs
     ]
     try:
         prev: Dict[str, dict] = {}
@@ -301,30 +335,26 @@ async def watch(
             await notify.wait()
             notify.clear()
 
-            if main_sub.failed or any(sub.failed for sub, _, _ in ancestor_subs):
+            if main_sub.failed or any(sub.failed for sub, _, _, _ in ancestor_subs):
                 raise WatchUnavailable()
 
-            for ancestor_sub, _, ancestor_id in ancestor_subs:
+            for ancestor_sub, _, _, _ in ancestor_subs:
                 ancestor_state = ancestor_sub.take()
                 if ancestor_state is _UNSET:
                     continue
-                if not any(m.get_id() == ancestor_id for m in ancestor_state):
+                if not ancestor_state:  # parent's detail watch delivered []: gone
                     return
 
             models = main_sub.take()
             if models is _UNSET:
                 continue
-            # select() filtering and to_dict() diffing are CPU-bound; keep them
-            # off the event loop. Selects must not do blocking DB reads (they
-            # filter the supplied model list) — DTO building, which may, stays
-            # in the web layer's threadpool.
             events, prev = await loop.run_in_executor(
                 None, _compute_batch, models, select, prev)
             yield events
     finally:
-        get_hub(model_cls).unsubscribe(main_sub)
-        for ancestor_sub, cls, _ in ancestor_subs:
-            get_hub(cls).unsubscribe(ancestor_sub)
+        get_scope_watch(model_cls, scope, entity_id).unsubscribe(main_sub)
+        for ancestor_sub, pcls, pscope, pid in ancestor_subs:
+            get_scope_watch(pcls, pscope, pid).unsubscribe(ancestor_sub)
 
 
 def _compute_batch(

@@ -178,6 +178,9 @@ class StorageNode(BaseNodeObject):
             return self.hublvol.nvmf_port
         return 0
 
+    def watch_scope(self):
+        return (self.cluster_id,)
+
     def client(self, **kwargs):
         """Return API client to this node
         """

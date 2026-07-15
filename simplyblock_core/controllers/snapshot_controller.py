@@ -33,9 +33,9 @@ async def watch_snapshots(cluster_id, pool_id):
     """Stream snapshot changes for one pool (same scope as get_snapshots_by_pool_id)."""
     db = DBController()
     async for batch in db.watch(
-            SnapShot,
+            SnapShot, scope=(pool_id,),
             select=lambda models: db.get_snapshots_by_pool_id(pool_id, source=models),
-            ancestors=[(Cluster, cluster_id), (Pool, pool_id)]):
+            ancestors=[(Cluster, (), cluster_id), (Pool, (cluster_id,), pool_id)]):
         yield batch
 
 
@@ -43,12 +43,8 @@ async def watch_snapshot(cluster_id, pool_id, snapshot_id):
     """Stream changes for a single snapshot."""
     db = DBController()
     async for batch in db.watch(
-            SnapShot,
-            select=lambda models: [
-                snap for snap in db.get_snapshots_by_pool_id(pool_id, source=models)
-                if snap.get_id() == snapshot_id
-            ],
-            ancestors=[(Cluster, cluster_id), (Pool, pool_id)]):
+            SnapShot, scope=(pool_id,), entity_id=snapshot_id,
+            ancestors=[(Cluster, (), cluster_id), (Pool, (cluster_id,), pool_id)]):
         yield batch
 
 db_controller = DBController()

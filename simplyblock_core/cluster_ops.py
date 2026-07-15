@@ -46,9 +46,7 @@ async def watch_clusters():
 
 async def watch_cluster(cluster_id):
     """Stream changes for a single cluster."""
-    async for batch in db_controller.watch(
-            Cluster,
-            select=lambda models: [c for c in models if c.get_id() == cluster_id]):
+    async for batch in db_controller.watch(Cluster, entity_id=cluster_id):
         yield batch
 
 def _create_update_user(cluster_id, grafana_url, grafana_secret: SecretStr, user_secret: SecretStr, update_secret=False):

@@ -56,14 +56,15 @@ class DBController(metaclass=Singleton):
         except Exception:
             logger.exception("FDB initialization failed")
 
-    def watch(self, model_cls, *, select=None, ancestors=()):
-        """Async stream of watch.ChangeEvent batches for a watched model class.
+    def watch(self, model_cls, *, scope=(), entity_id=None, select=None, ancestors=()):
+        """Async stream of watch.ChangeEvent batches for a watched scope.
 
         Thin pass-through to :func:`simplyblock_core.watch.watch` so controllers
         reach the watch primitive the same way they reach every other DB op.
         """
         from simplyblock_core import watch as _watch
-        return _watch.watch(model_cls, select=select, ancestors=ancestors)
+        return _watch.watch(
+            model_cls, scope=scope, entity_id=entity_id, select=select, ancestors=ancestors)
 
     def get_storage_nodes(self) -> List[StorageNode]:
         ret = StorageNode().read_from_db(self.kv_store)
@@ -686,7 +687,9 @@ class DBController(metaclass=Singleton):
             return obj
         tr[key] = json.dumps(obj.to_dict(unwrap_secrets=True)).encode()
         if getattr(model_cls, '_WATCHED', False):
-            tr.add(watches.watch_counter_key(model_cls), watches.ONE_LE64)
+            scope = obj.watch_scope()
+            tr.add(watches.watch_index_rollup_key(model_cls, scope), watches.ONE_LE64)
+            tr.add(watches.watch_index_version_key(model_cls, scope, obj.get_id()), watches.ONE_LE64)
         return obj
 
     def atomic_update(self, obj, mutate_fn):
@@ -932,7 +935,9 @@ class DBController(metaclass=Singleton):
             prefix = target.get_db_id()
             data = json.dumps(target.get_clean_dict(unwrap_secrets=True))
             tr[prefix.encode()] = data.encode()
-            tr.add(watches.watch_counter_key(StorageNode), watches.ONE_LE64)
+            scope = target.watch_scope()
+            tr.add(watches.watch_index_rollup_key(StorageNode, scope), watches.ONE_LE64)
+            tr.add(watches.watch_index_version_key(StorageNode, scope, target.get_id()), watches.ONE_LE64)
 
         return True, None
 
