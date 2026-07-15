@@ -46,25 +46,25 @@ import os
 logger = utils.get_logger(__name__)
 
 
-def watch_storage_nodes(cluster_id):
+async def watch_storage_nodes(cluster_id):
     """Stream storage-node changes for one cluster (same scope as
     get_storage_nodes_by_cluster_id)."""
     db = DBController()
-    return db.watch(
-        StorageNode,
-        select=lambda models: db.get_storage_nodes_by_cluster_id(cluster_id, source=models),
-        ancestors=[(Cluster, cluster_id)],
-    )
+    async for batch in db.watch(
+            StorageNode,
+            select=lambda models: db.get_storage_nodes_by_cluster_id(cluster_id, source=models),
+            ancestors=[(Cluster, cluster_id)]):
+        yield batch
 
 
-def watch_storage_node(cluster_id, node_id):
+async def watch_storage_node(cluster_id, node_id):
     """Stream changes for a single storage node."""
     db = DBController()
-    return db.watch(
-        StorageNode,
-        select=lambda models: [node for node in models if node.get_id() == node_id],
-        ancestors=[(Cluster, cluster_id)],
-    )
+    async for batch in db.watch(
+            StorageNode,
+            select=lambda models: [node for node in models if node.get_id() == node_id],
+            ancestors=[(Cluster, cluster_id)]):
+        yield batch
 
 
 class LVSRestartRequiredError(Exception):

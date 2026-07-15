@@ -15,26 +15,26 @@ logger = logging.getLogger()
 db = db_controller.DBController()
 
 
-def watch_tasks(cluster_id):
+async def watch_tasks(cluster_id):
     """Stream task changes for one cluster (excludes device-migration tasks,
     matching the task list endpoint)."""
-    return db.watch(
-        JobSchedule,
-        select=lambda models: [
-            task for task in db.get_job_tasks(cluster_id, source=models)
-            if task.function_name != JobSchedule.FN_DEV_MIG
-        ],
-        ancestors=[(Cluster, cluster_id)],
-    )
+    async for batch in db.watch(
+            JobSchedule,
+            select=lambda models: [
+                task for task in db.get_job_tasks(cluster_id, source=models)
+                if task.function_name != JobSchedule.FN_DEV_MIG
+            ],
+            ancestors=[(Cluster, cluster_id)]):
+        yield batch
 
 
-def watch_task(cluster_id, task_id):
+async def watch_task(cluster_id, task_id):
     """Stream changes for a single task."""
-    return db.watch(
-        JobSchedule,
-        select=lambda models: [task for task in models if task.uuid == task_id],
-        ancestors=[(Cluster, cluster_id)],
-    )
+    async for batch in db.watch(
+            JobSchedule,
+            select=lambda models: [task for task in models if task.uuid == task_id],
+            ancestors=[(Cluster, cluster_id)]):
+        yield batch
 
 # Identity used for task leases. Hostname (not pid) so a runner that crashes
 # and restarts on the same host re-claims its own in-flight tasks immediately.
