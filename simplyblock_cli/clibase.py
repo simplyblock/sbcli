@@ -1077,7 +1077,7 @@ class CLIWrapperBase:
         return fdb_backup_controller.add_backup_task(args.cluster_id)
 
     def db_backup__list(self, sub_command, args):
-        return fdb_backup_controller.list_backups()
+        return fdb_backup_controller.list_backups(args.cluster_id)
 
     def db_backup__status(self, sub_command, args):
         return fdb_backup_controller.backup_status()

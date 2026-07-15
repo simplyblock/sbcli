@@ -2658,6 +2658,11 @@ commands:
             type: str
       - name: list
         help: "Lists all fdb backups"
+        arguments:
+          - name: "cluster_id"
+            help: "Cluster ID to restore db backup to"
+            dest: cluster_id
+            type: str
       - name: status
         help: "get backup status"
       - name: restore

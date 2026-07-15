@@ -1111,6 +1111,7 @@ class CLIWrapper(CLIWrapperBase):
 
     def init_db_backup__list(self, subparser):
         subcommand = self.add_sub_command(subparser, 'list', 'Lists all fdb backups')
+        subcommand.add_argument('cluster_id', help='Cluster ID to restore db backup to', type=str)
 
     def init_db_backup__status(self, subparser):
         subcommand = self.add_sub_command(subparser, 'status', 'get backup status')
