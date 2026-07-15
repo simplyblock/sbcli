@@ -20,7 +20,7 @@ def __get_fdb_cont():
         return
     node_docker = docker.DockerClient(base_url=f"tcp://{snode.docker_ip_port}", version="auto")
     for container in node_docker.containers.list():
-        if container.name.startswith("app_fdb-server"): # type: ignore[union-attr]
+        if container.name.startswith("app_fdb-backup-agent"): # type: ignore[union-attr]
             return container
 
 def create_backup(cluster_id):
