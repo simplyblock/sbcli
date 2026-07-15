@@ -101,6 +101,9 @@ class LVol(BaseModel):
     # policy derives them from policy + target.
     replication_policy_id: str = ""
 
+    def watch_scope(self):
+        return (self.pool_uuid,)
+
     def has_qos(self):
         return (self.rw_ios_per_sec > 0 or self.rw_mbytes_per_sec > 0 or self.r_mbytes_per_sec > 0 or self.w_mbytes_per_sec > 0)
 

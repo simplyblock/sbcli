@@ -20,7 +20,7 @@ from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.pool import Pool
-from simplyblock_core.watch import get_hub
+from simplyblock_core.watch import get_scope_watch
 
 
 @pytest.fixture(scope='module')
@@ -205,11 +205,12 @@ def test_client_disconnect_unsubscribes(base_url):
     reader = SSEReader(response)
     name, _ = reader.next_event()
     assert name == 'snapshot'
-    assert get_hub(LVol).subscriber_count() > 0
+    watch = get_scope_watch(LVol, (pool.get_id(),))
+    assert watch.subscriber_count() > 0
 
     response.close()
 
     deadline = time.monotonic() + 20
-    while get_hub(LVol).subscriber_count() > 0 and time.monotonic() < deadline:
+    while watch.subscriber_count() > 0 and time.monotonic() < deadline:
         time.sleep(0.2)
-    assert get_hub(LVol).subscriber_count() == 0
+    assert watch.subscriber_count() == 0
