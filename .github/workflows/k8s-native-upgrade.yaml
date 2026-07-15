@@ -380,9 +380,10 @@ jobs:
           CORE_PERCENTAGE="30"
           FORCE_FORMAT_4K="false"
           CLUSTER_ENV="${{ github.event.inputs.cluster_environment || 'local' }}"
-          if [ "$CLUSTER_ENV" = "aws-openshift" ] || [ "$CLUSTER_ENV" = "openshift-local" ]; then
+          if [ "$CLUSTER_ENV" = "aws-openshift" ] || [ "$CLUSTER_ENV" = "openshift-local" ] || [ "$CLUSTER_ENV" = "openshift-baremetal" ]; then
             OPENSHIFT_CLUSTER="true"
             SKIP_KUBELET_CONFIG="true"
+            CORE_PERCENTAGE="50"
           fi
 
           # Build vault settings (conditional on TLS)
