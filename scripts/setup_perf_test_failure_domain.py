@@ -1,6 +1,9 @@
 import argparse
 import os
+import sys
+import threading
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 
 import boto3
 import paramiko
@@ -160,19 +163,49 @@ def _ssh_connect_with_retry(ip, retries=15, delay=10, timeout=15):
     raise RuntimeError(f"SSH connect to {ip} failed after {retries} attempts: {last_exc}")
 
 
-def ssh_exec(ip, cmds, get_output=False, check=False, cmd_timeout=600):
+def ssh_exec(ip, cmds, get_output=False, check=False, cmd_timeout=600,
+             reconnect_retries=3):
     # cmd_timeout bounds each remote command. 600s suits quick ops, but the
     # long 32-node operations (sn deploy = concurrent docker image pull +
     # SPDK bring-up, cluster activate = full mesh/hublvol wiring) need much
     # more; callers pass a larger value for those.
+    #
+    # Like the connect-time retries in _ssh_connect_with_retry, an
+    # established transport can also die mid-session under 30+ parallel
+    # long-lived connections (e.g. [WinError 10054] reset while opening a
+    # channel) and must not abort the whole deployment. On transport death
+    # the current command is re-run on a fresh connection, so every command
+    # routed through here has to stay idempotent. reconnect_retries=0
+    # disables this for commands where re-running is wrong (e.g. reboot).
     ssh = _ssh_connect_with_retry(ip)
     results = []
     for cmd in cmds:
-        print(f"  [{ip}] $ {cmd}")
-        stdin, stdout, stderr = ssh.exec_command(cmd, timeout=cmd_timeout)
-        out = stdout.read().decode('utf-8')
-        err = stderr.read().decode('utf-8')
-        rc = stdout.channel.recv_exit_status()
+        for attempt in range(reconnect_retries + 1):
+            print(f"  [{ip}] $ {cmd}")
+            try:
+                stdin, stdout, stderr = ssh.exec_command(cmd, timeout=cmd_timeout)
+                out = stdout.read().decode('utf-8')
+                err = stderr.read().decode('utf-8')
+                rc = stdout.channel.recv_exit_status()
+                break
+            except (paramiko.SSHException, EOFError, OSError) as e:
+                if isinstance(e, TimeoutError):
+                    # Command exceeded cmd_timeout; re-running won't help.
+                    ssh.close()
+                    raise
+                try:
+                    ssh.close()
+                except Exception:
+                    pass
+                if attempt >= reconnect_retries:
+                    raise RuntimeError(
+                        f"SSH transport to {ip} died {reconnect_retries + 1} "
+                        f"times running: {cmd}: {e}") from e
+                print(f"  [{ip}] connection died mid-command "
+                      f"({type(e).__name__}: {e}), reconnecting and re-running "
+                      f"(retry {attempt + 2}/{reconnect_retries + 1})")
+                time.sleep(10)
+                ssh = _ssh_connect_with_retry(ip)
         if get_output:
             results.append(out)
         if rc != 0:
@@ -445,8 +478,30 @@ class PersistentSSH:
 
 
 
-def main():
+class _TeeStdout:
+    """Mirror stdout to a log file so a failed run leaves forensics behind
+    (which node's [ip] line preceded the traceback, timings, command output).
+    Thread-safe because ssh_exec prints from ThreadPoolExecutor workers."""
 
+    def __init__(self, path):
+        self._file = open(path, "a", buffering=1, encoding="utf-8")
+        self._stdout = sys.stdout
+        self._lock = threading.Lock()
+
+    def write(self, data):
+        with self._lock:
+            self._stdout.write(data)
+            self._file.write(data)
+
+    def flush(self):
+        self._stdout.flush()
+        self._file.flush()
+
+
+def main():
+    log_path = f"setup_perf_fd_{datetime.now():%Y%m%d_%H%M%S}.log"
+    sys.stdout = sys.stderr = _TeeStdout(log_path)
+    print(f"Logging to {log_path}")
 
     # Launch Mgmt Node
     print("Launching Management Node...")
@@ -526,9 +581,12 @@ def main():
             t.result()
     print("Phase 2c: DONE - all SNs deployed. Rebooting...")
 
-    # Reboot all SNs in parallel (reboot returns non-zero, don't check)
+    # Reboot all SNs in parallel (reboot returns non-zero, don't check).
+    # reconnect_retries=0: the reboot is EXPECTED to kill the connection;
+    # a reconnect-retry would reboot the node a second time.
     with ThreadPoolExecutor(max_workers=len(sn_ips)) as executor:
-        [executor.submit(ssh_exec, ip, ["sudo reboot"]) for ip in sn_ips]
+        [executor.submit(ssh_exec, ip, ["sudo reboot"], reconnect_retries=0)
+         for ip in sn_ips]
 
     print("Waiting for SN reboot recovery...")
     time.sleep(30)
