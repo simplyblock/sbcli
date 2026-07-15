@@ -1,8 +1,7 @@
 # coding=utf-8
-"""WatchHub against real FDB: watch firing, reconcile poll, teardown."""
+"""ScopeWatch against real FDB: scoped delivery, scoped wakeup, teardown."""
 
 import asyncio
-import json
 import time
 from uuid import uuid4
 
@@ -10,14 +9,13 @@ import pytest
 
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.pool import Pool
-from simplyblock_core import watch
-from simplyblock_core.watch import _UNSET, WatchHub
+from simplyblock_core.watch import _UNSET, ScopeWatch
 
 
-def _pool_dict(pool_id=None):
+def _pool_dict(cluster_id):
     return {
-        'uuid': pool_id or str(uuid4()),
-        'cluster_id': str(uuid4()),
+        'uuid': str(uuid4()),
+        'cluster_id': cluster_id,
         'pool_name': 'hub-test-pool',
         'status': Pool.STATUS_ACTIVE,
     }
@@ -37,19 +35,20 @@ async def _await_publication(sub, notify, timeout=10.0):
 
 
 @pytest.mark.timeout(60)
-def test_hub_publishes_writes_and_stops_on_unsubscribe():
+def test_scopewatch_delivers_scoped_writes_and_stops_on_unsubscribe():
     db = DBController()
+    cluster_id = str(uuid4())
 
     async def scenario():
         loop = asyncio.get_running_loop()
         notify = asyncio.Event()
-        hub = WatchHub(Pool)
-        sub = hub.subscribe(loop, notify)
+        sw = ScopeWatch(Pool, (cluster_id,), None)
+        sub = sw.subscribe(loop, notify)
         try:
-            # Initial publication (whatever the range currently holds).
-            await _await_publication(sub, notify)
+            # Initial publication for this (empty) scope.
+            assert await _await_publication(sub, notify) == []
 
-            pool = Pool(_pool_dict())
+            pool = Pool(_pool_dict(cluster_id))
             started = time.monotonic()
             await asyncio.to_thread(pool.write_to_db, db.kv_store)
             state = await _await_publication(sub, notify, timeout=5.0)
@@ -60,9 +59,9 @@ def test_hub_publishes_writes_and_stops_on_unsubscribe():
             state = await _await_publication(sub, notify, timeout=5.0)
             assert not any(m.get_id() == pool.get_id() for m in state)
         finally:
-            hub.unsubscribe(sub)
+            sw.unsubscribe(sub)
 
-        thread = hub._thread
+        thread = sw._thread
         deadline = time.monotonic() + 10
         while thread.is_alive() and time.monotonic() < deadline:
             await asyncio.sleep(0.1)
@@ -72,29 +71,27 @@ def test_hub_publishes_writes_and_stops_on_unsubscribe():
 
 
 @pytest.mark.timeout(60)
-def test_reconcile_catches_writes_without_counter_bump(monkeypatch):
-    """Old-version writers don't bump counters; the reconcile poll must
-    still pick their writes up."""
-    monkeypatch.setattr(watch, 'WATCH_RECONCILE_SEC', 0.5)
+def test_scopewatch_ignores_other_scope():
+    """A write in a different cluster's scope must not wake this watch."""
     db = DBController()
+    cluster_a = str(uuid4())
+    cluster_b = str(uuid4())
 
     async def scenario():
         loop = asyncio.get_running_loop()
         notify = asyncio.Event()
-        hub = WatchHub(Pool)
-        sub = hub.subscribe(loop, notify)
+        sw = ScopeWatch(Pool, (cluster_a,), None)
+        sub = sw.subscribe(loop, notify)
         try:
-            await _await_publication(sub, notify)
+            assert await _await_publication(sub, notify) == []
 
-            # Simulate a pre-upgrade writer: raw set, no counter bump.
-            legacy = _pool_dict()
-            key = f'object/Pool/{legacy["uuid"]}'.encode()
-            await asyncio.to_thread(
-                db.kv_store.set, key, json.dumps(legacy).encode())
+            other = Pool(_pool_dict(cluster_b))
+            await asyncio.to_thread(other.write_to_db, db.kv_store)
 
-            state = await _await_publication(sub, notify, timeout=10.0)
-            assert any(m.get_id() == legacy['uuid'] for m in state)
+            # cluster_a's rollup key never bumped -> no publication (< reconcile).
+            with pytest.raises(asyncio.TimeoutError):
+                await _await_publication(sub, notify, timeout=3.0)
         finally:
-            hub.unsubscribe(sub)
+            sw.unsubscribe(sub)
 
     asyncio.run(scenario())

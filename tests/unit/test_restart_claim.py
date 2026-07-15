@@ -30,7 +30,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from simplyblock_core import constants, storage_node_ops
+from simplyblock_core import constants, storage_node_ops, watches
 from simplyblock_core import db_controller as db_module
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.job_schedule import JobSchedule
@@ -96,8 +96,19 @@ def test_claim_active_naive_ts_treated_as_utc():
 # --------------------------------------------------------------------------
 
 class _FakeTr(dict):
+    """Row writes land in the dict itself; watch-counter bumps are atomic
+    mutations on separate keys, so they are recorded apart from the rows the
+    assertions below json-decode."""
+
+    def __init__(self):
+        super().__init__()
+        self.added = {}
+
     def __setitem__(self, key, value):
         dict.__setitem__(self, key, value)
+
+    def add(self, key, param):
+        self.added[key] = self.added.get(key, 0) + watches.unpack_counter(param)
 
 
 def _run_tx(monkeypatch, nodes, node_id="node-1", cluster_id="cl-1",

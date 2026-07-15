@@ -1,5 +1,5 @@
 # coding=utf-8
-"""Every entity write path bumps the per-class change counter — real FDB."""
+"""Every entity write path maintains the version index — real FDB."""
 
 from uuid import uuid4
 
@@ -10,9 +10,13 @@ from simplyblock_core.models.stats import LVolStatObject
 from simplyblock_core.models.storage_node import StorageNode
 
 
-def _counter(db, model_cls):
-    raw = db.kv_store.get(watches.watch_counter_key(model_cls))
+def _rollup(db, model_cls, scope):
+    raw = db.kv_store.get(watches.watch_index_rollup_key(model_cls, scope))
     return watches.unpack_counter(bytes(raw)) if raw is not None else 0
+
+
+def _version_present(db, model_cls, scope, leaf):
+    return db.kv_store.get(watches.watch_index_version_key(model_cls, scope, leaf)) is not None
 
 
 def _make_pool(cluster_id=None):
@@ -24,25 +28,29 @@ def _make_pool(cluster_id=None):
     })
 
 
-def test_write_to_db_bumps_counter_by_one():
+def test_write_to_db_bumps_rollup_and_version():
     db = DBController()
     pool = _make_pool()
-    before = _counter(db, Pool)
+    scope = pool.watch_scope()
+    before = _rollup(db, Pool, scope)
     pool.write_to_db(db.kv_store)
-    assert _counter(db, Pool) == before + 1
+    assert _rollup(db, Pool, scope) == before + 1
+    assert _version_present(db, Pool, scope, pool.get_id())
     assert db.get_pool_by_id(pool.get_id()).get_id() == pool.get_id()
 
 
-def test_remove_bumps_counter():
+def test_remove_bumps_rollup_and_clears_version():
     db = DBController()
     pool = _make_pool()
     pool.write_to_db(db.kv_store)
-    before = _counter(db, Pool)
+    scope = pool.watch_scope()
+    before = _rollup(db, Pool, scope)
     pool.remove(db.kv_store)
-    assert _counter(db, Pool) == before + 1
+    assert _rollup(db, Pool, scope) == before + 1
+    assert not _version_present(db, Pool, scope, pool.get_id())
 
 
-def test_atomic_update_bumps_counter():
+def test_atomic_update_bumps_index():
     db = DBController()
     node = StorageNode({
         'uuid': str(uuid4()),
@@ -50,17 +58,19 @@ def test_atomic_update_bumps_counter():
         'status': StorageNode.STATUS_ONLINE,
     })
     node.write_to_db(db.kv_store)
-    before = _counter(db, StorageNode)
+    scope = node.watch_scope()
+    before = _rollup(db, StorageNode, scope)
 
     def mutate(fresh):
         fresh.status = StorageNode.STATUS_SUSPENDED
 
     updated = db.atomic_update(node, mutate)
     assert updated.status == StorageNode.STATUS_SUSPENDED
-    assert _counter(db, StorageNode) == before + 1
+    assert _rollup(db, StorageNode, scope) == before + 1
+    assert _version_present(db, StorageNode, scope, node.get_id())
 
 
-def test_try_set_node_restarting_bumps_counter(monkeypatch):
+def test_try_set_node_restarting_bumps_index(monkeypatch):
     from simplyblock_core import distr_controller
     monkeypatch.setattr(distr_controller, 'send_node_status_event', lambda *a, **kw: None)
 
@@ -72,28 +82,30 @@ def test_try_set_node_restarting_bumps_counter(monkeypatch):
         'status': StorageNode.STATUS_ONLINE,
     })
     node.write_to_db(db.kv_store)
-    before = _counter(db, StorageNode)
+    scope = node.watch_scope()
+    before = _rollup(db, StorageNode, scope)
 
     acquired, reason = db.try_set_node_restarting(cluster_id, node.get_id())
     assert acquired, reason
-    assert _counter(db, StorageNode) == before + 1
+    assert _rollup(db, StorageNode, scope) == before + 1
 
 
-def test_counter_keys_invisible_to_entity_reads():
+def test_index_keys_invisible_to_entity_reads():
     db = DBController()
     pool = _make_pool()
     pool.write_to_db(db.kv_store)
-    # A counter key inside the entity prefix would blow up the JSON parse in
+    # An index key inside the entity prefix would blow up the JSON parse in
     # read_from_db; parsing the whole range cleanly is the collision guard.
     pools = Pool().read_from_db(db.kv_store)
     assert pool.get_id() in {p.get_id() for p in pools}
     entity_keys = [bytes(k) for k, _ in db.kv_store.get_range_startswith(b'object/Pool/')]
-    assert all(b'watch_seq' not in key for key in entity_keys)
+    assert all(b'watch_index' not in key for key in entity_keys)
 
 
-def test_unwatched_write_creates_no_counter():
+def test_unwatched_write_creates_no_index():
     db = DBController()
-    before = _counter(db, LVolStatObject)
+    scope = ()  # LVolStatObject is unwatched; default scope
+    before = _rollup(db, LVolStatObject, scope)
     stat = LVolStatObject({
         'uuid': str(uuid4()),
         'cluster_id': str(uuid4()),
@@ -101,4 +113,4 @@ def test_unwatched_write_creates_no_counter():
         'date': 1,
     })
     stat.write_to_db(db.kv_store)
-    assert _counter(db, LVolStatObject) == before
+    assert _rollup(db, LVolStatObject, scope) == before

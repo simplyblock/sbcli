@@ -15,15 +15,17 @@ itself is not unit-testable without libfdb_c; what is verified here is the
 claim/recount/persist logic and its atomic pairing.
 """
 
+import struct
 from types import SimpleNamespace
 
+from simplyblock_core import watches
 from simplyblock_core.db_controller import DBController, SubsystemCapacityError
 from simplyblock_core.models.lvol_model import LVol, LVolMini
 
 
 class FakeKV:
     """Dict-backed store implementing the surface BaseModel and _NoTxnStore
-    use: get/set/clear + get_range_startswith (read_from_db's fallback for
+    use: get/set/clear/add + get_range_startswith (read_from_db's fallback for
     stores without raw range reads)."""
 
     def __init__(self):
@@ -37,6 +39,10 @@ class FakeKV:
 
     def clear(self, key):
         self.data.pop(key, None)
+
+    def add(self, key, param):
+        self.data[key] = struct.pack(
+            '<q', watches.unpack_counter(self.data.get(key)) + watches.unpack_counter(param))
 
     def get_range_startswith(self, prefix, limit=0, reverse=False):
         items = sorted((k, v) for k, v in self.data.items() if k.startswith(prefix))
