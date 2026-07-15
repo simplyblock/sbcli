@@ -41,7 +41,7 @@ spec:
         path: /var/simplyblock
     - name: tmp-simplyblock
       hostPath:
-        path: /tmp/simplyblock
+        path: /var/run/simplyblock
         type: DirectoryOrCreate
     - name: host-modules
       hostPath:
@@ -49,6 +49,10 @@ spec:
     - name: dev-vol
       hostPath:
         path: /dev
+    - name: var-crash
+      hostPath:
+        path: /var/crash
+        type: DirectoryOrCreate
     - name: hugepage
       emptyDir:
         medium: HugePages
@@ -122,6 +126,8 @@ spec:
           mountPath: /script
         - name: etc-simplyblock
           mountPath: /etc/simplyblock
+        - name: var-crash
+          mountPath: /var/crash
       resources:
         limits:
           hugepages-2Mi: {{ MEM_MEGA }}Mi
@@ -147,7 +153,7 @@ spec:
         - name: socket-dir
           mountPath: /mnt/ramdisk
         - name: tmp-simplyblock
-          mountPath: /tmp/simplyblock
+          mountPath: /var/run/simplyblock
         {% if TLS_SERVE or TLS_CONNECT != "disabled" %}
         - name: tls
           mountPath: /etc/simplyblock/tls

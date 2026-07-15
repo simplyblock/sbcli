@@ -95,6 +95,16 @@ def _validate_new_task_node_restart(cluster_id, node_id):
 def _add_task(function_name, cluster_id, node_id, device_id,
               max_retry=constants.TASK_EXEC_RETRY_COUNT, function_params=None, send_to_cluster_log=True):
 
+    # NOTE on expansion: migration-family tasks (device / new-device /
+    # failed-device / lvol migration) may be QUEUED while the cluster is in
+    # expansion — e.g. an unexpected node outage during the rebalance queues
+    # its recovery migrations — but they do not RUN: every migration runner
+    # defers while the cluster is not ACTIVE/DEGRADED/READONLY AND while a
+    # cluster-expand task is open. Refusing creation here (an earlier
+    # revision did) silently lost the outage's recovery work. Ordering after
+    # an expansion: expansion completes -> outage device migration drains ->
+    # expansion (new-device) migration runs (see tasks_runner_new_dev_migration).
+
     if function_name in [JobSchedule.FN_DEV_RESTART, JobSchedule.FN_FAILED_DEV_MIG]:
         if not _validate_new_task_dev_restart(cluster_id, node_id, device_id):
             return False
@@ -126,6 +136,12 @@ def _add_task(function_name, cluster_id, node_id, device_id,
             return False
     elif function_name == JobSchedule.FN_LVOL_SYNC_DEL:
         task_id = get_lvol_sync_del_task(cluster_id, node_id, function_params['lvol_bdev_name'])
+        if task_id:
+            logger.info(f"Task found, skip adding new task: {task_id}")
+            return False
+    elif function_name == JobSchedule.FN_LVOL_SYNC_OP:
+        task_id = get_lvol_sync_op_task(cluster_id, node_id,
+                                        function_params['lvol_id'], function_params['op'])
         if task_id:
             logger.info(f"Task found, skip adding new task: {task_id}")
             return False
@@ -218,6 +234,37 @@ def add_device_to_auto_restart(device):
     return _add_task(JobSchedule.FN_DEV_RESTART, device.cluster_id, device.node_id, device.get_id())
 
 
+def is_suspension_operator_caused(cluster):
+    """True when the cluster's SUSPENDED state is explained by deliberate
+    operator node shutdowns (``auto_restart_disabled`` markers, set by
+    ``sn shutdown``): without those nodes, the remaining not-online nodes
+    alone would still be within the cluster's fault tolerance.
+
+    In that case the automated suspend recovery (drain force-shutdown of the
+    surviving nodes + full parallel restart + reactivation) must NOT run — it
+    would fight an intentional shutdown by killing and restarting the healthy
+    nodes. Recovery is the operator's call: restart the stopped nodes, or run
+    ``cluster restart`` (which clears the markers and re-arms recovery).
+
+    A suspension where the non-deliberate outages already exceed FTT is a
+    genuine failure regardless of any deliberate shutdowns, and auto recovery
+    proceeds."""
+    if cluster.status != Cluster.STATUS_SUSPENDED:
+        return False
+    deliberate_down = 0
+    other_not_online = 0
+    for node in db.get_storage_nodes_by_cluster_id(cluster.get_id()):
+        if node.status in (StorageNode.STATUS_ONLINE, StorageNode.STATUS_REMOVED):
+            continue
+        if node.auto_restart_disabled:
+            deliberate_down += 1
+        else:
+            other_not_online += 1
+    ftt = cluster.max_fault_tolerance if isinstance(cluster.max_fault_tolerance, int) \
+        and cluster.max_fault_tolerance >= 1 else 1
+    return deliberate_down > 0 and other_not_online <= ftt
+
+
 def is_auto_restart_paused(cluster):
     """Auto-restart is paused while a SUSPENDED cluster is still being drained
     to a clean all-offline slate by the suspend-recovery auto-shutdown
@@ -227,9 +274,16 @@ def is_auto_restart_paused(cluster):
     health-checked). So we hold every restart until the drain is complete
     (cluster.suspend_drain_complete), then let the existing auto-restart bring
     the nodes back from offline. Used by both the queue chokepoint
-    (add_node_to_auto_restart) and the restart task runner."""
+    (add_node_to_auto_restart) and the restart task runner.
+
+    Exception: an operator-caused suspension (see
+    ``is_suspension_operator_caused``) never drains, so the drain marker would
+    pause restarts forever. The surviving nodes are still up in that state —
+    restarting a genuinely-failed node one-by-one onto up peers is the normal
+    restart path, not the strand-prone post-drain path — so don't pause."""
     return (cluster.status == Cluster.STATUS_SUSPENDED
-            and not cluster.suspend_drain_complete)
+            and not cluster.suspend_drain_complete
+            and not is_suspension_operator_caused(cluster))
 
 
 def add_node_to_auto_restart(node):
@@ -295,13 +349,36 @@ def add_node_to_auto_restart(node):
                               Cluster.STATUS_READONLY, Cluster.STATUS_UNREADY, Cluster.STATUS_SUSPENDED]:
         logger.warning(f"Cluster is not active, skip node auto restart, status: {cluster.status}")
         return False
-    offline_nodes = 0
-    for sn in db.get_storage_nodes_by_cluster_id(node.cluster_id):
-        if node.get_id() != sn.get_id() and sn.status != StorageNode.STATUS_ONLINE and node.mgmt_ip != sn.mgmt_ip:
-            offline_nodes += 1
-    if offline_nodes > cluster.distr_npcs and cluster.status != Cluster.STATUS_SUSPENDED:
-        logger.info("Node found that is not online, skip node auto restart")
-        return False
+    # Past-fault-tolerance guard: don't auto-restart nodes one-by-one when
+    # more than the cluster can tolerate is already offline — that churn is
+    # what wedged the cluster before (stale ONLINE peers / stuck lvstore
+    # in_creation), and the SUSPENDED-drain path (above) owns that case.
+    #
+    # BUT this raw ``offline_nodes > distr_npcs`` count is failure-domain
+    # blind. On a failure-domain cluster a WHOLE domain going offline (e.g.
+    # a 1+1 cluster losing all 16 nodes of one domain) is the *tolerated*
+    # case: the FD-aware status logic keeps the cluster DEGRADED (never
+    # SUSPENDED), so `offline_nodes(15) > npcs(1)` trips and, because it is
+    # not SUSPENDED, blocks auto-restart for every node in the domain —
+    # permanently, since nothing will ever move it to SUSPENDED. Result:
+    # the whole rebooted domain never restarts (incident 2026-07-08,
+    # 32-node/2-domain/1+1 whole-domain reboot soak).
+    #
+    # For a failure-domain cluster the cluster STATUS already encodes
+    # tolerance (the FD-aware get_next_cluster_status returns DEGRADED when
+    # the loss is within the domain budget, SUSPENDED when it exceeds it).
+    # So when enable_failure_domain is set, trust the status: ACTIVE/DEGRADED
+    # means "tolerated, go ahead and restart"; the SUSPENDED-not-drained case
+    # is already held by is_auto_restart_paused above. Only apply the flat
+    # node-count guard to non-FD clusters.
+    if not cluster.enable_failure_domain:
+        offline_nodes = 0
+        for sn in db.get_storage_nodes_by_cluster_id(node.cluster_id):
+            if node.get_id() != sn.get_id() and sn.status != StorageNode.STATUS_ONLINE and node.mgmt_ip != sn.mgmt_ip:
+                offline_nodes += 1
+        if offline_nodes > cluster.distr_npcs and cluster.status != Cluster.STATUS_SUSPENDED:
+            logger.info("Node found that is not online, skip node auto restart")
+            return False
     return _add_task(JobSchedule.FN_NODE_RESTART, node.cluster_id, node.get_id(), "", max_retry=11)
 
 
@@ -537,10 +614,15 @@ def add_node_add_task(cluster_id, function_params):
 def add_cluster_expand_task(cluster_id, new_node_id):
     """Queue a single-node cluster-expansion task. The runner drives the
     planner/orchestrator/executor to integrate ``new_node_id`` into the
-    role rotation, resuming from a persisted cursor across retries."""
+    role rotation, resuming from a persisted cursor across retries.
+
+    max_retry=-1 (never give up): an unexpected node outage mid-expansion
+    can hold the plan suspended for many backoff cycles, but a half-moved
+    topology MUST complete — abandoning it strands stale sec/tert
+    pointers. The task is cancellable by the operator if truly stuck."""
     return _add_task(
         JobSchedule.FN_CLUSTER_EXPAND, cluster_id, new_node_id, "",
-        function_params={"new_node_id": new_node_id}, max_retry=3)
+        function_params={"new_node_id": new_node_id}, max_retry=-1)
 
 
 def get_active_cluster_expand_task(cluster_id):
@@ -552,6 +634,27 @@ def get_active_cluster_expand_task(cluster_id):
                 and task.status != JobSchedule.STATUS_DONE:
             return task.uuid
     return False
+
+
+def defer_task_for_expansion(task):
+    """Suspend ``task`` if a cluster expansion is in progress. Returns True
+    when deferred.
+
+    Migration-family runners call this right after their cluster-status
+    gate. The status gate alone is not enough: a node outage mid-expansion
+    suspends the cluster-expand task and restores the cluster status to
+    ACTIVE between its retries — without this gate the outage's recovery
+    migrations would start running in that window and then block the
+    expansion resume, inverting the required order (expansion completes
+    FIRST, then outage device migration, then expansion migration).
+    Deliberately does not consume a retry: this is a deferral, not a
+    failure."""
+    if not get_active_cluster_expand_task(task.cluster_id):
+        return False
+    task.function_result = "cluster expansion in progress, deferring"
+    task.status = JobSchedule.STATUS_SUSPENDED
+    task.write_to_db(db.kv_store)
+    return True
 
 
 def get_active_node_tasks(cluster_id, node_id):
@@ -676,6 +779,121 @@ def add_lvol_mig_task(migration):
 def add_lvol_sync_del_task(cluster_id, node_id, lvol_bdev_name, primary_node):
     return _add_task(JobSchedule.FN_LVOL_SYNC_DEL, cluster_id, node_id, "",
                      function_params={"lvol_bdev_name": lvol_bdev_name, "primary_node": primary_node}, max_retry=10)
+
+
+def get_lvol_sync_op_task(cluster_id, node_id, lvol_id, op):
+    for task in db.get_job_tasks(cluster_id):
+        if task.function_name == JobSchedule.FN_LVOL_SYNC_OP and task.node_id == node_id:
+            if task.status != JobSchedule.STATUS_DONE and task.canceled is False:
+                if (task.function_params.get("lvol_id") == lvol_id
+                        and task.function_params.get("op") == op):
+                    return task.uuid
+    return False
+
+
+def add_lvol_sync_op_task(cluster_id, node_id, lvol_id, op, secondary_index=0):
+    """DB-backed deferred per-node lvol operation (``op`` is ``"register"``
+    or ``"resize"``).
+
+    Replaces the in-memory ``_restart_op_queues`` deferral for lvol
+    create/resize registrations on non-leaders: that queue is a
+    module-level dict — per process (webappapi queues, the restart runner
+    drains only its OWN copy on phase transitions) and gone on process
+    restart. Incident 2026-07-10 lost a tertiary create-registration that
+    way and a dual outage within FTT killed all IO paths. A JobSchedule
+    task survives process boundaries and restarts; the sync-op runner
+    (tasks_runner_sync_lvol_del service) applies it once the node is
+    ONLINE, the lvol settled, and no restart owns the LVS. The op is
+    idempotent, and obsolescence (lvol deleted) completes the task."""
+    return _add_task(JobSchedule.FN_LVOL_SYNC_OP, cluster_id, node_id, "",
+                     function_params={"lvol_id": lvol_id, "op": op,
+                                      "secondary_index": secondary_index},
+                     max_retry=-1)
+
+
+def run_lvol_sync_op_task(task):
+    """Execute one FN_LVOL_SYNC_OP task (called by the sync runner's loop;
+    lives here so it is importable without triggering the runner's
+    module-level loop). Idempotent; never raises."""
+    from simplyblock_core import storage_node_ops
+    from simplyblock_core.models.lvol_model import LVol
+
+    def _finish(result):
+        task.function_result = result
+        task.status = JobSchedule.STATUS_DONE
+        task.write_to_db(db.kv_store)
+
+    def _defer(result):
+        task.function_result = result
+        task.status = JobSchedule.STATUS_SUSPENDED
+        task.write_to_db(db.kv_store)
+
+    try:
+        if task.canceled:
+            _finish("canceled")
+            return
+
+        lvol_id = task.function_params.get("lvol_id")
+        op = task.function_params.get("op")
+        try:
+            lvol = db.get_lvol_by_id(lvol_id)
+        except KeyError:
+            _finish("lvol no longer exists")
+            return
+        if lvol.status == LVol.STATUS_IN_DELETION:
+            _finish("lvol is being deleted")
+            return
+        if lvol.status != LVol.STATUS_ONLINE:
+            _defer(f"lvol status is {lvol.status}, retrying")
+            return
+
+        try:
+            node = db.get_storage_node_by_id(task.node_id)
+        except KeyError:
+            _finish("node no longer exists")
+            return
+        if node.get_id() not in lvol.nodes:
+            _finish("node no longer hosts this lvol (topology moved)")
+            return
+        if node.status != StorageNode.STATUS_ONLINE:
+            _defer(f"node is {node.status}, retrying")
+            return
+        if storage_node_ops.get_restart_phase(task.node_id, lvol.lvs_name):
+            # The owning flow (restart/activation/expansion) re-registers
+            # lvols itself; re-check once it has released the LVS.
+            _defer("LVS owned by a restart/activation/expansion, retrying")
+            return
+
+        if task.status != JobSchedule.STATUS_RUNNING:
+            task.status = JobSchedule.STATUS_RUNNING
+            task.write_to_db(db.kv_store)
+
+        if op == "register":
+            ok, err = storage_node_ops.repair_lvol_registration_on_non_leader(
+                lvol, node, task.function_params.get("secondary_index", 0))
+            if ok:
+                _finish(f"registered lvol {lvol_id} on {task.node_id}")
+            else:
+                _defer(f"registration failed: {err}")
+        elif op == "resize":
+            # Converge to the CURRENT DB size — resize_lvol persists the new
+            # size after the fan-out, so this always applies the latest
+            # target even if the lvol was resized again meanwhile.
+            size_in_mib = utils.convert_size(lvol.size, 'MiB')
+            ret = node.rpc_client(timeout=10, retry=2).bdev_lvol_resize(
+                f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib)
+            if ret:
+                _finish(f"resized lvol {lvol_id} on {task.node_id} to {size_in_mib} MiB")
+            else:
+                _defer("resize RPC failed, retrying")
+        else:
+            _finish(f"unknown op {op!r}")
+    except Exception as e:
+        logger.error(f"lvol sync-op task {task.uuid} failed: {e}")
+        try:
+            _defer(f"error: {e}")
+        except Exception:
+            pass
 
 def get_lvol_sync_del_task(cluster_id, node_id, lvol_bdev_name=None):
     tasks = db.get_job_tasks(cluster_id)

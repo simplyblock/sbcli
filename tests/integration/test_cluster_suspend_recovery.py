@@ -194,8 +194,12 @@ class TestGetNextClusterStatusCountsNonOnline(unittest.TestCase):
         self.assertEqual(self._run(nodes, c), Cluster.STATUS_DEGRADED)
 
     def test_unreachable_node_counts_as_affected(self):
-        # Same story for UNREACHABLE — mgmt-plane gone, data records
-        # may still claim ONLINE because escalation hasn't fired yet.
+        # UNREACHABLE is a mgmt-plane verdict; since the data-plane gating
+        # (fix(suspend): gate mgmt-unreachable on data-plane loss) it counts
+        # toward suspension only once a peer quorum confirms the node's data
+        # plane is gone. With the quorum confirming, 3 unreachable > k=2
+        # -> SUSPENDED.
+        from simplyblock_core.services import storage_node_monitor as mod
         nodes = [
             _node("n0", status=StorageNode.STATUS_UNREACHABLE),
             _node("n1", status=StorageNode.STATUS_UNREACHABLE),
@@ -203,12 +207,30 @@ class TestGetNextClusterStatusCountsNonOnline(unittest.TestCase):
             _node("n3", status=StorageNode.STATUS_ONLINE),
         ]
         c = _cluster(distr_ndcs=1, distr_npcs=2)
-        # 3 unreachable > k=2 -> SUSPENDED
-        self.assertEqual(self._run(nodes, c), Cluster.STATUS_SUSPENDED)
+        with patch.object(mod, "is_node_data_plane_disconnected_quorum",
+                          return_value=True):
+            self.assertEqual(self._run(nodes, c), Cluster.STATUS_SUSPENDED)
+
+    def test_unreachable_without_data_plane_loss_not_counted(self):
+        # The gate itself: mgmt-unreachable with the data plane still serving
+        # (quorum says connected) must NOT suspend — an API blip or mgmt-NIC
+        # flap leaves clients unaffected.
+        from simplyblock_core.services import storage_node_monitor as mod
+        nodes = [
+            _node("n0", status=StorageNode.STATUS_UNREACHABLE),
+            _node("n1", status=StorageNode.STATUS_UNREACHABLE),
+            _node("n2", status=StorageNode.STATUS_UNREACHABLE),
+            _node("n3", status=StorageNode.STATUS_ONLINE),
+        ]
+        c = _cluster(distr_ndcs=1, distr_npcs=2)
+        with patch.object(mod, "is_node_data_plane_disconnected_quorum",
+                          return_value=False):
+            self.assertEqual(self._run(nodes, c), Cluster.STATUS_ACTIVE)
 
     def test_schedulable_node_counts_as_affected(self):
-        # SCHEDULABLE means SPDK RPC double-timed-out — SPDK is sick.
-        # Treat as affected.
+        # SCHEDULABLE means SPDK RPC double-timed-out — SPDK is sick. Counts
+        # once the data-plane quorum confirms (same gate as UNREACHABLE).
+        from simplyblock_core.services import storage_node_monitor as mod
         nodes = [
             _node("n0", status=StorageNode.STATUS_SCHEDULABLE),
             _node("n1", status=StorageNode.STATUS_SCHEDULABLE),
@@ -216,7 +238,9 @@ class TestGetNextClusterStatusCountsNonOnline(unittest.TestCase):
             _node("n3", status=StorageNode.STATUS_ONLINE),
         ]
         c = _cluster(distr_ndcs=1, distr_npcs=2)
-        self.assertEqual(self._run(nodes, c), Cluster.STATUS_SUSPENDED)
+        with patch.object(mod, "is_node_data_plane_disconnected_quorum",
+                          return_value=True):
+            self.assertEqual(self._run(nodes, c), Cluster.STATUS_SUSPENDED)
 
     def test_removed_node_does_not_count_as_affected(self):
         # REMOVED nodes are excluded from the cluster — they should not
@@ -334,6 +358,18 @@ class TestUpdateClusterStatusRequeuesOffline(unittest.TestCase):
         mock_tc.get_active_node_restart_task.side_effect = \
             lambda cid, nid: active.get(nid, False)
         mock_tc.add_node_to_auto_restart = MagicMock(return_value="task-uuid")
+        # _requeue_stuck_auto_restarts gates on is_auto_restart_paused (since
+        # c8d30507); a bare MagicMock return value is truthy and silently
+        # skips the whole re-queue scan. Mirror the real semantics (paused
+        # only while a SUSPENDED cluster's drain is incomplete) so both the
+        # re-queue tests and test_requeue_paused_while_suspended_draining
+        # exercise the actual gating behavior.
+        mock_tc.is_auto_restart_paused.side_effect = (
+            lambda cl: cl.status == Cluster.STATUS_SUSPENDED
+            and not getattr(cl, "suspend_drain_complete", False))
+        # is_suspension_operator_caused stays a truthy MagicMock on purpose:
+        # it keeps update_cluster_status's SUSPENDED drain branch inert, the
+        # same benign path these tests exercised before the gate existed.
 
         return mod, {"db": mock_db, "co": mock_co, "tc": mock_tc}
 

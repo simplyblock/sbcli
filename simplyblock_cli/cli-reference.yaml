@@ -1435,6 +1435,14 @@ commands:
             dest: cluster_id
             type: str
             completer: _completer_get_cluster_list
+      - name: restart
+        help: "Performs a full cluster restart: shuts down every node that is not offline, restarts all nodes in parallel and reactivates the cluster."
+        arguments:
+          - name: "cluster_id"
+            help: "The cluster id."
+            dest: cluster_id
+            type: str
+            completer: _completer_get_cluster_list
       - name: graceful-startup
         help: "Initiates a graceful startup of a cluster's storage nodes."
         arguments:
@@ -2466,9 +2474,10 @@ commands:
             dest: node
             type: str
           - name: "--cluster-id"
-            help: "The cluster id."
+            help: "The target cluster id."
             dest: cluster_id
             type: str
+            required: true
       - name: export
         help: "Export backup metadata to a JSON file for cross-cluster restore."
         arguments:

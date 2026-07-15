@@ -714,7 +714,7 @@ def _setup_snap_transfer(snap, snap_index, migration, src_node, tgt_node,
     Callers are responsible for rolling back any previously launched transfers.
     """
     snap_uuid = snap.uuid
-    snap_short = _snap_short_name(snap) + _MIGRATION_BDEV_SUFFIX
+    snap_short = _snap_tgt_short_name(snap)
     src_composite = _snap_composite(src_node.lvstore, snap)
     tgt_composite = f"{tgt_node.lvstore}/{snap_short}"
 
@@ -832,7 +832,7 @@ def _post_process_snap(snap: SnapShot, tgt_node: StorageNode, tgt_rpc: RPCClient
             # Predecessor was created on target with the migration suffix — build
             # composite from the source short name + suffix, not from snap_bdev
             # (which still holds the source path until apply_migration_to_db runs).
-            pred_composite = f"{tgt_node.lvstore}/{_snap_short_name(pred_snap) + _MIGRATION_BDEV_SUFFIX}"
+            pred_composite = f"{tgt_node.lvstore}/{_snap_tgt_short_name(pred_snap)}"
             ret = tgt_rpc.bdev_lvol_add_clone(tgt_composite, pred_composite)
             if not ret:
                 return False, f"bdev_lvol_add_clone failed for {snap_uuid}"
@@ -959,8 +959,7 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                 except KeyError:
                     return False, True, f"Snapshot {snap_uuid} not found in DB"
 
-                snap_short_src = _snap_short_name(snap)
-                snap_short_tgt = snap_short_src + _MIGRATION_BDEV_SUFFIX
+                snap_short_tgt = _snap_tgt_short_name(snap)
                 src_composite = _snap_composite(src_node.lvstore, snap)
                 tgt_composite = f"{tgt_node.lvstore}/{snap_short_tgt}"
 
@@ -1171,8 +1170,7 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             if tgt_sec:
                 sec_rpc = _make_rpc(tgt_sec)
 
-        snap_short_src = _snap_short_name(snap)
-        snap_short_tgt = snap_short_src + _MIGRATION_BDEV_SUFFIX
+        snap_short_tgt = _snap_tgt_short_name(snap)
         src_composite  = _snap_composite(src_node.lvstore, snap)
         tgt_composite  = f"{tgt_node.lvstore}/{snap_short_tgt}"
 
@@ -1420,7 +1418,7 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                 src_rpc.bdev_nvme_detach_controller(ctrl_name)
                 _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc, secondary_rpc=sec_setup_rpc)
                 return False, True, f"Last snapshot {last_snap_uuid} not found"
-            tgt_snap_composite = f"{tgt_node.lvstore}/{_snap_short_name(last_snap) + _MIGRATION_BDEV_SUFFIX}"
+            tgt_snap_composite = f"{tgt_node.lvstore}/{_snap_tgt_short_name(last_snap)}"
         else:
             last_snap_uuid = migration.snaps_preexisting_on_target[-1]
             last_snap = db.get_snapshot_by_id(last_snap_uuid)
@@ -2068,6 +2066,13 @@ def task_runner(task):
     if cluster.status not in (Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED):
         return _suspend_task(
             task, migration, f"cluster not active (status={cluster.status})")
+
+    # Expansion-first ordering: defer while a cluster expansion is open —
+    # even between the expand task's retries, when the cluster status is
+    # momentarily ACTIVE (see tasks_controller.defer_task_for_expansion).
+    if tasks_controller.get_active_cluster_expand_task(task.cluster_id):
+        return _suspend_task(
+            task, migration, "cluster expansion in progress, deferring")
 
     # --- Transition NEW/SUSPENDED → RUNNING ---
     if task.status in (JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED):

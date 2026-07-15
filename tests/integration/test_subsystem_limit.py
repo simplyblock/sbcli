@@ -2,17 +2,21 @@
 """
 test_subsystem_limit.py – unit tests for subsystem-based limit checks.
 
-The max_lvol limit on a storage node should count unique subsystems (NQNs),
-not individual lvols. Multiple namespaces (volumes) sharing a subsystem
-should count as one.
+``max_lvol`` on a storage node caps the number of PRIMARY lvol subsystems:
+distinct NQNs among the lvols whose ``node_id`` is that node. Secondary and
+tertiary replica subsystems are intentionally NOT counted — the node's memory
+reservation already provisions for the replica subsystems it hosts for other
+nodes' lvols. Namespaced volumes share a subsystem (one NQN) and count as one.
 
 Covers:
-- _get_next_3_nodes: skips nodes at subsystem limit, allows nodes with
-  many lvols sharing subsystems, tracks subsys count in node_stats
-- add_lvol_ha: rejects creation when subsystem limit exceeded, allows
-  creation when lvols share subsystems
-- snapshot clone: rejects clone when subsystem limit exceeded, allows
-  clone when lvols share subsystems
+- count_lvol_subsystems: distinct primary NQNs; excludes other nodes' lvols
+  (i.e. replicas hosted for them) and lvols in deletion
+- _get_next_3_nodes: skips nodes at the subsystem limit; keeps at-limit nodes
+  for namespaced creates when an existing subsystem has a free namespace
+  slot; prefers nodes with free namespace slots for namespaced creates
+- _resolve_lvol_subsystem: namespaced lvols join an existing subsystem
+  without consuming a subsystem slot (cap not enforced); creating a new
+  subsystem enforces the cap
 
 All external dependencies (FDB, RPC, SPDK) are mocked.
 """
@@ -20,6 +24,7 @@ All external dependencies (FDB, RPC, SPDK) are mocked.
 import unittest
 from unittest.mock import MagicMock, patch
 
+from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.storage_node import StorageNode
 
@@ -39,55 +44,106 @@ def _node(uuid, max_lvol=3, status=StorageNode.STATUS_ONLINE,
     return n
 
 
-def _lvol(uuid, node_id, nqn=None):
+def _lvol(uuid, node_id, nqn=None, max_ns=1, status=LVol.STATUS_ONLINE):
     lv = LVol()
     lv.uuid = uuid
     lv.node_id = node_id
     lv.nqn = nqn or f"nqn.unique:{uuid}"
-    lv.status = LVol.STATUS_ONLINE
+    lv.status = status
+    lv.max_namespace_per_subsys = max_ns
     return lv
 
 
-def _call_get_next_3_nodes(nodes, lvols_by_node, cluster_id="cluster-1"):
-    """Call _get_next_3_nodes with each node's lvol subsystem list mocked.
+def _cluster(nqn="nqn.2023-02.io.simplyblock:cluster-1"):
+    cl = Cluster()
+    cl.uuid = "cluster-1"
+    cl.nqn = nqn
+    return cl
 
-    _get_next_3_nodes now counts a candidate node's lvol subsystems directly
-    from the data plane via ``node.rpc_client().subsystem_list()`` — counting
-    NQNs that carry the ``:lvol:`` tag — instead of scanning lvol records in
-    the DB. We translate the supplied lvols into a per-node subsystem list:
-    one ``:lvol:`` subsystem entry per DISTINCT NQN on the node. This mirrors
-    the data plane, which reports a single subsystem regardless of how many
-    namespaces (volumes) it carries.
 
-    ``lvols_by_node`` may be a flat list of all cluster lvols, or a callable
-    ``node_id -> [lvols]``.
-    """
+def _flatten(nodes, lvols_by_node):
+    """``lvols_by_node`` may be a flat list of all cluster lvols, or a
+    callable ``node_id -> [lvols]``."""
     if callable(lvols_by_node):
-        per_node = {n.get_id(): list(lvols_by_node(n.get_id())) for n in nodes}
-    else:
-        per_node = {}
-        for lv in lvols_by_node:
-            per_node.setdefault(lv.node_id, []).append(lv)
+        return [lv for n in nodes for lv in lvols_by_node(n.get_id())]
+    return list(lvols_by_node)
 
-    for node in nodes:
-        distinct_nqns = {lv.nqn for lv in per_node.get(node.get_id(), [])}
-        # One subsystem per distinct NQN; tag it ``:lvol:`` so the production
-        # filter counts it (device/hublvol subsystems would be excluded).
-        subsystems = [{"nqn": f"nqn.test:lvol:{nqn}"} for nqn in distinct_nqns]
-        rpc = MagicMock()
-        rpc.subsystem_list.return_value = subsystems
-        node.rpc_client = MagicMock(return_value=rpc)
+
+def _call_get_next_3_nodes(nodes, lvols_by_node, cluster_id="cluster-1",
+                           namespaced=False):
+    """Call _get_next_3_nodes with the DB mocked out.
+
+    Subsystem counting works on the pre-fetched ``all_lvols`` list (one
+    subsystem per distinct NQN among a node's primary lvols), so only the
+    storage-node lookup needs mocking.
+    """
+    all_lvols = _flatten(nodes, lvols_by_node)
 
     with patch("simplyblock_core.controllers.lvol_controller.DBController") as mock_db_cls:
         from simplyblock_core.controllers.lvol_controller import _get_next_3_nodes
 
         db = MagicMock()
         db.get_storage_nodes_by_cluster_id.return_value = nodes
-
+        db.get_storage_node_by_id.side_effect = lambda nid: next(
+            n for n in nodes if n.get_id() == nid)
         mock_db_cls.return_value = db
 
         with patch.object(StorageNode, 'lvol_sync_del', return_value=False):
-            return _get_next_3_nodes(cluster_id)
+            return _get_next_3_nodes(cluster_id, all_lvols=all_lvols,
+                                     namespaced=namespaced)
+
+
+# ===========================================================================
+# Tests for count_lvol_subsystems
+# ===========================================================================
+
+class TestCountLvolSubsystems(unittest.TestCase):
+    """Only primary subsystems (distinct NQNs of lvols whose node_id is the
+    node) count against max_lvol."""
+
+    def _count(self, node, lvols):
+        from simplyblock_core.controllers.lvol_controller import count_lvol_subsystems
+        return count_lvol_subsystems(node, lvols)
+
+    def test_counts_distinct_primary_nqns(self):
+        node = _node("n1")
+        lvols = [
+            _lvol("v1", "n1", nqn="nqn:A"),
+            _lvol("v2", "n1", nqn="nqn:A"),  # shares subsystem with v1
+            _lvol("v3", "n1", nqn="nqn:B"),
+        ]
+        self.assertEqual(self._count(node, lvols), 2)
+
+    def test_excludes_other_nodes_lvols(self):
+        """LVols whose primary is another node must not count — the node may
+        host their secondary/tertiary replica subsystems, but the memory
+        reservation already provisions for those."""
+        node = _node("n1")
+        lvols = [
+            _lvol("v1", "n1", nqn="nqn:A"),
+            _lvol("v2", "n2", nqn="nqn:B"),
+            _lvol("v3", "n3", nqn="nqn:C"),
+        ]
+        self.assertEqual(self._count(node, lvols), 1)
+
+    def test_excludes_lvols_in_deletion(self):
+        node = _node("n1")
+        lvols = [
+            _lvol("v1", "n1", nqn="nqn:A", status=LVol.STATUS_IN_DELETION),
+            _lvol("v2", "n1", nqn="nqn:B", status=LVol.STATUS_DELETED),
+            _lvol("v3", "n1", nqn="nqn:C"),
+        ]
+        self.assertEqual(self._count(node, lvols), 1)
+
+    def test_counts_lvols_in_creation(self):
+        """In-creation lvols hold a subsystem slot — their subsystem is about
+        to exist; not counting them would let concurrent creates overshoot."""
+        node = _node("n1")
+        lvols = [_lvol("v1", "n1", nqn="nqn:A", status=LVol.STATUS_IN_CREATION)]
+        self.assertEqual(self._count(node, lvols), 1)
+
+    def test_empty(self):
+        self.assertEqual(self._count(_node("n1"), []), 0)
 
 
 # ===========================================================================
@@ -95,7 +151,7 @@ def _call_get_next_3_nodes(nodes, lvols_by_node, cluster_id="cluster-1"):
 # ===========================================================================
 
 class TestGetNext3NodesSubsystemLimit(unittest.TestCase):
-    """_get_next_3_nodes should count unique subsystems (NQNs), not lvols."""
+    """_get_next_3_nodes should count unique primary subsystems (NQNs)."""
 
     def test_node_skipped_when_subsystem_limit_reached(self):
         """Node with distinct NQNs equal to max_lvol should be skipped."""
@@ -133,6 +189,20 @@ class TestGetNext3NodesSubsystemLimit(unittest.TestCase):
         result = _call_get_next_3_nodes([node], [])
         self.assertIn(node, result)
 
+    def test_replica_subsystems_do_not_count(self):
+        """LVols primary on other nodes (whose replicas this node hosts) must
+        not push the node over its limit."""
+        node = _node("n1", max_lvol=2)
+        lvols = [
+            _lvol("v1", "n1", nqn="nqn:A"),
+            # primaries elsewhere; n1 may hold their replica subsystems
+            _lvol("v2", "n2", nqn="nqn:B"),
+            _lvol("v3", "n3", nqn="nqn:C"),
+            _lvol("v4", "n4", nqn="nqn:D"),
+        ]
+        result = _call_get_next_3_nodes([node], lvols)
+        self.assertIn(node, result)
+
     def test_secondary_nodes_always_skipped(self):
         """Secondary nodes should be skipped regardless of subsystem count."""
         node = _node("n1", max_lvol=100, is_secondary=True)
@@ -165,13 +235,6 @@ class TestGetNext3NodesSubsystemLimit(unittest.TestCase):
         self.assertNotIn(node_full, result)
         self.assertIn(node_ok, result)
 
-    def test_32_namespaces_one_subsystem_not_skipped(self):
-        """32 lvols sharing one NQN = 1 subsystem, should not hit limit."""
-        node = _node("n1", max_lvol=2)
-        lvols = [_lvol(f"v{i}", "n1", nqn="nqn:shared") for i in range(32)]
-        result = _call_get_next_3_nodes([node], lvols)
-        self.assertIn(node, result)
-
     def test_node_at_limit_with_mixed_nqns(self):
         """Node with some shared and some unique NQNs hitting the limit."""
         node = _node("n1", max_lvol=3)
@@ -187,190 +250,164 @@ class TestGetNext3NodesSubsystemLimit(unittest.TestCase):
 
 
 # ===========================================================================
-# Tests for add_lvol_ha subsystem limit check
+# Tests for namespaced placement in _get_next_3_nodes
 # ===========================================================================
 
-class TestAddLvolHaSubsystemLimit(unittest.TestCase):
-    """add_lvol_ha should count unique subsystems, not total lvols."""
+class TestGetNext3NodesNamespaced(unittest.TestCase):
+    """Namespaced creates consume a namespace slot, not a subsystem slot,
+    when an existing subsystem can take them."""
 
-    def _count_subsystems(self, lvols):
-        """Mirror the check at lvol_controller.py:527."""
-        return len(set(lv.nqn for lv in lvols))
-
-    def test_rejects_when_subsystem_limit_exceeded(self):
-        """Should reject when unique NQN count exceeds max_lvol."""
-        node = _node("n1", max_lvol=2)
-        lvols = [
-            _lvol("v1", "n1", nqn="nqn:A"),
-            _lvol("v2", "n1", nqn="nqn:B"),
-            _lvol("v3", "n1", nqn="nqn:C"),
-        ]
-        subsys_count = self._count_subsystems(lvols)
-        self.assertGreater(subsys_count, node.max_lvol)
-
-    def test_allows_when_lvols_share_subsystems(self):
-        """Many lvols sharing NQNs should stay under the limit."""
-        node = _node("n1", max_lvol=2)
-        lvols = [_lvol(f"v{i}", "n1", nqn="nqn:A") for i in range(5)]
-        lvols += [_lvol(f"w{i}", "n1", nqn="nqn:B") for i in range(5)]
-        subsys_count = self._count_subsystems(lvols)
-        self.assertFalse(subsys_count > node.max_lvol)
-
-    def test_allows_when_under_limit(self):
-        """Should allow when subsystem count is below max_lvol."""
-        node = _node("n1", max_lvol=5)
-        lvols = [
-            _lvol("v1", "n1", nqn="nqn:A"),
-            _lvol("v2", "n1", nqn="nqn:B"),
-        ]
-        subsys_count = self._count_subsystems(lvols)
-        self.assertFalse(subsys_count > node.max_lvol)
-
-    def test_empty_node_always_allowed(self):
-        """Node with no lvols should always be allowed."""
+    def test_at_limit_node_kept_when_namespace_slot_free(self):
+        """A node at max_lvol stays eligible for a namespaced create if one
+        of its subsystems has a free namespace slot."""
         node = _node("n1", max_lvol=1)
-        subsys_count = self._count_subsystems([])
-        self.assertEqual(subsys_count, 0)
-        self.assertFalse(subsys_count > node.max_lvol)
+        lvols = [_lvol("parent", "n1", nqn="nqn:parent", max_ns=300)]
+        self.assertEqual(_call_get_next_3_nodes([node], lvols), [])
+        result = _call_get_next_3_nodes([node], lvols, namespaced=True)
+        self.assertIn(node, result)
 
-    def test_single_subsystem_with_32_namespaces(self):
-        """32 lvols sharing one NQN = 1 subsystem, should never hit limit."""
-        node = _node("n1", max_lvol=2)
-        shared_nqn = "nqn:shared"
-        lvols = [_lvol(f"v{i}", "n1", nqn=shared_nqn) for i in range(32)]
-        subsys_count = self._count_subsystems(lvols)
-        self.assertEqual(subsys_count, 1)
-        self.assertFalse(subsys_count > node.max_lvol)
-
-    def test_exact_boundary_not_rejected(self):
-        """Subsystem count exactly at max_lvol: > check should pass (not reject)."""
-        node = _node("n1", max_lvol=3)
-        lvols = [
-            _lvol("v1", "n1", nqn="nqn:A"),
-            _lvol("v2", "n1", nqn="nqn:B"),
-            _lvol("v3", "n1", nqn="nqn:C"),
-        ]
-        subsys_count = self._count_subsystems(lvols)
-        self.assertFalse(subsys_count > node.max_lvol)
-
-    def test_one_over_boundary_rejected(self):
-        """Subsystem count one above max_lvol: > check should reject."""
-        node = _node("n1", max_lvol=2)
-        lvols = [
-            _lvol("v1", "n1", nqn="nqn:A"),
-            _lvol("v2", "n1", nqn="nqn:B"),
-            _lvol("v3", "n1", nqn="nqn:C"),
-        ]
-        subsys_count = self._count_subsystems(lvols)
-        self.assertTrue(subsys_count > node.max_lvol)
-
-
-# ===========================================================================
-# Tests for snapshot clone subsystem limit check
-# ===========================================================================
-
-class TestSnapshotCloneSubsystemLimit(unittest.TestCase):
-    """Snapshot clone should count unique subsystems, not total lvols."""
-
-    def _count_subsystems(self, lvols):
-        """Mirror the check at snapshot_controller.py:498."""
-        return len(set(lv.nqn for lv in lvols))
-
-    def test_rejects_when_subsystem_limit_reached(self):
-        """Should reject clone when unique NQN count >= max_lvol."""
-        node = _node("n1", max_lvol=2)
-        lvols = [
-            _lvol("v1", "n1", nqn="nqn:A"),
-            _lvol("v2", "n1", nqn="nqn:B"),
-        ]
-        subsys_count = self._count_subsystems(lvols)
-        self.assertTrue(subsys_count >= node.max_lvol)
-
-    def test_allows_clone_when_lvols_share_subsystems(self):
-        """Many lvols sharing NQNs should stay under the limit."""
-        node = _node("n1", max_lvol=2)
-        lvols = [_lvol(f"v{i}", "n1", nqn="nqn:shared") for i in range(8)]
-        subsys_count = self._count_subsystems(lvols)
-        self.assertFalse(subsys_count >= node.max_lvol)
-
-    def test_allows_clone_when_under_limit(self):
-        """Should allow clone when subsystem count is below max_lvol."""
-        node = _node("n1", max_lvol=5)
-        lvols = [
-            _lvol("v1", "n1", nqn="nqn:A"),
-            _lvol("v2", "n1", nqn="nqn:B"),
-        ]
-        subsys_count = self._count_subsystems(lvols)
-        self.assertFalse(subsys_count >= node.max_lvol)
-
-    def test_empty_node_allows_clone(self):
-        """Node with no lvols should always allow clone."""
+    def test_at_limit_node_skipped_when_no_namespace_slot(self):
+        """A node at max_lvol whose subsystems are all full stays ineligible
+        even for namespaced creates."""
         node = _node("n1", max_lvol=1)
-        subsys_count = self._count_subsystems([])
-        self.assertFalse(subsys_count >= node.max_lvol)
+        lvols = [_lvol("v1", "n1", nqn="nqn:full", max_ns=1)]
+        result = _call_get_next_3_nodes([node], lvols, namespaced=True)
+        self.assertEqual(result, [])
 
-    def test_single_subsystem_with_many_namespaces(self):
-        """Many lvols sharing one NQN = 1 subsystem, should not block clone."""
-        node = _node("n1", max_lvol=2)
-        lvols = [_lvol(f"v{i}", "n1", nqn="nqn:shared") for i in range(32)]
-        subsys_count = self._count_subsystems(lvols)
-        self.assertEqual(subsys_count, 1)
-        self.assertFalse(subsys_count >= node.max_lvol)
+    def test_namespaced_prefers_nodes_with_free_slot(self):
+        """When some nodes have joinable subsystems, a namespaced create
+        should land there instead of opening a new subsystem elsewhere."""
+        node_parent = _node("n-parent", max_lvol=10)
+        node_empty = _node("n-empty", max_lvol=10)
+        lvols = [_lvol("parent", "n-parent", nqn="nqn:parent", max_ns=300)]
 
-    def test_exact_boundary_rejects(self):
-        """Subsystem count exactly at max_lvol: >= check should reject."""
-        node = _node("n1", max_lvol=2)
-        lvols = [
-            _lvol("v1", "n1", nqn="nqn:A"),
-            _lvol("v2", "n1", nqn="nqn:B"),
-        ]
-        subsys_count = self._count_subsystems(lvols)
-        self.assertTrue(subsys_count >= node.max_lvol)
+        result = _call_get_next_3_nodes([node_parent, node_empty], lvols,
+                                        namespaced=True)
+        self.assertEqual(result, [node_parent])
 
-    def test_one_under_boundary_allowed(self):
-        """Subsystem count one below max_lvol: >= check should allow."""
-        node = _node("n1", max_lvol=3)
-        lvols = [
-            _lvol("v1", "n1", nqn="nqn:A"),
-            _lvol("v2", "n1", nqn="nqn:B"),
-        ]
-        subsys_count = self._count_subsystems(lvols)
-        self.assertFalse(subsys_count >= node.max_lvol)
+    def test_non_namespaced_ignores_namespace_slots(self):
+        """Non-namespaced creates keep the normal weighted selection."""
+        node_parent = _node("n-parent", max_lvol=10)
+        node_empty = _node("n-empty", max_lvol=10)
+        lvols = [_lvol("parent", "n-parent", nqn="nqn:parent", max_ns=300)]
+
+        result = _call_get_next_3_nodes([node_parent, node_empty], lvols)
+        self.assertIn(node_parent, result)
+        self.assertIn(node_empty, result)
+
+    def test_namespaced_no_slots_anywhere_falls_back_to_normal(self):
+        """With no joinable subsystem on any node, namespaced creates fall
+        back to the normal selection over nodes below the limit."""
+        node_a = _node("n-a", max_lvol=10)
+        node_b = _node("n-b", max_lvol=10)
+        lvols = [_lvol("v1", "n-a", nqn="nqn:full", max_ns=1)]
+
+        result = _call_get_next_3_nodes([node_a, node_b], lvols,
+                                        namespaced=True)
+        self.assertIn(node_a, result)
+        self.assertIn(node_b, result)
 
 
 # ===========================================================================
-# Tests verifying the boundary difference between add_lvol_ha and clone
+# Tests for _resolve_lvol_subsystem (create path subsystem choice + cap)
 # ===========================================================================
 
-class TestBoundaryDifference(unittest.TestCase):
-    """add_lvol_ha uses > while snapshot clone uses >=.
+class TestResolveLvolSubsystem(unittest.TestCase):
+    """The subsystem cap only applies when a new subsystem is created;
+    joining an existing subsystem bypasses it."""
 
-    This verifies the existing asymmetry is correctly preserved.
-    """
+    def _resolve(self, lvol, host_node, namespaced, all_lvols):
+        from simplyblock_core.controllers.lvol_controller import _resolve_lvol_subsystem
+        return _resolve_lvol_subsystem(lvol, host_node, _cluster(), namespaced,
+                                       all_lvols)
 
-    def test_add_lvol_ha_allows_at_exact_boundary(self):
-        """add_lvol_ha: subsys_count == max_lvol should NOT reject (> check)."""
-        max_lvol = 3
-        lvols = [_lvol(f"v{i}", "n1", nqn=f"nqn:{i}") for i in range(3)]
-        subsys_count = len(set(lv.nqn for lv in lvols))
-        self.assertEqual(subsys_count, max_lvol)
-        self.assertFalse(subsys_count > max_lvol)
+    def test_namespaced_joins_existing_subsystem_on_full_node(self):
+        """Namespaced lvol joins a subsystem with a free slot even when the
+        node is at max_lvol — no new subsystem is needed."""
+        node = _node("n1", max_lvol=1)
+        parent = _lvol("parent", "n1", nqn="nqn:parent", max_ns=300)
+        new_lvol = _lvol("new", "n1")
 
-    def test_snapshot_clone_rejects_at_exact_boundary(self):
-        """snapshot clone: subsys_count == max_lvol should reject (>= check)."""
-        max_lvol = 3
-        lvols = [_lvol(f"v{i}", "n1", nqn=f"nqn:{i}") for i in range(3)]
-        subsys_count = len(set(lv.nqn for lv in lvols))
-        self.assertEqual(subsys_count, max_lvol)
-        self.assertTrue(subsys_count >= max_lvol)
+        ok, error = self._resolve(new_lvol, node, True, [parent])
+        self.assertTrue(ok, error)
+        self.assertEqual(new_lvol.nqn, "nqn:parent")
+        self.assertEqual(new_lvol.namespace, "parent")
+        self.assertEqual(new_lvol.max_namespace_per_subsys, 300)
 
-    def test_get_next_3_nodes_rejects_at_exact_boundary(self):
-        """_get_next_3_nodes: subsys_count == max_lvol should reject (>= check)."""
-        max_lvol = 2
-        lvols = [_lvol(f"v{i}", "n1", nqn=f"nqn:{i}") for i in range(2)]
-        subsys_count = len(set(lv.nqn for lv in lvols))
-        self.assertEqual(subsys_count, max_lvol)
-        self.assertTrue(subsys_count >= max_lvol)
+    def test_namespaced_rejected_on_full_node_without_slot(self):
+        node = _node("n1", max_lvol=1)
+        existing = _lvol("v1", "n1", nqn="nqn:full", max_ns=1)
+        new_lvol = _lvol("new", "n1")
+
+        ok, error = self._resolve(new_lvol, node, True, [existing])
+        self.assertFalse(ok)
+        self.assertIn("Too many subsystems", error)
+
+    def test_namespaced_new_subsystem_when_under_cap(self):
+        node = _node("n1", max_lvol=10)
+        existing = _lvol("v1", "n1", nqn="nqn:full", max_ns=1)
+        new_lvol = _lvol("new", "n1")
+
+        ok, error = self._resolve(new_lvol, node, True, [existing])
+        self.assertTrue(ok, error)
+        self.assertIn(new_lvol.uuid, new_lvol.nqn)
+
+    def test_namespaced_ignores_subsystems_on_other_nodes(self):
+        """A joinable subsystem on another node is irrelevant — namespaces
+        live on the subsystem's node."""
+        node = _node("n1", max_lvol=1)
+        own_full = _lvol("v1", "n1", nqn="nqn:own", max_ns=1)  # n1 at cap
+        parent_elsewhere = _lvol("parent", "n2", nqn="nqn:parent", max_ns=300)
+        new_lvol = _lvol("new", "n1")
+
+        ok, error = self._resolve(new_lvol, node, True,
+                                  [own_full, parent_elsewhere])
+        self.assertFalse(ok)
+        self.assertIn("Too many subsystems", error)
+        self.assertNotEqual(new_lvol.nqn, "nqn:parent")
+
+    def test_non_namespaced_rejected_at_cap(self):
+        node = _node("n1", max_lvol=1)
+        existing = _lvol("v1", "n1", nqn="nqn:A")
+        new_lvol = _lvol("new", "n1")
+
+        ok, error = self._resolve(new_lvol, node, False, [existing])
+        self.assertFalse(ok)
+        self.assertIn("Too many subsystems", error)
+
+    def test_non_namespaced_allowed_below_cap(self):
+        node = _node("n1", max_lvol=2)
+        existing = _lvol("v1", "n1", nqn="nqn:A")
+        new_lvol = _lvol("new", "n1")
+
+        ok, error = self._resolve(new_lvol, node, False, [existing])
+        self.assertTrue(ok, error)
+        self.assertIn(new_lvol.uuid, new_lvol.nqn)
+
+    def test_non_namespaced_never_joins(self):
+        """Non-namespaced lvols always get their own subsystem even when a
+        joinable one exists."""
+        node = _node("n1", max_lvol=10)
+        parent = _lvol("parent", "n1", nqn="nqn:parent", max_ns=300)
+        new_lvol = _lvol("new", "n1")
+
+        ok, error = self._resolve(new_lvol, node, False, [parent])
+        self.assertTrue(ok, error)
+        self.assertNotEqual(new_lvol.nqn, "nqn:parent")
+
+    def test_replica_subsystems_do_not_block_creation(self):
+        """LVols primary on other nodes must not count toward this node's
+        cap (their replica subsystems are covered by the memory reservation)."""
+        node = _node("n1", max_lvol=2)
+        lvols = [
+            _lvol("v1", "n1", nqn="nqn:A"),
+            _lvol("v2", "n2", nqn="nqn:B"),
+            _lvol("v3", "n3", nqn="nqn:C"),
+        ]
+        new_lvol = _lvol("new", "n1")
+
+        ok, error = self._resolve(new_lvol, node, False, lvols)
+        self.assertTrue(ok, error)
 
 
 if __name__ == "__main__":

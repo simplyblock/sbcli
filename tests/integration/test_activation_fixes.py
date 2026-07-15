@@ -393,7 +393,14 @@ class TestAttachControllerTimeoutCap(unittest.TestCase):
         # to force the attach path.
         node_rpc = MagicMock()
         node_rpc.bdev_nvme_controller_list.return_value = None
-        node_rpc.get_bdevs.return_value = [{"name": "remote-fake-n1"}]
+        # Since SFAM-2774 connect_device has no bdev_names snapshot param; it
+        # probes get_bdevs("<name>n1") as the already-connected fast path. That
+        # probe must MISS ("remote-faken1") to force the attach path this test
+        # exercises, while the post-attach verification of the bdev the attach
+        # returned ("remote-fake-n1") must HIT.
+        node_rpc.get_bdevs.side_effect = (
+            lambda name=None, *a, **kw:
+            [] if name == "remote-faken1" else [{"name": "remote-fake-n1"}])
         def _rpc_client(*_args, **kwargs):
             if "timeout" in kwargs:
                 return attach_rpc
@@ -420,8 +427,7 @@ class TestAttachControllerTimeoutCap(unittest.TestCase):
         MockModelDBCtrl.return_value = model_db
 
         # No caller-specified timeout: should default-cap at 1.
-        ops.connect_device("remote-fake", device, node,
-                           bdev_names=[], reattach=False)
+        ops.connect_device("remote-fake", device, node)
         timeouts_used = [c.kwargs.get("timeout") for c in node.rpc_client.call_args_list
                          if "timeout" in c.kwargs]
         self.assertTrue(timeouts_used,
@@ -431,8 +437,7 @@ class TestAttachControllerTimeoutCap(unittest.TestCase):
 
         # Caller passes 5 — must be clamped to 1.
         node.rpc_client.reset_mock()
-        ops.connect_device("remote-fake", device, node,
-                           bdev_names=[], reattach=False, attach_timeout=5)
+        ops.connect_device("remote-fake", device, node, attach_timeout=5)
         timeouts_used = [c.kwargs.get("timeout") for c in node.rpc_client.call_args_list
                          if "timeout" in c.kwargs]
         self.assertLessEqual(max(timeouts_used), 1,
@@ -440,8 +445,7 @@ class TestAttachControllerTimeoutCap(unittest.TestCase):
 
         # Caller passes 0.3 — must be kept (lower than cap).
         node.rpc_client.reset_mock()
-        ops.connect_device("remote-fake", device, node,
-                           bdev_names=[], reattach=False, attach_timeout=0.3)
+        ops.connect_device("remote-fake", device, node, attach_timeout=0.3)
         timeouts_used = [c.kwargs.get("timeout") for c in node.rpc_client.call_args_list
                          if "timeout" in c.kwargs]
         self.assertIn(0.3, timeouts_used,

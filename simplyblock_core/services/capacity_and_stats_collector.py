@@ -211,7 +211,7 @@ def add_device_stats(cl, device, capacity_dict, stats_dict):
     return stat_obj
 
 
-def add_node_stats(node, records, all_lvols):
+def add_node_stats(cluster, node, records, all_lvols):
     size_used = 0
     size_total = 0
     data = {}
@@ -233,7 +233,7 @@ def add_node_stats(node, records, all_lvols):
         size_prov_util = int((size_prov / size_total) * 100)
 
     data.update({
-        "cluster_id": cl.get_id(),
+        "cluster_id": cluster.get_id(),
         "uuid": node.get_id(),
         "date": int(time.time()),
         "size_util": size_util,
@@ -289,7 +289,8 @@ def add_cluster_stats(cl, records):
 # get DB controller
 db = db_controller.DBController()
 
-if __name__ == "__main__":
+
+def main():
     logger.info("Starting capacity and stats collector...")
     while True:
         try:
@@ -318,15 +319,6 @@ if __name__ == "__main__":
                     continue
 
                 rpc_client = node.rpc_client(timeout=5, retry=2)
-                node_devs_stats = {}
-                try:
-                    ret = rpc_client.get_lvol_stats()
-                    if ret:
-                        node_devs_stats = {b['name']: b for b in ret['bdevs']}
-                except Exception as e:
-                    logger.error(e)
-                    continue
-
                 devices_records = []
                 for device in node.nvme_devices:
                     logger.info("Getting device stats: %s", device.uuid)
@@ -338,14 +330,15 @@ if __name__ == "__main__":
                     except Exception as e:
                         logger.error(e)
                         continue
-                    if device.nvme_bdev in node_devs_stats:
-                        stats_dict = node_devs_stats[device.nvme_bdev]
+                    ret = rpc_client.get_lvol_stats(device.nvme_bdev)
+                    if ret:
+                        stats_dict = ret['bdevs'][0]
                         record = add_device_stats(cl, device, capacity_dict, stats_dict)
                         if record:
                             devices_records.append(record)
                             cluster_device_records.append((device, record))
 
-                node_record = add_node_stats(node, devices_records, all_lvols)
+                node_record = add_node_stats(cl, node, devices_records, all_lvols)
                 node_records.append(node_record)
 
             add_cluster_stats(cl, node_records)
@@ -356,3 +349,7 @@ if __name__ == "__main__":
                 logger.error(f"latency-outlier detection failed for cluster {cl.get_id()}: {e}")
 
         time.sleep(constants.DEV_STAT_COLLECTOR_INTERVAL_SEC)
+
+
+if __name__ == "__main__":
+    main()

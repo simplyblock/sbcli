@@ -44,7 +44,9 @@ class _CreateParams(BaseModel):
     npcs: util.Unsigned = 0
     allowed_hosts: Optional[List[str]] = None
     fabric: str = "tcp"
-    max_namespace_per_subsys: int = 1
+    # None → resolved by add_lvol_ha: a shareable default for namespaced
+    # volumes, 1 otherwise.
+    max_namespace_per_subsys: Optional[int] = None
     do_replicate: bool = False
     replication_cluster_id: Optional[str] = None
     encrypt: bool = False

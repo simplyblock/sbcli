@@ -47,6 +47,15 @@ class Cluster(BaseModel):
     # storage_node_monitor watchdog to detect and revert a wedged activation
     # (incident 2026-06-25). Empty string means "not currently activating".
     in_activation_since: str = ""
+    # ISO-8601 UTC timestamp refreshed every ~60s by the heartbeat thread that
+    # cluster_activate runs for its whole duration. Lets the watchdog tell a
+    # LIVE long activation (heartbeat fresh — leave it alone, up to the
+    # absolute budget) from a DEAD one (driver process/container gone,
+    # heartbeat stale — revert after minutes instead of the node-scaled
+    # budget, which is 42 min on a 32-node cluster; incident 2026-07-13).
+    # Empty on records from before this field existed -> watchdog falls back
+    # to the absolute budget alone.
+    activation_heartbeat: str = ""
     cap_warn: int = 80
     cli_pass: SecretStr = SecretStr("")
     cluster_max_devices: int = 0

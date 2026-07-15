@@ -149,6 +149,7 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             subcommand.add_argument('--disable-ha-jm', help='Disable HA JM for distrib creation. Default: `true`.', dest='enable_ha_jm', action='store_false')
         subcommand.add_argument('--ha-jm-count', help='HA JM count. Defaults to 4 for FT=2 clusters, otherwise 3.', type=int, dest='ha_jm_count')
+        subcommand.add_argument('--failure-domain', help='The failure-domain id (a non-negative integer identifying the rack/cabinet/DC) this node belongs to. Required when the cluster was created with --enable-failure-domain; must be omitted otherwise.', type=int, dest='failure_domain')
         subcommand.add_argument('--namespace', help='The Kubernetes namespace to deploy on.', type=str, dest='namespace')
         if self.developer_mode:
             subcommand.add_argument('--id-device-by-nqn', help='Use the device NQN instead of the serial number for identification. Default: `false`.', dest='id_device_by_nqn', action='store_true')
@@ -381,6 +382,7 @@ class CLIWrapper(CLIWrapperBase):
         self.init_cluster__check(subparser)
         self.init_cluster__update(subparser)
         self.init_cluster__graceful_shutdown(subparser)
+        self.init_cluster__restart(subparser)
         self.init_cluster__graceful_startup(subparser)
         self.init_cluster__list_tasks(subparser)
         self.init_cluster__cancel_task(subparser)
@@ -432,6 +434,7 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             subcommand.add_argument('--disable-monitoring', help='Disable monitoring stack, false by default. Default: `false`.', dest='disable_monitoring', action='store_true')
         subcommand.add_argument('--strict-node-anti-affinity', help='Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node. This requires a minimum of _data-chunks-in-stripe + parity-chunks-in-stripe + 1_ nodes in the cluster.', dest='strict_node_anti_affinity', action='store_true')
+        subcommand.add_argument('--enable-failure-domain', help='Enable failure-domain anti-affinity. Each storage node must then be added with a --failure-domain tag (rack/cabinet/DC); data, journal and secondary/tertiary copies are spread across distinct failure domains (best-effort). Deploy-time only: a cluster cannot be upgraded into this feature, it must be redeployed.', dest='enable_failure_domain', action='store_true')
         subcommand.add_argument('--name', '-n', help='Assigns a name to the newly created cluster.', type=str, dest='name')
         subcommand.add_argument('--qpair-count', help='The NVMe/TCP transport qpair count per logical volume. Default: `32`.', type=range_type(0, 128), default=32, dest='qpair_count')
         subcommand.add_argument('--client-qpair-count', help='The default NVMe/TCP transport qpair count per logical volume for client. Default: `3`.', type=range_type(0, 128), default=3, dest='client_qpair_count')
@@ -467,6 +470,7 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             subcommand.add_argument('--inflight-io-threshold', help='The number of inflight IOs allowed before the IO queuing starts. Default: `4`.', type=int, default=4, dest='inflight_io_threshold')
         subcommand.add_argument('--strict-node-anti-affinity', help='Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node. This requires a minimum of _data-chunks-in-stripe + parity-chunks-in-stripe + 1_ nodes in the cluster."', dest='strict_node_anti_affinity', action='store_true')
+        subcommand.add_argument('--enable-failure-domain', help='Enable failure-domain anti-affinity. Each storage node must then be added with a --failure-domain tag (rack/cabinet/DC); data, journal and secondary/tertiary copies are spread across distinct failure domains (best-effort). Deploy-time only: a cluster cannot be upgraded into this feature, it must be redeployed.', dest='enable_failure_domain', action='store_true')
         subcommand.add_argument('--name', '-n', help='Assigns a name to the newly created cluster.', type=str, dest='name')
         subcommand.add_argument('--client-data-nic', help='Network interface name from client to use for logical volume connection.', type=str, dest='client_data_nic')
         subcommand.add_argument('--use-backup', help='The path to JSON file with S3/MinIO backup configuration.', type=str, dest='use_backup')
@@ -550,6 +554,10 @@ class CLIWrapper(CLIWrapperBase):
 
     def init_cluster__graceful_shutdown(self, subparser):
         subcommand = self.add_sub_command(subparser, 'graceful-shutdown', 'Initiates a graceful shutdown of a cluster\'s storage nodes.')
+        subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
+
+    def init_cluster__restart(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'restart', 'Performs a full cluster restart: shuts down every node that is not offline, restarts all nodes in parallel and reactivates the cluster.')
         subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
 
     def init_cluster__graceful_startup(self, subparser):
@@ -1013,7 +1021,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--lvol', help='The new logical volume name.', type=str, dest='lvol_name', required=True)
         subcommand.add_argument('--pool', help='The target pool name or id.', type=str, dest='pool', required=True)
         subcommand.add_argument('--node', help='The target storage node id.', type=str, dest='node')
-        subcommand.add_argument('--cluster-id', help='The cluster id.', type=str, dest='cluster_id')
+        subcommand.add_argument('--cluster-id', help='The target cluster id.', type=str, dest='cluster_id', required=True)
 
     def init_backup__export(self, subparser):
         subcommand = self.add_sub_command(subparser, 'export', 'Export backup metadata to a JSON file for cross-cluster restore.')
@@ -1346,6 +1354,8 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.cluster__update(sub_command, args)
                 elif sub_command in ['graceful-shutdown']:
                     ret = self.cluster__graceful_shutdown(sub_command, args)
+                elif sub_command in ['restart']:
+                    ret = self.cluster__restart(sub_command, args)
                 elif sub_command in ['graceful-startup']:
                     ret = self.cluster__graceful_startup(sub_command, args)
                 elif sub_command in ['list-tasks']:
