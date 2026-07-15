@@ -5193,7 +5193,38 @@ def _count_fabric_disconnected_nodes(all_nodes, lvs_peer_ids=None):
 
 
 def find_leader_with_failover(all_nodes, lvs_name):
-    """Detect the current leader and failover if needed.
+    """Detect the current leader and failover if needed — with a no-leader
+    fail-fast gate.
+
+    If a full detection pass recently (< NO_LEADER_TTL_SEC) concluded the LVS
+    has no confirmable leader, return (None, []) immediately without probing:
+    the caller must fail the operation until a leader is re-established. This
+    caps the probe/recovery machinery at one full pass per TTL window per
+    process — under a mass-create workload against a leaderless LVS, running
+    the pass per request stormed every LVS member with several
+    bdev_lvol_get_lvstores per second for hours (run 20260712-231123).
+    """
+    from simplyblock_core.utils.ttl_cache import no_leader_cache, NO_LEADER_TTL_SEC
+
+    cluster_id = all_nodes[0].cluster_id if all_nodes else ""
+    cache_key = (cluster_id, lvs_name)
+    if no_leader_cache.get(cache_key, NO_LEADER_TTL_SEC):
+        logger.warning(
+            "LVS %s was confirmed leaderless less than %ss ago — failing fast "
+            "without re-probing; operations are rejected until a leader is "
+            "re-established", lvs_name, NO_LEADER_TTL_SEC)
+        return None, []
+
+    leader, non_leaders = _find_leader_with_failover_impl(all_nodes, lvs_name)
+    if leader is None:
+        no_leader_cache.put(cache_key, True)
+    else:
+        no_leader_cache.invalidate(cache_key)
+    return leader, non_leaders
+
+
+def _find_leader_with_failover_impl(all_nodes, lvs_name):
+    """Single full leader-detection/recovery pass.
 
     0. Cached fast path: if a leader for this lvstore was confirmed within
        LEADER_TTL_SEC, probe ONLY that node (one RPC). Leadership rarely moves,

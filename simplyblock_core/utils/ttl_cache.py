@@ -68,10 +68,19 @@ class TTLCache:
 # targeted invalidation stays simple.
 capacity_scan_cache = TTLCache()   # "mini_lvols" / ("snapshots", cluster_id) -> list
 leader_cache = TTLCache()          # (cluster_id, lvs_name) -> leader node id
+no_leader_cache = TTLCache()       # (cluster_id, lvs_name) -> True (LVS confirmed leaderless)
 quorum_verdict_cache = TTLCache()  # (node_id, lvs_peer_ids) -> bool (disconnected)
 
 CAPACITY_SCAN_TTL_SEC = 10
 LEADER_TTL_SEC = 8
+# Negative verdict: a full find_leader_with_failover pass (scan + recovery)
+# found NO confirmable leader. Object create/clone/snapshot requests against
+# the LVS fail fast inside this window instead of re-running the probe/recovery
+# machinery per request — a leaderless LVS under a mass-create workload
+# otherwise probes every member several times per second for hours (run
+# 20260712-231123: 61k bdev_lvol_get_lvstores per member). The TTL bounds how
+# long a restored leader can go unnoticed, so keep it short-ish.
+NO_LEADER_TTL_SEC = 15
 QUORUM_VERDICT_TTL_SEC = 8
 
 
