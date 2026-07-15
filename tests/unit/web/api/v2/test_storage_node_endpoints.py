@@ -55,10 +55,24 @@ class TestCreateStorageNode:
             'spdk_proxy_image': None,
             'spdk_sys_mem': None,
             'failure_domain': None,
+            'expansion': False,
         })
         # Default response format is 'identifier': body is the task id
         assert response.json() == TASK_ID
         assert response.headers['Location'].endswith(f'/tasks/{TASK_ID}/')
+
+    def test_expand_flag_forwarded(self, client, db, cluster, tasks_controller):
+        tasks_controller.add_node_add_task.return_value = TASK_ID
+
+        response = client.post(f'{BASE}/', json={
+            'node_address': '10.0.0.10:5000',
+            'interface_name': 'eth0',
+            'expand': True,
+        })
+
+        assert response.status_code == 201
+        (_, submitted_task), _ = tasks_controller.add_node_add_task.call_args
+        assert submitted_task['expansion'] is True
 
 
 class TestGetStorageNode:
