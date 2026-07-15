@@ -1,0 +1,180 @@
+name: API Parity Audit
+
+on:
+  workflow_dispatch:
+    inputs:
+      cluster:
+        default: c141
+        description: "Cluster to deploy on"
+        required: true
+        type: string
+      sbcli_branch:
+        description: "sbcli branch to test"
+        required: false
+        default: main
+        type: string
+      send_slack_notification:
+        description: 'Send Slack notification?'
+        required: false
+        default: false
+        type: boolean
+  schedule:
+    - cron: '0 6 * * 1'  # Weekly on Monday 6am UTC
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    runs-on: self-hosted
+    steps:
+      - name: Fix workspace permissions
+        run: sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" 2>/dev/null || true
+
+      - name: Checkout deployment tooling
+        uses: actions/checkout@v4
+        with:
+          repository: simplyblock-io/simplyBlockDeploy
+          path: deploy
+
+      - name: cleanup cluster
+        timeout-minutes: 15
+        run: |
+          cd deploy/bare-metal
+          cluster="${{ inputs.cluster || 'c141' }}"
+          cluster="${cluster:1}"
+          echo "cleaning up cluster $cluster"
+          KEY="~/.ssh/simplyblock-us-east-2.pem"
+          eval $(python3 inventory.py inventory/c${cluster}.yml)
+          ssh -i $KEY -o StrictHostKeyChecking=no root@192.168.10.1 "bash proxmox_script.sh cluster_${cluster}"
+
+  deploy:
+    needs: cleanup
+    uses: ./.github/workflows/bare-metal-deploy.yml
+    with:
+      runs_on: self-hosted
+      cluster: ${{ inputs.cluster || 'c141' }}
+      docker_image: simplyblock/simplyblock:${{ github.head_ref || github.ref_name }}
+      sbcli_source: ${{ github.head_ref || github.ref_name }}
+      k8s_snode: false
+
+  audit:
+    runs-on: self-hosted
+    needs: deploy
+    steps:
+      - name: Fix workspace permissions
+        run: sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" 2>/dev/null || true
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.sbcli_branch || github.ref_name }}
+
+      - name: Record Audit Start Time
+        run: echo "AUDIT_START_TIME=$(date +%s)" >> $GITHUB_ENV
+
+      - name: Setup & Run Parity Audit
+        timeout-minutes: 60
+        env:
+          CLUSTER_ID: ${{ needs.deploy.outputs.cluster_id }}
+          CLUSTER_SECRET: ${{ needs.deploy.outputs.cluster_secret }}
+          CLUSTER_IP: ${{ needs.deploy.outputs.cluster_ip }}
+          API_BASE_URL: ${{ needs.deploy.outputs.cluster_ip }}
+          KEY_NAME: "simplyblock-us-east-2.pem"
+          SSH_USER: root
+          SBCLI_CMD: "sbctl"
+          MNODES: "${{ needs.deploy.outputs.mnodes }}"
+        run: |
+          cd $GITHUB_WORKSPACE/e2e
+          pip install virtualenv
+          python3 -m venv myenv
+          source myenv/bin/activate
+          python3 -m pip install -r requirements.txt
+          echo "Running API Parity Audit"
+          python3 e2e.py --testname TestAPIParityAudit
+
+      - name: Record Audit End Time
+        if: always()
+        run: echo "AUDIT_END_TIME=$(date +%s)" >> $GITHUB_ENV
+
+      - name: Calculate Total Time Taken
+        if: always()
+        run: |
+          AUDIT_TIME=$(($AUDIT_END_TIME - $AUDIT_START_TIME))
+          AUDIT_TIME_MINS=$((AUDIT_TIME / 60))
+          AUDIT_TIME_SECS=$((AUDIT_TIME % 60))
+          echo "Audit runtime: ${AUDIT_TIME_MINS}m ${AUDIT_TIME_SECS}s"
+          echo "AUDIT_TIME_MINS=$AUDIT_TIME_MINS" >> $GITHUB_ENV
+          echo "AUDIT_TIME_SECS=$AUDIT_TIME_SECS" >> $GITHUB_ENV
+
+      - name: Upload HTML report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-parity-report
+          path: |
+            e2e/logs/**/api_parity_report.html
+            e2e/logs/**/api_parity_findings.json
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Post Job Summary
+        if: always()
+        run: |
+          {
+            echo "## API Parity Audit Results"
+            echo ""
+            echo "**Branch:** \`${{ github.ref_name }}\`"
+            echo "**Duration:** ${AUDIT_TIME_MINS:-0}m ${AUDIT_TIME_SECS:-0}s"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Try to extract summary counts from JSON sidecar
+          JSON_FILE=$(find $GITHUB_WORKSPACE/e2e/logs -name "api_parity_findings.json" 2>/dev/null | head -1)
+          if [ -n "$JSON_FILE" ] && [ -f "$JSON_FILE" ]; then
+            python3 -c "
+          import json
+          with open('${JSON_FILE}') as f:
+              findings = json.load(f)
+          total = len(findings)
+          errors = sum(1 for f in findings if f.get('severity') == 'error')
+          warnings = sum(1 for f in findings if f.get('severity') == 'warning')
+          info = sum(1 for f in findings if f.get('severity') == 'info')
+          print(f'| Severity | Count |')
+          print(f'|----------|-------|')
+          print(f'| **Total** | {total} |')
+          print(f'| Errors   | {errors} |')
+          print(f'| Warnings | {warnings} |')
+          print(f'| Info     | {info} |')
+          print()
+          if errors > 0:
+              print('> :warning: **Errors found** — download the HTML report artifact for details.')
+          else:
+              print('> :white_check_mark: No errors detected.')
+          " >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "> :warning: No findings JSON found — audit may have failed before producing output." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Report artifact:** \`api-parity-report\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload logs to MinIO
+        if: always()
+        env:
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          MINIO_ACCESS_KEY: ${{ secrets.MINIO_ACCESS_KEY }}
+          MINIO_SECRET_KEY: ${{ secrets.MINIO_SECRET_KEY }}
+          MNODES: "${{ needs.deploy.outputs.mnodes }}"
+          STORAGE_PRIVATE_IPS: "${{ needs.deploy.outputs.storage_private_ips }}"
+          USER: "root"
+        run: |
+          cd $GITHUB_WORKSPACE/e2e/
+          python3 logs/upload_logs_to_miniio.py
+
+      - name: Cleanup build folder
+        if: always()
+        run: |
+          rm -rf ./* || true
+          rm -rf ./.??* || true

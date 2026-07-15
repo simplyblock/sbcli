@@ -530,35 +530,71 @@ class TestClusterBase:
 
     def _connect_and_mount_dual(self, lvol_name, mount_path=None,
                                 format_disk=True, fs_type="ext4"):
-        """NVMe connect + mount (Docker) or no-op (K8s). Returns (device, mount)."""
+        """NVMe connect + mount (Docker) or no-op (K8s). Returns (device, mount).
+
+        For namespace (child) lvols the device may auto-appear on any
+        client that already has the parent subsystem connected.  After
+        the initial connect attempt this method checks **all** client
+        machines for a new block device.  If nothing appears it runs
+        ``nvme ns-rescan`` on every live controller and retries.
+        """
         if self.k8s_test:
             reg = self._volume_registry.get(lvol_name, {})
             pvc_name = reg.get("pvc_name", self._k8s_normalize_name(lvol_name))
             self.logger.info(f"[k8s] _connect_and_mount_dual no-op for PVC '{pvc_name}'")
             return pvc_name, pvc_name
 
-        node = self.client_machines[0]
-        initial_devices = self.ssh_obj.get_devices(node=node)
+        # Snapshot devices on ALL clients before connecting
+        initial_devices_per_client = {}
+        for client in self.client_machines:
+            initial_devices_per_client[client] = set(
+                self.ssh_obj.get_devices(node=client)
+            )
+
         connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
+        node = self.client_machines[0]
         for connect_str in connect_ls:
             self.ssh_obj.exec_command(node=node, command=connect_str)
-        sleep_n_sec(10)
-        final_devices = self.ssh_obj.get_devices(node=node)
+
+        # Search all clients for a new device, with ns-rescan retry
         disk_use = None
-        for device in final_devices:
-            if device not in initial_devices:
-                disk_use = f"/dev/{device.strip()}"
+        found_node = None
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            sleep_n_sec(10 if attempt == 1 else 5)
+            for client in self.client_machines:
+                final_devices = set(self.ssh_obj.get_devices(node=client))
+                new_devs = final_devices - initial_devices_per_client[client]
+                if new_devs:
+                    disk_use = f"/dev/{next(iter(new_devs)).strip()}"
+                    found_node = client
+                    break
+            if disk_use:
                 break
+            if attempt < max_attempts:
+                self.logger.info(
+                    f"No new device for {lvol_name} (attempt {attempt}/{max_attempts}), "
+                    f"running nvme ns-rescan on all clients"
+                )
+                for client in self.client_machines:
+                    self.ssh_obj.rescan_live_nvme_controllers(client)
+
         assert disk_use, f"No new block device after connecting {lvol_name}"
-        self.logger.info(f"Using disk: {disk_use}")
-        self.ssh_obj.unmount_path(node=node, device=disk_use)
+        if found_node != self.client_machines[0]:
+            self.logger.info(
+                f"Device {disk_use} appeared on {found_node} "
+                f"(not primary client {self.client_machines[0]})"
+            )
+        self.logger.info(f"Using disk: {disk_use} on {found_node}")
+        self.ssh_obj.unmount_path(node=found_node, device=disk_use)
         if format_disk:
-            self.ssh_obj.format_disk(node=node, device=disk_use, fs_type=fs_type)
+            self.ssh_obj.format_disk(node=found_node, device=disk_use, fs_type=fs_type)
         if mount_path:
-            self.ssh_obj.mount_path(node=node, device=disk_use, mount_path=mount_path)
+            self.ssh_obj.mount_path(node=found_node, device=disk_use, mount_path=mount_path)
         reg = self._volume_registry.get(lvol_name, {})
         reg["device"] = disk_use
         reg["mount"] = mount_path
+        reg["node"] = found_node
         self._volume_registry[lvol_name] = reg
         return disk_use, mount_path
 
@@ -598,8 +634,8 @@ class TestClusterBase:
             self._k8s_configmaps.append(cm_name)
             return job_name
         else:
-            node = self.client_machines[0]
             reg = self._volume_registry.get(lvol_name, {})
+            node = reg.get("node") or self.client_machines[0]
             device = reg.get("device")
             mount = mount_path or reg.get("mount")
             fio_thread = threading.Thread(
@@ -779,8 +815,8 @@ class TestClusterBase:
         """Unmount + NVMe disconnect (Docker) or no-op (K8s)."""
         if self.k8s_test:
             return
-        node = self.client_machines[0]
         reg = self._volume_registry.get(lvol_name, {})
+        node = reg.get("node") or self.client_machines[0]
         mount = reg.get("mount")
         device = reg.get("device")
         if mount:
@@ -1158,6 +1194,60 @@ class TestClusterBase:
                 self.logger.info(f"[k8s collect_mgmt] journalctl+dmesg collected for client {node}")
             except Exception as e:
                 self.logger.warning(f"[k8s collect_mgmt] journalctl/dmesg for {node}: {e}")
+
+    def start_periodic_resource_collection(self, interval=1800):
+        """Start background thread that periodically collects kubectl resource snapshots.
+
+        Collects kubectl get pods/nodes, top nodes/pods, and describe nodes
+        every *interval* seconds (default 30 min). Returns a threading.Event
+        that the caller should set() to stop the collection thread.
+        """
+        if not self.k8s_test:
+            return threading.Event()  # no-op for docker mode
+
+        stop_event = threading.Event()
+        base_path = os.path.join(self.docker_logs_path, "periodic_resources")
+        os.makedirs(base_path, exist_ok=True)
+        k8s = self.sbcli_utils.k8s
+
+        def _collect():
+            iteration = 0
+            while not stop_event.is_set():
+                stop_event.wait(interval)
+                if stop_event.is_set():
+                    break
+                iteration += 1
+                ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+                tag = f"_{iteration:03d}_{ts}"
+                self.logger.info(
+                    f"[periodic_resources] Collection #{iteration} at {ts}"
+                )
+                kubectl_cmds = [
+                    (f"pods_all{tag}.txt", "kubectl get pods -A -o wide"),
+                    (f"nodes{tag}.txt", "kubectl get nodes -o wide"),
+                    (f"top_nodes{tag}.txt",
+                     "kubectl top nodes 2>/dev/null || echo 'metrics-server not available'"),
+                    (f"top_pods{tag}.txt",
+                     "kubectl top pods -A 2>/dev/null || echo 'metrics-server not available'"),
+                    (f"describe_nodes{tag}.txt", "kubectl describe nodes"),
+                ]
+                for filename, cmd in kubectl_cmds:
+                    try:
+                        out, _ = k8s._exec_kubectl(cmd, supress_logs=True)
+                        with open(os.path.join(base_path, filename), "w") as fh:
+                            fh.write(out or "")
+                    except Exception as e:
+                        self.logger.warning(
+                            f"[periodic_resources] {filename}: {e}"
+                        )
+
+        t = threading.Thread(target=_collect, daemon=True,
+                             name="periodic-resource-collector")
+        t.start()
+        self.logger.info(
+            f"[periodic_resources] Started collection every {interval}s"
+        )
+        return stop_event
 
     def collect_management_details(self, post_teardown=False, suffix=None):
         if suffix is None:

@@ -103,7 +103,7 @@ from stress_test.mass_create_delete_stress import (
     MassCreateDeletePersistent_1x500_Docker,
     MassCreateDeletePersistent_30x100_Docker,
     MassCreateDeletePersistent_300x10_Docker,
-    MassCreateDeletePersistent_300x10_20Snap_Docker,
+    MassCreateDeletePersistent_300x10_10Snap_Docker,
     MassCreateDeletePersistent_500x1_Docker,
     MassCreateDeletePersistent_3000x1_Docker,
     MassCreateDeletePersistent_1x500_K8s,
@@ -217,6 +217,8 @@ from e2e_tests.test_concurrent_operations import TestConcurrentOperations
 from e2e_tests.test_pool_host_management import TestPoolHostManagement
 from e2e_tests.test_lvol_placement import TestLvolPlacement
 from e2e_tests.test_node_shutdown_restart import TestNodeShutdownRestart
+
+from e2e_tests.test_api_parity_audit import TestAPIParityAudit
 
 from e2e_tests.backup.test_backup_restore import (
     TestBackupBasicPositive,
@@ -400,7 +402,7 @@ ALL_TESTS = [
     MassCreateDeletePersistent_1x500_Docker,
     MassCreateDeletePersistent_30x100_Docker,
     MassCreateDeletePersistent_300x10_Docker,
-    MassCreateDeletePersistent_300x10_20Snap_Docker,
+    MassCreateDeletePersistent_300x10_10Snap_Docker,
     MassCreateDeletePersistent_500x1_Docker,
     MassCreateDeletePersistent_3000x1_Docker,
     MassCreateDeletePersistent_1x500_K8s,
@@ -479,6 +481,8 @@ ALL_TESTS = [
     TestPoolHostManagement,
     TestLvolPlacement,
     TestNodeShutdownRestart,
+    # ── API Parity Audit ──────────────────────────────────────────────
+    TestAPIParityAudit,
 ]
 
 def get_all_tests(custom=True, ha_test=False):
@@ -670,7 +674,7 @@ def get_stress_tests():
         MassCreateDeletePersistent_1x500_Docker,
         MassCreateDeletePersistent_30x100_Docker,
         MassCreateDeletePersistent_300x10_Docker,
-        MassCreateDeletePersistent_300x10_20Snap_Docker,
+        MassCreateDeletePersistent_300x10_10Snap_Docker,
         MassCreateDeletePersistent_500x1_Docker,
         MassCreateDeletePersistent_3000x1_Docker,
         MassCreateDeletePersistent_1x500_K8s,
@@ -720,7 +724,7 @@ def get_monitoring_tests():
         MassCreateDeletePersistent_1x500_Docker,
         MassCreateDeletePersistent_30x100_Docker,
         MassCreateDeletePersistent_300x10_Docker,
-        MassCreateDeletePersistent_300x10_20Snap_Docker,
+        MassCreateDeletePersistent_300x10_10Snap_Docker,
         MassCreateDeletePersistent_500x1_Docker,
         MassCreateDeletePersistent_3000x1_Docker,
         MassCreateDeletePersistent_1x500_K8s,
@@ -815,3 +819,10 @@ def get_load_tests():
         TestLvolOutageLoadTest
     ]
     return tests
+
+
+def get_parity_tests():
+    """API parity audit — CLI vs v1 vs v2 three-way comparison."""
+    return [
+        TestAPIParityAudit,
+    ]
