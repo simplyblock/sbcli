@@ -1540,6 +1540,22 @@ def delete_lvol(lvol: LVol, *, force_delete: bool = False, lock: bool = True) ->
     if pool.status == Pool.STATUS_INACTIVE:
         raise PreconditionError("Pool is disabled")
 
+    # Refuse deletes while the cluster cannot complete them. The controller
+    # only runs the leader-side async delete; the sync deletes on the
+    # non-leaders and the record removal are driven by lvol_monitor, which
+    # skips clusters in these states — accepting the delete here would
+    # strand the lvol in_deletion with its teardown half done (2026-07-12
+    # mass-delete run: 8.7k deletes accepted while the cluster was stuck
+    # in_activation, none ever completed). read_only stays allowed: deletes
+    # free space and are the way out of a capacity-critical cluster.
+    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+    if not force_delete and cluster.status in [
+            Cluster.STATUS_SUSPENDED, Cluster.STATUS_IN_ACTIVATION,
+            Cluster.STATUS_UNREADY, Cluster.STATUS_INACTIVE]:
+        raise PreconditionError(
+            f"Cannot delete lvol {lvol.uuid}: cluster {cluster.get_id()} "
+            f"status is {cluster.status}")
+
     # Persist deletion intent BEFORE any data-plane RPC. If the leader-side
     # delete then times out or errors (for example: SPDK back-pressure on
     # the leader while a peer is being container-killed in an outage soak),
@@ -2149,6 +2165,14 @@ def resize_lvol(id, new_size, lock=True) -> None:
     pool = db_controller.get_pool_by_id(lvol.pool_uuid)
     if pool.status == Pool.STATUS_INACTIVE:
         raise PreconditionError(f"Pool is disabled {pool.get_id()}")
+
+    # Resize grows the allocation, so it is gated like create: only an
+    # operational cluster may take it (same allow-list as add_lvol_ha).
+    cluster = db_controller.get_cluster_by_id(pool.cluster_id)
+    if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED]:
+        raise PreconditionError(
+            f"Cannot resize lvol {lvol.uuid}: cluster {cluster.get_id()} "
+            f"status is {cluster.status}")
 
     if lvol.size == new_size:
         return  # Nothing to do

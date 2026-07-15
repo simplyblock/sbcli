@@ -728,6 +728,22 @@ def _delete_locked(snap, snapshot_uuid, force_delete=False, lock=True):
     except KeyError:
         pass
 
+    # Refuse deletes while the cluster cannot complete them: the controller
+    # only issues the leader-side async delete and marks the snapshot
+    # in_deletion; snapshot_monitor performs the sync deletes on the
+    # non-leaders and removes the record, but it skips clusters in these
+    # states — accepting the delete here would strand the snapshot forever
+    # (2026-07-12 mass-delete run: ~60k snapshot deletes accepted while the
+    # cluster was stuck in_activation, none ever completed). read_only stays
+    # allowed: deletes free space.
+    if not force_delete:
+        cluster = db_controller.get_cluster_by_id(snap.cluster_id)
+        if cluster.status in [cluster.STATUS_SUSPENDED, cluster.STATUS_IN_ACTIVATION,
+                              cluster.STATUS_UNREADY, cluster.STATUS_INACTIVE]:
+            logger.error(f"Cannot delete snapshot {snapshot_uuid}: cluster "
+                         f"{cluster.get_id()} status is {cluster.status}")
+            return False
+
     # Block deletion if the snapshot's parent volume is being migrated
     active_mig = migration_controller.get_active_migration_for_lvol(
         snap.lvol.uuid, snap.cluster_id)
