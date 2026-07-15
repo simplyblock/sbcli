@@ -56,17 +56,18 @@ class TestSubsystem(unittest.TestCase):
         self.assertEqual(r1, r2)
 
     @patch.object(RPCClient, "_request3")
-    def test_subsystem_get_filters_by_nqn(self, mock_req):
-        mock_req.return_value = [
-            {"nqn": "nqn.a", "namespaces": []},
-            {"nqn": "nqn.b", "namespaces": []},
-        ]
+    def test_subsystem_get_delegates_filtering_to_rpc(self, mock_req):
+        # nvmf_get_subsystems filters server-side, so the RPC returns only the
+        # matching subsystem when queried by nqn.
+        mock_req.return_value = [{"nqn": "nqn.b", "namespaces": []}]
         client = _make_client()
+
         self.assertEqual(client.subsystem_get("nqn.b")["nqn"], "nqn.b")
+        mock_req.assert_called_once_with("nvmf_get_subsystems", nqn="nqn.b")
 
     @patch.object(RPCClient, "_request3")
-    def test_subsystem_get_filter_miss_returns_empty(self, mock_req):
-        mock_req.return_value = [{"nqn": "nqn.a", "namespaces": []}]
+    def test_subsystem_get_filter_miss_returns_none(self, mock_req):
+        mock_req.return_value = []
         client = _make_client()
         self.assertIsNone(client.subsystem_get("nqn.nonexistent"))
 

@@ -2,17 +2,18 @@ import json
 from json import JSONDecodeError
 from typing import Any, Optional
 
-import requests
-from pydantic import SecretStr
-from requests.exceptions import ConnectionError, HTTPError, Timeout, TooManyRedirects
 import jsonschema
+import requests
 from jsonschema.exceptions import ValidationError
+from pydantic import SecretStr
+from requests.adapters import HTTPAdapter
+from requests.exceptions import ConnectionError, HTTPError, Timeout, TooManyRedirects
+from urllib3 import Retry
 
 from simplyblock_core import utils, constants
 from simplyblock_core.settings import Settings
+from simplyblock_core.utils.helpers import single_or_none
 from simplyblock_core.utils.secrets import unwrap_secrets_for_send
-from requests.adapters import HTTPAdapter
-from urllib3 import Retry
 
 logger = utils.get_logger()
 
@@ -209,12 +210,7 @@ class RPCClient:
         return self._request3("nvmf_get_subsystems")
 
     def subsystem_get(self, nqn: str) -> Optional[dict]:
-        return next((
-            subsystem
-            for subsystem
-            in self.subsystem_list()
-            if subsystem["nqn"] == nqn
-        ), None)
+        return single_or_none(self._request3("nvmf_get_subsystems", nqn=nqn))
 
     def subsystem_delete(self, nqn):
         return self._request("nvmf_delete_subsystem", params={'nqn': nqn})
