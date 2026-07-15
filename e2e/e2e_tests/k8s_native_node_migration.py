@@ -54,6 +54,17 @@ class K8sNativeNodeMigrationTest(TestClusterBase):
         if isinstance(self.migrate_to_worker, str):
             self.migrate_to_worker = self.migrate_to_worker.strip()
 
+        # New SSD PCIe addresses for the target worker (comma-separated string)
+        new_ssd_pcie_raw = kwargs.get("new_ssd_pcie", "")
+        if isinstance(new_ssd_pcie_raw, str) and new_ssd_pcie_raw.strip():
+            self.new_ssd_pcie = [addr.strip() for addr in new_ssd_pcie_raw.split(",") if addr.strip()]
+        else:
+            self.new_ssd_pcie = []
+
+        # Whether to reattach volumes after migration
+        reattach_raw = kwargs.get("reattach_volume", "")
+        self.reattach_volume = str(reattach_raw).strip().lower() in ("true", "1", "yes")
+
         # K8s resource naming
         self.STORAGE_CLASS_NAME = "simplyblock-csi-sc"
         self.XFS_STORAGE_CLASS_NAME = "simplyblock-csi-sc-xfs"
@@ -74,6 +85,8 @@ class K8sNativeNodeMigrationTest(TestClusterBase):
         self.clone_details: dict[str, dict] = {}
 
         self.logger.info(f"Migrate to worker: {self.migrate_to_worker}")
+        self.logger.info(f"New SSD PCIe addresses: {self.new_ssd_pcie}")
+        self.logger.info(f"Reattach volumes: {self.reattach_volume}")
 
     # ── Setup ─────────────────────────────────────────────────────────────────
 
@@ -381,6 +394,8 @@ class K8sNativeNodeMigrationTest(TestClusterBase):
         self.k8s_utils.patch_storage_node_migrate(
             node_uuid=migrate_node_uuid,
             target_worker=self.migrate_to_worker,
+            new_ssd_pcie=self.new_ssd_pcie if self.new_ssd_pcie else None,
+            reattach_volume=self.reattach_volume,
         )
 
         # Verify the CRD patch was applied

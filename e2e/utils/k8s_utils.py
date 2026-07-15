@@ -1370,6 +1370,8 @@ class K8sUtils:
         )
 
     def patch_storage_node_migrate(self, node_uuid: str, target_worker: str,
+                                     new_ssd_pcie: list[str] | None = None,
+                                     reattach_volume: bool = False,
                                      name: str = "simplyblock-node",
                                      namespace: str = None):
         """Patch StorageNode CRD to migrate a storage node to a different worker.
@@ -1383,23 +1385,35 @@ class K8sUtils:
             UUID of the storage node to migrate.
         target_worker : str
             Kubernetes node name to migrate the storage node onto.
+        new_ssd_pcie : list[str] | None
+            PCIe addresses for new SSDs on the target worker.
+        reattach_volume : bool
+            Whether to reattach volumes after migration.
         name : str
             StorageNode CR name (default ``simplyblock-node``).
         namespace : str | None
             Override namespace (default ``self.namespace``).
         """
         ns = namespace or self.namespace
-        patch = (
-            f'{{"spec":{{"action":"restart",'
-            f'"nodeUUID":"{node_uuid}",'
-            f'"workerNode":"{target_worker}"}}}}'
-        )
+
+        import json
+        spec = {
+            "action": "restart",
+            "nodeUUID": node_uuid,
+            "workerNode": target_worker,
+            "reattachVolume": reattach_volume,
+        }
+        if new_ssd_pcie:
+            spec["newSsdPcie"] = new_ssd_pcie
+
+        patch = json.dumps({"spec": spec})
         cmd = (
             f"kubectl patch storagenodesets.storage.simplyblock.io {name} "
             f"-n {ns} --type=merge -p '{patch}'"
         )
         self.logger.info(
             f"[K8sUtils] Migrating storage node {node_uuid} to worker '{target_worker}'"
+            f" (newSsdPcie={new_ssd_pcie}, reattachVolume={reattach_volume})"
         )
         out, err = self._exec_kubectl(cmd)
         return out, err
