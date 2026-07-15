@@ -24,9 +24,9 @@ async def watch_pools(cluster_id):
     """Stream pool changes for one cluster (same scope as get_pools)."""
     db = DBController()
     async for batch in db.watch(
-            Pool,
+            Pool, scope=(cluster_id,),
             select=lambda models: db.get_pools(cluster_id, source=models),
-            ancestors=[(Cluster, cluster_id)]):
+            ancestors=[(Cluster, (), cluster_id)]):
         yield batch
 
 
@@ -34,9 +34,8 @@ async def watch_pool(cluster_id, pool_id):
     """Stream changes for a single pool."""
     db = DBController()
     async for batch in db.watch(
-            Pool,
-            select=lambda models: [pool for pool in models if pool.get_id() == pool_id],
-            ancestors=[(Cluster, cluster_id)]):
+            Pool, scope=(cluster_id,), entity_id=pool_id,
+            ancestors=[(Cluster, (), cluster_id)]):
         yield batch
 
 

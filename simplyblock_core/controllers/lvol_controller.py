@@ -32,9 +32,9 @@ async def watch_volumes(cluster_id, pool_id):
     """Stream volume changes for one pool (same scope as get_lvols_by_pool_id)."""
     db = DBController()
     async for batch in db.watch(
-            LVol,
+            LVol, scope=(pool_id,),
             select=lambda models: db.get_lvols_by_pool_id(pool_id, source=models),
-            ancestors=[(Cluster, cluster_id), (Pool, pool_id)]):
+            ancestors=[(Cluster, (), cluster_id), (Pool, (cluster_id,), pool_id)]):
         yield batch
 
 
@@ -42,12 +42,11 @@ async def watch_volume(cluster_id, pool_id, volume_id):
     """Stream changes for a single volume."""
     db = DBController()
     async for batch in db.watch(
-            LVol,
-            select=lambda models: [
-                lvol for lvol in db.get_lvols_by_pool_id(pool_id, source=models)
-                if lvol.get_id() == volume_id
-            ],
-            ancestors=[(Cluster, cluster_id), (Pool, pool_id)]):
+            LVol, scope=(pool_id,), entity_id=volume_id,
+            # Reuse the pool getter so deleted volumes leave the set (soft-delete
+            # -> deleted event + close), matching the list endpoint's filter.
+            select=lambda models: db.get_lvols_by_pool_id(pool_id, source=models),
+            ancestors=[(Cluster, (), cluster_id), (Pool, (cluster_id,), pool_id)]):
         yield batch
 
 
