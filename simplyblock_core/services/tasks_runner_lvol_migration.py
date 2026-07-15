@@ -1857,6 +1857,8 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             f"lvol={lvol.uuid} src={src_lvol_composite} tgt_snap={tgt_snap_composite}")
         ret = src_rpc.bdev_lvol_transfer_final_step(
             src_lvol_composite, tgt_map_id, tgt_snap_composite, 2, hub_bdev, "migrate")
+        logger.info("logged bdev_lvol_transfer_final_step return value:")
+        logger.info(ret)
         if ret is None:
             # Connection timeout or SPDK error (e.g. "File exists" = already in progress).
             # SPDK may have completed the migration while the RPC connection dropped.
@@ -3149,8 +3151,12 @@ def _group_worker_phase_dispatch(task, migration, phase, src_node, tgt_node, src
         # intermediates_done signalled — wait for batch_result.
         group = db.get_migration_group_by_id(group_id)
         if group.batch_result is True:
+            lvol = db.get_lvol_by_id(migration.lvol_id)
             migration.phase = LVolMigration.PHASE_CLEANUP_SOURCE
-            migration.transfer_context = {}
+            migration.transfer_context = {
+                'source_lvol_bdev': lvol.lvol_bdev,
+                'tgt_lvol_bdev': _lvol_tgt_bdev_name(lvol.lvol_bdev),
+            }
             migration.write_to_db(db.kv_store)
             migration_events.migration_phase_changed(migration)
             return _group_worker_phase_dispatch(
