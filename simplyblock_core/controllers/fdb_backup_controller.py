@@ -10,15 +10,9 @@ import docker
 from simplyblock_core import utils, constants
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.job_schedule import JobSchedule
-from simplyblock_core.models.snapshot import SnapShot
 
 logger = lg.getLogger()
 db_controller = DBController()
-# backup_path = constants.KVD_DB_BACKUP_PATH
-clusters = db_controller.get_clusters()
-if clusters:
-    cluster = clusters[0]
-
 
 def __get_fdb_cont():
     snode = db_controller.get_mgmt_nodes()[0]
@@ -29,9 +23,10 @@ def __get_fdb_cont():
         if container.name.startswith("app_fdb-server"): # type: ignore[union-attr]
             return container
 
-def create_backup():
+def create_backup(cluster_id):
     container = __get_fdb_cont()
     if container:
+        cluster = db_controller.get_cluster_by_id(cluster_id)
         backup_path = cluster.backup_local_path
         if cluster.backup_s3_bucket and cluster.backup_s3_cred:
             folder = f"backup-{str(datetime.datetime.now())}"
@@ -46,10 +41,11 @@ def create_backup():
         return True
     return False
 
-def list_backups():
+def list_backups(cluster_id):
     container = __get_fdb_cont()
     data = []
     if container:
+        cluster = db_controller.get_cluster_by_id(cluster_id)
         backup_path = cluster.get_backup_path()
         res = container.exec_run(cmd=f"fdbbackup list -b {backup_path}")
         logger.info(f"backup list from : {backup_path}")
@@ -106,9 +102,10 @@ def backup_status():
         return True
 
 
-def backup_restore(backup_name):
+def backup_restore(backup_name, cluster_id):
     container = __get_fdb_cont()
     if container:
+        cluster = db_controller.get_cluster_by_id(cluster_id)
         backup_path = cluster.get_backup_path(backup_name)
         res = container.exec_run(cmd="fdbcli --exec \"writemode on; clearrange \\\"\\\" \\xff\"")
         cont = res.output.decode("utf-8")
@@ -157,24 +154,6 @@ def backup_configure(backup_path, backup_frequency, bucket_name, region_name, ba
         clusters[0].backup_s3_cred = backup_credentials if backup_credentials else ""
         clusters[0].write_to_db()
         return True
-
-
-def create_snapshot_backup(snapshot: SnapShot):
-    container = __get_fdb_cont()
-    if container:
-        backup_path = cluster.backup_local_path
-        if cluster.backup_s3_bucket and cluster.backup_s3_cred:
-            folder = f"backup-{str(datetime.datetime.now())}"
-            folder = folder.replace(" ", "-")
-            folder = folder.replace(":", "-")
-            folder = folder.split(".")[0]
-            backup_path = f"blobstore://{cluster.backup_s3_cred}@s3.{cluster.backup_s3_region}.amazonaws.com/{folder}?bucket={cluster.backup_s3_bucket}&region={cluster.backup_s3_region}&sc=0"
-
-        res = container.exec_run(cmd=f"fdbbackup start -d {backup_path} -w")
-        cont = res.output.decode("utf-8")
-        logger.info(cont)
-        return True
-    return False
 
 def add_backup_task(cluster_id):
     try:

@@ -31,7 +31,7 @@ def process_fdb_backup_task(task):
         task.status = JobSchedule.STATUS_RUNNING
         task.write_to_db(db.kv_store)
 
-    ret = fdb_backup_controller.create_backup()
+    ret = fdb_backup_controller.create_backup(task.cluster_id)
     if ret:
         task.function_result = "Backup created"
         task.status = JobSchedule.STATUS_DONE

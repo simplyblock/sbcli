@@ -1118,6 +1118,7 @@ class CLIWrapper(CLIWrapperBase):
     def init_db_backup__restore(self, subparser):
         subcommand = self.add_sub_command(subparser, 'restore', 'restore a backup')
         subcommand.add_argument('name', help='backup class name', type=str)
+        subcommand.add_argument('cluster_id', help='Cluster ID to restore db backup to', type=str)
 
     def init_db_backup__config(self, subparser):
         subcommand = self.add_sub_command(subparser, 'config', 'Set backup configuration')

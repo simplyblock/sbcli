@@ -2667,6 +2667,10 @@ commands:
             help: "backup class name"
             dest: name
             type: str
+          - name: "cluster_id"
+            help: "Cluster ID to restore db backup to"
+            dest: cluster_id
+            type: str
       - name: config
         help: "Set backup configuration"
         arguments:
