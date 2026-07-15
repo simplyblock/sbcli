@@ -40,6 +40,15 @@ on:
       migrate_to_worker:
         description: 'K8s worker node name to migrate a randomly chosen storage node onto'
         required: true
+      new_ssd_pcie:
+        description: 'Comma-separated PCIe addresses for new SSDs on the target worker (e.g. 0000:0b:00.0,0000:02:00.0). Leave empty to keep existing.'
+        required: false
+        default: ''
+      reattach_volume:
+        description: 'Reattach volumes after migration'
+        required: false
+        default: true
+        type: boolean
       ifc_names:
         description: 'Network interfaces (mgmt_ifc:data_nics)'
         required: false
@@ -1092,9 +1101,20 @@ jobs:
           export K8S_LOCAL_KUBECTL=1
           export SBCLI_CMD=sbctl
 
+          NEW_SSD_PCIE_ARG=""
+          if [ -n "${{ github.event.inputs.new_ssd_pcie }}" ]; then
+            NEW_SSD_PCIE_ARG="--new_ssd_pcie ${{ github.event.inputs.new_ssd_pcie }}"
+          fi
+
+          REATTACH_VOL_ARG=""
+          if [ "${{ github.event.inputs.reattach_volume }}" = "true" ]; then
+            REATTACH_VOL_ARG="--reattach_volume True"
+          fi
+
           python3 -u e2e.py \
             --testname K8sNativeNodeMigrationTest \
             --migrate_to_worker "${{ github.event.inputs.migrate_to_worker }}" \
+            ${NEW_SSD_PCIE_ARG} ${REATTACH_VOL_ARG} \
             --ndcs $NDCS --npcs $NPCS --bs $BS --chunk_bs $CHUNK_BS \
             --run_k8s True 2>&1 | tee output.log
         env:

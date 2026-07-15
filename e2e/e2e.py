@@ -46,6 +46,8 @@ def main():
     parser.add_argument('--namespace', type=str, help="Kubernetes namespace", default="")
     parser.add_argument('--new_worker_nodes', type=str, help="New K8s worker node names to add (comma-separated)", default="")
     parser.add_argument('--migrate_to_worker', type=str, help="K8s worker node name to migrate a storage node onto", default="")
+    parser.add_argument('--new_ssd_pcie', type=str, help="Comma-separated PCIe addresses for new SSDs on the target worker", default="")
+    parser.add_argument('--reattach_volume', type=str, help="Reattach volumes after migration (True/False)", default="")
     parser.add_argument('--preserve_resources_on_failure', type=bool,
                         help="Skip K8s resource cleanup when test fails (preserve PVCs/pods for debugging)",
                         default=False)
@@ -190,6 +192,8 @@ def main():
                         namespace=args.namespace,
                         new_worker_nodes=new_worker_nodes,
                         migrate_to_worker=args.migrate_to_worker,
+                        new_ssd_pcie=args.new_ssd_pcie,
+                        reattach_volume=args.reattach_volume,
                         preserve_resources_on_failure=args.preserve_resources_on_failure,
                         )
         try:

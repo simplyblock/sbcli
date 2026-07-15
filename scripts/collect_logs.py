@@ -366,7 +366,7 @@ def graylog_fetch_all(session, base_url, query, from_iso, to_iso, out_path):
         return 0, 0
     if total == 0:
         Path(out_path).touch()
-        print(f"    total entries: 0")
+        print("    total entries: 0")
         return 0, 0
 
     print(f"    total entries: {total}")
