@@ -2367,3 +2367,10 @@ def add_replication(source_cl_id, target_cl_id, timeout=0, target_pool=None) -> 
     db_controller.atomic_update(db_controller.get_cluster_by_id(source_cl_id), _mut)
     logger.info("Done")
     return True
+
+
+def rebalance(cluster_id) -> bool:
+    for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+        if node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
+            tasks_controller.add_device_mig_task_for_node(node.get_id())
+    return True

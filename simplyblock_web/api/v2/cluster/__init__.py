@@ -244,6 +244,12 @@ def update_cluster( cluster: Cluster, parameters: _UpdateParams) -> Response:
     return Response(status_code=204)
 
 
+@instance_api.post('/rebalance', name='clusters:rebalance', status_code=204, responses={204: {"content": None}})
+def rebalance_cluster( cluster: Cluster) -> Response:
+    cluster_ops.rebalance(cluster.get_id())
+    return Response(status_code=204)
+
+
 instance_api.include_router(storage_node_api, prefix='/storage-nodes')
 instance_api.include_router(task_api, prefix='/tasks')
 instance_api.include_router(pool_api, prefix='/storage-pools')
