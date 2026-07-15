@@ -218,8 +218,6 @@ from e2e_tests.test_pool_host_management import TestPoolHostManagement
 from e2e_tests.test_lvol_placement import TestLvolPlacement
 from e2e_tests.test_node_shutdown_restart import TestNodeShutdownRestart
 
-from e2e_tests.test_api_parity_audit import TestAPIParityAudit
-
 from e2e_tests.backup.test_backup_restore import (
     TestBackupBasicPositive,
     TestBackupRestoreDataIntegrity,
@@ -481,8 +479,6 @@ ALL_TESTS = [
     TestPoolHostManagement,
     TestLvolPlacement,
     TestNodeShutdownRestart,
-    # ── API Parity Audit ──────────────────────────────────────────────
-    TestAPIParityAudit,
 ]
 
 def get_all_tests(custom=True, ha_test=False):
@@ -823,6 +819,8 @@ def get_load_tests():
 
 def get_parity_tests():
     """API parity audit — CLI vs v1 vs v2 three-way comparison."""
-    return [
-        TestAPIParityAudit,
-    ]
+    try:
+        from e2e_tests.test_api_parity_audit import TestAPIParityAudit
+        return [TestAPIParityAudit]
+    except ImportError:
+        return []

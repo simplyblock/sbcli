@@ -3241,7 +3241,6 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
             f"(prefix={prefix}, timeout={timeout}s)"
         )
         deadline = time.time() + timeout
-        last_count = expected_gone
         last_progress_count = expected_gone
         last_progress_time = time.time()
 
