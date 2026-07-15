@@ -27,7 +27,7 @@ def create_backup(cluster_id):
     container = __get_fdb_cont()
     if container:
         cluster = db_controller.get_cluster_by_id(cluster_id)
-        backup_path = cluster.backup_local_path
+        backup_path = cluster.get_backup_path()
         if cluster.backup_s3_bucket and cluster.backup_s3_cred:
             folder = f"backup-{str(datetime.datetime.now())}"
             folder = folder.replace(" ", "-")
@@ -139,20 +139,32 @@ def parse_history_param(history_string):
     return int(total_seconds)
 
 
-def backup_configure(backup_path, backup_frequency, bucket_name, region_name, backup_credentials):
-    clusters = db_controller.get_clusters()
-    if clusters:
+def backup_configure(cluster_id, backup_path, backup_frequency, bucket_name, region_name, backup_credentials):
+    cluster = db_controller.get_cluster_by_id(cluster_id)
+    if cluster:
         if backup_path:
             if not backup_path.startswith("file://"):
                 backup_path = f"file://{backup_path}"
-            clusters[0].backup_local_path = backup_path
+            cluster.backup_local_path = backup_path
         if backup_frequency:
             total_seconds = parse_history_param(backup_frequency)
-            clusters[0].backup_frequency_seconds = total_seconds
-        clusters[0].backup_s3_region = region_name if region_name else ""
-        clusters[0].backup_s3_bucket = bucket_name if bucket_name else ""
-        clusters[0].backup_s3_cred = backup_credentials if backup_credentials else ""
-        clusters[0].write_to_db()
+            cluster.backup_frequency_seconds = total_seconds
+        container = __get_fdb_cont()
+        if container:
+            backup_path = f"blobstore://{backup_credentials}@s3.{region_name}.amazonaws.com/?bucket={bucket_name}&region={region_name}&sc=0"
+            res = container.exec_run(cmd=f"fdbbackup list -b {backup_path}")
+            cont = res.output.decode("utf-8")
+            if res.exit_code == 0:
+                logger.info(f"backup list from : {backup_path}")
+                logger.info(cont)
+                cluster.backup_s3_region = region_name if region_name else ""
+                cluster.backup_s3_bucket = bucket_name if bucket_name else ""
+                cluster.backup_s3_cred = backup_credentials if backup_credentials else ""
+                cluster.write_to_db()
+            else:
+                logger.error(f"Failed to list backup from s3: {backup_path}")
+                logger.error(cont)
+                return False
         return True
 
 def add_backup_task(cluster_id):

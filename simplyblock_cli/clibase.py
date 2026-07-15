@@ -1086,7 +1086,7 @@ class CLIWrapperBase:
         return fdb_backup_controller.backup_restore(args.name, args.cluster_id)
 
     def db_backup__config(self, sub_command, args):
-        return fdb_backup_controller.backup_configure(args.backup_path, args.backup_frequency, args.bucket_name, args.region_name, args.backup_credentials)
+        return fdb_backup_controller.backup_configure(args.cluster_id, args.backup_path, args.backup_frequency, args.bucket_name, args.region_name, args.backup_credentials)
 
     def storage_node_list_devices(self, args):
         data = storage_ops.list_storage_devices(args.node_id)

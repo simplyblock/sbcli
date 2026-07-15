@@ -190,8 +190,10 @@ class Cluster(BaseModel):
         if self.backup_s3_bucket and self.backup_s3_cred:
             backup_path = f"blobstore://{self.backup_s3_cred}@s3.{self.backup_s3_region}.amazonaws.com/{path}?bucket={self.backup_s3_bucket}" \
                           + f"&region={self.backup_s3_region}&sc=0"
-        else:
+        elif self.backup_local_path:
             backup_path = os.path.join(self.backup_local_path, path)
+        else:
+            backup_path = os.path.join(constants.KVD_DB_BACKUP_PATH, self.uuid, path)
         return backup_path
 
 

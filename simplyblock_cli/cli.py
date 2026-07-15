@@ -1123,6 +1123,7 @@ class CLIWrapper(CLIWrapperBase):
 
     def init_db_backup__config(self, subparser):
         subcommand = self.add_sub_command(subparser, 'config', 'Set backup configuration')
+        subcommand.add_argument('cluster_id', help='Cluster ID to configure db backup for', type=str)
         subcommand.add_argument('--backup-path', help='local backup path, defaults to /etc/foundationdb/backup', type=str, dest='backup_path')
         subcommand.add_argument('--backup-frequency', help='backup frequency, can be 3h, 1d', type=str, dest='backup_frequency')
         subcommand.add_argument('--s3-bucket', help='AWS S3 bucket name', type=str, dest='bucket_name')

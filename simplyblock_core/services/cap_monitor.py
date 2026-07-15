@@ -15,10 +15,12 @@ db = db_controller.DBController()
 last_event: dict[str, dict] = {}
 
 def create_fdb_backup_if_needed(cluster):
-    last_backup_task = None
     tasks = fdb_backup_controller.get_backup_tasks(cluster.get_id())
-    if tasks:
-        last_backup_task = tasks[0]
+    if not tasks:
+        fdb_backup_controller.add_backup_task(cluster.get_id())
+        return
+
+    last_backup_task = tasks[0]
     if last_backup_task and last_backup_task.status == JobSchedule.STATUS_DONE:
         if last_backup_task.date + cluster.backup_frequency_seconds < time.time():
             fdb_backup_controller.add_backup_task(cluster.get_id())
