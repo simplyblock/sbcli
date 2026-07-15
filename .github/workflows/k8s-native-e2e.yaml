@@ -92,6 +92,7 @@ on:
           - local
           - aws-openshift
           - openshift-local
+          - openshift-baremetal
           - gcp
       skip_nfs:
         description: 'Skip NFS mounting (use local logs directory instead)'
@@ -260,6 +261,7 @@ jobs:
           KUBECONFIG_DATA: ${{
             github.event.inputs.cluster_environment == 'aws-openshift' && secrets.KUBECONFIG_AWS_OPENSHIFT ||
             github.event.inputs.cluster_environment == 'openshift-local' && secrets.KUBECONFIG_OPENSHIFT_LOCAL ||
+            github.event.inputs.cluster_environment == 'openshift-baremetal' && secrets.KUBECONFIG_OPENSHIFT_BM ||
             github.event.inputs.cluster_environment == 'gcp' && secrets.KUBECONFIG_GCP ||
             secrets.KUBECONFIG_LOCAL || secrets.KUBECONFIG_CONTENT
             }}

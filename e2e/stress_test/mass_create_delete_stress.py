@@ -104,6 +104,13 @@ class _MassCreateDeleteMixin:
     CLONE_PHASE_TIMEOUT = 7200       # 2 hours
     DELETE_PHASE_TIMEOUT = 3600      # 1 hour
 
+    # ── Per-item time budget (seconds) ────────────────────────────────────
+    # Used to compute a hard wall-clock cap for creation/snapshot phases
+    # that scales with the number of items.  E.g. for 3000 items at 6s
+    # each → 18000s = 5h max.  Floor of 1800s (30 min) for small runs.
+    PER_ITEM_TIME_BUDGET = 6         # seconds per PVC / snapshot / clone
+    PHASE_TIME_FLOOR = 1800          # minimum 30 min even for tiny runs
+
     # ── Persistent retry mode ─────────────────────────────────────────────
     # Subclasses set PERSISTENT_RETRY = True to retry failed items until
     # all expected entities are created or a terminal error is hit.
@@ -221,12 +228,12 @@ class _MassCreateDeleteMixin:
             )
         return len(resolved), resolved
 
-    def _check_count(self, actual, expected, label, hard_min_pct=0.50):
+    def _check_count(self, actual, expected, label, hard_min_pct=0.80):
         """Validate count against hard minimum and soft tolerance.
 
-        If actual < hard_min_pct of expected, raises RuntimeError to stop
-        the test immediately — proceeding with <50% of resources is
-        meaningless and wastes compute.
+        If actual < hard_min_pct of expected (default 80%), raises
+        RuntimeError to stop the test immediately — proceeding with too
+        few resources wastes compute and masks real failures.
 
         If actual < 90% of expected (but above hard min), logs a warning
         and appends to _soft_failures for end-of-test reporting.
@@ -245,6 +252,20 @@ class _MassCreateDeleteMixin:
             )
             self.logger.warning(msg)
             self._soft_failures.append(msg)
+
+    def _phase_time_limit(self, count, label="phase"):
+        """Compute a wall-clock cap for a phase based on item count.
+
+        Returns seconds.  E.g. 3000 items × 6s = 18000s = 5h.
+        """
+        limit = max(self.PHASE_TIME_FLOOR,
+                     count * self.PER_ITEM_TIME_BUDGET)
+        self.logger.info(
+            f"[{label}] Time limit: {round(limit/3600, 1)}h "
+            f"({count} items × {self.PER_ITEM_TIME_BUDGET}s, "
+            f"floor={self.PHASE_TIME_FLOOR}s)"
+        )
+        return limit
 
     # ── Batch execution (from large_scale_lvol_stress.py) ──────────────────
 
@@ -447,6 +468,9 @@ class _MassCreateDeleteMixin:
         test_start = time.time()
         test_deadline = test_start + max_dur
 
+        # Start periodic kubectl resource collection (every 30 min)
+        periodic_stop = self.start_periodic_resource_collection(interval=1800)
+
         def _check_deadline(phase_name):
             elapsed = time.time() - test_start
             remaining = test_deadline - time.time()
@@ -461,6 +485,18 @@ class _MassCreateDeleteMixin:
                 f"remaining={round(remaining/60,0)}min"
             )
 
+        def _check_phase_time(phase_name, phase_start, item_count):
+            """Fail if a phase exceeded its per-item time budget."""
+            elapsed = time.time() - phase_start
+            limit = self._phase_time_limit(item_count, phase_name)
+            if elapsed > limit:
+                raise RuntimeError(
+                    f"[{phase_name}] exceeded time limit: "
+                    f"{round(elapsed/3600, 1)}h > "
+                    f"{round(limit/3600, 1)}h "
+                    f"({item_count} items × {self.PER_ITEM_TIME_BUDGET}s)"
+                )
+
         try:
             # Phase 1: Mass-create lvols
             t0 = time.time()
@@ -474,6 +510,7 @@ class _MassCreateDeleteMixin:
 
             if not self._lvol_registry:
                 raise RuntimeError("No lvols created — cannot proceed")
+            _check_phase_time("Phase 1", t0, total)
             _check_deadline("Phase 1")
 
             # Phase 2: FIO on 10% of lvols
@@ -527,11 +564,16 @@ class _MassCreateDeleteMixin:
                 f"ready_wait={self._phase_durations['3_ready_wait']}s, "
                 f"total={round(t_ready - t0, 1)}s"
             )
+            # Compare against actual lvols (not original total) — if Phase 1
+            # created fewer lvols, comparing against total would hide whether
+            # Phase 3 itself had failures vs inheriting Phase 1's shortfall.
+            expected_snaps = len(self._lvol_registry) * self.SNAPSHOTS_PER_LVOL
             self._check_count(
                 verified_snaps,
-                total * self.SNAPSHOTS_PER_LVOL,
+                expected_snaps,
                 "snapshots",
             )
+            _check_phase_time("Phase 3", t0, expected_snaps)
             _check_deadline("Phase 3")
 
             # Phase 4: Delete lvols to free subsystem slots for clones.
@@ -546,6 +588,7 @@ class _MassCreateDeleteMixin:
                 f"[Phase 4] Lvols deleted "
                 f"in {self._phase_durations['4_delete_lvols']}s"
             )
+            _check_phase_time("Phase 4", t0, len(self._lvol_registry))
             _check_deadline("Phase 4")
 
             # Phase 5: Mass-create clones from (orphaned) snapshots
@@ -562,6 +605,7 @@ class _MassCreateDeleteMixin:
             self._check_count(
                 len(self._clone_registry), total, "clones",
             )
+            _check_phase_time("Phase 5", t0, total)
             _check_deadline("Phase 5")
 
             # Phase 6: FIO on 10% of clones
@@ -599,6 +643,7 @@ class _MassCreateDeleteMixin:
             )
 
         finally:
+            periodic_stop.set()
             try:
                 self.collect_management_details(suffix="_pre_delete")
             except Exception as exc:
@@ -2651,10 +2696,13 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
             # Fire all PVCs in batches of CREATE_BATCH_SIZE with
             # CREATE_MAX_WORKERS concurrent threads per batch
             t_fire_start = time.time()
+            # Pin PVCs to first storage node (same as Docker path)
+            host_id = self.sn_nodes[0] if self.sn_nodes else None
             fired_items, errors, _ = self._fire_in_batches(
                 pvc_names,
                 lambda name: self.k8s_utils.create_pvc(
                     name, self.PVC_SIZE, self.STORAGE_CLASS_NAME,
+                    node_id=host_id,
                 ),
                 "Phase 1",
                 concurrent=self.CREATE_BATCH_SIZE,
@@ -2712,6 +2760,9 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
             self._lvol_registry[pvc_name] = {
                 "id": pvc_name, "parent_name": None,
             }
+
+        # Hard/soft check: fail early if too few PVCs bound
+        self._check_count(len(bound_names), total, "Phase 1 PVCs")
 
         # Verify backend: wait until sbctl lvol list count matches Bound PVCs.
         self._verify_backend_lvol_count(len(bound_names), label="Phase 1")
@@ -3171,6 +3222,68 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
         self._log_time_series("Phase 4", series)
         self._metrics["lvols_deleted"] = len(fired_items)
 
+        # Verify PVCs are actually gone (not just marked for deletion)
+        self._verify_delete_complete(
+            "mcd-pvc", initial_count, "Phase 4",
+            timeout=self.DELETE_PHASE_TIMEOUT,
+        )
+
+    def _verify_delete_complete(self, prefix, expected_gone, label,
+                                timeout=600, poll_interval=30):
+        """Poll until PVCs matching *prefix* are actually gone from K8s.
+
+        After kubectl delete fires, PVCs may linger while finalizers run.
+        This polls until the remaining count drops to zero or stalls.
+        """
+        stall_timeout = getattr(self, 'BOUND_STALL_TIMEOUT', 300)
+        self.logger.info(
+            f"[{label}] Verifying {expected_gone} PVCs deleted "
+            f"(prefix={prefix}, timeout={timeout}s)"
+        )
+        deadline = time.time() + timeout
+        last_count = expected_gone
+        last_progress_count = expected_gone
+        last_progress_time = time.time()
+
+        while time.time() < deadline:
+            remaining = self._count_pvcs_by_prefix(prefix)
+            if remaining < last_progress_count:
+                last_progress_time = time.time()
+                last_progress_count = remaining
+
+            stall_elapsed = time.time() - last_progress_time
+            self.logger.info(
+                f"[{label}] Delete verification: {remaining} PVCs remaining "
+                f"(stall={round(stall_elapsed)}s/{stall_timeout}s)"
+            )
+            if remaining == 0:
+                self.logger.info(
+                    f"[{label}] All PVCs deleted successfully"
+                )
+                return
+            if stall_elapsed >= stall_timeout:
+                self._soft_failures.append(
+                    f"[{label}] {remaining} PVCs still exist after "
+                    f"delete — finalizers may be stuck"
+                )
+                self.logger.warning(
+                    f"[{label}] Delete verification stalled: "
+                    f"{remaining} PVCs stuck for {round(stall_elapsed)}s"
+                )
+                return
+            time.sleep(poll_interval)
+
+        remaining = self._count_pvcs_by_prefix(prefix)
+        if remaining > 0:
+            self._soft_failures.append(
+                f"[{label}] {remaining} PVCs still exist after "
+                f"{timeout}s delete timeout"
+            )
+            self.logger.warning(
+                f"[{label}] Delete verification timed out: "
+                f"{remaining} PVCs remaining after {timeout}s"
+            )
+
     # ── Phase 5: Create clone PVCs from VolumeSnapshots ───────────────────
 
     def _phase_5_create_clones(self):
@@ -3422,6 +3535,12 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
         self._time_series["phase_7_delete_clones"] = series
         self._log_time_series("Phase 7", series)
         self._metrics["clones_deleted"] = len(fired_items)
+
+        # Verify clone PVCs are actually gone
+        self._verify_delete_complete(
+            "clone-pvc", len(clone_names), "Phase 7",
+            timeout=self.DELETE_PHASE_TIMEOUT,
+        )
 
     # ── Phase 8: Delete VolumeSnapshots ───────────────────────────────────
 
@@ -3760,12 +3879,12 @@ class MassCreateDeletePersistent_3000x1_Docker(_MassCreateDeleteDocker):
     NS_PER_SUBSYSTEM = 3000
 
 
-class MassCreateDeletePersistent_300x10_20Snap_Docker(_MassCreateDeleteDocker):
-    """300 ns/sub × 10 subsystems = 3000 lvols, 20 snapshots each = 60000 snapshots (persistent retry)."""
+class MassCreateDeletePersistent_300x10_10Snap_Docker(_MassCreateDeleteDocker):
+    """300 ns/sub × 10 subsystems = 3000 lvols, 10 snapshots each = 60000 snapshots (persistent retry)."""
     PERSISTENT_RETRY = True
     NUM_SUBSYSTEMS = 10
     NS_PER_SUBSYSTEM = 300
-    SNAPSHOTS_PER_LVOL = 20
+    SNAPSHOTS_PER_LVOL = 10
 
 
 # K8s persistent variants

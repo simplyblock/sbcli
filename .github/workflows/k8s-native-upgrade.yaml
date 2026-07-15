@@ -85,6 +85,7 @@ on:
           - local
           - aws-openshift
           - openshift-local
+          - openshift-baremetal
           - gcp
 
       # ── Runner config ──
