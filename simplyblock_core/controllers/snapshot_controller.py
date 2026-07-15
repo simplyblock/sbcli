@@ -29,27 +29,27 @@ from simplyblock_core.models.storage_node import StorageNode
 logger = lg.getLogger()
 
 
-def watch_snapshots(cluster_id, pool_id):
+async def watch_snapshots(cluster_id, pool_id):
     """Stream snapshot changes for one pool (same scope as get_snapshots_by_pool_id)."""
     db = DBController()
-    return db.watch(
-        SnapShot,
-        select=lambda models: db.get_snapshots_by_pool_id(pool_id, source=models),
-        ancestors=[(Cluster, cluster_id), (Pool, pool_id)],
-    )
+    async for batch in db.watch(
+            SnapShot,
+            select=lambda models: db.get_snapshots_by_pool_id(pool_id, source=models),
+            ancestors=[(Cluster, cluster_id), (Pool, pool_id)]):
+        yield batch
 
 
-def watch_snapshot(cluster_id, pool_id, snapshot_id):
+async def watch_snapshot(cluster_id, pool_id, snapshot_id):
     """Stream changes for a single snapshot."""
     db = DBController()
-    return db.watch(
-        SnapShot,
-        select=lambda models: [
-            snap for snap in db.get_snapshots_by_pool_id(pool_id, source=models)
-            if snap.get_id() == snapshot_id
-        ],
-        ancestors=[(Cluster, cluster_id), (Pool, pool_id)],
-    )
+    async for batch in db.watch(
+            SnapShot,
+            select=lambda models: [
+                snap for snap in db.get_snapshots_by_pool_id(pool_id, source=models)
+                if snap.get_id() == snapshot_id
+            ],
+            ancestors=[(Cluster, cluster_id), (Pool, pool_id)]):
+        yield batch
 
 db_controller = DBController()
 

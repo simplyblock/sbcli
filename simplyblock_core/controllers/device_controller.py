@@ -32,27 +32,27 @@ def _explode_devices(nodes, node_id):
     return []
 
 
-def watch_devices(cluster_id, node_id):
+async def watch_devices(cluster_id, node_id):
     """Stream device changes for one storage node."""
     db = DBController()
-    return db.watch(
-        StorageNode,
-        select=lambda nodes: _explode_devices(nodes, node_id),
-        ancestors=[(Cluster, cluster_id), (StorageNode, node_id)],
-    )
+    async for batch in db.watch(
+            StorageNode,
+            select=lambda nodes: _explode_devices(nodes, node_id),
+            ancestors=[(Cluster, cluster_id), (StorageNode, node_id)]):
+        yield batch
 
 
-def watch_device(cluster_id, node_id, device_id):
+async def watch_device(cluster_id, node_id, device_id):
     """Stream changes for a single device."""
     db = DBController()
-    return db.watch(
-        StorageNode,
-        select=lambda nodes: [
-            device for device in _explode_devices(nodes, node_id)
-            if device.get_id() == device_id
-        ],
-        ancestors=[(Cluster, cluster_id), (StorageNode, node_id)],
-    )
+    async for batch in db.watch(
+            StorageNode,
+            select=lambda nodes: [
+                device for device in _explode_devices(nodes, node_id)
+                if device.get_id() == device_id
+            ],
+            ancestors=[(Cluster, cluster_id), (StorageNode, node_id)]):
+        yield batch
 
 
 def get_storage_node_by_jm_device(db_controller: DBController, id) -> StorageNode:

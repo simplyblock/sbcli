@@ -38,17 +38,18 @@ logger = utils.get_logger(__name__)
 db_controller = DBController()
 
 
-def watch_clusters():
+async def watch_clusters():
     """Stream changes across all clusters."""
-    return db_controller.watch(Cluster)
+    async for batch in db_controller.watch(Cluster):
+        yield batch
 
 
-def watch_cluster(cluster_id):
+async def watch_cluster(cluster_id):
     """Stream changes for a single cluster."""
-    return db_controller.watch(
-        Cluster,
-        select=lambda models: [c for c in models if c.get_id() == cluster_id],
-    )
+    async for batch in db_controller.watch(
+            Cluster,
+            select=lambda models: [c for c in models if c.get_id() == cluster_id]):
+        yield batch
 
 def _create_update_user(cluster_id, grafana_url, grafana_secret: SecretStr, user_secret: SecretStr, update_secret=False):
     session = requests.session()
