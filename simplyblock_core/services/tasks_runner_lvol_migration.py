@@ -1859,8 +1859,19 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         logger.info(
             f"[IO-FREEZE] {_now_ms()} bdev_lvol_final_migration starting: "
             f"lvol={lvol.uuid} src={src_lvol_composite} tgt_snap={tgt_snap_composite}")
-        ret = src_rpc.bdev_lvol_transfer_final_step(
-            src_lvol_composite, tgt_map_id, tgt_snap_composite, 2, hub_bdev, "migrate")
+        try:
+            ret = src_rpc.bdev_lvol_transfer_final_step(
+                src_lvol_composite, tgt_map_id, tgt_snap_composite, 2, hub_bdev, "migrate")
+        except Exception:
+            # SRC secondary/tertiary were just flipped inaccessible above; if the
+            # RPC itself raises (e.g. source unreachable — RPCException("connection
+            # error")) rather than returning a falsy result, that revert must still
+            # happen here — otherwise a source outage leaves replicas inaccessible
+            # for as long as the outage lasts, with no working path at all, since
+            # this exception propagates past this function to task_runner's
+            # generic RPCException handler which only suspends the task.
+            _revert_src_replicas("final migration RPC call failed")
+            raise
         if not ret:
             # Falsy, not just None: a target restart mid-RPC can come back as a
             # 200 with an empty/non-JSON body, which rpc_client._request2 then
