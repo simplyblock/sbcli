@@ -119,6 +119,14 @@ TASK_LEASE_TTL_SEC = 1200
 CLUSTER_ADD_LOCK_HEARTBEAT_SEC = 30
 CLUSTER_ADD_LOCK_TTL_SEC = 120
 
+# How long a queued add_node waits for the lock before failing for retry.
+# "Short" is relative: one mesh section takes minutes on a 32-node cluster,
+# and parallel deploys queue up to (workers - 1) adds behind the holder, so
+# the tail waiter legitimately needs workers x mesh-time (2026-07-16 perf
+# deploy: 300s timed out routinely with 8 parallel adds). A timeout here
+# costs a full node-local re-setup on retry, so err on the side of waiting.
+CLUSTER_ADD_LOCK_WAIT_TIMEOUT_SEC = 1800
+
 # A node-add port reservation older than this is treated as abandoned and
 # ignored/reclaimed. Must exceed the worst-case time from port allocation to
 # persisting the node record (which spans the SPDK boot), so a live add never
@@ -211,6 +219,14 @@ INSTANCE_STORAGE_DATA = {
     }
 
 MAX_SNAP_COUNT = 100
+
+# Per-SPDK-instance object cap: each vCPU in the instance's core mask serves
+# at most this many objects (lvols + clones + snapshots), counted against
+# their primary node. 8 cores (the minimum) -> 16k objects, 32 cores -> 64k.
+# Guards the data plane against object-count overload (run 20260712-231123:
+# ~68k objects on one 12-core instance drove swap thrash and a JC-quartet
+# abort).
+MAX_OBJECTS_PER_CORE = 2000
 
 SPDK_PROXY_MULTI_THREADING_ENABLED=True
 SPDK_PROXY_TIMEOUT=60*5
@@ -393,7 +409,7 @@ MIG_JOB_SIZE = 64
 
 # Live volume migration constants
 LVOL_MIG_MAX_RETRIES = 5          # max retry attempts before aborting
-LVOL_MIG_DEADLINE_SEC = 360  # default 4-hour deadline (0 = no deadline)
+LVOL_MIG_DEADLINE_SEC = 3600  # 1-hour deadline (0 = no deadline)
 LVOL_MIG_MAX_INTERMEDIATE_SNAPS = 3        # max recursive "shrink" snapshot rounds
 LVOL_MIG_INTERMEDIATE_SNAP_THRESHOLD_BYTES = 500 * 1024 * 1024  # 500 MiB — skip if delta is smaller
 LVOL_MIG_BDEV_SUFFIX = 'm'  # appended to every migration bdev on the target to avoid collision with real bdevs

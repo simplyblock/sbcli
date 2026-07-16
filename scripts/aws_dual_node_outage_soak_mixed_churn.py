@@ -2458,11 +2458,20 @@ class SoakRunner:
         group while keeping the relative ring-distance fixed per category.
         Same-method method pairs are NOT included — ordered distinct pairs
         only, per itertools.permutations(methods, 2).
+
+        NOTE: pairs without a network outage are temporarily DISABLED —
+        only pairs where at least one method is network_outage_* are kept.
+        Drop the startswith filter below to restore the full enumeration.
         """
         _ = nodes  # unused: pair picking happens at iteration time
         scenarios = []
+        skipped = 0
         for category in ROLE_CATEGORIES:
             for m_a, m_b in itertools.permutations(self.methods, 2):
+                if not (m_a.startswith("network_outage_")
+                        or m_b.startswith("network_outage_")):
+                    skipped += 1
+                    continue
                 scenarios.append({
                     "method_a": m_a,
                     "method_b": m_b,
@@ -2472,7 +2481,8 @@ class SoakRunner:
         self.logger.log(
             f"Built {len(scenarios)} scenarios: "
             f"{len(ROLE_CATEGORIES)} role categories × "
-            f"P({len(self.methods)},2)={method_pair_count} ordered method pairs "
+            f"P({len(self.methods)},2)={method_pair_count} ordered method pairs, "
+            f"{skipped} without a network_outage_* method disabled "
             f"(node pair rolled randomly per scenario)"
         )
         return scenarios

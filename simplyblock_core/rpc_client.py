@@ -1,28 +1,22 @@
+import errno
 import json
-import threading
-import time
 from json import JSONDecodeError
 from typing import Any, Optional
 
-import requests
-from pydantic import SecretStr
-from requests.exceptions import ConnectionError, HTTPError, Timeout, TooManyRedirects
 import jsonschema
+import requests
 from jsonschema.exceptions import ValidationError
+from pydantic import SecretStr
+from requests.adapters import HTTPAdapter
+from requests.exceptions import ConnectionError, HTTPError, Timeout, TooManyRedirects
+from urllib3 import Retry
 
 from simplyblock_core import utils, constants
 from simplyblock_core.settings import Settings
+from simplyblock_core.utils.helpers import single_or_none
 from simplyblock_core.utils.secrets import unwrap_secrets_for_send
-from requests.adapters import HTTPAdapter
-from urllib3 import Retry
 
 logger = utils.get_logger()
-
-# Shared per-node cache for expensive read-only RPCs (e.g. bdev_get_bdevs, nvmf_get_subsystems).
-# Key: (host, port, method_name), Value: (timestamp, result)
-_rpc_cache: dict[tuple, tuple[float, Any]] = {}
-_rpc_cache_lock = threading.Lock()
-RPC_CACHE_TTL_SEC = 15  # cached results are valid for this many seconds
 
 
 _response_schema = {
@@ -127,22 +121,6 @@ class RPCClient:
         if settings.tls_connect == "authenticated":
             self.session.cert = (str(settings.tls_certificate), str(settings.tls_key))
 
-    def _request_cached(self, method, params=None, cache_ttl=RPC_CACHE_TTL_SEC):
-        """Like _request but returns a cached result if one exists within cache_ttl seconds."""
-        cache_key = (self.host, self.port, method, json.dumps(params, sort_keys=True) if params else None)
-        now = time.monotonic()
-        with _rpc_cache_lock:
-            if cache_key in _rpc_cache:
-                ts, cached_result = _rpc_cache[cache_key]
-                if now - ts < cache_ttl:
-                    logger.debug("Cache hit for %s on %s:%s", method, self.host, self.port)
-                    return cached_result
-        result = self._request(method, params)
-        if result is not None:
-            with _rpc_cache_lock:
-                _rpc_cache[cache_key] = (now, result)
-        return result
-
     def _request(self, method, params=None, request_timeout=None):
         ret, _ = self._request2(method, params, request_timeout=request_timeout)
         return ret
@@ -229,15 +207,16 @@ class RPCClient:
     def get_version(self):
         return self._request("spdk_get_version")
 
-    def subsystem_list(self, nqn_name=None):
-        data = self._request("nvmf_get_subsystems")
-        if data and nqn_name:
-            for d in data:
-                if d['nqn'] == nqn_name:
-                    return [d]
-            return []
-        else:
-            return data
+    def subsystem_list(self) -> list[dict]:
+        return self._request3("nvmf_get_subsystems")
+
+    def subsystem_get(self, nqn: str) -> Optional[dict]:
+        try:
+            return single_or_none(self._request3("nvmf_get_subsystems", nqn=nqn))
+        except RPCException as e:
+            if e.code == -errno.ENODEV:
+                return None
+            raise
 
     def subsystem_delete(self, nqn):
         return self._request("nvmf_delete_subsystem", params={'nqn': nqn})
@@ -475,24 +454,22 @@ class RPCClient:
         ret, err = self._request2("nvmf_subsystem_add_ns", params)
         if err and idempotent:
             try:
-                subs = self.subsystem_list(nqn_name=nqn) or []
-                if subs:
-                    for ns in subs[0].get("namespaces", []) or []:
-                        if ns.get("bdev_name") != dev_name:
-                            continue
-                        if nsid is not None and ns.get("nsid") != nsid:
-                            continue
-                        if uuid is not None and ns.get("uuid") and ns.get("uuid") != uuid:
-                            # Same bdev at a different nsid is fine to no-op,
-                            # but a mismatched uuid on the same bdev is a real
-                            # conflict — keep the original error.
-                            continue
-                        existing_nsid = ns.get("nsid")
-                        logger.info(
-                            "nvmf_subsystem_add_ns: %s already has %s at nsid=%s, "
-                            "treating rejected duplicate add as success",
-                            nqn, dev_name, existing_nsid)
-                        return existing_nsid, None
+                for ns in (self.subsystem_get(nqn) or {}).get("namespaces", []):
+                    if ns.get("bdev_name") != dev_name:
+                        continue
+                    if nsid is not None and ns.get("nsid") != nsid:
+                        continue
+                    if uuid is not None and ns.get("uuid") and ns.get("uuid") != uuid:
+                        # Same bdev at a different nsid is fine to no-op,
+                        # but a mismatched uuid on the same bdev is a real
+                        # conflict — keep the original error.
+                        continue
+                    existing_nsid = ns.get("nsid")
+                    logger.info(
+                        "nvmf_subsystem_add_ns: %s already has %s at nsid=%s, "
+                        "treating rejected duplicate add as success",
+                        nqn, dev_name, existing_nsid)
+                    return existing_nsid, None
             except Exception as e:
                 # Don't let the idempotency probe mask the original error.
                 logger.debug(
@@ -1309,6 +1286,9 @@ class RPCClient:
         params = {"lvs_name": name}
         return self._request("bdev_lvol_get_lvstores", params)
 
+    def bdev_lvol_rename(self, old_name, new_name):
+        return self._request3("bdev_lvol_rename", old_name=old_name, new_name=new_name)
+
     def bdev_lvol_resize(self, name, size_in_mib):
         params = {
             "name": name,
@@ -1872,3 +1852,9 @@ class RPCClient:
         return self._request("bdev_lvol_s3_delete", {
             "s3_ids": s3_ids,
         })
+
+    def bdev_nvme_get_controller_health_info(self, name):
+        params = {
+            "name": name
+        }
+        return self._request("bdev_nvme_get_controller_health_info", params)

@@ -1,3 +1,4 @@
+import json
 import threading
 import time
 import logging
@@ -445,11 +446,11 @@ def _def_create_device_stack(device_obj, snode, force=False, clear_data=False):
     subsystem_nqn = snode.subsystem + ":dev:" + alceml_id
     namespace_found = False
     subsys_found = False
-    ret = rpc_client.subsystem_list(subsystem_nqn)
+    ret = rpc_client.subsystem_get(subsystem_nqn)
     if ret :
         subsys_found = True
-        if ret[0]["namespaces"]:
-            for ns in ret[0]["namespaces"]:
+        if ret["namespaces"]:
+            for ns in ret["namespaces"]:
                 if ns['name'] == pt_name:
                     namespace_found = True
                     break
@@ -535,7 +536,7 @@ def restart_device(device_id, force=False):
     teardown_errors = []
     if device_obj.nvmf_nqn:
         try:
-            if teardown_client.subsystem_list(device_obj.nvmf_nqn):
+            if teardown_client.subsystem_get(device_obj.nvmf_nqn):
                 logger.info(f"Tearing down subsystem {device_obj.nvmf_nqn}")
                 teardown_client.subsystem_delete(device_obj.nvmf_nqn)
         except Exception as e:
@@ -749,7 +750,7 @@ def device_remove(device_id, force=True, cause=CAUSE_OTHER):
     logger.info("Removing device fabric")
     rpc_client = snode.rpc_client()
 
-    if rpc_client.subsystem_list(device.nvmf_nqn):
+    if rpc_client.subsystem_get(device.nvmf_nqn):
         logger.info("Removing device subsystem")
         ret = rpc_client.subsystem_delete(device.nvmf_nqn)
         if not ret:
@@ -1361,3 +1362,17 @@ def new_device_from_failed(device_id):
         db_controller.get_storage_node_by_id(device_node.get_id()), _mut)
     logger.info(f"New device created from failed device: {device_id}, new device id: {new_device.get_id()}")
     return new_device.get_id()
+
+
+def get_device_health_info(device_id):
+    db_controller = DBController()
+    try:
+        device = db_controller.get_storage_device_by_id(device_id)
+        snode = db_controller.get_storage_node_by_id(device.node_id)
+    except KeyError as e:
+        logger.error(e)
+        return False
+
+    rpc_client = snode.rpc_client()
+    ret = rpc_client.bdev_nvme_get_controller_health_info(device.nvme_controller)
+    return json.dumps(ret, indent=2)

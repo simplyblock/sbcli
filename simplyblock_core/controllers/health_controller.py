@@ -63,7 +63,7 @@ def check_bdev(name, *, rpc_client=None, bdev_names=None) -> bool:
 
 def check_subsystem(nqn, *, rpc_client=None, nqns=None, ns_uuid=None) -> bool:
     if rpc_client:
-        subsystem = subsystems[0] if (subsystems := rpc_client.subsystem_list(nqn)) is not None else None
+        subsystem = rpc_client.subsystem_get(nqn)
     elif nqns:
         subsystem = nqns.get(nqn)
     else:
@@ -775,7 +775,7 @@ def check_node(node_id, with_devices=True):
                     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
                     try:
                         sec1_rpc = second_node_1.rpc_client(timeout=8, retry=1)
-                        if snode.hublvol and not sec1_rpc.subsystem_list(snode.hublvol.nqn):
+                        if snode.hublvol and not sec1_rpc.subsystem_get(snode.hublvol.nqn):
                             logger.info("Secondary hublvol NQN missing on sec_1 %s, recreating",
                                         second_node_1.get_id())
                             second_node_1.create_secondary_hublvol(snode, cluster.nqn)

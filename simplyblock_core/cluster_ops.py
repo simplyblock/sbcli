@@ -280,7 +280,10 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         logger.info("Configuring docker swarm...")
         c = docker.DockerClient(base_url=f"tcp://{dev_ip}:2375", version="auto")
         if c.swarm.attrs and "ID" in c.swarm.attrs:
-            logger.info("Docker swarm found, leaving swarm now")
+            logger.warning("Warning! Docker swarm found")
+            ret = utils.query_yes_no("Destroy current cluster and create new one?", default="no")
+            if not ret:
+                raise ValueError("Aborting")
             c.swarm.leave(force=True)
             try:
                 c.volumes.get("monitoring_grafana_data").remove(force=True)
@@ -689,6 +692,35 @@ def _wait_for_full_device_connectivity(cl_id, timeout_sec=300, poll_sec=10):
                 by_node[n_id].add(owner_id)
 
         def _repair_node(node_id, owner_ids):
+            # A full-mesh outage (whole-fleet reboot) leaves each node missing
+            # MOST owners. The per-owner delta below pays its fixed overhead
+            # (DB reads, connect round-trips, JM reconcile, atomic_update)
+            # once per owner — measured ~40s each, and 31 sequential owners
+            # made round 1 the 21-minute activation stall of 2026-07-16
+            # (13:09:43 "1353 missing" -> 13:30:49 "15 missing", one round).
+            # One FULL reconcile connects every peer's devices in parallel
+            # behind a single shared surface-poll (~67s/node, 2026-07-13
+            # measurement), so use it whenever more than a couple of owners
+            # are missing; keep the delta for the small post-node-add case.
+            if len(owner_ids) > 2:
+                try:
+                    node = db_controller.get_storage_node_by_id(node_id)
+                    remote_devices = storage_node_ops._connect_to_remote_devs(
+                        node, force_connect_restarting_nodes=True)
+                    remote_jm_devices = None
+                    if node.enable_ha_jm:
+                        remote_jm_devices = storage_node_ops._connect_to_remote_jm_devs(node)
+
+                    def _apply(n, rd=remote_devices, rjd=remote_jm_devices):
+                        n.remote_devices = rd
+                        if rjd is not None:
+                            n.remote_jm_devices = rjd
+                    db_controller.atomic_update(node, _apply)
+                except Exception as e:
+                    logger.warning(
+                        "Pre-activation full reconcile of %s failed: %s",
+                        node_id[:8], e)
+                return
             for owner_id in sorted(owner_ids):
                 try:
                     node = db_controller.get_storage_node_by_id(node_id)
@@ -2368,4 +2400,11 @@ def add_replication(source_cl_id, target_cl_id, timeout=0, target_pool=None) -> 
 
     db_controller.atomic_update(db_controller.get_cluster_by_id(source_cl_id), _mut)
     logger.info("Done")
+    return True
+
+
+def rebalance(cluster_id) -> bool:
+    for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+        if node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
+            tasks_controller.add_device_mig_task_for_node(node.get_id())
     return True

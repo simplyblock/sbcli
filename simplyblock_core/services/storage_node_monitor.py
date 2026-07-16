@@ -321,7 +321,9 @@ def get_next_cluster_status(cluster_id):
             else:
                 node_offline_devices += 1
 
-        if node_offline_devices > 0 or (node_online_devices == 0 and node.status != StorageNode.STATUS_REMOVED):
+        if (node_offline_devices > 0
+                or (node_online_devices == 0 and node.status != StorageNode.STATUS_REMOVED)
+                or node.status == StorageNode.STATUS_OFFLINE):
             affected_nodes += 1
             if node.mgmt_ip not in affected_physical_nodes:
                 affected_physical_nodes.append(node.mgmt_ip)

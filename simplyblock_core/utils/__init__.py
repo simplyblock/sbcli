@@ -375,6 +375,19 @@ def sum_records(records):
         return total
 
 
+def lvol_tgt_bdev_name(lvol_bdev: str) -> str:
+    """Return the migration-target bdev short name for a writable lvol.
+
+    Idempotent: strips any existing migration suffix before adding one, so
+    retries or back-to-back migrations (where lvol_bdev already ends in the
+    suffix from a previous run) never accumulate it (e.g. 'LVOL_Xmm').
+    """
+    suffix = constants.LVOL_MIG_BDEV_SUFFIX
+    if lvol_bdev.endswith(suffix):
+        lvol_bdev = lvol_bdev[:-len(suffix)]
+    return lvol_bdev + suffix
+
+
 def _used_bdev_name_numbers(db_controller, all_lvols=None, all_snapshots=None):
     used = set()
     if not all_lvols:
@@ -3511,3 +3524,34 @@ class _SecretAwareEncoder(json.JSONEncoder):
 
 def dump_json(data, unwrap_secrets: bool = False, **kwargs):
     return json.dumps(data, cls=_SecretAwareEncoder, unwrap_secrets=unwrap_secrets, **kwargs)
+
+
+def query_yes_no(question, default="yes")-> bool:
+    """Ask a yes/no question via raw_input() and return their answer.
+
+    "question" is a string that is presented to the user.
+    "default" is the presumed answer if the user just hits <Enter>.
+            It must be "yes" (the default), "no" or None (meaning
+            an answer is required of the user).
+
+    The "answer" return value is True for "yes" or False for "no".
+    """
+    valid = {"yes": True, "y": True, "ye": True, "no": False, "n": False}
+    if default is None:
+        prompt = " [y/n] "
+    elif default == "yes":
+        prompt = " [Y/n] "
+    elif default == "no":
+        prompt = " [y/N] "
+    else:
+        raise ValueError("invalid default answer: '%s'" % default)
+
+    while True:
+        sys.stdout.write(question + prompt)
+        choice = str(input()).lower()
+        if default is not None and choice == "":
+            return valid[default]
+        elif choice in valid:
+            return valid[choice]
+        else:
+            sys.stdout.write("Please respond with 'yes' or 'no' " "(or 'y' or 'n').\n")

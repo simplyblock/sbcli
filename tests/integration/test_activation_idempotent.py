@@ -21,7 +21,6 @@ from simplyblock_core.storage_node_ops import (
     LVSRestartRequiredError,
     _rpc_bdev_exists,
     _rpc_lvstore_exists,
-    _rpc_subsystem_exists,
     _rpc_subsystem_has_listener,
     _rpc_subsystem_has_ns,
 )
@@ -59,69 +58,59 @@ class TestExistenceProbes(unittest.TestCase):
         rpc.bdev_lvol_get_lvstores.return_value = None
         self.assertFalse(_rpc_lvstore_exists(rpc, "LVS_A"))
 
-    def test_subsystem_exists_true(self):
-        rpc = MagicMock()
-        rpc.subsystem_list.return_value = [{"nqn": "nqn.test"}]
-        self.assertTrue(_rpc_subsystem_exists(rpc, "nqn.test"))
-
-    def test_subsystem_exists_false_when_missing(self):
-        rpc = MagicMock()
-        rpc.subsystem_list.return_value = []
-        self.assertFalse(_rpc_subsystem_exists(rpc, "nqn.test"))
-
     def test_subsystem_has_ns_by_nsid_and_bdev(self):
         rpc = MagicMock()
-        rpc.subsystem_list.return_value = [{
+        rpc.subsystem_get.return_value = {
             "nqn": "nqn.test",
             "namespaces": [{"nsid": 1, "bdev_name": "LVS_A/vol1"}],
-        }]
+        }
         self.assertTrue(_rpc_subsystem_has_ns(rpc, "nqn.test",
                                               nsid=1, bdev_name="LVS_A/vol1"))
 
     def test_subsystem_has_ns_mismatched_bdev_returns_false(self):
         rpc = MagicMock()
-        rpc.subsystem_list.return_value = [{
+        rpc.subsystem_get.return_value = {
             "nqn": "nqn.test",
             "namespaces": [{"nsid": 1, "bdev_name": "OTHER"}],
-        }]
+        }
         self.assertFalse(_rpc_subsystem_has_ns(rpc, "nqn.test",
                                                nsid=1, bdev_name="LVS_A/vol1"))
 
     def test_subsystem_has_ns_no_subsystem(self):
         rpc = MagicMock()
-        rpc.subsystem_list.return_value = []
+        rpc.subsystem_get.return_value = None
         self.assertFalse(_rpc_subsystem_has_ns(rpc, "nqn.test", nsid=1))
 
     def test_subsystem_has_listener_match(self):
         rpc = MagicMock()
-        rpc.subsystem_list.return_value = [{
+        rpc.subsystem_get.return_value = {
             "nqn": "nqn.test",
             "listen_addresses": [
                 {"trtype": "tcp", "traddr": "10.0.0.1", "trsvcid": "4420"},
             ],
-        }]
+        }
         self.assertTrue(_rpc_subsystem_has_listener(
             rpc, "nqn.test", "TCP", "10.0.0.1", 4420))
 
     def test_subsystem_has_listener_mismatch_trsvcid(self):
         rpc = MagicMock()
-        rpc.subsystem_list.return_value = [{
+        rpc.subsystem_get.return_value = {
             "nqn": "nqn.test",
             "listen_addresses": [
                 {"trtype": "TCP", "traddr": "10.0.0.1", "trsvcid": 4420},
             ],
-        }]
+        }
         self.assertFalse(_rpc_subsystem_has_listener(
             rpc, "nqn.test", "TCP", "10.0.0.1", 4422))
 
     def test_subsystem_has_listener_mismatch_traddr(self):
         rpc = MagicMock()
-        rpc.subsystem_list.return_value = [{
+        rpc.subsystem_get.return_value = {
             "nqn": "nqn.test",
             "listen_addresses": [
                 {"trtype": "TCP", "traddr": "10.0.0.1", "trsvcid": 4420},
             ],
-        }]
+        }
         self.assertFalse(_rpc_subsystem_has_listener(
             rpc, "nqn.test", "TCP", "10.0.0.2", 4420))
 

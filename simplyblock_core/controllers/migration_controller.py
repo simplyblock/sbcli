@@ -44,7 +44,7 @@ import uuid
 from datetime import datetime
 
 from simplyblock_core import constants
-from simplyblock_core.controllers import migration_events, tasks_controller, snapshot_controller
+from simplyblock_core.controllers import migration_events, tasks_controller
 from simplyblock_core.exceptions import MigrationConflictError, PreconditionError
 from simplyblock_core.controllers.host_auth import _reapply_allowed_hosts
 from simplyblock_core.kms import create_kms_connection, lvol_dek_path, pool_kek_name
@@ -54,7 +54,7 @@ from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.nvme_connect import NvmeConnectEntry
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.utils import convert_size
+from simplyblock_core.utils import convert_size, lvol_tgt_bdev_name
 
 # Note: JobSchedule is not imported directly here; task creation is delegated to
 # tasks_controller.add_lvol_mig_task() which handles event logging consistently.
@@ -121,12 +121,6 @@ def start_migration(migration_id,
         raise ValueError(f"Target node is not online (status={target_node.status})")
 
     snap_plan = get_snapshot_chain(lvol_id, source_node_id)
-    if not snap_plan:
-        snap_name = f"_mig_{migration.uuid[:8]}_lvol_{migration.lvol_id[:8]}"
-        snap_uuid, err = snapshot_controller.add(lvol_id, snap_name, bypass_migration_check=True)
-        if err:
-            raise ValueError(f"Failed to create snapshot: {err}")
-        snap_plan = [snap_uuid]
 
     snaps_found_on_target = [s for s in snap_plan if _is_snap_on_node(s, target_node_id)]
     snap_migration_plan = [s for s in snap_plan if s not in snaps_found_on_target]
@@ -222,7 +216,7 @@ def _cleanup_created(migration):
         return
 
     nqn = lvol.nqn
-    bdev_short = lvol.lvol_bdev + _MIGRATION_BDEV_SUFFIX
+    bdev_short = lvol_tgt_bdev_name(lvol.lvol_bdev)
     composite = f"{tgt_node.lvstore}/{bdev_short}"
 
     # Compute overlap: nodes shared between SRC and TGT paths.
@@ -423,7 +417,8 @@ def _is_snap_on_node(snap_id, node_id):
         snap = db.get_snapshot_by_id(snap_id)
     except KeyError:
         return False
-    if snap.lvol.node_id == node_id:
+    # snap.lvol defaults to None (SnapShot.lvol) — guard before dereferencing.
+    if snap.lvol and snap.lvol.node_id == node_id:
         return True
     return any(
         inst.get('lvol', {}).get('node_id') == node_id
@@ -433,10 +428,18 @@ def _is_snap_on_node(snap_id, node_id):
 
 def _get_snap_ancestry(snap_uuid):
     """
-    Walk the ``snap_ref_id`` chain from *snap_uuid* upward to the root and
+    Walk the blobstore parent chain from *snap_uuid* upward to the root and
     return the UUIDs in root-first order (oldest ancestor first).
 
-    ``snap_ref_id`` points from a child snapshot to its parent snapshot.
+    Two parent pointers are tried in order:
+    - ``snap_ref_id``: set for snapshots taken from a clone volume (points to
+      the clone's parent snapshot, used for ref-count tracking).
+    - ``prev_snap_uuid``: set for all snapshots and records the previous
+      snapshot in the lvol's own sequence — this is the blobstore parent for
+      snapshots taken from a non-clone volume (e.g. snap_A3 → snap_A2 →
+      snap_A1 taken from the original lvol_A).  Without this fallback, the
+      ancestry walk stops at the clone's immediate parent and misses the older
+      ancestor snapshots whose data is not copied standalone.
     """
     chain = []
     current = snap_uuid
@@ -448,7 +451,7 @@ def _get_snap_ancestry(snap_uuid):
         except KeyError:
             break
         chain.append(current)
-        current = snap.snap_ref_id
+        current = snap.snap_ref_id or snap.prev_snap_uuid
     chain.reverse()  # oldest → newest
     return chain
 
@@ -495,7 +498,7 @@ def get_snaps_safe_to_delete_on_source(migration):
         if lvol.uuid == migration.lvol_id:
             continue
         if lvol.cloned_from_snap and lvol.cloned_from_snap in candidates:
-            _protect_snap_and_ancestors(lvol.cloned_from_snap, candidates)
+            candidates -= _collect_snap_ancestry(lvol.cloned_from_snap)
 
     return candidates
 
@@ -525,7 +528,7 @@ def get_snaps_to_delete_on_target(migration):
         if lvol.uuid == migration.lvol_id:
             continue
         if lvol.cloned_from_snap:
-            _collect_snap_ancestry(lvol.cloned_from_snap, protected)
+            protected |= _collect_snap_ancestry(lvol.cloned_from_snap)
 
     return [
         uid for uid in migration.snaps_migrated
@@ -533,39 +536,23 @@ def get_snaps_to_delete_on_target(migration):
     ]
 
 
-def _protect_snap_and_ancestors(snap_uuid, candidate_set):
-    """Remove *snap_uuid* and all its ancestors from *candidate_set*."""
+def _collect_snap_ancestry(snap_uuid) -> set:
+    """Return the set of *snap_uuid* and all its ancestors."""
+    result: set = set()
     current = snap_uuid
-    visited = set()
-    while current and current not in visited:
-        visited.add(current)
-        candidate_set.discard(current)
+    while current and current not in result:
+        result.add(current)
         try:
             snap = db.get_snapshot_by_id(current)
-            current = snap.snap_ref_id
+            current = snap.snap_ref_id or snap.prev_snap_uuid
         except KeyError:
             break
-
-
-def _collect_snap_ancestry(snap_uuid, out_set):
-    """Add *snap_uuid* and all its ancestors to *out_set*."""
-    current = snap_uuid
-    visited = set()
-    while current and current not in visited:
-        visited.add(current)
-        out_set.add(current)
-        try:
-            snap = db.get_snapshot_by_id(current)
-            current = snap.snap_ref_id
-        except KeyError:
-            break
+    return result
 
 
 # ---------------------------------------------------------------------------
 # Post-migration DB updates
 # ---------------------------------------------------------------------------
-
-_MIGRATION_BDEV_SUFFIX = constants.LVOL_MIG_BDEV_SUFFIX
 
 
 def _build_connect_entries(node, port, lvol, nqn, ctrl_loss_tmo, cluster, host_entry, host_nqn):
@@ -675,7 +662,7 @@ def create_migration(lvol_id, target_node_id,
     cluster = db.get_cluster_by_id(tgt_node.cluster_id)
     tgt_rpc = tgt_node.rpc_client()
     nqn = lvol.nqn
-    bdev_short = lvol.lvol_bdev + _MIGRATION_BDEV_SUFFIX
+    bdev_short = lvol_tgt_bdev_name(lvol.lvol_bdev)
     composite = f"{tgt_node.lvstore}/{bdev_short}"
     size_in_mib = convert_size(lvol.size, 'MiB')
     tgt_port = tgt_node.get_lvol_subsys_port(tgt_node.lvstore)
@@ -738,7 +725,7 @@ def create_migration(lvol_id, target_node_id,
                 f"create_migration: secondary registration error (continuing): {_e}")
 
     _pre_ter_node = None
-    if lvol.ha_type == "ha3" and tgt_node.tertiary_node_id:
+    if tgt_node.tertiary_node_id:
         try:
             _pre_ter_node = db.get_storage_node_by_id(tgt_node.tertiary_node_id)
             _ter_rpc_reg  = _pre_ter_node.rpc_client()
@@ -861,7 +848,7 @@ def create_migration(lvol_id, target_node_id,
         if _node_id in overlap_ids:
             # Subsystem already exists from SRC role — add inaccessible listener
             # at TGT port so clients can pre-connect to the future TGT endpoint.
-            subsys = _rpc.subsystem_list(nqn)[0]
+            subsys = _rpc.subsystem_get(nqn) or {}
             subsys_min_cntlid_used.add(subsys.get('min_cntlid', 0))
 
         if _node_id in overlap_ids:
@@ -881,7 +868,7 @@ def create_migration(lvol_id, target_node_id,
                         f"create_migration: listener on overlap {_node_id[:8]} "
                         f"(non-fatal): {_e}")
         else:
-            if not _rpc.subsystem_list(nqn):
+            if not _rpc.subsystem_get(nqn):
                 if _min_cntlid in subsys_min_cntlid_used:
                     _min_cntlid = _min_cntlid + 10000
                 _rpc.subsystem_create(

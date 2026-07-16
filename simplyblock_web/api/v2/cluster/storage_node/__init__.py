@@ -3,7 +3,7 @@ from typing import List, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.controllers import tasks_controller
@@ -34,26 +34,27 @@ def list(cluster: Cluster) -> List[StorageNodeDTO]:
 class StorageNodeParams(BaseModel):
     node_address: str
     interface_name: str
-    max_snapshots: Optional[int] = Field(500)
-    ha_jm: Optional[bool] = Field(True)
-    test_device: Optional[bool] = Field(False)
-    spdk_image: Optional[str] = Field("")
-    spdk_debug: bool = Field(False)
-    data_nics: List[str] = Field([])
-    namespace: str = Field('default')
-    id_device_by_nqn: Optional[bool] = Field(False)
-    jm_percent: util.Percent = Field(3)
-    partitions: int = Field(1)
-    iobuf_small_pool_count: int = Field(0)
-    iobuf_large_pool_count: int = Field(0)
+    max_snapshots: Optional[int] = 500
+    ha_jm: Optional[bool] = True
+    test_device: Optional[bool] = False
+    spdk_image: Optional[str] = ""
+    spdk_debug: bool = False
+    data_nics: List[str] = []
+    namespace: str = 'default'
+    id_device_by_nqn: Optional[bool] = False
+    jm_percent: util.Percent = 3
+    partitions: int = 1
+    iobuf_small_pool_count: int = 0
+    iobuf_large_pool_count: int = 0
     cr_name: str = ""
     cr_namespace: str = ""
     cr_plural: str = ""
-    ha_jm_count: Optional[int] = Field(None)
-    format_4k: bool = Field(False)
+    ha_jm_count: Optional[int] = None
+    format_4k: bool = False
     spdk_proxy_image: Optional[str] = None
     spdk_sys_mem: Optional[str] = None
     failure_domain: Optional[int] = None
+    expand: bool = False
 
 
 @api.post('/', name='clusters:storage-nodes:create', status_code=201, responses={201: {"content": None}})
@@ -84,6 +85,7 @@ def add(request: Request, cluster: Cluster, parameters: StorageNodeParams, respo
             "spdk_proxy_image": parameters.spdk_proxy_image,
             "spdk_sys_mem": parameters.spdk_sys_mem,
             "failure_domain": parameters.failure_domain,
+            "expansion": parameters.expand,
         }
     )
     if not task_id_or_false:
@@ -228,6 +230,7 @@ class _RestartParams(BaseModel):
     force: bool = False
     reattach_volume: bool = False
     node_address: Optional[str] = None
+    new_ssd_pcie: List[str] = []
 
 
 @instance_api.post('/start', name='clusters:storage-nodes:start', status_code=202, responses={202: {"content": None}})  # Same as restart for now
@@ -240,10 +243,17 @@ def restart(cluster: Cluster, storage_node: StorageNode, parameters: _RestartPar
             "force": parameters.force,
             "node_address": parameters.node_address,
             "reattach_volume": parameters.reattach_volume,
+            "new_ssd_pcie": parameters.new_ssd_pcie,
         }
     ).start()
 
     return Response(status_code=202)  # FIXME: Provide URL for checking task status
+
+
+@instance_api.post('/promote', name='clusters:storage-nodes:start', status_code=204, responses={204: {"content": None}})
+def promote(cluster: Cluster, storage_node: StorageNode) -> Response:
+    storage_node_ops.make_sec_new_primary(storage_node.uuid)
+    return Response(status_code=204)
 
 
 instance_api.include_router(device_api, prefix='/devices')

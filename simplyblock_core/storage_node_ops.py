@@ -66,21 +66,13 @@ class LVSRestartRequiredError(Exception):
         super().__init__(msg)
 
 
-def _rpc_subsystem_exists(rpc_client, nqn):
-    """True iff a subsystem with the given NQN exists in SPDK."""
-    try:
-        return bool(rpc_client.subsystem_list(nqn_name=nqn))
-    except Exception:
-        return False
-
-
 def _rpc_subsystem_has_ns(rpc_client, nqn, nsid=None, bdev_name=None):
     """True iff the subsystem has a namespace matching nsid and/or bdev_name."""
     try:
-        subs = rpc_client.subsystem_list(nqn_name=nqn)
-        if not subs:
+        subsystem = rpc_client.subsystem_get(nqn)
+        if subsystem is None:
             return False
-        for ns in subs[0].get('namespaces', []) or []:
+        for ns in subsystem.get('namespaces', []) or []:
             if nsid is not None and ns.get('nsid') != nsid:
                 continue
             if bdev_name is not None and ns.get('bdev_name') != bdev_name:
@@ -94,10 +86,10 @@ def _rpc_subsystem_has_ns(rpc_client, nqn, nsid=None, bdev_name=None):
 def _rpc_subsystem_has_listener(rpc_client, nqn, trtype, traddr, trsvcid):
     """True iff the subsystem already has a matching listener."""
     try:
-        subs = rpc_client.subsystem_list(nqn_name=nqn)
-        if not subs:
+        subsystem = rpc_client.subsystem_get(nqn)
+        if subsystem is None:
             return False
-        for la in subs[0].get('listen_addresses', []) or []:
+        for la in subsystem.get('listen_addresses', []) or []:
             if (la.get('trtype', '').upper() == trtype.upper()
                     and la.get('traddr') == traddr
                     and str(la.get('trsvcid')) == str(trsvcid)):
@@ -1908,6 +1900,37 @@ def _cluster_add_lock_heartbeat(db_controller, cluster_id, owner, stop_event):
             return
 
 
+def _classify_existing_endpoint_record(db_controller, cluster_id, node_addr, ssd_pcie):
+    """Classify a pre-existing storage-node record for ``node_addr`` that owns
+    one of the joining node's SSDs, before an add-node proceeds.
+
+    An add-node whose SSH/API session died can survive server-side and finish
+    the registration (runs 20260712/20260715: orphaned adds completed after
+    their channels were reset mid-command); the caller's retry then finds the
+    record already present and must not fail permanently on it.
+
+    Returns one of:
+    - (None, None): no record for this endpoint owns any of these SSDs.
+    - ("already_added", node): record is ONLINE — the earlier add completed;
+      re-adding is an idempotent success, not an error.
+    - ("cleanup", node): record stuck in in_creation — a dead partial add;
+      kill its SPDK and delete the record, then re-add.
+    - ("conflict", node): record in any other status — refuse; the operator
+      must delete or restart that node explicitly.
+    """
+    for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+        if node.api_endpoint != node_addr:
+            continue
+        if not any(ssd in node.ssd_pcie for ssd in ssd_pcie):
+            continue
+        if node.status == StorageNode.STATUS_ONLINE:
+            return "already_added", node
+        if node.status == StorageNode.STATUS_IN_CREATION:
+            return "cleanup", node
+        return "conflict", node
+    return None, None
+
+
 def add_node(cluster_id, node_addr, iface_name, data_nics_list,
              max_snap, spdk_image=None, spdk_debug=False,
              small_bufsize=0, large_bufsize=0,
@@ -2054,24 +2077,36 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         ssd_pcie = node_config.get("ssd_pcis")
 
         if ssd_pcie:
-            for ssd in ssd_pcie:
-                for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
-                    if node.api_endpoint == node_addr:
-                        if ssd in node.ssd_pcie:
-                            if node.status == StorageNode.STATUS_IN_CREATION:
-                                logger.warning(
-                                    f"Node {node.get_id()} is in_creation status with SSD {ssd}, "
-                                    f"removing and deleting it")
-                                try:
-                                    stale_api = node.client(timeout=20)
-                                    stale_api.spdk_process_kill(node.rpc_port, node.cluster_id)
-                                except Exception:
-                                    logger.warning("Failed to kill SPDK process for stale in_creation node", exc_info=True)
-                                storage_events.snode_delete(node)
-                                node.remove(db_controller.kv_store)
-                                break
-                            logger.error(f"SSD is being used by other node, ssd: {ssd}, node: {node.get_id()}")
-                            return False
+            while True:
+                action, existing = _classify_existing_endpoint_record(
+                    db_controller, cluster_id, node_addr, ssd_pcie)
+                if action != "cleanup":
+                    break
+                # Repeated partial attempts can leave several stale records
+                # for the same endpoint, hence the loop.
+                logger.warning(
+                    f"Node {existing.get_id()} is in_creation status with endpoint "
+                    f"{node_addr}, removing and deleting it")
+                try:
+                    stale_api = existing.client(timeout=20)
+                    stale_api.spdk_process_kill(existing.rpc_port, existing.cluster_id)
+                except Exception:
+                    logger.warning("Failed to kill SPDK process for stale in_creation node", exc_info=True)
+                storage_events.snode_delete(existing)
+                existing.remove(db_controller.kv_store)
+            if action == "already_added":
+                logger.info(
+                    f"Node {existing.get_id()} with endpoint {node_addr} is already "
+                    f"added and online (owns the same SSDs); add-node is an "
+                    f"idempotent success")
+                return "Success"
+            elif action == "conflict":
+                logger.error(
+                    f"A node record with endpoint {node_addr} already exists in "
+                    f"status {existing.status} and owns the same SSDs "
+                    f"(node: {existing.get_id()}); delete or restart it instead "
+                    f"of re-adding")
+                return False
 
         fdb_connection = cluster.db_connection
 
@@ -2497,8 +2532,23 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         # always released (finally), including on the early `continue` and the
         # reverse-connect failure path.
         lock_owner = f"{socket.gethostname()}:{os.getpid()}:{node_uuid}"
-        if not _acquire_cluster_add_lock_blocking(db_controller, cluster_id, lock_owner):
+        if not _acquire_cluster_add_lock_blocking(
+                db_controller, cluster_id, lock_owner,
+                timeout=constants.CLUSTER_ADD_LOCK_WAIT_TIMEOUT_SEC):
+            # Nothing keeps driving this registration after the failure, but
+            # the record written above stays in_creation — retries and
+            # watchers read that as a live in-flight add (2026-07-16 perf
+            # deploy: 20-minute ghost waits per retry). Tear down the same
+            # way the stale-record path does: kill this node's SPDK and drop
+            # the record so a retry starts from a clean slate.
             logger.error("Could not acquire cluster node-add lock; failing for retry")
+            try:
+                snode_api.spdk_process_kill(snode.rpc_port, snode.cluster_id)
+            except Exception:
+                logger.warning(
+                    "Failed to kill SPDK process after node-add lock timeout", exc_info=True)
+            storage_events.snode_delete(snode)
+            snode.remove(db_controller.kv_store)
             return False
         stop_heartbeat = threading.Event()
         hb_thread = threading.Thread(
@@ -5201,7 +5251,38 @@ def _count_fabric_disconnected_nodes(all_nodes, lvs_peer_ids=None):
 
 
 def find_leader_with_failover(all_nodes, lvs_name):
-    """Detect the current leader and failover if needed.
+    """Detect the current leader and failover if needed — with a no-leader
+    fail-fast gate.
+
+    If a full detection pass recently (< NO_LEADER_TTL_SEC) concluded the LVS
+    has no confirmable leader, return (None, []) immediately without probing:
+    the caller must fail the operation until a leader is re-established. This
+    caps the probe/recovery machinery at one full pass per TTL window per
+    process — under a mass-create workload against a leaderless LVS, running
+    the pass per request stormed every LVS member with several
+    bdev_lvol_get_lvstores per second for hours (run 20260712-231123).
+    """
+    from simplyblock_core.utils.ttl_cache import no_leader_cache, NO_LEADER_TTL_SEC
+
+    cluster_id = all_nodes[0].cluster_id if all_nodes else ""
+    cache_key = (cluster_id, lvs_name)
+    if no_leader_cache.get(cache_key, NO_LEADER_TTL_SEC):
+        logger.warning(
+            "LVS %s was confirmed leaderless less than %ss ago — failing fast "
+            "without re-probing; operations are rejected until a leader is "
+            "re-established", lvs_name, NO_LEADER_TTL_SEC)
+        return None, []
+
+    leader, non_leaders = _find_leader_with_failover_impl(all_nodes, lvs_name)
+    if leader is None:
+        no_leader_cache.put(cache_key, True)
+    else:
+        no_leader_cache.invalidate(cache_key)
+    return leader, non_leaders
+
+
+def _find_leader_with_failover_impl(all_nodes, lvs_name):
+    """Single full leader-detection/recovery pass.
 
     0. Cached fast path: if a leader for this lvstore was confirmed within
        LEADER_TTL_SEC, probe ONLY that node (one RPC). Leadership rarely moves,
@@ -5842,7 +5923,7 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
     min_cntlid = 2000 if is_tertiary else 1000
     for lvol in lvol_list:
         allow_any = not bool(lvol.allowed_hosts)
-        if _rpc_subsystem_exists(snode_rpc_client, lvol.nqn):
+        if snode_rpc_client.subsystem_get(lvol.nqn):
             logger.info("subsystem %s already exists on %s, skipping create",
                         lvol.nqn, snode.get_id())
         else:
@@ -6690,7 +6771,7 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
         if lvol.nqn in created_subsystems:
             continue
         allow_any = not bool(lvol.allowed_hosts)
-        if _rpc_subsystem_exists(rpc_client, lvol.nqn):
+        if rpc_client.subsystem_get(lvol.nqn) is not None:
             logger.info("subsystem %s already exists on %s, skipping create",
                         lvol.nqn, snode.get_id())
             created_subsystems.append(lvol.nqn)
@@ -7353,7 +7434,7 @@ def repair_lvol_registration_on_non_leader(lvol, sec_node, secondary_index):
                        f"by a restart/activation/expansion")
 
     rpc_client = sec_node.rpc_client(timeout=10, retry=2)
-    if not _rpc_subsystem_exists(rpc_client, lvol.nqn):
+    if rpc_client.subsystem_get(lvol.nqn) is None:
         min_cntlid = 1000 * (secondary_index + 1)
         allow_any = not bool(lvol.allowed_hosts)
         logger.warning(
@@ -8030,7 +8111,13 @@ def _remove_bdev_stack(bdev_stack, rpc_client, remove_distr_only=False):
             ret = rpc_client.bdev_distrib_delete(name)
         elif type == "bdev_raid":
             ret = rpc_client.bdev_raid_delete(name)
-        elif type == "bdev_lvstore" and not remove_distr_only:
+        elif type == "bdev_lvstore":
+            if remove_distr_only:
+                # Non-leader teardown: bdev_lvol_delete_lvstore destroys the
+                # blobstore metadata on the shared backing storage — data loss
+                # for every replica. Deleting the raid below hot-removes the
+                # examined lvstore bdev from this node without touching disk.
+                continue
             ret = rpc_client.bdev_lvol_delete_lvstore(name)
         elif type == "bdev_ptnonexcl":
             ret = rpc_client.bdev_PT_NoExcl_delete(name)
@@ -8141,9 +8228,14 @@ def teardown_non_leader_lvstore(donor_node, primary_node, slot=None):
     Steps performed:
       1. Delete per-lvol nvmf subsystems on the donor for every lvol owned
          by ``primary_node``.
-      2. Remove the donor's bdev stack (distrib + raid + lvstore + ptnonexcl)
-         via ``_remove_bdev_stack`` using ``primary_node.lvstore_stack`` as
-         the structural template.
+      2. Remove the donor's bdev stack starting from the raid0 that backs
+         the LVS, then the distribs below (+ ptnonexcl), via
+         ``_remove_bdev_stack(remove_distr_only=True)`` using
+         ``primary_node.lvstore_stack`` as the structural template. The
+         lvstore bdev itself is NEVER deleted: it was only *examined* on the
+         donor, and ``bdev_lvol_delete_lvstore`` would destroy the shared
+         on-disk blobstore metadata — data loss for every replica. Deleting
+         the raid hot-removes the examined lvstore bdev cleanly.
       3. Detach the hublvol nvme controller on the donor (best-effort —
          may already be gone if the controller was never attached).
       4. Clear the corresponding back-reference field
@@ -8212,6 +8304,10 @@ def teardown_non_leader_lvstore(donor_node, primary_node, slot=None):
     # 3. Remove the bdev stack. The donor instantiated the stack from
     #    primary_node.lvstore_stack; we use the same list as the structural
     #    template so _remove_bdev_stack walks it in the right order.
+    #    remove_distr_only=True: the lvstore itself must NEVER be deleted on
+    #    a non-leader — it was only examined here, and bdev_lvol_delete_lvstore
+    #    wipes the blobstore metadata on the shared backing storage (data loss
+    #    for all replicas). Deleting the raid hot-removes the lvstore bdev.
     if primary_node.lvstore_stack:
         # _remove_bdev_stack mutates 'status' fields — work on a shallow copy
         # of the dicts so we don't accidentally persist 'deleted' markers
