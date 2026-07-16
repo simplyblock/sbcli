@@ -311,12 +311,34 @@ def _remote_connect_lock(node_id):
     with _remote_connect_locks_guard:
         return _remote_connect_locks.setdefault(node_id, threading.Lock())
 
+
+#: In-process dedupe of concurrent connects of the SAME (device, node) pair.
+#: Replaces the DB-backed NVMeDevice.lock_device_connection debounce inside
+#: connect_device: that variant cost a node-table scan plus a whole-node
+#: record write in FDB per device connect, which under parallel node restarts
+#: (16 nodes × ~34 devices → 500+ concurrent connect threads) saturated FDB
+#: with conflicting transactions and killed connect threads before their
+#: attach RPC ever ran (2026-07-16 half-cluster restart incident). A blocking
+#: process-local lock is a strictly stronger dedupe for the storm path — all
+#: parallel restarts run in the single task-runner process — at zero DB cost.
+_device_connect_locks_guard = threading.Lock()
+_device_connect_locks: dict = {}
+
+
+def _device_connect_lock(device_id, node_id):
+    with _device_connect_locks_guard:
+        return _device_connect_locks.setdefault((device_id, node_id), threading.Lock())
+
 #: Serializes lvstore port allocation + persistence in create_lvstore.
 #: get_next_lvstore_ports has no reservation step, so concurrent creates
 #: (parallel activation Pass 1) would allocate colliding ports without this.
 #: Process-local is sufficient — all Pass-1 creates run in the single
 #: activation driver process.
 _lvstore_port_alloc_lock = threading.Lock()
+
+#: Serializes recreate_all_lvstores across parallel node restarts — see the
+#: docstring there for scope and why process-local suffices.
+_recreate_lvstore_gate = threading.Lock()
 
 
 def _collect_attached_ips(ctrlr_list):
@@ -390,13 +412,24 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, attach_time
     if attach_timeout is None or attach_timeout > _ATTACH_CONTROLLER_MAX_TIMEOUT_SEC:
         attach_timeout = _ATTACH_CONTROLLER_MAX_TIMEOUT_SEC
     attach_rpc_client = node.rpc_client(timeout=attach_timeout, retry=0)
-    # check connection status
-    if device.is_connection_in_progress_to_node(node.get_id()):
-        logger.warning("This device is being connected to from other node, sleep for 5 seconds")
-        time.sleep(5)
 
-    device.lock_device_connection(node.get_id())
+    # Dedupe concurrent connects of the same (device, node) pair with a
+    # process-local lock (see _device_connect_lock for why the DB-backed
+    # lock_device_connection debounce had to go). Blocking is intended:
+    # the second caller waits out the first attach instead of racing it,
+    # then hits the already-attached fast paths below.
+    with _device_connect_lock(device.get_id(), node.get_id()):
+        return _connect_device_attach(
+            name, device, node, rpc_client, attach_rpc_client,
+            expected_ips, is_multipath)
 
+
+def _connect_device_attach(name, device, node, rpc_client, attach_rpc_client,
+                           expected_ips, is_multipath):
+    """Controller inspect + attach path of connect_device.
+
+    Runs under the per-(device, node) connect lock taken by connect_device.
+    """
     ret = rpc_client.bdev_nvme_controller_list(name)
     if ret:
         # "failed" is transient here, NOT a terminal state to act on: the
@@ -432,7 +465,6 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, attach_time
         else:
             # Still transient after the full budget: something is genuinely
             # hanging (usually stuck IO). Never detach here — surface it.
-            device.release_device_connection()
             raise RuntimeError(f"Controller: {name}, status is {states}")
 
     db_ctrl = DBController()
@@ -444,7 +476,6 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, attach_time
     else:
         msg = "target node to connect has no active fabric."
         logger.error(msg)
-        device.release_device_connection()
         raise RuntimeError(msg)
 
     # nvmf_multipath is a bool on the device record; translate it into
@@ -475,7 +506,6 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, attach_time
         if not bdev_name:
             msg = f"Bdev name not returned from controller attach for {name}"
             logger.error(msg)
-            device.release_device_connection()
             raise RuntimeError(msg)
         bdev_found = False
         for i in range(5):
@@ -485,8 +515,6 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, attach_time
                 break
             else:
                 time.sleep(1)
-
-        device.release_device_connection()
 
         if not bdev_found:
             logger.error("Bdev not found after 5 attempts")
@@ -528,8 +556,6 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, attach_time
                 logger.warning(
                     "Controller %s still missing paths after attach: %s (now %d/%d)",
                     name, still_missing, len(now_attached), len(expected_ips))
-
-    device.release_device_connection()
 
     if rpc_client.get_bdevs(bdev_name):
         return bdev_name
@@ -1251,6 +1277,34 @@ def _prepare_cluster_devices_on_restart(snode, clear_data=False):
     return True
 
 
+def _connect_device_thread(name: str, device: NVMeDevice, node: StorageNode):
+    """Thread body for bulk remote-device connects: bounded retry + loud logs.
+
+    An exception raised in a bare ``Thread(target=connect_device)`` vanishes —
+    the device silently ends up missing from ``remote_devices``, its map entry
+    degrades to ``unavailable``, and the first stripe read through it fails
+    minutes later with no trace of the real cause (2026-07-16 half-cluster
+    incident: connect threads died on FDB timeouts BEFORE the attach RPC ran).
+    The attach RPC itself is cheap (µs on a reachable peer, 1s cap otherwise),
+    so a transient bookkeeping/RPC failure is always worth two more attempts,
+    and a terminal failure must name the device and the reason at ERROR level.
+    """
+    last_err: Optional[Exception] = None
+    for attempt in (1, 2, 3):
+        try:
+            connect_device(name, device, node)
+            return
+        except Exception as e:
+            last_err = e
+            logger.warning(
+                "connect %s -> node %s attempt %d/3 failed: %s",
+                name, node.get_id(), attempt, e)
+            time.sleep(attempt)
+    logger.error(
+        "connect %s -> node %s failed after 3 attempts: %s",
+        name, node.get_id(), last_err)
+
+
 def _connect_to_remote_devs(
         this_node: StorageNode, /,
         reattach: bool = True, force_connect_restarting_nodes: bool = False,
@@ -1306,7 +1360,7 @@ def _connect_to_remote_devs(
                 raise ValueError(f"device alceml bdev not found!, {dev.get_id()}")
             devices_to_connect.append(dev)
             t = threading.Thread(
-                target=connect_device,
+                target=_connect_device_thread,
                 args=(f"remote_{dev.alceml_bdev}", dev, this_node,))
             connect_threads.append(t)
             t.start()
@@ -1428,6 +1482,84 @@ def _connect_to_remote_devs(
             remote_device_ids.add(dev.get_id())
 
     return remote_devices
+
+
+def _verify_online_device_coverage(snode: StorageNode, repair: bool = True):
+    """Verify this node's SPDK holds a remote bdev for every data device its
+    distrib cluster maps will list as reachable; optionally repair and re-check.
+
+    Returns the sorted list of still-missing expected bdev names (empty means
+    full coverage). Coverage means: for every ONLINE/DOWN peer, every data
+    device in a data-bearing status has its ``remote_<alceml_bdev>n1`` bdev
+    present on ``snode``. Peers in in_restart/offline are excluded on purpose —
+    they are legitimately unconnected and re-linked by the health service once
+    they recover.
+
+    Why this gate exists: the node-specific cluster map degrades any device
+    absent from ``remote_devices`` to ``unavailable`` (distr_controller), so a
+    single silently-failed connect surfaces only minutes later — as an EIO on
+    the first stripe whose surviving chunk lives on that device, deep inside
+    the raid examine read of recreate_lvstore (2026-07-16 half-cluster
+    incident: 16 nodes looped restart→EIO→offline for 1.5h over exactly this).
+    Verifying coverage BEFORE the data path turns that into an immediate,
+    named, retryable failure.
+    """
+    db_controller = DBController()
+    rpc_client = snode.rpc_client(timeout=10, retry=1)
+
+    expected = {}  # expected remote bdev name -> owning device record
+    for peer in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
+        if peer.get_id() == snode.get_id():
+            continue
+        if peer.status not in (StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN):
+            continue
+        for dev in peer.nvme_devices:
+            if dev.status not in (NVMeDevice.STATUS_ONLINE,
+                                  NVMeDevice.STATUS_READONLY,
+                                  NVMeDevice.STATUS_CANNOT_ALLOCATE):
+                continue
+            if not dev.alceml_bdev:
+                continue
+            expected[f"remote_{dev.alceml_bdev}n1"] = dev
+
+    def _probe_missing():
+        out = {}
+        for bdev, dev in expected.items():
+            try:
+                if not rpc_client.get_bdevs(bdev):
+                    out[bdev] = dev
+            except Exception:
+                out[bdev] = dev
+        return out
+
+    missing = _probe_missing()
+    if missing and repair:
+        logger.warning(
+            "Connectivity coverage on %s: %d/%d remote device bdevs missing, "
+            "re-attempting connects: %s",
+            snode.get_id(), len(missing), len(expected), sorted(missing))
+        repair_threads = []
+        for dev in missing.values():
+            t = threading.Thread(
+                target=_connect_device_thread,
+                args=(f"remote_{dev.alceml_bdev}", dev, snode))
+            t.start()
+            repair_threads.append(t)
+        for t in repair_threads:
+            t.join()
+        missing = _probe_missing()
+        if not missing:
+            # The repair attached bdevs the earlier reconcile missed. Refresh
+            # the persisted remote_devices records too — the cluster map is
+            # generated from node.remote_devices, not from SPDK state, so
+            # without this the repaired devices still degrade to
+            # `unavailable` in the maps.
+            with _remote_connect_lock(snode.get_id()):
+                remote_devices = _connect_to_remote_devs(snode)
+                db_controller.atomic_update(
+                    snode,
+                    lambda n, rd=remote_devices: setattr(n, "remote_devices", rd))
+    return sorted(missing)
 
 
 def sync_remote_devices_from_spdk(this_node: StorageNode):
@@ -3637,6 +3769,24 @@ def _restart_storage_node_impl(
             _kill_spdk_until_dead(snode)
             set_node_status(snode.get_id(), StorageNode.STATUS_OFFLINE,
                             caused_by="restart_cleanup")
+
+        # Connectivity-coverage gate: recreate consumes remote alceml bdevs
+        # through the distrib data path, and any online peer device absent
+        # from this node's SPDK shows up as `unavailable` in the node's
+        # cluster maps — the failure then surfaces only as an EIO on the raid
+        # examine read, minutes into the attempt. Verify (and repair once)
+        # BEFORE entering the data path; abort with the explicit missing list
+        # if coverage stays incomplete so the retry starts from a clean SPDK.
+        try:
+            missing_remote_bdevs = _verify_online_device_coverage(snode, repair=True)
+        except Exception as e:
+            missing_remote_bdevs = [f"coverage check failed: {e}"]
+        if missing_remote_bdevs:
+            _set_lvstore_status_atomic(snode.get_id(), "failed", db_controller)
+            _abort_restart(
+                "connectivity coverage incomplete before LVS recreation; "
+                f"missing remote bdevs: {missing_remote_bdevs}")
+            return False
 
         try:
             ret = recreate_all_lvstores(snode, force=force_lvol_recreate)
@@ -6477,7 +6627,24 @@ def recreate_all_lvstores(snode, force=False):
 
     This is the dispatch logic extracted from restart_storage_node() so it can
     be called independently (e.g. from tests) without the SPDK init preamble.
+
+    STRICTLY SERIAL across parallel node restarts (design requirement):
+    recreate blocks LVS ports on counterparty nodes, rewrites hublvol
+    topology and flips lvstore_status on peer records — two nodes of the
+    same LVS group recreating concurrently race those into writer conflicts.
+    Everything before this point in a restart (SPDK bring-up, device/JM
+    connects, connect-back) stays parallel. The gate is process-local, which
+    covers the restart path: all parallel restart tasks run in the single
+    restart task-runner process. Activation-mode recreates
+    (cluster_ops.activate: recreate_lvstore(activation_mode=True)) do not
+    pass through here and keep their own orchestration — the suspended
+    cluster serves no IO there and ports are globally blocked.
     """
+    with _recreate_lvstore_gate:
+        return _recreate_all_lvstores_serial(snode, force=force)
+
+
+def _recreate_all_lvstores_serial(snode, force=False):
     db_controller = DBController()
 
     # --- Step 1: Primary LVS ---

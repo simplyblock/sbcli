@@ -76,15 +76,35 @@ class NVMeDevice(BaseModel):
     pt_bdev_uuid: str = ""
 
     def __change_dev_connection_to(self, connecting_from_node):
+        # Targeted single-record write. The previous implementation scanned
+        # the WHOLE node table and full-object-wrote the owning node record
+        # for this one debounce field — per device connect. Under parallel
+        # node restarts (16 nodes × ~34 devices → 500+ concurrent connect
+        # threads, 2026-07-16 half-cluster incident) that saturated FDB with
+        # conflicting transactions (error 1031) and the whole-object writes
+        # raced the restart flow's own remote_devices updates. The owning
+        # node is always known (node_id); atomic_update confines the write
+        # to this field on a fresh copy. Best-effort: the flag is only a
+        # debounce, so on any failure we skip it rather than propagate.
+        if not self.node_id:
+            return
         from simplyblock_core.db_controller import DBController
         db = DBController()
-        for n in db.get_storage_nodes():
-            if n.nvme_devices:
-                for d in n.nvme_devices:
-                    if d.get_id() == self.get_id():
-                        d.connecting_from_node = connecting_from_node
-                        n.write_to_db()
-                        break
+        dev_id = self.get_id()
+
+        def _set(n):
+            for d in n.nvme_devices or []:
+                if d.get_id() == dev_id:
+                    d.connecting_from_node = connecting_from_node
+                    return None
+            return False  # device not on the fresh record — skip the write
+
+        try:
+            owner = db.get_storage_node_by_id(self.node_id)
+            if owner is not None:
+                db.atomic_update(owner, _set)
+        except Exception:
+            pass
 
     def lock_device_connection(self, node_id):
         self.__change_dev_connection_to(node_id)
