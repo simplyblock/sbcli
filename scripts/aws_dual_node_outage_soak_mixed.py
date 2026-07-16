@@ -429,23 +429,9 @@ class SoakRunner:
         self.created_volume_ids = []
         # Mixed-outage state
         self.methods = list(args.methods)
-        # On multipath clusters, network-layer coverage is provided by the
-        # inter-iteration single-NIC chaos. Dropping all data NICs on a node
-        # (network_outage_*) is a simple-cluster-only scenario.
-        if self._is_multipath():
-            filtered = [m for m in self.methods if not m.startswith("network_outage_")]
-            dropped = [m for m in self.methods if m not in filtered]
-            if dropped:
-                self.logger.log(
-                    f"multipath cluster detected: excluding {dropped} from outage methods"
-                )
-            if not filtered:
-                raise TestRunError(
-                    "No outage methods remain after excluding network_outage_* "
-                    "on multipath cluster; pass --methods with at least one "
-                    "non-network_outage method"
-                )
-            self.methods = filtered
+        # network_outage_* is a FULL network outage (eth0 + data NICs) and
+        # must be covered on every cluster type, multipath included; the
+        # inter-iteration single-NIC chaos only covers partial path loss.
         self.node_hosts = {}  # uuid -> RemoteHost (private_ip of storage node)
         self.node_ip_map = self._build_node_ip_map()
 
@@ -1175,30 +1161,48 @@ class SoakRunner:
         self.wait_for_cluster_stable()
 
     def _network_outage(self, node_id, duration):
-        """Take all data NICs down on one storage node for *duration* seconds,
-        then bring them back up. Simulates a transient network partition of
-        a single node. Node is expected to auto-recover once the NICs return
-        — no sbctl restart is issued."""
+        """Full network outage: take eth0 (management) and all data NICs down
+        on one storage node for *duration* seconds. The node goes completely
+        unreachable — including SSH — so the restore is scheduled on the node
+        itself (detached, setsid) before the links drop. Node is expected to
+        auto-recover once the NICs return — no sbctl restart is issued."""
         host = self._node_host(node_id)
-        nics = self._get_data_nics() or ["eth1"]
+        nics = ["eth0"] + [n for n in self._get_data_nics() if n != "eth0"]
+        nic_list = " ".join(nics)
         self.logger.log(
-            f"network_outage on {node_id}: dropping {nics} for {duration}s"
+            f"network_outage on {node_id}: full outage, dropping {nics} for "
+            f"{duration}s (node will go unreachable; detached self-restore)"
         )
-        for nic in nics:
-            try:
-                host.run(f"sudo ip link set {nic} down", timeout=10, check=False,
-                         label=f"netout down {nic} on {node_id}")
-            except Exception as e:
-                self.logger.log(f"WARNING: failed to down {nic} on {node_id}: {e}")
+        blackout = (
+            f"sudo nohup setsid bash -c "
+            f"\"for n in {nic_list}; do ip link set \\$n down; done; "
+            f"sleep {duration}; "
+            f"for n in {nic_list}; do ip link set \\$n up; done\" "
+            f">/dev/null 2>&1 &"
+        )
         try:
-            time.sleep(duration)
-        finally:
-            for nic in nics:
-                try:
-                    host.run(f"sudo ip link set {nic} up", timeout=10, check=False,
-                             label=f"netout up {nic} on {node_id}")
-                except Exception as e:
-                    self.logger.log(f"WARNING: failed to up {nic} on {node_id}: {e}")
+            host.run(blackout, timeout=10, check=False,
+                     label=f"netout full blackout on {node_id} for {duration}s")
+        except Exception as e:
+            self.logger.log(f"WARNING: failed to start blackout on {node_id}: {e}")
+            return
+        time.sleep(duration + 5)
+        # Safety net: the detached restore should have brought the links up;
+        # reconnect and force them up in case it did not survive.
+        for _ in range(6):
+            try:
+                host.connect()
+                host.run(
+                    f"sudo bash -c 'for n in {nic_list}; do ip link set $n up; done'",
+                    timeout=10, check=False,
+                    label=f"netout verify links up on {node_id}")
+                break
+            except Exception:
+                time.sleep(5)
+        else:
+            self.logger.log(
+                f"WARNING: could not reconnect to {node_id} after network outage"
+            )
 
     def _apply_outage(self, node_id, method):
         self.logger.log(f"Applying outage '{method}' on {node_id}")

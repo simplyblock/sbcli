@@ -49,6 +49,10 @@ spec:
     - name: dev-vol
       hostPath:
         path: /dev
+    - name: var-crash
+      hostPath:
+        path: /var/crash
+        type: DirectoryOrCreate
     - name: hugepage
       emptyDir:
         medium: HugePages
@@ -122,6 +126,8 @@ spec:
           mountPath: /script
         - name: etc-simplyblock
           mountPath: /etc/simplyblock
+        - name: var-crash
+          mountPath: /var/crash
       resources:
         limits:
           hugepages-2Mi: {{ MEM_MEGA }}Mi

@@ -10,6 +10,7 @@ from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.utils.ttl_cache import TTLCache
 
 logger = utils.get_logger(__name__)
 
@@ -39,6 +40,10 @@ node_rpc_timeout_threads: dict[str, threading.Thread] = {}
 # sequential recreate/hublvol/ANA work.
 CLUSTER_ACTIVATION_WATCHDOG_SEC = 600
 CLUSTER_ACTIVATION_WATCHDOG_PER_NODE_SEC = 60
+# A live cluster_activate stamps Cluster.activation_heartbeat every ~60s.
+# Older than this => the activation driver is dead; revert immediately
+# instead of waiting out the node-scaled budget above.
+ACTIVATION_HEARTBEAT_STALE_SEC = 300
 
 
 def _activation_watchdog_budget_sec(cluster):
@@ -55,7 +60,12 @@ def _activation_watchdog_budget_sec(cluster):
 recovery_shutdown_threads: dict[str, threading.Thread] = {}
 
 
-def is_new_migrated_node(cluster_id, node):
+def is_new_migrated_node(cluster_id, node, tasks=None):
+    """``tasks`` lets the caller pass an already-fetched job-task list.
+    get_next_cluster_status calls this once per ONLINE node — fetching the
+    full per-cluster task table inside that loop made a single status verdict
+    O(n·T), amplified further by concurrent update_cluster_status callers
+    (2026-07-13 audit)."""
     dev_lst = []
     for dev in node.nvme_devices:
         if dev.status == NVMeDevice.STATUS_ONLINE:
@@ -67,7 +77,7 @@ def is_new_migrated_node(cluster_id, node):
             distr_names.append(item["name"])
 
     if dev_lst:
-        tasks = db.get_job_tasks(cluster_id)
+        tasks = tasks if tasks is not None else db.get_job_tasks(cluster_id)
         for task in tasks:
             if task.function_name == JobSchedule.FN_NEW_DEV_MIG and task.node_id == node.get_id():
                 if task.device_id not in dev_lst:
@@ -182,11 +192,88 @@ def _fd_aware_cluster_status(cluster, snodes, affected_ips, n, k, jm_replication
     return Cluster.STATUS_SUSPENDED
 
 
+# RPC-dependent signals feeding get_next_cluster_status, cached briefly so a
+# burst of update_cluster_status calls (every escalation triggers one) does
+# not re-probe the same nodes with 10s-class timeouts.
+_status_probe_cache = TTLCache()
+_JM_REPL_PROBE_TTL_SEC = 10
+_DP_QUORUM_PROBE_TTL_SEC = 8
+
+
+def _probe_jm_replication(node):
+    """Does ``node`` report an active JM replication task? RPC-backed."""
+    try:
+        if node.rpc_client(timeout=10).bdev_lvol_get_lvstores(node.lvstore):
+            ret = node.rpc_client(timeout=8).jc_get_jm_status(node.jm_vuid)
+            for jm in ret:
+                if ret[jm] is False:  # jm not ready (active replication task)
+                    return True
+        return False
+    except Exception:
+        logger.warning("Failed to get replication task!")
+        return False
+
+
+def _collect_status_probes(snodes):
+    """Gather every RPC-dependent signal for get_next_cluster_status —
+    in parallel across nodes, TTL-cached per node.
+
+    These probes carry 8-10 s timeouts each; running them inline and
+    sequentially inside the status computation made one verdict take
+    minutes during a mass outage (2026-07-10: 32-host reboot reported
+    ACTIVE for ~2 extra minutes because verdicts were computed from
+    snapshots taken before the escalations they overlapped). Probing
+    first, in parallel, keeps the verdict pass pure DB state.
+
+    Returns (jm_replication_by_node_id, dp_disconnected_by_node_id).
+    """
+    jm_repl: dict = {}
+    dp_quorum: dict = {}
+
+    def _jm(n):
+        jm_repl[n.get_id()] = bool(_status_probe_cache.get_or_compute(
+            ("jm_repl", n.get_id()), _JM_REPL_PROBE_TTL_SEC,
+            lambda: _probe_jm_replication(n)))
+
+    def _q(n):
+        dp_quorum[n.get_id()] = bool(_status_probe_cache.get_or_compute(
+            ("dp_quorum", n.get_id()), _DP_QUORUM_PROBE_TTL_SEC,
+            lambda: is_node_data_plane_disconnected_quorum(n)))
+
+    threads = []
+    for node in snodes:
+        if node.status == StorageNode.STATUS_ONLINE:
+            target = _jm
+        elif node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_REMOVED,
+                                 StorageNode.STATUS_DOWN, StorageNode.STATUS_OFFLINE,
+                                 StorageNode.STATUS_IN_CREATION, StorageNode.STATUS_SUSPENDED]:
+            # Transient states (UNREACHABLE / SCHEDULABLE / ...) may need the
+            # data-plane quorum answer in the verdict pass below.
+            target = _q
+        else:
+            continue
+        t = threading.Thread(target=target, args=(node,),
+                             name=f"status-probe-{node.get_id()[:8]}")
+        t.start()
+        threads.append(t)
+    for t in threads:
+        t.join()
+    return jm_repl, dp_quorum
+
+
 def get_next_cluster_status(cluster_id):
     logger.info(f"get_next_cluster_status for cluster_id: {cluster_id}")
     cluster = db.get_cluster_by_id(cluster_id)
     if cluster.status == cluster.STATUS_UNREADY:
         return Cluster.STATUS_UNREADY
+
+    # Phase 1: slow, RPC-dependent signals on a throwaway snapshot.
+    probe_snapshot = db.get_primary_storage_nodes_by_cluster_id(cluster_id)
+    jm_repl_by_node, dp_quorum_by_node = _collect_status_probes(probe_snapshot)
+
+    # Phase 2: the verdict, computed from a FRESH snapshot with no RPCs —
+    # milliseconds, so the returned status describes the cluster as it is
+    # NOW, not as it was when a slow probe pass started.
     snodes = db.get_primary_storage_nodes_by_cluster_id(cluster_id)
 
     online_nodes = 0
@@ -198,6 +285,11 @@ def get_next_cluster_status(cluster_id):
 
     affected_physical_nodes = []
 
+    # One task-table fetch for the whole verdict: is_new_migrated_node runs
+    # once per ONLINE node below and used to re-fetch the full per-cluster
+    # task list each time (O(n·T) per verdict).
+    cluster_tasks = db.get_job_tasks(cluster_id)
+
     for node in snodes:
 
         node_online_devices = 0
@@ -207,20 +299,15 @@ def get_next_cluster_status(cluster_id):
             continue
 
         if node.status == StorageNode.STATUS_ONLINE:
-            if is_new_migrated_node(cluster_id, node):
+            if is_new_migrated_node(cluster_id, node, tasks=cluster_tasks):
                 continue
             online_nodes += 1
-            try:
-                # check for jm rep tasks:
-                if node.rpc_client(timeout=10).bdev_lvol_get_lvstores(node.lvstore):
-                    ret = node.rpc_client(timeout=8).jc_get_jm_status(node.jm_vuid)
-                    for jm in ret:
-                        if ret[jm] is False: # jm is not ready (has active replication task)
-                            jm_replication_tasks = True
-                            logger.warning("Replication task found!")
-                            break
-            except Exception:
-                logger.warning("Failed to get replication task!")
+            # JM-replication signal precomputed by _collect_status_probes;
+            # a node that turned ONLINE after the probe pass defaults to
+            # False and is picked up by the next (now fast) tick.
+            if jm_repl_by_node.get(node.get_id()):
+                jm_replication_tasks = True
+                logger.warning("Replication task found!")
         elif node.status == StorageNode.STATUS_REMOVED:
             pass
         else:
@@ -274,8 +361,12 @@ def get_next_cluster_status(cluster_id):
             # (set_node_down flips node status only). Recovery is a port-unblock,
             # not a destructive restart, so a DOWN node must not tip the cluster
             # toward SUSPENDED.
+            # Quorum verdict precomputed by _collect_status_probes; a node
+            # that entered a transient state after the probe pass defaults
+            # to "connected" (don't count) — same conservative bias as the
+            # inline probe had, and the next fast tick re-evaluates it.
             if (node.mgmt_ip not in affected_physical_nodes
-                    and is_node_data_plane_disconnected_quorum(node)):
+                    and dp_quorum_by_node.get(node.get_id(), False)):
                 affected_physical_nodes.append(node.mgmt_ip)
 
         online_devices += node_online_devices
@@ -503,6 +594,32 @@ def _watchdog_stuck_activation(cluster):
         elapsed = (datetime.now(timezone.utc) - datetime.fromisoformat(since)).total_seconds()
     except (ValueError, TypeError):
         return
+
+    # Fast path: cluster_activate heartbeats every ~60s for its whole
+    # duration (cluster_ops wrapper). A stale heartbeat means the driving
+    # process/container is GONE (e.g. monitor replaced mid-activation) — no
+    # point waiting out the node-scaled budget (42 min at 32 nodes,
+    # incident 2026-07-13); revert after a few missed beats. A fresh
+    # heartbeat means the activation is alive: leave it alone until the
+    # absolute budget below, which stays as the backstop for a live-but-
+    # stuck activation (and for pre-heartbeat records, where the field is
+    # empty and only the budget applies).
+    heartbeat = getattr(cluster, "activation_heartbeat", "")
+    if heartbeat:
+        try:
+            hb_age = (datetime.now(timezone.utc)
+                      - datetime.fromisoformat(heartbeat)).total_seconds()
+        except (ValueError, TypeError):
+            hb_age = None
+        if hb_age is not None and hb_age >= ACTIVATION_HEARTBEAT_STALE_SEC:
+            logger.error(
+                "Cluster %s IN_ACTIVATION but activation heartbeat is %.0fs old "
+                "(> %ds): the activation driver is gone; reverting to SUSPENDED "
+                "so activation re-gates and auto-restart can re-queue",
+                cluster.get_id(), hb_age, ACTIVATION_HEARTBEAT_STALE_SEC)
+            cluster_ops.set_cluster_status(cluster.get_id(), Cluster.STATUS_SUSPENDED)
+            return
+
     budget = _activation_watchdog_budget_sec(cluster)
     if elapsed < budget:
         return
@@ -604,7 +721,39 @@ def _drive_suspend_recovery(cluster):
                 "unpaused", cluster.get_id())
 
 
+# Debounce state for update_cluster_status: during a mass outage every
+# per-node thread re-enters it synchronously on each status flip — up to n
+# concurrent full recomputes of the same cluster verdict (each doing
+# full-table scans, job-task scans and probe fan-outs): O(n²) DB pressure at
+# the worst possible moment (2026-07-13 audit, 32-node whole-cluster reboot).
+# All callers want the same thing — "recompute the verdict, something
+# changed" — so one thread computes while contemporaries just mark the
+# cluster dirty; the computing thread re-runs while dirty, so no caller's
+# change is ever missed, and the n-way recompute collapses to at most two
+# sequential passes.
+_ucs_state_lock = threading.Lock()
+_ucs_running: dict = {}
+_ucs_pending: dict = {}
+
+
 def update_cluster_status(cluster_id):
+    with _ucs_state_lock:
+        if _ucs_running.get(cluster_id):
+            _ucs_pending[cluster_id] = True
+            return
+        _ucs_running[cluster_id] = True
+    try:
+        while True:
+            _update_cluster_status_impl(cluster_id)
+            with _ucs_state_lock:
+                if not _ucs_pending.pop(cluster_id, False):
+                    break
+    finally:
+        with _ucs_state_lock:
+            _ucs_running[cluster_id] = False
+
+
+def _update_cluster_status_impl(cluster_id):
     # Run the re-queue scan FIRST, before any of the transition branches
     # that may early-return. Otherwise OFFLINE/SCHEDULABLE nodes can stay
     # stranded whenever the cluster takes a recovery path (e.g.
@@ -880,7 +1029,21 @@ def _count_data_plane_votes(node):
     perpetually votes "connected" and the quorum gets stuck.
 
     Returns (disconnected_count, total_peers_checked).
+
+    Peers are probed IN PARALLEL and the whole vote is TTL-cached per target
+    node: the previous serial loop cost up to ~16s per down peer (two 8s
+    RPCs) — ~8 minutes at 31 peers — inside EVERY unreachable-node thread,
+    each recomputing the identical vote (2026-07-13 audit). The cache
+    collapses the N concurrent escalation threads onto one computation;
+    parallelism bounds it to the slowest single peer.
     """
+    node_id = node.get_id()
+    return _status_probe_cache.get_or_compute(
+        ("dp_votes", node_id), _DP_QUORUM_PROBE_TTL_SEC,
+        lambda: _count_data_plane_votes_uncached(node))
+
+
+def _count_data_plane_votes_uncached(node):
     node_id = node.get_id()
     cluster_nodes = db.get_storage_nodes_by_cluster_id(node.cluster_id)
 
@@ -897,10 +1060,10 @@ def _count_data_plane_votes(node):
 
     ctrl_name = f"remote_jm_{node_id}"
     bdev_name = f"{ctrl_name}n1"
-    disconnected = 0
-    total = 0
+    # Vote per peer: True = disconnected, False = connected, None = abstain.
+    votes: dict = {}
 
-    for peer in online_peers:
+    def _vote_one_peer(peer):
         peer_rpc = peer.rpc_client(timeout=8, retry=1)
 
         # Fast path: does the namespace bdev still exist on the peer?
@@ -914,7 +1077,7 @@ def _count_data_plane_votes(node):
             bdevs = peer_rpc.get_bdevs(bdev_name)
         except Exception as e:
             logger.debug("get_bdevs(%s) on peer %s failed: %s", bdev_name, peer.get_id(), e)
-            continue
+            return
 
         if not bdevs:
             # If the peer never had a topology link to this node, it never
@@ -924,7 +1087,7 @@ def _count_data_plane_votes(node):
             # place to assert "this peer SHOULD have seen it".
             logger.debug("Data-plane check: peer %s has no %s bdev; abstaining",
                          peer.get_id(), bdev_name)
-            continue
+            return
 
         # Bdev exists -> controller must exist too. Now check its state.
         try:
@@ -932,26 +1095,37 @@ def _count_data_plane_votes(node):
         except Exception as e:
             logger.debug("bdev_nvme_controller_list(%s) on peer %s failed: %s",
                          ctrl_name, peer.get_id(), e)
-            continue
+            return
 
-        total += 1
         if not ret:
             logger.info("Data-plane check: peer %s has %s bdev but no controller -> disconnected",
                         peer.get_id(), bdev_name)
-            disconnected += 1
-            continue
+            votes[peer.get_id()] = True
+            return
 
         paths = ret[0].get("ctrlrs") or []
         enabled = any((p.get("state") == "enabled") for p in paths)
         if enabled:
             logger.info("Data-plane check: peer %s sees %s controller enabled",
                         peer.get_id(), node_id)
+            votes[peer.get_id()] = False
         else:
             states = [p.get("state") for p in paths] or ["no-paths"]
             logger.info("Data-plane check: peer %s reports %s controller state=%s -> disconnected",
                         peer.get_id(), node_id, states)
-            disconnected += 1
+            votes[peer.get_id()] = True
 
+    vote_threads = []
+    for peer in online_peers:
+        t = threading.Thread(target=_vote_one_peer, args=(peer,),
+                             name=f"dp-vote-{peer.get_id()[:8]}")
+        t.start()
+        vote_threads.append(t)
+    for t in vote_threads:
+        t.join()
+
+    disconnected = sum(1 for v in votes.values() if v)
+    total = len(votes)
     logger.info("Data-plane check for %s: %d/%d peers report disconnected", node_id, disconnected, total)
     return disconnected, total
 
@@ -1388,6 +1562,7 @@ def readmit_devices_after_node_online(node_id):
     """
     try:
         fresh = db.get_storage_node_by_id(node_id)
+        readmitted = 0
         for dev in fresh.nvme_devices:
             if dev.status in (NVMeDevice.STATUS_ONLINE,
                               NVMeDevice.STATUS_REMOVED,
@@ -1396,10 +1571,19 @@ def readmit_devices_after_node_online(node_id):
             logger.info(
                 f"Re-admitting device {dev.get_id()} (was {dev.status}) "
                 f"after node {fresh.get_id()} cleared to ONLINE")
-            if not device_controller.device_set_online(dev.get_id()):
+            # connect_peers=False: the peer fan-out reconnects every ONLINE
+            # peer to THIS node's devices, and all of them flip within this
+            # loop — running it per device repeats the identical delta
+            # reconcile d times. Coalesce to one fan-out after the loop.
+            if not device_controller.device_set_online(dev.get_id(),
+                                                       connect_peers=False):
                 logger.error(
                     f"Re-admit of device {dev.get_id()} after node "
                     f"{fresh.get_id()} cleared to ONLINE was refused")
+            else:
+                readmitted += 1
+        if readmitted:
+            device_controller.connect_peers_to_node_devices(fresh)
     except Exception as e:
         logger.error(f"Device re-admit after node clear to ONLINE failed: {e}")
 

@@ -445,6 +445,9 @@ class CLIWrapperBase:
     def storage_node__set(self, sub_command, args):
         return storage_ops.set_value(args.node_id, args.attr_name, args.attr_value)
 
+    def storage_node__get_device_health_info(self, sub_command, args):
+        return device_controller.get_device_health_info(args.device_id)
+
     def cluster__create(self, sub_command, args):
         return self.cluster_create(args)
 

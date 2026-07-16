@@ -358,6 +358,18 @@ class TestUpdateClusterStatusRequeuesOffline(unittest.TestCase):
         mock_tc.get_active_node_restart_task.side_effect = \
             lambda cid, nid: active.get(nid, False)
         mock_tc.add_node_to_auto_restart = MagicMock(return_value="task-uuid")
+        # _requeue_stuck_auto_restarts gates on is_auto_restart_paused (since
+        # c8d30507); a bare MagicMock return value is truthy and silently
+        # skips the whole re-queue scan. Mirror the real semantics (paused
+        # only while a SUSPENDED cluster's drain is incomplete) so both the
+        # re-queue tests and test_requeue_paused_while_suspended_draining
+        # exercise the actual gating behavior.
+        mock_tc.is_auto_restart_paused.side_effect = (
+            lambda cl: cl.status == Cluster.STATUS_SUSPENDED
+            and not getattr(cl, "suspend_drain_complete", False))
+        # is_suspension_operator_caused stays a truthy MagicMock on purpose:
+        # it keeps update_cluster_status's SUSPENDED drain branch inert, the
+        # same benign path these tests exercised before the gate existed.
 
         return mod, {"db": mock_db, "co": mock_co, "tc": mock_tc}
 

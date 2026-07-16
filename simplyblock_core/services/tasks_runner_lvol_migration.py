@@ -188,9 +188,9 @@ def _apply_migration_to_db(migration, tgt_lvol_uuid=None, tgt_lvol_bdev=None):
         logger.info(
             f"_apply_migration_to_db: queried {len(spdk_info)} bdevs "
             f"from target lvstore {tgt_node.lvstore}")
-        subsys = tgt_rpc.subsystem_list(lvol.nqn)
-        if subsys and isinstance(subsys[0], dict):
-            for ns in subsys[0].get('namespaces') or []:
+        subsys = tgt_rpc.subsystem_get(lvol.nqn)
+        if subsys:
+            for ns in subsys.get('namespaces'):
                 if ns['uuid'] == lvol.uuid:
                     lvol.ns_id = ns['nsid']
                     break
@@ -609,8 +609,7 @@ def _swap_namespace(rpc, nqn, new_bdev, uuid, guid, label):
 
     Discovers the current nsid dynamically rather than assuming nsid=1.
     """
-    sub = rpc.subsystem_list(nqn)
-    s = (sub[0] if isinstance(sub, list) else sub) if sub else None
+    s = rpc.subsystem_get(nqn)
     ns_list = s.get('namespaces', []) if s else []
     nsid = ns_list[0]['nsid'] if ns_list else 1
     try:
@@ -1788,11 +1787,10 @@ def _cleanup_subsystem_or_ns(nqn, ns_id, subsystem_was_created_by_migration, rpc
     present before we attached our namespace, so we never delete it—we only
     remove our namespace entry.
     """
-    sub_list = rpc.subsystem_list(nqn)
-    if not sub_list:
+    sub = rpc.subsystem_get(nqn)
+    if not sub:
         return  # already gone
 
-    sub = sub_list[0] if isinstance(sub_list, list) else sub_list
     ns_count = len(sub.get('namespaces', []))
 
     if ns_count > 1 or not subsystem_was_created_by_migration:
@@ -2365,6 +2363,13 @@ def task_runner(task):
     if cluster.status not in (Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED):
         return _suspend_task(
             task, migration, f"cluster not active (status={cluster.status})")
+
+    # Expansion-first ordering: defer while a cluster expansion is open —
+    # even between the expand task's retries, when the cluster status is
+    # momentarily ACTIVE (see tasks_controller.defer_task_for_expansion).
+    if tasks_controller.get_active_cluster_expand_task(task.cluster_id):
+        return _suspend_task(
+            task, migration, "cluster expansion in progress, deferring")
 
     # --- Transition NEW/SUSPENDED → RUNNING ---
     if task.status in (JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED):

@@ -848,7 +848,7 @@ def create_migration(lvol_id, target_node_id,
         if _node_id in overlap_ids:
             # Subsystem already exists from SRC role — add inaccessible listener
             # at TGT port so clients can pre-connect to the future TGT endpoint.
-            subsys = _rpc.subsystem_list(nqn)[0]
+            subsys = _rpc.subsystem_get(nqn) or {}
             subsys_min_cntlid_used.add(subsys.get('min_cntlid', 0))
 
         if _node_id in overlap_ids:
@@ -868,7 +868,7 @@ def create_migration(lvol_id, target_node_id,
                         f"create_migration: listener on overlap {_node_id[:8]} "
                         f"(non-fatal): {_e}")
         else:
-            if not _rpc.subsystem_list(nqn):
+            if not _rpc.subsystem_get(nqn):
                 if _min_cntlid in subsys_min_cntlid_used:
                     _min_cntlid = _min_cntlid + 10000
                 _rpc.subsystem_create(

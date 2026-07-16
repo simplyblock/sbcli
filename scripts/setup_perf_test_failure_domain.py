@@ -1,6 +1,9 @@
 import argparse
 import os
+import sys
+import threading
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 
 import boto3
 import paramiko
@@ -160,19 +163,49 @@ def _ssh_connect_with_retry(ip, retries=15, delay=10, timeout=15):
     raise RuntimeError(f"SSH connect to {ip} failed after {retries} attempts: {last_exc}")
 
 
-def ssh_exec(ip, cmds, get_output=False, check=False, cmd_timeout=600):
+def ssh_exec(ip, cmds, get_output=False, check=False, cmd_timeout=600,
+             reconnect_retries=3):
     # cmd_timeout bounds each remote command. 600s suits quick ops, but the
     # long 32-node operations (sn deploy = concurrent docker image pull +
     # SPDK bring-up, cluster activate = full mesh/hublvol wiring) need much
     # more; callers pass a larger value for those.
+    #
+    # Like the connect-time retries in _ssh_connect_with_retry, an
+    # established transport can also die mid-session under 30+ parallel
+    # long-lived connections (e.g. [WinError 10054] reset while opening a
+    # channel) and must not abort the whole deployment. On transport death
+    # the current command is re-run on a fresh connection, so every command
+    # routed through here has to stay idempotent. reconnect_retries=0
+    # disables this for commands where re-running is wrong (e.g. reboot).
     ssh = _ssh_connect_with_retry(ip)
     results = []
     for cmd in cmds:
-        print(f"  [{ip}] $ {cmd}")
-        stdin, stdout, stderr = ssh.exec_command(cmd, timeout=cmd_timeout)
-        out = stdout.read().decode('utf-8')
-        err = stderr.read().decode('utf-8')
-        rc = stdout.channel.recv_exit_status()
+        for attempt in range(reconnect_retries + 1):
+            print(f"  [{ip}] $ {cmd}")
+            try:
+                stdin, stdout, stderr = ssh.exec_command(cmd, timeout=cmd_timeout)
+                out = stdout.read().decode('utf-8')
+                err = stderr.read().decode('utf-8')
+                rc = stdout.channel.recv_exit_status()
+                break
+            except (paramiko.SSHException, EOFError, OSError) as e:
+                if isinstance(e, TimeoutError):
+                    # Command exceeded cmd_timeout; re-running won't help.
+                    ssh.close()
+                    raise
+                try:
+                    ssh.close()
+                except Exception:
+                    pass
+                if attempt >= reconnect_retries:
+                    raise RuntimeError(
+                        f"SSH transport to {ip} died {reconnect_retries + 1} "
+                        f"times running: {cmd}: {e}") from e
+                print(f"  [{ip}] connection died mid-command "
+                      f"({type(e).__name__}: {e}), reconnecting and re-running "
+                      f"(retry {attempt + 2}/{reconnect_retries + 1})")
+                time.sleep(10)
+                ssh = _ssh_connect_with_retry(ip)
         if get_output:
             results.append(out)
         if rc != 0:
@@ -445,8 +478,30 @@ class PersistentSSH:
 
 
 
-def main():
+class _TeeStdout:
+    """Mirror stdout to a log file so a failed run leaves forensics behind
+    (which node's [ip] line preceded the traceback, timings, command output).
+    Thread-safe because ssh_exec prints from ThreadPoolExecutor workers."""
 
+    def __init__(self, path):
+        self._file = open(path, "a", buffering=1, encoding="utf-8")
+        self._stdout = sys.stdout
+        self._lock = threading.Lock()
+
+    def write(self, data):
+        with self._lock:
+            self._stdout.write(data)
+            self._file.write(data)
+
+    def flush(self):
+        self._stdout.flush()
+        self._file.flush()
+
+
+def main():
+    log_path = f"setup_perf_fd_{datetime.now():%Y%m%d_%H%M%S}.log"
+    sys.stdout = sys.stderr = _TeeStdout(log_path)
+    print(f"Logging to {log_path}")
 
     # Launch Mgmt Node
     print("Launching Management Node...")
@@ -526,9 +581,12 @@ def main():
             t.result()
     print("Phase 2c: DONE - all SNs deployed. Rebooting...")
 
-    # Reboot all SNs in parallel (reboot returns non-zero, don't check)
+    # Reboot all SNs in parallel (reboot returns non-zero, don't check).
+    # reconnect_retries=0: the reboot is EXPECTED to kill the connection;
+    # a reconnect-retry would reboot the node a second time.
     with ThreadPoolExecutor(max_workers=len(sn_ips)) as executor:
-        [executor.submit(ssh_exec, ip, ["sudo reboot"]) for ip in sn_ips]
+        [executor.submit(ssh_exec, ip, ["sudo reboot"], reconnect_retries=0)
+         for ip in sn_ips]
 
     print("Waiting for SN reboot recovery...")
     time.sleep(30)
@@ -562,19 +620,93 @@ def main():
     print("Phase 3: Adding storage nodes to cluster IN PARALLEL "
           "(with --failure-domain tags)...")
 
+    _uuid_re = re.compile(r'[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}')
+    _node_statuses = {"online", "offline", "unreachable", "in_creation", "in_shutdown",
+                      "suspended", "down", "removed", "restarting", "schedulable", "new"}
+
+    def _find_node_record(priv_ip):
+        """Return (uuid, status) of the storage-node record whose mgmt IP is
+        priv_ip, or (None, None). Parses the `sbctl sn list` table."""
+        out = ssh_exec(mgmt_ip, ["sudo /usr/local/bin/sbctl sn list"], get_output=True)[0]
+        for line in out.splitlines():
+            cells = [c.strip() for c in line.split('|')]
+            if not any(c == priv_ip or c.startswith(priv_ip + ':') for c in cells):
+                continue
+            node_uuid = next((c for c in cells if _uuid_re.fullmatch(c)), None)
+            status = next((c for c in cells if c in _node_statuses), 'unknown')
+            return node_uuid, status
+        return None, None
+
     def _add_one_node(idx_priv):
         idx, priv_ip = idx_priv
         fd = FAILURE_DOMAINS[idx]
         print(f"  Node {idx} ({priv_ip}) -> failure domain {fd}")
         for attempt in range(5):
+            # add-node is NOT blindly re-runnable: an attempt whose SSH channel
+            # died may have kept running on the mgmt node and completed the
+            # registration server-side (run 2026-07-15: five orphaned adds
+            # finished after their channels were reset, and the retries then
+            # live-locked on "SSD is being used by other node"). Reconcile
+            # against the cluster state before every (re-)run.
+            node_uuid, status = _find_node_record(priv_ip)
+
+            if status == 'in_creation':
+                # An orphaned add may still be in flight server-side; wait for
+                # it to land instead of racing it with a second add. But a
+                # record can also be orphaned with nothing behind it (run
+                # 2026-07-16: a node-add lock timeout returned without
+                # cleanup), so verify a driver exists: every add-node for this
+                # cluster is an sbctl process on the mgmt node. No matching
+                # process == ghost record — stop waiting and clear it below.
+                # ([e] bracket keeps pgrep from matching its own ssh/sudo
+                # wrappers.)
+                print(f"  Node {idx} ({priv_ip}) is in_creation ({node_uuid}); "
+                      f"waiting for the in-flight add to finish...")
+                deadline = time.time() + 3600
+                while time.time() < deadline:
+                    alive = ssh_exec(mgmt_ip, [
+                        f"pgrep -f 'sn add-nod[e] .*{priv_ip}:5000' || true"
+                    ], get_output=True)[0].strip()
+                    if not alive:
+                        print(f"  Node {idx} ({priv_ip}): no add-node process "
+                              f"behind in_creation record {node_uuid}; treating "
+                              f"as a dead add")
+                        break
+                    time.sleep(30)
+                    node_uuid, status = _find_node_record(priv_ip)
+                    if status != 'in_creation':
+                        break
+
+            if status == 'online':
+                print(f"  Node {idx} ({priv_ip}) is already online as {node_uuid}; "
+                      f"add-node skipped")
+                return
+
+            if node_uuid is not None:
+                # Any leftover record blocks re-adding (same-endpoint SSD
+                # guard) — including one still in_creation after the wait
+                # above (dead add). Clear it: remove transitions it to
+                # 'removed', delete drops the record. Best effort — if it
+                # fails the add-node below fails too and the next attempt
+                # retries this.
+                print(f"  Node {idx} ({priv_ip}): clearing stale record "
+                      f"{node_uuid} (status={status}) before re-add")
+                ssh_exec(mgmt_ip, [
+                    f"sudo /usr/local/bin/sbctl -d sn remove {node_uuid} --force-remove",
+                    f"sudo /usr/local/bin/sbctl -d sn delete {node_uuid} --force",
+                ], cmd_timeout=600)
+
             try:
                 # add-node wires the new node into the mesh (serialized behind
                 # ClusterAddNodeLock); at 32 nodes a single add can queue on
-                # that lock for minutes, so allow 20 min per attempt.
+                # that lock up to CLUSTER_ADD_LOCK_WAIT_TIMEOUT_SEC (30 min)
+                # on top of its own node-local setup and mesh section, so the
+                # SSH timeout must sit above that — killing the channel here
+                # orphans a server-side add (2026-07-15 live-lock).
                 ssh_exec(mgmt_ip, [
                     f"sudo /usr/local/bin/sbctl -d sn add-node {cluster_uuid} {priv_ip}:5000 {IFACE}"
                     f" --ha-jm-count 4 --failure-domain {fd}"
-                ], check=True, cmd_timeout=1200)
+                ], check=True, cmd_timeout=3600)
                 return
             except RuntimeError:
                 if attempt < 4:

@@ -7,7 +7,6 @@ from simplyblock_core.controllers import (
     tcp_ports_events, health_controller, tasks_controller, storage_events, device_controller,
 )
 from simplyblock_core.models.job_schedule import JobSchedule
-from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.lvol_model import LVol
@@ -451,7 +450,7 @@ def _reconnect_inbound_hublvols(node):
     try:
         cluster = db.get_cluster_by_id(node.cluster_id)
         rpc = node.rpc_client(timeout=5, retry=1)
-        if not rpc.subsystem_list(primary.hublvol.nqn):
+        if not rpc.subsystem_get(primary.hublvol.nqn):
             logger.info("Re-exposing secondary hublvol on %s for %s",
                         node.get_id()[:8], primary.lvstore)
             node.create_secondary_hublvol(primary, cluster.nqn)
@@ -609,16 +608,6 @@ def exec_port_allow_task(task):
     logger.info("connect to remote devices")
     # connect to remote devs
     try:
-        node_bdevs = node.rpc_client().get_bdevs()
-        logger.debug(node_bdevs)
-        if node_bdevs:
-            node_bdev_names = {}
-            for b in node_bdevs:
-                node_bdev_names[b['name']] = b
-                for al in b['aliases']:
-                    node_bdev_names[al] = b
-        else:
-            node_bdev_names = {}
         remote_devices = storage_node_ops._connect_to_remote_devs(node, reattach=False)
         if not remote_devices:
             msg = "Node unable to connect to remote devs, retry task"
@@ -1059,8 +1048,16 @@ def _main():
             logger.error("No clusters found!")
         else:
             for cl in clusters:
-                if cl.status == Cluster.STATUS_IN_ACTIVATION:
-                    continue
+                # Deliberately NOT skipped while the cluster is IN_ACTIVATION:
+                # port_allow is the final step of a node's recovery, and
+                # activation NEEDS those ports open (2026-07-16 full-fleet
+                # reboot: a task suspended seconds before activation started
+                # froze at 0/8 retries for the entire 30-minute activation,
+                # while the activation's hublvol attaches to that node failed
+                # against its still-blocked port). The task's own gates (node
+                # status, mgmt/data-NIC pings, verified-open hublvols) decide
+                # whether a retry can proceed; a retry that still can't just
+                # re-suspends.
                 tasks = db.get_job_tasks(cl.get_id(), reverse=False)
                 for task in tasks:
                     if task.function_name == JobSchedule.FN_PORT_ALLOW:

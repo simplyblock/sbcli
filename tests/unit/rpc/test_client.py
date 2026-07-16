@@ -1,0 +1,93 @@
+# coding=utf-8
+"""Unit tests for RPCClient wrapper methods (e.g. get_bdevs, subsystem_list,
+subsystem_get). Coverage is partial — add cases here as wrappers grow."""
+
+import errno
+import unittest
+from unittest.mock import patch
+
+from pydantic import SecretStr
+
+from simplyblock_core.rpc_client import RPCClient, RPCException
+
+
+def _make_client(**kwargs):
+    """Create an RPCClient without hitting the network."""
+    with patch("requests.session"):
+        return RPCClient("127.0.0.1", 8081, "user", SecretStr("pass"), timeout=1, retry=0, **kwargs)
+
+
+class TestGetBdevs(unittest.TestCase):
+
+    @patch.object(RPCClient, "_request")
+    def test_get_bdevs_calls_request_each_time(self, mock_req):
+        mock_req.return_value = [{"name": "bdev0"}]
+        client = _make_client()
+
+        r1 = client.get_bdevs()
+        r2 = client.get_bdevs()
+
+        # get_bdevs uses _request directly (no caching)
+        self.assertEqual(mock_req.call_count, 2)
+        self.assertEqual(r1, r2)
+
+    @patch.object(RPCClient, "_request")
+    def test_get_bdevs_with_name_separate_from_all(self, mock_req):
+        mock_req.side_effect = [["all"], ["one"]]
+        client = _make_client()
+
+        client.get_bdevs()
+        client.get_bdevs(name="bdev0")
+
+        self.assertEqual(mock_req.call_count, 2)
+
+
+class TestSubsystem(unittest.TestCase):
+
+    @patch.object(RPCClient, "_request3")
+    def test_subsystem_list_calls_request_each_time(self, mock_req):
+        mock_req.return_value = [{"nqn": "nqn.test", "namespaces": []}]
+        client = _make_client()
+
+        r1 = client.subsystem_list()
+        r2 = client.subsystem_list()
+
+        # subsystem_list uses _request3 directly (no caching)
+        self.assertEqual(mock_req.call_count, 2)
+        self.assertEqual(r1, r2)
+
+    @patch.object(RPCClient, "_request3")
+    def test_subsystem_get_delegates_filtering_to_rpc(self, mock_req):
+        # nvmf_get_subsystems filters server-side, so the RPC returns only the
+        # matching subsystem when queried by nqn.
+        mock_req.return_value = [{"nqn": "nqn.b", "namespaces": []}]
+        client = _make_client()
+
+        self.assertEqual(client.subsystem_get("nqn.b")["nqn"], "nqn.b")
+        mock_req.assert_called_once_with("nvmf_get_subsystems", nqn="nqn.b")
+
+    @patch.object(RPCClient, "_request3")
+    def test_subsystem_get_filter_miss_returns_none(self, mock_req):
+        mock_req.return_value = []
+        client = _make_client()
+        self.assertIsNone(client.subsystem_get("nqn.nonexistent"))
+
+    @patch.object(RPCClient, "_request3")
+    def test_subsystem_get_no_such_device_returns_none(self, mock_req):
+        # SPDK returns ENODEV (-19) "No such device" when the subsystem is gone;
+        # treat it as absent rather than propagating the error.
+        mock_req.side_effect = RPCException("No such device", code=-errno.ENODEV)
+        client = _make_client()
+        self.assertIsNone(client.subsystem_get("nqn.gone"))
+
+    @patch.object(RPCClient, "_request3")
+    def test_subsystem_get_other_rpc_error_propagates(self, mock_req):
+        # Generic RPC failures must still surface.
+        mock_req.side_effect = RPCException("Something broke", code=-errno.EINVAL)
+        client = _make_client()
+        with self.assertRaises(RPCException):
+            client.subsystem_get("nqn.b")
+
+
+if __name__ == "__main__":
+    unittest.main()

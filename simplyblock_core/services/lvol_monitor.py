@@ -14,6 +14,35 @@ logger = utils.get_logger(__name__)
 
 utils.init_sentry_sdk(__name__)
 
+
+def try_repair_lvol_on_non_leader(lvol, sec_node, secondary_index):
+    """Self-heal a missing/incomplete lvol registration on an ONLINE
+    non-leader (secondary/tertiary).
+
+    A create-time registration can be lost: the create path queues the
+    non-leader registration when the node's LVS is gated (restart phase),
+    and that queue is in-memory per process — a stale/resurrected phase
+    turns the deferral into a permanent loss (incident 2026-07-10: lvol
+    cef09c39's tertiary subsystem was never created, the volume served
+    2/3 paths and a dual outage within FTT killed all IO). The monitor
+    already detects the miss via check_lvol_on_node — this converts the
+    detection into a repair: create the subsystem if absent (mirrors the
+    restart flow's idempotent registration loop) and re-run the
+    idempotent ns+listener registration.
+
+    Returns True when the registration was repaired."""
+    from simplyblock_core import storage_node_ops
+
+    ok, err = storage_node_ops.repair_lvol_registration_on_non_leader(
+        lvol, sec_node, secondary_index)
+    if not ok:
+        logger.error("Repair of lvol %s registration on %s failed: %s",
+                     lvol.get_id(), sec_node.get_id(), err)
+        return False
+    logger.info("Repaired lvol %s registration on non-leader %s",
+                lvol.get_id(), sec_node.get_id())
+    return True
+
 def set_lvol_status(lvol, status):
     # Atomic compare-and-set: a full read-modify-write would clobber a concurrent
     # change to another LVol field (e.g. lvol_stat_collector clearing io_error,
@@ -89,7 +118,7 @@ def resume_comp(lvol):
         tasks_controller.add_jc_comp_resume_task(node.cluster_id, node.get_id(), node.jm_vuid)
 
 
-def post_lvol_delete_rebalance(lvol):
+def post_lvol_delete_rebalance(cluster, lvol):
     global lvol_del_start_time
     diff = time.time() - lvol_del_start_time
     if diff > 0:
@@ -108,7 +137,7 @@ def post_lvol_delete_rebalance(lvol):
             resume_comp(lvol)
 
 
-def process_lvol_delete_finish(lvol):
+def process_lvol_delete_finish(cluster, lvol):
     logger.info(f"LVol deleted successfully, id: {lvol.get_id()}")
 
     # check leadership
@@ -200,7 +229,7 @@ def process_lvol_delete_finish(lvol):
         logger.info("All devices are full, starting expansion migrations")
         for dev_id in full_devs_ids:
             tasks_controller.add_new_device_mig_task(dev_id)
-    post_lvol_delete_rebalance(lvol)
+    post_lvol_delete_rebalance(cluster, lvol)
 
 
 def process_lvol_delete_try_again(lvol):
@@ -208,46 +237,7 @@ def process_lvol_delete_try_again(lvol):
                      lambda x: setattr(x, "deletion_status", ""))
 
 
-def check_node(snode, all_lvols):
-    node_bdev_names = []
-    node_lvols_nqns = {}
-    sec_node_bdev_names = {}
-    sec_node_lvols_nqns = {}
-    sec_node = None
-
-    if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
-        node_bdevs = snode.rpc_client().get_bdevs()
-        if node_bdevs:
-            node_bdev_names = [b['name'] for b in node_bdevs]
-            for bdev in node_bdevs:
-                if "aliases" in bdev and bdev["aliases"]:
-                    node_bdev_names.extend(bdev['aliases'])
-        ret = snode.rpc_client().subsystem_list()
-        if ret:
-            for sub in ret:
-                node_lvols_nqns[sub['nqn']] = sub
-
-    sec_ids_for_check = []
-    if snode.secondary_node_id:
-        sec_ids_for_check.append(snode.secondary_node_id)
-    if snode.tertiary_node_id:
-        sec_ids_for_check.append(snode.tertiary_node_id)
-    first_sec_node = None
-    for sec_id in sec_ids_for_check:
-        sec_node = db.get_storage_node_by_id(sec_id)
-        if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
-            if first_sec_node is None:
-                first_sec_node = sec_node
-            sec_rpc_client = sec_node.rpc_client()
-            ret = sec_rpc_client.get_bdevs()
-            if ret:
-                for bdev in ret:
-                    sec_node_bdev_names[bdev['name']] = bdev
-
-            ret = sec_rpc_client.subsystem_list()
-            if ret:
-                for sub in ret:
-                    sec_node_lvols_nqns[sub['nqn']] = sub
+def check_node(cluster, snode, all_lvols):
 
     for lvol in all_lvols:
         if lvol.node_id != snode.get_id():
@@ -325,7 +315,7 @@ def check_node(snode, all_lvols):
                 break
 
             if ret == 0 or ret == 2:  # Lvol may have already been deleted (not found) or delete completed
-                process_lvol_delete_finish(lvol)
+                process_lvol_delete_finish(cluster, lvol)
 
             elif ret == 1:  # Async lvol deletion is in progress or queued
                 logger.info(f"LVol deletion in progress, id: {lvol.get_id()}")
@@ -361,7 +351,7 @@ def check_node(snode, all_lvols):
             elif ret == -2:  # No such file or directory
                 logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
                 logger.error("No such file or directory")
-                process_lvol_delete_finish(lvol)
+                process_lvol_delete_finish(cluster, lvol)
 
             elif ret == -5:  # I/O error
                 logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
@@ -386,7 +376,7 @@ def check_node(snode, all_lvols):
             elif ret == -19:  # No such device
                 logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
                 logger.error("Finishing lvol delete")
-                process_lvol_delete_finish(lvol)
+                process_lvol_delete_finish(cluster, lvol)
 
             elif ret == -35:  # Leadership changed
                 logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
@@ -404,64 +394,78 @@ def check_node(snode, all_lvols):
 
             continue
 
+
+        if snode.lvstore_status != "ready":
+            continue
+
         passed = True
         try:
-            ret = health_controller.check_lvol_on_node(
-                lvol.get_id(), lvol.node_id, node_bdev_names, node_lvols_nqns)
-            if not ret:
-                passed = False
+            passed &= health_controller.check_subsystem(lvol.nqn, rpc_client=snode.rpc_client(), ns_uuid=lvol.uuid)
         except Exception as e:
             logger.error(f"Failed to check lvol:{lvol.get_id()} on node: {lvol.node_id}")
             logger.error(e)
 
         if lvol.ha_type == "ha":
-            for sec_id in lvol.nodes[1:]:
+            for sec_index, sec_id in enumerate(lvol.nodes[1:]):
                 try:
                     sec_node = db.get_storage_node_by_id(sec_id)
                 except KeyError:
                     continue
                 if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
                     try:
-                        ret = health_controller.check_lvol_on_node(
-                            lvol.get_id(), sec_id, sec_node_bdev_names, sec_node_lvols_nqns)
+                        ret = health_controller.check_subsystem(
+                            lvol.nqn, rpc_client=sec_node.rpc_client(), ns_uuid=lvol.uuid)
                         if not ret:
                             passed = False
-                        else:
-                            passed = True
+                            # Self-heal: a missing registration on an online
+                            # non-leader never fixes itself (the create-time
+                            # deferral queue is lossy) — re-register now. The
+                            # next monitor cycle re-checks and restores
+                            # health_check once the repair sticks.
+                            try:
+                                try_repair_lvol_on_non_leader(lvol, sec_node, sec_index)
+                            except Exception as re:
+                                logger.error(
+                                    f"Repair attempt for lvol {lvol.get_id()} "
+                                    f"on node {sec_id} raised: {re}")
                     except Exception as e:
                         logger.error(f"Failed to check lvol: {lvol.get_id()} on node: {sec_id}")
                         logger.error(e)
 
-        if snode.lvstore_status == "ready":
-
-            logger.info(f"LVol: {lvol.get_id()}, is healthy: {passed}")
-            set_lvol_health_check(lvol, passed)
-            if passed:
-                set_lvol_status(lvol, LVol.STATUS_ONLINE)
+        logger.info(f"LVol: {lvol.get_id()}, is healthy: {passed}")
+        set_lvol_health_check(lvol, passed)
+        if passed:
+            set_lvol_status(lvol, LVol.STATUS_ONLINE)
 
 
 
 # get DB controller
 db = db_controller.DBController()
 
-logger.info("Starting LVol monitor...")
-while True:
-    try:
-        db.get_clusters()
-    except Exception as e:
-        logger.error(f"Failed to get clusters: {e}")
-        time.sleep(3)
-        continue
-    for cluster in db.get_clusters():
 
-        if cluster.status in [Cluster.STATUS_INACTIVE, Cluster.STATUS_UNREADY, Cluster.STATUS_IN_ACTIVATION]:
-            logger.warning(f"Cluster {cluster.get_id()} is in {cluster.status} state, skipping")
+def main():
+    logger.info("Starting LVol monitor...")
+    while True:
+        try:
+            db.get_clusters()
+        except Exception as e:
+            logger.error(f"Failed to get clusters: {e}")
+            time.sleep(3)
             continue
-        all_lvols = db.get_all_lvols()
-        for snode in db.get_storage_nodes_by_cluster_id(cluster.get_id()):
-            try:
-                check_node(snode, all_lvols)
-            except Exception as e:
-                logger.error(e)
+        for cluster in db.get_clusters():
 
-    time.sleep(constants.LVOL_MONITOR_INTERVAL_SEC)
+            if cluster.status in [Cluster.STATUS_INACTIVE, Cluster.STATUS_UNREADY, Cluster.STATUS_IN_ACTIVATION]:
+                logger.warning(f"Cluster {cluster.get_id()} is in {cluster.status} state, skipping")
+                continue
+            all_lvols = db.get_all_lvols()
+            for snode in db.get_storage_nodes_by_cluster_id(cluster.get_id()):
+                try:
+                    check_node(cluster, snode, all_lvols)
+                except Exception as e:
+                    logger.error(e)
+
+        time.sleep(constants.LVOL_MONITOR_INTERVAL_SEC)
+
+
+if __name__ == "__main__":
+    main()

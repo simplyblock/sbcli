@@ -13,31 +13,36 @@ logger = utils.get_logger(__name__)
 
 db = db_controller.DBController()
 
-logger.info("Starting backup merge service...")
-while True:
-    try:
-        db.get_clusters()
-    except Exception as e:
-        logger.error(f"Failed to get clusters: {e}")
-        time.sleep(3)
-        continue
-    clusters = db.get_clusters()
-    for cl in clusters:
-        if cl.status == Cluster.STATUS_IN_ACTIVATION:
-            continue
-
+def main():
+    logger.info("Starting backup merge service...")
+    while True:
         try:
-            lvols = db.get_lvols(cl.get_id())
-            for lvol in lvols:
-                try:
-                    backup_controller.evaluate_policy(lvol)
-                except Exception as e:
-                    logger.error(f"Error evaluating policy for lvol {lvol.get_id()}: {e}")
-                try:
-                    backup_controller.evaluate_schedule(lvol)
-                except Exception as e:
-                    logger.error(f"Error evaluating schedule for lvol {lvol.get_id()}: {e}")
+            db.get_clusters()
         except Exception as e:
-            logger.error(f"Error processing cluster {cl.get_id()}: {e}")
+            logger.error(f"Failed to get clusters: {e}")
+            time.sleep(3)
+            continue
+        clusters = db.get_clusters()
+        for cl in clusters:
+            if cl.status == Cluster.STATUS_IN_ACTIVATION:
+                continue
 
-    time.sleep(constants.BACKUP_MERGE_SERVICE_INTERVAL_SEC)
+            try:
+                lvols = db.get_lvols(cl.get_id())
+                for lvol in lvols:
+                    try:
+                        backup_controller.evaluate_policy(lvol)
+                    except Exception as e:
+                        logger.error(f"Error evaluating policy for lvol {lvol.get_id()}: {e}")
+                    try:
+                        backup_controller.evaluate_schedule(lvol)
+                    except Exception as e:
+                        logger.error(f"Error evaluating schedule for lvol {lvol.get_id()}: {e}")
+            except Exception as e:
+                logger.error(f"Error processing cluster {cl.get_id()}: {e}")
+
+        time.sleep(constants.BACKUP_MERGE_SERVICE_INTERVAL_SEC)
+
+
+if __name__ == "__main__":
+    main()

@@ -131,6 +131,14 @@ class RpcServerSim:
 
     def bdev_raid_delete(self, name, **_):
         self.bdevs.pop(name, None)
+        # Hot-remove semantics: deleting the base bdev of an examined
+        # lvstore unloads the lvstore bdev on this node. The superblock
+        # (cluster_sim.lvstore_by_base) is untouched — data stays intact,
+        # any node can re-examine the base later and rediscover the lvs.
+        if self.cluster_sim is not None:
+            lvs = self.cluster_sim.lvstore_by_base.get(name)
+            if lvs:
+                self.bdevs.pop(lvs, None)
         return True
 
     def bdev_alceml_create(self, name, nvme_bdev=None, uuid=None, **_):
@@ -163,6 +171,16 @@ class RpcServerSim:
 
     def bdev_lvol_delete_lvstore(self, name, **_):
         self.bdevs.pop(name, None)
+        # DESTRUCTIVE: in real SPDK this wipes the blobstore metadata on the
+        # shared backing storage — every replica of the lvstore loses its
+        # data, not just this node's view. Model that by erasing the
+        # superblock and recording the destruction so tests can assert the
+        # expansion path never issues this on a shared lvstore.
+        if self.cluster_sim is not None:
+            for base, lvs in list(self.cluster_sim.lvstore_by_base.items()):
+                if lvs == name:
+                    del self.cluster_sim.lvstore_by_base[base]
+            self.cluster_sim.destroyed_lvstores.add(name)
         return True
 
     def bdev_lvol_get_lvstores(self, name=None, **_):
@@ -346,6 +364,10 @@ class ClusterSim:
         # lvstore is created and read back when any node examines the base
         # bdev, so a non-leader rediscovers the lvstore the way SPDK does.
         self.lvstore_by_base: Dict[str, str] = {}
+        # Lvstores destroyed via bdev_lvol_delete_lvstore (a data-destroying
+        # operation on shared storage). Expansion tests assert this stays
+        # empty — re-homing a role must unwind raid+distribs, never the lvs.
+        self.destroyed_lvstores: set = set()
 
     def add_server(self, sim: RpcServerSim) -> None:
         self.servers[sim.node_id] = sim

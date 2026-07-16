@@ -280,7 +280,10 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         logger.info("Configuring docker swarm...")
         c = docker.DockerClient(base_url=f"tcp://{dev_ip}:2375", version="auto")
         if c.swarm.attrs and "ID" in c.swarm.attrs:
-            logger.info("Docker swarm found, leaving swarm now")
+            logger.warning("Warning! Docker swarm found")
+            ret = utils.query_yes_no("Destroy current cluster and create new one?", default="no")
+            if not ret:
+                raise ValueError("Aborting")
             c.swarm.leave(force=True)
             try:
                 c.volumes.get("monitoring_grafana_data").remove(force=True)
@@ -614,7 +617,188 @@ def set_name(cl_id, name) -> Cluster:
     return cluster
 
 
+def _wait_for_full_device_connectivity(cl_id, timeout_sec=300, poll_sec=10):
+    """Block until every ONLINE primary node holds a connected remote-device
+    record for every ONLINE device of every OTHER online node, or raise.
+
+    Activation's first create_lvstore builds distribs that immediately
+    read/write across ALL cluster devices. A single missing cross-node
+    connection fails that create ~12 s in with an opaque distrib
+    ``error_read`` and aborts the whole activation (incident 2026-07-10
+    14:12: the deploy retried two node-adds via delete+re-add, producing
+    four fresh device records in the final 3 minutes, and activation
+    started 70 s after the last join — before peers had attached to the
+    re-added nodes' devices). Node records converge as the add/health
+    flows finish attaching, so waiting here is both sufficient and
+    bounded; on timeout the error names the exact missing links instead
+    of a distrib read error.
+    """
+    deadline = time.time() + timeout_sec
+    prev_missing = None
+    while True:
+        snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
+        online = [n for n in snodes
+                  if not n.is_secondary_node and n.status == StorageNode.STATUS_ONLINE]
+        expected = {}  # device uuid -> owner node id
+        for node in online:
+            for dev in node.nvme_devices:
+                if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY,
+                                  NVMeDevice.STATUS_CANNOT_ALLOCATE]:
+                    expected[dev.get_id()] = node.get_id()
+        missing = []
+        for node in online:
+            have = {rd.get_id() for rd in node.remote_devices if rd.remote_bdev}
+            for dev_id, owner in expected.items():
+                if owner != node.get_id() and dev_id not in have:
+                    missing.append((node.get_id(), owner, dev_id))
+        if not missing:
+            logger.info("Pre-activation connectivity check passed: %d nodes fully meshed "
+                        "over %d devices", len(online), len(expected))
+            return
+        if time.time() >= deadline:
+            sample = ", ".join(f"{n[:8]}->{o[:8]}/dev {d[:8]}" for n, o, d in missing[:8])
+            raise ValueError(
+                f"Failed to activate cluster: {len(missing)} cross-node device "
+                f"connection(s) still missing after {timeout_sec}s "
+                f"(node->device-owner/device): {sample}. Nodes are still "
+                f"attaching to recently (re-)added peers — retry activation "
+                f"once node health checks pass.")
+        logger.warning("Pre-activation connectivity check: %d cross-node device "
+                       "connection(s) missing; repairing, then waiting %ds "
+                       "(%.0fs left)", len(missing), poll_sec,
+                       deadline - time.time())
+
+        # Actively REPAIR the missing links instead of only waiting for them.
+        # Waiting is sufficient after node-add (the add/health flows are still
+        # attaching), but after a whole-cluster parallel recovery nothing else
+        # drives these: each restart's peer reconnect is best-effort and skips
+        # peers that are mid-restart at that moment, and once the last restart
+        # finishes no reconciliation sweeps the leftovers — a bare wait
+        # livelocks activation (2026-07-13: 382 links static across repeated
+        # in_activation -> suspended -> in_activation cycles). Repair mirrors
+        # _reconnect_peers_to_restarted_node: per-node worker threads, DELTA
+        # reconnect per missing owner, atomic_update so we never clobber the
+        # node's concurrent flows. Best-effort — the re-check above is the
+        # only pass/fail authority.
+        # NB: a plain ``set()`` here would resolve to this module's ``set``
+        # function (it shadows the builtin).
+        by_node: dict = {}
+        for n_id, owner_id, _ in missing:
+            if n_id not in by_node:
+                by_node[n_id] = {owner_id}
+            else:
+                by_node[n_id].add(owner_id)
+
+        def _repair_node(node_id, owner_ids):
+            # A full-mesh outage (whole-fleet reboot) leaves each node missing
+            # MOST owners. The per-owner delta below pays its fixed overhead
+            # (DB reads, connect round-trips, JM reconcile, atomic_update)
+            # once per owner — measured ~40s each, and 31 sequential owners
+            # made round 1 the 21-minute activation stall of 2026-07-16
+            # (13:09:43 "1353 missing" -> 13:30:49 "15 missing", one round).
+            # One FULL reconcile connects every peer's devices in parallel
+            # behind a single shared surface-poll (~67s/node, 2026-07-13
+            # measurement), so use it whenever more than a couple of owners
+            # are missing; keep the delta for the small post-node-add case.
+            if len(owner_ids) > 2:
+                try:
+                    node = db_controller.get_storage_node_by_id(node_id)
+                    remote_devices = storage_node_ops._connect_to_remote_devs(
+                        node, force_connect_restarting_nodes=True)
+                    remote_jm_devices = None
+                    if node.enable_ha_jm:
+                        remote_jm_devices = storage_node_ops._connect_to_remote_jm_devs(node)
+
+                    def _apply(n, rd=remote_devices, rjd=remote_jm_devices):
+                        n.remote_devices = rd
+                        if rjd is not None:
+                            n.remote_jm_devices = rjd
+                    db_controller.atomic_update(node, _apply)
+                except Exception as e:
+                    logger.warning(
+                        "Pre-activation full reconcile of %s failed: %s",
+                        node_id[:8], e)
+                return
+            for owner_id in sorted(owner_ids):
+                try:
+                    node = db_controller.get_storage_node_by_id(node_id)
+                    remote_devices = storage_node_ops._connect_to_remote_devs(
+                        node, force_connect_restarting_nodes=True,
+                        only_node_id=owner_id)
+                    remote_jm_devices = None
+                    if node.enable_ha_jm:
+                        remote_jm_devices = storage_node_ops._connect_to_remote_jm_devs(
+                            node, only_node_id=owner_id)
+
+                    def _apply(n, rd=remote_devices, rjd=remote_jm_devices):
+                        n.remote_devices = rd
+                        if rjd is not None:
+                            n.remote_jm_devices = rjd
+                    db_controller.atomic_update(node, _apply)
+                except Exception as e:
+                    logger.warning(
+                        "Pre-activation repair of %s -> %s failed: %s",
+                        node_id[:8], owner_id[:8], e)
+
+        repair_threads = []
+        for node_id, owner_ids in by_node.items():
+            t = threading.Thread(
+                target=_repair_node, args=(node_id, owner_ids),
+                name=f"preact-repair-{node_id[:8]}")
+            t.start()
+            repair_threads.append(t)
+        for t in repair_threads:
+            t.join()
+
+        # Progress-aware deadline. The FIRST completed repair round counts as
+        # progress unconditionally: the round itself may consume the whole
+        # initial budget (2026-07-13 validation run: 1116 links repaired at
+        # ~38/min = 25+ min in round 1), and without this the already-expired
+        # deadline forced a pointless abort lap on the re-check even though
+        # the mesh was nearly healed. After that, extend only while the
+        # missing count keeps shrinking — a stalled repair (no reduction
+        # across a full round) still runs the clock out.
+        if prev_missing is None or len(missing) < prev_missing:
+            deadline = max(deadline, time.time() + timeout_sec / 2)
+        prev_missing = len(missing)
+        time.sleep(poll_sec)
+
+
 def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
+    """Wrapper around the activation body that keeps ``activation_heartbeat``
+    fresh for its whole duration. The storage_node_monitor watchdog uses a
+    stale heartbeat to tell a DEAD activation (driver process/container gone)
+    from a merely long one: without it, a wedged IN_ACTIVATION sat for the
+    full node-scaled budget — 42 minutes on a 32-node cluster — before the
+    revert (incident 2026-07-13, monitor container replaced mid-activation).
+    """
+    stop_beat = threading.Event()
+
+    def _beat():
+        while not stop_beat.wait(60):
+            try:
+                fresh = db_controller.get_cluster_by_id(cl_id)
+                if fresh.status != Cluster.STATUS_IN_ACTIVATION:
+                    continue
+                now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                db_controller.atomic_update(
+                    fresh, lambda c, v=now_iso: setattr(c, "activation_heartbeat", v))
+            except Exception:
+                # Never let heartbeat trouble touch the activation itself; a
+                # missed beat only means the watchdog waits for the next one.
+                pass
+
+    beat_thread = threading.Thread(
+        target=_beat, daemon=True, name=f"activation-heartbeat-{cl_id[:8]}")
+    beat_thread.start()
+    try:
+        _cluster_activate_impl(
+            cl_id, force=force, force_lvstore_create=force_lvstore_create)
+    finally:
+        stop_beat.set()
+
+
+def _cluster_activate_impl(cl_id, force=False, force_lvstore_create=False) -> None:
     cluster = db_controller.get_cluster_by_id(cl_id)
 
     if cluster.status == Cluster.STATUS_ACTIVE:
@@ -660,6 +844,15 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     if dev_count < minimum_devices:
         set_cluster_status(cl_id, ols_status)
         raise ValueError(f"Failed to activate cluster, No enough online device.. Minimum is {minimum_devices}")
+
+    # The distribs created below span every online device — require the full
+    # cross-node connectivity mesh before building on top of it (see
+    # _wait_for_full_device_connectivity for the incident this prevents).
+    try:
+        _wait_for_full_device_connectivity(cl_id)
+    except ValueError:
+        set_cluster_status(cl_id, ols_status)
+        raise
 
     # Failure-domain coverage check (best-effort: warn, don't block). To
     # survive losing a whole failure domain we need at least npcs+1 distinct
@@ -739,8 +932,15 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     # Re-activation (recreate_lvstore, activation_mode=True) only touches the
     # node being recreated plus RPCs to its peers, and every worker operates on
     # a distinct node — safe to fan out (bounded pool). A fresh create_lvstore
-    # additionally writes to the node's secondary record, which can be shared
-    # between primaries, so creates stay sequential.
+    # additionally writes its secondary/tertiary records (full-object
+    # read-modify-write), and in a cross-pair layout the same record is
+    # written both as "own" by its create and as "sec" by its partner's —
+    # so creates fan out on the pool too, serializing only creates whose
+    # touched-record sets intersect (per-node locks taken in sorted order,
+    # the Pass 3 pattern). The old fully-serial loop cost ~40s x n — 22 min
+    # at n=32, the dominant cost of a fresh activation (2026-07-13 audit).
+    # Port allocation inside create_lvstore is separately serialized by
+    # storage_node_ops._lvstore_port_alloc_lock.
     snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     pass1_recreate_ids: t.List[str] = []
     pass1_create_ids: t.List[str] = []
@@ -757,19 +957,26 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
         else:
             pass1_create_ids.append(snode.get_id())
 
+    def _set_lvstore_status(node_id, value) -> None:
+        # Atomic: full-object writes of node records race concurrent
+        # parallel-pass workers AND phase transitions on the same record —
+        # a stale copy written back resurrects a just-cleared restart phase
+        # (observed twice on fresh activation, 2026-07-10 20:22 soak run).
+        node = db_controller.get_storage_node_by_id(node_id)
+        db_controller.atomic_update(
+            node, lambda n, v=value: setattr(n, "lvstore_status", v))
+
     def _finish_pass1_node(node_id, ret) -> None:
-        snode = db_controller.get_storage_node_by_id(node_id)
         if ret:
-            snode.lvstore_status = "ready"
-            snode.write_to_db()
+            _set_lvstore_status(node_id, "ready")
 
             # Create S3 bdev for backup support (only if backup is configured)
             if cluster.backup_config:
+                snode = db_controller.get_storage_node_by_id(node_id)
                 backup_controller.create_s3_bdev(snode, cluster.backup_config)
 
         else:
-            snode.lvstore_status = "failed"
-            snode.write_to_db()
+            _set_lvstore_status(node_id, "failed")
             logger.error(f"Failed to restore lvstore on node {node_id}")
             set_cluster_status(cl_id, ols_status)
             raise ValueError("Failed to activate cluster")
@@ -804,11 +1011,54 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
         for node_id in pass1_recreate_ids:
             _finish_pass1_node(node_id, pass1_results.get(node_id))
 
-    for node_id in pass1_create_ids:
-        snode = db_controller.get_storage_node_by_id(node_id)
-        ret = storage_node_ops.create_lvstore(snode, cluster.distr_ndcs, cluster.distr_npcs, cluster.distr_bs,
-                                          cluster.distr_chunk_bs, cluster.page_size_in_blocks, max_size)
-        _finish_pass1_node(node_id, ret)
+    if pass1_create_ids:
+        # Lock set per create = the records create_lvstore writes: the node
+        # itself plus its secondary/tertiary. Locks are acquired in sorted-id
+        # order so two creates with intersecting sets serialize deadlock-free
+        # while disjoint pairs run concurrently.
+        pass1_create_lock_ids: t.Dict[str, t.List[str]] = {}
+        pass1_create_locks: t.Dict[str, threading.Lock] = {}
+        for nid in pass1_create_ids:
+            n = db_controller.get_storage_node_by_id(nid)
+            touched = {nid}
+            if n.secondary_node_id:
+                touched.add(n.secondary_node_id)
+            if n.tertiary_node_id:
+                touched.add(n.tertiary_node_id)
+            pass1_create_lock_ids[nid] = sorted(touched)
+            for lid in pass1_create_lock_ids[nid]:
+                pass1_create_locks.setdefault(lid, threading.Lock())
+
+        def _create_primary_lvs(node_id):
+            locks = [pass1_create_locks[lid] for lid in pass1_create_lock_ids[node_id]]
+            for lk in locks:
+                lk.acquire()
+            try:
+                snode = db_controller.get_storage_node_by_id(node_id)
+                return storage_node_ops.create_lvstore(
+                    snode, cluster.distr_ndcs, cluster.distr_npcs, cluster.distr_bs,
+                    cluster.distr_chunk_bs, cluster.page_size_in_blocks, max_size)
+            finally:
+                for lk in reversed(locks):
+                    lk.release()
+
+        create_results: t.Dict[str, t.Any] = {}
+        create_errors: t.List[ValueError] = []
+        workers = min(constants.CLUSTER_ACTIVATION_MAX_PARALLEL_NODES, len(pass1_create_ids))
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="activate-p1c") as pool:
+            futures = {pool.submit(_create_primary_lvs, nid): nid for nid in pass1_create_ids}
+            for future in as_completed(futures):
+                node_id = futures[future]
+                try:
+                    create_results[node_id] = future.result()
+                except Exception as e:
+                    logger.error(e)
+                    create_errors.append(ValueError("Failed to activate cluster"))
+        if create_errors:
+            set_cluster_status(cl_id, ols_status)
+            raise create_errors[0]
+        for node_id in pass1_create_ids:
+            _finish_pass1_node(node_id, create_results.get(node_id))
 
     # Pass 2: Recreate secondary/tertiary LVS on every node that participates
     # as a non-leader for another node's LVS. In a ring topology (FTT=2 with
@@ -842,9 +1092,14 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
             with pass2_primary_locks[primary_node.get_id()]:
                 # Re-read under the lock: a peer worker (the other non-leader of
                 # this primary) may have written lvstore_status meanwhile.
+                # Atomic: a full-object write here races the primary's OWN
+                # pass-2 worker transitioning restart phases on the same
+                # record — writing a stale copy back resurrects a cleared
+                # phase (stale-phase generator, 2026-07-10).
                 primary_node = db_controller.get_storage_node_by_id(primary_node.get_id())
-                primary_node.lvstore_status = "in_creation"
-                primary_node.write_to_db()
+                db_controller.atomic_update(
+                    primary_node,
+                    lambda n: setattr(n, "lvstore_status", "in_creation"))
 
                 # On re-activation the primary's LVS is still alive and serving
                 # client I/O — snode's examine of its non-leader raid0 will race
@@ -898,13 +1153,10 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
             if not r:
                 ret = False
 
-        snode = db_controller.get_storage_node_by_id(node_id)
         if ret:
-            snode.lvstore_status = "ready"
-            snode.write_to_db()
+            _set_lvstore_status(node_id, "ready")
         else:
-            snode.lvstore_status = "failed"
-            snode.write_to_db()
+            _set_lvstore_status(node_id, "failed")
             logger.error(f"Failed to restore lvstore on node {node_id}")
             raise ValueError("Failed to activate cluster")
         return True
@@ -983,7 +1235,10 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                 if sec_node.status != StorageNode.STATUS_ONLINE:
                     continue
                 try:
-                    time.sleep(1)
+                    # Brief settle beat before the connect; connect_to_hublvol
+                    # itself retries via the reconnect coordinator, so a full
+                    # 1s per edge was pure serial latency across the pass.
+                    time.sleep(0.2)
                     failover_node = sec1 if i >= 1 and sec1 and sec1.status == StorageNode.STATUS_ONLINE else None
                     sec_role = "tertiary" if i >= 1 else "secondary"
                     sec_node.connect_to_hublvol(snode, failover_node=failover_node, role=sec_role)
@@ -1215,8 +1470,10 @@ def set_cluster_status(cl_id, status) -> None:
         # atomically with the status flip.
         if status == Cluster.STATUS_IN_ACTIVATION:
             fresh.in_activation_since = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            fresh.activation_heartbeat = fresh.in_activation_since
         elif captured['old'] == Cluster.STATUS_IN_ACTIVATION:
             fresh.in_activation_since = ""
+            fresh.activation_heartbeat = ""
         # Leaving suspension for a healthy status closes the current
         # suspend-recovery episode: clear the drain marker so the next
         # suspension starts a fresh drain (auto-restart paused -> drain ->
@@ -2141,4 +2398,11 @@ def add_replication(source_cl_id, target_cl_id, timeout=0, target_pool=None) -> 
 
     db_controller.atomic_update(db_controller.get_cluster_by_id(source_cl_id), _mut)
     logger.info("Done")
+    return True
+
+
+def rebalance(cluster_id) -> bool:
+    for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+        if node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
+            tasks_controller.add_device_mig_task_for_node(node.get_id())
     return True

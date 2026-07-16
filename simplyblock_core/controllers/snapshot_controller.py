@@ -172,11 +172,25 @@ def _find_lvs_leader(cluster_id, lvs_name, all_nodes):
     recently-confirmed leader — the probe is itself a fresh confirmation, so a
     moved leadership simply misses and falls back to scanning every candidate.
     Replaces the per-create full scan, which paid one bdev_lvol_get_lvstores
-    RPC per candidate node on every snapshot/clone."""
+    RPC per candidate node on every snapshot/clone.
+
+    No-leader fail-fast: when the LVS was recently confirmed leaderless,
+    return None without probing at all — callers must reject the operation
+    until a leader is re-established. When the scan itself comes up empty,
+    delegate to find_leader_with_failover, which owns the leaderless-LVS
+    recovery (take-leadership on the configured primary) and the shared
+    negative cache, so at most one recovery pass runs per NO_LEADER_TTL_SEC
+    even under a snapshot/clone-only workload."""
     from simplyblock_core.controllers import lvol_controller
-    from simplyblock_core.utils.ttl_cache import leader_cache, LEADER_TTL_SEC
+    from simplyblock_core.utils.ttl_cache import (
+        leader_cache, LEADER_TTL_SEC, no_leader_cache, NO_LEADER_TTL_SEC)
 
     key = (cluster_id, lvs_name)
+    if no_leader_cache.get(key, NO_LEADER_TTL_SEC):
+        logger.warning(
+            "LVS %s was confirmed leaderless less than %ss ago — failing fast "
+            "without re-probing", lvs_name, NO_LEADER_TTL_SEC)
+        return None
     cached_id = leader_cache.get(key, LEADER_TTL_SEC)
     if cached_id:
         cached_node = next((n for n in all_nodes if n.get_id() == cached_id), None)
@@ -195,7 +209,13 @@ def _find_lvs_leader(cluster_id, lvs_name, all_nodes):
                 return candidate
         except Exception:
             continue
-    return None
+    # Nobody admits leadership — run the full failover/recovery helper once;
+    # it records the no-leader verdict in the shared negative cache so every
+    # call within NO_LEADER_TTL_SEC (including the fast path above) fails
+    # instantly instead of re-probing.
+    from simplyblock_core.storage_node_ops import find_leader_with_failover
+    leader, _ = find_leader_with_failover(all_nodes, lvs_name)
+    return leader
 
 
 # Namespace prefix so a per-object lock key can never collide with a real
@@ -327,6 +347,16 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
         logger.error(msg)
         return False, msg
 
+    # Per-core object cap (lvols + clones + snapshots per SPDK instance).
+    from simplyblock_core.controllers import lvol_controller as _lvol_ctrl
+    from simplyblock_core.utils.ttl_cache import cached_mini_lvols, cached_snapshots
+    limit_error = _lvol_ctrl.check_node_object_limit(
+        snode, cached_mini_lvols(db_controller),
+        cached_snapshots(db_controller, pool.cluster_id))
+    if limit_error:
+        logger.error(limit_error)
+        return False, limit_error
+
     logger.info(f"Creating snapshot: {snapshot_name} from LVol: {lvol.get_id()}")
 
     # The stats read only refines the size used for the pool-limit checks
@@ -413,7 +443,16 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
         secondary_nodes = []
         primary_node = _find_lvs_leader(pool.cluster_id, lvol.lvs_name, all_nodes)
         if not primary_node:
-            primary_node = host_node
+            # Never fall back to the configured primary: a create attempted on
+            # a non-leader fails on SPDK anyway, and under mass-create retries
+            # the per-request leader probing stormed every LVS member for
+            # hours (run 20260712-231123). Fail until a leader is
+            # re-established (recovery runs inside _find_lvs_leader, at most
+            # once per NO_LEADER_TTL_SEC).
+            msg = (f"No leader available for LVS {lvol.lvs_name} — "
+                   f"rejecting snapshot create until leadership is re-established")
+            logger.error(msg)
+            return False, msg
 
         # Check non-leader nodes (no status checks)
         for candidate in all_nodes:
@@ -699,6 +738,22 @@ def _delete_locked(snap, snapshot_uuid, force_delete=False, lock=True):
     except KeyError:
         pass
 
+    # Refuse deletes while the cluster cannot complete them: the controller
+    # only issues the leader-side async delete and marks the snapshot
+    # in_deletion; snapshot_monitor performs the sync deletes on the
+    # non-leaders and removes the record, but it skips clusters in these
+    # states — accepting the delete here would strand the snapshot forever
+    # (2026-07-12 mass-delete run: ~60k snapshot deletes accepted while the
+    # cluster was stuck in_activation, none ever completed). read_only stays
+    # allowed: deletes free space.
+    if not force_delete:
+        cluster = db_controller.get_cluster_by_id(snap.cluster_id)
+        if cluster.status in [cluster.STATUS_SUSPENDED, cluster.STATUS_IN_ACTIVATION,
+                              cluster.STATUS_UNREADY, cluster.STATUS_INACTIVE]:
+            logger.error(f"Cannot delete snapshot {snapshot_uuid}: cluster "
+                         f"{cluster.get_id()} status is {cluster.status}")
+            return False
+
     # Block deletion if the snapshot's parent volume is being migrated
     active_mig = migration_controller.get_active_migration_for_lvol(
         snap.lvol.uuid, snap.cluster_id)
@@ -946,6 +1001,16 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     if cluster.status not in [cluster.STATUS_ACTIVE, cluster.STATUS_DEGRADED]:
         return False, f"Cluster is not active, status: {cluster.status}"
 
+    # Per-core object cap (lvols + clones + snapshots per SPDK instance).
+    from simplyblock_core.controllers import lvol_controller as _lvol_ctrl
+    from simplyblock_core.utils.ttl_cache import cached_mini_lvols, cached_snapshots
+    limit_error = _lvol_ctrl.check_node_object_limit(
+        snode, cached_mini_lvols(db_controller),
+        cached_snapshots(db_controller, pool.cluster_id))
+    if limit_error:
+        logger.error(limit_error)
+        return False, limit_error
+
     # Clone-name uniqueness / reuse via the per-pool lvol name index (O(1) point
     # read) instead of scanning every lvol in the DB.
     existing = db_controller.lvol_name_lookup(pool.get_id(), clone_name)
@@ -1140,7 +1205,14 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
         secondary_nodes = []
         primary_node = _find_lvs_leader(pool.cluster_id, lvol.lvs_name, all_nodes)
         if not primary_node:
-            primary_node = host_node
+            # Same contract as snapshot create: never attempt the clone on a
+            # non-leader — fail until a leader is re-established. The lvol
+            # record was already persisted above, so roll it back.
+            msg = (f"No leader available for LVS {lvol.lvs_name} — "
+                   f"rejecting clone until leadership is re-established")
+            logger.error(msg)
+            lvol.remove(db_controller.kv_store)
+            return False, msg
 
         # Assign each non-leader a stable index so its subsystem is created
         # with a unique cntlid window (sec0 -> min_cntlid 1000, sec1 -> 2000,

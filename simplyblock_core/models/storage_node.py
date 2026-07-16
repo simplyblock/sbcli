@@ -221,8 +221,7 @@ class StorageNode(BaseNodeObject):
         rpc_client = self.rpc_client()
 
         try:
-            subsys_list = rpc_client.subsystem_list(nqn)
-            subsys = subsys_list[0] if subsys_list else None
+            subsys = rpc_client.subsystem_get(nqn)
             if subsys is None:
                 if not rpc_client.subsystem_create(
                         nqn=nqn,
@@ -341,7 +340,7 @@ class StorageNode(BaseNodeObject):
             if hublvol_uuid is not None and rpc_client.get_bdevs(hublvol_uuid):
                 rpc_client.bdev_lvol_delete_hublvol(self.hublvol.nqn)
 
-            if self.hublvol and rpc_client.subsystem_list(self.hublvol.nqn):
+            if self.hublvol and rpc_client.subsystem_get(self.hublvol.nqn):
                 rpc_client.subsystem_delete(self.hublvol.nqn)
                 self.hublvol = None  # type: ignore[assignment]
 
@@ -399,7 +398,7 @@ class StorageNode(BaseNodeObject):
             if transfer_hub_uuid is not None and rpc_client.get_bdevs(transfer_hub_uuid):
                 rpc_client.bdev_lvol_delete_hublvol(transfer_hub_uuid)
 
-            if self.transfer_hublvol and rpc_client.subsystem_list(self.transfer_hublvol.nqn):
+            if self.transfer_hublvol and rpc_client.subsystem_get(self.transfer_hublvol.nqn):
                 rpc_client.subsystem_delete(self.transfer_hublvol.nqn)
                 self.transfer_hublvol = None  # type: ignore[assignment]
 
