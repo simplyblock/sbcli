@@ -6,8 +6,7 @@ from simplyblock_core.db_controller import DBController
 from simplyblock_core.controllers import device_controller
 
 from ..._dependencies import Cluster, StorageNode, Device
-from ..._dtos import DeviceDTO
-
+from ..._dtos import DeviceDTO, DeviceHealthInfoDTO
 
 api = APIRouter()
 db = DBController()
@@ -86,7 +85,7 @@ def reset(cluster: Cluster, storage_node: StorageNode, device: Device) -> Respon
     ret = device_controller.get_device_health_info(device.get_id())
     if not ret:
         raise ValueError('Failed to get device health info')
-    return ret
+    return DeviceHealthInfoDTO.from_model(device, ret)
 
 
 api.include_router(instance_api)
