@@ -726,15 +726,15 @@ def _ensure_target_nvmf_state(migration, lvol, src_node, tgt_node, src_rpc, tgt_
         owns_subsystem = node_id in owned_node_ids
 
         try:
-            sub_list = rpc.subsystem_list(nqn)
+            sub = rpc.subsystem_get(nqn)
         except Exception as e:
             logger.warning(
-                f"_ensure_target_nvmf_state: subsystem_list failed on "
+                f"_ensure_target_nvmf_state: subsystem_get failed on "
                 f"{label} {node_id[:8]}: {e}")
             migration.error_message = f"could not query subsystem on {label} target node: {e}"
             return _WAIT
 
-        if not sub_list:
+        if not sub:
             if not owns_subsystem:
                 msg = (f"target {label} node {node_id[:8]} is missing subsystem "
                        f"{nqn} that this migration does not own; waiting for "
@@ -775,7 +775,6 @@ def _ensure_target_nvmf_state(migration, lvol, src_node, tgt_node, src_rpc, tgt_
             continue
 
         # Subsystem present — verify our listener survived.
-        sub = sub_list[0] if isinstance(sub_list, list) else sub_list
         try:
             listeners = rpc.listeners_list(nqn) or []
         except Exception as e:

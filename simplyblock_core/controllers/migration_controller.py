@@ -661,7 +661,7 @@ def cleanup_migration_target(migration_id):
             try:
                 node = db.get_storage_node_by_id(node_id)
                 rpc = node.rpc_client()
-                if rpc.subsystem_list(migration.target_subsystem_nqn):
+                if rpc.subsystem_get(migration.target_subsystem_nqn):
                     rpc.subsystem_delete(migration.target_subsystem_nqn)
                     deleted.append({"type": "subsystem",
                                     "nqn": migration.target_subsystem_nqn,
