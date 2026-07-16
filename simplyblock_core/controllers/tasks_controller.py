@@ -548,6 +548,8 @@ def get_active_node_mig_task(cluster_id, node_id, distr_name=None):
     return False
 
 
+
+
 def add_device_failed_mig_task(device_id):
     device = db.get_storage_device_by_id(device_id)
     for node in db.get_storage_nodes_by_cluster_id(device.cluster_id):

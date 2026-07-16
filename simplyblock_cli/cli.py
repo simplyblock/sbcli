@@ -31,6 +31,7 @@ class CLIWrapper(CLIWrapperBase):
         self.init_snapshot()
         self.init_backup()
         self.init_qos()
+        self.init_db_backup()
         super().__init__()
 
     def init_storage_node(self):
@@ -1100,6 +1101,41 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('cluster_id', help='The cluster id.', type=str, default='')
 
 
+    def init_db_backup(self):
+        subparser = self.add_command('db-backup', 'FDB Backup operations')
+        self.init_db_backup__create(subparser)
+        self.init_db_backup__list(subparser)
+        self.init_db_backup__status(subparser)
+        self.init_db_backup__restore(subparser)
+        self.init_db_backup__config(subparser)
+
+
+    def init_db_backup__create(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'create', 'Creates an fdb backup')
+        subcommand.add_argument('cluster_id', help='Cluster ID to create db backup for', type=str)
+
+    def init_db_backup__list(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'list', 'Lists all fdb backups')
+        subcommand.add_argument('cluster_id', help='Cluster ID to restore db backup to', type=str)
+
+    def init_db_backup__status(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'status', 'get backup status')
+
+    def init_db_backup__restore(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'restore', 'restore a backup')
+        subcommand.add_argument('name', help='backup class name', type=str)
+        subcommand.add_argument('cluster_id', help='Cluster ID to restore db backup to', type=str)
+
+    def init_db_backup__config(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'config', 'Set backup configuration')
+        subcommand.add_argument('cluster_id', help='Cluster ID to configure db backup for', type=str)
+        subcommand.add_argument('--backup-path', help='local backup path, defaults to /etc/foundationdb/backup', type=str, dest='backup_path')
+        subcommand.add_argument('--backup-frequency', help='backup frequency, can be 3h, 1d', type=str, dest='backup_frequency')
+        subcommand.add_argument('--s3-bucket', help='AWS S3 bucket name', type=str, dest='bucket_name')
+        subcommand.add_argument('--s3-region', help='AWS S3 region', type=str, dest='region_name')
+        subcommand.add_argument('--s3-credentials', help='AWS S3 API key and secret, should be supplied like this: [API_KEY]:[API_SECRET]', type=str, dest='backup_credentials')
+
+
     def run(self):
         args = self.parser.parse_args()
         if args.debug:
@@ -1547,6 +1583,21 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.qos__list(sub_command, args)
                 elif sub_command in ['delete']:
                     ret = self.qos__delete(sub_command, args)
+                else:
+                    self.parser.print_help()
+
+            elif args.command in ['db-backup']:
+                sub_command = args_dict['db-backup']
+                if sub_command in ['create']:
+                    ret = self.db_backup__create(sub_command, args)
+                elif sub_command in ['list']:
+                    ret = self.db_backup__list(sub_command, args)
+                elif sub_command in ['status']:
+                    ret = self.db_backup__status(sub_command, args)
+                elif sub_command in ['restore']:
+                    ret = self.db_backup__restore(sub_command, args)
+                elif sub_command in ['config']:
+                    ret = self.db_backup__config(sub_command, args)
                 else:
                     self.parser.print_help()
 

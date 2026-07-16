@@ -381,6 +381,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.snode_api_port = snode_api_port
     cluster.container_image_prefix = container_image_prefix or ""
     cluster.hashicorp_vault_settings = hashicorp_vault_settings
+    cluster.backup_local_path = os.path.join(constants.KVD_DB_BACKUP_PATH, cluster.uuid)
 
     if nvmeof_tls_config:
         cluster.tls = True
@@ -596,6 +597,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     if backup_config:
         cluster.backup_config = backup_config
 
+    cluster.backup_local_path = os.path.join(constants.KVD_DB_BACKUP_PATH, cluster.uuid)
     cluster.status = Cluster.STATUS_UNREADY
     cluster.create_dt = str(datetime.datetime.now())
     cluster.write_to_db(db_controller.kv_store)
