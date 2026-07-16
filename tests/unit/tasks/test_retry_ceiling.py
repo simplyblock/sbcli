@@ -400,7 +400,11 @@ def _retry_driven_runner_files():
     """Every runner whose source increments task.retry — the set that must
     enforce a ceiling. Used only to *discover* which runners to parametrise
     over; the ceiling itself is verified behaviourally per runner below."""
-    return [p for p in _runner_files() if _INCREMENTS_RETRY.search(p.read_text())]
+    # encoding="utf-8": the repo is UTF-8; Path.read_text() defaults to the
+    # platform codec (cp1252 on Windows), which chokes on runner sources
+    # containing non-latin-1 characters.
+    return [p for p in _runner_files()
+            if _INCREMENTS_RETRY.search(p.read_text(encoding='utf-8'))]
 
 
 @pytest.mark.parametrize(
