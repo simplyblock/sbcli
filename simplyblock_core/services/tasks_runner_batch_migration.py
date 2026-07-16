@@ -55,6 +55,10 @@ from simplyblock_core.services.tasks_runner_lvol_migration import (
     _snap_short_name,
     _get_target_secondary_node,
     _get_target_tertiary_node,
+    _lvol_tgt_bdev_name,
+    _build_paths,
+    _swap_namespace,
+    _cleanup_subsystem_or_ns,
 )
 
 logger = utils.get_logger(__name__)
@@ -216,7 +220,6 @@ def _build_batch_final_args(group, member_migrations, src_node, tgt_node, tgt_rp
         src_composite = f"{src_node.lvstore}/{lvol.lvol_bdev}"
         lvol_names.append(src_composite)
 
-        from simplyblock_core.services.tasks_runner_lvol_migration import _lvol_tgt_bdev_name
         tgt_bdev_short = _lvol_tgt_bdev_name(lvol.lvol_bdev)
         entry = name_to_entry.get(tgt_bdev_short) or name_to_entry.get(
             tgt_bdev_short.split('/')[-1])
@@ -249,26 +252,86 @@ def _build_batch_final_args(group, member_migrations, src_node, tgt_node, tgt_rp
     return lvol_names, lvol_ids, snapshot_names
 
 
-def _flip_ana_to_optimized(group, tgt_node, tgt_rpc):
+def _flip_ana_to_optimized(group, member_migrations, src_node, src_rpc, tgt_node, tgt_rpc):
     """
-    Flip ANA state from inaccessible to optimized on all listeners of the
-    target subsystem (shared NQN).  Best-effort: logs warnings, does not raise.
+    After a successful bdev_lvol_batch_final_step, drive clients to the new target:
+
+      1. TGT primary listeners  → optimized   (with retry, same as single-lvol)
+      2. TGT secondary/tertiary → non_optimized
+      3. Overlap nodes: swap each member's SRC namespace to the migrated TGT bdev
+      4. SRC listeners (non-overlap) → inaccessible
+
+    Best-effort: logs warnings but does not raise.
     """
     nqn = group.target_nqn
-    try:
-        tgt_rpc.nvmf_subsystem_set_ana_state(nqn, "optimized", 1)
-        logger.info(f"Group {group.uuid[:8]}: ANA flipped to optimized on TGT-prim")
-    except Exception as e:
-        logger.warning(f"Group {group.uuid[:8]}: ANA flip on TGT-prim (non-fatal): {e}")
+    src_paths, tgt_paths, overlap_ids = _build_paths(src_node, tgt_node, src_rpc, tgt_rpc)
 
-    if tgt_node.secondary_node_id:
+    def _flip(rpc, ip, port, trtype, state, label):
         try:
-            sec_node = db.get_storage_node_by_id(tgt_node.secondary_node_id)
-            sec_rpc = _make_rpc(sec_node)
-            sec_rpc.nvmf_subsystem_set_ana_state(nqn, "optimized", 1)
-            logger.info(f"Group {group.uuid[:8]}: ANA flipped to optimized on TGT-sec")
+            rpc.nvmf_subsystem_listener_set_ana_state(nqn, ip, port, trtype=trtype, ana=state)
+            logger.info(f"Group {group.uuid[:8]}: ANA {label} {ip}:{port} → {state}")
+            return True
         except Exception as e:
-            logger.warning(f"Group {group.uuid[:8]}: ANA flip on TGT-sec (non-fatal): {e}")
+            logger.warning(f"Group {group.uuid[:8]}: ANA {label} {ip}:{port} (non-fatal): {e}")
+            return False
+
+    def _flip_required(rpc, ip, port, trtype, state, label, attempts=3):
+        for i in range(attempts):
+            if _flip(rpc, ip, port, trtype, state, label):
+                return True
+            if i < attempts - 1:
+                time.sleep(1.0)
+        return False
+
+    # Step 1: TGT primary → optimized (required; abort flip sequence if it fails)
+    tp = tgt_paths[0]
+    if not _flip_required(tp['rpc'], tp['ip'], tp['port'], tp['trtype'], "optimized", "TGT-prim"):
+        logger.error(f"Group {group.uuid[:8]}: failed to flip TGT primary to optimized after retries")
+
+    # Step 2: TGT secondary / tertiary → non_optimized
+    for i, tp in enumerate(tgt_paths[1:], 1):
+        _flip(tp['rpc'], tp['ip'], tp['port'], tp['trtype'], "non_optimized", f"TGT-rep{i}")
+
+    # Step 3: overlap nodes — swap each member's SRC namespace to the migrated TGT bdev
+    if overlap_ids:
+        for sp in src_paths:
+            if sp['node_id'] not in overlap_ids:
+                continue
+            for m in member_migrations:
+                try:
+                    lvol = db.get_lvol_by_id(m.lvol_id)
+                    ns_id = next(
+                        (rec['ns_id'] for rec in group.members if rec['migration_id'] == m.uuid),
+                        None)
+                    tgt_bdev_composite = f"{tgt_node.lvstore}/{_lvol_tgt_bdev_name(lvol.lvol_bdev)}"
+                    if ns_id:
+                        try:
+                            sp['rpc'].nvmf_subsystem_remove_ns(nqn, ns_id)
+                            logger.info(
+                                f"Group {group.uuid[:8]}: removed ns_id={ns_id} "
+                                f"from overlap {sp['node_id'][:8]}")
+                        except Exception as e:
+                            logger.warning(
+                                f"Group {group.uuid[:8]}: remove ns overlap "
+                                f"{sp['node_id'][:8]} (non-fatal): {e}")
+                    try:
+                        sp['rpc'].nvmf_subsystem_add_ns(nqn, tgt_bdev_composite, lvol.uuid, lvol.guid)
+                        logger.info(
+                            f"Group {group.uuid[:8]}: added TGT ns {tgt_bdev_composite} "
+                            f"on overlap {sp['node_id'][:8]}")
+                    except Exception as e:
+                        logger.warning(
+                            f"Group {group.uuid[:8]}: add ns overlap "
+                            f"{sp['node_id'][:8]} (non-fatal): {e}")
+                except Exception as e:
+                    logger.warning(
+                        f"Group {group.uuid[:8]}: overlap member {m.uuid[:8]}: {e}")
+
+    # Step 4: SRC listeners (non-overlap) → inaccessible
+    for sp in src_paths:
+        if sp['node_id'] in overlap_ids:
+            continue
+        _flip(sp['rpc'], sp['ip'], sp['port'], sp['trtype'], "inaccessible", f"SRC-{sp['node_id'][:8]}")
 
 
 def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, src_rpc, tgt_rpc):
@@ -311,21 +374,52 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
     try:
         ret = src_rpc.bdev_lvol_batch_final_step(
             lvol_names, lvol_ids, snapshot_names, 2, hub_bdev, "migrate")
-        # Synchronous call: _request3 raises RPCException on any JSONRPC error.
-        # A null/void return (ret is None) means success.
-        logger.info(f"Group {group.uuid[:8]}: bdev_lvol_batch_final_step returned {ret!r} (success)")
+        logger.info(f"Group {group.uuid[:8]}: bdev_lvol_batch_final_step returned {ret!r}")
         batch_ok = True
     except Exception as e:
         logger.error(f"Group {group.uuid[:8]}: bdev_lvol_batch_final_step failed: {e}")
         batch_err = str(e)
 
+    if batch_ok:
+        # bdev_lvol_batch_final_step handles add_clone on the primary internally.
+        # Secondary and tertiary nodes need an explicit add_clone call for each member's
+        # final migrated bdev, linking it to the last intermediate snapshot.
+        sec_node, _ = _get_target_secondary_node(tgt_node)
+        ter_node, _ = _get_target_tertiary_node(tgt_node)
+        if sec_node or ter_node:
+            sec_rpc_extra = _make_rpc(sec_node) if sec_node else None
+            ter_rpc_extra = _make_rpc(ter_node) if ter_node else None
+            for m, snap_composite in zip(member_migrations, snapshot_names):
+                if not snap_composite:
+                    continue
+                try:
+                    lvol = db.get_lvol_by_id(m.lvol_id)
+                    tgt_bdev_composite = f"{tgt_node.lvstore}/{_lvol_tgt_bdev_name(lvol.lvol_bdev)}"
+                    for extra_rpc, extra_label in [
+                        (sec_rpc_extra, "secondary"),
+                        (ter_rpc_extra, "tertiary"),
+                    ]:
+                        if not extra_rpc:
+                            continue
+                        ret = extra_rpc.bdev_lvol_add_clone(tgt_bdev_composite, snap_composite)
+                        if not ret:
+                            logger.warning(
+                                f"Group {group.uuid[:8]}: add_clone on {extra_label} "
+                                f"failed for {tgt_bdev_composite} (non-fatal)")
+                        else:
+                            logger.info(
+                                f"Group {group.uuid[:8]}: add_clone on {extra_label} "
+                                f"OK: {tgt_bdev_composite} → {snap_composite}")
+                except Exception as e:
+                    logger.warning(
+                        f"Group {group.uuid[:8]}: add_clone for member {m.uuid[:8]} (non-fatal): {e}")
+
+        _flip_ana_to_optimized(group, member_migrations, src_node, src_rpc, tgt_node, tgt_rpc)
+
     try:
         src_rpc.bdev_nvme_detach_controller(ctrl_name)
     except Exception as e:
         logger.warning(f"Group {group.uuid[:8]}: hub detach (non-fatal): {e}")
-
-    if batch_ok:
-        _flip_ana_to_optimized(group, tgt_node, tgt_rpc)
 
     return batch_ok, batch_err
 
@@ -349,42 +443,68 @@ def _handle_cleanup_source_barrier(group):
     return expected.issubset(set(group.cleanup_source_done))
 
 
-def _delete_source_subsystem(group, src_node, src_rpc):
-    """Delete the source NVMe-oF subsystem for the shared NQN.  Best-effort."""
+def _delete_source_subsystem(group, src_node, src_rpc, tgt_node, tgt_rpc):
+    """
+    Delete the source NVMe-oF subsystem on all SRC replicas (primary, secondary,
+    tertiary).  Overlap nodes (which also host TGT replicas) are skipped because
+    the subsystem is still in use on those nodes.  Best-effort.
+    """
     nqn = group.target_nqn
-    try:
-        src_rpc.subsystem_delete(nqn)
-        logger.info(f"Group {group.uuid[:8]}: deleted source subsystem {nqn}")
-    except Exception as e:
-        logger.warning(f"Group {group.uuid[:8]}: source subsystem delete (non-fatal): {e}")
+    _, _, overlap_ids = _build_paths(src_node, tgt_node, src_rpc, tgt_rpc)
+
+    def _try_delete(rpc, node_id, label):
+        if node_id in overlap_ids:
+            logger.info(f"Group {group.uuid[:8]}: skipping {label} subsystem delete (overlap)")
+            return
+        try:
+            rpc.subsystem_delete(nqn)
+            logger.info(f"Group {group.uuid[:8]}: deleted {label} source subsystem {nqn}")
+        except Exception as e:
+            logger.warning(f"Group {group.uuid[:8]}: {label} source subsystem delete (non-fatal): {e}")
+
+    _try_delete(src_rpc, src_node.get_id(), "primary")
 
     if src_node.secondary_node_id:
         try:
             sec_node = db.get_storage_node_by_id(src_node.secondary_node_id)
             sec_rpc = _make_rpc(sec_node)
-            sec_rpc.subsystem_delete(nqn)
+            _try_delete(sec_rpc, sec_node.get_id(), "secondary")
         except Exception as e:
             logger.warning(
-                f"Group {group.uuid[:8]}: secondary source subsystem delete (non-fatal): {e}")
+                f"Group {group.uuid[:8]}: secondary src node lookup (non-fatal): {e}")
+
+    tert_node, _ = _get_target_tertiary_node(src_node)
+    if tert_node:
+        tert_rpc = _make_rpc(tert_node)
+        _try_delete(tert_rpc, tert_node.get_id(), "tertiary")
 
 
 def _delete_target_subsystem(group, tgt_node, tgt_rpc):
-    """Delete the target NVMe-oF subsystem for the shared NQN.  Best-effort."""
+    """Delete the target NVMe-oF subsystem on all TGT replicas.  Best-effort."""
     nqn = group.target_nqn
-    try:
-        tgt_rpc.subsystem_delete(nqn)
-        logger.info(f"Group {group.uuid[:8]}: deleted target subsystem {nqn}")
-    except Exception as e:
-        logger.warning(f"Group {group.uuid[:8]}: target subsystem delete (non-fatal): {e}")
+
+    def _try_delete(rpc, label):
+        try:
+            rpc.subsystem_delete(nqn)
+            logger.info(f"Group {group.uuid[:8]}: deleted {label} target subsystem {nqn}")
+        except Exception as e:
+            logger.warning(f"Group {group.uuid[:8]}: {label} target subsystem delete (non-fatal): {e}")
+
+    _try_delete(tgt_rpc, "primary")
 
     if tgt_node.secondary_node_id:
         try:
             sec_node = db.get_storage_node_by_id(tgt_node.secondary_node_id)
             sec_rpc = _make_rpc(sec_node)
-            sec_rpc.subsystem_delete(nqn)
+            _try_delete(sec_rpc, "secondary")
         except Exception as e:
             logger.warning(
-                f"Group {group.uuid[:8]}: secondary target subsystem delete (non-fatal): {e}")
+                f"Group {group.uuid[:8]}: secondary tgt node lookup (non-fatal): {e}")
+
+    tert_node, _ = _get_target_tertiary_node(tgt_node)
+    if tert_node:
+        tert_rpc = _make_rpc(tert_node)
+        _try_delete(tert_rpc, "tertiary")
 
 
 # ---------------------------------------------------------------------------
@@ -524,7 +644,7 @@ def task_runner(task):
             task.write_to_db(db.kv_store)
             return False
 
-        _delete_source_subsystem(group, src_node, src_rpc)
+        _delete_source_subsystem(group, src_node, src_rpc, tgt_node, tgt_rpc)
 
         group.phase = LVolMigrationGroup.PHASE_COMPLETED
         group.status = LVolMigrationGroup.STATUS_DONE
