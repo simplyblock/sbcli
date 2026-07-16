@@ -81,5 +81,12 @@ def reset(cluster: Cluster, storage_node: StorageNode, device: Device) -> Respon
 
     return Response(status_code=204)
 
+@instance_api.get('/get-device-health-info', name='clusters:storage_nodes:devices:get-device-health-info')
+def reset(cluster: Cluster, storage_node: StorageNode, device: Device) -> Response:
+    ret = device_controller.get_device_health_info(device.get_id())
+    if not ret:
+        raise ValueError('Failed to get device health info')
+    return ret
+
 
 api.include_router(instance_api)
