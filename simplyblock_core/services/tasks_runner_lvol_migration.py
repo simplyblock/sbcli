@@ -1709,7 +1709,14 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
     # If we re-enter with stage='transfer' the migration already finished; check
     # stat once to detect the rare SPDK-side failure, then re-run Done handler.
     if ctx.get('stage') == 'transfer':
-        result = src_rpc.bdev_lvol_transfer_stat(src_lvol_composite)
+        try:
+            result = src_rpc.bdev_lvol_transfer_stat(src_lvol_composite)
+        except Exception:
+            # Same reasoning as the fresh-attempt path below: the pre-freeze
+            # flip already happened in a prior call before the crash/restart
+            # this is recovering from, so a raise here must still revert it.
+            _revert_src_replicas("final migration status check failed (crash recovery)")
+            raise
         if not result:
             # Falsy covers both a hard None (RPC/connection error) and the
             # malformed-but-200 empty body a target restart can produce mid-RPC
@@ -1862,26 +1869,33 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         try:
             ret = src_rpc.bdev_lvol_transfer_final_step(
                 src_lvol_composite, tgt_map_id, tgt_snap_composite, 2, hub_bdev, "migrate")
+            if not ret:
+                # Falsy, not just None: a target restart mid-RPC can come back as a
+                # 200 with an empty/non-JSON body, which rpc_client._request2 then
+                # returns as raw bytes (e.g. b'') rather than None — that must be
+                # treated the same as a hard failure, not silently as success.
+                # Connection timeout or SPDK error (e.g. "File exists" = already in
+                # progress). SPDK may have completed the migration while the RPC
+                # connection dropped. Check transfer_stat before treating this as
+                # a hard failure. This call can itself raise (source still
+                # unreachable) — kept inside this same try so that case is
+                # reverted below like any other failure of this attempt.
+                stat = src_rpc.bdev_lvol_transfer_stat(src_lvol_composite)
+                state = (stat or {}).get('transfer_state') if stat is not None else None
+            else:
+                state = None
         except Exception:
-            # SRC secondary/tertiary were just flipped inaccessible above; if the
-            # RPC itself raises (e.g. source unreachable — RPCException("connection
-            # error")) rather than returning a falsy result, that revert must still
-            # happen here — otherwise a source outage leaves replicas inaccessible
-            # for as long as the outage lasts, with no working path at all, since
-            # this exception propagates past this function to task_runner's
-            # generic RPCException handler which only suspends the task.
+            # SRC secondary/tertiary were just flipped inaccessible above; if
+            # either RPC above raises (e.g. source unreachable — RPCException
+            # ("connection error")) rather than returning a falsy result, that
+            # revert must still happen here — otherwise a source outage leaves
+            # replicas inaccessible for as long as the outage lasts, with no
+            # working path at all, since this exception propagates past this
+            # function to task_runner's generic RPCException handler which
+            # only suspends the task.
             _revert_src_replicas("final migration RPC call failed")
             raise
         if not ret:
-            # Falsy, not just None: a target restart mid-RPC can come back as a
-            # 200 with an empty/non-JSON body, which rpc_client._request2 then
-            # returns as raw bytes (e.g. b'') rather than None — that must be
-            # treated the same as a hard failure, not silently as success.
-            # Connection timeout or SPDK error (e.g. "File exists" = already in progress).
-            # SPDK may have completed the migration while the RPC connection dropped.
-            # Check transfer_stat before treating this as a hard failure.
-            stat = src_rpc.bdev_lvol_transfer_stat(src_lvol_composite)
-            state = (stat or {}).get('transfer_state') if stat is not None else None
             if state not in ('Done', 'No process'):
                 _revert_src_replicas("final migration failed")
                 src_rpc.bdev_nvme_detach_controller(ctrl_name)
