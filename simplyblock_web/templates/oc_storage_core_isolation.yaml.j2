@@ -17,6 +17,12 @@ spec:
           operator: Exists
         - effect: NoExecute
           operator: Exists
+      {% if IMAGE_PULL_SECRETS %}
+      imagePullSecrets:
+        {% for secret in IMAGE_PULL_SECRETS %}
+        - name: {{ secret.name }}
+        {% endfor %}
+      {% endif %}
       volumes:
         - name: var-simplyblock
           hostPath:
