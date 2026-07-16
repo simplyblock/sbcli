@@ -1,3 +1,4 @@
+import errno
 import json
 from json import JSONDecodeError
 from typing import Any, Optional
@@ -210,7 +211,12 @@ class RPCClient:
         return self._request3("nvmf_get_subsystems")
 
     def subsystem_get(self, nqn: str) -> Optional[dict]:
-        return single_or_none(self._request3("nvmf_get_subsystems", nqn=nqn))
+        try:
+            return single_or_none(self._request3("nvmf_get_subsystems", nqn=nqn))
+        except RPCException as e:
+            if e.code == -errno.ENODEV:
+                return None
+            raise
 
     def subsystem_delete(self, nqn):
         return self._request("nvmf_delete_subsystem", params={'nqn': nqn})
