@@ -110,6 +110,7 @@ class ClusterDTO(BaseModel):
     provisioned_capacity_warning: util.Unsigned
     node_affinity: bool
     anti_affinity: bool
+    enable_failure_domain: bool
     secret: SecretStr
     tls_enabled: bool
     max_fault_tolerance: int
@@ -138,6 +139,7 @@ class ClusterDTO(BaseModel):
             provisioned_capacity_critical=model.prov_cap_crit,
             node_affinity=model.enable_node_affinity,
             anti_affinity=model.strict_node_anti_affinity,
+            enable_failure_domain=model.enable_failure_domain,
             secret=model.secret,
             tls_enabled=model.tls,
             max_fault_tolerance=model.max_fault_tolerance,
@@ -281,7 +283,8 @@ class SnapshotDTO(BaseModel):
             created_at=datetime.fromtimestamp(model.created_at, tz=timezone.utc),
             lvol=str(
                 request.url_for(
-                    "clusters:pools:volumes:detail",
+                    #"clusters:pools:volumes:detail",
+                    "clusters:storage-pools:volumes:detail",
                     cluster_id=cluster_id,
                     pool_id=pool_id,
                     volume_id=model.lvol.get_id(),
@@ -318,6 +321,7 @@ class StorageNodeDTO(BaseModel):
     health_check: Optional[bool]
     device_count: int
     online_device_count: int
+    failure_domain: int
     capacity: CapacityStatDTO
 
     @staticmethod
@@ -347,6 +351,7 @@ class StorageNodeDTO(BaseModel):
             health_check=model.health_check,
             device_count=len(model.nvme_devices),
             online_device_count=len([device for device in model.nvme_devices if device.status == "online" ]),
+            failure_domain=model.failure_domain,
             capacity=CapacityStatDTO.from_model(
                 stat_obj if stat_obj else StatsObject()
             ),
@@ -590,3 +595,57 @@ class MigrationDTO(BaseModel):
             completed_at=model.completed_at,
             connect_strings=connect_strings or [],
         )
+
+
+class DeviceHealthInfoDTO(BaseModel):
+    id: UUID
+    model_number: str
+    serial_number: str
+    firmware_revision: str
+    traddr: str
+    critical_warning: int
+    temperature_celsius: int
+    available_spare_percentage: int
+    available_spare_threshold_percentage: int
+    percentage_used: int
+    data_units_read: int
+    data_units_written: int
+    host_read_commands: int
+    host_write_commands: int
+    controller_busy_time: int
+    power_cycles: int
+    power_on_hours: int
+    unsafe_shutdowns: int
+    media_errors: int
+    num_err_log_entries: int
+    warning_temperature_time_minutes: int
+    critical_composite_temperature_time_minutes: int
+
+
+    @staticmethod
+    def from_model(model: NVMeDevice, health_info: dict):
+        return DeviceHealthInfoDTO(
+            id=UUID(model.get_id()),
+            model_number=health_info["model_number"],
+            serial_number=health_info["serial_number"],
+            firmware_revision=health_info["firmware_revision"],
+            traddr=health_info["traddr"],
+            critical_warning=health_info["critical_warning"],
+            temperature_celsius=health_info["temperature_celsius"],
+            available_spare_percentage=health_info["available_spare_percentage"],
+            available_spare_threshold_percentage=health_info["available_spare_threshold_percentage"],
+            percentage_used=health_info["percentage_used"],
+            data_units_read=health_info["data_units_read"],
+            data_units_written=health_info["data_units_written"],
+            host_read_commands=health_info["host_read_commands"],
+            host_write_commands=health_info["host_write_commands"],
+            controller_busy_time=health_info["controller_busy_time"],
+            power_cycles=health_info["power_cycles"],
+            power_on_hours=health_info["power_on_hours"],
+            unsafe_shutdowns=health_info["unsafe_shutdowns"],
+            media_errors=health_info["media_errors"],
+            num_err_log_entries=health_info["num_err_log_entries"],
+            warning_temperature_time_minutes=health_info["warning_temperature_time_minutes"],
+            critical_composite_temperature_time_minutes=health_info["critical_composite_temperature_time_minutes"],
+        )
+

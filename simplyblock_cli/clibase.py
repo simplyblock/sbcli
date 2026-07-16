@@ -13,7 +13,7 @@ from simplyblock_core.exceptions import MigrationConflictError, PreconditionErro
 from simplyblock_core import storage_node_ops as storage_ops
 from simplyblock_core import mgmt_node_ops as mgmt_ops
 from simplyblock_core.controllers import pool_controller, lvol_controller, snapshot_controller, device_controller, \
-    tasks_controller, qos_controller, migration_controller, backup_controller
+    tasks_controller, qos_controller, migration_controller, backup_controller, fdb_backup_controller
 from simplyblock_core.controllers import health_controller
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.cluster import Cluster, HashicorpVaultSettings
@@ -445,6 +445,9 @@ class CLIWrapperBase:
     def storage_node__set(self, sub_command, args):
         return storage_ops.set_value(args.node_id, args.attr_name, args.attr_value)
 
+    def storage_node__get_device_health_info(self, sub_command, args):
+        return device_controller.get_device_health_info(args.device_id)
+
     def cluster__create(self, sub_command, args):
         return self.cluster_create(args)
 
@@ -540,6 +543,14 @@ class CLIWrapperBase:
 
     def cluster__graceful_shutdown(self, sub_command, args):
         cluster_ops.cluster_grace_shutdown(args.cluster_id)
+        return True
+
+    def cluster__restart(self, sub_command, args):
+        try:
+            cluster_ops.cluster_restart(args.cluster_id)
+        except Exception as e:
+            print(f"Error restarting cluster: {e}")
+            return False
         return True
 
     def cluster__graceful_startup(self, sub_command, args):
@@ -956,7 +967,7 @@ class CLIWrapperBase:
     def backup__restore(self, sub_command, args):
         result, error = backup_controller.restore_backup(
             args.backup_id, args.lvol_name, args.pool,
-            cluster_id=getattr(args, 'cluster_id', None),
+            cluster_id=args.cluster_id,
             target_node_id=getattr(args, 'node', None))
         if error:
             print(f"Error: {error}")
@@ -1064,6 +1075,21 @@ class CLIWrapperBase:
         else:
             print(f"Switched to external backup source: {target}")
         return True
+
+    def db_backup__create(self, sub_command, args):
+        return fdb_backup_controller.add_backup_task(args.cluster_id)
+
+    def db_backup__list(self, sub_command, args):
+        return fdb_backup_controller.list_backups(args.cluster_id)
+
+    def db_backup__status(self, sub_command, args):
+        return fdb_backup_controller.backup_status()
+
+    def db_backup__restore(self, sub_command, args):
+        return fdb_backup_controller.backup_restore(args.name, args.cluster_id)
+
+    def db_backup__config(self, sub_command, args):
+        return fdb_backup_controller.backup_configure(args.cluster_id, args.backup_path, args.backup_frequency, args.bucket_name, args.region_name, args.backup_credentials)
 
     def storage_node_list_devices(self, args):
         data = storage_ops.list_storage_devices(args.node_id)

@@ -85,6 +85,7 @@ class ClusterParams(BaseModel):
     snode_api_port: int = 50001
     backup_config: Optional[BackupConfigParams] = None
     hashicorp_vault_settings: Optional[HashicorpVaultSettings] = None
+    enable_failure_domain: bool = False
 
 
 @api.get('/', name='clusters:list')
@@ -240,6 +241,12 @@ def update_cluster( cluster: Cluster, parameters: _UpdateParams) -> Response:
         spdk_image=parameters.spdk_image,
         restart=parameters.restart
     )
+    return Response(status_code=204)
+
+
+@instance_api.post('/rebalance', name='clusters:rebalance', status_code=204, responses={204: {"content": None}})
+def rebalance_cluster( cluster: Cluster) -> Response:
+    cluster_ops.rebalance(cluster.get_id())
     return Response(status_code=204)
 
 

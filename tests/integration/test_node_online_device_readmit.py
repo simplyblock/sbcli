@@ -56,6 +56,10 @@ def _node(uuid, status):
     n.status = status
     n.cluster_id = "c1"
     n.nvme_devices = []
+    # Distinct per-node mgmt_ip: get_next_cluster_status dedups affected
+    # nodes by physical host (mgmt_ip); leaving the model default ("") on
+    # every node collapses all affected nodes into one and undercounts.
+    n.mgmt_ip = f"10.99.0.{abs(hash(uuid)) % 250 + 1}"
     return n
 
 

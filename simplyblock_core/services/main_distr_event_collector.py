@@ -514,24 +514,29 @@ def start_event_collector_on_node(node_id):
 
 threads_maps: dict[str, threading.Thread] = {}
 
-while True:
-    try:
-        db.get_clusters()
-    except Exception as e:
-        logger.error(f"Failed to get clusters: {e}")
-        time.sleep(3)
-        continue
-    clusters = db.get_clusters()
-    for cluster in clusters:
-        cluster_id = cluster.get_id()
+def main():
+    while True:
+        try:
+            db.get_clusters()
+        except Exception as e:
+            logger.error(f"Failed to get clusters: {e}")
+            time.sleep(3)
+            continue
+        clusters = db.get_clusters()
+        for cluster in clusters:
+            cluster_id = cluster.get_id()
 
-        nodes = db.get_storage_nodes_by_cluster_id(cluster_id)
-        for snode in nodes:
-            node_id = snode.get_id()
-            # logger.info(f"Checking node {snode.hostname}")
-            if node_id not in threads_maps or threads_maps[node_id].is_alive() is False:
-                t = threading.Thread(target=start_event_collector_on_node, args=(node_id,))
-                t.start()
-                threads_maps[node_id] = t
+            nodes = db.get_storage_nodes_by_cluster_id(cluster_id)
+            for snode in nodes:
+                node_id = snode.get_id()
+                # logger.info(f"Checking node {snode.hostname}")
+                if node_id not in threads_maps or threads_maps[node_id].is_alive() is False:
+                    t = threading.Thread(target=start_event_collector_on_node, args=(node_id,))
+                    t.start()
+                    threads_maps[node_id] = t
 
-    time.sleep(5)
+        time.sleep(5)
+
+
+if __name__ == "__main__":
+    main()

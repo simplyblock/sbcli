@@ -51,9 +51,25 @@ What you *may* still mock: everything **above** the database. Storage nodes are 
 ## Running tests
 
 ```bash
-tox run -e unit          # Fast; no infra.
-tox run -e integration   # Requires Docker + libfdb_c on host.
+tox run -e unit             # Fast; no infra.
+tox run -e integration      # Requires Docker + libfdb_c on host. EXCLUDES slow tests.
+tox run -e integration-slow # Slow tier only (the migration suite, ~20min).
 ```
+
+### Slow tests (the `slow` marker)
+
+The migration suite (`tests/integration/migration/`, ~138 tests, ~20min) is tagged
+`slow` and **excluded from the default `integration` run**. Tests there are tagged
+automatically by `tests/integration/migration/conftest.py` — you don't mark them
+individually. To mark a slow test elsewhere, add `@pytest.mark.slow` (the marker is
+registered in `pyproject.toml`).
+
+- `tox run -e integration` → runs `-m "not slow"` (fast tier; what `tox run` and the
+  default CI job use).
+- `tox run -e integration-slow` → runs `-m slow` (the migration suite; CI runs this in
+  a separate `integration-slow` job with a longer timeout).
+- Targeted runs still opt in via posargs (posargs replace the default filter):
+  `tox run -e integration -- tests/integration/migration -m slow`.
 
 The `integration` env brings up FoundationDB through `testcontainers` (image `foundationdb/foundationdb:7.3.63`, ~3–5s boot, pulled on first run). **By default, always run the integration tests through tox and rely on this testcontainers-provisioned FDB** — do not point them at another cluster.
 

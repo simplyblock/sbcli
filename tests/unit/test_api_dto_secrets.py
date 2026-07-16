@@ -57,6 +57,7 @@ def _build_cluster_dto():
         provisioned_capacity_warning=50,
         node_affinity=False,
         anti_affinity=False,
+        enable_failure_domain=False,
         secret=SecretStr("CLUSTER-SECRET"),
         tls_enabled=False,
         max_fault_tolerance=1,

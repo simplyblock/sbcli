@@ -24,3 +24,26 @@ if 'fdb' not in sys.modules:
         pass
     _stub('fdb', open=lambda *a, **kw: None, FDBError=_FDBError)
     _stub('fdb.tuple')
+
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _reset_ttl_caches():
+    """The create-path TTL caches (leader / quorum-verdict / capacity-scan) are
+    module-level and keyed by ids that unit tests reuse across cases
+    ('node-1', 'LVS_1', ...), so a verdict cached in one test would silently
+    leak into the next. Clear them around every test."""
+    try:
+        from simplyblock_core.utils import ttl_cache
+    except Exception:
+        yield
+        return
+    for cache in (ttl_cache.capacity_scan_cache, ttl_cache.leader_cache,
+                  ttl_cache.quorum_verdict_cache):
+        cache.invalidate()
+    yield
+    for cache in (ttl_cache.capacity_scan_cache, ttl_cache.leader_cache,
+                  ttl_cache.quorum_verdict_cache):
+        cache.invalidate()

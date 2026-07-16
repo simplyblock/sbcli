@@ -115,8 +115,12 @@ class TestTeardownNonLeaderLvstore(unittest.TestCase):
         self.assertEqual(rpc.subsystem_delete.call_count, 2)
         rpc.subsystem_delete.assert_any_call("nqn.test:lv-1")
         rpc.subsystem_delete.assert_any_call("nqn.test:lv-2")
-        # Bdev stack walked in reverse: lvstore -> raid -> distrs
-        rpc.bdev_lvol_delete_lvstore.assert_called_once_with("LVS_100")
+        # Bdev stack removed starting from the raid0 that backs the LVS,
+        # then the distribs below. The lvstore itself must NEVER be deleted:
+        # bdev_lvol_delete_lvstore destroys the shared on-disk metadata
+        # (data loss for every replica) — deleting the raid hot-removes the
+        # examined lvstore bdev instead.
+        rpc.bdev_lvol_delete_lvstore.assert_not_called()
         rpc.bdev_raid_delete.assert_called_once_with("raid_LVS_100")
         self.assertEqual(rpc.bdev_distrib_delete.call_count, 2)
         # Hublvol controller detached
@@ -142,8 +146,9 @@ class TestTeardownNonLeaderLvstore(unittest.TestCase):
         self.assertTrue(ok)
         # No lvols → no subsystem deletes
         rpc.subsystem_delete.assert_not_called()
-        # Stack still removed
-        rpc.bdev_lvol_delete_lvstore.assert_called_once_with("LVS_200")
+        # Stack still removed (raid + distribs) but never the lvstore itself
+        rpc.bdev_raid_delete.assert_called_once_with("raid_LVS_200")
+        rpc.bdev_lvol_delete_lvstore.assert_not_called()
         # Correct field cleared
         self.assertEqual(donor.lvstore_stack_tertiary, "")
         # secondary_1 left untouched
@@ -166,6 +171,8 @@ class TestTeardownNonLeaderLvstore(unittest.TestCase):
         self.assertFalse(ok)
         # Refusal must be silent on the wire — no RPCs issued.
         rpc.subsystem_delete.assert_not_called()
+        rpc.bdev_raid_delete.assert_not_called()
+        rpc.bdev_distrib_delete.assert_not_called()
         rpc.bdev_lvol_delete_lvstore.assert_not_called()
         rpc.bdev_nvme_detach_controller.assert_not_called()
         donor.write_to_db.assert_not_called()
@@ -209,7 +216,8 @@ class TestTeardownNonLeaderLvstore(unittest.TestCase):
         ok = teardown_non_leader_lvstore(donor, primary)
 
         self.assertTrue(ok)
-        rpc.bdev_lvol_delete_lvstore.assert_called_once_with("LVS_100")
+        rpc.bdev_raid_delete.assert_called_once_with("raid_LVS_100")
+        rpc.bdev_lvol_delete_lvstore.assert_not_called()
         self.assertEqual(donor.lvstore_stack_secondary, "")
 
     @patch("simplyblock_core.storage_node_ops.DBController")

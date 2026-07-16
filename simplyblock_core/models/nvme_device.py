@@ -71,6 +71,9 @@ class NVMeDevice(BaseModel):
     hang_bdev: str = ""
     connecting_from_node: str = ""
     previous_status: str = ""
+    # Passthrough bdev UUID for cross-node nvme bdev identification,
+    # meaning that remote bdev to this bdev would share the same uuid.
+    pt_bdev_uuid: str = ""
 
     def __change_dev_connection_to(self, connecting_from_node):
         from simplyblock_core.db_controller import DBController

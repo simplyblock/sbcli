@@ -43,6 +43,26 @@ def task_runner(task):
         task.write_to_db(db.kv_store)
         return False
 
+    # Expansion-first ordering: defer while a cluster expansion is open
+    # (see tasks_controller.defer_task_for_expansion).
+    if tasks_controller.defer_task_for_expansion(task):
+        return False
+
+    # Recovery-before-expansion priority: the expansion migration (this
+    # task family, queued when the role rebalance completes) must not run
+    # while any outage-recovery data migration is open — an unexpected
+    # node outage during the expansion queues those, and the required
+    # order is: expansion completes -> outage device migration drains ->
+    # expansion migration runs. Deferral, not failure: no retry consumed.
+    for t in db.get_job_tasks(task.cluster_id):
+        if t.function_name in (JobSchedule.FN_DEV_MIG, JobSchedule.FN_FAILED_DEV_MIG) \
+                and t.status != JobSchedule.STATUS_DONE and t.canceled is False:
+            task.function_result = (
+                f"deferring: recovery migration {t.uuid} ({t.function_name}) is open")
+            task.status = JobSchedule.STATUS_SUSPENDED
+            task.write_to_db(db.kv_store)
+            return False
+
     if task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED]:
         for node in db.get_storage_nodes_by_cluster_id(task.cluster_id):
             if node.is_secondary_node:  # pass
@@ -143,32 +163,39 @@ logger = utils.get_logger(__name__)
 
 # get DB controller
 db = db_controller.DBController()
-logger.info("Starting Tasks runner...")
-while True:
-    try:
-        db.get_clusters()
-    except Exception as e:
-        logger.error(f"Failed to get clusters: {e}")
+
+
+def main():
+    logger.info("Starting Tasks runner...")
+    while True:
+        try:
+            db.get_clusters()
+        except Exception as e:
+            logger.error(f"Failed to get clusters: {e}")
+            time.sleep(3)
+            continue
         time.sleep(3)
-        continue
-    time.sleep(3)
-    clusters = db.get_clusters()
-    if not clusters:
-        logger.error("No clusters found!")
-    else:
-        for cl in clusters:
-            tasks = db.get_job_tasks(cl.get_id(), reverse=False)
-            for task in tasks:
-                if task.function_name == JobSchedule.FN_NEW_DEV_MIG:
-                    if task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED]:
-                        active_task = tasks_controller.get_active_node_mig_task(
-                            task.cluster_id, task.node_id,  task.function_params["distr_name"])
-                        if active_task:
-                            logger.info("task found on same node, retry")
-                            continue
-                    if task.status != JobSchedule.STATUS_DONE:
-                        # get new task object because it could be changed from cancel task
-                        task = db.get_task_by_id(task.uuid)
-                        res = task_runner(task)
-                        if not res:
-                            time.sleep(2)
+        clusters = db.get_clusters()
+        if not clusters:
+            logger.error("No clusters found!")
+        else:
+            for cl in clusters:
+                tasks = db.get_job_tasks(cl.get_id(), reverse=False)
+                for task in tasks:
+                    if task.function_name == JobSchedule.FN_NEW_DEV_MIG:
+                        if task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED]:
+                            active_task = tasks_controller.get_active_node_mig_task(
+                                task.cluster_id, task.node_id,  task.function_params["distr_name"])
+                            if active_task:
+                                logger.info("task found on same node, retry")
+                                continue
+                        if task.status != JobSchedule.STATUS_DONE:
+                            # get new task object because it could be changed from cancel task
+                            task = db.get_task_by_id(task.uuid)
+                            res = task_runner(task)
+                            if not res:
+                                time.sleep(2)
+
+
+if __name__ == "__main__":
+    main()

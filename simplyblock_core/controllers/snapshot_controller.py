@@ -85,7 +85,29 @@ def _acquire_lvstore_lock_blocking(db_controller, cluster_id, lvs_name, owner,
             logger.error("Timed out waiting for lvstore lock %s (held by %s)",
                          lvs_name, current_owner)
             return False
-        time.sleep(poll)
+        # Wait on an FDB watch of the lock key instead of sleeping a blind
+        # poll interval: the waiter wakes the moment the holder releases (the
+        # watch also fires on heartbeats, which just re-attempts early). The
+        # 2s failsafe re-attempts even without a watch event so a missed
+        # event or a stale-TTL reclaim window is never waited out in full.
+        # ``is_ready()`` is a local check — no FDB round-trip in the spin.
+        watch = None
+        try:
+            watch = db_controller.watch_lvstore_lock(cluster_id, lvs_name)
+        except Exception:
+            watch = None
+        if watch is None:
+            time.sleep(poll)
+            continue
+        wait_until = min(time.time() + 2.0, deadline)
+        try:
+            while time.time() < wait_until and not watch.is_ready():
+                time.sleep(0.02)
+        finally:
+            try:
+                watch.cancel()
+            except Exception:
+                pass
 
 
 def _lvstore_lock_heartbeat(db_controller, cluster_id, lvs_name, owner, stop_event):
@@ -99,7 +121,7 @@ def _lvstore_lock_heartbeat(db_controller, cluster_id, lvs_name, owner, stop_eve
 
 
 @contextlib.contextmanager
-def lvstore_op_lock(cluster_id, lvs_name, *, enabled=True):
+def lvstore_op_lock(cluster_id, lvs_name, *, node_id=None, enabled=True):
     """INNER lock — serialize a SINGLE single-node data-plane operation per
     lvstore (one RPC to one node).
 
@@ -112,26 +134,88 @@ def lvstore_op_lock(cluster_id, lvs_name, *, enabled=True):
     lvstore on a node at the same time, so replica blob-tree mutations never
     interleave and corrupt the tree.
 
+    ``node_id`` scopes the lock to the node the RPC targets. The invariant is
+    per-node ("mutate the lvstore ON A NODE"), so ops of DIFFERENT objects may
+    proceed on the primary and a secondary of the same lvstore concurrently —
+    keying on lvs_name alone serialized them cluster-wide and was the dominant
+    queueing cost of mass snapshot creation. Callers that cannot name the
+    target node fall back to the whole-lvstore key (strictly stronger).
+
     Chain (blobid) ordering across operations on the *same* object is provided
     by the OUTER per-object lock (``object_mutation_lock``), not by this one.
     """
     if not enabled or not cluster_id:
         yield
         return
+    lock_key = f"{lvs_name}@{node_id[:8]}" if node_id else lvs_name
     owner = _new_lvstore_lock_owner()
-    if not _acquire_lvstore_lock_blocking(db_controller, cluster_id, lvs_name, owner):
+    if not _acquire_lvstore_lock_blocking(db_controller, cluster_id, lock_key, owner):
         raise PreconditionError(
-            f"Timed out acquiring lvstore lock on {lvs_name}")
+            f"Timed out acquiring lvstore lock on {lock_key}")
     stop = threading.Event()
     threading.Thread(
         target=_lvstore_lock_heartbeat,
-        args=(db_controller, cluster_id, lvs_name, owner, stop),
+        args=(db_controller, cluster_id, lock_key, owner, stop),
         daemon=True).start()
     try:
         yield
     finally:
         stop.set()
-        db_controller.release_lvstore_lock(cluster_id, lvs_name, owner)
+        db_controller.release_lvstore_lock(cluster_id, lock_key, owner)
+
+
+def _find_lvs_leader(cluster_id, lvs_name, all_nodes):
+    """Return the confirmed leader among ``all_nodes`` for ``lvs_name``, or None.
+
+    Cached fast path (same contract as
+    storage_node_ops.find_leader_with_failover): probe only the
+    recently-confirmed leader — the probe is itself a fresh confirmation, so a
+    moved leadership simply misses and falls back to scanning every candidate.
+    Replaces the per-create full scan, which paid one bdev_lvol_get_lvstores
+    RPC per candidate node on every snapshot/clone.
+
+    No-leader fail-fast: when the LVS was recently confirmed leaderless,
+    return None without probing at all — callers must reject the operation
+    until a leader is re-established. When the scan itself comes up empty,
+    delegate to find_leader_with_failover, which owns the leaderless-LVS
+    recovery (take-leadership on the configured primary) and the shared
+    negative cache, so at most one recovery pass runs per NO_LEADER_TTL_SEC
+    even under a snapshot/clone-only workload."""
+    from simplyblock_core.controllers import lvol_controller
+    from simplyblock_core.utils.ttl_cache import (
+        leader_cache, LEADER_TTL_SEC, no_leader_cache, NO_LEADER_TTL_SEC)
+
+    key = (cluster_id, lvs_name)
+    if no_leader_cache.get(key, NO_LEADER_TTL_SEC):
+        logger.warning(
+            "LVS %s was confirmed leaderless less than %ss ago — failing fast "
+            "without re-probing", lvs_name, NO_LEADER_TTL_SEC)
+        return None
+    cached_id = leader_cache.get(key, LEADER_TTL_SEC)
+    if cached_id:
+        cached_node = next((n for n in all_nodes if n.get_id() == cached_id), None)
+        if cached_node is not None:
+            try:
+                if lvol_controller.is_node_leader(cached_node, lvs_name):
+                    leader_cache.put(key, cached_id)
+                    return cached_node
+            except Exception:
+                pass
+        leader_cache.invalidate(key)
+    for candidate in all_nodes:
+        try:
+            if lvol_controller.is_node_leader(candidate, lvs_name):
+                leader_cache.put(key, candidate.get_id())
+                return candidate
+        except Exception:
+            continue
+    # Nobody admits leadership — run the full failover/recovery helper once;
+    # it records the no-leader verdict in the shared negative cache so every
+    # call within NO_LEADER_TTL_SEC (including the fast path above) fails
+    # instantly instead of re-probing.
+    from simplyblock_core.storage_node_ops import find_leader_with_failover
+    leader, _ = find_leader_with_failover(all_nodes, lvs_name)
+    return leader
 
 
 # Namespace prefix so a per-object lock key can never collide with a real
@@ -263,13 +347,26 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
         logger.error(msg)
         return False, msg
 
+    # Per-core object cap (lvols + clones + snapshots per SPDK instance).
+    from simplyblock_core.controllers import lvol_controller as _lvol_ctrl
+    from simplyblock_core.utils.ttl_cache import cached_mini_lvols, cached_snapshots
+    limit_error = _lvol_ctrl.check_node_object_limit(
+        snode, cached_mini_lvols(db_controller),
+        cached_snapshots(db_controller, pool.cluster_id))
+    if limit_error:
+        logger.error(limit_error)
+        return False, limit_error
+
     logger.info(f"Creating snapshot: {snapshot_name} from LVol: {lvol.get_id()}")
 
-    rec = db_controller.get_lvol_stats(lvol, 1)
-    if rec:
-        size = rec[0].size_used
-    else:
-        size = lvol.size
+    # The stats read only refines the size used for the pool-limit checks
+    # below; on unlimited pools (the common case) its result is never
+    # consulted, so skip the FDB stats lookup entirely.
+    size = lvol.size
+    if pool.lvol_max_size > 0 or pool.pool_max_size > 0:
+        rec = db_controller.get_lvol_stats(lvol, 1)
+        if rec:
+            size = rec[0].size_used
 
     if 0 < pool.lvol_max_size < size:
         msg = f"Pool Max LVol size is: {utils.humanbytes(pool.lvol_max_size)}, LVol size: {utils.humanbytes(size)} must be below this limit"
@@ -343,17 +440,19 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
             except KeyError:
                 pass
 
-        primary_node = None
         secondary_nodes = []
-        for candidate in all_nodes:
-            try:
-                if lvol_controller.is_node_leader(candidate, lvol.lvs_name):
-                    primary_node = candidate
-                    break
-            except Exception:
-                continue
+        primary_node = _find_lvs_leader(pool.cluster_id, lvol.lvs_name, all_nodes)
         if not primary_node:
-            primary_node = host_node
+            # Never fall back to the configured primary: a create attempted on
+            # a non-leader fails on SPDK anyway, and under mass-create retries
+            # the per-request leader probing stormed every LVS member for
+            # hours (run 20260712-231123). Fail until a leader is
+            # re-established (recovery runs inside _find_lvs_leader, at most
+            # once per NO_LEADER_TTL_SEC).
+            msg = (f"No leader available for LVS {lvol.lvs_name} — "
+                   f"rejecting snapshot create until leadership is re-established")
+            logger.error(msg)
+            return False, msg
 
         # Check non-leader nodes (no status checks)
         for candidate in all_nodes:
@@ -381,7 +480,8 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
 
                 logger.info("Creating Snapshot bdev")
                 ret = False
-                with lvstore_op_lock(pool.cluster_id, lvol.lvs_name, enabled=lock):
+                with lvstore_op_lock(pool.cluster_id, lvol.lvs_name,
+                                     node_id=primary_node.get_id(), enabled=lock):
                     for i in range(5):
                         ret, err = rpc_client.lvol_create_snapshot2(f"{lvol.lvs_name}/{lvol.lvol_bdev}", snap_bdev_name)
                         if not ret:
@@ -392,18 +492,22 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
                                 break
                         else:
                             break
-                    if not ret:
-                        return False, f"Failed to create snapshot on node: {snode.get_id()}"
+                if not ret:
+                    return False, f"Failed to create snapshot on node: {snode.get_id()}"
 
-                    snap_bdev = rpc_client.get_bdevs(f"{lvol.lvs_name}/{snap_bdev_name}")
-                    if snap_bdev:
-                        snap_uuid = snap_bdev[0]['uuid']
-                        blobid = snap_bdev[0]['driver_specific']['lvol']['blobid']
-                        cluster_size = cluster.page_size_in_blocks
-                        num_allocated_clusters = snap_bdev[0]["driver_specific"]["lvol"]["num_allocated_clusters"]
-                        used_size = int(num_allocated_clusters*cluster_size)
-                    else:
-                        return False, f"Failed to create snapshot on node: {snode.get_id()}"
+                # Read-only follow-up — deliberately OUTSIDE the lvstore lock:
+                # the lock exists to keep lvstore mutations from interleaving,
+                # and holding it across this read serialized every other
+                # waiter behind a query that mutates nothing.
+                snap_bdev = rpc_client.get_bdevs(f"{lvol.lvs_name}/{snap_bdev_name}")
+                if snap_bdev:
+                    snap_uuid = snap_bdev[0]['uuid']
+                    blobid = snap_bdev[0]['driver_specific']['lvol']['blobid']
+                    cluster_size = cluster.page_size_in_blocks
+                    num_allocated_clusters = snap_bdev[0]["driver_specific"]["lvol"]["num_allocated_clusters"]
+                    used_size = int(num_allocated_clusters*cluster_size)
+                else:
+                    return False, f"Failed to create snapshot on node: {snode.get_id()}"
 
             for sec in secondary_nodes:
                 # Per design: gate snapshot registration around restart port block.
@@ -419,7 +523,8 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
 
                 sec_rpc_client = sec.rpc_client()
 
-                with lvstore_op_lock(pool.cluster_id, lvol.lvs_name, enabled=lock):
+                with lvstore_op_lock(pool.cluster_id, lvol.lvs_name,
+                                     node_id=sec.get_id(), enabled=lock):
                     ret = sec_rpc_client.bdev_lvol_snapshot_register(
                         f"{lvol.lvs_name}/{lvol.lvol_bdev}", snap_bdev_name, snap_uuid, blobid)
                 if not ret:
@@ -427,7 +532,8 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
                     logger.error(msg)
                     logger.info(f"Removing snapshot from {primary_node.get_id()}")
                     rpc_client = primary_node.rpc_client()
-                    with lvstore_op_lock(pool.cluster_id, lvol.lvs_name, enabled=lock):
+                    with lvstore_op_lock(pool.cluster_id, lvol.lvs_name,
+                                         node_id=primary_node.get_id(), enabled=lock):
                         ret, _ = rpc_client.delete_lvol(f"{lvol.lvs_name}/{snap_bdev_name}")
                     if not ret:
                         logger.error(f"Failed to delete snap from node: {snode.get_id()}")
@@ -632,6 +738,22 @@ def _delete_locked(snap, snapshot_uuid, force_delete=False, lock=True):
     except KeyError:
         pass
 
+    # Refuse deletes while the cluster cannot complete them: the controller
+    # only issues the leader-side async delete and marks the snapshot
+    # in_deletion; snapshot_monitor performs the sync deletes on the
+    # non-leaders and removes the record, but it skips clusters in these
+    # states — accepting the delete here would strand the snapshot forever
+    # (2026-07-12 mass-delete run: ~60k snapshot deletes accepted while the
+    # cluster was stuck in_activation, none ever completed). read_only stays
+    # allowed: deletes free space.
+    if not force_delete:
+        cluster = db_controller.get_cluster_by_id(snap.cluster_id)
+        if cluster.status in [cluster.STATUS_SUSPENDED, cluster.STATUS_IN_ACTIVATION,
+                              cluster.STATUS_UNREADY, cluster.STATUS_INACTIVE]:
+            logger.error(f"Cannot delete snapshot {snapshot_uuid}: cluster "
+                         f"{cluster.get_id()} status is {cluster.status}")
+            return False
+
     # Block deletion if the snapshot's parent volume is being migrated
     active_mig = migration_controller.get_active_migration_for_lvol(
         snap.lvol.uuid, snap.cluster_id)
@@ -722,7 +844,8 @@ def _delete_locked(snap, snapshot_uuid, force_delete=False, lock=True):
         if snode.status == StorageNode.STATUS_ONLINE:
             rpc_client = snode.rpc_client()
 
-            with lvstore_op_lock(snap.cluster_id, snap.lvol.lvs_name, enabled=lock and not force_delete):
+            with lvstore_op_lock(snap.cluster_id, snap.lvol.lvs_name,
+                                 node_id=snode.get_id(), enabled=lock and not force_delete):
                 ret, _ = rpc_client.delete_lvol(snap.snap_bdev)
             if not ret:
                 logger.error(f"Failed to delete snap from node: {snode.get_id()}")
@@ -775,7 +898,8 @@ def _delete_locked(snap, snapshot_uuid, force_delete=False, lock=True):
         except Exception:
             pass
 
-        with lvstore_op_lock(snap.cluster_id, snap.lvol.lvs_name, enabled=lock and not force_delete):
+        with lvstore_op_lock(snap.cluster_id, snap.lvol.lvs_name,
+                             node_id=primary_node.get_id(), enabled=lock and not force_delete):
             ret, _ = rpc_client.delete_lvol(snap.snap_bdev, del_async=False, special_delete=special_delete)
         if not ret:
             logger.error(f"Failed to delete snap from node: {snode.get_id()}")
@@ -877,6 +1001,16 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     if cluster.status not in [cluster.STATUS_ACTIVE, cluster.STATUS_DEGRADED]:
         return False, f"Cluster is not active, status: {cluster.status}"
 
+    # Per-core object cap (lvols + clones + snapshots per SPDK instance).
+    from simplyblock_core.controllers import lvol_controller as _lvol_ctrl
+    from simplyblock_core.utils.ttl_cache import cached_mini_lvols, cached_snapshots
+    limit_error = _lvol_ctrl.check_node_object_limit(
+        snode, cached_mini_lvols(db_controller),
+        cached_snapshots(db_controller, pool.cluster_id))
+    if limit_error:
+        logger.error(limit_error)
+        return False, limit_error
+
     # Clone-name uniqueness / reuse via the per-pool lvol name index (O(1) point
     # read) instead of scanning every lvol in the DB.
     existing = db_controller.lvol_name_lookup(pool.get_id(), clone_name)
@@ -929,8 +1063,8 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     _available_subsys = lvol_controller.get_next_available_subsystem_on_node(snode.get_id(), all_lvols=all_lvols) if namespaced else None
 
     if not _available_subsys:
-        subsys_count = lvol_controller.count_lvol_subsystems(snode)
-        if subsys_count is not None and subsys_count >= snode.max_lvol:
+        subsys_count = lvol_controller.count_lvol_subsystems(snode, all_lvols)
+        if subsys_count >= snode.max_lvol:
             error = f"Too many subsystems on node: {snode.get_id()}, max subsystems reached: {snode.max_lvol}"
             logger.error(error)
             return False, error
@@ -1068,17 +1202,17 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
             except KeyError:
                 pass
 
-        primary_node = None
         secondary_nodes = []
-        for candidate in all_nodes:
-            try:
-                if lvol_controller.is_node_leader(candidate, lvol.lvs_name):
-                    primary_node = candidate
-                    break
-            except Exception:
-                continue
+        primary_node = _find_lvs_leader(pool.cluster_id, lvol.lvs_name, all_nodes)
         if not primary_node:
-            primary_node = host_node
+            # Same contract as snapshot create: never attempt the clone on a
+            # non-leader — fail until a leader is re-established. The lvol
+            # record was already persisted above, so roll it back.
+            msg = (f"No leader available for LVS {lvol.lvs_name} — "
+                   f"rejecting clone until leadership is re-established")
+            logger.error(msg)
+            lvol.remove(db_controller.kv_store)
+            return False, msg
 
         # Assign each non-leader a stable index so its subsystem is created
         # with a unique cntlid window (sec0 -> min_cntlid 1000, sec1 -> 2000,
@@ -1125,7 +1259,8 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
         try:
             with object_mutation_lock(pool.cluster_id, snap.uuid, enabled=lock):
                 if primary_node:
-                    with lvstore_op_lock(pool.cluster_id, lvol.lvs_name, enabled=lock):
+                    with lvstore_op_lock(pool.cluster_id, lvol.lvs_name,
+                                         node_id=primary_node.get_id(), enabled=lock):
                         lvol_bdev, error = lvol_controller.add_lvol_on_node(lvol, primary_node)
                     if error:
                         logger.error(error)
@@ -1136,7 +1271,8 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
                     lvol.blobid = lvol_bdev['driver_specific']['lvol']['blobid']
 
                 for sec in secondary_nodes:
-                    with lvstore_op_lock(pool.cluster_id, lvol.lvs_name, enabled=lock):
+                    with lvstore_op_lock(pool.cluster_id, lvol.lvs_name,
+                                         node_id=sec.get_id(), enabled=lock):
                         lvol_bdev, error = lvol_controller.add_lvol_on_node(
                             lvol, sec, is_primary=False,
                             secondary_index=secondary_index_map[sec.get_id()])

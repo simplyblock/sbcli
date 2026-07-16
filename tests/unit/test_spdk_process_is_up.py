@@ -39,6 +39,11 @@ from flask import Flask
 
 from simplyblock_web.api.internal.storage_node import docker as mod
 
+# AF_UNIX does not exist in the socket module on Windows; the probe only ever
+# runs on Linux storage nodes, but these tests must pass on any dev platform.
+# Use the real value where available so the Linux assertion stays exact.
+AF_UNIX = getattr(real_socket, "AF_UNIX", 0x5AFE)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -120,12 +125,17 @@ class TestUnixSocketProbe(unittest.TestCase):
 
         with patch.object(mod.os.path, "isdir", return_value=True), \
              patch.object(mod.os.path, "exists", return_value=True), \
-             patch.object(mod.socket, "socket", _FakeSock):
+             patch.object(mod.socket, "socket", _FakeSock), \
+             patch.object(mod.socket, "AF_UNIX", AF_UNIX, create=True):
             self.assertTrue(mod._spdk_unix_socket_alive(8084))
 
-        self.assertEqual(captured["family"], real_socket.AF_UNIX)
+        self.assertEqual(captured["family"], AF_UNIX)
         self.assertEqual(captured["kind"], real_socket.SOCK_STREAM)
-        self.assertEqual(captured["path"], "/mnt/ramdisk/spdk_8084/spdk.sock")
+        # The probe builds the path with os.path.join; on the Linux nodes it
+        # runs on this is /mnt/ramdisk/spdk_8084/spdk.sock. Join here too so
+        # the assertion also holds on Windows dev machines (backslashes).
+        self.assertEqual(captured["path"],
+                         os.path.join("/mnt/ramdisk", "spdk_8084", "spdk.sock"))
         self.assertLessEqual(captured["timeout"], 1.0,
                              "probe timeout must be small enough that a wedged "
                              "socket cannot stall the API handler")
@@ -153,7 +163,8 @@ class TestUnixSocketProbe(unittest.TestCase):
 
         with patch.object(mod.os.path, "isdir", return_value=True), \
              patch.object(mod.os.path, "exists", return_value=True), \
-             patch.object(mod.socket, "socket", _FakeSock):
+             patch.object(mod.socket, "socket", _FakeSock), \
+             patch.object(mod.socket, "AF_UNIX", AF_UNIX, create=True):
             self.assertFalse(mod._spdk_unix_socket_alive(8084))
 
 

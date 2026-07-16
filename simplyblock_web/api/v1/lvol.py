@@ -145,7 +145,9 @@ def add_lvol():
     namespaced = utils.get_value_or_default(cl_data, "namespaced", False)
     uid = utils.get_value_or_default(cl_data, "uid", None)
     pvc_name = utils.get_value_or_default(cl_data, "pvc_name", None)
-    max_namespace_per_subsys = utils.get_value_or_default(cl_data, "max_namespace_per_subsys", 1)
+    # None → resolved by add_lvol_ha: a shareable default for namespaced
+    # lvols, 1 otherwise.
+    max_namespace_per_subsys = utils.get_value_or_default(cl_data, "max_namespace_per_subsys", None)
     ndcs = utils.get_value_or_default(cl_data, "ndcs", 0)
     npcs = utils.get_value_or_default(cl_data, "npcs", 0)
     fabric = utils.get_value_or_default(cl_data, "fabric", "tcp")
@@ -281,7 +283,7 @@ def connect_lvol(uuid):
     ret, err = lvol_controller.connect_lvol(uuid, host_nqn=host_nqn)
     if err:
         return utils.get_response_error(err, 400)
-    return utils.get_response([e.model_dump() for e in ret])
+    return utils.get_response([e.model_dump(by_alias=True) for e in ret])
 
 
 @bp.route('/lvol/create_snapshot', methods=['POST'])

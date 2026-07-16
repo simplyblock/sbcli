@@ -191,6 +191,10 @@ def get_distr_cluster_map(snodes, target_node, distr_name=""):
     local_node_index = 0
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(target_node.cluster_id)
+    # Index the target's remote-device records once: the per-device linear
+    # scan below made every map build O(D²) in total cluster devices — and a
+    # map is built per target per push (n pushes per recovering node).
+    target_remote_by_id = {rd.get_id(): rd for rd in target_node.remote_devices}
     for index, snode in enumerate(snodes):
         if snode.is_secondary_node:  # pass
             continue
@@ -207,11 +211,10 @@ def get_distr_cluster_map(snodes, target_node, distr_name=""):
                 name = dev.alceml_bdev
                 local_node_index = index
             else:
-                for dev2 in target_node.remote_devices:
-                    if dev2.get_id() == dev.get_id():
-                        name = dev2.remote_bdev
-                        dev_status = dev.status
-                        break
+                dev2 = target_remote_by_id.get(dev.get_id())
+                if dev2 is not None:
+                    name = dev2.remote_bdev
+                    dev_status = dev.status
             if not name:
                 name = f"remote_{dev.alceml_bdev}n1"
                 if dev_status == NVMeDevice.STATUS_ONLINE:

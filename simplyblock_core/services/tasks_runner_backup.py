@@ -119,11 +119,17 @@ def _run_backup(task):
         elif state == "Failed":
             _fail_backup(backup, task, "Backup transfer failed on data plane")
         elif state == "No process" and backup.status == Backup.STATUS_IN_PROGRESS:
-            # The data plane doesn't set transfer_status for S3 backups, so
-            # transfer_stat always returns "No process" while the backup runs.
-            # Keep polling — the backup completes on the data plane independently.
-            # When max_retry is reached the task runner marks it completed
-            # (the data plane returns "Failed" on actual failures).
+            # "No process" means no transfer is running for this bdev — the
+            # backup died (e.g. an SPDK crash wiped the in-flight transfer).
+            # Re-issue by resetting to PENDING, but COUNT it as a retry so the
+            # max_retry ceiling in process_task() can stop a backup that keeps
+            # failing. Without the increment this branch loops forever, and
+            # re-issuing an RPC that crashes the data plane just re-crashes it.
+            # NOTE: this treats "No process" as a failure. It relies on a
+            # healthy in-progress backup NOT sitting in "No process"; if the
+            # data plane ever reports "No process" for a running backup, this
+            # would fail it prematurely and completion needs another signal.
+            task.retry += 1
             backup.status = Backup.STATUS_PENDING
             backup.write_to_db()
             task.function_result = "No process, retrying backup start"
@@ -278,10 +284,8 @@ def _run_restore(task):
                 task.retry += 1
                 task.status = JobSchedule.STATUS_SUSPENDED
             task.write_to_db(db.kv_store)
-        elif state == "No process" and recovery_started:
-            # "No process" may mean the transfer hasn't registered yet or
-            # completed and was cleaned up.  Keep polling — the data plane
-            # returns "Failed" on actual failures.
+        elif state == "No process":
+            task.function_params["recovery_started"] = False
             task.status = JobSchedule.STATUS_SUSPENDED
             task.write_to_db(db.kv_store)
         else:
@@ -362,79 +366,107 @@ def _run_merge(task):
     logger.info(f"Merge completed: {old_backup_id} merged into {keep_backup_id}")
 
 
-logger.info("Starting backup tasks runner...")
-while True:
-    try:
-        db.get_clusters()
-    except Exception as e:
-        logger.error(f"Failed to get clusters: {e}")
-        time.sleep(3)
-        continue
-    clusters = db.get_clusters()
-    for cl in clusters:
-        if cl.status == Cluster.STATUS_IN_ACTIVATION:
-            continue
+def _terminate_task(task, reason):
+    """Terminate a backup/restore/merge task and finalize its resource.
 
-        tasks = db.get_job_tasks(cl.get_id(), reverse=False)
-        for task in tasks:
-            if task.status == JobSchedule.STATUS_DONE or task.canceled:
-                continue
-
-            # Re-fetch task for freshness
-            task = db.get_task_by_id(task.uuid)
-            if task.canceled:
-                task.function_result = "canceled"
-                task.status = JobSchedule.STATUS_DONE
-                task.write_to_db(db.kv_store)
-                continue
-
-            # Time-based timeout for backup/restore tasks instead of retry count.
-            # These tasks poll "No process" while the data plane works — retries
-            # are not failures, they are poll cycles.  Only time out after the
-            # configured limit (default 4 hours).
-            backup_timeout_sec = getattr(cl, 'backup_timeout_seconds', 0) or 14400
-            elapsed = int(time.time()) - task.date if task.date else 0
-            timed_out = elapsed > backup_timeout_sec
-
-            if timed_out:
-                task.function_result = f"timeout after {elapsed}s"
-                task.status = JobSchedule.STATUS_DONE
-                task.write_to_db(db.kv_store)
-                if task.function_name == JobSchedule.FN_BACKUP:
-                    bid = task.function_params.get("backup_id")
-                    if bid:
-                        try:
-                            b = db.get_backup_by_id(bid)
-                            if b.status in (Backup.STATUS_PENDING, Backup.STATUS_IN_PROGRESS):
-                                _fail_backup(b, task, f"timeout after {elapsed}s")
-                        except KeyError:
-                            pass
-                elif task.function_name == JobSchedule.FN_BACKUP_MERGE:
-                    old_bid = task.function_params.get("old_backup_id")
-                    if old_bid:
-                        try:
-                            ob = db.get_backup_by_id(old_bid)
-                            if ob.status == Backup.STATUS_MERGING:
-                                ob.status = Backup.STATUS_COMPLETED
-                                ob.write_to_db()
-                        except KeyError:
-                            pass
-                continue
-
+    Shared by the time-based timeout and the max_retry ceiling so both stop
+    the task the same way instead of leaving it to loop.
+    """
+    if task.function_name == JobSchedule.FN_BACKUP:
+        bid = task.function_params.get("backup_id")
+        if bid:
             try:
-                if task.function_name == JobSchedule.FN_BACKUP:
-                    _run_backup(task)
-                elif task.function_name == JobSchedule.FN_BACKUP_RESTORE:
-                    _run_restore(task)
-                elif task.function_name == JobSchedule.FN_BACKUP_MERGE:
-                    _run_merge(task)
-            except Exception as e:
-                logger.error(f"Error running backup task {task.uuid}: {e}")
-                # Increment retry so the task eventually reaches max_retry
-                # instead of looping forever on non-RPCException errors
-                task.retry += 1
-                task.function_result = f"Unhandled error: {e}"
-                task.status = JobSchedule.STATUS_SUSPENDED
-                task.write_to_db(db.kv_store)
+                b = db.get_backup_by_id(bid)
+                if b.status in (Backup.STATUS_PENDING, Backup.STATUS_IN_PROGRESS):
+                    _fail_backup(b, task, reason)
+                    return
+            except KeyError:
+                pass
+    elif task.function_name == JobSchedule.FN_BACKUP_RESTORE:
+        _set_lvol_restore_failed(task, reason)
+    elif task.function_name == JobSchedule.FN_BACKUP_MERGE:
+        old_bid = task.function_params.get("old_backup_id")
+        if old_bid:
+            try:
+                ob = db.get_backup_by_id(old_bid)
+                if ob.status == Backup.STATUS_MERGING:
+                    # Merge did not finish; leave the old backup intact.
+                    ob.status = Backup.STATUS_COMPLETED
+                    ob.write_to_db()
+            except KeyError:
+                pass
 
-    time.sleep(constants.TASK_EXEC_INTERVAL_SEC)
+    task.function_result = reason
+    task.status = JobSchedule.STATUS_DONE
+    task.write_to_db(db.kv_store)
+
+
+def process_task(task, cl):
+    """Advance a single backup task by one step, or terminate it.
+
+    Terminates on cancellation, on the time-based timeout, or once the
+    max_retry ceiling is reached — the last is what stops a backup that keeps
+    crashing the data plane from re-issuing its RPC forever.
+    """
+    if task.canceled:
+        task.function_result = "canceled"
+        task.status = JobSchedule.STATUS_DONE
+        task.write_to_db(db.kv_store)
+        return
+
+    # Time-based backstop for a task that is stuck but not erroring (default 4h).
+    backup_timeout_sec = getattr(cl, 'backup_timeout_seconds', 0) or 14400
+    elapsed = int(time.time()) - task.date if task.date else 0
+    if elapsed > backup_timeout_sec:
+        _terminate_task(task, f"timeout after {elapsed}s")
+        return
+
+    # Retry ceiling: every other task runner enforces this. Without it a task
+    # whose step keeps failing (e.g. an RPC that crashes SPDK) loops until the
+    # timeout, re-triggering the failure each cycle. max_retry <= 0 means the
+    # task is intentionally unbounded and only the timeout applies.
+    if task.max_retry > 0 and task.retry >= task.max_retry:
+        _terminate_task(task, f"max retry reached ({task.retry}/{task.max_retry})")
+        return
+
+    try:
+        if task.function_name == JobSchedule.FN_BACKUP:
+            _run_backup(task)
+        elif task.function_name == JobSchedule.FN_BACKUP_RESTORE:
+            _run_restore(task)
+        elif task.function_name == JobSchedule.FN_BACKUP_MERGE:
+            _run_merge(task)
+    except Exception as e:
+        logger.error(f"Error running backup task {task.uuid}: {e}")
+        # Increment retry so the task eventually reaches max_retry
+        # instead of looping forever on non-RPCException errors
+        task.retry += 1
+        task.function_result = f"Unhandled error: {e}"
+        task.status = JobSchedule.STATUS_SUSPENDED
+        task.write_to_db(db.kv_store)
+
+
+if __name__ == "__main__":
+    logger.info("Starting backup tasks runner...")
+    while True:
+        try:
+            db.get_clusters()
+        except Exception as e:
+            logger.error(f"Failed to get clusters: {e}")
+            time.sleep(3)
+            continue
+        clusters = db.get_clusters()
+        for cl in clusters:
+            if cl.status == Cluster.STATUS_IN_ACTIVATION:
+                continue
+
+            tasks = db.get_job_tasks(cl.get_id(), reverse=False)
+            for task in tasks:
+                if task.status == JobSchedule.STATUS_DONE or task.canceled:
+                    continue
+
+                # Re-fetch task for freshness
+                task = db.get_task_by_id(task.uuid)
+                process_task(task, cl)
+
+        time.sleep(constants.TASK_EXEC_INTERVAL_SEC)

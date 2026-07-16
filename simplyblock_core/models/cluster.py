@@ -1,9 +1,10 @@
 # coding=utf-8
-
+import os.path
 from typing import List, Optional
 
 from pydantic import SecretStr
 
+from simplyblock_core import constants
 from simplyblock_core.models.base_model import BaseModel
 
 
@@ -46,6 +47,15 @@ class Cluster(BaseModel):
     # storage_node_monitor watchdog to detect and revert a wedged activation
     # (incident 2026-06-25). Empty string means "not currently activating".
     in_activation_since: str = ""
+    # ISO-8601 UTC timestamp refreshed every ~60s by the heartbeat thread that
+    # cluster_activate runs for its whole duration. Lets the watchdog tell a
+    # LIVE long activation (heartbeat fresh — leave it alone, up to the
+    # absolute budget) from a DEAD one (driver process/container gone,
+    # heartbeat stale — revert after minutes instead of the node-scaled
+    # budget, which is 42 min on a 32-node cluster; incident 2026-07-13).
+    # Empty on records from before this field existed -> watchdog falls back
+    # to the absolute budget alone.
+    activation_heartbeat: str = ""
     cap_warn: int = 80
     cli_pass: SecretStr = SecretStr("")
     cluster_max_devices: int = 0
@@ -155,6 +165,11 @@ class Cluster(BaseModel):
     # ``simplyblock_core.controllers.cluster_expansion.planner``. See the feature plan
     # ``single_node_expansion_plan.md`` for the schema.
     expand_state: dict = {}
+    backup_local_path: str = constants.KVD_DB_BACKUP_PATH
+    backup_frequency_seconds: int = 3*60*60
+    backup_s3_bucket: str = ""
+    backup_s3_region: str = ""
+    backup_s3_cred: str = ""
 
     def get_status_code(self):
         if self.status in self.STATUS_CODE_MAP:
@@ -171,6 +186,15 @@ class Cluster(BaseModel):
             return True
         return False
 
+    def get_backup_path(self, path=""):
+        if self.backup_s3_bucket and self.backup_s3_cred:
+            backup_path = f"blobstore://{self.backup_s3_cred}@s3.{self.backup_s3_region}.amazonaws.com/{path}?bucket={self.backup_s3_bucket}" \
+                          + f"&region={self.backup_s3_region}&sc=0"
+        elif self.backup_local_path:
+            backup_path = os.path.join(self.backup_local_path, path)
+        else:
+            backup_path = os.path.join(constants.KVD_DB_BACKUP_PATH, self.uuid, path)
+        return backup_path
 
 
 class ClusterAddNodeLock(BaseModel):

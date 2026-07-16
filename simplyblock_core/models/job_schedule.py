@@ -24,6 +24,9 @@ class JobSchedule(BaseModel):
     FN_JC_COMP_RESUME = "jc_comp_resume"
     FN_SNAPSHOT_REPLICATION = "snapshot_replication"
     FN_LVOL_SYNC_DEL = "lvol_sync_del"
+    # Deferred per-node lvol operation ("register" / "resize") — DB-backed
+    # replacement for the in-memory restart drain queue (incident 2026-07-10).
+    FN_LVOL_SYNC_OP = "lvol_sync_op"
     FN_LVOL_MIG = "lvol_migration"
     FN_BACKUP = "s3_backup"
     FN_BACKUP_RESTORE = "s3_backup_restore"
@@ -33,6 +36,7 @@ class JobSchedule(BaseModel):
     # lvol delta to the target, flip ANA so the client fails over. Used for
     # migration commit and fail-back (fresh or recovered source).
     FN_REPLICATION_FINAL = "replication_final"
+    FN_FDB_BACKUP = "fdb_backup"
 
     canceled: bool = False
     cluster_id: str = ""
