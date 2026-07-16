@@ -2385,9 +2385,32 @@ class K8sSbcliUtils:
         # Pool does not exist — create it
         cid = cluster_id or self.cluster_id
         cluster_details = self.get_cluster_details(cluster_id=cid)
-        cluster_name = cluster_details.get("name") or cluster_details.get("Name", cid)
+        # sbcli cluster get returns "cluster_name" (not "name")
+        cluster_name = (
+            cluster_details.get("cluster_name")
+            or cluster_details.get("name")
+            or cluster_details.get("Name", cid)
+        )
 
+        # Look up the StorageCluster CRD name from K8s to ensure
+        # the Pool CRD references the correct CRD resource name.
         ns = self.k8s.namespace
+        sc_out, _ = self.k8s._exec_kubectl(
+            f"kubectl get storageclusters -n {ns} --no-headers "
+            f"-o custom-columns=NAME:.metadata.name 2>/dev/null || true"
+        )
+        sc_names = [s.strip() for s in sc_out.strip().splitlines() if s.strip()]
+        if sc_names:
+            cluster_name = sc_names[0]
+            self.logger.info(
+                f"[pool] Using StorageCluster CRD name '{cluster_name}' "
+                f"from K8s (found {len(sc_names)} CRD(s))"
+            )
+        else:
+            self.logger.warning(
+                f"[pool] No StorageCluster CRDs found in namespace {ns}; "
+                f"falling back to cluster_name='{cluster_name}' from sbcli"
+            )
         sc_params = ""
         if encryption:
             sc_params = (

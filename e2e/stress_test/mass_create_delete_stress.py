@@ -2239,13 +2239,15 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
             sleep_n_sec(30)
 
         if remaining:
-            self.logger.warning(
-                f"[{label}] Timeout: {len(remaining)} items still exist "
-                f"after {timeout}s. Proceeding anyway."
-            )
             self._metrics[f"{label}_delete_timeout_remaining"] = len(
                 remaining
             )
+            msg = (
+                f"[{label}] Timeout: {len(remaining)}/{len(names)} items "
+                f"still exist after {timeout}s"
+            )
+            self.logger.error(msg)
+            raise RuntimeError(msg)
         else:
             self.logger.info(f"[{label}] All items deleted successfully")
 
@@ -3373,27 +3375,23 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
                 )
                 return
             if stall_elapsed >= stall_timeout:
-                self._soft_failures.append(
-                    f"[{label}] {remaining} PVCs still exist after "
-                    f"delete — finalizers may be stuck"
-                )
-                self.logger.warning(
+                msg = (
                     f"[{label}] Delete verification stalled: "
-                    f"{remaining} PVCs stuck for {round(stall_elapsed)}s"
+                    f"{remaining} PVCs stuck for {round(stall_elapsed)}s "
+                    f"— finalizers may be stuck"
                 )
-                return
+                self.logger.error(msg)
+                raise RuntimeError(msg)
             time.sleep(poll_interval)
 
         remaining = self._count_pvcs_by_prefix(prefix)
         if remaining > 0:
-            self._soft_failures.append(
-                f"[{label}] {remaining} PVCs still exist after "
-                f"{timeout}s delete timeout"
-            )
-            self.logger.warning(
+            msg = (
                 f"[{label}] Delete verification timed out: "
                 f"{remaining} PVCs remaining after {timeout}s"
             )
+            self.logger.error(msg)
+            raise RuntimeError(msg)
 
     # ── Phase 5: Create clone PVCs from VolumeSnapshots ───────────────────
 
