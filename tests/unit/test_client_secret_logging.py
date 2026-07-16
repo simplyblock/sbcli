@@ -58,6 +58,23 @@ def test_rpc_client_request_body_carries_unwrapped_param(rpc_client, caplog):
     assert "ctor-secret" not in _captured_logs_text(caplog)
 
 
+def test_rpc_client_keyring_add_key_wire_unwraps_and_logs_mask(rpc_client, caplog):
+    rpc_client._fake_session.post.return_value = _make_json_response({
+        "jsonrpc": "2.0", "id": 1, "result": True,
+    })
+
+    with caplog.at_level(logging.DEBUG):
+        rpc_client.keyring_add_key("key_host_1", SecretStr("DHHC-1:00:S0VZVkFMVUU=:"))
+
+    posted_body = rpc_client._fake_session.post.call_args.kwargs["data"]
+    parsed = json.loads(posted_body)
+    assert parsed["method"] == "keyring_add_key"
+    assert parsed["params"] == {"name": "key_host_1", "key": "DHHC-1:00:S0VZVkFMVUU=:"}
+
+    assert "DHHC-1:00:S0VZVkFMVUU=:" not in _captured_logs_text(caplog)
+    assert "ctor-secret" not in _captured_logs_text(caplog)
+
+
 def test_rpc_client_response_body_hidden_by_default(rpc_client, caplog):
     rpc_client._fake_session.post.return_value = _make_json_response({
         "jsonrpc": "2.0", "id": 1, "result": {"sensitive": "RESPVALUE"},

@@ -1,6 +1,10 @@
 # coding=utf-8
+from pydantic import SecretStr
+
 from simplyblock_core import constants, utils
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.rpc_client import RPCException
+from simplyblock_core.snode_client import SNodeClientException
 
 logger = utils.get_logger(__name__)
 
@@ -22,8 +26,55 @@ def _get_dhchap_group(cluster, pool=None):
     return "null"
 
 
+def _register_key_on_node(snode, rpc_client, key_name, key_value):
+    """Register a single key in SPDK's keyring on a storage node.
+
+    Prefers the spdk-proxy's keyring_add_key interceptor, which delivers the
+    key material inline and keeps it on a memory-backed volume. A proxy that
+    predates interception support forwards keyring_add_key to SPDK, which
+    rejects the unknown method (-32601); we then fall back to the deprecated
+    SNodeAPI write_key_file + keyring_file_add_key path (key file on persistent
+    host storage) so nodes not yet restarted after an upgrade keep working.
+
+    "File exists" (code -17) means the key is already registered, which is
+    fine (e.g. same host on another volume) and handled via allow_existing.
+
+    Returns True if the key is registered (or already was), False on failure.
+    """
+    try:
+        rpc_client.keyring_add_key(key_name, key_value, allow_existing=True)
+        return True
+    except RPCException as e:
+        if e.code != -32601:  # anything but "Method not found" is a real failure
+            logger.error("Failed to register key %s in SPDK keyring on node %s: %s",
+                         key_name, snode.get_id(), e.message)
+            return False
+        logger.warning("Node %s uses a spdk-proxy without keyring_add_key support; "
+                       "falling back to the deprecated on-disk key path — restart "
+                       "the storage node to enable in-memory key delivery",
+                       snode.get_id())
+
+    try:
+        key_path, error = snode.client().write_key_file(key_name, key_value)
+    except SNodeClientException as e:
+        logger.error("Failed to write key file %s on node %s: %s",
+                     key_name, snode.get_id(), e.message)
+        return False
+    if error:
+        logger.error("Failed to write key file %s on node %s: %s",
+                     key_name, snode.get_id(), error)
+        return False
+    try:
+        rpc_client.keyring_file_add_key(key_name, key_path, allow_existing=True)
+        return True
+    except RPCException as e:
+        logger.error("Failed to register key %s in SPDK keyring on node %s: %s",
+                     key_name, snode.get_id(), e.message)
+        return False
+
+
 def _register_pool_dhchap_keys_on_node(pool, snode, rpc_client):
-    """Write pool-level DHCHAP key files to a storage node and register in SPDK keyring.
+    """Register pool-level DHCHAP keys on a storage node's SPDK keyring.
 
     All LVols in a DHCHAP pool share one key pair stored on the pool.
     Key names are pool-scoped so a single registration serves all LVols.
@@ -31,46 +82,29 @@ def _register_pool_dhchap_keys_on_node(pool, snode, rpc_client):
     Returns a dict with 'dhchap_key' and 'dhchap_ctrlr_key' keyring names,
     or an empty dict on failure.
     """
-    snode_api = snode.client()
     safe_pool = pool.get_id().replace("-", "_")
     key_names = {}
 
     for key_type, key_value in (
-        ("dhchap_key", pool.dhchap_key.get_secret_value()),
-        ("dhchap_ctrlr_key", pool.dhchap_ctrlr_key.get_secret_value()),
+        ("dhchap_key", pool.dhchap_key),
+        ("dhchap_ctrlr_key", pool.dhchap_ctrlr_key),
     ):
-        if not key_value:
+        if not key_value or not key_value.get_secret_value():
             continue
         key_name = f"pool_{safe_pool}_{key_type}"
-        result, error = snode_api.write_key_file(key_name, key_value)
-        if error:
-            logger.error("Failed to write pool key %s on node %s: %s",
-                         key_name, snode.get_id(), error)
-            continue
-        key_path = result
-        ret, err = rpc_client._request2("keyring_file_add_key",
-                                        {"name": key_name, "path": key_path})
-        if not ret and err:
-            if err.get("code") == -17:
-                logger.info("Pool key %s already in SPDK keyring on node %s, reusing",
-                            key_name, snode.get_id())
-            else:
-                logger.error("Failed to register pool key %s in SPDK keyring on node %s: %s",
-                             key_name, snode.get_id(), err.get("message", err))
-                continue
-        key_names[key_type] = key_name
+        if _register_key_on_node(snode, rpc_client, key_name, key_value):
+            key_names[key_type] = key_name
 
     return key_names
 
 
 def _register_dhchap_keys_on_node(snode, host_nqn, host_entry, rpc_client):
-    """Write DHCHAP key files to a storage node and register them in SPDK's keyring.
+    """Register per-host DHCHAP/PSK keys on a storage node's SPDK keyring.
 
     Returns a dict mapping key type ('dhchap_key', 'dhchap_ctrlr_key', 'psk')
     to the SPDK keyring name for use in subsystem_add_host.
     """
-    snode_api = snode.client()
-    # Sanitize host NQN for use as filename
+    # Sanitize host NQN for use as key name
     safe_host = host_nqn.replace(":", "_").replace(".", "_")
     key_names = {}
 
@@ -79,24 +113,8 @@ def _register_dhchap_keys_on_node(snode, host_nqn, host_entry, rpc_client):
         if not key_value:
             continue
         key_name = f"{key_type}_{safe_host}"
-        result, error = snode_api.write_key_file(key_name, key_value)
-        if error:
-            logger.error("Failed to write key file %s on node %s: %s", key_name, snode.get_id(), error)
-            continue
-        key_path = result
-        # Register in SPDK keyring — "File exists" (code -17) means the key
-        # is already registered, which is fine (e.g. same host on another volume).
-        ret, err = rpc_client._request2("keyring_file_add_key",
-                                        {"name": key_name, "path": key_path})
-        if not ret and err:
-            if err.get("code") == -17:
-                logger.info("Key %s already in SPDK keyring on node %s, reusing",
-                            key_name, snode.get_id())
-            else:
-                logger.error("Failed to register key %s in SPDK keyring on node %s: %s",
-                             key_name, snode.get_id(), err.get("message", err))
-                continue
-        key_names[key_type] = key_name
+        if _register_key_on_node(snode, rpc_client, key_name, SecretStr(key_value)):
+            key_names[key_type] = key_name
 
     return key_names
 
