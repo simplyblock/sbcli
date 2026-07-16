@@ -375,6 +375,19 @@ def sum_records(records):
         return total
 
 
+def lvol_tgt_bdev_name(lvol_bdev: str) -> str:
+    """Return the migration-target bdev short name for a writable lvol.
+
+    Idempotent: strips any existing migration suffix before adding one, so
+    retries or back-to-back migrations (where lvol_bdev already ends in the
+    suffix from a previous run) never accumulate it (e.g. 'LVOL_Xmm').
+    """
+    suffix = constants.LVOL_MIG_BDEV_SUFFIX
+    if lvol_bdev.endswith(suffix):
+        lvol_bdev = lvol_bdev[:-len(suffix)]
+    return lvol_bdev + suffix
+
+
 def _used_bdev_name_numbers(db_controller, all_lvols=None, all_snapshots=None):
     used = set()
     if not all_lvols:
