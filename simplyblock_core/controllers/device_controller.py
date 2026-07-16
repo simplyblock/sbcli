@@ -1374,5 +1374,5 @@ def get_device_health_info(device_id):
         return False
 
     rpc_client = snode.rpc_client()
-    ret = rpc_client.bdev_nvme_get_controller_health_info(device.nvme_bdev)
+    ret = rpc_client.bdev_nvme_get_controller_health_info(device.nvme_controller)
     return json.dumps(ret, indent=2)
