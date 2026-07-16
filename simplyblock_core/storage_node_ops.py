@@ -206,7 +206,15 @@ def _failover_primary_ana(primary_node):
     if primary_node.secondary_node_id:
         first_sec = db_ctrl.get_storage_node_by_id(primary_node.secondary_node_id)
 
+    # Namespaces share subsystems (one NQN hosts many lvols) and the listener
+    # RPC is per-subsystem — repeating it per lvol multiplies the ANA calls
+    # (and, for stale records whose subsystem is gone, the error spam) by the
+    # namespace count. One call per (nqn, lvs) covers every lvol in it.
+    seen_subsystems = set()
     for lvol in lvol_list:
+        if (lvol.nqn, lvol.lvs_name) in seen_subsystems:
+            continue
+        seen_subsystems.add((lvol.nqn, lvol.lvs_name))
         if first_sec and first_sec.status == StorageNode.STATUS_ONLINE:
             _set_lvol_ana_on_node(lvol, first_sec, "optimized")
 
@@ -224,7 +232,12 @@ def _failback_primary_ana(primary_node):
     if primary_node.secondary_node_id:
         first_sec = db_ctrl.get_storage_node_by_id(primary_node.secondary_node_id)
 
+    # Same per-subsystem dedupe as _failover_primary_ana.
+    seen_subsystems = set()
     for lvol in lvol_list:
+        if (lvol.nqn, lvol.lvs_name) in seen_subsystems:
+            continue
+        seen_subsystems.add((lvol.nqn, lvol.lvs_name))
         if first_sec and first_sec.status == StorageNode.STATUS_ONLINE:
             _set_lvol_ana_on_node(lvol, first_sec, "non_optimized")
 
@@ -7350,6 +7363,21 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
 def add_lvol_thread(lvol, snode, lvol_ana_state="optimized"):
     db_controller = DBController()
 
+    # Refuse to (re)register an lvol that is being torn down: the delete
+    # flow removes the namespace BEFORE the async blob delete, so an add_ns
+    # here re-exposes a deleted blob to clients (incident 2026-07-14: reads
+    # on the resurrected namespace returned INTERNAL DEVICE ERROR and
+    # flapped the whole cluster). Callers hold stale objects — check fresh.
+    try:
+        if db_controller.get_lvol_by_id(lvol.get_id()).status == LVol.STATUS_IN_DELETION:
+            msg = f"LVol {lvol.get_id()} is in_deletion, skipping registration"
+            logger.info(msg)
+            return False, msg
+    except KeyError:
+        msg = f"LVol {lvol.get_id()} no longer exists, skipping registration"
+        logger.info(msg)
+        return False, msg
+
     rpc_client = snode.rpc_client(timeout=10, retry=2)
 
     pool = db_controller.get_pool_by_id(lvol.pool_uuid)
@@ -7388,11 +7416,36 @@ def add_lvol_thread(lvol, snode, lvol_ana_state="optimized"):
         rpc_client.listeners_create(
             lvol.nqn, tr, iface.ip4_address, listener_port, ana_state=lvol_ana_state)
 
-    lvol_obj = db_controller.get_lvol_by_id(lvol.get_id())
-    lvol_obj.status = LVol.STATUS_ONLINE
-    lvol_obj.io_error = False
-    lvol_obj.health_check = True
-    lvol_obj.write_to_db()
+    # Guarded CAS instead of read-modify-write: a delete can land between the
+    # entry guard and this point, and an unconditional full-object write both
+    # clobbers concurrent field updates and resurrects an in_deletion record
+    # to online (the 2026-07-14 leak: 1393 ghost "online" lvols post-run).
+    def _set_online(x):
+        if x.status == LVol.STATUS_IN_DELETION:
+            return False
+        x.status = LVol.STATUS_ONLINE
+        x.io_error = False
+        x.health_check = True
+        return True
+
+    try:
+        lvol_obj = db_controller.get_lvol_by_id(lvol.get_id())
+    except KeyError:
+        msg = f"LVol {lvol.get_id()} deleted during registration"
+        logger.info(msg)
+        return False, msg
+    updated = db_controller.atomic_update(lvol_obj, _set_online)
+    if updated is None or updated.status == LVol.STATUS_IN_DELETION:
+        # The delete flow's remove_ns ran before (or while) we re-registered —
+        # undo our add so a deleted blob is never left exposed to clients.
+        try:
+            rpc_client.nvmf_subsystem_remove_ns(lvol.nqn, lvol.ns_id)
+        except Exception as e:
+            logger.warning("Failed to undo ns registration for deleted lvol %s: %s",
+                           lvol.get_id(), e)
+        msg = f"LVol {lvol.get_id()} entered deletion during registration"
+        logger.info(msg)
+        return False, msg
     # set QOS
     if lvol.rw_ios_per_sec or lvol.rw_mbytes_per_sec or lvol.r_mbytes_per_sec or lvol.w_mbytes_per_sec:
         lvol_controller.set_lvol(lvol.uuid, lvol.rw_ios_per_sec, lvol.rw_mbytes_per_sec,
@@ -7421,6 +7474,19 @@ def repair_lvol_registration_on_non_leader(lvol, sec_node, secondary_index):
     if get_restart_phase(sec_node.get_id(), lvol.lvs_name):
         return False, (f"LVS {lvol.lvs_name} on {sec_node.get_id()} is owned "
                        f"by a restart/activation/expansion")
+
+    # Repair only volumes that are actually supposed to be registered. Both
+    # callers hand in lvol objects that can be minutes stale (the monitor's
+    # cycle-start snapshot, a queued sync task) — a "missing" registration on
+    # an in_deletion lvol is the delete flow's own remove_ns, and repairing
+    # it re-exposes an async-deleted blob to clients (incident 2026-07-14).
+    try:
+        lvol = DBController().get_lvol_by_id(lvol.get_id())
+    except KeyError:
+        return False, f"LVol {lvol.get_id()} no longer exists"
+    if lvol.status not in (LVol.STATUS_ONLINE, LVol.STATUS_OFFLINE):
+        return False, (f"LVol {lvol.get_id()} status is {lvol.status}, "
+                       f"not repairing registration")
 
     rpc_client = sec_node.rpc_client(timeout=10, retry=2)
     if rpc_client.subsystem_get(lvol.nqn) is None:

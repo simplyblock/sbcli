@@ -394,6 +394,21 @@ def check_node(cluster, snode, all_lvols):
 
             continue
 
+        # `all_lvols` is a cycle-start snapshot and a full pass takes minutes
+        # at scale — a mass delete can flip a volume to in_deletion long
+        # before the loop reaches it. Acting on the stale status here made
+        # the monitor "repair" (re-add) namespaces the delete flow had just
+        # removed, re-exposing an async-deleted blob to clients and
+        # resurrecting the DB record (incident mass_create_delete_k8s
+        # 2026-07-14: 2123 leaked lvols + all-night restart storm). Re-read
+        # before checking; states owned by other flows wait for the next
+        # cycle's snapshot to route them to their own branch above.
+        try:
+            lvol = db.get_lvol_by_id(lvol.get_id())
+        except KeyError:
+            continue
+        if lvol.status not in (LVol.STATUS_ONLINE, LVol.STATUS_OFFLINE):
+            continue
 
         if snode.lvstore_status != "ready":
             continue
