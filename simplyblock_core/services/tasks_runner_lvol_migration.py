@@ -2538,7 +2538,7 @@ def _fail_task(task, migration_or_msg, reason=None):
 # Runner main loop
 # ---------------------------------------------------------------------------
 
-if __name__ == "__main__":
+def main():
     logger.info("Starting LVol Migration task runner...")
 
     while True:
@@ -2563,3 +2563,7 @@ if __name__ == "__main__":
                     task_runner(task)
 
         time.sleep(3)
+
+
+if __name__ == "__main__":
+    main()

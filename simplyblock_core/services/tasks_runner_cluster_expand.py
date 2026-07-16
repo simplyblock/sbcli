@@ -22,7 +22,7 @@ logger = utils.get_logger(__name__)
 db = db_controller.DBController()
 
 
-def process_task(task):
+def task_runner(task):
     if task.canceled:
         task.function_result = "canceled"
         task.status = JobSchedule.STATUS_DONE
@@ -116,7 +116,7 @@ def main():
                     delay_seconds = constants.TASK_EXEC_INTERVAL_SEC
                     if task.function_name != JobSchedule.FN_CLUSTER_EXPAND:
                         continue
-                    # Per-task isolation: a crash in process_task must not
+                    # Per-task isolation: a crash in task_runner must not
                     # escape to the outer loop and kill the runner.
                     try:
                         while task.status != JobSchedule.STATUS_DONE:
@@ -128,7 +128,7 @@ def main():
                                     f"Cluster-expand task {task.uuid} owned by "
                                     f"another runner host; skipping")
                                 break
-                            res = process_task(task)
+                            res = task_runner(task)
                             if res:
                                 if task.status == JobSchedule.STATUS_DONE:
                                     break

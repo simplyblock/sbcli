@@ -1,7 +1,7 @@
 # coding=utf-8
 """
 test_port_allow_recovery.py — tests for
-``tasks_runner_port_allow.exec_port_allow_task`` (network-outage recovery).
+``tasks_runner_port_allow.task_runner`` (network-outage recovery).
 
 Reworked 2026-07-07 after the 2026-07-06 failback incident: the management
 plane prepares redirection and then steps away. Invariants covered:
@@ -116,7 +116,7 @@ def _make_task(node_id, port_number):
 
 
 class _BasePortAllowTest(unittest.TestCase):
-    """Shared plumbing: patches every boundary so exec_port_allow_task
+    """Shared plumbing: patches every boundary so task_runner
     runs start-to-finish against in-memory mocks and records every
     ordered call into ``self.calls``."""
 
@@ -321,8 +321,8 @@ class TestDeviceRefreshBeforeUnblock(_BasePortAllowTest):
         self.sec.nvme_devices = [self.sec_dev]
 
     def _run(self):
-        from simplyblock_core.services.tasks_runner_port_allow import exec_port_allow_task
-        exec_port_allow_task(self.task)
+        from simplyblock_core.services.tasks_runner_port_allow import task_runner
+        task_runner(self.task)
 
     def test_full_cluster_map_push_is_gone(self):
         self._run()
@@ -382,13 +382,13 @@ class TestDeviceRefreshBeforeUnblock(_BasePortAllowTest):
                         "every device event lands before the port opens")
 
     def test_readmit_refused_suspends_task(self):
-        from simplyblock_core.services.tasks_runner_port_allow import exec_port_allow_task
+        from simplyblock_core.services.tasks_runner_port_allow import task_runner
         with patch(
             "simplyblock_core.services.tasks_runner_port_allow."
             "device_controller.device_set_online",
             return_value=False,
         ):
-            exec_port_allow_task(self.task)
+            task_runner(self.task)
         self.assertEqual(self.task.status, JobSchedule.STATUS_SUSPENDED)
         self.assertEqual(self._node_allows(), [],
                          "no firewall allow when the pre-unblock re-admit "
@@ -398,13 +398,13 @@ class TestDeviceRefreshBeforeUnblock(_BasePortAllowTest):
                          "no device events are sent when the re-admit failed")
 
     def test_broadcast_failure_suspends_task(self):
-        from simplyblock_core.services.tasks_runner_port_allow import exec_port_allow_task
+        from simplyblock_core.services.tasks_runner_port_allow import task_runner
         with patch(
             "simplyblock_core.services.tasks_runner_port_allow."
             "distr_controller.send_dev_status_event",
             side_effect=Exception("distrib send failed"),
         ):
-            exec_port_allow_task(self.task)
+            task_runner(self.task)
         self.assertEqual(self.task.status, JobSchedule.STATUS_SUSPENDED)
         self.assertEqual(self._node_allows(), [],
                          "no firewall allow when the device-status refresh "
@@ -428,13 +428,13 @@ class TestDataNicGate(_BasePortAllowTest):
         self.node.data_nics = [nic]
 
     def _run_with_data_ping(self, result):
-        from simplyblock_core.services.tasks_runner_port_allow import exec_port_allow_task
+        from simplyblock_core.services.tasks_runner_port_allow import task_runner
         with patch(
             "simplyblock_core.services.tasks_runner_port_allow."
             "health_controller._check_ping_from_node",
             return_value=result,
         ):
-            exec_port_allow_task(self.task)
+            task_runner(self.task)
 
     def _node_allows(self):
         return [
@@ -472,8 +472,8 @@ class TestLeadershipFailback(_BasePortAllowTest):
     a port, never drains in a blocked window."""
 
     def _run(self):
-        from simplyblock_core.services.tasks_runner_port_allow import exec_port_allow_task
-        exec_port_allow_task(self.task)
+        from simplyblock_core.services.tasks_runner_port_allow import task_runner
+        task_runner(self.task)
 
     def test_acting_leader_demoted_exactly_once_and_plain(self):
         self._run()
@@ -696,8 +696,8 @@ class TestLeadershipFailbackTertiaryActingLeader(_BasePortAllowTest):
         return [self.node, self.sec, self.tert]
 
     def _run(self):
-        from simplyblock_core.services.tasks_runner_port_allow import exec_port_allow_task
-        exec_port_allow_task(self.task)
+        from simplyblock_core.services.tasks_runner_port_allow import task_runner
+        task_runner(self.task)
 
     def test_demote_lands_on_tertiary_only_and_is_plain(self):
         self._run()
@@ -759,8 +759,8 @@ class TestOnlyNodePortAllowed(_BasePortAllowTest):
     port-block windows and follower fencing were removed on 2026-07-07."""
 
     def test_exactly_one_allow_on_recovering_node_and_it_is_last(self):
-        from simplyblock_core.services.tasks_runner_port_allow import exec_port_allow_task
-        exec_port_allow_task(self.task)
+        from simplyblock_core.services.tasks_runner_port_allow import task_runner
+        task_runner(self.task)
 
         node_allows = self._node_allows()
         self.assertEqual(
@@ -775,8 +775,8 @@ class TestOnlyNodePortAllowed(_BasePortAllowTest):
         self.assertEqual(len(fw_calls), 1)
 
     def test_no_port_is_ever_blocked(self):
-        from simplyblock_core.services.tasks_runner_port_allow import exec_port_allow_task
-        exec_port_allow_task(self.task)
+        from simplyblock_core.services.tasks_runner_port_allow import task_runner
+        task_runner(self.task)
 
         blocks = [c for c in self.calls
                   if c[0] == "firewall_set_port" and c[3] == "block"]
@@ -811,7 +811,7 @@ class TestSourceShape(unittest.TestCase):
 
     def test_no_get_lvs_leader_helper(self):
         # The old pre-2026-05-02 helper stays gone; leader detection lives
-        # inline in exec_port_allow_task with explicit failure handling.
+        # inline in task_runner with explicit failure handling.
         self.assertNotIn("def _get_lvs_leader", self.src)
 
     def test_failback_present_and_ordered(self):
@@ -963,7 +963,7 @@ class TestStrictHublvolGate(_StrictGateBase):
         """Happy path: ``_check_sec_node_hublvol`` returns True AND the
         strict ``_hublvol_verified_open`` returns True on the first
         attempt → port allowed."""
-        from simplyblock_core.services.tasks_runner_port_allow import exec_port_allow_task
+        from simplyblock_core.services.tasks_runner_port_allow import task_runner
 
         with patch(
             "simplyblock_core.services.tasks_runner_port_allow._hublvol_verified_open",
@@ -971,7 +971,7 @@ class TestStrictHublvolGate(_StrictGateBase):
         ) as verify_mock, patch(
             "simplyblock_core.services.tasks_runner_port_allow._reconnect_peer_hublvol_once",
         ) as reconnect_mock:
-            exec_port_allow_task(self.task)
+            task_runner(self.task)
 
         verify_mock.assert_called()  # strict check was applied
         reconnect_mock.assert_not_called()  # no forced reconnect needed
@@ -983,7 +983,7 @@ class TestStrictHublvolGate(_StrictGateBase):
     def test_strict_verify_failing_then_succeeding_via_reconnect_unblocks(self):
         """Strict check fails first, forced reconnect runs, second strict
         check succeeds → port allowed within the retry budget."""
-        from simplyblock_core.services.tasks_runner_port_allow import exec_port_allow_task
+        from simplyblock_core.services.tasks_runner_port_allow import task_runner
 
         # _hublvol_verified_open is consulted twice per attempt (pre + post-
         # reconnect); make it False, False, True, True so the first attempt
@@ -996,7 +996,7 @@ class TestStrictHublvolGate(_StrictGateBase):
             "simplyblock_core.services.tasks_runner_port_allow._reconnect_peer_hublvol_once",
             return_value=True,
         ) as reconnect_mock:
-            exec_port_allow_task(self.task)
+            task_runner(self.task)
 
         reconnect_mock.assert_called_once()
         allow_calls = [c for c in self.calls
@@ -1010,7 +1010,7 @@ class TestStrictHublvolGate(_StrictGateBase):
     def test_strict_verify_exhausts_retries_aborts_recovering_node(self):
         """Strict check never succeeds → after 5 attempts the recovering
         node is aborted (SPDK kill + OFFLINE) and the port is NOT allowed."""
-        from simplyblock_core.services.tasks_runner_port_allow import exec_port_allow_task
+        from simplyblock_core.services.tasks_runner_port_allow import task_runner
 
         with patch(
             "simplyblock_core.services.tasks_runner_port_allow._hublvol_verified_open",
@@ -1022,7 +1022,7 @@ class TestStrictHublvolGate(_StrictGateBase):
             "simplyblock_core.services.tasks_runner_port_allow._abort_recovering_node",
             side_effect=lambda n, r: self.calls.append(("abort_recovering_node", n.uuid, r)),
         ) as abort_mock:
-            exec_port_allow_task(self.task)
+            task_runner(self.task)
 
         abort_mock.assert_called_once()
         self.assertEqual(abort_mock.call_args.args[0].uuid, self.node.uuid)
@@ -1049,7 +1049,7 @@ class TestStrictHublvolGate(_StrictGateBase):
         ``_check_sec_node_hublvol`` (mocked True in the base setup) and not
         attempt the strict path. This is the safety net for callers that
         haven't populated hublvol metadata yet."""
-        from simplyblock_core.services.tasks_runner_port_allow import exec_port_allow_task
+        from simplyblock_core.services.tasks_runner_port_allow import task_runner
 
         # Strip the hublvol metadata we added in _StrictGateBase.setUp.
         self.node.hublvol = None
@@ -1059,7 +1059,7 @@ class TestStrictHublvolGate(_StrictGateBase):
         ) as verify_mock, patch(
             "simplyblock_core.services.tasks_runner_port_allow._reconnect_peer_hublvol_once",
         ) as reconnect_mock:
-            exec_port_allow_task(self.task)
+            task_runner(self.task)
 
         verify_mock.assert_not_called()
         reconnect_mock.assert_not_called()
@@ -1137,7 +1137,7 @@ class TestSourceShapeStrictGate(unittest.TestCase):
 
     def test_abort_helper_present_and_used(self):
         self.assertIn("def _abort_recovering_node", self.src)
-        # Helper must be invoked from exec_port_allow_task on exhaustion.
+        # Helper must be invoked from task_runner on exhaustion.
         self.assertIn("_abort_recovering_node(node, reason)", self.src)
 
     def test_no_port_allowed_after_abort(self):
@@ -1149,7 +1149,7 @@ class TestSourceShapeStrictGate(unittest.TestCase):
         i_done = self.src.find("STATUS_DONE", i_abort)
         i_return = self.src.find("return", i_done)
         # The invariant is about the port_allowed occurrence in
-        # exec_port_allow_task AFTER the abort path's return.
+        # task_runner AFTER the abort path's return.
         i_allow_event = self.src.find("tcp_ports_events.port_allowed", i_abort)
         self.assertGreater(i_abort, 0)
         self.assertGreater(i_done, i_abort)
@@ -1212,8 +1212,8 @@ class TestDeviceReadmitOnPortAllow(_BasePortAllowTest):
         self.addCleanup(self._readmit_patch.stop)
 
     def _run(self):
-        from simplyblock_core.services.tasks_runner_port_allow import exec_port_allow_task
-        exec_port_allow_task(self.task)
+        from simplyblock_core.services.tasks_runner_port_allow import task_runner
+        task_runner(self.task)
 
     def test_unavailable_device_readmitted_though_node_not_online(self):
         self._run()
@@ -1337,12 +1337,12 @@ class _SecRoleReconnectBase(_BasePortAllowTest):
         return [self.node, self.sec, self.prim, self.tert]
 
     def _run_with_verify(self, verify_side_effect):
-        from simplyblock_core.services.tasks_runner_port_allow import exec_port_allow_task
+        from simplyblock_core.services.tasks_runner_port_allow import task_runner
         with patch(
             "simplyblock_core.services.tasks_runner_port_allow._verify_or_reconnect_peer_hublvol",
             side_effect=verify_side_effect,
         ) as verify_mock:
-            exec_port_allow_task(self.task)
+            task_runner(self.task)
         return verify_mock
 
 
@@ -1497,7 +1497,7 @@ class TestStaleLeaderConvergence(_SecRoleReconnectBase):
         self.node_rpc.bdev_lvol_set_leader.side_effect = _set_leader
 
     def _run(self, recommit=True):
-        from simplyblock_core.services.tasks_runner_port_allow import exec_port_allow_task
+        from simplyblock_core.services.tasks_runner_port_allow import task_runner
         with patch(
             "simplyblock_core.services.tasks_runner_port_allow._verify_or_reconnect_peer_hublvol",
             return_value=True,
@@ -1505,7 +1505,7 @@ class TestStaleLeaderConvergence(_SecRoleReconnectBase):
             "simplyblock_core.services.tasks_runner_port_allow._reconnect_peer_hublvol_once",
             return_value=recommit,
         ) as recommit_mock:
-            exec_port_allow_task(self.task)
+            task_runner(self.task)
         return recommit_mock
 
     def _node_demotes(self):
@@ -1756,8 +1756,8 @@ class TestTertiaryFollowsActingLeader(_BasePortAllowTest):
         return super()._get_node(uuid)
 
     def _run(self):
-        from simplyblock_core.services.tasks_runner_port_allow import exec_port_allow_task
-        exec_port_allow_task(self.task)
+        from simplyblock_core.services.tasks_runner_port_allow import task_runner
+        task_runner(self.task)
 
     def test_redirect_rewired_toward_acting_leader(self):
         self._run()

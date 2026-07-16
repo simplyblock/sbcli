@@ -31,7 +31,7 @@ _inflight = set()
 _inflight_lock = threading.Lock()
 
 
-def process_task(task, cl):
+def task_runner(task, cl):
     if task.canceled:
         task.function_result = "canceled"
         task.status = JobSchedule.STATUS_DONE
@@ -92,7 +92,7 @@ def _run_task(task_uuid, cluster_id):
             if not tasks_controller.claim_task(task):
                 logger.info(f"Node-add task {task_uuid} owned by another runner host; skipping")
                 break
-            res = process_task(task, cl)
+            res = task_runner(task, cl)
             if res:
                 if task.status == JobSchedule.STATUS_DONE:
                     break

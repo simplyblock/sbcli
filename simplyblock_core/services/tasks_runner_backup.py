@@ -122,7 +122,7 @@ def _run_backup(task):
             # "No process" means no transfer is running for this bdev — the
             # backup died (e.g. an SPDK crash wiped the in-flight transfer).
             # Re-issue by resetting to PENDING, but COUNT it as a retry so the
-            # max_retry ceiling in process_task() can stop a backup that keeps
+            # max_retry ceiling in task_runner() can stop a backup that keeps
             # failing. Without the increment this branch loops forever, and
             # re-issuing an RPC that crashes the data plane just re-crashes it.
             # NOTE: this treats "No process" as a failure. It relies on a
@@ -401,7 +401,7 @@ def _terminate_task(task, reason):
     task.write_to_db(db.kv_store)
 
 
-def process_task(task, cl):
+def task_runner(task, cl):
     """Advance a single backup task by one step, or terminate it.
 
     Terminates on cancellation, on the time-based timeout, or once the
@@ -446,7 +446,7 @@ def process_task(task, cl):
         task.write_to_db(db.kv_store)
 
 
-if __name__ == "__main__":
+def main():
     logger.info("Starting backup tasks runner...")
     while True:
         try:
@@ -467,6 +467,10 @@ if __name__ == "__main__":
 
                 # Re-fetch task for freshness
                 task = db.get_task_by_id(task.uuid)
-                process_task(task, cl)
+                task_runner(task, cl)
 
         time.sleep(constants.TASK_EXEC_INTERVAL_SEC)
+
+
+if __name__ == "__main__":
+    main()

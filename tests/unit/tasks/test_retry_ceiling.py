@@ -41,9 +41,9 @@ from simplyblock_core.models.storage_node import StorageNode
 # --------------------------------------------------------------------------
 # Backup runner: terminates instead of looping forever.
 #
-# The backup runner's loop is inline under ``if __name__ == '__main__'`` (it has
-# no ``def main()``), so it is driven at the ``process_task`` level here. The
-# other runners below are driven through their real ``main()``.
+# The backup runner is driven at the ``task_runner`` level here (one task, one
+# step), rather than through its ``main()`` loop, to assert the ceiling directly.
+# The other runners below are driven through their real ``main()``.
 # --------------------------------------------------------------------------
 
 @pytest.fixture
@@ -96,7 +96,7 @@ def test_backup_fails_when_max_retry_reached(runner, monkeypatch):
     monkeypatch.setattr(runner, "_run_backup", run_backup)
 
     task = _backup_task(retry=10, max_retry=10)
-    runner.process_task(task, _cluster())
+    runner.task_runner(task, _cluster())
 
     assert backup.status == Backup.STATUS_FAILED
     assert task.status == JobSchedule.STATUS_DONE
@@ -111,7 +111,7 @@ def test_backup_runs_below_max_retry(runner, monkeypatch):
     monkeypatch.setattr(runner, "_run_backup", run_backup)
 
     task = _backup_task(retry=9, max_retry=10)
-    runner.process_task(task, _cluster())
+    runner.task_runner(task, _cluster())
 
     run_backup.assert_called_once_with(task)
 
@@ -367,11 +367,10 @@ _MAIN_DRIVEN_SPECS = {
 }
 
 # Retry-driven runners covered by a dedicated test elsewhere rather than the
-# generic drive-main harness. The backup runner's loop is inline under
-# ``if __name__ == '__main__'`` (no ``def main()``), so it is exercised at the
-# ``process_task`` level by ``test_backup_*`` above.
+# generic drive-main harness. The backup runner is exercised at the
+# ``task_runner`` level (one task, one step) by ``test_backup_*`` above.
 _COVERED_ELSEWHERE = {
-    "tasks_runner_backup.py": "driven via process_task in test_backup_* above",
+    "tasks_runner_backup.py": "driven via task_runner in test_backup_* above",
 }
 
 # Runners that increment task.retry but are intentionally UNBOUNDED: the

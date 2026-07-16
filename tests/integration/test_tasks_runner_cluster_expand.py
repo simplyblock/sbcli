@@ -1,5 +1,5 @@
 # coding=utf-8
-"""Unit tests for ``tasks_runner_cluster_expand.process_task``.
+"""Unit tests for ``tasks_runner_cluster_expand.task_runner``.
 
 No FDB / SPDK: ``integrate_new_node_into_cluster`` and the DB handle are
 mocked, so these run in milliseconds. This is the "fast tier" that lets
@@ -67,7 +67,7 @@ class TestProcessTask(unittest.TestCase):
 
     def test_canceled_marks_done(self):
         task = _task(canceled=True)
-        res = runner.process_task(task)
+        res = runner.task_runner(task)
         self.assertFalse(res)
         self.assertEqual(task.status, JobSchedule.STATUS_DONE)
         self.assertEqual(task.function_result, "canceled")
@@ -75,7 +75,7 @@ class TestProcessTask(unittest.TestCase):
 
     def test_max_retry_marks_done(self):
         task = _task(retry=3, max_retry=3)
-        res = runner.process_task(task)
+        res = runner.task_runner(task)
         self.assertTrue(res)
         self.assertEqual(task.status, JobSchedule.STATUS_DONE)
         self.assertEqual(task.function_result, "max retry reached")
@@ -83,7 +83,7 @@ class TestProcessTask(unittest.TestCase):
 
     def test_missing_new_node_id_marks_done(self):
         task = _task(new_node_id=None)
-        res = runner.process_task(task)
+        res = runner.task_runner(task)
         self.assertTrue(res)
         self.assertEqual(task.status, JobSchedule.STATUS_DONE)
         self.integrate.assert_not_called()
@@ -101,7 +101,7 @@ class TestProcessTask(unittest.TestCase):
         self.integrate.side_effect = _integrate
 
         task = _task()
-        res = runner.process_task(task)
+        res = runner.task_runner(task)
 
         self.assertTrue(res)
         self.assertEqual(task.status, JobSchedule.STATUS_DONE)
@@ -115,7 +115,7 @@ class TestProcessTask(unittest.TestCase):
         self.integrate.side_effect = RuntimeError("boom")
 
         task = _task(retry=0)
-        res = runner.process_task(task)
+        res = runner.task_runner(task)
 
         self.assertFalse(res)
         self.assertEqual(task.status, JobSchedule.STATUS_SUSPENDED)
@@ -146,7 +146,7 @@ class TestProcessTask(unittest.TestCase):
         self.integrate.side_effect = _integrate
 
         task = _task()
-        runner.process_task(task)
+        runner.task_runner(task)
 
         # By the time integrate ran, the state was rearmed to in_progress and
         # the cursor preserved.

@@ -48,7 +48,7 @@ def _task(function_name, retry, max_retry, **params):
 
 
 # --------------------------------------------------------------------------
-# tasks_runner_node_add.process_task
+# tasks_runner_node_add.task_runner
 # --------------------------------------------------------------------------
 
 def test_node_add_max_retry_finishes_without_adding(monkeypatch):
@@ -58,7 +58,7 @@ def test_node_add_max_retry_finishes_without_adding(monkeypatch):
     monkeypatch.setattr(node_add_runner, "db", MagicMock())
 
     task = _task(JobSchedule.FN_NODE_ADD, retry=3, max_retry=3, node_id="node-1")
-    res = node_add_runner.process_task(task, MagicMock())
+    res = node_add_runner.task_runner(task, MagicMock())
 
     assert res is True
     assert task.status == JobSchedule.STATUS_DONE
@@ -76,7 +76,7 @@ def test_node_add_below_ceiling_dispatches(monkeypatch):
     monkeypatch.setattr(node_add_runner, "db", MagicMock())
 
     task = _task(JobSchedule.FN_NODE_ADD, retry=0, max_retry=3, node_id="node-1")
-    res = node_add_runner.process_task(task, MagicMock())
+    res = node_add_runner.task_runner(task, MagicMock())
 
     assert res is True
     sops.add_node.assert_called_once_with(node_id="node-1")
@@ -92,7 +92,7 @@ def test_node_add_failure_below_ceiling_suspends_and_counts_retry(monkeypatch):
     monkeypatch.setattr(node_add_runner, "db", MagicMock())
 
     task = _task(JobSchedule.FN_NODE_ADD, retry=1, max_retry=3, node_id="node-1")
-    res = node_add_runner.process_task(task, MagicMock())
+    res = node_add_runner.task_runner(task, MagicMock())
 
     assert res is True  # processed; the loop keeps polling
     assert task.status == JobSchedule.STATUS_SUSPENDED

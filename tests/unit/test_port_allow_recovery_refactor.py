@@ -214,14 +214,14 @@ class TestSourceInvariants(unittest.TestCase):
         self.assertNotIn("bdev_distrib_force_to_non_leader", body)
 
     def test_unblocks_all_node_lvs_ports(self):
-        # exec_port_allow_task must unblock every LVS port, not a single one.
-        s = self.src.index("def exec_port_allow_task")
+        # task_runner must unblock every LVS port, not a single one.
+        s = self.src.index("def task_runner")
         body = self.src[s:]
         self.assertIn("_node_lvs_ports(node)", body)
         self.assertIn("for p in lvs_ports:", body)
 
     def test_device_status_positive_gate_not_blind_sleep(self):
-        s = self.src.index("def exec_port_allow_task")
+        s = self.src.index("def task_runner")
         body = self.src[s:]
         self.assertIn("not applied by all", body)          # local broadcast gate
         self.assertIn("not applied by recovering", body)   # targeted gate

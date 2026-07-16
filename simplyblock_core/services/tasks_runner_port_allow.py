@@ -534,7 +534,7 @@ def _abort_recovering_node(node, reason):
             "Failed to mark %s OFFLINE during port-allow abort", node.get_id())
 
 
-def exec_port_allow_task(task):
+def task_runner(task):
     # get new task object because it could be changed from cancel task
     task = db.get_task_by_id(task.uuid)
 
@@ -1034,7 +1034,7 @@ def exec_port_allow_task(task):
     task.write_to_db(db.kv_store)
 
 
-def _main():
+def main():
     logger.info("Starting Tasks runner...")
     while True:
         try:
@@ -1066,10 +1066,10 @@ def _main():
                             if not tasks_controller.claim_task(task):
                                 logger.info(f"Port-allow task {task.uuid} owned by another runner host; skipping")
                                 continue
-                            exec_port_allow_task(task)
+                            task_runner(task)
 
         time.sleep(5)
 
 
 if __name__ == "__main__":
-    _main()
+    main()
