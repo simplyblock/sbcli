@@ -836,6 +836,13 @@ commands:
             help: "The storage node id."
             dest: node_id
             type: str
+      - name: get-device-health-info
+        help: "Returns the device health information from SPDK."
+        arguments:
+          - name: "device_id"
+            help: "The device node id."
+            dest: device_id
+            type: str
   - name: "cluster"
     help: "Cluster Commands"
     weight: 200

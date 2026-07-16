@@ -1849,3 +1849,9 @@ class RPCClient:
         return self._request("bdev_lvol_s3_delete", {
             "s3_ids": s3_ids,
         })
+
+    def bdev_nvme_get_controller_health_info(self, name):
+        params = {
+            "name": name
+        }
+        return self._request("bdev_nvme_get_controller_health_info", params)

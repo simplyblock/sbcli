@@ -1,3 +1,4 @@
+import json
 import threading
 import time
 import logging
@@ -1361,3 +1362,17 @@ def new_device_from_failed(device_id):
         db_controller.get_storage_node_by_id(device_node.get_id()), _mut)
     logger.info(f"New device created from failed device: {device_id}, new device id: {new_device.get_id()}")
     return new_device.get_id()
+
+
+def get_device_health_info(device_id):
+    db_controller = DBController()
+    try:
+        device = db_controller.get_storage_device_by_id(device_id)
+        snode = db_controller.get_storage_node_by_id(device.node_id)
+    except KeyError as e:
+        logger.error(e)
+        return False
+
+    rpc_client = snode.rpc_client()
+    ret = rpc_client.bdev_nvme_get_controller_health_info(device.nvme_bdev)
+    return json.dumps(ret, indent=2)
