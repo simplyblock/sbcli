@@ -280,7 +280,10 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         logger.info("Configuring docker swarm...")
         c = docker.DockerClient(base_url=f"tcp://{dev_ip}:2375", version="auto")
         if c.swarm.attrs and "ID" in c.swarm.attrs:
-            logger.info("Docker swarm found, leaving swarm now")
+            logger.warning("Warning! Docker swarm found")
+            ret = utils.query_yes_no("Destroy current cluster and create new one?", default="no")
+            if not ret:
+                raise ValueError("Aborting")
             c.swarm.leave(force=True)
             try:
                 c.volumes.get("monitoring_grafana_data").remove(force=True)
