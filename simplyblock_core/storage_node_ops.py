@@ -2801,7 +2801,15 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
 
             storage_events.snode_add(snode)
 
-            cluster_ops.set_cluster_status(cluster.get_id(), Cluster.STATUS_IN_EXPANSION)
+            # Legacy (non --expansion) flow only: the follow-up
+            # cluster_ops.cluster_expand accepts IN_EXPANSION and flips back
+            # to ACTIVE when done. In --expansion mode the status must stay
+            # ACTIVE: integrate_new_node_into_cluster's preconditions require
+            # it and the executor owns the IN_EXPANSION transition itself —
+            # setting it here deadlocks the cluster-expand task ("cluster
+            # status is in_expansion, expansion requires active").
+            if not expansion:
+                cluster_ops.set_cluster_status(cluster.get_id(), Cluster.STATUS_IN_EXPANSION)
         finally:
             stop_heartbeat.set()
             db_controller.release_cluster_add_lock(cluster_id, lock_owner)
