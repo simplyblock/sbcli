@@ -522,6 +522,34 @@ class _MassCreateDeleteMixin:
                 f"{self._metrics['fio_lvol_started']} lvols"
             )
 
+            # Phase 2b: Wait for FIO to finish before creating snapshots
+            if self._fio_lvol_threads:
+                fio_timeout = self.FIO_RUNTIME + 120
+                self.logger.info(
+                    f"[Phase 2b] Waiting for {len(self._fio_lvol_threads)} "
+                    f"FIO threads to finish (timeout={fio_timeout}s)"
+                )
+                for t in self._fio_lvol_threads:
+                    t.join(timeout=fio_timeout)
+                still_alive = sum(
+                    1 for t in self._fio_lvol_threads if t.is_alive()
+                )
+                if still_alive:
+                    self.logger.warning(
+                        f"[Phase 2b] {still_alive} FIO threads still "
+                        f"alive after {fio_timeout}s timeout"
+                    )
+                else:
+                    self.logger.info(
+                        "[Phase 2b] All FIO threads completed"
+                    )
+
+            # Phase 2c: Collect FIO results to NFS share
+            if hasattr(self, '_collect_fio_logs_to_nfs'):
+                self._collect_fio_logs_to_nfs(
+                    label="Phase_2", threads=self._fio_lvol_threads,
+                )
+
             _check_deadline("Phase 2")
 
             # Catch-up: pick up PVCs that bound while Phase 2 was running
@@ -618,6 +646,13 @@ class _MassCreateDeleteMixin:
                 f"[Phase 6] FIO started on "
                 f"{self._metrics['fio_clone_started']} clones"
             )
+
+            # Collect clone FIO results to NFS share
+            if hasattr(self, '_collect_fio_logs_to_nfs'):
+                self._collect_fio_logs_to_nfs(
+                    label="Phase_6", threads=self._fio_clone_threads,
+                )
+
             _check_deadline("Phase 6")
 
             # Phase 7: Mass-delete all clones
@@ -1366,6 +1401,83 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
             host_id=host_id,
             retry=3,
         )
+
+    # ── FIO log collection ────────────────────────────────────────────────
+
+    def _collect_fio_logs_to_nfs(self, label, threads=None):
+        """Collect FIO log files from client nodes to the NFS share.
+
+        Reads /tmp/fio_{label}_*.log from each client node and writes
+        them into the test's NFS log directory under a fio_results/
+        subdirectory.
+        """
+        if not getattr(self, 'docker_logs_path', None):
+            self.logger.warning(
+                f"[{label}] No docker_logs_path set — skipping FIO log collection"
+            )
+            return
+
+        fio_dir = os.path.join(self.docker_logs_path, "fio_results")
+        os.makedirs(fio_dir, exist_ok=True)
+
+        collected = 0
+        fio_errors = 0
+        for client in self.fio_node:
+            # List FIO log files on the client
+            try:
+                out, _ = self.ssh_obj.exec_command(
+                    node=client,
+                    command=f"ls /tmp/fio_{label}_*.log /tmp/fio_mcd_*.log 2>/dev/null || true",
+                    supress_logs=True,
+                )
+            except Exception as exc:
+                self.logger.warning(
+                    f"[{label}] Failed to list FIO logs on {client}: {exc}"
+                )
+                continue
+
+            log_files = [
+                f.strip() for f in (out or "").splitlines() if f.strip()
+            ]
+            if not log_files:
+                self.logger.info(
+                    f"[{label}] No FIO log files found on {client}"
+                )
+                continue
+
+            for remote_path in log_files:
+                fname = os.path.basename(remote_path)
+                local_path = os.path.join(
+                    fio_dir, f"{client}_{fname}"
+                )
+                try:
+                    file_data = self.ssh_obj.read_file(client, remote_path)
+                    if file_data:
+                        with open(local_path, "w") as f:
+                            f.write(file_data)
+                        collected += 1
+                        # Check for FIO errors in the log
+                        lower = file_data.lower()
+                        if "error" in lower or "fail" in lower:
+                            fio_errors += 1
+                            self.logger.error(
+                                f"[{label}] FIO error detected in "
+                                f"{remote_path} on {client}"
+                            )
+                except Exception as exc:
+                    self.logger.warning(
+                        f"[{label}] Failed to collect {remote_path} "
+                        f"from {client}: {exc}"
+                    )
+
+        self.logger.info(
+            f"[{label}] Collected {collected} FIO log files to "
+            f"{fio_dir} ({fio_errors} with errors)"
+        )
+        if fio_errors:
+            self._soft_failures.append(
+                f"[{label}] {fio_errors} FIO log(s) contain errors"
+            )
 
     # ── Phase 2: FIO on 10% of lvols ──────────────────────────────────────
 
