@@ -2413,15 +2413,17 @@ class K8sSbcliUtils:
         yaml_escaped = yaml_content.replace("'", "'\\''")
         self.k8s._exec_kubectl(f"echo '{yaml_escaped}' | kubectl apply -f -")
 
-        # Wait up to 90s for the pool to become visible in sbcli
-        for _ in range(18):
+        # Wait up to 180s for the pool to become visible in sbcli
+        for _ in range(36):
             pools = self.list_storage_pools()
             if pool_name in pools:
                 self.logger.info(f"[pool] Pool '{pool_name}' is ready")
                 return pool_name
             sleep_n_sec(5)
-        self.logger.warning(f"[pool] Pool '{pool_name}' not confirmed after kubectl apply")
-        return pool_name
+        raise RuntimeError(
+            f"[pool] Pool '{pool_name}' not confirmed after kubectl apply "
+            f"— operator did not reconcile the Pool CRD within 180s"
+        )
 
     def add_host_to_pool(self, pool_id, host_nqn):
         """Run ``pool add-host <pool_id> <nqn>`` via kubectl exec.

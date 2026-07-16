@@ -163,7 +163,24 @@ class K8sNativeFailoverTest(TestClusterBase):
         """
         self.logger.info("Inside K8sNativeFailoverTest.setup()")
 
-        # 1. Retry sbcli API calls (routed through kubectl exec via K8sSbcliUtils)
+        # 1. Set up log directories with NFS retry + fallback FIRST so that
+        #    RUN_DIR_FILE is written even if later steps (API retries) fail.
+        #    This ensures the workflow graylog-collect step can always find
+        #    the test run folder instead of creating an orphaned directory.
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        log_base = self._prepare_log_base(self.nfs_log_base, retries=3)
+        self.nfs_log_base = log_base
+        self.docker_logs_path = os.path.join(log_base, f"{self.test_name}-{timestamp}")
+        self.log_path = os.path.join(self.docker_logs_path, "ClientLogs")
+        os.makedirs(self.log_path, exist_ok=True)
+        os.makedirs(self.docker_logs_path, exist_ok=True)
+
+        run_file = os.getenv("RUN_DIR_FILE", None)
+        if run_file:
+            with open(run_file, "w") as f:
+                f.write(self.docker_logs_path)
+
+        # 2. Retry sbcli API calls (routed through kubectl exec via K8sSbcliUtils)
         retry = 30
         while retry > 0:
             try:
@@ -183,25 +200,9 @@ class K8sNativeFailoverTest(TestClusterBase):
 
         self._validate_storage_node_health()
 
-        # 2. No client machines needed — FIO runs as K8s Jobs
+        # 3. No client machines needed — FIO runs as K8s Jobs
         self.client_machines = []
         self.fio_node = []
-
-        # 3. Set up log directories with NFS retry + fallback
-        #    Try the configured NFS path with retries (handles stale mounts
-        #    by remounting).  Fall back to ~/e2e-logs if NFS stays unusable.
-        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        log_base = self._prepare_log_base(self.nfs_log_base, retries=3)
-        self.nfs_log_base = log_base
-        self.docker_logs_path = os.path.join(log_base, f"{self.test_name}-{timestamp}")
-        self.log_path = os.path.join(self.docker_logs_path, "ClientLogs")
-        os.makedirs(self.log_path, exist_ok=True)
-        os.makedirs(self.docker_logs_path, exist_ok=True)
-
-        run_file = os.getenv("RUN_DIR_FILE", None)
-        if run_file:
-            with open(run_file, "w") as f:
-                f.write(self.docker_logs_path)
 
         # 4. Start K8s log monitor (local kubectl, no SSH)
         self.runner_k8s_log = RunnerK8sLog(
@@ -5660,3 +5661,8 @@ class K8sNativeScaleBreakTest(K8sNativeFailoverTest):
             self._log_scale_break_summary(break_reason)
             if not test_failed:
                 self._cleanup_all_k8s_resources()
+
+        if test_failed:
+            raise RuntimeError(
+                f"Scale-break test failed: {break_reason}"
+            )
