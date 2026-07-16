@@ -352,6 +352,46 @@ def _resolve_lvol_subsystem(lvol, host_node, cl, namespaced, all_lvols):
     return True, ""
 
 
+def check_node_object_limit(host_node, all_lvols, all_snaps, new_objects=1):
+    """Per-SPDK-instance object cap: every vCPU in the node's core mask serves
+    at most constants.MAX_OBJECTS_PER_CORE objects (lvols, clones, snapshots),
+    so an 8-core instance (the minimum) takes 16k objects, a 32-core one 64k.
+
+    Objects are counted against their primary node (lvol.node_id /
+    snap.lvol.node_id). Replica registrations on secondary/tertiary are not
+    counted — the HA layout is symmetric, so the primary count is the
+    per-instance load proxy and counting replicas would just triple every
+    node's number against a limit meant per instance.
+
+    ``all_lvols`` accepts mini or full lvol records; ``all_snaps`` must be
+    full SnapShot records (needs ``.lvol.node_id`` and ``.deleted``).
+
+    Returns None when within the limit, an error message otherwise. Nodes
+    without a parseable core mask are not limited (the mask is set at node
+    add; missing means we cannot know the budget).
+    """
+    try:
+        cores = len(utils.hexa_to_cpu_list(host_node.spdk_cpu_mask)) \
+            if host_node.spdk_cpu_mask else 0
+    except (ValueError, TypeError):
+        cores = 0
+    if cores <= 0:
+        return None
+    limit = cores * constants.MAX_OBJECTS_PER_CORE
+    node_id = host_node.get_id()
+    lvol_count = sum(1 for lv in all_lvols
+                     if lv.node_id == node_id and lv.status != LVol.STATUS_DELETED)
+    snap_count = sum(1 for s in all_snaps
+                     if s.lvol and s.lvol.node_id == node_id and not s.deleted)
+    total = lvol_count + snap_count
+    if total + new_objects > limit:
+        return (f"Object limit reached on node {node_id}: {total} objects "
+                f"(lvols/clones: {lvol_count}, snapshots: {snap_count}) with "
+                f"{cores} SPDK cores allows at most {limit} "
+                f"({constants.MAX_OBJECTS_PER_CORE} per core)")
+    return None
+
+
 def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=False, use_crypto=False,
                 distr_vuid=0, max_rw_iops=0, max_rw_mbytes=0, max_r_mbytes=0, max_w_mbytes=0,
                 with_snapshot=False, max_size=0, lvol_priority_class=0,
@@ -548,6 +588,11 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         if not nodes:
             return False, "No nodes found with enough resources to create the LVol"
         host_node = nodes[0]
+
+    limit_error = check_node_object_limit(host_node, all_lvols, all_snaps)
+    if limit_error:
+        logger.error(limit_error)
+        return False, limit_error
 
     # Create a new subsystem by default unless namespaced is set and an
     # existing subsystem on the host node has a free namespace slot.

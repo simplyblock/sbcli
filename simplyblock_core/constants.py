@@ -219,6 +219,14 @@ INSTANCE_STORAGE_DATA = {
 
 MAX_SNAP_COUNT = 100
 
+# Per-SPDK-instance object cap: each vCPU in the instance's core mask serves
+# at most this many objects (lvols + clones + snapshots), counted against
+# their primary node. 8 cores (the minimum) -> 16k objects, 32 cores -> 64k.
+# Guards the data plane against object-count overload (run 20260712-231123:
+# ~68k objects on one 12-core instance drove swap thrash and a JC-quartet
+# abort).
+MAX_OBJECTS_PER_CORE = 2000
+
 SPDK_PROXY_MULTI_THREADING_ENABLED=True
 SPDK_PROXY_TIMEOUT=60*5
 LVOL_NVME_CONNECT_RECONNECT_DELAY=2

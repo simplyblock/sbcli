@@ -347,6 +347,16 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
         logger.error(msg)
         return False, msg
 
+    # Per-core object cap (lvols + clones + snapshots per SPDK instance).
+    from simplyblock_core.controllers import lvol_controller as _lvol_ctrl
+    from simplyblock_core.utils.ttl_cache import cached_mini_lvols, cached_snapshots
+    limit_error = _lvol_ctrl.check_node_object_limit(
+        snode, cached_mini_lvols(db_controller),
+        cached_snapshots(db_controller, pool.cluster_id))
+    if limit_error:
+        logger.error(limit_error)
+        return False, limit_error
+
     logger.info(f"Creating snapshot: {snapshot_name} from LVol: {lvol.get_id()}")
 
     # The stats read only refines the size used for the pool-limit checks
@@ -990,6 +1000,16 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     cluster = db_controller.get_cluster_by_id(pool.cluster_id)
     if cluster.status not in [cluster.STATUS_ACTIVE, cluster.STATUS_DEGRADED]:
         return False, f"Cluster is not active, status: {cluster.status}"
+
+    # Per-core object cap (lvols + clones + snapshots per SPDK instance).
+    from simplyblock_core.controllers import lvol_controller as _lvol_ctrl
+    from simplyblock_core.utils.ttl_cache import cached_mini_lvols, cached_snapshots
+    limit_error = _lvol_ctrl.check_node_object_limit(
+        snode, cached_mini_lvols(db_controller),
+        cached_snapshots(db_controller, pool.cluster_id))
+    if limit_error:
+        logger.error(limit_error)
+        return False, limit_error
 
     # Clone-name uniqueness / reuse via the per-pool lvol name index (O(1) point
     # read) instead of scanning every lvol in the DB.
