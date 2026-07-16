@@ -620,19 +620,93 @@ def main():
     print("Phase 3: Adding storage nodes to cluster IN PARALLEL "
           "(with --failure-domain tags)...")
 
+    _uuid_re = re.compile(r'[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}')
+    _node_statuses = {"online", "offline", "unreachable", "in_creation", "in_shutdown",
+                      "suspended", "down", "removed", "restarting", "schedulable", "new"}
+
+    def _find_node_record(priv_ip):
+        """Return (uuid, status) of the storage-node record whose mgmt IP is
+        priv_ip, or (None, None). Parses the `sbctl sn list` table."""
+        out = ssh_exec(mgmt_ip, ["sudo /usr/local/bin/sbctl sn list"], get_output=True)[0]
+        for line in out.splitlines():
+            cells = [c.strip() for c in line.split('|')]
+            if not any(c == priv_ip or c.startswith(priv_ip + ':') for c in cells):
+                continue
+            node_uuid = next((c for c in cells if _uuid_re.fullmatch(c)), None)
+            status = next((c for c in cells if c in _node_statuses), 'unknown')
+            return node_uuid, status
+        return None, None
+
     def _add_one_node(idx_priv):
         idx, priv_ip = idx_priv
         fd = FAILURE_DOMAINS[idx]
         print(f"  Node {idx} ({priv_ip}) -> failure domain {fd}")
         for attempt in range(5):
+            # add-node is NOT blindly re-runnable: an attempt whose SSH channel
+            # died may have kept running on the mgmt node and completed the
+            # registration server-side (run 2026-07-15: five orphaned adds
+            # finished after their channels were reset, and the retries then
+            # live-locked on "SSD is being used by other node"). Reconcile
+            # against the cluster state before every (re-)run.
+            node_uuid, status = _find_node_record(priv_ip)
+
+            if status == 'in_creation':
+                # An orphaned add may still be in flight server-side; wait for
+                # it to land instead of racing it with a second add. But a
+                # record can also be orphaned with nothing behind it (run
+                # 2026-07-16: a node-add lock timeout returned without
+                # cleanup), so verify a driver exists: every add-node for this
+                # cluster is an sbctl process on the mgmt node. No matching
+                # process == ghost record — stop waiting and clear it below.
+                # ([e] bracket keeps pgrep from matching its own ssh/sudo
+                # wrappers.)
+                print(f"  Node {idx} ({priv_ip}) is in_creation ({node_uuid}); "
+                      f"waiting for the in-flight add to finish...")
+                deadline = time.time() + 3600
+                while time.time() < deadline:
+                    alive = ssh_exec(mgmt_ip, [
+                        f"pgrep -f 'sn add-nod[e] .*{priv_ip}:5000' || true"
+                    ], get_output=True)[0].strip()
+                    if not alive:
+                        print(f"  Node {idx} ({priv_ip}): no add-node process "
+                              f"behind in_creation record {node_uuid}; treating "
+                              f"as a dead add")
+                        break
+                    time.sleep(30)
+                    node_uuid, status = _find_node_record(priv_ip)
+                    if status != 'in_creation':
+                        break
+
+            if status == 'online':
+                print(f"  Node {idx} ({priv_ip}) is already online as {node_uuid}; "
+                      f"add-node skipped")
+                return
+
+            if node_uuid is not None:
+                # Any leftover record blocks re-adding (same-endpoint SSD
+                # guard) — including one still in_creation after the wait
+                # above (dead add). Clear it: remove transitions it to
+                # 'removed', delete drops the record. Best effort — if it
+                # fails the add-node below fails too and the next attempt
+                # retries this.
+                print(f"  Node {idx} ({priv_ip}): clearing stale record "
+                      f"{node_uuid} (status={status}) before re-add")
+                ssh_exec(mgmt_ip, [
+                    f"sudo /usr/local/bin/sbctl -d sn remove {node_uuid} --force-remove",
+                    f"sudo /usr/local/bin/sbctl -d sn delete {node_uuid} --force",
+                ], cmd_timeout=600)
+
             try:
                 # add-node wires the new node into the mesh (serialized behind
                 # ClusterAddNodeLock); at 32 nodes a single add can queue on
-                # that lock for minutes, so allow 20 min per attempt.
+                # that lock up to CLUSTER_ADD_LOCK_WAIT_TIMEOUT_SEC (30 min)
+                # on top of its own node-local setup and mesh section, so the
+                # SSH timeout must sit above that — killing the channel here
+                # orphans a server-side add (2026-07-15 live-lock).
                 ssh_exec(mgmt_ip, [
                     f"sudo /usr/local/bin/sbctl -d sn add-node {cluster_uuid} {priv_ip}:5000 {IFACE}"
                     f" --ha-jm-count 4 --failure-domain {fd}"
-                ], check=True, cmd_timeout=1200)
+                ], check=True, cmd_timeout=3600)
                 return
             except RuntimeError:
                 if attempt < 4:

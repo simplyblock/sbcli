@@ -1900,6 +1900,37 @@ def _cluster_add_lock_heartbeat(db_controller, cluster_id, owner, stop_event):
             return
 
 
+def _classify_existing_endpoint_record(db_controller, cluster_id, node_addr, ssd_pcie):
+    """Classify a pre-existing storage-node record for ``node_addr`` that owns
+    one of the joining node's SSDs, before an add-node proceeds.
+
+    An add-node whose SSH/API session died can survive server-side and finish
+    the registration (runs 20260712/20260715: orphaned adds completed after
+    their channels were reset mid-command); the caller's retry then finds the
+    record already present and must not fail permanently on it.
+
+    Returns one of:
+    - (None, None): no record for this endpoint owns any of these SSDs.
+    - ("already_added", node): record is ONLINE — the earlier add completed;
+      re-adding is an idempotent success, not an error.
+    - ("cleanup", node): record stuck in in_creation — a dead partial add;
+      kill its SPDK and delete the record, then re-add.
+    - ("conflict", node): record in any other status — refuse; the operator
+      must delete or restart that node explicitly.
+    """
+    for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+        if node.api_endpoint != node_addr:
+            continue
+        if not any(ssd in node.ssd_pcie for ssd in ssd_pcie):
+            continue
+        if node.status == StorageNode.STATUS_ONLINE:
+            return "already_added", node
+        if node.status == StorageNode.STATUS_IN_CREATION:
+            return "cleanup", node
+        return "conflict", node
+    return None, None
+
+
 def add_node(cluster_id, node_addr, iface_name, data_nics_list,
              max_snap, spdk_image=None, spdk_debug=False,
              small_bufsize=0, large_bufsize=0,
@@ -2046,24 +2077,36 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         ssd_pcie = node_config.get("ssd_pcis")
 
         if ssd_pcie:
-            for ssd in ssd_pcie:
-                for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
-                    if node.api_endpoint == node_addr:
-                        if ssd in node.ssd_pcie:
-                            if node.status == StorageNode.STATUS_IN_CREATION:
-                                logger.warning(
-                                    f"Node {node.get_id()} is in_creation status with SSD {ssd}, "
-                                    f"removing and deleting it")
-                                try:
-                                    stale_api = node.client(timeout=20)
-                                    stale_api.spdk_process_kill(node.rpc_port, node.cluster_id)
-                                except Exception:
-                                    logger.warning("Failed to kill SPDK process for stale in_creation node", exc_info=True)
-                                storage_events.snode_delete(node)
-                                node.remove(db_controller.kv_store)
-                                break
-                            logger.error(f"SSD is being used by other node, ssd: {ssd}, node: {node.get_id()}")
-                            return False
+            while True:
+                action, existing = _classify_existing_endpoint_record(
+                    db_controller, cluster_id, node_addr, ssd_pcie)
+                if action != "cleanup":
+                    break
+                # Repeated partial attempts can leave several stale records
+                # for the same endpoint, hence the loop.
+                logger.warning(
+                    f"Node {existing.get_id()} is in_creation status with endpoint "
+                    f"{node_addr}, removing and deleting it")
+                try:
+                    stale_api = existing.client(timeout=20)
+                    stale_api.spdk_process_kill(existing.rpc_port, existing.cluster_id)
+                except Exception:
+                    logger.warning("Failed to kill SPDK process for stale in_creation node", exc_info=True)
+                storage_events.snode_delete(existing)
+                existing.remove(db_controller.kv_store)
+            if action == "already_added":
+                logger.info(
+                    f"Node {existing.get_id()} with endpoint {node_addr} is already "
+                    f"added and online (owns the same SSDs); add-node is an "
+                    f"idempotent success")
+                return "Success"
+            elif action == "conflict":
+                logger.error(
+                    f"A node record with endpoint {node_addr} already exists in "
+                    f"status {existing.status} and owns the same SSDs "
+                    f"(node: {existing.get_id()}); delete or restart it instead "
+                    f"of re-adding")
+                return False
 
         fdb_connection = cluster.db_connection
 
@@ -2489,8 +2532,23 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         # always released (finally), including on the early `continue` and the
         # reverse-connect failure path.
         lock_owner = f"{socket.gethostname()}:{os.getpid()}:{node_uuid}"
-        if not _acquire_cluster_add_lock_blocking(db_controller, cluster_id, lock_owner):
+        if not _acquire_cluster_add_lock_blocking(
+                db_controller, cluster_id, lock_owner,
+                timeout=constants.CLUSTER_ADD_LOCK_WAIT_TIMEOUT_SEC):
+            # Nothing keeps driving this registration after the failure, but
+            # the record written above stays in_creation — retries and
+            # watchers read that as a live in-flight add (2026-07-16 perf
+            # deploy: 20-minute ghost waits per retry). Tear down the same
+            # way the stale-record path does: kill this node's SPDK and drop
+            # the record so a retry starts from a clean slate.
             logger.error("Could not acquire cluster node-add lock; failing for retry")
+            try:
+                snode_api.spdk_process_kill(snode.rpc_port, snode.cluster_id)
+            except Exception:
+                logger.warning(
+                    "Failed to kill SPDK process after node-add lock timeout", exc_info=True)
+            storage_events.snode_delete(snode)
+            snode.remove(db_controller.kv_store)
             return False
         stop_heartbeat = threading.Event()
         hb_thread = threading.Thread(
