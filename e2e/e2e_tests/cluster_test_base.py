@@ -141,6 +141,23 @@ class TestClusterBase:
         """Contains setup required to run the test case
         """
         self.logger.info("Inside setup function")
+
+        # Set up log directories and RUN_DIR_FILE FIRST so that even if
+        # API retries fail, the workflow graylog-collect step can find
+        # the test run folder instead of creating an orphaned directory.
+        # Record UTC start time for Graylog log export at teardown
+        self.test_start_time_utc = datetime.now(timezone.utc)
+
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        self.docker_logs_path = os.path.join(self.nfs_log_base, f"{self.test_name}-{timestamp}")
+        self.log_path = os.path.join(self.docker_logs_path, "ClientLogs")
+        os.makedirs(self.log_path, exist_ok=True)
+
+        run_file = os.getenv("RUN_DIR_FILE", None)
+        if run_file:
+            with open(run_file, "w") as f:
+                f.write(self.docker_logs_path)
+
         retry = 30
         while retry > 0:
             try:
@@ -224,27 +241,12 @@ class TestClusterBase:
         else:
             self.fio_node = []
 
-        # Record UTC start time for Graylog log export at teardown
-        self.test_start_time_utc = datetime.now(timezone.utc)
-
-        # Construct the logs path with test name and timestamp
-        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        # fresh folder per run on NFS (mounted on client and runner):
-        self.docker_logs_path = os.path.join(self.nfs_log_base, f"{self.test_name}-{timestamp}")
-        self.log_path = os.path.join(self.docker_logs_path, "ClientLogs")
-        os.makedirs(self.log_path, exist_ok=True)
-
         # Start background thread to move rotated logs to NFS every 30 min
         start_log_flusher(self.docker_logs_path)
         if not self.k8s_test:
             for node in self.fio_node:
                 self.ssh_obj.make_directory(node=node, dir_name=self.log_path)
 
-        run_file = os.getenv("RUN_DIR_FILE", None)
-        if run_file:
-            with open(run_file, "w") as f:
-                f.write(self.docker_logs_path)
-        
         self.runner_k8s_log = RunnerK8sLog(
                 log_dir=self.docker_logs_path,
                 test_name=self.test_name
