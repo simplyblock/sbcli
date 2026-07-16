@@ -975,8 +975,13 @@ class K8sNativeFailoverTest(TestClusterBase):
         # Cap at ~60% of PVC capacity to account for filesystem formatting
         # overhead (ext4/xfs journal, inode tables, superblock = ~5-15%)
         # and COW block growth from clones/snapshots over long test runs.
-        max_fio_gb = int(self.int_pvc_size * 0.60)
+        # fio_size is per-numjob: total written = fio_size × fio_num_jobs.
+        num_jobs = getattr(self, "fio_num_jobs", 1) or 1
+        max_fio_gb = int(self.int_pvc_size * 0.60 / num_jobs)
         fio_size_gb = min(fio_size_gb, max_fio_gb)
+        # Reduce by 20% so filesystem metadata (superblock, journal, inodes)
+        # and mount overhead don't cause ENOSPC during the FIO run.
+        fio_size_gb = int(fio_size_gb * 0.80)
         fio_size_gb = max(fio_size_gb, 1)  # at least 1G
 
         self.fio_size = f"{fio_size_gb}G"
@@ -5248,7 +5253,7 @@ class K8sNativeScaleBreakTest(K8sNativeFailoverTest):
       - block size: random 4K-128K
       - r/w mix: 70/30
       - iodepth: 32
-      - numjobs: 4
+      - numjobs: 1 (one job per PVC to stay within capacity)
       - max_latency: 20s
       - runtime: 15 min per iteration
       - no verify (scale test, not integrity test)
@@ -5262,8 +5267,9 @@ class K8sNativeScaleBreakTest(K8sNativeFailoverTest):
         self.pvc_size = "20Gi"
         self.int_pvc_size = 20
 
-        # FIO: fixed runtime, aggressive params
-        self.fio_num_jobs = 4
+        # FIO: fixed runtime, aggressive params — one job per PVC to avoid
+        # exceeding PVC capacity (size is per-job, so numjobs>1 multiplies it)
+        self.fio_num_jobs = 1
         self.FIO_RUNTIME = 900          # 15 min, fixed
         self.fio_size = "8G"            # default; _compute_fio_size scales it
 
