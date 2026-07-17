@@ -365,6 +365,15 @@ jobs:
           helm uninstall cert-manager -n cert-manager 2>/dev/null || true
           kubectl delete namespace cert-manager --wait=false 2>/dev/null || true
           kubectl wait --for=delete namespace/cert-manager --timeout=120s 2>/dev/null || true
+          echo "=== Deleting cert-manager CRDs (Helm does not remove CRDs on uninstall) ==="
+          kubectl delete crd \
+            certificaterequests.cert-manager.io \
+            certificates.cert-manager.io \
+            challenges.acme.cert-manager.io \
+            clusterissuers.cert-manager.io \
+            issuers.cert-manager.io \
+            orders.acme.cert-manager.io \
+            --ignore-not-found 2>/dev/null || true
 
       - name: Cleanup old KMS
         if: ${{ github.event.inputs.use_existing_cluster != 'true' }}

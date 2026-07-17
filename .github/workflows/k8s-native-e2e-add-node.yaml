@@ -355,6 +355,15 @@ jobs:
           kubectl delete namespace cert-manager --wait=false 2>/dev/null || true
           echo "Waiting for cert-manager namespace to be deleted..."
           kubectl wait --for=delete namespace/cert-manager --timeout=120s 2>/dev/null || true
+          echo "=== Deleting cert-manager CRDs (Helm does not remove CRDs on uninstall) ==="
+          kubectl delete crd \
+            certificaterequests.cert-manager.io \
+            certificates.cert-manager.io \
+            challenges.acme.cert-manager.io \
+            clusterissuers.cert-manager.io \
+            issuers.cert-manager.io \
+            orders.acme.cert-manager.io \
+            --ignore-not-found 2>/dev/null || true
           echo "=== cert-manager cleanup complete ==="
 
       - name: Cleanup old KMS deployment
