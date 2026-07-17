@@ -2104,20 +2104,6 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             logger.error("Cluster not found: %s", cluster_id)
             return False
 
-        # Expansion pre-flight (cluster-wide half): the node add itself must
-        # not start unless the cluster is ACTIVE, all nodes are ONLINE and no
-        # migration / restart / backup task is open. The full check —
-        # including deletes on the impacted donor nodes, which are only known
-        # once the role moves are planned — reruns in
-        # integrate_new_node_into_cluster before the rebalance executes.
-        if expansion:
-            from simplyblock_core.controllers.cluster_expansion.preconditions import (
-                check_expansion_preconditions)
-            ok, reason = check_expansion_preconditions(cluster, db_controller)
-            if not ok:
-                logger.error(f"Cannot start expansion node-add: {reason}")
-                return False
-
         ha_jm_count = resolve_ha_jm_count(cluster, ha_jm_count)
 
         # Failure-domain id is mandatory exactly when the cluster has the
