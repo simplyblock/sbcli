@@ -104,6 +104,26 @@ def main():
                     logger.warning("Skipping K8sNativeNodeMigrationTest: requires --migrate_to_worker with a K8s worker node name.")
                     skipped_cases += 1
                     continue
+            if cls.__name__ == "TestSequentialNodeAdd":
+                if len(new_nodes) < 2 and len(new_worker_nodes) < 2:
+                    logger.warning("Skipping TestSequentialNodeAdd: requires --new_nodes with at least 2 IPs or --new_worker_nodes with at least 2 node names.")
+                    skipped_cases += 1
+                    continue
+            if cls.__name__ == "TestAddNodeSnapshotCloneOnNewNode":
+                if len(new_nodes) == 0 and len(new_worker_nodes) == 0:
+                    logger.warning("Skipping TestAddNodeSnapshotCloneOnNewNode: requires --new_nodes or --new_worker_nodes with at least 1 entry.")
+                    skipped_cases += 1
+                    continue
+            if cls.__name__ in ("TestBackupAfterNodeAdd", "TestBackupWithFioOnNewNode"):
+                if len(new_nodes) == 0 and len(new_worker_nodes) == 0:
+                    logger.warning(f"Skipping {cls.__name__}: requires --new_nodes or --new_worker_nodes with at least 1 entry.")
+                    skipped_cases += 1
+                    continue
+            if cls.__name__ in ("TestBackupAfterNodeMigration", "TestBackupDuringMigration"):
+                if args.run_k8s and not args.migrate_to_worker.strip():
+                    logger.warning(f"Skipping {cls.__name__}: K8s mode requires --migrate_to_worker.")
+                    skipped_cases += 1
+                    continue
 
             test_class_run.append(cls)
     else:
@@ -130,6 +150,18 @@ def main():
                             continue
                         if not args.migrate_to_worker.strip():
                             raise ValueError("K8sNativeNodeMigrationTest requires --migrate_to_worker with a K8s worker node name.")
+                    if cls.__name__ == "TestSequentialNodeAdd":
+                        if len(new_nodes) < 2 and len(new_worker_nodes) < 2:
+                            raise ValueError("TestSequentialNodeAdd requires --new_nodes with at least 2 IPs or --new_worker_nodes with at least 2 node names.")
+                    if cls.__name__ == "TestAddNodeSnapshotCloneOnNewNode":
+                        if len(new_nodes) == 0 and len(new_worker_nodes) == 0:
+                            raise ValueError("TestAddNodeSnapshotCloneOnNewNode requires --new_nodes or --new_worker_nodes with at least 1 entry.")
+                    if cls.__name__ in ("TestBackupAfterNodeAdd", "TestBackupWithFioOnNewNode"):
+                        if len(new_nodes) == 0 and len(new_worker_nodes) == 0:
+                            raise ValueError(f"{cls.__name__} requires --new_nodes or --new_worker_nodes with at least 1 entry.")
+                    if cls.__name__ in ("TestBackupAfterNodeMigration", "TestBackupDuringMigration"):
+                        if args.run_k8s and not args.migrate_to_worker.strip():
+                            raise ValueError(f"{cls.__name__} requires --migrate_to_worker in K8s mode.")
                     test_class_run.append(cls)
                     seen.add(cls)
 

@@ -1285,13 +1285,19 @@ class SshUtils:
         return output
     
     def stop_spdk_process(self, node, rpc_port, cluster_id):
-        """Stops spdk process and waits until spdk_* containers are either exited or no longer listed.
-        
-        If containers are not killed within 20 seconds, the kill command is retried.
+        """Stops spdk process and waits until the specific spdk_{rpc_port} container is exited or gone.
+
+        If the container is not killed within 20 seconds, the kill command is retried.
         A maximum of 50 kill attempts is allowed.
+
+        Note: Uses an exact container name filter (``^spdk_{rpc_port}$``) so that
+        hosts running multiple SPDK containers (2 nodes per host) only track the
+        targeted container, not its sibling.
 
         Args:
             node (str): Node IP
+            rpc_port: RPC port identifying the specific SPDK container
+            cluster_id: Cluster ID
         """
         max_attempts = 50
         attempt = 0
@@ -1304,20 +1310,25 @@ class SshUtils:
         # record the time when the kill command was last sent
         last_kill_time = time.time()
 
+        # Filter by the exact container name for this rpc_port so that
+        # sibling SPDK containers on the same host are not considered.
+        container_name = f"spdk_{rpc_port}"
+
         while attempt < max_attempts:
-            # Command to check the status of containers matching "spdk_"
-            status_cmd = "sudo docker ps -a --filter 'name=spdk_' --format '{{.Status}}'"
+            # Check only the targeted container, not all spdk_* containers
+            status_cmd = (
+                f"sudo docker ps -a --filter 'name=^{container_name}$' "
+                f"--format '{{{{.Status}}}}'"
+            )
             status_output, err = self.exec_command(node=node, command=status_cmd)
             status_output = status_output.strip()
 
-            # If no containers found, exit the loop
+            # If no container found (removed), exit the loop
             if not status_output:
                 break
 
-            statuses = status_output.splitlines()
-            # Determine if every container is in an "Exited" state (e.g., "Exited (0)")
-            all_exited = all("Exited" in status for status in statuses)
-            if all_exited:
+            # Container is in "Exited" state — kill succeeded
+            if "Exited" in status_output:
                 break
 
             # If 20 seconds have passed since the last kill command, retry the kill command.
