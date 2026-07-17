@@ -612,7 +612,7 @@ services:
 
   FDBExporter:
     <<: *service-base
-    image: simplyblock/foundationdb-exporter:latest
+    image: aikoven/foundationdb-exporter:3.1.0
     environment:
       FDB_CLUSTER_FILE: /etc/foundationdb/fdb.cluster
     deploy:
