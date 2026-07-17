@@ -22,3 +22,8 @@ scrape_configs:
       - 'tasks.node-exporter'
       type: 'A'
       port: 9100
+
+  - job_name: 'foundationdb'
+    static_configs:
+      - targets: [ 'FDBExporter:9444' ]
+
