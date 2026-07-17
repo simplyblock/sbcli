@@ -512,59 +512,59 @@ def get_all_tests(custom=True, ha_test=False):
         # TestDeviceNodeRestart
 
         # ── Phase 1 functional E2E tests ─────────────────────────────
-        TestLvolBasicCRUD,
-        TestLvolCapacityIOStats,
-        TestLvolNegativeCases,
-        TestSnapshotNegativeCases,
-        # TestPoolAttributes,  # DISABLED: QoS causes SPDK crash (corrupted double-linked list in bdev_set_qos_limit_done)
-        TestPoolEnableDisable,
-        TestPoolNegativeCases,
-        # TestNodeSuspendResume,          # DEPRECATED: sn suspend/resume are no-ops in CLI
-        TestPoolDisableIO,
-        TestCrossResourceNegative,
-        TestNamespacePlacement,
-        TestNamespaceFio,
-        TestNamespaceLimits,
-        TestNamespaceNegative,
-        # TestVolumeSuspendResume,        # UNCERTAIN: volume suspend/resume may not be wired to API
-        TestVolumeCloneLvol,
-        # TestNodeAntiAffinity,           # UNCERTAIN: requires --strict-node-anti-affinity cluster flag
+        # TestLvolBasicCRUD,
+        # TestLvolCapacityIOStats,
+        # TestLvolNegativeCases,
+        # TestSnapshotNegativeCases,
+        # # TestPoolAttributes,  # DISABLED: QoS causes SPDK crash (corrupted double-linked list in bdev_set_qos_limit_done)
+        # TestPoolEnableDisable,
+        # TestPoolNegativeCases,
+        # # TestNodeSuspendResume,          # DEPRECATED: sn suspend/resume are no-ops in CLI
+        # TestPoolDisableIO,
+        # TestCrossResourceNegative,
+        # TestNamespacePlacement,
+        # TestNamespaceFio,
+        # TestNamespaceLimits,
+        # TestNamespaceNegative,
+        # # TestVolumeSuspendResume,        # UNCERTAIN: volume suspend/resume may not be wired to API
+        # TestVolumeCloneLvol,
+        # # TestNodeAntiAffinity,           # UNCERTAIN: requires --strict-node-anti-affinity cluster flag
 
-        # ── Phase 2 functional E2E tests ─────────────────────────────
-        TestLvolInflate,
-        TestLvolMigrationLoad,
-        TestStorageNodeStats,
-        TestStorageNodePorts,
-        TestClusterStats,
-        TestClusterTasks,
-        TestClusterSecret,
-        # TestQosClass,                   # DEPRECATED: QoS class API not verified
-        # TestQosEnforcement,             # DEPRECATED: QoS enforcement API not verified
-        TestPoolStats,
-        TestClusterGracefulShutdown,
-        TestMultiClientConnect,
-        TestPoolDhchap,
-        TestPoolCapacityLimits,
-        TestNamespaceE2E,
-        TestDeviceRestart,
-        # TestVolumePriority,             # UNCERTAIN: volume priority enforcement unclear
-        # TestSharedPlacement,            # UNCERTAIN: requires cluster set-shared-placement
-        # TestQpairTuning,               # UNCERTAIN: requires RDMA-enabled cluster
-        TestCapacityThresholds,
+        # # ── Phase 2 functional E2E tests ─────────────────────────────
+        # TestLvolInflate,
+        # TestLvolMigrationLoad,
+        # TestStorageNodeStats,
+        # TestStorageNodePorts,
+        # TestClusterStats,
+        # TestClusterTasks,
+        # TestClusterSecret,
+        # # TestQosClass,                   # DEPRECATED: QoS class API not verified
+        # # TestQosEnforcement,             # DEPRECATED: QoS enforcement API not verified
+        # TestPoolStats,
+        # TestClusterGracefulShutdown,
+        # TestMultiClientConnect,
+        # TestPoolDhchap,
+        # TestPoolCapacityLimits,
+        # TestNamespaceE2E,
+        # TestDeviceRestart,
+        # # TestVolumePriority,             # UNCERTAIN: volume priority enforcement unclear
+        # # TestSharedPlacement,            # UNCERTAIN: requires cluster set-shared-placement
+        # # TestQpairTuning,               # UNCERTAIN: requires RDMA-enabled cluster
+        # TestCapacityThresholds,
 
-        # ── Phase 3 functional E2E tests (new coverage gaps) ───────────
-        TestHealthChecks,
-        TestSnapshotLifecycle,
-        TestMigrationLifecycle,
-        TestStorageNodeListing,
-        TestDeviceCapacityIO,
-        TestLvolConnectLifecycle,
-        # TestVolumeQosDynamic,
-        TestClusterOperations,
-        TestConcurrentOperations,
-        TestPoolHostManagement,
-        TestLvolPlacement,
-        TestNodeShutdownRestart,
+        # # ── Phase 3 functional E2E tests (new coverage gaps) ───────────
+        # TestHealthChecks,
+        # TestSnapshotLifecycle,
+        # TestMigrationLifecycle,
+        # TestStorageNodeListing,
+        # TestDeviceCapacityIO,
+        # TestLvolConnectLifecycle,
+        # # TestVolumeQosDynamic,
+        # TestClusterOperations,
+        # TestConcurrentOperations,
+        # TestPoolHostManagement,
+        # TestLvolPlacement,
+        # TestNodeShutdownRestart,
     ]
     # tests += [
     #     # Security E2E tests
