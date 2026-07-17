@@ -836,7 +836,8 @@ def _ensure_target_nvmf_state(migration, lvol, src_node, tgt_node, src_rpc, tgt_
 
 
 def _cleanup_final_migration(src_rpc, ctx, tgt_rpc=None, rollback_target=False,
-                             tgt_sec_rpc=None, tgt_ter_rpc=None):
+                             tgt_sec_rpc=None, tgt_ter_rpc=None,
+                             nqn=None, lvol_uuid=None, subsystem_created_on_target=False):
     """Clean up after a final lvol migration attempt.
 
     On the success path (rollback_target=False) the hub controller is kept
@@ -845,6 +846,12 @@ def _cleanup_final_migration(src_rpc, ctx, tgt_rpc=None, rollback_target=False,
 
     On the rollback path (rollback_target=True) the hub controller IS detached
     and the target lvol/subsystem are torn down so a retry starts clean.
+
+    ``nqn``/``lvol_uuid``/``subsystem_created_on_target`` must come from the
+    caller (the lvol record and migration.target_subsystem_node_ids) —
+    transfer_context never carries an nqn/ns_id/ownership entry for this
+    stage, so reading them from ``ctx`` here silently no-ops the subsystem
+    cleanup entirely.
     """
     ctrl_name = ctx.get('ctrl_name')
     if ctrl_name and rollback_target:
@@ -855,14 +862,12 @@ def _cleanup_final_migration(src_rpc, ctx, tgt_rpc=None, rollback_target=False,
 
     if rollback_target and tgt_rpc:
         tgt_composite = ctx.get('tgt_lvol_composite')
-        nqn = ctx.get('nqn')
-        tgt_ns_id = ctx.get('tgt_ns_id')
-        sub_created = ctx.get('subsystem_created_on_target', False)
-        if nqn and tgt_ns_id is not None:
+        _nqn = ctx.get('nqn') or nqn
+        if _nqn and lvol_uuid:
             try:
-                _cleanup_subsystem_or_ns(nqn, tgt_ns_id, sub_created, tgt_rpc)
+                migration_controller.cleanup_subsystem_or_ns(_nqn, lvol_uuid, subsystem_created_on_target, tgt_rpc)
             except Exception as e:
-                logger.warning(f"cleanup target subsystem {nqn}: {e}")
+                logger.warning(f"cleanup target subsystem {_nqn}: {e}")
         if tgt_composite and tgt_rpc.get_bdevs(tgt_composite):
             try:
                 _delete_bdev_blocking(tgt_composite, tgt_rpc,
@@ -1723,7 +1728,10 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             # e.g. b'', when json decoding fails) — neither is a valid stat dict.
             _revert_src_replicas("final migration status unavailable (crash recovery)")
             _cleanup_final_migration(src_rpc, ctx, tgt_rpc, rollback_target=True,
-                                     tgt_sec_rpc=tgt_sec_rpc, tgt_ter_rpc=tgt_ter_rpc)
+                                     tgt_sec_rpc=tgt_sec_rpc, tgt_ter_rpc=tgt_ter_rpc,
+                                     nqn=lvol.nqn, lvol_uuid=lvol.uuid,
+                                     subsystem_created_on_target=(
+                                         tgt_node.get_id() in (migration.target_subsystem_node_ids or [])))
             migration.transfer_context = {}
             migration.write_to_db(db.kv_store)
             return False, True, "bdev_lvol_transfer_stat returned None (crash recovery)"
@@ -1731,7 +1739,10 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         if state == 'Failed':
             _revert_src_replicas("final migration failed (crash recovery)")
             _cleanup_final_migration(src_rpc, ctx, tgt_rpc, rollback_target=True,
-                                     tgt_sec_rpc=tgt_sec_rpc, tgt_ter_rpc=tgt_ter_rpc)
+                                     tgt_sec_rpc=tgt_sec_rpc, tgt_ter_rpc=tgt_ter_rpc,
+                                     nqn=lvol.nqn, lvol_uuid=lvol.uuid,
+                                     subsystem_created_on_target=(
+                                         tgt_node.get_id() in (migration.target_subsystem_node_ids or [])))
             migration.transfer_context = {}
             migration.write_to_db(db.kv_store)
             return False, True, "Final migration Failed (crash recovery)"
@@ -2083,35 +2094,6 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
 
 
 
-def _cleanup_subsystem_or_ns(nqn, ns_id, subsystem_was_created_by_migration, rpc):
-    """
-    Remove a volume's namespace from an NVMe-oF subsystem, deleting the
-    subsystem entirely only when no other namespaces remain AND we originally
-    created the subsystem (i.e. it wasn't pre-existing from a sibling volume).
-
-    If ``subsystem_was_created_by_migration`` is False the subsystem was already
-    present before we attached our namespace, so we never delete it—we only
-    remove our namespace entry.
-    """
-    sub = rpc.subsystem_get(nqn)
-    if not sub:
-        return  # already gone
-
-    ns_count = len(sub.get('namespaces', []))
-
-    if ns_count > 1 or not subsystem_was_created_by_migration:
-        # Other namespaces still alive or we didn't create the subsystem:
-        # remove only our namespace entry.
-        if ns_id:
-            rpc.nvmf_subsystem_remove_ns(nqn, ns_id)
-        else:
-            logger.warning(
-                f"Cannot remove namespace from {nqn}: ns_id unknown; skipping")
-    else:
-        # We're the sole namespace and we created the subsystem – delete it.
-        rpc.subsystem_delete(nqn)
-
-
 def _delete_intermediate_snaps_on_target(migration, tgt_rpc, tgt_sec_rpc=None, tgt_ter_rpc=None):
     """
     Delete migration-created intermediate ('shrink') snapshots from the target
@@ -2439,7 +2421,7 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
                     f"Step 8: skip subsystem delete on overlap node "
                     f"{_sp['node_id'][:8]} (now serving TGT)")
             else:
-                _cleanup_subsystem_or_ns(lvol.nqn, lvol.ns_id, True, _sp['rpc'])
+                migration_controller.cleanup_subsystem_or_ns(lvol.nqn, lvol.uuid, True, _sp['rpc'])
     except Exception as e:
         logger.warning(f"Source subsystem cleanup failed (non-fatal): {e}")
 
@@ -2527,8 +2509,14 @@ def _handle_cleanup_target(migration, tgt_node, tgt_rpc, src_rpc=None):
     if ctx.get('stage') != 'cleanup_tgt':
         tgt_lvol_composite = ctx.get('tgt_lvol_composite')
         nqn = ctx.get('nqn')
-        tgt_ns_id = ctx.get('tgt_ns_id')
-        subsystem_created_on_target = ctx.get('subsystem_created_on_target', True)
+
+        # Per-node ownership: migration.target_subsystem_node_ids is the
+        # authoritative record of which nodes had their subsystem *created*
+        # by this migration (see _ensure_target_nvmf_state). An overlap node
+        # reuses a preexisting subsystem it doesn't own, so it's never added
+        # to this list — cleanup must not delete a subsystem this migration
+        # never created just because the transfer failed/was cancelled.
+        owned_node_ids = set(migration.target_subsystem_node_ids or [])
 
         # Derive the migration bdev name in case it was pre-created but not yet
         # recorded in transfer_context (i.e. failure before LVOL_MIGRATE saved ctx).
@@ -2545,14 +2533,20 @@ def _handle_cleanup_target(migration, tgt_node, tgt_rpc, src_rpc=None):
         _nqn_to_clean = nqn or _pre_nqn
         if _nqn_to_clean:
             try:
-                _cleanup_subsystem_or_ns(_nqn_to_clean, tgt_ns_id, subsystem_created_on_target, tgt_rpc)
+                migration_controller.cleanup_subsystem_or_ns(
+                    _nqn_to_clean, migration.lvol_id,
+                    tgt_node.get_id() in owned_node_ids, tgt_rpc)
             except Exception as e:
                 logger.warning(f"cleanup target subsystem {_nqn_to_clean}: {e}")
-            for _label, _extra_rpc in [("secondary", tgt_sec_rpc), ("tertiary", tgt_ter_rpc)]:
-                if _extra_rpc:
+            for _label, _extra_node, _extra_rpc in [
+                ("secondary", tgt_sec, tgt_sec_rpc),
+                ("tertiary", tgt_ter, tgt_ter_rpc),
+            ]:
+                if _extra_rpc and _extra_node:
                     try:
-                        _cleanup_subsystem_or_ns(_nqn_to_clean, tgt_ns_id,
-                                                 subsystem_created_on_target, _extra_rpc)
+                        migration_controller.cleanup_subsystem_or_ns(
+                            _nqn_to_clean, migration.lvol_id,
+                            _extra_node.get_id() in owned_node_ids, _extra_rpc)
                     except Exception as e:
                         logger.warning(f"cleanup target {_label} subsystem {_nqn_to_clean}: {e}")
 

@@ -570,6 +570,50 @@ _MIG_SUFFIX  = constants.LVOL_MIG_BDEV_SUFFIX  # 'm'
 _DONE_SUFFIX = 'am'
 
 
+def cleanup_subsystem_or_ns(nqn, lvol_uuid, subsystem_was_created_by_migration, rpc):
+    """
+    Remove a volume's namespace from an NVMe-oF subsystem, deleting the
+    subsystem entirely only when no other namespaces remain AND we originally
+    created the subsystem (i.e. it wasn't pre-existing from a sibling volume
+    or an overlap node reusing the source's own subsystem).
+
+    If ``subsystem_was_created_by_migration`` is False the subsystem was already
+    present before we attached our namespace, so we never delete it — we only
+    remove our namespace entry.
+
+    The namespace ID is resolved live from SPDK by matching ``lvol_uuid``
+    against the subsystem's current namespace list rather than trusting a
+    cached value — live subsystem state is the only reliable source of truth.
+
+    Shared by cleanup_migration_target() (manual/API cleanup) and the task
+    runner's cancel/failure rollback — do not reimplement this ownership
+    check in either caller.
+
+    Returns one of: 'not_found', 'subsystem_deleted', 'ns_removed', 'ns_unknown'.
+    """
+    sub = rpc.subsystem_get(nqn)
+    if not sub:
+        return 'not_found'  # already gone
+
+    namespaces = sub.get('namespaces', [])
+    ns_count = len(namespaces)
+
+    if ns_count > 1 or not subsystem_was_created_by_migration:
+        # Other namespaces still alive or we didn't create the subsystem:
+        # remove only our namespace entry.
+        ns_id = next((ns['nsid'] for ns in namespaces if ns.get('uuid') == lvol_uuid), None)
+        if ns_id:
+            rpc.nvmf_subsystem_remove_ns(nqn, ns_id)
+            return 'ns_removed'
+        logger.warning(
+            f"Cannot find namespace for lvol {lvol_uuid} on subsystem {nqn}; skipping ns removal")
+        return 'ns_unknown'
+
+    # We're the sole namespace and we created the subsystem — delete it.
+    rpc.subsystem_delete(nqn)
+    return 'subsystem_deleted'
+
+
 def cleanup_migration_target(migration_id):
     """
     Idempotently remove every object this migration created on the target node(s).
@@ -580,7 +624,9 @@ def cleanup_migration_target(migration_id):
     (including after the migration is done/failed) — "not found" is treated
     as already cleaned up.
 
-    Returns {"deleted": [...], "not_found": [...], "errors": [...]}.
+    Returns {"deleted": [...], "not_found": [...], "skipped": [...], "errors": [...]}.
+    "skipped" holds snapshots this migration copied but that are still
+    referenced by another lvol already on the target (protected, not deleted).
     Raises ValueError when the migration or its target node cannot be found.
     """
     try:
@@ -595,6 +641,7 @@ def cleanup_migration_target(migration_id):
 
     deleted = []
     not_found = []
+    skipped = []
     errors = []
 
     def _try_delete_bdev(rpc, bdev_path, tag):
@@ -636,9 +683,36 @@ def cleanup_migration_target(migration_id):
     # target_snap_bdevs stores the exact path at creation time ("LVS_TGT/SNAP_xxx_m").
     # The bdev may have been renamed by the time cleanup runs, so we also probe the
     # canonical name (strip _m) and the post-done interim name (_am).
+    #
+    # Protection: target_snap_bdevs only ever holds snaps this migration itself
+    # copied (pre-existing snaps are never added — see the append site in
+    # _setup_snap_transfer), but a sibling lvol may have arrived on the target
+    # afterward and cloned from one of them. get_snaps_to_delete_on_target()
+    # already computes that "still referenced" protection; reuse it instead of
+    # reimplementing the check here, and skip any protected snap even though
+    # it's in target_snap_bdevs — deleting it would break the sibling's chain.
+    allowed_snap_uuids = set(get_snaps_to_delete_on_target(migration))
+    protected_short_bases = set()
+    for snap_uuid in migration.snaps_migrated:
+        if snap_uuid in migration.snaps_preexisting_on_target or snap_uuid in allowed_snap_uuids:
+            continue
+        try:
+            snap = db.get_snapshot_by_id(snap_uuid)
+        except KeyError:
+            continue
+        short = snap.snap_bdev.split('/', 1)[-1]
+        if short.endswith(_MIG_SUFFIX):
+            short = short[:-len(_MIG_SUFFIX)]
+        protected_short_bases.add(short)
+
     for stored_path in reversed(migration.target_snap_bdevs):
         lvstore, short_m = stored_path.rsplit('/', 1)
         short_base = short_m[:-len(_MIG_SUFFIX)] if short_m.endswith(_MIG_SUFFIX) else short_m
+
+        if short_base in protected_short_bases:
+            skipped.append({"type": "snap_bdev", "stored_path": stored_path,
+                            "reason": "referenced by another lvol on target"})
+            continue
 
         for _, rpc, label in rpc_clients:
             bdev_name = next(
@@ -656,26 +730,26 @@ def cleanup_migration_target(migration_id):
                                    "node": label})
 
     # ── 3. Subsystems — only on nodes where we called subsystem_create ─────────
+    # Delegates the delete-vs-detach-namespace decision to cleanup_subsystem_or_ns
+    # (shared with the task runner's cancel/failure rollback) rather than
+    # reimplementing that ownership check here.
     if migration.target_subsystem_nqn and migration.target_subsystem_node_ids:
         for node_id in migration.target_subsystem_node_ids:
+            tag = {"type": "subsystem", "nqn": migration.target_subsystem_nqn,
+                   "node": node_id[:8]}
             try:
                 node = db.get_storage_node_by_id(node_id)
                 rpc = node.rpc_client()
-                if rpc.subsystem_get(migration.target_subsystem_nqn):
-                    rpc.subsystem_delete(migration.target_subsystem_nqn)
-                    deleted.append({"type": "subsystem",
-                                    "nqn": migration.target_subsystem_nqn,
-                                    "node": node_id[:8]})
+                outcome = cleanup_subsystem_or_ns(
+                    migration.target_subsystem_nqn, migration.lvol_id, True, rpc)
+                if outcome == 'not_found':
+                    not_found.append(tag)
                 else:
-                    not_found.append({"type": "subsystem",
-                                      "nqn": migration.target_subsystem_nqn,
-                                      "node": node_id[:8]})
+                    deleted.append({**tag, "action": outcome})
             except Exception as exc:
-                errors.append({"type": "subsystem",
-                                "nqn": migration.target_subsystem_nqn,
-                                "node": node_id[:8], "error": str(exc)})
+                errors.append({**tag, "error": str(exc)})
 
-    return {"deleted": deleted, "not_found": not_found, "errors": errors}
+    return {"deleted": deleted, "not_found": not_found, "skipped": skipped, "errors": errors}
 
 
 # ---------------------------------------------------------------------------
