@@ -2253,6 +2253,24 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                     f"of re-adding")
                 return False
 
+        # Expansion pre-flight (cluster-wide half): the node add itself must
+        # not start unless the cluster is ACTIVE, all nodes are ONLINE and no
+        # migration / restart / backup task is open. The full check —
+        # including deletes on the impacted donor nodes, which are only known
+        # once the role moves are planned — reruns in
+        # integrate_new_node_into_cluster before the rebalance executes.
+        # This deliberately runs AFTER the stale-record cleanup above: a
+        # ghost in_creation record left by a died prior attempt of THIS
+        # endpoint would otherwise fail the all-nodes-online condition and
+        # permanently block its own retry (2026-07-17, node f6308adb).
+        if expansion:
+            from simplyblock_core.controllers.cluster_expansion.preconditions import (
+                check_expansion_preconditions)
+            ok, reason = check_expansion_preconditions(cluster, db_controller)
+            if not ok:
+                logger.error(f"Cannot start expansion node-add: {reason}")
+                return False
+
         fdb_connection = cluster.db_connection
 
         if cluster.mode == "docker":
@@ -6066,7 +6084,19 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
     # connecting here too would double the hublvol attach.
     if activation_mode:
         try:
-            snode.connect_to_hublvol(primary_node, failover_node=None)
+            # Role from topology, never a default: this call used to pass
+            # no role and connect_to_hublvol defaulted to "secondary", so
+            # an activation-mode TERTIARY recreate stamped role=secondary
+            # onto its LVS — a duplicate secondary role next to the real
+            # secondary (mass_create_delete_k8s 2026-07-14 12:02:37,
+            # LVS_11 on worker-1) until a later topology-correct call
+            # happened to repair it. Every LVS must hold a unique role
+            # per node at all times.
+            activation_role = ("tertiary"
+                               if primary_node.tertiary_node_id == snode.get_id()
+                               else "secondary")
+            snode.connect_to_hublvol(primary_node, failover_node=None,
+                                     role=activation_role)
         except Exception as e:
             logger.error("Error establishing hublvol: %s", e)
             # return False
@@ -8163,8 +8193,14 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
         except RPCException as e:
             logger.error("Error creating transfer hublvol: %s", e.message)
 
-        # Create secondary hublvol on sec_1 so tertiary can multipath
-        sec1 = db_controller.get_storage_node_by_id(secondary_ids[0])
+        # Create secondary hublvol on sec_1 so tertiary can multipath.
+        # sec_1 is the CONFIGURED secondary — never secondary_ids[0], which
+        # is the tertiary whenever secondary_node_id is unset (e.g. demoted
+        # after a failover) and would get the secondary hublvol created on
+        # the wrong node.
+        sec1 = None
+        if snode.secondary_node_id:
+            sec1 = db_controller.get_storage_node_by_id(snode.secondary_node_id)
         if sec1 and sec1.status == StorageNode.STATUS_ONLINE:
             try:
                 cluster = db_controller.get_cluster_by_id(snode.cluster_id)
@@ -8172,16 +8208,23 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
             except Exception as e:
                 logger.error("Error creating secondary hublvol on sec_1: %s", e)
 
-        for i, sec_node_id in enumerate(secondary_ids):
+        for sec_node_id in secondary_ids:
             sec_node = db_controller.get_storage_node_by_id(sec_node_id)
             if sec_node.status == StorageNode.STATUS_ONLINE:
                 try:
                     # Brief settle beat; connect_to_hublvol retries via the
                     # reconnect coordinator, the old 1s was serial latency.
                     time.sleep(0.2)
-                    # tertiary gets multipath failover to sec_1
-                    failover_node = sec1 if i >= 1 and sec1 and sec1.status == StorageNode.STATUS_ONLINE else None
-                    sec_role = "tertiary" if i >= 1 else "secondary"
+                    # Role and failover from topology, never list position:
+                    # with secondary_node_id unset the tertiary sits at
+                    # index 0 and an index rule marks it "secondary" — a
+                    # duplicate secondary role (same class as the 2026-05-21
+                    # takeover fix in recreate_lvstore; recurred in
+                    # mass_create_delete_k8s 2026-07-14). Tertiary gets
+                    # multipath failover to sec_1.
+                    is_tert = sec_node_id == snode.tertiary_node_id
+                    failover_node = sec1 if is_tert and sec1 and sec1.status == StorageNode.STATUS_ONLINE else None
+                    sec_role = "tertiary" if is_tert else "secondary"
                     sec_node.connect_to_hublvol(snode, failover_node=failover_node, role=sec_role)
                 except Exception as e:
                     logger.error("Error establishing hublvol: %s", e)

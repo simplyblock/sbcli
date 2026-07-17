@@ -538,9 +538,18 @@ class StorageNode(BaseNodeObject):
                 logger.error("Error establishing hublvol: %s", e.message)
                 return False
 
-    def connect_to_hublvol(self, primary_node, failover_node=None, role="secondary",
+    def connect_to_hublvol(self, primary_node, failover_node=None, *, role,
                            timeout=None, rpc_timeout=None, lvs_node=None):
         """Connect to a primary node's hublvol, optionally with multipath failover.
+
+        ``role`` is required and must be this node's role for the LVS being
+        wired up ("secondary" or "tertiary"), derived from topology
+        (secondary_node_id / tertiary_node_id back-refs) — NEVER from list
+        position or a default. It is stamped onto the LVS via
+        bdev_lvol_set_lvs_opts; a wrong value gives two nodes the same role
+        for one LVS (the old ``role="secondary"`` default did exactly that
+        to activation-mode tertiary recreates, mass_create_delete_k8s
+        2026-07-14: LVS_11 tertiary worker-1 stamped "secondary").
 
         If failover_node is provided (typically sec_1), sets up NVMe ANA
         multipath so that IO automatically fails over from the primary path
