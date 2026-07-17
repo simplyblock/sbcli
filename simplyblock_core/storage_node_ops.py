@@ -2793,7 +2793,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             logger.info("Setting node status to Active")
             set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE, caused_by="add_node")
 
-            # In --expansion mode the caller (clibase) triggers expansion
+            # In --expansion mode the expand-task runner triggers expansion
             # migration explicitly *after* integrate_new_node_into_cluster has
             # built the post-rotation lvstore_stack and flipped cluster status
             # back to ACTIVE. Skipping it here avoids racing the half-built
@@ -2802,6 +2802,24 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 for dev in snode.nvme_devices:
                     if dev.status == NVMeDevice.STATUS_ONLINE:
                         tasks_controller.add_new_device_mig_task(dev.get_id())
+            else:
+                # Queue the integration HERE so every entry point gets it —
+                # CLI, web API and the k8s node-add task runner all funnel
+                # through add_node, but only clibase used to queue the
+                # cluster-expand task, so CRD-driven adds completed without
+                # the rebalance ever starting (2026-07-17, vm15).
+                expand_task_id = tasks_controller.add_cluster_expand_task(
+                    cluster.get_id(), snode.get_id())
+                if expand_task_id:
+                    logger.info(
+                        f"expansion: queued cluster-expand task "
+                        f"{expand_task_id} for {snode.get_id()}")
+                else:
+                    logger.warning(
+                        f"expansion: a cluster-expand task is already open "
+                        f"for this cluster; node {snode.get_id()} will NOT "
+                        f"be integrated by it — re-add it after the current "
+                        f"expansion completes")
 
             storage_events.snode_add(snode)
 

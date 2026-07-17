@@ -237,19 +237,21 @@ class CLIWrapperBase:
                     f"--expansion: expected exactly 1 new storage node after "
                     f"add_node, found {len(new_snodes)}; cannot integrate")
                 return False
-            # Queue the integration as a background task rather than driving
-            # it inline: the rebalance runs the heavy SPDK recreate/teardown
-            # path (minutes), and the orchestrator persists a resume cursor
-            # so the runner survives a mgmt-node restart mid-expansion. The
-            # post-integration new-device-migration trigger now lives in the
-            # runner's success path (it must run after the rotation lands).
+            # add_node queues the integration task itself (so non-CLI entry
+            # points — web API, k8s node-add runner — get it too). This is
+            # only a fallback for the window where add_node succeeded but
+            # its queueing was skipped; add_cluster_expand_task refuses
+            # duplicates, so a falsy return here normally means add_node's
+            # task is already open — report it instead of failing.
             task_id = tasks_controller.add_cluster_expand_task(
                 cluster_id, new_snodes[0].get_id())
             if not task_id:
-                print("--expansion: an expansion task already exists for "
-                      "this cluster")
-                return False
-            print(f"--expansion: queued integration task {task_id} for "
+                task_id = tasks_controller.get_active_cluster_expand_task(
+                    cluster_id)
+                if not task_id:
+                    print("--expansion: failed to queue the integration task")
+                    return False
+            print(f"--expansion: integration task {task_id} queued for "
                   f"{new_snodes[0].get_id()}; monitor with `sbctl task list`")
 
         return out
