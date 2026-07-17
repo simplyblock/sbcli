@@ -128,7 +128,14 @@ def main():
             logger.error("No clusters found!")
         else:
             for cl in clusters:
-                tasks = db.get_job_tasks(cl.get_id(), reverse=False)
+                # An unhandled FDBError here (1031 transaction timeout) killed
+                # this runner at cluster start on 2026-07-16 — no auto-restart
+                # ran for the rest of the run. Log and retry next tick instead.
+                try:
+                    tasks = db.get_job_tasks(cl.get_id(), reverse=False)
+                except Exception as e:
+                    logger.error(f"Failed to read tasks for cluster {cl.get_id()}: {e}")
+                    continue
                 for task in tasks:
                     if task.function_name != JobSchedule.FN_NODE_ADD:
                         continue

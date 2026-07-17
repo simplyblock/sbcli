@@ -174,15 +174,57 @@ class BaseModel(object):
     def to_str(self):
         return pprint.pformat(self.to_dict())
 
+    # Upper bound for one range-read transaction. An unbounded
+    # get_range_startswith over a large prefix (e.g. the job-task table during
+    # a mass test) is a single FDB transaction: once it exceeds the 5s
+    # transaction limit it fails with 1031 and the binding's on_error retry
+    # restarts the SAME full scan — it never completes, and on 2026-07-16 it
+    # killed TasksNodeAddRunner at cluster start. Chunks of this size each run
+    # in their own (auto-retried) transaction and always finish.
+    _READ_CHUNK_SIZE = 2000
+
     def read_from_db(self, kv_store, id="", limit=0, reverse=False):
         if not kv_store:
             from simplyblock_core.db_controller import DBController
             kv_store = DBController().kv_store
         try:
             objects = []
-            prefix = self.get_db_id(id)
-            for k, v in kv_store.get_range_startswith(prefix.strip().encode('utf-8'),  limit=limit, reverse=reverse):
-                objects.append(self.__class__().from_dict(json.loads(v)))
+            prefix = self.get_db_id(id).strip().encode('utf-8')
+
+            if limit and limit <= self._READ_CHUNK_SIZE:
+                # Bounded small read — a single transaction is fine.
+                for k, v in kv_store.get_range_startswith(prefix, limit=limit, reverse=reverse):
+                    objects.append(self.__class__().from_dict(json.loads(v)))
+                return objects
+
+            try:
+                import fdb
+                first_ge = fdb.KeySelector.first_greater_or_equal
+                first_gt = fdb.KeySelector.first_greater_than
+                strinc = fdb.impl.strinc
+            except (ImportError, AttributeError):
+                # fdb API unavailable (stubbed store) — legacy single scan.
+                for k, v in kv_store.get_range_startswith(prefix, limit=limit, reverse=reverse):
+                    objects.append(self.__class__().from_dict(json.loads(v)))
+                return objects
+
+            begin = first_ge(prefix)
+            end = first_ge(strinc(prefix))
+            while True:
+                n = self._READ_CHUNK_SIZE
+                if limit:
+                    n = min(n, limit - len(objects))
+                    if n <= 0:
+                        break
+                kvs = list(kv_store.get_range(begin, end, limit=n, reverse=reverse))
+                for kv in kvs:
+                    objects.append(self.__class__().from_dict(json.loads(kv.value)))
+                if len(kvs) < n:
+                    break
+                if reverse:
+                    end = first_ge(kvs[-1].key)
+                else:
+                    begin = first_gt(kvs[-1].key)
             return objects
         except Exception as e:
             from simplyblock_core import utils

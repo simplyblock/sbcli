@@ -1307,8 +1307,22 @@ def _remove_bdev_stack(bdev_stack, rpc_client, del_async=False):
             ret = rpc_client.bdev_lvol_delete_lvstore(name)
         elif type == "bdev_lvol":
             name = bdev['params']["lvs_name"]+"/"+bdev['params']["name"]
+            if not rpc_client.get_bdevs(name):
+                # Already gone (e.g. the monitor's finish-phase re-issues the
+                # leader delete after the async pass completed). Re-deleting
+                # walks the snapshot/clone metadata a second time and errors
+                # on every entry the first pass cleaned ("Clone entry not
+                # found", 1382x in run mass_create_delete_docker-20260716) —
+                # skip instead.
+                logger.info(f"BDev {name} already deleted, skipping")
+                bdev['status'] = 'deleted'
+                continue
             ret, _ = rpc_client.delete_lvol(name, del_async=del_async)
         elif type == "bdev_lvol_clone":
+            if not rpc_client.get_bdevs(name):
+                logger.info(f"BDev {name} already deleted, skipping")
+                bdev['status'] = 'deleted'
+                continue
             ret, _ = rpc_client.delete_lvol(name,  del_async=del_async)
         else:
             logger.debug(f"Unknown BDev type: {type}")

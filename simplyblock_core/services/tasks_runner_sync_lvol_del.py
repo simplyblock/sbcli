@@ -4,7 +4,7 @@ import time
 from typing import Optional
 
 from simplyblock_core import db_controller, utils
-from simplyblock_core.controllers import tasks_controller
+from simplyblock_core.controllers import snapshot_controller, tasks_controller
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.storage_node import StorageNode
@@ -59,12 +59,24 @@ def main():
                              "exiting for a clean restart")
                 sys.exit(1)
         else:
-            _consecutive_db_failures = 0
             for cl in clusters:
                 if cl.status == Cluster.STATUS_IN_ACTIVATION:
                     continue
 
-                tasks = db.get_job_tasks(cl.get_id(), reverse=False)
+                # An unhandled FDBError here (e.g. 1031 transaction timeout,
+                # 2026-07-16 run) killed the whole runner — count it toward
+                # the same wedge-detection threshold as get_clusters instead.
+                try:
+                    tasks = db.get_job_tasks(cl.get_id(), reverse=False)
+                except Exception as e:
+                    _consecutive_db_failures += 1
+                    logger.error(f"Failed to read tasks for cluster {cl.get_id()} "
+                                 f"({_consecutive_db_failures}): {e}")
+                    if _consecutive_db_failures >= _DB_FAILURE_RESTART_THRESHOLD:
+                        logger.error("FDB unreadable for too long; exiting for a clean restart")
+                        sys.exit(1)
+                    continue
+                _consecutive_db_failures = 0
                 for task in tasks:
                     if task.function_name == JobSchedule.FN_LVOL_SYNC_OP:
                         if task.status != JobSchedule.STATUS_DONE:
@@ -118,7 +130,28 @@ def main():
                             lvol_bdev_name = task.function_params["lvol_bdev_name"]
 
                             logger.info(f"Sync delete bdev: {lvol_bdev_name} from node: {node.get_id()}")
-                            ret, err = node.rpc_client().delete_lvol(lvol_bdev_name, del_async=True)
+                            try:
+                                # Per-node lvstore lock: the sync delete mutates
+                                # the replica blob tree and must not interleave
+                                # with a create/register of another object on
+                                # this node. The try also keeps a dead node from
+                                # killing the runner: on 2026-07-16 an unhandled
+                                # RPCException ('connection error') here took the
+                                # whole service down and no deferred sync delete
+                                # ever ran again.
+                                with snapshot_controller.lvstore_op_lock(
+                                        node.cluster_id,
+                                        lvol_bdev_name.split("/")[0],
+                                        node_id=node.get_id()):
+                                    ret, err = node.rpc_client().delete_lvol(lvol_bdev_name, del_async=True)
+                            except Exception as e:
+                                msg = (f"Sync delete of {lvol_bdev_name} on {node.get_id()} "
+                                       f"failed: {e}; will retry")
+                                logger.error(msg)
+                                task.function_result = msg
+                                task.status = JobSchedule.STATUS_SUSPENDED
+                                task.write_to_db(db.kv_store)
+                                continue
                             if not ret:
                                 if "code" in err and err["code"] == -19:
                                     logger.error(f"Sync delete completed with error: {err}")
