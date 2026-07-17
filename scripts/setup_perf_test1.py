@@ -1,18 +1,17 @@
-import os
-from concurrent.futures import ThreadPoolExecutor
-
+import json
 import logging
+import os
+import re
+import select
+import time
+from concurrent.futures import ThreadPoolExecutor
 
 import boto3
 import paramiko
-import time
 
 # paramiko's transport thread logs banner/handshake errors to stderr on its own;
 # silence them since wait_for_ssh retries through these failures anyway
 logging.getLogger("paramiko").setLevel(logging.CRITICAL)
-import re
-import json
-import select
 
 # --- INPUT PARAMETERS ---
 AMI_ID = "ami-0dfc569a8686b9320"  # Rocky 9 us-east-1
