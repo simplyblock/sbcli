@@ -3133,6 +3133,58 @@ def restart_storage_node(
     return result
 
 
+def fd_dead_recovery_allowed(db_controller, snode) -> bool:
+    """Same-failure-domain parallel restart carve-out, reinstated with a hard gate.
+
+    Concurrent node restarts outside a drained SUSPENDED cluster are sanctioned
+    in exactly one situation: the target node's ENTIRE failure domain is dead
+    (no member ONLINE). Restarting its members concurrently cannot reduce
+    served availability — every member is already out of service — and the
+    surviving domains' IO is protected by the connect-storm fixes (targeted
+    device-connect updates, bounded connect retries, coverage gate) plus
+    _remote_connect_gate serializing the cross-node reconnect phase.
+
+    Hard gates, all on a fresh read:
+    - the cluster has >= 2 distinct failure domains among its nodes (with a
+      single/unset domain this predicate would degenerate to "whole cluster
+      down", which is the drained-suspension path's job);
+    - no member of the target's domain is ONLINE;
+    - no node OUTSIDE the target's domain is RESTARTING / IN_SHUTDOWN
+      (cross-domain concurrency stays forbidden).
+
+    The 2026-07-16 contract violation was parallel in_restart while the same
+    domain was still SERVING (DEGRADED cluster, domain partially online); the
+    no-ONLINE-member gate makes that state ineligible by construction.
+
+    Evaluated OUTSIDE the restart-guard FDB tx by design: the guard tx must
+    stay a single-row point read/write — fat node rows plus concurrent
+    acquisitions drove the FDB 1031 timeout storms (2026-07-16/17). Same
+    pattern as suspend_drain_complete, which is also read outside the tx.
+    The residual race (a domain member flipping ONLINE between this check and
+    lock acquisition) is bounded: the restarting set is already offline, and
+    reconnects are serialized by _remote_connect_gate. Any error → strict.
+    """
+    try:
+        nodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
+        if len({n.failure_domain for n in nodes}) < 2:
+            return False
+        for n in nodes:
+            if n.get_id() == snode.get_id():
+                continue
+            if n.failure_domain == snode.failure_domain:
+                if n.status == StorageNode.STATUS_ONLINE:
+                    return False
+            elif n.status in (StorageNode.STATUS_RESTARTING,
+                              StorageNode.STATUS_IN_SHUTDOWN):
+                return False
+        return True
+    except Exception as e:
+        logger.warning(
+            "fd_dead_recovery predicate failed for %s, staying strict: %s",
+            snode.get_id(), e)
+        return False
+
+
 def _restart_storage_node_impl(
         node_id, max_lvol=0, max_snap=0, max_prov=0,
         spdk_image=None, set_spdk_debug=None,
@@ -3183,11 +3235,15 @@ def _restart_storage_node_impl(
     # survivors still serve IO — keep strict one-restart-at-a-time semantics.
     allow_concurrent_peers = (cluster.status == Cluster.STATUS_SUSPENDED
                               and cluster.suspend_drain_complete)
-    # No failure-domain relaxation here: concurrent node restarts are
-    # permitted ONLY on a drained SUSPENDED cluster. The former same_fd_of
-    # carve-out let same-domain peers restart in parallel on a DEGRADED
-    # cluster that was still serving IO — against the operator contract
-    # (violation observed 2026-07-16).
+    # Second sanctioned relaxation: the target's whole failure domain is dead
+    # (fd_dead_recovery_allowed — no domain member ONLINE, no cross-domain
+    # restart in flight). The former same_fd_of carve-out that allowed
+    # same-domain peers to restart in parallel while the domain was still
+    # SERVING (2026-07-16 violation) remains removed; this gate only opens
+    # once the domain serves nothing, so recovery of a fully-rebooted domain
+    # fans out instead of paying 16 x single-restart serially (2026-07-17).
+    if not allow_concurrent_peers:
+        allow_concurrent_peers = fd_dead_recovery_allowed(db_controller, snode)
     acquired, reason = db_controller.try_set_node_restarting(
         snode.cluster_id, node_id, allow_concurrent_peers=allow_concurrent_peers)
     if not acquired:
