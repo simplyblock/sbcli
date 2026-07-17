@@ -1,12 +1,14 @@
 from threading import Thread
-from typing import Annotated, List, Literal, Optional
+from typing import Annotated, List, Literal, Optional, Union
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field, SecretStr
 from pydantic.networks import AnyUrl, UrlConstraints
+from sse_starlette import EventSourceResponse
 
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.models.cluster import Cluster as ClusterModel
 from simplyblock_core.models.cluster import HashicorpVaultSettings as ModelVaultSettings
 from simplyblock_core import cluster_ops
 
@@ -16,6 +18,7 @@ from .storage_pool import api as pool_api
 from .storage_node import api as storage_node_api
 from .task import api as task_api
 from .._dtos import ClusterDTO
+from .._sse import WATCH_RESPONSES, WatchParam, sse_response
 from .. import util as util
 
 
@@ -88,8 +91,15 @@ class ClusterParams(BaseModel):
     enable_failure_domain: bool = False
 
 
-@api.get('/', name='clusters:list')
-def list() -> List[ClusterDTO]:
+def _cluster_dto(cluster: ClusterModel) -> ClusterDTO:
+    ret = db.get_cluster_capacity(cluster, 1)
+    return ClusterDTO.from_model(cluster, ret[0] if ret else None)
+
+
+@api.get('/', name='clusters:list', response_model=List[ClusterDTO], responses=WATCH_RESPONSES)
+def list(watch: WatchParam = False) -> Union[List[ClusterDTO], EventSourceResponse]:
+    if watch:
+        return sse_response(cluster_ops.watch_clusters(), _cluster_dto)
     data = []
     for cluster in db.get_clusters():
         stat_obj = None
@@ -128,8 +138,14 @@ def add(request: Request, parameters: ClusterParams, response_format: util.Creat
 instance_api = APIRouter(prefix='/{cluster_id}')
 
 
-@instance_api.get('/', name='clusters:detail')
-def get(cluster: Cluster) -> ClusterDTO:
+@instance_api.get('/', name='clusters:detail', response_model=ClusterDTO, responses=WATCH_RESPONSES)
+def get(cluster: Cluster, watch: WatchParam = False) -> Union[ClusterDTO, EventSourceResponse]:
+    if watch:
+        return sse_response(
+            cluster_ops.watch_cluster(cluster.get_id()),
+            _cluster_dto,
+            single=True,
+        )
     stat_obj = None
     ret = db.get_cluster_capacity(cluster, 1)
     if ret:

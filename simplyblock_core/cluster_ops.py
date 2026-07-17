@@ -37,6 +37,18 @@ logger = utils.get_logger(__name__)
 
 db_controller = DBController()
 
+
+async def watch_clusters():
+    """Stream changes across all clusters."""
+    async for batch in db_controller.watch(Cluster):
+        yield batch
+
+
+async def watch_cluster(cluster_id):
+    """Stream changes for a single cluster."""
+    async for batch in db_controller.watch(Cluster, entity_id=cluster_id):
+        yield batch
+
 def _create_update_user(cluster_id, grafana_url, grafana_secret: SecretStr, user_secret: SecretStr, update_secret=False):
     session = requests.session()
     session.auth = ("admin", grafana_secret.get_secret_value())

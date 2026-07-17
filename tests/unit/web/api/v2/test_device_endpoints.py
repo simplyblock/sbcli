@@ -107,6 +107,32 @@ class TestDeviceStats:
             DEVICE_ID, None, parse_sizes=False)
 
 
+class TestWatchDevices:
+
+    def test_list_dispatches_watch_devices(self, client, device, device_controller, watch_stream):
+        device_controller.watch_devices.return_value = watch_stream([device])
+
+        response = client.get(f'{BASE}/?watch=true')
+
+        assert response.status_code == 200
+        assert response.headers['content-type'].startswith('text/event-stream')
+        assert 'event: snapshot' in response.text
+        assert DEVICE_ID in response.text
+        device_controller.watch_devices.assert_called_once_with(CLUSTER_ID, STORAGE_NODE_ID)
+
+    def test_detail_dispatches_watch_device(self, client, device, device_controller, watch_stream):
+        device_controller.watch_device.return_value = watch_stream([device])
+
+        response = client.get(f'{BASE}/{DEVICE_ID}/?watch=true')
+
+        assert response.status_code == 200
+        assert response.headers['content-type'].startswith('text/event-stream')
+        assert 'event: snapshot' in response.text
+        assert DEVICE_ID in response.text
+        device_controller.watch_device.assert_called_once_with(
+            CLUSTER_ID, STORAGE_NODE_ID, DEVICE_ID)
+
+
 class TestDeviceHealthInfo:
 
     def test_returns_health_info(self, client, device, device_controller):

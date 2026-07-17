@@ -21,6 +21,8 @@ logger = utils.get_logger(__name__)
 
 class StorageNode(BaseNodeObject):
 
+    _WATCHED = True
+
     # Restart phase constants (per-LVS)
     RESTART_PHASE_PRE_BLOCK = "pre_block"
     RESTART_PHASE_BLOCKED = "blocked"
@@ -175,6 +177,9 @@ class StorageNode(BaseNodeObject):
         if self.hublvol:
             return self.hublvol.nvmf_port
         return 0
+
+    def watch_scope(self):
+        return (self.cluster_id,)
 
     def client(self, **kwargs):
         """Return API client to this node

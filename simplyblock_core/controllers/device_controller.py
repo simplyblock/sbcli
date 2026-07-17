@@ -7,6 +7,7 @@ import uuid
 from simplyblock_core import distr_controller, utils, storage_node_ops, constants
 from simplyblock_core.controllers import device_events, tasks_controller
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.prom_client import PromClient
@@ -19,6 +20,39 @@ from simplyblock_core.prom_client import PromClient
 DEVICE_FLAP_DEBOUNCE_SEC = 10.0
 
 logger = logging.getLogger()
+
+
+def _explode_devices(nodes, node_id):
+    # Devices are embedded in their StorageNode record; expose them as per-device
+    # entries so the diff yields device-level events. The one place that knows
+    # devices live inside nodes.
+    for node in nodes:
+        if node.get_id() == node_id:
+            return list(node.nvme_devices)
+    return []
+
+
+async def watch_devices(cluster_id, node_id):
+    """Stream device changes for one storage node (a device change is a node write)."""
+    db = DBController()
+    async for batch in db.watch(
+            StorageNode, scope=(cluster_id,), entity_id=node_id,
+            select=lambda nodes: _explode_devices(nodes, node_id),
+            ancestors=[(Cluster, (), cluster_id), (StorageNode, (cluster_id,), node_id)]):
+        yield batch
+
+
+async def watch_device(cluster_id, node_id, device_id):
+    """Stream changes for a single device."""
+    db = DBController()
+    async for batch in db.watch(
+            StorageNode, scope=(cluster_id,), entity_id=node_id,
+            select=lambda nodes: [
+                device for device in _explode_devices(nodes, node_id)
+                if device.get_id() == device_id
+            ],
+            ancestors=[(Cluster, (), cluster_id), (StorageNode, (cluster_id,), node_id)]):
+        yield batch
 
 
 def get_storage_node_by_jm_device(db_controller: DBController, id) -> StorageNode:

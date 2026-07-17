@@ -55,3 +55,28 @@ class TestGetTask:
         response = client.get(f'{BASE}/{TASK_ID}/')
 
         assert response.status_code == 404
+
+
+class TestWatchTasks:
+
+    def test_list_dispatches_watch_tasks(self, client, task, tasks_controller, watch_stream):
+        tasks_controller.watch_tasks.return_value = watch_stream([task])
+
+        response = client.get(f'{BASE}/?watch=true')
+
+        assert response.status_code == 200
+        assert response.headers['content-type'].startswith('text/event-stream')
+        assert 'event: snapshot' in response.text
+        assert TASK_ID in response.text
+        tasks_controller.watch_tasks.assert_called_once_with(CLUSTER_ID)
+
+    def test_detail_dispatches_watch_task(self, client, task, tasks_controller, watch_stream):
+        tasks_controller.watch_task.return_value = watch_stream([task])
+
+        response = client.get(f'{BASE}/{TASK_ID}/?watch=true')
+
+        assert response.status_code == 200
+        assert response.headers['content-type'].startswith('text/event-stream')
+        assert 'event: snapshot' in response.text
+        assert TASK_ID in response.text
+        tasks_controller.watch_task.assert_called_once_with(CLUSTER_ID, TASK_ID)

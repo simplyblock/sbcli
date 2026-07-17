@@ -6,6 +6,8 @@ from simplyblock_core.models.base_model import BaseModel
 
 class JobSchedule(BaseModel):
 
+    _WATCHED = True
+
     STATUS_NEW = 'new'
     STATUS_RUNNING = 'running'
     STATUS_SUSPENDED = 'suspended'
@@ -54,6 +56,9 @@ class JobSchedule(BaseModel):
     # gives a soft lease: a different host may take over only once the lease
     # goes stale (see constants.TASK_LEASE_TTL_SEC). See tasks_controller.claim_task.
     owner: str = ""
+
+    def watch_scope(self):
+        return (self.cluster_id,)
 
     def write_to_db(self, kv_store=None):
         self.updated_at = str(datetime.datetime.now(datetime.timezone.utc))

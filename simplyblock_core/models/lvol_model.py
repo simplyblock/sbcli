@@ -7,6 +7,8 @@ from simplyblock_core.models.base_model import BaseModel
 
 class LVol(BaseModel):
 
+    _WATCHED = True
+
     STATUS_IN_CREATION = 'in_creation'
     STATUS_ONLINE = 'online'
     STATUS_OFFLINE = 'offline'
@@ -78,6 +80,9 @@ class LVol(BaseModel):
     # Interval in minutes for automatic internal snapshots that drive
     # replication. 0 disables interval snapshots (only user snaps replicate).
     replication_interval_min: int = 0
+
+    def watch_scope(self):
+        return (self.pool_uuid,)
 
     def has_qos(self):
         return (self.rw_ios_per_sec > 0 or self.rw_mbytes_per_sec > 0 or self.r_mbytes_per_sec > 0 or self.w_mbytes_per_sec > 0)

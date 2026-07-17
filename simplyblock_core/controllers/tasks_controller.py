@@ -14,6 +14,32 @@ from simplyblock_core.models.storage_node import StorageNode
 logger = logging.getLogger()
 db = db_controller.DBController()
 
+
+async def watch_tasks(cluster_id):
+    """Stream task changes for one cluster (excludes device-migration tasks,
+    matching the task list endpoint)."""
+    async for batch in db.watch(
+            JobSchedule, scope=(cluster_id,),
+            select=lambda models: [
+                task for task in db.get_job_tasks(cluster_id, source=models)
+                if task.function_name != JobSchedule.FN_DEV_MIG
+            ],
+            ancestors=[(Cluster, (), cluster_id)]):
+        yield batch
+
+
+async def watch_task(cluster_id, task_id):
+    """Stream changes for a single task.
+
+    JobSchedule's compound object key has no uuid-only version key to watch, so
+    this watches the cluster rollup and filters to the task uuid.
+    """
+    async for batch in db.watch(
+            JobSchedule, scope=(cluster_id,),
+            select=lambda models: [task for task in models if task.uuid == task_id],
+            ancestors=[(Cluster, (), cluster_id)]):
+        yield batch
+
 # Identity used for task leases. Hostname (not pid) so a runner that crashes
 # and restarts on the same host re-claims its own in-flight tasks immediately.
 _RUNNER_HOST = socket.gethostname()

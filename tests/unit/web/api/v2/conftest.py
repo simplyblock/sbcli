@@ -109,6 +109,55 @@ def client(app):
     return TestClient(app)
 
 
+# --- Watch (?watch=true) dispatch -------------------------------------------
+
+class _FakeChangeStream:
+    """Async-iterator stub over pre-built ``ChangeEvent`` batches.
+
+    Yields each batch once, then raises ``StopAsyncIteration`` so the SSE
+    generator returns and the streaming response completes for ``TestClient``.
+    """
+
+    def __init__(self, batches):
+        self._it = iter(batches)
+        self.closed = False
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        try:
+            return next(self._it)
+        except StopIteration:
+            raise StopAsyncIteration
+
+    async def aclose(self):
+        self.closed = True
+
+
+@pytest.fixture()
+def watch_stream(monkeypatch):
+    """Enable the SSE backend and build fake ``ChangeEvent`` streams.
+
+    Returns a factory: ``watch_stream([model, ...])`` yields a single
+    ``created`` batch for the given models (rendered as one ``snapshot`` event)
+    and then closes. This lets the endpoint tests assert the ``?watch=true``
+    dispatch — the correct controller ``watch_*`` call and a real
+    ``text/event-stream`` snapshot built by the route's own DTO builder —
+    without a live watch backend.
+    """
+    from simplyblock_core.watch import ChangeEvent
+    from simplyblock_web.api.v2 import _sse
+
+    monkeypatch.setattr(_sse, 'backend_available', lambda: True)
+
+    def make(models):
+        batch = [ChangeEvent('created', model.get_id(), model) for model in models]
+        return _FakeChangeStream([batch])
+
+    return make
+
+
 # --- Controller mocks -------------------------------------------------------
 
 @pytest.fixture()
@@ -160,6 +209,7 @@ def storage_node_ops(monkeypatch):
 def tasks_controller(monkeypatch):
     mock = MagicMock()
     monkeypatch.setattr(storage_node_module, 'tasks_controller', mock)
+    monkeypatch.setattr(task_module, 'tasks_controller', mock)
     return mock
 
 
