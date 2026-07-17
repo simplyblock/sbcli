@@ -40,6 +40,10 @@ from e2e_tests.add_node_fio_run import (
 )
 from e2e_tests.k8s_native_add_node import K8sNativeAddNodeTest
 from e2e_tests.k8s_native_node_migration import K8sNativeNodeMigrationTest
+from e2e_tests.test_add_node_edge_cases import (
+    TestSequentialNodeAdd,
+    TestAddNodeSnapshotCloneOnNewNode,
+)
 from e2e_tests.reboot_on_another_node_fio_run import TestRestartNodeOnAnotherHost
 from e2e_tests.mgmt_restart_fio_run import TestMgmtNodeReboot
 from e2e_tests.single_node_vm_reboot import TestRebootNodeHost
@@ -255,6 +259,15 @@ from e2e_tests.backup.test_backup_restore import (
     TestBackupInterruptedRestore,
 )
 
+from e2e_tests.backup.test_backup_node_add import (
+    TestBackupAfterNodeAdd,
+    TestBackupWithFioOnNewNode,
+)
+from e2e_tests.backup.test_backup_node_migration import (
+    TestBackupAfterNodeMigration,
+    TestBackupDuringMigration,
+)
+
 from stress_test.continuous_backup_stress import (
     BackupStressParallelSnapshots,
     BackupStressTcpFailover,
@@ -299,6 +312,8 @@ ALL_TESTS = [
     TestAddK8sNodesDuringFioRun,
     K8sNativeAddNodeTest,
     K8sNativeNodeMigrationTest,
+    TestSequentialNodeAdd,
+    TestAddNodeSnapshotCloneOnNewNode,
     K8sNativeMajorUpgrade,
     # Security E2E tests
     TestLvolSecurityCombinations,
@@ -360,6 +375,11 @@ ALL_TESTS = [
     TestBackupUpgradeCompatibility,
     TestBackupRestoreEdgeCases,
     TestBackupSourceSwitch,
+    # Backup node-add / node-migration edge cases
+    TestBackupAfterNodeAdd,
+    TestBackupWithFioOnNewNode,
+    TestBackupAfterNodeMigration,
+    TestBackupDuringMigration,
     # Backup stress tests
     BackupStressParallelSnapshots,
     BackupStressTcpFailover,
@@ -783,6 +803,11 @@ def get_backup_tests():
         TestBackupInterruptedBackup,
         TestBackupInterruptedRestore,
         TestBackupConcurrentIO,
+        # Backup node-add / node-migration edge cases
+        TestBackupAfterNodeAdd,
+        TestBackupWithFioOnNewNode,
+        TestBackupAfterNodeMigration,
+        TestBackupDuringMigration,
     ]
 
 
