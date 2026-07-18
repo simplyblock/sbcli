@@ -10,7 +10,7 @@ Handles three task types:
 import time
 
 from simplyblock_core import constants, db_controller, utils
-from simplyblock_core.controllers import backup_events
+from simplyblock_core.controllers import backup_events, tasks_controller
 from simplyblock_core.models.backup import Backup
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
@@ -456,7 +456,17 @@ def main():
 
             tasks = db.get_job_tasks(cl.get_id(), reverse=False)
             for task in tasks:
+                if task.function_name not in (
+                    JobSchedule.FN_BACKUP,
+                    JobSchedule.FN_BACKUP_RESTORE,
+                    JobSchedule.FN_BACKUP_MERGE,
+                ):
+                    continue
                 if task.status == JobSchedule.STATUS_DONE or task.canceled:
+                    continue
+
+                if not tasks_controller.claim_task(task):
+                    logger.info(f"Backup task {task.uuid} owned by another runner host; skipping")
                     continue
 
                 # Re-fetch task for freshness
