@@ -241,7 +241,7 @@ def task_runner(task):
 def task_runner_device(task):
     device = _get_device(task)
 
-    if task.retry >= constants.TASK_EXEC_RETRY_COUNT:
+    if 0 <= task.max_retry <= task.retry:
         task.function_result = "max retry reached"
         task.status = JobSchedule.STATUS_DONE
         task.write_to_db(db.kv_store)
@@ -323,7 +323,7 @@ def task_runner_node(task):
         _task_finish(task, "node not found")
         return True
 
-    if task.retry >= task.max_retry:
+    if 0 <= task.max_retry <= task.retry:
         if not _task_finish(task, "max retry reached"):
             # Concurrently finished/canceled — someone else owns the outcome;
             # the give-up side effects (OFFLINE flip + re-queue) must not run.
