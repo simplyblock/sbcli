@@ -30,6 +30,9 @@ def main():
 
                     if task.function_name == JobSchedule.FN_JC_COMP_RESUME:
                         if task.status != JobSchedule.STATUS_DONE:
+                            if not tasks_controller.claim_task(task):
+                                logger.info(f"JC-comp task {task.uuid} owned by another runner host; skipping")
+                                continue
 
                             # get new task object because it could be changed from cancel task
                             task = db.get_task_by_id(task.uuid)

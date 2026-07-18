@@ -1018,6 +1018,9 @@ def main():
         else:
             for cl in clusters:
                 for task in db.get_active_batch_migration_tasks(cl.get_id()):
+                    if not tasks_controller.claim_task(task):
+                        logger.info(f"Batch-migration task {task.uuid} owned by another runner host; skipping")
+                        continue
                     task_runner(task)
 
         time.sleep(3)

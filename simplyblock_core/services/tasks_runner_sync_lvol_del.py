@@ -39,6 +39,9 @@ def main():
                 for task in tasks:
                     if task.function_name == JobSchedule.FN_LVOL_SYNC_OP:
                         if task.status != JobSchedule.STATUS_DONE:
+                            if not tasks_controller.claim_task(task):
+                                logger.info(f"LVol sync task {task.uuid} owned by another runner host; skipping")
+                                continue
                             # Re-read (it may have been canceled concurrently).
                             task = db.get_task_by_id(task.uuid)
                             if task.status == JobSchedule.STATUS_DONE:
@@ -51,6 +54,9 @@ def main():
 
                     if task.function_name == JobSchedule.FN_LVOL_SYNC_DEL:
                         if task.status != JobSchedule.STATUS_DONE:
+                            if not tasks_controller.claim_task(task):
+                                logger.info(f"LVol sync task {task.uuid} owned by another runner host; skipping")
+                                continue
 
                             # get new task object because it could be changed from cancel task
                             task = db.get_task_by_id(task.uuid)
