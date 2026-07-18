@@ -90,7 +90,7 @@ class TestPathInvocationContract(unittest.TestCase):
         "health_check_service", "lvol_monitor", "lvol_stat_collector",
         "main_distr_event_collector", "mgmt_node_monitor", "snapshot_monitor",
         "snapshot_replication", "spdk_http_proxy_server", "storage_node_monitor",
-        "tasks_cluster_status", "tasks_runner_backup", "tasks_runner_backup_merge",
+        "tasks_cluster_status", "tasks_runner_backup", "backup_merge_service",
         "tasks_runner_batch_migration", "tasks_runner_cluster_expand",
         "tasks_runner_failed_migration", "tasks_runner_fdb_backup",
         "tasks_runner_jc_comp", "tasks_runner_lvol_migration",

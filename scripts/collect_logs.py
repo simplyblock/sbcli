@@ -101,7 +101,7 @@ CONTROL_PLANE_SERVICES_DOCKER = [
     "TasksRunnerJCCompResume",
     "TasksRunnerLVolSyncDelete",
     "TasksRunnerBackup",
-    "TasksRunnerBackupMerge",
+    "BackupMergeService",
     # Async cross-cluster replication: these run on the CP but were missing from
     # this list, so a replication incident collected no replication logs at all.
     "SnapshotReplication",
