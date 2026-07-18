@@ -38,7 +38,7 @@ def task_runner(task, cl):
         task.write_to_db(db.kv_store)
         return False
 
-    if task.retry >= task.max_retry:
+    if 0 <= task.max_retry <= task.retry:
         task.function_result = "max retry reached"
         task.status = JobSchedule.STATUS_DONE
         task.write_to_db(db.kv_store)

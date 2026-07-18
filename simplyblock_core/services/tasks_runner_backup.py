@@ -423,9 +423,9 @@ def task_runner(task, cl):
 
     # Retry ceiling: every other task runner enforces this. Without it a task
     # whose step keeps failing (e.g. an RPC that crashes SPDK) loops until the
-    # timeout, re-triggering the failure each cycle. max_retry <= 0 means the
+    # timeout, re-triggering the failure each cycle. max_retry < 0 means the
     # task is intentionally unbounded and only the timeout applies.
-    if task.max_retry > 0 and task.retry >= task.max_retry:
+    if 0 <= task.max_retry <= task.retry:
         _terminate_task(task, f"max retry reached ({task.retry}/{task.max_retry})")
         return
 

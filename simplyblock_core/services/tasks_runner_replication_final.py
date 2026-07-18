@@ -56,7 +56,7 @@ def task_runner(task: JobSchedule):
     if not lvol_id:
         return _finalize(task, False, "missing lvol_id in task params")
 
-    if task.retry >= task.max_retry or task.canceled is True:
+    if (0 <= task.max_retry <= task.retry) or task.canceled is True:
         task.function_result = "task cancelled" if task.canceled else "max retry reached"
         task.status = JobSchedule.STATUS_DONE
         task.write_to_db(db.kv_store)
