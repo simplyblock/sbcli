@@ -279,12 +279,7 @@ def _prepare_cutover(task, lvol, src_node, tgt_node):
 def main():
     logger.info("Starting replication-final tasks runner...")
     while True:
-        try:
-            clusters = db.get_clusters()
-        except Exception as e:
-            logger.error(f"Failed to get clusters: {e}")
-            time.sleep(3)
-            continue
+        clusters = db.get_clusters()
         for cl in clusters:
             for task in db.get_job_tasks(cl.get_id(), reverse=False):
                 if task.function_name != JobSchedule.FN_REPLICATION_FINAL:

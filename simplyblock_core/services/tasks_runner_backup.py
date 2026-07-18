@@ -449,12 +449,6 @@ def process_task(task, cl):
 if __name__ == "__main__":
     logger.info("Starting backup tasks runner...")
     while True:
-        try:
-            db.get_clusters()
-        except Exception as e:
-            logger.error(f"Failed to get clusters: {e}")
-            time.sleep(3)
-            continue
         clusters = db.get_clusters()
         for cl in clusters:
             if cl.status == Cluster.STATUS_IN_ACTIVATION:
