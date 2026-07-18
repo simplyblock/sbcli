@@ -95,7 +95,7 @@ CONTROL_PLANE_SERVICES = [
     "TasksRunnerJCCompResume",
     "TasksRunnerLVolSyncDelete",
     "TasksRunnerBackup",
-    "TasksRunnerBackupMerge",
+    "BackupMergeService",
     "HAProxy",
 ]
 

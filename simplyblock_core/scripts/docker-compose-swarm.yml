@@ -554,10 +554,10 @@ services:
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
 
-  TasksRunnerBackupMerge:
+  BackupMergeService:
     <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "python3 simplyblock_core/services/tasks_runner_backup_merge.py"
+    command: "python3 simplyblock_core/services/backup_merge_service.py"
     deploy:
       placement:
         constraints: [node.role == manager]
