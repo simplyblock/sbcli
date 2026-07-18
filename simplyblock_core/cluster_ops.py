@@ -1222,8 +1222,13 @@ def _cluster_activate_impl(cl_id, force=False, force_lvstore_create=False) -> No
             except Exception as e:
                 logger.error("Error creating hublvol on %s: %s", node_id, e)
 
-            # Create secondary hublvol on sec_1 (for tertiary multipath failover)
-            sec1 = db_controller.get_storage_node_by_id(secondary_ids[0])
+            # Create secondary hublvol on sec_1 (for tertiary multipath
+            # failover). sec_1 is the CONFIGURED secondary — never
+            # secondary_ids[0], which is the tertiary whenever
+            # secondary_node_id is unset (e.g. demoted after a failover).
+            sec1 = None
+            if snode.secondary_node_id:
+                sec1 = db_controller.get_storage_node_by_id(snode.secondary_node_id)
             if sec1 and sec1.status == StorageNode.STATUS_ONLINE:
                 try:
                     snode = db_controller.get_storage_node_by_id(node_id)
@@ -1232,7 +1237,7 @@ def _cluster_activate_impl(cl_id, force=False, force_lvstore_create=False) -> No
                     logger.error("Error creating secondary hublvol on sec_1 %s: %s", sec1.get_id(), e)
 
             # Connect each secondary/tertiary to primary's hublvol
-            for i, sec_node_id in enumerate(secondary_ids):
+            for sec_node_id in secondary_ids:
                 sec_node = db_controller.get_storage_node_by_id(sec_node_id)
                 if sec_node.status != StorageNode.STATUS_ONLINE:
                     continue
@@ -1241,8 +1246,15 @@ def _cluster_activate_impl(cl_id, force=False, force_lvstore_create=False) -> No
                     # itself retries via the reconnect coordinator, so a full
                     # 1s per edge was pure serial latency across the pass.
                     time.sleep(0.2)
-                    failover_node = sec1 if i >= 1 and sec1 and sec1.status == StorageNode.STATUS_ONLINE else None
-                    sec_role = "tertiary" if i >= 1 else "secondary"
+                    # Role and failover from topology, never list position:
+                    # with secondary_node_id unset the tertiary sits at
+                    # index 0 and an index rule marks it "secondary" — a
+                    # duplicate secondary role on the LVS (recurred in
+                    # mass_create_delete_k8s 2026-07-14; each LVS must hold
+                    # a unique role per node).
+                    is_tert = sec_node_id == snode.tertiary_node_id
+                    failover_node = sec1 if is_tert and sec1 and sec1.status == StorageNode.STATUS_ONLINE else None
+                    sec_role = "tertiary" if is_tert else "secondary"
                     sec_node.connect_to_hublvol(snode, failover_node=failover_node, role=sec_role)
                 except Exception as e:
                     logger.error("Error connecting %s to hublvol on %s: %s", sec_node.get_id(), node_id, e)

@@ -99,7 +99,7 @@ class RPCClient:
     # still apply, since a failed *connect* means the request never reached the
     # node and is safe to resend.
     DEFAULT_ALLOWED_METHODS = ["HEAD", "GET", "PUT", "DELETE", "OPTIONS", "TRACE"]
-    RPC_NO_PRINT_OUTPUT = ["bdev_get_bdevs", "nvmf_get_subsystems", "bdev_get_iostat"]
+    RPC_NO_PRINT_OUTPUT = ["bdev_get_bdevs", "nvmf_get_subsystems", "bdev_get_iostat", "bdev_get_histogram"]
 
     def __init__(self, host, port, username, password: SecretStr, timeout=180, retry=3):
         self.host = host
@@ -1184,6 +1184,22 @@ class RPCClient:
 
     def bdev_wait_for_examine(self):
         return self._request("bdev_wait_for_examine")
+
+    def bdev_enable_histogram(self, name, enable=True, opc=None):
+        # opc filters to a single I/O type (e.g. "read"/"write"); requires
+        # SPDK >= 24.01. Toggling disable->enable clears the collected data,
+        # which is the only way to reset the (cumulative) histogram.
+        params = {"name": name, "enable": enable}
+        if opc:
+            params["opc"] = opc
+        return self._request("bdev_enable_histogram", params)
+
+    def bdev_get_histogram(self, name):
+        # Returns {"histogram": <base64 of uint64 buckets>, "bucket_shift",
+        # "tsc_rate"}. Counts are cumulative since enable; diff two snapshots
+        # to get a time window.
+        params = {"name": name}
+        return self._request("bdev_get_histogram", params)
 
     def nbd_start_disk(self, bdev_name, nbd_device="/dev/nbd0"):
         params = {

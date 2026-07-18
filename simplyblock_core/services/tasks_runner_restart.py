@@ -369,13 +369,15 @@ def task_runner_node(task):
     # IO — so it keeps the full pre-check.
     cluster_obj = db.get_cluster_by_id(node.cluster_id)
     if not (cluster_obj.status == Cluster.STATUS_SUSPENDED
-            and cluster_obj.suspend_drain_complete):
-        # Strict one-restart-at-a-time everywhere outside drained suspension.
-        # The failure-domain relaxation (same-domain non-pair peers allowed
-        # mid-restart on a DEGRADED cluster) is removed: a degraded cluster
-        # is still serving IO, and the operator contract permits concurrent
-        # node restarts ONLY on a drained SUSPENDED cluster (violation
-        # observed 2026-07-16: parallel in_restart while DEGRADED).
+            and cluster_obj.suspend_drain_complete) \
+            and not storage_node_ops.fd_dead_recovery_allowed(db, node):
+        # Strict one-restart-at-a-time outside the two sanctioned cases:
+        # drained suspension, and a fully-dead failure domain
+        # (fd_dead_recovery_allowed — no domain member ONLINE, so parallel
+        # recovery cannot touch served IO; see the predicate's docstring).
+        # The former relaxation that fanned out same-domain restarts while
+        # the domain was still SERVING (2026-07-16 violation: parallel
+        # in_restart while DEGRADED) remains removed.
         for peer in db.get_storage_nodes_by_cluster_id(node.cluster_id):
             if peer.get_id() == node.get_id():
                 continue
@@ -645,16 +647,22 @@ def main():
                         # node went OFFLINE, i.e. no client IO — an operator-caused
                         # suspension never drains, its survivors are still serving,
                         # and its restarts must stay sequential with full guards.
-                        # Parallel dispatch ONLY here. The failure-domain
-                        # relaxation that also fanned out same-domain restarts
-                        # on a DEGRADED cluster is removed: a degraded cluster
-                        # is still serving IO, and the operator contract is
-                        # strict — concurrent node restarts are permitted only
-                        # once a SUSPENDED cluster has drained to all-offline
-                        # (observed violating the contract 2026-07-16: multiple
-                        # nodes in_restart in parallel while DEGRADED).
+                        # Parallel dispatch in the two sanctioned cases only:
+                        # drained suspension (full-cluster recovery), and a
+                        # fully-dead failure domain (fd_dead_recovery_allowed:
+                        # no domain member ONLINE, no cross-domain restart in
+                        # flight — recovery of a rebooted domain fans out
+                        # instead of 16 x single-restart serially). The former
+                        # relaxation that fanned out while the domain was
+                        # still SERVING (2026-07-16 violation) stays removed.
                         dispatch_parallel = (cl_fresh.status == Cluster.STATUS_SUSPENDED
                                              and cl_fresh.suspend_drain_complete)
+                        if not dispatch_parallel and task.node_id:
+                            try:
+                                dispatch_parallel = storage_node_ops.fd_dead_recovery_allowed(
+                                    db, db.get_storage_node_by_id(task.node_id))
+                            except KeyError:
+                                pass
 
                     if dispatch_parallel:
                         inflight = _restart_inflight.get(task.uuid)

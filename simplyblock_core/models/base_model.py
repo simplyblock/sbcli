@@ -174,15 +174,80 @@ class BaseModel(object):
     def to_str(self):
         return pprint.pformat(self.to_dict())
 
+    # Per-chunk row count for one range-read transaction. An unbounded
+    # get_range_startswith over a large prefix (e.g. the job-task table during
+    # a mass test) is a single FDB transaction: once it exceeds the 5s
+    # transaction limit it fails with 1031 and the binding's on_error retry
+    # restarts the SAME full scan — it never completes, and on 2026-07-16 it
+    # killed TasksNodeAddRunner at cluster start.
+    #
+    # This is a CHUNK size, not a result cap: read_from_db() below continues
+    # key-range pagination until the prefix is exhausted and always returns
+    # the complete result set. Every key that exists for the whole duration
+    # of the scan is returned exactly once. What the chunking does trade away
+    # (when kv_store is a Database, so each chunk is its own transaction) is
+    # single-snapshot isolation: a row created/deleted WHILE the scan runs
+    # may or may not be included — the same guarantee class as any paginated
+    # enumeration. Callers whose invariants depend on concurrent mutations
+    # (e.g. free-slot accounting over all lvols) must enforce them at claim
+    # time (atomic claim / re-validation), not at scan time — a single-txn
+    # snapshot is equally stale by the time it is acted upon. When kv_store
+    # is a Transaction the loop runs inside that one transaction and keeps
+    # snapshot semantics (and its 5s budget) unchanged.
+    _READ_CHUNK_SIZE = 2000
+
+    @staticmethod
+    def _next_prefix(prefix: bytes) -> bytes:
+        """Smallest key strictly greater than every key starting with
+        ``prefix`` (equivalent of fdb's ``strinc``, implemented locally: the
+        fdb binding injects its API at ``fdb.api_version()`` time, so mypy
+        cannot see ``fdb.KeySelector``/``fdb.impl``, and ``fdb.impl`` is
+        private anyway)."""
+        stripped = prefix.rstrip(b'\xff')
+        if not stripped:
+            raise ValueError('prefix consists solely of 0xff bytes')
+        return stripped[:-1] + bytes([stripped[-1] + 1])
+
     def read_from_db(self, kv_store, id="", limit=0, reverse=False):
         if not kv_store:
             from simplyblock_core.db_controller import DBController
             kv_store = DBController().kv_store
         try:
             objects = []
-            prefix = self.get_db_id(id)
-            for k, v in kv_store.get_range_startswith(prefix.strip().encode('utf-8'),  limit=limit, reverse=reverse):
-                objects.append(self.__class__().from_dict(json.loads(v)))
+            prefix = self.get_db_id(id).strip().encode('utf-8')
+
+            if (limit and limit <= self._READ_CHUNK_SIZE) or not hasattr(kv_store, 'get_range'):
+                # Single scan: either the read is bounded and small (one
+                # transaction is fine), or the store does not support raw
+                # key-range reads — the unit-tier fdb stub and the fake
+                # stores in tests implement only get_range_startswith.
+                for k, v in kv_store.get_range_startswith(prefix, limit=limit, reverse=reverse):
+                    objects.append(self.__class__().from_dict(json.loads(v)))
+                return objects
+
+            # Chunked pagination over [prefix, next_prefix(prefix)) with plain
+            # byte keys (begin inclusive, end exclusive — the binding turns
+            # them into KeySelectors). Continuation: forward moves begin to
+            # the successor of the last key seen (key + b'\x00' is the
+            # smallest key strictly greater than key); reverse moves the
+            # exclusive end down onto the last (smallest) key seen.
+            begin = prefix
+            end = self._next_prefix(prefix)
+            while True:
+                n = self._READ_CHUNK_SIZE
+                if limit:
+                    n = min(n, limit - len(objects))
+                    if n <= 0:
+                        break
+                kvs = list(kv_store.get_range(begin, end, limit=n, reverse=reverse))
+                for kv in kvs:
+                    objects.append(self.__class__().from_dict(json.loads(kv.value)))
+                if len(kvs) < n:
+                    break
+                if reverse:
+                    end = bytes(kvs[-1].key)
+                else:
+                    begin = bytes(kvs[-1].key) + b'\x00'
             return objects
         except Exception as e:
             from simplyblock_core import utils

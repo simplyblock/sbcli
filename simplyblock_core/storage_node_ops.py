@@ -206,7 +206,15 @@ def _failover_primary_ana(primary_node):
     if primary_node.secondary_node_id:
         first_sec = db_ctrl.get_storage_node_by_id(primary_node.secondary_node_id)
 
+    # Namespaces share subsystems (one NQN hosts many lvols) and the listener
+    # RPC is per-subsystem — repeating it per lvol multiplies the ANA calls
+    # (and, for stale records whose subsystem is gone, the error spam) by the
+    # namespace count. One call per (nqn, lvs) covers every lvol in it.
+    seen_subsystems = set()
     for lvol in lvol_list:
+        if (lvol.nqn, lvol.lvs_name) in seen_subsystems:
+            continue
+        seen_subsystems.add((lvol.nqn, lvol.lvs_name))
         if first_sec and first_sec.status == StorageNode.STATUS_ONLINE:
             _set_lvol_ana_on_node(lvol, first_sec, "optimized")
 
@@ -224,7 +232,12 @@ def _failback_primary_ana(primary_node):
     if primary_node.secondary_node_id:
         first_sec = db_ctrl.get_storage_node_by_id(primary_node.secondary_node_id)
 
+    # Same per-subsystem dedupe as _failover_primary_ana.
+    seen_subsystems = set()
     for lvol in lvol_list:
+        if (lvol.nqn, lvol.lvs_name) in seen_subsystems:
+            continue
+        seen_subsystems.add((lvol.nqn, lvol.lvs_name))
         if first_sec and first_sec.status == StorageNode.STATUS_ONLINE:
             _set_lvol_ana_on_node(lvol, first_sec, "non_optimized")
 
@@ -298,12 +311,34 @@ def _remote_connect_lock(node_id):
     with _remote_connect_locks_guard:
         return _remote_connect_locks.setdefault(node_id, threading.Lock())
 
+
+#: In-process dedupe of concurrent connects of the SAME (device, node) pair.
+#: Replaces the DB-backed NVMeDevice.lock_device_connection debounce inside
+#: connect_device: that variant cost a node-table scan plus a whole-node
+#: record write in FDB per device connect, which under parallel node restarts
+#: (16 nodes × ~34 devices → 500+ concurrent connect threads) saturated FDB
+#: with conflicting transactions and killed connect threads before their
+#: attach RPC ever ran (2026-07-16 half-cluster restart incident). A blocking
+#: process-local lock is a strictly stronger dedupe for the storm path — all
+#: parallel restarts run in the single task-runner process — at zero DB cost.
+_device_connect_locks_guard = threading.Lock()
+_device_connect_locks: dict = {}
+
+
+def _device_connect_lock(device_id, node_id):
+    with _device_connect_locks_guard:
+        return _device_connect_locks.setdefault((device_id, node_id), threading.Lock())
+
 #: Serializes lvstore port allocation + persistence in create_lvstore.
 #: get_next_lvstore_ports has no reservation step, so concurrent creates
 #: (parallel activation Pass 1) would allocate colliding ports without this.
 #: Process-local is sufficient — all Pass-1 creates run in the single
 #: activation driver process.
 _lvstore_port_alloc_lock = threading.Lock()
+
+#: Serializes recreate_all_lvstores across parallel node restarts — see the
+#: docstring there for scope and why process-local suffices.
+_recreate_lvstore_gate = threading.Lock()
 
 
 def _collect_attached_ips(ctrlr_list):
@@ -377,13 +412,24 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, attach_time
     if attach_timeout is None or attach_timeout > _ATTACH_CONTROLLER_MAX_TIMEOUT_SEC:
         attach_timeout = _ATTACH_CONTROLLER_MAX_TIMEOUT_SEC
     attach_rpc_client = node.rpc_client(timeout=attach_timeout, retry=0)
-    # check connection status
-    if device.is_connection_in_progress_to_node(node.get_id()):
-        logger.warning("This device is being connected to from other node, sleep for 5 seconds")
-        time.sleep(5)
 
-    device.lock_device_connection(node.get_id())
+    # Dedupe concurrent connects of the same (device, node) pair with a
+    # process-local lock (see _device_connect_lock for why the DB-backed
+    # lock_device_connection debounce had to go). Blocking is intended:
+    # the second caller waits out the first attach instead of racing it,
+    # then hits the already-attached fast paths below.
+    with _device_connect_lock(device.get_id(), node.get_id()):
+        return _connect_device_attach(
+            name, device, node, rpc_client, attach_rpc_client,
+            expected_ips, is_multipath)
 
+
+def _connect_device_attach(name, device, node, rpc_client, attach_rpc_client,
+                           expected_ips, is_multipath):
+    """Controller inspect + attach path of connect_device.
+
+    Runs under the per-(device, node) connect lock taken by connect_device.
+    """
     ret = rpc_client.bdev_nvme_controller_list(name)
     if ret:
         # "failed" is transient here, NOT a terminal state to act on: the
@@ -419,7 +465,6 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, attach_time
         else:
             # Still transient after the full budget: something is genuinely
             # hanging (usually stuck IO). Never detach here — surface it.
-            device.release_device_connection()
             raise RuntimeError(f"Controller: {name}, status is {states}")
 
     db_ctrl = DBController()
@@ -431,7 +476,6 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, attach_time
     else:
         msg = "target node to connect has no active fabric."
         logger.error(msg)
-        device.release_device_connection()
         raise RuntimeError(msg)
 
     # nvmf_multipath is a bool on the device record; translate it into
@@ -462,7 +506,6 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, attach_time
         if not bdev_name:
             msg = f"Bdev name not returned from controller attach for {name}"
             logger.error(msg)
-            device.release_device_connection()
             raise RuntimeError(msg)
         bdev_found = False
         for i in range(5):
@@ -472,8 +515,6 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, attach_time
                 break
             else:
                 time.sleep(1)
-
-        device.release_device_connection()
 
         if not bdev_found:
             logger.error("Bdev not found after 5 attempts")
@@ -515,8 +556,6 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, attach_time
                 logger.warning(
                     "Controller %s still missing paths after attach: %s (now %d/%d)",
                     name, still_missing, len(now_attached), len(expected_ips))
-
-    device.release_device_connection()
 
     if rpc_client.get_bdevs(bdev_name):
         return bdev_name
@@ -1238,6 +1277,34 @@ def _prepare_cluster_devices_on_restart(snode, clear_data=False):
     return True
 
 
+def _connect_device_thread(name: str, device: NVMeDevice, node: StorageNode):
+    """Thread body for bulk remote-device connects: bounded retry + loud logs.
+
+    An exception raised in a bare ``Thread(target=connect_device)`` vanishes —
+    the device silently ends up missing from ``remote_devices``, its map entry
+    degrades to ``unavailable``, and the first stripe read through it fails
+    minutes later with no trace of the real cause (2026-07-16 half-cluster
+    incident: connect threads died on FDB timeouts BEFORE the attach RPC ran).
+    The attach RPC itself is cheap (µs on a reachable peer, 1s cap otherwise),
+    so a transient bookkeeping/RPC failure is always worth two more attempts,
+    and a terminal failure must name the device and the reason at ERROR level.
+    """
+    last_err: Optional[Exception] = None
+    for attempt in (1, 2, 3):
+        try:
+            connect_device(name, device, node)
+            return
+        except Exception as e:
+            last_err = e
+            logger.warning(
+                "connect %s -> node %s attempt %d/3 failed: %s",
+                name, node.get_id(), attempt, e)
+            time.sleep(attempt)
+    logger.error(
+        "connect %s -> node %s failed after 3 attempts: %s",
+        name, node.get_id(), last_err)
+
+
 def _connect_to_remote_devs(
         this_node: StorageNode, /,
         reattach: bool = True, force_connect_restarting_nodes: bool = False,
@@ -1293,7 +1360,7 @@ def _connect_to_remote_devs(
                 raise ValueError(f"device alceml bdev not found!, {dev.get_id()}")
             devices_to_connect.append(dev)
             t = threading.Thread(
-                target=connect_device,
+                target=_connect_device_thread,
                 args=(f"remote_{dev.alceml_bdev}", dev, this_node,))
             connect_threads.append(t)
             t.start()
@@ -1415,6 +1482,84 @@ def _connect_to_remote_devs(
             remote_device_ids.add(dev.get_id())
 
     return remote_devices
+
+
+def _verify_online_device_coverage(snode: StorageNode, repair: bool = True):
+    """Verify this node's SPDK holds a remote bdev for every data device its
+    distrib cluster maps will list as reachable; optionally repair and re-check.
+
+    Returns the sorted list of still-missing expected bdev names (empty means
+    full coverage). Coverage means: for every ONLINE/DOWN peer, every data
+    device in a data-bearing status has its ``remote_<alceml_bdev>n1`` bdev
+    present on ``snode``. Peers in in_restart/offline are excluded on purpose —
+    they are legitimately unconnected and re-linked by the health service once
+    they recover.
+
+    Why this gate exists: the node-specific cluster map degrades any device
+    absent from ``remote_devices`` to ``unavailable`` (distr_controller), so a
+    single silently-failed connect surfaces only minutes later — as an EIO on
+    the first stripe whose surviving chunk lives on that device, deep inside
+    the raid examine read of recreate_lvstore (2026-07-16 half-cluster
+    incident: 16 nodes looped restart→EIO→offline for 1.5h over exactly this).
+    Verifying coverage BEFORE the data path turns that into an immediate,
+    named, retryable failure.
+    """
+    db_controller = DBController()
+    rpc_client = snode.rpc_client(timeout=10, retry=1)
+
+    expected = {}  # expected remote bdev name -> owning device record
+    for peer in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
+        if peer.get_id() == snode.get_id():
+            continue
+        if peer.status not in (StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN):
+            continue
+        for dev in peer.nvme_devices:
+            if dev.status not in (NVMeDevice.STATUS_ONLINE,
+                                  NVMeDevice.STATUS_READONLY,
+                                  NVMeDevice.STATUS_CANNOT_ALLOCATE):
+                continue
+            if not dev.alceml_bdev:
+                continue
+            expected[f"remote_{dev.alceml_bdev}n1"] = dev
+
+    def _probe_missing():
+        out = {}
+        for bdev, dev in expected.items():
+            try:
+                if not rpc_client.get_bdevs(bdev):
+                    out[bdev] = dev
+            except Exception:
+                out[bdev] = dev
+        return out
+
+    missing = _probe_missing()
+    if missing and repair:
+        logger.warning(
+            "Connectivity coverage on %s: %d/%d remote device bdevs missing, "
+            "re-attempting connects: %s",
+            snode.get_id(), len(missing), len(expected), sorted(missing))
+        repair_threads = []
+        for dev in missing.values():
+            t = threading.Thread(
+                target=_connect_device_thread,
+                args=(f"remote_{dev.alceml_bdev}", dev, snode))
+            t.start()
+            repair_threads.append(t)
+        for t in repair_threads:
+            t.join()
+        missing = _probe_missing()
+        if not missing:
+            # The repair attached bdevs the earlier reconcile missed. Refresh
+            # the persisted remote_devices records too — the cluster map is
+            # generated from node.remote_devices, not from SPDK state, so
+            # without this the repaired devices still degrade to
+            # `unavailable` in the maps.
+            with _remote_connect_lock(snode.get_id()):
+                remote_devices = _connect_to_remote_devs(snode)
+                db_controller.atomic_update(
+                    snode,
+                    lambda n, rd=remote_devices: setattr(n, "remote_devices", rd))
+    return sorted(missing)
 
 
 def sync_remote_devices_from_spdk(this_node: StorageNode):
@@ -1959,20 +2104,6 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             logger.error("Cluster not found: %s", cluster_id)
             return False
 
-        # Expansion pre-flight (cluster-wide half): the node add itself must
-        # not start unless the cluster is ACTIVE, all nodes are ONLINE and no
-        # migration / restart / backup task is open. The full check —
-        # including deletes on the impacted donor nodes, which are only known
-        # once the role moves are planned — reruns in
-        # integrate_new_node_into_cluster before the rebalance executes.
-        if expansion:
-            from simplyblock_core.controllers.cluster_expansion.preconditions import (
-                check_expansion_preconditions)
-            ok, reason = check_expansion_preconditions(cluster, db_controller)
-            if not ok:
-                logger.error(f"Cannot start expansion node-add: {reason}")
-                return False
-
         ha_jm_count = resolve_ha_jm_count(cluster, ha_jm_count)
 
         # Failure-domain id is mandatory exactly when the cluster has the
@@ -2106,6 +2237,24 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                     f"status {existing.status} and owns the same SSDs "
                     f"(node: {existing.get_id()}); delete or restart it instead "
                     f"of re-adding")
+                return False
+
+        # Expansion pre-flight (cluster-wide half): the node add itself must
+        # not start unless the cluster is ACTIVE, all nodes are ONLINE and no
+        # migration / restart / backup task is open. The full check —
+        # including deletes on the impacted donor nodes, which are only known
+        # once the role moves are planned — reruns in
+        # integrate_new_node_into_cluster before the rebalance executes.
+        # This deliberately runs AFTER the stale-record cleanup above: a
+        # ghost in_creation record left by a died prior attempt of THIS
+        # endpoint would otherwise fail the all-nodes-online condition and
+        # permanently block its own retry (2026-07-17, node f6308adb).
+        if expansion:
+            from simplyblock_core.controllers.cluster_expansion.preconditions import (
+                check_expansion_preconditions)
+            ok, reason = check_expansion_preconditions(cluster, db_controller)
+            if not ok:
+                logger.error(f"Cannot start expansion node-add: {reason}")
                 return False
 
         fdb_connection = cluster.db_connection
@@ -2644,7 +2793,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             logger.info("Setting node status to Active")
             set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE, caused_by="add_node")
 
-            # In --expansion mode the caller (clibase) triggers expansion
+            # In --expansion mode the expand-task runner triggers expansion
             # migration explicitly *after* integrate_new_node_into_cluster has
             # built the post-rotation lvstore_stack and flipped cluster status
             # back to ACTIVE. Skipping it here avoids racing the half-built
@@ -2653,10 +2802,36 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 for dev in snode.nvme_devices:
                     if dev.status == NVMeDevice.STATUS_ONLINE:
                         tasks_controller.add_new_device_mig_task(dev.get_id())
+            else:
+                # Queue the integration HERE so every entry point gets it —
+                # CLI, web API and the k8s node-add task runner all funnel
+                # through add_node, but only clibase used to queue the
+                # cluster-expand task, so CRD-driven adds completed without
+                # the rebalance ever starting (2026-07-17, vm15).
+                expand_task_id = tasks_controller.add_cluster_expand_task(
+                    cluster.get_id(), snode.get_id())
+                if expand_task_id:
+                    logger.info(
+                        f"expansion: queued cluster-expand task "
+                        f"{expand_task_id} for {snode.get_id()}")
+                else:
+                    logger.warning(
+                        f"expansion: a cluster-expand task is already open "
+                        f"for this cluster; node {snode.get_id()} will NOT "
+                        f"be integrated by it — re-add it after the current "
+                        f"expansion completes")
 
             storage_events.snode_add(snode)
 
-            cluster_ops.set_cluster_status(cluster.get_id(), Cluster.STATUS_IN_EXPANSION)
+            # Legacy (non --expansion) flow only: the follow-up
+            # cluster_ops.cluster_expand accepts IN_EXPANSION and flips back
+            # to ACTIVE when done. In --expansion mode the status must stay
+            # ACTIVE: integrate_new_node_into_cluster's preconditions require
+            # it and the executor owns the IN_EXPANSION transition itself —
+            # setting it here deadlocks the cluster-expand task ("cluster
+            # status is in_expansion, expansion requires active").
+            if not expansion:
+                cluster_ops.set_cluster_status(cluster.get_id(), Cluster.STATUS_IN_EXPANSION)
         finally:
             stop_heartbeat.set()
             db_controller.release_cluster_add_lock(cluster_id, lock_owner)
@@ -2958,6 +3133,58 @@ def restart_storage_node(
     return result
 
 
+def fd_dead_recovery_allowed(db_controller, snode) -> bool:
+    """Same-failure-domain parallel restart carve-out, reinstated with a hard gate.
+
+    Concurrent node restarts outside a drained SUSPENDED cluster are sanctioned
+    in exactly one situation: the target node's ENTIRE failure domain is dead
+    (no member ONLINE). Restarting its members concurrently cannot reduce
+    served availability — every member is already out of service — and the
+    surviving domains' IO is protected by the connect-storm fixes (targeted
+    device-connect updates, bounded connect retries, coverage gate) plus
+    _remote_connect_gate serializing the cross-node reconnect phase.
+
+    Hard gates, all on a fresh read:
+    - the cluster has >= 2 distinct failure domains among its nodes (with a
+      single/unset domain this predicate would degenerate to "whole cluster
+      down", which is the drained-suspension path's job);
+    - no member of the target's domain is ONLINE;
+    - no node OUTSIDE the target's domain is RESTARTING / IN_SHUTDOWN
+      (cross-domain concurrency stays forbidden).
+
+    The 2026-07-16 contract violation was parallel in_restart while the same
+    domain was still SERVING (DEGRADED cluster, domain partially online); the
+    no-ONLINE-member gate makes that state ineligible by construction.
+
+    Evaluated OUTSIDE the restart-guard FDB tx by design: the guard tx must
+    stay a single-row point read/write — fat node rows plus concurrent
+    acquisitions drove the FDB 1031 timeout storms (2026-07-16/17). Same
+    pattern as suspend_drain_complete, which is also read outside the tx.
+    The residual race (a domain member flipping ONLINE between this check and
+    lock acquisition) is bounded: the restarting set is already offline, and
+    reconnects are serialized by _remote_connect_gate. Any error → strict.
+    """
+    try:
+        nodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
+        if len({n.failure_domain for n in nodes}) < 2:
+            return False
+        for n in nodes:
+            if n.get_id() == snode.get_id():
+                continue
+            if n.failure_domain == snode.failure_domain:
+                if n.status == StorageNode.STATUS_ONLINE:
+                    return False
+            elif n.status in (StorageNode.STATUS_RESTARTING,
+                              StorageNode.STATUS_IN_SHUTDOWN):
+                return False
+        return True
+    except Exception as e:
+        logger.warning(
+            "fd_dead_recovery predicate failed for %s, staying strict: %s",
+            snode.get_id(), e)
+        return False
+
+
 def _restart_storage_node_impl(
         node_id, max_lvol=0, max_snap=0, max_prov=0,
         spdk_image=None, set_spdk_debug=None,
@@ -3008,11 +3235,15 @@ def _restart_storage_node_impl(
     # survivors still serve IO — keep strict one-restart-at-a-time semantics.
     allow_concurrent_peers = (cluster.status == Cluster.STATUS_SUSPENDED
                               and cluster.suspend_drain_complete)
-    # No failure-domain relaxation here: concurrent node restarts are
-    # permitted ONLY on a drained SUSPENDED cluster. The former same_fd_of
-    # carve-out let same-domain peers restart in parallel on a DEGRADED
-    # cluster that was still serving IO — against the operator contract
-    # (violation observed 2026-07-16).
+    # Second sanctioned relaxation: the target's whole failure domain is dead
+    # (fd_dead_recovery_allowed — no domain member ONLINE, no cross-domain
+    # restart in flight). The former same_fd_of carve-out that allowed
+    # same-domain peers to restart in parallel while the domain was still
+    # SERVING (2026-07-16 violation) remains removed; this gate only opens
+    # once the domain serves nothing, so recovery of a fully-rebooted domain
+    # fans out instead of paying 16 x single-restart serially (2026-07-17).
+    if not allow_concurrent_peers:
+        allow_concurrent_peers = fd_dead_recovery_allowed(db_controller, snode)
     acquired, reason = db_controller.try_set_node_restarting(
         snode.cluster_id, node_id, allow_concurrent_peers=allow_concurrent_peers)
     if not acquired:
@@ -3624,6 +3855,24 @@ def _restart_storage_node_impl(
             _kill_spdk_until_dead(snode)
             set_node_status(snode.get_id(), StorageNode.STATUS_OFFLINE,
                             caused_by="restart_cleanup")
+
+        # Connectivity-coverage gate: recreate consumes remote alceml bdevs
+        # through the distrib data path, and any online peer device absent
+        # from this node's SPDK shows up as `unavailable` in the node's
+        # cluster maps — the failure then surfaces only as an EIO on the raid
+        # examine read, minutes into the attempt. Verify (and repair once)
+        # BEFORE entering the data path; abort with the explicit missing list
+        # if coverage stays incomplete so the retry starts from a clean SPDK.
+        try:
+            missing_remote_bdevs = _verify_online_device_coverage(snode, repair=True)
+        except Exception as e:
+            missing_remote_bdevs = [f"coverage check failed: {e}"]
+        if missing_remote_bdevs:
+            _set_lvstore_status_atomic(snode.get_id(), "failed", db_controller)
+            _abort_restart(
+                "connectivity coverage incomplete before LVS recreation; "
+                f"missing remote bdevs: {missing_remote_bdevs}")
+            return False
 
         try:
             ret = recreate_all_lvstores(snode, force=force_lvol_recreate)
@@ -5895,7 +6144,19 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
     # connecting here too would double the hublvol attach.
     if activation_mode:
         try:
-            snode.connect_to_hublvol(primary_node, failover_node=None)
+            # Role from topology, never a default: this call used to pass
+            # no role and connect_to_hublvol defaulted to "secondary", so
+            # an activation-mode TERTIARY recreate stamped role=secondary
+            # onto its LVS — a duplicate secondary role next to the real
+            # secondary (mass_create_delete_k8s 2026-07-14 12:02:37,
+            # LVS_11 on worker-1) until a later topology-correct call
+            # happened to repair it. Every LVS must hold a unique role
+            # per node at all times.
+            activation_role = ("tertiary"
+                               if primary_node.tertiary_node_id == snode.get_id()
+                               else "secondary")
+            snode.connect_to_hublvol(primary_node, failover_node=None,
+                                     role=activation_role)
         except Exception as e:
             logger.error("Error establishing hublvol: %s", e)
             # return False
@@ -6464,7 +6725,24 @@ def recreate_all_lvstores(snode, force=False):
 
     This is the dispatch logic extracted from restart_storage_node() so it can
     be called independently (e.g. from tests) without the SPDK init preamble.
+
+    STRICTLY SERIAL across parallel node restarts (design requirement):
+    recreate blocks LVS ports on counterparty nodes, rewrites hublvol
+    topology and flips lvstore_status on peer records — two nodes of the
+    same LVS group recreating concurrently race those into writer conflicts.
+    Everything before this point in a restart (SPDK bring-up, device/JM
+    connects, connect-back) stays parallel. The gate is process-local, which
+    covers the restart path: all parallel restart tasks run in the single
+    restart task-runner process. Activation-mode recreates
+    (cluster_ops.activate: recreate_lvstore(activation_mode=True)) do not
+    pass through here and keep their own orchestration — the suspended
+    cluster serves no IO there and ports are globally blocked.
     """
+    with _recreate_lvstore_gate:
+        return _recreate_all_lvstores_serial(snode, force=force)
+
+
+def _recreate_all_lvstores_serial(snode, force=False):
     db_controller = DBController()
 
     # --- Step 1: Primary LVS ---
@@ -7350,6 +7628,21 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
 def add_lvol_thread(lvol, snode, lvol_ana_state="optimized"):
     db_controller = DBController()
 
+    # Refuse to (re)register an lvol that is being torn down: the delete
+    # flow removes the namespace BEFORE the async blob delete, so an add_ns
+    # here re-exposes a deleted blob to clients (incident 2026-07-14: reads
+    # on the resurrected namespace returned INTERNAL DEVICE ERROR and
+    # flapped the whole cluster). Callers hold stale objects — check fresh.
+    try:
+        if db_controller.get_lvol_by_id(lvol.get_id()).status == LVol.STATUS_IN_DELETION:
+            msg = f"LVol {lvol.get_id()} is in_deletion, skipping registration"
+            logger.info(msg)
+            return False, msg
+    except KeyError:
+        msg = f"LVol {lvol.get_id()} no longer exists, skipping registration"
+        logger.info(msg)
+        return False, msg
+
     rpc_client = snode.rpc_client(timeout=10, retry=2)
 
     pool = db_controller.get_pool_by_id(lvol.pool_uuid)
@@ -7388,11 +7681,36 @@ def add_lvol_thread(lvol, snode, lvol_ana_state="optimized"):
         rpc_client.listeners_create(
             lvol.nqn, tr, iface.ip4_address, listener_port, ana_state=lvol_ana_state)
 
-    lvol_obj = db_controller.get_lvol_by_id(lvol.get_id())
-    lvol_obj.status = LVol.STATUS_ONLINE
-    lvol_obj.io_error = False
-    lvol_obj.health_check = True
-    lvol_obj.write_to_db()
+    # Guarded CAS instead of read-modify-write: a delete can land between the
+    # entry guard and this point, and an unconditional full-object write both
+    # clobbers concurrent field updates and resurrects an in_deletion record
+    # to online (the 2026-07-14 leak: 1393 ghost "online" lvols post-run).
+    def _set_online(x):
+        if x.status == LVol.STATUS_IN_DELETION:
+            return False
+        x.status = LVol.STATUS_ONLINE
+        x.io_error = False
+        x.health_check = True
+        return True
+
+    try:
+        lvol_obj = db_controller.get_lvol_by_id(lvol.get_id())
+    except KeyError:
+        msg = f"LVol {lvol.get_id()} deleted during registration"
+        logger.info(msg)
+        return False, msg
+    updated = db_controller.atomic_update(lvol_obj, _set_online)
+    if updated is None or updated.status == LVol.STATUS_IN_DELETION:
+        # The delete flow's remove_ns ran before (or while) we re-registered —
+        # undo our add so a deleted blob is never left exposed to clients.
+        try:
+            rpc_client.nvmf_subsystem_remove_ns(lvol.nqn, lvol.ns_id)
+        except Exception as e:
+            logger.warning("Failed to undo ns registration for deleted lvol %s: %s",
+                           lvol.get_id(), e)
+        msg = f"LVol {lvol.get_id()} entered deletion during registration"
+        logger.info(msg)
+        return False, msg
     # set QOS
     if lvol.rw_ios_per_sec or lvol.rw_mbytes_per_sec or lvol.r_mbytes_per_sec or lvol.w_mbytes_per_sec:
         lvol_controller.set_lvol(lvol.uuid, lvol.rw_ios_per_sec, lvol.rw_mbytes_per_sec,
@@ -7421,6 +7739,19 @@ def repair_lvol_registration_on_non_leader(lvol, sec_node, secondary_index):
     if get_restart_phase(sec_node.get_id(), lvol.lvs_name):
         return False, (f"LVS {lvol.lvs_name} on {sec_node.get_id()} is owned "
                        f"by a restart/activation/expansion")
+
+    # Repair only volumes that are actually supposed to be registered. Both
+    # callers hand in lvol objects that can be minutes stale (the monitor's
+    # cycle-start snapshot, a queued sync task) — a "missing" registration on
+    # an in_deletion lvol is the delete flow's own remove_ns, and repairing
+    # it re-exposes an async-deleted blob to clients (incident 2026-07-14).
+    try:
+        lvol = DBController().get_lvol_by_id(lvol.get_id())
+    except KeyError:
+        return False, f"LVol {lvol.get_id()} no longer exists"
+    if lvol.status not in (LVol.STATUS_ONLINE, LVol.STATUS_OFFLINE):
+        return False, (f"LVol {lvol.get_id()} status is {lvol.status}, "
+                       f"not repairing registration")
 
     rpc_client = sec_node.rpc_client(timeout=10, retry=2)
     if rpc_client.subsystem_get(lvol.nqn) is None:
@@ -7922,8 +8253,14 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
         except RPCException as e:
             logger.error("Error creating transfer hublvol: %s", e.message)
 
-        # Create secondary hublvol on sec_1 so tertiary can multipath
-        sec1 = db_controller.get_storage_node_by_id(secondary_ids[0])
+        # Create secondary hublvol on sec_1 so tertiary can multipath.
+        # sec_1 is the CONFIGURED secondary — never secondary_ids[0], which
+        # is the tertiary whenever secondary_node_id is unset (e.g. demoted
+        # after a failover) and would get the secondary hublvol created on
+        # the wrong node.
+        sec1 = None
+        if snode.secondary_node_id:
+            sec1 = db_controller.get_storage_node_by_id(snode.secondary_node_id)
         if sec1 and sec1.status == StorageNode.STATUS_ONLINE:
             try:
                 cluster = db_controller.get_cluster_by_id(snode.cluster_id)
@@ -7931,16 +8268,23 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
             except Exception as e:
                 logger.error("Error creating secondary hublvol on sec_1: %s", e)
 
-        for i, sec_node_id in enumerate(secondary_ids):
+        for sec_node_id in secondary_ids:
             sec_node = db_controller.get_storage_node_by_id(sec_node_id)
             if sec_node.status == StorageNode.STATUS_ONLINE:
                 try:
                     # Brief settle beat; connect_to_hublvol retries via the
                     # reconnect coordinator, the old 1s was serial latency.
                     time.sleep(0.2)
-                    # tertiary gets multipath failover to sec_1
-                    failover_node = sec1 if i >= 1 and sec1 and sec1.status == StorageNode.STATUS_ONLINE else None
-                    sec_role = "tertiary" if i >= 1 else "secondary"
+                    # Role and failover from topology, never list position:
+                    # with secondary_node_id unset the tertiary sits at
+                    # index 0 and an index rule marks it "secondary" — a
+                    # duplicate secondary role (same class as the 2026-05-21
+                    # takeover fix in recreate_lvstore; recurred in
+                    # mass_create_delete_k8s 2026-07-14). Tertiary gets
+                    # multipath failover to sec_1.
+                    is_tert = sec_node_id == snode.tertiary_node_id
+                    failover_node = sec1 if is_tert and sec1 and sec1.status == StorageNode.STATUS_ONLINE else None
+                    sec_role = "tertiary" if is_tert else "secondary"
                     sec_node.connect_to_hublvol(snode, failover_node=failover_node, role=sec_role)
                 except Exception as e:
                     logger.error("Error establishing hublvol: %s", e)
