@@ -829,12 +829,7 @@ def _any_cutover_in_flight(tasks):
 def main():
     logger.info("Starting replication-final tasks runner...")
     while True:
-        try:
-            clusters = db.get_clusters()
-        except Exception as e:
-            logger.error(f"Failed to get clusters: {e}")
-            time.sleep(3)
-            continue
+        clusters = db.get_clusters()
         active = False
         for cl in clusters:
             # Read once per cluster per pass and reuse: the owner lookup used to
