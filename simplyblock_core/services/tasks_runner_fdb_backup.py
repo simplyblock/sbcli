@@ -21,7 +21,7 @@ def process_fdb_backup_task(task):
         task.write_to_db(db.kv_store)
         return
 
-    if task.retry >= task.max_retry:
+    if 0 <= task.max_retry <= task.retry:
         task.function_result = "max retry reached, stopping task"
         task.status = JobSchedule.STATUS_DONE
         task.write_to_db(db.kv_store)
