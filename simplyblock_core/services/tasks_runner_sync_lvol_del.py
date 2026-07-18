@@ -137,6 +137,9 @@ def main():
                     ):
                         continue
                     if task.status != JobSchedule.STATUS_DONE:
+                        if not tasks_controller.claim_task(task):
+                            logger.info(f"LVol sync task {task.uuid} owned by another runner host; skipping")
+                            continue
                         task_runner(task)
 
         time.sleep(3)

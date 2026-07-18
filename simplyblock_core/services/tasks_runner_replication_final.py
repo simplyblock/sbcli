@@ -15,6 +15,7 @@ task.function_params:
 import time
 
 from simplyblock_core import constants, db_controller, utils
+from simplyblock_core.controllers import tasks_controller
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVolReplication
 from simplyblock_core.models.storage_node import StorageNode
@@ -113,6 +114,9 @@ def main():
                 if task.status == JobSchedule.STATUS_DONE:
                     continue
                 task = db.get_task_by_id(task.uuid)
+                if not tasks_controller.claim_task(task):
+                    logger.info(f"Replication-final task {task.uuid} owned by another runner host; skipping")
+                    continue
                 try:
                     res = task_runner(task)
                 except Exception as e:

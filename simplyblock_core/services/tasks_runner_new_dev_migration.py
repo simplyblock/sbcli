@@ -186,6 +186,9 @@ def main():
                         if task.status != JobSchedule.STATUS_DONE:
                             # get new task object because it could be changed from cancel task
                             task = db.get_task_by_id(task.uuid)
+                            if not tasks_controller.claim_task(task):
+                                logger.info(f"New-device migration task {task.uuid} owned by another runner host; skipping")
+                                continue
                             res = task_runner(task)
                             if not res:
                                 time.sleep(2)

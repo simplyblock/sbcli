@@ -274,6 +274,9 @@ def _wire_base(runner, monkeypatch, task):
     monkeypatch.setattr(runner, "db", db)
     monkeypatch.setattr(JobSchedule, "write_to_db", MagicMock())
     _patch_clock(monkeypatch, runner, task)
+    # Every runner claims the lease before running a task; grant it so the loop
+    # reaches the work under test instead of skipping the task as foreign-owned.
+    monkeypatch.setattr(runner.tasks_controller, "claim_task", lambda *a, **k: True)
     return db, cluster, node
 
 
@@ -289,8 +292,6 @@ def _wire_base(runner, monkeypatch, task):
 def _spec_cluster_expand(runner, monkeypatch):
     task = _make_task(JobSchedule.FN_CLUSTER_EXPAND, new_node_id="new-1")
     _wire_base(runner, monkeypatch, task)
-    monkeypatch.setattr(runner.tasks_controller, "claim_task",
-                        lambda *a, **k: True)
     # The actual expansion work fails every cycle.
     monkeypatch.setattr(
         runner, "integrate_new_node_into_cluster",
@@ -303,8 +304,6 @@ def _spec_node_add(runner, monkeypatch):
     _wire_base(runner, monkeypatch, task)
     monkeypatch.setattr(runner, "ThreadPoolExecutor", _InlineExecutor)
     monkeypatch.setattr(runner, "_inflight", set())
-    monkeypatch.setattr(runner.tasks_controller, "claim_task",
-                        lambda *a, **k: True)
     # add_node fails (returns falsy) every cycle.
     monkeypatch.setattr(runner.storage_node_ops, "add_node",
                         MagicMock(return_value=False))
@@ -342,8 +341,6 @@ def _spec_restart(runner, monkeypatch):
     monkeypatch.setattr(runner, "_restart_next_attempt", {})
     monkeypatch.setattr(runner, "_restart_inflight", {})
     monkeypatch.setattr(runner, "_node_inflight", {})
-    monkeypatch.setattr(runner.tasks_controller, "claim_task",
-                        lambda *a, **k: True)
     monkeypatch.setattr(runner.tasks_controller, "is_auto_restart_paused",
                         lambda *a, **k: False)
     monkeypatch.setattr(runner.tasks_controller, "add_node_to_auto_restart",

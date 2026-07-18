@@ -107,6 +107,9 @@ def main():
                 for task in tasks:
                     if task.function_name == JobSchedule.FN_JC_COMP_RESUME:
                         if task.status != JobSchedule.STATUS_DONE:
+                            if not tasks_controller.claim_task(task):
+                                logger.info(f"JC-comp task {task.uuid} owned by another runner host; skipping")
+                                continue
                             task_runner(task)
 
         time.sleep(60)

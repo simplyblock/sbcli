@@ -3,7 +3,7 @@ import time
 
 
 from simplyblock_core import db_controller, utils, constants
-from simplyblock_core.controllers import fdb_backup_controller
+from simplyblock_core.controllers import fdb_backup_controller, tasks_controller
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.cluster import Cluster
 
@@ -54,6 +54,9 @@ def main():
                 for task in tasks:
                     if task.status != JobSchedule.STATUS_DONE:
                         if task.function_name == JobSchedule.FN_FDB_BACKUP:
+                            if not tasks_controller.claim_task(task):
+                                logger.info(f"FDB-backup task {task.uuid} owned by another runner host; skipping")
+                                continue
                             task_runner(task)
 
         time.sleep(constants.TASK_EXEC_INTERVAL_SEC)
