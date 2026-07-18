@@ -350,7 +350,7 @@ def task_runner(task: JobSchedule, tasks=None):
     if not lvol_id:
         return _finalize(task, False, "missing lvol_id in task params")
 
-    if task.retry >= task.max_retry or task.canceled is True:
+    if (0 <= task.max_retry <= task.retry) or task.canceled is True:
         if task.canceled:
             task.function_result = "task cancelled"
         else:
