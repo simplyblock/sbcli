@@ -118,24 +118,12 @@ def main():
     executor = ThreadPoolExecutor(max_workers=MAX_CONCURRENT_NODE_ADDS)
 
     while True:
-        try:
-            clusters = db.get_clusters()
-        except Exception as e:
-            logger.error(f"Failed to get clusters: {e}")
-            time.sleep(3)
-            continue
+        clusters = db.get_clusters()
         if not clusters:
             logger.error("No clusters found!")
         else:
             for cl in clusters:
-                # An unhandled FDBError here (1031 transaction timeout) killed
-                # this runner at cluster start on 2026-07-16 — no auto-restart
-                # ran for the rest of the run. Log and retry next tick instead.
-                try:
-                    tasks = db.get_job_tasks(cl.get_id(), reverse=False)
-                except Exception as e:
-                    logger.error(f"Failed to read tasks for cluster {cl.get_id()}: {e}")
-                    continue
+                tasks = db.get_job_tasks(cl.get_id(), reverse=False)
                 for task in tasks:
                     if task.function_name != JobSchedule.FN_NODE_ADD:
                         continue

@@ -95,12 +95,6 @@ def task_runner(task):
 def main():
     logger.info("Starting Tasks runner...")
     while True:
-        try:
-            db.get_clusters()
-        except Exception as e:
-            logger.error(f"Failed to get clusters: {e}")
-            time.sleep(3)
-            continue
         clusters = db.get_clusters()
         if not clusters:
             logger.error("No clusters found!")
