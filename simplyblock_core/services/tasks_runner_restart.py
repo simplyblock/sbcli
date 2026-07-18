@@ -458,7 +458,15 @@ def task_runner_node(task):
         try:
             # resetting node
             logger.info(f"Restart node {node.get_id()}")
-            ret = storage_node_ops.restart_storage_node(node.get_id(), force=True, current_restart_task_id=task.get_id())
+            # task.uuid, NOT task.get_id(): get_active_node_restart_task (the
+            # guard restart_storage_node compares this against) returns the
+            # bare uuid, while JobSchedule.get_id() is the composite
+            # "cluster/date/uuid" FDB key. Passing the composite here meant
+            # the comparison could never match, so this call's own task was
+            # never recognized as "ours" — masked only because this call
+            # uses force=True, which proceeds past the guard regardless and
+            # just logged a spurious "Restart task found" error every time.
+            ret = storage_node_ops.restart_storage_node(node.get_id(), force=True, current_restart_task_id=task.uuid)
             if ret:
                 logger.info("Node restart succeeded")
         except Exception as e:
