@@ -72,11 +72,7 @@ def main():
 
     while True:
         time.sleep(constants.TASK_EXEC_INTERVAL_SEC)
-        try:
-            clusters = db.get_clusters()
-        except Exception as e:
-            logger.error(f"Failed to get clusters: {e}")
-            continue
+        clusters = db.get_clusters()
         if not clusters:
             logger.error("No clusters found!")
             continue
