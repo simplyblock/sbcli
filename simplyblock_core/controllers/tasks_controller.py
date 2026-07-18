@@ -166,7 +166,14 @@ def _validate_new_task_node_restart(cluster_id, node_id):
     for task in tasks:
         if task.function_name == JobSchedule.FN_NODE_RESTART and task.node_id == node_id:
             if task.status != JobSchedule.STATUS_DONE and task.canceled is False:
-                return task.get_id()
+                # Return the bare uuid, NOT get_id(): JobSchedule.get_id() is the
+                # composite FDB key "cluster/date/uuid", which db.get_task_by_id
+                # (uuid lookup) cannot resolve. ensure_node_restart_task feeds
+                # this straight into get_task_by_id — with the composite it
+                # raised KeyError and the restart-lease heartbeat never engaged
+                # (observed 2026-07-17: "Could not set up transferable restart
+                # ownership ... 'Task <cluster>/<date>/<uuid> not found'").
+                return task.uuid
     return False
 
 

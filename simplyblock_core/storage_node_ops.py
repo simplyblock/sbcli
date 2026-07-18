@@ -3409,8 +3409,16 @@ def restart_storage_node(
     # the ONLINE transition auto-cancels the task. Pre-status RESTARTING /
     # IN_SHUTDOWN means another caller owns the transition — don't touch
     # its task, and don't add our own.
+    #
+    # Only self-create when the caller did not already hand us a task id:
+    # the task runner (tasks_runner_restart) already owns a NODE_RESTART
+    # task when it drives this restart and passes it in via
+    # current_restart_task_id — creating a second one here would be
+    # redundant and would fight the runner's own task for the lease.
     _hb_stop = threading.Event()
-    if pre_status not in (StorageNode.STATUS_RESTARTING, StorageNode.STATUS_IN_SHUTDOWN, None):
+    _owned_task_id = None
+    if current_restart_task_id is None and pre_status not in (
+            StorageNode.STATUS_RESTARTING, StorageNode.STATUS_IN_SHUTDOWN, None):
         try:
             from simplyblock_core.controllers import tasks_controller
             # Reuse the node read for pre_status above — pre_status is only
@@ -3421,6 +3429,15 @@ def restart_storage_node(
             _task_id = tasks_controller.ensure_node_restart_task(_snode_pre)
             _hb_task = db_ctrl.get_task_by_id(_task_id) if _task_id else None
             if _hb_task and tasks_controller.claim_task(_hb_task):
+                # We hold this task's lease: it is OUR ownership token, not a
+                # competing restart. Passed to the impl so its active-task
+                # guard does not abort on the very task this call created
+                # (observed 2026-07-17: every manual `sn restart` failed
+                # inline with "Restart task found: <own task>" and degraded
+                # into waiting for the task runner). Only set when the claim
+                # succeeded — if another live host owns the lease, the guard
+                # must keep rejecting us.
+                _owned_task_id = _task_id
                 def _lease_heartbeat():
                     while not _hb_stop.wait(constants.TASK_LEASE_HEARTBEAT_SEC):
                         try:
@@ -3443,7 +3460,8 @@ def restart_storage_node(
             small_bufsize=small_bufsize, large_bufsize=large_bufsize,
             force=force, node_address=node_address, reattach_volume=reattach_volume,
             clear_data=clear_data, new_ssd_pcie=new_ssd_pcie,
-            force_lvol_recreate=force_lvol_recreate, spdk_proxy_image=spdk_proxy_image, current_restart_task_id=current_restart_task_id)
+            force_lvol_recreate=force_lvol_recreate, spdk_proxy_image=spdk_proxy_image,
+            current_restart_task_id=current_restart_task_id or _owned_task_id)
     except Exception:
         # exc_info so the traceback is captured: without it a failing restart
         # only logs this one line, leaving the actual raise point (e.g. a
@@ -3633,6 +3651,16 @@ def _restart_storage_node_impl(
 
     # Guard: atomically check no peer is restarting/shutting down and set RESTARTING.
     # Uses a single FDB transaction to prevent TOCTOU race conditions.
+    #
+    # current_restart_task_id: either the task-runner's own NODE_RESTART task
+    # (passed in when it drives this restart) or the restart_storage_node
+    # wrapper's self-created ownership token for a caller with no task
+    # context (manual `sn restart`) — either way, that task is THIS restart,
+    # not a competing one. Aborting on it made every manual restart fail
+    # against its own token (2026-07-17). A task owned by anyone else still
+    # blocks; get_active_node_restart_task returns the bare task uuid, so
+    # callers must pass the bare uuid here too (not JobSchedule.get_id()'s
+    # composite cluster/date/uuid key) or this comparison never matches.
     task_id = tasks_controller.get_active_node_restart_task(snode.cluster_id, snode.get_id())
     if task_id and task_id != current_restart_task_id:
         logger.error(f"Restart task found: {task_id}, can not restart storage node")
