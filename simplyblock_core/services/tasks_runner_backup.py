@@ -10,7 +10,7 @@ import errno
 import time
 
 from simplyblock_core import constants, db_controller, utils
-from simplyblock_core.controllers import backup_events
+from simplyblock_core.controllers import backup_events, tasks_controller
 from simplyblock_core.controllers.backup import controller as backup_controller
 from simplyblock_core.controllers.backup import device as backup_device
 from simplyblock_core.controllers.backup.manifest import ManifestError
@@ -654,6 +654,10 @@ def main():
                 if task.function_name not in BACKUP_FUNCTIONS:
                     continue
                 if task.status == JobSchedule.STATUS_DONE or task.canceled:
+                    continue
+
+                if not tasks_controller.claim_task(task):
+                    logger.info(f"Backup task {task.uuid} owned by another runner host; skipping")
                     continue
 
                 # Re-fetch task for freshness
