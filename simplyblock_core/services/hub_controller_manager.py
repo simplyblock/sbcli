@@ -217,7 +217,29 @@ class HubControllerManager:
 
         Returns (ctrl_name, hub_bdev, error).
         """
-        if tgt_node.transfer_hublvol is None or not tgt_node.transfer_hublvol.bdev_name:
+        hub_missing = tgt_node.transfer_hublvol is None or not tgt_node.transfer_hublvol.bdev_name
+        if not hub_missing:
+            # A transfer_hublvol DB record from an earlier migration can outlive
+            # a node restart or cluster reactivation — SPDK's own bdev/subsystem
+            # state is not persisted across that, only the DB record is. Trusting
+            # the cached record alone leads every future attach attempt to fail
+            # with "Invalid subsystem" against a hub that no longer exists on the
+            # target. Verify liveness against the target's own SPDK before
+            # skipping (re)creation — same subsystem_get-based check
+            # _ensure_target_nvmf_state uses for the equivalent lvol-subsystem case.
+            try:
+                hub_missing = not tgt_node.rpc_client().subsystem_get(tgt_node.transfer_hublvol.nqn)
+            except Exception as e:
+                logger.warning(
+                    f"[HubMgr] could not verify hub subsystem on {tgt_node.get_id()}, "
+                    f"assuming missing: {e}"
+                )
+                hub_missing = True
+
+        if hub_missing:
+            # create_transfer_hublvol() itself re-checks live existence, creates
+            # the bdev + subsystem/listener only if actually missing, and persists
+            # the (possibly new) bdev_name/uuid back to the DB record.
             tgt_node.create_transfer_hublvol()
 
         # Already attached (crash recovery or concurrent acquire)
