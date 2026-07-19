@@ -146,7 +146,33 @@ class LVolMigration(BaseModel):
 
     def write_to_db(self, kv_store=None):
         self.updated_at = str(datetime.datetime.now(datetime.timezone.utc))
+        self._merge_external_cancel(kv_store)
         super().write_to_db(kv_store)
+
+    def _merge_external_cancel(self, kv_store):
+        """Guard against losing a concurrent cancel_migration() call.
+
+        write_to_db() is a full-object overwrite with no CAS/versioning, and
+        the task runner holds one in-memory copy of this object across an
+        entire tick (sometimes several RPCs long, e.g. a snapshot transfer).
+        If `migrate-cancel` sets canceled=True on the DB record after that
+        in-memory copy was loaded, the tick's own next write — carrying its
+        stale canceled=False — would otherwise silently revert the
+        cancellation, and the migration runs to completion instead of
+        rolling back. Re-checking on every write (not just at the top of a
+        tick) means a cancellation landing at any point during a tick
+        survives whatever that tick writes afterward.
+        """
+        if self.canceled:
+            return
+        try:
+            from simplyblock_core.utils.helpers import single_or_none
+            existing = single_or_none(
+                self.__class__().read_from_db(kv_store, id=self.get_id()))
+        except Exception:
+            return
+        if existing is not None and existing.canceled:
+            self.canceled = True
 
     def is_active(self):
         return self.status in (

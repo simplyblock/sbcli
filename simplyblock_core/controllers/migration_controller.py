@@ -194,6 +194,10 @@ def cancel_migration(migration_id):
     migration.write_to_db(db.kv_store)
     migration_events.migration_cancelled(migration)
     logger.info(f"Migration cancelled: id={migration_id} lvol={migration.lvol_id}")
+    # A concurrent task runner tick may be holding a stale in-memory copy of
+    # this migration (canceled=False) from before this write landed — see
+    # LVolMigration._merge_external_cancel(), which guarantees that tick's
+    # own next write re-checks and preserves this flag instead of reverting it.
 
 
 def _cleanup_created(migration):
