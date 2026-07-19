@@ -60,13 +60,12 @@ def process_snap_delete_finish(snap, leader_node):
     if not leader_node:
         raise Exception("Failed to get leader node")
 
-    special_delete = False
-    try:
-        snap_bdev_info = leader_node.rpc_client().get_bdevs(snap.snap_bdev)
-        if snap_bdev_info[0]["driver_specific"]["lvol"]["open_ref"] > 1:
-            special_delete = True
-    except Exception:
-        pass
+    # special_delete (SPDK migration_flag) is set ONLY when the SAME snapshot
+    # exists on more than one node (lvol migration placed a copy elsewhere).
+    # snap.instances holds those extra node-copies and is empty for a
+    # home-node-only snapshot; it is NOT grown by local clones. Do not use the
+    # blob open_ref>1, which local clones bump and a clone-entry leak strands.
+    special_delete = len(snap.instances) > 0
     if snap.deletion_status != leader_node.get_id():
         ret, _ = leader_node.rpc_client().delete_lvol(snap.snap_bdev, del_async=False, special_delete=special_delete)
         if not ret:
@@ -193,13 +192,10 @@ def process_snap_delete(snap, snode):
                 return False
 
     if snap.deletion_status == "" or snap.deletion_status != leader_node.get_id():
-        special_delete = False
-        try:
-            snap_bdev_info = leader_node.rpc_client().get_bdevs(snap.snap_bdev)
-            if snap_bdev_info[0]["driver_specific"]["lvol"]["open_ref"] > 1:
-                special_delete = True
-        except Exception:
-            pass
+        # See note above: special_delete only for a snapshot copied to another
+        # node by lvol migration (snap.instances non-empty), never for a local
+        # clone or a stranded blob open_ref.
+        special_delete = len(snap.instances) > 0
         ret, _ = leader_node.rpc_client().delete_lvol(snap.snap_bdev, del_async=False, special_delete=special_delete)
         if not ret:
             logger.error(f"Failed to delete snap from node: {snode.get_id()}")

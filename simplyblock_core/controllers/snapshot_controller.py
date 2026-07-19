@@ -889,14 +889,16 @@ def _delete_locked(snap, snapshot_uuid, force_delete=False, lock=True):
 
         rpc_client = primary_node.rpc_client()
 
-        special_delete = False
-        try:
-            snap_bdev_info = rpc_client.get_bdevs(snap.snap_bdev)
-            logger.debug(f"snap_bdev_info: {snap_bdev_info[0]}")
-            if snap_bdev_info[0]["driver_specific"]["lvol"]["open_ref"] > 1:
-                special_delete = True
-        except Exception:
-            pass
+        # special_delete (SPDK migration_flag) must be set ONLY when the SAME
+        # snapshot exists on more than one node — i.e. lvol migration placed a
+        # copy on another node. snap.instances holds exactly those extra
+        # node-copies; it is empty for a snapshot on its home node only and is
+        # NOT grown by local clones. Previously this was derived from the
+        # blobstore blob open_ref>1, which a local clone also bumps and which a
+        # clone-entry metadata leak can strand high — both wrongly forced
+        # special_delete=True (e2e 20260717: LVS_9/SNAP_34 had only a local
+        # clone, no migration, yet went out special_delete=True).
+        special_delete = len(snap.instances) > 0
 
         with lvstore_op_lock(snap.cluster_id, snap.lvol.lvs_name,
                              node_id=primary_node.get_id(), enabled=lock and not force_delete):
