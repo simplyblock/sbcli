@@ -531,7 +531,15 @@ class TestClusterBase:
                 node_id=host_id,
             )
             k8s.wait_pvc_bound(pvc_name)
-            lvol_id = k8s.get_pvc_volume_handle(pvc_name)
+            volume_handle = k8s.get_pvc_volume_handle(pvc_name)
+            # The CSI volumeHandle is a composite "cluster:node:lvol_uuid".
+            # Extract the bare lvol UUID (last segment) so it matches what
+            # sbcli lvol list / lvol get expects.
+            lvol_id = volume_handle.rsplit(":", 1)[-1] if ":" in volume_handle else volume_handle
+            self.logger.info(
+                f"[k8s] PVC '{pvc_name}' bound — volumeHandle={volume_handle}, "
+                f"lvol_id={lvol_id}"
+            )
             self._k8s_pvcs.append(pvc_name)
             self._volume_registry[lvol_name] = {
                 "pvc_name": pvc_name, "lvol_id": lvol_id,
@@ -783,7 +791,12 @@ class TestClusterBase:
                 snapshot_name=snapshot_id,
             )
             k8s.wait_pvc_bound(pvc_name)
-            lvol_id = k8s.get_pvc_volume_handle(pvc_name)
+            volume_handle = k8s.get_pvc_volume_handle(pvc_name)
+            lvol_id = volume_handle.rsplit(":", 1)[-1] if ":" in volume_handle else volume_handle
+            self.logger.info(
+                f"[k8s] Clone PVC '{pvc_name}' bound — volumeHandle={volume_handle}, "
+                f"lvol_id={lvol_id}"
+            )
             self._k8s_pvcs.append(pvc_name)
             self._volume_registry[clone_name] = {
                 "pvc_name": pvc_name, "lvol_id": lvol_id,
