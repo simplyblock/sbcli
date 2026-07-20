@@ -299,6 +299,7 @@ class StorageNodeDTO(BaseModel):
     id: UUID
     cluster_id: UUID
     secondary_node_id: Optional[UUID]
+    is_secondary: bool
     status: StorageNodeStatus
     uptime: Optional[timedelta]
     hostname: str
@@ -330,6 +331,7 @@ class StorageNodeDTO(BaseModel):
             id=UUID(model.get_id()),
             cluster_id=UUID(model.cluster_id),
             secondary_node_id=UUID(model.secondary_node_id) if model.secondary_node_id else None,
+            is_secondary=model.is_secondary_node,
             status=cast(StorageNodeStatus, model.status),
             uptime=model.uptime(),
             hostname=model.hostname,
