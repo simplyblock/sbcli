@@ -1011,6 +1011,24 @@ class TestClusterBase:
                 self.ssh_obj.delete_file_dir(node, entity=f"{base_path}/distrib*", recursive=True)
                 self.ssh_obj.delete_file_dir(node, entity=f"{base_path}/*.txt*", recursive=True)
                 self.ssh_obj.delete_file_dir(node, entity=f"{base_path}/*.log*", recursive=True)
+        else:
+            # K8s mode: clean core dumps inside SPDK pods
+            try:
+                k8s = self._ensure_k8s_utils()
+                _, storage_ips = self.sbcli_utils.get_all_nodes_ip()
+                for node_ip in storage_ips:
+                    try:
+                        pod_name = k8s.get_spdk_pod_name(node_ip)
+                        k8s._exec_kubectl(
+                            f"kubectl exec {pod_name} -c spdk-container -n {k8s.namespace} -- "
+                            f"bash -c 'rm -f /etc/simplyblock/*core*.zst 2>/dev/null || true'",
+                            supress_logs=True,
+                        )
+                        self.logger.info(f"[k8s] Cleaned old core dumps on {node_ip} ({pod_name})")
+                    except Exception as e:
+                        self.logger.warning(f"[k8s] Could not clean core dumps on {node_ip}: {e}")
+            except Exception as e:
+                self.logger.warning(f"[k8s] Core dump cleanup skipped: {e}")
 
     def stop_docker_logs_collect(self):
         for node in self.storage_nodes:
