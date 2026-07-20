@@ -277,6 +277,16 @@ CLUSTER_ACTIVATION_MAX_PARALLEL_NODES=16
 # per-node exclusivity is enforced by the dispatch _node_inflight map.
 NODE_RESTART_MAX_PARALLEL_SUSPENDED=32
 
+# Global cap on concurrently-RUNNING connect/reconnect worker threads across
+# ALL parallel node restarts. A whole-failure-domain reboot dispatches up to
+# NODE_RESTART_MAX_PARALLEL_SUSPENDED restarts, each fanning out per-peer /
+# per-remote-device connect threads — 100+ concurrent threads were observed
+# (2026-07-20 FD-0 reboot), saturating the single Python GIL and starving the
+# (serialized) recreate's between-RPC work so the client-port-block window
+# ballooned from ~2s to ~20s. Bounding the concurrent worker threads keeps GIL
+# headroom for recreate while preserving enough I/O overlap. Tune via e2e.
+RESTART_WORKER_MAX_CONCURRENCY=24
+
 NVMF_MAX_SUBSYSTEMS=50000
 KATO=5000
 # transport_ack_timeout exponent: server tears down a client qpair if it

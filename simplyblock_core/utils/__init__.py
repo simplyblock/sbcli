@@ -670,6 +670,30 @@ def decimal_to_hex_power_of_2(decimal_number):
     return hex_result
 
 
+def make_async_handler(target_handler):
+    """Wrap ``target_handler`` for non-blocking logging: worker threads only
+    enqueue a record (cheap); a single background ``QueueListener`` thread does
+    the format + write. Returns a ``QueueHandler`` to attach to a logger.
+
+    Rationale: restart recovery runs 100+ concurrent threads; with a plain
+    StreamHandler every one serialized on the handler lock + stdout write on
+    each debug() call, starving the (GIL-bound) recreate thread's between-RPC
+    work and ballooning the client-port-block window (2026-07-20). The listener
+    is kept alive via the returned handler's ``_listener`` attr and stopped at
+    interpreter exit.
+    """
+    import atexit
+    import queue as _queue
+    import logging.handlers as _lh
+    log_queue = _queue.Queue(-1)  # unbounded; enqueue never blocks a worker
+    listener = _lh.QueueListener(log_queue, target_handler, respect_handler_level=False)
+    listener.start()
+    atexit.register(listener.stop)
+    qh = _lh.QueueHandler(log_queue)
+    qh._listener = listener  # keep a strong ref so it isn't GC'd
+    return qh
+
+
 def get_logger(name=""):
     # first configure a root logger
     # Silence external libraries that log secrets (tokens, full HTTP response
@@ -688,9 +712,24 @@ def get_logger(name=""):
         logg.setLevel(constants.LOG_LEVEL)
 
     if not logg.hasHandlers():
+        # Async logging: worker threads only enqueue a record (cheap); a single
+        # background listener thread does the actual format + stdout write.
+        # Restart recovery runs 100+ concurrent threads (32-way restart pool +
+        # per-peer reconnect threads); with a plain StreamHandler every one of
+        # them serialized on the handler's lock and the stdout write on every
+        # debug() call, starving the (GIL-bound) recreate thread's between-RPC
+        # work and ballooning the client-port-block window (2026-07-20 FD-0
+        # reboot: recreate block 2s -> 20s under logging+GIL contention). A
+        # QueueHandler removes that shared-lock / I/O contention from the hot
+        # threads without dropping any log line or changing the level. Falls
+        # back to the direct StreamHandler if async setup fails.
         logger_handler = logging.StreamHandler(stream=sys.stdout)
         logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(thread)d: %(levelname)s: %(message)s'))
-        logg.addHandler(logger_handler)
+        try:
+            logg.addHandler(make_async_handler(logger_handler))
+        except Exception:
+            # Safety: never lose logging if the async path can't be set up.
+            logg.addHandler(logger_handler)
         # gelf_handler = GELFTCPHandler('0.0.0.0', constants.GELF_PORT)
         # logg.addHandler(gelf_handler)
 

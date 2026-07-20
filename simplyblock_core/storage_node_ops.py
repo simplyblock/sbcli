@@ -336,9 +336,47 @@ def _device_connect_lock(device_id, node_id):
 #: activation driver process.
 _lvstore_port_alloc_lock = threading.Lock()
 
-#: Serializes recreate_all_lvstores across parallel node restarts — see the
-#: docstring there for scope and why process-local suffices.
-_recreate_lvstore_gate = threading.Lock()
+#: Per-LVS recreate locks. Recreate must be serialized only against a
+#: concurrent recreate of the SAME LVS (two members of one LVS group racing the
+#: port-block / hublvol-topology rewrite / peer lvstore_status writes into a
+#: writer conflict). It does NOT need to be serialized across DIFFERENT LVSes
+#: or node-wide. The previous single global gate serialized ALL recreates of
+#: ALL LVSes on ALL parallel-restarting nodes (~60-98s/node, ~25min for a
+#: 16-node failure-domain reboot). Keying the lock per LVS lets independent
+#: LVSes recreate concurrently — in a single-FD reboot each LVS has only its
+#: one FD-member restarting, so recreates run fully parallel. Process-local
+#: suffices: all parallel restart tasks run in the one restart task-runner
+#: process. Activation-mode recreates bypass this (globally blocked, serves no
+#: IO — see the wrappers).
+_recreate_lvstore_locks_guard = threading.Lock()
+_recreate_lvstore_locks: dict = {}
+
+
+def _recreate_lvstore_lock(lvs_name):
+    with _recreate_lvstore_locks_guard:
+        return _recreate_lvstore_locks.setdefault(lvs_name, threading.Lock())
+
+#: Global cap on concurrently-RUNNING restart connect/reconnect worker threads.
+#: See constants.RESTART_WORKER_MAX_CONCURRENCY: a whole-failure-domain reboot
+#: dispatches up to 32 parallel node restarts, each fanning out per-peer /
+#: per-remote-device connect threads — 100+ concurrent threads saturated the
+#: single Python GIL and starved the (serialized) recreate's between-RPC work.
+#: A wrapped worker holds one slot for the duration of its run; excess threads
+#: block on the semaphore (no CPU) until a slot frees.
+_restart_worker_sem = threading.BoundedSemaphore(constants.RESTART_WORKER_MAX_CONCURRENCY)
+
+
+def _bounded_thread(target, args=(), name=None):
+    """threading.Thread whose worker first acquires a global concurrency slot
+    (``_restart_worker_sem``), bounding how many connect/reconnect workers run
+    at once across all parallel node restarts. Drop-in for the previous bare
+    ``threading.Thread(target=..., args=..., name=...)`` fan-out: the caller's
+    ``start()``/``join()`` and the target's own error handling are unchanged;
+    only the concurrent-run count is capped (GIL relief for recreate)."""
+    def _run(*a):
+        with _restart_worker_sem:
+            target(*a)
+    return threading.Thread(target=_run, args=args, name=name)
 
 
 def _collect_attached_ips(ctrlr_list):
@@ -1288,21 +1326,39 @@ def _connect_device_thread(name: str, device: NVMeDevice, node: StorageNode):
     The attach RPC itself is cheap (µs on a reachable peer, 1s cap otherwise),
     so a transient bookkeeping/RPC failure is always worth two more attempts,
     and a terminal failure must name the device and the reason at ERROR level.
+
+    Fast-skip (2026-07-20 FD-0 reboot): if the device's owning peer is
+    known-down (its whole failure domain is rebooting), a connect cannot
+    succeed yet — do a single attempt instead of the 1+2+3s backoff-retry.
+    A whole-FD reboot otherwise burned ~6s of sleeps per device × many devices
+    × parallel restarts, and each sleep now also pins a bounded worker slot
+    (_restart_worker_sem), starving reachable connects and the recreate. A
+    later restart pass / health repair reconnects the device once its owner is
+    back ONLINE — coverage is unchanged, only the pointless backoff is dropped.
     """
+    attempts = (1, 2, 3)
+    try:
+        owner = DBController().get_storage_node_by_id(device.node_id)
+        if owner is not None and owner.status != StorageNode.STATUS_ONLINE:
+            attempts = (1,)
+    except Exception:
+        # Unknown owner / DB hiccup: keep the full best-effort retry.
+        pass
     last_err: Optional[Exception] = None
-    for attempt in (1, 2, 3):
+    for attempt in attempts:
         try:
             connect_device(name, device, node)
             return
         except Exception as e:
             last_err = e
             logger.warning(
-                "connect %s -> node %s attempt %d/3 failed: %s",
-                name, node.get_id(), attempt, e)
-            time.sleep(attempt)
+                "connect %s -> node %s attempt %d/%d failed: %s",
+                name, node.get_id(), attempt, len(attempts), e)
+            if attempt != attempts[-1]:
+                time.sleep(attempt)
     logger.error(
-        "connect %s -> node %s failed after 3 attempts: %s",
-        name, node.get_id(), last_err)
+        "connect %s -> node %s failed after %d attempt(s): %s",
+        name, node.get_id(), len(attempts), last_err)
 
 
 def _connect_to_remote_devs(
@@ -1359,9 +1415,9 @@ def _connect_to_remote_devs(
             if not dev.alceml_bdev:
                 raise ValueError(f"device alceml bdev not found!, {dev.get_id()}")
             devices_to_connect.append(dev)
-            t = threading.Thread(
-                target=_connect_device_thread,
-                args=(f"remote_{dev.alceml_bdev}", dev, this_node,))
+            t = _bounded_thread(
+                _connect_device_thread,
+                (f"remote_{dev.alceml_bdev}", dev, this_node,))
             connect_threads.append(t)
             t.start()
 
@@ -1507,11 +1563,41 @@ def _verify_online_device_coverage(snode: StorageNode, repair: bool = True):
     db_controller = DBController()
     rpc_client = snode.rpc_client(timeout=10, retry=1)
 
+    # Degraded-recovery carve-out (FD-0 whole-domain reboot, 2026-07-20).
+    # When the target's ENTIRE failure domain is dead and its concurrent
+    # recovery is sanctioned (fd_dead_recovery_allowed), that domain's sibling
+    # peers are legitimately unreachable — their remote bdevs cannot be
+    # connected until they come back. Requiring them here is the circular
+    # dependency that made a whole-FD reboot loop restart->abort->offline:
+    # every member aborts the coverage gate waiting on its down siblings'
+    # devices, kills SPDK, goes offline, retries, and never converges.
+    #
+    # The predicate is a hard FTT floor: it opens ONLY when >=2 domains exist,
+    # NO member of the target's domain is ONLINE, and NO node outside the domain
+    # is restarting/shutting down — i.e. exactly one domain is down, strictly
+    # within FTT. The raid rebuilds the excluded chunks from the surviving
+    # domains during examine, which is precisely what the failure-domain design
+    # tolerates. This does NOT weaken the 2026-07-16 protection: if a
+    # same-domain member is still ONLINE (a device silently failed while the
+    # domain was serving) the predicate is False and every online peer's device
+    # stays required, so the gate still aborts before the data path.
+    fd_recovery = fd_dead_recovery_allowed(db_controller, snode)
+    excluded_fd_devs = 0
+
     expected = {}  # expected remote bdev name -> owning device record
     for peer in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
         if peer.get_id() == snode.get_id():
             continue
         if peer.status not in (StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN):
+            continue
+        if fd_recovery and peer.failure_domain == snode.failure_domain:
+            # Legitimately-down sibling in the domain being recovered. Count it
+            # for the log line below, but do not require its bdevs.
+            excluded_fd_devs += sum(
+                1 for d in peer.nvme_devices
+                if d.status in (NVMeDevice.STATUS_ONLINE,
+                                NVMeDevice.STATUS_READONLY,
+                                NVMeDevice.STATUS_CANNOT_ALLOCATE) and d.alceml_bdev)
             continue
         for dev in peer.nvme_devices:
             if dev.status not in (NVMeDevice.STATUS_ONLINE,
@@ -1521,6 +1607,14 @@ def _verify_online_device_coverage(snode: StorageNode, repair: bool = True):
             if not dev.alceml_bdev:
                 continue
             expected[f"remote_{dev.alceml_bdev}n1"] = dev
+
+    if fd_recovery and excluded_fd_devs:
+        # Never a silent relaxation — degraded recovery must be visible in logs.
+        logger.warning(
+            "Coverage gate on %s: sanctioned dead-FD recovery (domain %s) — "
+            "excluding %d device(s) owned by down same-domain peers from the "
+            "required set; raid rebuilds those chunks degraded within FTT.",
+            snode.get_id(), snode.failure_domain, excluded_fd_devs)
 
     def _probe_missing():
         out = {}
@@ -1540,9 +1634,9 @@ def _verify_online_device_coverage(snode: StorageNode, repair: bool = True):
             snode.get_id(), len(missing), len(expected), sorted(missing))
         repair_threads = []
         for dev in missing.values():
-            t = threading.Thread(
-                target=_connect_device_thread,
-                args=(f"remote_{dev.alceml_bdev}", dev, snode))
+            t = _bounded_thread(
+                _connect_device_thread,
+                (f"remote_{dev.alceml_bdev}", dev, snode))
             t.start()
             repair_threads.append(t)
         for t in repair_threads:
@@ -1919,8 +2013,8 @@ def _reconnect_peers_to_restarted_node(snode: StorageNode):
     for node in snodes:
         if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
             continue
-        t = threading.Thread(target=_one_peer, args=(node.get_id(),),
-                             name=f"peer-reconnect-{node.get_id()[:8]}")
+        t = _bounded_thread(_one_peer, (node.get_id(),),
+                            name=f"peer-reconnect-{node.get_id()[:8]}")
         t.start()
         threads.append(t)
     for t in threads:
@@ -1951,8 +2045,8 @@ def _refresh_cluster_maps_after_node_recovery(snode: StorageNode):
         if node.get_id() == snode.get_id():
             continue
         if node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
-            t = threading.Thread(target=_send_one, args=(node,),
-                                 name=f"map-push-{node.get_id()[:8]}")
+            t = _bounded_thread(_send_one, (node,),
+                                name=f"map-push-{node.get_id()[:8]}")
             t.start()
             map_threads.append(t)
     for t in map_threads:
@@ -6032,6 +6126,18 @@ def _handle_rpc_failure_on_peer(snode, peer_node, lvs_jm_vuid, lvs_name=None):
 
 
 def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_mode=False, force=False):
+    """Per-LVS-locked wrapper: serialize recreate of ``primary_node.lvstore``
+    only against a concurrent recreate of the SAME LVS. Activation-mode
+    (globally blocked, serves no IO) bypasses the lock — see recreate_all_lvstores."""
+    if activation_mode:
+        return _recreate_lvstore_on_non_leader_impl(
+            snode, leader_node, primary_node, activation_mode=True, force=force)
+    with _recreate_lvstore_lock(primary_node.lvstore):
+        return _recreate_lvstore_on_non_leader_impl(
+            snode, leader_node, primary_node, activation_mode=False, force=force)
+
+
+def _recreate_lvstore_on_non_leader_impl(snode, leader_node, primary_node, activation_mode=False, force=False):
     """Recreate a non-leader LVS on snode.
 
     Per design: runs for secondary when primary is online, or for tertiary always.
@@ -6190,6 +6296,7 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
                 f"leader={leader_node.get_id()[:8]}, is_tert={is_tertiary}")
 
     # Set restart phase: blocked — sync deletes and registrations must be delayed until post_unblock
+    _port_block_t0 = time.monotonic()
     _set_restart_phase(snode, primary_node.lvstore, StorageNode.RESTART_PHASE_BLOCKED, db_controller)
 
     # Resolve the secondary node for tertiary→secondary hublvol fallback
@@ -6601,6 +6708,8 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
 
     # Set restart phase: post_unblock — delayed sync deletes and registrations can now proceed
     _set_restart_phase(snode, primary_node.lvstore, StorageNode.RESTART_PHASE_POST_UNBLOCK, db_controller)
+    logger.info("[RESTART] Port-block phase for %s on %s took %.3fs",
+                primary_node.lvstore, snode.get_id()[:8], time.monotonic() - _port_block_t0)
 
     ### 8b- deferred failover-path attach (tertiary only, leader was alive)
     # The in-freeze attach above used a single path. Now that the leader
@@ -6726,20 +6835,18 @@ def recreate_all_lvstores(snode, force=False):
     This is the dispatch logic extracted from restart_storage_node() so it can
     be called independently (e.g. from tests) without the SPDK init preamble.
 
-    STRICTLY SERIAL across parallel node restarts (design requirement):
-    recreate blocks LVS ports on counterparty nodes, rewrites hublvol
-    topology and flips lvstore_status on peer records — two nodes of the
-    same LVS group recreating concurrently race those into writer conflicts.
-    Everything before this point in a restart (SPDK bring-up, device/JM
-    connects, connect-back) stays parallel. The gate is process-local, which
-    covers the restart path: all parallel restart tasks run in the single
-    restart task-runner process. Activation-mode recreates
-    (cluster_ops.activate: recreate_lvstore(activation_mode=True)) do not
-    pass through here and keep their own orchestration — the suspended
-    cluster serves no IO there and ports are globally blocked.
+    Serialization is PER-LVS, not node-wide: each per-role recreate
+    (primary/secondary/tertiary) takes ``_recreate_lvstore_lock(lvs_name)``
+    inside its wrapper, so two members of the SAME LVS group cannot race the
+    port-block / hublvol rewrite / peer lvstore_status writes, while DIFFERENT
+    LVSes recreate concurrently. (Previously a single global gate serialized
+    ALL recreates of ALL LVSes across ALL parallel-restarting nodes — ~60-98s
+    per node, the dominant cost of a whole-FD reboot recovery.) Everything
+    before recreate (SPDK bring-up, device/JM connects) already runs parallel.
+    Activation-mode recreates keep their own orchestration (suspended cluster,
+    ports globally blocked) and bypass the per-LVS lock.
     """
-    with _recreate_lvstore_gate:
-        return _recreate_all_lvstores_serial(snode, force=force)
+    return _recreate_all_lvstores_serial(snode, force=force)
 
 
 def _recreate_all_lvstores_serial(snode, force=False):
@@ -6861,6 +6968,20 @@ def _recreate_all_lvstores_serial(snode, force=False):
 
 
 def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False):
+    """Per-LVS-locked wrapper: serialize recreate of this LVS only against a
+    concurrent recreate of the SAME LVS. The LVS is ``lvs_primary.lvstore``
+    (secondary taking leadership) or ``snode.lvstore`` (own primary).
+    Activation-mode (globally blocked, serves no IO) bypasses the lock."""
+    lvs_name = lvs_primary.lvstore if lvs_primary is not None else snode.lvstore
+    if activation_mode:
+        return _recreate_lvstore_impl(
+            snode, force=force, lvs_primary=lvs_primary, activation_mode=True)
+    with _recreate_lvstore_lock(lvs_name):
+        return _recreate_lvstore_impl(
+            snode, force=force, lvs_primary=lvs_primary, activation_mode=False)
+
+
+def _recreate_lvstore_impl(snode, force=False, lvs_primary=None, activation_mode=False):
     """Recreate LVStore as leader.
 
     Per design: runs for snode's own primary LVS, and also when snode
@@ -7059,6 +7180,7 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
     snode_lvs_port = lvs_node.get_lvol_subsys_port(lvs_name)
 
     # Phase transition: blocked — sync deletes and registrations must be delayed
+    _port_block_t0 = time.monotonic()
     _set_restart_phase(snode, lvs_name, StorageNode.RESTART_PHASE_BLOCKED, db_controller)
 
     # Peers whose LVS port is currently blocked. Client IO to any peer on
@@ -7558,6 +7680,8 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
 
     # Phase transition: post_unblock — delayed sync deletes and registrations can now proceed
     _set_restart_phase(snode, lvs_name, StorageNode.RESTART_PHASE_POST_UNBLOCK, db_controller)
+    logger.info("[RESTART] Port-block phase for %s on %s took %.3fs",
+                lvs_name, snode.get_id()[:8], time.monotonic() - _port_block_t0)
 
     ### 10b- deferred tertiary→secondary hublvol failover paths
     # The in-freeze attach above used a single path (tertiary → primary).

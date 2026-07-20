@@ -1280,21 +1280,10 @@ def main():
             use_json=True,
         )
 
-        # 4. sn check <node_uuid>  – one file per storage node
-        print("  sbctl sn check  (per node) …")
-        sn_check_dir = info_dir / "sn_check"
-        sn_check_dir.mkdir()
-        for node in sn_list:
-            node_uuid = node.get("UUID", "")
-            node_hostname = node.get("Hostname", node_uuid)
-            node_ip = node.get("Management IP", "")
-            label = f"{node_hostname}_{node_ip}".strip("_") if node_ip else node_hostname
-            text = sbctl_raw("sn", "check", node_uuid)
-            if text is not None:
-                (sn_check_dir / f"{label}.txt").write_text(text)
-                print(f"    {label}")
-            else:
-                print(f"    {label}  FAILED", file=sys.stderr)
+        # 4. (removed) per-node "sbctl sn check" — its O(N^2) bdev dumps make
+        # collection prohibitively slow / can hang on a large or unhealthy
+        # cluster. Skip it entirely; the spdk / spdk_proxy per-node logs and
+        # cluster get-logs already carry what's needed for analysis.
 
         # 5. cluster get-logs --limit 0  (all cluster-level events)
         save_sbctl(
