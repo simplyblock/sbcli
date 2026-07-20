@@ -2561,6 +2561,86 @@ class K8sSbcliUtils:
             })
         return tasks
 
+    def get_cluster_logs(self, cluster_id=None):
+        """Return list of cluster log dicts (each has ``Message``, etc.)."""
+        cid = cluster_id or self.cluster_id
+        return self._run_json(f"{self.sbcli_cmd} cluster get-logs {cid} --json --limit 0")
+
+    def get_cluster_status(self, cluster_id=None):
+        """Return cluster status dict."""
+        details = self.get_cluster_details(cluster_id)
+        return details
+
+    def list_migration_tasks(self, cluster_id=None):
+        """Return raw task list (same shape as ``get_cluster_tasks``)."""
+        cid = cluster_id or self.cluster_id
+        tasks = self.get_cluster_tasks(cid)
+        return {"results": tasks}
+
+    # ── device / node capacity methods ────────────────────────────────────────
+
+    def get_device_details(self, storage_node_id):
+        """Return list of device dicts for a storage node."""
+        data = self._run_json(
+            f"{self.sbcli_cmd} sn list-devices {storage_node_id} --json"
+        )
+        self.logger.info(f"Device Details: {data}")
+        return data
+
+    def get_device_capacity(self, device_id):
+        """Return capacity records for a device.
+
+        ``sbctl sn get-capacity-device`` does not support ``--json``,
+        so we parse the table output.
+        """
+        out = self._run(f"{self.sbcli_cmd} sn get-capacity-device {device_id}")
+        records = []
+        headers = []
+        for line in out.splitlines():
+            line = line.strip()
+            if not line or line.startswith("+"):
+                continue
+            parts = [p.strip() for p in line.split("|")]
+            parts = [p for p in parts if p]
+            if not headers:
+                headers = [h.lower().replace(" ", "_") for h in parts]
+                continue
+            if len(parts) == len(headers):
+                records.append(dict(zip(headers, parts)))
+        return records
+
+    def get_node_capacity(self, node_id, history=None):
+        """Return capacity records for a storage node.
+
+        ``sbctl sn get-capacity`` does not support ``--json``,
+        so we parse the table output.
+        """
+        cmd = f"{self.sbcli_cmd} sn get-capacity {node_id}"
+        if history:
+            cmd += f" --history {history}"
+        out = self._run(cmd)
+        records = []
+        headers = []
+        for line in out.splitlines():
+            line = line.strip()
+            if not line or line.startswith("+"):
+                continue
+            parts = [p.strip() for p in line.split("|")]
+            parts = [p for p in parts if p]
+            if not headers:
+                headers = [h.lower().replace(" ", "_") for h in parts]
+                continue
+            if len(parts) == len(headers):
+                records.append(dict(zip(headers, parts)))
+        return records
+
+    # ── pool methods ──────────────────────────────────────────────────────────
+
+    def get_pool_by_id(self, pool_id):
+        """Return pool dict for the given pool id."""
+        data = self._run_json(f"{self.sbcli_cmd} pool get {pool_id} --json")
+        return data
+
     def get_io_stats(self, cluster_id=None, time_duration=None):
         """
         Fetch last 10 minutes of I/O stats and return a single averaged dict so
