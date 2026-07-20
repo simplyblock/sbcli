@@ -86,9 +86,7 @@ class TestSingleNodeResizeLvolCone(TestClusterBase):
                 size="5G",
                 host_id=node_id,
             )
-            lvols = self.sbcli_utils.list_lvols()
-            assert lvol_name in list(lvols.keys()), \
-                f"Lvol {lvol_name} is not present in list of lvols post add: {lvols}"
+            self._verify_lvol_exists_dual(lvol_name)
 
             device, mount = self._connect_and_mount_dual(
                 lvol_name, mount_path=mount_path
@@ -122,9 +120,7 @@ class TestSingleNodeResizeLvolCone(TestClusterBase):
                 format_disk=False,
             )
 
-            clone = self.sbcli_utils.list_lvols()
-            assert clone_name in list(clone.keys()), \
-                f"Clone {clone_name} is not present in list of lvols post add: {clone}"
+            self._verify_lvol_exists_dual(clone_name)
 
             fio_handle = self._run_fio_dual(
                 lvol_name=clone_name,
