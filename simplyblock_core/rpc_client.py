@@ -1765,8 +1765,8 @@ class RPCClient:
         """
         return self._request3("bdev_lvol_batch_transfer_final_step",
                               lvol_names=lvol_names,
-                              lvol_ids=lvol_ids,
-                              snapshot_names=snapshot_names,
+                              ids=lvol_ids,
+                              snapshots=snapshot_names,
                               cluster_batch=batch_size,
                               gateway=gateway,
                               operation=operation)
