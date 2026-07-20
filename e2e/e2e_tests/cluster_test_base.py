@@ -449,7 +449,11 @@ class TestClusterBase:
         """Create StorageClass + VolumeSnapshotClass if in K8s mode.
 
         If the operator already created a simplyblock StorageClass (from the
-        Pool CRD), reuse it instead of creating a new one.
+        Pool CRD), reuse it — but only if it matches *self.pool_name* and uses
+        ``volumeBindingMode: Immediate``.  Operator-created SCs typically use
+        ``WaitForFirstConsumer`` which causes PVCs to stay Pending until a pod
+        is scheduled; the e2e flow creates PVCs first and waits for binding, so
+        we need ``Immediate``.
         """
         if not self.k8s_test:
             return
@@ -462,22 +466,57 @@ class TestClusterBase:
             "{.metadata.name}{\"\\n\"}{end}' 2>/dev/null || true"
         )
         existing_sc = [s.strip() for s in out.strip().splitlines() if s.strip()]
+        selected_sc = None
         if existing_sc:
             self.logger.info(
                 f"[k8s] Found existing simplyblock StorageClass(es): {existing_sc}"
             )
-            # Prefer our name if it exists, otherwise use the first available
+            # Prefer our exact name if it exists
             if self._k8s_storage_class_name in existing_sc:
+                selected_sc = self._k8s_storage_class_name
+            else:
+                # Match the SC that corresponds to self.pool_name.
+                # Operator names look like: simplyblock-<ns>-<cluster>-<pool>
+                pool_suffix = self.pool_name.replace("_", "-")
+                for sc in existing_sc:
+                    if sc.endswith(pool_suffix):
+                        selected_sc = sc
+                        break
+                if not selected_sc:
+                    # Broader match: pool name anywhere in SC name
+                    for sc in existing_sc:
+                        if pool_suffix in sc:
+                            selected_sc = sc
+                            break
+
+        if selected_sc:
+            # Verify the SC uses Immediate binding — the e2e flow creates PVCs
+            # before pods, so WaitForFirstConsumer causes a permanent hang.
+            binding_mode, _ = k8s._exec_kubectl(
+                f"kubectl get storageclass {selected_sc} "
+                f"-o jsonpath='{{.volumeBindingMode}}' 2>/dev/null || true",
+                supress_logs=True,
+            )
+            binding_mode = binding_mode.strip()
+            if binding_mode and binding_mode != "Immediate":
+                self.logger.info(
+                    f"[k8s] Operator SC '{selected_sc}' has "
+                    f"volumeBindingMode={binding_mode}; creating own SC "
+                    f"with Immediate binding for e2e compatibility"
+                )
+                selected_sc = None  # fall through to creation below
+            else:
+                self._k8s_storage_class_name = selected_sc
                 self.logger.info(
                     f"[k8s] Using existing SC '{self._k8s_storage_class_name}'"
                 )
-            else:
-                self._k8s_storage_class_name = existing_sc[0]
-                self.logger.info(
-                    f"[k8s] Using operator-created SC '{self._k8s_storage_class_name}'"
-                )
-        else:
-            # No simplyblock SC exists — create one
+
+        if not selected_sc:
+            # No suitable SC found — create one with Immediate binding
+            self.logger.info(
+                f"[k8s] Creating SC '{self._k8s_storage_class_name}' "
+                f"for pool '{self.pool_name}' with volumeBindingMode=Immediate"
+            )
             k8s.create_storage_class(
                 name=self._k8s_storage_class_name,
                 cluster_id=self.cluster_id,
