@@ -193,7 +193,7 @@ def _apply_migration_to_db(migration, tgt_lvol_uuid=None, tgt_lvol_bdev=None):
             f"from target lvstore {tgt_node.lvstore}")
         subsys = tgt_rpc.subsystem_get(lvol.nqn)
         if subsys:
-            for ns in subsys.get('namespaces'):
+            for ns in subsys.get('namespaces') or []:
                 if ns['uuid'] == lvol.uuid:
                     lvol.ns_id = ns['nsid']
                     break
@@ -212,6 +212,8 @@ def _apply_migration_to_db(migration, tgt_lvol_uuid=None, tgt_lvol_bdev=None):
     lvol.top_bdev = f"{tgt_node.lvstore}/{lvol.lvol_bdev}"
     if tgt_lvol_uuid:
         lvol.lvol_uuid = tgt_lvol_uuid
+    elif lvol.lvol_bdev in spdk_info and spdk_info[lvol.lvol_bdev].get('uuid'):
+        lvol.lvol_uuid = spdk_info[lvol.lvol_bdev]['uuid']
 
     # bdev_stack: the 'bdev_lvol' entry bakes in lvs_name (and name) at creation
     # time; _remove_bdev_stack() uses them to build the delete bdev composite, so
@@ -2914,15 +2916,30 @@ def _handle_group_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             migration.write_to_db(db.kv_store)
             return False, False, None
 
+        _g_tgt_sec, _g_sec_err = _get_target_secondary_node(tgt_node, src_node.get_id())
+        _g_tgt_ter, _g_ter_err = _get_target_tertiary_node(tgt_node, src_node.get_id())
+        if _g_sec_err:
+            migration.error_message = _g_sec_err
+            migration.write_to_db(db.kv_store)
+            return False, True, _WAIT
+        if _g_ter_err:
+            migration.error_message = _g_ter_err
+            migration.write_to_db(db.kv_store)
+            return False, True, _WAIT
+        _g_sec_rpc = _make_rpc(_g_tgt_sec) if _g_tgt_sec else None
+        _g_ter_rpc = _make_rpc(_g_tgt_ter) if _g_tgt_ter else None
+
         if tgt_rpc.get_bdevs(tgt_composite):
             try:
-                _delete_bdev_blocking(tgt_composite, tgt_rpc)
+                _delete_bdev_blocking(tgt_composite, tgt_rpc, _g_sec_rpc, _g_ter_rpc)
             except Exception as e:
                 logger.warning(f"Group worker: pre-cleanup of {tgt_composite} failed: {e}")
 
         t, err = _setup_snap_transfer(
             snap, plan.index(snap_uuid), src_node, tgt_node,
             src_rpc, tgt_rpc, trtype,
+            tgt_sec=_g_tgt_sec, sec_rpc=_g_sec_rpc,
+            tgt_ter=_g_tgt_ter, ter_rpc=_g_ter_rpc,
             lvol_size_mib=_snap_lvol_size_mib)
         if t is None:
             return False, True, err
@@ -3026,15 +3043,30 @@ def _handle_group_intermediate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         except KeyError:
             _snap_lvol_size_mib = None
 
+        _g_tgt_sec, _g_sec_err = _get_target_secondary_node(tgt_node, src_node.get_id())
+        _g_tgt_ter, _g_ter_err = _get_target_tertiary_node(tgt_node, src_node.get_id())
+        if _g_sec_err:
+            migration.error_message = _g_sec_err
+            migration.write_to_db(db.kv_store)
+            return False, True, _WAIT
+        if _g_ter_err:
+            migration.error_message = _g_ter_err
+            migration.write_to_db(db.kv_store)
+            return False, True, _WAIT
+        _g_sec_rpc = _make_rpc(_g_tgt_sec) if _g_tgt_sec else None
+        _g_ter_rpc = _make_rpc(_g_tgt_ter) if _g_tgt_ter else None
+
         if tgt_rpc.get_bdevs(tgt_composite):
             try:
-                _delete_bdev_blocking(tgt_composite, tgt_rpc)
+                _delete_bdev_blocking(tgt_composite, tgt_rpc, _g_sec_rpc, _g_ter_rpc)
             except Exception as e:
                 logger.warning(f"Group intermediate: pre-cleanup of {tgt_composite} failed: {e}")
 
         t, err = _setup_snap_transfer(
             snap, snap_index, src_node, tgt_node,
             src_rpc, tgt_rpc, trtype,
+            tgt_sec=_g_tgt_sec, sec_rpc=_g_sec_rpc,
+            tgt_ter=_g_tgt_ter, ter_rpc=_g_ter_rpc,
             lvol_size_mib=_snap_lvol_size_mib)
         if t is None:
             return False, True, err
