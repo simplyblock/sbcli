@@ -537,13 +537,14 @@ class K8sNativeFailoverTest(TestClusterBase):
     def _start_dmesg_collectors(self):
         """Deploy a privileged pod on each K8s node that streams host dmesg.
 
-        Each pod runs ``nsenter`` into the host PID namespace and executes
-        ``dmesg -Tw`` (follow mode with human-readable timestamps).  The
-        output is captured on pod stdout, retrievable via ``kubectl logs``
-        at any time.
+        The **dmesg** container runs ``dmesg -Tw`` directly from busybox.
+        Since the pod is ``privileged: true``, the kernel ring buffer is
+        accessible without ``nsenter`` — it is global to the host kernel.
 
-        Also starts a ``journalctl -kf`` stream in a second container for
-        kernel journal messages.
+        The **journalctl** container tries ``nsenter`` into the host PID
+        namespace to run ``journalctl -kf``.  On Talos Linux (and other
+        minimal distros where ``/bin/sh`` is absent from the host rootfs)
+        this gracefully falls back to ``dmesg`` streaming.
 
         Deployed on ALL platforms (Talos, K8s, OpenShift).  On OpenShift
         ``oc debug node/`` is available as a fallback if the pod is down.
@@ -578,16 +579,14 @@ class K8sNativeFailoverTest(TestClusterBase):
                 f"  containers:\n"
                 f"  - name: dmesg\n"
                 f"    image: busybox\n"
-                f"    command: ['nsenter', '-t', '1', '-m', '-u', '-i', '-n', '--',\n"
-                f"              'sh', '-c',\n"
+                f"    command: ['sh', '-c',\n"
                 f"              'dmesg -T; echo === FOLLOW ===; dmesg -Tw 2>/dev/null || while true; do sleep 30; dmesg -T; done']\n"
                 f"    securityContext:\n"
                 f"      privileged: true\n"
                 f"  - name: journalctl\n"
                 f"    image: busybox\n"
-                f"    command: ['nsenter', '-t', '1', '-m', '-u', '-i', '-n', '--',\n"
-                f"              'sh', '-c',\n"
-                f"              'journalctl -kb --no-pager 2>/dev/null; echo === FOLLOW ===; journalctl -kf --no-pager 2>/dev/null || dmesg -T; dmesg -Tw 2>/dev/null || while true; do sleep 30; dmesg -T; done']\n"
+                f"    command: ['sh', '-c',\n"
+                f"              'nsenter -t 1 -m -u -i -n -- sh -c \"journalctl -kb --no-pager 2>/dev/null; echo === FOLLOW ===; journalctl -kf --no-pager\" 2>/dev/null || echo \"=== journalctl unavailable (Talos?), falling back to dmesg ===\"; dmesg -T; echo === FOLLOW ===; dmesg -Tw 2>/dev/null || while true; do sleep 30; dmesg -T; done']\n"
                 f"    securityContext:\n"
                 f"      privileged: true\n"
                 f"  restartPolicy: Always\n"
