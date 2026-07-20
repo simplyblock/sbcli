@@ -288,18 +288,26 @@ jobs:
       - name: Set parameters
         run: |
           PARAMS="${{ github.event.inputs.cluster_params || 'ndcs=2,npcs=2,bs=4096,chunk_bs=4096,partitions=1,jm_count=4' }}"
+          # Parse into local vars first, then apply defaults
+          _ndcs="" _npcs="" _bs="" _chunk_bs="" _partitions="" _jm_count=""
           for pair in $(echo "$PARAMS" | tr ',' ' '); do
             key=$(echo "$pair" | cut -d= -f1)
             val=$(echo "$pair" | cut -d= -f2)
             case "$key" in
-              ndcs)       echo "NDCS=$val" >> $GITHUB_ENV ;;
-              npcs)       echo "NPCS=$val" >> $GITHUB_ENV ;;
-              bs)         echo "BS=$val" >> $GITHUB_ENV ;;
-              chunk_bs)   echo "CHUNK_BS=$val" >> $GITHUB_ENV ;;
-              partitions) echo "PARTITIONS=$val" >> $GITHUB_ENV ;;
-              jm_count)   echo "JM_COUNT=$val" >> $GITHUB_ENV ;;
+              ndcs)       _ndcs="$val" ;;
+              npcs)       _npcs="$val" ;;
+              bs)         _bs="$val" ;;
+              chunk_bs)   _chunk_bs="$val" ;;
+              partitions) _partitions="$val" ;;
+              jm_count)   _jm_count="$val" ;;
             esac
           done
+          echo "NDCS=${_ndcs:-2}" >> $GITHUB_ENV
+          echo "NPCS=${_npcs:-2}" >> $GITHUB_ENV
+          echo "BS=${_bs:-4096}" >> $GITHUB_ENV
+          echo "CHUNK_BS=${_chunk_bs:-4096}" >> $GITHUB_ENV
+          echo "PARTITIONS=${_partitions:-1}" >> $GITHUB_ENV
+          echo "JM_COUNT=${_jm_count:-4}" >> $GITHUB_ENV
 
       - name: Verify kubectl connectivity
         run: kubectl get nodes
