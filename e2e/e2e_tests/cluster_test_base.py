@@ -585,6 +585,42 @@ class TestClusterBase:
             assert lvol_name in list(lvols.keys()), \
                 f"Lvol {lvol_name} not present in list of lvols: {lvols}"
 
+    def _get_node_with_lvols_dual(self):
+        """Return a non-secondary storage node dict that hosts at least one lvol.
+
+        In Docker mode, uses the ``lvols`` count field from the REST API.
+        In K8s mode, resolves through lvol details since the CLI ``sn get``
+        output may not carry a pre-computed lvol count.
+
+        Returns ``(node_uuid, node_dict)`` or raises if none found.
+        """
+        sn_data = self.sbcli_utils.get_storage_nodes()["results"]
+        if not self.k8s_test:
+            for node in reversed(sn_data):
+                if node.get("lvols", 0) > 0 and not node.get("is_secondary_node"):
+                    return node["uuid"], node
+        else:
+            # Build set of node UUIDs that host lvols
+            nodes_with_lvols = set()
+            for lid in self.sbcli_utils.list_lvols().values():
+                try:
+                    details = self.sbcli_utils.get_lvol_details(lid)
+                    if details:
+                        nid = details[0].get("node_id")
+                        if nid:
+                            nodes_with_lvols.add(nid)
+                except Exception:
+                    pass
+            self.logger.info(f"[k8s] Nodes hosting lvols: {nodes_with_lvols}")
+            for node in reversed(sn_data):
+                nid = node.get("uuid") or node.get("UUID", "")
+                if nid in nodes_with_lvols and not node.get("is_secondary_node"):
+                    return nid, node
+        raise RuntimeError(
+            "No non-secondary node with lvols found. "
+            f"Nodes: {[n.get('uuid') or n.get('UUID') for n in sn_data]}"
+        )
+
     def _get_lvol_id_dual(self, lvol_name):
         """Return the lvol UUID for *lvol_name*.
 
@@ -3381,7 +3417,8 @@ class TestClusterBase:
         """
         node_details = self.sbcli_utils.get_storage_node_details(storage_node_id=node_uuid)
         self.logger.info(f"Storage Node Details: {node_details}")
-        self.sbcli_utils.get_device_details(storage_node_id=node_uuid)
+        if hasattr(self.sbcli_utils, "get_device_details"):
+            self.sbcli_utils.get_device_details(storage_node_id=node_uuid)
         lvol_id = self._get_lvol_id_dual(self.lvol_name)
         self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
 

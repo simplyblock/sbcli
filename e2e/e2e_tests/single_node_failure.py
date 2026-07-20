@@ -306,13 +306,7 @@ class TestHASingleNodeFailure(TestClusterBase):
             lvol_name = f"LVOL_{i}"
             self.add_lvol_and_run_fio(lvol_name)
 
-        no_lvol_node = None
-        for node in self.sbcli_utils.get_storage_nodes()['results'][::-1]:
-            if node['lvols'] > 0 and node['is_secondary_node'] is False:
-                no_lvol_node = node
-                break
-
-        no_lvol_node_uuid = no_lvol_node['uuid']
+        no_lvol_node_uuid, no_lvol_node = self._get_node_with_lvols_dual()
         node_ip = no_lvol_node["mgmt_ip"]
 
         self.validations(node_uuid=no_lvol_node_uuid,
