@@ -5350,7 +5350,7 @@ class K8sNativeScaleBreakTest(K8sNativeFailoverTest):
     def _perform_single_outage(self) -> tuple[str, str]:
         """Pick one random storage node and trigger a graceful shutdown.
 
-        Returns (node_uuid, outage_type).
+        Returns (node_uuid, outage_type)
         """
         node = random.choice(list(self.sn_nodes))
         outage_type = random.choice(self.outage_types2)
