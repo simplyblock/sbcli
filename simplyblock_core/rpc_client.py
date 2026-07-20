@@ -141,12 +141,12 @@ class RPCClient:
             # instead of the proxy-global timeout. Prevents an abandoned/stuck
             # RPC from squatting a proxy slot for minutes and starving other RPCs.
             wire_payload = unwrap_secrets_for_send(payload)
-            if method in ("bdev_lvol_transfer_final_step", "bdev_lvol_batch_final_step"):
+            if method in ("bdev_lvol_transfer_final_step", ):
                 logger.debug("ebi Wire payload: %s", wire_payload)
             response = self.session.post(
                 self.url, data=json.dumps(wire_payload), timeout=effective_timeout,
                 headers={"X-RPC-Timeout": str(effective_timeout)})
-            if method in ("bdev_lvol_transfer_final_step", "bdev_lvol_batch_final_step"):
+            if method in ("bdev_lvol_transfer_final_step", ):
                 logger.debug(
                     "ebi Response: status_code: %s, headers: %s, content: %s",
                     response.status_code, dict(response.headers), response.text)
@@ -191,12 +191,12 @@ class RPCClient:
                 'method': method,
                 'params': kwargs,
             })
-            if method in ("bdev_lvol_transfer_final_step", "bdev_lvol_batch_final_step"):
+            if method in ("bdev_lvol_transfer_final_step", "bdev_lvol_batch_transfer_final_step"):
                 logger.debug("ebi Wire payload: %s", wire_payload)
             response = self.session.post(
                 self.url, data=json.dumps(wire_payload), timeout=self.timeout,
                 headers={"X-RPC-Timeout": str(self.timeout)})
-            if method in ("bdev_lvol_transfer_final_step", "bdev_lvol_batch_final_step"):
+            if method in ("bdev_lvol_transfer_final_step", "bdev_lvol_batch_transfer_final_step"):
                 logger.debug(
                     "ebi Response: status_code: %s, headers: %s, content: %s",
                     response.status_code, dict(response.headers), response.text)
@@ -1740,7 +1740,7 @@ class RPCClient:
             "operation": operation,
         })
 
-    def bdev_lvol_batch_final_step(self, lvol_names, lvol_ids, snapshot_names, batch_size, gateway, operation):
+    def bdev_lvol_batch_transfer_final_step(self, lvol_names, lvol_ids, snapshot_names, batch_size, gateway, operation):
         """
         Start the final transfer step for a batch of lvols simultaneously.
 
@@ -1763,7 +1763,7 @@ class RPCClient:
         Poll per-lvol progress with :meth:`bdev_lvol_transfer_stat` using
         the corresponding entry from *lvol_names*.
         """
-        return self._request3("bdev_lvol_batch_final_step",
+        return self._request3("bdev_lvol_batch_transfer_final_step",
                               lvol_names=lvol_names,
                               lvol_ids=lvol_ids,
                               snapshot_names=snapshot_names,

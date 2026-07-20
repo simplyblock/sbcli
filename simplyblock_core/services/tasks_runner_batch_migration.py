@@ -499,12 +499,19 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
     batch_ok = False
     batch_err = None
     try:
-        ret = src_rpc.bdev_lvol_batch_final_step(
+        ret = src_rpc.bdev_lvol_batch_transfer_final_step(
             lvol_names, lvol_ids, snapshot_names, 2, hub_bdev, "migrate")
-        logger.info(f"Group {group.uuid[:8]}: bdev_lvol_batch_final_step returned {ret!r}")
+        logger.info(f"Group {group.uuid[:8]}: bdev_lvol_batch_transfer_final_step returned {ret!r}")
         batch_ok = True
+    except RPCException as e:
+        logger.error(f"Group {group.uuid[:8]}: bdev_lvol_batch_transfer_final_step RPC error code={e.code}: {e}")
+        batch_err = str(e)
+        # -32601 = Method not found: SPDK binary is missing this RPC handler.
+        # Retrying will never help; surface as fatal so the group fails immediately.
+        if e.code == -32601:
+            return False, batch_err
     except Exception as e:
-        logger.error(f"Group {group.uuid[:8]}: bdev_lvol_batch_final_step failed: {e}")
+        logger.error(f"Group {group.uuid[:8]}: bdev_lvol_batch_transfer_final_step failed: {e}")
         batch_err = str(e)
 
     if batch_ok:
