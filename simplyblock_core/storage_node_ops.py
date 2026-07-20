@@ -999,11 +999,22 @@ def _create_device_partitions(rpc_client, nvme, snode, num_partitions_per_dev, j
         if not rpc_client.bdev_nvme_controller_list(nvme.nvme_controller):
             break
         time.sleep(1)
-    try:
-        rpc_client.bdev_nvme_controller_attach(nvme.nvme_controller, nvme.pcie_address)
-    except RPCException as e:
-        logger.error('Failed to create device partitions: ' + str(e))
-        return False
+    # Reattaching the controller may be slower on certain devices, so retry with bounded backoff
+    attach_attempts = 5
+    for attempt in range(1, attach_attempts + 1):
+        try:
+            rpc_client.bdev_nvme_controller_attach(nvme.nvme_controller, nvme.pcie_address)
+            break
+        except RPCException as e:
+            if attempt == attach_attempts:
+                logger.error(
+                    f"Failed to re-attach {nvme.nvme_controller} at {nvme.pcie_address} "
+                    f"after {attach_attempts} attempts (DPDK PCI removal stuck): {e}")
+                return False
+            logger.warning(
+                f"Re-attach {nvme.nvme_controller}@{nvme.pcie_address} failed "
+                f"(attempt {attempt}/{attach_attempts}, code={e.code}); retrying in 3s")
+            time.sleep(3)
     time.sleep(1)
     rpc_client.bdev_examine(nvme.nvme_bdev)
     time.sleep(1)
