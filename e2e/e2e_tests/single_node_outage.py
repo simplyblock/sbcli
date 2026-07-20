@@ -76,9 +76,7 @@ class TestSingleNodeOutage(TestClusterBase):
             pool_name=self.pool_name,
             size="800M"
         )
-        lvols = self.sbcli_utils.list_lvols()
-        assert self.lvol_name in list(lvols.keys()), \
-            f"Lvol {self.lvol_name} present in list of lvols post add: {lvols}"
+        self._verify_lvol_exists_dual(self.lvol_name)
 
         device, mount = self._connect_and_mount_dual(
             self.lvol_name, mount_path=self.mount_path
@@ -95,7 +93,7 @@ class TestSingleNodeOutage(TestClusterBase):
         no_lvol_node_uuid = self.sbcli_utils.get_node_without_lvols()
 
         self.logger.info("Getting lvol status before shutdown")
-        lvol_id = self.sbcli_utils.get_lvol_id(lvol_name=self.lvol_name)
+        lvol_id = self._get_lvol_id_dual(self.lvol_name)
         lvol_details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
 
         for lvol in lvol_details:
@@ -432,16 +430,14 @@ class TestHASingleNodeOutage(TestClusterBase):
 
         host_id = self.sbcli_utils.get_node_without_lvols()
 
-        self._create_lvol_dual(
+        _, lvol_id = self._create_lvol_dual(
             lvol_name=self.lvol_name,
             pool_name=self.pool_name,
             size="10G",
             host_id=host_id,
         )
 
-        lvols = self.sbcli_utils.list_lvols()
-        assert self.lvol_name in list(lvols.keys()), \
-            f"Lvol {self.lvol_name} not present in list of lvols post add: {lvols}"
+        self._verify_lvol_exists_dual(self.lvol_name)
 
         device, mount = self._connect_and_mount_dual(
             self.lvol_name, mount_path=mount_path, fs_type='xfs'
@@ -456,4 +452,4 @@ class TestHASingleNodeOutage(TestClusterBase):
             time_based=True,
         )
         self.fio_handles.append(fio_handle)
-        return lvols[self.lvol_name]
+        return lvol_id

@@ -448,82 +448,66 @@ class TestClusterBase:
     def _k8s_ensure_storage_class(self):
         """Create StorageClass + VolumeSnapshotClass if in K8s mode.
 
-        If the operator already created a simplyblock StorageClass (from the
-        Pool CRD), reuse it — but only if it matches *self.pool_name* and uses
-        ``volumeBindingMode: Immediate``.  Operator-created SCs typically use
-        ``WaitForFirstConsumer`` which causes PVCs to stay Pending until a pod
-        is scheduled; the e2e flow creates PVCs first and waits for binding, so
-        we need ``Immediate``.
+        Always creates (or recreates) our own StorageClass with
+        ``volumeBindingMode: Immediate`` and the current pool parameters.
+
+        Operator-created SCs use ``WaitForFirstConsumer`` which causes PVCs
+        to stay Pending until a pod is scheduled; the e2e flow creates PVCs
+        first and waits for binding, so ``Immediate`` is required.
+
+        Recreating the SC on every test ensures parameters (pool_name,
+        cluster_id) are never stale from a previous test run.
         """
         if not self.k8s_test:
             return
         k8s = self._ensure_k8s_utils()
 
-        # Check if a simplyblock StorageClass already exists
+        # Log existing SCs for diagnostics
         out, _ = k8s._exec_kubectl(
             "kubectl get storageclass -o jsonpath="
             "'{range .items[?(@.provisioner==\"csi.simplyblock.io\")]}"
             "{.metadata.name}{\"\\n\"}{end}' 2>/dev/null || true"
         )
         existing_sc = [s.strip() for s in out.strip().splitlines() if s.strip()]
-        selected_sc = None
         if existing_sc:
             self.logger.info(
-                f"[k8s] Found existing simplyblock StorageClass(es): {existing_sc}"
+                f"[k8s] Existing simplyblock StorageClass(es): {existing_sc}"
             )
-            # Prefer our exact name if it exists
-            if self._k8s_storage_class_name in existing_sc:
-                selected_sc = self._k8s_storage_class_name
-            else:
-                # Match the SC that corresponds to self.pool_name.
-                # Operator names look like: simplyblock-<ns>-<cluster>-<pool>
-                pool_suffix = self.pool_name.replace("_", "-")
-                for sc in existing_sc:
-                    if sc.endswith(pool_suffix):
-                        selected_sc = sc
-                        break
-                if not selected_sc:
-                    # Broader match: pool name anywhere in SC name
-                    for sc in existing_sc:
-                        if pool_suffix in sc:
-                            selected_sc = sc
-                            break
 
-        if selected_sc:
-            # Verify the SC uses Immediate binding — the e2e flow creates PVCs
-            # before pods, so WaitForFirstConsumer causes a permanent hang.
-            binding_mode, _ = k8s._exec_kubectl(
-                f"kubectl get storageclass {selected_sc} "
-                f"-o jsonpath='{{.volumeBindingMode}}' 2>/dev/null || true",
-                supress_logs=True,
-            )
-            binding_mode = binding_mode.strip()
-            if binding_mode and binding_mode != "Immediate":
-                self.logger.info(
-                    f"[k8s] Operator SC '{selected_sc}' has "
-                    f"volumeBindingMode={binding_mode}; creating own SC "
-                    f"with Immediate binding for e2e compatibility"
-                )
-                selected_sc = None  # fall through to creation below
-            else:
-                self._k8s_storage_class_name = selected_sc
-                self.logger.info(
-                    f"[k8s] Using existing SC '{self._k8s_storage_class_name}'"
-                )
+        # Always create (or recreate) our own SC with current parameters.
+        # create_storage_class() deletes any existing SC with the same name
+        # first, ensuring pool_name / cluster_id are never stale.
+        self.logger.info(
+            f"[k8s] Creating SC '{self._k8s_storage_class_name}' "
+            f"for pool '{self.pool_name}', cluster '{self.cluster_id}' "
+            f"with volumeBindingMode=Immediate"
+        )
+        k8s.create_storage_class(
+            name=self._k8s_storage_class_name,
+            cluster_id=self.cluster_id,
+            pool_name=self.pool_name,
+            ndcs=self.ndcs,
+            npcs=self.npcs,
+        )
 
-        if not selected_sc:
-            # No suitable SC found — create one with Immediate binding
+        # Verify the SC was actually created
+        verify_out, _ = k8s._exec_kubectl(
+            f"kubectl get storageclass {self._k8s_storage_class_name} "
+            f"-o jsonpath='{{.volumeBindingMode}}' 2>/dev/null || true",
+            supress_logs=True,
+        )
+        binding_mode = verify_out.strip()
+        if binding_mode == "Immediate":
             self.logger.info(
-                f"[k8s] Creating SC '{self._k8s_storage_class_name}' "
-                f"for pool '{self.pool_name}' with volumeBindingMode=Immediate"
+                f"[k8s] SC '{self._k8s_storage_class_name}' verified: "
+                f"volumeBindingMode=Immediate"
             )
-            k8s.create_storage_class(
-                name=self._k8s_storage_class_name,
-                cluster_id=self.cluster_id,
-                pool_name=self.pool_name,
-                ndcs=self.ndcs,
-                npcs=self.npcs,
+        else:
+            self.logger.warning(
+                f"[k8s] SC '{self._k8s_storage_class_name}' verification "
+                f"returned unexpected binding mode: {binding_mode!r}"
             )
+
         k8s.create_volume_snapshot_class(name=self._k8s_snapshot_class_name)
 
     def _create_lvol_dual(self, lvol_name, size, pool_name=None,
@@ -568,6 +552,48 @@ class TestClusterBase:
             lvol_id = self.sbcli_utils.get_lvol_id(lvol_name=lvol_name)
             self._volume_registry[lvol_name] = {"lvol_id": lvol_id}
             return lvol_name, lvol_id
+
+    def _verify_lvol_exists_dual(self, lvol_name):
+        """Assert that an lvol exists after creation.
+
+        In Docker mode, checks by lvol_name in ``sbcli lvol list`` keys.
+        In K8s mode, the CSI driver assigns its own lvol name (usually the
+        PV name), so we verify by lvol_id from the volume registry instead.
+        """
+        lvols = self.sbcli_utils.list_lvols()
+        if self.k8s_test:
+            reg = self._volume_registry.get(lvol_name, {})
+            lvol_id = reg.get("lvol_id")
+            if lvol_id:
+                assert lvol_id in lvols.values(), \
+                    (f"Lvol ID {lvol_id} (for '{lvol_name}') not found in "
+                     f"backend lvol list: {lvols}")
+            else:
+                self.logger.warning(
+                    f"[k8s] No lvol_id in registry for '{lvol_name}'; "
+                    f"skipping backend verification"
+                )
+        else:
+            assert lvol_name in list(lvols.keys()), \
+                f"Lvol {lvol_name} not present in list of lvols: {lvols}"
+
+    def _get_lvol_id_dual(self, lvol_name):
+        """Return the lvol UUID for *lvol_name*.
+
+        In K8s mode the CSI driver picks its own lvol name, so a name-based
+        lookup via ``sbcli lvol list`` would fail.  Use the lvol_id cached
+        in ``_volume_registry`` instead.
+        """
+        if self.k8s_test:
+            reg = self._volume_registry.get(lvol_name, {})
+            lvol_id = reg.get("lvol_id")
+            if lvol_id:
+                return lvol_id
+            self.logger.warning(
+                f"[k8s] No lvol_id in registry for '{lvol_name}'; "
+                f"falling back to name lookup"
+            )
+        return self.sbcli_utils.get_lvol_id(lvol_name=lvol_name)
 
     def _connect_and_mount_dual(self, lvol_name, mount_path=None,
                                 format_disk=True, fs_type="ext4"):
@@ -909,6 +935,15 @@ class TestClusterBase:
                 self.logger.warning(f"[k8s-teardown] PVC error {pvc_name}: {e}")
         self._k8s_pvcs.clear()
         self._volume_registry.clear()
+        # Clean up test-created StorageClass to avoid stale SC parameters
+        # (pool_name, cluster_id) interfering with subsequent test runs.
+        try:
+            k8s._exec_kubectl(
+                f"kubectl delete storageclass {self._k8s_storage_class_name} "
+                f"--ignore-not-found"
+            )
+        except Exception as e:
+            self.logger.warning(f"[k8s-teardown] SC cleanup error: {e}")
 
     def cleanup_logs(self):
         """Cleans logs
@@ -3334,7 +3369,7 @@ class TestClusterBase:
         node_details = self.sbcli_utils.get_storage_node_details(storage_node_id=node_uuid)
         self.logger.info(f"Storage Node Details: {node_details}")
         self.sbcli_utils.get_device_details(storage_node_id=node_uuid)
-        lvol_id = self.sbcli_utils.get_lvol_id(lvol_name=self.lvol_name)
+        lvol_id = self._get_lvol_id_dual(self.lvol_name)
         self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
 
 
