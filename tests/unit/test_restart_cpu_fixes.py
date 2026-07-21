@@ -79,6 +79,68 @@ class TestBoundedThread:
 
 
 # ---------------------------------------------------------------------------
+# Fix B regression — nested coordinator/leaf bounded threads must not deadlock
+# (2026-07-21: _one_peer coordinators held every shared-semaphore slot while
+# joining leaf _connect_device_thread workers waiting on the SAME semaphore ->
+# permanent deadlock, all nodes stuck in_restart)
+# ---------------------------------------------------------------------------
+class TestTwoTierBoundedThreads:
+    def _nested_run(self, monkeypatch, coordinator_sem):
+        """Reproduce the restart shape: N coordinators each spawn M leaf
+        bounded threads and JOIN them, with tiny caps so any tier-sharing
+        deadlocks immediately. Returns True if all work completed in time."""
+        monkeypatch.setattr(storage_node_ops, "_restart_worker_sem",
+                            threading.BoundedSemaphore(2))
+        done = {"leaves": 0}
+        lock = threading.Lock()
+
+        def leaf():
+            time.sleep(0.01)
+            with lock:
+                done["leaves"] += 1
+
+        def coordinator():
+            inner = [storage_node_ops._bounded_thread(leaf) for _ in range(3)]
+            for t in inner:
+                t.start()
+            for t in inner:
+                t.join()
+
+        coords = [
+            storage_node_ops._bounded_thread(coordinator, sem=coordinator_sem)
+            for _ in range(6)
+        ]
+        for t in coords:
+            t.start()
+        deadline = time.time() + 15
+        for t in coords:
+            t.join(timeout=max(0.1, deadline - time.time()))
+        return all(not t.is_alive() for t in coords) and done["leaves"] == 18
+
+    def test_separate_tiers_complete(self, monkeypatch):
+        # Coordinators on their own semaphore -> must always finish.
+        sem = threading.BoundedSemaphore(2)
+        assert self._nested_run(monkeypatch, sem) is True
+
+    def test_one_peer_site_uses_coordinator_tier(self):
+        # Source-level guard: the peer-reconnect fan-out must pass the
+        # coordinator semaphore; regressing to the leaf pool deadlocks.
+        import inspect
+        src = inspect.getsource(
+            storage_node_ops._reconnect_peers_to_restarted_node)
+        assert "sem=_restart_coordinator_sem" in src
+
+    def test_default_tier_is_leaf(self, monkeypatch):
+        seen = []
+        monkeypatch.setattr(storage_node_ops, "_restart_worker_sem",
+                            threading.BoundedSemaphore(1))
+        t = storage_node_ops._bounded_thread(lambda: seen.append(1))
+        t.start()
+        t.join(timeout=5)
+        assert seen == [1]
+
+
+# ---------------------------------------------------------------------------
 # Fix A — async logging handler
 # ---------------------------------------------------------------------------
 class TestAsyncLogging:

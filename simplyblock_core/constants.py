@@ -287,6 +287,14 @@ NODE_RESTART_MAX_PARALLEL_SUSPENDED=32
 # headroom for recreate while preserving enough I/O overlap. Tune via e2e.
 RESTART_WORKER_MAX_CONCURRENCY=24
 
+# Cap for the COORDINATOR tier: bounded workers that themselves spawn and
+# join LEAF workers (peer-reconnect _one_peer -> per-device connect threads).
+# Must be a semaphore distinct from RESTART_WORKER_MAX_CONCURRENCY: sharing
+# one pool let 24 coordinators hold every slot while joining leaves that
+# waited on the same semaphore — permanent deadlock, all nodes stuck
+# in_restart (2026-07-21 FD reboot; py-spy: 24 holders / 469 waiters).
+RESTART_COORDINATOR_MAX_CONCURRENCY=16
+
 NVMF_MAX_SUBSYSTEMS=50000
 KATO=5000
 # transport_ack_timeout exponent: server tears down a client qpair if it

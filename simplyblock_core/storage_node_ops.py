@@ -365,16 +365,35 @@ def _recreate_lvstore_lock(lvs_name):
 #: block on the semaphore (no CPU) until a slot frees.
 _restart_worker_sem = threading.BoundedSemaphore(constants.RESTART_WORKER_MAX_CONCURRENCY)
 
+#: Coordinator tier: workers that themselves SPAWN AND JOIN leaf workers
+#: (e.g. _one_peer -> _connect_to_remote_devs -> _connect_device_thread).
+#: A coordinator must NEVER share the leaf semaphore: with one shared pool,
+#: 24 coordinators held every slot while joining leaves waiting on the same
+#: semaphore -> permanent deadlock, every node stuck in_restart (2026-07-21
+#: FD reboot: py-spy showed exactly 24 _one_peer holders + 469 acquire
+#: waiters in TasksRunnerRestart). Two distinct tiers cannot deadlock:
+#: coordinators wait only on leaves, leaves wait on nothing.
+_restart_coordinator_sem = threading.BoundedSemaphore(
+    constants.RESTART_COORDINATOR_MAX_CONCURRENCY)
 
-def _bounded_thread(target, args=(), name=None):
-    """threading.Thread whose worker first acquires a global concurrency slot
-    (``_restart_worker_sem``), bounding how many connect/reconnect workers run
-    at once across all parallel node restarts. Drop-in for the previous bare
+
+def _bounded_thread(target, args=(), name=None, sem=None):
+    """threading.Thread whose worker first acquires a global concurrency slot,
+    bounding how many connect/reconnect workers run at once across all
+    parallel node restarts. Drop-in for the previous bare
     ``threading.Thread(target=..., args=..., name=...)`` fan-out: the caller's
     ``start()``/``join()`` and the target's own error handling are unchanged;
-    only the concurrent-run count is capped (GIL relief for recreate)."""
+    only the concurrent-run count is capped (GIL relief for recreate).
+
+    ``sem`` selects the tier and defaults to the LEAF semaphore
+    (``_restart_worker_sem``). Any target that itself spawns and joins
+    bounded threads MUST pass ``sem=_restart_coordinator_sem`` — sharing the
+    leaf pool between a joining parent and its children deadlocks the whole
+    restart runner (2026-07-21)."""
+    sem = _restart_worker_sem if sem is None else sem
+
     def _run(*a):
-        with _restart_worker_sem:
+        with sem:
             target(*a)
     return threading.Thread(target=_run, args=args, name=name)
 
@@ -2013,8 +2032,12 @@ def _reconnect_peers_to_restarted_node(snode: StorageNode):
     for node in snodes:
         if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
             continue
+        # COORDINATOR tier: _one_peer -> _connect_to_remote_devs spawns and
+        # joins leaf _connect_device_thread workers. On the leaf semaphore
+        # this deadlocked (holders joining waiters of their own pool).
         t = _bounded_thread(_one_peer, (node.get_id(),),
-                            name=f"peer-reconnect-{node.get_id()[:8]}")
+                            name=f"peer-reconnect-{node.get_id()[:8]}",
+                            sem=_restart_coordinator_sem)
         t.start()
         threads.append(t)
     for t in threads:
