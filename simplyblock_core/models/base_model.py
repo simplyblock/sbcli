@@ -303,6 +303,27 @@ class BaseModel(object):
             kv_store = DBController().kv_store
         try:
             prefix = self.get_db_id()
+            if self.name == "StorageNode":
+                # Tripwire (2026-07-21 d3fc2c16 incident): a full-object write
+                # of a STALE StorageNode copy silently resurrected
+                # status=in_restart within 2.5s of the restart's committed
+                # ONLINE flip — no event, no log — and the runner's
+                # _reset_if_transient then killed SPDK on a healthy node.
+                # Every full node write now names its caller so the next
+                # occurrence identifies the writer instantly. Full-object
+                # node writes are rare (hot paths use atomic_update); prefer
+                # atomic_update for ANY new node-record mutation.
+                import os.path
+                import traceback
+                from simplyblock_core import utils
+                frames = [
+                    f"{os.path.basename(fs.filename)}:{fs.lineno}:{fs.name}"
+                    for fs in traceback.extract_stack(limit=6)[:-1]
+                ]
+                utils.get_logger(__name__).info(
+                    "[NODE-WRITE] full-object write of %s status=%s by %s",
+                    self.get_id(), getattr(self, "status", "?"),
+                    " <- ".join(reversed(frames)))
             st = json.dumps(self.to_dict(unwrap_secrets=True))
             kv_store.set(prefix.encode(), st.encode())
             return True

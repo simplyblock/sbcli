@@ -467,6 +467,27 @@ def task_runner_node(task):
 
         time.sleep(3)
         node = db.get_storage_node_by_id(task.node_id)
+        if ret and node.status == StorageNode.STATUS_RESTARTING:
+            # Self-heal for the silent stale-write race (2026-07-21,
+            # d3fc2c16): the restart impl SUCCEEDED and committed the
+            # in_restart->online CAS, but within ~2.5s a stale full-object
+            # node write resurrected status=in_restart — no event, no log
+            # (the [NODE-WRITE] tripwire in BaseModel.write_to_db names the
+            # writer on the next occurrence). Without this branch the
+            # re-read below declares the successful restart failed and the
+            # finally-guard kills SPDK on a healthy, serving node — a
+            # 2-minute self-inflicted outage per hit. Re-assert ONLINE
+            # (atomic CAS; the FSM allows RESTARTING->ONLINE) and continue.
+            # A genuinely new concurrent restart would have logged its own
+            # guard acquisition + event; none existed in the incident.
+            logger.warning(
+                "Node %s reads in_restart although its restart just "
+                "succeeded — stale-write resurrection suspected; "
+                "re-asserting ONLINE (see [NODE-WRITE] tripwire)",
+                task.node_id)
+            storage_node_ops.set_node_status(
+                task.node_id, StorageNode.STATUS_ONLINE, caused_by="restart")
+            node = db.get_storage_node_by_id(task.node_id)
         # Mirrors the task-entry short-circuit: success of THIS task is
         # "node is ONLINE". health_check / residual device UNAVAILABLE flags
         # are the responsibility of other recovery paths (FN_DEV_RESTART,
