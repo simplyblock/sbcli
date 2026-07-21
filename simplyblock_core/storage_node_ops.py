@@ -2325,11 +2325,9 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         ssd_pcie = node_config.get("ssd_pcis")
 
         if ssd_pcie:
-            while True:
-                action, existing = _classify_existing_endpoint_record(
-                    db_controller, cluster_id, node_addr, ssd_pcie)
-                if action != "cleanup":
-                    break
+            action, existing = _classify_existing_endpoint_record(
+                db_controller, cluster_id, node_addr, ssd_pcie)
+            if action == "cleanup":
                 # Repeated partial attempts can leave several stale records
                 # for the same endpoint, hence the loop.
                 logger.warning(
@@ -2342,7 +2340,8 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                     logger.warning("Failed to kill SPDK process for stale in_creation node", exc_info=True)
                 storage_events.snode_delete(existing)
                 existing.remove(db_controller.kv_store)
-            if action == "already_added":
+                return False
+            elif action == "already_added":
                 logger.info(
                     f"Node {existing.get_id()} with endpoint {node_addr} is already "
                     f"added and online (owns the same SSDs); add-node is an "
