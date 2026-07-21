@@ -120,6 +120,11 @@ on:
         required: false
         default: false
         type: boolean
+      run_ha_test:
+        description: 'Run HA test variants (TestHASingleNodeFailure, etc.)'
+        required: false
+        default: true
+        type: boolean
 
 jobs:
   e2e-test:
@@ -1292,7 +1297,7 @@ jobs:
 
           python3 -u e2e.py $TESTNAME_ARG \
             --ndcs $NDCS --npcs $NPCS --bs $BS --chunk_bs $CHUNK_BS \
-            --run_k8s True $PRESERVE_ARG 2>&1 | tee output.log
+            --run_k8s True --run_ha ${{ github.event.inputs.run_ha_test || 'true' }} $PRESERVE_ARG 2>&1 | tee output.log
         env:
           NDCS: ${{ env.NDCS }}
           NPCS: ${{ env.NPCS }}

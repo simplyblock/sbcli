@@ -212,6 +212,7 @@ class TestSingleNodeFailure(TestClusterBase):
         _, cl2_mount = self._create_clone_dual(
             snapshot_id=snapshot_id_2,
             clone_name=f"{self.lvol_name}_cl_2",
+            size="25Gi",
             mount_path=f"{clone_mount_file}_2" if not self.k8s_test else None,
             format_disk=False,
         )
