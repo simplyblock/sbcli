@@ -21,7 +21,7 @@ from simplyblock_core import utils, scripts, constants, mgmt_node_ops, storage_n
 from simplyblock_core import port_block
 from simplyblock_core.controllers import backup_controller, cluster_events, device_controller, qos_controller, tasks_controller, tcp_ports_events
 from simplyblock_core.db_controller import DBController
-from simplyblock_core.models.cluster import Cluster, HashicorpVaultSettings, ClusterConfig
+from simplyblock_core.models.cluster import Cluster, HashicorpVaultSettings, DeployConfig
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.mgmt_node import MgmtNode
@@ -264,53 +264,47 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     scripts.install_deps(mode)
     logger.info("Installing dependencies > Done")
 
-    db_connection: t.Optional[SecretStr] = SecretStr("")
-    if mode == "docker":
-        if not ifname:
-            ifname = "eth0"
+    if not ifname:
+        ifname = "eth0"
 
-        dev_ip = utils.get_iface_ip(ifname)
-        if not dev_ip:
-            raise ValueError(f"Error getting interface ip: {ifname}")
+    dev_ip = utils.get_iface_ip(ifname)
+    if not dev_ip:
+        raise ValueError(f"Error getting interface ip: {ifname}")
 
-        db_connection = SecretStr(f"{utils.generate_string(8)}:{utils.generate_string(32)}@{dev_ip}:4500")
-        scripts.set_db_config(db_connection.get_secret_value())
-        logger.info(f"Node IP: {dev_ip}")
-        scripts.configure_docker(dev_ip)
-        logger.info("Configuring docker swarm...")
-        c = docker.DockerClient(base_url=f"tcp://{dev_ip}:2375", version="auto")
-        if c.swarm.attrs and "ID" in c.swarm.attrs:
-            logger.warning("Warning! Docker swarm found")
-            ret = utils.query_yes_no("Destroy current cluster and create new one?", default="no")
-            if not ret:
-                raise ValueError("Aborting")
-            c.swarm.leave(force=True)
-            try:
-                c.volumes.get("monitoring_grafana_data").remove(force=True)
-            except DockerException:
-                pass
-            time.sleep(3)
+    db_connection = SecretStr(f"{utils.generate_string(8)}:{utils.generate_string(32)}@{dev_ip}:4500")
+    scripts.set_db_config(db_connection.get_secret_value())
+    logger.info(f"Node IP: {dev_ip}")
+    scripts.configure_docker(dev_ip)
+    logger.info("Configuring docker swarm...")
+    c = docker.DockerClient(base_url=f"tcp://{dev_ip}:2375", version="auto")
+    if c.swarm.attrs and "ID" in c.swarm.attrs:
+        logger.warning("Warning! Docker swarm found")
+        ret = utils.query_yes_no("Destroy current cluster and create new one?", default="no")
+        if not ret:
+            raise ValueError("Aborting")
+        c.swarm.leave(force=True)
+        try:
+            c.volumes.get("monitoring_grafana_data").remove(force=True)
+        except DockerException:
+            pass
+        time.sleep(3)
 
-        c.swarm.init(dev_ip)
-        logger.info("Configuring docker swarm > Done")
+    c.swarm.init(dev_ip)
+    logger.info("Configuring docker swarm > Done")
 
-        hostname = socket.gethostname()
-        current_node = next((node for node in c.nodes.list() if node.attrs["Description"]["Hostname"] == hostname), None)
-        if current_node:
-            current_spec = current_node.attrs["Spec"]
-            current_labels = current_spec.get("Labels", {})
-            current_labels["app"] = "graylog"
-            current_spec["Labels"] = current_labels
+    hostname = socket.gethostname()
+    current_node = next((node for node in c.nodes.list() if node.attrs["Description"]["Hostname"] == hostname), None)
+    if current_node:
+        current_spec = current_node.attrs["Spec"]
+        current_labels = current_spec.get("Labels", {})
+        current_labels["app"] = "graylog"
+        current_spec["Labels"] = current_labels
 
-            current_node.update(current_spec)
+        current_node.update(current_spec)
 
-            logger.info(f"Labeled node '{hostname}' with app=graylog")
-        else:
-            logger.warning("Could not find current node for labeling")
-    elif mode == "kubernetes":
-        dev_ip = mgmt_ip
-        if not dev_ip:
-            raise ValueError("Error getting ip: For Kubernetes-based deployments, please supply --mgmt-ip.")
+        logger.info(f"Labeled node '{hostname}' with app=graylog")
+    else:
+        logger.warning("Could not find current node for labeling")
 
 
     if not cli_pass:
@@ -390,35 +384,22 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     if backup_config:
         cluster.backup_config = backup_config
 
-    if mode == "docker":
-        if not disable_monitoring:
-            utils.render_and_deploy_alerting_configs(contact_point, cluster.grafana_endpoint, cluster.uuid, cluster.secret.get_secret_value())
+    if not disable_monitoring:
+        utils.render_and_deploy_alerting_configs(contact_point, cluster.grafana_endpoint, cluster.uuid, cluster.secret.get_secret_value())
 
-        logger.info("Deploying swarm stack ...")
-        log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"
-        scripts.deploy_stack(cli_pass.get_secret_value(), dev_ip, constants.SIMPLY_BLOCK_DOCKER_IMAGE, cluster.secret.get_secret_value(), cluster.uuid,
-                                log_del_interval, metrics_retention_period, log_level, cluster.grafana_endpoint, str(disable_monitoring))
-        logger.info("Deploying swarm stack > Done")
+    logger.info("Deploying swarm stack ...")
+    log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"
+    scripts.deploy_stack(cli_pass.get_secret_value(), dev_ip, constants.SIMPLY_BLOCK_DOCKER_IMAGE, cluster.secret.get_secret_value(), cluster.uuid,
+                            log_del_interval, metrics_retention_period, log_level, cluster.grafana_endpoint, str(disable_monitoring))
+    logger.info("Deploying swarm stack > Done")
 
-        logger.info("Configuring DB...")
-        scripts.set_db_config_single()
-        logger.info("Configuring DB > Done")
-        monitoring_secret = cluster.secret
+    logger.info("Configuring DB...")
+    scripts.set_db_config_single()
+    logger.info("Configuring DB > Done")
+    monitoring_secret = cluster.secret
 
-    elif mode == "kubernetes":
-        logger.info("Retrieving foundationdb connection string...")
-        fdb_cluster_string = utils.get_fdb_cluster_string(constants.FDB_CONFIG_NAME, constants.K8S_NAMESPACE)
-        db_connection = fdb_cluster_string
 
-        logger.info("Patching prometheus configmap...")
-        utils.patch_prometheus_configmap(cluster.uuid, cluster.secret.get_secret_value())
-
-        if ingress_host_source == "hostip":
-            dns_name = dev_ip
-    else:
-        assert False, "Unreachable"
-
-    cfg = ClusterConfig()
+    cfg = DeployConfig()
     cfg.mode = mode
     cfg.grafana_endpoint = grafana_endpoint or default_grafana
     cfg.grafana_secret = monitoring_secret if mode == "kubernetes" else cluster.secret
@@ -526,7 +507,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     cluster.strict_node_anti_affinity = strict_node_anti_affinity
     cluster.enable_failure_domain = enable_failure_domain
 
-    cfg = db_controller.get_cluster_config()
+    cfg = db_controller.get_deploy_config()
     if not cfg:
         logger.error("Cluster config not found. Please create a cluster first.")
         raise ValueError("Cluster config not found. Please create a cluster first.")
@@ -577,128 +558,6 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     cluster.create_dt = str(datetime.datetime.now())
     cluster.write_to_db(db_controller.kv_store)
     cluster_events.cluster_create(cluster)
-
-    return cluster.get_id()
-
-
-def create_k8s_first_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
-                distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity, qpair_count,
-                max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name, cr_name=None,
-                cr_namespace=None, cr_plural=None, fabric="tcp", cluster_ip=None, grafana_secret: t.Optional[SecretStr] = None,
-                client_data_nic="", max_fault_tolerance=1, backup_config=None,
-                nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001,
-                hashicorp_vault_settings : t.Optional[HashicorpVaultSettings] = None,
-                enable_failure_domain=False,
-) -> str:
-
-
-    enable_monitoring = bool(os.environ.get("ENABLE_MONITORING", True))
-
-    if distr_ndcs == 0 and distr_npcs == 0:
-        raise ValueError("both distr_ndcs and distr_npcs cannot be 0")
-
-    if max_fault_tolerance > 1:
-        if ha_type != "ha":
-            raise ValueError("max_fault_tolerance > 1 requires ha_type='ha'")
-        if distr_npcs < 2:
-            raise ValueError("max_fault_tolerance > 1 requires distr_npcs >= 2")
-
-    if (hashicorp_vault_settings is not None) and (Settings().tls_connect != "authenticated"):
-        raise ValueError("External KMS requires mTLS authentication to be used")
-
-    monitoring_secret = SecretStr(os.environ.get("MONITORING_SECRET", ""))
-
-    logger.info("Adding new cluster")
-    cluster = Cluster()
-    cluster.uuid = str(uuid.uuid4())
-    cluster.cluster_name = name
-    # New clusters use per-chunk (shared) placement from the start: every
-    # distrib and JM created at add-node / activation / restart picks up the
-    # flag via cluster.shared_placement (see create_lvstore and
-    # bdev_jm_create). No legacy-then-migrate phase. The deferred migration
-    # path (shared_placement_migration_pending) is only for clusters UPGRADED
-    # from a legacy release, whose pre-existing bdevs need the one-shot
-    # runtime flip via set_shared_placement.
-    cluster.shared_placement = True
-    cluster.blk_size = blk_size
-    cluster.page_size_in_blocks = page_size_in_blocks
-    cluster.nqn = f"{constants.CLUSTER_NQN}:{cluster.uuid}"
-    cluster.secret = SecretStr(utils.generate_string(20))
-    cluster.strict_node_anti_affinity = strict_node_anti_affinity
-    cluster.enable_failure_domain = enable_failure_domain
-
-    cluster.mode = "kubernetes"
-    logger.info("Retrieving foundationdb connection string...")
-    fdb_cluster_string = utils.get_fdb_cluster_string(constants.FDB_CONFIG_NAME, constants.K8S_NAMESPACE)
-    cluster.db_connection = fdb_cluster_string
-    if monitoring_secret:
-        cluster.grafana_secret = monitoring_secret
-    elif not enable_monitoring:
-        cluster.grafana_secret = SecretStr("")
-    else:
-        raise Exception("monitoring_secret is required")
-    cluster.grafana_endpoint = constants.GRAFANA_K8S_ENDPOINT
-    if not cluster_ip:
-        cluster_ip = "0.0.0.0"
-
-    # add mgmt node object
-    mgmt_node_ops.add_mgmt_node(cluster_ip, "kubernetes", cluster.uuid)
-    if enable_monitoring:
-        graylog_endpoint = constants.GRAYLOG_K8S_ENDPOINT
-        os_endpoint = constants.OS_K8S_ENDPOINT
-        _set_max_result_window(os_endpoint)
-        _add_graylog_input(graylog_endpoint, monitoring_secret)
-
-    _create_update_user(cluster.uuid, cluster.grafana_endpoint, cluster.grafana_secret, cluster.secret)
-    utils.patch_prometheus_configmap(cluster.uuid, cluster.secret.get_secret_value())
-
-    cluster.distr_ndcs = distr_ndcs
-    cluster.distr_npcs = distr_npcs
-    cluster.distr_bs = distr_bs
-    cluster.distr_chunk_bs = distr_chunk_bs
-    cluster.ha_type = ha_type
-    cluster.is_single_node = is_single_node
-    cluster.enable_node_affinity = enable_node_affinity
-    cluster.qpair_count = qpair_count or constants.QPAIR_COUNT
-    cluster.max_queue_size = max_queue_size
-    cluster.inflight_io_threshold = inflight_io_threshold
-    cluster.cr_name = cr_name
-    cluster.cr_namespace = cr_namespace
-    cluster.cr_plural = cr_plural
-    if cap_warn and cap_warn > 0:
-        cluster.cap_warn = cap_warn
-    if cap_crit and cap_crit > 0:
-        cluster.cap_crit = cap_crit
-    if prov_cap_warn and prov_cap_warn > 0:
-        cluster.prov_cap_warn = prov_cap_warn
-    if prov_cap_crit and prov_cap_crit > 0:
-        cluster.prov_cap_crit = prov_cap_crit
-    protocols = parse_protocols(fabric)
-    cluster.fabric_tcp = protocols["tcp"]
-    cluster.fabric_rdma = protocols["rdma"]
-    cluster.full_page_unmap = False
-    cluster.client_data_nic = client_data_nic or ""
-    cluster.max_fault_tolerance = max_fault_tolerance
-    cluster.nvmf_base_port = nvmf_base_port
-    cluster.rpc_base_port = rpc_base_port
-    cluster.snode_api_port = snode_api_port
-    cluster.hashicorp_vault_settings = hashicorp_vault_settings
-    if backup_config:
-        cluster.backup_config = backup_config
-
-    cluster.backup_local_path = os.path.join(constants.KVD_DB_BACKUP_PATH, cluster.uuid)
-    cluster.status = Cluster.STATUS_UNREADY
-    cluster.create_dt = str(datetime.datetime.now())
-    cluster.write_to_db(db_controller.kv_store)
-    cluster_events.cluster_create(cluster)
-
-
-    cfg = ClusterConfig()
-    cfg.mode = cluster.mode
-    cfg.grafana_endpoint = cluster.grafana_endpoint
-    cfg.grafana_secret = cluster.grafana_secret
-    cfg.db_connection = cluster.db_connection
-    cfg.write_to_db()
 
     return cluster.get_id()
 

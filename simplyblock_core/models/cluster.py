@@ -241,7 +241,7 @@ class PortReservation(BaseModel):
         return "%s/%s" % (self.cluster_id, self.port)
 
 
-class ClusterConfig(BaseModel):
+class DeployConfig(BaseModel):
     """Cluster-wide configuration settings."""
     grafana_endpoint: str = ""
     db_connection: SecretStr = SecretStr("")

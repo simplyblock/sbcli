@@ -8,7 +8,7 @@ import fdb
 from typing import Any, List, Optional
 
 from simplyblock_core import constants
-from simplyblock_core.models.cluster import Cluster, ClusterAddNodeLock, PortReservation, ClusterConfig
+from simplyblock_core.models.cluster import Cluster, ClusterAddNodeLock, PortReservation, DeployConfig
 from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol, LVolReplication, LVolMini
@@ -286,10 +286,10 @@ class DBController(metaclass=Singleton):
     def get_clusters(self) -> List[Cluster]:
         return Cluster().read_from_db(self.kv_store)
 
-    def get_cluster_config(self) -> ClusterConfig:
-        ret = ClusterConfig().read_from_db(self.kv_store)
+    def get_deploy_config(self) -> DeployConfig:
+        ret = DeployConfig().read_from_db(self.kv_store)
         if not ret:
-            raise KeyError("No cluster config found")
+            raise KeyError("No deploy config found")
         return ret[0]
 
     def get_cluster_by_id(self, cluster_id: str) -> Cluster:
