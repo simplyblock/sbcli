@@ -1007,6 +1007,7 @@ class TestClusterBase:
             for node in self.storage_nodes:
                 self.ssh_obj.delete_file_dir(node, entity="/etc/simplyblock/[0-9]*", recursive=True)
                 self.ssh_obj.delete_file_dir(node, entity="/etc/simplyblock/*core*.zst", recursive=True)
+                self.ssh_obj.delete_file_dir(node, entity="/var/lib/systemd/coredump/*core*.zst", recursive=True)
                 self.ssh_obj.delete_file_dir(node, entity="/etc/simplyblock/LVS*", recursive=True)
                 self.ssh_obj.delete_file_dir(node, entity=f"{base_path}/distrib*", recursive=True)
                 self.ssh_obj.delete_file_dir(node, entity=f"{base_path}/*.txt*", recursive=True)
