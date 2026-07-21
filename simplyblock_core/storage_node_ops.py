@@ -2051,9 +2051,10 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=None, only_node_id=None):
     return new_devs
 
 
-def _reconnect_peers_to_restarted_node(snode: StorageNode):
+def _reconnect_peers_to_restarted_node(snode: StorageNode, only_peer_ids=None):
     """Best-effort DELTA reconnect of every ONLINE peer to ``snode``'s
-    devices and JM after its restart.
+    devices and JM after its restart. Returns the set of peer ids whose
+    reconnect FAILED (empty set = full success).
 
     Replaces the previous per-peer full-inventory reconcile
     (_connect_to_remote_devs without only_node_id), which issued
@@ -2061,6 +2062,17 @@ def _reconnect_peers_to_restarted_node(snode: StorageNode):
     get_bdevs calls and ~40% of a 220 s restart on a 32-node cluster
     (2026-07-10). The restarted node is the only peer whose connections
     changed, so each peer reconnects to its 2-3 devices + JM only.
+
+    ``only_peer_ids``: restrict the sweep to these peers. The restart flow
+    runs this sweep twice (before recreates — connectivity is a recreate
+    precondition — and in finalization); the second pass used to redo ALL
+    peers, doubling the largest fan-out of the restart (2026-07-17 profile:
+    the duplicate sweep was ~55% of a 3m51s restart; 2026-07-21: 2 sweeps x
+    16 restarts x 16 peers = 512 coordinator jobs through the coordinator
+    pool). Peer-to-device connections do not change during LVS recreation
+    (recreates build distribs/raids/lvols on ``snode``, not new alceml
+    devices), so the finalization pass now re-runs only the peers that
+    FAILED the first pass.
 
     Peers are mutually independent (each worker mutates only its own
     peer's record), so they run concurrently. Reconnect stays best-effort
@@ -2070,6 +2082,9 @@ def _reconnect_peers_to_restarted_node(snode: StorageNode):
     """
     db_controller = DBController()
     snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
+    attempted_ids = set()
+    failed_ids = set()
+    failed_guard = threading.Lock()
 
     def _one_peer(peer_id):
         for attempt in range(1, 4):
@@ -2104,11 +2119,16 @@ def _reconnect_peers_to_restarted_node(snode: StorageNode):
         logger.error(
             f"Skipping peer {peer_id} after 3 failed reconnect attempts; "
             f"continuing restart (peer reconnect is best-effort)")
+        with failed_guard:
+            failed_ids.add(peer_id)
 
     threads = []
     for node in snodes:
         if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
             continue
+        if only_peer_ids is not None and node.get_id() not in only_peer_ids:
+            continue
+        attempted_ids.add(node.get_id())
         # COORDINATOR tier: _one_peer -> _connect_to_remote_devs spawns and
         # joins leaf _connect_device_thread workers. On the leaf semaphore
         # this deadlocked (holders joining waiters of their own pool).
@@ -2119,6 +2139,7 @@ def _reconnect_peers_to_restarted_node(snode: StorageNode):
         threads.append(t)
     for t in threads:
         t.join()
+    return attempted_ids, failed_ids
 
 
 def _refresh_cluster_maps_after_node_recovery(snode: StorageNode):
@@ -4027,7 +4048,8 @@ def _restart_storage_node_impl(
         # Remote device connectivity is node-level and must be established before
         # any LVS recreation consumes remote alceml bdevs in distrib maps/stacks.
         logger.info("Make other nodes connect to the node devices")
-        _reconnect_peers_to_restarted_node(snode)
+        peer_swept_ids, peer_reconnect_failed = \
+            _reconnect_peers_to_restarted_node(snode)
 
         # === LVS Recreation: clear sequential structure per design ===
         # No recursion. Process primary, secondary, tertiary LVS in order.
@@ -4097,9 +4119,28 @@ def _restart_storage_node_impl(
                 logger.exception(str(e))
                 return False
 
-        # make other nodes connect to the new devices
-        logger.info("Make other nodes connect to the node devices")
-        _reconnect_peers_to_restarted_node(snode)
+        # Finalization peer sweep, DEDUPED (2026-07-17 profile: the wholesale
+        # second sweep was ~55% of restart time; 2026-07-21: 512 coordinator
+        # jobs across a 16-node recovery). Peer-to-device connections do not
+        # change during LVS recreation, so re-sweep only:
+        #   (a) peers that FAILED the pre-recreate sweep, and
+        #   (b) peers that came ONLINE since it ran — their own restart's
+        #       connect-back skipped this node (it was RESTARTING then), so
+        #       the wholesale second sweep was their only prompt link-up;
+        #       keep exactly that coverage without redoing succeeded peers.
+        _retry_ids = set(peer_reconnect_failed)
+        for _p in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
+            if (_p.get_id() != snode.get_id()
+                    and _p.status == StorageNode.STATUS_ONLINE
+                    and _p.get_id() not in peer_swept_ids):
+                _retry_ids.add(_p.get_id())
+        if _retry_ids:
+            logger.info(
+                "Finalization peer re-sweep for %d peer(s) "
+                "(failed pass-1 or newly online): %s",
+                len(_retry_ids), sorted(p[:8] for p in _retry_ids))
+            _reconnect_peers_to_restarted_node(
+                snode, only_peer_ids=_retry_ids)
 
         if snode.jm_device and snode.jm_device.status in [JMDevice.STATUS_UNAVAILABLE, JMDevice.STATUS_ONLINE]:
             device_controller.set_jm_device_state(snode.jm_device.get_id(), JMDevice.STATUS_ONLINE)
@@ -6437,6 +6478,27 @@ def _recreate_lvstore_on_non_leader_impl(snode, leader_node, primary_node, activ
     # one LVS's client port is blocked at any moment across the runner.
     _gate_state = {"held": False}
 
+    # True client-outage accounting for the leader port (may block/unblock
+    # several times across the attach-retry loop). The phase print at the
+    # end brackets the whole phase and overstates the real outage ~2x
+    # (2026-07-21); the 6s nvmf ack-timeout reject applies to each interval
+    # measured here.
+    _leader_block = {"t0": None, "max": 0.0}
+
+    def _mark_leader_blocked():
+        _leader_block["t0"] = time.monotonic()
+
+    def _mark_leader_unblocked():
+        if _leader_block["t0"] is None:
+            return
+        _d = time.monotonic() - _leader_block["t0"]
+        _leader_block["t0"] = None
+        _leader_block["max"] = max(_leader_block["max"], _d)
+        logger.info(
+            "[RESTART] Leader client port %s (%s) was blocked %.3fs "
+            "(reject threshold 6s)",
+            leader_lvs_port, primary_node.lvstore, _d)
+
     def _acquire_block_gate():
         _tw = time.monotonic()
         _port_block_window_gate.acquire()
@@ -6468,6 +6530,7 @@ def _recreate_lvstore_on_non_leader_impl(snode, leader_node, primary_node, activ
             try:
                 port_block.set_port(leader_node, leader_lvs_port, block=False, timeout=5, retry=2)
                 tcp_ports_events.port_allowed(leader_node, leader_lvs_port)
+                _mark_leader_unblocked()
             except Exception as ue:
                 logger.error("Failed to unblock leader port during abort: %s", ue)
         _release_block_gate()
@@ -6511,6 +6574,7 @@ def _recreate_lvstore_on_non_leader_impl(snode, leader_node, primary_node, activ
                 port_block.set_port(leader_node, leader_lvs_port, block=True, timeout=3, retry=1)
                 tcp_ports_events.port_deny(leader_node, leader_lvs_port)
                 leader_port_blocked = True
+                _mark_leader_blocked()
                 last_err = None
                 break
             except Exception as e:
@@ -6808,6 +6872,7 @@ def _recreate_lvstore_on_non_leader_impl(snode, leader_node, primary_node, activ
                         tcp_ports_events.port_allowed(
                             leader_node, leader_lvs_port)
                         leader_port_blocked = False
+                        _mark_leader_unblocked()
                     except Exception as ue:
                         logger.warning(
                             "Unblock leader %s during attach-retry gap "
@@ -6817,6 +6882,7 @@ def _recreate_lvstore_on_non_leader_impl(snode, leader_node, primary_node, activ
                     port_block.set_port(leader_node, leader_lvs_port, block=True, timeout=3, retry=1)
                     tcp_ports_events.port_deny(leader_node, leader_lvs_port)
                     leader_port_blocked = True
+                    _mark_leader_blocked()
                 except Exception as be:
                     _abort_and_unblock(
                         f"Re-block leader {leader_node.get_id()} port "
@@ -6841,6 +6907,7 @@ def _recreate_lvstore_on_non_leader_impl(snode, leader_node, primary_node, activ
                     port_block.set_port(leader_node, leader_lvs_port, block=False, timeout=3, retry=1)
                     tcp_ports_events.port_allowed(leader_node, leader_lvs_port)
                     unblocked = True
+                    _mark_leader_unblocked()
                     break
                 except Exception as e:
                     logger.warning(
@@ -6864,7 +6931,13 @@ def _recreate_lvstore_on_non_leader_impl(snode, leader_node, primary_node, activ
     _release_block_gate()
     _release_hub_lock()
     _set_restart_phase(snode, primary_node.lvstore, StorageNode.RESTART_PHASE_POST_UNBLOCK, db_controller)
-    logger.info("[RESTART] Port-block phase for %s on %s took %.3fs",
+    if _leader_block["max"]:
+        logger.info("[RESTART] Longest client-port block for %s: %.3fs "
+                    "(reject threshold 6s)",
+                    primary_node.lvstore, _leader_block["max"])
+    logger.info("[RESTART] Port-block phase for %s on %s took %.3fs "
+                "(phase span incl. post-unblock work; see per-port lines "
+                "for true outage)",
                 primary_node.lvstore, snode.get_id()[:8], time.monotonic() - _port_block_t0)
 
     ### 8b- deferred failover-path attach (tertiary only, leader was alive)
@@ -7344,6 +7417,14 @@ def _recreate_lvstore_impl(snode, force=False, lvs_primary=None, activation_mode
     # Every blocked peer MUST be unblocked — either per-peer after its
     # connect_to_hublvol succeeds, or en bloc on abort.
     blocked_peers: list = []
+    # True client-outage accounting: per-peer monotonic stamp at successful
+    # block, duration logged at unblock. The phase print below brackets the
+    # whole BLOCKED->POST_UNBLOCK phase (incl. work after the last unblock)
+    # and overstates the real outage ~2x (2026-07-21: printed 11-21s vs
+    # 6.2-8.9s true block->unblock from spdk logs). The 6s nvmf ack-timeout
+    # reject applies to THIS number, per port.
+    _block_started: dict = {}
+    _block_longest = {"sec": 0.0}
 
     def _unblock_peer_port(peer):
         """Remove the port block for snode_lvs_port on peer and drop
@@ -7353,6 +7434,14 @@ def _recreate_lvstore_impl(snode, force=False, lvs_primary=None, activation_mode
         try:
             port_block.set_port(peer, snode_lvs_port, block=False, timeout=5, retry=2)
             tcp_ports_events.port_allowed(peer, snode_lvs_port)
+            _t0 = _block_started.pop(peer.get_id(), None)
+            if _t0 is not None:
+                _d = time.monotonic() - _t0
+                _block_longest["sec"] = max(_block_longest["sec"], _d)
+                logger.info(
+                    "[RESTART] Client port %s on %s was blocked %.3fs "
+                    "(reject threshold 6s)",
+                    snode_lvs_port, peer.get_id()[:8], _d)
         except Exception as ue:
             logger.error("Failed to unblock port %s on %s: %s",
                          snode_lvs_port, peer.get_id(), ue)
@@ -7487,6 +7576,7 @@ def _recreate_lvstore_impl(snode, force=False, lvs_primary=None, activation_mode
                     port_block.set_port(current_leader, snode_lvs_port, block=True, timeout=5, retry=2)
                     tcp_ports_events.port_deny(current_leader, snode_lvs_port)
                     blocked_peers.append(current_leader)
+                    _block_started[current_leader.get_id()] = time.monotonic()
                 except Exception as e:
                     # Failing to port-block the current leader means we cannot
                     # safely promote snode: the old leader may still be serving
@@ -7536,6 +7626,7 @@ def _recreate_lvstore_impl(snode, force=False, lvs_primary=None, activation_mode
                 port_block.set_port(sec_node, snode_lvs_port, block=True, timeout=5, retry=2)
                 tcp_ports_events.port_deny(sec_node, snode_lvs_port)
                 blocked_peers.append(sec_node)
+                _block_started[sec_node.get_id()] = time.monotonic()
             except Exception as e:
                 # Same rationale as the leader port-block: cannot safely
                 # decide "peer gone" vs "peer slow" before snode has
@@ -7898,7 +7989,12 @@ def _recreate_lvstore_impl(snode, force=False, lvs_primary=None, activation_mode
     _release_block_gate()
     _release_hub_locks()
     _set_restart_phase(snode, lvs_name, StorageNode.RESTART_PHASE_POST_UNBLOCK, db_controller)
-    logger.info("[RESTART] Port-block phase for %s on %s took %.3fs",
+    if _block_longest["sec"]:
+        logger.info("[RESTART] Longest client-port block for %s: %.3fs "
+                    "(reject threshold 6s)", lvs_name, _block_longest["sec"])
+    logger.info("[RESTART] Port-block phase for %s on %s took %.3fs "
+                "(phase span incl. post-unblock work; see per-port lines "
+                "for true outage)",
                 lvs_name, snode.get_id()[:8], time.monotonic() - _port_block_t0)
 
     ### 10b- deferred tertiary→secondary hublvol failover paths

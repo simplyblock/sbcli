@@ -368,3 +368,99 @@ class TestDegradedRecreateCoverage:
             monkeypatch, fd_recovery=True,
             present_bdevs={"remote_alc_b1n1", "remote_alc_c1n1"})
         assert missing == [], missing
+
+
+# ---------------------------------------------------------------------------
+# Peer-sweep dedupe — _reconnect_peers_to_restarted_node returns
+# (attempted, failed); the finalization pass re-sweeps only failures and
+# newly-online peers instead of redoing every peer (2026-07-17 profile:
+# duplicate sweep = ~55% of restart; 2026-07-21: 512 coordinator jobs).
+# ---------------------------------------------------------------------------
+class TestPeerSweepDedupe:
+    @staticmethod
+    def _mk_peer(pid, status=StorageNode.STATUS_ONLINE):
+        return types.SimpleNamespace(
+            get_id=lambda _p=pid: _p, status=status, enable_ha_jm=False)
+
+    def _run(self, monkeypatch, peers, fail_ids=(), only_peer_ids=None):
+        calls = []
+
+        class _DBC:
+            def get_storage_nodes_by_cluster_id(self, _cid):
+                return peers
+
+            def get_storage_node_by_id(self, pid):
+                return next(p for p in peers if p.get_id() == pid)
+
+            def atomic_update(self, node, fn):
+                return True
+
+        def fake_connect(node, **kw):
+            calls.append(node.get_id())
+            if node.get_id() in fail_ids:
+                raise RuntimeError("connect failed")
+            return []
+
+        monkeypatch.setattr(storage_node_ops, "DBController", lambda: _DBC())
+        monkeypatch.setattr(storage_node_ops, "_connect_to_remote_devs",
+                            fake_connect)
+        monkeypatch.setattr(storage_node_ops.time, "sleep", lambda *_a: None)
+        snode = types.SimpleNamespace(get_id=lambda: "self", cluster_id="c1")
+        attempted, failed = storage_node_ops._reconnect_peers_to_restarted_node(
+            snode, only_peer_ids=only_peer_ids)
+        return attempted, failed, calls
+
+    def test_returns_attempted_and_failed(self, monkeypatch):
+        peers = [self._mk_peer("a"), self._mk_peer("b"), self._mk_peer("c")]
+        attempted, failed, _ = self._run(monkeypatch, peers, fail_ids={"b"})
+        assert attempted == {"a", "b", "c"}
+        assert failed == {"b"}
+
+    def test_only_peer_ids_restricts_sweep(self, monkeypatch):
+        peers = [self._mk_peer("a"), self._mk_peer("b"), self._mk_peer("c")]
+        attempted, failed, calls = self._run(
+            monkeypatch, peers, only_peer_ids={"b"})
+        assert attempted == {"b"}
+        assert set(calls) == {"b"}
+        assert failed == set()
+
+    def test_offline_and_self_skipped(self, monkeypatch):
+        peers = [self._mk_peer("a"),
+                 self._mk_peer("down", status=StorageNode.STATUS_OFFLINE),
+                 self._mk_peer("self")]
+        attempted, _, _ = self._run(monkeypatch, peers)
+        assert attempted == {"a"}
+
+    def test_finalization_resweep_wiring(self):
+        # Source-level guard: the finalization pass must be conditional
+        # (failed / newly-online only), never a wholesale second sweep.
+        import inspect
+        src = inspect.getsource(storage_node_ops._restart_storage_node_impl)
+        assert "only_peer_ids=_retry_ids" in src
+        assert "peer_swept_ids" in src
+
+
+# ---------------------------------------------------------------------------
+# True block-span accounting — per-port blocked duration is logged from
+# block->unblock stamps (the phase print overstates ~2x).
+# ---------------------------------------------------------------------------
+class TestBlockSpanAccounting:
+    def test_impls_stamp_and_report(self):
+        import inspect
+        src_p = inspect.getsource(storage_node_ops._recreate_lvstore_impl)
+        assert "_block_started[" in src_p
+        assert "was blocked" in src_p
+        assert "Longest client-port block" in src_p
+        src_n = inspect.getsource(
+            storage_node_ops._recreate_lvstore_on_non_leader_impl)
+        assert "_mark_leader_blocked()" in src_n
+        assert "_mark_leader_unblocked()" in src_n
+        assert "Longest client-port block" in src_n
+        # every block=True in the non-leader impl is stamped
+        # (+1: the def line itself contains the token)
+        assert src_n.count("_mark_leader_blocked()") == src_n.count(
+            "block=True, timeout=3") + 1
+
+    def test_coordinator_cap_raised(self):
+        from simplyblock_core import constants
+        assert constants.RESTART_COORDINATOR_MAX_CONCURRENCY == 64
