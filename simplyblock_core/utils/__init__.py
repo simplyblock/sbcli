@@ -2636,9 +2636,9 @@ def patch_cr_node_status(
                 # Node already absent from status — nothing to do.
                 return
             # Node not yet in status.nodes[] — operator syncs this asynchronously.
-            # Silently return so callers during node_add (in_creation phase) don't abort.
+            # Log and return so callers during node_add (in_creation phase) don't abort.
             logger.warning(
-                f"patch_cr_node_status: node not yet in status.nodes "
+                f"patch_cr_node_status: node not yet in status.nodes for {namespace}/{name} "
                 f"(uuid={node_uuid}, mgmtIp={node_mgmt_ip}), skipping"
             )
             return
