@@ -676,7 +676,7 @@ def make_async_handler(target_handler):
     the format + write. Returns a ``QueueHandler`` to attach to a logger.
 
     Rationale: restart recovery runs 100+ concurrent threads; with a plain
-    StreamHandler every one serialized on the handler lock + stdout write on
+    StreamHandler every one serialized on the handler lock + stream write on
     each debug() call, starving the (GIL-bound) recreate thread's between-RPC
     work and ballooning the client-port-block window (2026-07-20). The listener
     is kept alive via the returned handler's ``_listener`` attr and stopped at
@@ -712,18 +712,24 @@ def get_logger(name=""):
         logg.setLevel(constants.LOG_LEVEL)
 
     if not logg.hasHandlers():
+        # Diagnostics -> stderr; machine-readable command output (CLI `print`,
+        # e.g. `sn list --json`) stays on stdout. Keeping logs on stdout let
+        # DEBUG lines interleave with the JSON a caller parses — and the async
+        # handler below (which flushes on a background thread + at exit) makes
+        # that ordering nondeterministic, so a trailing log line's bracket was
+        # picked up as the payload (2026-07-21 soak: `sn list --json` parsed an
+        # int list -> "'int' object is not subscriptable"). stderr is still
+        # captured by docker/journald, so no log line is lost.
+        #
         # Async logging: worker threads only enqueue a record (cheap); a single
-        # background listener thread does the actual format + stdout write.
-        # Restart recovery runs 100+ concurrent threads (32-way restart pool +
-        # per-peer reconnect threads); with a plain StreamHandler every one of
-        # them serialized on the handler's lock and the stdout write on every
-        # debug() call, starving the (GIL-bound) recreate thread's between-RPC
-        # work and ballooning the client-port-block window (2026-07-20 FD-0
-        # reboot: recreate block 2s -> 20s under logging+GIL contention). A
-        # QueueHandler removes that shared-lock / I/O contention from the hot
-        # threads without dropping any log line or changing the level. Falls
-        # back to the direct StreamHandler if async setup fails.
-        logger_handler = logging.StreamHandler(stream=sys.stdout)
+        # background listener thread does the format + write. Restart recovery
+        # runs 100+ concurrent threads; a plain StreamHandler serialized every
+        # one on the handler lock + stream write per debug() call, starving the
+        # GIL-bound recreate thread's between-RPC work and ballooning the
+        # client-port-block window (2026-07-20 FD-0 reboot: block 2s -> 20s).
+        # The QueueHandler removes that contention without dropping lines or
+        # changing the level; falls back to the direct handler on setup error.
+        logger_handler = logging.StreamHandler(stream=sys.stderr)
         logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(thread)d: %(levelname)s: %(message)s'))
         try:
             logg.addHandler(make_async_handler(logger_handler))
