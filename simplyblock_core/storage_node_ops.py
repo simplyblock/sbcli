@@ -363,6 +363,22 @@ def _recreate_lvstore_lock(lvs_name):
 #: single Python GIL and starved the (serialized) recreate's between-RPC work.
 #: A wrapped worker holds one slot for the duration of its run; excess threads
 #: block on the semaphore (no CPU) until a slot frees.
+#: Global mutex over the port-block critical span (first client-port
+#: nvmf_port_block -> last nvmf_port_unblock) of a recreate. Layered ON TOP
+#: of the per-LVS recreate locks: pre-block phases of different LVSes stay
+#: parallel; only the seconds during which a client port is actually
+#: blocked are serialized cluster-wide (this runner is the only block
+#: issuer). Rationale (2026-07-21 FD-reboot, 7 volumes EIO): ~6 recreates
+#: ran their block windows concurrently, each window's RPC chain + FDB txns
+#: queued behind the others' GIL/CPU work, stretching blocks to 6.2-8.9s —
+#: past the 6.0s nvmf ack-timeout that reject-converts a blocked port and
+#: kills the client's last live path. Serializing the windows (a) removes
+#: sibling-window contention from the critical seconds and (b) caps the
+#: blast radius to ONE port at risk at any moment. Lock order: per-LVS
+#: recreate lock -> hublvol advisory locks -> THIS gate (innermost); the
+#: gated span acquires no other module lock, so no cycle is possible.
+_port_block_window_gate = threading.Lock()
+
 _restart_worker_sem = threading.BoundedSemaphore(constants.RESTART_WORKER_MAX_CONCURRENCY)
 
 #: Coordinator tier: workers that themselves SPAWN AND JOIN leaf workers
@@ -6329,10 +6345,56 @@ def _recreate_lvstore_on_non_leader_impl(snode, leader_node, primary_node, activ
 
     leader_port_blocked = False
 
+    # Pre-acquire the hublvol advisory lock OUTSIDE the port-block window.
+    # The acquire is an FDB transaction (avg 858ms/std 487 measured INSIDE
+    # blocked windows, 2026-07-21 n=11) — paying it before the leader port
+    # is blocked keeps the client-visible outage window short. Ownership:
+    # released after the unblock/print below, in _abort_and_unblock on
+    # aborts, and by the 60s lock TTL on any other escape. Failure to
+    # pre-acquire is non-fatal: connect_to_hublvol then locks internally
+    # (the pre-fix behavior).
+    _hub_lock_holder = {"lock": None}
+    if not activation_mode:
+        try:
+            from simplyblock_core.utils.hublvol_reconnect import (
+                HublvolReconnectCoordinator,
+            )
+            _hub_lock_holder["lock"] = HublvolReconnectCoordinator(
+                db_controller).acquire_lock(snode.get_id(), primary_node.lvstore)
+        except Exception as _hl_e:
+            logger.warning(
+                "Pre-acquire of hublvol lock (%s, %s) failed — reconcile "
+                "will lock in-window: %s",
+                snode.get_id(), primary_node.lvstore, _hl_e)
+
+    def _release_hub_lock():
+        lk = _hub_lock_holder.pop("lock", None)
+        if lk is not None:
+            lk.release()
+
+    # Global port-block window gate (see _port_block_window_gate): at most
+    # one LVS's client port is blocked at any moment across the runner.
+    _gate_state = {"held": False}
+
+    def _acquire_block_gate():
+        _tw = time.monotonic()
+        _port_block_window_gate.acquire()
+        _gate_state["held"] = True
+        _waited = time.monotonic() - _tw
+        if _waited > 0.5:
+            logger.info("[RESTART] Waited %.3fs for port-block window gate (%s)",
+                        _waited, primary_node.lvstore)
+
+    def _release_block_gate():
+        if _gate_state["held"]:
+            _gate_state["held"] = False
+            _port_block_window_gate.release()
+
     def _abort_and_unblock(reason):
         """Abort restart: kill SPDK on snode, set offline, unblock leader port, raise."""
         logger.error("Aborting non-leader restart on %s for %s: %s",
                      snode.get_id(), primary_node.lvstore, reason)
+        _release_hub_lock()
         try:
             storage_events.snode_restart_failed(snode)
             snode_api = snode.client(timeout=5, retry=5)
@@ -6347,6 +6409,7 @@ def _recreate_lvstore_on_non_leader_impl(snode, leader_node, primary_node, activ
                 tcp_ports_events.port_allowed(leader_node, leader_lvs_port)
             except Exception as ue:
                 logger.error("Failed to unblock leader port during abort: %s", ue)
+        _release_block_gate()
         _set_restart_phase(snode, primary_node.lvstore, "", db_controller)
         raise Exception(f"Abort non-leader restart: {reason}")
 
@@ -6356,6 +6419,12 @@ def _recreate_lvstore_on_non_leader_impl(snode, leader_node, primary_node, activ
     lvs_peer_ids_excl_snode = [sid for sid in [primary_node.secondary_node_id, primary_node.tertiary_node_id]
                                if sid and sid != snode.get_id()]
     leader_has_quorum = not _check_peer_disconnected(leader_node, lvs_peer_ids=lvs_peer_ids_excl_snode)
+
+    if not activation_mode:
+        # Serialize the client-port outage span across all concurrent
+        # recreates (covers the initial block, the attach-retry re-blocks,
+        # and the final unblock below).
+        _acquire_block_gate()
 
     if not activation_mode and leader_has_quorum:
         ### 3- block leader port ONLY (no siblings)
@@ -6655,7 +6724,8 @@ def _recreate_lvstore_on_non_leader_impl(snode, leader_node, primary_node, activ
                     ok = snode.connect_to_hublvol(
                         attach_target, failover_node=None,
                         role=sec_role, rpc_timeout=1.0,
-                        lvs_node=primary_node)
+                        lvs_node=primary_node,
+                        coordinator_lock=_hub_lock_holder.get("lock"))
                     last_err = None
                 except Exception as e:
                     ok = False
@@ -6730,6 +6800,8 @@ def _recreate_lvstore_on_non_leader_impl(snode, leader_node, primary_node, activ
             leader_port_blocked = False
 
     # Set restart phase: post_unblock — delayed sync deletes and registrations can now proceed
+    _release_block_gate()
+    _release_hub_lock()
     _set_restart_phase(snode, primary_node.lvstore, StorageNode.RESTART_PHASE_POST_UNBLOCK, db_controller)
     logger.info("[RESTART] Port-block phase for %s on %s took %.3fs",
                 primary_node.lvstore, snode.get_id()[:8], time.monotonic() - _port_block_t0)
@@ -7248,16 +7320,70 @@ def _recreate_lvstore_impl(snode, force=False, lvs_primary=None, activation_mode
         set_node_status(snode.get_id(), StorageNode.STATUS_OFFLINE,
                         caused_by="restart_cleanup")
 
+    # Pre-acquired hublvol advisory locks, one per peer that will
+    # connect_to_hublvol inside the blocked window (key: peer id). The
+    # acquire is an FDB transaction (avg 858ms/std 487 measured INSIDE
+    # blocked windows, 2026-07-21 n=11) — paying it before the peer ports
+    # are blocked keeps the client-visible outage short. Released after the
+    # unblock/print below, on aborts, and by the 60s lock TTL on any other
+    # escape. Pre-acquire failure is non-fatal: connect_to_hublvol then
+    # locks internally (the pre-fix behavior).
+    _hub_locks: dict = {}
+
+    def _release_hub_locks():
+        for _pid in list(_hub_locks):
+            lk = _hub_locks.pop(_pid, None)
+            if lk is not None:
+                lk.release()
+
+    # Global port-block window gate (see _port_block_window_gate): at most
+    # one LVS's client port is blocked at any moment across the runner.
+    _gate_state = {"held": False}
+
+    def _acquire_block_gate():
+        _tw = time.monotonic()
+        _port_block_window_gate.acquire()
+        _gate_state["held"] = True
+        _waited = time.monotonic() - _tw
+        if _waited > 0.5:
+            logger.info("[RESTART] Waited %.3fs for port-block window gate (%s)",
+                        _waited, lvs_name)
+
+    def _release_block_gate():
+        if _gate_state["held"]:
+            _gate_state["held"] = False
+            _port_block_window_gate.release()
+
     def _abort_restart_and_unblock(reason):
         """Abort: kill SPDK, set offline, unblock every blocked peer, raise."""
         logger.error("Aborting recreate_lvstore on %s for %s: %s",
                      snode.get_id(), lvs_name, reason)
+        _release_hub_locks()
         _kill_app()
         for peer in list(blocked_peers):
             _unblock_peer_port(peer)
+        _release_block_gate()
         raise Exception(f"Abort restart: {reason}")
 
     if not activation_mode:
+        try:
+            from simplyblock_core.utils.hublvol_reconnect import (
+                HublvolReconnectCoordinator,
+            )
+            _hub_coord = HublvolReconnectCoordinator(db_controller)
+            for _peer in sec_nodes:
+                if _peer.get_id() in disconnected_peers:
+                    continue
+                _hub_locks[_peer.get_id()] = _hub_coord.acquire_lock(
+                    _peer.get_id(), lvs_node.lvstore)
+        except Exception as _hl_e:
+            logger.warning(
+                "Pre-acquire of hublvol locks for %s failed — reconcile "
+                "will lock in-window: %s", lvs_name, _hl_e)
+        # Serialize the client-port outage span across all concurrent
+        # recreates. Acquired AFTER the hublvol advisory locks (fixed lock
+        # order: per-LVS recreate lock -> hublvol locks -> window gate).
+        _acquire_block_gate()
         ### 3- block LVS port on every connected peer (leader + non-leaders),
         # then suspend the leader's journal replication before the flap.
         #
@@ -7682,7 +7808,8 @@ def _recreate_lvstore_impl(snode, force=False, lvs_primary=None, activation_mode
                 # was unblocked, worker-1 re-promoted on next client
                 # write, writer conflict on worker-4.)
                 ok = sec_node.connect_to_hublvol(snode, failover_node=None, role=sec_role,
-                                                 rpc_timeout=0.2, lvs_node=lvs_node)
+                                                 rpc_timeout=0.2, lvs_node=lvs_node,
+                                                 coordinator_lock=_hub_locks.get(sec_node.get_id()))
             except Exception as e:
                 logger.error("Error establishing hublvol on %s: %s", sec_node.get_id(), e)
                 _abort_restart_and_unblock(
@@ -7695,6 +7822,11 @@ def _recreate_lvstore_impl(snode, force=False, lvs_primary=None, activation_mode
             if sec_node in blocked_peers:
                 _unblock_peer_port(sec_node)
 
+        # Every peer port is unblocked — end of the client-visible outage
+        # span. Release the window gate BEFORE the lvol-attach pass below
+        # so the next recreate's block window can start while lvols attach.
+        _release_block_gate()
+
     ### 9- add lvols to subsystems
     executor = ThreadPoolExecutor(max_workers=50)
     for lvol in lvol_list:
@@ -7702,6 +7834,8 @@ def _recreate_lvstore_impl(snode, force=False, lvs_primary=None, activation_mode
     executor.shutdown(wait=True)
 
     # Phase transition: post_unblock — delayed sync deletes and registrations can now proceed
+    _release_block_gate()
+    _release_hub_locks()
     _set_restart_phase(snode, lvs_name, StorageNode.RESTART_PHASE_POST_UNBLOCK, db_controller)
     logger.info("[RESTART] Port-block phase for %s on %s took %.3fs",
                 lvs_name, snode.get_id()[:8], time.monotonic() - _port_block_t0)

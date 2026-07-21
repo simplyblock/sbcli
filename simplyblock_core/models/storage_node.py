@@ -539,7 +539,8 @@ class StorageNode(BaseNodeObject):
                 return False
 
     def connect_to_hublvol(self, primary_node, failover_node=None, *, role,
-                           timeout=None, rpc_timeout=None, lvs_node=None):
+                           timeout=None, rpc_timeout=None, lvs_node=None,
+                           coordinator_lock=None):
         """Connect to a primary node's hublvol, optionally with multipath failover.
 
         ``role`` is required and must be this node's role for the LVS being
@@ -631,8 +632,15 @@ class StorageNode(BaseNodeObject):
             )
             peers = [primary_node] + ([failover_node] if failover_node else [])
             coordinator = HublvolReconnectCoordinator(DBController())
+            # coordinator_lock: pre-entered advisory lock from
+            # HublvolReconnectCoordinator.acquire_lock — the restart
+            # port-block window acquires it BEFORE blocking the client port
+            # (the acquire txn measured avg 858ms inside the window,
+            # 2026-07-21) and releases it after the unblock. Ownership stays
+            # with the caller.
             if not coordinator.reconcile(self, lvs_node, peers, role=role,
-                                         rpc_timeout=rpc_timeout):
+                                         rpc_timeout=rpc_timeout,
+                                         lock=coordinator_lock):
                 logger.error(
                     "Hublvol reconcile failed for %s on %s (role=%s)",
                     lvs_node.hublvol.bdev_name, self.get_id(), role,
