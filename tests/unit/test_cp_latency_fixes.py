@@ -194,3 +194,108 @@ class TestPortBlockWindowGate:
         acquire(); release(); release()  # double release must be harmless
         assert g.acquire(blocking=False)
         g.release()
+
+
+# ---------------------------------------------------------------------------
+# Window-collapse package (2026-07-21 #1-#4): pre-staged hublvol subsystems,
+# deferred coordinator stamp, deferred port events, pre-block probes.
+# ---------------------------------------------------------------------------
+class TestPrestageHublvolSubsystem:
+    def _node(self, rpc):
+        n = StorageNode()
+        n.uuid = "n1"
+        n.data_nics = [types.SimpleNamespace(ip4_address="10.0.0.1",
+                                             trtype="TCP", if_name="eth0")]
+        n.active_rdma = False
+        n.rpc_client = lambda *a, **k: rpc
+        return n
+
+    def test_creates_subsystem_and_listener_when_missing(self):
+        calls = []
+        rpc = types.SimpleNamespace(
+            subsystem_get=lambda nqn: None,
+            subsystem_create=lambda **kw: calls.append(("create", kw)) or True,
+            listeners_create=lambda **kw: calls.append(("listener", kw)) or True,
+        )
+        self._node(rpc).prestage_hublvol_subsystem(
+            "nqn.test:hub", "model-1", 4600, ana_state="non_optimized",
+            min_cntlid=1000)
+        kinds = [c[0] for c in calls]
+        assert kinds == ["create", "listener"]
+        assert calls[0][1]["min_cntlid"] == 1000
+        assert calls[1][1]["ana_state"] == "non_optimized"
+
+    def test_skips_existing_subsystem_and_listener(self):
+        calls = []
+        rpc = types.SimpleNamespace(
+            subsystem_get=lambda nqn: {
+                "listen_addresses": [
+                    {"trtype": "TCP", "traddr": "10.0.0.1", "trsvcid": "4600"}]},
+            subsystem_create=lambda **kw: calls.append("create") or True,
+            listeners_create=lambda **kw: calls.append("listener") or True,
+        )
+        self._node(rpc).prestage_hublvol_subsystem(
+            "nqn.test:hub", "model-1", 4600)
+        assert calls == []  # fully idempotent: probe only
+
+
+class TestWindowCollapseWiring:
+    def _src(self, fn):
+        import inspect
+        return inspect.getsource(fn)
+
+    def test_prestage_wired_in_both_impls(self):
+        for fn in (storage_node_ops._recreate_lvstore_impl,
+                   storage_node_ops._recreate_lvstore_on_non_leader_impl):
+            assert "prestage_hublvol_subsystem" in self._src(fn), fn.__name__
+
+    def test_port_events_deferred_in_both_impls(self):
+        for fn in (storage_node_ops._recreate_lvstore_impl,
+                   storage_node_ops._recreate_lvstore_on_non_leader_impl):
+            src = self._src(fn)
+            # no direct event emission from the window paths; the flush
+            # helper is the only emitter
+            assert "_deferred_port_events.append" in src, fn.__name__
+            assert "_flush_port_events()" in src, fn.__name__
+            emit_lines = [ln for ln in src.splitlines()
+                          if ("tcp_ports_events.port_deny(" in ln
+                              or "tcp_ports_events.port_allowed(" in ln)
+                          and "_flush" not in ln]
+            # only the two lines inside _flush_port_events itself remain
+            assert len(emit_lines) == 2, (fn.__name__, emit_lines)
+
+    def test_probes_computed_before_block_section(self):
+        # anchor on the ### 3 block-section marker (the gate helper's DEF
+        # appears earlier in source than its call site)
+        for fn, marker in (
+                (storage_node_ops._recreate_lvstore_impl,
+                 "### 3- block LVS port"),
+                (storage_node_ops._recreate_lvstore_on_non_leader_impl,
+                 "### 3- block leader port")):
+            src = self._src(fn)
+            assert src.index("raid_already = _rpc_bdev_exists") \
+                < src.index(marker), fn.__name__
+
+    def test_stamp_deferred_on_external_lock(self):
+        import inspect
+        from simplyblock_core.utils import hublvol_reconnect as hr
+        src = inspect.getsource(
+            hr.HublvolReconnectCoordinator._reconcile_under_lock)
+        assert "pending_stamp" in src and "externally_managed" in src
+        # release helpers in ops pay the deferred stamp
+        for fn in (storage_node_ops._recreate_lvstore_impl,
+                   storage_node_ops._recreate_lvstore_on_non_leader_impl):
+            assert "stamp_attach" in self._src(fn), fn.__name__
+
+    def test_acquire_lock_marks_external(self):
+        from simplyblock_core.utils import hublvol_reconnect as hr
+        coord = hr.HublvolReconnectCoordinator.__new__(
+            hr.HublvolReconnectCoordinator)
+        coord._db = types.SimpleNamespace(kv_store=None)
+        coord._lock_ttl = 5
+        lock = coord.acquire_lock("nX", "LVS_ext")
+        try:
+            assert lock.externally_managed is True
+            assert lock.pending_stamp is False
+        finally:
+            lock.release()

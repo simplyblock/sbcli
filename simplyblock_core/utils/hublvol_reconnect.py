@@ -436,6 +436,11 @@ class HublvolReconnectCoordinator:
         lock = _HublvolLock(self._db.kv_store, node_id, lvstore,
                             ttl_sec=self._lock_ttl)
         lock.__enter__()
+        # Externally-managed locks defer the success stamp (one FDB txn) to
+        # the caller's release point — post-unblock — instead of paying it
+        # inside the port-block window (#2, 2026-07-21).
+        lock.externally_managed = True
+        lock.pending_stamp = False
         return lock
 
     def reconcile(self, node, primary_node, peer_nodes, role="secondary",
@@ -542,7 +547,14 @@ class HublvolReconnectCoordinator:
                     node, role, rpc_timeout=rpc_timeout)
 
             if ok:
-                lock.stamp_attach()
+                if getattr(lock, "externally_managed", False):
+                    # Deferred: the owning restart flow stamps at its release
+                    # point AFTER the port unblock (one FDB txn out of the
+                    # latency-critical window). Cooldown semantics shift a
+                    # few seconds later — strictly more conservative.
+                    lock.pending_stamp = True
+                else:
+                    lock.stamp_attach()
             return ok
 
     def _fresh_multipath_attach(self, rpc, ctrl_name, nqn, port, expected,

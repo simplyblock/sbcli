@@ -6469,9 +6469,39 @@ def _recreate_lvstore_on_non_leader_impl(snode, leader_node, primary_node, activ
                 "will lock in-window: %s",
                 snode.get_id(), primary_node.lvstore, _hl_e)
 
+        # #1 pre-stage: the secondary-hublvol NVMf subsystem + listeners have
+        # no lvstore dependency (params come from the primary's persisted
+        # hublvol metadata) — create them BEFORE the block window so the
+        # in-window create_secondary_hublvol/expose reduces to probe+add_ns
+        # (was ~4 RPCs x ~50ms inside every window, 2026-07-21). Idempotent;
+        # failure is non-fatal (expose creates in-window as before).
+        if not is_tertiary and primary_node.hublvol:
+            try:
+                _cluster_pre = db_controller.get_cluster_by_id(snode.cluster_id)
+                snode.prestage_hublvol_subsystem(
+                    nqn=StorageNode.hublvol_nqn_for_lvstore(
+                        _cluster_pre.nqn, primary_node.lvstore),
+                    model_number=primary_node.hublvol.model_number,
+                    port=primary_node.hublvol.nvmf_port,
+                    ana_state="non_optimized",
+                    min_cntlid=1000,
+                )
+            except Exception as _ps_e:
+                logger.warning(
+                    "Hublvol subsystem pre-stage failed on %s for %s "
+                    "(in-window expose will create it): %s",
+                    snode.get_id(), primary_node.lvstore, _ps_e)
+
     def _release_hub_lock():
         lk = _hub_lock_holder.pop("lock", None)
         if lk is not None:
+            if getattr(lk, "pending_stamp", False):
+                # Deferred success stamp (#2): paid here, post-unblock,
+                # instead of inside the port-block window.
+                try:
+                    lk.stamp_attach()
+                except Exception as _st_e:
+                    logger.warning("Deferred hublvol stamp failed: %s", _st_e)
             lk.release()
 
     # Global port-block window gate (see _port_block_window_gate): at most
@@ -6484,6 +6514,22 @@ def _recreate_lvstore_on_non_leader_impl(snode, leader_node, primary_node, activ
     # (2026-07-21); the 6s nvmf ack-timeout reject applies to each interval
     # measured here.
     _leader_block = {"t0": None, "max": 0.0}
+
+    # #3: port deny/allow event emission (FDB+graylog write, ~190ms measured
+    # in-window) is deferred to after the unblock; the block-span logs carry
+    # the true timing, the events remain complete for audit.
+    _deferred_port_events: list = []
+
+    def _flush_port_events():
+        for _kind, _n, _p in _deferred_port_events:
+            try:
+                if _kind == "deny":
+                    tcp_ports_events.port_deny(_n, _p)
+                else:
+                    tcp_ports_events.port_allowed(_n, _p)
+            except Exception as _ev_e:
+                logger.warning("Deferred port event emit failed: %s", _ev_e)
+        del _deferred_port_events[:]
 
     def _mark_leader_blocked():
         _leader_block["t0"] = time.monotonic()
@@ -6529,11 +6575,12 @@ def _recreate_lvstore_on_non_leader_impl(snode, leader_node, primary_node, activ
         if leader_port_blocked:
             try:
                 port_block.set_port(leader_node, leader_lvs_port, block=False, timeout=5, retry=2)
-                tcp_ports_events.port_allowed(leader_node, leader_lvs_port)
+                _deferred_port_events.append(("allow", leader_node, leader_lvs_port))
                 _mark_leader_unblocked()
             except Exception as ue:
                 logger.error("Failed to unblock leader port during abort: %s", ue)
         _release_block_gate()
+        _flush_port_events()
         _set_restart_phase(snode, primary_node.lvstore, "", db_controller)
         raise Exception(f"Abort non-leader restart: {reason}")
 
@@ -6543,6 +6590,13 @@ def _recreate_lvstore_on_non_leader_impl(snode, leader_node, primary_node, activ
     lvs_peer_ids_excl_snode = [sid for sid in [primary_node.secondary_node_id, primary_node.tertiary_node_id]
                                if sid and sid != snode.get_id()]
     leader_has_quorum = not _check_peer_disconnected(leader_node, lvs_peer_ids=lvs_peer_ids_excl_snode)
+
+    # #4: compute the examine-idempotency probes BEFORE the block window —
+    # they only read snode's own fresh SPDK (raid built at ###1 pre-block;
+    # nothing else mutates it until the examine below), so probing here
+    # gives the identical answer without paying two in-window round-trips.
+    raid_already = _rpc_bdev_exists(snode_rpc_client, primary_node.raid)
+    lvstore_already = _rpc_lvstore_exists(snode_rpc_client, primary_node.lvstore)
 
     if not activation_mode:
         # Serialize the client-port outage span across all concurrent
@@ -6572,7 +6626,7 @@ def _recreate_lvstore_on_non_leader_impl(snode, leader_node, primary_node, activ
         for attempt in range(1, attempts + 1):
             try:
                 port_block.set_port(leader_node, leader_lvs_port, block=True, timeout=3, retry=1)
-                tcp_ports_events.port_deny(leader_node, leader_lvs_port)
+                _deferred_port_events.append(("deny", leader_node, leader_lvs_port))
                 leader_port_blocked = True
                 _mark_leader_blocked()
                 last_err = None
@@ -6611,8 +6665,9 @@ def _recreate_lvstore_on_non_leader_impl(snode, leader_node, primary_node, activ
                     leader_node.get_id(), primary_node.lvstore)
 
     ### 4- examine (idempotent: skip only when raid AND lvstore already surfaced)
-    raid_already = _rpc_bdev_exists(snode_rpc_client, primary_node.raid)
-    lvstore_already = _rpc_lvstore_exists(snode_rpc_client, primary_node.lvstore)
+    # #4: probes were computed pre-block (see above the block section) —
+    # nothing touches snode's fresh SPDK between there and here, and each
+    # in-window RPC costs a full CP round-trip.
     if raid_already and lvstore_already:
         logger.info(
             "Raid %s and lvstore %s already present on %s; skipping examine",
@@ -6869,8 +6924,7 @@ def _recreate_lvstore_on_non_leader_impl(snode, leader_node, primary_node, activ
                 if leader_port_blocked:
                     try:
                         port_block.set_port(leader_node, leader_lvs_port, block=False, timeout=3, retry=1)
-                        tcp_ports_events.port_allowed(
-                            leader_node, leader_lvs_port)
+                        _deferred_port_events.append(("allow", leader_node, leader_lvs_port))
                         leader_port_blocked = False
                         _mark_leader_unblocked()
                     except Exception as ue:
@@ -6880,7 +6934,7 @@ def _recreate_lvstore_on_non_leader_impl(snode, leader_node, primary_node, activ
                 time.sleep(ATTACH_RETRY_GAP_SEC)
                 try:
                     port_block.set_port(leader_node, leader_lvs_port, block=True, timeout=3, retry=1)
-                    tcp_ports_events.port_deny(leader_node, leader_lvs_port)
+                    _deferred_port_events.append(("deny", leader_node, leader_lvs_port))
                     leader_port_blocked = True
                     _mark_leader_blocked()
                 except Exception as be:
@@ -6905,7 +6959,7 @@ def _recreate_lvstore_on_non_leader_impl(snode, leader_node, primary_node, activ
             for attempt in range(1, attempts + 1):
                 try:
                     port_block.set_port(leader_node, leader_lvs_port, block=False, timeout=3, retry=1)
-                    tcp_ports_events.port_allowed(leader_node, leader_lvs_port)
+                    _deferred_port_events.append(("allow", leader_node, leader_lvs_port))
                     unblocked = True
                     _mark_leader_unblocked()
                     break
@@ -6929,6 +6983,7 @@ def _recreate_lvstore_on_non_leader_impl(snode, leader_node, primary_node, activ
 
     # Set restart phase: post_unblock — delayed sync deletes and registrations can now proceed
     _release_block_gate()
+    _flush_port_events()
     _release_hub_lock()
     _set_restart_phase(snode, primary_node.lvstore, StorageNode.RESTART_PHASE_POST_UNBLOCK, db_controller)
     if _leader_block["max"]:
@@ -7426,6 +7481,22 @@ def _recreate_lvstore_impl(snode, force=False, lvs_primary=None, activation_mode
     _block_started: dict = {}
     _block_longest = {"sec": 0.0}
 
+    # #3: port deny/allow event emission (FDB+graylog write, ~190ms measured
+    # in-window) is deferred to after the unblock; the per-port block-span
+    # logs carry the true timing, the events remain complete for audit.
+    _deferred_port_events: list = []
+
+    def _flush_port_events():
+        for _kind, _n, _p in _deferred_port_events:
+            try:
+                if _kind == "deny":
+                    tcp_ports_events.port_deny(_n, _p)
+                else:
+                    tcp_ports_events.port_allowed(_n, _p)
+            except Exception as _ev_e:
+                logger.warning("Deferred port event emit failed: %s", _ev_e)
+        del _deferred_port_events[:]
+
     def _unblock_peer_port(peer):
         """Remove the port block for snode_lvs_port on peer and drop
         the peer from blocked_peers. Safe to call if peer is not currently
@@ -7433,7 +7504,7 @@ def _recreate_lvstore_impl(snode, force=False, lvs_primary=None, activation_mode
         other peers can still be unblocked."""
         try:
             port_block.set_port(peer, snode_lvs_port, block=False, timeout=5, retry=2)
-            tcp_ports_events.port_allowed(peer, snode_lvs_port)
+            _deferred_port_events.append(("allow", peer, snode_lvs_port))
             _t0 = _block_started.pop(peer.get_id(), None)
             if _t0 is not None:
                 _d = time.monotonic() - _t0
@@ -7484,6 +7555,13 @@ def _recreate_lvstore_impl(snode, force=False, lvs_primary=None, activation_mode
         for _pid in list(_hub_locks):
             lk = _hub_locks.pop(_pid, None)
             if lk is not None:
+                if getattr(lk, "pending_stamp", False):
+                    # Deferred success stamp (#2): paid here, post-unblock,
+                    # instead of inside the port-block window.
+                    try:
+                        lk.stamp_attach()
+                    except Exception as _st_e:
+                        logger.warning("Deferred hublvol stamp failed: %s", _st_e)
                 lk.release()
 
     # Global port-block window gate (see _port_block_window_gate): at most
@@ -7513,7 +7591,15 @@ def _recreate_lvstore_impl(snode, force=False, lvs_primary=None, activation_mode
         for peer in list(blocked_peers):
             _unblock_peer_port(peer)
         _release_block_gate()
+        _flush_port_events()
         raise Exception(f"Abort restart: {reason}")
+
+    # #4: compute the examine-idempotency probes BEFORE the block window —
+    # they only read snode's own fresh SPDK (raid built at ###1 pre-block),
+    # so probing here gives the identical answer without paying two
+    # in-window round-trips.
+    raid_already = _rpc_bdev_exists(rpc_client, lvs_raid)
+    lvstore_already = _rpc_lvstore_exists(rpc_client, lvs_name)
 
     if not activation_mode:
         try:
@@ -7530,6 +7616,52 @@ def _recreate_lvstore_impl(snode, force=False, lvs_primary=None, activation_mode
             logger.warning(
                 "Pre-acquire of hublvol locks for %s failed — reconcile "
                 "will lock in-window: %s", lvs_name, _hl_e)
+
+        # #1 pre-stage: NVMf subsystems + listeners for the hublvols wired
+        # inside the window have no lvstore/bdev dependency — create them
+        # here so the in-window expose calls reduce to probe+add_ns. All
+        # params come from persisted hublvol metadata; every call is
+        # idempotent and failure is non-fatal (in-window expose creates as
+        # before).
+        try:
+            if lvs_node.hublvol:
+                _cluster_pre = db_controller.get_cluster_by_id(snode.cluster_id)
+                # snode's own (leader) hublvol subsystem
+                snode.prestage_hublvol_subsystem(
+                    nqn=lvs_node.hublvol.nqn,
+                    model_number=lvs_node.hublvol.model_number,
+                    port=lvs_node.hublvol.nvmf_port,
+                    ana_state="optimized",
+                )
+                # transferhub subsystem (only when its metadata is persisted;
+                # otherwise create_transfer_hublvol mints a fresh model
+                # number in-window and must own the create)
+                if snode.transfer_hublvol and snode.transfer_hublvol.nqn:
+                    snode.prestage_hublvol_subsystem(
+                        nqn=snode.transfer_hublvol.nqn,
+                        model_number=snode.transfer_hublvol.model_number,
+                        port=snode.transfer_hublvol.nvmf_port,
+                        ana_state="optimized",
+                    )
+                # sec_1's shared-NQN secondary hublvol subsystem
+                _sec1_pre = next(
+                    (p for p in sec_nodes
+                     if p.get_id() == lvs_node.secondary_node_id
+                     and p.get_id() not in disconnected_peers), None)
+                if _sec1_pre is not None:
+                    _sec1_pre.prestage_hublvol_subsystem(
+                        nqn=StorageNode.hublvol_nqn_for_lvstore(
+                            _cluster_pre.nqn, lvs_node.lvstore),
+                        model_number=lvs_node.hublvol.model_number,
+                        port=lvs_node.hublvol.nvmf_port,
+                        ana_state="non_optimized",
+                        min_cntlid=1000,
+                    )
+        except Exception as _ps_e:
+            logger.warning(
+                "Hublvol subsystem pre-stage failed for %s "
+                "(in-window expose will create it): %s", lvs_name, _ps_e)
+
         # Serialize the client-port outage span across all concurrent
         # recreates. Acquired AFTER the hublvol advisory locks (fixed lock
         # order: per-LVS recreate lock -> hublvol locks -> window gate).
@@ -7574,7 +7706,7 @@ def _recreate_lvstore_impl(snode, force=False, lvs_primary=None, activation_mode
                     current_leader.lvstore_status = "in_creation"
                     current_leader.write_to_db()
                     port_block.set_port(current_leader, snode_lvs_port, block=True, timeout=5, retry=2)
-                    tcp_ports_events.port_deny(current_leader, snode_lvs_port)
+                    _deferred_port_events.append(("deny", current_leader, snode_lvs_port))
                     blocked_peers.append(current_leader)
                     _block_started[current_leader.get_id()] = time.monotonic()
                 except Exception as e:
@@ -7624,7 +7756,7 @@ def _recreate_lvstore_impl(snode, force=False, lvs_primary=None, activation_mode
                 continue
             try:
                 port_block.set_port(sec_node, snode_lvs_port, block=True, timeout=5, retry=2)
-                tcp_ports_events.port_deny(sec_node, snode_lvs_port)
+                _deferred_port_events.append(("deny", sec_node, snode_lvs_port))
                 blocked_peers.append(sec_node)
                 _block_started[sec_node.get_id()] = time.monotonic()
             except Exception as e:
@@ -7718,9 +7850,10 @@ def _recreate_lvstore_impl(snode, force=False, lvs_primary=None, activation_mode
             rpc_client.jc_explicit_synchronization(lvs_jm_vuid)
 
     ### 5- examine (idempotent: skip only when raid AND lvstore already surfaced)
+    # #4: raid/lvstore probes were computed pre-block (see above the block
+    # section) — they read snode's own fresh SPDK only, and
+    # force_to_non_leader does not affect bdev/lvstore presence.
     rpc_client.bdev_distrib_force_to_non_leader(lvs_jm_vuid)
-    raid_already = _rpc_bdev_exists(rpc_client, lvs_raid)
-    lvstore_already = _rpc_lvstore_exists(rpc_client, lvs_name)
     if raid_already and lvstore_already:
         logger.info(
             "Raid %s and lvstore %s already present on %s; skipping examine",
@@ -7978,6 +8111,7 @@ def _recreate_lvstore_impl(snode, force=False, lvs_primary=None, activation_mode
         # span. Release the window gate BEFORE the lvol-attach pass below
         # so the next recreate's block window can start while lvols attach.
         _release_block_gate()
+        _flush_port_events()
 
     ### 9- add lvols to subsystems
     executor = ThreadPoolExecutor(max_workers=50)
@@ -7987,6 +8121,7 @@ def _recreate_lvstore_impl(snode, force=False, lvs_primary=None, activation_mode
 
     # Phase transition: post_unblock — delayed sync deletes and registrations can now proceed
     _release_block_gate()
+    _flush_port_events()
     _release_hub_locks()
     _set_restart_phase(snode, lvs_name, StorageNode.RESTART_PHASE_POST_UNBLOCK, db_controller)
     if _block_longest["sec"]:
