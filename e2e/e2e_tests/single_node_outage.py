@@ -200,6 +200,9 @@ class TestSingleNodeOutage(TestClusterBase):
             if isinstance(fio_handle, threading.Thread):
                 fio_handle.join()
 
+        self._validate_fio_dual(fio_handle, log_path=self.log_path)
+        self._cleanup_fio_k8s(fio_handle)
+
         self.logger.info("Taking snapshot 2")
         snapshot_id_2 = self._create_snapshot_dual(
             self.lvol_name, f"{self.snapshot_name}_2"
@@ -224,8 +227,6 @@ class TestSingleNodeOutage(TestClusterBase):
             mount_path=f"{clone_mount_file}_2" if not self.k8s_test else None,
             format_disk=False,
         )
-
-        self._validate_fio_dual(fio_handle, log_path=self.log_path)
 
         self._resize_lvol_dual(f"{self.lvol_name}_cl_1", "30G")
         self._resize_lvol_dual(f"{self.lvol_name}_cl_2", "30G")
