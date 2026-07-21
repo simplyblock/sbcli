@@ -3124,7 +3124,7 @@ def restart_storage_node(
         spdk_image=None, set_spdk_debug=None,
         small_bufsize=0, large_bufsize=0,
         force=False, node_address=None, reattach_volume=False, clear_data=False, new_ssd_pcie=[],
-        force_lvol_recreate=False, spdk_proxy_image=None):
+        force_lvol_recreate=False, spdk_proxy_image=None, current_restart_task_id=None):
     """Wrapper that guarantees the node is reset to OFFLINE if the restart
     fails after THIS call set the RESTARTING status. Without this, any
     ``return False`` inside the inner logic leaves the node pinned in
@@ -3162,7 +3162,7 @@ def restart_storage_node(
             small_bufsize=small_bufsize, large_bufsize=large_bufsize,
             force=force, node_address=node_address, reattach_volume=reattach_volume,
             clear_data=clear_data, new_ssd_pcie=new_ssd_pcie,
-            force_lvol_recreate=force_lvol_recreate, spdk_proxy_image=spdk_proxy_image)
+            force_lvol_recreate=force_lvol_recreate, spdk_proxy_image=spdk_proxy_image, current_restart_task_id=current_restart_task_id)
     except Exception:
         # exc_info so the traceback is captured: without it a failing restart
         # only logs this one line, leaving the actual raise point (e.g. a
@@ -3323,7 +3323,7 @@ def _restart_storage_node_impl(
         spdk_image=None, set_spdk_debug=None,
         small_bufsize=0, large_bufsize=0,
         force=False, node_address=None, reattach_volume=False, clear_data=False, new_ssd_pcie=[],
-        force_lvol_recreate=False, spdk_proxy_image=None):
+        force_lvol_recreate=False, spdk_proxy_image=None, current_restart_task_id=None):
     db_controller = DBController()
     logger.info("Restarting storage node")
     try:
@@ -3352,7 +3352,7 @@ def _restart_storage_node_impl(
     # Guard: atomically check no peer is restarting/shutting down and set RESTARTING.
     # Uses a single FDB transaction to prevent TOCTOU race conditions.
     task_id = tasks_controller.get_active_node_restart_task(snode.cluster_id, snode.get_id())
-    if task_id:
+    if task_id and task_id != current_restart_task_id:
         logger.error(f"Restart task found: {task_id}, can not restart storage node")
         if force is False:
             return False
