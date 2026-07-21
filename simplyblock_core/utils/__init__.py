@@ -2634,10 +2634,14 @@ def patch_cr_node_status(
         if not found:
             if remove:
                 # Node already absent from status — nothing to do.
-                return            
-            raise RuntimeError(
-                f"Node not found (uuid={node_uuid}, mgmtIp={node_mgmt_ip})"
+                return
+            # Node not yet in status.nodes[] — operator syncs this asynchronously.
+            # Silently return so callers during node_add (in_creation phase) don't abort.
+            logger.warning(
+                f"patch_cr_node_status: node not yet in status.nodes "
+                f"(uuid={node_uuid}, mgmtIp={node_mgmt_ip}), skipping"
             )
+            return
 
         api.patch_namespaced_custom_object_status(
             group=group,
