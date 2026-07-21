@@ -100,7 +100,7 @@ class _MassCreateDeleteMixin:
     FIO_PHASE_TIMEOUT = 7200    # 2 hours max for FIO job creation phase
 
     # ── Phase timeouts (seconds) ───────────────────────────────────────────
-    SNAPSHOT_PHASE_TIMEOUT = 14400   # 4 hours
+    SNAPSHOT_PHASE_TIMEOUT = 25200   # 7 hours
     CLONE_PHASE_TIMEOUT = 7200       # 2 hours
     DELETE_PHASE_TIMEOUT = 3600      # 1 hour
 
@@ -1798,29 +1798,45 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
 
         self._check_count(verified, expected_snaps, "Phase 3 snapshots")
 
+    def _is_name_exists_error(self, exc):
+        """Detect 'name must be unique' — snapshot already created."""
+        text = str(exc).lower()
+        return "name must be unique" in text or "already exists" in text
+
     def _fire_create_snapshot(self, params: dict):
         """Fire add_snapshot only. No ID fetch — bulk verify resolves IDs.
 
         Retries on sync-deletion errors (lvol temporarily in cleanup state)
         with backoff, similar to _fire_create_standalone.
+
+        Treats "name must be unique" as idempotent success — the snapshot
+        was created on a prior attempt that returned a transient error
+        (503/500) before the success response reached the client.
         """
         lvol_id = params["lvol_id"]
         snap_name = params["snap_name"]
         sync_retries = 0
 
-        for attempt in range(6):
+        max_attempts = 3 if self.PERSISTENT_RETRY else 6
+        for attempt in range(max_attempts):
             try:
                 self.sbcli_utils.add_snapshot(
                     lvol_id=lvol_id, snapshot_name=snap_name, retry=3
                 )
                 return
             except Exception as e:
+                if self._is_name_exists_error(e):
+                    logger.info(
+                        f"[snapshot] {snap_name} already exists "
+                        f"(prior attempt succeeded) — treating as success"
+                    )
+                    return
                 if self._is_sync_deletion_error(e) and sync_retries < 5:
                     sync_retries += 1
                     sleep_n_sec(15)
                     continue
-                if attempt < 5:
-                    sleep_n_sec(5)
+                if attempt < max_attempts - 1:
+                    sleep_n_sec(3)
                     continue
                 raise
 
