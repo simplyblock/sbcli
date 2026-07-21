@@ -40,14 +40,21 @@ STAT_COLLECTOR_INTERVAL_SEC = 60*5  # 5 minutes
 LVOL_STAT_COLLECTOR_INTERVAL_SEC = 30
 LVOL_MONITOR_INTERVAL_SEC = 30
 DEV_MONITOR_INTERVAL_SEC = 10
-DEV_STAT_COLLECTOR_INTERVAL_SEC = 5
-PROT_STAT_COLLECTOR_INTERVAL_SEC = 2
+# Collector cadence (#5, 2026-07-21): the idle-cluster baseline measured
+# 4,290 RPCs/min cluster-wide (get_iostat 16k / alceml_get_pages_usage 15k /
+# distr events 27k per 28min) — ~9-10 CP threads permanently busy servicing
+# monitors, which is the standing GIL convoy that taxed every restart RPC.
+# Stats collection is dashboard granularity, not failure detection (that is
+# NODE/DEVICE_MONITOR + KA + distr events), so stretch the pure-stats
+# cycles; keep the event collector at a failure-latency-compatible cadence.
+DEV_STAT_COLLECTOR_INTERVAL_SEC = 15
+PROT_STAT_COLLECTOR_INTERVAL_SEC = 10
 SPDK_STAT_COLLECTOR_INTERVAL_SEC = 30
-DISTR_EVENT_COLLECTOR_INTERVAL_SEC = 2
+DISTR_EVENT_COLLECTOR_INTERVAL_SEC = 5
 DISTR_EVENT_COLLECTOR_NUM_OF_EVENTS = 10
-CAP_MONITOR_INTERVAL_SEC = 10
+CAP_MONITOR_INTERVAL_SEC = 30
 SSD_VENDOR_WHITE_LIST = ["1d0f:cd01", "1d0f:cd00"]
-CACHED_LVOL_STAT_COLLECTOR_INTERVAL_SEC = 5
+CACHED_LVOL_STAT_COLLECTOR_INTERVAL_SEC = 15
 DEV_DISCOVERY_INTERVAL_SEC = 60
 
 PMEM_DIR = '/tmp/pmem'

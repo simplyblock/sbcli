@@ -299,3 +299,55 @@ class TestWindowCollapseWiring:
             assert lock.pending_stamp is False
         finally:
             lock.release()
+
+
+# ---------------------------------------------------------------------------
+# #5 — monitor baseline trim: batched blocked-port checks + stretched
+# collector cadence (idle baseline was 4,290 RPCs/min cluster-wide).
+# ---------------------------------------------------------------------------
+class TestBlockedPortsBatching:
+    @staticmethod
+    def _node(rpc):
+        return types.SimpleNamespace(rpc_client=lambda *a, **k: rpc)
+
+    def test_one_fetch_answers_all_ports(self):
+        from simplyblock_core.controllers import health_controller
+        calls = {"n": 0}
+
+        def get_blocked():
+            calls["n"] += 1
+            return {"blocked_ports": [{"port": 4500}]}
+        rpc = types.SimpleNamespace(nvmf_get_blocked_ports=get_blocked)
+        res = health_controller.check_ports_on_node(
+            self._node(rpc), [4500, 4502, 4504])
+        assert calls["n"] == 1
+        assert res == {4500: False, 4502: True, 4504: True}
+
+    def test_empty_ports_no_rpc(self):
+        from simplyblock_core.controllers import health_controller
+        rpc = types.SimpleNamespace(
+            nvmf_get_blocked_ports=lambda: (_ for _ in ()).throw(
+                RuntimeError("must not be called")))
+        assert health_controller.check_ports_on_node(self._node(rpc), []) == {}
+
+    def test_loops_wired_to_batch(self):
+        import inspect
+        from simplyblock_core.services import health_check_service
+        from simplyblock_core.services import storage_node_monitor
+        from simplyblock_core.controllers import health_controller
+        for mod in (health_check_service, storage_node_monitor):
+            src = inspect.getsource(mod)
+            assert "check_ports_on_node" in src, mod.__name__
+        assert "check_ports_on_node(snode, _hc_ports)" in inspect.getsource(
+            health_controller)
+
+    def test_collector_cadence_stretched(self):
+        from simplyblock_core import constants as c
+        assert c.DEV_STAT_COLLECTOR_INTERVAL_SEC >= 15
+        assert c.PROT_STAT_COLLECTOR_INTERVAL_SEC >= 10
+        assert c.DISTR_EVENT_COLLECTOR_INTERVAL_SEC >= 5
+        assert c.CACHED_LVOL_STAT_COLLECTOR_INTERVAL_SEC >= 15
+        assert c.CAP_MONITOR_INTERVAL_SEC >= 30
+        # failure-detection cadence untouched
+        assert c.NODE_MONITOR_INTERVAL_SEC == 3
+        assert c.DEVICE_MONITOR_INTERVAL_SEC == 5
