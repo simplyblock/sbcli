@@ -2329,7 +2329,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 db_controller, cluster_id, node_addr, ssd_pcie)
             if action == "cleanup":
                 # Repeated partial attempts can leave several stale records
-                # for the same endpoint, hence the loop.
+                # for the same endpoint; we clean one per task retry.
                 logger.warning(
                     f"Node {existing.get_id()} is in_creation status with endpoint "
                     f"{node_addr}, removing and deleting it")
