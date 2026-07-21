@@ -1539,6 +1539,13 @@ def _connect_to_remote_devs(
     # Some callers overwrite node.remote_devices with this return value. Make
     # the return value authoritative for existing SPDK state, not only for the
     # connect attempts above.
+    #
+    # Batched probe: ONE bdev dump answers every device's presence question
+    # below (previously one filtered get_bdevs RPC per device — the full
+    # sweep cost O(cluster devices) round-trips; measured share of the
+    # +31,710 excess get_bdevs, 2026-07-21 FD recovery). None -> fall back
+    # to per-device probes.
+    _sweep_bdev_names = _fetch_bdev_name_set(rpc_client)
     for node in nodes:
         if node.get_id() == this_node.get_id() or node.status not in allowed_node_statuses:
             continue
@@ -1556,11 +1563,15 @@ def _connect_to_remote_devs(
             if dev.status not in allowed_dev_statuses:
                 continue
             expected_bdev = f"remote_{dev.alceml_bdev}n1"
-            try:
-                if not rpc_client.get_bdevs(expected_bdev):
+            if _sweep_bdev_names is not None:
+                if expected_bdev not in _sweep_bdev_names:
                     continue
-            except Exception:
-                continue
+            else:
+                try:
+                    if not rpc_client.get_bdevs(expected_bdev):
+                        continue
+                except Exception:
+                    continue
             remote_bdev = RemoteDevice()
             remote_bdev.uuid = dev.uuid
             remote_bdev.alceml_name = dev.alceml_name
@@ -1573,6 +1584,40 @@ def _connect_to_remote_devs(
             remote_device_ids.add(dev.get_id())
 
     return remote_devices
+
+
+def _fetch_bdev_name_set(rpc_client):
+    """One unfiltered ``bdev_get_bdevs`` -> set of every bdev name and alias
+    on the node, or ``None`` if the dump could not be fetched (caller falls
+    back to per-name probes).
+
+    Purpose: the reconcile sweeps used to probe presence with ONE filtered
+    ``get_bdevs(name)`` RPC PER DEVICE — measured +31,710 excess get_bdevs
+    during the 2026-07-21 16-node FD recovery, each paying the full CP
+    round-trip. One dump per sweep answers every membership question
+    locally. This is the inverse of the 2026-07-16 O(N^2)-dumps problem:
+    that was a full dump PER DEVICE; this is a single dump reused for N
+    checks. Freshness is the same TOCTOU class as the sequential per-device
+    probes it replaces (a sweep was never atomic).
+
+    Membership must mirror filtered-get_bdevs semantics, which matches by
+    name OR alias — so aliases are included in the set.
+    """
+    try:
+        ret = rpc_client.get_bdevs()
+    except Exception as e:
+        logger.debug("bdev dump for batched probe failed: %s", e)
+        return None
+    if not ret:
+        return None
+    names = set()
+    for b in ret:
+        n = b.get("name")
+        if n:
+            names.add(n)
+        for a in (b.get("aliases") or []):
+            names.add(a)
+    return names
 
 
 def _verify_online_device_coverage(snode: StorageNode, repair: bool = True):
@@ -1652,13 +1697,23 @@ def _verify_online_device_coverage(snode: StorageNode, repair: bool = True):
             snode.get_id(), snode.failure_domain, excluded_fd_devs)
 
     def _probe_missing():
+        # Batched probe: one dump per pass instead of one filtered
+        # get_bdevs per expected device (up to ~97 per pass, two passes per
+        # restart — measured share of the +31,710 excess get_bdevs,
+        # 2026-07-21). Fallback keeps the old per-device semantics,
+        # including "probe error counts as missing".
+        names = _fetch_bdev_name_set(rpc_client)
         out = {}
         for bdev, dev in expected.items():
-            try:
-                if not rpc_client.get_bdevs(bdev):
+            if names is not None:
+                if bdev not in names:
                     out[bdev] = dev
-            except Exception:
-                out[bdev] = dev
+            else:
+                try:
+                    if not rpc_client.get_bdevs(bdev):
+                        out[bdev] = dev
+                except Exception:
+                    out[bdev] = dev
         return out
 
     missing = _probe_missing()
@@ -1698,6 +1753,9 @@ def sync_remote_devices_from_spdk(this_node: StorageNode):
     fresh_node = db_controller.get_storage_node_by_id(this_node.get_id())
     remote_by_id = {dev.get_id(): dev for dev in fresh_node.remote_devices}
     changed = False
+    # Batched probe: one dump instead of one filtered get_bdevs per peer
+    # device (O(cluster devices) per call). None -> per-device fallback.
+    _sweep_bdev_names = _fetch_bdev_name_set(rpc_client)
 
     for peer in db_controller.get_storage_nodes_by_cluster_id(fresh_node.cluster_id):
         if peer.get_id() == fresh_node.get_id():
@@ -1712,7 +1770,10 @@ def sync_remote_devices_from_spdk(this_node: StorageNode):
             ]:
                 continue
             expected_bdev = f"remote_{dev.alceml_bdev}n1"
-            if not rpc_client.get_bdevs(expected_bdev):
+            if _sweep_bdev_names is not None:
+                if expected_bdev not in _sweep_bdev_names:
+                    continue
+            elif not rpc_client.get_bdevs(expected_bdev):
                 continue
             remote_dev = remote_by_id.get(dev.get_id())
             if remote_dev:

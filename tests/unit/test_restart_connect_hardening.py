@@ -198,8 +198,14 @@ class TestVerifyOnlineDeviceCoverage(unittest.TestCase):
         dev = _make_dev("dev-1", "node-b")
         peer.nvme_devices = [dev]
         self._set_cluster(peer)
-        # First probe: absent. Probe after repair: present.
-        self.rpc.get_bdevs.side_effect = [[], [{"name": "remote_alceml_dev-1n1"}]]
+        # Probes are batched (one unfiltered dump per pass, 2026-07-21):
+        # pass 1 dump lacks the expected bdev; post-repair dump has it. The
+        # dumps must be non-empty — an empty dump is treated as a failed
+        # fetch and falls back to per-device filtered probes.
+        self.rpc.get_bdevs.side_effect = [
+            [{"name": "some_other_bdev"}],
+            [{"name": "remote_alceml_dev-1n1"}],
+        ]
 
         missing = storage_node_ops._verify_online_device_coverage(self.snode)
 
