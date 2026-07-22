@@ -209,7 +209,7 @@ def process_lvol_delete_finish(cluster, lvol):
                 break
         with snapshot_controller.lvstore_op_lock(
                 cluster.get_id(), lvol.lvs_name, node_id=primary_node.get_id()):
-            ret = lvol_controller.delete_lvol_from_node(lvol.get_id(), primary_node.get_id(), del_async=True)
+            ret = lvol_controller.delete_lvol_from_node(lvol.get_id(), primary_node.get_id(), sync=True)
         if not ret:
             logger.error(f"Failed to delete lvol from primary_node node: {primary_node.get_id()}")
 
@@ -223,7 +223,7 @@ def process_lvol_delete_finish(cluster, lvol):
             # sneaked in between async and sync delete").
             with snapshot_controller.lvstore_op_lock(
                     cluster.get_id(), lvol.lvs_name, node_id=sec_node.get_id()):
-                ret, err = sec_node.rpc_client().delete_lvol(lvol_bdev_name, del_async=True)
+                ret, err = sec_node.rpc_client().delete_lvol(lvol_bdev_name, sync=True)
             if not ret:
                 if "code" in err and err["code"] == -19:
                     logger.error(f"Sync delete completed with error: {err}")

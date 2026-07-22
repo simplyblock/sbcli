@@ -269,6 +269,87 @@ def _rollback_lvol_creation(lvol, node_ids):
             logger.error(f"Failed to rollback lvol {lvol.get_id()} from node {node_id}: {e}")
 
 
+def _rollback_snapshot_bdev(cluster_id, lvs_name, primary_node, snap_bdev_name,
+                            registered_nodes, restart_gated_ids, lock=True):
+    """Complete the async→sync delete protocol for a snapshot bdev that was
+    created on the leader but must be rolled back after a replica-registration
+    failure.
+
+    Invariant (2026-07-22): an async delete must ALWAYS be followed by sync
+    deletes on every peer that may hold the blob — peers where the snapshot
+    registration already succeeded, plus peers that were restart-gated during
+    the window (their journal replay can materialize the blob without any
+    registration). Peers that never saw the object and did not restart owe
+    nothing (a needless sync delete re-walks metadata the async pass cleaned:
+    "Clone entry not found" storm, run 20260716). The previous rollback fired
+    only the bare async delete and returned — 77 orphaned delete windows in
+    run 20260721-213609.
+
+    The primary's lvstore lock is held across the async delete AND its
+    completion poll, so no other object create/delete interleaves with the
+    open window on the leader; each peer sync delete runs under that peer's
+    own lvstore lock. Peers that cannot be reached get a durable sync-delete
+    task instead of being forgotten."""
+    db = DBController()
+    rpc_client = primary_node.rpc_client()
+    bdev_name = f"{lvs_name}/{snap_bdev_name}"
+
+    delete_completed = False
+    with lvstore_op_lock(cluster_id, lvs_name,
+                         node_id=primary_node.get_id(), enabled=lock):
+        ret, _ = rpc_client.delete_lvol(bdev_name)  # async initial delete
+        if not ret:
+            logger.error(f"Rollback: failed to delete {bdev_name} from node: "
+                         f"{primary_node.get_id()}")
+        else:
+            # Bounded completion poll INSIDE the lock: the delete window on
+            # the leader stays exclusive until the async pass has finished.
+            deadline = time.time() + 15
+            while time.time() < deadline:
+                try:
+                    st = rpc_client.bdev_lvol_get_lvol_delete_status(bdev_name)
+                except Exception as e:
+                    logger.error(f"Rollback: delete-status poll for {bdev_name} "
+                                 f"failed: {e}")
+                    break
+                if st in (0, 2, -2, -19):  # completed / not found
+                    delete_completed = True
+                    break
+                time.sleep(0.5)
+            if not delete_completed:
+                logger.error(f"Rollback: async delete of {bdev_name} did not "
+                             f"complete within 15s on {primary_node.get_id()}; "
+                             f"peers still get their sync deletes")
+
+    # Peers owing a sync delete: registered there, or restart-gated during
+    # the window. Everyone reachable gets it now (under their own lvstore
+    # lock); everyone else gets a durable task so the delete is never lost.
+    owing = {}
+    for node in registered_nodes:
+        owing[node.get_id()] = node
+    for node_id in restart_gated_ids:
+        if node_id not in owing:
+            try:
+                owing[node_id] = db.get_storage_node_by_id(node_id)
+            except KeyError:
+                continue
+    for node in owing.values():
+        if node.status == StorageNode.STATUS_ONLINE:
+            try:
+                with lvstore_op_lock(cluster_id, lvs_name,
+                                     node_id=node.get_id(), enabled=lock):
+                    ret, err = node.rpc_client().delete_lvol(bdev_name, sync=True)
+                if ret or (err and err.get("code") == -19):
+                    continue
+                logger.error(f"Rollback: sync delete of {bdev_name} on "
+                             f"{node.get_id()[:8]} failed ({err}); adding task")
+            except Exception as e:
+                logger.error(f"Rollback: sync delete of {bdev_name} on "
+                             f"{node.get_id()[:8]} raised: {e}; adding task")
+        tasks_controller.add_lvol_sync_del_task(
+            cluster_id, node.get_id(), bdev_name, primary_node.get_id())
+
+
 def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvols=None,
         bypass_migration_check=False, snap_type=SnapShot.TYPE_USER):
     try:
@@ -509,11 +590,18 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
                 else:
                     return False, f"Failed to create snapshot on node: {snode.get_id()}"
 
+            # Rollback bookkeeping: peers where the registration already
+            # succeeded owe a sync delete if we abort; restart-gated peers
+            # owe one too (journal replay can materialize the blob on them
+            # without any registration).
+            registered_secs = []
+            restart_gated_ids = []
             for sec in secondary_nodes:
                 # Per design: gate snapshot registration around restart port block.
                 from simplyblock_core.storage_node_ops import wait_or_delay_for_restart_gate, queue_for_restart_drain
                 gate = wait_or_delay_for_restart_gate(sec.get_id(), lvol.lvs_name)
                 if gate == "delay":
+                    restart_gated_ids.append(sec.get_id())
                     queue_for_restart_drain(
                         sec.get_id(), lvol.lvs_name,
                         lambda s=sec: s.rpc_client().bdev_lvol_snapshot_register(
@@ -531,13 +619,12 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
                     msg = f"Failed to register snapshot on node: {sec.get_id()}"
                     logger.error(msg)
                     logger.info(f"Removing snapshot from {primary_node.get_id()}")
-                    rpc_client = primary_node.rpc_client()
-                    with lvstore_op_lock(pool.cluster_id, lvol.lvs_name,
-                                         node_id=primary_node.get_id(), enabled=lock):
-                        ret, _ = rpc_client.delete_lvol(f"{lvol.lvs_name}/{snap_bdev_name}")
-                    if not ret:
-                        logger.error(f"Failed to delete snap from node: {snode.get_id()}")
+                    _rollback_snapshot_bdev(
+                        pool.cluster_id, lvol.lvs_name, primary_node,
+                        snap_bdev_name, registered_secs, restart_gated_ids,
+                        lock=lock)
                     return False, msg
+                registered_secs.append(sec)
 
     snap = SnapShot()
     snap.uuid = str(uuid.uuid4())
@@ -902,7 +989,7 @@ def _delete_locked(snap, snapshot_uuid, force_delete=False, lock=True):
 
         with lvstore_op_lock(snap.cluster_id, snap.lvol.lvs_name,
                              node_id=primary_node.get_id(), enabled=lock and not force_delete):
-            ret, _ = rpc_client.delete_lvol(snap.snap_bdev, del_async=False, special_delete=special_delete)
+            ret, _ = rpc_client.delete_lvol(snap.snap_bdev, sync=False, special_delete=special_delete)
         if not ret:
             logger.error(f"Failed to delete snap from node: {snode.get_id()}")
             if not force_delete:

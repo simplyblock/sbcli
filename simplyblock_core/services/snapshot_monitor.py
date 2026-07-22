@@ -67,7 +67,7 @@ def process_snap_delete_finish(snap, leader_node):
     # blob open_ref>1, which local clones bump and a clone-entry leak strands.
     special_delete = len(snap.instances) > 0
     if snap.deletion_status != leader_node.get_id():
-        ret, _ = leader_node.rpc_client().delete_lvol(snap.snap_bdev, del_async=False, special_delete=special_delete)
+        ret, _ = leader_node.rpc_client().delete_lvol(snap.snap_bdev, sync=False, special_delete=special_delete)
         if not ret:
             logger.error(f"Failed to delete snap from node: {snode.get_id()}")
         snap = db.get_snapshot_by_id(snap.get_id())
@@ -98,7 +98,7 @@ def process_snap_delete_finish(snap, leader_node):
             for nl in non_leaders)
         if any_sec_down:
             primary_node.lvol_del_sync_lock()
-        ret, _ = primary_node.rpc_client().delete_lvol(snap.snap_bdev, del_async=True, special_delete=special_delete)
+        ret, _ = primary_node.rpc_client().delete_lvol(snap.snap_bdev, sync=True, special_delete=special_delete)
         if not ret:
             logger.error(f"Failed to delete snap from node: {snode.get_id()}")
 
@@ -106,7 +106,7 @@ def process_snap_delete_finish(snap, leader_node):
     for non_leader in non_leaders:
         if non_leader.status in [StorageNode.STATUS_ONLINE]:
             logger.info(f"Sync delete bdev: {lvol_bdev_name} from node: {non_leader.get_id()}")
-            ret, err = non_leader.rpc_client().delete_lvol(lvol_bdev_name, del_async=True, special_delete=special_delete)
+            ret, err = non_leader.rpc_client().delete_lvol(lvol_bdev_name, sync=True, special_delete=special_delete)
             if not ret:
                 if "code" in err and err["code"] == -19:
                     logger.error(f"Sync delete completed with error: {err}")
@@ -198,7 +198,7 @@ def process_snap_delete(snap, snode, all_mini_lvols=None):
         # node by lvol migration (snap.instances non-empty), never for a local
         # clone or a stranded blob open_ref.
         special_delete = len(snap.instances) > 0
-        ret, _ = leader_node.rpc_client().delete_lvol(snap.snap_bdev, del_async=False, special_delete=special_delete)
+        ret, _ = leader_node.rpc_client().delete_lvol(snap.snap_bdev, sync=False, special_delete=special_delete)
         if not ret:
             logger.error(f"Failed to delete snap from node: {snode.get_id()}")
             return False

@@ -773,16 +773,22 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
                 return False, msg
             elif action == "proceed":
                 secondary_nodes.append(nl)
-            elif action == "queue":
-                # DB-backed deferral (NOT the in-memory drain queue: that is
-                # per-process and dies with it — incident 2026-07-10 lost a
-                # tertiary registration this way). The sync-op runner applies
-                # the registration once the node is serviceable and the lvol
-                # has settled ONLINE on the leader.
+            else:
+                # "queue", "skip", or any other non-proceed verdict: DB-backed
+                # deferral (NOT the in-memory drain queue: that is per-process
+                # and dies with it — incident 2026-07-10 lost a tertiary
+                # registration this way). "skip" used to drop the registration
+                # entirely on the assumption that node-restart recovery would
+                # rebuild it — but the verdict can be stale/wrong while the
+                # node is actually up (run 20260721-213609: LVOL_109's
+                # secondary answered add_ns 200ms later, yet was never
+                # registered; every later snapshot of it failed). The sync-op
+                # runner applies the registration once the node is
+                # serviceable; a registration the restart flow already
+                # replayed is idempotent.
                 tasks_controller.add_lvol_sync_op_task(
                     host_node.cluster_id, nl.get_id(), lvol.get_id(),
                     "register", secondary_index=_lvol_secondary_index(lvol, nl))
-            # "skip" — disconnected or pre_block, skip
 
         # Step 2: Execute on leader (with failover on failure)
         def _create_on_leader(leader):
@@ -795,7 +801,24 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
             all_nodes, lvol.lvs_name, _create_on_leader, known_leader=primary_node)
         if not success:
             logger.error(f"Failed to create lvol on leader: {result}")
-            lvol.remove(db_controller.kv_store)
+            # If a leader attempt got far enough to create the blob, its
+            # rollback issued the ASYNC initial delete and flipped the record
+            # to in_deletion (_fail_after_bdev / _create_bdev_stack). Keep the
+            # record: the lvol monitor's delete state machine owns completing
+            # that delete (poll → finish → sync replicas). Erasing it here
+            # orphaned the async delete with no sync follow-up — 27 open
+            # delete windows in run 20260721-213609.
+            try:
+                fresh = db_controller.get_lvol_by_id(lvol.get_id())
+            except KeyError:
+                fresh = None
+            if fresh is not None and fresh.status == LVol.STATUS_IN_DELETION:
+                logger.warning(
+                    "LVol %s rollback left an in-flight async delete; keeping "
+                    "the record in in_deletion for the monitor to complete",
+                    lvol.get_id())
+            else:
+                lvol.remove(db_controller.kv_store)
             return False, str(result)
 
         lvol_bdev = result
@@ -842,16 +865,19 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
                     tasks_controller.add_lvol_sync_op_task(
                         host_node.cluster_id, sec.get_id(), lvol.get_id(),
                         "register", secondary_index=reg_index)
-            elif action == "kill_and_wait":
-                logger.warning("Non-leader %s needs kill+restart for lvol create", sec.get_id()[:8])
+            else:
+                # "kill_and_wait", "queue", "skip", "reject": the leader op is
+                # already committed, so a registration that cannot run NOW must
+                # never be dropped — defer every non-proceed verdict to the
+                # durable sync-op task (a silently skipped registration leaves
+                # the replica permanently missing and fails every later
+                # snapshot of the volume on that node; run 20260721-213609,
+                # LVOL_109).
+                if action == "kill_and_wait":
+                    logger.warning("Non-leader %s needs kill+restart for lvol create", sec.get_id()[:8])
                 tasks_controller.add_lvol_sync_op_task(
                     host_node.cluster_id, sec.get_id(), lvol.get_id(),
                     "register", secondary_index=reg_index)
-            elif action == "queue":
-                tasks_controller.add_lvol_sync_op_task(
-                    host_node.cluster_id, sec.get_id(), lvol.get_id(),
-                    "register", secondary_index=reg_index)
-            # "skip", "reject" at this stage → already handled or skip
 
     lvol.status = LVol.STATUS_ONLINE
     lvol.write_to_db(db_controller.kv_store)
@@ -926,6 +952,22 @@ def _create_bdev_stack(lvol, snode, is_primary=True):
             if created_bdevs:
                 # rollback
                 _remove_bdev_stack(created_bdevs[::-1], rpc_client)
+                # If the rollback tore down a blob-carrying bdev on the
+                # primary, it fired the ASYNC initial delete — that delete
+                # must be completed by the monitor's state machine (poll →
+                # finish → sync replicas), so flip the record to in_deletion
+                # here. Callers must not erase the record in this state (see
+                # add_lvol_ha's leader-failure branch).
+                if is_primary and any(
+                        b['type'] in ("bdev_lvol", "bdev_lvol_clone")
+                        for b in created_bdevs):
+                    try:
+                        lvol.status = LVol.STATUS_IN_DELETION
+                        lvol.write_to_db(DBController().kv_store)
+                    except Exception:
+                        logger.exception(
+                            "failed to persist in_deletion after stack "
+                            "rollback for %s", lvol.get_id())
             return False, f"Failed to create BDev: {name}"
 
     return True, None
@@ -1287,7 +1329,7 @@ def recreate_lvol(lvol_id):
     return lvol
 
 
-def _remove_bdev_stack(bdev_stack, rpc_client, del_async=False):
+def _remove_bdev_stack(bdev_stack, rpc_client, sync=False):
     for bdev in bdev_stack:
         # if 'status' in bdev and bdev['status'] == 'deleted':
         #     continue
@@ -1301,7 +1343,7 @@ def _remove_bdev_stack(bdev_stack, rpc_client, del_async=False):
             pass
         elif type == "ultra_lvol":
             ret = rpc_client.ultra21_lvol_dismount(name)
-        elif type == "crypto" and not del_async:
+        elif type == "crypto" and not sync:
             ret = rpc_client.lvol_crypto_delete(name)
             if ret:
                 ret = rpc_client.lvol_crypto_key_delete(f'key_{name}')
@@ -1320,13 +1362,13 @@ def _remove_bdev_stack(bdev_stack, rpc_client, del_async=False):
                 logger.info(f"BDev {name} already deleted, skipping")
                 bdev['status'] = 'deleted'
                 continue
-            ret, _ = rpc_client.delete_lvol(name, del_async=del_async)
+            ret, _ = rpc_client.delete_lvol(name, sync=sync)
         elif type == "bdev_lvol_clone":
             if not rpc_client.get_bdevs(name):
                 logger.info(f"BDev {name} already deleted, skipping")
                 bdev['status'] = 'deleted'
                 continue
-            ret, _ = rpc_client.delete_lvol(name,  del_async=del_async)
+            ret, _ = rpc_client.delete_lvol(name,  sync=sync)
         else:
             logger.debug(f"Unknown BDev type: {type}")
             continue
@@ -1338,7 +1380,7 @@ def _remove_bdev_stack(bdev_stack, rpc_client, del_async=False):
     return True
 
 
-def delete_lvol_from_node(lvol_id, node_id, clear_data=True, del_async=False, force=False):
+def delete_lvol_from_node(lvol_id, node_id, clear_data=True, sync=False, force=False):
     db_controller = DBController()
     try:
         lvol = db_controller.get_lvol_by_id(lvol_id)
@@ -1386,7 +1428,7 @@ def delete_lvol_from_node(lvol_id, node_id, clear_data=True, del_async=False, fo
 
     # 2- remove bdevs
     logger.info("Removing bdev stack")
-    ret = _remove_bdev_stack(lvol.bdev_stack[::-1], rpc_client, del_async)
+    ret = _remove_bdev_stack(lvol.bdev_stack[::-1], rpc_client, sync)
     if not ret:
         return False
 

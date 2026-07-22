@@ -143,7 +143,7 @@ def main():
                                         node.cluster_id,
                                         lvol_bdev_name.split("/")[0],
                                         node_id=node.get_id()):
-                                    ret, err = node.rpc_client().delete_lvol(lvol_bdev_name, del_async=True)
+                                    ret, err = node.rpc_client().delete_lvol(lvol_bdev_name, sync=True)
                             except Exception as e:
                                 msg = (f"Sync delete of {lvol_bdev_name} on {node.get_id()} "
                                        f"failed: {e}; will retry")

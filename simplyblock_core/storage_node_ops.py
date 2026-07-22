@@ -9581,14 +9581,14 @@ def safe_delete_bdev(name, node_id):
             time.sleep(1)
 
         elif ret == 0 or ret == 2:  # Lvol may have already been deleted (not found) or delete completed
-            ret, _ = primary_node.rpc_client().delete_lvol(bdev_name, del_async=True)
+            ret, _ = primary_node.rpc_client().delete_lvol(bdev_name, sync=True)
             if not ret:
                 logger.error(f"Failed to delete bdev: {bdev_name} from node: {primary_node.get_id()}")
                 return False
 
             logger.info(f"deletion completed on primary: {bdev_name}")
             logger.info(f"deleting from secondary: {bdev_name}")
-            ret, _ = secondary_node.rpc_client().delete_lvol(bdev_name, del_async=True)
+            ret, _ = secondary_node.rpc_client().delete_lvol(bdev_name, sync=True)
             if not ret:
                 logger.error(f"Failed to delete bdev: {bdev_name} from node: {secondary_node.get_id()}")
                 return False

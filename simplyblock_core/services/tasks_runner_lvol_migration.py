@@ -411,7 +411,7 @@ def _delete_bdev_blocking(bdev_name, primary_rpc, secondary_rpc=None, tertiary_r
     """
     Two-phase blocking bdev delete.
 
-    Phase 1 — primary only, sync=False (del_async=False): initiates the async
+    Phase 1 — primary only, sync=False (sync=False): initiates the async
       delete.  By default (coalescing=False) special_delete=True tells SPDK to
       free the bdev's own clusters without merging them into any child —
       correct for source cleanup, rollback, and any path where no child needs
@@ -420,9 +420,9 @@ def _delete_bdev_blocking(bdev_name, primary_rpc, secondary_rpc=None, tertiary_r
       snapshot, where the surviving lvol/snap needs the merged data).
     Wait   — poll bdev_lvol_get_lvol_delete_status on primary until done.
     Phase 2 — all nodes (primary + secondary + tertiary), sync=True
-      (del_async=True, special_delete=False): finalises the deletion on every replica.
+      (sync=True, special_delete=False): finalises the deletion on every replica.
     """
-    ret, _ = primary_rpc.delete_lvol(bdev_name, del_async=False, special_delete=not coalescing)
+    ret, _ = primary_rpc.delete_lvol(bdev_name, sync=False, special_delete=not coalescing)
     if not ret:
         raise RuntimeError(f"delete bdev {bdev_name}: initiation failed")
 
@@ -440,7 +440,7 @@ def _delete_bdev_blocking(bdev_name, primary_rpc, secondary_rpc=None, tertiary_r
 
     for rpc in filter(None, [primary_rpc, secondary_rpc, tertiary_rpc]):
         try:
-            rpc.delete_lvol(bdev_name, del_async=True, special_delete=False)
+            rpc.delete_lvol(bdev_name, sync=True, special_delete=False)
         except Exception as e:
             logger.warning(f"delete bdev {bdev_name} finalize on replica (non-fatal): {e}")
 
