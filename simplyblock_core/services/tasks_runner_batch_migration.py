@@ -397,14 +397,20 @@ def _flip_ana_to_optimized(group, member_migrations, src_node, src_rpc, tgt_node
                     f"(non-fatal): {e}")
                 ns_by_uuid = {}
 
+            # Two-pass swap: remove ALL old namespaces first, then add ALL new ones.
+            # A per-member remove+add loop would cause N sequential "namespace gone"
+            # events visible to initiators — each one triggering a reconnect. Batching
+            # the removes into one pass and the adds into a second pass collapses this
+            # into a single collective disruption, which initiators handle cleanly.
+            ns_adds = []  # (tgt_ns_bdev, uuid, guid) — collected during remove pass
             for m in member_migrations:
                 try:
                     lvol = db.get_lvol_by_id(m.lvol_id)
                     tgt_bdev_short = _lvol_tgt_bdev_name(lvol.lvol_bdev)
-                    if lvol.crypto_bdev:
-                        tgt_ns_bdev = f"crypto_{tgt_bdev_short}"
-                    else:
-                        tgt_ns_bdev = f"{tgt_node.lvstore}/{tgt_bdev_short}"
+                    tgt_ns_bdev = (
+                        f"crypto_{tgt_bdev_short}" if lvol.crypto_bdev
+                        else f"{tgt_node.lvstore}/{tgt_bdev_short}"
+                    )
                     nsid = ns_by_uuid.get(lvol.uuid)
                     if nsid:
                         try:
@@ -420,7 +426,15 @@ def _flip_ana_to_optimized(group, member_migrations, src_node, src_rpc, tgt_node
                         logger.warning(
                             f"Group {group.uuid[:8]}: no namespace for uuid={lvol.uuid[:8]} "
                             f"on {tgt['node_id'][:8]}; skipping remove")
-                    ret = tgt['rpc'].nvmf_subsystem_add_ns(nqn, tgt_ns_bdev, lvol.uuid, lvol.guid)
+                    ns_adds.append((tgt_ns_bdev, lvol.uuid, lvol.guid))
+                except Exception as e:
+                    logger.warning(
+                        f"Group {group.uuid[:8]}: namespace swap member {m.uuid[:8]} "
+                        f"on {tgt['node_id'][:8]} (non-fatal): {e}")
+
+            for tgt_ns_bdev, uuid, guid in ns_adds:
+                try:
+                    ret = tgt['rpc'].nvmf_subsystem_add_ns(nqn, tgt_ns_bdev, uuid, guid)
                     if not ret:
                         logger.error(
                             f"Group {group.uuid[:8]}: add ns {tgt_ns_bdev} failed "
@@ -431,7 +445,7 @@ def _flip_ana_to_optimized(group, member_migrations, src_node, src_rpc, tgt_node
                             f"added {tgt_ns_bdev}")
                 except Exception as e:
                     logger.warning(
-                        f"Group {group.uuid[:8]}: namespace swap member {m.uuid[:8]} "
+                        f"Group {group.uuid[:8]}: add ns {tgt_ns_bdev} "
                         f"on {tgt['node_id'][:8]} (non-fatal): {e}")
 
         # Step 5: all TGT paths → correct ANA state at TGT port
