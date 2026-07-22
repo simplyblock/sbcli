@@ -345,7 +345,7 @@ class StorageNode(BaseNodeObject):
         logger.info("Pre-staged hublvol subsystem %s on %s (port %s)",
                     nqn, self.get_id(), port)
 
-    def create_hublvol(self, cluster_nqn=None):
+    def create_hublvol(self, cluster_nqn=None, defer_db_write=False):
         """Create a hublvol for this node's lvstore.
 
         If cluster_nqn is provided, use a shared NQN scheme for multipath.
@@ -396,11 +396,18 @@ class StorageNode(BaseNodeObject):
 
             raise
 
-        self.write_to_db()
+        if not defer_db_write:
+            self.write_to_db()
         return self.hublvol
 
-    def create_transfer_hublvol(self):
-        """Create a hublvol for this node's transfer lvstore."""
+    def create_transfer_hublvol(self, defer_db_write=False):
+        """Create a hublvol for this node's transfer lvstore.
+
+        ``defer_db_write=True``: skip the full-object node write (an FDB
+        round-trip measured ~150ms INSIDE the port-block window, and a
+        member of the stale-full-write class behind the 2026-07-21 status
+        resurrection) — the caller persists ``transfer_hublvol`` atomically
+        after the unblock."""
         logger.info(f'Creating transfer hublvol on {self.get_id()}')
 
         if not self.transfer_hublvol or not self.transfer_hublvol.bdev_name:
@@ -454,7 +461,8 @@ class StorageNode(BaseNodeObject):
 
             raise
 
-        self.write_to_db()
+        if not defer_db_write:
+            self.write_to_db()
         return self.transfer_hublvol
 
 

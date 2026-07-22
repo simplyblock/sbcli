@@ -507,3 +507,50 @@ class TestWindowPriorityDrain:
         for t in threads:
             t.join(timeout=5)
         assert storage_node_ops._inflight_bounded["n"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Deferred in-window node persist (2026-07-22): create_transfer_hublvol's
+# full-object write (~150ms FDB round-trip, caught in-window by the
+# [NODE-WRITE] tripwire) moves post-unblock and becomes an atomic
+# field-only update.
+# ---------------------------------------------------------------------------
+class TestDeferredHublvolPersist:
+    def test_creators_accept_defer_flag(self):
+        import inspect
+        for m in (StorageNode.create_transfer_hublvol,
+                  StorageNode.create_hublvol):
+            assert "defer_db_write" in inspect.signature(m).parameters, m
+
+    def test_deferred_skips_write(self, monkeypatch):
+        wrote = {"n": 0}
+        n = StorageNode()
+        n.uuid = "n-defer"
+        n.lvstore = "LVS_D"
+        n.cluster_id = "c1"
+        n.data_nics = []
+        n.active_rdma = False
+        n.hublvol = types.SimpleNamespace(nvmf_port=4600)
+        monkeypatch.setattr(
+            StorageNode, "write_to_db",
+            lambda self, *a, **k: wrote.__setitem__("n", wrote["n"] + 1))
+        rpc = types.SimpleNamespace(
+            get_bdevs=lambda name=None: [{"name": name, "uuid": "u-t"}],
+            subsystem_get=lambda nqn: {"listen_addresses": [],
+                                       "namespaces": [{"uuid": "u-t"}]},
+        )
+        n.rpc_client = lambda *a, **k: rpc
+        n.create_transfer_hublvol(defer_db_write=True)
+        assert wrote["n"] == 0
+        n.create_transfer_hublvol()
+        assert wrote["n"] == 1
+
+    def test_impl_wires_defer_and_atomic_persist(self):
+        import inspect
+        src = inspect.getsource(storage_node_ops._recreate_lvstore_impl)
+        assert "create_transfer_hublvol(defer_db_write=True)" in src
+        assert "_persist_deferred_node_fields()" in src
+        assert "atomic_update" in src  # field-only persist, not full write
+        # persist runs right after the window closes (flush point)
+        flush_nl_persist = "_flush_port_events()\n        _persist_deferred_node_fields()"
+        assert flush_nl_persist in src

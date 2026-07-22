@@ -6823,9 +6823,17 @@ def _recreate_lvstore_on_non_leader_impl(snode, leader_node, primary_node, activ
                     f"lvstore {primary_node.lvstore} did not recover after examine "
                     f"on non-leader {snode.get_id()}")
 
-        # Per-lvol name-filtered probes (bdev_get_bdevs resolves name or
-        # alias/uuid) instead of one unfiltered dump — the full dump costs
-        # seconds of SPDK app-thread time on large clusters.
+    # Per-lvol recovery verification — DEFERRED to after the port unblock
+    # (2026-07-22, user decision): the probes cost 60-230ms of blocked-window
+    # time and feed only the abort decision; a post-unblock abort kills SPDK
+    # (crash-equivalent, handled by failover) instead of a clean in-window
+    # abort. Runs before ### 9 so no subsystem binds a missing blob.
+    # Per-lvol name-filtered probes, NOT one unfiltered dump (the dump costs
+    # seconds of SPDK app-thread time on large clusters).
+    def _deferred_lvol_verify():
+        if activation_mode:
+            return
+
         def _lvol_bdev_registered(lv):
             for candidate in (lv.lvol_uuid, f"{lv.lvs_name}/{lv.lvol_bdev}"):
                 try:
@@ -7058,6 +7066,7 @@ def _recreate_lvstore_on_non_leader_impl(snode, leader_node, primary_node, activ
     _release_block_gate()
     _flush_port_events()
     _release_hub_lock()
+    _deferred_lvol_verify()
     _set_restart_phase(snode, primary_node.lvstore, StorageNode.RESTART_PHASE_POST_UNBLOCK, db_controller)
     if _leader_block["max"]:
         logger.info("[RESTART] Longest client-port block for %s: %.3fs "
@@ -7624,6 +7633,25 @@ def _recreate_lvstore_impl(snode, force=False, lvs_primary=None, activation_mode
     # locks internally (the pre-fix behavior).
     _hub_locks: dict = {}
 
+    # Deferred persistence of hublvol/transfer_hublvol metadata mutated
+    # in-window with defer_db_write=True. Persisted ATOMICALLY (field-only
+    # update) post-unblock — a full-object write here is both an in-window
+    # FDB round-trip and a stale-write hazard (2026-07-21 resurrection).
+    _deferred_node_persist = {"needed": False}
+
+    def _persist_deferred_node_fields():
+        if not _deferred_node_persist.pop("needed", False):
+            return
+        try:
+            db_controller.atomic_update(
+                snode,
+                lambda n, h=snode.hublvol, t=snode.transfer_hublvol: (
+                    setattr(n, "hublvol", h),
+                    setattr(n, "transfer_hublvol", t)))
+        except Exception as _pe:
+            logger.error("Deferred hublvol persist failed for %s: %s",
+                         snode.get_id(), _pe)
+
     def _release_hub_locks():
         for _pid in list(_hub_locks):
             lk = _hub_locks.pop(_pid, None)
@@ -7658,6 +7686,7 @@ def _recreate_lvstore_impl(snode, force=False, lvs_primary=None, activation_mode
         """Abort: kill SPDK, set offline, unblock every blocked peer, raise."""
         logger.error("Aborting recreate_lvstore on %s for %s: %s",
                      snode.get_id(), lvs_name, reason)
+        _persist_deferred_node_fields()
         _release_hub_locks()
         _kill_app()
         for peer in list(blocked_peers):
@@ -8032,17 +8061,24 @@ def _recreate_lvstore_impl(snode, force=False, lvs_primary=None, activation_mode
         if not force:
             _abort_restart_and_unblock("Failed to recover lvstore")
 
-    # Validate all bdev recovery. Per-lvol name-filtered probes (check_bdev
-    # with rpc_client resolves by name or alias/uuid) instead of one unfiltered
-    # bdev_get_bdevs dump — the full dump costs seconds of SPDK app-thread
-    # time on large clusters (O(cluster size) bdev inventory).
-    for lv in lvol_list:
-        bdev_name = lv.lvol_uuid
-        passed = health_controller.check_bdev(bdev_name, rpc_client=rpc_client)
-        if not passed:
-            logger.error(f"Failed to recover BDev: {bdev_name} on node: {snode.get_id()}")
-            if not force:
-                _abort_restart_and_unblock("Failed to recover lvstore")
+    # Validate all bdev recovery — DEFERRED to after the port unblock
+    # (2026-07-22, user decision): the per-lvol probes cost 60-230ms of
+    # blocked-window time and their only consumer is the abort decision. An
+    # abort after the unblock kills SPDK outright, which to the cluster is a
+    # node crash — a state the failover machinery already handles — so the
+    # rare missing-blob case trades a clean in-window abort for a
+    # crash-equivalent one, and every restart stops paying the probes inside
+    # the client-visible outage. Runs before ### 9 so no subsystem is bound
+    # to a missing blob. Per-lvol name-filtered probes, NOT one unfiltered
+    # dump (the dump costs seconds of SPDK app-thread time at scale).
+    def _deferred_lvol_verify():
+        for lv in lvol_list:
+            bdev_name = lv.lvol_uuid
+            passed = health_controller.check_bdev(bdev_name, rpc_client=rpc_client)
+            if not passed:
+                logger.error(f"Failed to recover BDev: {bdev_name} on node: {snode.get_id()}")
+                if not force:
+                    _abort_restart_and_unblock("Failed to recover lvstore")
 
     ### 7- take leadership
     # Derive the kernel-side role from snode's topology relative to lvs_node.
@@ -8105,7 +8141,11 @@ def _recreate_lvstore_impl(snode, force=False, lvs_primary=None, activation_mode
                     logger.error("Error creating hublvol: %s", e.message)
                     _abort_restart_and_unblock(f"recreate_hublvol raised: {e.message}")
                 try:
-                    snode.create_transfer_hublvol()
+                    # defer_db_write: the full-object node write (~150ms FDB
+                    # round-trip caught in-window by the [NODE-WRITE]
+                    # tripwire) is persisted atomically post-unblock below.
+                    snode.create_transfer_hublvol(defer_db_write=True)
+                    _deferred_node_persist["needed"] = True
                 except RPCException as e:
                     logger.error("Error creating transfer hublvol: %s", e.message)
 
@@ -8214,6 +8254,9 @@ def _recreate_lvstore_impl(snode, force=False, lvs_primary=None, activation_mode
         # so the next recreate's block window can start while lvols attach.
         _release_block_gate()
         _flush_port_events()
+        _persist_deferred_node_fields()
+
+    _deferred_lvol_verify()
 
     ### 9- add lvols to subsystems
     executor = ThreadPoolExecutor(max_workers=50)
@@ -8224,6 +8267,7 @@ def _recreate_lvstore_impl(snode, force=False, lvs_primary=None, activation_mode
     # Phase transition: post_unblock — delayed sync deletes and registrations can now proceed
     _release_block_gate()
     _flush_port_events()
+    _persist_deferred_node_fields()
     _release_hub_locks()
     _set_restart_phase(snode, lvs_name, StorageNode.RESTART_PHASE_POST_UNBLOCK, db_controller)
     if _block_longest["sec"]:
