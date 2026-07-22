@@ -2,7 +2,7 @@
 K8s-native node migration E2E test.
 
 Migrates a randomly chosen storage node to a user-specified worker node
-by patching the StorageNode CRD with action=restart.  FIO runs as K8s
+by creating a StorageNodeOps CR with action=migrate.  FIO runs as K8s
 Jobs throughout the migration to verify I/O is not interrupted.
 
 No SSH to worker nodes is required (Talos-compatible).
@@ -391,35 +391,36 @@ class K8sNativeNodeMigrationTest(TestClusterBase):
 
         migration_timestamp = int(datetime.now().timestamp())
 
-        self.k8s_utils.patch_storage_node_migrate(
+        ops_name, storage_node_cr = self.k8s_utils.patch_storage_node_migrate(
             node_uuid=migrate_node_uuid,
             target_worker=self.migrate_to_worker,
             new_ssd_pcie=self.new_ssd_pcie if self.new_ssd_pcie else None,
             reattach_volume=self.reattach_volume,
         )
 
-        # Verify the CRD patch was applied
-        verify_out, _ = self.k8s_utils._exec_kubectl(
-            f"kubectl get storagenodesets.storage.simplyblock.io simplyblock-node "
-            f"-n {self.k8s_utils.namespace} "
-            f"-o jsonpath='{{.spec.action}} {{.spec.nodeUUID}} {{.spec.workerNode}}'"
+        # Verify the StorageNodeOps CR was created
+        ops_json = self.k8s_utils.get_resource_json(
+            "storagenodeops.storage.simplyblock.io", ops_name,
+            namespace=self.k8s_utils.namespace,
         )
-        self.logger.info(f"CRD spec after patch: {verify_out}")
-        assert migrate_node_uuid in verify_out, (
-            f"CRD patch verification failed: nodeUUID {migrate_node_uuid} "
-            f"not found in CRD spec: {verify_out}"
+        ops_spec = ops_json.get("spec", {})
+        self.logger.info(f"StorageNodeOps spec after create: {ops_spec}")
+        assert ops_spec.get("action") == "migrate", (
+            f"StorageNodeOps verification failed: expected action=migrate, "
+            f"got: {ops_spec}"
         )
-        assert self.migrate_to_worker in verify_out, (
-            f"CRD patch verification failed: workerNode '{self.migrate_to_worker}' "
-            f"not found in CRD spec: {verify_out}"
+        assert ops_spec.get("storageNodeRef") == storage_node_cr, (
+            f"StorageNodeOps verification failed: expected "
+            f"storageNodeRef={storage_node_cr}, got: {ops_spec}"
         )
 
         # ── Step 5: Wait for migration to complete ────────────────────────
-        self.logger.info("Step 5: Waiting for migration to complete")
+        self.logger.info("Step 5: Waiting for StorageNodeOps to complete")
 
-        sleep_n_sec(30)
+        # Wait for the StorageNodeOps CR to reach Succeeded
+        self.k8s_utils.wait_storage_node_ops_done(ops_name, timeout=600)
 
-        # Wait for node to come back online
+        # Also verify via sbcli that node is back online
         self.sbcli_utils.wait_for_storage_node_status(
             node_id=migrate_node_uuid,
             status="online",

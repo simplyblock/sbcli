@@ -179,9 +179,22 @@ class _MassCreateDeleteMixin:
             or "exceeded the max number of lvol" in text
         )
 
+    def _is_object_limit_error(self, exc):
+        """Detect SPDK per-node object limit (2,000 per core).
+
+        The controller returns HTTP 400 with 'Object limit reached'
+        when the node cannot host more lvols/snapshots/clones.
+        This is a hard limit — no retry can overcome it.
+        """
+        return "object limit reached" in str(exc).lower()
+
     def _is_terminal_error(self, exc):
         """Return True if retrying is pointless (limit or capacity hit)."""
-        return self._is_max_lvols_error(exc) or self._is_capacity_error(exc)
+        return (
+            self._is_max_lvols_error(exc)
+            or self._is_capacity_error(exc)
+            or self._is_object_limit_error(exc)
+        )
 
     # ── Bulk verify / soft validation ────────────────────────────────────────
 
@@ -1831,6 +1844,11 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
                         f"(prior attempt succeeded) — treating as success"
                     )
                     return
+                if self._is_object_limit_error(e):
+                    # Hard limit — no internal retry can help. Raise
+                    # immediately so _batch_exec_persistent sees it as
+                    # terminal and stops the entire phase.
+                    raise
                 if self._is_sync_deletion_error(e) and sync_retries < 5:
                     sync_retries += 1
                     sleep_n_sec(15)
@@ -2327,24 +2345,41 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
 
     # ── Cleanup safety net ─────────────────────────────────────────────────
 
+    # Maximum wall-clock time for the entire cleanup phase.
+    # Prevents stuck in_deletion lvols from blocking the test indefinitely.
+    CLEANUP_TIMEOUT = 1800  # 30 minutes
+
     def _phase_cleanup(self):
-        self.logger.info("=== Cleanup ===")
-        try:
-            self.sbcli_utils.delete_all_clones()
-        except Exception as exc:
-            self.logger.warning(f"[cleanup] delete_all_clones: {exc}")
-        try:
-            self.sbcli_utils.delete_all_snapshots()
-        except Exception as exc:
-            self.logger.warning(f"[cleanup] delete_all_snapshots: {exc}")
-        try:
-            self.sbcli_utils.delete_all_lvols()
-        except Exception as exc:
-            self.logger.warning(f"[cleanup] delete_all_lvols: {exc}")
-        try:
-            self.sbcli_utils.delete_all_storage_pools()
-        except Exception as exc:
-            self.logger.warning(f"[cleanup] delete_all_storage_pools: {exc}")
+        timeout = self.CLEANUP_TIMEOUT
+        self.logger.info(f"=== Cleanup (timeout={timeout}s) ===")
+
+        steps = [
+            ("delete_all_clones", self.sbcli_utils.delete_all_clones),
+            ("delete_all_snapshots", self.sbcli_utils.delete_all_snapshots),
+            ("delete_all_lvols", self.sbcli_utils.delete_all_lvols),
+            ("delete_all_storage_pools", self.sbcli_utils.delete_all_storage_pools),
+        ]
+
+        def _run_cleanup():
+            for label, fn in steps:
+                try:
+                    fn()
+                except Exception as exc:
+                    self.logger.warning(f"[cleanup] {label}: {exc}")
+
+        cleanup_thread = threading.Thread(
+            target=_run_cleanup, daemon=True
+        )
+        cleanup_thread.start()
+        cleanup_thread.join(timeout=timeout)
+
+        if cleanup_thread.is_alive():
+            self.logger.warning(
+                f"[cleanup] Timed out after {timeout}s — "
+                f"some resources may not have been cleaned up. "
+                f"The background cleanup thread will continue "
+                f"but the test will proceed to report results."
+            )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -4004,12 +4039,12 @@ class MassCreateDeletePersistent_3000x1_Docker(_MassCreateDeleteDocker):
     NS_PER_SUBSYSTEM = 3000
 
 
-class MassCreateDeletePersistent_300x10_10Snap_Docker(_MassCreateDeleteDocker):
-    """300 ns/sub × 10 subsystems = 3000 lvols, 10 snapshots each = 60000 snapshots (persistent retry)."""
+class MassCreateDeletePersistent_300x10_6Snap_Docker(_MassCreateDeleteDocker):
+    """300 ns/sub × 10 subsystems = 3000 lvols, 6 snapshots each = 18000 snapshots (persistent retry)."""
     PERSISTENT_RETRY = True
     NUM_SUBSYSTEMS = 10
     NS_PER_SUBSYSTEM = 300
-    SNAPSHOTS_PER_LVOL = 10
+    SNAPSHOTS_PER_LVOL = 6
 
 
 # K8s persistent variants
