@@ -351,3 +351,78 @@ class TestBlockedPortsBatching:
         # failure-detection cadence untouched
         assert c.NODE_MONITOR_INTERVAL_SEC == 3
         assert c.DEVICE_MONITOR_INTERVAL_SEC == 5
+
+
+# ---------------------------------------------------------------------------
+# Pre-block controller attach (2026-07-22): the NVMe-oF attach is inert until
+# bdev_lvol_connect_hublvol registers the redirect, so it runs BEFORE the
+# window; only set_lvs_opts + connect_hublvol remain inside.
+# ---------------------------------------------------------------------------
+class TestAttachOnlyPrestage:
+    def _wire(self, monkeypatch, bdev_present_after=0):
+        """Node whose rpc counts calls; get_bdevs turns truthy after N polls."""
+        calls = {"set_opts": 0, "connect": 0, "get_bdevs": 0, "reconcile": 0}
+
+        def get_bdevs(name=None):
+            calls["get_bdevs"] += 1
+            return ([{"name": name}]
+                    if calls["get_bdevs"] > bdev_present_after else [])
+        rpc = types.SimpleNamespace(
+            get_bdevs=get_bdevs,
+            bdev_lvol_set_lvs_opts=lambda *a, **k: calls.__setitem__(
+                "set_opts", calls["set_opts"] + 1) or True,
+            bdev_lvol_connect_hublvol=lambda *a, **k: calls.__setitem__(
+                "connect", calls["connect"] + 1) or True,
+        )
+        n = StorageNode()
+        n.uuid = "conn-1"
+        n.rpc_client = lambda *a, **k: rpc
+
+        class _Coord:
+            def __init__(self, _db): pass
+
+            def reconcile(self, *a, **k):
+                calls["reconcile"] += 1
+                return True
+        monkeypatch.setattr(hublvol_reconnect, "HublvolReconnectCoordinator",
+                            _Coord)
+        import time as _t
+        monkeypatch.setattr(_t, "sleep", lambda *_a: None)
+        hub = types.SimpleNamespace(bdev_name="LVS_9/hublvol",
+                                    nqn="nqn.t:hub", nvmf_port=4600)
+        primary = types.SimpleNamespace(
+            get_id=lambda: "prim-1", lvstore="LVS_9", jm_vuid=9,
+            hublvol=hub,
+            get_lvol_subsys_port=lambda _l: 4500,
+            get_hublvol_port=lambda _l: 4600)
+        return n, primary, calls
+
+    def test_attach_only_skips_lvs_wiring(self, monkeypatch):
+        # first probe finds no bdev -> reconcile (the attach) runs
+        n, primary, calls = self._wire(monkeypatch, bdev_present_after=1)
+        ok = n.connect_to_hublvol(primary, role="secondary",
+                                  attach_only=True)
+        assert ok is True
+        assert calls["reconcile"] == 1
+        assert calls["set_opts"] == 0 and calls["connect"] == 0, \
+            "attach_only must NOT touch set_lvs_opts/connect_hublvol"
+
+    def test_full_connect_waits_for_n1_bdev(self, monkeypatch):
+        # bdev absent on first probes (empty-subsystem pre-attach; ns added
+        # in-window, AER latency) -> the n1-wait must poll until it appears
+        # and then complete the LVS wiring.
+        n, primary, calls = self._wire(monkeypatch, bdev_present_after=3)
+        ok = n.connect_to_hublvol(primary, role="secondary")
+        assert ok is True
+        assert calls["set_opts"] == 1 and calls["connect"] == 1
+        assert calls["get_bdevs"] >= 4  # initial + reconcile-path + polls
+
+    def test_preblock_attach_wired_in_both_impls(self):
+        import inspect
+        for fn in (storage_node_ops._recreate_lvstore_impl,
+                   storage_node_ops._recreate_lvstore_on_non_leader_impl):
+            src = inspect.getsource(fn)
+            assert "attach_only=True" in src, fn.__name__
+            # and the pre-block attach precedes the block section
+            assert src.index("attach_only=True") < src.index("### 3-"), \
+                fn.__name__

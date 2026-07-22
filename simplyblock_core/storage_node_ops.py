@@ -6491,6 +6491,26 @@ def _recreate_lvstore_on_non_leader_impl(snode, leader_node, primary_node, activ
                     "(in-window expose will create it): %s",
                     snode.get_id(), primary_node.lvstore, _ps_e)
 
+        # Pre-block controller ATTACH to the leader's live hublvol: the
+        # attach is inert until bdev_lvol_connect_hublvol (issued in-window)
+        # registers the redirect, so only set_lvs_opts + connect remain in
+        # the blocked span. Leader's hublvol subsystem+namespace are fully
+        # live (it is serving), so the n1 bdev appears immediately.
+        # Non-fatal: any failure falls back to the in-window attach path.
+        if primary_node.hublvol:
+            try:
+                snode.connect_to_hublvol(
+                    leader_node, failover_node=None,
+                    role=("tertiary" if is_tertiary else "secondary"),
+                    rpc_timeout=2.0, lvs_node=primary_node,
+                    coordinator_lock=_hub_lock_holder.get("lock"),
+                    attach_only=True)
+            except Exception as _pa_e:
+                logger.warning(
+                    "Pre-block hublvol attach on %s for %s failed "
+                    "(in-window attach will retry): %s",
+                    snode.get_id(), primary_node.lvstore, _pa_e)
+
     def _release_hub_lock():
         lk = _hub_lock_holder.pop("lock", None)
         if lk is not None:
@@ -7660,6 +7680,36 @@ def _recreate_lvstore_impl(snode, force=False, lvs_primary=None, activation_mode
             logger.warning(
                 "Hublvol subsystem pre-stage failed for %s "
                 "(in-window expose will create it): %s", lvs_name, _ps_e)
+
+        # Pre-block controller ATTACH from every connected peer to snode's
+        # pre-staged hublvol subsystem. The subsystem is still NAMESPACE-LESS
+        # (the hublvol bdev exists only after the in-window examine): the
+        # controller attaches empty and the peer's n1 bdev surfaces via AER
+        # once the in-window add_ns runs — connect_to_hublvol's n1-wait
+        # covers that. The attach is inert until the in-window
+        # bdev_lvol_connect_hublvol registers the redirect. Non-fatal per
+        # peer: failure falls back to the in-window attach.
+        if lvs_node.hublvol:
+            for _peer in sec_nodes:
+                if _peer.get_id() in disconnected_peers:
+                    continue
+                if _peer.get_id() == lvs_node.secondary_node_id:
+                    _pre_role = "secondary"
+                elif _peer.get_id() == lvs_node.tertiary_node_id:
+                    _pre_role = "tertiary"
+                else:
+                    continue
+                try:
+                    _peer.connect_to_hublvol(
+                        snode, failover_node=None, role=_pre_role,
+                        rpc_timeout=1.0, lvs_node=lvs_node,
+                        coordinator_lock=_hub_locks.get(_peer.get_id()),
+                        attach_only=True)
+                except Exception as _pa_e:
+                    logger.warning(
+                        "Pre-block hublvol attach on %s for %s failed "
+                        "(in-window attach will retry): %s",
+                        _peer.get_id(), lvs_name, _pa_e)
 
         # Serialize the client-port outage span across all concurrent
         # recreates. Acquired AFTER the hublvol advisory locks (fixed lock

@@ -590,7 +590,7 @@ class StorageNode(BaseNodeObject):
 
     def connect_to_hublvol(self, primary_node, failover_node=None, *, role,
                            timeout=None, rpc_timeout=None, lvs_node=None,
-                           coordinator_lock=None):
+                           coordinator_lock=None, attach_only=False):
         """Connect to a primary node's hublvol, optionally with multipath failover.
 
         ``role`` is required and must be this node's role for the LVS being
@@ -696,6 +696,35 @@ class StorageNode(BaseNodeObject):
                     lvs_node.hublvol.bdev_name, self.get_id(), role,
                 )
                 return False
+
+        if attach_only:
+            # Pre-block staging (2026-07-22): the NVMe-oF controller attach is
+            # inert until bdev_lvol_connect_hublvol registers the hub as the
+            # LVS redirect target — so the attach (the coordinator round-trips
+            # above) runs BEFORE the client-port-block window and only
+            # set_lvs_opts + connect_hublvol remain inside it. When the target
+            # subsystem is still namespace-less (a restarting leader whose
+            # hublvol bdev is created only after the in-window examine), the
+            # controller attaches empty and the n1 bdev surfaces via AER after
+            # the in-window add_ns — the wait below covers that.
+            return True
+
+        if not rpc_client.get_bdevs(remote_bdev):
+            # Attach done (either just now or pre-staged with attach_only)
+            # but the namespace bdev has not surfaced yet — the target's
+            # add_ns may have completed only milliseconds ago and the AER
+            # hot-add propagates asynchronously. Poll briefly, then PROCEED
+            # either way (pre-existing semantics: connect_hublvol below is
+            # the arbiter and fails loudly if the bdev is truly absent).
+            for _ in range(10):
+                time.sleep(0.1)
+                if rpc_client.get_bdevs(remote_bdev):
+                    break
+            else:
+                logger.warning(
+                    "Hublvol bdev %s not surfaced on %s yet after attach; "
+                    "proceeding — connect_hublvol will verify",
+                    remote_bdev, self.get_id())
 
         if not rpc_client.bdev_lvol_set_lvs_opts(
                 lvs_node.lvstore,
