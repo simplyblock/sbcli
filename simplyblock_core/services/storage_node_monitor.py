@@ -753,6 +753,14 @@ def update_cluster_status(cluster_id):
             _ucs_running[cluster_id] = False
 
 
+def _delete_old_tasks(tasks: list[JobSchedule]):
+    now_in_seconds = int(time.time())
+    for task in tasks:
+        if now_in_seconds - task.date > constants.TASKS_RETENTION_PERIOD_SEC:
+            task.remove(db.kv_store)
+    pass
+
+
 def _update_cluster_status_impl(cluster_id):
     # Run the re-queue scan FIRST, before any of the transition branches
     # that may early-return. Otherwise OFFLINE/SCHEDULABLE nodes can stay
@@ -776,7 +784,8 @@ def _update_cluster_status_impl(cluster_id):
         JobSchedule.FN_LVOL_MIG,
     }
     active_rebalancing_tasks = 0
-    for task in db.get_job_tasks(cluster_id):
+    cluster_tasks = db.get_job_tasks(cluster_id)
+    for task in cluster_tasks:
         if task.canceled:
             continue
         if task.status == JobSchedule.STATUS_DONE:
@@ -794,6 +803,8 @@ def _update_cluster_status_impl(cluster_id):
 
     current_cluster_status = cluster.status
     logger.info("cluster_status: %s", current_cluster_status)
+
+    _delete_old_tasks(cluster_tasks)
 
     # Suspend recovery: while the cluster is SUSPENDED, first drain every node
     # to OFFLINE (auto-restart is paused until then), so recovery restarts from
