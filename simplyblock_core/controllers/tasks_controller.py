@@ -313,6 +313,7 @@ def add_device_mig_task_for_node(node_id):
             task_obj.write_to_db(db.kv_store)
             tasks_events.task_create(task_obj)
         return True
+    return False
 
 
 def add_device_to_auto_restart(device):
@@ -959,8 +960,8 @@ def run_lvol_sync_op_task(task):
         logger.error(f"lvol sync-op task {task.uuid} failed: {e}")
         try:
             _defer(f"error: {e}")
-        except Exception:
-            pass
+        except Exception as defer_e:
+            logger.debug(f"lvol sync-op task {task.uuid}: _defer fallback also failed: {defer_e}")
 
 def get_lvol_sync_del_task(cluster_id, node_id, lvol_bdev_name=None):
     tasks = db.get_job_tasks(cluster_id)
