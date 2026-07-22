@@ -40,14 +40,21 @@ STAT_COLLECTOR_INTERVAL_SEC = 60*5  # 5 minutes
 LVOL_STAT_COLLECTOR_INTERVAL_SEC = 30
 LVOL_MONITOR_INTERVAL_SEC = 30
 DEV_MONITOR_INTERVAL_SEC = 10
-DEV_STAT_COLLECTOR_INTERVAL_SEC = 5
-PROT_STAT_COLLECTOR_INTERVAL_SEC = 2
+# Collector cadence (#5, 2026-07-21): the idle-cluster baseline measured
+# 4,290 RPCs/min cluster-wide (get_iostat 16k / alceml_get_pages_usage 15k /
+# distr events 27k per 28min) — ~9-10 CP threads permanently busy servicing
+# monitors, which is the standing GIL convoy that taxed every restart RPC.
+# Stats collection is dashboard granularity, not failure detection (that is
+# NODE/DEVICE_MONITOR + KA + distr events), so stretch the pure-stats
+# cycles; keep the event collector at a failure-latency-compatible cadence.
+DEV_STAT_COLLECTOR_INTERVAL_SEC = 15
+PROT_STAT_COLLECTOR_INTERVAL_SEC = 10
 SPDK_STAT_COLLECTOR_INTERVAL_SEC = 30
-DISTR_EVENT_COLLECTOR_INTERVAL_SEC = 2
+DISTR_EVENT_COLLECTOR_INTERVAL_SEC = 5
 DISTR_EVENT_COLLECTOR_NUM_OF_EVENTS = 10
-CAP_MONITOR_INTERVAL_SEC = 10
+CAP_MONITOR_INTERVAL_SEC = 30
 SSD_VENDOR_WHITE_LIST = ["1d0f:cd01", "1d0f:cd00"]
-CACHED_LVOL_STAT_COLLECTOR_INTERVAL_SEC = 5
+CACHED_LVOL_STAT_COLLECTOR_INTERVAL_SEC = 15
 DEV_DISCOVERY_INTERVAL_SEC = 60
 
 PMEM_DIR = '/tmp/pmem'
@@ -78,7 +85,21 @@ HEALTH_CHECK_FAST_INTERVAL_SEC = 5
 
 GRAYLOG_CHECK_INTERVAL_SEC = 60
 
-FDB_CHECK_INTERVAL_SEC = 60
+# Stats-retention cleanup cycle. Retention granularity is days
+# (LOG_DELETION_INTERVAL, default 7d), so hourly sweeps are more than enough;
+# the previous 60s cycle re-cleared the same (mostly empty) ranges ~100
+# commits/s all day and contributed to FDB overload under mass create
+# (run 2026-07-21).
+FDB_CLEANUP_INTERVAL_SEC = 60 * 60
+
+# Continuous per-lvol NVMf subsystem verification + auto-repair in the lvol
+# monitor. Off by default: it exists only to compensate for a lost deferred
+# non-leader registration (lossy in-memory drain queue), and at scale it costs
+# 2 RPCs per lvol per 30s cycle while its repair path has re-added namespaces
+# of in-deletion lvols mid-delete (incidents 2026-07-14 / 2026-07-16). Set
+# LVOL_MONITOR_SUBSYS_CHECK=1 to re-enable on clusters that need the sweep.
+LVOL_MONITOR_SUBSYS_CHECK = str(
+    os.getenv("LVOL_MONITOR_SUBSYS_CHECK", "")).lower() in ("1", "true", "yes")
 
 TASK_EXEC_INTERVAL_SEC = 10
 TASK_EXEC_RETRY_COUNT = 8
@@ -293,7 +314,14 @@ RESTART_WORKER_MAX_CONCURRENCY=24
 # one pool let 24 coordinators hold every slot while joining leaves that
 # waited on the same semaphore — permanent deadlock, all nodes stuck
 # in_restart (2026-07-21 FD reboot; py-spy: 24 holders / 469 waiters).
-RESTART_COORDINATOR_MAX_CONCURRENCY=16
+#
+# 64, not 16: coordinators are I/O-bound (RPC + FDB waits release the GIL;
+# their CPU share collapsed with the BaseModel reflection cache), and 16
+# queued a 16-node FD recovery's peer sweeps into 30+ serial waves
+# (py-spy 2026-07-21: exactly 16 running / 160 queued while every restart
+# thread sat in the sweep join). 64 still bounds thread count but clears a
+# full-cluster sweep in ~4 waves.
+RESTART_COORDINATOR_MAX_CONCURRENCY=64
 
 NVMF_MAX_SUBSYSTEMS=50000
 KATO=5000

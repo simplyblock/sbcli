@@ -185,6 +185,22 @@ def check_port_on_node(snode, port_id):
     return not port_block.is_port_blocked(snode, port_id)
 
 
+def check_ports_on_node(snode, port_ids):
+    """Batch variant of :func:`check_port_on_node`: ONE
+    ``nvmf_get_blocked_ports`` fetch answers every port in ``port_ids``.
+    Returns ``{port: bool}`` (True = open). Falls back to per-port checks on
+    legacy nodes without the RPC. Raises on fetch failure — callers treat it
+    like the single-port failure path."""
+    from simplyblock_core import port_block
+    port_ids = list(port_ids)
+    if not port_ids:
+        return {}
+    blocked = port_block.get_blocked_ports_set(snode)
+    if blocked is None:
+        return {p: check_port_on_node(snode, p) for p in port_ids}
+    return {p: int(p) not in blocked for p in port_ids}
+
+
 def _check_node_ping(ip):
     res = utils.ping_host(ip)
     if res:
@@ -636,26 +652,28 @@ def check_node(node_id, with_devices=True):
             logger.info(f"Check: ping ip {data_nic.ip4_address} ... {ping_check}")
             data_nics_check &= ping_check
 
+    # Batched: collect every port first, answer them with ONE
+    # nvmf_get_blocked_ports fetch (was one full-list fetch per port).
+    _hc_ports = []
     for sec_attr in ['lvstore_stack_secondary', 'lvstore_stack_tertiary']:
         primary_id = getattr(snode, sec_attr, None)
         if primary_id:
             try:
                 n = db_controller.get_storage_node_by_id(primary_id)
-                sec_lvs_port = n.get_lvol_subsys_port(n.lvstore)
-                lvol_port_check = check_port_on_node(snode, sec_lvs_port)
-                logger.info(f"Check: node {snode.mgmt_ip}, port: {sec_lvs_port} ... {lvol_port_check}")
+                _hc_ports.append(n.get_lvol_subsys_port(n.lvstore))
             except KeyError:
                 logger.error("node not found")
-            except Exception as e:
-                _log_port_check_failure(db_controller, snode, sec_lvs_port, e)
 
     if not snode.is_secondary_node:
+        _hc_ports.append(snode.get_lvol_subsys_port(snode.lvstore))
+
+    if _hc_ports:
         try:
-            own_lvs_port = snode.get_lvol_subsys_port(snode.lvstore)
-            lvol_port_check = check_port_on_node(snode, own_lvs_port)
-            logger.info(f"Check: node {snode.mgmt_ip}, port: {own_lvs_port} ... {lvol_port_check}")
+            for _p, lvol_port_check in check_ports_on_node(snode, _hc_ports).items():
+                logger.info(f"Check: node {snode.mgmt_ip}, port: {_p} ... {lvol_port_check}")
         except Exception as e:
-            _log_port_check_failure(db_controller, snode, own_lvs_port, e)
+            for _p in _hc_ports:
+                _log_port_check_failure(db_controller, snode, _p, e)
 
     is_node_online = ping_check and node_api_check and node_rpc_check
 

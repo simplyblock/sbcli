@@ -151,7 +151,7 @@ def set_snap_offline(snap):
     sn.write_to_db()
 
 
-def process_snap_delete(snap, snode):
+def process_snap_delete(snap, snode, all_mini_lvols=None):
     # check leadership
     leader_node = None
     if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED,
@@ -185,7 +185,9 @@ def process_snap_delete(snap, snode):
     if not leader_node:
         raise Exception("Failed to get leader node")
 
-    for lvol in db.get_mini_lvols():
+    if all_mini_lvols is None:
+        all_mini_lvols = db.get_mini_lvols()
+    for lvol in all_mini_lvols:
         if lvol.cloned_from_snap and lvol.cloned_from_snap == snap.get_id():
             if lvol.status == SnapShot.STATUS_IN_DELETION:
                 logger.error("Cannot delete snapshot while it's clone is in deletion")
@@ -308,9 +310,20 @@ def _due_for_internal_snapshot(lvol, all_snaps, now_ts):
 
 def take_due_internal_snapshots(cluster_id, now_ts):
     """Create an internal snapshot for every replicated volume whose interval
-    has elapsed. The snapshot's creation auto-enqueues a replication task."""
-    all_snaps = db.get_snapshots(cluster_id)
-    for lvol in db.get_lvols(cluster_id):
+    has elapsed. The snapshot's creation auto-enqueues a replication task.
+
+    The snapshot listing is only loaded when at least one volume actually
+    replicates on an interval — and then from the mini table, which carries
+    everything ``_due_for_internal_snapshot`` reads (lvol id, snap_type,
+    created_at). The previous unconditional full-SnapShot scan here ran twice
+    per monitor cycle and was a steady multi-second FDB load at 10k+
+    snapshots (mass-snapshot run 2026-07-21) with zero replicated volumes."""
+    repl_lvols = [lv for lv in db.get_lvols(cluster_id)
+                  if lv.do_replicate and lv.replication_interval_min > 0]
+    if not repl_lvols:
+        return
+    all_snaps = db.get_mini_snapshots()
+    for lvol in repl_lvols:
         try:
             if not _due_for_internal_snapshot(lvol, all_snaps, now_ts):
                 continue
@@ -344,17 +357,35 @@ def main():
             except Exception as e:
                 logger.error(f"Internal snapshot scheduling failed for cluster {cluster.get_id()}: {e}")
 
-            all_snaps = db.get_snapshots(cluster.get_id())
-            for snode in db.get_storage_nodes_by_cluster_id(cluster.get_id()):
-
-                for snap in all_snaps:
-                    if snap.lvol.node_id != snode.get_id():
-                        continue
-                    if snap.status == SnapShot.STATUS_IN_DELETION:
-                        try:
-                            process_snap_delete(snap, snode)
-                        except Exception as e:
-                            logger.error(e)
+            # Only in-deletion snapshots need any processing. Find them via
+            # the mini table (cheap; no embedded LVol dict) and fetch the few
+            # full records individually — the previous full-SnapShot scan per
+            # cycle was a steady multi-second FDB read at 10k+ snapshots.
+            in_deletion = [m for m in db.get_mini_snapshots()
+                           if m.status == SnapShot.STATUS_IN_DELETION]
+            if not in_deletion:
+                continue
+            snodes = {n.get_id(): n
+                      for n in db.get_storage_nodes_by_cluster_id(cluster.get_id())}
+            all_mini_lvols = db.get_mini_lvols()
+            for mini in in_deletion:
+                try:
+                    snap = db.get_snapshot_by_id(mini.get_id())
+                except KeyError:
+                    continue
+                # Re-check on the authoritative record; also skip snapshots
+                # of other clusters (the mini table is not cluster-scoped).
+                if snap.status != SnapShot.STATUS_IN_DELETION:
+                    continue
+                if snap.cluster_id and snap.cluster_id != cluster.get_id():
+                    continue
+                snode = snodes.get(snap.lvol.node_id)
+                if snode is None:
+                    continue
+                try:
+                    process_snap_delete(snap, snode, all_mini_lvols)
+                except Exception as e:
+                    logger.error(e)
 
         time.sleep(constants.LVOL_MONITOR_INTERVAL_SEC)
 

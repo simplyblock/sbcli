@@ -82,7 +82,7 @@ def test_take_due_internal_snapshots_creates_internal_type(monkeypatch):
         def get_lvols(self, cluster_id):
             return [due, not_due]
 
-        def get_snapshots(self, cluster_id):
+        def get_mini_snapshots(self):
             return []
 
     calls = []

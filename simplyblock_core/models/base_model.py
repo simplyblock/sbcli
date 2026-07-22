@@ -2,7 +2,7 @@
 import pprint
 
 import json
-from inspect import ismethod
+from inspect import ismethod, isfunction
 import sys
 from typing import Mapping, Type, Union
 from collections import ChainMap
@@ -51,12 +51,47 @@ class BaseModel(object):
     def get_id(self):
         return self.uuid
 
+    @classmethod
+    def _annotated_attrs(cls):
+        """Per-class cache of ``[(attr, type)]`` for all public annotated data
+        attributes.
+
+        The annotation walk (``all_annotations`` -> ``inspect.get_annotations``
+        over the full MRO) and the method/underscore filter are class-level
+        constants, yet they used to be re-derived on EVERY object
+        construction, ``to_dict`` and ``keys()`` call — measured at 6.8 ms of
+        GIL-held CPU per fat StorageNode (97 nested device models) and
+        ~216 ms per ``get_storage_nodes_by_cluster_id`` (32 nodes). Across
+        ~30 control-plane threads this reflection convoy inflated every RPC
+        round-trip (6 ms at the proxy -> 135 ms CP-observed, n=3837) and
+        every FDB transaction (0.8-1.4 s inside restart port-block windows),
+        pushing client-port blocks past the 6 s nvmf ack-timeout reject
+        (2026-07-21 FD-reboot: 7 volumes EIO'd).
+
+        Only the reflection is cached. Defaults still come from
+        ``getattr(self, attr)`` at call time in :meth:`get_attrs_map`, so
+        ``from_dict`` on a populated instance keeps its merge semantics and
+        no new sharing of mutable defaults is introduced. The filter checks
+        both ``ismethod`` and ``isfunction``: on an instance a class function
+        appears as a bound method, but on the class (where we now evaluate)
+        it is a plain function.
+        """
+        cached = cls.__dict__.get('_annotated_attrs_cache')
+        if cached is None:
+            cached = [
+                (s, t) for s, t in cls.all_annotations().items()
+                if not s.startswith("_")
+                and not ismethod(getattr(cls, s, None))
+                and not isfunction(getattr(cls, s, None))
+            ]
+            cls._annotated_attrs_cache = cached
+        return cached
+
     def get_attrs_map(self):
-        _attribute_map = {}
-        for s , t in self.all_annotations().items():
-            if not s.startswith("_") and not ismethod(getattr(self, s)):
-                _attribute_map[s]= {"type": t, "default": getattr(self, s)}
-        return _attribute_map
+        return {
+            s: {"type": t, "default": getattr(self, s)}
+            for s, t in self.__class__._annotated_attrs()
+        }
 
     def get_db_id(self, use_this_id=None):
         if use_this_id:
@@ -268,6 +303,27 @@ class BaseModel(object):
             kv_store = DBController().kv_store
         try:
             prefix = self.get_db_id()
+            if self.name == "StorageNode":
+                # Tripwire (2026-07-21 d3fc2c16 incident): a full-object write
+                # of a STALE StorageNode copy silently resurrected
+                # status=in_restart within 2.5s of the restart's committed
+                # ONLINE flip — no event, no log — and the runner's
+                # _reset_if_transient then killed SPDK on a healthy node.
+                # Every full node write now names its caller so the next
+                # occurrence identifies the writer instantly. Full-object
+                # node writes are rare (hot paths use atomic_update); prefer
+                # atomic_update for ANY new node-record mutation.
+                import os.path
+                import traceback
+                from simplyblock_core import utils
+                frames = [
+                    f"{os.path.basename(fs.filename)}:{fs.lineno}:{fs.name}"
+                    for fs in traceback.extract_stack(limit=6)[:-1]
+                ]
+                utils.get_logger(__name__).info(
+                    "[NODE-WRITE] full-object write of %s status=%s by %s",
+                    self.get_id(), getattr(self, "status", "?"),
+                    " <- ".join(reversed(frames)))
             st = json.dumps(self.to_dict(unwrap_secrets=True))
             kv_store.set(prefix.encode(), st.encode())
             return True

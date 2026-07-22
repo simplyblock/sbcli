@@ -349,10 +349,10 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
 
     # Per-core object cap (lvols + clones + snapshots per SPDK instance).
     from simplyblock_core.controllers import lvol_controller as _lvol_ctrl
-    from simplyblock_core.utils.ttl_cache import cached_mini_lvols, cached_snapshots
+    from simplyblock_core.utils.ttl_cache import cached_mini_lvols, cached_mini_snapshots
     limit_error = _lvol_ctrl.check_node_object_limit(
         snode, cached_mini_lvols(db_controller),
-        cached_snapshots(db_controller, pool.cluster_id))
+        cached_mini_snapshots(db_controller))
     if limit_error:
         logger.error(limit_error)
         return False, limit_error
@@ -379,7 +379,7 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
         if not all_lvols:
             all_lvols = db_controller.get_mini_lvols()
         if not all_snaps:
-            all_snaps = db_controller.get_snapshots(pool.cluster_id)
+            all_snaps = db_controller.get_mini_snapshots()
         total = pool_controller.get_pool_total_capacity(pool.get_id(), all_lvols, all_snaps)
         if total + size > pool.pool_max_size:
             msg = f"Invalid LVol size: {utils.humanbytes(size)}. pool max size has reached {utils.humanbytes(total+size)} of {utils.humanbytes(pool.pool_max_size)}"
@@ -1005,10 +1005,10 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
 
     # Per-core object cap (lvols + clones + snapshots per SPDK instance).
     from simplyblock_core.controllers import lvol_controller as _lvol_ctrl
-    from simplyblock_core.utils.ttl_cache import cached_mini_lvols, cached_snapshots
+    from simplyblock_core.utils.ttl_cache import cached_mini_lvols, cached_mini_snapshots
     limit_error = _lvol_ctrl.check_node_object_limit(
         snode, cached_mini_lvols(db_controller),
-        cached_snapshots(db_controller, pool.cluster_id))
+        cached_mini_snapshots(db_controller))
     if limit_error:
         logger.error(limit_error)
         return False, limit_error
@@ -1028,8 +1028,11 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
         logger.error(msg)
         return False, msg
 
-    if not all_snaps:
-        all_snaps = db_controller.get_snapshots()
+    # all_snaps only feeds the pool-capacity sum below (get_random_vuid no
+    # longer dedupes); minis suffice and the load is skipped entirely for
+    # unlimited pools instead of full-scanning every snapshot per clone.
+    if not all_snaps and pool.pool_max_size > 0:
+        all_snaps = db_controller.get_mini_snapshots()
     if not all_lvols:
         all_lvols = db_controller.get_mini_lvols()
     size = snap.size

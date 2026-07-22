@@ -295,6 +295,56 @@ class StorageNode(BaseNodeObject):
         """
         return f"{cluster_nqn}:hublvol:{lvstore_name}"
 
+    def prestage_hublvol_subsystem(self, nqn, model_number, port,
+                                   ana_state=None, min_cntlid=1):
+        """Create the NVMf subsystem + listeners for a hublvol NQN WITHOUT
+        its namespace.
+
+        The subsystem/listener half of :meth:`expose_bdev` has no lvstore or
+        bdev dependency, so the restart flow runs it BEFORE the client-port
+        block window; the in-window ``expose_bdev`` then reduces to one probe
+        plus ``add_ns`` (measured 2026-07-21: subsystem+listener creation was
+        ~4 RPCs x ~50ms inside every blocked window). Idempotent — guarded by
+        ``subsystem_get``; parameters MUST match the later ``expose_bdev``
+        call (same nqn/model/port/ana/min_cntlid — see the disjoint-cntlid
+        requirement in ``create_secondary_hublvol``)."""
+        rpc_client = self.rpc_client()
+        subsys = rpc_client.subsystem_get(nqn)
+        if subsys is None:
+            if not rpc_client.subsystem_create(
+                    nqn=nqn,
+                    serial_number='sbcli-cn',
+                    model_number=model_number,
+                    min_cntlid=min_cntlid,
+            ):
+                raise RPCException(f'Failed to pre-create subsystem for {nqn}')
+            existing_listeners: set = set()
+        else:
+            existing_listeners = {
+                (la.get("trtype", "").upper(),
+                 la.get("traddr"),
+                 str(la.get("trsvcid")))
+                for la in (subsys.get("listen_addresses") or [])
+            }
+        for iface in self.data_nics:
+            ip = iface.ip4_address
+            if self.active_rdma:
+                if iface.trtype != "RDMA":
+                    continue
+                trtype = "RDMA"
+            else:
+                if iface.trtype != "TCP":
+                    continue
+                trtype = "TCP"
+            if (trtype, ip, str(port)) in existing_listeners:
+                continue
+            rpc_client.listeners_create(
+                nqn=nqn, trtype=trtype, traddr=ip, trsvcid=port,
+                ana_state=ana_state,
+            )
+        logger.info("Pre-staged hublvol subsystem %s on %s (port %s)",
+                    nqn, self.get_id(), port)
+
     def create_hublvol(self, cluster_nqn=None):
         """Create a hublvol for this node's lvstore.
 
@@ -539,7 +589,8 @@ class StorageNode(BaseNodeObject):
                 return False
 
     def connect_to_hublvol(self, primary_node, failover_node=None, *, role,
-                           timeout=None, rpc_timeout=None, lvs_node=None):
+                           timeout=None, rpc_timeout=None, lvs_node=None,
+                           coordinator_lock=None):
         """Connect to a primary node's hublvol, optionally with multipath failover.
 
         ``role`` is required and must be this node's role for the LVS being
@@ -631,8 +682,15 @@ class StorageNode(BaseNodeObject):
             )
             peers = [primary_node] + ([failover_node] if failover_node else [])
             coordinator = HublvolReconnectCoordinator(DBController())
+            # coordinator_lock: pre-entered advisory lock from
+            # HublvolReconnectCoordinator.acquire_lock — the restart
+            # port-block window acquires it BEFORE blocking the client port
+            # (the acquire txn measured avg 858ms inside the window,
+            # 2026-07-21) and releases it after the unblock. Ownership stays
+            # with the caller.
             if not coordinator.reconcile(self, lvs_node, peers, role=role,
-                                         rpc_timeout=rpc_timeout):
+                                         rpc_timeout=rpc_timeout,
+                                         lock=coordinator_lock):
                 logger.error(
                     "Hublvol reconcile failed for %s on %s (role=%s)",
                     lvs_node.hublvol.bdev_name, self.get_id(), role,
