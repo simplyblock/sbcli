@@ -379,6 +379,49 @@ def _recreate_lvstore_lock(lvs_name):
 #: gated span acquires no other module lock, so no cycle is possible.
 _port_block_window_gate = threading.Lock()
 
+#: Window-priority drain: BEFORE a client-port-block window opens, new
+#: bounded fan-out tasks are paused and the in-flight ones are drained;
+#: only then is the port blocked. The window's serial RPC chain then runs
+#: with exclusive CPU instead of competing with the connect-storm convoy
+#: (2026-07-22 run: steady windows 1.4-1.9s but 3.6-5.2s while the first
+#: windows raced the full 16-node fan-out) — and the drain cost is paid
+#: OUTSIDE the client-visible outage. Deadlock-free by construction: the
+#: gate holder never spawns or joins bounded workers inside the window
+#: (connect sweeps are strictly pre/post-window); both the worker pause
+#: (30s) and the drain (60s) are timeout-bounded so a stuck side cannot
+#: freeze the other.
+_window_clear = threading.Event()
+_window_clear.set()
+_inflight_bounded_cond = threading.Condition()
+_inflight_bounded = {"n": 0}
+
+
+def _open_port_block_window(label):
+    """Serialize + prioritize a port-block window: take the global gate,
+    pause new bounded fan-out tasks, drain the running ones, and only then
+    return (the caller blocks the client port next). Returns seconds spent
+    waiting (gate + drain) for the caller's logging."""
+    _t0 = time.monotonic()
+    _port_block_window_gate.acquire()
+    _window_clear.clear()
+    _deadline = time.monotonic() + 60
+    with _inflight_bounded_cond:
+        while _inflight_bounded["n"] > 0:
+            _remaining = _deadline - time.monotonic()
+            if _remaining <= 0:
+                logger.warning(
+                    "Opening port-block window (%s) with %d fan-out task(s) "
+                    "still running — drain timed out",
+                    label, _inflight_bounded["n"])
+                break
+            _inflight_bounded_cond.wait(min(_remaining, 1.0))
+    return time.monotonic() - _t0
+
+
+def _close_port_block_window():
+    _window_clear.set()
+    _port_block_window_gate.release()
+
 _restart_worker_sem = threading.BoundedSemaphore(constants.RESTART_WORKER_MAX_CONCURRENCY)
 
 #: Coordinator tier: workers that themselves SPAWN AND JOIN leaf workers
@@ -409,8 +452,20 @@ def _bounded_thread(target, args=(), name=None, sem=None):
     sem = _restart_worker_sem if sem is None else sem
 
     def _run(*a):
+        # Window-priority drain: don't START while a port-block window is
+        # open/opening (bounded wait — a stuck window must not freeze the
+        # fan-out forever). Running tasks are counted so the window opener
+        # can drain them BEFORE blocking the client port.
+        _window_clear.wait(timeout=30)
         with sem:
-            target(*a)
+            with _inflight_bounded_cond:
+                _inflight_bounded["n"] += 1
+            try:
+                target(*a)
+            finally:
+                with _inflight_bounded_cond:
+                    _inflight_bounded["n"] -= 1
+                    _inflight_bounded_cond.notify_all()
     return threading.Thread(target=_run, args=args, name=name)
 
 
@@ -6565,18 +6620,17 @@ def _recreate_lvstore_on_non_leader_impl(snode, leader_node, primary_node, activ
             leader_lvs_port, primary_node.lvstore, _d)
 
     def _acquire_block_gate():
-        _tw = time.monotonic()
-        _port_block_window_gate.acquire()
+        _waited = _open_port_block_window(primary_node.lvstore)
         _gate_state["held"] = True
-        _waited = time.monotonic() - _tw
         if _waited > 0.5:
-            logger.info("[RESTART] Waited %.3fs for port-block window gate (%s)",
+            logger.info("[RESTART] Waited %.3fs for port-block window "
+                        "(gate + fan-out drain) (%s)",
                         _waited, primary_node.lvstore)
 
     def _release_block_gate():
         if _gate_state["held"]:
             _gate_state["held"] = False
-            _port_block_window_gate.release()
+            _close_port_block_window()
 
     def _abort_and_unblock(reason):
         """Abort restart: kill SPDK on snode, set offline, unblock leader port, raise."""
@@ -7588,18 +7642,17 @@ def _recreate_lvstore_impl(snode, force=False, lvs_primary=None, activation_mode
     _gate_state = {"held": False}
 
     def _acquire_block_gate():
-        _tw = time.monotonic()
-        _port_block_window_gate.acquire()
+        _waited = _open_port_block_window(lvs_name)
         _gate_state["held"] = True
-        _waited = time.monotonic() - _tw
         if _waited > 0.5:
-            logger.info("[RESTART] Waited %.3fs for port-block window gate (%s)",
+            logger.info("[RESTART] Waited %.3fs for port-block window "
+                        "(gate + fan-out drain) (%s)",
                         _waited, lvs_name)
 
     def _release_block_gate():
         if _gate_state["held"]:
             _gate_state["held"] = False
-            _port_block_window_gate.release()
+            _close_port_block_window()
 
     def _abort_restart_and_unblock(reason):
         """Abort: kill SPDK, set offline, unblock every blocked peer, raise."""

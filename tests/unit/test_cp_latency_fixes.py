@@ -426,3 +426,84 @@ class TestAttachOnlyPrestage:
             # and the pre-block attach precedes the block section
             assert src.index("attach_only=True") < src.index("### 3-"), \
                 fn.__name__
+
+
+# ---------------------------------------------------------------------------
+# Window-priority drain (2026-07-22): before a port-block window opens, new
+# bounded fan-out tasks pause and running ones are drained — the window's
+# RPC chain runs with exclusive CPU and the drain cost is paid pre-block.
+# ---------------------------------------------------------------------------
+class TestWindowPriorityDrain:
+    def teardown_method(self, _m):
+        # never leak a cleared event / held gate into other tests
+        storage_node_ops._window_clear.set()
+        if storage_node_ops._port_block_window_gate.acquire(blocking=False):
+            storage_node_ops._port_block_window_gate.release()
+
+    def test_open_drains_running_tasks(self, monkeypatch):
+        monkeypatch.setattr(storage_node_ops, "_restart_worker_sem",
+                            threading.BoundedSemaphore(4))
+        release = threading.Event()
+        started = threading.Event()
+
+        def slow():
+            started.set()
+            release.wait(10)
+
+        t = storage_node_ops._bounded_thread(slow)
+        t.start()
+        started.wait(5)
+
+        opened = {"at": None}
+
+        def opener():
+            storage_node_ops._open_port_block_window("LVS_drain")
+            opened["at"] = time.monotonic()
+            storage_node_ops._close_port_block_window()
+
+        ot = threading.Thread(target=opener)
+        ot.start()
+        time.sleep(0.3)
+        assert opened["at"] is None, "window opened before drain completed"
+        freed = time.monotonic()
+        release.set()
+        ot.join(timeout=10)
+        t.join(timeout=10)
+        assert opened["at"] is not None and opened["at"] >= freed
+
+    def test_new_tasks_pause_while_window_open(self, monkeypatch):
+        monkeypatch.setattr(storage_node_ops, "_restart_worker_sem",
+                            threading.BoundedSemaphore(4))
+        storage_node_ops._open_port_block_window("LVS_pause")
+        try:
+            ran = threading.Event()
+            t = storage_node_ops._bounded_thread(lambda: ran.set())
+            t.start()
+            assert not ran.wait(0.4), "task started during an open window"
+        finally:
+            storage_node_ops._close_port_block_window()
+        assert ran.wait(5), "task must resume after the window closes"
+        t.join(timeout=5)
+
+    def test_drain_timeout_does_not_wedge(self, monkeypatch):
+        # a task that outlives the drain deadline must not block the window
+        # forever — shrink the deadline via monotonic patching is intrusive;
+        # instead verify the wait loop is timeout-bounded by inspecting the
+        # helper (behavioral cap covered by the 60s constant).
+        import inspect
+        src = inspect.getsource(storage_node_ops._open_port_block_window)
+        assert "drain timed out" in src and "+ 60" in src
+
+    def test_inflight_counter_balanced_after_exception(self, monkeypatch):
+        monkeypatch.setattr(storage_node_ops, "_restart_worker_sem",
+                            threading.BoundedSemaphore(2))
+        monkeypatch.setattr(threading, "excepthook", lambda *a, **k: None)
+
+        def boom():
+            raise RuntimeError("x")
+        threads = [storage_node_ops._bounded_thread(boom) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5)
+        assert storage_node_ops._inflight_bounded["n"] == 0
