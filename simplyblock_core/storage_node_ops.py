@@ -2516,11 +2516,19 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 existing.remove(db_controller.kv_store)
                 return False
             elif action == "already_added":
+                # This is one of possibly several (nodes_per_socket * sockets)
+                # slots being added for this host in the SAME call — only THIS
+                # entry is already provisioned. Move on to the remaining
+                # entries instead of reporting the whole host done: an early
+                # `return` here silently skipped every other socket/slot on
+                # a fresh host and left them forever unadded (only the first
+                # config entry, whichever it happened to already own, was ever
+                # checked — 2026-07-22, all-4-pods-on-numa-0 incident).
                 logger.info(
                     f"Node {existing.get_id()} with endpoint {node_addr} is already "
-                    f"added and online (owns the same SSDs); add-node is an "
-                    f"idempotent success")
-                return "Success"
+                    f"added and online (owns the same SSDs); skipping this slot "
+                    f"and checking the rest")
+                continue
             elif action == "conflict":
                 logger.error(
                     f"A node record with endpoint {node_addr} already exists in "
@@ -2663,13 +2671,15 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 # once that attempt is ONLINE it no longer matches, so a second add
                 # would build a node that can never come up (the socket's cores and
                 # hugepages are already owned) and strand it IN_CREATION (observed on
-                # worker-1, 2026-07-10). Record it and abort as an idempotent no-op.
+                # worker-1, 2026-07-10). Record it and skip to the next slot as an
+                # idempotent no-op for THIS entry only.
                 existing_healthy = n
         if existing_healthy is not None:
             logger.warning(
                 f"Storage node {existing_healthy.get_id()} already present for {node_addr} "
-                f"socket {node_socket} (status {existing_healthy.status}); skipping duplicate add")
-            return "Success"
+                f"socket {node_socket} (status {existing_healthy.status}); skipping duplicate add "
+                f"for this slot and checking the rest")
+            continue
 
         total_mem = minimum_hp_memory
         for n in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
