@@ -759,7 +759,7 @@ def _delete_old_tasks(tasks: list[JobSchedule]):
     for task in tasks:
         if now_in_seconds - task.date > constants.TASKS_RETENTION_PERIOD_SEC:
             task.remove(db.kv_store)
-    pass
+
 
 def _delete_old_logs(events: list[EventObj], cluster_id: str):
     now_in_seconds = int(time.time())
@@ -768,7 +768,6 @@ def _delete_old_logs(events: list[EventObj], cluster_id: str):
             continue
         if now_in_seconds - int(event.date/1000) > constants.TASKS_RETENTION_PERIOD_SEC:
             event.remove(db.kv_store)
-    pass
 
 
 def _update_cluster_status_impl(cluster_id):
