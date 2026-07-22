@@ -125,6 +125,14 @@ def _now_ms():
     return datetime.datetime.now().strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3]
 
 
+def get_active_lvol_migration(node_id):
+    """Return active LVolMigration records with ``node_id`` as source or target."""
+    return [
+        m for m in db.get_migrations()
+        if m.is_active() and node_id in (m.source_node_id, m.target_node_id)
+    ]
+
+
 # ---------------------------------------------------------------------------
 # NIC / transport helpers
 # ---------------------------------------------------------------------------

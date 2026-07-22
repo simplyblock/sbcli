@@ -914,6 +914,13 @@ def create_migration(lvol_id, target_node_id,
         raise ValueError(f"Source node {src_node_id} not found")
 
     cluster = db.get_cluster_by_id(tgt_node.cluster_id)
+    if cluster.is_re_balancing:
+        raise PreconditionError(f"Cluster {cluster.get_id()} is rebalancing; wait for it to finish before migrating")
+
+    for node_id in (src_node_id, target_node_id):
+        if tasks_controller.get_active_node_mig_task(tgt_node.cluster_id, node_id):
+            raise PreconditionError(f"Node {node_id} has a data migration in progress; wait for it to finish")
+
     tgt_rpc = tgt_node.rpc_client()
     nqn = lvol.nqn
     bdev_short = lvol_tgt_bdev_name(lvol.lvol_bdev)
