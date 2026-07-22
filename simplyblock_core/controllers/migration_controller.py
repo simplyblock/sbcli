@@ -49,6 +49,7 @@ from simplyblock_core.exceptions import MigrationConflictError, PreconditionErro
 from simplyblock_core.controllers.host_auth import _reapply_allowed_hosts
 from simplyblock_core.kms import create_kms_connection, lvol_dek_path, pool_kek_name
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.lvol_migration import LVolMigration
 from simplyblock_core.models.lvol_migration_group import LVolMigrationGroup
 from simplyblock_core.models.lvol_model import LVol
@@ -120,6 +121,16 @@ def start_migration(migration_id,
 
     if target_node.status != StorageNode.STATUS_ONLINE:
         raise ValueError(f"Target node is not online (status={target_node.status})")
+
+    cluster = db.get_cluster_by_id(migration.cluster_id)
+    if cluster.status != Cluster.STATUS_ACTIVE:
+        raise PreconditionError(f"Cluster {cluster.get_id()} is not active (status={cluster.status})")
+    if cluster.is_re_balancing:
+        raise PreconditionError(f"Cluster {cluster.get_id()} is rebalancing; wait for it to finish before migrating")
+
+    for node_id in (source_node_id, target_node_id):
+        if tasks_controller.get_active_node_mig_task(migration.cluster_id, node_id):
+            raise PreconditionError(f"Node {node_id} has a data migration in progress; wait for it to finish")
 
     snap_plan = get_snapshot_chain(lvol_id, source_node_id)
 
@@ -914,6 +925,8 @@ def create_migration(lvol_id, target_node_id,
         raise ValueError(f"Source node {src_node_id} not found")
 
     cluster = db.get_cluster_by_id(tgt_node.cluster_id)
+    if cluster.status != Cluster.STATUS_ACTIVE:
+        raise PreconditionError(f"Cluster {cluster.get_id()} is not active (status={cluster.status})")
     if cluster.is_re_balancing:
         raise PreconditionError(f"Cluster {cluster.get_id()} is rebalancing; wait for it to finish before migrating")
 
