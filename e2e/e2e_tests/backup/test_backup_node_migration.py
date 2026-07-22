@@ -92,16 +92,17 @@ class TestBackupAfterNodeMigration(BackupTestBase):
         return ""
 
     def _trigger_migration_k8s(self, node_uuid: str):
-        """Trigger node migration via CRD patch (K8s mode)."""
+        """Trigger node migration via StorageNodeOps CR (K8s mode)."""
         from utils.k8s_utils import K8sUtils
         mgmt_node = self.mgmt_nodes[0] if self.mgmt_nodes else ""
         k8s_utils = K8sUtils(ssh_obj=self.ssh_obj, mgmt_node=mgmt_node)
-        k8s_utils.patch_storage_node_migrate(
+        ops_name, _ = k8s_utils.patch_storage_node_migrate(
             node_uuid=node_uuid,
             target_worker=self.migrate_to_worker,
             new_ssd_pcie=self.new_ssd_pcie if self.new_ssd_pcie else None,
             reattach_volume=self.reattach_volume,
         )
+        self.logger.info(f"StorageNodeOps '{ops_name}' created for migration")
 
     def _trigger_migration_docker(self, node_id: str):
         """In Docker mode, trigger migration by restarting the storage node.
@@ -360,11 +361,17 @@ class TestBackupDuringMigration(BackupTestBase):
             from utils.k8s_utils import K8sUtils
             mgmt_node = self.mgmt_nodes[0] if self.mgmt_nodes else ""
             k8s_utils = K8sUtils(ssh_obj=self.ssh_obj, mgmt_node=mgmt_node)
-            k8s_utils.patch_storage_node_migrate(
+            ops_name, _ = k8s_utils.patch_storage_node_migrate(
                 node_uuid=hosting_node,
                 target_worker=self.migrate_to_worker,
                 new_ssd_pcie=self.new_ssd_pcie if self.new_ssd_pcie else None,
                 reattach_volume=self.reattach_volume,
+            )
+            # Note: intentionally NOT waiting for ops completion here —
+            # this test races backup against active migration
+            self.logger.info(
+                f"StorageNodeOps '{ops_name}' created; proceeding "
+                f"with in-flight backup immediately"
             )
         else:
             node_details = self.sbcli_utils.get_storage_node_details(hosting_node)

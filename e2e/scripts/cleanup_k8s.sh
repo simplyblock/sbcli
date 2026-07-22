@@ -102,6 +102,7 @@ for CR_TYPE in \
   "simplyblockdevices.storage.simplyblock.io" \
   "simplyblockstoragenodes.storage.simplyblock.io" \
   "simplyblockstoragenodesets.storage.simplyblock.io" \
+  "simplyblockstoragenodeops.storage.simplyblock.io" \
   "simplyblockstorageclusters.storage.simplyblock.io" \
   "simplyblocksnapshotreplications.storage.simplyblock.io" \
   "pool.storage.simplyblock.io" \
@@ -110,6 +111,7 @@ for CR_TYPE in \
   "devices.storage.simplyblock.io" \
   "storagenodes.storage.simplyblock.io" \
   "storagenodesets.storage.simplyblock.io" \
+  "storagenodeops.storage.simplyblock.io" \
   "storageclusters.storage.simplyblock.io" \
   "snapshotreplications.storage.simplyblock.io" \
   "storagebackups.storage.simplyblock.io" \
@@ -262,11 +264,13 @@ for CR_TYPE in \
   "simplyblocklvol.storage.simplyblock.io" \
   "simplyblockstoragenodes.storage.simplyblock.io" \
   "simplyblockstoragenodesets.storage.simplyblock.io" \
+  "simplyblockstoragenodeops.storage.simplyblock.io" \
   "simplyblockstorageclusters.storage.simplyblock.io" \
   "pool.storage.simplyblock.io" \
   "lvol.storage.simplyblock.io" \
   "storagenodes.storage.simplyblock.io" \
   "storagenodesets.storage.simplyblock.io" \
+  "storagenodeops.storage.simplyblock.io" \
   "storageclusters.storage.simplyblock.io" \
   "storagebackups.storage.simplyblock.io" \
   "backuprestores.storage.simplyblock.io" \
