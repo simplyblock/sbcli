@@ -323,6 +323,19 @@ RESTART_WORKER_MAX_CONCURRENCY=24
 # full-cluster sweep in ~4 waves.
 RESTART_COORDINATOR_MAX_CONCURRENCY=64
 
+# Quiesce after blocking the CONFIGURED PRIMARY's client port in
+# recreate_lvstore_on_non_leader, before the peer's examine. A fixed wait,
+# NOT a drain: on this node class the only inflight counter
+# (bdev_distrib_check_inflight_io) includes data-migration mover IO that a
+# port block cannot stop, so poll-to-zero never settles on a migrating
+# primary (the 10s regression fixed by 5cf279db). Client IO admitted before
+# the block settles in single-digit ms; 200ms keeps ~2 orders of magnitude
+# margin (was 500ms — 40% of the whole post-fix window, 2026-07-22).
+# Durable replacement: nvmf-layer drain of the blocked port's own
+# outstanding commands (nvmf_port_block wait_for_drain, SPDK fork change) —
+# migration-immune and exact, on every node class.
+NON_LEADER_BLOCK_QUIESCE_SEC = 0.2
+
 NVMF_MAX_SUBSYSTEMS=50000
 KATO=5000
 # transport_ack_timeout exponent: server tears down a client qpair if it

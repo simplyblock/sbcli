@@ -6724,14 +6724,14 @@ def _recreate_lvstore_on_non_leader_impl(snode, leader_node, primary_node, activ
                 _abort_and_unblock(msg)
 
     if not activation_mode and leader_port_blocked:
-        # Fixed 0.5s quiesce window instead of draining distrib-inflight.
-        # bdev_distrib_check_inflight_io counts internal distrib IO (including
-        # data-migration moves) which the port block does not pause, so polling
-        # for it to hit zero can hold the leader's lvol port blocked long
-        # enough to breach client fio max_latency. Migration IO does not touch
+        # Fixed quiesce window instead of draining distrib-inflight — see
+        # constants.NON_LEADER_BLOCK_QUIESCE_SEC for the full rationale
+        # (the inflight counter is polluted by migration mover IO on this
+        # node class, so a drain loop never settles; client IO admitted
+        # before the block settles in ms). Migration IO does not touch
         # lvstore metadata, so a brief fixed wait is sufficient for the
         # secondary's examine to see a consistent superblock.
-        time.sleep(0.5)
+        time.sleep(constants.NON_LEADER_BLOCK_QUIESCE_SEC)
 
     elif not activation_mode and not leader_has_quorum:
         logger.info("Leader %s has no quorum for %s, skipping port block",

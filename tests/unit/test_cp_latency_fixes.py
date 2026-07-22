@@ -554,3 +554,14 @@ class TestDeferredHublvolPersist:
         # persist runs right after the window closes (flush point)
         flush_nl_persist = "_flush_port_events()\n        _persist_deferred_node_fields()"
         assert flush_nl_persist in src
+
+
+class TestQuiesceConstant:
+    def test_quiesce_is_named_constant_at_200ms(self):
+        from simplyblock_core import constants as c
+        assert c.NON_LEADER_BLOCK_QUIESCE_SEC == 0.2
+        import inspect
+        src = inspect.getsource(
+            storage_node_ops._recreate_lvstore_on_non_leader_impl)
+        assert "time.sleep(constants.NON_LEADER_BLOCK_QUIESCE_SEC)" in src
+        assert "time.sleep(0.5)" not in src
