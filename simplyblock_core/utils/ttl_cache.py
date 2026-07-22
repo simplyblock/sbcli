@@ -71,7 +71,6 @@ class TTLCache:
         ``None`` is a meaningful, stable answer.
         """
         now = time.monotonic()
-        stale = None
         with self._lock:
             entry = self._data.get(key)
             if entry is not None and (now - entry[0]) < ttl:

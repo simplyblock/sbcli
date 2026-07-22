@@ -203,6 +203,10 @@ class _HublvolLock:
         self._token = uuid.uuid4().hex
         self._process_lock = None  # set in __enter__ when kv_store is None
         self.last_attach_at = 0.0
+        # Set by HublvolReconnectCoordinator.acquire_lock for locks whose
+        # lifetime is owned by the restart port-block flow.
+        self.externally_managed = False
+        self.pending_stamp = False
 
     def __enter__(self):
         if self._kv is None:

@@ -84,7 +84,7 @@ class BaseModel(object):
                 and not ismethod(getattr(cls, s, None))
                 and not isfunction(getattr(cls, s, None))
             ]
-            cls._annotated_attrs_cache = cached
+            cls._annotated_attrs_cache = cached  # type: ignore[attr-defined]
         return cached
 
     def get_attrs_map(self):

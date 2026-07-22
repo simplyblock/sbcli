@@ -1426,7 +1426,7 @@ def _connect_device_thread(name: str, device: NVMeDevice, node: StorageNode):
     later restart pass / health repair reconnects the device once its owner is
     back ONLINE — coverage is unchanged, only the pointless backoff is dropped.
     """
-    attempts = (1, 2, 3)
+    attempts: tuple = (1, 2, 3)
     try:
         owner = DBController().get_storage_node_by_id(device.node_id)
         if owner is not None and owner.status != StorageNode.STATUS_ONLINE:
@@ -6613,7 +6613,7 @@ def _recreate_lvstore_on_non_leader_impl(snode, leader_node, primary_node, activ
             return
         _d = time.monotonic() - _leader_block["t0"]
         _leader_block["t0"] = None
-        _leader_block["max"] = max(_leader_block["max"], _d)
+        _leader_block["max"] = max(float(_leader_block["max"] or 0.0), _d)
         logger.info(
             "[RESTART] Leader client port %s (%s) was blocked %.3fs "
             "(reject threshold 6s)",
@@ -7643,11 +7643,11 @@ def _recreate_lvstore_impl(snode, force=False, lvs_primary=None, activation_mode
         if not _deferred_node_persist.pop("needed", False):
             return
         try:
-            db_controller.atomic_update(
-                snode,
-                lambda n, h=snode.hublvol, t=snode.transfer_hublvol: (
-                    setattr(n, "hublvol", h),
-                    setattr(n, "transfer_hublvol", t)))
+            def _apply_hub_fields(n, h=snode.hublvol,
+                                  t=snode.transfer_hublvol):
+                n.hublvol = h
+                n.transfer_hublvol = t
+            db_controller.atomic_update(snode, _apply_hub_fields)
         except Exception as _pe:
             logger.error("Deferred hublvol persist failed for %s: %s",
                          snode.get_id(), _pe)

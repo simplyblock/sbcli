@@ -103,7 +103,8 @@ class TestHublvolLockPreAcquire:
                 except hublvol_reconnect.HublvolReconnectError:
                     pass
             t = threading.Thread(target=try_second)
-            t.start(); t.join(timeout=5)
+            t.start()
+            t.join(timeout=5)
             assert got['ok'] is False, 'second acquire should time out while held'
         finally:
             lock.release()
@@ -185,13 +186,16 @@ class TestPortBlockWindowGate:
         state = {'held': False}
 
         def acquire():
-            g.acquire(); state['held'] = True
+            g.acquire()
+            state['held'] = True
 
         def release():
             if state['held']:
                 state['held'] = False
                 g.release()
-        acquire(); release(); release()  # double release must be harmless
+        acquire()
+        release()
+        release()  # double release must be harmless
         assert g.acquire(blocking=False)
         g.release()
 

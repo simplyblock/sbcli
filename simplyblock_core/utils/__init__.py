@@ -685,12 +685,12 @@ def make_async_handler(target_handler):
     import atexit
     import queue as _queue
     import logging.handlers as _lh
-    log_queue = _queue.Queue(-1)  # unbounded; enqueue never blocks a worker
+    log_queue: "_queue.Queue" = _queue.Queue(-1)  # unbounded; enqueue never blocks a worker
     listener = _lh.QueueListener(log_queue, target_handler, respect_handler_level=False)
     listener.start()
     atexit.register(listener.stop)
     qh = _lh.QueueHandler(log_queue)
-    qh._listener = listener  # keep a strong ref so it isn't GC'd
+    qh._listener = listener  # type: ignore[attr-defined]  # strong ref, not GC'd
     return qh
 
 

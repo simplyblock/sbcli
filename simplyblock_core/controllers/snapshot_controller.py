@@ -594,7 +594,7 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
             # succeeded owe a sync delete if we abort; restart-gated peers
             # owe one too (journal replay can materialize the blob on them
             # without any registration).
-            registered_secs = []
+            registered_secs: list = []
             restart_gated_ids = []
             for sec in secondary_nodes:
                 # Per design: gate snapshot registration around restart port block.
