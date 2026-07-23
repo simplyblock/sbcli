@@ -795,9 +795,9 @@ def _ensure_target_nvmf_state(migration, lvol, src_node, tgt_node, src_rpc, tgt_
             return _WAIT
 
         listener_present = any(
-            (l.get('address', {}).get('traddr') == path['ip']
-             and str(l.get('address', {}).get('trsvcid')) == str(path['port']))
-            for l in listeners)
+            (ls.get('address', {}).get('traddr') == path['ip']
+             and str(ls.get('address', {}).get('trsvcid')) == str(path['port']))
+            for ls in listeners)
 
         if not listener_present:
             logger.warning(

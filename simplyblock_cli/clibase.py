@@ -819,7 +819,7 @@ class CLIWrapperBase:
                     max_retries=args.max_retries,
                     deadline_seconds=args.deadline_seconds,
                 )
-            except ValueError as e:
+            except (ValueError, MigrationConflictError, PreconditionError, RuntimeError) as e:
                 print(f"Error: {e}")
                 return False
             print(f"Batch migration started: {group_id}")
@@ -830,7 +830,7 @@ class CLIWrapperBase:
                 max_retries=args.max_retries,
                 deadline_seconds=args.deadline_seconds,
             )
-        except ValueError as e:
+        except (ValueError, MigrationConflictError, PreconditionError, RuntimeError) as e:
             print(f"Error: {e}")
             return False
         print(f"Migration started: {migration_id}")

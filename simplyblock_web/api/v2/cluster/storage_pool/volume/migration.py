@@ -39,7 +39,7 @@ def create_migration(request: Request, cluster: Cluster, volume: Volume, paramet
             ctrl_loss_tmo=parameters.ctrl_loss_tmo,
             host_nqn=parameters.host_nqn,
         )
-    except (ValueError, MigrationConflictError, PreconditionError) as e:
+    except (ValueError, MigrationConflictError, PreconditionError, RuntimeError) as e:
         raise HTTPException(400, str(e))
     db = DBController()
     return creation_response(
@@ -78,7 +78,7 @@ def continue_migration(cluster: Cluster, migration: Migration, parameters: _Cont
             max_retries=parameters.max_retries,
             deadline_seconds=parameters.deadline_seconds,
         )
-    except ValueError as e:
+    except (ValueError, MigrationConflictError, PreconditionError, RuntimeError) as e:
         raise HTTPException(400, str(e))
     return {"migration_id": migration_id}
 

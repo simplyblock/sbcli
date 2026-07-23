@@ -666,16 +666,20 @@ def cleanup_migration_target(migration_id):
                 deleted.append({**tag, "bdev": bdev_path})
             else:
                 not_found.append({**tag, "bdev": bdev_path})
-        except Exception as exc:
-            errors.append({**tag, "bdev": bdev_path, "error": str(exc)})
+        except Exception:
+            logger.exception("cleanup_migration_target: failed to delete bdev %s", bdev_path)
+            errors.append({**tag, "bdev": bdev_path, "error": "Internal error during cleanup operation"})
 
     # Build RPC clients for primary + HA peers.
     rpc_clients = []
     try:
         rpc_clients.append((tgt_node.get_id(), tgt_node.rpc_client(), "primary"))
-    except Exception as exc:
+    except Exception:
+        logger.exception(
+            "cleanup_migration_target: failed to create RPC client for node %s",
+            migration.target_node_id[:8])
         errors.append({"type": "rpc_connect", "node": migration.target_node_id[:8],
-                       "error": str(exc)})
+                       "error": "Internal error during cleanup operation"})
 
     for attr, label in [("secondary_node_id", "secondary"),
                          ("tertiary_node_id",  "tertiary")]:
@@ -761,8 +765,11 @@ def cleanup_migration_target(migration_id):
                     not_found.append(tag)
                 else:
                     deleted.append({**tag, "action": outcome})
-            except Exception as exc:
-                errors.append({**tag, "error": str(exc)})
+            except Exception:
+                logger.exception(
+                    "cleanup_migration_target: failed to cleanup subsystem %s on node %s",
+                    migration.target_subsystem_nqn, node_id[:8])
+                errors.append({**tag, "error": "Internal error during cleanup operation"})
 
     return {"deleted": deleted, "not_found": not_found, "skipped": skipped, "errors": errors}
 
@@ -830,8 +837,8 @@ def _get_shared_subsystem_members(lvol, cluster_id):
     if lvol.max_namespace_per_subsys <= 1:
         return []
     nqn = lvol.nqn
-    members = [l for l in db.get_lvols(cluster_id) if l.nqn == nqn]
-    return sorted(members, key=lambda l: l.ns_id)
+    members = [lv for lv in db.get_lvols(cluster_id) if lv.nqn == nqn]
+    return sorted(members, key=lambda lv: lv.ns_id)
 
 
 def _compute_snap_owners(members, source_node_id):

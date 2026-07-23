@@ -37,22 +37,18 @@ PHASE_CLEANUP_TARGET (orchestrator: wait + target teardown)
 """
 
 import time
-from typing import List, Optional, Tuple
+from typing import Optional
 
-from simplyblock_core import db_controller as db_mod, utils, constants
-from simplyblock_core.utils import convert_size
+from simplyblock_core import db_controller as db_mod, utils
 from simplyblock_core.controllers import migration_controller, tasks_events
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
-from simplyblock_core.models.lvol_migration import LVolMigration
 from simplyblock_core.models.lvol_migration_group import LVolMigrationGroup
-from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.rpc_client import RPCClient, RPCException
+from simplyblock_core.rpc_client import RPCException
 from simplyblock_core.services.hub_controller_manager import hub_manager
 from simplyblock_core.services.tasks_runner_lvol_migration import (
     _make_rpc,
     _snap_tgt_short_name,
-    _snap_short_name,
     _get_target_secondary_node,
     _get_target_tertiary_node,
     _get_source_tertiary_node,
@@ -269,7 +265,12 @@ def _build_batch_final_args(group, member_migrations, src_node, tgt_node, tgt_rp
                 last_snap = db.get_snapshot_by_id(last_uuid)
                 tgt_snap_composite = f"{tgt_node.lvstore}/{_snap_tgt_short_name(last_snap)}"
             except KeyError:
-                pass
+                logger.debug(
+                    "Migrated snapshot %s not found while building batch final args for migration %s; "
+                    "continuing with empty snapshot path",
+                    last_uuid,
+                    migration_id,
+                )
         elif m.snaps_preexisting_on_target:
             last_uuid = m.snaps_preexisting_on_target[-1]
             try:
@@ -286,7 +287,12 @@ def _build_batch_final_args(group, member_migrations, src_node, tgt_node, tgt_rp
                             tgt_snap_composite = _inst_bdev
                             break
             except KeyError:
-                pass
+                logger.debug(
+                    "Preexisting snapshot %s not found while building batch final args for migration %s; "
+                    "continuing with empty snapshot path",
+                    last_uuid,
+                    migration_id,
+                )
         snapshot_names.append(tgt_snap_composite)
 
     return lvol_names, lvol_ids, snapshot_names
@@ -503,8 +509,10 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
     except (ValueError, KeyError) as e:
         try:
             src_rpc.bdev_nvme_detach_controller(ctrl_name)
-        except Exception:
-            pass
+        except Exception as detach_exc:
+            logger.warning(
+                f"Group {group.uuid[:8]}: hub controller detach after build-args "
+                f"failure (non-fatal): {detach_exc}")
         return None, str(e)
 
     logger.info(
@@ -583,7 +591,9 @@ def _all_workers_terminal(group):
             if m.is_active():
                 return False
         except KeyError:
-            pass
+            logger.debug(
+                "_all_workers_terminal: worker migration %s not found; treating as terminal", mid,
+            )
     return True
 
 

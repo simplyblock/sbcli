@@ -98,6 +98,16 @@ class LVolMigrationGroup(BaseModel):
 
     # --- Helpers ---
 
+    def __eq__(self, other):
+        if self is other:
+            return True
+        if not isinstance(other, LVolMigrationGroup):
+            return NotImplemented
+        return self.cluster_id == other.cluster_id and self.uuid == other.uuid
+
+    def __hash__(self):
+        return hash((self.cluster_id, self.uuid))
+
     def get_id(self):
         return "%s/%s" % (self.cluster_id, self.uuid)
 

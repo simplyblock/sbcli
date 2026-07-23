@@ -141,15 +141,9 @@ class RPCClient:
             # instead of the proxy-global timeout. Prevents an abandoned/stuck
             # RPC from squatting a proxy slot for minutes and starving other RPCs.
             wire_payload = unwrap_secrets_for_send(payload)
-            if method in ("bdev_lvol_transfer_final_step", ):
-                logger.debug("ebi Wire payload: %s", wire_payload)
             response = self.session.post(
                 self.url, data=json.dumps(wire_payload), timeout=effective_timeout,
                 headers={"X-RPC-Timeout": str(effective_timeout)})
-            if method in ("bdev_lvol_transfer_final_step", ):
-                logger.debug(
-                    "ebi Response: status_code: %s, headers: %s, content: %s",
-                    response.status_code, dict(response.headers), response.text)
         except Exception:
             raise RPCException("connection error")
 
@@ -191,15 +185,9 @@ class RPCClient:
                 'method': method,
                 'params': kwargs,
             })
-            if method in ("bdev_lvol_transfer_final_step", "bdev_lvol_batch_transfer_final_step"):
-                logger.debug("ebi Wire payload: %s", wire_payload)
             response = self.session.post(
                 self.url, data=json.dumps(wire_payload), timeout=self.timeout,
                 headers={"X-RPC-Timeout": str(self.timeout)})
-            if method in ("bdev_lvol_transfer_final_step", "bdev_lvol_batch_transfer_final_step"):
-                logger.debug(
-                    "ebi Response: status_code: %s, headers: %s, content: %s",
-                    response.status_code, dict(response.headers), response.text)
             response.raise_for_status()
             data = response.json()
             _response_validator.validate(data)
