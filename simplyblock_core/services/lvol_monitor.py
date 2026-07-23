@@ -1,5 +1,7 @@
 # coding=utf-8
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 
@@ -99,10 +101,13 @@ def set_snapshot_health_check(snap, health_check_status):
 
 
 lvol_del_start_time = 0.0
+_del_rebalance_lock = threading.Lock()
+
 def pre_lvol_delete_rebalance():
     global lvol_del_start_time
-    if lvol_del_start_time == 0:
-        lvol_del_start_time = time.time()
+    with _del_rebalance_lock:
+        if lvol_del_start_time == 0:
+            lvol_del_start_time = time.time()
 
 
 def resume_comp(lvol):
@@ -121,7 +126,10 @@ def resume_comp(lvol):
 
 def post_lvol_delete_rebalance(cluster, lvol):
     global lvol_del_start_time
-    diff = time.time() - lvol_del_start_time
+    with _del_rebalance_lock:
+        if lvol_del_start_time == 0:
+            return
+        diff = time.time() - lvol_del_start_time
     if diff > 0:
         records = db.get_cluster_capacity(cluster, int(diff/5))
         total_size = records[0].size_total
@@ -129,7 +137,8 @@ def post_lvol_delete_rebalance(cluster, lvol):
         start_cap = records[-1].size_used
         if start_cap - current_cap > int(total_size * 10 / 100):
             resume_comp(lvol)
-        lvol_del_start_time = 0
+        with _del_rebalance_lock:
+            lvol_del_start_time = 0
         return True
     lvol_records = db.get_lvol_stats(lvol, 1)
     if lvol_records:
@@ -261,7 +270,80 @@ def process_lvol_delete_try_again(lvol):
                      lambda x: setattr(x, "deletion_status", ""))
 
 
+def _handle_delete_poll_result(cluster, lvol, ret):
+    """Handle the result of a bdev_lvol_get_lvol_delete_status poll."""
+    if ret == 0 or ret == 2:  # Lvol may have already been deleted (not found) or delete completed
+        process_lvol_delete_finish(cluster, lvol)
+
+    elif ret == 1:  # Async lvol deletion is in progress or queued
+        logger.info(f"LVol deletion in progress, id: {lvol.get_id()}")
+        pre_lvol_delete_rebalance()
+
+    elif ret == 3:  # Async deletion is done, but leadership has changed (sync deletion is now blocked)
+        logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
+        logger.error("Async deletion is done, but leadership has changed (sync deletion is now blocked)")
+
+    elif ret == 4:  # No async delete request exists for this lvol
+        logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
+        logger.warning("No async delete request exists for this lvol; re-issuing on next pass")
+        process_lvol_delete_try_again(lvol)
+
+    elif ret == -1:  # Operation not permitted
+        logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
+        logger.error("Operation not permitted")
+        lvol = db.atomic_update(db.get_lvol_by_id(lvol.get_id()),
+                                lambda x: setattr(x, "io_error", True))
+        set_lvol_status(lvol, LVol.STATUS_OFFLINE)
+
+    elif ret == -2:  # No such file or directory
+        logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
+        logger.error("No such file or directory")
+        process_lvol_delete_finish(cluster, lvol)
+
+    elif ret == -5:  # I/O error
+        logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
+        logger.error("I/O error")
+        process_lvol_delete_try_again(lvol)
+
+    elif ret == -11:  # Try again
+        logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
+        logger.error("Try again")
+        process_lvol_delete_try_again(lvol)
+
+    elif ret == -12:  # Out of memory
+        logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
+        logger.error("Out of memory")
+        process_lvol_delete_try_again(lvol)
+
+    elif ret == -16:  # Device or resource busy
+        logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
+        logger.error("Device or resource busy")
+        process_lvol_delete_try_again(lvol)
+
+    elif ret == -19:  # No such device
+        logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
+        logger.error("Finishing lvol delete")
+        process_lvol_delete_finish(cluster, lvol)
+
+    elif ret == -35:  # Leadership changed
+        logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
+        logger.error("Leadership changed")
+        process_lvol_delete_try_again(lvol)
+
+    elif ret == -36:  # Failed to update lvol for deletion
+        logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
+        logger.error("Failed to update lvol for deletion")
+        process_lvol_delete_try_again(lvol)
+
+    else:  # Failed to update lvol for deletion
+        logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
+        logger.error("Failed to update lvol for deletion")
+
+
 def check_node(cluster, snode, all_lvols):
+    _leader_cache = {}  # lvs_name → leader_node (cached per check_node call)
+    _pending_polls = []  # [(lvol, leader_node), ...] for batched status polling
+    _needs_initial_sleep = False
 
     for lvol in all_lvols:
         if lvol.node_id != snode.get_id():
@@ -298,33 +380,40 @@ def check_node(cluster, snode, all_lvols):
             continue
 
         if lvol.status == lvol.STATUS_IN_DELETION:
-            # check leadership
-            leader_node = None
-            snode = db.get_storage_node_by_id(snode.get_id())
-            if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
-                ret = snode.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
-                if not ret:
-                    raise Exception("Failed to get LVol info")
-                lvs_info = ret[0]
-                if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
-                    leader_node = snode
+            # Leadership discovery with per-lvstore cache — avoids repeating
+            # the same RPC for every in_deletion lvol on the same lvstore.
+            cache_key = lvol.lvs_name
+            if cache_key in _leader_cache:
+                leader_node = _leader_cache[cache_key]
+            else:
+                leader_node = None
+                snode = db.get_storage_node_by_id(snode.get_id())
+                if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
+                    ret = snode.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
+                    if not ret:
+                        raise Exception("Failed to get LVol info")
+                    lvs_info = ret[0]
+                    if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
+                        leader_node = snode
 
-            if not leader_node:
-                for sec_id in lvol.nodes[1:]:
-                    try:
-                        _sec = db.get_storage_node_by_id(sec_id)
-                    except KeyError:
-                        continue
-                    if _sec.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
-                        ret = _sec.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
-                        if ret:
-                            lvs_info = ret[0]
-                            if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
-                                leader_node = _sec
-                                break
+                if not leader_node:
+                    for sec_id in lvol.nodes[1:]:
+                        try:
+                            _sec = db.get_storage_node_by_id(sec_id)
+                        except KeyError:
+                            continue
+                        if _sec.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
+                            ret = _sec.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
+                            if ret:
+                                lvs_info = ret[0]
+                                if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
+                                    leader_node = _sec
+                                    break
 
-            if not leader_node:
-                raise Exception("Failed to get leader node")
+                if not leader_node:
+                    logger.error(f"Failed to get leader node for lvol {lvol.get_id()}")
+                    continue
+                _leader_cache[cache_key] = leader_node
 
             # Leader stickiness: while the node that owns the in-flight
             # async delete (deletion_status) is still reachable, keep
@@ -344,6 +433,7 @@ def check_node(cluster, snode, all_lvols):
                 except KeyError:
                     pass
 
+            # Issue initial delete if needed (no per-lvol sleep — batched below)
             if lvol.deletion_status == "" or lvol.deletion_status != leader_node.get_id():
                 # Serialize against creates/registers on the target node —
                 # an unlocked delete interleaving with another object's
@@ -351,94 +441,9 @@ def check_node(cluster, snode, all_lvols):
                 with snapshot_controller.lvstore_op_lock(
                         cluster.get_id(), lvol.lvs_name, node_id=leader_node.get_id()):
                     lvol_controller.delete_lvol_from_node(lvol.get_id(), leader_node.get_id())
-                time.sleep(3)
+                _needs_initial_sleep = True
 
-            try:
-                ret = leader_node.rpc_client().bdev_lvol_get_lvol_delete_status(
-                    f"{lvol.lvs_name}/{lvol.lvol_bdev}")
-            except Exception as e:
-                logger.error(e)
-                # timeout detected, check other node
-                break
-
-            if ret == 0 or ret == 2:  # Lvol may have already been deleted (not found) or delete completed
-                process_lvol_delete_finish(cluster, lvol)
-
-            elif ret == 1:  # Async lvol deletion is in progress or queued
-                logger.info(f"LVol deletion in progress, id: {lvol.get_id()}")
-                pre_lvol_delete_rebalance()
-
-            elif ret == 3:  # Async deletion is done, but leadership has changed (sync deletion is now blocked)
-                logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
-                logger.error("Async deletion is done, but leadership has changed (sync deletion is now blocked)")
-
-            elif ret == 4:  # No async delete request exists for this lvol
-                # Transient during leadership/RPC churn (e.g. a peer down +
-                # post-unblock drain): the async-delete request was never
-                # registered on the node we polled because leadership flipped or
-                # the re-issue RPC didn't land on a flaky leader. This is NOT a
-                # terminal error — flipping the lvol OFFLINE + io_error here
-                # abandons the deletion and strands it (incident
-                # mass_create_delete_docker-20260629: 14 lvols stuck offline).
-                # Reset deletion_status so the next pass re-issues the async
-                # delete on the then-current leader; the lvol stays in_deletion
-                # and drains once leadership/RPC settles (same handling as the
-                # -35 "leadership changed" case).
-                logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
-                logger.warning("No async delete request exists for this lvol; re-issuing on next pass")
-                process_lvol_delete_try_again(lvol)
-
-            elif ret == -1:  # Operation not permitted
-                logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
-                logger.error("Operation not permitted")
-                lvol = db.atomic_update(db.get_lvol_by_id(lvol.get_id()),
-                                        lambda x: setattr(x, "io_error", True))
-                set_lvol_status(lvol, LVol.STATUS_OFFLINE)
-
-            elif ret == -2:  # No such file or directory
-                logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
-                logger.error("No such file or directory")
-                process_lvol_delete_finish(cluster, lvol)
-
-            elif ret == -5:  # I/O error
-                logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
-                logger.error("I/O error")
-                process_lvol_delete_try_again(lvol)
-
-            elif ret == -11:  # Try again
-                logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
-                logger.error("Try again")
-                process_lvol_delete_try_again(lvol)
-
-            elif ret == -12:  # Out of memory
-                logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
-                logger.error("Out of memory")
-                process_lvol_delete_try_again(lvol)
-
-            elif ret == -16:  # Device or resource busy
-                logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
-                logger.error("Device or resource busy")
-                process_lvol_delete_try_again(lvol)
-
-            elif ret == -19:  # No such device
-                logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
-                logger.error("Finishing lvol delete")
-                process_lvol_delete_finish(cluster, lvol)
-
-            elif ret == -35:  # Leadership changed
-                logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
-                logger.error("Leadership changed")
-                process_lvol_delete_try_again(lvol)
-
-            elif ret == -36:  # Failed to update lvol for deletion
-                logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
-                logger.error("Failed to update lvol for deletion")
-                process_lvol_delete_try_again(lvol)
-
-            else:  # Failed to update lvol for deletion
-                logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
-                logger.error("Failed to update lvol for deletion")
-
+            _pending_polls.append((lvol, leader_node))
             continue
 
         # `all_lvols` is a cycle-start snapshot and a full pass takes minutes
@@ -499,6 +504,19 @@ def check_node(cluster, snode, all_lvols):
         if passed:
             set_lvol_status(lvol, LVol.STATUS_ONLINE)
 
+    # Batch poll: single sleep covers all initial deletes issued above,
+    # then poll each in_deletion lvol's async-delete status in one pass.
+    if _needs_initial_sleep:
+        time.sleep(3)
+
+    for lvol, leader_node in _pending_polls:
+        try:
+            ret = leader_node.rpc_client().bdev_lvol_get_lvol_delete_status(
+                f"{lvol.lvs_name}/{lvol.lvol_bdev}")
+        except Exception as e:
+            logger.error(e)
+            continue
+        _handle_delete_poll_result(cluster, lvol, ret)
 
 
 # get DB controller
@@ -520,11 +538,16 @@ def main():
                 logger.warning(f"Cluster {cluster.get_id()} is in {cluster.status} state, skipping")
                 continue
             all_lvols = db.get_all_lvols()
-            for snode in db.get_storage_nodes_by_cluster_id(cluster.get_id()):
+            snodes = db.get_storage_nodes_by_cluster_id(cluster.get_id())
+
+            def _check_node_safe(snode, _cluster=cluster, _all_lvols=all_lvols):
                 try:
-                    check_node(cluster, snode, all_lvols)
+                    check_node(_cluster, snode, _all_lvols)
                 except Exception as e:
                     logger.error(e)
+
+            with ThreadPoolExecutor(max_workers=max(len(snodes), 1)) as executor:
+                list(executor.map(_check_node_safe, snodes))
 
         time.sleep(constants.LVOL_MONITOR_INTERVAL_SEC)
 

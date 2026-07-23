@@ -716,7 +716,12 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
 
     if ha_type == "single":
         if host_node.status == StorageNode.STATUS_ONLINE:
-            lvol_bdev, error = add_lvol_on_node(lvol, host_node)
+            try:
+                with snapshot_controller.lvstore_op_lock(
+                        pool.cluster_id, lvol.lvs_name, node_id=host_node.get_id()):
+                    lvol_bdev, error = add_lvol_on_node(lvol, host_node)
+            except PreconditionError as e:
+                lvol_bdev, error = None, str(e)
             if error:
                 lvol.remove(db_controller.kv_store)
                 return False, error
@@ -783,7 +788,9 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
 
         # Step 2: Execute on leader (with failover on failure)
         def _create_on_leader(leader):
-            lvol_bdev, error = add_lvol_on_node(lvol, leader)
+            with snapshot_controller.lvstore_op_lock(
+                    pool.cluster_id, lvol.lvs_name, node_id=leader.get_id()):
+                lvol_bdev, error = add_lvol_on_node(lvol, leader)
             if error:
                 raise RuntimeError(error)
             return lvol_bdev
@@ -814,8 +821,10 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
                 leader_op_completed=True, all_nodes=all_nodes)
             if action == "proceed":
                 try:
-                    lvol_bdev, error = add_lvol_on_node(
-                        lvol, sec, is_primary=False, secondary_index=reg_index)
+                    with snapshot_controller.lvstore_op_lock(
+                            pool.cluster_id, lvol.lvs_name, node_id=sec.get_id()):
+                        lvol_bdev, error = add_lvol_on_node(
+                            lvol, sec, is_primary=False, secondary_index=reg_index)
                 except Exception as e:
                     # e.g. PreconditionError from the per-node lvstore lock —
                     # the node can die while this op WAITS for the lock (the
