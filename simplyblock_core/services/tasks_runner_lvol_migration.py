@@ -924,6 +924,10 @@ def _setup_snap_transfer(snap, snap_index, src_node, tgt_node,
     _ndcs = snap_lvol.ndcs if snap_lvol else 0
     _npcs = snap_lvol.npcs if snap_lvol else 0
     _priority_class = snap_lvol.lvol_priority_class if snap_lvol else 0
+    ok, err = migration_controller._ensure_lvstore_primary_leader(
+        tgt_rpc, tgt_node.lvstore, tgt_node.get_id())
+    if not ok:
+        return None, err
     ret = tgt_rpc.create_lvol(snap_short, size_in_mib, tgt_node.lvstore, ndcs=_ndcs, npcs=_npcs)
     if not ret:
         return None, f"Failed to create target lvol for snap {snap_uuid}"

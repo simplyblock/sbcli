@@ -863,6 +863,35 @@ def _compute_snap_owners(members, source_node_id):
     return snap_owner_lvol
 
 
+def _ensure_lvstore_primary_leader(rpc, lvs_name, node_id=None):
+    """Verify `lvs_name` is both PRIMARY and currently holds LEADERSHIP on
+    the node behind `rpc` before creating an lvol bdev on it.
+
+    Creating an lvol against a non-primary or non-leader lvstore writes
+    through a stale/secondary view of the LVS, which can corrupt its
+    on-disk superblock (see: LVS_16 unrecoverable crash-loop, 2026-07-21 —
+    node stuck permanently re-failing `recreate_lvstore` after a migration
+    created a bdev against it while it wasn't actually the leader).
+
+    Returns (ok: bool, error: str) — error is empty when ok is True.
+    """
+    try:
+        ret = rpc.bdev_lvol_get_lvstores(lvs_name)
+    except Exception as e:
+        return False, f"Could not query lvstore {lvs_name}{f' on {node_id}' if node_id else ''}: {e}"
+    if not ret or not isinstance(ret, list) or len(ret) == 0:
+        return False, f"Lvstore {lvs_name} not found{f' on {node_id}' if node_id else ''}"
+    lvs = ret[0]
+    is_primary = bool(lvs.get("lvs_primary"))
+    is_leader = bool(lvs.get("lvs leadership"))
+    if not is_primary or not is_leader:
+        return False, (
+            f"Lvstore {lvs_name}{f' on {node_id}' if node_id else ''} is not primary/leader "
+            f"(lvs_primary={is_primary}, lvs leadership={is_leader}) — refusing to create lvol"
+        )
+    return True, ""
+
+
 def create_migration(lvol_id, target_node_id,
                          ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO,
                          host_nqn=None,
@@ -950,6 +979,9 @@ def create_migration(lvol_id, target_node_id,
 
     # ── 1. Bdev ──────────────────────────────────────────────────────────────
     if not tgt_rpc.get_bdevs(composite):
+        ok, err = _ensure_lvstore_primary_leader(tgt_rpc, tgt_node.lvstore, target_node_id)
+        if not ok:
+            raise PreconditionError(f"Cannot create target lvol {composite}: {err}")
         ret = tgt_rpc.create_lvol(
             bdev_short, size_in_mib, tgt_node.lvstore,
             lvol_priority_class=lvol.lvol_priority_class,
