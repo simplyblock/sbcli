@@ -994,3 +994,11 @@ def add_replication_final_task(cluster_id, src_node_id, function_params):
     """
     return _add_task(JobSchedule.FN_REPLICATION_FINAL, cluster_id, src_node_id, "",
                      function_params=function_params, send_to_cluster_log=False)
+
+
+def get_active_lvol_migration(node_id):
+    """Return active LVolMigration records with ``node_id`` as source or target."""
+    return [
+        m for m in db.get_migrations()
+        if m.is_active() and node_id in (m.source_node_id, m.target_node_id)
+    ]
