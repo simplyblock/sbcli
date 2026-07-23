@@ -31,6 +31,19 @@ MAX_CONCURRENT_NODE_ADDS = constants.NODE_ADD_MAX_PARALLEL
 _inflight = set()
 _inflight_lock = threading.Lock()
 
+# target node_addr values currently being driven by a worker, guarded by the
+# same lock. The concurrency model above ("different tasks target different
+# nodes, no shared state") breaks if TWO task records ever target the SAME
+# host — e.g. a caller's retried HTTP request creating a second FN_NODE_ADD
+# task before tasks_controller._validate_new_task_node_add existed to block
+# it, or any task created before that dedup shipped. Without this, both
+# tasks' add_node() calls race the same host's config-slot classify-then-
+# create logic milliseconds apart (2026-07-23: two threads, 4ms apart,
+# produced 6 node records for a 4-slot host). This is belt-and-suspenders
+# for the task-creation-time dedup — it protects against any duplicate task
+# that already exists, regardless of how it got created.
+_inflight_addrs = set()
+
 
 def process_task(task, cl):
     if task.canceled:
@@ -120,7 +133,7 @@ def _wait_node_reachable(task, task_uuid):
     return True
 
 
-def _run_task(task_uuid, cluster_id):
+def _run_task(task_uuid, cluster_id, node_addr):
     """Worker thread: drive one node-add task to completion (or suspension),
     then drop it from the in-flight set so a later cycle can retry it.
 
@@ -180,6 +193,8 @@ def _run_task(task_uuid, cluster_id):
     finally:
         with _inflight_lock:
             _inflight.discard(task_uuid)
+            if node_addr:
+                _inflight_addrs.discard(node_addr)
 
 
 def main():
@@ -211,14 +226,24 @@ def main():
                         continue
                     if task.status == JobSchedule.STATUS_DONE:
                         continue
+                    node_addr = (task.function_params or {}).get("node_addr")
                     # Dispatch to a worker once; skip if a worker on this host is
                     # already driving it. Excess tasks queue in the executor and
-                    # run as workers free up.
+                    # run as workers free up. Also skip if a DIFFERENT task
+                    # already targets the SAME node_addr: tasks_controller's
+                    # creation-time dedup should prevent that task from ever
+                    # existing, but this is the backstop — two tasks racing the
+                    # same host's config-slot classify-then-create logic
+                    # produced duplicate storage-node records (2026-07-23).
                     with _inflight_lock:
                         if task.uuid in _inflight:
                             continue
+                        if node_addr and node_addr in _inflight_addrs:
+                            continue
                         _inflight.add(task.uuid)
-                    executor.submit(_run_task, task.uuid, cl.get_id())
+                        if node_addr:
+                            _inflight_addrs.add(node_addr)
+                    executor.submit(_run_task, task.uuid, cl.get_id(), node_addr)
 
         time.sleep(constants.TASK_EXEC_INTERVAL_SEC)
 

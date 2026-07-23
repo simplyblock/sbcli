@@ -177,6 +177,31 @@ def _validate_new_task_node_restart(cluster_id, node_id):
     return False
 
 
+def _validate_new_task_node_add(cluster_id, node_addr):
+    # FN_NODE_ADD has no node_id (the node doesn't exist yet) — the only
+    # identity a caller (the operator posting "add this host") has is the
+    # target node_addr inside function_params. Without this dedup, a retried
+    # HTTP request from the caller (or any other double-post) creates a
+    # SECOND independent task for the same host; tasks_runner_node_add's
+    # concurrency guard only dedups by task uuid, not target host (its
+    # concurrency model assumes different tasks target different nodes with
+    # no shared state), so both tasks get dispatched to run add_node()
+    # concurrently — two threads racing the same host's config-slot
+    # classify-then-create logic milliseconds apart (2026-07-23, 6 nodes
+    # created for a 4-slot host). Block the duplicate at creation time.
+    if not node_addr:
+        return False
+    tasks = db.get_job_tasks(cluster_id)
+    for task in tasks:
+        if task.function_name != JobSchedule.FN_NODE_ADD:
+            continue
+        if task.status == JobSchedule.STATUS_DONE or task.canceled:
+            continue
+        if (task.function_params or {}).get("node_addr") == node_addr:
+            return task.uuid
+    return False
+
+
 def _add_task(function_name, cluster_id, node_id, device_id,
               max_retry=constants.TASK_EXEC_RETRY_COUNT, function_params=None, send_to_cluster_log=True):
 
@@ -232,6 +257,11 @@ def _add_task(function_name, cluster_id, node_id, device_id,
             return False
     elif function_name == JobSchedule.FN_LVOL_MIG:
         task_id = get_active_lvol_mig_task(cluster_id, function_params.get("lvol_id"))
+        if task_id:
+            logger.info(f"Task found, skip adding new task: {task_id}")
+            return False
+    elif function_name == JobSchedule.FN_NODE_ADD:
+        task_id = _validate_new_task_node_add(cluster_id, (function_params or {}).get("node_addr"))
         if task_id:
             logger.info(f"Task found, skip adding new task: {task_id}")
             return False
