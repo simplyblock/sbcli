@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from simplyblock_core import constants, db_controller, cluster_ops, storage_node_ops, utils
 from simplyblock_core.controllers import health_controller, device_controller, tasks_controller, storage_events
 from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
@@ -753,6 +754,22 @@ def update_cluster_status(cluster_id):
             _ucs_running[cluster_id] = False
 
 
+def _delete_old_tasks(tasks: list[JobSchedule]):
+    now_in_seconds = int(time.time())
+    for task in tasks:
+        if now_in_seconds - task.date > constants.TASKS_RETENTION_PERIOD_SEC:
+            task.remove(db.kv_store)
+
+
+def _delete_old_logs(events: list[EventObj], cluster_id: str):
+    now_in_seconds = int(time.time())
+    for event in events:
+        if event.cluster_uuid != cluster_id:
+            continue
+        if now_in_seconds - int(event.date/1000) > constants.TASKS_RETENTION_PERIOD_SEC:
+            event.remove(db.kv_store)
+
+
 def _update_cluster_status_impl(cluster_id):
     # Run the re-queue scan FIRST, before any of the transition branches
     # that may early-return. Otherwise OFFLINE/SCHEDULABLE nodes can stay
@@ -776,7 +793,8 @@ def _update_cluster_status_impl(cluster_id):
         JobSchedule.FN_LVOL_MIG,
     }
     active_rebalancing_tasks = 0
-    for task in db.get_job_tasks(cluster_id):
+    cluster_tasks = db.get_job_tasks(cluster_id)
+    for task in cluster_tasks:
         if task.canceled:
             continue
         if task.status == JobSchedule.STATUS_DONE:
@@ -794,6 +812,9 @@ def _update_cluster_status_impl(cluster_id):
 
     current_cluster_status = cluster.status
     logger.info("cluster_status: %s", current_cluster_status)
+
+    _delete_old_tasks(cluster_tasks)
+    _delete_old_logs(db.get_events(), cluster_id)
 
     # Suspend recovery: while the cluster is SUSPENDED, first drain every node
     # to OFFLINE (auto-restart is paused until then), so recovery restarts from
