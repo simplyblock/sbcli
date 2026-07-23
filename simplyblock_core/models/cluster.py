@@ -239,3 +239,14 @@ class PortReservation(BaseModel):
 
     def get_id(self):
         return "%s/%s" % (self.cluster_id, self.port)
+
+
+class DeployConfig(BaseModel):
+    """Cluster-wide configuration settings."""
+    grafana_endpoint: str = ""
+    db_connection: SecretStr = SecretStr("")
+    grafana_secret: SecretStr = SecretStr("")
+    mode: str = "docker"
+
+    def get_id(self):
+        return "uuid"
