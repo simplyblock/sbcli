@@ -153,7 +153,9 @@ class NonLeaderPath_KeepsFixedSleep(unittest.TestCase):
     def setUpClass(cls):
         src = _read("simplyblock_core/storage_node_ops.py")
         # Slice from the function definition to the next top-level def.
-        start = src.index("def recreate_lvstore_on_non_leader(")
+        # The behavior under test lives in the impl since the public name
+        # became a thin per-LVS-locking wrapper (2026-07-20 refactor).
+        start = src.index("def _recreate_lvstore_on_non_leader_impl(")
         end = src.index("\ndef ", start + 1)
         cls.fn = src[start:end]
 
@@ -168,8 +170,10 @@ class NonLeaderPath_KeepsFixedSleep(unittest.TestCase):
         )
 
     def test_has_fixed_quiesce(self):
+        # The quiesce became a named constant (2026-07-22): 0.5s -> 0.2s,
+        # rationale documented at constants.NON_LEADER_BLOCK_QUIESCE_SEC.
         self.assertIn(
-            "time.sleep(0.5)", self.fn,
+            "time.sleep(constants.NON_LEADER_BLOCK_QUIESCE_SEC)", self.fn,
             "recreate_lvstore_on_non_leader keeps a fixed-duration quiesce "
             "after blocking the leader's port (sufficient for the "
             "secondary's bdev_examine to see metadata-coherent superblock).",

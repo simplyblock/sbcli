@@ -670,6 +670,30 @@ def decimal_to_hex_power_of_2(decimal_number):
     return hex_result
 
 
+def make_async_handler(target_handler):
+    """Wrap ``target_handler`` for non-blocking logging: worker threads only
+    enqueue a record (cheap); a single background ``QueueListener`` thread does
+    the format + write. Returns a ``QueueHandler`` to attach to a logger.
+
+    Rationale: restart recovery runs 100+ concurrent threads; with a plain
+    StreamHandler every one serialized on the handler lock + stream write on
+    each debug() call, starving the (GIL-bound) recreate thread's between-RPC
+    work and ballooning the client-port-block window (2026-07-20). The listener
+    is kept alive via the returned handler's ``_listener`` attr and stopped at
+    interpreter exit.
+    """
+    import atexit
+    import queue as _queue
+    import logging.handlers as _lh
+    log_queue: "_queue.Queue" = _queue.Queue(-1)  # unbounded; enqueue never blocks a worker
+    listener = _lh.QueueListener(log_queue, target_handler, respect_handler_level=False)
+    listener.start()
+    atexit.register(listener.stop)
+    qh = _lh.QueueHandler(log_queue)
+    qh._listener = listener  # type: ignore[attr-defined]  # strong ref, not GC'd
+    return qh
+
+
 def get_logger(name=""):
     # first configure a root logger
     # Silence external libraries that log secrets (tokens, full HTTP response
@@ -688,9 +712,30 @@ def get_logger(name=""):
         logg.setLevel(constants.LOG_LEVEL)
 
     if not logg.hasHandlers():
-        logger_handler = logging.StreamHandler(stream=sys.stdout)
+        # Diagnostics -> stderr; machine-readable command output (CLI `print`,
+        # e.g. `sn list --json`) stays on stdout. Keeping logs on stdout let
+        # DEBUG lines interleave with the JSON a caller parses — and the async
+        # handler below (which flushes on a background thread + at exit) makes
+        # that ordering nondeterministic, so a trailing log line's bracket was
+        # picked up as the payload (2026-07-21 soak: `sn list --json` parsed an
+        # int list -> "'int' object is not subscriptable"). stderr is still
+        # captured by docker/journald, so no log line is lost.
+        #
+        # Async logging: worker threads only enqueue a record (cheap); a single
+        # background listener thread does the format + write. Restart recovery
+        # runs 100+ concurrent threads; a plain StreamHandler serialized every
+        # one on the handler lock + stream write per debug() call, starving the
+        # GIL-bound recreate thread's between-RPC work and ballooning the
+        # client-port-block window (2026-07-20 FD-0 reboot: block 2s -> 20s).
+        # The QueueHandler removes that contention without dropping lines or
+        # changing the level; falls back to the direct handler on setup error.
+        logger_handler = logging.StreamHandler(stream=sys.stderr)
         logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(thread)d: %(levelname)s: %(message)s'))
-        logg.addHandler(logger_handler)
+        try:
+            logg.addHandler(make_async_handler(logger_handler))
+        except Exception:
+            # Safety: never lose logging if the async path can't be set up.
+            logg.addHandler(logger_handler)
         # gelf_handler = GELFTCPHandler('0.0.0.0', constants.GELF_PORT)
         # logg.addHandler(gelf_handler)
 
@@ -2589,10 +2634,14 @@ def patch_cr_node_status(
         if not found:
             if remove:
                 # Node already absent from status — nothing to do.
-                return            
-            raise RuntimeError(
-                f"Node not found (uuid={node_uuid}, mgmtIp={node_mgmt_ip})"
+                return
+            # Node not yet in status.nodes[] — operator syncs this asynchronously.
+            # Log and return so callers during node_add (in_creation phase) don't abort.
+            logger.warning(
+                f"patch_cr_node_status: node not yet in status.nodes for {namespace}/{name} "
+                f"(uuid={node_uuid}, mgmtIp={node_mgmt_ip}), skipping"
             )
+            return
 
         api.patch_namespaced_custom_object_status(
             group=group,

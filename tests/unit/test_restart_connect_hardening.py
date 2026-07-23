@@ -198,8 +198,14 @@ class TestVerifyOnlineDeviceCoverage(unittest.TestCase):
         dev = _make_dev("dev-1", "node-b")
         peer.nvme_devices = [dev]
         self._set_cluster(peer)
-        # First probe: absent. Probe after repair: present.
-        self.rpc.get_bdevs.side_effect = [[], [{"name": "remote_alceml_dev-1n1"}]]
+        # Probes are batched (one unfiltered dump per pass, 2026-07-21):
+        # pass 1 dump lacks the expected bdev; post-repair dump has it. The
+        # dumps must be non-empty — an empty dump is treated as a failed
+        # fetch and falls back to per-device filtered probes.
+        self.rpc.get_bdevs.side_effect = [
+            [{"name": "some_other_bdev"}],
+            [{"name": "remote_alceml_dev-1n1"}],
+        ]
 
         missing = storage_node_ops._verify_online_device_coverage(self.snode)
 
@@ -237,11 +243,19 @@ class TestVerifyOnlineDeviceCoverage(unittest.TestCase):
 
 
 class TestRecreateAllLvstoresSerialization(unittest.TestCase):
-    """Invariant 4: recreate_all_lvstores never overlaps across threads."""
+    """Invariant 4 (revised 2026-07-20): recreate_all_lvstores is no longer
+    globally serialized — the process-wide gate was replaced by per-LVS
+    locks (same-LVS recreates serialize; different-LVS run concurrently,
+    covered by TestPerLvsRecreateLock in test_restart_cpu_fixes.py). The
+    port-block critical span is serialized separately by
+    ``_port_block_window_gate``. Here: different-node calls must be ABLE to
+    overlap (the whole point of dropping the global gate), and all complete.
+    """
 
-    def test_concurrent_calls_serialize(self):
+    def test_concurrent_calls_can_overlap(self):
         active = []
         overlap_seen = []
+        done = []
 
         def _fake_serial(snode, force=False):
             active.append(snode)
@@ -249,6 +263,7 @@ class TestRecreateAllLvstoresSerialization(unittest.TestCase):
                 overlap_seen.append(True)
             time.sleep(0.05)
             active.remove(snode)
+            done.append(snode)
             return True
 
         with patch.object(
@@ -265,7 +280,10 @@ class TestRecreateAllLvstoresSerialization(unittest.TestCase):
             for t in threads:
                 t.join()
 
-        self.assertEqual(overlap_seen, [])
+        self.assertEqual(len(done), 4)
+        self.assertTrue(overlap_seen,
+                        "different-node recreates must run concurrently "
+                        "(global gate was removed by design)")
 
 
 if __name__ == "__main__":

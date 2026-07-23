@@ -60,15 +60,14 @@ def process_snap_delete_finish(snap, leader_node):
     if not leader_node:
         raise Exception("Failed to get leader node")
 
-    special_delete = False
-    try:
-        snap_bdev_info = leader_node.rpc_client().get_bdevs(snap.snap_bdev)
-        if snap_bdev_info[0]["driver_specific"]["lvol"]["open_ref"] > 1:
-            special_delete = True
-    except Exception:
-        pass
+    # special_delete (SPDK migration_flag) is set ONLY when the SAME snapshot
+    # exists on more than one node (lvol migration placed a copy elsewhere).
+    # snap.instances holds those extra node-copies and is empty for a
+    # home-node-only snapshot; it is NOT grown by local clones. Do not use the
+    # blob open_ref>1, which local clones bump and a clone-entry leak strands.
+    special_delete = len(snap.instances) > 0
     if snap.deletion_status != leader_node.get_id():
-        ret, _ = leader_node.rpc_client().delete_lvol(snap.snap_bdev, del_async=False, special_delete=special_delete)
+        ret, _ = leader_node.rpc_client().delete_lvol(snap.snap_bdev, sync=False, special_delete=special_delete)
         if not ret:
             logger.error(f"Failed to delete snap from node: {snode.get_id()}")
         snap = db.get_snapshot_by_id(snap.get_id())
@@ -99,7 +98,7 @@ def process_snap_delete_finish(snap, leader_node):
             for nl in non_leaders)
         if any_sec_down:
             primary_node.lvol_del_sync_lock()
-        ret, _ = primary_node.rpc_client().delete_lvol(snap.snap_bdev, del_async=True, special_delete=special_delete)
+        ret, _ = primary_node.rpc_client().delete_lvol(snap.snap_bdev, sync=True, special_delete=special_delete)
         if not ret:
             logger.error(f"Failed to delete snap from node: {snode.get_id()}")
 
@@ -107,7 +106,7 @@ def process_snap_delete_finish(snap, leader_node):
     for non_leader in non_leaders:
         if non_leader.status in [StorageNode.STATUS_ONLINE]:
             logger.info(f"Sync delete bdev: {lvol_bdev_name} from node: {non_leader.get_id()}")
-            ret, err = non_leader.rpc_client().delete_lvol(lvol_bdev_name, del_async=True, special_delete=special_delete)
+            ret, err = non_leader.rpc_client().delete_lvol(lvol_bdev_name, sync=True, special_delete=special_delete)
             if not ret:
                 if "code" in err and err["code"] == -19:
                     logger.error(f"Sync delete completed with error: {err}")
@@ -152,7 +151,7 @@ def set_snap_offline(snap):
     sn.write_to_db()
 
 
-def process_snap_delete(snap, snode):
+def process_snap_delete(snap, snode, all_mini_lvols=None):
     # check leadership
     leader_node = None
     if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED,
@@ -186,21 +185,20 @@ def process_snap_delete(snap, snode):
     if not leader_node:
         raise Exception("Failed to get leader node")
 
-    for lvol in db.get_mini_lvols():
+    if all_mini_lvols is None:
+        all_mini_lvols = db.get_mini_lvols()
+    for lvol in all_mini_lvols:
         if lvol.cloned_from_snap and lvol.cloned_from_snap == snap.get_id():
             if lvol.status == SnapShot.STATUS_IN_DELETION:
                 logger.error("Cannot delete snapshot while it's clone is in deletion")
                 return False
 
     if snap.deletion_status == "" or snap.deletion_status != leader_node.get_id():
-        special_delete = False
-        try:
-            snap_bdev_info = leader_node.rpc_client().get_bdevs(snap.snap_bdev)
-            if snap_bdev_info[0]["driver_specific"]["lvol"]["open_ref"] > 1:
-                special_delete = True
-        except Exception:
-            pass
-        ret, _ = leader_node.rpc_client().delete_lvol(snap.snap_bdev, del_async=False, special_delete=special_delete)
+        # See note above: special_delete only for a snapshot copied to another
+        # node by lvol migration (snap.instances non-empty), never for a local
+        # clone or a stranded blob open_ref.
+        special_delete = len(snap.instances) > 0
+        ret, _ = leader_node.rpc_client().delete_lvol(snap.snap_bdev, sync=False, special_delete=special_delete)
         if not ret:
             logger.error(f"Failed to delete snap from node: {snode.get_id()}")
             return False
@@ -312,9 +310,20 @@ def _due_for_internal_snapshot(lvol, all_snaps, now_ts):
 
 def take_due_internal_snapshots(cluster_id, now_ts):
     """Create an internal snapshot for every replicated volume whose interval
-    has elapsed. The snapshot's creation auto-enqueues a replication task."""
-    all_snaps = db.get_snapshots(cluster_id)
-    for lvol in db.get_lvols(cluster_id):
+    has elapsed. The snapshot's creation auto-enqueues a replication task.
+
+    The snapshot listing is only loaded when at least one volume actually
+    replicates on an interval — and then from the mini table, which carries
+    everything ``_due_for_internal_snapshot`` reads (lvol id, snap_type,
+    created_at). The previous unconditional full-SnapShot scan here ran twice
+    per monitor cycle and was a steady multi-second FDB load at 10k+
+    snapshots (mass-snapshot run 2026-07-21) with zero replicated volumes."""
+    repl_lvols = [lv for lv in db.get_lvols(cluster_id)
+                  if lv.do_replicate and lv.replication_interval_min > 0]
+    if not repl_lvols:
+        return
+    all_snaps = db.get_mini_snapshots()
+    for lvol in repl_lvols:
         try:
             if not _due_for_internal_snapshot(lvol, all_snaps, now_ts):
                 continue
@@ -348,17 +357,35 @@ def main():
             except Exception as e:
                 logger.error(f"Internal snapshot scheduling failed for cluster {cluster.get_id()}: {e}")
 
-            all_snaps = db.get_snapshots(cluster.get_id())
-            for snode in db.get_storage_nodes_by_cluster_id(cluster.get_id()):
-
-                for snap in all_snaps:
-                    if snap.lvol.node_id != snode.get_id():
-                        continue
-                    if snap.status == SnapShot.STATUS_IN_DELETION:
-                        try:
-                            process_snap_delete(snap, snode)
-                        except Exception as e:
-                            logger.error(e)
+            # Only in-deletion snapshots need any processing. Find them via
+            # the mini table (cheap; no embedded LVol dict) and fetch the few
+            # full records individually — the previous full-SnapShot scan per
+            # cycle was a steady multi-second FDB read at 10k+ snapshots.
+            in_deletion = [m for m in db.get_mini_snapshots()
+                           if m.status == SnapShot.STATUS_IN_DELETION]
+            if not in_deletion:
+                continue
+            snodes = {n.get_id(): n
+                      for n in db.get_storage_nodes_by_cluster_id(cluster.get_id())}
+            all_mini_lvols = db.get_mini_lvols()
+            for mini in in_deletion:
+                try:
+                    snap = db.get_snapshot_by_id(mini.get_id())
+                except KeyError:
+                    continue
+                # Re-check on the authoritative record; also skip snapshots
+                # of other clusters (the mini table is not cluster-scoped).
+                if snap.status != SnapShot.STATUS_IN_DELETION:
+                    continue
+                if snap.cluster_id and snap.cluster_id != cluster.get_id():
+                    continue
+                snode = snodes.get(snap.lvol.node_id)
+                if snode is None:
+                    continue
+                try:
+                    process_snap_delete(snap, snode, all_mini_lvols)
+                except Exception as e:
+                    logger.error(e)
 
         time.sleep(constants.LVOL_MONITOR_INTERVAL_SEC)
 

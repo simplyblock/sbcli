@@ -21,9 +21,14 @@ _NOT_SET = object()
 
 
 class TTLCache:
+    # How long a follower waits for the in-flight leader compute before
+    # giving up and computing on its own (leader crashed / hung on FDB).
+    _INFLIGHT_WAIT_SEC = 60.0
+
     def __init__(self):
         self._data: dict[Any, tuple[float, Any]] = {}
         self._lock = threading.Lock()
+        self._inflight: dict[Any, threading.Event] = {}
 
     def get(self, key, ttl: float):
         """Return the cached value for ``key`` if younger than ``ttl`` seconds,
@@ -51,22 +56,63 @@ class TTLCache:
                        cache_none: bool = False):
         """Return the cached value or run ``compute()`` and cache its result.
 
+        Single-flight: at most ONE thread per process runs ``compute()`` for a
+        given key at a time. Without this, every request arriving after the
+        TTL lapsed fired its own full-DB scan; once the scan grew slower than
+        the TTL (mass-snapshot run 2026-07-21: 15s scan vs 10s TTL) the cache
+        was permanently stale and the scans stampeded FDB into 1031 timeouts.
+        While a refresh is in flight, other threads are served the stale value
+        (staleness-tolerant by contract of this cache); threads with no stale
+        value wait for the leader and fall back to computing themselves only
+        if the leader fails.
+
         ``None`` results are not cached by default (a failed probe should not
         suppress retries for a full TTL); pass ``cache_none=True`` where
         ``None`` is a meaningful, stable answer.
         """
-        value = self.get(key, ttl)
-        if value is not None:
+        now = time.monotonic()
+        with self._lock:
+            entry = self._data.get(key)
+            if entry is not None and (now - entry[0]) < ttl:
+                return entry[1]
+            event = self._inflight.get(key)
+            if event is not None:
+                # Someone else is already refreshing this key.
+                if entry is not None:
+                    return entry[1]  # serve stale while it refreshes
+                leader = False
+            else:
+                event = threading.Event()
+                self._inflight[key] = event
+                leader = True
+
+        if not leader:
+            event.wait(self._INFLIGHT_WAIT_SEC)
+            with self._lock:
+                entry = self._data.get(key)
+            if entry is not None:
+                return entry[1]
+            # Leader failed (exception) or timed out without caching — fall
+            # through and compute uncoordinated; correctness over dedup.
+            value = compute()
+            if value is not None or cache_none:
+                self.put(key, value)
             return value
-        value = compute()
-        if value is not None or cache_none:
-            self.put(key, value)
-        return value
+
+        try:
+            value = compute()
+            if value is not None or cache_none:
+                self.put(key, value)
+            return value
+        finally:
+            with self._lock:
+                self._inflight.pop(key, None)
+            event.set()
 
 
 # Shared instances, one per concern, so unrelated keys never collide and
 # targeted invalidation stays simple.
-capacity_scan_cache = TTLCache()   # "mini_lvols" / ("snapshots", cluster_id) -> list
+capacity_scan_cache = TTLCache()   # "mini_lvols" / "mini_snapshots" -> list
 leader_cache = TTLCache()          # (cluster_id, lvs_name) -> leader node id
 no_leader_cache = TTLCache()       # (cluster_id, lvs_name) -> True (LVS confirmed leaderless)
 quorum_verdict_cache = TTLCache()  # (node_id, lvs_peer_ids) -> bool (disconnected)
@@ -92,8 +138,15 @@ def cached_mini_lvols(db_controller, ttl: float = CAPACITY_SCAN_TTL_SEC):
         "mini_lvols", ttl, db_controller.get_mini_lvols)
 
 
-def cached_snapshots(db_controller, cluster_id, ttl: float = CAPACITY_SCAN_TTL_SEC):
-    """TTL-cached ``get_snapshots(cluster_id)`` — same tolerance as above."""
+def cached_mini_snapshots(db_controller, ttl: float = CAPACITY_SCAN_TTL_SEC):
+    """TTL-cached ``get_mini_snapshots()`` — same tolerance as above.
+
+    Minis, never full SnapShot records: a full record embeds the complete
+    72-field LVol dict, so scanning the full table cost ~10ms/object in
+    deserialization alone and reached 15s per refresh at 10k snapshots
+    (mass-snapshot run 2026-07-21) — on every create request. The mini table
+    is maintained transactionally on every SnapShot write and carries
+    everything the advisory consumers need (lvol.node_id / lvol.pool_uuid,
+    status, size, used_size, vuid)."""
     return capacity_scan_cache.get_or_compute(
-        ("snapshots", cluster_id), ttl,
-        lambda: db_controller.get_snapshots(cluster_id))
+        "mini_snapshots", ttl, db_controller.get_mini_snapshots)

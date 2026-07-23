@@ -561,10 +561,10 @@ class RPCClient:
             params["uuid"] = uuid
         return self._request("bdev_lvol_create", params)
 
-    def delete_lvol(self, name, del_async=False, special_delete=False):
+    def delete_lvol(self, name, sync=False, special_delete=False):
         params = {
             "name": name,
-            "sync": del_async,
+            "sync": sync,
             "special_delete": special_delete,
         }
         return self._request2("bdev_lvol_delete", params)

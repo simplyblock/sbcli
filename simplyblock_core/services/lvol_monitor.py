@@ -218,7 +218,7 @@ def process_lvol_delete_finish(cluster, lvol):
                 break
         with snapshot_controller.lvstore_op_lock(
                 cluster.get_id(), lvol.lvs_name, node_id=primary_node.get_id()):
-            ret = lvol_controller.delete_lvol_from_node(lvol.get_id(), primary_node.get_id(), del_async=True)
+            ret = lvol_controller.delete_lvol_from_node(lvol.get_id(), primary_node.get_id(), sync=True)
         if not ret:
             logger.error(f"Failed to delete lvol from primary_node node: {primary_node.get_id()}")
 
@@ -232,7 +232,7 @@ def process_lvol_delete_finish(cluster, lvol):
             # sneaked in between async and sync delete").
             with snapshot_controller.lvstore_op_lock(
                     cluster.get_id(), lvol.lvs_name, node_id=sec_node.get_id()):
-                ret, err = sec_node.rpc_client().delete_lvol(lvol_bdev_name, del_async=True)
+                ret, err = sec_node.rpc_client().delete_lvol(lvol_bdev_name, sync=True)
             if not ret:
                 if "code" in err and err["code"] == -19:
                     logger.error(f"Sync delete completed with error: {err}")
@@ -374,12 +374,30 @@ def check_node(cluster, snode, all_lvols):
                     f"LVol {lvol.get_id()} stuck in {LVol.STATUS_IN_CREATION} "
                     f"since {lvol.create_dt}; cleaning up orphaned create")
                 try:
-                    lvol_controller.delete_lvol(lvol, force_delete=True)
+                    # `all_lvols` holds mini records; the delete needs the
+                    # full lvol. Re-read also re-verifies the status — the
+                    # create may have finished since the cycle-start scan.
+                    full_lvol = db.get_lvol_by_id(lvol.get_id())
+                    if full_lvol.status == LVol.STATUS_IN_CREATION:
+                        lvol_controller.delete_lvol(full_lvol, force_delete=True)
+                except KeyError:
+                    pass
                 except Exception as e:
                     logger.error(f"Failed to clean up orphaned in_creation lvol {lvol.get_id()}: {e}")
             continue
 
-        if lvol.status == lvol.STATUS_IN_DELETION:
+        if lvol.status == LVol.STATUS_IN_DELETION:
+            # `all_lvols` holds mini records; the deletion state machine
+            # needs the full lvol (nodes, deletion_status, lvs_name). The
+            # re-read also re-verifies the status against the authoritative
+            # record instead of the cycle-start snapshot.
+            try:
+                lvol = db.get_lvol_by_id(lvol.get_id())
+            except KeyError:
+                continue
+            if lvol.status != LVol.STATUS_IN_DELETION:
+                continue
+
             # Leadership discovery with per-lvstore cache — avoids repeating
             # the same RPC for every in_deletion lvol on the same lvstore.
             cache_key = lvol.lvs_name
@@ -444,6 +462,13 @@ def check_node(cluster, snode, all_lvols):
                 _needs_initial_sleep = True
 
             _pending_polls.append((lvol, leader_node))
+            continue
+
+        # Continuous per-lvol subsystem verification + repair is opt-in
+        # (LVOL_MONITOR_SUBSYS_CHECK env): it compensates for a lost deferred
+        # non-leader registration, costs 2 RPCs per lvol per cycle at scale,
+        # and its repair path has raced mass deletes (2026-07-14 incident).
+        if not constants.LVOL_MONITOR_SUBSYS_CHECK:
             continue
 
         # `all_lvols` is a cycle-start snapshot and a full pass takes minutes
@@ -537,7 +562,11 @@ def main():
             if cluster.status in [Cluster.STATUS_INACTIVE, Cluster.STATUS_UNREADY, Cluster.STATUS_IN_ACTIVATION]:
                 logger.warning(f"Cluster {cluster.get_id()} is in {cluster.status} state, skipping")
                 continue
-            all_lvols = db.get_all_lvols()
+            # Mini records: check_node only filters on node_id/status/
+            # create_dt here and re-reads the full lvol for any state it
+            # acts on. The full-LVol scan re-read every 72-field record
+            # per 30s cycle.
+            all_lvols = db.get_mini_lvols()
             snodes = db.get_storage_nodes_by_cluster_id(cluster.get_id())
 
             def _check_node_safe(snode, _cluster=cluster, _all_lvols=all_lvols):

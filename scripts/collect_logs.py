@@ -23,9 +23,6 @@ Usage
 Options
 -------
   --output-dir DIR    Write the tarball here (default: current directory).
-  --mode MODE         Deployment mode: "docker" (default) or "kubernetes".
-                      Selects the set of control-plane service names and
-                      adjusts which log sources are queried.
   --use-opensearch    Query OpenSearch scroll API directly instead of the
                       Graylog search REST API.  Useful when Graylog is
                       unavailable or when the result set is very large.
@@ -37,18 +34,17 @@ Examples
   collect_logs.py "2024-01-15T10:00:00" 60
   collect_logs.py "2024-01-15 10:00:00" 30 --output-dir /tmp/logs
   collect_logs.py "2024-01-15T10:00:00" 120 --use-opensearch
-  collect_logs.py "2024-01-15T10:00:00" 60 --mode kubernetes
 """
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 import tarfile
 import tempfile
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Any
 
 try:
     import requests
@@ -73,12 +69,8 @@ PAGE_SIZE = 1000
 MAX_RESULT_WINDOW = 100_000
 
 # Docker Swarm service names that run on the management / control-plane node.
-CONTROL_PLANE_SERVICES_DOCKER = [
+CONTROL_PLANE_SERVICES = [
     "WebAppAPI",
-    "WebAppAPI2",
-    "WebAppAPI3",
-    "WebAppAPI4",
-    "WebAppAPI5",
     "fdb-server",
     "fdb-backup-agent",
     "StorageNodeMonitor",
@@ -105,33 +97,6 @@ CONTROL_PLANE_SERVICES_DOCKER = [
     "TasksRunnerBackup",
     "TasksRunnerBackupMerge",
     "HAProxy",
-]
-
-CONTROL_PLANE_SERVICES_KUBERNETES = [
-    "simplyblock-control",
-    "webappapi",
-    "storage-node-monitor",
-    "mgmt-node-monitor",
-    "lvol-stats-collector",
-    "main-distr-event-collector",
-    "capacity-and-stats-collector",
-    "capacity-monitor",
-    "health-check",
-    "device-monitor",
-    "lvol-monitor",
-    "snapshot-monitor",
-    "tasks-node-add-runner",
-    "tasks-runner-restart",
-    "tasks-runner-migration",
-    "tasks-runner-failed-migration",
-    "tasks-runner-cluster-status",
-    "tasks-runner-new-device-migration",
-    "tasks-runner-port-allow",
-    "tasks-runner-jc-comp-resume",
-    "tasks-runner-sync-lvol-del",
-    "tasks-runner-backup",
-    "tasks-runner-backup-merge",
-    "tasks-runner-snapshot-replication",
 ]
 
 # ---------------------------------------------------------------------------
@@ -190,6 +155,67 @@ def sbctl_raw(*args):
 
 
 # ---------------------------------------------------------------------------
+# SSH + per-host helpers (for --include-node-docker-logs, --include-client-dmesg)
+# ---------------------------------------------------------------------------
+
+
+def ssh_exec(host: str, user: str, key: str, command: str, timeout: int = 120) -> tuple[int, str, str]:
+    """Run *command* on *host* via ssh. Returns (rc, stdout, stderr)."""
+    argv = [
+        "ssh",
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "BatchMode=yes",
+        "-o", "ConnectTimeout=15",
+        "-o", "ServerAliveInterval=15",
+        "-o", "ServerAliveCountMax=3",
+        "-i", key,
+        f"{user}@{host}",
+        f"bash -lc {json.dumps(command)}",
+    ]
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        return 124, exc.stdout or "", exc.stderr or "timeout"
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+def docker_logs_for_window(host: str, user: str, key: str, container: str,
+                           from_iso: str, to_iso: str, out_path: Path) -> int:
+    """Capture `docker logs <container>` for the given UTC window. Returns line count."""
+    # --since/--until accept RFC3339. Graylog ISOs already look like
+    # 2024-01-15T10:00:00.000Z which docker accepts.
+    cmd = (
+        f"sudo docker logs --timestamps "
+        f"--since {from_iso} --until {to_iso} {container} 2>&1 || true"
+    )
+    rc, out, err = ssh_exec(host, user, key, cmd, timeout=300)
+    out_path.write_text(out, encoding="utf-8", errors="replace")
+    # rc is best-effort; docker may return non-zero if the container died but
+    # still dumped logs. We keep whatever it produced.
+    return out.count("\n")
+
+
+def files_overlapping_window(directory: Path, patterns: tuple,
+                             from_dt: datetime, to_dt: datetime, slack_s: int = 7200) -> list[Path]:
+    """Return files in *directory* matching *patterns* whose mtime falls inside
+    [from_dt - slack, to_dt + slack].  A generous slack catches the run that
+    started before the window and is still being appended to after it."""
+    if not directory.is_dir():
+        return []
+    window_start = from_dt.timestamp() - slack_s
+    window_end = to_dt.timestamp() + slack_s
+    matched: list[Path] = []
+    for pattern in patterns:
+        for p in directory.glob(pattern):
+            if not p.is_file():
+                continue
+            mtime = p.stat().st_mtime
+            if window_start <= mtime <= window_end:
+                matched.append(p)
+    return sorted(set(matched))
+
+
+# ---------------------------------------------------------------------------
 # Log-line formatter
 # ---------------------------------------------------------------------------
 
@@ -204,17 +230,82 @@ def _fmt(msg: dict) -> str:
     return f"{ts}  src={src}  ctr={cname}  lvl={lvl}  {text}"
 
 
+# Match the leading timestamp in a line emitted by ``_fmt``.
+# Accepts both ISO-8601 (``2026-04-30T14:14:22.314Z`` / ``+00:00``) and the
+# Graylog-storage form (``2026-04-30 14:14:22.314``). Fractional seconds and
+# trailing zone are optional.  We normalise the captured value to a single
+# canonical key so the sort is monotonic across mixed formats.
+_LEADING_TS_RE = re.compile(
+    r"^(?P<ts>\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?)(?:Z|[+-]\d{2}:?\d{2})?"
+)
+
+
+def _ts_sort_key(line: str) -> str:
+    """Return a canonical ascending-sortable timestamp key for *line*.
+
+    Lines that begin with a recognised timestamp (Graylog/OpenSearch shapes)
+    yield ``YYYY-MM-DDTHH:MM:SS.ffffff`` so that:
+      * ``"2026-04-30 14:14:22.3"`` and ``"2026-04-30T14:14:22.300000Z"``
+        produce the same key (the ' ' vs 'T' separator and the trailing
+        ``Z``/offset don't break ordering),
+      * truncated fractional seconds (``.3`` vs ``.300``) compare correctly
+        because we right-pad to 6 digits.
+    Lines without a parseable timestamp sort *after* every parseable line
+    while keeping their original relative order (handled by the caller's
+    stable sort + the ``"~"`` sentinel which is greater than any digit).
+    """
+    m = _LEADING_TS_RE.match(line)
+    if not m:
+        return "~" + line
+    ts = m.group("ts").replace(" ", "T")
+    if "." in ts:
+        head, frac = ts.split(".", 1)
+        frac = (frac + "000000")[:6]
+        ts = f"{head}.{frac}"
+    else:
+        ts = f"{ts}.000000"
+    return ts
+
+
+def _sort_log_file_inplace(path: Path) -> None:
+    """Re-sort an emitted log file by ascending event timestamp.
+
+    Run after a backend fetch so a single output file is monotonic in time
+    even when records arrived in non-monotonic order — e.g. the Graylog
+    >100 k path that walks adjacent 10-minute sub-windows but cannot promise
+    cross-window ordering when the underlying index reports timestamps with
+    sub-second precision varying across pages, or the OpenSearch scroll
+    path when the resolved index expression covers multiple time-based
+    indices whose shards interleave on continuation batches.
+
+    Uses Python's stable sort, so records with identical timestamps keep
+    the order in which they were originally received from the backend.
+    Lines that don't carry a parseable timestamp prefix (rare; mostly
+    multi-line log entries that survived the ``\\n`` flattening in
+    ``_fmt``) sink to the bottom in arrival order.
+    """
+    if not path.exists():
+        return
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return
+    if size == 0:
+        return
+    with path.open("r", encoding="utf-8", errors="replace") as fh:
+        lines = fh.readlines()
+    if len(lines) < 2:
+        return
+    lines.sort(key=_ts_sort_key)
+    tmp = path.with_suffix(path.suffix + ".sorted")
+    with tmp.open("w", encoding="utf-8", errors="replace") as fh:
+        fh.writelines(lines)
+    tmp.replace(path)
+
+
 # ---------------------------------------------------------------------------
 # Graylog REST API helpers
 # ---------------------------------------------------------------------------
-
-def _gl_escape(value: str) -> str:
-    """
-    Escape Lucene special characters in a Graylog field query term.
-    Hyphens are NOT escaped — they are only special in range expressions
-    and cause HTTP 400 when escaped in the Graylog REST API.
-    """
-    return value.replace(".", "\\.")
 
 
 def _gl_search_page(session, search_url, query, from_iso, to_iso, limit, offset):
@@ -239,6 +330,11 @@ def _gl_search_page(session, search_url, query, from_iso, to_iso, limit, offset)
         print(f"    WARN: Graylog page request failed (offset={offset}): {exc}", file=sys.stderr)
         return None, 0
 
+    # Graylog 5.0.x returns HTTP 200 with an empty body when the request
+    # does not negotiate JSON. The explicit Accept header above is the
+    # primary defence; the empty-body / JSONDecodeError guards below
+    # avoid a fatal crash if a future patch regresses content-negotiation
+    # again or HAProxy strips the header.
     if not resp.text.strip():
         print(f"    WARN: Graylog returned empty response (offset={offset}, status={resp.status_code})", file=sys.stderr)
         return None, 0
@@ -252,23 +348,21 @@ def _gl_search_page(session, search_url, query, from_iso, to_iso, limit, offset)
 
 def _gl_write_window(session, search_url, query, from_iso, to_iso, fh):
     """
-    Paginate through a single time window and write ALL lines to *fh*.
-
-    The window MUST have total <= MAX_RESULT_WINDOW.  Caller is responsible
-    for checking the count first (via ``_gl_probe_total``) and bisecting
-    the window when it exceeds the limit.
-
+    Paginate through a single time window and write lines to *fh*.
     Returns number of lines written.
     """
     written = 0
     offset = 0
 
-    while True:
+    # Probe total size first
+    msgs, total = _gl_search_page(session, search_url, query, from_iso, to_iso, 1, 0)
+    if msgs is None:
+        return 0
+
+    while offset < total:
         msgs, _ = _gl_search_page(
             session, search_url, query, from_iso, to_iso, PAGE_SIZE, offset
         )
-        if msgs is None:
-            break
         if not msgs:
             break
         for m in msgs:
@@ -277,109 +371,53 @@ def _gl_write_window(session, search_url, query, from_iso, to_iso, fh):
         offset += len(msgs)
         if len(msgs) < PAGE_SIZE:
             break
-        if offset >= MAX_RESULT_WINDOW:
-            break
 
     return written
-
-
-def _gl_probe_total(session, search_url, query, from_iso, to_iso):
-    """Return total number of matching entries for a window, or -1 on error."""
-    msgs, total = _gl_search_page(session, search_url, query, from_iso, to_iso, 1, 0)
-    if msgs is None:
-        return -1
-    return total
-
-
-# Minimum bisection window size in seconds.  Windows smaller than this are
-# fetched best-effort (capped at MAX_RESULT_WINDOW).
-MIN_BISECT_SEC = 1
-
-
-def _gl_fetch_recursive(session, search_url, query, from_dt, to_dt, fh,
-                         depth=0):
-    """
-    Recursively bisect the time window until entries fit within
-    MAX_RESULT_WINDOW, then paginate and write.
-
-    Returns ``(lines_written, truncated_count)`` where *truncated_count*
-    is the number of leaf windows that exceeded the limit even at the
-    minimum window size (data loss).
-    """
-    from_iso = from_dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
-    to_iso = to_dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
-    window_sec = (to_dt - from_dt).total_seconds()
-    indent = "    " + "  " * min(depth, 6)
-
-    total = _gl_probe_total(session, search_url, query, from_iso, to_iso)
-    if total <= 0:
-        return 0, 0
-
-    # Window fits — fetch everything
-    if total <= MAX_RESULT_WINDOW:
-        written = _gl_write_window(session, search_url, query,
-                                    from_iso, to_iso, fh)
-        return written, 0
-
-    # Window too big — can we bisect further?
-    if window_sec <= MIN_BISECT_SEC:
-        # Smallest window reached — best-effort fetch (capped at 100k)
-        print(f"{indent}WARN: {window_sec:.0f}s window at {from_iso} has "
-              f"{total} entries (>{MAX_RESULT_WINDOW}), capturing first "
-              f"{MAX_RESULT_WINDOW} (best effort)", file=sys.stderr)
-        written = _gl_write_window(session, search_url, query,
-                                    from_iso, to_iso, fh)
-        return written, 1
-
-    # Bisect
-    mid_dt = from_dt + (to_dt - from_dt) / 2
-    print(f"{indent}NOTE: {from_iso}..{to_iso} ({window_sec:.0f}s) has "
-          f"{total} entries, bisecting")
-
-    w1, t1 = _gl_fetch_recursive(session, search_url, query,
-                                  from_dt, mid_dt, fh, depth + 1)
-    w2, t2 = _gl_fetch_recursive(session, search_url, query,
-                                  mid_dt, to_dt, fh, depth + 1)
-    return w1 + w2, t1 + t2
 
 
 def graylog_fetch_all(session, base_url, query, from_iso, to_iso, out_path):
     """
     Download all log messages matching *query* within [from_iso, to_iso].
 
-    Uses recursive binary bisection: probe the window count first, and if
-    it exceeds MAX_RESULT_WINDOW, split the window in half and recurse.
-    Keeps halving down to MIN_BISECT_SEC (1 second).  Only writes data at
-    leaf windows that fit within the limit (no duplicate writes).
+    Strategy:
+      1. Probe total_results.
+      2. If <= MAX_RESULT_WINDOW  → straightforward offset pagination.
+      3. If >  MAX_RESULT_WINDOW  → split into 10-minute sub-windows and
+                                    paginate each one independently.
 
     Writes one text line per message to *out_path*.
-    Returns ``(lines_written, truncated_count)`` where *truncated_count*
-    is the number of leaf windows that still exceeded the limit at the
-    minimum window size.
+    Returns number of lines written.
     """
     search_url = f"{base_url}/search/universal/absolute"
+    written = 0
 
-    # Quick probe
-    total = _gl_probe_total(session, search_url, query, from_iso, to_iso)
-    if total < 0:
+    # Probe
+    msgs, total = _gl_search_page(session, search_url, query, from_iso, to_iso, 1, 0)
+    if msgs is None:
         Path(out_path).touch()
-        return 0, 0
-    if total == 0:
-        Path(out_path).touch()
-        print("    total entries: 0")
-        return 0, 0
+        return 0
 
     print(f"    total entries: {total}")
 
-    from_dt = datetime.fromisoformat(from_iso.replace("Z", "+00:00"))
-    to_dt = datetime.fromisoformat(to_iso.replace("Z", "+00:00"))
-
     with open(out_path, "w") as fh:
-        written, truncated = _gl_fetch_recursive(
-            session, search_url, query, from_dt, to_dt, fh,
-        )
+        if total <= MAX_RESULT_WINDOW:
+            written = _gl_write_window(session, search_url, query, from_iso, to_iso, fh)
+        else:
+            # Split into 10-minute chunks to stay under max_result_window
+            print("    NOTE: >100 k entries – collecting via 10-minute sub-windows")
+            t = datetime.fromisoformat(from_iso.replace("Z", "+00:00"))
+            t_end = datetime.fromisoformat(to_iso.replace("Z", "+00:00"))
+            chunk = timedelta(minutes=10)
+            while t < t_end:
+                chunk_end = min(t + chunk, t_end)
+                c_from = t.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+                c_to = chunk_end.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+                written += _gl_write_window(
+                    session, search_url, query, c_from, c_to, fh
+                )
+                t = chunk_end
 
-    return written, truncated
+    return written
 
 
 # ---------------------------------------------------------------------------
@@ -439,8 +477,7 @@ def _os_probe(session, os_url, index, from_ms, to_ms):
                 if "@timestamp" in src:
                     result["ts_field"] = "@timestamp"
                 # Detect container-name field (various naming conventions)
-                for candidate in ("kubernetes_container_name", "container_name",
-                                  "container_id", "containerName",
+                for candidate in ("container_name", "container_id", "containerName",
                                   "_container_name", "docker_container_name"):
                     if candidate in src:
                         result["cname_field"] = candidate
@@ -564,7 +601,7 @@ def opensearch_diagnose(session, os_url, from_iso, to_iso):
 
 
 def opensearch_fetch_all(session, os_url, container_name, source, from_iso, to_iso, out_path,
-                         probe_cache=None, pod_name=None):
+                         probe_cache=None):
     """
     Fetch logs directly from OpenSearch using the scroll API.
 
@@ -605,7 +642,7 @@ def opensearch_fetch_all(session, os_url, container_name, source, from_iso, to_i
     # Use query_string wildcards so partial names work:
     #   "WebAppAPI"  matches "simplyblock_WebAppAPI.1.abc123"
     #   "spdk_8080"  matches "/spdk_8080"
-    must_clauses: list[Any] = [
+    must_clauses = [
         {"range": {ts_f: {"gte": from_ms, "lte": to_ms, "format": "epoch_millis"}}},
     ]
     if container_name:
@@ -614,15 +651,6 @@ def opensearch_fetch_all(session, os_url, container_name, source, from_iso, to_i
             "query_string": {
                 "default_field": cname_f,
                 "query": f"*{esc}*",
-                "analyze_wildcard": True,
-            }
-        })
-    if pod_name:
-        esc_pod = pod_name.replace("/", "\\/").replace(":", "\\:")
-        must_clauses.append({
-            "query_string": {
-                "default_field": "kubernetes_pod_name",
-                "query": f"*{esc_pod}*",
                 "analyze_wildcard": True,
             }
         })
@@ -742,161 +770,29 @@ def fetch(
     to_iso,
     out_path,
     probe_cache,
-    os_pod_name=None,
 ):
     """Route to Graylog or OpenSearch depending on *use_opensearch*.
 
-    When using Graylog and the recursive bisection still has truncated
-    leaf windows, automatically falls back to OpenSearch scroll API
-    (which has no offset limit) for the entire service.
+    Backend writers append records in the order their pages/batches arrive,
+    which for the Graylog 10-minute-sub-window path and the multi-index
+    OpenSearch scroll path is *not* always monotonic in event timestamp.
+    A post-fetch stable sort by leading timestamp restores chronological
+    order without depending on backend-side guarantees.
     """
     if use_opensearch:
-        return opensearch_fetch_all(
+        n = opensearch_fetch_all(
             os_session, opensearch_base,
             os_container, os_source,
             from_iso, to_iso, str(out_path),
             probe_cache=probe_cache,
-            pod_name=os_pod_name,
         )
-
-    written, truncated = graylog_fetch_all(
-        gl_session, graylog_base,
-        gl_query, from_iso, to_iso, str(out_path),
-    )
-
-    if truncated and opensearch_base:
-        print(f"    NOTE: Graylog had {truncated} truncated window(s), "
-              f"retrying via OpenSearch scroll API for complete data")
-        try:
-            os_written = opensearch_fetch_all(
-                os_session, opensearch_base,
-                os_container, os_source,
-                from_iso, to_iso, str(out_path),
-                probe_cache=probe_cache,
-                pod_name=os_pod_name,
-            )
-            if os_written > 0:
-                return os_written
-            print(f"    WARN: OpenSearch fallback returned 0 lines, "
-                  f"keeping Graylog result ({written} lines)")
-        except Exception as exc:
-            print(f"    WARN: OpenSearch fallback failed ({exc}), "
-                  f"keeping Graylog result ({written} lines)",
-                  file=sys.stderr)
-
-    return written
-
-
-# ---------------------------------------------------------------------------
-# kubectl pod-log helpers
-# ---------------------------------------------------------------------------
-
-
-def _kubectl(*args, timeout=60) -> str:
-    """Run kubectl with the given args and return stdout. Returns '' on failure."""
-    try:
-        r = subprocess.run(
-            ["kubectl"] + list(args),
-            capture_output=True, text=True, timeout=timeout,
+    else:
+        n = graylog_fetch_all(
+            gl_session, graylog_base,
+            gl_query, from_iso, to_iso, str(out_path),
         )
-        return r.stdout
-    except Exception as exc:
-        print(f"    WARN: kubectl {' '.join(args[:4])} … failed: {exc}", file=sys.stderr)
-        return ""
-
-
-def _kubectl_list_pods(namespace: str, prefix: str) -> list[str]:
-    """Return pod names in *namespace* whose name starts with *prefix*."""
-    out = _kubectl("get", "pods", "-n", namespace,
-                   "--no-headers", "-o", "custom-columns=:metadata.name")
-    return [p for p in out.splitlines() if p.startswith(prefix)]
-
-
-def _kubectl_containers(namespace: str, pod: str) -> list[str]:
-    """Return init + regular container names for *pod*."""
-    out = _kubectl(
-        "get", "pod", pod, "-n", namespace,
-        "-o",
-        "jsonpath={range .spec.initContainers[*]}{.name}{'\\n'}{end}"
-        "{range .spec.containers[*]}{.name}{'\\n'}{end}",
-    )
-    return [c for c in out.splitlines() if c]
-
-
-def collect_k8s_pod_logs(namespace: str, pod: str, out_dir: Path,
-                          from_iso: str, to_iso: str) -> None:
-    """
-    Write current + previous logs for every container in *pod* to *out_dir*.
-    Files are named  <pod>_<container>.log
-    """
-    containers = _kubectl_containers(namespace, pod)
-    for container in containers:
-        log_file = out_dir / f"{pod}_{container}.log"
-        print(f"      {pod} / {container}")
-        with open(log_file, "w") as fh:
-            fh.write(f"=== Pod: {pod} | Container: {container} | Namespace: {namespace} ===\n")
-            fh.write(f"=== From: {from_iso} | Until: {to_iso} ===\n\n")
-
-            fh.write("--- current logs ---\n")
-            out = _kubectl("logs", pod, "-c", container, "-n", namespace,
-                           "--timestamps", f"--since-time={from_iso}", timeout=120)
-            # Trim lines beyond to_iso
-            for line in out.splitlines():
-                if line[:26] > to_iso[:26]:
-                    break
-                fh.write(line + "\n")
-
-            fh.write("\n--- previous (last crash) logs ---\n")
-            prev = _kubectl("logs", pod, "-c", container, "-n", namespace,
-                            "--timestamps", "--previous", timeout=60)
-            fh.write(prev if prev.strip() else "(no previous logs)\n")
-
-
-def collect_k8s_csi_dmesg(namespace: str, pod: str, out_dir: Path,
-                            from_iso: str, to_iso: str) -> None:
-    """
-    Collect dmesg from the csi-node container of a CSI pod,
-    filtered to the requested time window using the kernel boot epoch.
-    """
-    from_epoch = int(datetime.fromisoformat(from_iso.replace("Z", "+00:00")).timestamp())
-    to_epoch   = int(datetime.fromisoformat(to_iso.replace("Z", "+00:00")).timestamp())
-
-    log_file = out_dir / f"{pod}_csi-node_dmesg.log"
-    print(f"      {pod} / csi-node (dmesg)")
-
-    # Derive boot epoch from /proc/uptime inside the container
-    uptime_out = _kubectl("exec", pod, "-c", "csi-node", "-n", namespace,
-                          "--", "cat", "/proc/uptime", timeout=10)
-    try:
-        boot_epoch = int(datetime.now(timezone.utc).timestamp()) - int(float(uptime_out.split()[0]))
-    except Exception:
-        boot_epoch = 0
-
-    # Prefer human-readable reltime; fall back to monotonic seconds
-    dmesg_out = _kubectl("exec", pod, "-c", "csi-node", "-n", namespace,
-                         "--", "dmesg", "--kernel", "--time-format=reltime",
-                         "--nopager", timeout=30)
-    if not dmesg_out.strip():
-        dmesg_out = _kubectl("exec", pod, "-c", "csi-node", "-n", namespace,
-                             "--", "dmesg", "--kernel", "--nopager", timeout=30)
-        # Filter by monotonic timestamp
-        filtered = []
-        import re
-        for line in dmesg_out.splitlines():
-            m = re.match(r'^\[\s*([0-9]+\.[0-9]+)\]', line)
-            if m:
-                wall = boot_epoch + int(float(m.group(1)))
-                if wall < from_epoch:
-                    continue
-                if wall > to_epoch:
-                    break
-            filtered.append(line)
-        dmesg_out = "\n".join(filtered)
-
-    with open(log_file, "w") as fh:
-        fh.write(f"=== Pod: {pod} | Container: csi-node | dmesg ===\n")
-        fh.write(f"=== From: {from_iso} | Until: {to_iso} ===\n\n")
-        fh.write(dmesg_out or "(no dmesg output)\n")
+    _sort_log_file_inplace(Path(out_path))
+    return n
 
 
 # ---------------------------------------------------------------------------
@@ -914,7 +810,6 @@ def main():
             '  collect_logs.py "2024-01-15T10:00:00" 60\n'
             '  collect_logs.py "2024-01-15 10:00:00" 30 --output-dir /tmp/logs\n'
             '  collect_logs.py "2024-01-15T10:00:00" 120 --use-opensearch\n'
-            '  collect_logs.py "2024-01-15T10:00:00" 60 --mode kubernetes\n'
         ),
     )
     parser.add_argument(
@@ -936,16 +831,6 @@ def main():
         help="Directory to write the output tarball (default: current directory).",
     )
     parser.add_argument(
-        "--mode",
-        choices=["docker", "kubernetes"],
-        default="docker",
-        help=(
-            "Deployment mode: 'docker' (default) uses Docker Swarm service names "
-            "for control-plane log collection; 'kubernetes' uses Kubernetes container "
-            "names and skips Graylog-based SPDK log collection (kubectl is used instead)."
-        ),
-    )
-    parser.add_argument(
         "--use-opensearch",
         action="store_true",
         help=(
@@ -965,23 +850,6 @@ def main():
         help="Override the management-node IP used to reach Graylog / OpenSearch.",
     )
     parser.add_argument(
-        "--monitoring-secret",
-        metavar="SECRET",
-        help=(
-            "Graylog / OpenSearch password to use instead of the cluster secret. "
-            "When provided this takes precedence over the cluster secret."
-        ),
-    )
-    parser.add_argument(
-        "--namespace",
-        default="simplyblock",
-        metavar="NS",
-        help=(
-            "Kubernetes namespace to collect CSI / storage-node DS pod logs from "
-            "(default: simplyblock).  Pass an empty string to skip kubectl collection."
-        ),
-    )
-    parser.add_argument(
         "--diagnose",
         action="store_true",
         help=(
@@ -991,9 +859,87 @@ def main():
             "to understand the actual data layout.  Implies --use-opensearch."
         ),
     )
+    parser.add_argument(
+        "--include-node-docker-logs",
+        action="store_true",
+        help=(
+            "SSH to each storage node and capture `docker logs SNodeAPI` for "
+            "the requested time window (supplements the Graylog-based "
+            "collection with raw container output)."
+        ),
+    )
+    parser.add_argument(
+        "--node-ssh-user",
+        default="ec2-user",
+        help="SSH user for storage-node docker-logs collection (default ec2-user).",
+    )
+    parser.add_argument(
+        "--node-ssh-key",
+        metavar="PATH",
+        help="SSH private key for storage-node docker-logs collection.",
+    )
+    parser.add_argument(
+        "--include-soak-logs",
+        action="store_true",
+        help=(
+            "Include soak test stdout/log files (*.log, *.out) whose mtime "
+            "overlaps the requested window, from --soak-logs-dir."
+        ),
+    )
+    parser.add_argument(
+        "--soak-logs-dir",
+        metavar="DIR",
+        default=str(Path.home() / "perf"),
+        help="Directory to scan for soak *.log/*.out files (default: ~/perf).",
+    )
+    parser.add_argument(
+        "--include-client-dmesg",
+        action="store_true",
+        help=(
+            "SSH to each client and collect dmesg + a persistent dmesg log "
+            "(/var/log/sb-dmesg.log if present) + journalctl -k for the "
+            "window.  NOTE: full coverage requires the soak script to run "
+            "`nohup sudo dmesg -Tw >> /var/log/sb-dmesg.log &` at start so "
+            "the kernel ring buffer doesn't rotate the incident out."
+        ),
+    )
+    parser.add_argument(
+        "--metadata",
+        metavar="PATH",
+        help=(
+            "Cluster metadata JSON (e.g. cluster_metadata_base.json) used to "
+            "auto-fill client IPs and the SSH key path for client/node "
+            "collections."
+        ),
+    )
+    parser.add_argument(
+        "--client-ssh-user",
+        default="ec2-user",
+        help="SSH user for client dmesg collection (default ec2-user).",
+    )
+    parser.add_argument(
+        "--client-ssh-key",
+        metavar="PATH",
+        help="SSH private key for client dmesg collection.",
+    )
     args = parser.parse_args()
     if args.diagnose:
         args.use_opensearch = True
+
+    # ── 0. Metadata auto-fill ───────────────────────────────────────────────
+    metadata_clients: list[dict] = []
+    if args.metadata:
+        with open(args.metadata, "r", encoding="utf-8") as fh:
+            md = json.load(fh)
+        metadata_clients = md.get("clients") or []
+        if not args.node_ssh_key:
+            args.node_ssh_key = md.get("key_path") or None
+        if not args.client_ssh_key:
+            args.client_ssh_key = md.get("key_path") or None
+        if md.get("user") and args.client_ssh_user == "ec2-user":
+            args.client_ssh_user = md["user"]
+        if md.get("user") and args.node_ssh_user == "ec2-user":
+            args.node_ssh_user = md["user"]
 
     # ── 1. Parse time range ──────────────────────────────────────────────────
 
@@ -1014,7 +960,6 @@ def main():
     print("  Simplyblock Log Collector")
     print("=" * 64)
     print(f"  Window : {from_iso}  →  {to_iso}  ({args.duration_minutes} min)")
-    print(f"  Deploy : {args.mode}")
     print(f"  Mode   : {'OpenSearch (direct)' if args.use_opensearch else 'Graylog REST API'}")
 
     # ── 2. Cluster UUID + secret ─────────────────────────────────────────────
@@ -1050,12 +995,8 @@ def main():
         mgmt_ip = cp_nodes[0]["IP"]
         print(f"    Management IP : {mgmt_ip}  ({len(cp_nodes)} node(s) total)")
 
-    if args.mode == "kubernetes":
-        graylog_base = f"http://{mgmt_ip}:9000/api"
-        opensearch_base = f"http://{mgmt_ip}:9200"
-    else:
-        graylog_base = f"http://{mgmt_ip}/graylog/api"
-        opensearch_base = f"http://{mgmt_ip}/opensearch"
+    graylog_base = f"http://{mgmt_ip}/graylog/api"
+    opensearch_base = f"http://{mgmt_ip}/opensearch"
 
     # ── 4. Storage nodes ─────────────────────────────────────────────────────
 
@@ -1068,12 +1009,8 @@ def main():
 
     # ── 5. HTTP sessions ─────────────────────────────────────────────────────
 
-    graylog_password = args.monitoring_secret if args.monitoring_secret else cluster_secret
-    if args.monitoring_secret:
-        print("    Using provided --monitoring-secret for Graylog auth.")
-
     gl_session = requests.Session()
-    gl_session.auth = ("admin", graylog_password)
+    gl_session.auth = ("admin", cluster_secret)
     gl_session.headers.update({"X-Requested-By": "sb-log-collector"})
 
     os_session = requests.Session()
@@ -1134,21 +1071,15 @@ def main():
 
         # ── 7. Control-plane logs ────────────────────────────────────────────
 
-        cp_services = (
-            CONTROL_PLANE_SERVICES_KUBERNETES
-            if args.mode == "kubernetes"
-            else CONTROL_PLANE_SERVICES_DOCKER
-        )
-        print(f"\n[5] Collecting control-plane logs ({len(cp_services)} services, mode={args.mode}) …")
+        print(f"\n[5] Collecting control-plane logs ({len(CONTROL_PLANE_SERVICES)} services) …")
         cp_dir = log_root / "control_plane"
         cp_dir.mkdir()
 
-        gl_cname_field = "kubernetes_container_name" if args.mode == "kubernetes" else "container_name"
-
         total_cp_lines = 0
-        for svc in cp_services:
+        for svc in CONTROL_PLANE_SERVICES:
             out_f = cp_dir / f"{svc}.log"
-            gl_q = f'{gl_cname_field}:/.*{_gl_escape(svc)}.*/'
+            # Graylog Lucene query – no source filter (services are globally unique)
+            gl_q = f'container_name:"{svc}"'
             n = fetch(
                 gl_query=gl_q,
                 os_container=svc,
@@ -1163,158 +1094,146 @@ def main():
         print(f"  {'Control-plane total':<42} {total_cp_lines:>8,} lines")
 
         # ── 8. Storage-node logs ─────────────────────────────────────────────
-        # Docker mode: collect SPDK/SNodeAPI logs from Graylog/OpenSearch.
-        # Kubernetes mode: SPDK logs are captured via kubectl in step 9.
 
-        if args.mode == "docker":
-            print("\n[6] Collecting storage-node logs (docker) …")
-            sn_root = log_root / "storage_nodes"
-            sn_root.mkdir()
+        print("\n[6] Collecting storage-node logs …")
+        sn_root = log_root / "storage_nodes"
+        sn_root.mkdir()
 
-            # SNodeAPI runs on every storage node under the same container name.
-            # Its GELF 'source' field is the Docker host hostname whose exact
-            # format varies by deployment and cannot be reliably derived from
-            # the management IP alone.  Collect ALL SNodeAPI logs once (no
-            # source filter) into a shared file; each line contains src=<host>
-            # so per-node filtering can be done with grep afterwards.
-            print("\n  SNodeAPI (all nodes combined) …")
-            snode_api_log = sn_root / "SNodeAPI_all_nodes.log"
-            snode_api_count = fetch(
-                gl_query='container_name:"SNodeAPI"',
-                os_container="SNodeAPI",
-                os_source=None,
-                out_path=snode_api_log,
-                **fetch_kw,
+        # SNodeAPI runs on every storage node under the same container name.
+        # Its GELF 'source' field is the Docker host hostname whose exact
+        # format varies by deployment and cannot be reliably derived from
+        # the management IP alone.  Collect ALL SNodeAPI logs once (no
+        # source filter) into a shared file; each line contains src=<host>
+        # so per-node filtering can be done with grep afterwards.
+        print("\n  SNodeAPI (all nodes combined) …")
+        snode_api_log = sn_root / "SNodeAPI_all_nodes.log"
+        snode_api_count = fetch(
+            gl_query='container_name:"SNodeAPI"',
+            os_container="SNodeAPI",
+            os_source=None,
+            out_path=snode_api_log,
+            **fetch_kw,
+        )
+        print(f"  {'SNodeAPI (all nodes)':<42} {snode_api_count:>8,} lines")
+        print("  (filter by src=<ip> to isolate per-node logs)")
+
+        for node in sn_list:
+            hostname = node.get("Hostname", "unknown")
+            node_ip = node.get("Management IP", "")
+            rpc_port = node.get("SPDK P", 8080)
+
+            node_label = f"{hostname}_{node_ip}".strip("_") if node_ip else hostname
+            node_dir = sn_root / node_label
+            node_dir.mkdir()
+
+            print(f"\n  Node: {hostname}  ip={node_ip}  rpc_port={rpc_port}")
+
+            # spdk_N and spdk_proxy_N are globally unique by RPC port number;
+            # no source filter needed.
+            spdk_containers = [
+                (f"spdk_{rpc_port}",       f"spdk_{rpc_port}.log"),
+                (f"spdk_proxy_{rpc_port}", f"spdk_proxy_{rpc_port}.log"),
+            ]
+
+            for cname, fname in spdk_containers:
+                out_f = node_dir / fname
+                n = fetch(
+                    gl_query=f'container_name:"{cname}"',
+                    os_container=cname,
+                    os_source=None,
+                    out_path=out_f,
+                    **fetch_kw,
+                )
+                print(f"    {cname:<42} {n:>8,} lines")
+
+        # ── 8b. SNodeAPI per-node docker logs (optional, via SSH) ────────────
+        if args.include_node_docker_logs:
+            print("\n[6b] Collecting SNodeAPI docker logs per storage node (ssh) …")
+            if not args.node_ssh_key:
+                print("  SKIP: --node-ssh-key not set (and no key_path in --metadata).")
+            else:
+                for node in sn_list:
+                    hostname = node.get("Hostname", "unknown")
+                    node_ip = node.get("Management IP", "")
+                    if not node_ip:
+                        print(f"  SKIP {hostname}: no Management IP")
+                        continue
+                    node_label = f"{hostname}_{node_ip}".strip("_") if node_ip else hostname
+                    node_dir = sn_root / node_label
+                    node_dir.mkdir(exist_ok=True)
+                    out_f = node_dir / "SNodeAPI_docker.log"
+                    print(f"  ssh {args.node_ssh_user}@{node_ip}: docker logs SNodeAPI --since {from_iso} --until {to_iso}")
+                    try:
+                        n = docker_logs_for_window(
+                            node_ip, args.node_ssh_user, args.node_ssh_key,
+                            "SNodeAPI", from_iso, to_iso, out_f,
+                        )
+                        print(f"    {'SNodeAPI (docker)':<42} {n:>8,} lines -> {out_f.name}")
+                    except Exception as exc:
+                        print(f"    WARN: {exc}", file=sys.stderr)
+
+        # ── 8c. Client dmesg (optional, via SSH) ─────────────────────────────
+        if args.include_client_dmesg:
+            print("\n[6c] Collecting client dmesg / journalctl -k …")
+            if not args.client_ssh_key:
+                print("  SKIP: --client-ssh-key not set (and no key_path in --metadata).")
+            elif not metadata_clients:
+                print("  SKIP: no clients in --metadata JSON.")
+            else:
+                client_dir = log_root / "clients"
+                client_dir.mkdir(exist_ok=True)
+                for c in metadata_clients:
+                    host = c.get("public_ip") or c.get("private_ip")
+                    if not host:
+                        print(f"  SKIP client without IP: {c}")
+                        continue
+                    per = client_dir / host.replace(".", "_")
+                    per.mkdir(exist_ok=True)
+                    # 1. Persistent dmesg log written by the soak script (if any)
+                    rc, out, _ = ssh_exec(
+                        host, args.client_ssh_user, args.client_ssh_key,
+                        "sudo cat /var/log/sb-dmesg.log 2>/dev/null || true",
+                        timeout=180,
+                    )
+                    (per / "sb-dmesg.log").write_text(out, encoding="utf-8", errors="replace")
+                    if not out:
+                        print(f"  {host}: /var/log/sb-dmesg.log missing or empty "
+                              f"(soak script must run `nohup sudo dmesg -Tw >> /var/log/sb-dmesg.log &` at start)")
+                    # 2. Current kernel ring buffer snapshot (may have rotated)
+                    _, out, _ = ssh_exec(
+                        host, args.client_ssh_user, args.client_ssh_key,
+                        "sudo dmesg -T 2>&1 || true",
+                    )
+                    (per / "dmesg_current.log").write_text(out, encoding="utf-8", errors="replace")
+                    # 3. journalctl -k for the window (often has longer retention)
+                    cmd = (
+                        f"sudo journalctl -k --no-pager --since {json.dumps(from_iso)} "
+                        f"--until {json.dumps(to_iso)} 2>&1 || true"
+                    )
+                    _, out, _ = ssh_exec(host, args.client_ssh_user, args.client_ssh_key, cmd, timeout=180)
+                    (per / "journalctl_k.log").write_text(out, encoding="utf-8", errors="replace")
+                    print(f"  {host}: sb-dmesg / dmesg_current / journalctl_k saved under clients/{per.name}/")
+
+        # ── 8d. Soak test stdout/log files (optional, local copy) ────────────
+        if args.include_soak_logs:
+            print(f"\n[6d] Collecting soak *.log/*.out from {args.soak_logs_dir} …")
+            soak_src = Path(args.soak_logs_dir).expanduser()
+            matched = files_overlapping_window(
+                soak_src, ("*.log", "*.out"), start_dt, end_dt,
             )
-            print(f"  {'SNodeAPI (all nodes)':<42} {snode_api_count:>8,} lines")
-            print("  (filter by src=<ip> to isolate per-node logs)")
-
-            for node in sn_list:
-                hostname = node.get("Hostname", "unknown")
-                node_ip = node.get("Management IP", "")
-                rpc_port = node.get("SPDK P", 8080)
-
-                node_label = f"{hostname}_{node_ip}".strip("_") if node_ip else hostname
-                node_dir = sn_root / node_label
-                node_dir.mkdir()
-
-                print(f"\n  Node: {hostname}  ip={node_ip}  rpc_port={rpc_port}")
-
-                # spdk_N and spdk_proxy_N are globally unique by RPC port number;
-                # no source filter needed.
-                spdk_containers = [
-                    (f"spdk_{rpc_port}",       f"spdk_{rpc_port}.log"),
-                    (f"spdk_proxy_{rpc_port}", f"spdk_proxy_{rpc_port}.log"),
-                ]
-
-                for cname, fname in spdk_containers:
-                    out_f = node_dir / fname
-                    n = fetch(
-                        gl_query=f'container_name:"{cname}"',
-                        os_container=cname,
-                        os_source=None,
-                        out_path=out_f,
-                        **fetch_kw,
-                    )
-                    print(f"    {cname:<42} {n:>8,} lines")
-        else:
-            print("\n[6] Collecting storage-node logs (kubernetes) …")
-            sn_root = log_root / "storage_nodes"
-            sn_root.mkdir()
-
-            for node in sn_list:
-                hostname = node.get("Hostname", "unknown")
-                node_ip = node.get("Management IP", "")
-                rpc_port = node.get("SPDK P", 8080)
-
-                node_label = f"{hostname}_{node_ip}".strip("_") if node_ip else hostname
-                node_dir = sn_root / node_label
-                node_dir.mkdir()
-
-                print(f"\n  Node: {hostname}  ip={node_ip}  rpc_port={rpc_port}")
-
-                # Pod name pattern: snode-spdk-pod-<rpc_port>-<cluster_uuid>
-                # Container names inside that pod: spdk-container, spdk-proxy-container
-                pod_name = f"snode-spdk-pod-{rpc_port}-*"
-                spdk_containers = [
-                    ("spdk-container",       f"spdk-container_{rpc_port}.log"),
-                    ("spdk-proxy-container", f"spdk-proxy-container_{rpc_port}.log"),
-                ]
-
-                for cname, fname in spdk_containers:
-                    out_f = node_dir / fname
-                    gl_q = (
-                        f'kubernetes_pod_name:{_gl_escape(pod_name)} '
-                        f'AND kubernetes_container_name:/.*{_gl_escape(cname)}.*/'
-                    )
-                    n = fetch(
-                        gl_query=gl_q,
-                        os_container=cname,
-                        os_source=None,
-                        os_pod_name=pod_name,
-                        out_path=out_f,
-                        **fetch_kw,
-                    )
-                    print(f"    {cname:<42} {n:>8,} lines")
-
-        # ── 9. Kubernetes pod logs (CSI node + storage-node DS) ──────────────
-
-        k8s_ns = args.namespace
-        if k8s_ns:
-            print(f"\n[7] Collecting Kubernetes pod logs (namespace: {k8s_ns}) …")
-            k8s_dir = log_root / "k8s_pods"
-            k8s_dir.mkdir()
-
-            # 9a. simplyblock-csi-node* pods — all containers + dmesg
-            csi_pods = _kubectl_list_pods(k8s_ns, "simplyblock-csi-node")
-            if csi_pods:
-                csi_dir = k8s_dir / "csi-node"
-                csi_dir.mkdir()
-                print(f"  CSI node pods ({len(csi_pods)}) …")
-                for pod in csi_pods:
-                    collect_k8s_pod_logs(k8s_ns, pod, csi_dir, from_iso, to_iso)
-                    collect_k8s_csi_dmesg(k8s_ns, pod, csi_dir, from_iso, to_iso)
+            if not matched:
+                print("  (no files overlap the time window)")
             else:
-                print(f"  No simplyblock-csi-node pods found in namespace {k8s_ns}.")
+                soak_dst = log_root / "soak_scripts"
+                soak_dst.mkdir(exist_ok=True)
+                import shutil as _sh
+                for p in matched:
+                    _sh.copy2(p, soak_dst / p.name)
+                    print(f"  copied {p.name} ({p.stat().st_size} bytes)")
 
-            # 9b. simplyblock-csi-controller* pods — all containers
-            csi_ctrl_pods = _kubectl_list_pods(k8s_ns, "simplyblock-csi-controller")
-            if csi_ctrl_pods:
-                csi_ctrl_dir = k8s_dir / "csi-controller"
-                csi_ctrl_dir.mkdir()
-                print(f"  CSI controller pods ({len(csi_ctrl_pods)}) …")
-                for pod in csi_ctrl_pods:
-                    collect_k8s_pod_logs(k8s_ns, pod, csi_ctrl_dir, from_iso, to_iso)
-            else:
-                print(f"  No simplyblock-csi-controller pods found in namespace {k8s_ns}.")
+        # ── 9. sbctl cluster / node snapshots ────────────────────────────────
 
-            # 9c. simplyblock-manager* pods — all containers
-            mgr_pods = _kubectl_list_pods(k8s_ns, "simplyblock-manager")
-            if mgr_pods:
-                mgr_dir = k8s_dir / "simplyblock-manager"
-                mgr_dir.mkdir()
-                print(f"  Simplyblock manager pods ({len(mgr_pods)}) …")
-                for pod in mgr_pods:
-                    collect_k8s_pod_logs(k8s_ns, pod, mgr_dir, from_iso, to_iso)
-            else:
-                print(f"  No simplyblock-manager pods found in namespace {k8s_ns}.")
-
-            # 9d. simplyblock-storage-node-ds* pods — all containers
-            sn_ds_pods = _kubectl_list_pods(k8s_ns, "simplyblock-storage-node-ds")
-            if sn_ds_pods:
-                sn_ds_dir = k8s_dir / "storage-node-ds"
-                sn_ds_dir.mkdir()
-                print(f"  Storage-node DS pods ({len(sn_ds_pods)}) …")
-                for pod in sn_ds_pods:
-                    collect_k8s_pod_logs(k8s_ns, pod, sn_ds_dir, from_iso, to_iso)
-            else:
-                print(f"  No simplyblock-storage-node-ds pods found in namespace {k8s_ns}.")
-        else:
-            print("\n[7] Skipping Kubernetes pod logs (--namespace not set).")
-
-        # ── 10. sbctl cluster / node snapshots ───────────────────────────────
-
-        print("\n[8] Collecting sbctl cluster / node info …")
+        print("\n[7] Collecting sbctl cluster / node info …")
         info_dir = log_root / "sbctl_info"
         info_dir.mkdir()
 
@@ -1361,21 +1280,10 @@ def main():
             use_json=True,
         )
 
-        # 4. sn check <node_uuid>  – one file per storage node
-        print("  sbctl sn check  (per node) …")
-        sn_check_dir = info_dir / "sn_check"
-        sn_check_dir.mkdir()
-        for node in sn_list:
-            node_uuid = node.get("UUID", "")
-            node_hostname = node.get("Hostname", node_uuid)
-            node_ip = node.get("Management IP", "")
-            label = f"{node_hostname}_{node_ip}".strip("_") if node_ip else node_hostname
-            text = sbctl_raw("sn", "check", node_uuid)
-            if text is not None:
-                (sn_check_dir / f"{label}.txt").write_text(text)
-                print(f"    {label}")
-            else:
-                print(f"    {label}  FAILED", file=sys.stderr)
+        # 4. (removed) per-node "sbctl sn check" — its O(N^2) bdev dumps make
+        # collection prohibitively slow / can hang on a large or unhealthy
+        # cluster. Skip it entirely; the spdk / spdk_proxy per-node logs and
+        # cluster get-logs already carry what's needed for analysis.
 
         # 5. cluster get-logs --limit 0  (all cluster-level events)
         save_sbctl(
@@ -1393,8 +1301,7 @@ def main():
             "duration_minutes": args.duration_minutes,
             "cluster_uuid": cluster_uuid,
             "mgmt_ip": mgmt_ip,
-            "deploy_mode": args.mode,
-            "log_source": "opensearch-direct" if args.use_opensearch else "graylog-api",
+            "mode": "opensearch-direct" if args.use_opensearch else "graylog-api",
             "storage_nodes": [
                 {
                     "hostname": n.get("Hostname"),
@@ -1410,7 +1317,7 @@ def main():
 
         # ── 12. Pack into tarball ─────────────────────────────────────────────
 
-        print("\n[9] Creating tarball …")
+        print("\n[8] Creating tarball …")
         with tarfile.open(str(tarball_path), "w:gz") as tar:
             tar.add(str(log_root), arcname=bundle_name)
 

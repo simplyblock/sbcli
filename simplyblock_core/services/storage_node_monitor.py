@@ -1242,12 +1242,13 @@ def node_port_check_fun(snode):
         if not snode.is_secondary_node:
             ports.append(snode.get_lvol_subsys_port(snode.lvstore))
 
-        for port in ports:
-            try:
-                ret = health_controller.check_port_on_node(snode, port)
+        # Batched: one nvmf_get_blocked_ports fetch answers every port.
+        try:
+            for port, ret in health_controller.check_ports_on_node(snode, ports).items():
                 logger.info(f"Check: node port {snode.mgmt_ip}, {port} ... {ret}")
                 node_port_check &= ret
-            except Exception as e:
+        except Exception as e:
+            for port in ports:
                 health_controller._log_port_check_failure(db, snode, port, e)
 
         # Data-NIC reachability via the node agent. _check_ping_from_node is

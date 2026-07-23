@@ -203,6 +203,10 @@ class _HublvolLock:
         self._token = uuid.uuid4().hex
         self._process_lock = None  # set in __enter__ when kv_store is None
         self.last_attach_at = 0.0
+        # Set by HublvolReconnectCoordinator.acquire_lock for locks whose
+        # lifetime is owned by the restart port-block flow.
+        self.externally_managed = False
+        self.pending_stamp = False
 
     def __enter__(self):
         if self._kv is None:
@@ -249,6 +253,11 @@ class _HublvolLock:
             # Release must never raise from __exit__; TTL will recover.
             logger.warning("Failed to release hublvol lock %s: %s", self._key, e)
         return False
+
+    def release(self):
+        """Explicit release for locks entered outside a ``with`` block (the
+        pre-acquired port-block-window flow). Never raises; TTL recovers."""
+        self.__exit__(None, None, None)
 
 
 def _ctrlrs_from_list(rpc, ctrl_name):
@@ -414,8 +423,32 @@ class HublvolReconnectCoordinator:
         self._cooldown = cooldown_sec
         self._lock_ttl = lock_ttl_sec
 
+    def acquire_lock(self, node_id, lvstore):
+        """Enter and return the hublvol advisory lock for ``(node_id,
+        lvstore)`` OUTSIDE of :meth:`reconcile`.
+
+        Purpose: the lock acquire is one FDB transaction (+0.1s poll
+        quantums when contended) — measured avg 858ms/std 487 inside restart
+        port-block windows (2026-07-21, n=11). Pre-acquiring BEFORE the
+        client port is blocked and passing the entered lock to
+        ``reconcile(lock=...)`` moves that transaction out of the
+        latency-critical window without changing what the lock excludes —
+        the exclusion span only grows (pre-block .. post-unblock), it never
+        shrinks. Caller MUST call ``lock.release()`` in a finally block;
+        the TTL recovers from a crashed holder.
+        """
+        lock = _HublvolLock(self._db.kv_store, node_id, lvstore,
+                            ttl_sec=self._lock_ttl)
+        lock.__enter__()
+        # Externally-managed locks defer the success stamp (one FDB txn) to
+        # the caller's release point — post-unblock — instead of paying it
+        # inside the port-block window (#2, 2026-07-21).
+        lock.externally_managed = True
+        lock.pending_stamp = False
+        return lock
+
     def reconcile(self, node, primary_node, peer_nodes, role="secondary",
-                  rpc_timeout=None):
+                  rpc_timeout=None, lock=None):
         """Observe, then converge, the hublvol controller state.
 
         Returns True if the controller ends up with at least one
@@ -427,6 +460,13 @@ class HublvolReconnectCoordinator:
         abort fast. ``None`` (default) leaves the rpc client's own
         timeout in place — appropriate for post-freeze background
         reconciliation.
+
+        ``lock``: an already-entered advisory lock from
+        :meth:`acquire_lock` for the SAME ``(node, primary_node.lvstore)``
+        pair. When given, reconcile runs under it and does NOT release it —
+        ownership stays with the caller (the port-block-window flow
+        acquires before the block and releases after the unblock). When
+        None (default), the lock is acquired and released here, unchanged.
         """
         if primary_node.hublvol is None:
             raise ValueError(
@@ -444,9 +484,20 @@ class HublvolReconnectCoordinator:
                 f"no data-NIC IPs to attach for hublvol {ctrl_name} on "
                 f"{node.get_id()}")
 
+        if lock is not None:
+            return self._reconcile_under_lock(
+                lock, node, ctrl_name, nqn, port, expected, role,
+                rpc_timeout)
         with _HublvolLock(self._db.kv_store, node.get_id(),
                           primary_node.lvstore,
-                          ttl_sec=self._lock_ttl) as lock:
+                          ttl_sec=self._lock_ttl) as owned_lock:
+            return self._reconcile_under_lock(
+                owned_lock, node, ctrl_name, nqn, port, expected, role,
+                rpc_timeout)
+
+    def _reconcile_under_lock(self, lock, node, ctrl_name, nqn, port,
+                              expected, role, rpc_timeout):
+        if True:  # preserve the original with-block body indentation
             rpc = node.rpc_client()
 
             # 1. Cooldown: coalesce a second arrival inside the window.
@@ -500,7 +551,14 @@ class HublvolReconnectCoordinator:
                     node, role, rpc_timeout=rpc_timeout)
 
             if ok:
-                lock.stamp_attach()
+                if getattr(lock, "externally_managed", False):
+                    # Deferred: the owning restart flow stamps at its release
+                    # point AFTER the port unblock (one FDB txn out of the
+                    # latency-critical window). Cooldown semantics shift a
+                    # few seconds later — strictly more conservative.
+                    lock.pending_stamp = True
+                else:
+                    lock.stamp_attach()
             return ok
 
     def _fresh_multipath_attach(self, rpc, ctrl_name, nqn, port, expected,
