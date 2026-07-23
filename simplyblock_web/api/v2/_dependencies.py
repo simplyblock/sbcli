@@ -8,6 +8,7 @@ from simplyblock_core.models.backup import Backup as BackupModel, BackupPolicy
 from simplyblock_core.models.cluster import Cluster as ClusterModel
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_migration import LVolMigration
+from simplyblock_core.models.lvol_migration_group import LVolMigrationGroup
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.mgmt_node import MgmtNode
 from simplyblock_core.models.nvme_device import NVMeDevice
@@ -152,3 +153,16 @@ def _lookup_migration(migration_id: UUID, volume: Volume) -> LVolMigration:
 
 
 Migration = Annotated[LVolMigration, Depends(_lookup_migration)]
+
+
+def _lookup_migration_group(group_id: UUID, cluster: Cluster) -> LVolMigrationGroup:
+    try:
+        group = _db.get_migration_group_by_id(str(group_id))
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    if group.cluster_id != cluster.get_id():
+        raise HTTPException(404, f'MigrationGroup {group_id} not found')
+    return group
+
+
+MigrationGroup = Annotated[LVolMigrationGroup, Depends(_lookup_migration_group)]
