@@ -285,8 +285,11 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         c.swarm.leave(force=True)
         try:
             c.volumes.get("monitoring_grafana_data").remove(force=True)
-        except DockerException:
-            pass
+        except DockerException as e:
+            logger.debug(
+                "Best-effort cleanup: could not remove volume 'monitoring_grafana_data'; continuing cluster reset. Error: %s",
+                e,
+            )
         time.sleep(3)
 
     c.swarm.init(dev_ip)
