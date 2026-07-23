@@ -100,6 +100,13 @@ def task_runner(task):
     if tasks_controller.defer_task_for_expansion(task):
         return False
 
+    if tasks_controller.get_active_lvol_migration(task.node_id):
+        task.function_result = "LVol migration tasks found, retrying"
+        task.status = JobSchedule.STATUS_SUSPENDED
+        task.retry += 1
+        task.write_to_db(db.kv_store)
+        return False
+
     if task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED]:
         current_online_devices = 0
         unavailable = _cluster_unavailable_state(task.cluster_id)

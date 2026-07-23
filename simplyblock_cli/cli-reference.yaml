@@ -2005,11 +2005,10 @@ commands:
             dest: clone_name
             type: str
       - name: migrate
-        help: "Pre-create the target NVMe-oF subsystem for a volume migration. Returns a migration ID and NVMe connect strings (inaccessible ANA state). Connect the client, then run migrate-continue."
-        private: true
+        help: "Pre-create the target NVMe-oF subsystem for a volume migration. Returns a migration ID (or group ID with --batch) and NVMe connect strings (inaccessible ANA state). Connect the client, then run migrate-continue."
         arguments:
           - name: "volume_id"
-            help: "The volume ID to migrate."
+            help: "The volume ID to migrate. With --batch, any member of the shared-namespace subsystem."
             dest: volume_id
             type: str
           - name: "target_node_id"
@@ -2025,12 +2024,16 @@ commands:
             help: "Host NQN for DH-HMAC-CHAP authentication (required when volume has allowed hosts)."
             dest: host_nqn
             type: str
+          - name: "--batch"
+            help: "Migrate all lvols sharing the same NVMe-oF subsystem as a coordinated group."
+            dest: batch
+            type: bool
+            action: store_true
       - name: migrate-continue
         help: "Advance a pre-created migration to the snapshot-copy phase and launch the task runner."
-        private: true
         arguments:
           - name: "migration_id"
-            help: "The migration ID returned by migrate."
+            help: "The migration ID returned by migrate (or group ID with --batch)."
             dest: migration_id
             type: str
           - name: "--max-retries"
@@ -2043,9 +2046,13 @@ commands:
             dest: deadline_seconds
             type: int
             default: 14400
+          - name: "--batch"
+            help: "ID is a batch migration group ID."
+            dest: batch
+            type: bool
+            action: store_true
       - name: migrate-list
         help: "List volume migrations."
-        private: true
         arguments:
           - name: "--cluster-id"
             help: "Filter by cluster id."
@@ -2058,12 +2065,36 @@ commands:
             action: store_true
       - name: migrate-cancel
         help: "Cancel an active volume migration."
+        arguments:
+          - name: "migration_id"
+            help: "The migration id (or group ID with --batch)."
+            dest: migration_id
+            type: str
+          - name: "--batch"
+            help: "ID is a batch migration group ID."
+            dest: batch
+            type: bool
+            action: store_true
+      - name: migrate-cleanup
+        help: "Idempotently remove all objects a migration created on the target. Safe to run at any time; already-removed objects are reported as not_found."
         private: true
         arguments:
           - name: "migration_id"
             help: "The migration id."
             dest: migration_id
             type: str
+      - name: migrate-group-list
+        help: "List batch (shared-namespace) migration groups."
+        arguments:
+          - name: "--cluster-id"
+            help: "Filter by cluster ID."
+            dest: cluster_id
+            type: str
+          - name: "--json"
+            help: "Print output in JSON format."
+            dest: json
+            type: bool
+            action: store_true
   - name: "control-plane"
     help: "Control Plane Commands"
     aliases:

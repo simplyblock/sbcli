@@ -2362,10 +2362,16 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                      "If you run it and the config has been manually changed please "
                      "run 'sbcli sn configure-upgrade'")
         return False
+    db_controller = DBController()
+    for n in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+        if tasks_controller.get_active_lvol_migration(n.get_id()):
+            msg = f"LVol migration tasks found on node: {n.get_id()}"
+            logger.error(msg)
+            return False
+
     snode_api.set_hugepages()
     for node_config in nodes:
         logger.debug(node_config)
-        db_controller = DBController()
         kv_store = db_controller.kv_store
 
         try:
@@ -4792,6 +4798,12 @@ def shutdown_storage_node(node_id, force=False, keep_auto_restart=False):
             logger.error(
                 "Node is in %s state; only online/suspended/down can be "
                 "gracefully shut down. Use --force.", snode.status)
+            return False
+
+    for n in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
+        if tasks_controller.get_active_lvol_migration(n.get_id()):
+            msg = f"LVol migration tasks found on node: {n.get_id()}"
+            logger.error(msg)
             return False
 
     # Step 1: mark the node in_shutdown. set_node_status fans out a

@@ -791,6 +791,7 @@ def _update_cluster_status_impl(cluster_id):
         JobSchedule.FN_BALANCING_AFTER_DEV_REMOVE,
         JobSchedule.FN_BALANCING_AFTER_DEV_EXPANSION,
         JobSchedule.FN_LVOL_MIG,
+        JobSchedule.FN_LVOL_BATCH_MIG,
     }
     active_rebalancing_tasks = 0
     cluster_tasks = db.get_job_tasks(cluster_id)

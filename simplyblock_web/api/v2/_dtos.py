@@ -21,6 +21,7 @@ from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.backup import Backup, BackupPolicy
 from simplyblock_core.models.stats import StatsObject
 from simplyblock_core.models.lvol_migration import LVolMigration
+from simplyblock_core.models.lvol_migration_group import LVolMigrationGroup
 
 from . import util
 
@@ -593,6 +594,34 @@ class MigrationDTO(BaseModel):
             error_message=model.error_message or "",
             started_at=model.started_at,
             completed_at=model.completed_at,
+            connect_strings=connect_strings or [],
+        )
+
+
+class MigrationGroupDTO(BaseModel):
+    id: UUID
+    cluster_id: str
+    source_node_id: str
+    target_node_id: str
+    target_nqn: str
+    phase: str
+    status: str
+    member_count: int
+    error_message: str
+    connect_strings: list[NvmeConnectEntry] = []
+
+    @staticmethod
+    def from_model(model: LVolMigrationGroup, connect_strings: Optional[List[NvmeConnectEntry]] = None):
+        return MigrationGroupDTO(
+            id=UUID(model.uuid),
+            cluster_id=model.cluster_id,
+            source_node_id=model.source_node_id,
+            target_node_id=model.target_node_id,
+            target_nqn=model.target_nqn,
+            phase=model.phase,
+            status=model.status,
+            member_count=model.member_count(),
+            error_message=model.error_message or "",
             connect_strings=connect_strings or [],
         )
 

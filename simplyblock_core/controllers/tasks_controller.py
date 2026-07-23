@@ -744,6 +744,20 @@ def add_lvol_mig_task(migration):
     )
 
 
+def add_batch_mig_task(group):
+    """Create the JobSchedule task that drives a batch (shared-namespace) migration."""
+    return _add_task(
+        JobSchedule.FN_LVOL_BATCH_MIG,
+        group.cluster_id,
+        group.source_node_id,
+        "",
+        function_params={
+            "group_id": group.uuid,
+            "target_node_id": group.target_node_id,
+        },
+    )
+
+
 def add_lvol_sync_del_task(cluster_id, node_id, lvol_bdev_name, primary_node):
     return _add_task(JobSchedule.FN_LVOL_SYNC_DEL, cluster_id, node_id, "",
                      function_params={"lvol_bdev_name": lvol_bdev_name, "primary_node": primary_node}, max_retry=10)
@@ -980,3 +994,11 @@ def add_replication_final_task(cluster_id, src_node_id, function_params):
     """
     return _add_task(JobSchedule.FN_REPLICATION_FINAL, cluster_id, src_node_id, "",
                      function_params=function_params, send_to_cluster_log=False)
+
+
+def get_active_lvol_migration(node_id):
+    """Return active LVolMigration records with ``node_id`` as source or target."""
+    return [
+        m for m in db.get_migrations()
+        if m.is_active() and node_id in (m.source_node_id, m.target_node_id)
+    ]
