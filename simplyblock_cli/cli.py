@@ -640,18 +640,13 @@ class CLIWrapper(CLIWrapperBase):
         self.init_volume__suspend(subparser)
         self.init_volume__resume(subparser)
         self.init_volume__clone_lvol(subparser)
-        if self.developer_mode:
-            self.init_volume__migrate(subparser)
-        if self.developer_mode:
-            self.init_volume__migrate_continue(subparser)
-        if self.developer_mode:
-            self.init_volume__migrate_list(subparser)
-        if self.developer_mode:
-            self.init_volume__migrate_cancel(subparser)
+        self.init_volume__migrate(subparser)
+        self.init_volume__migrate_continue(subparser)
+        self.init_volume__migrate_list(subparser)
+        self.init_volume__migrate_cancel(subparser)
         if self.developer_mode:
             self.init_volume__migrate_cleanup(subparser)
-        if self.developer_mode:
-            self.init_volume__migrate_group_list(subparser)
+        self.init_volume__migrate_group_list(subparser)
 
 
     def init_volume__add(self, subparser):
@@ -1469,29 +1464,13 @@ class CLIWrapper(CLIWrapperBase):
                 elif sub_command in ['clone-lvol']:
                     ret = self.volume__clone_lvol(sub_command, args)
                 elif sub_command in ['migrate']:
-                    if not self.developer_mode:
-                        print("This command is private.")
-                        ret = False
-                    else:
-                        ret = self.volume__migrate(sub_command, args)
+                    ret = self.volume__migrate(sub_command, args)
                 elif sub_command in ['migrate-continue']:
-                    if not self.developer_mode:
-                        print("This command is private.")
-                        ret = False
-                    else:
-                        ret = self.volume__migrate_continue(sub_command, args)
+                    ret = self.volume__migrate_continue(sub_command, args)
                 elif sub_command in ['migrate-list']:
-                    if not self.developer_mode:
-                        print("This command is private.")
-                        ret = False
-                    else:
-                        ret = self.volume__migrate_list(sub_command, args)
+                    ret = self.volume__migrate_list(sub_command, args)
                 elif sub_command in ['migrate-cancel']:
-                    if not self.developer_mode:
-                        print("This command is private.")
-                        ret = False
-                    else:
-                        ret = self.volume__migrate_cancel(sub_command, args)
+                    ret = self.volume__migrate_cancel(sub_command, args)
                 elif sub_command in ['migrate-cleanup']:
                     if not self.developer_mode:
                         print("This command is private.")
@@ -1499,11 +1478,7 @@ class CLIWrapper(CLIWrapperBase):
                     else:
                         ret = self.volume__migrate_cleanup(sub_command, args)
                 elif sub_command in ['migrate-group-list']:
-                    if not self.developer_mode:
-                        print("This command is private.")
-                        ret = False
-                    else:
-                        ret = self.volume__migrate_group_list(sub_command, args)
+                    ret = self.volume__migrate_group_list(sub_command, args)
                 else:
                     self.parser.print_help()
 
