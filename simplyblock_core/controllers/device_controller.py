@@ -1035,6 +1035,12 @@ def device_set_failed(device_id):
         logger.error(f"Restart task found: {task_id}, can not fail device")
         return False
 
+    for n in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
+        if tasks_controller.get_active_lvol_migration(n.get_id()):
+            msg = f"LVol migration tasks found on node: {n.get_id()}"
+            logger.error(msg)
+            return False
+
     ret = device_set_state(device_id, NVMeDevice.STATUS_FAILED)
     if not ret:
         logger.warning("Failed to set device state to failed")
