@@ -957,9 +957,16 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
                     )
                     continue
 
-                connect_data = self.sbcli_utils.get_request(
-                    api_url=f"/lvol/connect/{lvol_id}"
-                )
+                try:
+                    connect_data = self.sbcli_utils.get_request(
+                        api_url=f"/lvol/connect/{lvol_id}"
+                    )
+                except Exception as exc:
+                    self.logger.warning(
+                        f"[{label}] {name} ({lvol_id}): connect "
+                        f"API failed: {exc}, skipping"
+                    )
+                    continue
                 results = connect_data.get("results", [])
                 if not results:
                     self.logger.warning(
@@ -1209,7 +1216,9 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
             f"[Phase 1] Bulk-verifying {len(names)} standalone lvols"
         )
         verified, id_map = self._bulk_verify_created(
-            names, self.sbcli_utils.list_lvols, "verify_standalone",
+            names,
+            lambda: self.sbcli_utils.list_lvols(exclude_in_deletion=True),
+            "verify_standalone",
             timeout=600,
         )
         for name in names:
@@ -1300,7 +1309,9 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
             f"[Phase 1a] Bulk-verifying {len(parent_names)} parents"
         )
         verified, id_map = self._bulk_verify_created(
-            parent_names, self.sbcli_utils.list_lvols, "verify_parents",
+            parent_names,
+            lambda: self.sbcli_utils.list_lvols(exclude_in_deletion=True),
+            "verify_parents",
             timeout=300,
         )
         for pn in parent_names:
@@ -1353,7 +1364,9 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
             f"[Phase 1b] Bulk-verifying {len(child_names)} children"
         )
         c_verified, c_id_map = self._bulk_verify_created(
-            child_names, self.sbcli_utils.list_lvols, "verify_children",
+            child_names,
+            lambda: self.sbcli_utils.list_lvols(exclude_in_deletion=True),
+            "verify_children",
             timeout=600,
         )
         for ct in child_tasks:
@@ -2092,7 +2105,8 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
                 f"[Phase 5] Bulk-verifying {len(all_clone_names)} clones"
             )
             verified, id_map = self._bulk_verify_created(
-                all_clone_names, self.sbcli_utils.list_lvols,
+                all_clone_names,
+                lambda: self.sbcli_utils.list_lvols(exclude_in_deletion=True),
                 "verify_clones", timeout=600,
             )
             for cn, cid in id_map.items():

@@ -412,13 +412,19 @@ class SbcliUtils:
             self.logger.info(f"Deleting pool: {name}")
             self.delete_storage_pool(pool_name=name)
 
-    def list_lvols(self):
+    def list_lvols(self, exclude_in_deletion=False):
         """Return all lvols
+
+        Args:
+            exclude_in_deletion: If True, skip lvols whose status is
+                ``in_deletion``.  Useful for verification after creation
+                where a rolled-back lvol may still be in the DB briefly.
         """
         lvol_data = dict()
         data = self.get_request(api_url="/lvol")
-        # self.logger.info(f"LVOL List: {data}")
         for lvol_info in data["results"]:
+            if exclude_in_deletion and lvol_info.get("status") == "in_deletion":
+                continue
             lvol_data[lvol_info["lvol_name"]] = lvol_info["id"]
         self.logger.debug(f"LVOL List: {lvol_data}")
         return lvol_data
@@ -451,7 +457,7 @@ class SbcliUtils:
                  max_namespace_per_subsys=None, namespace=None):
         """Adds lvol with given params
         """
-        lvols = self.list_lvols()
+        lvols = self.list_lvols(exclude_in_deletion=True)
         for name in list(lvols.keys()):
             if name == lvol_name:
                 self.logger.info(f"LVOL {lvol_name} already exists. Exiting")
