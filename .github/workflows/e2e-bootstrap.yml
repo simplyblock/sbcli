@@ -234,7 +234,7 @@ jobs:
   bootstrap-and-e2e:
     name: Pre-clean -> Bootstrap -> E2E
     runs-on: [self-hosted]
-    timeout-minutes: 1000
+    timeout-minutes: 1800
 
     env:
       # Cluster/lab env
@@ -1212,146 +1212,6 @@ jobs:
               print(f"[{ip}] Saved -> {dest_dir}/{os.path.basename(last)}", flush=True)
           PY
 
-      - name: Collect Graylog/OpenSearch logs
-        if: '!cancelled()'
-        timeout-minutes: 240
-        shell: bash
-        run: |
-          set +e
-          [ -z "${TEST_START_EPOCH:-}" ] || [ -z "${TEST_END_EPOCH:-}" ] && exit 0
-          ELAPSED=$((TEST_END_EPOCH - TEST_START_EPOCH))
-          [ "${ELAPSED}" -le 0 ] && exit 0
-
-          WINDOW_START=$((TEST_START_EPOCH - 3600))
-          WINDOW_END=$((TEST_END_EPOCH + 3600))
-
-          MGMT_IP="$(echo "${MNODES}" | awk '{print $1}')"
-          SSH_OPTS=(-i "${KEY_PATH}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10)
-
-          OUTPUT_DIR=""
-          if [ -n "${RUN_BASE_DIR:-}" ] && [ -d "${RUN_BASE_DIR}" ]; then
-            OUTPUT_DIR="${RUN_BASE_DIR}/graylog_collected"
-          else
-            OUTPUT_DIR="${NFS_MOUNTPOINT:-/mnt/nfs_share}/graylog_collected-$(date -u '+%Y%m%d-%H%M%S')"
-          fi
-          mkdir -p "${OUTPUT_DIR}" 2>/dev/null || true
-
-          epoch_to_iso() {
-            python3 -c "from datetime import datetime,timezone; print(datetime.fromtimestamp($1,tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%S'))"
-          }
-
-          # Build chunk boundaries, then iterate in REVERSE order (newest first)
-          _CHUNK_STARTS=()
-          _C=${WINDOW_START}
-          while [ ${_C} -lt ${WINDOW_END} ]; do
-            _CHUNK_STARTS+=(${_C})
-            _C=$((_C + 3600))
-          done
-          NUM_CHUNKS=${#_CHUNK_STARTS[@]}
-
-          run_collect() {
-            local iso=$1 mins=$2 outdir=$3 extra_flag=${4:-}
-            ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" \
-              "python3 -m simplyblock_core.scripts.collect_logs \
-                '${iso}' '${mins}' \
-                --mode docker \
-                --output-dir '${outdir}' \
-                ${extra_flag} \
-                ${CLUSTER_ID:+--cluster-id '${CLUSTER_ID}'}" \
-            2>&1
-            local rc=$?
-            [ $rc -ne 0 ] && return $rc
-            local has_content
-            has_content=$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" \
-              "find '${outdir}' -name '*.log' -size +0 2>/dev/null | head -1")
-            if [ -z "${has_content}" ]; then
-              echo "  WARN: collect_logs.py succeeded but all .log files are 0 bytes"
-              return 1
-            fi
-          }
-
-          collect_adaptive() {
-            local start_epoch=$1 end_epoch=$2 outdir=$3 extra_flag=${4:-}
-            local duration=$((end_epoch - start_epoch))
-            local mins=$(( (duration + 59) / 60 ))
-            local iso=$(epoch_to_iso ${start_epoch})
-            if run_collect "${iso}" "${mins}" "${outdir}" "${extra_flag}"; then
-              return 0
-            fi
-            echo "  WARN: ${mins}m window failed, retrying with 5-min sub-windows..."
-            local sub_start=${start_epoch}
-            while [ ${sub_start} -lt ${end_epoch} ]; do
-              local sub_end=$((sub_start + 300))
-              [ ${sub_end} -gt ${end_epoch} ] && sub_end=${end_epoch}
-              local sub_mins=$(( ((sub_end - sub_start) + 59) / 60 ))
-              local sub_iso=$(epoch_to_iso ${sub_start})
-              if ! run_collect "${sub_iso}" "${sub_mins}" "${outdir}" "${extra_flag}"; then
-                echo "  WARN: 5-min window at ${sub_iso} failed, retrying with 1-min windows..."
-                local micro_start=${sub_start}
-                while [ ${micro_start} -lt ${sub_end} ]; do
-                  local micro_end=$((micro_start + 60))
-                  [ ${micro_end} -gt ${sub_end} ] && micro_end=${sub_end}
-                  local micro_mins=$(( ((micro_end - micro_start) + 59) / 60 ))
-                  local micro_iso=$(epoch_to_iso ${micro_start})
-                  run_collect "${micro_iso}" "${micro_mins}" "${outdir}" "${extra_flag}" || \
-                    echo "  WARN: 1-min window at ${micro_iso} also failed"
-                  micro_start=${micro_end}
-                done
-              fi
-              sub_start=${sub_end}
-            done
-          }
-
-          PREFER_OPENSEARCH=""
-          CHUNK=0
-          for (( _IDX=NUM_CHUNKS-1; _IDX>=0; _IDX-- )); do
-            CHUNK=$((CHUNK + 1))
-            CHUNK_START=${_CHUNK_STARTS[$_IDX]}
-            CHUNK_END=$((CHUNK_START + 3600))
-            [ ${CHUNK_END} -gt ${WINDOW_END} ] && CHUNK_END=${WINDOW_END}
-            CHUNK_MINUTES=$(( ((CHUNK_END - CHUNK_START) + 59) / 60 ))
-            CHUNK_ISO=$(epoch_to_iso ${CHUNK_START})
-            echo "--- Chunk ${CHUNK}/${NUM_CHUNKS}: ${CHUNK_ISO} for ${CHUNK_MINUTES}m (newest-first) ---"
-            REMOTE_OUTPUT_DIR="/tmp/graylog_collect_chunk${CHUNK}"
-            ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" "mkdir -p '${REMOTE_OUTPUT_DIR}'" 2>/dev/null || true
-            if [ -z "${PREFER_OPENSEARCH}" ]; then
-              echo "  Probing OpenSearch availability..."
-              if run_collect "${CHUNK_ISO}" "${CHUNK_MINUTES}" "${REMOTE_OUTPUT_DIR}" "--use-opensearch"; then
-                PREFER_OPENSEARCH=true
-                echo "  OpenSearch works — using it for all chunks"
-              else
-                PREFER_OPENSEARCH=false
-                echo "  OpenSearch unavailable — using Graylog for all chunks"
-                ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" "rm -rf '${REMOTE_OUTPUT_DIR}'" 2>/dev/null || true
-                ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" "mkdir -p '${REMOTE_OUTPUT_DIR}'" 2>/dev/null || true
-                collect_adaptive ${CHUNK_START} ${CHUNK_END} "${REMOTE_OUTPUT_DIR}" || \
-                  echo "WARN: Graylog also failed for chunk ${CHUNK}"
-              fi
-            elif [ "${PREFER_OPENSEARCH}" = "true" ]; then
-              collect_adaptive ${CHUNK_START} ${CHUNK_END} "${REMOTE_OUTPUT_DIR}" "--use-opensearch" || {
-                echo "WARN: OpenSearch failed, falling back to Graylog..."
-                collect_adaptive ${CHUNK_START} ${CHUNK_END} "${REMOTE_OUTPUT_DIR}" || true
-              }
-            else
-              collect_adaptive ${CHUNK_START} ${CHUNK_END} "${REMOTE_OUTPUT_DIR}" || {
-                echo "WARN: Graylog failed, falling back to OpenSearch..."
-                collect_adaptive ${CHUNK_START} ${CHUNK_END} "${REMOTE_OUTPUT_DIR}" "--use-opensearch" || true
-              }
-            fi
-            TARBALLS=$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" \
-              "find '${REMOTE_OUTPUT_DIR}' -name '*.tar.gz' -type f 2>/dev/null") || true
-            if [ -n "${TARBALLS}" ]; then
-              for TB in ${TARBALLS}; do
-                scp "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}:${TB}" "${OUTPUT_DIR}/$(basename ${TB})" 2>&1 || true
-              done
-              for TB_FILE in "${OUTPUT_DIR}"/*.tar.gz; do
-                [ -f "${TB_FILE}" ] && tar -xzf "${TB_FILE}" -C "${OUTPUT_DIR}/" 2>/dev/null || true
-              done
-            fi
-            ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" "rm -rf '${REMOTE_OUTPUT_DIR}'" 2>/dev/null || true
-          done
-          echo "=== Log collection complete (${CHUNK} chunks, newest-first): ${OUTPUT_DIR} ==="
-
       # =========================
       # SUMMARY (always)
       # =========================
@@ -1510,6 +1370,8 @@ jobs:
             echo '```'
             echo ""
             echo "</details>"
+            echo ""
+            echo "> **Note:** Graylog/OpenSearch logs are currently being collected and will be available in the NFS log directory shortly."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Send Slack Notification
@@ -1622,6 +1484,7 @@ jobs:
               "",
               f":link: *Run:* <{run_url}|View on GitHub>",
               f":file_folder: *Final Logs:* `{log_dir}`",
+              f":hourglass_flowing_sand: _Logs are being collected and will be available shortly._",
           ]
 
           payload = {"text": "\n".join(lines)}
@@ -1637,6 +1500,146 @@ jobs:
               print(f"WARN: Slack notification failed: {exc}", file=sys.stderr)
           PYEOF
 
+
+      - name: Collect Graylog/OpenSearch logs
+        if: '!cancelled()'
+        timeout-minutes: 480
+        shell: bash
+        run: |
+          set +e
+          [ -z "${TEST_START_EPOCH:-}" ] || [ -z "${TEST_END_EPOCH:-}" ] && exit 0
+          ELAPSED=$((TEST_END_EPOCH - TEST_START_EPOCH))
+          [ "${ELAPSED}" -le 0 ] && exit 0
+
+          WINDOW_START=$((TEST_START_EPOCH - 3600))
+          WINDOW_END=$((TEST_END_EPOCH + 3600))
+
+          MGMT_IP="$(echo "${MNODES}" | awk '{print $1}')"
+          SSH_OPTS=(-i "${KEY_PATH}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10)
+
+          OUTPUT_DIR=""
+          if [ -n "${RUN_BASE_DIR:-}" ] && [ -d "${RUN_BASE_DIR}" ]; then
+            OUTPUT_DIR="${RUN_BASE_DIR}/graylog_collected"
+          else
+            OUTPUT_DIR="${NFS_MOUNTPOINT:-/mnt/nfs_share}/graylog_collected-$(date -u '+%Y%m%d-%H%M%S')"
+          fi
+          mkdir -p "${OUTPUT_DIR}" 2>/dev/null || true
+
+          epoch_to_iso() {
+            python3 -c "from datetime import datetime,timezone; print(datetime.fromtimestamp($1,tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%S'))"
+          }
+
+          # Build chunk boundaries, then iterate in REVERSE order (newest first)
+          _CHUNK_STARTS=()
+          _C=${WINDOW_START}
+          while [ ${_C} -lt ${WINDOW_END} ]; do
+            _CHUNK_STARTS+=(${_C})
+            _C=$((_C + 3600))
+          done
+          NUM_CHUNKS=${#_CHUNK_STARTS[@]}
+
+          run_collect() {
+            local iso=$1 mins=$2 outdir=$3 extra_flag=${4:-}
+            ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" \
+              "python3 -m simplyblock_core.scripts.collect_logs \
+                '${iso}' '${mins}' \
+                --mode docker \
+                --output-dir '${outdir}' \
+                ${extra_flag} \
+                ${CLUSTER_ID:+--cluster-id '${CLUSTER_ID}'}" \
+            2>&1
+            local rc=$?
+            [ $rc -ne 0 ] && return $rc
+            local has_content
+            has_content=$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" \
+              "find '${outdir}' -name '*.tar.gz' -size +0 2>/dev/null | head -1")
+            if [ -z "${has_content}" ]; then
+              echo "  WARN: collect_logs.py succeeded but no .tar.gz output found"
+              return 1
+            fi
+          }
+
+          collect_adaptive() {
+            local start_epoch=$1 end_epoch=$2 outdir=$3 extra_flag=${4:-}
+            local duration=$((end_epoch - start_epoch))
+            local mins=$(( (duration + 59) / 60 ))
+            local iso=$(epoch_to_iso ${start_epoch})
+            if run_collect "${iso}" "${mins}" "${outdir}" "${extra_flag}"; then
+              return 0
+            fi
+            echo "  WARN: ${mins}m window failed, retrying with 5-min sub-windows..."
+            local sub_start=${start_epoch}
+            while [ ${sub_start} -lt ${end_epoch} ]; do
+              local sub_end=$((sub_start + 300))
+              [ ${sub_end} -gt ${end_epoch} ] && sub_end=${end_epoch}
+              local sub_mins=$(( ((sub_end - sub_start) + 59) / 60 ))
+              local sub_iso=$(epoch_to_iso ${sub_start})
+              if ! run_collect "${sub_iso}" "${sub_mins}" "${outdir}" "${extra_flag}"; then
+                echo "  WARN: 5-min window at ${sub_iso} failed, retrying with 1-min windows..."
+                local micro_start=${sub_start}
+                while [ ${micro_start} -lt ${sub_end} ]; do
+                  local micro_end=$((micro_start + 60))
+                  [ ${micro_end} -gt ${sub_end} ] && micro_end=${sub_end}
+                  local micro_mins=$(( ((micro_end - micro_start) + 59) / 60 ))
+                  local micro_iso=$(epoch_to_iso ${micro_start})
+                  run_collect "${micro_iso}" "${micro_mins}" "${outdir}" "${extra_flag}" || \
+                    echo "  WARN: 1-min window at ${micro_iso} also failed"
+                  micro_start=${micro_end}
+                done
+              fi
+              sub_start=${sub_end}
+            done
+          }
+
+          PREFER_OPENSEARCH=""
+          CHUNK=0
+          for (( _IDX=NUM_CHUNKS-1; _IDX>=0; _IDX-- )); do
+            CHUNK=$((CHUNK + 1))
+            CHUNK_START=${_CHUNK_STARTS[$_IDX]}
+            CHUNK_END=$((CHUNK_START + 3600))
+            [ ${CHUNK_END} -gt ${WINDOW_END} ] && CHUNK_END=${WINDOW_END}
+            CHUNK_MINUTES=$(( ((CHUNK_END - CHUNK_START) + 59) / 60 ))
+            CHUNK_ISO=$(epoch_to_iso ${CHUNK_START})
+            echo "--- Chunk ${CHUNK}/${NUM_CHUNKS}: ${CHUNK_ISO} for ${CHUNK_MINUTES}m (newest-first) ---"
+            REMOTE_OUTPUT_DIR="/tmp/graylog_collect_chunk${CHUNK}"
+            ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" "mkdir -p '${REMOTE_OUTPUT_DIR}'" 2>/dev/null || true
+            if [ -z "${PREFER_OPENSEARCH}" ]; then
+              echo "  Probing OpenSearch availability..."
+              if run_collect "${CHUNK_ISO}" "${CHUNK_MINUTES}" "${REMOTE_OUTPUT_DIR}" "--use-opensearch"; then
+                PREFER_OPENSEARCH=true
+                echo "  OpenSearch works — using it for all chunks"
+              else
+                PREFER_OPENSEARCH=false
+                echo "  OpenSearch unavailable — using Graylog for all chunks"
+                ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" "rm -rf '${REMOTE_OUTPUT_DIR}'" 2>/dev/null || true
+                ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" "mkdir -p '${REMOTE_OUTPUT_DIR}'" 2>/dev/null || true
+                collect_adaptive ${CHUNK_START} ${CHUNK_END} "${REMOTE_OUTPUT_DIR}" || \
+                  echo "WARN: Graylog also failed for chunk ${CHUNK}"
+              fi
+            elif [ "${PREFER_OPENSEARCH}" = "true" ]; then
+              collect_adaptive ${CHUNK_START} ${CHUNK_END} "${REMOTE_OUTPUT_DIR}" "--use-opensearch" || {
+                echo "WARN: OpenSearch failed, falling back to Graylog..."
+                collect_adaptive ${CHUNK_START} ${CHUNK_END} "${REMOTE_OUTPUT_DIR}" || true
+              }
+            else
+              collect_adaptive ${CHUNK_START} ${CHUNK_END} "${REMOTE_OUTPUT_DIR}" || {
+                echo "WARN: Graylog failed, falling back to OpenSearch..."
+                collect_adaptive ${CHUNK_START} ${CHUNK_END} "${REMOTE_OUTPUT_DIR}" "--use-opensearch" || true
+              }
+            fi
+            TARBALLS=$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" \
+              "find '${REMOTE_OUTPUT_DIR}' -name '*.tar.gz' -type f 2>/dev/null") || true
+            if [ -n "${TARBALLS}" ]; then
+              for TB in ${TARBALLS}; do
+                scp "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}:${TB}" "${OUTPUT_DIR}/$(basename ${TB})" 2>&1 || true
+              done
+              for TB_FILE in "${OUTPUT_DIR}"/*.tar.gz; do
+                [ -f "${TB_FILE}" ] && tar -xzf "${TB_FILE}" -C "${OUTPUT_DIR}/" 2>/dev/null || true
+              done
+            fi
+            ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" "rm -rf '${REMOTE_OUTPUT_DIR}'" 2>/dev/null || true
+          done
+          echo "=== Log collection complete (${CHUNK} chunks, newest-first): ${OUTPUT_DIR} ==="
       - name: Upload logs (always)
         if: always()
         uses: actions/upload-artifact@v4

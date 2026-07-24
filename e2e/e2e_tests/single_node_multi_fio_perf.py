@@ -28,9 +28,6 @@ class TestLvolFioBase(TestClusterBase):
         self._add_pool_dual(
             pool_name=self.pool_name,
             cluster_id=self.cluster_id,
-            max_rw_iops=30000,
-            max_r_mbytes=100,
-            max_w_mbytes=100
         )
 
         self._verify_pool_exists_dual()

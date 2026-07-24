@@ -28,6 +28,19 @@ Stress scenarios
   BackupStressMarathon             – TC-BCK-STR-060..065
     Long-running mixed marathon: N rounds of backup / restore / delete / verify
     across 3 lvols.  Default 20 rounds for CI; set num_rounds=100 for full stress.
+
+  BackupStressLargeScale           – TC-BCK-STR-070..076
+    100 consecutive backups on a single lvol with periodic FIO writes.
+    Restores from various chain depths (latest, oldest, mid-chain).
+
+  BackupStressFilesystemSecurityMix – TC-BCK-STR-080..087
+    Matrix of (ext4, xfs) x (plain, crypto, dhchap+crypto) — 6 combos.
+    Each goes through backup → retention merge → restore → checksum verify.
+
+  BackupStressRetentionMergeCycles  – TC-BCK-STR-090..095
+    Repeated delete → backup → retention-merge → restore cycles on
+    plain/crypto/xfs lvols.  Targets the regression where deleted backups
+    corrupt the chain after retention merge.
 """
 
 from __future__ import annotations
@@ -419,18 +432,35 @@ class BackupStressTcpFailover(BackupStressBase):
             result = info["fio_results"].get(info["label"], "not_set")
             self.logger.info(f"TC-BCK-STR-012: FIO result for {name}: {result}")
 
-        # TC-BCK-STR-013: Restore the last backup of each lvol; verify
+        # Capture checksums after FIO completes (data is stable now)
         for name, info in lvol_map.items():
-            backups_all = self._list_backups()
-            if not backups_all:
-                continue
-            bk_id = (
-                backups_all[-1].get("id")
-                or backups_all[-1].get("ID")
-                or backups_all[-1].get("uuid")
-                or None
-            )
+            try:
+                files = self.ssh_obj.find_files(self.fio_node, info["mount"])
+                info["checksums"] = self.ssh_obj.generate_checksums(
+                    self.fio_node, files)
+            except Exception as e:
+                self.logger.warning(
+                    f"TC-BCK-STR-012: could not capture checksums for {name}: {e}")
+                info["checksums"] = {}
+
+        # Take a final backup of each lvol now that FIO is done (data is stable)
+        final_backup_ids: dict[str, str | None] = {}
+        for name, info in lvol_map.items():
+            bk_id = self._snap_and_backup(info["id"], "final")
+            if bk_id:
+                status = self._wait_for_backup_terminal(bk_id)
+                if status in ("done", "complete", "completed"):
+                    final_backup_ids[name] = bk_id
+                    continue
+            final_backup_ids[name] = None
+            self.logger.warning(f"TC-BCK-STR-013: final backup failed for {name}")
+
+        # TC-BCK-STR-013: Restore the final backup of each lvol; verify checksums
+        for name, info in lvol_map.items():
+            bk_id = final_backup_ids.get(name)
             if not bk_id:
+                self.logger.warning(
+                    f"TC-BCK-STR-013: no final backup for {name} — skipping restore")
                 continue
             restored_name = f"tcp_rest_{_rand_suffix()}"
             try:
@@ -441,6 +471,20 @@ class BackupStressTcpFailover(BackupStressBase):
                     restored_name, rest_id,
                     mount=f"{self.mount_path}/tr_{_rand_suffix()}",
                     format_disk=False)
+                # Verify checksums match what was captured after FIO completed
+                if info.get("checksums"):
+                    r_files = self.ssh_obj.find_files(self.fio_node, r_mount)
+                    self.ssh_obj.verify_checksums(
+                        self.fio_node, r_files, info["checksums"],
+                        message=f"TC-BCK-STR-013: checksum mismatch for {name}",
+                        by_name=True)
+                    self.logger.info(
+                        f"TC-BCK-STR-013: {name} checksum verified after failover")
+                else:
+                    # Fallback: at least verify files exist
+                    r_files = self.ssh_obj.find_files(self.fio_node, r_mount)
+                    assert len(r_files) > 0, (
+                        f"TC-BCK-STR-013: no files in restored {name}")
                 self._run_fio(r_mount, runtime=30)
                 self.logger.info(
                     f"TC-BCK-STR-013: restore after TCP failover OK for {name}")
@@ -617,6 +661,11 @@ class BackupStressPolicyRetention(BackupStressBase):
         device, mount = self._connect_and_mount(lvol_name, lvol_id)
         self._run_fio(mount, runtime=20)
 
+        # Capture checksums for verification after restore
+        files = self.ssh_obj.find_files(self.fio_node, mount)
+        original_checksums = self.ssh_obj.generate_checksums(
+            self.fio_node, files)
+
         # TC-BCK-STR-041: rapid snapshots
         for i in range(self.num_snapshots):
             self.logger.info(
@@ -634,7 +683,7 @@ class BackupStressPolicyRetention(BackupStressBase):
             f"{self.num_snapshots} snapshots (policy versions=3)")
         # Delta chain can be larger during merge window; just log
 
-        # TC-BCK-STR-043: restore latest backup after merges
+        # TC-BCK-STR-043: restore latest backup after merges + verify checksums
         if backups_now:
             latest_id = (
                 backups_now[-1].get("id")
@@ -643,11 +692,28 @@ class BackupStressPolicyRetention(BackupStressBase):
                 or None
             )
             if latest_id:
+                self._unmount_and_disconnect(self.fio_node, mount, lvol_id)
                 ret_restored = f"ret_rest_{_RAND_SUFFIX()}"
                 self._restore_backup(latest_id, ret_restored)
                 self._wait_for_restore(ret_restored)
+                rest_id = self.sbcli_utils.get_lvol_id(
+                    lvol_name=ret_restored)
+                _, r_mount = self._connect_and_mount(
+                    ret_restored, rest_id,
+                    mount=f"{self.mount_path}/retr_{_rand_suffix()}",
+                    format_disk=False)
+                r_files = self.ssh_obj.find_files(self.fio_node, r_mount)
+                self.ssh_obj.verify_checksums(
+                    self.fio_node, r_files, original_checksums,
+                    message="TC-BCK-STR-043: checksum mismatch after "
+                            "retention merge restore",
+                    by_name=True)
                 self.logger.info(
-                    "TC-BCK-STR-043: restore after merges succeeded ✓")
+                    "TC-BCK-STR-043: restore after merges — "
+                    "checksums verified ✓")
+                # Reconnect source for subsequent operations
+                _, mount = self._connect_and_mount(
+                    lvol_name, lvol_id, format_disk=False)
 
         # TC-BCK-STR-044: detach policy, more snapshots → no auto-backup
         self._detach_policy(policy_id, "lvol", lvol_id)
@@ -1004,3 +1070,484 @@ class BackupStressMarathon(BackupStressBase):
             f"TC-BCK-STR-065: backup list returned {len(final_list)} entries — service healthy ✓")
 
         self.logger.info("=== BackupStressMarathon PASSED ===")
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  Stress 8 – Large-scale: 100 backups on a single lvol
+# ════════════════════════════════════════════════════════════════════════════
+
+
+class BackupStressLargeScale(BackupStressBase):
+    """
+    TC-BCK-STR-070..076
+
+    Creates 100 incremental backups on a single lvol (with periodic FIO
+    writes between batches to produce real deltas), then restores from
+    the latest, the oldest, and several mid-chain points.
+
+    Validates:
+      - Service stays stable after 100 consecutive backups
+      - Delta chain management keeps backup list bounded (via auto-merge)
+      - Restore from any depth of the chain yields correct data
+      - Backup list responds promptly even with many entries
+
+    This test is designed for the backup-stress runner.  On a CI cluster
+    with limited resources, num_backups can be lowered via subclass override.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.test_name = "backup_stress_large_scale"
+        self.num_backups = 100
+        self.fio_interval = 10   # write new data every N backups
+        self.restore_count = 5   # how many chain points to restore
+
+    def run(self):
+        self.logger.info(
+            f"=== BackupStressLargeScale START  num_backups={self.num_backups} ===")
+        self.fio_node = self.fio_node[0]
+        self._ensure_pool_and_sc()
+
+        # TC-BCK-STR-070: create lvol, initial FIO, capture baseline
+        self.logger.info("TC-BCK-STR-070: create lvol and write initial data")
+        lvol_name, lvol_id = self._create_lvol(
+            name=f"scale_{_rand_suffix()}", size="10G")
+        _, mount = self._connect_and_mount(lvol_name, lvol_id)
+        self._run_fio(mount, runtime=30)
+        latest_checksums = self._get_checksums(self.fio_node, mount)
+        assert latest_checksums, "TC-BCK-STR-070: no checksums captured"
+
+        # TC-BCK-STR-071: create N backups with periodic FIO writes
+        # Track checksums at each FIO write point so mid-chain restores
+        # can be verified against the correct data snapshot.
+        self.logger.info(
+            f"TC-BCK-STR-071: creating {self.num_backups} backups "
+            f"(FIO every {self.fio_interval} backups)")
+        all_bk_ids: list[str] = []
+        # Maps backup index → checksums valid at that point
+        checksums_at: dict[int, dict] = {0: latest_checksums}
+        for i in range(self.num_backups):
+            # Write new data periodically to create real deltas
+            if i > 0 and i % self.fio_interval == 0:
+                self._run_fio(mount, runtime=10, rw="write")
+                latest_checksums = self._get_checksums(self.fio_node, mount)
+                checksums_at[i] = latest_checksums
+                self.logger.info(
+                    f"TC-BCK-STR-071[{i}]: wrote new data, updated checksums")
+
+            sn = f"sc_{i}_{_rand_suffix()}"
+            try:
+                self._create_snapshot(lvol_id, sn, backup=True)
+                bk_id = self._wait_for_backup_by_snap(sn, f"TC-BCK-STR-071[{i}]")
+                all_bk_ids.append(bk_id)
+            except Exception as e:
+                self.logger.warning(f"TC-BCK-STR-071[{i}]: backup failed: {e}")
+                all_bk_ids.append("")
+
+            if i % 20 == 19:
+                self.logger.info(
+                    f"TC-BCK-STR-071: {i + 1}/{self.num_backups} backups done")
+            sleep_n_sec(2)
+
+        successful = [b for b in all_bk_ids if b]
+        self.logger.info(
+            f"TC-BCK-STR-071: {len(successful)}/{self.num_backups} backups succeeded")
+        assert len(successful) >= self.num_backups * 0.8, (
+            f"TC-BCK-STR-071: too many failures — only {len(successful)} of "
+            f"{self.num_backups} backups succeeded"
+        )
+
+        # TC-BCK-STR-072: backup list health — must still respond
+        all_backups = self._list_backups()
+        self.logger.info(
+            f"TC-BCK-STR-072: backup list has {len(all_backups)} entries after "
+            f"{self.num_backups} backup operations")
+
+        # TC-BCK-STR-073: restore from multiple chain depths
+        # Pick: latest, oldest, and evenly spaced mid-chain points
+        restore_indices = [len(successful) - 1, 0]
+        step = max(1, len(successful) // (self.restore_count - 2))
+        for j in range(1, self.restore_count - 1):
+            idx = min(j * step, len(successful) - 1)
+            if idx not in restore_indices:
+                restore_indices.append(idx)
+
+        self._unmount_and_disconnect(self.fio_node, mount, lvol_id)
+
+        restore_ok = 0
+        for idx in restore_indices:
+            bk_id = successful[idx]
+            rst_name = f"sc_rst_{idx}_{_rand_suffix()}"
+            try:
+                self._restore_backup(bk_id, rst_name)
+                self._wait_for_restore(rst_name)
+                rst_id = self._get_lvol_id(rst_name)
+                _, rst_mount = self._connect_and_mount(
+                    rst_name, rst_id,
+                    mount=f"{self.mount_path}/scr_{idx}_{_rand_suffix()}",
+                    format_disk=False)
+                # Find the checksums valid at this backup's point in time:
+                # use the latest FIO write point at or before this index.
+                # checksums_at keys: 0, fio_interval, 2*fio_interval, ...
+                # Map successful[idx] back to its original all_bk_ids index
+                orig_idx = all_bk_ids.index(bk_id) if bk_id in all_bk_ids else idx
+                valid_points = sorted(
+                    k for k in checksums_at if k <= orig_idx)
+                expected = checksums_at[valid_points[-1]] if valid_points else latest_checksums
+
+                r_files = self.ssh_obj.find_files(self.fio_node, rst_mount)
+                assert len(r_files) > 0, (
+                    f"TC-BCK-STR-073: no files in restore from backup[{idx}]")
+                self.ssh_obj.verify_checksums(
+                    self.fio_node, r_files, expected,
+                    message=f"TC-BCK-STR-073: checksum mismatch at chain depth {idx}",
+                    by_name=True)
+                restore_ok += 1
+                self.logger.info(
+                    f"TC-BCK-STR-073: restore from chain depth {idx} — "
+                    f"checksum verified ({len(r_files)} files)")
+                self._unmount_and_disconnect(self.fio_node, rst_mount, rst_id)
+            except Exception as e:
+                self.logger.error(
+                    f"TC-BCK-STR-073: restore from chain depth {idx} failed: {e}")
+
+        assert restore_ok >= len(restore_indices) - 1, (
+            f"TC-BCK-STR-073: only {restore_ok}/{len(restore_indices)} "
+            f"restores succeeded"
+        )
+
+        # TC-BCK-STR-074: restore latest and verify latest checksums
+        self.logger.info("TC-BCK-STR-074: restore latest backup, verify checksums")
+        latest_bk_id = successful[-1]
+        rst_latest = f"sc_latest_{_rand_suffix()}"
+        self._restore_backup(latest_bk_id, rst_latest)
+        self._wait_for_restore(rst_latest)
+        rst_latest_id = self._get_lvol_id(rst_latest)
+        _, rst_latest_mount = self._connect_and_mount(
+            rst_latest, rst_latest_id,
+            mount=f"{self.mount_path}/scl_{_rand_suffix()}",
+            format_disk=False)
+        self._verify_checksums(
+            self.fio_node, rst_latest_mount, latest_checksums)
+        self.logger.info("TC-BCK-STR-074: latest restore checksum match")
+        self._unmount_and_disconnect(
+            self.fio_node, rst_latest_mount, rst_latest_id)
+
+        self.logger.info("=== BackupStressLargeScale PASSED ===")
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  Stress 9 – Filesystem + security matrix: ext4/xfs x plain/crypto/dhchap
+# ════════════════════════════════════════════════════════════════════════════
+
+
+class BackupStressFilesystemSecurityMix(BackupStressBase):
+    """
+    TC-BCK-STR-080..087
+
+    Creates lvols across a matrix of filesystem type (ext4, xfs) and
+    security configuration (plain, crypto, dhchap+crypto).  Each lvol
+    goes through a full backup → retention merge → restore → verify cycle.
+
+    Validates:
+      - Backup/restore works for every (fs, security) combination
+      - Retention merge preserves data for all configurations
+      - No cross-contamination between different lvol configs
+      - XFS UUID handling doesn't break restore
+      - Crypto + DHCHAP don't interfere with backup data chain
+
+    Combinations tested (6 lvols):
+      ext4 + plain
+      ext4 + crypto
+      ext4 + dhchap+crypto
+      xfs  + plain
+      xfs  + crypto
+      xfs  + dhchap+crypto
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.test_name = "backup_stress_fs_security_mix"
+        self._combos = [
+            # (label, fs_type, crypto, dhchap)
+            ("ext4_plain",       "ext4", False, False),
+            ("ext4_crypto",      "ext4", True,  False),
+            ("ext4_dhchap_crypt", "ext4", True,  True),
+            ("xfs_plain",        "xfs",  False, False),
+            ("xfs_crypto",       "xfs",  True,  False),
+            ("xfs_dhchap_crypt", "xfs",  True,  True),
+        ]
+
+    def _connect_format_mount(self, lvol_name: str, lvol_id: str,
+                               fs_type: str = "ext4") -> tuple[str, str]:
+        """Connect lvol and format with specified filesystem type."""
+        if self.k8s_test:
+            pvc_name = self._k8s_normalize_name(lvol_name)
+            return pvc_name, pvc_name
+
+        mount = f"{self.mount_path}/{lvol_name}"
+        initial = self.ssh_obj.get_devices(node=self.fio_node)
+        connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
+        for cmd in connect_ls:
+            self.ssh_obj.exec_command(node=self.fio_node, command=cmd)
+        sleep_n_sec(3)
+        final = self.ssh_obj.get_devices(node=self.fio_node)
+        new_devs = [d for d in final if d not in initial]
+        assert new_devs, f"No new block device after connecting {lvol_name}"
+        device = f"/dev/{new_devs[0]}"
+        self.ssh_obj.format_disk(
+            node=self.fio_node, device=device, fs_type=fs_type)
+        self.ssh_obj.exec_command(self.fio_node, f"mkdir -p {mount}")
+        self.ssh_obj.mount_path(
+            node=self.fio_node, device=device, mount_path=mount)
+        self.mounted.append((self.fio_node, mount))
+        self.connected.append(lvol_id)
+        return device, mount
+
+    def run(self):
+        self.logger.info("=== BackupStressFilesystemSecurityMix START ===")
+        self.fio_node = self.fio_node[0]
+        self._ensure_pool_and_sc()
+
+        results: dict[str, str] = {}
+
+        for combo_idx, (label, fs_type, crypto, dhchap) in enumerate(self._combos):
+            self.logger.info(
+                f"TC-BCK-STR-08{combo_idx}: [{label}] "
+                f"fs={fs_type} crypto={crypto} dhchap={dhchap}")
+            try:
+                # Create lvol with specified config
+                lvol_name, lvol_id = self._create_lvol(
+                    name=f"fsm_{label}_{_rand_suffix()}",
+                    crypto=crypto)
+
+                # Connect and format with specified filesystem
+                _, mount = self._connect_format_mount(
+                    lvol_name, lvol_id, fs_type=fs_type)
+
+                # Write data and capture checksums
+                self._run_fio(mount, runtime=20)
+                checksums = self._get_checksums(self.fio_node, mount)
+                assert checksums, f"[{label}] no checksums captured"
+
+                # Take 5 backups, apply retention policy
+                bk_ids = []
+                for i in range(5):
+                    sn = f"fsm_{label}_{i}_{_rand_suffix()}"
+                    self._create_snapshot(lvol_id, sn, backup=True)
+                    bk_id = self._wait_for_backup_by_snap(
+                        sn, f"[{label}][{i}]")
+                    bk_ids.append(bk_id)
+                    sleep_n_sec(3)
+
+                pol_name = f"fsm_pol_{label}_{_rand_suffix()}"
+                pol_id = self._add_policy(pol_name, versions=3, age="1d")
+                self._attach_policy(pol_id, "lvol", lvol_id)
+                sleep_n_sec(30)  # let retention merge run
+
+                # Restore from latest and verify checksums
+                self._unmount_and_disconnect(self.fio_node, mount, lvol_id)
+
+                rst_name = f"fsm_rst_{label}_{_rand_suffix()}"
+                self._restore_backup(bk_ids[-1], rst_name)
+                self._wait_for_restore(rst_name)
+                rst_id = self._get_lvol_id(rst_name)
+
+                # Restored lvol already has filesystem — mount without format
+                _, rst_mount = self._connect_and_mount(
+                    rst_name, rst_id,
+                    mount=f"{self.mount_path}/fsmr_{label}_{_rand_suffix()}",
+                    format_disk=False)
+
+                self._verify_checksums(
+                    self.fio_node, rst_mount, checksums)
+                self.logger.info(f"[{label}] restore + checksum OK")
+                self._unmount_and_disconnect(
+                    self.fio_node, rst_mount, rst_id)
+
+                # Clean up policy
+                self._detach_policy(pol_id, "lvol", lvol_id)
+
+                results[label] = "PASSED"
+
+            except Exception as e:
+                self.logger.error(f"[{label}] FAILED: {e}")
+                results[label] = f"FAILED: {e}"
+
+        # Summary
+        passed = sum(1 for v in results.values() if v == "PASSED")
+        total = len(self._combos)
+        self.logger.info(
+            f"TC-BCK-STR-087: {passed}/{total} combos passed: {results}")
+        assert passed == total, (
+            f"TC-BCK-STR-087: {total - passed} combo(s) failed: "
+            + ", ".join(k for k, v in results.items() if v != "PASSED")
+        )
+
+        self.logger.info("=== BackupStressFilesystemSecurityMix PASSED ===")
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  Stress 10 – Retention merge cycles with mixed configs
+# ════════════════════════════════════════════════════════════════════════════
+
+
+class BackupStressRetentionMergeCycles(BackupStressBase):
+    """
+    TC-BCK-STR-090..095
+
+    Repeated delete → backup → retention-merge → restore cycles on lvols
+    with different configurations (plain, crypto, xfs).  Each cycle adds
+    new data before the backup to produce real deltas, then verifies the
+    restored data matches the latest write.
+
+    This specifically targets the regression where older deleted backups
+    corrupt the chain for new backups after retention merge.
+
+    Validates:
+      - Multiple delete-backup-merge-restore cycles produce correct data
+      - No stale data leaks across cycles
+      - Works with crypto, plain, and XFS lvols
+      - Retention merge handles the chain correctly after each delete
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.test_name = "backup_stress_retention_merge_cycles"
+        self.num_cycles = 5
+        self._configs = [
+            # (label, crypto, fs_type)
+            ("plain_ext4", False, "ext4"),
+            ("crypto_ext4", True,  "ext4"),
+            ("plain_xfs",  False, "xfs"),
+        ]
+
+    def _connect_format_mount(self, lvol_name: str, lvol_id: str,
+                               fs_type: str = "ext4") -> tuple[str, str]:
+        """Connect lvol and format with specified filesystem type."""
+        if self.k8s_test:
+            pvc_name = self._k8s_normalize_name(lvol_name)
+            return pvc_name, pvc_name
+
+        mount = f"{self.mount_path}/{lvol_name}"
+        initial = self.ssh_obj.get_devices(node=self.fio_node)
+        connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
+        for cmd in connect_ls:
+            self.ssh_obj.exec_command(node=self.fio_node, command=cmd)
+        sleep_n_sec(3)
+        final = self.ssh_obj.get_devices(node=self.fio_node)
+        new_devs = [d for d in final if d not in initial]
+        assert new_devs, f"No new block device after connecting {lvol_name}"
+        device = f"/dev/{new_devs[0]}"
+        self.ssh_obj.format_disk(
+            node=self.fio_node, device=device, fs_type=fs_type)
+        self.ssh_obj.exec_command(self.fio_node, f"mkdir -p {mount}")
+        self.ssh_obj.mount_path(
+            node=self.fio_node, device=device, mount_path=mount)
+        self.mounted.append((self.fio_node, mount))
+        self.connected.append(lvol_id)
+        return device, mount
+
+    def run(self):
+        self.logger.info(
+            f"=== BackupStressRetentionMergeCycles START "
+            f"cycles={self.num_cycles} ===")
+        self.fio_node = self.fio_node[0]
+        self._ensure_pool_and_sc()
+
+        results: dict[str, str] = {}
+
+        for label, crypto, fs_type in self._configs:
+            self.logger.info(
+                f"TC-BCK-STR-090: [{label}] starting "
+                f"{self.num_cycles} delete-merge-restore cycles")
+
+            try:
+                lvol_name, lvol_id = self._create_lvol(
+                    name=f"rmc_{label}_{_rand_suffix()}",
+                    crypto=crypto)
+
+                # Initial format and data write
+                _, mount = self._connect_format_mount(
+                    lvol_name, lvol_id, fs_type=fs_type)
+                self._run_fio(mount, runtime=20)
+
+                for cycle in range(self.num_cycles):
+                    self.logger.info(
+                        f"[{label}] cycle {cycle + 1}/{self.num_cycles}")
+
+                    # Write new data each cycle
+                    self._run_fio(mount, runtime=15, rw="write")
+                    cycle_checksums = self._get_checksums(
+                        self.fio_node, mount)
+
+                    # Delete any existing backups
+                    if cycle > 0:
+                        self._delete_backups(lvol_id)
+                        sleep_n_sec(10)
+
+                    # Take 4 backups
+                    cycle_bk_ids = []
+                    for i in range(4):
+                        sn = f"rmc_{label}_c{cycle}_{i}_{_rand_suffix()}"
+                        self._create_snapshot(lvol_id, sn, backup=True)
+                        bk_id = self._wait_for_backup_by_snap(
+                            sn, f"[{label}][c{cycle}.{i}]")
+                        cycle_bk_ids.append(bk_id)
+                        sleep_n_sec(3)
+
+                    # Apply retention policy (versions=2)
+                    pol_name = f"rmc_pol_{label}_{cycle}_{_rand_suffix()}"
+                    pol_id = self._add_policy(
+                        pol_name, versions=2, age="1d")
+                    self._attach_policy(pol_id, "lvol", lvol_id)
+                    sleep_n_sec(20)  # let merge run
+
+                    # Restore latest and verify
+                    self._unmount_and_disconnect(
+                        self.fio_node, mount, lvol_id)
+
+                    rst_name = f"rmc_rst_{label}_{cycle}_{_rand_suffix()}"
+                    self._restore_backup(cycle_bk_ids[-1], rst_name)
+                    self._wait_for_restore(rst_name)
+                    rst_id = self._get_lvol_id(rst_name)
+                    _, rst_mount = self._connect_and_mount(
+                        rst_name, rst_id,
+                        mount=(
+                            f"{self.mount_path}/"
+                            f"rmcr_{label}_{cycle}_{_rand_suffix()}"
+                        ),
+                        format_disk=False)
+
+                    self._verify_checksums(
+                        self.fio_node, rst_mount, cycle_checksums)
+                    self.logger.info(
+                        f"[{label}] cycle {cycle + 1} restore checksum OK")
+                    self._unmount_and_disconnect(
+                        self.fio_node, rst_mount, rst_id)
+
+                    # Detach policy, reconnect source for next cycle
+                    self._detach_policy(pol_id, "lvol", lvol_id)
+                    _, mount = self._connect_and_mount(lvol_name, lvol_id,
+                                                       format_disk=False)
+
+                self._unmount_and_disconnect(self.fio_node, mount, lvol_id)
+                results[label] = "PASSED"
+                self.logger.info(
+                    f"[{label}] all {self.num_cycles} cycles PASSED")
+
+            except Exception as e:
+                self.logger.error(f"[{label}] FAILED: {e}")
+                results[label] = f"FAILED: {e}"
+
+        # Summary
+        passed = sum(1 for v in results.values() if v == "PASSED")
+        total = len(self._configs)
+        self.logger.info(
+            f"TC-BCK-STR-095: {passed}/{total} configs passed: {results}")
+        assert passed == total, (
+            f"TC-BCK-STR-095: {total - passed} config(s) failed: "
+            + ", ".join(k for k, v in results.items() if v != "PASSED")
+        )
+
+        self.logger.info("=== BackupStressRetentionMergeCycles PASSED ===")

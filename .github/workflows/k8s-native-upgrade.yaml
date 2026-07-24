@@ -39,9 +39,9 @@ on:
         required: false
         default: ''
 
-      # ── Helm chart branches (base,target — e.g. "main,main" or "release-25,main") ──
-      helm_charts_branches:
-        description: 'Helm chart branches: base_branch,target_branch (e.g. main,main)'
+      # ── Operator repo branches (base,target — e.g. "main,main" or "release-25,main") ──
+      operator_repo_branches:
+        description: 'Operator repo branches: base_branch,target_branch (e.g. main,main)'
         required: true
         default: 'main,main'
 
@@ -85,6 +85,7 @@ on:
           - local
           - aws-openshift
           - openshift-local
+          - openshift-baremetal
           - gcp
 
       # ── Runner config ──
@@ -157,8 +158,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Parse helm_charts_branches (format: "base_branch,target_branch")
-          IFS=',' read -r BASE_HELM TARGET_HELM <<< "${{ github.event.inputs.helm_charts_branches || 'main,main' }}"
+          # Parse operator_repo_branches (format: "base_branch,target_branch")
+          IFS=',' read -r BASE_HELM TARGET_HELM <<< "${{ github.event.inputs.operator_repo_branches || 'main,main' }}"
           TARGET_HELM="${TARGET_HELM:-$BASE_HELM}"
           echo "BASE_HELM_BRANCH=${BASE_HELM}" >> "$GITHUB_ENV"
           echo "TARGET_HELM_BRANCH=${TARGET_HELM}" >> "$GITHUB_ENV"
@@ -185,21 +186,21 @@ jobs:
             echo "CSI_TAG=" >> "$GITHUB_ENV"
           fi
 
-      # Checkout helm charts for BASE version (initial deployment)
+      # Checkout simplyblock-operator for BASE version (initial deployment)
       - uses: actions/checkout@master
-        name: Checkout helm-charts (base version)
+        name: Checkout simplyblock-operator (base version)
         with:
-          repository: simplyblock/helm-charts
+          repository: simplyblock/simplyblock-operator
           ref: ${{ env.BASE_HELM_BRANCH }}
-          path: 'helm-charts'
+          path: 'simplyblock-operator'
 
-      # Checkout helm charts for TARGET version (for helm upgrade)
+      # Checkout simplyblock-operator for TARGET version (for helm upgrade)
       - uses: actions/checkout@master
-        name: Checkout helm-charts (target version)
+        name: Checkout simplyblock-operator (target version)
         with:
-          repository: simplyblock/helm-charts
+          repository: simplyblock/simplyblock-operator
           ref: ${{ env.TARGET_HELM_BRANCH }}
-          path: 'helm-charts-target'
+          path: 'simplyblock-operator-target'
 
       # Checkout sbcli R25 charts (r25-to-r2x only)
       - uses: actions/checkout@v4
@@ -209,14 +210,8 @@ jobs:
           ref: ${{ env.R25_SBCLI_BRANCH }}
           path: 'sbcli-r25'
 
-      # Checkout simplyblock-csi repo for R25 CSI helm chart (r25-to-r2x only)
-      - uses: actions/checkout@master
-        name: Checkout simplyblock-csi (R25 CSI chart)
-        if: ${{ github.event.inputs.upgrade_type == 'r25-to-r2x' }}
-        with:
-          repository: simplyblock/simplyblock-csi
-          ref: ${{ env.R25_CSI_REF }}
-          path: 'simplyblock-csi'
+      # R25 CSI chart is now in the simplyblock-operator mono-repo under csi-driver/
+      # The base simplyblock-operator checkout above already contains it
 
       - name: Resolve KEY_PATH and validate key exists
         shell: bash
@@ -299,7 +294,7 @@ jobs:
       - name: Install Helm Chart for simplyblock-operator (BASE version)
         if: ${{ github.event.inputs.use_existing_cluster != 'true' && github.event.inputs.upgrade_type != 'r25-to-r2x' }}
         run: |
-          cd $GITHUB_WORKSPACE/helm-charts/charts/simplyblock-operator/
+          cd $GITHUB_WORKSPACE/simplyblock-operator/helm-charts/charts/simplyblock-operator/
 
           TLS_FLAGS=""
           if [ "${{ github.event.inputs.tls_enabled }}" = "true" ]; then
@@ -385,9 +380,10 @@ jobs:
           CORE_PERCENTAGE="30"
           FORCE_FORMAT_4K="false"
           CLUSTER_ENV="${{ github.event.inputs.cluster_environment || 'local' }}"
-          if [ "$CLUSTER_ENV" = "aws-openshift" ] || [ "$CLUSTER_ENV" = "openshift-local" ]; then
+          if [ "$CLUSTER_ENV" = "aws-openshift" ] || [ "$CLUSTER_ENV" = "openshift-local" ] || [ "$CLUSTER_ENV" = "openshift-baremetal" ]; then
             OPENSHIFT_CLUSTER="true"
             SKIP_KUBELET_CONFIG="true"
+            CORE_PERCENTAGE="50"
           fi
 
           # Build vault settings (conditional on TLS)
@@ -471,6 +467,10 @@ jobs:
             kubectl patch serviceaccount "$sa" -n simplyblock \
               --patch '{"imagePullSecrets": [{"name": "regcred"}]}'
           done
+          for deploy in $(kubectl get deployments -n simplyblock --no-headers -o custom-columns=:metadata.name 2>/dev/null); do
+            kubectl patch deployment "$deploy" -n simplyblock \
+              --type=merge -p '{"spec":{"template":{"spec":{"imagePullSecrets":[{"name":"regcred"}]}}}}' || true
+          done
 
       - name: Delete ImagePullBackOff pods and wait for Running (post-CRD, operator)
         if: ${{ github.event.inputs.use_existing_cluster != 'true' && github.event.inputs.upgrade_type != 'r25-to-r2x' }}
@@ -507,10 +507,14 @@ jobs:
             sleep 10
           done
 
-          echo "Patching service accounts with imagePullSecrets..."
+          echo "Patching service accounts and deployments with imagePullSecrets..."
           for sa in $(kubectl get serviceaccounts -n $NAMESPACE --no-headers | awk '{print $1}'); do
             kubectl patch serviceaccount "$sa" -n $NAMESPACE \
               --patch '{"imagePullSecrets": [{"name": "regcred"}]}'
+          done
+          for deploy in $(kubectl get deployments -n $NAMESPACE --no-headers -o custom-columns=:metadata.name 2>/dev/null); do
+            kubectl patch deployment "$deploy" -n $NAMESPACE \
+              --type=merge -p '{"spec":{"template":{"spec":{"imagePullSecrets":[{"name":"regcred"}]}}}}' || true
           done
 
           if [ "$CLUSTER_ENV" = "aws-openshift" ] || [ "$CLUSTER_ENV" = "openshift-local" ]; then
@@ -538,7 +542,7 @@ jobs:
       # ── CSI-based bootstrap (r25-to-r2x upgrade, R25 base) ──
       # R25 uses two separate Helm charts:
       #   1. sbcli chart (from sbcli repo p2p-migration branch) — control plane
-      #   2. spdk-csi chart (from simplyblock-csi repo) — storage nodes + CSI driver
+      #   2. spdk-csi chart (from simplyblock-operator mono-repo csi-driver/) — storage nodes + CSI driver
 
       - name: Install sbcli control plane chart (R25)
         if: ${{ github.event.inputs.use_existing_cluster != 'true' && github.event.inputs.upgrade_type == 'r25-to-r2x' }}
@@ -658,7 +662,7 @@ jobs:
           NAMESPACE=simplyblock
 
           echo "=== Installing R25 spdk-csi chart ==="
-          cd $GITHUB_WORKSPACE/simplyblock-csi/charts/spdk-csi/latest/spdk-csi/
+          cd $GITHUB_WORKSPACE/simplyblock-operator/csi-driver/charts/spdk-csi/latest/spdk-csi/
 
           helm install -n $NAMESPACE spdk-csi ./ \
             --set csiConfig.simplybk.uuid="${CLUSTER_ID}" \
@@ -909,7 +913,7 @@ jobs:
           export OPERATOR_TAG="${OPERATOR_TAG:-$TARGET_SB_IMAGE}"
           export SIMPLYBLOCK_REPO="${SIMPLYBLOCK_REPO}"
           export OPERATOR_REPO="${OPERATOR_REPO}"
-          export HELM_CHART_PATH="$GITHUB_WORKSPACE/helm-charts-target/charts/simplyblock-operator/"
+          export HELM_CHART_PATH="$GITHUB_WORKSPACE/simplyblock-operator-target/helm-charts/charts/simplyblock-operator/"
           export TLS_ENABLED="${TLS_ENABLED}"
           export CSI_REPOSITORY="${CSI_REPOSITORY}"
           export CSI_TAG="${CSI_TAG}"
@@ -1014,9 +1018,52 @@ jobs:
           [ "$LOG_COLLECT_TIMEOUT_MINS" -lt 30 ] && LOG_COLLECT_TIMEOUT_MINS=30
           echo "LOG_COLLECT_TIMEOUT_MINS=$LOG_COLLECT_TIMEOUT_MINS" >> $GITHUB_ENV
 
+      - name: Write Job Summary
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          out_log="$GITHUB_WORKSPACE/e2e/output.log"
+          dur_fmt="${TEST_TIME_HOURS:-0}h ${TEST_TIME_MINS:-0}m ${TEST_TIME_SECS:-0}s"
+
+          total_cases="$(grep -E 'Total Cases:|Total Test Cases:' "${out_log}" 2>/dev/null | tail -n 1 | grep -oE '[0-9]+' | tail -1 || echo '?')"
+          passed_cnt="$(grep -E 'Passed:' "${out_log}" 2>/dev/null | tail -n 1 | grep -oE '[0-9]+' | tail -1 || echo '?')"
+          failed_cnt="$(grep -E 'Failed:' "${out_log}" 2>/dev/null | tail -n 1 | grep -oE '[0-9]+' | tail -1 || echo '?')"
+
+          {
+            echo "## K8s Native Upgrade Test Results"
+            echo ""
+            echo "| Metric | Value |"
+            echo "|--------|-------|"
+            echo "| Base Version | \`${{ github.event.inputs.base_simplyblock_image }}\` |"
+            echo "| Target Version | \`${{ github.event.inputs.target_simplyblock_image }}\` |"
+            echo "| Duration | ${dur_fmt} |"
+            echo "| Total | ${total_cases} |"
+            echo "| Passed | ${passed_cnt} |"
+            echo "| Failed | ${failed_cnt} |"
+            echo ""
+            if [ -n "${RUN_BASE_DIR:-}" ]; then
+              echo "**Logs:** \`${RUN_BASE_DIR}\`"
+            fi
+            echo ""
+            echo "> **Note:** Graylog/OpenSearch logs are currently being collected and will be available in the NFS log directory shortly."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Send Slack notification
+        if: ${{ always() && github.event.inputs.send_slack_notification == 'true' }}
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          payload: |
+            {
+              "text": "K8s Upgrade Test: ${{ job.status }} | ${{ github.event.inputs.base_simplyblock_image }} -> ${{ github.event.inputs.target_simplyblock_image }} | ${{ github.event.inputs.cluster_environment }} | Duration: ${{ env.TEST_TIME_HOURS }}h ${{ env.TEST_TIME_MINS }}m | <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run>\n:hourglass_flowing_sand: _Logs are being collected and will be available shortly._"
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+
       - name: Collect Graylog/OpenSearch logs
         if: '!cancelled()'
-        timeout-minutes: ${{ fromJSON(env.LOG_COLLECT_TIMEOUT_MINS || '240') }}
+        timeout-minutes: ${{ fromJSON(env.LOG_COLLECT_TIMEOUT_MINS || '480') }}
         run: |
           set +e
           echo "=== Collecting Graylog/OpenSearch logs ==="
@@ -1055,6 +1102,23 @@ jobs:
           if [ -z "${ADMIN_POD}" ]; then
             echo "ERROR: No running admin pod found, skipping"
             exit 0
+          fi
+
+          # Deploy updated collect_logs.py to admin pod (use /tmp since package dir is read-only)
+          BUILTIN_SCRIPT="/usr/local/lib/python3.12/site-packages/simplyblock_core/scripts/collect_logs.py"
+          DEPLOYED_SCRIPT="/tmp/collect_logs.py"
+          SCRIPT_SRC="${GITHUB_WORKSPACE}/scripts/collect_logs.py"
+          if [ -f "${SCRIPT_SRC}" ]; then
+            kubectl -n ${NAMESPACE} cp "${SCRIPT_SRC}" "${ADMIN_POD}:${DEPLOYED_SCRIPT}" 2>/dev/null || \
+              echo "WARN: failed to deploy updated collect_logs.py, using built-in version"
+          fi
+          # Determine which script to use
+          COLLECT_SCRIPT="${BUILTIN_SCRIPT}"
+          if kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- test -f "${DEPLOYED_SCRIPT}" 2>/dev/null; then
+            COLLECT_SCRIPT="${DEPLOYED_SCRIPT}"
+            echo "  Using deployed script: ${COLLECT_SCRIPT}"
+          else
+            echo "  Using built-in script: ${COLLECT_SCRIPT}"
           fi
 
           MGMT_IP=$(kubectl get svc -n ${NAMESPACE} | grep graylog | awk '{print $3}')
@@ -1098,7 +1162,7 @@ jobs:
               mgmt_ip_to_use="${OPENSEARCH_IP}"
             fi
             kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- \
-              python3 /usr/local/lib/python3.12/site-packages/simplyblock_core/scripts/collect_logs.py \
+              python3 "${COLLECT_SCRIPT}" \
                 "${iso}" "${mins}" \
                 --mode kubernetes \
                 --namespace "${NAMESPACE}" \
@@ -1112,9 +1176,9 @@ jobs:
             [ $rc -ne 0 ] && return $rc
             local has_content
             has_content=$(kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- \
-              find "${outdir}" -name "*.log" -size +0 2>/dev/null | head -1)
+              find "${outdir}" -name "*.tar.gz" -size +0 2>/dev/null | head -1)
             if [ -z "${has_content}" ]; then
-              echo "  WARN: collect_logs.py succeeded but all .log files are 0 bytes"
+              echo "  WARN: collect_logs.py succeeded but no .tar.gz output found"
               return 1
             fi
           }
@@ -1228,43 +1292,3 @@ jobs:
         env:
           CLUSTER_ID: ${{ env.CLUSTER_ID }}
           MON_SECRET: ${{ secrets.MON_SECRET }}
-
-      - name: Write Job Summary
-        if: always()
-        shell: bash
-        run: |
-          set +e
-          out_log="$GITHUB_WORKSPACE/e2e/output.log"
-          dur_fmt="${TEST_TIME_HOURS:-0}h ${TEST_TIME_MINS:-0}m ${TEST_TIME_SECS:-0}s"
-
-          total_cases="$(grep -E 'Total Cases:|Total Test Cases:' "${out_log}" 2>/dev/null | tail -n 1 | grep -oE '[0-9]+' | tail -1 || echo '?')"
-          passed_cnt="$(grep -E 'Passed:' "${out_log}" 2>/dev/null | tail -n 1 | grep -oE '[0-9]+' | tail -1 || echo '?')"
-          failed_cnt="$(grep -E 'Failed:' "${out_log}" 2>/dev/null | tail -n 1 | grep -oE '[0-9]+' | tail -1 || echo '?')"
-
-          {
-            echo "## K8s Native Upgrade Test Results"
-            echo ""
-            echo "| Metric | Value |"
-            echo "|--------|-------|"
-            echo "| Base Version | \`${{ github.event.inputs.base_simplyblock_image }}\` |"
-            echo "| Target Version | \`${{ github.event.inputs.target_simplyblock_image }}\` |"
-            echo "| Duration | ${dur_fmt} |"
-            echo "| Total | ${total_cases} |"
-            echo "| Passed | ${passed_cnt} |"
-            echo "| Failed | ${failed_cnt} |"
-            echo ""
-            if [ -n "${RUN_BASE_DIR:-}" ]; then
-              echo "**Logs:** \`${RUN_BASE_DIR}\`"
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Send Slack notification
-        if: ${{ always() && github.event.inputs.send_slack_notification == 'true' }}
-        uses: slackapi/slack-github-action@v1.26.0
-        with:
-          payload: |
-            {
-              "text": "K8s Upgrade Test: ${{ job.status }} | ${{ github.event.inputs.base_simplyblock_image }} -> ${{ github.event.inputs.target_simplyblock_image }} | ${{ github.event.inputs.cluster_environment }} | Duration: ${{ env.TEST_TIME_HOURS }}h ${{ env.TEST_TIME_MINS }}m | <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run>"
-            }
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

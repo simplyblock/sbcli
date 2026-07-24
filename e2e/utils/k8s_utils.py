@@ -61,15 +61,28 @@ class K8sUtils:
 
     # ── kubectl dispatch ─────────────────────────────────────────────────────
 
-    def _exec_kubectl(self, cmd: str, supress_logs: bool = False):
+    def _exec_kubectl(self, cmd: str, supress_logs: bool = False,
+                      timeout: int = 300):
         """
         Execute *cmd* either locally via subprocess (when use_local_kubectl=True)
         or via SSH to mgmt_node.  Returns (stdout, stderr) strings.
+
+        *timeout* caps subprocess execution (default 300s / 5 min).
         """
         if self.use_local_kubectl:
             if not supress_logs:
                 self.logger.info(f"[K8sUtils] local: {cmd}")
-            result = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
+            try:
+                result = subprocess.run(
+                    ["bash", "-c", cmd],
+                    capture_output=True, text=True,
+                    timeout=timeout,
+                )
+            except subprocess.TimeoutExpired:
+                msg = f"[K8sUtils] subprocess timed out after {timeout}s: {cmd[:120]}"
+                if not supress_logs:
+                    self.logger.warning(msg)
+                return "", msg
             if not supress_logs:
                 if result.stdout.strip():
                     self.logger.info(f"[K8sUtils] stdout: {result.stdout.strip()}")
@@ -555,11 +568,15 @@ class K8sUtils:
 
     # ── Generic YAML apply / delete ─────────────────────────────────────────
 
-    def apply_yaml(self, yaml_content: str, namespace: str = None):
+    def apply_yaml(self, yaml_content: str, namespace: str = None,
+                   request_timeout: str = "60s"):
         """Apply a YAML manifest via ``kubectl apply -f -``."""
         ns = namespace or self.namespace
         escaped = yaml_content.replace("'", "'\\''")
-        return self._exec_kubectl(f"echo '{escaped}' | kubectl apply -n {ns} -f -")
+        return self._exec_kubectl(
+            f"echo '{escaped}' | kubectl apply -n {ns} "
+            f"--request-timeout={request_timeout} -f -"
+        )
 
     def apply_yaml_cluster_scoped(self, yaml_content: str):
         """Apply a cluster-scoped YAML manifest (no namespace flag)."""
@@ -1189,6 +1206,49 @@ class K8sUtils:
         )
         return out.strip()
 
+    def get_pod_status_detail(self, pod_name: str,
+                              namespace: str = None) -> dict:
+        """Return pod phase and container-level waiting reason.
+
+        Returns a dict with keys:
+          - ``phase``: Pod phase (Pending, Running, Succeeded, Failed, Unknown)
+          - ``reason``: Human-readable waiting reason if any container is
+            stuck (e.g. ``PodInitializing``, ``ContainerCreating``,
+            ``CrashLoopBackOff``, ``ErrImagePull``).  Empty string when
+            no container is in a waiting state.
+          - ``message``: Optional detail message from the waiting state.
+        """
+        ns = namespace or self.namespace
+        # Phase
+        phase_out, _ = self._exec_kubectl(
+            f"kubectl get pod {pod_name} -n {ns} "
+            f"-o jsonpath='{{.status.phase}}' 2>/dev/null || true",
+            supress_logs=True,
+        )
+        phase = phase_out.strip() or "Unknown"
+
+        # Container waiting reason (init + regular containers)
+        # jsonpath: check initContainerStatuses first, then containerStatuses
+        reason = ""
+        message = ""
+        for path in (
+            ".status.initContainerStatuses[?(@.state.waiting)].state.waiting",
+            ".status.containerStatuses[?(@.state.waiting)].state.waiting",
+        ):
+            out, _ = self._exec_kubectl(
+                f"kubectl get pod {pod_name} -n {ns} "
+                f"-o jsonpath='{{range {path}}}{{.reason}}|{{.message}}{{end}}'"
+                f" 2>/dev/null || true",
+                supress_logs=True,
+            )
+            parts = out.strip().split("|", 1)
+            if parts[0]:
+                reason = parts[0]
+                message = parts[1] if len(parts) > 1 else ""
+                break
+
+        return {"phase": phase, "reason": reason, "message": message}
+
     def get_pod_logs(self, pod_name: str, namespace: str = None,
                      tail: int = 200) -> str:
         """Get pod logs (last *tail* lines)."""
@@ -1243,45 +1303,287 @@ class K8sUtils:
 
     # ── CRD patch operations (StorageNode / StorageCluster) ────────────────
 
-    def patch_storage_node_add_workers(self, new_workers: list,
-                                        name: str = "simplyblock-node",
-                                        namespace: str = None):
-        """Patch StorageNode CRD to add new worker nodes.
+    def resolve_storage_node_cr_name(self, node_uuid: str,
+                                      namespace: str = None) -> str:
+        """Resolve a storage node UUID to its StorageNode CR name.
 
-        Uses JSON Patch (RFC 6902) to append each worker name to
-        ``spec.workerNodes``.  Workers must be added in counts of at
-        least 2.
+        The operator creates StorageNode CRs with random names
+        (e.g. ``simplyblock-node-nklffw``).  This method lists all
+        StorageNode CRs and finds the one whose ``status.uuid``
+        matches *node_uuid*.
+
+        Parameters
+        ----------
+        node_uuid : str
+            UUID of the storage node (from sbcli / API).
+        namespace : str | None
+            Override namespace (default ``self.namespace``).
+
+        Returns
+        -------
+        str
+            The ``metadata.name`` of the matching StorageNode CR.
+
+        Raises
+        ------
+        ValueError
+            If no StorageNode CR matches the given UUID.
+        """
+        ns = namespace or self.namespace
+        out, _ = self._exec_kubectl(
+            f"kubectl get storagenodes.storage.simplyblock.io -n {ns} "
+            f"-o json 2>/dev/null || true",
+            supress_logs=True,
+        )
+        try:
+            data = json.loads(out.strip()) if out and out.strip() else {}
+        except Exception:
+            data = {}
+
+        for item in data.get("items", []):
+            status = item.get("status", {})
+            cr_uuid = status.get("uuid", "")
+            if cr_uuid == node_uuid:
+                cr_name = item["metadata"]["name"]
+                self.logger.info(
+                    f"[K8sUtils] Resolved node UUID {node_uuid} -> "
+                    f"StorageNode CR '{cr_name}'"
+                )
+                return cr_name
+
+        raise ValueError(
+            f"[K8sUtils] No StorageNode CR found with UUID {node_uuid} "
+            f"in namespace {ns}"
+        )
+
+    def create_storage_node_ops(self, name: str,
+                                 storage_node_ref: str,
+                                 action: str,
+                                 target_worker_node: str = None,
+                                 reattach_volume: bool = False,
+                                 new_ssd_pcie: list[str] | None = None,
+                                 namespace: str = None):
+        """Create a StorageNodeOps CR to trigger a node operation.
+
+        Replaces the old pattern of patching StorageNodeSet with
+        ``spec.action``.  The operator watches StorageNodeOps CRs
+        and executes the requested operation.
+
+        Parameters
+        ----------
+        name : str
+            Name for the StorageNodeOps CR
+            (e.g. ``migrate-83c2a579-to-worker-4``).
+        storage_node_ref : str
+            Name of the StorageNode CR to operate on
+            (e.g. ``simplyblock-node-nklffw``).
+        action : str
+            Operation: ``migrate``, ``restart``, ``suspend``,
+            ``resume``, ``remove``, or ``shutdown``.
+        target_worker_node : str | None
+            Target worker node name (required for ``migrate``).
+        reattach_volume : bool
+            Whether to reattach volumes after the operation.
+        new_ssd_pcie : list[str] | None
+            PCIe addresses for new SSDs on the target worker.
+        namespace : str | None
+            Override namespace (default ``self.namespace``).
+        """
+        ns = namespace or self.namespace
+
+        spec_lines = (
+            f"  storageNodeRef: {storage_node_ref}\n"
+            f"  action: {action}\n"
+        )
+        if target_worker_node:
+            spec_lines += f"  targetWorkerNode: {target_worker_node}\n"
+        if reattach_volume:
+            spec_lines += "  reattachVolume: true\n"
+        if new_ssd_pcie:
+            spec_lines += "  newSsdPcie:\n"
+            for pcie in new_ssd_pcie:
+                spec_lines += f'    - "{pcie}"\n'
+
+        yaml_content = (
+            "apiVersion: storage.simplyblock.io/v1alpha1\n"
+            "kind: StorageNodeOps\n"
+            "metadata:\n"
+            f"  name: {name}\n"
+            f"  namespace: {ns}\n"
+            "spec:\n"
+            f"{spec_lines}"
+        )
+
+        self.logger.info(
+            f"[K8sUtils] Creating StorageNodeOps '{name}' "
+            f"(action={action}, ref={storage_node_ref})"
+        )
+        return self.apply_yaml(yaml_content, namespace=ns)
+
+    def wait_storage_node_ops_done(self, name: str, timeout: int = 600,
+                                    namespace: str = None) -> dict:
+        """Poll until StorageNodeOps reaches ``Succeeded`` phase.
+
+        Parameters
+        ----------
+        name : str
+            StorageNodeOps CR name.
+        timeout : int
+            Maximum wait time in seconds (default 600).
+        namespace : str | None
+            Override namespace.
+
+        Returns
+        -------
+        dict
+            The StorageNodeOps resource JSON on success.
+
+        Raises
+        ------
+        AssertionError
+            If the operation reaches ``Failed`` phase.
+        TimeoutError
+            If the operation does not reach ``Succeeded`` within
+            *timeout*.
+        """
+        ns = namespace or self.namespace
+        deadline = time.time() + timeout
+        phase = "unknown"
+        while time.time() < deadline:
+            res = self.get_resource_json(
+                "storagenodeops.storage.simplyblock.io", name, namespace=ns,
+            )
+            status = res.get("status", {})
+            phase = (status.get("phase") or "").strip()
+            sub_phase = (status.get("subPhase") or "").strip()
+
+            if phase == "Succeeded":
+                self.logger.info(
+                    f"[K8sUtils] StorageNodeOps '{name}' Succeeded"
+                )
+                return res
+            if phase == "Failed":
+                self._dump_storage_node_ops_diagnostics(name, ns)
+                raise AssertionError(
+                    f"StorageNodeOps '{name}' failed: "
+                    f"{status.get('message', 'no message')}"
+                )
+            self.logger.info(
+                f"[K8sUtils] Waiting for StorageNodeOps '{name}' "
+                f"(phase={phase}, subPhase={sub_phase})"
+            )
+            time.sleep(15)
+        self._dump_storage_node_ops_diagnostics(name, ns)
+        raise TimeoutError(
+            f"StorageNodeOps '{name}' did not reach Succeeded within "
+            f"{timeout}s (last phase={phase})"
+        )
+
+    def _dump_storage_node_ops_diagnostics(self, ops_name: str,
+                                            namespace: str) -> None:
+        """Log diagnostic info when a StorageNodeOps fails or times out."""
+        self.logger.error(
+            f"[nodeops-diag] StorageNodeOps '{ops_name}' did not succeed. "
+            f"Dumping diagnostics..."
+        )
+        try:
+            out, _ = self._exec_kubectl(
+                f"kubectl describe storagenodeops.storage.simplyblock.io "
+                f"{ops_name} -n {namespace}",
+                supress_logs=True,
+            )
+            self.logger.error(f"[nodeops-diag] describe:\n{out}")
+        except Exception as e:
+            self.logger.warning(f"[nodeops-diag] describe failed: {e}")
+
+        try:
+            out, _ = self._exec_kubectl(
+                f"kubectl get events -n {namespace} --sort-by=.lastTimestamp "
+                f"--field-selector involvedObject.name={ops_name} "
+                f"2>/dev/null || true",
+                supress_logs=True,
+            )
+            if out and out.strip():
+                self.logger.error(f"[nodeops-diag] events:\n{out}")
+        except Exception as e:
+            self.logger.warning(f"[nodeops-diag] events query failed: {e}")
+
+        try:
+            out, _ = self._exec_kubectl(
+                f"kubectl logs -n {namespace} "
+                f"-l app=simplyblock-operator --tail=50 "
+                f"--all-containers 2>/dev/null || true",
+                supress_logs=True,
+            )
+            if out and out.strip():
+                self.logger.error(
+                    f"[nodeops-diag] operator logs (tail 50):\n{out}"
+                )
+        except Exception as e:
+            self.logger.warning(f"[nodeops-diag] operator logs failed: {e}")
+
+    def cleanup_stale_node_ops(self, namespace: str = None):
+        """Remove leftover StorageNodeOps CRs from previous test runs."""
+        ns = namespace or self.namespace
+        self.logger.info(
+            f"[K8sUtils] Cleaning stale StorageNodeOps in {ns}..."
+        )
+        self._exec_kubectl(
+            f"kubectl delete storagenodeops.storage.simplyblock.io --all "
+            f"-n {ns} --ignore-not-found --wait=false 2>/dev/null || true"
+        )
+
+    def patch_storage_node_add_workers(self, new_workers: list,
+                                        storage_node_set_ref: str = "simplyblock-node",
+                                        namespace: str = None):
+        """Add worker nodes by creating StorageNode CRs directly.
+
+        For each worker, a ``StorageNode`` CR is created with
+        ``spec.overrides.expand: true``.  The operator detects the
+        new CR and handles provisioning automatically — no separate
+        ``StorageCluster`` expand patch is needed.
 
         Parameters
         ----------
         new_workers : list[str]
             Kubernetes node names to add (e.g. ``["worker-4", "worker-5"]``).
-        name : str
-            StorageNode CR name (default ``simplyblock-node``).
+        storage_node_set_ref : str
+            Name of the parent StorageNodeSet
+            (default ``simplyblock-node``).
         namespace : str | None
             Override namespace (default ``self.namespace``).
         """
         ns = namespace or self.namespace
-        patch_ops = ",".join(
-            f'{{"op":"add","path":"/spec/workerNodes/-","value":"{w}"}}'
-            for w in new_workers
-        )
-        cmd = (
-            f"kubectl patch storagenodesets.storage.simplyblock.io {name} "
-            f"-n {ns} --type=json -p '[{patch_ops}]'"
-        )
-        self.logger.info(
-            f"[K8sUtils] Patching StorageNodeSet '{name}' to add workers: {new_workers}"
-        )
-        out, err = self._exec_kubectl(cmd)
-        return out, err
+        for worker in new_workers:
+            cr_name = f"{storage_node_set_ref}-expand-{worker}"
+            yaml_content = (
+                "apiVersion: storage.simplyblock.io/v1alpha1\n"
+                "kind: StorageNode\n"
+                "metadata:\n"
+                f"  name: {cr_name}\n"
+                f"  namespace: {ns}\n"
+                "spec:\n"
+                f"  storageNodeSetRef: {storage_node_set_ref}\n"
+                f"  workerNode: {worker}\n"
+                "  socketIndex: 0\n"
+                "  overrides:\n"
+                "    expand: true\n"
+            )
+            self.logger.info(
+                f"[K8sUtils] Creating StorageNode CR '{cr_name}' "
+                f"for worker '{worker}' (expand=true)"
+            )
+            self.apply_yaml(yaml_content, namespace=ns)
 
     def patch_storage_cluster_expand(self, name: str = "simplyblock-cluster",
                                       namespace: str = None):
         """Patch StorageCluster CRD to trigger cluster expansion.
 
-        Sets ``spec.action`` to ``expand`` which the operator watches
-        and acts upon.
+        .. note::
+           With the new StorageNode CR model, expansion is triggered
+           automatically when a StorageNode CR is created with
+           ``overrides.expand: true``.  This method is retained for
+           backward compatibility but may no longer be needed.
 
         Parameters
         ----------
@@ -1353,12 +1655,14 @@ class K8sUtils:
         )
 
     def patch_storage_node_migrate(self, node_uuid: str, target_worker: str,
+                                     new_ssd_pcie: list[str] | None = None,
+                                     reattach_volume: bool = False,
                                      name: str = "simplyblock-node",
                                      namespace: str = None):
-        """Patch StorageNode CRD to migrate a storage node to a different worker.
+        """Trigger node migration via a StorageNodeOps CR.
 
-        Triggers a node restart/migration by setting ``spec.action`` to
-        ``restart`` along with the target ``nodeUUID`` and ``workerNode``.
+        Resolves the StorageNode CR name from the node UUID, then
+        creates a ``StorageNodeOps`` CR with ``action=migrate``.
 
         Parameters
         ----------
@@ -1366,38 +1670,61 @@ class K8sUtils:
             UUID of the storage node to migrate.
         target_worker : str
             Kubernetes node name to migrate the storage node onto.
+        new_ssd_pcie : list[str] | None
+            PCIe addresses for new SSDs on the target worker.
+        reattach_volume : bool
+            Whether to reattach volumes after migration.
         name : str
-            StorageNode CR name (default ``simplyblock-node``).
+            Unused (kept for backward compatibility).
         namespace : str | None
             Override namespace (default ``self.namespace``).
+
+        Returns
+        -------
+        tuple[str, str]
+            ``(ops_name, storage_node_cr)`` — the StorageNodeOps CR
+            name and the resolved StorageNode CR name.
         """
         ns = namespace or self.namespace
-        patch = (
-            f'{{"spec":{{"action":"restart",'
-            f'"nodeUUID":"{node_uuid}",'
-            f'"workerNode":"{target_worker}"}}}}'
+
+        storage_node_cr = self.resolve_storage_node_cr_name(
+            node_uuid, namespace=ns,
         )
-        cmd = (
-            f"kubectl patch storagenodesets.storage.simplyblock.io {name} "
-            f"-n {ns} --type=merge -p '{patch}'"
-        )
+
+        uuid_prefix = node_uuid[:8] if len(node_uuid) >= 8 else node_uuid
+        worker_suffix = target_worker.replace(".", "-").replace("_", "-")
+        ts = int(time.time())
+        ops_name = f"migrate-{uuid_prefix}-to-{worker_suffix}-{ts}"
+
         self.logger.info(
-            f"[K8sUtils] Migrating storage node {node_uuid} to worker '{target_worker}'"
+            f"[K8sUtils] Migrating storage node {node_uuid} "
+            f"(CR={storage_node_cr}) to worker '{target_worker}'"
+            f" (newSsdPcie={new_ssd_pcie}, reattachVolume={reattach_volume})"
         )
-        out, err = self._exec_kubectl(cmd)
-        return out, err
+
+        self.create_storage_node_ops(
+            name=ops_name,
+            storage_node_ref=storage_node_cr,
+            action="migrate",
+            target_worker_node=target_worker,
+            reattach_volume=reattach_volume,
+            new_ssd_pcie=new_ssd_pcie,
+            namespace=ns,
+        )
+
+        return ops_name, storage_node_cr
 
     def patch_storage_node_restart(self, node_uuid: str,
                                     spdk_image: str = None,
                                     spdk_proxy_image: str = None,
                                     name: str = "simplyblock-node",
                                     namespace: str = None):
-        """Patch StorageNode CRD to restart a node, optionally with new images.
+        """Trigger node restart via a StorageNodeOps CR.
 
-        Sets ``spec.action`` to ``restart`` along with the ``nodeUUID``.
-        When *spdk_image* or *spdk_proxy_image* are provided, the CRD
-        spec fields ``spdkImage`` / ``spdkProxyImage`` are updated too,
-        which causes the operator to deploy the new images on restart.
+        If *spdk_image* or *spdk_proxy_image* are provided, the
+        StorageNodeSet is patched with the new images first (these
+        are set-level config fields), then a ``StorageNodeOps`` CR
+        with ``action=restart`` is created.
 
         Parameters
         ----------
@@ -1408,29 +1735,61 @@ class K8sUtils:
         spdk_proxy_image : str | None
             New SPDK proxy container image.
         name : str
-            StorageNode CR name (default ``simplyblock-node``).
+            StorageNodeSet CR name for image patches
+            (default ``simplyblock-node``).
         namespace : str | None
             Override namespace (default ``self.namespace``).
+
+        Returns
+        -------
+        tuple[str, str]
+            ``(ops_name, storage_node_cr)`` — the StorageNodeOps CR
+            name and the resolved StorageNode CR name.
         """
         ns = namespace or self.namespace
-        patch_dict = {"spec": {"action": "restart", "nodeUUID": node_uuid}}
-        if spdk_image:
-            patch_dict["spec"]["spdkImage"] = spdk_image
-        if spdk_proxy_image:
-            patch_dict["spec"]["spdkProxyImage"] = spdk_proxy_image
 
-        patch_json = json.dumps(patch_dict)
-        cmd = (
-            f"kubectl patch storagenodesets.storage.simplyblock.io {name} "
-            f"-n {ns} --type=merge -p '{patch_json}'"
+        # If new images are provided, patch the StorageNodeSet first
+        # (spdkImage/spdkProxyImage are set-level fields, not per-op)
+        if spdk_image or spdk_proxy_image:
+            patch_dict: dict = {"spec": {}}
+            if spdk_image:
+                patch_dict["spec"]["spdkImage"] = spdk_image
+            if spdk_proxy_image:
+                patch_dict["spec"]["spdkProxyImage"] = spdk_proxy_image
+
+            patch_json = json.dumps(patch_dict)
+            cmd = (
+                f"kubectl patch storagenodesets.storage.simplyblock.io {name} "
+                f"-n {ns} --type=merge -p '{patch_json}'"
+            )
+            self.logger.info(
+                f"[K8sUtils] Patching StorageNodeSet '{name}' with new images"
+                + (f" spdkImage={spdk_image}" if spdk_image else "")
+                + (f" spdkProxyImage={spdk_proxy_image}" if spdk_proxy_image else "")
+            )
+            self._exec_kubectl(cmd)
+
+        storage_node_cr = self.resolve_storage_node_cr_name(
+            node_uuid, namespace=ns,
         )
+
+        uuid_prefix = node_uuid[:8] if len(node_uuid) >= 8 else node_uuid
+        ts = int(time.time())
+        ops_name = f"restart-{uuid_prefix}-{ts}"
+
         self.logger.info(
-            f"[K8sUtils] Restarting storage node {node_uuid}"
-            + (f" with spdkImage={spdk_image}" if spdk_image else "")
-            + (f", spdkProxyImage={spdk_proxy_image}" if spdk_proxy_image else "")
+            f"[K8sUtils] Restarting storage node {node_uuid} "
+            f"(CR={storage_node_cr})"
         )
-        out, err = self._exec_kubectl(cmd)
-        return out, err
+
+        self.create_storage_node_ops(
+            name=ops_name,
+            storage_node_ref=storage_node_cr,
+            action="restart",
+            namespace=ns,
+        )
+
+        return ops_name, storage_node_cr
 
     def validate_fio_job(self, job_name: str, namespace: str = None,
                          timeout: int = 600) -> bool:
@@ -1443,10 +1802,39 @@ class K8sUtils:
         Returns True if valid.  Raises RuntimeError on failure.
         """
         ns = namespace or self.namespace
+
+        # Quick pre-check: if the pod is stuck in PodInitializing or similar,
+        # report that immediately instead of waiting the full timeout.
+        pod_name_pre = self.get_job_pod_name(job_name, namespace=ns)
+        if pod_name_pre:
+            detail = self.get_pod_status_detail(pod_name_pre, namespace=ns)
+            reason = detail.get("reason", "")
+            if reason in (
+                "PodInitializing", "ContainerCreating",
+                "ErrImagePull", "ImagePullBackOff",
+            ):
+                raise RuntimeError(
+                    f"FIO Job '{job_name}' pod '{pod_name_pre}' never "
+                    f"started: {reason} — {detail.get('message', '')}"
+                )
+
         status = self.wait_job_complete(job_name, namespace=ns, timeout=timeout)
         if status != "succeeded":
+            # Include pod status detail in the error for diagnostics
+            diag = ""
+            pod_name_diag = self.get_job_pod_name(job_name, namespace=ns)
+            if pod_name_diag:
+                detail = self.get_pod_status_detail(
+                    pod_name_diag, namespace=ns
+                )
+                diag = (
+                    f" (pod phase={detail.get('phase')}, "
+                    f"reason={detail.get('reason')}, "
+                    f"msg={detail.get('message', '')!r})"
+                )
             raise RuntimeError(
-                f"FIO Job '{job_name}' did not succeed (status={status})"
+                f"FIO Job '{job_name}' did not succeed "
+                f"(status={status}){diag}"
             )
         pod_names = self.get_job_pod_names(job_name, namespace=ns)
         if not pod_names:
@@ -2354,14 +2742,37 @@ class K8sSbcliUtils:
         # Pool does not exist — create it
         cid = cluster_id or self.cluster_id
         cluster_details = self.get_cluster_details(cluster_id=cid)
-        cluster_name = cluster_details.get("name") or cluster_details.get("Name", cid)
+        # sbcli cluster get returns "cluster_name" (not "name")
+        cluster_name = (
+            cluster_details.get("cluster_name")
+            or cluster_details.get("name")
+            or cluster_details.get("Name", cid)
+        )
 
+        # Look up the StorageCluster CRD name from K8s to ensure
+        # the Pool CRD references the correct CRD resource name.
         ns = self.k8s.namespace
+        sc_out, _ = self.k8s._exec_kubectl(
+            f"kubectl get storageclusters -n {ns} --no-headers "
+            f"-o custom-columns=NAME:.metadata.name 2>/dev/null || true"
+        )
+        sc_names = [s.strip() for s in sc_out.strip().splitlines() if s.strip()]
+        if sc_names:
+            cluster_name = sc_names[0]
+            self.logger.info(
+                f"[pool] Using StorageCluster CRD name '{cluster_name}' "
+                f"from K8s (found {len(sc_names)} CRD(s))"
+            )
+        else:
+            self.logger.warning(
+                f"[pool] No StorageCluster CRDs found in namespace {ns}; "
+                f"falling back to cluster_name='{cluster_name}' from sbcli"
+            )
         sc_params = ""
         if encryption:
             sc_params = (
-                "    storageClassParameters:\n"
-                "      encryption: true\n"
+                "  storageClassParameters:\n"
+                "    encryption: true\n"
             )
 
         yaml_content = (
@@ -2382,15 +2793,17 @@ class K8sSbcliUtils:
         yaml_escaped = yaml_content.replace("'", "'\\''")
         self.k8s._exec_kubectl(f"echo '{yaml_escaped}' | kubectl apply -f -")
 
-        # Wait up to 90s for the pool to become visible in sbcli
-        for _ in range(18):
+        # Wait up to 180s for the pool to become visible in sbcli
+        for _ in range(36):
             pools = self.list_storage_pools()
             if pool_name in pools:
                 self.logger.info(f"[pool] Pool '{pool_name}' is ready")
                 return pool_name
             sleep_n_sec(5)
-        self.logger.warning(f"[pool] Pool '{pool_name}' not confirmed after kubectl apply")
-        return pool_name
+        raise RuntimeError(
+            f"[pool] Pool '{pool_name}' not confirmed after kubectl apply "
+            f"— operator did not reconcile the Pool CRD within 180s"
+        )
 
     def add_host_to_pool(self, pool_id, host_nqn):
         """Run ``pool add-host <pool_id> <nqn>`` via kubectl exec.
@@ -2504,6 +2917,86 @@ class K8sSbcliUtils:
                 "date": date_ts,
             })
         return tasks
+
+    def get_cluster_logs(self, cluster_id=None):
+        """Return list of cluster log dicts (each has ``Message``, etc.)."""
+        cid = cluster_id or self.cluster_id
+        return self._run_json(f"{self.sbcli_cmd} cluster get-logs {cid} --json --limit 0")
+
+    def get_cluster_status(self, cluster_id=None):
+        """Return cluster status dict."""
+        details = self.get_cluster_details(cluster_id)
+        return details
+
+    def list_migration_tasks(self, cluster_id=None):
+        """Return raw task list (same shape as ``get_cluster_tasks``)."""
+        cid = cluster_id or self.cluster_id
+        tasks = self.get_cluster_tasks(cid)
+        return {"results": tasks}
+
+    # ── device / node capacity methods ────────────────────────────────────────
+
+    def get_device_details(self, storage_node_id):
+        """Return list of device dicts for a storage node."""
+        data = self._run_json(
+            f"{self.sbcli_cmd} sn list-devices {storage_node_id} --json"
+        )
+        self.logger.info(f"Device Details: {data}")
+        return data
+
+    def get_device_capacity(self, device_id):
+        """Return capacity records for a device.
+
+        ``sbctl sn get-capacity-device`` does not support ``--json``,
+        so we parse the table output.
+        """
+        out = self._run(f"{self.sbcli_cmd} sn get-capacity-device {device_id}")
+        records = []
+        headers = []
+        for line in out.splitlines():
+            line = line.strip()
+            if not line or line.startswith("+"):
+                continue
+            parts = [p.strip() for p in line.split("|")]
+            parts = [p for p in parts if p]
+            if not headers:
+                headers = [h.lower().replace(" ", "_") for h in parts]
+                continue
+            if len(parts) == len(headers):
+                records.append(dict(zip(headers, parts)))
+        return records
+
+    def get_node_capacity(self, node_id, history=None):
+        """Return capacity records for a storage node.
+
+        ``sbctl sn get-capacity`` does not support ``--json``,
+        so we parse the table output.
+        """
+        cmd = f"{self.sbcli_cmd} sn get-capacity {node_id}"
+        if history:
+            cmd += f" --history {history}"
+        out = self._run(cmd)
+        records = []
+        headers = []
+        for line in out.splitlines():
+            line = line.strip()
+            if not line or line.startswith("+"):
+                continue
+            parts = [p.strip() for p in line.split("|")]
+            parts = [p for p in parts if p]
+            if not headers:
+                headers = [h.lower().replace(" ", "_") for h in parts]
+                continue
+            if len(parts) == len(headers):
+                records.append(dict(zip(headers, parts)))
+        return records
+
+    # ── pool methods ──────────────────────────────────────────────────────────
+
+    def get_pool_by_id(self, pool_id):
+        """Return pool dict for the given pool id."""
+        data = self._run_json(f"{self.sbcli_cmd} pool get {pool_id} --json")
+        return data
 
     def get_io_stats(self, cluster_id=None, time_duration=None):
         """

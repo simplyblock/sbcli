@@ -3,7 +3,7 @@ import threading
 import time
 import boto3
 from utils.sbcli_utils import SbcliUtils
-from utils.ssh_utils import SshUtils, RunnerK8sLog
+from utils.ssh_utils import SshUtils, RunnerK8sLog, _compress_and_cleanup_old_dumps
 from utils.k8s_utils import K8sUtils, K8sSbcliUtils
 from utils.common_utils import CommonUtils
 from logger_config import setup_logger, start_log_flusher
@@ -62,6 +62,7 @@ class TestClusterBase:
         self.common_utils = CommonUtils(self.sbcli_utils, self.ssh_obj)
         self.mgmt_nodes = None
         self.storage_nodes = None
+        self.sn_nodes = []
         self.fio_node = None
         self.ndcs = kwargs.get("ndcs", 1)
         self.npcs = kwargs.get("npcs", 1)
@@ -99,30 +100,64 @@ class TestClusterBase:
         self._k8s_snapshot_class_name = "simplyblock-csi-snapshotclass"
         self._volume_registry = {}  # lvol_name -> {pvc_name, lvol_id, device, mount}
 
-    def _validate_storage_node_health(self):
-        """Validate all storage nodes are online and healthy before starting test."""
-        self.logger.info("Validating storage node health before test...")
-        storage_nodes = self.sbcli_utils.get_storage_nodes()["results"]
-        unhealthy = []
-        for node in storage_nodes:
-            node_id = node.get("id", "unknown")
-            status = node.get("status", "unknown")
-            health = node.get("health_check", False)
-            if status != "online" or not health:
-                unhealthy.append(f"  Node {node_id}: status={status}, health_check={health}")
-        if unhealthy:
-            msg = (
-                f"Pre-test health check FAILED — {len(unhealthy)} storage node(s) not healthy:\n"
-                + "\n".join(unhealthy)
+    def _validate_storage_node_health(self, timeout=300):
+        """Validate all storage nodes are online and healthy before starting test.
+
+        Retries every 20s for up to *timeout* seconds (default 300 = 5 min).
+        If nodes are still unhealthy after the timeout, raises RuntimeError.
+        """
+        deadline = time.time() + timeout
+        self.logger.info("Validating storage node health before test (timeout=%ds)...", timeout)
+
+        while True:
+            storage_nodes = self.sbcli_utils.get_storage_nodes()["results"]
+            unhealthy = []
+            for node in storage_nodes:
+                node_id = node.get("id", node.get("uuid", "unknown"))
+                status = node.get("status", "unknown")
+                health = node.get("health_check", False)
+                if status != "online" or not health:
+                    unhealthy.append(f"  Node {node_id}: status={status}, health_check={health}")
+
+            if not unhealthy:
+                self.logger.info(f"All {len(storage_nodes)} storage node(s) are online and healthy.")
+                return
+
+            if time.time() >= deadline:
+                msg = (
+                    f"Pre-test health check FAILED — {len(unhealthy)} storage node(s) "
+                    f"not healthy after {timeout}s:\n" + "\n".join(unhealthy)
+                )
+                self.logger.error(msg)
+                raise RuntimeError(msg)
+
+            self.logger.info(
+                "%d node(s) not yet healthy, retrying in 20s...\n%s",
+                len(unhealthy), "\n".join(unhealthy),
             )
-            self.logger.error(msg)
-            raise RuntimeError(msg)
-        self.logger.info(f"All {len(storage_nodes)} storage node(s) are online and healthy.")
+            time.sleep(20)
 
     def setup(self):
         """Contains setup required to run the test case
         """
         self.logger.info("Inside setup function")
+
+        # Set up log directories and RUN_DIR_FILE FIRST so that even if
+        # API retries fail, the workflow graylog-collect step can find
+        # the test run folder instead of creating an orphaned directory.
+        # Record UTC start time for Graylog log export at teardown
+        self.test_start_time_utc = datetime.now(timezone.utc)
+
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        self.docker_logs_path = os.path.join(self.nfs_log_base, f"{self.test_name}-{timestamp}")
+        self.log_path = os.path.join(self.docker_logs_path, "ClientLogs")
+        os.makedirs(self.log_path, exist_ok=True)
+
+        run_file = os.getenv("RUN_DIR_FILE", None)
+        if run_file:
+            with open(run_file, "w") as f:
+                f.write(self.docker_logs_path)
+
         retry = 30
         while retry > 0:
             try:
@@ -130,7 +165,6 @@ class TestClusterBase:
                 self.mgmt_nodes, self.storage_nodes = self.sbcli_utils.get_all_nodes_ip()
                 self.sbcli_utils.list_lvols()
                 self.sbcli_utils.list_storage_pools()
-                self._validate_storage_node_health()
                 break
             except Exception as e:
                 self.logger.debug(f"API call failed with error:{e}")
@@ -139,6 +173,13 @@ class TestClusterBase:
                     self.logger.info(f"Retry attemp exhausted. API failed with: {e}. Exiting")
                     raise e
                 self.logger.info(f"Retrying Base APIs before starting tests. Attempt: {30 - retry + 1}")
+        self._validate_storage_node_health()
+        # Populate sn_nodes with storage node UUIDs for tests that need them
+        try:
+            sn_data = self.sbcli_utils.get_storage_nodes()
+            self.sn_nodes = [n["uuid"] for n in sn_data.get("results", [])]
+        except Exception as e:
+            self.logger.warning(f"Could not populate sn_nodes: {e}")
         if not self.k8s_test:
             for node in self.mgmt_nodes:
                 self.logger.info(f"**Connecting to management nodes** - {node}")
@@ -200,27 +241,12 @@ class TestClusterBase:
         else:
             self.fio_node = []
 
-        # Record UTC start time for Graylog log export at teardown
-        self.test_start_time_utc = datetime.now(timezone.utc)
-
-        # Construct the logs path with test name and timestamp
-        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        # fresh folder per run on NFS (mounted on client and runner):
-        self.docker_logs_path = os.path.join(self.nfs_log_base, f"{self.test_name}-{timestamp}")
-        self.log_path = os.path.join(self.docker_logs_path, "ClientLogs")
-        os.makedirs(self.log_path, exist_ok=True)
-
         # Start background thread to move rotated logs to NFS every 30 min
         start_log_flusher(self.docker_logs_path)
         if not self.k8s_test:
             for node in self.fio_node:
                 self.ssh_obj.make_directory(node=node, dir_name=self.log_path)
 
-        run_file = os.getenv("RUN_DIR_FILE", None)
-        if run_file:
-            with open(run_file, "w") as f:
-                f.write(self.docker_logs_path)
-        
         self.runner_k8s_log = RunnerK8sLog(
                 log_dir=self.docker_logs_path,
                 test_name=self.test_name
@@ -422,14 +448,21 @@ class TestClusterBase:
     def _k8s_ensure_storage_class(self):
         """Create StorageClass + VolumeSnapshotClass if in K8s mode.
 
-        If the operator already created a simplyblock StorageClass (from the
-        Pool CRD), reuse it instead of creating a new one.
+        Always creates (or recreates) our own StorageClass with
+        ``volumeBindingMode: Immediate`` and the current pool parameters.
+
+        Operator-created SCs use ``WaitForFirstConsumer`` which causes PVCs
+        to stay Pending until a pod is scheduled; the e2e flow creates PVCs
+        first and waits for binding, so ``Immediate`` is required.
+
+        Recreating the SC on every test ensures parameters (pool_name,
+        cluster_id) are never stale from a previous test run.
         """
         if not self.k8s_test:
             return
         k8s = self._ensure_k8s_utils()
 
-        # Check if a simplyblock StorageClass already exists
+        # Log existing SCs for diagnostics
         out, _ = k8s._exec_kubectl(
             "kubectl get storageclass -o jsonpath="
             "'{range .items[?(@.provisioner==\"csi.simplyblock.io\")]}"
@@ -438,27 +471,43 @@ class TestClusterBase:
         existing_sc = [s.strip() for s in out.strip().splitlines() if s.strip()]
         if existing_sc:
             self.logger.info(
-                f"[k8s] Found existing simplyblock StorageClass(es): {existing_sc}"
+                f"[k8s] Existing simplyblock StorageClass(es): {existing_sc}"
             )
-            # Prefer our name if it exists, otherwise use the first available
-            if self._k8s_storage_class_name in existing_sc:
-                self.logger.info(
-                    f"[k8s] Using existing SC '{self._k8s_storage_class_name}'"
-                )
-            else:
-                self._k8s_storage_class_name = existing_sc[0]
-                self.logger.info(
-                    f"[k8s] Using operator-created SC '{self._k8s_storage_class_name}'"
-                )
+
+        # Always create (or recreate) our own SC with current parameters.
+        # create_storage_class() deletes any existing SC with the same name
+        # first, ensuring pool_name / cluster_id are never stale.
+        self.logger.info(
+            f"[k8s] Creating SC '{self._k8s_storage_class_name}' "
+            f"for pool '{self.pool_name}', cluster '{self.cluster_id}' "
+            f"with volumeBindingMode=Immediate"
+        )
+        k8s.create_storage_class(
+            name=self._k8s_storage_class_name,
+            cluster_id=self.cluster_id,
+            pool_name=self.pool_name,
+            ndcs=self.ndcs,
+            npcs=self.npcs,
+        )
+
+        # Verify the SC was actually created
+        verify_out, _ = k8s._exec_kubectl(
+            f"kubectl get storageclass {self._k8s_storage_class_name} "
+            f"-o jsonpath='{{.volumeBindingMode}}' 2>/dev/null || true",
+            supress_logs=True,
+        )
+        binding_mode = verify_out.strip()
+        if binding_mode == "Immediate":
+            self.logger.info(
+                f"[k8s] SC '{self._k8s_storage_class_name}' verified: "
+                f"volumeBindingMode=Immediate"
+            )
         else:
-            # No simplyblock SC exists — create one
-            k8s.create_storage_class(
-                name=self._k8s_storage_class_name,
-                cluster_id=self.cluster_id,
-                pool_name=self.pool_name,
-                ndcs=self.ndcs,
-                npcs=self.npcs,
+            self.logger.warning(
+                f"[k8s] SC '{self._k8s_storage_class_name}' verification "
+                f"returned unexpected binding mode: {binding_mode!r}"
             )
+
         k8s.create_volume_snapshot_class(name=self._k8s_snapshot_class_name)
 
     def _create_lvol_dual(self, lvol_name, size, pool_name=None,
@@ -482,7 +531,15 @@ class TestClusterBase:
                 node_id=host_id,
             )
             k8s.wait_pvc_bound(pvc_name)
-            lvol_id = k8s.get_pvc_volume_handle(pvc_name)
+            volume_handle = k8s.get_pvc_volume_handle(pvc_name)
+            # The CSI volumeHandle is a composite "cluster:node:lvol_uuid".
+            # Extract the bare lvol UUID (last segment) so it matches what
+            # sbcli lvol list / lvol get expects.
+            lvol_id = volume_handle.rsplit(":", 1)[-1] if ":" in volume_handle else volume_handle
+            self.logger.info(
+                f"[k8s] PVC '{pvc_name}' bound — volumeHandle={volume_handle}, "
+                f"lvol_id={lvol_id}"
+            )
             self._k8s_pvcs.append(pvc_name)
             self._volume_registry[lvol_name] = {
                 "pvc_name": pvc_name, "lvol_id": lvol_id,
@@ -504,37 +561,151 @@ class TestClusterBase:
             self._volume_registry[lvol_name] = {"lvol_id": lvol_id}
             return lvol_name, lvol_id
 
+    def _verify_lvol_exists_dual(self, lvol_name):
+        """Assert that an lvol exists after creation.
+
+        In Docker mode, checks by lvol_name in ``sbcli lvol list`` keys.
+        In K8s mode, the CSI driver assigns its own lvol name (usually the
+        PV name), so we verify by lvol_id from the volume registry instead.
+        """
+        lvols = self.sbcli_utils.list_lvols()
+        if self.k8s_test:
+            reg = self._volume_registry.get(lvol_name, {})
+            lvol_id = reg.get("lvol_id")
+            if lvol_id:
+                assert lvol_id in lvols.values(), \
+                    (f"Lvol ID {lvol_id} (for '{lvol_name}') not found in "
+                     f"backend lvol list: {lvols}")
+            else:
+                self.logger.warning(
+                    f"[k8s] No lvol_id in registry for '{lvol_name}'; "
+                    f"skipping backend verification"
+                )
+        else:
+            assert lvol_name in list(lvols.keys()), \
+                f"Lvol {lvol_name} not present in list of lvols: {lvols}"
+
+    def _get_node_with_lvols_dual(self):
+        """Return a non-secondary storage node dict that hosts at least one lvol.
+
+        In Docker mode, uses the ``lvols`` count field from the REST API.
+        In K8s mode, resolves through lvol details since the CLI ``sn get``
+        output may not carry a pre-computed lvol count.
+
+        Returns ``(node_uuid, node_dict)`` or raises if none found.
+        """
+        sn_data = self.sbcli_utils.get_storage_nodes()["results"]
+        if not self.k8s_test:
+            for node in reversed(sn_data):
+                if node.get("lvols", 0) > 0 and not node.get("is_secondary_node"):
+                    return node["uuid"], node
+        else:
+            # Build set of node UUIDs that host lvols
+            nodes_with_lvols = set()
+            for lid in self.sbcli_utils.list_lvols().values():
+                try:
+                    details = self.sbcli_utils.get_lvol_details(lid)
+                    if details:
+                        nid = details[0].get("node_id")
+                        if nid:
+                            nodes_with_lvols.add(nid)
+                except Exception:
+                    pass
+            self.logger.info(f"[k8s] Nodes hosting lvols: {nodes_with_lvols}")
+            for node in reversed(sn_data):
+                nid = node.get("uuid") or node.get("UUID", "")
+                if nid in nodes_with_lvols and not node.get("is_secondary_node"):
+                    return nid, node
+        raise RuntimeError(
+            "No non-secondary node with lvols found. "
+            f"Nodes: {[n.get('uuid') or n.get('UUID') for n in sn_data]}"
+        )
+
+    def _get_lvol_id_dual(self, lvol_name):
+        """Return the lvol UUID for *lvol_name*.
+
+        In K8s mode the CSI driver picks its own lvol name, so a name-based
+        lookup via ``sbcli lvol list`` would fail.  Use the lvol_id cached
+        in ``_volume_registry`` instead.
+        """
+        if self.k8s_test:
+            reg = self._volume_registry.get(lvol_name, {})
+            lvol_id = reg.get("lvol_id")
+            if lvol_id:
+                return lvol_id
+            self.logger.warning(
+                f"[k8s] No lvol_id in registry for '{lvol_name}'; "
+                f"falling back to name lookup"
+            )
+        return self.sbcli_utils.get_lvol_id(lvol_name=lvol_name)
+
     def _connect_and_mount_dual(self, lvol_name, mount_path=None,
                                 format_disk=True, fs_type="ext4"):
-        """NVMe connect + mount (Docker) or no-op (K8s). Returns (device, mount)."""
+        """NVMe connect + mount (Docker) or no-op (K8s). Returns (device, mount).
+
+        For namespace (child) lvols the device may auto-appear on any
+        client that already has the parent subsystem connected.  After
+        the initial connect attempt this method checks **all** client
+        machines for a new block device.  If nothing appears it runs
+        ``nvme ns-rescan`` on every live controller and retries.
+        """
         if self.k8s_test:
             reg = self._volume_registry.get(lvol_name, {})
             pvc_name = reg.get("pvc_name", self._k8s_normalize_name(lvol_name))
             self.logger.info(f"[k8s] _connect_and_mount_dual no-op for PVC '{pvc_name}'")
             return pvc_name, pvc_name
 
-        node = self.client_machines[0]
-        initial_devices = self.ssh_obj.get_devices(node=node)
+        # Snapshot devices on ALL clients before connecting
+        initial_devices_per_client = {}
+        for client in self.client_machines:
+            initial_devices_per_client[client] = set(
+                self.ssh_obj.get_devices(node=client)
+            )
+
         connect_ls = self.sbcli_utils.get_lvol_connect_str(lvol_name=lvol_name)
+        node = self.client_machines[0]
         for connect_str in connect_ls:
             self.ssh_obj.exec_command(node=node, command=connect_str)
-        sleep_n_sec(10)
-        final_devices = self.ssh_obj.get_devices(node=node)
+
+        # Search all clients for a new device, with ns-rescan retry
         disk_use = None
-        for device in final_devices:
-            if device not in initial_devices:
-                disk_use = f"/dev/{device.strip()}"
+        found_node = None
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            sleep_n_sec(10 if attempt == 1 else 5)
+            for client in self.client_machines:
+                final_devices = set(self.ssh_obj.get_devices(node=client))
+                new_devs = final_devices - initial_devices_per_client[client]
+                if new_devs:
+                    disk_use = f"/dev/{next(iter(new_devs)).strip()}"
+                    found_node = client
+                    break
+            if disk_use:
                 break
+            if attempt < max_attempts:
+                self.logger.info(
+                    f"No new device for {lvol_name} (attempt {attempt}/{max_attempts}), "
+                    f"running nvme ns-rescan on all clients"
+                )
+                for client in self.client_machines:
+                    self.ssh_obj.rescan_live_nvme_controllers(client)
+
         assert disk_use, f"No new block device after connecting {lvol_name}"
-        self.logger.info(f"Using disk: {disk_use}")
-        self.ssh_obj.unmount_path(node=node, device=disk_use)
+        if found_node != self.client_machines[0]:
+            self.logger.info(
+                f"Device {disk_use} appeared on {found_node} "
+                f"(not primary client {self.client_machines[0]})"
+            )
+        self.logger.info(f"Using disk: {disk_use} on {found_node}")
+        self.ssh_obj.unmount_path(node=found_node, device=disk_use)
         if format_disk:
-            self.ssh_obj.format_disk(node=node, device=disk_use, fs_type=fs_type)
+            self.ssh_obj.format_disk(node=found_node, device=disk_use, fs_type=fs_type)
         if mount_path:
-            self.ssh_obj.mount_path(node=node, device=disk_use, mount_path=mount_path)
+            self.ssh_obj.mount_path(node=found_node, device=disk_use, mount_path=mount_path)
         reg = self._volume_registry.get(lvol_name, {})
         reg["device"] = disk_use
         reg["mount"] = mount_path
+        reg["node"] = found_node
         self._volume_registry[lvol_name] = reg
         return disk_use, mount_path
 
@@ -574,8 +745,8 @@ class TestClusterBase:
             self._k8s_configmaps.append(cm_name)
             return job_name
         else:
-            node = self.client_machines[0]
             reg = self._volume_registry.get(lvol_name, {})
+            node = reg.get("node") or self.client_machines[0]
             device = reg.get("device")
             mount = mount_path or reg.get("mount")
             fio_thread = threading.Thread(
@@ -656,7 +827,12 @@ class TestClusterBase:
                 snapshot_name=snapshot_id,
             )
             k8s.wait_pvc_bound(pvc_name)
-            lvol_id = k8s.get_pvc_volume_handle(pvc_name)
+            volume_handle = k8s.get_pvc_volume_handle(pvc_name)
+            lvol_id = volume_handle.rsplit(":", 1)[-1] if ":" in volume_handle else volume_handle
+            self.logger.info(
+                f"[k8s] Clone PVC '{pvc_name}' bound — volumeHandle={volume_handle}, "
+                f"lvol_id={lvol_id}"
+            )
             self._k8s_pvcs.append(pvc_name)
             self._volume_registry[clone_name] = {
                 "pvc_name": pvc_name, "lvol_id": lvol_id,
@@ -755,8 +931,8 @@ class TestClusterBase:
         """Unmount + NVMe disconnect (Docker) or no-op (K8s)."""
         if self.k8s_test:
             return
-        node = self.client_machines[0]
         reg = self._volume_registry.get(lvol_name, {})
+        node = reg.get("node") or self.client_machines[0]
         mount = reg.get("mount")
         device = reg.get("device")
         if mount:
@@ -808,6 +984,15 @@ class TestClusterBase:
                 self.logger.warning(f"[k8s-teardown] PVC error {pvc_name}: {e}")
         self._k8s_pvcs.clear()
         self._volume_registry.clear()
+        # Clean up test-created StorageClass to avoid stale SC parameters
+        # (pool_name, cluster_id) interfering with subsequent test runs.
+        try:
+            k8s._exec_kubectl(
+                f"kubectl delete storageclass {self._k8s_storage_class_name} "
+                f"--ignore-not-found"
+            )
+        except Exception as e:
+            self.logger.warning(f"[k8s-teardown] SC cleanup error: {e}")
 
     def cleanup_logs(self):
         """Cleans logs
@@ -822,10 +1007,29 @@ class TestClusterBase:
             for node in self.storage_nodes:
                 self.ssh_obj.delete_file_dir(node, entity="/etc/simplyblock/[0-9]*", recursive=True)
                 self.ssh_obj.delete_file_dir(node, entity="/etc/simplyblock/*core*.zst", recursive=True)
+                self.ssh_obj.delete_file_dir(node, entity="/var/lib/systemd/coredump/*core*.zst", recursive=True)
                 self.ssh_obj.delete_file_dir(node, entity="/etc/simplyblock/LVS*", recursive=True)
                 self.ssh_obj.delete_file_dir(node, entity=f"{base_path}/distrib*", recursive=True)
                 self.ssh_obj.delete_file_dir(node, entity=f"{base_path}/*.txt*", recursive=True)
                 self.ssh_obj.delete_file_dir(node, entity=f"{base_path}/*.log*", recursive=True)
+        else:
+            # K8s mode: clean core dumps inside SPDK pods
+            try:
+                k8s = self._ensure_k8s_utils()
+                _, storage_ips = self.sbcli_utils.get_all_nodes_ip()
+                for node_ip in storage_ips:
+                    try:
+                        pod_name = k8s.get_spdk_pod_name(node_ip)
+                        k8s._exec_kubectl(
+                            f"kubectl exec {pod_name} -c spdk-container -n {k8s.namespace} -- "
+                            f"bash -c 'rm -f /etc/simplyblock/*core*.zst 2>/dev/null || true'",
+                            supress_logs=True,
+                        )
+                        self.logger.info(f"[k8s] Cleaned old core dumps on {node_ip} ({pod_name})")
+                    except Exception as e:
+                        self.logger.warning(f"[k8s] Could not clean core dumps on {node_ip}: {e}")
+            except Exception as e:
+                self.logger.warning(f"[k8s] Core dump cleanup skipped: {e}")
 
     def stop_docker_logs_collect(self):
         for node in self.storage_nodes:
@@ -855,6 +1059,8 @@ class TestClusterBase:
             return
         self.runner_k8s_log.stop_resource_monitor()
         self.runner_k8s_log.stop_log_monitor()
+        # Capture final one-shot logs before killing tmux sessions
+        self.runner_k8s_log.collect_final_k8s_logs()
         self.runner_k8s_log.stop_logging()
 
     def fetch_all_nodes_distrib_log(self):
@@ -906,6 +1112,14 @@ class TestClusterBase:
             self._collect_all_node_dumps_parallel(tag)
         except Exception as e:
             self.logger.warning(f"[diagnostics] _collect_all_node_dumps_parallel failed: {e}")
+
+        # 3. Compress old dump files & delete aged-out compressed dumps in background
+        dump_dir = os.path.join(self.docker_logs_path, f"node_dumps{tag}")
+        threading.Thread(
+            target=_compress_and_cleanup_old_dumps,
+            args=(self.docker_logs_path, dump_dir, self.logger),
+            daemon=True,
+        ).start()
 
         self.logger.info(f"[diagnostics] === Completed outage diagnostics: {label} at {timestamp} ===")
 
@@ -1089,6 +1303,16 @@ class TestClusterBase:
              f"kubectl get volumesnapshot -n {ns} -o yaml 2>/dev/null || true"),
             (f"pvc_list{suffix}.txt",
              f"kubectl get pvc -n {ns} -o wide 2>/dev/null || true"),
+            (f"pods_all_namespaces{suffix}.txt",
+             "kubectl get pods -A -o wide"),
+            (f"nodes{suffix}.txt",
+             "kubectl get nodes -o wide"),
+            (f"node_resources{suffix}.txt",
+             "kubectl top nodes 2>/dev/null || echo 'metrics-server not available'"),
+            (f"node_describe{suffix}.txt",
+             "kubectl describe nodes"),
+            (f"pod_resources{suffix}.txt",
+             "kubectl top pods -A 2>/dev/null || echo 'metrics-server not available'"),
         ]
         for filename, cmd in kubectl_diag:
             try:
@@ -1114,6 +1338,60 @@ class TestClusterBase:
                 self.logger.info(f"[k8s collect_mgmt] journalctl+dmesg collected for client {node}")
             except Exception as e:
                 self.logger.warning(f"[k8s collect_mgmt] journalctl/dmesg for {node}: {e}")
+
+    def start_periodic_resource_collection(self, interval=1800):
+        """Start background thread that periodically collects kubectl resource snapshots.
+
+        Collects kubectl get pods/nodes, top nodes/pods, and describe nodes
+        every *interval* seconds (default 30 min). Returns a threading.Event
+        that the caller should set() to stop the collection thread.
+        """
+        if not self.k8s_test:
+            return threading.Event()  # no-op for docker mode
+
+        stop_event = threading.Event()
+        base_path = os.path.join(self.docker_logs_path, "periodic_resources")
+        os.makedirs(base_path, exist_ok=True)
+        k8s = self.sbcli_utils.k8s
+
+        def _collect():
+            iteration = 0
+            while not stop_event.is_set():
+                stop_event.wait(interval)
+                if stop_event.is_set():
+                    break
+                iteration += 1
+                ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+                tag = f"_{iteration:03d}_{ts}"
+                self.logger.info(
+                    f"[periodic_resources] Collection #{iteration} at {ts}"
+                )
+                kubectl_cmds = [
+                    (f"pods_all{tag}.txt", "kubectl get pods -A -o wide"),
+                    (f"nodes{tag}.txt", "kubectl get nodes -o wide"),
+                    (f"top_nodes{tag}.txt",
+                     "kubectl top nodes 2>/dev/null || echo 'metrics-server not available'"),
+                    (f"top_pods{tag}.txt",
+                     "kubectl top pods -A 2>/dev/null || echo 'metrics-server not available'"),
+                    (f"describe_nodes{tag}.txt", "kubectl describe nodes"),
+                ]
+                for filename, cmd in kubectl_cmds:
+                    try:
+                        out, _ = k8s._exec_kubectl(cmd, supress_logs=True)
+                        with open(os.path.join(base_path, filename), "w") as fh:
+                            fh.write(out or "")
+                    except Exception as e:
+                        self.logger.warning(
+                            f"[periodic_resources] {filename}: {e}"
+                        )
+
+        t = threading.Thread(target=_collect, daemon=True,
+                             name="periodic-resource-collector")
+        t.start()
+        self.logger.info(
+            f"[periodic_resources] Started collection every {interval}s"
+        )
+        return stop_event
 
     def collect_management_details(self, post_teardown=False, suffix=None):
         if suffix is None:
@@ -2159,13 +2437,15 @@ class TestClusterBase:
             text = str(msg.get("message", "")).replace("\n", "\\n")
             return f"{ts}  src={src}  ctr={cname}  lvl={lvl}  {text}"
 
-        def _write_window(fh, q, f_iso, t_iso):
+        def _write_window_simple(fh, q, f_iso, t_iso):
+            """Paginate a single Graylog window, stopping at MAX_RESULT_WINDOW."""
             written = 0
             offset = 0
             msgs, total = _fetch_page(q, f_iso, t_iso, 1, 0)
             if msgs is None:
-                return 0
-            while offset < total:
+                return written, total
+            capped_total = min(total, MAX_RESULT_WINDOW)
+            while offset < capped_total:
                 msgs, _ = _fetch_page(q, f_iso, t_iso, PAGE_SIZE, offset)
                 if not msgs:
                     break
@@ -2175,6 +2455,49 @@ class TestClusterBase:
                 offset += len(msgs)
                 if len(msgs) < PAGE_SIZE:
                     break
+            return written, total
+
+        # Minimum sub-window granularity: 1 minute
+        _MIN_CHUNK_MINUTES = 1
+
+        def _write_window_adaptive(fh, q, f_iso, t_iso, chunk_minutes):
+            """Fetch a window, recursively splitting if total > 100k."""
+            msgs, total = _fetch_page(q, f_iso, t_iso, 1, 0)
+            if msgs is None:
+                return 0
+            if total <= MAX_RESULT_WINDOW:
+                w, _ = _write_window_simple(fh, q, f_iso, t_iso)
+                return w
+
+            # Window exceeds 100k — split into smaller sub-windows
+            sub_minutes = max(chunk_minutes // 2, _MIN_CHUNK_MINUTES)
+            if sub_minutes >= chunk_minutes:
+                # Already at minimum granularity; fetch what we can
+                self.logger.warning(
+                    f"[graylog-export] {container_name}: "
+                    f"{total} entries in {chunk_minutes}m window "
+                    f"(>{MAX_RESULT_WINDOW}), fetching first {MAX_RESULT_WINDOW}"
+                )
+                w, _ = _write_window_simple(fh, q, f_iso, t_iso)
+                return w
+
+            self.logger.info(
+                f"[graylog-export] {container_name}: "
+                f"{total} entries in {chunk_minutes}m window, "
+                f"splitting into {sub_minutes}m sub-windows"
+            )
+            t = datetime.fromisoformat(f_iso.replace("Z", "+00:00"))
+            t_end = datetime.fromisoformat(t_iso.replace("Z", "+00:00"))
+            delta = timedelta(minutes=sub_minutes)
+            written = 0
+            while t < t_end:
+                c_end = min(t + delta, t_end)
+                c_from = t.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+                c_to = c_end.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+                written += _write_window_adaptive(
+                    fh, q, c_from, c_to, sub_minutes,
+                )
+                t = c_end
             return written
 
         # Probe total result count
@@ -2186,12 +2509,15 @@ class TestClusterBase:
         written = 0
         with open(out_path, "w") as fh:
             if total <= MAX_RESULT_WINDOW:
-                written = _write_window(fh, query, from_iso, to_iso)
+                written, _ = _write_window_simple(
+                    fh, query, from_iso, to_iso,
+                )
             else:
-                # Split into 10-minute sub-windows
+                # Split into 10-minute sub-windows, recursively halving
+                # if a sub-window still exceeds 100k
                 self.logger.info(
-                    f"[graylog-export] {container_name}: >100k entries, "
-                    f"using 10-min sub-windows"
+                    f"[graylog-export] {container_name}: {total} entries "
+                    f"(>{MAX_RESULT_WINDOW}), using adaptive sub-windows"
                 )
                 t = datetime.fromisoformat(from_iso.replace("Z", "+00:00"))
                 t_end = datetime.fromisoformat(to_iso.replace("Z", "+00:00"))
@@ -2200,7 +2526,9 @@ class TestClusterBase:
                     chunk_end = min(t + chunk, t_end)
                     c_from = t.strftime("%Y-%m-%dT%H:%M:%S.000Z")
                     c_to = chunk_end.strftime("%Y-%m-%dT%H:%M:%S.000Z")
-                    written += _write_window(fh, query, c_from, c_to)
+                    written += _write_window_adaptive(
+                        fh, query, c_from, c_to, 10,
+                    )
                     t = chunk_end
 
         return written
@@ -3108,8 +3436,9 @@ class TestClusterBase:
         """
         node_details = self.sbcli_utils.get_storage_node_details(storage_node_id=node_uuid)
         self.logger.info(f"Storage Node Details: {node_details}")
-        self.sbcli_utils.get_device_details(storage_node_id=node_uuid)
-        lvol_id = self.sbcli_utils.get_lvol_id(lvol_name=self.lvol_name)
+        if hasattr(self.sbcli_utils, "get_device_details"):
+            self.sbcli_utils.get_device_details(storage_node_id=node_uuid)
+        lvol_id = self._get_lvol_id_dual(self.lvol_name)
         self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
 
 
@@ -3240,20 +3569,23 @@ class TestClusterBase:
                     self.ssh_obj.remove_dir(node=node, dir_path=mount_dir)
     
     def disconnect_lvol(self, lvol_device):
-        """Disconnects the logical volume."""
+        """Disconnects the logical volume.
+
+        Skips full subsystem disconnect if other namespaces (e.g. clones
+        placed by server-side random subsystem assignment) still share
+        the subsystem, to avoid disrupting their active IO.
+        """
         if isinstance(self.fio_node, list):
             for node in self.fio_node:
                 nqn_lvol = self.ssh_obj.get_nvme_subsystems(node=node,
                                                             nqn_filter=lvol_device)
                 for nqn in nqn_lvol:
-                    self.logger.info(f"Disconnecting NVMe subsystem: {nqn}")
-                    self.ssh_obj.disconnect_nvme(node=node, nqn_grep=nqn)
+                    self.ssh_obj.safe_disconnect_nvme(node=node, nqn=nqn)
         else:
             nqn_lvol = self.ssh_obj.get_nvme_subsystems(node=self.fio_node,
                                                         nqn_filter=lvol_device)
             for nqn in nqn_lvol:
-                self.logger.info(f"Disconnecting NVMe subsystem: {nqn}")
-                self.ssh_obj.disconnect_nvme(node=self.fio_node, nqn_grep=nqn)
+                self.ssh_obj.safe_disconnect_nvme(node=self.fio_node, nqn=nqn)
 
     def disconnect_lvols(self):
         """ Disconnect all NVMe devices with NQN containing 'lvol' """

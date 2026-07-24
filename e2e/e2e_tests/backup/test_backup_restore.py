@@ -41,6 +41,7 @@ Test class map
   TestBackupNegative               – TC-BCK-030..040
   TestBackupCryptoLvol             – TC-BCK-050..055
   TestBackupCustomGeometry         – TC-BCK-060..063
+  TestBackupRetentionMergeAfterDelete – TC-BCK-200..208
   TestBackupDeleteAndRestore       – TC-BCK-077..081
   TestBackupConcurrentIO           – TC-BCK-100..103
   TestBackupMultipleRestores       – TC-BCK-104..107
@@ -643,11 +644,16 @@ class BackupTestBase(TestClusterBase):
         raise TimeoutError(
             f"No completed backup for snapshot {snap_name} within {timeout}s")
 
-    def _restore_backup(self, backup_id: str, lvol_name: str, pool_name: str = None) -> str:
+    def _restore_backup(self, backup_id: str, lvol_name: str, pool_name: str = None,
+                         restore_size: str = None) -> str:
         """Restore a backup to a new lvol; return the new lvol name.
 
         In k8s mode: creates a BackupRestore CRD that provisions a new PVC
         from the StorageBackup.
+
+        Args:
+            restore_size: PVC size for the restored volume (e.g. "20G").
+                          Defaults to self.lvol_size if not provided.
         """
         if self.k8s_test:
             k8s = self._ensure_k8s_utils()
@@ -656,7 +662,7 @@ class BackupTestBase(TestClusterBase):
             sleep_n_sec(60)
             pvc_name = self._k8s_normalize_name(lvol_name)
             restore_name = f"rst-{pvc_name}"
-            pvc_size = self.lvol_size
+            pvc_size = restore_size or self.lvol_size
             if "Gi" not in pvc_size:
                 pvc_size = pvc_size.replace("G", "Gi")
             k8s.create_backup_restore(
@@ -676,7 +682,8 @@ class BackupTestBase(TestClusterBase):
         sleep_n_sec(60)
         pool = pool_name or self.pool_name
         out, err = self._sbcli(
-            f"-d backup restore {backup_id} --lvol {lvol_name} --pool {pool}")
+            f"-d backup restore {backup_id} --lvol {lvol_name} --pool {pool}"
+            f" --cluster-id {self.cluster_id}")
         assert not (err and "error" in err.lower()), \
             f"backup restore failed: {err}"
         if out and "Error:" in out:
@@ -840,12 +847,23 @@ class BackupTestBase(TestClusterBase):
                     status = latest[4]
                     result = latest[5] if len(latest) > 5 else ""
                     if status == "done":
+                        # Detect product-side failures marked as "done"
+                        # (e.g. "S3 transfer failed on data plane (attempt 3)")
+                        if "failed" in result.lower():
+                            raise AssertionError(
+                                f"Restore task for {lvol_name} completed with "
+                                f"failure: {result}"
+                            )
                         self.logger.info(
                             f"[restore] Restore task for {lvol_name} is done "
                             f"({result}). Waiting 60s before connect/mount."
                         )
                         sleep_n_sec(60)
                         return
+                    if status == "failed":
+                        raise AssertionError(
+                            f"Restore task for {lvol_name} failed: {result}"
+                        )
                     self.logger.info(
                         f"[restore] Restore task status: {status} "
                         f"({int(deadline - time.time())}s remaining)"
@@ -1845,12 +1863,28 @@ class TestBackupRestoreDataIntegrity(BackupTestBase):
 
         tc18_snap_name = f"tc18_snap_{_rand_suffix()}"
         tc18_snap_id = self._create_snapshot(tc18_lvol_id, tc18_snap_name, backup=True)
-        self.logger.info(f"TC-BCK-018: snapshot {tc18_snap_id} + backup triggered — deleting lvol immediately")
+        self.logger.info(f"TC-BCK-018: snapshot {tc18_snap_id} + backup triggered — deleting lvol after backup source resolved")
 
-        # Delete lvol before backup completes (backup reads from snapshot, not live lvol)
+        # Delete lvol before backup completes (backup reads from snapshot, not live lvol).
+        # In K8s mode we must wait for the StorageBackup to leave Pending phase,
+        # otherwise the backup controller can't resolve the source PVC.
         if self.k8s_test:
             k8s = self._ensure_k8s_utils()
             pvc_name = self._k8s_normalize_name(tc18_lvol_name)
+            # tc18_snap_id is the StorageBackup CRD name (bck-tc18-snap-xxx)
+            bck_name = tc18_snap_id
+            # Wait up to 120s for backup to move past Pending
+            for _ in range(24):
+                try:
+                    res = k8s.get_resource_json("storagebackup", bck_name)
+                    phase = (res.get("status", {}).get("phase") or "").lower()
+                    if phase and phase != "pending":
+                        self.logger.info(
+                            f"TC-BCK-018: StorageBackup {bck_name} reached phase={phase}, safe to delete PVC")
+                        break
+                except Exception:
+                    pass
+                sleep_n_sec(5)
             k8s.delete_pvc(pvc_name)
             if pvc_name in self.created_pvcs:
                 self.created_pvcs.remove(pvc_name)
@@ -2050,8 +2084,9 @@ class TestBackupNegative(BackupTestBase):
         # --- TC-BCK-030: restore invalid backup_id → error ---
         self.logger.info("TC-BCK-030: restore invalid backup_id")
         out, err = self._sbcli(
-            "backup restore 00000000-0000-0000-0000-000000000000 "
-            "--lvol invalid_restore --pool bck_test_pool")
+            f"backup restore 00000000-0000-0000-0000-000000000000 "
+            f"--lvol invalid_restore --pool bck_test_pool"
+            f" --cluster-id {self.cluster_id}")
         assert err or "error" in out.lower(), \
             "TC-BCK-030: expected error for invalid backup_id"
         self.logger.info("TC-BCK-030: got expected error ✓")
@@ -2147,7 +2182,7 @@ class TestBackupNegative(BackupTestBase):
         self.logger.info(f"TC-BCK-039: backup {bk39_id} completed, testing restore conflict")
         out, err = self._sbcli(
             f"backup restore {bk39_id} --lvol {lvol_name} "
-            f"--pool {self.pool_name}")
+            f"--pool {self.pool_name} --cluster-id {self.cluster_id}")
         assert err or "error" in out.lower(), \
             "TC-BCK-039: expected conflict error restoring to existing lvol name"
         self.logger.info("TC-BCK-039: got expected conflict error ✓")
@@ -2314,6 +2349,437 @@ class TestBackupCustomGeometry(BackupTestBase):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+#  Test – Retention merge after backup delete (regression)
+#
+#  Validates that restoring from a backup chain that was built AFTER a
+#  previous set of backups was deleted yields the correct data.
+#
+#  Root cause (found in production):
+#    1. Backups B1..B3 are created (contain base filesystem data).
+#    2. All backups are deleted (status → merged/deleted, S3 data lingers).
+#    3. New backups B4..B8 are taken WITHOUT writing new data → they are
+#       empty incremental diffs (0 extent pages) because the blobstore
+#       hasn't changed.
+#    4. Retention policy (versions=3) merges the two oldest of B4..B8,
+#       but since they are empty diffs the merged result is also empty.
+#    5. Restore from B8 walks the chain B8→B7→...→merged-base, misses the
+#       actual data from B1..B3, and produces an empty (corrupt) lvol.
+#
+#  This test MUST run first (before other backup tests) so it operates on a
+#  clean S3 bucket with no leftover backup chains from prior tests.
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestBackupRetentionMergeAfterDelete(BackupTestBase):
+    """
+    TC-BCK-200..208 — retention merge after backup delete (regression).
+
+    Ensures that older deleted backups do not corrupt the chain for new
+    backups.  Specifically, after deleting all backups for an lvol and
+    taking fresh ones, a retention merge followed by restore must still
+    yield the original data.
+
+    Steps:
+      TC-BCK-200  Create lvol, write data, take 2 backups
+      TC-BCK-201  Delete all backups for the lvol
+      TC-BCK-202  Take 5 new backups (no new data written — incremental diffs)
+      TC-BCK-203  Apply retention policy (versions=3), restore latest, verify checksums
+      TC-BCK-204  Delete all, write NEW data, take 5 backups, retention merge, restore — verify new data
+      TC-BCK-205  Delete-backup-delete-backup cycle: two rounds of delete → backup → restore
+      TC-BCK-206  Single backup after full delete — no merge, just verify restore works
+      TC-BCK-207  Restore OLDEST retained backup after retention merge (most vulnerable position)
+      TC-BCK-208  Two-lvol isolation: delete lvol1 backups, verify lvol2 restore unaffected
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.test_name = "backup_retention_merge_after_delete"
+
+    def run(self):
+        self.logger.info("=== TestBackupRetentionMergeAfterDelete START ===")
+        self.fio_node = self.fio_node[0]
+        self._ensure_pool_and_sc()
+
+        # ── TC-BCK-200: create lvol, write data, build 2 initial backups ──
+        self.logger.info("TC-BCK-200: create lvol, write data, build 2-backup chain")
+        lvol_name, lvol_id = self._create_lvol()
+        _, mount = self._connect_and_mount(lvol_name, lvol_id)
+        self._run_fio(mount, runtime=30)
+
+        original_checksums = self._get_checksums(self.fio_node, mount)
+        assert original_checksums, "TC-BCK-200: no checksums captured — FIO may not have written data"
+        self.logger.info(f"TC-BCK-200: {len(original_checksums)} checksum(s) captured")
+
+        initial_bk_ids = []
+        for i in range(2):
+            sn = f"rmd_init_{i}_{_rand_suffix()}"
+            self._create_snapshot(lvol_id, sn, backup=True)
+            bk_id = self._wait_for_backup_by_snap(sn, f"TC-BCK-200[{i}]")
+            initial_bk_ids.append(bk_id)
+            self.logger.info(f"TC-BCK-200[{i}]: backup {bk_id} complete")
+
+        self.logger.info(f"TC-BCK-200: {len(initial_bk_ids)} initial backups built")
+
+        # ── TC-BCK-201: delete all backups for this lvol ──────────────────
+        self.logger.info(f"TC-BCK-201: deleting all backups for {lvol_id}")
+        self._delete_backups(lvol_id)
+        sleep_n_sec(10)
+
+        backups_after = self._list_backups()
+        lvol_backups = [
+            b for b in backups_after
+            if lvol_name in " ".join(str(v) for v in b.values())
+        ]
+        assert len(lvol_backups) == 0, (
+            f"TC-BCK-201: expected 0 backups for {lvol_name} after delete, "
+            f"got {len(lvol_backups)}: {lvol_backups}"
+        )
+        self.logger.info("TC-BCK-201: all backups deleted")
+
+        # ── TC-BCK-202: take 5 new backups WITHOUT writing new data ───────
+        # These will be incremental diffs with 0 extent pages since the
+        # blobstore hasn't changed since the original FIO.
+        self.logger.info("TC-BCK-202: taking 5 new backups (no new data written)")
+        new_bk_ids = []
+        for i in range(5):
+            sn = f"rmd_new_{i}_{_rand_suffix()}"
+            self._create_snapshot(lvol_id, sn, backup=True)
+            bk_id = self._wait_for_backup_by_snap(sn, f"TC-BCK-202[{i}]")
+            new_bk_ids.append(bk_id)
+            self.logger.info(f"TC-BCK-202[{i}]: backup {bk_id} complete")
+            sleep_n_sec(3)
+
+        self.logger.info(f"TC-BCK-202: {len(new_bk_ids)} new backups created after delete")
+
+        # ── TC-BCK-203: apply retention policy, restore latest, verify ────
+        self.logger.info("TC-BCK-203: retention merge — policy versions=3 on 5 backups")
+        policy_name = f"rmd_pol_{_rand_suffix()}"
+        policy_id = self._add_policy(policy_name, versions=3, age="1d")
+        self._attach_policy(policy_id, "lvol", lvol_id)
+
+        # Allow retention merge to process
+        sleep_n_sec(30)
+
+        backups_retained = self._list_backups()
+        retained_for_lvol = [
+            b for b in backups_retained
+            if lvol_name in " ".join(str(v) for v in b.values())
+        ]
+        self.logger.info(
+            f"TC-BCK-203: {len(retained_for_lvol)} backups retained after policy merge"
+        )
+
+        # Find the latest backup that is still active (not merged/deleted)
+        latest_bk_id = None
+        for bk_id in reversed(new_bk_ids):
+            for b in retained_for_lvol:
+                bid = b.get("id") or b.get("ID") or b.get("uuid") or ""
+                status = (b.get("status") or b.get("Status") or "").lower()
+                if bid == bk_id and status not in ("merged", "deleted", "failed", "error"):
+                    latest_bk_id = bk_id
+                    break
+            if latest_bk_id:
+                break
+
+        assert latest_bk_id, (
+            f"TC-BCK-203: no active backup found for restore. "
+            f"Retained backups: {retained_for_lvol}"
+        )
+        self.logger.info(f"TC-BCK-203: restoring from latest active backup {latest_bk_id}")
+
+        # Disconnect source before restoring (XFS UUID safety)
+        self._unmount_and_disconnect(self.fio_node, mount, lvol_id)
+
+        rst_name = f"rmd_rst_{_rand_suffix()}"
+        self._restore_backup(latest_bk_id, rst_name)
+        self._wait_for_restore(rst_name)
+        rst_id = self._get_lvol_id(rst_name)
+        _, rst_mount = self._connect_and_mount(
+            rst_name, rst_id,
+            mount=f"{self.mount_path}/rmd_{_rand_suffix()}",
+            format_disk=False)
+
+        self._verify_checksums(self.fio_node, rst_mount, original_checksums)
+        self.logger.info("TC-BCK-203: restored data checksums match original")
+
+        # Clean up restored lvol
+        self._unmount_and_disconnect(self.fio_node, rst_mount, rst_id)
+
+        # Detach policy before next phase
+        self._detach_policy(policy_id, "lvol", lvol_id)
+
+        # ── TC-BCK-204: delete all, write NEW data, backup, merge, restore ─
+        # After deleting backups the next backup must capture a full base,
+        # not an empty diff referencing the deleted chain.
+        self.logger.info("TC-BCK-204: delete all, write NEW data, backup, retention merge, restore")
+        self._delete_backups(lvol_id)
+        sleep_n_sec(10)
+
+        # Reconnect source lvol and write new data
+        _, mount2 = self._connect_and_mount(lvol_name, lvol_id)
+        self._run_fio(mount2, runtime=30, rw="write")
+        new_checksums = self._get_checksums(self.fio_node, mount2)
+        assert new_checksums, "TC-BCK-204: no checksums after writing new data"
+        self.logger.info(f"TC-BCK-204: {len(new_checksums)} new checksum(s) captured")
+
+        new2_bk_ids = []
+        for i in range(5):
+            sn = f"rmd2_snap_{i}_{_rand_suffix()}"
+            self._create_snapshot(lvol_id, sn, backup=True)
+            bk_id = self._wait_for_backup_by_snap(sn, f"TC-BCK-204[{i}]")
+            new2_bk_ids.append(bk_id)
+            self.logger.info(f"TC-BCK-204[{i}]: backup {bk_id} complete")
+            sleep_n_sec(3)
+
+        pol2_name = f"rmd2_pol_{_rand_suffix()}"
+        pol2_id = self._add_policy(pol2_name, versions=3, age="1d")
+        self._attach_policy(pol2_id, "lvol", lvol_id)
+        sleep_n_sec(30)
+
+        # Find latest active backup
+        backups2 = self._list_backups()
+        retained2 = [
+            b for b in backups2
+            if lvol_name in " ".join(str(v) for v in b.values())
+        ]
+        latest2_bk_id = None
+        for bk_id in reversed(new2_bk_ids):
+            for b in retained2:
+                bid = b.get("id") or b.get("ID") or b.get("uuid") or ""
+                status = (b.get("status") or b.get("Status") or "").lower()
+                if bid == bk_id and status not in ("merged", "deleted", "failed", "error"):
+                    latest2_bk_id = bk_id
+                    break
+            if latest2_bk_id:
+                break
+
+        assert latest2_bk_id, (
+            f"TC-BCK-204: no active backup found. Retained: {retained2}"
+        )
+
+        self._unmount_and_disconnect(self.fio_node, mount2, lvol_id)
+
+        rst2_name = f"rmd2_rst_{_rand_suffix()}"
+        self._restore_backup(latest2_bk_id, rst2_name)
+        self._wait_for_restore(rst2_name)
+        rst2_id = self._get_lvol_id(rst2_name)
+        _, rst2_mount = self._connect_and_mount(
+            rst2_name, rst2_id,
+            mount=f"{self.mount_path}/rmd2_{_rand_suffix()}",
+            format_disk=False)
+
+        self._verify_checksums(self.fio_node, rst2_mount, new_checksums)
+        self.logger.info("TC-BCK-204: restored data matches NEW data (not old)")
+        self._unmount_and_disconnect(self.fio_node, rst2_mount, rst2_id)
+        self._detach_policy(pol2_id, "lvol", lvol_id)
+
+        # ── TC-BCK-205: delete → backup → delete → backup → restore ──────
+        # Two rounds of delete + re-backup.  The second round's restore must
+        # succeed even though there are two layers of deleted chains.
+        self.logger.info("TC-BCK-205: double delete-backup cycle")
+
+        # Round 1: backup
+        self._delete_backups(lvol_id)
+        sleep_n_sec(10)
+
+        _, mount3 = self._connect_and_mount(lvol_name, lvol_id)
+        self._run_fio(mount3, runtime=20, rw="write")
+
+        sn_r1 = f"rmd3_r1_{_rand_suffix()}"
+        self._create_snapshot(lvol_id, sn_r1, backup=True)
+        r1_bk_id = self._wait_for_backup_by_snap(sn_r1, "TC-BCK-205[r1]")
+        self.logger.info(f"TC-BCK-205: round 1 backup {r1_bk_id} complete")
+
+        # Round 2: delete round 1, write different data, backup again
+        self._delete_backups(lvol_id)
+        sleep_n_sec(10)
+
+        self._run_fio(mount3, runtime=20, rw="write")
+        round2_checksums = self._get_checksums(self.fio_node, mount3)
+
+        r2_bk_ids = []
+        for i in range(3):
+            sn_r2 = f"rmd3_r2_{i}_{_rand_suffix()}"
+            self._create_snapshot(lvol_id, sn_r2, backup=True)
+            bk_id = self._wait_for_backup_by_snap(sn_r2, f"TC-BCK-205[r2.{i}]")
+            r2_bk_ids.append(bk_id)
+            self.logger.info(f"TC-BCK-205[r2.{i}]: backup {bk_id} complete")
+            sleep_n_sec(3)
+
+        # Restore from the latest round 2 backup
+        self._unmount_and_disconnect(self.fio_node, mount3, lvol_id)
+
+        rst3_name = f"rmd3_rst_{_rand_suffix()}"
+        self._restore_backup(r2_bk_ids[-1], rst3_name)
+        self._wait_for_restore(rst3_name)
+        rst3_id = self._get_lvol_id(rst3_name)
+        _, rst3_mount = self._connect_and_mount(
+            rst3_name, rst3_id,
+            mount=f"{self.mount_path}/rmd3_{_rand_suffix()}",
+            format_disk=False)
+
+        self._verify_checksums(self.fio_node, rst3_mount, round2_checksums)
+        self.logger.info("TC-BCK-205: double-cycle restore matches round 2 data")
+        self._unmount_and_disconnect(self.fio_node, rst3_mount, rst3_id)
+
+        # ── TC-BCK-206: single backup after full delete → restore ─────────
+        # Simplest regression: delete all → take exactly 1 backup → restore.
+        # No retention merge involved.  If this fails, the backup system
+        # cannot produce a standalone base backup after a delete.
+        self.logger.info("TC-BCK-206: single backup after full delete — no merge")
+        self._delete_backups(lvol_id)
+        sleep_n_sec(10)
+
+        _, mount4 = self._connect_and_mount(lvol_name, lvol_id)
+        self._run_fio(mount4, runtime=20, rw="write")
+        single_checksums = self._get_checksums(self.fio_node, mount4)
+        assert single_checksums, "TC-BCK-206: no checksums captured"
+
+        sn_single = f"rmd4_single_{_rand_suffix()}"
+        self._create_snapshot(lvol_id, sn_single, backup=True)
+        single_bk_id = self._wait_for_backup_by_snap(sn_single, "TC-BCK-206")
+        self.logger.info(f"TC-BCK-206: single backup {single_bk_id} complete")
+
+        self._unmount_and_disconnect(self.fio_node, mount4, lvol_id)
+
+        rst4_name = f"rmd4_rst_{_rand_suffix()}"
+        self._restore_backup(single_bk_id, rst4_name)
+        self._wait_for_restore(rst4_name)
+        rst4_id = self._get_lvol_id(rst4_name)
+        _, rst4_mount = self._connect_and_mount(
+            rst4_name, rst4_id,
+            mount=f"{self.mount_path}/rmd4_{_rand_suffix()}",
+            format_disk=False)
+
+        self._verify_checksums(self.fio_node, rst4_mount, single_checksums)
+        self.logger.info("TC-BCK-206: single post-delete backup restore OK")
+        self._unmount_and_disconnect(self.fio_node, rst4_mount, rst4_id)
+
+        # ── TC-BCK-207: restore OLDEST retained backup after merge ────────
+        # After retention merge with versions=3 on 5 backups, restore the
+        # OLDEST retained backup (not the latest).  The oldest position sits
+        # right at the merge boundary and is the most vulnerable to missing
+        # base data.
+        self.logger.info("TC-BCK-207: restore oldest retained backup after merge")
+        self._delete_backups(lvol_id)
+        sleep_n_sec(10)
+
+        _, mount5 = self._connect_and_mount(lvol_name, lvol_id)
+        self._run_fio(mount5, runtime=20, rw="write")
+        oldest_checksums = self._get_checksums(self.fio_node, mount5)
+        assert oldest_checksums, "TC-BCK-207: no checksums captured"
+
+        old_bk_ids = []
+        for i in range(5):
+            sn_old = f"rmd5_snap_{i}_{_rand_suffix()}"
+            self._create_snapshot(lvol_id, sn_old, backup=True)
+            bk_id = self._wait_for_backup_by_snap(sn_old, f"TC-BCK-207[{i}]")
+            old_bk_ids.append(bk_id)
+            self.logger.info(f"TC-BCK-207[{i}]: backup {bk_id} complete")
+            sleep_n_sec(3)
+
+        pol5_name = f"rmd5_pol_{_rand_suffix()}"
+        pol5_id = self._add_policy(pol5_name, versions=3, age="1d")
+        self._attach_policy(pol5_id, "lvol", lvol_id)
+        sleep_n_sec(30)
+
+        # Find the OLDEST active backup
+        backups5 = self._list_backups()
+        retained5 = [
+            b for b in backups5
+            if lvol_name in " ".join(str(v) for v in b.values())
+        ]
+        oldest_bk_id = None
+        for bk_id in old_bk_ids:
+            for b in retained5:
+                bid = b.get("id") or b.get("ID") or b.get("uuid") or ""
+                status = (b.get("status") or b.get("Status") or "").lower()
+                if bid == bk_id and status not in ("merged", "deleted", "failed", "error"):
+                    oldest_bk_id = bk_id
+                    break
+            if oldest_bk_id:
+                break
+
+        assert oldest_bk_id, (
+            f"TC-BCK-207: no active backup found. Retained: {retained5}"
+        )
+        self.logger.info(f"TC-BCK-207: restoring OLDEST retained backup {oldest_bk_id}")
+
+        self._unmount_and_disconnect(self.fio_node, mount5, lvol_id)
+
+        rst5_name = f"rmd5_rst_{_rand_suffix()}"
+        self._restore_backup(oldest_bk_id, rst5_name)
+        self._wait_for_restore(rst5_name)
+        rst5_id = self._get_lvol_id(rst5_name)
+        _, rst5_mount = self._connect_and_mount(
+            rst5_name, rst5_id,
+            mount=f"{self.mount_path}/rmd5_{_rand_suffix()}",
+            format_disk=False)
+
+        self._verify_checksums(self.fio_node, rst5_mount, oldest_checksums)
+        self.logger.info("TC-BCK-207: oldest retained backup restore OK")
+        self._unmount_and_disconnect(self.fio_node, rst5_mount, rst5_id)
+        self._detach_policy(pol5_id, "lvol", lvol_id)
+
+        # ── TC-BCK-208: two-lvol isolation — delete one, verify other ─────
+        # Create two lvols with backups.  Delete lvol1's backups.  Verify
+        # that lvol2's backup chain is unaffected and restores correctly.
+        # (The s3_id counter is shared, so gaps from deleted backups must
+        # not break the surviving lvol's chain.)
+        self.logger.info("TC-BCK-208: two-lvol isolation after backup delete")
+
+        # lvol1 — will be deleted
+        lvol1_name, lvol1_id = self._create_lvol(name=f"rmd_iso1_{_rand_suffix()}")
+        _, mount_iso1 = self._connect_and_mount(lvol1_name, lvol1_id)
+        self._run_fio(mount_iso1, runtime=20)
+
+        for i in range(2):
+            sn_iso1 = f"rmd_iso1_snap_{i}_{_rand_suffix()}"
+            self._create_snapshot(lvol1_id, sn_iso1, backup=True)
+            self._wait_for_backup_by_snap(sn_iso1, f"TC-BCK-208[iso1.{i}]")
+        self.logger.info("TC-BCK-208: lvol1 has 2 backups")
+
+        # lvol2 — must survive
+        lvol2_name, lvol2_id = self._create_lvol(name=f"rmd_iso2_{_rand_suffix()}")
+        _, mount_iso2 = self._connect_and_mount(lvol2_name, lvol2_id)
+        self._run_fio(mount_iso2, runtime=20)
+        iso2_checksums = self._get_checksums(self.fio_node, mount_iso2)
+        assert iso2_checksums, "TC-BCK-208: no checksums for lvol2"
+
+        iso2_bk_ids = []
+        for i in range(3):
+            sn_iso2 = f"rmd_iso2_snap_{i}_{_rand_suffix()}"
+            self._create_snapshot(lvol2_id, sn_iso2, backup=True)
+            bk_id = self._wait_for_backup_by_snap(sn_iso2, f"TC-BCK-208[iso2.{i}]")
+            iso2_bk_ids.append(bk_id)
+        self.logger.info("TC-BCK-208: lvol2 has 3 backups")
+
+        # Delete lvol1's backups (this creates gaps in the s3_id sequence)
+        self._delete_backups(lvol1_id)
+        sleep_n_sec(10)
+        self.logger.info("TC-BCK-208: lvol1 backups deleted")
+
+        # Restore lvol2's latest backup — must be unaffected
+        self._unmount_and_disconnect(self.fio_node, mount_iso1, lvol1_id)
+        self._unmount_and_disconnect(self.fio_node, mount_iso2, lvol2_id)
+
+        rst_iso2_name = f"rmd_iso2_rst_{_rand_suffix()}"
+        self._restore_backup(iso2_bk_ids[-1], rst_iso2_name)
+        self._wait_for_restore(rst_iso2_name)
+        rst_iso2_id = self._get_lvol_id(rst_iso2_name)
+        _, rst_iso2_mount = self._connect_and_mount(
+            rst_iso2_name, rst_iso2_id,
+            mount=f"{self.mount_path}/rmd_iso2_{_rand_suffix()}",
+            format_disk=False)
+
+        self._verify_checksums(self.fio_node, rst_iso2_mount, iso2_checksums)
+        self.logger.info("TC-BCK-208: lvol2 restore unaffected by lvol1 backup delete")
+        self._unmount_and_disconnect(self.fio_node, rst_iso2_mount, rst_iso2_id)
+
+        self.logger.info("=== TestBackupRetentionMergeAfterDelete PASSED ===")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 #  Test 7 – Backup delete and post-merge restore
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -2378,7 +2844,8 @@ class TestBackupDeleteAndRestore(BackupTestBase):
         self.logger.info("TC-BCK-079: restore of deleted backup_id must fail")
         for bk_id in collected_bk_ids[:1]:  # test just one; all should fail
             out, err = self._sbcli(
-                f"-d backup restore {bk_id} --lvol del_rst_{_rand_suffix()} --pool {self.pool_name}")
+                f"-d backup restore {bk_id} --lvol del_rst_{_rand_suffix()} --pool {self.pool_name}"
+                f" --cluster-id {self.cluster_id}")
             assert err or "error" in (out or "").lower(), (
                 f"TC-BCK-079: expected error restoring deleted backup {bk_id}, "
                 f"got out={out!r} err={err!r}"
@@ -2433,12 +2900,23 @@ class TestBackupDeleteAndRestore(BackupTestBase):
             f"TC-BCK-081: {len(backups_retained)} backups after 5 snaps "
             f"(policy versions=3 — oldest 2 should be merged)")
 
-        # Restore each backup that still appears in the list; all must yield correct checksums
-        visible_ids = {
-            b.get("id") or b.get("ID") or b.get("uuid") or ""
-            for b in backups_retained
-            if lvol_name in " ".join(str(v) for v in b.values())
-        }
+        # Restore each backup that still appears in the list; all must yield correct checksums.
+        # If any backup has status=failed/error, that indicates the retention policy
+        # deleted a snapshot while its backup was still in-flight — fail the test.
+        visible_ids = set()
+        for b in backups_retained:
+            if lvol_name not in " ".join(str(v) for v in b.values()):
+                continue
+            bk_id = b.get("id") or b.get("ID") or b.get("uuid") or ""
+            if not bk_id:
+                continue
+            status = (b.get("status") or b.get("Status") or "").lower()
+            assert status not in ("failed", "error"), (
+                f"TC-BCK-081: backup {bk_id} has status={status} — "
+                f"retention policy likely deleted snapshot while "
+                f"backup was still in-flight. Entry: {b}")
+            visible_ids.add(bk_id)
+
         assert visible_ids, "TC-BCK-081: expected at least 1 retained backup after policy merge"
         for bk_id in visible_ids:
             rst_name = f"ret_rst_{_rand_suffix()}"
@@ -2846,9 +3324,17 @@ class TestBackupMultipleRestores(BackupTestBase):
         self.logger.info("TC-BCK-106: verify all 3 restored lvols are visible")
         for rname in restored_names:
             self._wait_for_restore(rname)
-        out, _ = self._sbcli("lvol list")
-        for rname in restored_names:
-            assert rname in out, f"TC-BCK-106: {rname} not found in lvol list"
+        if self.k8s_test:
+            # In K8s mode, restored lvols are named restore-<UUID> in sbctl,
+            # but _wait_for_restore already verified PVC is Bound.  Verify
+            # via _get_lvol_id which returns the normalised PVC name.
+            for rname in restored_names:
+                rid = self._get_lvol_id(rname)
+                assert rid, f"TC-BCK-106: {rname} not found via _get_lvol_id"
+        else:
+            out, _ = self._sbcli("lvol list")
+            for rname in restored_names:
+                assert rname in out, f"TC-BCK-106: {rname} not found in lvol list"
         self.logger.info("TC-BCK-106: all 3 restored lvols in lvol list ✓")
 
         # TC-BCK-107: checksums match on all 3
@@ -3454,7 +3940,7 @@ class TestBackupLargeLvol(BackupTestBase):
         # TC-BCK-137: restore with extended timeout
         self.logger.info("TC-BCK-137: restore large lvol (extended timeout 1200s)")
         restored_name = f"large_rest_{_rand_suffix()}"
-        self._restore_backup(bk_id, restored_name)
+        self._restore_backup(bk_id, restored_name, restore_size="20G")
         self._wait_for_restore(restored_name, timeout=1200)
         self.logger.info(f"TC-BCK-137: large lvol restore {restored_name} complete ✓")
 
@@ -3700,7 +4186,7 @@ class TestBackupSecurityLvol(BackupTestBase):
 
         # TC-BCK-154: connect and verify data
         self.logger.info("TC-BCK-154: Verifying restored lvol data …")
-        restored_id = self.sbcli_utils.get_lvol_id(restored_name)
+        restored_id = self._get_lvol_id(restored_name)
         assert restored_id, f"Could not find ID for {restored_name}"
         _, r_mount = self._connect_and_mount(restored_name, restored_id,
                                               mount=f"{self.mount_path}/r{restored_name[-8:]}",
@@ -4056,7 +4542,7 @@ class TestBackupResizedLvol(BackupTestBase):
         rst_v1 = f"rszrst1{_rand_suffix()}"
         self._restore_backup(bk_v1, rst_v1)
         self._wait_for_restore(rst_v1)
-        rst_v1_id = self.sbcli_utils.get_lvol_id(rst_v1)
+        rst_v1_id = self._get_lvol_id(rst_v1)
         assert rst_v1_id
         _, rst_v1_mnt = self._connect_and_mount(
             rst_v1, rst_v1_id,
@@ -4070,7 +4556,7 @@ class TestBackupResizedLvol(BackupTestBase):
         rst_v2 = f"rszrst2{_rand_suffix()}"
         self._restore_backup(bk_v2, rst_v2)
         self._wait_for_restore(rst_v2)
-        rst_v2_id = self.sbcli_utils.get_lvol_id(rst_v2)
+        rst_v2_id = self._get_lvol_id(rst_v2)
         assert rst_v2_id
         _, rst_v2_mnt = self._connect_and_mount(
             rst_v2, rst_v2_id,
@@ -4222,7 +4708,7 @@ class TestBackupUpgradeCompatibility(BackupTestBase):
         rst_name = f"rstupg{_rand_suffix()}"
         self._restore_backup(bk_id, rst_name)
         self._wait_for_restore(rst_name)
-        rst_id = self.sbcli_utils.get_lvol_id(rst_name)
+        rst_id = self._get_lvol_id(rst_name)
         assert rst_id
         _, rst_mnt = self._connect_and_mount(
             rst_name, rst_id,
@@ -4235,7 +4721,7 @@ class TestBackupUpgradeCompatibility(BackupTestBase):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  TC-BCK-181..185 – Restore edge cases
+#  TC-BCK-181..185, 191..193 – Restore edge cases
 # ═══════════════════════════════════════════════════════════════════════════
 
 class TestBackupRestoreEdgeCases(BackupTestBase):
@@ -4247,6 +4733,9 @@ class TestBackupRestoreEdgeCases(BackupTestBase):
     TC-BCK-183  Restore to same name as an already-deleted source lvol
     TC-BCK-184  Restore with duplicate name → expect error or graceful rejection
     TC-BCK-185  Restore from non-existent backup_id → expect error
+    TC-BCK-191  Restore without --cluster-id → expect error
+    TC-BCK-192  Restore with invalid --cluster-id → expect error
+    TC-BCK-193  (K8s only) Restore with wrong clusterName → expect failure
     """
 
     def __init__(self, **kwargs):
@@ -4276,61 +4765,214 @@ class TestBackupRestoreEdgeCases(BackupTestBase):
         # TC-BCK-181: restore with max-length name (31 chars)
         self.logger.info("TC-BCK-181: Restoring with max-length lvol name …")
         long_name = ("a" * 31)  # sbcli typically supports up to 63, use 31 to stay safe
-        out, err = self._sbcli(
-            f"-d backup restore {bk_id} --lvol {long_name} --pool {self.pool_name}")
-        if not (err and "error" in err.lower()):
-            self._wait_for_restore(long_name)
-            self.created_lvols.append(long_name)
-            self.logger.info("TC-BCK-181: Long name restore PASSED")
+        if self.k8s_test:
+            try:
+                restored = self._restore_backup(bk_id, long_name, pool_name=self.pool_name)
+                self._wait_for_restore(restored)
+                self.logger.info("TC-BCK-181: Long name restore PASSED")
+            except Exception as exc:
+                self.logger.info(
+                    f"TC-BCK-181: Long name rejected (expected): {exc!r} PASSED")
         else:
-            self.logger.info(f"TC-BCK-181: Long name rejected (expected): {err!r} PASSED")
+            out, err = self._sbcli(
+                f"-d backup restore {bk_id} --lvol {long_name} --pool {self.pool_name}"
+                f" --cluster-id {self.cluster_id}")
+            if not (err and "error" in err.lower()):
+                self._wait_for_restore(long_name)
+                self.created_lvols.append(long_name)
+                self.logger.info("TC-BCK-181: Long name restore PASSED")
+            else:
+                self.logger.info(f"TC-BCK-181: Long name rejected (expected): {err!r} PASSED")
 
-        # TC-BCK-182: restore without --pool
+        # TC-BCK-182: restore without --pool (should use source pool)
         self.logger.info("TC-BCK-182: Restoring without --pool …")
         nopool_name = f"rstnopool{_rand_suffix()}"
-        out, err = self._sbcli(f"-d backup restore {bk_id} --lvol {nopool_name}")
-        if not (err and "error" in err.lower()):
-            self._wait_for_restore(nopool_name)
-            self.created_lvols.append(nopool_name)
-            self.logger.info("TC-BCK-182: No-pool restore PASSED")
+        if self.k8s_test:
+            try:
+                # In K8s mode, omit target_pool to test default pool behaviour
+                restored = self._restore_backup(bk_id, nopool_name, pool_name=None)
+                self._wait_for_restore(restored)
+                self.logger.info("TC-BCK-182: No-pool restore PASSED")
+            except Exception as exc:
+                self.logger.info(f"TC-BCK-182: No-pool restore rejected: {exc!r}")
         else:
-            self.logger.info(f"TC-BCK-182: No-pool restore rejected: {err!r}")
+            out, err = self._sbcli(
+                f"-d backup restore {bk_id} --lvol {nopool_name}"
+                f" --cluster-id {self.cluster_id}")
+            if not (err and "error" in err.lower()):
+                self._wait_for_restore(nopool_name)
+                self.created_lvols.append(nopool_name)
+                self.logger.info("TC-BCK-182: No-pool restore PASSED")
+            else:
+                self.logger.info(f"TC-BCK-182: No-pool restore rejected: {err!r}")
 
         # TC-BCK-183: restore to same name as deleted source
         self.logger.info("TC-BCK-183: Restore to name of deleted lvol …")
         deleted_lvol_name = lvol_name
         self._delete_lvol(lvol_name, skip_error=False)
         sleep_n_sec(3)
-        out, err = self._sbcli(
-            f"-d backup restore {bk_id} --lvol {deleted_lvol_name} --pool {self.pool_name}")
-        if not (err and "error" in err.lower()):
-            self._wait_for_restore(deleted_lvol_name)
-            self.created_lvols.append(deleted_lvol_name)
-            self.logger.info("TC-BCK-183: Restore to deleted-name PASSED")
+        if self.k8s_test:
+            try:
+                restored = self._restore_backup(
+                    bk_id, deleted_lvol_name, pool_name=self.pool_name)
+                self._wait_for_restore(restored)
+                self.logger.info("TC-BCK-183: Restore to deleted-name PASSED")
+            except Exception as exc:
+                self.logger.info(
+                    f"TC-BCK-183: Rejected (acceptable): {exc!r} PASSED")
         else:
-            self.logger.info(f"TC-BCK-183: Rejected (acceptable): {err!r} PASSED")
+            out, err = self._sbcli(
+                f"-d backup restore {bk_id} --lvol {deleted_lvol_name} --pool {self.pool_name}"
+                f" --cluster-id {self.cluster_id}")
+            if not (err and "error" in err.lower()):
+                self._wait_for_restore(deleted_lvol_name)
+                self.created_lvols.append(deleted_lvol_name)
+                self.logger.info("TC-BCK-183: Restore to deleted-name PASSED")
+            else:
+                self.logger.info(f"TC-BCK-183: Rejected (acceptable): {err!r} PASSED")
 
         # TC-BCK-184: restore with duplicate name (already exists) → expect error
         self.logger.info("TC-BCK-184: Restoring with duplicate name …")
         lvol_dup, lvol_dup_id = self._create_lvol()
-        out, err = self._sbcli(
-            f"-d backup restore {bk_id} --lvol {lvol_dup} --pool {self.pool_name}")
-        has_error = bool(err and "error" in err.lower()) or \
-                    ("already exists" in (out or "").lower()) or \
-                    ("duplicate" in (out or "").lower())
-        self.logger.info(f"TC-BCK-184: Duplicate name result: has_error={has_error} PASSED")
+        if self.k8s_test:
+            k8s = self._ensure_k8s_utils()
+            pvc_name = self._k8s_normalize_name(lvol_dup)
+            restore_name = f"rst-dup-{_rand_suffix()}"
+            pvc_size = self.lvol_size
+            if "Gi" not in pvc_size:
+                pvc_size = pvc_size.replace("G", "Gi")
+            k8s.create_backup_restore(
+                name=restore_name,
+                backup_ref_name=bk_id,
+                pvc_name=pvc_name,
+                pvc_size=pvc_size,
+                cluster_name=self._cluster_name,
+                target_pool=self.pool_name,
+            )
+            self.created_backup_restores.append(restore_name)
+            sleep_n_sec(30)
+            try:
+                k8s.wait_backup_restore_done(restore_name, timeout=60)
+                self.logger.info("TC-BCK-184: Duplicate name was accepted (product allowed it)")
+            except Exception:
+                self.logger.info("TC-BCK-184: Duplicate name rejected PASSED")
+            finally:
+                try:
+                    k8s.delete_backup_restore(restore_name)
+                except Exception:
+                    pass
+        else:
+            out, err = self._sbcli(
+                f"-d backup restore {bk_id} --lvol {lvol_dup} --pool {self.pool_name}"
+                f" --cluster-id {self.cluster_id}")
+            has_error = bool(err and "error" in err.lower()) or \
+                        ("already exists" in (out or "").lower()) or \
+                        ("duplicate" in (out or "").lower())
+            self.logger.info(f"TC-BCK-184: Duplicate name result: has_error={has_error} PASSED")
 
         # TC-BCK-185: restore from non-existent backup_id → expect error
         self.logger.info("TC-BCK-185: Restoring from non-existent backup_id …")
         fake_bk_id = "00000000-0000-0000-0000-000000000099"
-        out, err = self._sbcli(
-            f"-d backup restore {fake_bk_id} --lvol rstfake{_rand_suffix()} --pool {self.pool_name}")
-        has_error = bool(err and "error" in err.lower()) or \
-                    ("not found" in (out or "").lower()) or \
-                    ("invalid" in (out or "").lower())
-        assert has_error, \
-            f"Restore from non-existent backup_id should fail; out={out!r} err={err!r}"
-        self.logger.info("TC-BCK-185: Non-existent backup_id rejected PASSED")
+        if self.k8s_test:
+            k8s = self._ensure_k8s_utils()
+            restore_name = f"rst-fakebk-{_rand_suffix()}"
+            fake_pvc = f"pvc-fakebk-{_rand_suffix()}"
+            pvc_size = self.lvol_size
+            if "Gi" not in pvc_size:
+                pvc_size = pvc_size.replace("G", "Gi")
+            k8s.create_backup_restore(
+                name=restore_name,
+                backup_ref_name=fake_bk_id,
+                pvc_name=fake_pvc,
+                pvc_size=pvc_size,
+                cluster_name=self._cluster_name,
+            )
+            self.created_backup_restores.append(restore_name)
+            sleep_n_sec(30)
+            try:
+                k8s.wait_backup_restore_done(restore_name, timeout=60)
+                assert False, \
+                    "TC-BCK-185: non-existent backup_id should not succeed"
+            except AssertionError:
+                raise
+            except Exception:
+                self.logger.info("TC-BCK-185: Non-existent backup_id rejected PASSED")
+            finally:
+                try:
+                    k8s.delete_backup_restore(restore_name)
+                except Exception:
+                    pass
+        else:
+            out, err = self._sbcli(
+                f"-d backup restore {fake_bk_id} --lvol rstfake{_rand_suffix()} --pool {self.pool_name}"
+                f" --cluster-id {self.cluster_id}")
+            has_error = bool(err and "error" in err.lower()) or \
+                        ("not found" in (out or "").lower()) or \
+                        ("invalid" in (out or "").lower())
+            assert has_error, \
+                f"Restore from non-existent backup_id should fail; out={out!r} err={err!r}"
+            self.logger.info("TC-BCK-185: Non-existent backup_id rejected PASSED")
+
+        # TC-BCK-191: restore without --cluster-id → expect error
+        # In K8s mode clusterName is a CRD field (tested by TC-BCK-193), not a CLI flag
+        if self.k8s_test:
+            self.logger.info("TC-BCK-191: SKIPPED (CLI --cluster-id flag not applicable in K8s mode)")
+        else:
+            self.logger.info("TC-BCK-191: Restoring without --cluster-id …")
+            out, err = self._sbcli(
+                f"-d backup restore {bk_id} --lvol rstnocluster{_rand_suffix()} --pool {self.pool_name}")
+            has_error = bool(err and "error" in err.lower()) or ("error" in (out or "").lower())
+            assert has_error, \
+                f"Restore without --cluster-id should fail; out={out!r} err={err!r}"
+            self.logger.info("TC-BCK-191: No cluster-id rejected PASSED")
+
+        # TC-BCK-192: restore with invalid --cluster-id → expect error
+        # In K8s mode the equivalent is wrong clusterName (tested by TC-BCK-193)
+        if self.k8s_test:
+            self.logger.info("TC-BCK-192: SKIPPED (CLI --cluster-id flag not applicable in K8s mode)")
+        else:
+            self.logger.info("TC-BCK-192: Restoring with invalid --cluster-id …")
+            fake_cluster = "00000000-0000-0000-0000-000000000000"
+            out, err = self._sbcli(
+                f"-d backup restore {bk_id} --lvol rstbadcluster{_rand_suffix()} --pool {self.pool_name}"
+                f" --cluster-id {fake_cluster}")
+            has_error = bool(err and "error" in err.lower()) or ("error" in (out or "").lower())
+            assert has_error, \
+                f"Restore with invalid cluster-id should fail; out={out!r} err={err!r}"
+            self.logger.info("TC-BCK-192: Invalid cluster-id rejected PASSED")
+
+        # TC-BCK-193: (K8s only) restore with wrong clusterName → expect failure
+        if self.k8s_test:
+            self.logger.info("TC-BCK-193: K8s restore with wrong clusterName …")
+            k8s = self._ensure_k8s_utils()
+            bad_restore = f"rst-badcluster-{_rand_suffix()}"
+            bad_pvc = f"pvc-badcluster-{_rand_suffix()}"
+            pvc_size = self.lvol_size
+            if "Gi" not in pvc_size:
+                pvc_size = pvc_size.replace("G", "Gi")
+            k8s.create_backup_restore(
+                name=bad_restore,
+                backup_ref_name=bk_id,
+                pvc_name=bad_pvc,
+                pvc_size=pvc_size,
+                cluster_name="nonexistent-cluster",
+            )
+            sleep_n_sec(30)
+            try:
+                info = k8s.wait_backup_restore_done(bad_restore, timeout=60)
+                assert False, \
+                    f"TC-BCK-193: wrong clusterName should not succeed; got {info}"
+            except AssertionError:
+                raise
+            except Exception:
+                self.logger.info("TC-BCK-193: Wrong clusterName rejected PASSED")
+            finally:
+                try:
+                    k8s.delete_backup_restore(bad_restore)
+                except Exception:
+                    pass
+        else:
+            self.logger.info("TC-BCK-193: SKIPPED (Docker mode, not applicable)")
 
         self.logger.info("=== TestBackupRestoreEdgeCases PASSED ===")
 
@@ -4417,7 +5059,7 @@ class TestBackupSourceSwitch(BackupTestBase):
         rst_1 = f"rstsw1{_rand_suffix()}"
         self._restore_backup(bk_id_1, rst_1)
         self._wait_for_restore(rst_1)
-        rst_1_id = self.sbcli_utils.get_lvol_id(rst_1)
+        rst_1_id = self._get_lvol_id(rst_1)
         assert rst_1_id
         _, rst_1_mnt = self._connect_and_mount(
             rst_1, rst_1_id,
@@ -4431,7 +5073,7 @@ class TestBackupSourceSwitch(BackupTestBase):
         rst_2 = f"rstsw2{_rand_suffix()}"
         self._restore_backup(bk_id_2, rst_2)
         self._wait_for_restore(rst_2)
-        rst_2_id = self.sbcli_utils.get_lvol_id(rst_2)
+        rst_2_id = self._get_lvol_id(rst_2)
         assert rst_2_id
         _, rst_2_mnt = self._connect_and_mount(
             rst_2, rst_2_id,

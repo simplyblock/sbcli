@@ -28,6 +28,27 @@ class TestSingleNodeResizeLvolCone(TestClusterBase):
         self.logger = setup_logger(__name__)
         self.test_name = "single_node_resize"
 
+    def _assert_no_core_dump(self, context: str):
+        """Check for SPDK core dumps on all storage nodes. Raises on detection.
+
+        Works on both SSH (bare-metal/docker) and K8s-native deployments.
+        """
+        if self.k8s_test:
+            k8s_obj = getattr(self.sbcli_utils, 'k8s', None)
+            if not k8s_obj:
+                return
+            for node_ip in self.storage_nodes:
+                files = k8s_obj.list_files_in_spdk_pod(node_ip, "/etc/simplyblock/")
+                self.logger.info(f"Files in /etc/simplyblock (spdk pod for {node_ip}): {files}")
+                if any("core" in f for f in files) and not any("tmp_cores" in f for f in files):
+                    raise Exception(f"Core file present on node {node_ip}! {context}")
+        else:
+            for node in self.storage_nodes:
+                files = self.ssh_obj.list_files(node, "/etc/simplyblock/")
+                self.logger.info(f"Files in /etc/simplyblock: {files}")
+                if "core.react" in files:
+                    raise Exception(f"Core file present! {context}")
+
     def run(self):
         """ Performs each step of the testcase
         """
@@ -65,9 +86,7 @@ class TestSingleNodeResizeLvolCone(TestClusterBase):
                 size="5G",
                 host_id=node_id,
             )
-            lvols = self.sbcli_utils.list_lvols()
-            assert lvol_name in list(lvols.keys()), \
-                f"Lvol {lvol_name} is not present in list of lvols post add: {lvols}"
+            self._verify_lvol_exists_dual(lvol_name)
 
             device, mount = self._connect_and_mount_dual(
                 lvol_name, mount_path=mount_path
@@ -101,9 +120,7 @@ class TestSingleNodeResizeLvolCone(TestClusterBase):
                 format_disk=False,
             )
 
-            clone = self.sbcli_utils.list_lvols()
-            assert clone_name in list(clone.keys()), \
-                f"Clone {clone_name} is not present in list of lvols post add: {clone}"
+            self._verify_lvol_exists_dual(clone_name)
 
             fio_handle = self._run_fio_dual(
                 lvol_name=clone_name,
@@ -115,12 +132,7 @@ class TestSingleNodeResizeLvolCone(TestClusterBase):
             )
             fio_handles.append(fio_handle)
 
-        if not self.k8s_test:
-            for node in self.storage_nodes:
-                files = self.ssh_obj.list_files(node, "/etc/simplyblock/")
-                self.logger.info(f"Files in /etc/simplyblock: {files}")
-                if "core.react" in files:
-                    raise Exception("Core file present! Not starting resize!!")
+        self._assert_no_core_dump("Not starting resize!!")
 
         for i in range(1, 11):
             for j in range(1, 6):
@@ -128,21 +140,11 @@ class TestSingleNodeResizeLvolCone(TestClusterBase):
                 clone_name = f"{lvol_name}_clone"
                 self._resize_lvol_dual(lvol_name, f"{lvol_size + i}G")
                 sleep_n_sec(10)
-                if not self.k8s_test:
-                    for node in self.storage_nodes:
-                        files = self.ssh_obj.list_files(node, "/etc/simplyblock/")
-                        self.logger.info(f"Files in /etc/simplyblock: {files}")
-                        if "core.react" in files:
-                            raise Exception("Core file present after lvol resize! Not continuing resize!!")
+                self._assert_no_core_dump("Core file present after lvol resize! Not continuing resize!!")
 
                 self._resize_lvol_dual(clone_name, f"{lvol_size + i}G")
                 sleep_n_sec(10)
-                if not self.k8s_test:
-                    for node in self.storage_nodes:
-                        files = self.ssh_obj.list_files(node, "/etc/simplyblock/")
-                        self.logger.info(f"Files in /etc/simplyblock: {files}")
-                        if "core.react" in files:
-                            raise Exception("Core file present after clone resize! Not continuing resize!!")
+                self._assert_no_core_dump("Core file present after clone resize! Not continuing resize!!")
 
         lvol_size = lvol_size + 20
 
@@ -187,20 +189,10 @@ class TestSingleNodeResizeLvolCone(TestClusterBase):
             cl_mount_path = f"{self.mount_path}_cl_{i}"
             self._resize_lvol_dual(lvol_name, f"{lvol_size}G")
             sleep_n_sec(10)
-            if not self.k8s_test:
-                for node in self.storage_nodes:
-                    files = self.ssh_obj.list_files(node, "/etc/simplyblock/")
-                    self.logger.info(f"Files in /etc/simplyblock: {files}")
-                    if "core.react" in files:
-                        raise Exception("Core file present after lvol resize! Not continuing resize!!")
+            self._assert_no_core_dump("Core file present after lvol resize! Not continuing resize!!")
             self._resize_lvol_dual(clone_name, f"{lvol_size}G")
             sleep_n_sec(10)
-            if not self.k8s_test:
-                for node in self.storage_nodes:
-                    files = self.ssh_obj.list_files(node, "/etc/simplyblock/")
-                    self.logger.info(f"Files in /etc/simplyblock: {files}")
-                    if "core.react" in files:
-                        raise Exception("Core file present after clone resize! Not continuing resize!!")
+            self._assert_no_core_dump("Core file present after clone resize! Not continuing resize!!")
 
             final_checksum = self._generate_checksums_dual(
                 lvol_name,

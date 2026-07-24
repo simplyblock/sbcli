@@ -872,6 +872,8 @@ jobs:
             echo "- Outage logs: \`${outage_dir}/outage*\`"
             echo "- Docker logs: \`${RUN_BASE_DIR:-<run_dir>}/<node_ip>/containers-final-*\`"
             echo "- Distrib dumps: \`${RUN_BASE_DIR:-<run_dir>}/<storage_ip>/finaldistrib_bdev_logs/\`"
+            echo ""
+            echo "> **Note:** Graylog/OpenSearch logs are currently being collected and will be available in the NFS log directory shortly."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Send Slack Notification
@@ -947,6 +949,7 @@ jobs:
               "",
               f":link: *Run:* <{run_url}|View on GitHub>",
               f":file_folder: *Final Logs:* `{log_dir}`",
+              f":hourglass_flowing_sand: _Logs are being collected and will be available shortly._",
           ]
           payload = {"text": "\n".join(lines)}
           req = urllib.request.Request(

@@ -2,7 +2,9 @@ import time
 import paramiko
 # paramiko.common.logging.basicConfig(level=paramiko.common.DEBUG)
 import os
+import gzip
 import json
+import shutil
 import paramiko.buffered_pipe
 import paramiko.ssh_exception
 from logger_config import setup_logger
@@ -843,15 +845,87 @@ class SshUtils:
                 self.exec_command(node, command)
         except Exception as e:
             self.logger.info(e)
-        
+
         time.sleep(3)
 
         self.make_directory(node=node, dir_name=mount_path)
-        
+
         time.sleep(3)
 
         command = f"sudo mount {device} {mount_path}"
         self.exec_command(node, command)
+
+    def is_mountpoint(self, node, path):
+        """Check if *path* is an active mount point on *node*.
+
+        Returns True only when the path is a mount point backed by a
+        real block device (not just a directory on the root filesystem).
+        """
+        out, _ = self.exec_command(
+            node,
+            f"mountpoint -q {path} && echo MOUNTED || echo NOT_MOUNTED",
+            max_retries=2,
+        )
+        return "MOUNTED" in (out or "")
+
+    def is_block_device(self, node, device):
+        """Return True if *device* exists as a block device on *node*."""
+        out, _ = self.exec_command(
+            node,
+            f"test -b {device} && echo EXISTS || echo MISSING",
+            max_retries=1,
+        )
+        return "EXISTS" in (out or "")
+
+    def wait_for_block_device(self, node, device, timeout=30, interval=3):
+        """Wait up to *timeout* seconds for *device* to appear as a block device.
+
+        Useful when an NVMe namespace was just added and the kernel
+        needs time to register the block device, especially when the
+        primary multipath controller is reconnecting and the device
+        needs to appear through an alternate live path.
+
+        Returns True if the device appeared, False if timed out.
+        """
+        elapsed = 0
+        while elapsed < timeout:
+            if self.is_block_device(node, device):
+                return True
+            time.sleep(interval)
+            elapsed += interval
+        return False
+
+    def rescan_live_nvme_controllers(self, node):
+        """Run ns-rescan only on NVMe controllers in 'live' state.
+
+        Controllers in 'connecting' or 'resetting' state are skipped
+        since they cannot discover new namespaces reliably.
+
+        Returns the list of controllers that were rescanned.
+        """
+        # Get controller states from sysfs
+        cmd = (
+            "for c in /sys/class/nvme/nvme*; do "
+            "  name=$(basename $c); "
+            "  state=$(cat $c/state 2>/dev/null || echo unknown); "
+            "  echo \"$name $state\"; "
+            "done"
+        )
+        out, _ = self.exec_command(node, cmd, supress_logs=True)
+        rescanned = []
+        for line in (out or "").strip().splitlines():
+            parts = line.strip().split()
+            if len(parts) < 2:
+                continue
+            ctrl_name, state = parts[0], parts[1]
+            if state == "live":
+                self.exec_command(
+                    node,
+                    f"sudo nvme ns-rescan /dev/{ctrl_name}",
+                    supress_logs=True,
+                )
+                rescanned.append(ctrl_name)
+        return rescanned
 
     def unmount_path(self, node, device):
         """Unmount device to given path on given node
@@ -1211,13 +1285,19 @@ class SshUtils:
         return output
     
     def stop_spdk_process(self, node, rpc_port, cluster_id):
-        """Stops spdk process and waits until spdk_* containers are either exited or no longer listed.
-        
-        If containers are not killed within 20 seconds, the kill command is retried.
+        """Stops spdk process and waits until the specific spdk_{rpc_port} container is exited or gone.
+
+        If the container is not killed within 20 seconds, the kill command is retried.
         A maximum of 50 kill attempts is allowed.
+
+        Note: Uses an exact container name filter (``^spdk_{rpc_port}$``) so that
+        hosts running multiple SPDK containers (2 nodes per host) only track the
+        targeted container, not its sibling.
 
         Args:
             node (str): Node IP
+            rpc_port: RPC port identifying the specific SPDK container
+            cluster_id: Cluster ID
         """
         max_attempts = 50
         attempt = 0
@@ -1230,20 +1310,25 @@ class SshUtils:
         # record the time when the kill command was last sent
         last_kill_time = time.time()
 
+        # Filter by the exact container name for this rpc_port so that
+        # sibling SPDK containers on the same host are not considered.
+        container_name = f"spdk_{rpc_port}"
+
         while attempt < max_attempts:
-            # Command to check the status of containers matching "spdk_"
-            status_cmd = "sudo docker ps -a --filter 'name=spdk_' --format '{{.Status}}'"
+            # Check only the targeted container, not all spdk_* containers
+            status_cmd = (
+                f"sudo docker ps -a --filter 'name=^{container_name}$' "
+                f"--format '{{{{.Status}}}}'"
+            )
             status_output, err = self.exec_command(node=node, command=status_cmd)
             status_output = status_output.strip()
 
-            # If no containers found, exit the loop
+            # If no container found (removed), exit the loop
             if not status_output:
                 break
 
-            statuses = status_output.splitlines()
-            # Determine if every container is in an "Exited" state (e.g., "Exited (0)")
-            all_exited = all("Exited" in status for status in statuses)
-            if all_exited:
+            # Container is in "Exited" state — kill succeeded
+            if "Exited" in status_output:
                 break
 
             # If 20 seconds have passed since the last kill command, retry the kill command.
@@ -1332,6 +1417,49 @@ class SshUtils:
         cmd = "sudo nvme list-subsys | grep -i %s | awk '{print $3}' | cut -d '=' -f 2" % nqn_filter
         output, error = self.exec_command(node=node, command=cmd)
         return output.strip().split()
+
+    def get_namespace_count_for_nqn(self, node, nqn):
+        """Count namespaces in the given NVMe subsystem on the client.
+
+        Returns the number of namespaces visible on the client for the
+        subsystem identified by *nqn*.  Returns -1 if the count cannot
+        be determined (caller should fall back to normal disconnect).
+        """
+        command = "sudo nvme list --output-format=json"
+        output, _ = self.exec_command(node=node, command=command, supress_logs=True)
+        try:
+            data = json.loads(output)
+            for device in data.get('Devices', []):
+                for subsystem in device.get('Subsystems', []):
+                    if subsystem.get('SubsystemNQN', '') == nqn:
+                        return len(subsystem.get('Namespaces', []))
+            return 0
+        except Exception as e:
+            self.logger.warning(f"Failed to count namespaces for NQN {nqn}: {e}")
+            return -1
+
+    def safe_disconnect_nvme(self, node, nqn):
+        """Disconnect NVMe subsystem only if no other namespaces share it.
+
+        When clone volumes are placed in unrelated lvols' subsystems
+        (due to server-side random assignment), disconnecting the
+        subsystem would destroy the clone's IO.  This method checks
+        first and skips if ns_count > 1.
+
+        Returns True if disconnect was performed, False if skipped.
+        """
+        ns_count = self.get_namespace_count_for_nqn(node=node, nqn=nqn)
+        if ns_count > 1:
+            self.logger.warning(
+                f"Subsystem {nqn} has {ns_count} namespaces on {node}; "
+                f"skipping NVMe disconnect to avoid disrupting other volumes. "
+                f"Server-side DELETE will remove the namespace."
+            )
+            return False
+        # ns_count <= 1 or -1 (error -> proceed with disconnect to preserve existing behavior)
+        self.logger.info(f"Disconnecting NVMe subsystem: {nqn}")
+        self.disconnect_nvme(node=node, nqn_grep=nqn)
+        return True
     
     def get_nvme_device_subsystems(self, node):
         """Get json for nvme device wise
@@ -1600,10 +1728,23 @@ class SshUtils:
         reduced so that ``new_size * numjobs`` fits within 80 % of the
         available space (leaving headroom for FS metadata).
 
+        Raises ``RuntimeError`` if *mount_point* is not an active mount —
+        this prevents FIO from writing to the root filesystem when the
+        NVMe block device has disappeared during a failover.
+
         Returns:
             The (possibly reduced) FIO ``--size`` value as a string, e.g.
             ``"5G"`` or ``"2G"``.
         """
+        # Guard: ensure the path is a real mount, not a bare directory on
+        # the root FS.  Without this check, ``df`` returns root-FS stats
+        # and FIO fills the root partition instead of the NVMe volume.
+        if not self.is_mountpoint(node, mount_point):
+            raise RuntimeError(
+                f"[space_check] {node}:{mount_point} is NOT a mount point — "
+                f"block device may have disappeared; refusing to start FIO"
+            )
+
         size_gb = self._parse_size_to_gb(fio_size_str)
         needed_gb = size_gb * numjobs
 
@@ -2045,6 +2186,7 @@ class SshUtils:
         - Auto-discovers containers via `docker ps -a`.
         - Writes logs to: <log_dir>/<node_ip>/containers-final-<ts>/
         - Captures: docker ps -a, docker logs, docker inspect (per container).
+        - Nodes are collected in parallel (one thread per node) for speed.
         """
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -2052,79 +2194,93 @@ class SshUtils:
             # Keep it filesystem friendly
             return re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("_") or "unnamed"
 
-        for node in nodes:
-            base_dir = os.path.join(log_dir, f"{node}", f"containers-final-{ts}")
-            # Ensure base dir exists on the remote
-            self.exec_command(node, f"bash -lc \"mkdir -p '{base_dir}' && chmod -R 777 '{base_dir}'\"")
+        def _collect_node(node):
+            """Collect all docker logs for a single node."""
+            try:
+                base_dir = os.path.join(log_dir, f"{node}", f"containers-final-{ts}")
+                # Ensure base dir exists on the remote
+                self.exec_command(node, f"bash -lc \"mkdir -p '{base_dir}' && chmod -R 777 '{base_dir}'\"")
 
-            # Always save a full container listing for later forensics
-            self.exec_command(
-                node,
-                f"bash -lc \"sudo docker ps -a > '{base_dir}/docker_ps_a_{_safe(node)}_{ts}.txt' 2>&1 || true\""
-            )
-
-            # Discover container names (include exited)
-            out, _ = self.exec_command(node, "bash -lc \"sudo docker ps -a --format '{{.Names}}' 2>/dev/null || true\"")
-            containers = [c.strip() for c in (out or "").splitlines() if c.strip()]
-
-            if not containers:
+                # Always save a full container listing for later forensics
                 self.exec_command(
                     node,
-                    f"bash -lc \"echo 'No containers found' > '{base_dir}/_NO_CONTAINERS_{_safe(node)}_{ts}.txt'\""
-                )
-                continue
-
-            for c in containers:
-                sc = _safe(c)
-                cont_dir = f"{base_dir}/{sc}"
-                self.exec_command(node, f"bash -lc \"mkdir -p '{cont_dir}'\"")
-
-                # docker logs (timestamps; non-follow). Use a tmp file then mv for atomicity.
-                self.exec_command(
-                    node,
-                    "bash -lc "
-                    f"\"sudo docker logs --timestamps {c} > '{cont_dir}/docker_logs_{sc}_{ts}.log.tmp' 2>&1 || true; "
-                    f"mv -f '{cont_dir}/docker_logs_{sc}_{ts}.log.tmp' '{cont_dir}/docker_logs_{sc}_{ts}.log' || true\""
+                    f"bash -lc \"sudo docker ps -a > '{base_dir}/docker_ps_a_{_safe(node)}_{ts}.txt' 2>&1 || true\""
                 )
 
-                # Extract delay-qpair entries from SPDK container logs for quick analysis
-                if re.match(r'^spdk_\d+$', c):
+                # Discover container names (include exited)
+                out, _ = self.exec_command(node, "bash -lc \"sudo docker ps -a --format '{{.Names}}' 2>/dev/null || true\"")
+                containers = [c.strip() for c in (out or "").splitlines() if c.strip()]
+
+                if not containers:
+                    self.exec_command(
+                        node,
+                        f"bash -lc \"echo 'No containers found' > '{base_dir}/_NO_CONTAINERS_{_safe(node)}_{ts}.txt'\""
+                    )
+                    return
+
+                for c in containers:
+                    sc = _safe(c)
+                    cont_dir = f"{base_dir}/{sc}"
+                    self.exec_command(node, f"bash -lc \"mkdir -p '{cont_dir}'\"")
+
+                    # docker logs (timestamps; non-follow). Use a tmp file then mv for atomicity.
                     self.exec_command(
                         node,
                         "bash -lc "
-                        f"\"grep -E 'nvmf_tcp_dump_delay_req_status|delay-qpair' "
-                        f"'{cont_dir}/docker_logs_{sc}_{ts}.log' "
-                        f"> '{cont_dir}/delay_qpair_{sc}_{ts}.log' 2>/dev/null; "
-                        f"[ -s '{cont_dir}/delay_qpair_{sc}_{ts}.log' ] || "
-                        f"rm -f '{cont_dir}/delay_qpair_{sc}_{ts}.log'\""
+                        f"\"sudo docker logs --timestamps {c} > '{cont_dir}/docker_logs_{sc}_{ts}.log.tmp' 2>&1 || true; "
+                        f"mv -f '{cont_dir}/docker_logs_{sc}_{ts}.log.tmp' '{cont_dir}/docker_logs_{sc}_{ts}.log' || true\""
                     )
 
-                # docker inspect (JSON)
+                    # Extract delay-qpair entries from SPDK container logs for quick analysis
+                    if re.match(r'^spdk_\d+$', c):
+                        self.exec_command(
+                            node,
+                            "bash -lc "
+                            f"\"grep -E 'nvmf_tcp_dump_delay_req_status|delay-qpair' "
+                            f"'{cont_dir}/docker_logs_{sc}_{ts}.log' "
+                            f"> '{cont_dir}/delay_qpair_{sc}_{ts}.log' 2>/dev/null; "
+                            f"[ -s '{cont_dir}/delay_qpair_{sc}_{ts}.log' ] || "
+                            f"rm -f '{cont_dir}/delay_qpair_{sc}_{ts}.log'\""
+                        )
+
+                    # docker inspect (JSON)
+                    self.exec_command(
+                        node,
+                        "bash -lc "
+                        f"\"sudo docker inspect {c} > '{cont_dir}/docker_inspect_{sc}_{ts}.json.tmp' 2>&1 || true; "
+                        f"mv -f '{cont_dir}/docker_inspect_{sc}_{ts}.json.tmp' '{cont_dir}/docker_inspect_{sc}_{ts}.json' || true\""
+                    )
+
+                    # Optional extras that often help:
+                    # docker top (may fail on exited containers, so '|| true')
+                    self.exec_command(
+                        node,
+                        f"bash -lc \"sudo docker top {c} > '{cont_dir}/docker_top_{sc}_{ts}.txt' 2>&1 || true\""
+                    )
+
+                    # container fs usage (size); harmless if unsupported
+                    self.exec_command(
+                        node,
+                        f"bash -lc \"sudo docker inspect --size {c} > '{cont_dir}/docker_inspect_size_{sc}_{ts}.json' 2>&1 || true\""
+                    )
+
+                # For convenience, also dump names list used
                 self.exec_command(
                     node,
-                    "bash -lc "
-                    f"\"sudo docker inspect {c} > '{cont_dir}/docker_inspect_{sc}_{ts}.json.tmp' 2>&1 || true; "
-                    f"mv -f '{cont_dir}/docker_inspect_{sc}_{ts}.json.tmp' '{cont_dir}/docker_inspect_{sc}_{ts}.json' || true\""
+                    f"bash -lc \"printf '%s\\n' {' '.join([repr(x) for x in containers])} > '{base_dir}/_containers_list_{_safe(node)}_{ts}.txt'\""
                 )
+            except Exception as exc:
+                self.logger.warning(f"[collect_final_docker_logs] Node {node} failed: {exc}")
 
-                # Optional extras that often help:
-                # docker top (may fail on exited containers, so '|| true')
-                self.exec_command(
-                    node,
-                    f"bash -lc \"sudo docker top {c} > '{cont_dir}/docker_top_{sc}_{ts}.txt' 2>&1 || true\""
-                )
+        # Collect all nodes in parallel
+        threads = []
+        for node in nodes:
+            t = threading.Thread(target=_collect_node, args=(node,), daemon=True)
+            threads.append(t)
+            t.start()
 
-                # container fs usage (size); harmless if unsupported
-                self.exec_command(
-                    node,
-                    f"bash -lc \"sudo docker inspect --size {c} > '{cont_dir}/docker_inspect_size_{sc}_{ts}.json' 2>&1 || true\""
-                )
-
-            # For convenience, also dump names list used
-            self.exec_command(
-                node,
-                f"bash -lc \"printf '%s\\n' {' '.join([repr(x) for x in containers])} > '{base_dir}/_containers_list_{_safe(node)}_{ts}.txt'\""
-            )
+        for t in threads:
+            t.join(timeout=300)  # 5 min max per node
 
 
     def restart_docker_logging(self, node_ip, containers, log_dir, test_name, timeout=60, max_retries=2):
@@ -2149,7 +2305,7 @@ class SshUtils:
                 tmux_session_name = f"{container}_logs_{random_suffix}"
                 command_logs = (
                     f"sudo tmux new-session -d -s {tmux_session_name} "
-                    f"\"docker logs --follow {container} > {log_file} 2>&1\""
+                    f"\"docker logs --follow --tail 0 {container} > {log_file} 2>&1\""
                 )
                 self.logger.info(f"Restarting Docker log collection for container '{container}' on {node_ip}. Command: {command_logs}")
                 self.exec_command(node_ip, command_logs, timeout=timeout, max_retries=max_retries)
@@ -3357,7 +3513,7 @@ class SshUtils:
                                 self.logger.info(f"[{node_ip}] Logging for container: {container}")
                                 cmd = (
                                     f"sudo tmux new-session -d -s {session} "
-                                    f"\"docker logs --follow {container} > {log_file} 2>&1\""
+                                    f"\"docker logs --follow --tail 0 {container} > {log_file} 2>&1\""
                                 )
                                 self.exec_command(node_ip, cmd, supress_logs=True)
                         except Exception as e:
@@ -3485,7 +3641,7 @@ class SshUtils:
         docker_cmd = f"""
         sudo tmux new-session -d -s docker_mem_monitor \
         'bash -c "while true; do date >> {docker_mem_log}; \
-        docker stats --no-stream --format \\"table {{.Name}}\\t{{.MemUsage}}\\" >> {docker_mem_log}; \
+        docker stats --no-stream --format \\"table {{{{.Name}}}}\\t{{{{.MemUsage}}}}\\" >> {docker_mem_log}; \
         echo >> {docker_mem_log}; sleep 10; done"'
         """
 
@@ -3827,7 +3983,8 @@ class SshUtils:
     def create_sec_lvol(self, node, lvol_name, size, pool,
                         encrypt=False,
                         distr_ndcs=0, distr_npcs=0, fabric="tcp",
-                        allowed_hosts=None, sec_options=None):
+                        allowed_hosts=None, sec_options=None,
+                        max_namespace_per_subsys=None):
         """
         Create an lvol via CLI.
 
@@ -3845,6 +4002,8 @@ class SshUtils:
             cmd += f" --fabric {fabric}"
         if distr_ndcs and distr_npcs:
             cmd += f" --data-chunks-per-stripe {distr_ndcs} --parity-chunks-per-stripe {distr_npcs}"
+        if max_namespace_per_subsys is not None:
+            cmd += f" --max-namespace-per-subsys {max_namespace_per_subsys}"
 
         self.logger.info(f"[create_sec_lvol] encrypt={encrypt} fabric={fabric} "
                          f"ndcs={distr_ndcs} npcs={distr_npcs}")
@@ -3935,6 +4094,92 @@ class SshUtils:
         self.logger.info(
             f"[get_lvol_host_secret] {lvol_id} {host_nqn}: out={out!r}, err={err!r}")
         return out, err
+
+
+def _compress_and_cleanup_old_dumps(log_dir, current_dump_dir, logger):
+    """Compress placement/lvstore dump files and delete old compressed dumps.
+
+    Only targets files inside ``node_dumps_*`` directories (placement dumps
+    like ``distrib_*_map_*.txt`` and lvstore dumps like ``LVS_dump_*.txt``).
+    Skips the *current* dump directory (just created, may still be validated).
+
+    Called in a background thread after collect_outage_diagnostics() to keep
+    NFS disk usage manageable during long stress tests.
+
+    1. Gzip .txt files in old node_dumps_* dirs (the large placement/lvstore dumps).
+    2. Delete .gz files older than 3 hours.
+
+    Args:
+        log_dir: Base NFS test log directory (docker_logs_path).
+        current_dump_dir: The node_dumps_* directory just created (skip it).
+        logger: Logger instance.
+    """
+    if not log_dir or not os.path.isdir(log_dir):
+        return
+    cutoff_time = time.time() - (3 * 3600)
+
+    compressed_count = 0
+    freed_bytes = 0
+    deleted_count = 0
+    deleted_bytes = 0
+
+    # Find all node_dumps_* directories in the base log dir
+    try:
+        entries = os.listdir(log_dir)
+    except OSError as exc:
+        logger.warning(f"[dump-compress] cannot list {log_dir}: {exc}")
+        return
+
+    current_abs = os.path.abspath(current_dump_dir) if current_dump_dir else None
+
+    for entry in entries:
+        if not entry.startswith("node_dumps_"):
+            continue
+        dump_path = os.path.join(log_dir, entry)
+        if not os.path.isdir(dump_path):
+            continue
+        # Skip the directory we just created
+        if current_abs and os.path.abspath(dump_path) == current_abs:
+            continue
+
+        for root, _dirs, files in os.walk(dump_path):
+            for fname in files:
+                fpath = os.path.join(root, fname)
+
+                # Phase 1: Compress .txt dump files (placement + lvstore dumps)
+                if fname.endswith('.txt') and not fname.endswith('.gz'):
+                    try:
+                        size = os.path.getsize(fpath)
+                        if size == 0:
+                            continue
+                        with open(fpath, 'rb') as f_in:
+                            with gzip.open(fpath + '.gz', 'wb', compresslevel=6) as f_out:
+                                shutil.copyfileobj(f_in, f_out)
+                        os.remove(fpath)
+                        compressed_count += 1
+                        freed_bytes += size
+                    except Exception as exc:
+                        logger.warning(f"[dump-compress] compress failed {fpath}: {exc}")
+
+                # Phase 2: Delete old compressed dumps
+                elif fname.endswith('.gz'):
+                    try:
+                        mtime = os.path.getmtime(fpath)
+                        if mtime < cutoff_time:
+                            size = os.path.getsize(fpath)
+                            os.remove(fpath)
+                            deleted_count += 1
+                            deleted_bytes += size
+                    except Exception as exc:
+                        logger.warning(f"[dump-compress] delete failed {fpath}: {exc}")
+
+    if compressed_count or deleted_count:
+        logger.info(
+            f"[dump-compress] Compressed {compressed_count} dump files "
+            f"({freed_bytes / (1024**3):.2f} GB), "
+            f"deleted {deleted_count} old .gz dumps "
+            f"({deleted_bytes / (1024**3):.2f} GB)"
+        )
 
 
 class RunnerK8sLog:
@@ -4073,6 +4318,19 @@ class RunnerK8sLog:
                 session_name = f"{pod}_{container}_logs_{self.generate_random_string()}"
                 container_id = self._get_container_id(pod, container)
                 key = f"{pod}:{container}"
+
+                # Kill any existing stream for this container to avoid duplicates
+                existing = self._active_log_streams.get(key)
+                if existing and existing.get("session"):
+                    try:
+                        subprocess.run(
+                            ["tmux", "kill-session", "-t", existing["session"]],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                        )
+                        self.logger.info(f"Killed old tmux session '{existing['session']}' for {key}")
+                    except Exception:
+                        pass
+
                 self._pod_container_map[key] = container_id
 
                 command_logs = [
@@ -4090,14 +4348,173 @@ class RunnerK8sLog:
                 }
                 self.logger.info(f"Started logging for pod '{pod}', container '{container}' ({outage_type}), logs stored at {log_file}.")
 
+            # Capture init container logs (one-shot, they're already completed)
+            try:
+                init_containers = subprocess.check_output(
+                    ["kubectl", "get", "pod", pod, "-n", self.namespace,
+                     "-o", "jsonpath={.spec.initContainers[*].name}"],
+                    universal_newlines=True,
+                ).strip().split()
+            except subprocess.CalledProcessError:
+                init_containers = []
+
+            for ic in init_containers:
+                if not ic:
+                    continue
+                ic_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                ic_log_file = f"{pod_log_dir}/{ic}_{self.test_name}_{ic_timestamp}_init.log"
+                try:
+                    subprocess.run(
+                        f"kubectl logs {pod} -c {ic} -n {self.namespace}"
+                        f" > {ic_log_file} 2>&1",
+                        shell=True, timeout=60,
+                    )
+                except Exception as e:
+                    self.logger.warning(f"Failed to capture init container logs for {pod}:{ic}: {e}")
+
 
     def stop_logging(self):
+        """Stop all Kubernetes logging processes with graceful shutdown."""
+        # Send C-c to each tmux session so kubectl can flush its buffer
+        try:
+            result = subprocess.run(
+                ["tmux", "list-sessions", "-F", "#{session_name}"],
+                capture_output=True, text=True,
+            )
+            if result.returncode == 0:
+                for session in result.stdout.splitlines():
+                    session = session.strip()
+                    if session:
+                        subprocess.run(
+                            ["tmux", "send-keys", "-t", session, "C-c", ""],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                        )
+        except Exception:
+            pass
+
+        # Give kubectl processes a moment to flush and exit
+        time.sleep(3)
+
+        subprocess.run(
+            ["tmux", "kill-server"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        self.logger.info("Stopped all Kubernetes logging processes.")
+
+    def collect_final_k8s_logs(self):
+        """One-shot kubectl logs for all containers — safety net at test end.
+
+        This is the K8s equivalent of
+        ``SshUtils.collect_final_docker_logs_simple()``.  It captures the
+        complete final state of every container's logs independent of the
+        follow-stream mechanism, so even if a tmux session crashed between
+        polls those logs are not lost.
         """
-        Stop all Kubernetes logging processes.
-        """
-        stop_command = ["tmux", "kill-server"]
-        subprocess.run(stop_command)
-        print("Stopped all Kubernetes logging processes.")
+        _LOG_PREFIXES = (
+            "simplyblock-admin-control",
+            "simplyblock-csi-controller",
+            "simplyblock-csi-node",
+            "simplyblock-fdb-",
+            "simplyblock-manager",
+            "simplyblock-mgmt-api-job",
+            "simplyblock-monitoring",
+            "simplyblock-operator",
+            "simplyblock-prometheus",
+            "simplyblock-storage-node-controller",
+            "simplyblock-storage-node-ds",
+            "simplyblock-tasks",
+            "simplyblock-webappapi",
+            "snode-spdk-pod",
+            "fio-",
+        )
+
+        pods = self.get_running_pods()
+        if not pods:
+            self.logger.warning("[final-logs] No running pods found")
+            return
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        for pod in pods:
+            if not pod.startswith(_LOG_PREFIXES):
+                continue
+
+            pod_log_dir = os.path.join(self.log_dir, pod)
+            os.makedirs(pod_log_dir, exist_ok=True)
+
+            # Discover regular containers
+            try:
+                containers = subprocess.check_output(
+                    ["kubectl", "get", "pod", pod, "-n", self.namespace,
+                     "-o", "jsonpath={.spec.containers[*].name}"],
+                    universal_newlines=True,
+                ).strip().split()
+            except subprocess.CalledProcessError:
+                containers = []
+
+            # Discover init containers
+            try:
+                init_containers = subprocess.check_output(
+                    ["kubectl", "get", "pod", pod, "-n", self.namespace,
+                     "-o", "jsonpath={.spec.initContainers[*].name}"],
+                    universal_newlines=True,
+                ).strip().split()
+            except subprocess.CalledProcessError:
+                init_containers = []
+
+            # Capture current logs for all containers (one-shot, no --follow)
+            for container in containers:
+                if not container:
+                    continue
+                log_file = f"{pod_log_dir}/{container}_{self.test_name}_{timestamp}_final.log"
+                try:
+                    subprocess.run(
+                        f"kubectl logs {pod} -c {container} -n {self.namespace}"
+                        f" --timestamps > {log_file} 2>&1",
+                        shell=True, timeout=120,
+                    )
+                except Exception as exc:
+                    self.logger.warning(f"[final-logs] Failed for {pod}:{container}: {exc}")
+
+                # Also capture --previous logs if available
+                prev_file = f"{pod_log_dir}/{container}_{self.test_name}_{timestamp}_final_previous.log"
+                try:
+                    subprocess.run(
+                        f"kubectl logs --previous {pod} -c {container}"
+                        f" -n {self.namespace} > {prev_file} 2>&1",
+                        shell=True, timeout=120,
+                    )
+                    if os.path.exists(prev_file) and os.path.getsize(prev_file) == 0:
+                        os.remove(prev_file)
+                except Exception:
+                    pass
+
+            # Capture init container logs (one-shot, they're completed)
+            for ic in init_containers:
+                if not ic:
+                    continue
+                ic_file = f"{pod_log_dir}/{ic}_{self.test_name}_{timestamp}_init.log"
+                try:
+                    subprocess.run(
+                        f"kubectl logs {pod} -c {ic} -n {self.namespace}"
+                        f" > {ic_file} 2>&1",
+                        shell=True, timeout=60,
+                    )
+                except Exception as exc:
+                    self.logger.warning(f"[final-logs] Failed for init {pod}:{ic}: {exc}")
+
+            # Capture pod describe
+            describe_file = f"{pod_log_dir}/{pod}_{self.test_name}_{timestamp}_final_describe.log"
+            try:
+                with open(describe_file, "w") as f:
+                    subprocess.run(
+                        ["kubectl", "describe", "pod", pod, "-n", self.namespace],
+                        stdout=f, stderr=subprocess.STDOUT, timeout=60,
+                    )
+            except Exception as exc:
+                self.logger.warning(f"[final-logs] describe failed for {pod}: {exc}")
+
+        self.logger.info(f"[final-logs] Captured final logs for {len(pods)} pods")
 
     def store_pod_descriptions(self):
         """
@@ -4147,7 +4564,7 @@ class RunnerK8sLog:
         cmd = [
             "tmux", "new-session", "-d", "-s", session_name,
             "bash", "-c",
-            f"kubectl logs --follow {pod} -c {container} -n {self.namespace} > {log_file} 2>&1"
+            f"kubectl logs --follow --tail=0 {pod} -c {container} -n {self.namespace} > {log_file} 2>&1"
         ]
         subprocess.Popen(cmd)
         self._active_log_streams[key] = {
@@ -4226,8 +4643,8 @@ class RunnerK8sLog:
         )
 
         # Number of consecutive stale checks before restarting a stream.
-        # With poll_interval=60s, 3 means the file hasn't grown for ~3 min.
-        STALE_THRESHOLD = 3
+        # With poll_interval=60s, 2 means the file hasn't grown for ~2 min.
+        STALE_THRESHOLD = 2
 
         def _monitor():
             while not self._monitor_stop_flag.is_set():

@@ -853,11 +853,252 @@ jobs:
           echo "TEST_END_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           echo "TEST_END_HUMAN=$(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> "$GITHUB_ENV"
 
+      # =========================
+      # SUMMARY (always): test run, outages, failure reason, mgmt files, duration
+      # Assumes outages are in sbcli/e2e/logs/outage*
+      # =========================
+      - name: Write Job Summary (test/outages/failure/mgmt/duration)
+        if: always()
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          mgmt_ip="$(echo "${MNODES}" | awk '{print $1}')"
+          out_log="sbcli/e2e/output.log"
+
+          start="${TEST_START_EPOCH:-0}"
+          end="${TEST_END_EPOCH:-0}"
+          dur_sec=0
+          if [[ "$start" =~ ^[0-9]+$ && "$end" =~ ^[0-9]+$ && "$end" -ge "$start" ]]; then
+            dur_sec=$((end-start))
+          fi
+          dur_h=$((dur_sec/3600))
+          dur_m=$(((dur_sec%3600)/60))
+          dur_s=$((dur_sec%60))
+          dur_fmt="${dur_h}h ${dur_m}m ${dur_s}s"
+
+          outage_dir="sbcli/e2e/logs"
+          outage_count=0
+          outage_latest=""
+          outage_lines=0
+          outage_tail=""
+          if compgen -G "${outage_dir}/outage*" > /dev/null; then
+            outage_count="$(ls -1 ${outage_dir}/outage* 2>/dev/null | wc -l | awk '{print $1}')"
+            outage_latest="$(ls -1t ${outage_dir}/outage* 2>/dev/null | head -n 1 || true)"
+            outage_lines="$(cat ${outage_dir}/outage* 2>/dev/null | wc -l | awk '{print $1}')"
+            [[ -n "${outage_latest}" && -f "${outage_latest}" ]] && outage_tail="$(tail -n 20 "${outage_latest}" 2>/dev/null || true)"
+          fi
+
+          # --- failure reason: MultipleExceptions line has "TestName: actual error" ---
+          failure_summary="(unknown)"
+          log_tail=""
+          if [[ -f "${out_log}" ]]; then
+            # The MultipleExceptions line is the definitive failure summary: "TestName: error"
+            failure_summary="$(grep -oE 'MultipleExceptions: .+|SkippedTestsException: .+' "${out_log}" \
+              | tail -n 1 | sed 's/\x1b\[[0-9;]*m//g' || true)"
+            if [[ -z "${failure_summary}" ]]; then
+              # Fallback: last RuntimeError / AssertionError logged
+              failure_summary="$(grep -E 'RuntimeError:|AssertionError:|Error:' "${out_log}" \
+                | tail -n 1 | sed 's/\x1b\[[0-9;]*m//g' || true)"
+            fi
+            [[ -z "${failure_summary}" ]] && failure_summary="(no exception line found)"
+            log_tail="$(tail -n 50 "${out_log}" | sed 's/\x1b\[[0-9;]*m//g' || true)"
+          fi
+
+          # --- test result counts from stress.py log lines ---
+          total_cases="$(grep -E 'Number of Total Cases:' "${out_log}" 2>/dev/null | tail -n 1 | grep -oE '[0-9]+$' || echo '?')"
+          passed_cnt="$(grep -E 'Number of Passed Cases:' "${out_log}" 2>/dev/null | tail -n 1 | grep -oE '[0-9]+$' || echo '?')"
+          failed_cnt="$(grep -E 'Number of Failed Cases:' "${out_log}" 2>/dev/null | tail -n 1 | grep -oE '[0-9]+$' || echo '?')"
+          skipped_cnt="$(grep -E 'Number of Skipped Cases:' "${out_log}" 2>/dev/null | tail -n 1 | grep -oE '[0-9]+$' || echo '?')"
+          test_wise="$(grep -E '(PASSED|FAILED|SKIPPED) CASE\.' "${out_log}" 2>/dev/null \
+            | sed 's/\x1b\[[0-9;]*m//g' | sed 's/.*INFO - //' || true)"
+
+          mgmt_dir="${RUN_BASE_DIR:-}/$(echo "${MNODES}" | awk '{print $1}')/mgmt_details/mgmt"
+          mgmt_files="(not found)"
+          if [[ -n "${RUN_BASE_DIR:-}" && -d "${mgmt_dir}" ]]; then
+            mgmt_files="$(find "${mgmt_dir}" -maxdepth 1 -type f -printf '%f (%s bytes)\n' 2>/dev/null | sort || true)"
+            [[ -n "${mgmt_files}" ]] || mgmt_files="(empty)"
+          fi
+
+          conclusion="SUCCESS"
+          if [[ "${{ job.status }}" != "success" ]]; then
+            conclusion="FAILED"
+          fi
+
+          {
+            echo "## SimplyBlock Stress Run Summary"
+            echo ""
+            echo "**Result:** ${conclusion}"
+            echo ""
+            echo "### Run Info"
+            echo "- **Test class:** \`${TEST_CLASS}\`"
+            echo "- **Cluster ID:** \`${CLUSTER_ID}\`"
+            echo "- **Mgmt node:** \`${mgmt_ip}\`"
+            echo "- **NDCS/NPCS:** \`${NDCS}/${NPCS}\`"
+            echo "- **Start (UTC):** ${TEST_START_HUMAN:-unknown}"
+            echo "- **End (UTC):** ${TEST_END_HUMAN:-unknown}"
+            echo "- **Duration:** ${dur_fmt}"
+            echo ""
+            echo "### Test Results"
+            echo "- **Total:** ${total_cases} | **Passed:** ${passed_cnt} | **Failed:** ${failed_cnt} | **Skipped:** ${skipped_cnt}"
+            if [[ -n "${test_wise}" ]]; then
+              echo '```'
+              printf '%s\n' "${test_wise}"
+              echo '```'
+            fi
+            echo ""
+            echo "### NFS Run Folder"
+            echo "- **RUN_BASE_DIR:** \`${RUN_BASE_DIR:-not detected}\`"
+            echo "- Client logs: \`${RUN_BASE_DIR:-<run_dir>}/ClientLogs\`"
+            echo "- Mgmt details: \`${RUN_BASE_DIR:-<run_dir>}/${mgmt_ip}/mgmt_details\`"
+            echo ""
+            echo "### Outages"
+            echo "- Outage files matched: \`${outage_dir}/outage*\`"
+            echo "- **Outage file count:** ${outage_count}"
+            echo "- **Total outage log lines:** ${outage_lines}"
+            [[ -n "${outage_latest}" ]] && echo "- **Latest outage file:** \`${outage_latest}\`"
+            if [[ -n "${outage_tail}" ]]; then
+              echo ""
+              echo "<details><summary>Latest outage file (last 20 lines)</summary>"
+              echo ""
+              echo '```'
+              printf '%s\n' "${outage_tail}"
+              echo '```'
+              echo "</details>"
+            fi
+            echo ""
+            echo "### Failure Reason"
+            echo '```'
+            printf '%s\n' "${failure_summary}"
+            echo '```'
+            if [[ -n "${log_tail}" ]]; then
+              echo ""
+              echo "<details><summary>Last 50 lines of output.log</summary>"
+              echo ""
+              echo '```'
+              printf '%s\n' "${log_tail}"
+              echo '```'
+              echo "</details>"
+            fi
+            if [[ -n "${POST_TEST_WARNINGS:-}" ]]; then
+              echo ""
+              echo "### :warning: Post-Test Warnings"
+              echo "The following post-test steps failed (did NOT affect test result):"
+              echo "- ${POST_TEST_WARNINGS}"
+            fi
+            echo ""
+            echo "### Mgmt Artifacts (mgmt_details/mgmt)"
+            echo "- Path: \`${mgmt_dir}\`"
+            echo "<details><summary>Files</summary>"
+            echo ""
+            echo '```'
+            printf '%s\n' "${mgmt_files}"
+            echo '```'
+            echo "</details>"
+            echo ""
+            echo "### Key Logs"
+            echo "- Runner stress log: \`${out_log}\`"
+            echo "- Outage logs: \`${outage_dir}/outage*\`"
+            echo "- Docker logs: \`${RUN_BASE_DIR:-<run_dir>}/<node_ip>/containers-final-*\`"
+            echo "- Distrib dumps: \`${RUN_BASE_DIR:-<run_dir>}/<storage_ip>/finaldistrib_bdev_logs/\`"
+            echo ""
+            echo "> **Note:** Graylog/OpenSearch logs are currently being collected and will be available in the NFS log directory shortly."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Send Slack Notification
+        if: always()
+        shell: bash
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          JOB_STATUS: ${{ job.status }}
+          SLACK_RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          SLACK_WF_NAME: "Stress (Bootstrap)"
+        run: |
+          python3 - <<'PYEOF'
+          import json, os, re, sys, urllib.request, urllib.error
+          webhook = os.environ.get("SLACK_WEBHOOK_URL", "")
+          if not webhook:
+              print("No SLACK_WEBHOOK_URL set, skipping.")
+              sys.exit(0)
+          out_log = "sbcli/e2e/output.log"
+          total = passed = failed = skipped = 0
+          if os.path.isfile(out_log):
+              content = open(out_log).read()
+              def px(pat):
+                  m = re.search(pat, content)
+                  return int(m.group(1)) if m else 0
+              total   = px(r'Number of Total Cases:\s*(\d+)')
+              passed  = px(r'Number of Passed Cases:\s*(\d+)')
+              failed  = px(r'Number of Failed Cases:\s*(\d+)')
+              skipped = px(r'Number of Skipped Cases:\s*(\d+)')
+          pass_pct = (passed * 100 // total) if total > 0 else 0
+          s    = int(os.environ.get("TEST_START_EPOCH", "0") or "0")
+          e    = int(os.environ.get("TEST_END_EPOCH",   "0") or "0")
+          secs = max(0, e - s) if e >= s > 0 else 0
+          dur  = f"{secs//3600}h {(secs%3600)//60}m {secs%60}s"
+          run_url  = os.environ.get("SLACK_RUN_URL",   "")
+          log_dir  = os.environ.get("RUN_BASE_DIR",    "N/A")
+          ndcs     = os.environ.get("NDCS",            "?")
+          npcs     = os.environ.get("NPCS",            "?")
+          test_cls = os.environ.get("TEST_CLASS",      "") or "all"
+          branch   = os.environ.get("GITHUB_REF_NAME", "?")
+          wf_name  = os.environ.get("SLACK_WF_NAME",   "Run")
+          warnings = os.environ.get("POST_TEST_WARNINGS", "")
+          ok       = os.environ.get("JOB_STATUS",      "") == "success"
+          if ok and warnings:
+              icon    = ":white_check_mark:"
+              status  = "SUCCESS (with warnings)"
+              mention = ""
+          elif ok:
+              icon    = ":white_check_mark:"
+              status  = "SUCCESS"
+              mention = ""
+          else:
+              icon    = ":x:"
+              status  = "FAILURE"
+              mention = " <!channel>"
+          lines = [
+              f"{icon} *SimplyBlock {wf_name}*{mention}",
+              f"*Status:* {status}  |  *Duration:* {dur}",
+              f"*Branch:* `{branch}`  |  *NDCS/NPCS:* `{ndcs}/{npcs}`  |  *Test class:* `{test_cls}`",
+              "",
+          ]
+          if total > 0:
+              lines += [
+                  f":white_check_mark: *Passed:*  {passed}/{total}  ({pass_pct}%)",
+                  f":x: *Failed:*  {failed}",
+                  f":fast_forward: *Skipped:*  {skipped}",
+              ]
+          else:
+              lines.append("_(test counts not found in log)_")
+          if warnings:
+              lines += ["", f":warning: *Post-test warnings:* {warnings}"]
+          lines += [
+              "",
+              f":link: *Run:* <{run_url}|View on GitHub>",
+              f":file_folder: *Final Logs:* `{log_dir}`",
+              f":hourglass_flowing_sand: _Logs are being collected and will be available shortly._",
+          ]
+          payload = {"text": "\n".join(lines)}
+          req = urllib.request.Request(
+              webhook,
+              data=json.dumps(payload).encode(),
+              headers={"Content-Type": "application/json"},
+          )
+          try:
+              urllib.request.urlopen(req, timeout=15)
+              print("Slack notification sent.")
+          except Exception as exc:
+              print(f"WARN: Slack notification failed: {exc}", file=sys.stderr)
+          PYEOF
+
+
       - name: Collect Graylog/OpenSearch logs
         id: collect-graylog
         if: '!cancelled()'
         continue-on-error: true
-        timeout-minutes: 240
+        timeout-minutes: 480
         shell: bash
         run: |
           set +e
@@ -906,9 +1147,9 @@ jobs:
             [ $rc -ne 0 ] && return $rc
             local has_content
             has_content=$(ssh "${SSH_OPTS[@]}" "${SSH_USER}@${MGMT_IP}" \
-              "find '${outdir}' -name '*.log' -size +0 2>/dev/null | head -1")
+              "find '${outdir}' -name '*.tar.gz' -size +0 2>/dev/null | head -1")
             if [ -z "${has_content}" ]; then
-              echo "  WARN: collect_logs.py succeeded but all .log files are 0 bytes"
+              echo "  WARN: collect_logs.py succeeded but no .tar.gz output found"
               return 1
             fi
           }
@@ -1304,244 +1545,6 @@ jobs:
           else
             echo "All post-test collection steps succeeded."
           fi
-
-      # =========================
-      # SUMMARY (always): test run, outages, failure reason, mgmt files, duration
-      # Assumes outages are in sbcli/e2e/logs/outage*
-      # =========================
-      - name: Write Job Summary (test/outages/failure/mgmt/duration)
-        if: always()
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          mgmt_ip="$(echo "${MNODES}" | awk '{print $1}')"
-          out_log="sbcli/e2e/output.log"
-
-          start="${TEST_START_EPOCH:-0}"
-          end="${TEST_END_EPOCH:-0}"
-          dur_sec=0
-          if [[ "$start" =~ ^[0-9]+$ && "$end" =~ ^[0-9]+$ && "$end" -ge "$start" ]]; then
-            dur_sec=$((end-start))
-          fi
-          dur_h=$((dur_sec/3600))
-          dur_m=$(((dur_sec%3600)/60))
-          dur_s=$((dur_sec%60))
-          dur_fmt="${dur_h}h ${dur_m}m ${dur_s}s"
-
-          outage_dir="sbcli/e2e/logs"
-          outage_count=0
-          outage_latest=""
-          outage_lines=0
-          outage_tail=""
-          if compgen -G "${outage_dir}/outage*" > /dev/null; then
-            outage_count="$(ls -1 ${outage_dir}/outage* 2>/dev/null | wc -l | awk '{print $1}')"
-            outage_latest="$(ls -1t ${outage_dir}/outage* 2>/dev/null | head -n 1 || true)"
-            outage_lines="$(cat ${outage_dir}/outage* 2>/dev/null | wc -l | awk '{print $1}')"
-            [[ -n "${outage_latest}" && -f "${outage_latest}" ]] && outage_tail="$(tail -n 20 "${outage_latest}" 2>/dev/null || true)"
-          fi
-
-          # --- failure reason: MultipleExceptions line has "TestName: actual error" ---
-          failure_summary="(unknown)"
-          log_tail=""
-          if [[ -f "${out_log}" ]]; then
-            # The MultipleExceptions line is the definitive failure summary: "TestName: error"
-            failure_summary="$(grep -oE 'MultipleExceptions: .+|SkippedTestsException: .+' "${out_log}" \
-              | tail -n 1 | sed 's/\x1b\[[0-9;]*m//g' || true)"
-            if [[ -z "${failure_summary}" ]]; then
-              # Fallback: last RuntimeError / AssertionError logged
-              failure_summary="$(grep -E 'RuntimeError:|AssertionError:|Error:' "${out_log}" \
-                | tail -n 1 | sed 's/\x1b\[[0-9;]*m//g' || true)"
-            fi
-            [[ -z "${failure_summary}" ]] && failure_summary="(no exception line found)"
-            log_tail="$(tail -n 50 "${out_log}" | sed 's/\x1b\[[0-9;]*m//g' || true)"
-          fi
-
-          # --- test result counts from stress.py log lines ---
-          total_cases="$(grep -E 'Number of Total Cases:' "${out_log}" 2>/dev/null | tail -n 1 | grep -oE '[0-9]+$' || echo '?')"
-          passed_cnt="$(grep -E 'Number of Passed Cases:' "${out_log}" 2>/dev/null | tail -n 1 | grep -oE '[0-9]+$' || echo '?')"
-          failed_cnt="$(grep -E 'Number of Failed Cases:' "${out_log}" 2>/dev/null | tail -n 1 | grep -oE '[0-9]+$' || echo '?')"
-          skipped_cnt="$(grep -E 'Number of Skipped Cases:' "${out_log}" 2>/dev/null | tail -n 1 | grep -oE '[0-9]+$' || echo '?')"
-          test_wise="$(grep -E '(PASSED|FAILED|SKIPPED) CASE\.' "${out_log}" 2>/dev/null \
-            | sed 's/\x1b\[[0-9;]*m//g' | sed 's/.*INFO - //' || true)"
-
-          mgmt_dir="${RUN_BASE_DIR:-}/$(echo "${MNODES}" | awk '{print $1}')/mgmt_details/mgmt"
-          mgmt_files="(not found)"
-          if [[ -n "${RUN_BASE_DIR:-}" && -d "${mgmt_dir}" ]]; then
-            mgmt_files="$(find "${mgmt_dir}" -maxdepth 1 -type f -printf '%f (%s bytes)\n' 2>/dev/null | sort || true)"
-            [[ -n "${mgmt_files}" ]] || mgmt_files="(empty)"
-          fi
-
-          conclusion="SUCCESS"
-          if [[ "${{ job.status }}" != "success" ]]; then
-            conclusion="FAILED"
-          fi
-
-          {
-            echo "## SimplyBlock Stress Run Summary"
-            echo ""
-            echo "**Result:** ${conclusion}"
-            echo ""
-            echo "### Run Info"
-            echo "- **Test class:** \`${TEST_CLASS}\`"
-            echo "- **Cluster ID:** \`${CLUSTER_ID}\`"
-            echo "- **Mgmt node:** \`${mgmt_ip}\`"
-            echo "- **NDCS/NPCS:** \`${NDCS}/${NPCS}\`"
-            echo "- **Start (UTC):** ${TEST_START_HUMAN:-unknown}"
-            echo "- **End (UTC):** ${TEST_END_HUMAN:-unknown}"
-            echo "- **Duration:** ${dur_fmt}"
-            echo ""
-            echo "### Test Results"
-            echo "- **Total:** ${total_cases} | **Passed:** ${passed_cnt} | **Failed:** ${failed_cnt} | **Skipped:** ${skipped_cnt}"
-            if [[ -n "${test_wise}" ]]; then
-              echo '```'
-              printf '%s\n' "${test_wise}"
-              echo '```'
-            fi
-            echo ""
-            echo "### NFS Run Folder"
-            echo "- **RUN_BASE_DIR:** \`${RUN_BASE_DIR:-not detected}\`"
-            echo "- Client logs: \`${RUN_BASE_DIR:-<run_dir>}/ClientLogs\`"
-            echo "- Mgmt details: \`${RUN_BASE_DIR:-<run_dir>}/${mgmt_ip}/mgmt_details\`"
-            echo ""
-            echo "### Outages"
-            echo "- Outage files matched: \`${outage_dir}/outage*\`"
-            echo "- **Outage file count:** ${outage_count}"
-            echo "- **Total outage log lines:** ${outage_lines}"
-            [[ -n "${outage_latest}" ]] && echo "- **Latest outage file:** \`${outage_latest}\`"
-            if [[ -n "${outage_tail}" ]]; then
-              echo ""
-              echo "<details><summary>Latest outage file (last 20 lines)</summary>"
-              echo ""
-              echo '```'
-              printf '%s\n' "${outage_tail}"
-              echo '```'
-              echo "</details>"
-            fi
-            echo ""
-            echo "### Failure Reason"
-            echo '```'
-            printf '%s\n' "${failure_summary}"
-            echo '```'
-            if [[ -n "${log_tail}" ]]; then
-              echo ""
-              echo "<details><summary>Last 50 lines of output.log</summary>"
-              echo ""
-              echo '```'
-              printf '%s\n' "${log_tail}"
-              echo '```'
-              echo "</details>"
-            fi
-            if [[ -n "${POST_TEST_WARNINGS:-}" ]]; then
-              echo ""
-              echo "### :warning: Post-Test Warnings"
-              echo "The following post-test steps failed (did NOT affect test result):"
-              echo "- ${POST_TEST_WARNINGS}"
-            fi
-            echo ""
-            echo "### Mgmt Artifacts (mgmt_details/mgmt)"
-            echo "- Path: \`${mgmt_dir}\`"
-            echo "<details><summary>Files</summary>"
-            echo ""
-            echo '```'
-            printf '%s\n' "${mgmt_files}"
-            echo '```'
-            echo "</details>"
-            echo ""
-            echo "### Key Logs"
-            echo "- Runner stress log: \`${out_log}\`"
-            echo "- Outage logs: \`${outage_dir}/outage*\`"
-            echo "- Docker logs: \`${RUN_BASE_DIR:-<run_dir>}/<node_ip>/containers-final-*\`"
-            echo "- Distrib dumps: \`${RUN_BASE_DIR:-<run_dir>}/<storage_ip>/finaldistrib_bdev_logs/\`"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Send Slack Notification
-        if: always()
-        shell: bash
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-          JOB_STATUS: ${{ job.status }}
-          SLACK_RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          GITHUB_REF_NAME: ${{ github.ref_name }}
-          SLACK_WF_NAME: "Stress (Bootstrap)"
-        run: |
-          python3 - <<'PYEOF'
-          import json, os, re, sys, urllib.request, urllib.error
-          webhook = os.environ.get("SLACK_WEBHOOK_URL", "")
-          if not webhook:
-              print("No SLACK_WEBHOOK_URL set, skipping.")
-              sys.exit(0)
-          out_log = "sbcli/e2e/output.log"
-          total = passed = failed = skipped = 0
-          if os.path.isfile(out_log):
-              content = open(out_log).read()
-              def px(pat):
-                  m = re.search(pat, content)
-                  return int(m.group(1)) if m else 0
-              total   = px(r'Number of Total Cases:\s*(\d+)')
-              passed  = px(r'Number of Passed Cases:\s*(\d+)')
-              failed  = px(r'Number of Failed Cases:\s*(\d+)')
-              skipped = px(r'Number of Skipped Cases:\s*(\d+)')
-          pass_pct = (passed * 100 // total) if total > 0 else 0
-          s    = int(os.environ.get("TEST_START_EPOCH", "0") or "0")
-          e    = int(os.environ.get("TEST_END_EPOCH",   "0") or "0")
-          secs = max(0, e - s) if e >= s > 0 else 0
-          dur  = f"{secs//3600}h {(secs%3600)//60}m {secs%60}s"
-          run_url  = os.environ.get("SLACK_RUN_URL",   "")
-          log_dir  = os.environ.get("RUN_BASE_DIR",    "N/A")
-          ndcs     = os.environ.get("NDCS",            "?")
-          npcs     = os.environ.get("NPCS",            "?")
-          test_cls = os.environ.get("TEST_CLASS",      "") or "all"
-          branch   = os.environ.get("GITHUB_REF_NAME", "?")
-          wf_name  = os.environ.get("SLACK_WF_NAME",   "Run")
-          warnings = os.environ.get("POST_TEST_WARNINGS", "")
-          ok       = os.environ.get("JOB_STATUS",      "") == "success"
-          if ok and warnings:
-              icon    = ":white_check_mark:"
-              status  = "SUCCESS (with warnings)"
-              mention = ""
-          elif ok:
-              icon    = ":white_check_mark:"
-              status  = "SUCCESS"
-              mention = ""
-          else:
-              icon    = ":x:"
-              status  = "FAILURE"
-              mention = " <!channel>"
-          lines = [
-              f"{icon} *SimplyBlock {wf_name}*{mention}",
-              f"*Status:* {status}  |  *Duration:* {dur}",
-              f"*Branch:* `{branch}`  |  *NDCS/NPCS:* `{ndcs}/{npcs}`  |  *Test class:* `{test_cls}`",
-              "",
-          ]
-          if total > 0:
-              lines += [
-                  f":white_check_mark: *Passed:*  {passed}/{total}  ({pass_pct}%)",
-                  f":x: *Failed:*  {failed}",
-                  f":fast_forward: *Skipped:*  {skipped}",
-              ]
-          else:
-              lines.append("_(test counts not found in log)_")
-          if warnings:
-              lines += ["", f":warning: *Post-test warnings:* {warnings}"]
-          lines += [
-              "",
-              f":link: *Run:* <{run_url}|View on GitHub>",
-              f":file_folder: *Final Logs:* `{log_dir}`",
-          ]
-          payload = {"text": "\n".join(lines)}
-          req = urllib.request.Request(
-              webhook,
-              data=json.dumps(payload).encode(),
-              headers={"Content-Type": "application/json"},
-          )
-          try:
-              urllib.request.urlopen(req, timeout=15)
-              print("Slack notification sent.")
-          except Exception as exc:
-              print(f"WARN: Slack notification failed: {exc}", file=sys.stderr)
-          PYEOF
-
       - name: Upload logs (always)
         if: always()
         uses: actions/upload-artifact@v4

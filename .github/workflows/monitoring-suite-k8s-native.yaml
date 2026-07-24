@@ -15,8 +15,8 @@ on:
       # =========================
       # Image / chart inputs
       # =========================
-      helm_charts_branch:
-        description: 'Branch for helm-charts'
+      operator_repo_branch:
+        description: 'Branch for simplyblock-operator repo'
         required: true
         default: 'main'
       simplyblock_image:
@@ -198,11 +198,11 @@ jobs:
         uses: actions/checkout@v4
 
       - uses: actions/checkout@master
-        name: Checkout helm-charts
+        name: Checkout simplyblock-operator
         with:
-          repository: simplyblock/helm-charts
-          ref: ${{ github.event.inputs.helm_charts_branch || 'main' }}
-          path: 'helm-charts'
+          repository: simplyblock/simplyblock-operator
+          ref: ${{ github.event.inputs.operator_repo_branch || 'main' }}
+          path: 'simplyblock-operator'
 
       - name: Resolve KEY_PATH
         shell: bash
@@ -331,178 +331,9 @@ jobs:
           set +e
           NAMESPACE=simplyblock
 
-          echo "=== Phase 1: Helm uninstall ==="
-          helm uninstall spdk-csi -n $NAMESPACE 2>/dev/null || true
-
-          echo "=== Phase 2: Patch finalizers and delete CRs ==="
-          RESOURCES=(
-            "simplyblockpool.storage.simplyblock.io simplyblock-pool"
-            "simplyblockpool.storage.simplyblock.io simplyblock-pool2"
-            "simplyblocklvol.storage.simplyblock.io simplyblock-lvol"
-            "simplyblocktask.storage.simplyblock.io simplyblock-task"
-            "simplyblockdevices.storage.simplyblock.io simplyblock-devices"
-            "simplyblockdevices.storage.simplyblock.io simplyblock-device-action"
-            "simplyblockstoragenodes.storage.simplyblock.io simplyblock-node"
-            "simplyblockstoragenodes.storage.simplyblock.io simplyblock-node2"
-            "simplyblockstoragenodes.storage.simplyblock.io simplyblock-node-action"
-            "simplyblockstoragenodesets.storage.simplyblock.io simplyblock-node"
-            "simplyblockstoragenodesets.storage.simplyblock.io simplyblock-node2"
-            "simplyblockstoragenodesets.storage.simplyblock.io simplyblock-node-action"
-            "simplyblockstorageclusters.storage.simplyblock.io simplyblock-cluster"
-            "simplyblockstorageclusters.storage.simplyblock.io simplyblock-cluster2"
-            "simplyblockstorageclusters.storage.simplyblock.io simplyblock-cluster-activate"
-            "simplyblocksnapshotreplications.storage.simplyblock.io simplyblock-snap-replication"
-            "simplyblocksnapshotreplications.storage.simplyblock.io simplyblock-snap-replication-failback"
-            "pool.storage.simplyblock.io simplyblock-pool"
-            "pool.storage.simplyblock.io simplyblock-pool2"
-            "lvol.storage.simplyblock.io simplyblock-lvol"
-            "task.storage.simplyblock.io simplyblock-task"
-            "devices.storage.simplyblock.io simplyblock-devices"
-            "devices.storage.simplyblock.io simplyblock-device-action"
-            "storagenodes.storage.simplyblock.io simplyblock-node"
-            "storagenodes.storage.simplyblock.io simplyblock-node2"
-            "storagenodes.storage.simplyblock.io simplyblock-node-action"
-            "storagenodesets.storage.simplyblock.io simplyblock-node"
-            "storagenodesets.storage.simplyblock.io simplyblock-node2"
-            "storagenodesets.storage.simplyblock.io simplyblock-node-action"
-            "storageclusters.storage.simplyblock.io simplyblock-cluster"
-            "storageclusters.storage.simplyblock.io simplyblock-cluster2"
-            "storageclusters.storage.simplyblock.io simplyblock-cluster-activate"
-            "snapshotreplications.storage.simplyblock.io simplyblock-snap-replication"
-            "snapshotreplications.storage.simplyblock.io simplyblock-snap-replication-failback"
-          )
-
-          patch_and_delete_crs() {
-            for item in "${RESOURCES[@]}"; do
-              KIND=$(echo "$item" | awk '{print $1}')
-              NAME=$(echo "$item" | awk '{print $2}')
-              kubectl -n $NAMESPACE patch "$KIND" "$NAME" \
-                --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
-            done
-            for item in "${RESOURCES[@]}"; do
-              KIND=$(echo "$item" | awk '{print $1}')
-              NAME=$(echo "$item" | awk '{print $2}')
-              kubectl -n $NAMESPACE delete "$KIND" "$NAME" \
-                --ignore-not-found --wait=false 2>/dev/null || true
-            done
-          }
-          patch_and_delete_crs
-
-          # Dynamic catch-all
-          for CR_TYPE in \
-            "simplyblockpool.storage.simplyblock.io" \
-            "simplyblocklvol.storage.simplyblock.io" \
-            "simplyblocktask.storage.simplyblock.io" \
-            "simplyblockdevices.storage.simplyblock.io" \
-            "simplyblockstoragenodes.storage.simplyblock.io" \
-            "simplyblockstoragenodesets.storage.simplyblock.io" \
-            "simplyblockstorageclusters.storage.simplyblock.io" \
-            "simplyblocksnapshotreplications.storage.simplyblock.io" \
-            "pool.storage.simplyblock.io" \
-            "lvol.storage.simplyblock.io" \
-            "task.storage.simplyblock.io" \
-            "devices.storage.simplyblock.io" \
-            "storagenodes.storage.simplyblock.io" \
-            "storagenodesets.storage.simplyblock.io" \
-            "storageclusters.storage.simplyblock.io" \
-            "snapshotreplications.storage.simplyblock.io"; do
-            for CR_NAME in $(kubectl -n $NAMESPACE get "$CR_TYPE" --no-headers -o custom-columns=:metadata.name 2>/dev/null); do
-              kubectl -n $NAMESPACE patch "$CR_TYPE" "$CR_NAME" \
-                --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
-              kubectl -n $NAMESPACE delete "$CR_TYPE" "$CR_NAME" \
-                --ignore-not-found --wait=false 2>/dev/null || true
-            done
-          done
-
-          echo "=== Phase 3a: Delete VolumeSnapshots & VolumeSnapshotContents ==="
-          for VS in $(kubectl get volumesnapshot -n $NAMESPACE --no-headers -o custom-columns=:metadata.name 2>/dev/null); do
-            kubectl -n $NAMESPACE patch volumesnapshot "$VS" --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
-            kubectl -n $NAMESPACE delete volumesnapshot "$VS" --wait=false 2>/dev/null || true
-          done
-          for VSC in $(kubectl get volumesnapshotcontent --no-headers -o custom-columns=:metadata.name 2>/dev/null); do
-            kubectl patch volumesnapshotcontent "$VSC" --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
-            kubectl delete volumesnapshotcontent "$VSC" --wait=false 2>/dev/null || true
-          done
-          for VSCLASS in $(kubectl get volumesnapshotclass --no-headers -o custom-columns=:metadata.name 2>/dev/null); do
-            kubectl delete volumesnapshotclass "$VSCLASS" --ignore-not-found 2>/dev/null || true
-          done
-
-          echo "=== Phase 3b: Delete PVCs ==="
-          kubectl -n $NAMESPACE delete pvc --all --wait=false 2>/dev/null || true
-          PVC_TIMEOUT=60
-          while [ $PVC_TIMEOUT -gt 0 ]; do
-            REMAINING=$(kubectl -n $NAMESPACE get pvc --no-headers 2>/dev/null | wc -l)
-            [ "$REMAINING" -eq 0 ] && break
-            sleep 5; PVC_TIMEOUT=$((PVC_TIMEOUT - 5))
-          done
-          STUCK_PVCS=$(kubectl -n $NAMESPACE get pvc --no-headers -o custom-columns=:metadata.name 2>/dev/null)
-          if [ -n "$STUCK_PVCS" ]; then
-            echo "Patching finalizers on stuck PVCs..."
-            echo "$STUCK_PVCS" | while read PVC; do
-              kubectl -n $NAMESPACE patch pvc "$PVC" --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null &
-            done
-            wait
-            kubectl -n $NAMESPACE delete pvc --all --force --grace-period=0 --wait=false 2>/dev/null || true
-            echo "PVC force-delete issued"
-          fi
-
-          echo "=== Phase 3c: Delete PVs ==="
-          PV_LIST=$(kubectl get pv --no-headers -o custom-columns=NAME:.metadata.name,CLAIM:.spec.claimRef.namespace 2>/dev/null \
-            | grep -v -E '\bvault\b' 2>/dev/null | awk '{print $1}')
-          if [ -n "$PV_LIST" ]; then
-            echo "Patching finalizers on $(echo "$PV_LIST" | wc -l) PVs..."
-            echo "$PV_LIST" | while read PV; do
-              kubectl patch pv "$PV" --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null &
-            done
-            wait
-            echo "$PV_LIST" | while read PV; do
-              kubectl delete pv "$PV" --force --grace-period=0 --wait=false 2>/dev/null &
-            done
-            wait
-            echo "PV force-delete issued"
-          fi
-
-          echo "=== Phase 3d: Force delete remaining namespaced resources ==="
-          for RTYPE in pod jobs service ds statefulset deployment replicaset secret sa configmap; do
-            kubectl -n $NAMESPACE delete $RTYPE --all --force --grace-period=0 2>/dev/null || true
-          done
-
-          echo "=== Phase 4: Cleanup cluster-scoped and kube-system resources ==="
-          for SC in $(kubectl get sc --no-headers -o custom-columns=:metadata.name 2>/dev/null | grep -i simplyblock 2>/dev/null); do
-            kubectl delete sc "$SC" --ignore-not-found 2>/dev/null || true
-          done
-          kubectl delete clusterrole simplyblock-storage-node-role --ignore-not-found 2>/dev/null || true
-          kubectl delete clusterrolebinding simplyblock-storage-node-binding --ignore-not-found 2>/dev/null || true
-          # Clean up simplyblock resources in kube-system (snapshot-controller, numa-plugin, etc.)
-          for RTYPE in deployment service ds sa configmap; do
-            for NAME in $(kubectl -n kube-system get $RTYPE --no-headers -o custom-columns=:metadata.name 2>/dev/null | grep -i simplyblock 2>/dev/null); do
-              kubectl -n kube-system delete $RTYPE "$NAME" --ignore-not-found 2>/dev/null || true
-            done
-          done
-          # Clean up simplyblock clusterroles and clusterrolebindings
-          for RES in clusterrole clusterrolebinding; do
-            for NAME in $(kubectl get $RES --no-headers -o custom-columns=:metadata.name 2>/dev/null | grep -i simplyblock 2>/dev/null); do
-              kubectl delete $RES "$NAME" --ignore-not-found 2>/dev/null || true
-            done
-          done
-
-          echo "=== Phase 5: Verify ==="
-          kubectl -n $NAMESPACE get all 2>/dev/null || true
-
-          echo "=== Phase 6: Delete namespace ==="
-          kubectl delete namespace $NAMESPACE --wait=false 2>/dev/null || true
-          for i in $(seq 1 36); do
-            if ! kubectl get namespace $NAMESPACE 2>/dev/null; then
-              echo "Namespace deleted"; break
-            fi
-            patch_and_delete_crs
-            if [ "$i" -ge 6 ]; then
-              kubectl get namespace $NAMESPACE -o json 2>/dev/null | \
-                jq '.spec.finalizers = []' | \
-                kubectl replace --raw "/api/v1/namespaces/$NAMESPACE/finalize" -f - 2>/dev/null || true
-            fi
-            sleep 5
-          done
+          # Run the shared cleanup script (handles etcd overload with
+          # --request-timeout, bulk deletes, and parallel finalizer patching)
+          bash $GITHUB_WORKSPACE/e2e/scripts/cleanup_k8s.sh $NAMESPACE
 
           echo "=== Phase 7: Delete Released PVs ==="
           for pv in $(kubectl get pv --no-headers 2>/dev/null | grep 'simplyblock/' | awk '{print $1}'); do
@@ -519,7 +350,7 @@ jobs:
             done
             kubectl patch crd "$crd_name" --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
           done
-          kubectl delete -f $GITHUB_WORKSPACE/helm-charts/charts/simplyblock-operator/crds/ --ignore-not-found --timeout=60s 2>/dev/null || true
+          kubectl delete -f $GITHUB_WORKSPACE/simplyblock-operator/helm-charts/charts/simplyblock-operator/crds/ --ignore-not-found --timeout=60s 2>/dev/null || true
           # Force-delete any CRDs that survived the timeout
           for crd in $(kubectl get crd -o name 2>/dev/null | grep simplyblock); do
             crd_name="${crd#customresourcedefinition.apiextensions.k8s.io/}"
@@ -534,6 +365,15 @@ jobs:
           helm uninstall cert-manager -n cert-manager 2>/dev/null || true
           kubectl delete namespace cert-manager --wait=false 2>/dev/null || true
           kubectl wait --for=delete namespace/cert-manager --timeout=120s 2>/dev/null || true
+          echo "=== Deleting cert-manager CRDs (Helm does not remove CRDs on uninstall) ==="
+          kubectl delete crd \
+            certificaterequests.cert-manager.io \
+            certificates.cert-manager.io \
+            challenges.acme.cert-manager.io \
+            clusterissuers.cert-manager.io \
+            issuers.cert-manager.io \
+            orders.acme.cert-manager.io \
+            --ignore-not-found 2>/dev/null || true
 
       - name: Cleanup old KMS
         if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
@@ -611,7 +451,7 @@ jobs:
       - name: Install Helm Chart for simplyblock-operator
         if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
         run: |
-          cd $GITHUB_WORKSPACE/helm-charts/charts/simplyblock-operator/
+          cd $GITHUB_WORKSPACE/simplyblock-operator/helm-charts/charts/simplyblock-operator/
           TLS_FLAGS=""
           if [ "${{ github.event.inputs.tls_enabled }}" = "true" ]; then
             TLS_FLAGS="--set tls.enabled=true --set tls.mutual_enabled=true"
@@ -672,6 +512,10 @@ jobs:
           for sa in $(kubectl get serviceaccounts -n simplyblock --no-headers | awk '{print $1}'); do
             kubectl patch serviceaccount "$sa" -n simplyblock \
               --patch '{"imagePullSecrets": [{"name": "regcred"}]}'
+          done
+          for deploy in $(kubectl get deployments -n simplyblock --no-headers -o custom-columns=:metadata.name 2>/dev/null); do
+            kubectl patch deployment "$deploy" -n simplyblock \
+              --type=merge -p '{"spec":{"template":{"spec":{"imagePullSecrets":[{"name":"regcred"}]}}}}' || true
           done
 
       - name: Delete ImagePullBackOff pods
@@ -735,7 +579,7 @@ jobs:
           STORAGE_CLASS=$(kubectl get sc -o jsonpath='{.items[?(@.metadata.annotations.storageclass\.kubernetes\.io/is-default-class=="true")].metadata.name}' | awk '{print $1}')
           [ -z "$STORAGE_CLASS" ] && STORAGE_CLASS=$(kubectl get sc -o jsonpath='{.items[0].metadata.name}')
           export STORAGE_CLASS
-          UNSEAL_KEYS_FILE=./openbao-init.txt bash $GITHUB_WORKSPACE/helm-charts/scripts/setup-kms.sh
+          UNSEAL_KEYS_FILE=./openbao-init.txt bash $GITHUB_WORKSPACE/simplyblock-operator/helm-charts/scripts/setup-kms.sh
           kubectl wait --for=condition=Ready pods -l app.kubernetes.io/name=openbao -n vault --timeout=300s || true
 
       - name: Cleanup stale CSI hostpath data on worker nodes
@@ -868,6 +712,10 @@ jobs:
             kubectl patch serviceaccount "$sa" -n simplyblock \
               --patch '{"imagePullSecrets": [{"name": "regcred"}]}'
           done
+          for deploy in $(kubectl get deployments -n simplyblock --no-headers -o custom-columns=:metadata.name 2>/dev/null); do
+            kubectl patch deployment "$deploy" -n simplyblock \
+              --type=merge -p '{"spec":{"template":{"spec":{"imagePullSecrets":[{"name":"regcred"}]}}}}' || true
+          done
 
       - name: Delete ImagePullBackOff pods post-CRD
         if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
@@ -893,6 +741,10 @@ jobs:
           for sa in $(kubectl get serviceaccounts -n $NAMESPACE --no-headers | awk '{print $1}'); do
             kubectl patch serviceaccount "$sa" -n $NAMESPACE \
               --patch '{"imagePullSecrets": [{"name": "regcred"}]}'
+          done
+          for deploy in $(kubectl get deployments -n $NAMESPACE --no-headers -o custom-columns=:metadata.name 2>/dev/null); do
+            kubectl patch deployment "$deploy" -n $NAMESPACE \
+              --type=merge -p '{"spec":{"template":{"spec":{"imagePullSecrets":[{"name":"regcred"}]}}}}' || true
           done
           if [ "$CLUSTER_ENV" = "aws-openshift" ] || [ "$CLUSTER_ENV" = "openshift-local" ]; then
             for sa in $(oc get sa -n $NAMESPACE -o name | cut -d/ -f2); do
@@ -1161,9 +1013,40 @@ jobs:
           RUN_BASE_DIR="$(cat "${RUN_DIR_FILE}" | tr -d '\r\n')"
           [[ -n "${RUN_BASE_DIR}" ]] && echo "RUN_BASE_DIR=${RUN_BASE_DIR}" >> "$GITHUB_ENV" || true
 
+      - name: Write Job Summary
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          out_log="${GITHUB_WORKSPACE}/e2e/output.log"
+          total="$(grep -m1 'Number of Total Cases:' "$out_log" 2>/dev/null | grep -oE '[0-9]+$' || echo '?')"
+          passed="$(grep -m1 'Number of Passed Cases:' "$out_log" 2>/dev/null | grep -oE '[0-9]+$' || echo '?')"
+          failed="$(grep -m1 'Number of Failed Cases:' "$out_log" 2>/dev/null | grep -oE '[0-9]+$' || echo '?')"
+          skipped="$(grep -m1 'Number of Skipped Cases:' "$out_log" 2>/dev/null | grep -oE '[0-9]+$' || echo '0')"
+
+          conclusion="SUCCESS"
+          if [[ "${{ job.status }}" != "success" ]]; then
+            conclusion="FAILED"
+          fi
+
+          {
+            echo "## K8s Native Monitoring Suite – ${TEST_CLASS} Summary"
+            echo ""
+            echo "**Result:** ${conclusion}"
+            echo ""
+            echo "### Test Results"
+            echo "- **Total:** ${total} | **Passed:** ${passed} | **Failed:** ${failed} | **Skipped:** ${skipped}"
+            echo ""
+            echo "### Run Info"
+            echo "- **Test class:** \`${TEST_CLASS}\`"
+            echo "- **Branch:** \`${{ github.ref_name }}\`"
+            echo ""
+            echo "> **Note:** Graylog/OpenSearch logs are currently being collected and will be available in the NFS log directory shortly."
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Collect Graylog/OpenSearch logs
         if: '!cancelled()'
-        timeout-minutes: ${{ fromJSON(env.LOG_COLLECT_TIMEOUT_MINS || '240') }}
+        timeout-minutes: ${{ fromJSON(env.LOG_COLLECT_TIMEOUT_MINS || '480') }}
         run: |
           set +e
           NAMESPACE=simplyblock
@@ -1187,6 +1070,23 @@ jobs:
             sleep 10
           done
           [ -z "${ADMIN_POD}" ] && exit 0
+
+          # Deploy updated collect_logs.py to admin pod (use /tmp since package dir is read-only)
+          BUILTIN_SCRIPT="/usr/local/lib/python3.12/site-packages/simplyblock_core/scripts/collect_logs.py"
+          DEPLOYED_SCRIPT="/tmp/collect_logs.py"
+          SCRIPT_SRC="${GITHUB_WORKSPACE}/scripts/collect_logs.py"
+          if [ -f "${SCRIPT_SRC}" ]; then
+            kubectl -n ${NAMESPACE} cp "${SCRIPT_SRC}" "${ADMIN_POD}:${DEPLOYED_SCRIPT}" 2>/dev/null || \
+              echo "WARN: failed to deploy updated collect_logs.py, using built-in version"
+          fi
+          # Determine which script to use
+          COLLECT_SCRIPT="${BUILTIN_SCRIPT}"
+          if kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- test -f "${DEPLOYED_SCRIPT}" 2>/dev/null; then
+            COLLECT_SCRIPT="${DEPLOYED_SCRIPT}"
+            echo "  Using deployed script: ${COLLECT_SCRIPT}"
+          else
+            echo "  Using built-in script: ${COLLECT_SCRIPT}"
+          fi
 
           MGMT_IP=$(kubectl get svc -n ${NAMESPACE} | grep graylog | awk '{print $3}')
           OPENSEARCH_IP=$(kubectl get svc opensearch-cluster-master -n ${NAMESPACE} -o jsonpath='{.spec.clusterIP}' 2>/dev/null || echo "")
@@ -1218,7 +1118,7 @@ jobs:
               mgmt_ip_to_use="${OPENSEARCH_IP}"
             fi
             kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- \
-              python3 /usr/local/lib/python3.12/site-packages/simplyblock_core/scripts/collect_logs.py \
+              python3 "${COLLECT_SCRIPT}" \
                 "${iso}" "${mins}" \
                 --mode kubernetes --namespace "${NAMESPACE}" \
                 --monitoring-secret "${MON_SECRET}" \
@@ -1231,9 +1131,9 @@ jobs:
             [ $rc -ne 0 ] && return $rc
             local has_content
             has_content=$(kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- \
-              find "${outdir}" -name "*.log" -size +0 2>/dev/null | head -1)
+              find "${outdir}" -name "*.tar.gz" -size +0 2>/dev/null | head -1)
             if [ -z "${has_content}" ]; then
-              echo "  WARN: collect_logs.py succeeded but all .log files are 0 bytes"
+              echo "  WARN: collect_logs.py succeeded but no .tar.gz output found"
               return 1
             fi
           }

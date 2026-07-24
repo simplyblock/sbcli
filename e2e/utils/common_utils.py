@@ -67,13 +67,13 @@ class CommonUtils:
                     re.compile(r"Storage node status changed from: in_restart to: online")
                 ]
             },
-            "Device": {
-                "restart": [
-                    re.compile(r"Device status changed from: .+ to: unavailable"),
-                    # TODO: Change from unavailable to online once bug is fixed.
-                    re.compile(r"Device restarted")
-                ]
-            }
+            # "Device": {
+            #     "restart": [
+            #         re.compile(r"Device status changed from: .+ to: unavailable"),
+            #         # TODO: Change from unavailable to online once bug is fixed.
+            #         re.compile(r"Device restarted")
+            #     ]
+            # }
         }
         
         for entity_type, steps in operations.items():

@@ -46,6 +46,8 @@ def main():
     parser.add_argument('--namespace', type=str, help="Kubernetes namespace", default="")
     parser.add_argument('--new_worker_nodes', type=str, help="New K8s worker node names to add (comma-separated)", default="")
     parser.add_argument('--migrate_to_worker', type=str, help="K8s worker node name to migrate a storage node onto", default="")
+    parser.add_argument('--new_ssd_pcie', type=str, help="Comma-separated PCIe addresses for new SSDs on the target worker", default="")
+    parser.add_argument('--reattach_volume', type=str, help="Reattach volumes after migration (True/False)", default="")
     parser.add_argument('--preserve_resources_on_failure', type=bool,
                         help="Skip K8s resource cleanup when test fails (preserve PVCs/pods for debugging)",
                         default=False)
@@ -102,6 +104,26 @@ def main():
                     logger.warning("Skipping K8sNativeNodeMigrationTest: requires --migrate_to_worker with a K8s worker node name.")
                     skipped_cases += 1
                     continue
+            if cls.__name__ == "TestSequentialNodeAdd":
+                if len(new_nodes) < 2 and len(new_worker_nodes) < 2:
+                    logger.warning("Skipping TestSequentialNodeAdd: requires --new_nodes with at least 2 IPs or --new_worker_nodes with at least 2 node names.")
+                    skipped_cases += 1
+                    continue
+            if cls.__name__ == "TestAddNodeSnapshotCloneOnNewNode":
+                if len(new_nodes) == 0 and len(new_worker_nodes) == 0:
+                    logger.warning("Skipping TestAddNodeSnapshotCloneOnNewNode: requires --new_nodes or --new_worker_nodes with at least 1 entry.")
+                    skipped_cases += 1
+                    continue
+            if cls.__name__ in ("TestBackupAfterNodeAdd", "TestBackupWithFioOnNewNode"):
+                if len(new_nodes) == 0 and len(new_worker_nodes) == 0:
+                    logger.warning(f"Skipping {cls.__name__}: requires --new_nodes or --new_worker_nodes with at least 1 entry.")
+                    skipped_cases += 1
+                    continue
+            if cls.__name__ in ("TestBackupAfterNodeMigration", "TestBackupDuringMigration"):
+                if args.run_k8s and not args.migrate_to_worker.strip():
+                    logger.warning(f"Skipping {cls.__name__}: K8s mode requires --migrate_to_worker.")
+                    skipped_cases += 1
+                    continue
 
             test_class_run.append(cls)
     else:
@@ -128,6 +150,18 @@ def main():
                             continue
                         if not args.migrate_to_worker.strip():
                             raise ValueError("K8sNativeNodeMigrationTest requires --migrate_to_worker with a K8s worker node name.")
+                    if cls.__name__ == "TestSequentialNodeAdd":
+                        if len(new_nodes) < 2 and len(new_worker_nodes) < 2:
+                            raise ValueError("TestSequentialNodeAdd requires --new_nodes with at least 2 IPs or --new_worker_nodes with at least 2 node names.")
+                    if cls.__name__ == "TestAddNodeSnapshotCloneOnNewNode":
+                        if len(new_nodes) == 0 and len(new_worker_nodes) == 0:
+                            raise ValueError("TestAddNodeSnapshotCloneOnNewNode requires --new_nodes or --new_worker_nodes with at least 1 entry.")
+                    if cls.__name__ in ("TestBackupAfterNodeAdd", "TestBackupWithFioOnNewNode"):
+                        if len(new_nodes) == 0 and len(new_worker_nodes) == 0:
+                            raise ValueError(f"{cls.__name__} requires --new_nodes or --new_worker_nodes with at least 1 entry.")
+                    if cls.__name__ in ("TestBackupAfterNodeMigration", "TestBackupDuringMigration"):
+                        if args.run_k8s and not args.migrate_to_worker.strip():
+                            raise ValueError(f"{cls.__name__} requires --migrate_to_worker in K8s mode.")
                     test_class_run.append(cls)
                     seen.add(cls)
 
@@ -190,6 +224,8 @@ def main():
                         namespace=args.namespace,
                         new_worker_nodes=new_worker_nodes,
                         migrate_to_worker=args.migrate_to_worker,
+                        new_ssd_pcie=args.new_ssd_pcie,
+                        reattach_volume=args.reattach_volume,
                         preserve_resources_on_failure=args.preserve_resources_on_failure,
                         )
         try:
@@ -207,6 +243,7 @@ def main():
         _skip_k8s = _test_failed and test_obj.preserve_resources_on_failure
         if _skip_k8s:
             logger.info(f"[cleanup] Test {test.__name__} failed — preserving K8s resources for debugging (--preserve_resources_on_failure)")
+        _is_bulk_run = len(test_class_run) > 1
         try:
             test_obj.collect_management_details(post_teardown=False)
             test_obj.teardown(delete_lvols=False, close_ssh=False, skip_k8s_cleanup=_skip_k8s)
@@ -214,13 +251,19 @@ def main():
                 test_obj.stop_docker_logs_collect()
             else:
                 test_obj.stop_k8s_log_collect()
-            test_obj.fetch_all_nodes_distrib_log()
+            if _test_failed:
+                test_obj.fetch_all_nodes_distrib_log()
+            else:
+                logger.info(f"[perf] Skipping distrib dump for passed test {test.__name__}")
             test_obj.collect_management_details(post_teardown=True)
             test_obj.teardown(delete_lvols=not _skip_k8s, close_ssh=False, skip_k8s_cleanup=_skip_k8s)
             if not args.run_k8s:
                 all_nodes = test_obj._get_all_nodes()
                 test_obj.ssh_obj.collect_final_docker_logs_simple(all_nodes, test_obj.docker_logs_path)
-            test_obj.export_graylog_logs()
+            if _is_bulk_run:
+                logger.info(f"[perf] Skipping per-test Graylog export in bulk run ({len(test_class_run)} tests)")
+            else:
+                test_obj.export_graylog_logs()
             test_obj.extract_delay_qpair_logs()
             test_obj.teardown(delete_lvols=False, close_ssh=True)
             # pass
