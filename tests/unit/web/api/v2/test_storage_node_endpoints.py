@@ -55,10 +55,24 @@ class TestCreateStorageNode:
             'spdk_proxy_image': None,
             'spdk_sys_mem': None,
             'failure_domain': None,
+            'expansion': False,
         })
         # Default response format is 'identifier': body is the task id
         assert response.json() == TASK_ID
         assert response.headers['Location'].endswith(f'/tasks/{TASK_ID}/')
+
+    def test_expand_flag_forwarded(self, client, db, cluster, tasks_controller):
+        tasks_controller.add_node_add_task.return_value = TASK_ID
+
+        response = client.post(f'{BASE}/', json={
+            'node_address': '10.0.0.10:5000',
+            'interface_name': 'eth0',
+            'expand': True,
+        })
+
+        assert response.status_code == 201
+        (_, submitted_task), _ = tasks_controller.add_node_add_task.call_args
+        assert submitted_task['expansion'] is True
 
 
 class TestGetStorageNode:
@@ -117,6 +131,12 @@ class TestStorageNodeLifecycle:
         assert response.status_code == 204
         storage_node_ops.resume_storage_node.assert_called_once_with(STORAGE_NODE_ID)
 
+    def test_promote(self, client, storage_node, storage_node_ops):
+        response = client.post(f'{BASE}/{STORAGE_NODE_ID}/promote')
+
+        assert response.status_code == 204
+        storage_node_ops.make_sec_new_primary.assert_called_once_with(STORAGE_NODE_ID)
+
     def test_forced_shutdown(self, client, storage_node, storage_node_ops):
         response = client.post(f'{BASE}/{STORAGE_NODE_ID}/shutdown', params={'force': True})
 
@@ -135,6 +155,22 @@ class TestStorageNodeLifecycle:
             force=True,
             node_address='10.0.0.11:5000',
             reattach_volume=False,
+            new_ssd_pcie=[],
+        )
+
+    def test_restart_passes_new_ssd_pcie(self, client, storage_node, storage_node_ops):
+        response = client.post(
+            f'{BASE}/{STORAGE_NODE_ID}/restart',
+            json={'new_ssd_pcie': ['0000:00:1e.0', '0000:00:1f.0']},
+        )
+
+        assert response.status_code == 202
+        storage_node_ops.restart_storage_node.assert_called_once_with(
+            node_id=STORAGE_NODE_ID,
+            force=False,
+            node_address=None,
+            reattach_volume=False,
+            new_ssd_pcie=['0000:00:1e.0', '0000:00:1f.0'],
         )
 
 

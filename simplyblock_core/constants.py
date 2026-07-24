@@ -26,6 +26,7 @@ GiB=1024*1024*1024
 KVD_DB_VERSION = 730
 KVD_DB_FILE_PATH = os.getenv('FDB_CLUSTER_FILE', '/etc/foundationdb/fdb.cluster')
 KVD_DB_TIMEOUT_MS = 10000
+KVD_DB_BACKUP_PATH = "file:///etc/foundationdb/backup"
 SPK_DIR = '/home/ec2-user/spdk'
 LOG_LEVEL = logging.INFO
 LOG_WEB_LEVEL = logging.DEBUG
@@ -39,14 +40,21 @@ STAT_COLLECTOR_INTERVAL_SEC = 60*5  # 5 minutes
 LVOL_STAT_COLLECTOR_INTERVAL_SEC = 30
 LVOL_MONITOR_INTERVAL_SEC = 30
 DEV_MONITOR_INTERVAL_SEC = 10
-DEV_STAT_COLLECTOR_INTERVAL_SEC = 5
-PROT_STAT_COLLECTOR_INTERVAL_SEC = 2
+# Collector cadence (#5, 2026-07-21): the idle-cluster baseline measured
+# 4,290 RPCs/min cluster-wide (get_iostat 16k / alceml_get_pages_usage 15k /
+# distr events 27k per 28min) — ~9-10 CP threads permanently busy servicing
+# monitors, which is the standing GIL convoy that taxed every restart RPC.
+# Stats collection is dashboard granularity, not failure detection (that is
+# NODE/DEVICE_MONITOR + KA + distr events), so stretch the pure-stats
+# cycles; keep the event collector at a failure-latency-compatible cadence.
+DEV_STAT_COLLECTOR_INTERVAL_SEC = 15
+PROT_STAT_COLLECTOR_INTERVAL_SEC = 10
 SPDK_STAT_COLLECTOR_INTERVAL_SEC = 30
-DISTR_EVENT_COLLECTOR_INTERVAL_SEC = 2
+DISTR_EVENT_COLLECTOR_INTERVAL_SEC = 5
 DISTR_EVENT_COLLECTOR_NUM_OF_EVENTS = 10
-CAP_MONITOR_INTERVAL_SEC = 10
+CAP_MONITOR_INTERVAL_SEC = 30
 SSD_VENDOR_WHITE_LIST = ["1d0f:cd01", "1d0f:cd00"]
-CACHED_LVOL_STAT_COLLECTOR_INTERVAL_SEC = 5
+CACHED_LVOL_STAT_COLLECTOR_INTERVAL_SEC = 15
 DEV_DISCOVERY_INTERVAL_SEC = 60
 
 PMEM_DIR = '/tmp/pmem'
@@ -77,7 +85,21 @@ HEALTH_CHECK_FAST_INTERVAL_SEC = 5
 
 GRAYLOG_CHECK_INTERVAL_SEC = 60
 
-FDB_CHECK_INTERVAL_SEC = 60
+# Stats-retention cleanup cycle. Retention granularity is days
+# (LOG_DELETION_INTERVAL, default 7d), so hourly sweeps are more than enough;
+# the previous 60s cycle re-cleared the same (mostly empty) ranges ~100
+# commits/s all day and contributed to FDB overload under mass create
+# (run 2026-07-21).
+FDB_CLEANUP_INTERVAL_SEC = 60 * 60
+
+# Continuous per-lvol NVMf subsystem verification + auto-repair in the lvol
+# monitor. Off by default: it exists only to compensate for a lost deferred
+# non-leader registration (lossy in-memory drain queue), and at scale it costs
+# 2 RPCs per lvol per 30s cycle while its repair path has re-added namespaces
+# of in-deletion lvols mid-delete (incidents 2026-07-14 / 2026-07-16). Set
+# LVOL_MONITOR_SUBSYS_CHECK=1 to re-enable on clusters that need the sweep.
+LVOL_MONITOR_SUBSYS_CHECK = str(
+    os.getenv("LVOL_MONITOR_SUBSYS_CHECK", "")).lower() in ("1", "true", "yes")
 
 TASK_EXEC_INTERVAL_SEC = 10
 TASK_EXEC_RETRY_COUNT = 8
@@ -124,6 +146,14 @@ TASK_LEASE_TTL_SEC = 180
 # add_node (SPDK boot) is OUTSIDE this lock, so the locked section is short.
 CLUSTER_ADD_LOCK_HEARTBEAT_SEC = 30
 CLUSTER_ADD_LOCK_TTL_SEC = 120
+
+# How long a queued add_node waits for the lock before failing for retry.
+# "Short" is relative: one mesh section takes minutes on a 32-node cluster,
+# and parallel deploys queue up to (workers - 1) adds behind the holder, so
+# the tail waiter legitimately needs workers x mesh-time (2026-07-16 perf
+# deploy: 300s timed out routinely with 8 parallel adds). A timeout here
+# costs a full node-local re-setup on retry, so err on the side of waiting.
+CLUSTER_ADD_LOCK_WAIT_TIMEOUT_SEC = 1800
 
 # A node-add port reservation older than this is treated as abandoned and
 # ignored/reclaimed. Must exceed the worst-case time from port allocation to
@@ -218,13 +248,21 @@ INSTANCE_STORAGE_DATA = {
 
 MAX_SNAP_COUNT = 100
 
+# Per-SPDK-instance object cap: each vCPU in the instance's core mask serves
+# at most this many objects (lvols + clones + snapshots), counted against
+# their primary node. 8 cores (the minimum) -> 16k objects, 32 cores -> 64k.
+# Guards the data plane against object-count overload (run 20260712-231123:
+# ~68k objects on one 12-core instance drove swap thrash and a JC-quartet
+# abort).
+MAX_OBJECTS_PER_CORE = 2000
+
 SPDK_PROXY_MULTI_THREADING_ENABLED=True
 SPDK_PROXY_TIMEOUT=60*5
 LVOL_NVME_CONNECT_RECONNECT_DELAY=2
 LVOL_NVME_CONNECT_CTRL_LOSS_TMO=60*60
-LVOL_NVME_CONNECT_FAST_IO_FAIL_TO=1
+LVOL_NVME_CONNECT_FAST_IO_FAIL_TO=8
 LVOL_NVME_CONNECT_NR_IO_QUEUES=3
-LVOL_NVME_KEEP_ALIVE_TO=4
+LVOL_NVME_KEEP_ALIVE_TO=7
 LVOL_NVME_KEEP_ALIVE_TO_TCP=4
 QPAIR_COUNT=64
 CLIENT_QPAIR_COUNT=3
@@ -250,7 +288,18 @@ PCIE_TIMEOUT_US=2000000
 # O(nodes) at ~40 s/node — 22 min on a 32-node cluster (2026-07-08) — which
 # starved the activation watchdog and every observer. Bounded so the mgmt node
 # and the FDB layer are not overwhelmed by 32 parallel RPC fan-outs.
-CLUSTER_ACTIVATION_MAX_PARALLEL_NODES=8
+# Raised 8 -> 16 (2026-07-13): at 8 the passes ran 4 serial waves on a
+# 32-node cluster (~13 min of lvstore passes in the validation run) while
+# per-worker time is dominated by waiting on the target node's own SPDK
+# (examine), not by mgmt/FDB load.
+CLUSTER_ACTIVATION_MAX_PARALLEL_NODES=16
+
+# Number of node-add tasks the runner processes concurrently. Single source of
+# truth for "parallel add": also used as the initial storage-MCP maxUnavailable
+# during bring-up, so up to this many nodes can reboot for CPU-topology at once
+# (matching how many are being added in parallel) instead of a one-at-a-time
+# queue. cluster_activate later narrows the pool to the cluster's fault tolerance.
+NODE_ADD_MAX_PARALLEL=8
 
 # Max concurrent node-restart tasks while the cluster is SUSPENDED (recovery
 # after full-cluster outage/shutdown: every node offline, no client IO — so
@@ -262,6 +311,44 @@ CLUSTER_ACTIVATION_MAX_PARALLEL_NODES=8
 # storage_node_ops._remote_connect_gate regardless of this fan-out, and
 # per-node exclusivity is enforced by the dispatch _node_inflight map.
 NODE_RESTART_MAX_PARALLEL_SUSPENDED=32
+
+# Global cap on concurrently-RUNNING connect/reconnect worker threads across
+# ALL parallel node restarts. A whole-failure-domain reboot dispatches up to
+# NODE_RESTART_MAX_PARALLEL_SUSPENDED restarts, each fanning out per-peer /
+# per-remote-device connect threads — 100+ concurrent threads were observed
+# (2026-07-20 FD-0 reboot), saturating the single Python GIL and starving the
+# (serialized) recreate's between-RPC work so the client-port-block window
+# ballooned from ~2s to ~20s. Bounding the concurrent worker threads keeps GIL
+# headroom for recreate while preserving enough I/O overlap. Tune via e2e.
+RESTART_WORKER_MAX_CONCURRENCY=24
+
+# Cap for the COORDINATOR tier: bounded workers that themselves spawn and
+# join LEAF workers (peer-reconnect _one_peer -> per-device connect threads).
+# Must be a semaphore distinct from RESTART_WORKER_MAX_CONCURRENCY: sharing
+# one pool let 24 coordinators hold every slot while joining leaves that
+# waited on the same semaphore — permanent deadlock, all nodes stuck
+# in_restart (2026-07-21 FD reboot; py-spy: 24 holders / 469 waiters).
+#
+# 64, not 16: coordinators are I/O-bound (RPC + FDB waits release the GIL;
+# their CPU share collapsed with the BaseModel reflection cache), and 16
+# queued a 16-node FD recovery's peer sweeps into 30+ serial waves
+# (py-spy 2026-07-21: exactly 16 running / 160 queued while every restart
+# thread sat in the sweep join). 64 still bounds thread count but clears a
+# full-cluster sweep in ~4 waves.
+RESTART_COORDINATOR_MAX_CONCURRENCY=64
+
+# Quiesce after blocking the CONFIGURED PRIMARY's client port in
+# recreate_lvstore_on_non_leader, before the peer's examine. A fixed wait,
+# NOT a drain: on this node class the only inflight counter
+# (bdev_distrib_check_inflight_io) includes data-migration mover IO that a
+# port block cannot stop, so poll-to-zero never settles on a migrating
+# primary (the 10s regression fixed by 5cf279db). Client IO admitted before
+# the block settles in single-digit ms; 200ms keeps ~2 orders of magnitude
+# margin (was 500ms — 40% of the whole post-fix window, 2026-07-22).
+# Durable replacement: nvmf-layer drain of the blocked port's own
+# outstanding commands (nvmf_port_block wait_for_drain, SPDK fork change) —
+# migration-immune and exact, on every node class.
+NON_LEADER_BLOCK_QUIESCE_SEC = 0.2
 
 NVMF_MAX_SUBSYSTEMS=50000
 KATO=5000
@@ -395,7 +482,7 @@ MIG_JOB_SIZE = 64
 
 # Live volume migration constants
 LVOL_MIG_MAX_RETRIES = 5          # max retry attempts before aborting
-LVOL_MIG_DEADLINE_SEC = 360  # default 4-hour deadline (0 = no deadline)
+LVOL_MIG_DEADLINE_SEC = 3600  # 1-hour deadline (0 = no deadline)
 LVOL_MIG_MAX_INTERMEDIATE_SNAPS = 3        # max recursive "shrink" snapshot rounds
 LVOL_MIG_INTERMEDIATE_SNAP_THRESHOLD_BYTES = 500 * 1024 * 1024  # 500 MiB — skip if delta is smaller
 LVOL_MIG_BDEV_SUFFIX = 'm'  # appended to every migration bdev on the target to avoid collision with real bdevs
@@ -430,3 +517,5 @@ BACKUP_POLL_INTERVAL_SEC = 5
 BACKUP_MAX_RETRIES = 10
 BACKUP_MERGE_SERVICE_INTERVAL_SEC = 60
 BACKUP_S3_METADATA_BUCKET = "simplyblock-backup-metadata"
+
+TASKS_RETENTION_PERIOD_SEC = 60*60*24*30 # 30 days

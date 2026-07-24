@@ -201,75 +201,81 @@ def add_pool_stats(pool, records):
 # get DB controller
 db = db_controller.DBController()
 
-logger.info("Starting stats collector...")
-while True:
-    try:
-        db.get_clusters()
-    except Exception as e:
-        logger.error(f"Failed to get clusters: {e}")
-        time.sleep(3)
-        continue
-    for cluster in db.get_clusters():
 
-        if cluster.status in [Cluster.STATUS_INACTIVE, Cluster.STATUS_UNREADY, Cluster.STATUS_IN_ACTIVATION]:
-            logger.warning(f"Cluster {cluster.get_id()} is in {cluster.status} state, skipping")
+def main():
+    logger.info("Starting stats collector...")
+    while True:
+        try:
+            db.get_clusters()
+        except Exception as e:
+            logger.error(f"Failed to get clusters: {e}")
+            time.sleep(3)
             continue
+        for cluster in db.get_clusters():
 
-        lvol_list = db.get_lvols(cluster.get_id())
+            if cluster.status in [Cluster.STATUS_INACTIVE, Cluster.STATUS_UNREADY, Cluster.STATUS_IN_ACTIVATION]:
+                logger.warning(f"Cluster {cluster.get_id()} is in {cluster.status} state, skipping")
+                continue
 
-        if not lvol_list:
-            continue
+            lvol_list = db.get_lvols(cluster.get_id())
 
-        pools_lvols_stats: dict[str, list[LVolStatObject]] = {}
-        for snode in db.get_storage_nodes_by_cluster_id(cluster.get_id()):
+            if not lvol_list:
+                continue
 
-            for lvol in lvol_list:
-                if lvol.status in [LVol.STATUS_IN_CREATION, LVol.STATUS_IN_DELETION]:
-                    continue
-                if lvol.node_id != snode.get_id():
-                    continue
+            pools_lvols_stats: dict[str, list[LVolStatObject]] = {}
+            for snode in db.get_storage_nodes_by_cluster_id(cluster.get_id()):
 
-                capacity_dict = {}
-                stats = []
-                if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
-                    logger.info("Getting lVol stats: %s from node: %s", lvol.uuid, snode.get_id())
-                    rpc_client = snode.rpc_client(timeout=3, retry=2)
-                    ret = rpc_client.get_lvol_stats(lvol.lvol_uuid)
-                    if ret:
-                        stats.append(ret["bdevs"][0])
-                    ret = rpc_client.get_bdevs(lvol.lvol_uuid)
-                    if ret:
-                        capacity_dict = ret[0]
+                for lvol in lvol_list:
+                    if lvol.status in [LVol.STATUS_IN_CREATION, LVol.STATUS_IN_DELETION]:
+                        continue
+                    if lvol.node_id != snode.get_id():
+                        continue
 
-                if lvol.ha_type == "ha":
-                    for sec_id in lvol.nodes[1:]:
-                        try:
-                            sec_node = db.get_storage_node_by_id(sec_id)
-                        except KeyError:
-                            continue
-                        if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
-                            logger.info("Getting lVol stats: %s from node: %s", lvol.uuid, sec_node.get_id())
-                            sec_rpc_client = sec_node.rpc_client(timeout=3, retry=2)
-                            ret = sec_rpc_client.get_lvol_stats(lvol.lvol_uuid)
-                            if ret:
-                                stats.append(ret["bdevs"][0])
-                            if not capacity_dict:
-                                ret = sec_rpc_client.get_bdevs(lvol.lvol_uuid)
+                    capacity_dict = {}
+                    stats = []
+                    if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
+                        logger.info("Getting lVol stats: %s from node: %s", lvol.uuid, snode.get_id())
+                        rpc_client = snode.rpc_client(timeout=3, retry=2)
+                        ret = rpc_client.get_lvol_stats(lvol.lvol_uuid)
+                        if ret:
+                            stats.append(ret["bdevs"][0])
+                        ret = rpc_client.get_bdevs(lvol.lvol_uuid)
+                        if ret:
+                            capacity_dict = ret[0]
+
+                    if lvol.ha_type == "ha":
+                        for sec_id in lvol.nodes[1:]:
+                            try:
+                                sec_node = db.get_storage_node_by_id(sec_id)
+                            except KeyError:
+                                continue
+                            if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
+                                logger.info("Getting lVol stats: %s from node: %s", lvol.uuid, sec_node.get_id())
+                                sec_rpc_client = sec_node.rpc_client(timeout=3, retry=2)
+                                ret = sec_rpc_client.get_lvol_stats(lvol.lvol_uuid)
                                 if ret:
-                                    capacity_dict = ret[0]
+                                    stats.append(ret["bdevs"][0])
+                                if not capacity_dict:
+                                    ret = sec_rpc_client.get_bdevs(lvol.lvol_uuid)
+                                    if ret:
+                                        capacity_dict = ret[0]
 
-                record = add_lvol_stats(cluster, lvol, stats, capacity_dict)
-                if record:
-                    if lvol.pool_uuid in pools_lvols_stats and pools_lvols_stats[lvol.pool_uuid]:
-                        pools_lvols_stats[lvol.pool_uuid].append(record)
-                    else:
-                        pools_lvols_stats[lvol.pool_uuid] = [record]
+                    record = add_lvol_stats(cluster, lvol, stats, capacity_dict)
+                    if record:
+                        if lvol.pool_uuid in pools_lvols_stats and pools_lvols_stats[lvol.pool_uuid]:
+                            pools_lvols_stats[lvol.pool_uuid].append(record)
+                        else:
+                            pools_lvols_stats[lvol.pool_uuid] = [record]
 
-        for pool in db.get_pools(cluster_id=cluster.get_id()):
+            for pool in db.get_pools(cluster_id=cluster.get_id()):
 
-            if pool.get_id() in pools_lvols_stats:
-                stat_records = pools_lvols_stats[pool.get_id()]
-                if stat_records:
-                    add_pool_stats(pool, stat_records)
+                if pool.get_id() in pools_lvols_stats:
+                    stat_records = pools_lvols_stats[pool.get_id()]
+                    if stat_records:
+                        add_pool_stats(pool, stat_records)
 
-    time.sleep(constants.LVOL_STAT_COLLECTOR_INTERVAL_SEC)
+        time.sleep(constants.LVOL_STAT_COLLECTOR_INTERVAL_SEC)
+
+
+if __name__ == "__main__":
+    main()

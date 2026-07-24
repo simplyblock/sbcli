@@ -221,8 +221,7 @@ class StorageNode(BaseNodeObject):
         rpc_client = self.rpc_client()
 
         try:
-            subsys_list = rpc_client.subsystem_list(nqn)
-            subsys = subsys_list[0] if subsys_list else None
+            subsys = rpc_client.subsystem_get(nqn)
             if subsys is None:
                 if not rpc_client.subsystem_create(
                         nqn=nqn,
@@ -296,7 +295,57 @@ class StorageNode(BaseNodeObject):
         """
         return f"{cluster_nqn}:hublvol:{lvstore_name}"
 
-    def create_hublvol(self, cluster_nqn=None):
+    def prestage_hublvol_subsystem(self, nqn, model_number, port,
+                                   ana_state=None, min_cntlid=1):
+        """Create the NVMf subsystem + listeners for a hublvol NQN WITHOUT
+        its namespace.
+
+        The subsystem/listener half of :meth:`expose_bdev` has no lvstore or
+        bdev dependency, so the restart flow runs it BEFORE the client-port
+        block window; the in-window ``expose_bdev`` then reduces to one probe
+        plus ``add_ns`` (measured 2026-07-21: subsystem+listener creation was
+        ~4 RPCs x ~50ms inside every blocked window). Idempotent — guarded by
+        ``subsystem_get``; parameters MUST match the later ``expose_bdev``
+        call (same nqn/model/port/ana/min_cntlid — see the disjoint-cntlid
+        requirement in ``create_secondary_hublvol``)."""
+        rpc_client = self.rpc_client()
+        subsys = rpc_client.subsystem_get(nqn)
+        if subsys is None:
+            if not rpc_client.subsystem_create(
+                    nqn=nqn,
+                    serial_number='sbcli-cn',
+                    model_number=model_number,
+                    min_cntlid=min_cntlid,
+            ):
+                raise RPCException(f'Failed to pre-create subsystem for {nqn}')
+            existing_listeners: set = set()
+        else:
+            existing_listeners = {
+                (la.get("trtype", "").upper(),
+                 la.get("traddr"),
+                 str(la.get("trsvcid")))
+                for la in (subsys.get("listen_addresses") or [])
+            }
+        for iface in self.data_nics:
+            ip = iface.ip4_address
+            if self.active_rdma:
+                if iface.trtype != "RDMA":
+                    continue
+                trtype = "RDMA"
+            else:
+                if iface.trtype != "TCP":
+                    continue
+                trtype = "TCP"
+            if (trtype, ip, str(port)) in existing_listeners:
+                continue
+            rpc_client.listeners_create(
+                nqn=nqn, trtype=trtype, traddr=ip, trsvcid=port,
+                ana_state=ana_state,
+            )
+        logger.info("Pre-staged hublvol subsystem %s on %s (port %s)",
+                    nqn, self.get_id(), port)
+
+    def create_hublvol(self, cluster_nqn=None, defer_db_write=False):
         """Create a hublvol for this node's lvstore.
 
         If cluster_nqn is provided, use a shared NQN scheme for multipath.
@@ -341,17 +390,24 @@ class StorageNode(BaseNodeObject):
             if hublvol_uuid is not None and rpc_client.get_bdevs(hublvol_uuid):
                 rpc_client.bdev_lvol_delete_hublvol(self.hublvol.nqn)
 
-            if self.hublvol and rpc_client.subsystem_list(self.hublvol.nqn):
+            if self.hublvol and rpc_client.subsystem_get(self.hublvol.nqn):
                 rpc_client.subsystem_delete(self.hublvol.nqn)
                 self.hublvol = None  # type: ignore[assignment]
 
             raise
 
-        self.write_to_db()
+        if not defer_db_write:
+            self.write_to_db()
         return self.hublvol
 
-    def create_transfer_hublvol(self):
-        """Create a hublvol for this node's transfer lvstore."""
+    def create_transfer_hublvol(self, defer_db_write=False):
+        """Create a hublvol for this node's transfer lvstore.
+
+        ``defer_db_write=True``: skip the full-object node write (an FDB
+        round-trip measured ~150ms INSIDE the port-block window, and a
+        member of the stale-full-write class behind the 2026-07-21 status
+        resurrection) — the caller persists ``transfer_hublvol`` atomically
+        after the unblock."""
         logger.info(f'Creating transfer hublvol on {self.get_id()}')
 
         if not self.transfer_hublvol or not self.transfer_hublvol.bdev_name:
@@ -399,13 +455,14 @@ class StorageNode(BaseNodeObject):
             if transfer_hub_uuid is not None and rpc_client.get_bdevs(transfer_hub_uuid):
                 rpc_client.bdev_lvol_delete_hublvol(transfer_hub_uuid)
 
-            if self.transfer_hublvol and rpc_client.subsystem_list(self.transfer_hublvol.nqn):
+            if self.transfer_hublvol and rpc_client.subsystem_get(self.transfer_hublvol.nqn):
                 rpc_client.subsystem_delete(self.transfer_hublvol.nqn)
                 self.transfer_hublvol = None  # type: ignore[assignment]
 
             raise
 
-        self.write_to_db()
+        if not defer_db_write:
+            self.write_to_db()
         return self.transfer_hublvol
 
 
@@ -539,9 +596,19 @@ class StorageNode(BaseNodeObject):
                 logger.error("Error establishing hublvol: %s", e.message)
                 return False
 
-    def connect_to_hublvol(self, primary_node, failover_node=None, role="secondary",
-                           timeout=None, rpc_timeout=None, lvs_node=None):
+    def connect_to_hublvol(self, primary_node, failover_node=None, *, role,
+                           timeout=None, rpc_timeout=None, lvs_node=None,
+                           coordinator_lock=None, attach_only=False):
         """Connect to a primary node's hublvol, optionally with multipath failover.
+
+        ``role`` is required and must be this node's role for the LVS being
+        wired up ("secondary" or "tertiary"), derived from topology
+        (secondary_node_id / tertiary_node_id back-refs) — NEVER from list
+        position or a default. It is stamped onto the LVS via
+        bdev_lvol_set_lvs_opts; a wrong value gives two nodes the same role
+        for one LVS (the old ``role="secondary"`` default did exactly that
+        to activation-mode tertiary recreates, mass_create_delete_k8s
+        2026-07-14: LVS_11 tertiary worker-1 stamped "secondary").
 
         If failover_node is provided (typically sec_1), sets up NVMe ANA
         multipath so that IO automatically fails over from the primary path
@@ -623,13 +690,49 @@ class StorageNode(BaseNodeObject):
             )
             peers = [primary_node] + ([failover_node] if failover_node else [])
             coordinator = HublvolReconnectCoordinator(DBController())
+            # coordinator_lock: pre-entered advisory lock from
+            # HublvolReconnectCoordinator.acquire_lock — the restart
+            # port-block window acquires it BEFORE blocking the client port
+            # (the acquire txn measured avg 858ms inside the window,
+            # 2026-07-21) and releases it after the unblock. Ownership stays
+            # with the caller.
             if not coordinator.reconcile(self, lvs_node, peers, role=role,
-                                         rpc_timeout=rpc_timeout):
+                                         rpc_timeout=rpc_timeout,
+                                         lock=coordinator_lock):
                 logger.error(
                     "Hublvol reconcile failed for %s on %s (role=%s)",
                     lvs_node.hublvol.bdev_name, self.get_id(), role,
                 )
                 return False
+
+        if attach_only:
+            # Pre-block staging (2026-07-22): the NVMe-oF controller attach is
+            # inert until bdev_lvol_connect_hublvol registers the hub as the
+            # LVS redirect target — so the attach (the coordinator round-trips
+            # above) runs BEFORE the client-port-block window and only
+            # set_lvs_opts + connect_hublvol remain inside it. When the target
+            # subsystem is still namespace-less (a restarting leader whose
+            # hublvol bdev is created only after the in-window examine), the
+            # controller attaches empty and the n1 bdev surfaces via AER after
+            # the in-window add_ns — the wait below covers that.
+            return True
+
+        if not rpc_client.get_bdevs(remote_bdev):
+            # Attach done (either just now or pre-staged with attach_only)
+            # but the namespace bdev has not surfaced yet — the target's
+            # add_ns may have completed only milliseconds ago and the AER
+            # hot-add propagates asynchronously. Poll briefly, then PROCEED
+            # either way (pre-existing semantics: connect_hublvol below is
+            # the arbiter and fails loudly if the bdev is truly absent).
+            for _ in range(10):
+                time.sleep(0.1)
+                if rpc_client.get_bdevs(remote_bdev):
+                    break
+            else:
+                logger.warning(
+                    "Hublvol bdev %s not surfaced on %s yet after attach; "
+                    "proceeding — connect_hublvol will verify",
+                    remote_bdev, self.get_id())
 
         if not rpc_client.bdev_lvol_set_lvs_opts(
                 lvs_node.lvstore,

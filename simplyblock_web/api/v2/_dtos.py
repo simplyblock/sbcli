@@ -21,6 +21,7 @@ from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.backup import Backup, BackupPolicy
 from simplyblock_core.models.stats import StatsObject
 from simplyblock_core.models.lvol_migration import LVolMigration
+from simplyblock_core.models.lvol_migration_group import LVolMigrationGroup
 
 from . import util
 
@@ -595,3 +596,85 @@ class MigrationDTO(BaseModel):
             completed_at=model.completed_at,
             connect_strings=connect_strings or [],
         )
+
+
+class MigrationGroupDTO(BaseModel):
+    id: UUID
+    cluster_id: str
+    source_node_id: str
+    target_node_id: str
+    target_nqn: str
+    phase: str
+    status: str
+    member_count: int
+    error_message: str
+    connect_strings: list[NvmeConnectEntry] = []
+
+    @staticmethod
+    def from_model(model: LVolMigrationGroup, connect_strings: Optional[List[NvmeConnectEntry]] = None):
+        return MigrationGroupDTO(
+            id=UUID(model.uuid),
+            cluster_id=model.cluster_id,
+            source_node_id=model.source_node_id,
+            target_node_id=model.target_node_id,
+            target_nqn=model.target_nqn,
+            phase=model.phase,
+            status=model.status,
+            member_count=model.member_count(),
+            error_message=model.error_message or "",
+            connect_strings=connect_strings or [],
+        )
+
+
+class DeviceHealthInfoDTO(BaseModel):
+    id: UUID
+    model_number: str
+    serial_number: str
+    firmware_revision: str
+    traddr: str
+    critical_warning: int
+    temperature_celsius: int
+    available_spare_percentage: int
+    available_spare_threshold_percentage: int
+    percentage_used: int
+    data_units_read: int
+    data_units_written: int
+    host_read_commands: int
+    host_write_commands: int
+    controller_busy_time: int
+    power_cycles: int
+    power_on_hours: int
+    unsafe_shutdowns: int
+    media_errors: int
+    num_err_log_entries: int
+    warning_temperature_time_minutes: int
+    critical_composite_temperature_time_minutes: int
+
+
+    @staticmethod
+    def from_model(model: NVMeDevice, health_info: dict):
+        return DeviceHealthInfoDTO(
+            id=UUID(model.get_id()),
+            model_number=health_info["model_number"],
+            serial_number=health_info["serial_number"],
+            firmware_revision=health_info["firmware_revision"],
+            traddr=health_info["traddr"],
+            critical_warning=health_info["critical_warning"],
+            temperature_celsius=health_info["temperature_celsius"],
+            available_spare_percentage=health_info["available_spare_percentage"],
+            available_spare_threshold_percentage=health_info["available_spare_threshold_percentage"],
+            percentage_used=health_info["percentage_used"],
+            data_units_read=health_info["data_units_read"],
+            data_units_written=health_info["data_units_written"],
+            host_read_commands=health_info["host_read_commands"],
+            host_write_commands=health_info["host_write_commands"],
+            controller_busy_time=health_info["controller_busy_time"],
+            power_cycles=health_info["power_cycles"],
+            power_on_hours=health_info["power_on_hours"],
+            unsafe_shutdowns=health_info["unsafe_shutdowns"],
+            media_errors=health_info["media_errors"],
+            num_err_log_entries=health_info["num_err_log_entries"],
+            warning_temperature_time_minutes=health_info["warning_temperature_time_minutes"],
+            critical_composite_temperature_time_minutes=health_info["critical_composite_temperature_time_minutes"],
+        )
+

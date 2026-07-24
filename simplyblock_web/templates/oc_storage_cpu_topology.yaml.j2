@@ -34,27 +34,6 @@ spec:
             - |
               set -e
               MARKER="/var/simplyblock/.cpu_topology_applied"
-              if [ -f "$MARKER" ]; then
-                  echo "[INFO] Node already configured. Waiting for NUMA plugin pod to be ready..."
-                  RETRIES=0
-                  while [ $RETRIES -lt 36 ]; do
-                    PLUGIN_READY=$(kubectl get pod -n kube-system \
-                      --field-selector spec.nodeName={{ HOSTNAME }} \
-                      -l app=simplyblock-numa-resource-plugin \
-                      -o jsonpath='{.items[0].status.containerStatuses[0].ready}' 2>/dev/null || true)
-                    NUMA_ALLOC=$(kubectl get node "{{ HOSTNAME }}" \
-                      -o jsonpath='{.status.allocatable.numa-align/numa-{{ NSOCKET }}}' 2>/dev/null || true)
-                    if [ "$PLUGIN_READY" = "true" ] && [ "$NUMA_ALLOC" = "100" ]; then
-                      echo "[INFO] NUMA plugin is ready and numa-align/numa-{{ NSOCKET }} is available (100)"
-                      exit 0
-                    fi
-                    RETRIES=$((RETRIES + 1))
-                    echo "[INFO] Waiting for NUMA readiness (plugin=$PLUGIN_READY, allocatable=$NUMA_ALLOC), retry $RETRIES/36 in 10s..."
-                    sleep 10
-                  done
-                  echo "[ERROR] NUMA plugin did not become ready after 6 minutes"
-                  exit 1
-              fi
 
               # Resource names — one MCP/MC/KC shared across all storage nodes in the cluster.
               # The MCP nodeSelector grows as new nodes are added (In operator).
@@ -102,9 +81,58 @@ spec:
                       operator: In
                       values:
                         - $HOSTNAME
-                maxUnavailable: 1
+                # Wide during initial node-add so first-time CPU-topology
+                # reboots roll in parallel (nodes are empty pre-activation);
+                # cluster_activate narrows this to the fault tolerance once the
+                # cluster serves IO.
+                maxUnavailable: {{ MCP_MAX_UNAVAILABLE }}
               MCPEOF
               fi
+
+              # ---- Enforce single storage-pool membership -------------------
+              # A node belongs to exactly ONE storage MCP. A previous cluster
+              # (different UUID -> different pool name) may still list this node
+              # in its storage-<oldid> pool; matching two custom pools makes MCO
+              # refuse the node ("belongs to 2 custom roles") and freeze its
+              # rollout. We just added the node to our pool ABOVE, so now drop it
+              # from every OTHER storage-* pool. Add-before-remove is deliberate:
+              # the node is never in zero custom pools, so it never falls back to
+              # the worker pool and never eats an extra reboot. We only edit
+              # nodeSelectors (never delete the old pool or its render), so the
+              # node just moves between identical-content renders — no reboot —
+              # and the stale pool harmlessly shrinks toward empty.
+              for OTHER in $(kubectl get mcp -o name | sed 's#.*/##' | grep '^storage-' | grep -v "^${MCP_NAME}$"); do
+                RETRY=0
+                # Retry: sibling node-add jobs may patch the same stale pool
+                # concurrently; each job loops until ITS hostname is gone, which
+                # converges under last-write-wins for the small parallel-add fan-out.
+                while [ $RETRY -lt 15 ]; do
+                  if ! kubectl get machineconfigpool "$OTHER" \
+                       -o jsonpath='{range .spec.nodeSelector.matchExpressions[0].values[*]}{@}{"\n"}{end}' 2>/dev/null \
+                       | grep -qx "$HOSTNAME"; then
+                    break
+                  fi
+                  NEWVALS=$(kubectl get machineconfigpool "$OTHER" \
+                    -o jsonpath='{range .spec.nodeSelector.matchExpressions[0].values[*]}{@}{"\n"}{end}' 2>/dev/null \
+                    | grep -vx "$HOSTNAME" \
+                    | awk 'BEGIN{printf "["} {printf "%s\"%s\"", (NR>1?",":""), $0} END{printf "]"}')
+                  # An In-operator selector with EMPTY values is invalid
+                  # ("values set can't be empty") and makes MCO degrade EVERY
+                  # node cluster-wide, freezing any node still migrating off this
+                  # pool's render. When removing the pool's last node, retire it
+                  # with a sentinel that matches no host instead of emptying it;
+                  # the pool becomes inert (0 nodes) but stays a valid object, so
+                  # nodes on its identical render migrate to their new pool.
+                  if [ "$NEWVALS" = "[]" ]; then
+                    NEWVALS='["retired-empty-storage-pool"]'
+                  fi
+                  echo "[INFO] Removing $HOSTNAME from stale storage pool $OTHER (values -> $NEWVALS)"
+                  kubectl patch machineconfigpool "$OTHER" --type=merge \
+                    -p "{\"spec\":{\"nodeSelector\":{\"matchExpressions\":[{\"key\":\"kubernetes.io/hostname\",\"operator\":\"In\",\"values\":$NEWVALS}]}}}" || true
+                  RETRY=$((RETRY + 1))
+                  sleep 2
+                done
+              done
 
               # ---- MachineConfig --------------------------------------------
               # Role matches MCP name so MCO-generated KubeletConfig MC is also picked up.
@@ -146,6 +174,35 @@ spec:
                   topologyManagerPolicy: single-numa-node
                   reservedSystemCPUs: {{ RESERVED_SYSTEM_CPUS }}
               KCEOF
+              fi
+
+              # MCP membership + MC + KubeletConfig are ensured on every run above,
+              # so a stale marker can never leave this node off the pool config.
+              # The marker only records that this node has already been through the
+              # first-time flow: if present, skip the reboot wait and just confirm
+              # NUMA-plugin readiness. SPDK start is gated separately by the agent
+              # (it waits for the MCO reboot to actually land), so correctness no
+              # longer depends on this marker being in sync.
+              if [ -f "$MARKER" ]; then
+                  echo "[INFO] Node already configured. Waiting for NUMA plugin pod to be ready..."
+                  RETRIES=0
+                  while [ $RETRIES -lt 36 ]; do
+                    PLUGIN_READY=$(kubectl get pod -n kube-system \
+                      --field-selector spec.nodeName={{ HOSTNAME }} \
+                      -l app=simplyblock-numa-resource-plugin \
+                      -o jsonpath='{.items[0].status.containerStatuses[0].ready}' 2>/dev/null || true)
+                    NUMA_ALLOC=$(kubectl get node "{{ HOSTNAME }}" \
+                      -o jsonpath='{.status.allocatable.numa-align/numa-{{ NSOCKET }}}' 2>/dev/null || true)
+                    if [ "$PLUGIN_READY" = "true" ] && [ "$NUMA_ALLOC" = "100" ]; then
+                      echo "[INFO] NUMA plugin is ready and numa-align/numa-{{ NSOCKET }} is available (100)"
+                      exit 0
+                    fi
+                    RETRIES=$((RETRIES + 1))
+                    echo "[INFO] Waiting for NUMA readiness (plugin=$PLUGIN_READY, allocatable=$NUMA_ALLOC), retry $RETRIES/36 in 10s..."
+                    sleep 10
+                  done
+                  echo "[ERROR] NUMA plugin did not become ready after 6 minutes"
+                  exit 1
               fi
 
               echo "[INFO] Marking node as configured."

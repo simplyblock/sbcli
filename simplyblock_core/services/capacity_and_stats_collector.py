@@ -211,7 +211,7 @@ def add_device_stats(cl, device, capacity_dict, stats_dict):
     return stat_obj
 
 
-def add_node_stats(node, records, all_lvols):
+def add_node_stats(cluster, node, records, all_lvols):
     size_used = 0
     size_total = 0
     data = {}
@@ -233,7 +233,7 @@ def add_node_stats(node, records, all_lvols):
         size_prov_util = int((size_prov / size_total) * 100)
 
     data.update({
-        "cluster_id": cl.get_id(),
+        "cluster_id": cluster.get_id(),
         "uuid": node.get_id(),
         "date": int(time.time()),
         "size_util": size_util,
@@ -289,7 +289,8 @@ def add_cluster_stats(cl, records):
 # get DB controller
 db = db_controller.DBController()
 
-if __name__ == "__main__":
+
+def main():
     logger.info("Starting capacity and stats collector...")
     while True:
         try:
@@ -337,7 +338,7 @@ if __name__ == "__main__":
                             devices_records.append(record)
                             cluster_device_records.append((device, record))
 
-                node_record = add_node_stats(node, devices_records, all_lvols)
+                node_record = add_node_stats(cl, node, devices_records, all_lvols)
                 node_records.append(node_record)
 
             add_cluster_stats(cl, node_records)
@@ -348,3 +349,7 @@ if __name__ == "__main__":
                 logger.error(f"latency-outlier detection failed for cluster {cl.get_id()}: {e}")
 
         time.sleep(constants.DEV_STAT_COLLECTOR_INTERVAL_SEC)
+
+
+if __name__ == "__main__":
+    main()

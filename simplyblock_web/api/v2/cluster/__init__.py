@@ -12,6 +12,7 @@ from simplyblock_core import cluster_ops
 
 from .._dependencies import Cluster
 from .backup import api as backup_api
+from .migration_group import api as migration_group_api
 from .storage_pool import api as pool_api
 from .storage_node import api as storage_node_api
 from .task import api as task_api
@@ -76,8 +77,6 @@ class ClusterParams(BaseModel):
     cr_name: str = ""
     cr_namespace: str = ""
     cr_plural: str = ""
-    cluster_ip: str = ""
-    grafana_secret: SecretStr = SecretStr("")
     client_data_nic: str = ""
     max_fault_tolerance: int = 1
     nvmf_base_port: int = 4420
@@ -244,8 +243,15 @@ def update_cluster( cluster: Cluster, parameters: _UpdateParams) -> Response:
     return Response(status_code=204)
 
 
+@instance_api.post('/rebalance', name='clusters:rebalance', status_code=204, responses={204: {"content": None}})
+def rebalance_cluster( cluster: Cluster) -> Response:
+    cluster_ops.rebalance(cluster.get_id())
+    return Response(status_code=204)
+
+
 instance_api.include_router(storage_node_api, prefix='/storage-nodes')
 instance_api.include_router(task_api, prefix='/tasks')
 instance_api.include_router(pool_api, prefix='/storage-pools')
 instance_api.include_router(backup_api, prefix='/backups')
+instance_api.include_router(migration_group_api, prefix='/migration-groups')
 api.include_router(instance_api)

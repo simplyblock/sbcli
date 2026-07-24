@@ -3,7 +3,7 @@ import json
 
 from pydantic import SecretStr
 
-from simplyblock_web.api.v2.cluster import BackupConfigParams, ClusterParams
+from simplyblock_web.api.v2.cluster import BackupConfigParams
 from simplyblock_web.api.v2._dtos import ClusterDTO, CapacityStatDTO
 from uuid import uuid4
 
@@ -32,12 +32,6 @@ def test_backup_config_repr_masks_secret_values():
     text = repr(params)
     assert "AKID" not in text
     assert "SK" not in text
-
-
-def test_cluster_params_grafana_secret_is_secretstr():
-    params = ClusterParams.model_validate({"grafana_secret": "graf-secret"})
-    assert isinstance(params.grafana_secret, SecretStr)
-    assert params.grafana_secret.get_secret_value() == "graf-secret"
 
 
 def _build_cluster_dto():

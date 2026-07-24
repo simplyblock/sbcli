@@ -1,28 +1,22 @@
+import errno
 import json
-import threading
-import time
 from json import JSONDecodeError
 from typing import Any, Optional
 
-import requests
-from pydantic import SecretStr
-from requests.exceptions import ConnectionError, HTTPError, Timeout, TooManyRedirects
 import jsonschema
+import requests
 from jsonschema.exceptions import ValidationError
+from pydantic import SecretStr
+from requests.adapters import HTTPAdapter
+from requests.exceptions import ConnectionError, HTTPError, Timeout, TooManyRedirects
+from urllib3 import Retry
 
 from simplyblock_core import utils, constants
 from simplyblock_core.settings import Settings
+from simplyblock_core.utils.helpers import single_or_none
 from simplyblock_core.utils.secrets import unwrap_secrets_for_send
-from requests.adapters import HTTPAdapter
-from urllib3 import Retry
 
 logger = utils.get_logger()
-
-# Shared per-node cache for expensive read-only RPCs (e.g. bdev_get_bdevs, nvmf_get_subsystems).
-# Key: (host, port, method_name), Value: (timestamp, result)
-_rpc_cache: dict[tuple, tuple[float, Any]] = {}
-_rpc_cache_lock = threading.Lock()
-RPC_CACHE_TTL_SEC = 15  # cached results are valid for this many seconds
 
 
 _response_schema = {
@@ -105,7 +99,7 @@ class RPCClient:
     # still apply, since a failed *connect* means the request never reached the
     # node and is safe to resend.
     DEFAULT_ALLOWED_METHODS = ["HEAD", "GET", "PUT", "DELETE", "OPTIONS", "TRACE"]
-    RPC_NO_PRINT_OUTPUT = ["bdev_get_bdevs", "nvmf_get_subsystems", "bdev_get_iostat"]
+    RPC_NO_PRINT_OUTPUT = ["bdev_get_bdevs", "nvmf_get_subsystems", "bdev_get_iostat", "bdev_get_histogram"]
 
     def __init__(self, host, port, username, password: SecretStr, timeout=180, retry=3):
         self.host = host
@@ -126,22 +120,6 @@ class RPCClient:
         self.session.mount("https://", HTTPAdapter(max_retries=retries))
         if settings.tls_connect == "authenticated":
             self.session.cert = (str(settings.tls_certificate), str(settings.tls_key))
-
-    def _request_cached(self, method, params=None, cache_ttl=RPC_CACHE_TTL_SEC):
-        """Like _request but returns a cached result if one exists within cache_ttl seconds."""
-        cache_key = (self.host, self.port, method, json.dumps(params, sort_keys=True) if params else None)
-        now = time.monotonic()
-        with _rpc_cache_lock:
-            if cache_key in _rpc_cache:
-                ts, cached_result = _rpc_cache[cache_key]
-                if now - ts < cache_ttl:
-                    logger.debug("Cache hit for %s on %s:%s", method, self.host, self.port)
-                    return cached_result
-        result = self._request(method, params)
-        if result is not None:
-            with _rpc_cache_lock:
-                _rpc_cache[cache_key] = (now, result)
-        return result
 
     def _request(self, method, params=None, request_timeout=None):
         ret, _ = self._request2(method, params, request_timeout=request_timeout)
@@ -229,15 +207,16 @@ class RPCClient:
     def get_version(self):
         return self._request("spdk_get_version")
 
-    def subsystem_list(self, nqn_name=None):
-        data = self._request("nvmf_get_subsystems")
-        if data and nqn_name:
-            for d in data:
-                if d['nqn'] == nqn_name:
-                    return [d]
-            return []
-        else:
-            return data
+    def subsystem_list(self) -> list[dict]:
+        return self._request3("nvmf_get_subsystems")
+
+    def subsystem_get(self, nqn: str) -> Optional[dict]:
+        try:
+            return single_or_none(self._request3("nvmf_get_subsystems", nqn=nqn))
+        except RPCException as e:
+            if e.code == -errno.ENODEV:
+                return None
+            raise
 
     def subsystem_delete(self, nqn):
         return self._request("nvmf_delete_subsystem", params={'nqn': nqn})
@@ -475,24 +454,22 @@ class RPCClient:
         ret, err = self._request2("nvmf_subsystem_add_ns", params)
         if err and idempotent:
             try:
-                subs = self.subsystem_list(nqn_name=nqn) or []
-                if subs:
-                    for ns in subs[0].get("namespaces", []) or []:
-                        if ns.get("bdev_name") != dev_name:
-                            continue
-                        if nsid is not None and ns.get("nsid") != nsid:
-                            continue
-                        if uuid is not None and ns.get("uuid") and ns.get("uuid") != uuid:
-                            # Same bdev at a different nsid is fine to no-op,
-                            # but a mismatched uuid on the same bdev is a real
-                            # conflict — keep the original error.
-                            continue
-                        existing_nsid = ns.get("nsid")
-                        logger.info(
-                            "nvmf_subsystem_add_ns: %s already has %s at nsid=%s, "
-                            "treating rejected duplicate add as success",
-                            nqn, dev_name, existing_nsid)
-                        return existing_nsid, None
+                for ns in (self.subsystem_get(nqn) or {}).get("namespaces", []):
+                    if ns.get("bdev_name") != dev_name:
+                        continue
+                    if nsid is not None and ns.get("nsid") != nsid:
+                        continue
+                    if uuid is not None and ns.get("uuid") and ns.get("uuid") != uuid:
+                        # Same bdev at a different nsid is fine to no-op,
+                        # but a mismatched uuid on the same bdev is a real
+                        # conflict — keep the original error.
+                        continue
+                    existing_nsid = ns.get("nsid")
+                    logger.info(
+                        "nvmf_subsystem_add_ns: %s already has %s at nsid=%s, "
+                        "treating rejected duplicate add as success",
+                        nqn, dev_name, existing_nsid)
+                    return existing_nsid, None
             except Exception as e:
                 # Don't let the idempotency probe mask the original error.
                 logger.debug(
@@ -584,10 +561,10 @@ class RPCClient:
             params["uuid"] = uuid
         return self._request("bdev_lvol_create", params)
 
-    def delete_lvol(self, name, del_async=False, special_delete=False):
+    def delete_lvol(self, name, sync=False, special_delete=False):
         params = {
             "name": name,
-            "sync": del_async,
+            "sync": sync,
             "special_delete": special_delete,
         }
         return self._request2("bdev_lvol_delete", params)
@@ -1208,6 +1185,22 @@ class RPCClient:
     def bdev_wait_for_examine(self):
         return self._request("bdev_wait_for_examine")
 
+    def bdev_enable_histogram(self, name, enable=True, opc=None):
+        # opc filters to a single I/O type (e.g. "read"/"write"); requires
+        # SPDK >= 24.01. Toggling disable->enable clears the collected data,
+        # which is the only way to reset the (cumulative) histogram.
+        params = {"name": name, "enable": enable}
+        if opc:
+            params["opc"] = opc
+        return self._request("bdev_enable_histogram", params)
+
+    def bdev_get_histogram(self, name):
+        # Returns {"histogram": <base64 of uint64 buckets>, "bucket_shift",
+        # "tsc_rate"}. Counts are cumulative since enable; diff two snapshots
+        # to get a time window.
+        params = {"name": name}
+        return self._request("bdev_get_histogram", params)
+
     def nbd_start_disk(self, bdev_name, nbd_device="/dev/nbd0"):
         params = {
             "bdev_name": bdev_name,
@@ -1308,6 +1301,9 @@ class RPCClient:
     def bdev_lvol_get_lvstores(self, name):
         params = {"lvs_name": name}
         return self._request("bdev_lvol_get_lvstores", params)
+
+    def bdev_lvol_rename(self, old_name, new_name):
+        return self._request3("bdev_lvol_rename", old_name=old_name, new_name=new_name)
 
     def bdev_lvol_resize(self, name, size_in_mib):
         params = {
@@ -1704,7 +1700,7 @@ class RPCClient:
         """
         return self._request("bdev_lvol_get_lvols", {"lvs_name": lvs_name})
 
-    def bdev_lvol_transfer_final_step(self, lvol_name, lvol_id, snapshot_name, batch_size, gateway, operation="migrate"):
+    def bdev_lvol_transfer_final_step(self, lvol_name, lvol_id, snapshot_name, batch_size, gateway, operation):
         """
         Start the final (live) transfer of a writable lvol from source to target.
         The source I/O is frozen for the brief delta transfer, then resumed.
@@ -1732,14 +1728,36 @@ class RPCClient:
             "operation": operation,
         })
 
-    def bdev_lvol_final_migration(self, lvol_name, lvol_id, snapshot_name, batch_size, bdev_name, operation="migrate"):
-        """Deprecated alias for :meth:`bdev_lvol_transfer_final_step`.
-
-        Retained for the intra-cluster migration runner; new replication code
-        should call ``bdev_lvol_transfer_final_step`` directly.
+    def bdev_lvol_batch_transfer_final_step(self, lvol_names, lvol_ids, snapshot_names, batch_size, gateway, operation):
         """
-        return self.bdev_lvol_transfer_final_step(
-            lvol_name, lvol_id, snapshot_name, batch_size, bdev_name, operation)
+        Start the final transfer step for a batch of lvols simultaneously.
+
+        Intended for shared-namespace subsystems where multiple lvols must be
+        frozen, transferred, and resumed together to keep their namespace IDs
+        consistent across source and target.  Each list argument must have the
+        same length; position N in each list describes one lvol.
+
+        Args:
+            lvol_names:     list of source lvol composite bdev names
+            lvol_ids:       list of map_ids of the corresponding target lvols
+                            (from :meth:`bdev_lvol_get_lvols`)
+            snapshot_names: list of composite names of the last transferred
+                            snapshot for each lvol on the target
+            batch_size:     cluster batch size – pass ``2`` for the final step
+            gateway:        target hub lvol bdev name (NVMe-oF attached on source);
+                            shared across all lvols in the batch
+            operation:      ``"migrate"`` or ``"replicate"``
+
+        Poll per-lvol progress with :meth:`bdev_lvol_transfer_stat` using
+        the corresponding entry from *lvol_names*.
+        """
+        return self._request3("bdev_lvol_batch_transfer_final_step",
+                              lvol_names=lvol_names,
+                              ids=lvol_ids,
+                              snapshots=snapshot_names,
+                              cluster_batch=batch_size,
+                              gateway=gateway,
+                              operation=operation)
 
     # ---- S3 Backup RPCs ----
 
@@ -1872,3 +1890,9 @@ class RPCClient:
         return self._request("bdev_lvol_s3_delete", {
             "s3_ids": s3_ids,
         })
+
+    def bdev_nvme_get_controller_health_info(self, name):
+        params = {
+            "name": name
+        }
+        return self._request("bdev_nvme_get_controller_health_info", params)

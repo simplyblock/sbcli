@@ -53,6 +53,29 @@ def set_port(node, port, block, is_reject=False, timeout=5, retry=2):
         port, "tcp", action, node.rpc_port, is_reject=is_reject)
 
 
+def get_blocked_ports_set(node, timeout=5, retry=5):
+    """One ``nvmf_get_blocked_ports`` fetch -> set of blocked port numbers,
+    or ``None`` when the node's SPDK lacks the method (legacy iptables path —
+    caller falls back to per-port :func:`is_port_blocked`).
+
+    The health/monitor loops used to call ``is_port_blocked`` per port,
+    re-fetching the identical full list each time — measured 528 of these
+    RPCs per minute cluster-wide at idle (2026-07-21 baseline audit). One
+    fetch per node per cycle answers every port.
+    """
+    rpc = node.rpc_client(timeout=timeout, retry=retry)
+    try:
+        blocked = rpc.nvmf_get_blocked_ports()
+    except Exception as exc:
+        if not _is_method_not_found(exc):
+            raise
+        return None
+    if not blocked:
+        return set()
+    entries = blocked.get("blocked_ports", []) if isinstance(blocked, dict) else []
+    return {int(e.get("port", -1)) for e in entries}
+
+
 def is_port_blocked(node, port_id, timeout=5, retry=5):
     """Return True if ``port_id`` is currently blocked on ``node``.
 

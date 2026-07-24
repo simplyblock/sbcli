@@ -161,6 +161,26 @@ class SpdkMoveExecutor(MoveExecutor):
         setattr(primary, primary_ptr_attr, holder.get_id())
         primary.write_to_db()
 
+        # 2b. Ensure the primary's hublvol exists before building the
+        #    holder's stack. The newcomer's LVS was created by the
+        #    create-primary move at a point where it had no sec/tert
+        #    pointers yet, and create_lvstore only creates hublvols when
+        #    secondaries exist — so the first create-sec move must create
+        #    them. This has to happen before recreate_lvstore_on_non_leader:
+        #    the holder's lvstore_ports rebuild reads
+        #    primary.hublvol.nvmf_port (falls back to 0 when absent) and
+        #    its connect_to_hublvol raises on a missing hublvol.
+        primary = db.get_storage_node_by_id(primary.get_id())
+        if not (primary.hublvol and primary.hublvol.uuid):
+            cluster = db.get_cluster_by_id(primary.cluster_id)
+            try:
+                primary.create_hublvol(cluster_nqn=cluster.nqn)
+                primary.create_transfer_hublvol()
+            except Exception as e:
+                raise RuntimeError(
+                    f"hublvol creation on new primary {primary.get_id()} "
+                    f"failed: {e!r}") from e
+
         # 3. Refresh + recreate. The holder is the newcomer (or another
         #    node that just gained this role); recreate iterates by the
         #    back-references we just set, so this is surgical.
@@ -243,6 +263,20 @@ class SpdkMoveExecutor(MoveExecutor):
             raise RuntimeError(
                 f"recreate_lvstore_on_sec failed on recipient "
                 f"{recipient.get_id()} during re-home of LVS@{primary.get_id()}")
+
+        # 2b. Re-point the per-lvol replica references. check_lvol and the
+        #    lvol monitor iterate lvol.nodes; leaving the donor listed makes
+        #    lvol health fail forever against the torn-down stack — worse,
+        #    the monitor keeps recreating empty subsystem shells (0
+        #    namespaces) on the donor after teardown deletes them. Swap
+        #    donor -> recipient now that the recipient's stack and per-lvol
+        #    subsystems exist, and before the donor teardown below.
+        for lvol in db.get_lvols_by_node_id(primary.get_id()):
+            nodes = list(lvol.nodes or [])
+            if move.from_node_id in nodes:
+                lvol.nodes = [move.to_node_id if n == move.from_node_id
+                              else n for n in nodes]
+                lvol.write_to_db()
 
         # 3. Tear down the donor's stack for this LVS. The primary's
         #    pointer was already moved to the recipient in step 1, so we

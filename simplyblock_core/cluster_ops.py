@@ -21,7 +21,7 @@ from simplyblock_core import utils, scripts, constants, mgmt_node_ops, storage_n
 from simplyblock_core import port_block
 from simplyblock_core.controllers import backup_controller, cluster_events, device_controller, qos_controller, tasks_controller, tcp_ports_events
 from simplyblock_core.db_controller import DBController
-from simplyblock_core.models.cluster import Cluster, HashicorpVaultSettings
+from simplyblock_core.models.cluster import Cluster, HashicorpVaultSettings, DeployConfig
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.mgmt_node import MgmtNode
@@ -264,50 +264,50 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     scripts.install_deps(mode)
     logger.info("Installing dependencies > Done")
 
-    db_connection: t.Optional[SecretStr] = None
-    if mode == "docker":
-        if not ifname:
-            ifname = "eth0"
+    if not ifname:
+        ifname = "eth0"
 
-        dev_ip = utils.get_iface_ip(ifname)
-        if not dev_ip:
-            raise ValueError(f"Error getting interface ip: {ifname}")
+    dev_ip = utils.get_iface_ip(ifname)
+    if not dev_ip:
+        raise ValueError(f"Error getting interface ip: {ifname}")
 
-        db_connection = SecretStr(f"{utils.generate_string(8)}:{utils.generate_string(32)}@{dev_ip}:4500")
-        scripts.set_db_config(db_connection.get_secret_value())
-        logger.info(f"Node IP: {dev_ip}")
-        scripts.configure_docker(dev_ip)
-        logger.info("Configuring docker swarm...")
-        c = docker.DockerClient(base_url=f"tcp://{dev_ip}:2375", version="auto")
-        if c.swarm.attrs and "ID" in c.swarm.attrs:
-            logger.info("Docker swarm found, leaving swarm now")
-            c.swarm.leave(force=True)
-            try:
-                c.volumes.get("monitoring_grafana_data").remove(force=True)
-            except DockerException:
-                pass
-            time.sleep(3)
+    db_connection = SecretStr(f"{utils.generate_string(8)}:{utils.generate_string(32)}@{dev_ip}:4500")
+    scripts.set_db_config(db_connection.get_secret_value())
+    logger.info(f"Node IP: {dev_ip}")
+    scripts.configure_docker(dev_ip)
+    logger.info("Configuring docker swarm...")
+    c = docker.DockerClient(base_url=f"tcp://{dev_ip}:2375", version="auto")
+    if c.swarm.attrs and "ID" in c.swarm.attrs:
+        logger.warning("Warning! Docker swarm found")
+        ret = utils.query_yes_no("Destroy current cluster and create new one?", default="no")
+        if not ret:
+            raise ValueError("Aborting")
+        c.swarm.leave(force=True)
+        try:
+            c.volumes.get("monitoring_grafana_data").remove(force=True)
+        except DockerException as e:
+            logger.debug(
+                "Best-effort cleanup: could not remove volume 'monitoring_grafana_data'; continuing cluster reset. Error: %s",
+                e,
+            )
+        time.sleep(3)
 
-        c.swarm.init(dev_ip)
-        logger.info("Configuring docker swarm > Done")
+    c.swarm.init(dev_ip)
+    logger.info("Configuring docker swarm > Done")
 
-        hostname = socket.gethostname()
-        current_node = next((node for node in c.nodes.list() if node.attrs["Description"]["Hostname"] == hostname), None)
-        if current_node:
-            current_spec = current_node.attrs["Spec"]
-            current_labels = current_spec.get("Labels", {})
-            current_labels["app"] = "graylog"
-            current_spec["Labels"] = current_labels
+    hostname = socket.gethostname()
+    current_node = next((node for node in c.nodes.list() if node.attrs["Description"]["Hostname"] == hostname), None)
+    if current_node:
+        current_spec = current_node.attrs["Spec"]
+        current_labels = current_spec.get("Labels", {})
+        current_labels["app"] = "graylog"
+        current_spec["Labels"] = current_labels
 
-            current_node.update(current_spec)
+        current_node.update(current_spec)
 
-            logger.info(f"Labeled node '{hostname}' with app=graylog")
-        else:
-            logger.warning("Could not find current node for labeling")
-    elif mode == "kubernetes":
-        dev_ip = mgmt_ip
-        if not dev_ip:
-            raise ValueError("Error getting ip: For Kubernetes-based deployments, please supply --mgmt-ip.")
+        logger.info(f"Labeled node '{hostname}' with app=graylog")
+    else:
+        logger.warning("Could not find current node for labeling")
 
 
     if not cli_pass:
@@ -378,6 +378,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.snode_api_port = snode_api_port
     cluster.container_image_prefix = container_image_prefix or ""
     cluster.hashicorp_vault_settings = hashicorp_vault_settings
+    cluster.backup_local_path = os.path.join(constants.KVD_DB_BACKUP_PATH, cluster.uuid)
 
     if nvmeof_tls_config:
         cluster.tls = True
@@ -386,33 +387,27 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     if backup_config:
         cluster.backup_config = backup_config
 
-    if mode == "docker":
-        if not disable_monitoring:
-            utils.render_and_deploy_alerting_configs(contact_point, cluster.grafana_endpoint, cluster.uuid, cluster.secret.get_secret_value())
+    if not disable_monitoring:
+        utils.render_and_deploy_alerting_configs(contact_point, cluster.grafana_endpoint, cluster.uuid, cluster.secret.get_secret_value())
 
-        logger.info("Deploying swarm stack ...")
-        log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"
-        scripts.deploy_stack(cli_pass.get_secret_value(), dev_ip, constants.SIMPLY_BLOCK_DOCKER_IMAGE, cluster.secret.get_secret_value(), cluster.uuid,
-                                log_del_interval, metrics_retention_period, log_level, cluster.grafana_endpoint, str(disable_monitoring))
-        logger.info("Deploying swarm stack > Done")
+    logger.info("Deploying swarm stack ...")
+    log_level = "DEBUG" if constants.LOG_WEB_DEBUG else "INFO"
+    scripts.deploy_stack(cli_pass.get_secret_value(), dev_ip, constants.SIMPLY_BLOCK_DOCKER_IMAGE, cluster.secret.get_secret_value(), cluster.uuid,
+                            log_del_interval, metrics_retention_period, log_level, cluster.grafana_endpoint, str(disable_monitoring))
+    logger.info("Deploying swarm stack > Done")
 
-        logger.info("Configuring DB...")
-        scripts.set_db_config_single()
-        logger.info("Configuring DB > Done")
-        monitoring_secret = cluster.secret
+    logger.info("Configuring DB...")
+    scripts.set_db_config_single()
+    logger.info("Configuring DB > Done")
+    monitoring_secret = cluster.secret
 
-    elif mode == "kubernetes":
-        logger.info("Retrieving foundationdb connection string...")
-        fdb_cluster_string = utils.get_fdb_cluster_string(constants.FDB_CONFIG_NAME, constants.K8S_NAMESPACE)
-        db_connection = fdb_cluster_string
 
-        logger.info("Patching prometheus configmap...")
-        utils.patch_prometheus_configmap(cluster.uuid, cluster.secret.get_secret_value())
-
-        if ingress_host_source == "hostip":
-            dns_name = dev_ip
-    else:
-        assert False, "Unreachable"
+    cfg = DeployConfig()
+    cfg.mode = mode
+    cfg.grafana_endpoint = grafana_endpoint or default_grafana
+    cfg.grafana_secret = monitoring_secret if mode == "kubernetes" else cluster.secret
+    cfg.db_connection = db_connection if db_connection else SecretStr("")
+    cfg.write_to_db()
 
     # Monitoring stack configuration (OpenSearch max_result_window, Graylog
     # GELF input + JSON extractor, Grafana admin user). Must run after the
@@ -471,23 +466,15 @@ def _cleanup_nvme(mount_point, nqn_value) -> None:
 def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
                 distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity, qpair_count,
                 max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name, cr_name=None,
-                cr_namespace=None, cr_plural=None, fabric="tcp", cluster_ip=None, grafana_secret: t.Optional[SecretStr] = None,
+                cr_namespace=None, cr_plural=None, fabric="tcp",
                 client_data_nic="", max_fault_tolerance=1, backup_config=None,
                 nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001,
                 hashicorp_vault_settings : t.Optional[HashicorpVaultSettings] = None,
                 enable_failure_domain=False,
 ) -> str:
 
-
-    default_cluster = None
-    enable_monitoring = os.environ.get("ENABLE_MONITORING", "")
     clusters = db_controller.get_clusters()
-    if clusters:
-        default_cluster = clusters[0]
-    else:
-        logger.info("No previous clusters found")
-
-    if name:
+    if name and clusters:
         for existing in clusters:
             if existing.cluster_name and existing.cluster_name == name:
                 raise ValueError(f"A cluster with the name '{name}' already exists")
@@ -503,8 +490,6 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
 
     if (hashicorp_vault_settings is not None) and (Settings().tls_connect != "authenticated"):
         raise ValueError("External KMS requires mTLS authentication to be used")
-
-    monitoring_secret = SecretStr(os.environ.get("MONITORING_SECRET", ""))
 
     logger.info("Adding new cluster")
     cluster = Cluster()
@@ -524,37 +509,48 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     cluster.secret = SecretStr(utils.generate_string(20))
     cluster.strict_node_anti_affinity = strict_node_anti_affinity
     cluster.enable_failure_domain = enable_failure_domain
-    if default_cluster:
-        cluster.mode = default_cluster.mode
-        cluster.db_connection = default_cluster.db_connection
-        cluster.grafana_secret = grafana_secret if grafana_secret else default_cluster.grafana_secret
-        cluster.grafana_endpoint = default_cluster.grafana_endpoint
+
+    if clusters:
+        cfg = db_controller.get_deploy_config()
+        cluster.mode = cfg.mode
+        cluster.db_connection = cfg.db_connection
+        cluster.grafana_secret = cfg.grafana_secret
+        cluster.grafana_endpoint = cfg.grafana_endpoint
     else:
-        # creating first cluster on k8s
+        # Bootstrapping the very first cluster of a fresh deployment: no
+        # DeployConfig exists yet (only the docker-swarm create_cluster()
+        # path writes one), so derive the cluster-wide settings here and
+        # persist them as the DeployConfig every later add_cluster() call
+        # will read.
+        logger.info("No previous clusters found, bootstrapping first cluster")
+        enable_monitoring = os.environ.get("ENABLE_MONITORING", "")
+        monitoring_secret = SecretStr(os.environ.get("MONITORING_SECRET", ""))
+
         cluster.mode = "kubernetes"
         logger.info("Retrieving foundationdb connection string...")
-        fdb_cluster_string = utils.get_fdb_cluster_string(constants.FDB_CONFIG_NAME, constants.K8S_NAMESPACE)
-        cluster.db_connection = fdb_cluster_string
+        cluster.db_connection = utils.get_fdb_cluster_string(constants.FDB_CONFIG_NAME, constants.K8S_NAMESPACE)
         if monitoring_secret:
             cluster.grafana_secret = monitoring_secret
         elif enable_monitoring != "true":
             cluster.grafana_secret = SecretStr("")
         else:
-            raise Exception("monitoring_secret is required")
+            raise ValueError("monitoring_secret is required")
         cluster.grafana_endpoint = constants.GRAFANA_K8S_ENDPOINT
-        if not cluster_ip:
-            cluster_ip = "0.0.0.0"
 
-        # add mgmt node object
-        mgmt_node_ops.add_mgmt_node(cluster_ip, "kubernetes", cluster.uuid)
+        mgmt_node_ops.add_mgmt_node("0.0.0.0", "kubernetes", cluster.uuid)
+
         if enable_monitoring == "true":
-            graylog_endpoint = constants.GRAYLOG_K8S_ENDPOINT
-            os_endpoint = constants.OS_K8S_ENDPOINT
-            _create_update_user(cluster.uuid, cluster.grafana_endpoint, cluster.grafana_secret, cluster.secret)
+            _set_max_result_window(constants.OS_K8S_ENDPOINT)
+            _add_graylog_input(constants.GRAYLOG_K8S_ENDPOINT, cluster.grafana_secret)
 
-            _set_max_result_window(os_endpoint)
+        cfg = DeployConfig()
+        cfg.mode = cluster.mode
+        cfg.grafana_endpoint = cluster.grafana_endpoint
+        cfg.grafana_secret = cluster.grafana_secret
+        cfg.db_connection = cluster.db_connection
+        cfg.write_to_db()
 
-            _add_graylog_input(graylog_endpoint, monitoring_secret)
+    _create_update_user(cluster.uuid, cluster.grafana_endpoint, cluster.grafana_secret, cluster.secret)
 
     if cluster.mode == "kubernetes":
         utils.patch_prometheus_configmap(cluster.uuid, cluster.secret.get_secret_value())
@@ -593,6 +589,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
     if backup_config:
         cluster.backup_config = backup_config
 
+    cluster.backup_local_path = os.path.join(constants.KVD_DB_BACKUP_PATH, cluster.uuid)
     cluster.status = Cluster.STATUS_UNREADY
     cluster.create_dt = str(datetime.datetime.now())
     cluster.write_to_db(db_controller.kv_store)
@@ -631,6 +628,7 @@ def _wait_for_full_device_connectivity(cl_id, timeout_sec=300, poll_sec=10):
     of a distrib read error.
     """
     deadline = time.time() + timeout_sec
+    prev_missing = None
     while True:
         snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
         online = [n for n in snodes
@@ -646,13 +644,13 @@ def _wait_for_full_device_connectivity(cl_id, timeout_sec=300, poll_sec=10):
             have = {rd.get_id() for rd in node.remote_devices if rd.remote_bdev}
             for dev_id, owner in expected.items():
                 if owner != node.get_id() and dev_id not in have:
-                    missing.append((node.get_id()[:8], owner[:8], dev_id[:8]))
+                    missing.append((node.get_id(), owner, dev_id))
         if not missing:
             logger.info("Pre-activation connectivity check passed: %d nodes fully meshed "
                         "over %d devices", len(online), len(expected))
             return
         if time.time() >= deadline:
-            sample = ", ".join(f"{n}->{o}/dev {d}" for n, o, d in missing[:8])
+            sample = ", ".join(f"{n[:8]}->{o[:8]}/dev {d[:8]}" for n, o, d in missing[:8])
             raise ValueError(
                 f"Failed to activate cluster: {len(missing)} cross-node device "
                 f"connection(s) still missing after {timeout_sec}s "
@@ -660,12 +658,162 @@ def _wait_for_full_device_connectivity(cl_id, timeout_sec=300, poll_sec=10):
                 f"attaching to recently (re-)added peers — retry activation "
                 f"once node health checks pass.")
         logger.warning("Pre-activation connectivity check: %d cross-node device "
-                       "connection(s) missing; waiting %ds (%.0fs left)",
-                       len(missing), poll_sec, deadline - time.time())
+                       "connection(s) missing; repairing, then waiting %ds "
+                       "(%.0fs left)", len(missing), poll_sec,
+                       deadline - time.time())
+
+        # Actively REPAIR the missing links instead of only waiting for them.
+        # Waiting is sufficient after node-add (the add/health flows are still
+        # attaching), but after a whole-cluster parallel recovery nothing else
+        # drives these: each restart's peer reconnect is best-effort and skips
+        # peers that are mid-restart at that moment, and once the last restart
+        # finishes no reconciliation sweeps the leftovers — a bare wait
+        # livelocks activation (2026-07-13: 382 links static across repeated
+        # in_activation -> suspended -> in_activation cycles). Repair mirrors
+        # _reconnect_peers_to_restarted_node: per-node worker threads, DELTA
+        # reconnect per missing owner, atomic_update so we never clobber the
+        # node's concurrent flows. Best-effort — the re-check above is the
+        # only pass/fail authority.
+        # NB: a plain ``set()`` here would resolve to this module's ``set``
+        # function (it shadows the builtin).
+        by_node: dict = {}
+        for n_id, owner_id, _ in missing:
+            if n_id not in by_node:
+                by_node[n_id] = {owner_id}
+            else:
+                by_node[n_id].add(owner_id)
+
+        def _repair_node(node_id, owner_ids):
+            # A full-mesh outage (whole-fleet reboot) leaves each node missing
+            # MOST owners. The per-owner delta below pays its fixed overhead
+            # (DB reads, connect round-trips, JM reconcile, atomic_update)
+            # once per owner — measured ~40s each, and 31 sequential owners
+            # made round 1 the 21-minute activation stall of 2026-07-16
+            # (13:09:43 "1353 missing" -> 13:30:49 "15 missing", one round).
+            # One FULL reconcile connects every peer's devices in parallel
+            # behind a single shared surface-poll (~67s/node, 2026-07-13
+            # measurement), so use it whenever more than a couple of owners
+            # are missing; keep the delta for the small post-node-add case.
+            if len(owner_ids) > 2:
+                try:
+                    node = db_controller.get_storage_node_by_id(node_id)
+                    remote_devices = storage_node_ops._connect_to_remote_devs(
+                        node, force_connect_restarting_nodes=True)
+                    remote_jm_devices = None
+                    if node.enable_ha_jm:
+                        remote_jm_devices = storage_node_ops._connect_to_remote_jm_devs(node)
+
+                    def _apply(n, rd=remote_devices, rjd=remote_jm_devices):
+                        n.remote_devices = rd
+                        if rjd is not None:
+                            n.remote_jm_devices = rjd
+                    db_controller.atomic_update(node, _apply)
+                except Exception as e:
+                    logger.warning(
+                        "Pre-activation full reconcile of %s failed: %s",
+                        node_id[:8], e)
+                return
+            for owner_id in sorted(owner_ids):
+                try:
+                    node = db_controller.get_storage_node_by_id(node_id)
+                    remote_devices = storage_node_ops._connect_to_remote_devs(
+                        node, force_connect_restarting_nodes=True,
+                        only_node_id=owner_id)
+                    remote_jm_devices = None
+                    if node.enable_ha_jm:
+                        remote_jm_devices = storage_node_ops._connect_to_remote_jm_devs(
+                            node, only_node_id=owner_id)
+
+                    def _apply(n, rd=remote_devices, rjd=remote_jm_devices):
+                        n.remote_devices = rd
+                        if rjd is not None:
+                            n.remote_jm_devices = rjd
+                    db_controller.atomic_update(node, _apply)
+                except Exception as e:
+                    logger.warning(
+                        "Pre-activation repair of %s -> %s failed: %s",
+                        node_id[:8], owner_id[:8], e)
+
+        repair_threads = []
+        for node_id, owner_ids in by_node.items():
+            t = threading.Thread(
+                target=_repair_node, args=(node_id, owner_ids),
+                name=f"preact-repair-{node_id[:8]}")
+            t.start()
+            repair_threads.append(t)
+        for t in repair_threads:
+            t.join()
+
+        # Progress-aware deadline. The FIRST completed repair round counts as
+        # progress unconditionally: the round itself may consume the whole
+        # initial budget (2026-07-13 validation run: 1116 links repaired at
+        # ~38/min = 25+ min in round 1), and without this the already-expired
+        # deadline forced a pointless abort lap on the re-check even though
+        # the mesh was nearly healed. After that, extend only while the
+        # missing count keeps shrinking — a stalled repair (no reduction
+        # across a full round) still runs the clock out.
+        if prev_missing is None or len(missing) < prev_missing:
+            deadline = max(deadline, time.time() + timeout_sec / 2)
+        prev_missing = len(missing)
         time.sleep(poll_sec)
 
 
 def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
+    """Wrapper around the activation body that keeps ``activation_heartbeat``
+    fresh for its whole duration. The storage_node_monitor watchdog uses a
+    stale heartbeat to tell a DEAD activation (driver process/container gone)
+    from a merely long one: without it, a wedged IN_ACTIVATION sat for the
+    full node-scaled budget — 42 minutes on a 32-node cluster — before the
+    revert (incident 2026-07-13, monitor container replaced mid-activation).
+    """
+    stop_beat = threading.Event()
+
+    def _beat():
+        while not stop_beat.wait(60):
+            try:
+                fresh = db_controller.get_cluster_by_id(cl_id)
+                if fresh.status != Cluster.STATUS_IN_ACTIVATION:
+                    continue
+                now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                db_controller.atomic_update(
+                    fresh, lambda c, v=now_iso: setattr(c, "activation_heartbeat", v))
+            except Exception:
+                # Never let heartbeat trouble touch the activation itself; a
+                # missed beat only means the watchdog waits for the next one.
+                pass
+
+    beat_thread = threading.Thread(
+        target=_beat, daemon=True, name=f"activation-heartbeat-{cl_id[:8]}")
+    beat_thread.start()
+    try:
+        _cluster_activate_impl(
+            cl_id, force=force, force_lvstore_create=force_lvstore_create)
+    finally:
+        stop_beat.set()
+
+
+def _cluster_activate_impl(cl_id, force=False, force_lvstore_create=False) -> None:
+    cluster = db_controller.get_cluster_by_id(cl_id)
+    prev_status = cluster.status
+    if prev_status == Cluster.STATUS_IN_ACTIVATION:
+        prev_status = Cluster.STATUS_UNREADY
+    try:
+        _cluster_activate(cl_id, force=force, force_lvstore_create=force_lvstore_create)
+    except Exception:
+        # Never leave the cluster wedged in in_activation: this often runs in
+        # a fire-and-forget thread, and an unhandled failure would otherwise
+        # block any retry (the activate API rejects in_activation clusters).
+        # The expected-failure paths inside _cluster_activate restore the
+        # status themselves; this only catches what they missed.
+        cluster = db_controller.get_cluster_by_id(cl_id)
+        if cluster.status == Cluster.STATUS_IN_ACTIVATION:
+            logger.error("Cluster activation failed unexpectedly; reverting status "
+                         f"from {Cluster.STATUS_IN_ACTIVATION} to {prev_status}")
+            set_cluster_status(cl_id, prev_status)
+        raise
+
+
+def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     cluster = db_controller.get_cluster_by_id(cl_id)
     prev_status = cluster.status
     if prev_status == Cluster.STATUS_IN_ACTIVATION:
@@ -820,8 +968,15 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     # Re-activation (recreate_lvstore, activation_mode=True) only touches the
     # node being recreated plus RPCs to its peers, and every worker operates on
     # a distinct node — safe to fan out (bounded pool). A fresh create_lvstore
-    # additionally writes to the node's secondary record, which can be shared
-    # between primaries, so creates stay sequential.
+    # additionally writes its secondary/tertiary records (full-object
+    # read-modify-write), and in a cross-pair layout the same record is
+    # written both as "own" by its create and as "sec" by its partner's —
+    # so creates fan out on the pool too, serializing only creates whose
+    # touched-record sets intersect (per-node locks taken in sorted order,
+    # the Pass 3 pattern). The old fully-serial loop cost ~40s x n — 22 min
+    # at n=32, the dominant cost of a fresh activation (2026-07-13 audit).
+    # Port allocation inside create_lvstore is separately serialized by
+    # storage_node_ops._lvstore_port_alloc_lock.
     snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     pass1_recreate_ids: t.List[str] = []
     pass1_create_ids: t.List[str] = []
@@ -892,11 +1047,54 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
         for node_id in pass1_recreate_ids:
             _finish_pass1_node(node_id, pass1_results.get(node_id))
 
-    for node_id in pass1_create_ids:
-        snode = db_controller.get_storage_node_by_id(node_id)
-        ret = storage_node_ops.create_lvstore(snode, cluster.distr_ndcs, cluster.distr_npcs, cluster.distr_bs,
-                                          cluster.distr_chunk_bs, cluster.page_size_in_blocks, max_size)
-        _finish_pass1_node(node_id, ret)
+    if pass1_create_ids:
+        # Lock set per create = the records create_lvstore writes: the node
+        # itself plus its secondary/tertiary. Locks are acquired in sorted-id
+        # order so two creates with intersecting sets serialize deadlock-free
+        # while disjoint pairs run concurrently.
+        pass1_create_lock_ids: t.Dict[str, t.List[str]] = {}
+        pass1_create_locks: t.Dict[str, threading.Lock] = {}
+        for nid in pass1_create_ids:
+            n = db_controller.get_storage_node_by_id(nid)
+            touched = {nid}
+            if n.secondary_node_id:
+                touched.add(n.secondary_node_id)
+            if n.tertiary_node_id:
+                touched.add(n.tertiary_node_id)
+            pass1_create_lock_ids[nid] = sorted(touched)
+            for lid in pass1_create_lock_ids[nid]:
+                pass1_create_locks.setdefault(lid, threading.Lock())
+
+        def _create_primary_lvs(node_id):
+            locks = [pass1_create_locks[lid] for lid in pass1_create_lock_ids[node_id]]
+            for lk in locks:
+                lk.acquire()
+            try:
+                snode = db_controller.get_storage_node_by_id(node_id)
+                return storage_node_ops.create_lvstore(
+                    snode, cluster.distr_ndcs, cluster.distr_npcs, cluster.distr_bs,
+                    cluster.distr_chunk_bs, cluster.page_size_in_blocks, max_size)
+            finally:
+                for lk in reversed(locks):
+                    lk.release()
+
+        create_results: t.Dict[str, t.Any] = {}
+        create_errors: t.List[ValueError] = []
+        workers = min(constants.CLUSTER_ACTIVATION_MAX_PARALLEL_NODES, len(pass1_create_ids))
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="activate-p1c") as pool:
+            futures = {pool.submit(_create_primary_lvs, nid): nid for nid in pass1_create_ids}
+            for future in as_completed(futures):
+                node_id = futures[future]
+                try:
+                    create_results[node_id] = future.result()
+                except Exception as e:
+                    logger.error(e)
+                    create_errors.append(ValueError("Failed to activate cluster"))
+        if create_errors:
+            set_cluster_status(cl_id, ols_status)
+            raise create_errors[0]
+        for node_id in pass1_create_ids:
+            _finish_pass1_node(node_id, create_results.get(node_id))
 
     # Pass 2: Recreate secondary/tertiary LVS on every node that participates
     # as a non-leader for another node's LVS. In a ring topology (FTT=2 with
@@ -1058,8 +1256,13 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
             except Exception as e:
                 logger.error("Error creating hublvol on %s: %s", node_id, e)
 
-            # Create secondary hublvol on sec_1 (for tertiary multipath failover)
-            sec1 = db_controller.get_storage_node_by_id(secondary_ids[0])
+            # Create secondary hublvol on sec_1 (for tertiary multipath
+            # failover). sec_1 is the CONFIGURED secondary — never
+            # secondary_ids[0], which is the tertiary whenever
+            # secondary_node_id is unset (e.g. demoted after a failover).
+            sec1 = None
+            if snode.secondary_node_id:
+                sec1 = db_controller.get_storage_node_by_id(snode.secondary_node_id)
             if sec1 and sec1.status == StorageNode.STATUS_ONLINE:
                 try:
                     snode = db_controller.get_storage_node_by_id(node_id)
@@ -1068,14 +1271,24 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                     logger.error("Error creating secondary hublvol on sec_1 %s: %s", sec1.get_id(), e)
 
             # Connect each secondary/tertiary to primary's hublvol
-            for i, sec_node_id in enumerate(secondary_ids):
+            for sec_node_id in secondary_ids:
                 sec_node = db_controller.get_storage_node_by_id(sec_node_id)
                 if sec_node.status != StorageNode.STATUS_ONLINE:
                     continue
                 try:
-                    time.sleep(1)
-                    failover_node = sec1 if i >= 1 and sec1 and sec1.status == StorageNode.STATUS_ONLINE else None
-                    sec_role = "tertiary" if i >= 1 else "secondary"
+                    # Brief settle beat before the connect; connect_to_hublvol
+                    # itself retries via the reconnect coordinator, so a full
+                    # 1s per edge was pure serial latency across the pass.
+                    time.sleep(0.2)
+                    # Role and failover from topology, never list position:
+                    # with secondary_node_id unset the tertiary sits at
+                    # index 0 and an index rule marks it "secondary" — a
+                    # duplicate secondary role on the LVS (recurred in
+                    # mass_create_delete_k8s 2026-07-14; each LVS must hold
+                    # a unique role per node).
+                    is_tert = sec_node_id == snode.tertiary_node_id
+                    failover_node = sec1 if is_tert and sec1 and sec1.status == StorageNode.STATUS_ONLINE else None
+                    sec_role = "tertiary" if is_tert else "secondary"
                     sec_node.connect_to_hublvol(snode, failover_node=failover_node, role=sec_role)
                 except Exception as e:
                     logger.error("Error connecting %s to hublvol on %s: %s", sec_node.get_id(), node_id, e)
@@ -1178,6 +1391,18 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                     future.result()
                 except Exception as e:
                     logger.error("Pass 4 ANA worker failed: %s", e)
+
+    # The cluster is now active and about to serve IO. During node-add the
+    # storage MCP was created wide (= parallel-add count) so the first-time
+    # CPU-topology reboots happened in one parallel wave rather than a
+    # serialized queue. Now narrow it to the cluster's fault tolerance so any
+    # future MachineConfig/KubeletConfig rollout never reboots more storage
+    # nodes at once than the data plane can absorb. Done here (success path,
+    # before flipping to ACTIVE) so a failed/aborted activation leaves the
+    # cluster non-serving with the wide value — harmless, since no data is at
+    # risk until it goes ACTIVE. (Use max_fault_tolerance - 1 instead if you
+    # want headroom for an unplanned failure concurrent with a rollout.)
+    utils.set_storage_mcp_max_unavailable(cl_id, cluster.max_fault_tolerance)
 
     set_cluster_status(cl_id, Cluster.STATUS_ACTIVE)
     logger.info("Cluster activated successfully")
@@ -1305,8 +1530,10 @@ def set_cluster_status(cl_id, status) -> None:
         # atomically with the status flip.
         if status == Cluster.STATUS_IN_ACTIVATION:
             fresh.in_activation_since = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            fresh.activation_heartbeat = fresh.in_activation_since
         elif captured['old'] == Cluster.STATUS_IN_ACTIVATION:
             fresh.in_activation_since = ""
+            fresh.activation_heartbeat = ""
         # Leaving suspension for a healthy status closes the current
         # suspend-recovery episode: clear the drain marker so the next
         # suspension starts a fresh drain (auto-restart paused -> drain ->
@@ -2166,9 +2393,6 @@ def delete_cluster(cl_id) -> None:
     if pools:
         raise ValueError("Can only remove Empty cluster, Pools found")
 
-    if len(db_controller.get_clusters()) == 1 :
-        raise ValueError("Can not remove the last cluster!")
-
     logger.info(f"Deleting Cluster {cl_id}")
     cluster_events.cluster_delete(cluster)
     cluster.remove(db_controller.kv_store)
@@ -2231,4 +2455,11 @@ def add_replication(source_cl_id, target_cl_id, timeout=0, target_pool=None) -> 
 
     db_controller.atomic_update(db_controller.get_cluster_by_id(source_cl_id), _mut)
     logger.info("Done")
+    return True
+
+
+def rebalance(cluster_id) -> bool:
+    for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+        if node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]:
+            tasks_controller.add_device_mig_task_for_node(node.get_id())
     return True

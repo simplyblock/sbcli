@@ -828,6 +828,13 @@ commands:
             help: "The storage node id."
             dest: node_id
             type: str
+      - name: get-device-health-info
+        help: "Returns the device health information from SPDK."
+        arguments:
+          - name: "device_id"
+            help: "The device node id."
+            dest: device_id
+            type: str
   - name: "cluster"
     help: "Cluster Commands"
     weight: 200
@@ -1990,11 +1997,10 @@ commands:
             dest: clone_name
             type: str
       - name: migrate
-        help: "Pre-create the target NVMe-oF subsystem for a volume migration. Returns a migration ID and NVMe connect strings (inaccessible ANA state). Connect the client, then run migrate-continue."
-        private: true
+        help: "Pre-create the target NVMe-oF subsystem for a volume migration. Returns a migration ID (or group ID with --batch) and NVMe connect strings (inaccessible ANA state). Connect the client, then run migrate-continue."
         arguments:
           - name: "volume_id"
-            help: "The volume ID to migrate."
+            help: "The volume ID to migrate. With --batch, any member of the shared-namespace subsystem."
             dest: volume_id
             type: str
           - name: "target_node_id"
@@ -2010,12 +2016,16 @@ commands:
             help: "Host NQN for DH-HMAC-CHAP authentication (required when volume has allowed hosts)."
             dest: host_nqn
             type: str
+          - name: "--batch"
+            help: "Migrate all lvols sharing the same NVMe-oF subsystem as a coordinated group."
+            dest: batch
+            type: bool
+            action: store_true
       - name: migrate-continue
         help: "Advance a pre-created migration to the snapshot-copy phase and launch the task runner."
-        private: true
         arguments:
           - name: "migration_id"
-            help: "The migration ID returned by migrate."
+            help: "The migration ID returned by migrate (or group ID with --batch)."
             dest: migration_id
             type: str
           - name: "--max-retries"
@@ -2028,9 +2038,13 @@ commands:
             dest: deadline_seconds
             type: int
             default: 14400
+          - name: "--batch"
+            help: "ID is a batch migration group ID."
+            dest: batch
+            type: bool
+            action: store_true
       - name: migrate-list
         help: "List volume migrations."
-        private: true
         arguments:
           - name: "--cluster-id"
             help: "Filter by cluster id."
@@ -2043,12 +2057,36 @@ commands:
             action: store_true
       - name: migrate-cancel
         help: "Cancel an active volume migration."
+        arguments:
+          - name: "migration_id"
+            help: "The migration id (or group ID with --batch)."
+            dest: migration_id
+            type: str
+          - name: "--batch"
+            help: "ID is a batch migration group ID."
+            dest: batch
+            type: bool
+            action: store_true
+      - name: migrate-cleanup
+        help: "Idempotently remove all objects a migration created on the target. Safe to run at any time; already-removed objects are reported as not_found."
         private: true
         arguments:
           - name: "migration_id"
             help: "The migration id."
             dest: migration_id
             type: str
+      - name: migrate-group-list
+        help: "List batch (shared-namespace) migration groups."
+        arguments:
+          - name: "--cluster-id"
+            help: "Filter by cluster ID."
+            dest: cluster_id
+            type: str
+          - name: "--json"
+            help: "Print output in JSON format."
+            dest: json
+            type: bool
+            action: store_true
   - name: "control-plane"
     help: "Control Plane Commands"
     aliases:
@@ -2637,3 +2675,61 @@ commands:
             type: str
             required: false
             default: ""
+  - name: "db-backup"
+    help: "FDB Backup operations"
+    weight: 800
+    subcommands:
+      - name: create
+        help: "Creates an fdb backup"
+        arguments:
+          - name: "cluster_id"
+            help: "Cluster ID to create db backup for"
+            dest: cluster_id
+            type: str
+      - name: list
+        help: "Lists all fdb backups"
+        arguments:
+          - name: "cluster_id"
+            help: "Cluster ID to restore db backup to"
+            dest: cluster_id
+            type: str
+      - name: status
+        help: "get backup status"
+      - name: restore
+        help: "restore a backup"
+        arguments:
+          - name: "name"
+            help: "backup class name"
+            dest: name
+            type: str
+          - name: "cluster_id"
+            help: "Cluster ID to restore db backup to"
+            dest: cluster_id
+            type: str
+      - name: config
+        help: "Set backup configuration"
+        arguments:
+          - name: "cluster_id"
+            help: "Cluster ID to configure db backup for"
+            dest: cluster_id
+            type: str
+          - name: "--backup-path"
+            help: 'local backup path, defaults to /etc/foundationdb/backup'
+            dest: backup_path
+            type: str
+          - name: "--backup-frequency"
+            help: "backup frequency, can be 3h, 1d"
+            dest: backup_frequency
+            type: str
+          - name: "--s3-bucket"
+            help: 'AWS S3 bucket name'
+            dest: bucket_name
+            type: str
+          - name: "--s3-region"
+            help: 'AWS S3 region'
+            dest: region_name
+            type: str
+          - name: "--s3-credentials"
+            help: 'AWS S3 API key and secret, should be supplied like this: [API_KEY]:[API_SECRET]'
+            dest: backup_credentials
+            type: str

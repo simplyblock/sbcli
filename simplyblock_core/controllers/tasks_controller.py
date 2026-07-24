@@ -1,7 +1,9 @@
 # coding=utf-8
+import contextlib
 import datetime
 import logging
 import socket
+import threading
 import time
 import uuid
 
@@ -92,6 +94,40 @@ def refresh_task_lease(task, owner=None):
     return refreshed["ok"]
 
 
+@contextlib.contextmanager
+def task_lease_heartbeat(task, owner=None):
+    """Refresh this host's lease on `task` every TASK_LEASE_HEARTBEAT_SEC for
+    the duration of the with-block.
+
+    Every runner that executes long-blocking work under a claimed lease MUST
+    wrap that work in this: since TASK_LEASE_TTL_SEC (180s) is far shorter
+    than a node add / restart / migration, a lease that is only refreshed on
+    task writes goes stale mid-execution, and a second runner host (e.g. the
+    new pod during a rolling update) would claim the task and double-drive
+    it — for node-add that means killing the in-flight add's SPDK and
+    deleting its half-created node record.
+
+    The heartbeat stops on its own if the lease is lost to another host
+    (refresh_task_lease returns False) — the takeover is authoritative.
+    """
+    stop = threading.Event()
+
+    def _beat():
+        while not stop.wait(constants.TASK_LEASE_HEARTBEAT_SEC):
+            try:
+                if not refresh_task_lease(task, owner):
+                    return
+            except Exception as e:
+                logger.debug(f"Lease heartbeat failed for task {task.uuid}: {e}")
+
+    thread = threading.Thread(target=_beat, daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+
+
 def ensure_node_restart_task(node):
     """Return the id of an unfinished FN_NODE_RESTART task for this node,
     creating one if none exists. Used by explicit restarts
@@ -130,7 +166,39 @@ def _validate_new_task_node_restart(cluster_id, node_id):
     for task in tasks:
         if task.function_name == JobSchedule.FN_NODE_RESTART and task.node_id == node_id:
             if task.status != JobSchedule.STATUS_DONE and task.canceled is False:
-                return task.get_id()
+                # Return the bare uuid, NOT get_id(): JobSchedule.get_id() is the
+                # composite FDB key "cluster/date/uuid", which db.get_task_by_id
+                # (uuid lookup) cannot resolve. ensure_node_restart_task feeds
+                # this straight into get_task_by_id — with the composite it
+                # raised KeyError and the restart-lease heartbeat never engaged
+                # (observed 2026-07-17: "Could not set up transferable restart
+                # ownership ... 'Task <cluster>/<date>/<uuid> not found'").
+                return task.uuid
+    return False
+
+
+def _validate_new_task_node_add(cluster_id, node_addr):
+    # FN_NODE_ADD has no node_id (the node doesn't exist yet) — the only
+    # identity a caller (the operator posting "add this host") has is the
+    # target node_addr inside function_params. Without this dedup, a retried
+    # HTTP request from the caller (or any other double-post) creates a
+    # SECOND independent task for the same host; tasks_runner_node_add's
+    # concurrency guard only dedups by task uuid, not target host (its
+    # concurrency model assumes different tasks target different nodes with
+    # no shared state), so both tasks get dispatched to run add_node()
+    # concurrently — two threads racing the same host's config-slot
+    # classify-then-create logic milliseconds apart (2026-07-23, 6 nodes
+    # created for a 4-slot host). Block the duplicate at creation time.
+    if not node_addr:
+        return False
+    tasks = db.get_job_tasks(cluster_id)
+    for task in tasks:
+        if task.function_name != JobSchedule.FN_NODE_ADD:
+            continue
+        if task.status == JobSchedule.STATUS_DONE or task.canceled:
+            continue
+        if (task.function_params or {}).get("node_addr") == node_addr:
+            return task.uuid
     return False
 
 
@@ -189,6 +257,11 @@ def _add_task(function_name, cluster_id, node_id, device_id,
             return False
     elif function_name == JobSchedule.FN_LVOL_MIG:
         task_id = get_active_lvol_mig_task(cluster_id, function_params.get("lvol_id"))
+        if task_id:
+            logger.info(f"Task found, skip adding new task: {task_id}")
+            return False
+    elif function_name == JobSchedule.FN_NODE_ADD:
+        task_id = _validate_new_task_node_add(cluster_id, (function_params or {}).get("node_addr"))
         if task_id:
             logger.info(f"Task found, skip adding new task: {task_id}")
             return False
@@ -276,6 +349,7 @@ def add_device_mig_task_for_node(node_id):
             task_obj.write_to_db(db.kv_store)
             tasks_events.task_create(task_obj)
         return True
+    return False
 
 
 def add_device_to_auto_restart(device):
@@ -596,6 +670,8 @@ def get_active_node_mig_task(cluster_id, node_id, distr_name=None):
     return False
 
 
+
+
 def add_device_failed_mig_task(device_id):
     device = db.get_storage_device_by_id(device_id)
     for node in db.get_storage_nodes_by_cluster_id(device.cluster_id):
@@ -811,6 +887,20 @@ def add_lvol_mig_task(migration):
     )
 
 
+def add_batch_mig_task(group):
+    """Create the JobSchedule task that drives a batch (shared-namespace) migration."""
+    return _add_task(
+        JobSchedule.FN_LVOL_BATCH_MIG,
+        group.cluster_id,
+        group.source_node_id,
+        "",
+        function_params={
+            "group_id": group.uuid,
+            "target_node_id": group.target_node_id,
+        },
+    )
+
+
 def add_lvol_sync_del_task(cluster_id, node_id, lvol_bdev_name, primary_node):
     return _add_task(JobSchedule.FN_LVOL_SYNC_DEL, cluster_id, node_id, "",
                      function_params={"lvol_bdev_name": lvol_bdev_name, "primary_node": primary_node}, max_retry=10)
@@ -927,8 +1017,8 @@ def run_lvol_sync_op_task(task):
         logger.error(f"lvol sync-op task {task.uuid} failed: {e}")
         try:
             _defer(f"error: {e}")
-        except Exception:
-            pass
+        except Exception as defer_e:
+            logger.debug(f"lvol sync-op task {task.uuid}: _defer fallback also failed: {defer_e}")
 
 def get_lvol_sync_del_task(cluster_id, node_id, lvol_bdev_name=None):
     tasks = db.get_job_tasks(cluster_id)
@@ -1047,3 +1137,11 @@ def add_replication_final_task(cluster_id, src_node_id, function_params):
     """
     return _add_task(JobSchedule.FN_REPLICATION_FINAL, cluster_id, src_node_id, "",
                      function_params=function_params, send_to_cluster_log=False)
+
+
+def get_active_lvol_migration(node_id):
+    """Return active LVolMigration records with ``node_id`` as source or target."""
+    return [
+        m for m in db.get_migrations()
+        if m.is_active() and node_id in (m.source_node_id, m.target_node_id)
+    ]

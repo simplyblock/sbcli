@@ -40,12 +40,12 @@ class TestAddNsIdempotent(unittest.TestCase):
         bdev = "LVS_345/LVOL_8403"
         uuid = "26cf808c-3c2e-472d-912f-b1da28d05350"
 
-        with patch.object(c, "subsystem_list", return_value=[{
+        with patch.object(c, "subsystem_get", return_value={
                 "nqn": nqn,
                 "namespaces": [{
                     "nsid": 1, "bdev_name": bdev, "uuid": uuid,
                 }],
-            }]) as mock_list, \
+            }) as mock_get, \
              patch.object(c, "_request2", return_value=(None, _DUP_ERR)) as mock_req:
             ret = c.nvmf_subsystem_add_ns(nqn, bdev, uuid=uuid, nsid=1)
 
@@ -53,18 +53,18 @@ class TestAddNsIdempotent(unittest.TestCase):
         # The add fires first; the probe runs only after the rejection.
         mock_req.assert_called_once()
         self.assertEqual(mock_req.call_args.args[0], "nvmf_subsystem_add_ns")
-        mock_list.assert_called_once_with(nqn_name=nqn)
+        mock_get.assert_called_once_with(nqn)
 
     def test_successful_add_never_probes(self):
         """The happy path pays no nvmf_get_subsystems dump at all."""
         c = _client()
-        with patch.object(c, "subsystem_list") as mock_list, \
+        with patch.object(c, "subsystem_get") as mock_get, \
              patch.object(c, "_request2", return_value=(1, None)) as mock_req:
             ret = c.nvmf_subsystem_add_ns("nqn.test:lvol:abc", "bdev0", uuid="u1", nsid=1)
 
         self.assertEqual(ret, 1)
         mock_req.assert_called_once()
-        mock_list.assert_not_called()
+        mock_get.assert_not_called()
 
     def test_missing_namespace_fires_rpc(self):
         """When the bdev is not yet in the subsystem, the real RPC fires."""
@@ -72,10 +72,10 @@ class TestAddNsIdempotent(unittest.TestCase):
         nqn = "nqn.test:lvol:abc"
         bdev = "LVS_345/LVOL_8403"
 
-        with patch.object(c, "subsystem_list", return_value=[{
+        with patch.object(c, "subsystem_get", return_value={
                 "nqn": nqn,
                 "namespaces": [],
-            }]), \
+            }), \
              patch.object(c, "_request2", return_value=(1, None)) as mock_req:
             ret = c.nvmf_subsystem_add_ns(nqn, bdev, uuid="u1", nsid=1)
 
@@ -88,7 +88,7 @@ class TestAddNsIdempotent(unittest.TestCase):
         """A rejected add with no matching namespace is a real failure — the
         original error must reach the caller (subsystem gone / full)."""
         c = _client()
-        with patch.object(c, "subsystem_list", return_value=[]), \
+        with patch.object(c, "subsystem_get", return_value=None), \
              patch.object(c, "_request2", return_value=(None, _DUP_ERR)) as mock_req:
             ret, err = c.nvmf_subsystem_add_ns2("nqn.test", "bdev0", uuid="u1")
         mock_req.assert_called_once()
@@ -102,12 +102,12 @@ class TestAddNsIdempotent(unittest.TestCase):
         nqn = "nqn.test:lvol:abc"
         bdev = "LVS_345/LVOL_8403"
 
-        with patch.object(c, "subsystem_list", return_value=[{
+        with patch.object(c, "subsystem_get", return_value={
                 "nqn": nqn,
                 "namespaces": [{
                     "nsid": 1, "bdev_name": bdev, "uuid": "old-uuid",
                 }],
-            }]), \
+            }), \
              patch.object(c, "_request2", return_value=(None, _DUP_ERR)) as mock_req:
             ret, err = c.nvmf_subsystem_add_ns2(nqn, bdev, uuid="new-uuid", nsid=1)
 
@@ -121,12 +121,12 @@ class TestAddNsIdempotent(unittest.TestCase):
         nqn = "nqn.test:lvol:abc"
         bdev = "LVS_345/LVOL_8403"
 
-        with patch.object(c, "subsystem_list") as mock_list, \
+        with patch.object(c, "subsystem_get") as mock_get, \
              patch.object(c, "_request2", return_value=(None, _DUP_ERR)) as mock_req:
             ret, err = c.nvmf_subsystem_add_ns2(nqn, bdev, uuid="u1", nsid=1,
                                                 idempotent=False)
 
-        mock_list.assert_not_called()
+        mock_get.assert_not_called()
         mock_req.assert_called_once()
         self.assertEqual(err, _DUP_ERR)
 
@@ -134,7 +134,7 @@ class TestAddNsIdempotent(unittest.TestCase):
         """If the error-path probe itself raises, the original rejection is
         returned rather than the probe's exception."""
         c = _client()
-        with patch.object(c, "subsystem_list", side_effect=RuntimeError("rpc down")), \
+        with patch.object(c, "subsystem_get", side_effect=RuntimeError("rpc down")), \
              patch.object(c, "_request2", return_value=(None, _DUP_ERR)) as mock_req:
             ret, err = c.nvmf_subsystem_add_ns2("nqn.test", "bdev0")
         mock_req.assert_called_once()
@@ -148,10 +148,10 @@ class TestAddNsIdempotent(unittest.TestCase):
         nqn = "nqn.test:lvol:abc"
         bdev = "LVS_345/LVOL_8403"
 
-        with patch.object(c, "subsystem_list", return_value=[{
+        with patch.object(c, "subsystem_get", return_value={
                 "nqn": nqn,
                 "namespaces": [{"nsid": 2, "bdev_name": bdev, "uuid": "u1"}],
-            }]), \
+            }), \
              patch.object(c, "_request2", return_value=(None, _DUP_ERR)) as mock_req:
             ret = c.nvmf_subsystem_add_ns(nqn, bdev, uuid="u1")  # no nsid pinned
 

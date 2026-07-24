@@ -100,6 +100,13 @@ def task_runner(task):
     if tasks_controller.defer_task_for_expansion(task):
         return False
 
+    if tasks_controller.get_active_lvol_migration(task.node_id):
+        task.function_result = "LVol migration tasks found, retrying"
+        task.status = JobSchedule.STATUS_SUSPENDED
+        task.retry += 1
+        task.write_to_db(db.kv_store)
+        return False
+
     if task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED]:
         current_online_devices = 0
         unavailable = _cluster_unavailable_state(task.cluster_id)
@@ -215,10 +222,8 @@ def task_runner(task):
 # get DB controller
 db = db_controller.DBController()
 
-logger.info("Starting Tasks runner...")
 
-
-def update_master_task(task):
+def update_master_task(task, cl):
     master_task = None
     tasks = {t.uuid: t for t in db.get_job_tasks(cl.get_id(), reverse=False)}
     for t in tasks.values():
@@ -259,64 +264,71 @@ def update_master_task(task):
         return True
 
 
-while True:
-    try:
-        db.get_clusters()
-    except Exception as e:
-        logger.error(f"Failed to get clusters: {e}")
-        time.sleep(3)
-        continue
-    clusters = db.get_clusters()
-    if not clusters:
-        logger.error("No clusters found!")
-    else:
-        for cl in clusters:
-            tasks = db.get_job_tasks(cl.get_id(), reverse=False)
-            for task in tasks:
-                if task.function_name == JobSchedule.FN_DEV_MIG and task.status != JobSchedule.STATUS_DONE:
-                    task = db.get_task_by_id(task.uuid)
-                    if task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED]:
-                        active_task = False
-                        suspended_task= False
-                        for t in db.get_job_tasks(task.cluster_id):
-                            if t.function_name in [JobSchedule.FN_FAILED_DEV_MIG, JobSchedule.FN_DEV_MIG,
-                                                      JobSchedule.FN_NEW_DEV_MIG] and t.node_id == task.node_id:
-                                if "distr_name" in t.function_params and t.function_params[
-                                    "distr_name"] == task.function_params['distr_name'] and t.canceled is False:
-                                    if t.status == JobSchedule.STATUS_RUNNING:
-                                        active_task = True
-                                    elif t.status == JobSchedule.STATUS_SUSPENDED and t.function_name == JobSchedule.FN_NEW_DEV_MIG:
-                                        suspended_task = True
-                            if active_task and suspended_task:
-                                break
-                        if active_task or suspended_task:
-                            logger.info("task found on same node, retry")
+def main():
+    logger.info("Starting Tasks runner...")
+    while True:
+        try:
+            db.get_clusters()
+        except Exception as e:
+            logger.error(f"Failed to get clusters: {e}")
+            time.sleep(3)
+            continue
+        clusters = db.get_clusters()
+        if not clusters:
+            logger.error("No clusters found!")
+        else:
+            for cl in clusters:
+                tasks = db.get_job_tasks(cl.get_id(), reverse=False)
+                for task in tasks:
+                    if task.function_name == JobSchedule.FN_DEV_MIG and task.status != JobSchedule.STATUS_DONE:
+                        task = db.get_task_by_id(task.uuid)
+                        if task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED]:
+                            active_task = False
+                            suspended_task= False
+                            for t in db.get_job_tasks(task.cluster_id):
+                                if t.function_name in [JobSchedule.FN_FAILED_DEV_MIG, JobSchedule.FN_DEV_MIG,
+                                                          JobSchedule.FN_NEW_DEV_MIG] and t.node_id == task.node_id:
+                                    if "distr_name" in t.function_params and t.function_params[
+                                        "distr_name"] == task.function_params['distr_name'] and t.canceled is False:
+                                        if t.status == JobSchedule.STATUS_RUNNING:
+                                            active_task = True
+                                        elif t.status == JobSchedule.STATUS_SUSPENDED and t.function_name == JobSchedule.FN_NEW_DEV_MIG:
+                                            suspended_task = True
+                                if active_task and suspended_task:
+                                    break
+                            if active_task or suspended_task:
+                                logger.info("task found on same node, retry")
+                                continue
+                        elif task.status == JobSchedule.STATUS_RUNNING:
+                            pass
+
+                        # Lease gate: skip a task another live runner host owns.
+                        if not tasks_controller.claim_task(task):
+                            logger.info(f"Migration task {task.uuid} owned by another runner host; skipping")
                             continue
-                    elif task.status == JobSchedule.STATUS_RUNNING:
-                        pass
+                        with tasks_controller.task_lease_heartbeat(task):
+                            res = task_runner(task)
+                        update_master_task(task, cl)
+                        if res:
+                            node_task = tasks_controller.get_active_node_tasks(task.cluster_id, task.node_id)
+                            if not node_task:
+                                logger.info("no task found on same node, resuming compression")
+                                node = db.get_storage_node_by_id(task.node_id)
+                                for n in db.get_storage_nodes_by_cluster_id(node.cluster_id):
+                                    if n.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:
+                                        logger.warning("Not all nodes are online, can not resume JC compression")
+                                        continue
+                                rpc_client = node.rpc_client(timeout=5, retry=2)
+                                try:
+                                    ret, err = rpc_client.jc_suspend_compression(jm_vuid=node.jm_vuid, suspend=False)
+                                    if err:
+                                        logger.info("Failed to resume JC compression adding task...")
+                                        tasks_controller.add_jc_comp_resume_task(task.cluster_id, task.node_id, node.jm_vuid)
+                                except Exception as e:
+                                    logger.error(e)
 
-                    # Lease gate: skip a task another live runner host owns.
-                    if not tasks_controller.claim_task(task):
-                        logger.info(f"Migration task {task.uuid} owned by another runner host; skipping")
-                        continue
-                    res = task_runner(task)
-                    update_master_task(task)
-                    if res:
-                        node_task = tasks_controller.get_active_node_tasks(task.cluster_id, task.node_id)
-                        if not node_task:
-                            logger.info("no task found on same node, resuming compression")
-                            node = db.get_storage_node_by_id(task.node_id)
-                            for n in db.get_storage_nodes_by_cluster_id(node.cluster_id):
-                                if n.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:
-                                    logger.warning("Not all nodes are online, can not resume JC compression")
-                                    continue
-                            rpc_client = node.rpc_client(timeout=5, retry=2)
-                            try:
-                                ret, err = rpc_client.jc_suspend_compression(jm_vuid=node.jm_vuid, suspend=False)
-                                if err:
-                                    logger.info("Failed to resume JC compression adding task...")
-                                    tasks_controller.add_jc_comp_resume_task(task.cluster_id, task.node_id, node.jm_vuid)
-                            except Exception as e:
-                                logger.error(e)
+        time.sleep(3)
 
-    time.sleep(3)
+
+if __name__ == "__main__":
+    main()

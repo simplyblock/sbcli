@@ -30,10 +30,6 @@ class LVolMigration(BaseModel):
     STATUS_NEW = 'new'
     STATUS_RUNNING = 'running'
     STATUS_SUSPENDED = 'suspended'
-    # CUTOVER: the target subsystem is live and the client must reconnect before
-    # the source subsystem is removed.  Set by PHASE_LVOL_MIGRATE (tgt_is_src_secondary
-    # path only); cleared to STATUS_DONE once PHASE_CLEANUP_SOURCE completes.
-    STATUS_CUTOVER = 'cutover'
     STATUS_DONE = 'done'
     STATUS_FAILED = 'failed'
     STATUS_CANCELLED = 'cancelled'
@@ -49,7 +45,6 @@ class LVolMigration(BaseModel):
         STATUS_NEW: 0,
         STATUS_RUNNING: 1,
         STATUS_SUSPENDED: 2,
-        STATUS_CUTOVER: 6,
         STATUS_DONE: 3,
         STATUS_FAILED: 4,
         STATUS_CANCELLED: 5,
@@ -82,6 +77,28 @@ class LVolMigration(BaseModel):
     # created by the migration process itself and must be cleaned up afterward.
     intermediate_snaps: List[str] = []
 
+    # ── Target inventory: objects created on the target by this migration ───
+    # Populated incrementally as objects are created so that the cleanup
+    # endpoint can remove them even if the migration ends in terminal state.
+
+    # Composite bdev path created on the target (e.g. "LVS_TGT/LVOL_xxx_m").
+    target_lvol_bdev: str = ""
+
+    # NQN of the subsystem created on non-overlap target nodes.
+    # Empty when the subsystem was pre-existing (overlap or shared).
+    target_subsystem_nqn: str = ""
+
+    # Node IDs (get_id() form) where we called subsystem_create during
+    # create_migration().  Overlap nodes are excluded — their subsystem
+    # belongs to the source role and must NOT be deleted on cleanup.
+    target_subsystem_node_ids: List[str] = []
+
+    # Full composite bdev paths created on the target by this migration
+    # (e.g. "LVS_TGT/SNAP_xxx_m").  Excludes pre-existing bdevs so the
+    # cleanup endpoint knows exactly what this migration created.
+    # Cleared to [] after cleanup (normal CLEANUP_TARGET or manual endpoint).
+    target_snap_bdevs: List[str] = []
+
     # In-progress RPC job ID for the currently executing data-plane operation
     # (either a snapshot copy or the final lvol migrate). Empty when idle.
     current_job_id: str = ""
@@ -113,18 +130,54 @@ class LVolMigration(BaseModel):
     max_retries: int = constants.LVOL_MIG_MAX_RETRIES
     canceled: bool = False
 
+    # Set when this migration is part of a batch (shared-namespace) migration.
+    # References an LVolMigrationGroup.uuid.  Empty for standalone migrations.
+    migration_group_id: str = ""
+
+    # Snaps whose raw data has been transferred to the target in group/worker
+    # mode but whose add_clone + convert have NOT yet been performed (the main
+    # orchestrator reconstructs the tree after all workers reach snap_copy_done).
+    # Unused for standalone migrations.
+    snaps_transferred_group: List[str] = []
+
     def get_id(self):
         # Prefix with cluster_id so that FDB range queries can filter by cluster.
         return "%s/%s" % (self.cluster_id, self.uuid)
 
     def write_to_db(self, kv_store=None):
         self.updated_at = str(datetime.datetime.now(datetime.timezone.utc))
+        self._merge_external_cancel(kv_store)
         super().write_to_db(kv_store)
+
+    def _merge_external_cancel(self, kv_store):
+        """Guard against losing a concurrent cancel_migration() call.
+
+        write_to_db() is a full-object overwrite with no CAS/versioning, and
+        the task runner holds one in-memory copy of this object across an
+        entire tick (sometimes several RPCs long, e.g. a snapshot transfer).
+        If `migrate-cancel` sets canceled=True on the DB record after that
+        in-memory copy was loaded, the tick's own next write — carrying its
+        stale canceled=False — would otherwise silently revert the
+        cancellation, and the migration runs to completion instead of
+        rolling back. Re-checking on every write (not just at the top of a
+        tick) means a cancellation landing at any point during a tick
+        survives whatever that tick writes afterward.
+        """
+        if self.canceled:
+            return
+        try:
+            from simplyblock_core.utils.helpers import single_or_none
+            existing = single_or_none(
+                self.__class__().read_from_db(kv_store, id=self.get_id()))
+        except Exception:
+            return
+        if existing is not None and existing.canceled:
+            self.canceled = True
 
     def is_active(self):
         return self.status in (
             self.STATUS_NEW, self.STATUS_RUNNING,
-            self.STATUS_SUSPENDED, self.STATUS_CUTOVER,
+            self.STATUS_SUSPENDED,
         )
 
     def has_deadline_passed(self):

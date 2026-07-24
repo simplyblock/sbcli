@@ -375,6 +375,19 @@ def sum_records(records):
         return total
 
 
+def lvol_tgt_bdev_name(lvol_bdev: str) -> str:
+    """Return the migration-target bdev short name for a writable lvol.
+
+    Idempotent: strips any existing migration suffix before adding one, so
+    retries or back-to-back migrations (where lvol_bdev already ends in the
+    suffix from a previous run) never accumulate it (e.g. 'LVOL_Xmm').
+    """
+    suffix = constants.LVOL_MIG_BDEV_SUFFIX
+    if lvol_bdev.endswith(suffix):
+        lvol_bdev = lvol_bdev[:-len(suffix)]
+    return lvol_bdev + suffix
+
+
 def _used_bdev_name_numbers(db_controller, all_lvols=None, all_snapshots=None):
     used = set()
     if not all_lvols:
@@ -657,6 +670,30 @@ def decimal_to_hex_power_of_2(decimal_number):
     return hex_result
 
 
+def make_async_handler(target_handler):
+    """Wrap ``target_handler`` for non-blocking logging: worker threads only
+    enqueue a record (cheap); a single background ``QueueListener`` thread does
+    the format + write. Returns a ``QueueHandler`` to attach to a logger.
+
+    Rationale: restart recovery runs 100+ concurrent threads; with a plain
+    StreamHandler every one serialized on the handler lock + stream write on
+    each debug() call, starving the (GIL-bound) recreate thread's between-RPC
+    work and ballooning the client-port-block window (2026-07-20). The listener
+    is kept alive via the returned handler's ``_listener`` attr and stopped at
+    interpreter exit.
+    """
+    import atexit
+    import queue as _queue
+    import logging.handlers as _lh
+    log_queue: "_queue.Queue" = _queue.Queue(-1)  # unbounded; enqueue never blocks a worker
+    listener = _lh.QueueListener(log_queue, target_handler, respect_handler_level=False)
+    listener.start()
+    atexit.register(listener.stop)
+    qh = _lh.QueueHandler(log_queue)
+    qh._listener = listener  # type: ignore[attr-defined]  # strong ref, not GC'd
+    return qh
+
+
 def get_logger(name=""):
     # first configure a root logger
     # Silence external libraries that log secrets (tokens, full HTTP response
@@ -675,9 +712,30 @@ def get_logger(name=""):
         logg.setLevel(constants.LOG_LEVEL)
 
     if not logg.hasHandlers():
-        logger_handler = logging.StreamHandler(stream=sys.stdout)
+        # Diagnostics -> stderr; machine-readable command output (CLI `print`,
+        # e.g. `sn list --json`) stays on stdout. Keeping logs on stdout let
+        # DEBUG lines interleave with the JSON a caller parses — and the async
+        # handler below (which flushes on a background thread + at exit) makes
+        # that ordering nondeterministic, so a trailing log line's bracket was
+        # picked up as the payload (2026-07-21 soak: `sn list --json` parsed an
+        # int list -> "'int' object is not subscriptable"). stderr is still
+        # captured by docker/journald, so no log line is lost.
+        #
+        # Async logging: worker threads only enqueue a record (cheap); a single
+        # background listener thread does the format + write. Restart recovery
+        # runs 100+ concurrent threads; a plain StreamHandler serialized every
+        # one on the handler lock + stream write per debug() call, starving the
+        # GIL-bound recreate thread's between-RPC work and ballooning the
+        # client-port-block window (2026-07-20 FD-0 reboot: block 2s -> 20s).
+        # The QueueHandler removes that contention without dropping lines or
+        # changing the level; falls back to the direct handler on setup error.
+        logger_handler = logging.StreamHandler(stream=sys.stderr)
         logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(thread)d: %(levelname)s: %(message)s'))
-        logg.addHandler(logger_handler)
+        try:
+            logg.addHandler(make_async_handler(logger_handler))
+        except Exception:
+            # Safety: never lose logging if the async path can't be set up.
+            logg.addHandler(logger_handler)
         # gelf_handler = GELFTCPHandler('0.0.0.0', constants.GELF_PORT)
         # logg.addHandler(gelf_handler)
 
@@ -2364,6 +2422,11 @@ def get_k8s_batch_client():
     return client.BatchV1Api()
 
 
+def get_k8s_custom_objects_client():
+    config.load_incluster_config()
+    return client.CustomObjectsApi()
+
+
 def get_storage_node_api_log_type(mgmt_ip, name):
     try:
         node_docker = docker.DockerClient(base_url=f"tcp://{mgmt_ip}:2375", version="auto", timeout=60 * 5)
@@ -2441,10 +2504,21 @@ def render_and_deploy_alerting_configs(contact_point, grafana_endpoint, cluster_
         print(f"File moved to {prometheus_file_path} successfully.")
 
 
+# hostPath mount of the host's /etc/modules-load.d inside the k8s storage-node
+# agent (see storage-node.yaml in the CSI chart). Writing to the container's
+# own /etc/modules-load.d is a silent no-op there: the file lands in the
+# ephemeral container layer, the host's systemd-modules-load never sees it,
+# and modules are gone after the next node reboot — which wedged node-adds
+# resuming after the CPU-topology reboot (2026-07-06, bind_device_to_spdk 500).
+HOST_MODULES_LOAD_DIR = "/host/etc/modules-load.d"
+
+
 def load_kernel_module(module):
     """
-    Loads a kernel module using modprobe and ensures it is persistent across reboots
-    by creating a module file in /etc/modules-load.d/<module>.conf.
+    Loads a kernel module using modprobe and ensures it is persistent across
+    reboots by creating a module file in modules-load.d/<module>.conf — on the
+    HOST when running inside the k8s agent (via the HOST_MODULES_LOAD_DIR
+    hostPath mount), otherwise locally.
     """
     try:
         # Attempt to load the module immediately
@@ -2456,8 +2530,12 @@ def load_kernel_module(module):
 
     # Ensure persistence across reboots
     try:
-        path = f"/etc/modules-load.d/{module}.conf"
-        os.makedirs("/etc/modules-load.d", exist_ok=True)
+        if os.path.isdir(HOST_MODULES_LOAD_DIR):
+            target_dir = HOST_MODULES_LOAD_DIR
+        else:
+            target_dir = "/etc/modules-load.d"
+            os.makedirs(target_dir, exist_ok=True)
+        path = f"{target_dir}/{module}.conf"
 
         with open(path, "w") as f:
             f.write(f"{module}\n")
@@ -2475,6 +2553,101 @@ def load_kube_config_with_fallback():
         config.load_incluster_config()
     except Exception:
         config.load_kube_config()
+
+
+def set_storage_mcp_max_unavailable(cluster_id: str, max_unavailable: int) -> bool:
+    """Set spec.maxUnavailable on the cluster's storage MachineConfigPool.
+
+    This controls how many storage nodes MCO reboots at once for a
+    MachineConfig / KubeletConfig rollout (the CPU-topology apply). It is
+    flipped between two phases:
+
+      * During initial node-add (cluster not yet active, nodes carry no data):
+        a WIDE value (= the parallel-add count) so the first-time topology
+        reboots happen in one wave instead of a serialized, one-at-a-time
+        queue — a node added early is otherwise stuck behind every other
+        node's reboot before its own.
+      * After cluster activation (nodes now serve IO): NARROWED to the
+        cluster's fault tolerance, so any later rollout never reboots more
+        storage nodes at once than the data plane can absorb.
+
+    OpenShift-only: MachineConfigPool is an OCP CRD, so this is a no-op on k3s
+    or when CPU topology was never applied (pool absent). Never raises — this
+    is rollout pacing, not business logic, and must not crash activation or
+    node-add. Returns True on success, False otherwise.
+    """
+    # maxUnavailable=0 wedges the pool (MCO can never take a node), so floor
+    # at 1. The MCP name mirrors the CPU-topology job template
+    # (storage-<first-6-of-cluster-id>).
+    value = max(int(max_unavailable), 1)
+    mcp_name = f"storage-{first_six_chars(cluster_id)}"
+    try:
+        load_kube_config_with_fallback()
+        api = client.CustomObjectsApi()
+        api.patch_cluster_custom_object(
+            group="machineconfiguration.openshift.io",
+            version="v1",
+            plural="machineconfigpools",
+            name=mcp_name,
+            body={"spec": {"maxUnavailable": value}},
+        )
+        logger.info(f"Set MachineConfigPool {mcp_name} maxUnavailable={value}")
+        return True
+    except ApiException as e:
+        if e.status == 404:
+            logger.info(f"MachineConfigPool {mcp_name} not found "
+                        f"(non-OpenShift or CPU topology not applied); "
+                        f"skipping maxUnavailable update")
+        else:
+            logger.warning(f"Failed to set maxUnavailable on MCP {mcp_name}: "
+                           f"{e.reason} {e.body}")
+        return False
+    except Exception as e:
+        logger.warning(f"Failed to set maxUnavailable on MCP {mcp_name}: {e}")
+        return False
+
+
+def get_max_parallel_node_adds_from_cr(cr_name, cr_namespace, cr_plural="storagenodesets"):
+    """Read spec.maxParallelNodeAdds from the node's StorageNodeSet CR.
+
+    This is the operator-facing knob for how many storage nodes are added — and
+    thus rebooted for the first-time CPU-topology apply — in parallel. We use it
+    to seed the storage MCP's initial maxUnavailable so those reboots roll in
+    one wave instead of a serialized, one-at-a-time queue (cluster_activate
+    later narrows the pool to the cluster's fault tolerance).
+
+    Read directly from the CR rather than via an operator-injected env, so it
+    works without any operator/deployment change. Returns None when the CR
+    reference is missing, the field is unset, or on any error, so callers fall
+    back to constants.NODE_ADD_MAX_PARALLEL. Never raises.
+    """
+    if not cr_name or not cr_namespace:
+        return None
+    try:
+        load_kube_config_with_fallback()
+        api = client.CustomObjectsApi()
+        cr = api.get_namespaced_custom_object(
+            group="storage.simplyblock.io",
+            version="v1alpha1",
+            namespace=cr_namespace,
+            plural=cr_plural or "storagenodesets",
+            name=cr_name,
+        )
+        value = (cr.get("spec") or {}).get("maxParallelNodeAdds")
+        if value is None:
+            return None
+        return max(int(value), 1)
+    except ApiException as e:
+        if e.status == 404:
+            logger.info(f"StorageNodeSet {cr_name} not found in {cr_namespace} "
+                        f"(non-OpenShift or CR absent); using default parallel-add")
+        else:
+            logger.warning(f"Failed to read maxParallelNodeAdds from CR "
+                           f"{cr_name}: {e.reason} {e.body}")
+        return None
+    except Exception as e:
+        logger.warning(f"Failed to read maxParallelNodeAdds from CR {cr_name}: {e}")
+        return None
 
 
 def patch_cr_status(
@@ -2597,9 +2770,24 @@ def patch_cr_node_status(
             if remove:
                 # Node already absent from status — nothing to do.
                 return True
-            # Node not (yet) in status — likely racing a concurrent
-            # whole-list rewrite; retry on fresh data.
-            continue
+            # Node not (yet) in status.nodes[] — most commonly the operator
+            # hasn't synced this node into the CR yet (node_add in_creation
+            # phase), which the retry loop below cannot fix: nothing here
+            # controls the operator's reconciliation timing, and this call
+            # sits on a synchronous hot path (set_node_status ->
+            # snode_status_change on every status transition), so retrying
+            # for several seconds would only add latency to the exact case
+            # this is meant to make cheap. Skip immediately rather than
+            # failing the caller — an earlier version raised/returned falsy
+            # here and crashed/aborted node_add / cluster_activate
+            # mid-flight. This is best-effort CR mirroring (not authoritative
+            # state), so a skipped patch here self-heals on this node's next
+            # status-change event.
+            logger.warning(
+                f"patch_cr_node_status: node not yet in status.nodes for {namespace}/{name} "
+                f"(uuid={node_uuid}, mgmtIp={node_mgmt_ip}), skipping"
+            )
+            return True
 
         try:
             api.patch_namespaced_custom_object_status(
@@ -2629,10 +2817,12 @@ def patch_cr_node_status(
             )
             return False
 
+    # Only reachable via persistent 409 lost-update conflicts on the patch
+    # call — the not-found case now returns from inside the loop above and
+    # never falls through to here.
     logger.error(
-        f"Failed to patch CR {name} after {attempts} attempts: node not "
-        f"found or persistent write conflicts (uuid={node_uuid}, "
-        f"mgmtIp={node_mgmt_ip})"
+        f"Failed to patch CR {name} after {attempts} attempts: persistent "
+        f"write conflicts (uuid={node_uuid}, mgmtIp={node_mgmt_ip})"
     )
     return False
 
@@ -3548,3 +3738,34 @@ class _SecretAwareEncoder(json.JSONEncoder):
 
 def dump_json(data, unwrap_secrets: bool = False, **kwargs):
     return json.dumps(data, cls=_SecretAwareEncoder, unwrap_secrets=unwrap_secrets, **kwargs)
+
+
+def query_yes_no(question, default="yes")-> bool:
+    """Ask a yes/no question via raw_input() and return their answer.
+
+    "question" is a string that is presented to the user.
+    "default" is the presumed answer if the user just hits <Enter>.
+            It must be "yes" (the default), "no" or None (meaning
+            an answer is required of the user).
+
+    The "answer" return value is True for "yes" or False for "no".
+    """
+    valid = {"yes": True, "y": True, "ye": True, "no": False, "n": False}
+    if default is None:
+        prompt = " [y/n] "
+    elif default == "yes":
+        prompt = " [Y/n] "
+    elif default == "no":
+        prompt = " [y/N] "
+    else:
+        raise ValueError("invalid default answer: '%s'" % default)
+
+    while True:
+        sys.stdout.write(question + prompt)
+        choice = str(input()).lower()
+        if default is not None and choice == "":
+            return valid[default]
+        elif choice in valid:
+            return valid[choice]
+        else:
+            sys.stdout.write("Please respond with 'yes' or 'no' " "(or 'y' or 'n').\n")

@@ -128,6 +128,10 @@ def check_node(snode):
         connected_devices = []
 
         for device in snode.nvme_devices:
+            if device.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_UNAVAILABLE]:
+                logger.info(f"Device skipped: {device.get_id()} status: {device.status}")
+                continue
+
             passed = True
 
             if device.io_error:
@@ -353,14 +357,18 @@ def check_node(snode):
                     except KeyError:
                         pass
 
-            for port in ports:
-                try:
-                    lvol_port_check = health_controller.check_port_on_node(snode, port)
+            # Batched: one nvmf_get_blocked_ports fetch answers every port
+            # (was one identical full-list fetch PER port — 528/min
+            # cluster-wide at idle, 2026-07-21 baseline audit).
+            try:
+                _port_results = health_controller.check_ports_on_node(snode, ports)
+                for port, lvol_port_check in _port_results.items():
                     logger.info(
                         f"Check: node {snode.mgmt_ip}, port: {port} ... {lvol_port_check}")
                     if not lvol_port_check and snode.status != StorageNode.STATUS_SUSPENDED:
                         tasks_controller.add_port_allow_task(snode.cluster_id, snode.get_id(), port)
-                except Exception as e:
+            except Exception as e:
+                for port in ports:
                     health_controller._log_port_check_failure(db, snode, port, e)
 
         health_check_status = is_node_online and node_devices_check and node_remote_devices_check and lvstore_check

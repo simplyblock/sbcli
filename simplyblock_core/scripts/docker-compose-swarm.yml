@@ -428,6 +428,20 @@ services:
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
 
+  TasksRunnerBatchMigration:
+    <<: *service-base
+    image: $SIMPLYBLOCK_DOCKER_IMAGE
+    command: "python3 simplyblock_core/services/tasks_runner_batch_migration.py"
+    deploy:
+      placement:
+        constraints: [node.role == manager]
+    volumes:
+      - "/etc/foundationdb:/etc/foundationdb"
+    networks:
+      - hostnet
+    environment:
+      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+
   TasksRunnerFailedMigration:
     <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
@@ -609,6 +623,35 @@ services:
       - hostnet
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+
+  BackupService:
+    <<: *service-base
+    image: $SIMPLYBLOCK_DOCKER_IMAGE
+    command: "python3 simplyblock_core/services/tasks_runner_fdb_backup.py"
+    deploy:
+      placement:
+        constraints: [node.role == manager]
+    volumes:
+      - "/etc/foundationdb:/etc/foundationdb"
+    networks:
+      - hostnet
+    environment:
+      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+
+  FDBExporter:
+    <<: *service-base
+    image: aikoven/foundationdb-exporter:3.1.0
+    environment:
+      FDB_CLUSTER_FILE: /etc/foundationdb/fdb.cluster
+    deploy:
+      placement:
+        constraints: [node.role == manager]
+    volumes:
+      - "/etc/foundationdb:/etc/foundationdb"
+    depends_on:
+      - fdb-server
+    networks:
+      - hostnet
 
 networks:
   monitoring-net:

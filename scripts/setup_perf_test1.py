@@ -1,12 +1,17 @@
+import json
+import logging
 import os
+import re
+import select
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 import boto3
 import paramiko
-import time
-import re
-import json
-import select
+
+# paramiko's transport thread logs banner/handshake errors to stderr on its own;
+# silence them since wait_for_ssh retries through these failures anyway
+logging.getLogger("paramiko").setLevel(logging.CRITICAL)
 
 # --- INPUT PARAMETERS ---
 AMI_ID = "ami-0dfc569a8686b9320"  # Rocky 9 us-east-1
@@ -82,7 +87,7 @@ def wait_for_ssh(ip, timeout=300):
     return False
 
 
-def ssh_exec(ip, cmds, get_output=False, check=False):
+def ssh_exec(ip, cmds, get_output=False, check=False, timeout=600):
     ssh = paramiko.SSHClient()
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     ssh.connect(ip, username='ec2-user', key_filename=KEY_PATH,
@@ -90,7 +95,7 @@ def ssh_exec(ip, cmds, get_output=False, check=False):
     results = []
     for cmd in cmds:
         print(f"  [{ip}] $ {cmd}")
-        stdin, stdout, stderr = ssh.exec_command(cmd, timeout=600)
+        stdin, stdout, stderr = ssh.exec_command(cmd, timeout=timeout)
         out = stdout.read().decode('utf-8')
         err = stderr.read().decode('utf-8')
         rc = stdout.channel.recv_exit_status()
@@ -422,7 +427,10 @@ def main():
         "sudo /usr/local/bin/sbctl -d --dev cluster create --enable-node-affinity"
         " --enable-hang-device"
         " --data-chunks-per-stripe 2 --parity-chunks-per-stripe 2"
-    ], check=True)
+        # Swarm stack deploy inside cluster create pulls the full CP image set;
+        # observed >10 min on cold registry pulls (2026-07-10, two deploys died
+        # on the default 600 s channel timeout at "Deploying swarm stack").
+    ], check=True, timeout=2400)
     print("Phase 2a: DONE - cluster created.")
 
     # Step 5b: Configure and deploy storage nodes in parallel

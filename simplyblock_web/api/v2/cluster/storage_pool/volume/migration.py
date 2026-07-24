@@ -39,7 +39,7 @@ def create_migration(request: Request, cluster: Cluster, volume: Volume, paramet
             ctrl_loss_tmo=parameters.ctrl_loss_tmo,
             host_nqn=parameters.host_nqn,
         )
-    except (ValueError, MigrationConflictError, PreconditionError) as e:
+    except (ValueError, MigrationConflictError, PreconditionError, RuntimeError) as e:
         raise HTTPException(400, str(e))
     db = DBController()
     return creation_response(
@@ -78,17 +78,34 @@ def continue_migration(cluster: Cluster, migration: Migration, parameters: _Cont
             max_retries=parameters.max_retries,
             deadline_seconds=parameters.deadline_seconds,
         )
-    except ValueError as e:
+    except (ValueError, MigrationConflictError, PreconditionError, RuntimeError) as e:
         raise HTTPException(400, str(e))
     return {"migration_id": migration_id}
 
 
 @instance_api.delete('/', name='cluster:storage-pools:volumes:migrations:cancel', status_code=200)
 def cancel_migration(cluster: Cluster, migration: Migration):
-    ok, error = migration_controller.cancel_migration(migration.get_id())
-    if not ok:
-        raise HTTPException(400, error)
+    try:
+        migration_controller.cancel_migration(migration.uuid)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     return {"status": "cancelled"}
+
+
+@instance_api.post('/cleanup-target', name='cluster:storage-pools:volumes:migrations:cleanup-target', status_code=200)
+def cleanup_migration_target(_cluster: Cluster, migration: Migration):
+    """
+    Idempotently remove every object this migration created on the target node(s).
+
+    Safe to call at any migration state — objects not found are reported as
+    already cleaned up rather than as errors.  Returns a report of what was
+    deleted, what was already gone, and any RPC errors encountered.
+    """
+    try:
+        result = migration_controller.cleanup_migration_target(migration.uuid)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return result
 
 
 api.include_router(instance_api)

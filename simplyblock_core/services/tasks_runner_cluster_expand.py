@@ -128,7 +128,8 @@ def main():
                                     f"Cluster-expand task {task.uuid} owned by "
                                     f"another runner host; skipping")
                                 break
-                            res = process_task(task)
+                            with tasks_controller.task_lease_heartbeat(task):
+                                res = process_task(task)
                             if res:
                                 if task.status == JobSchedule.STATUS_DONE:
                                     break

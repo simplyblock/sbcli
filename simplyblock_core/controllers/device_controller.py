@@ -1,3 +1,5 @@
+import json
+import threading
 import time
 import logging
 import uuid
@@ -99,7 +101,49 @@ def _atomic_device_set(db_controller, node_id, device_id, apply_fields):
     return db_controller.atomic_update(node, _mut)
 
 
-def device_set_state(device_id, state, cause=CAUSE_OTHER):
+def connect_peers_to_node_devices(snode):
+    """Make every ONLINE peer (re)connect to ``snode``'s devices.
+
+    DELTA reconcile, fanned out across peers: only ``snode``'s devices
+    changed, so each peer reconnects to those alone. The previous inline
+    full-inventory ``_connect_to_remote_devs(peer)`` probed every device of
+    every node on every peer, per device event — O(n²·d) RPCs per single
+    ``device_set_online`` and ~131k RPCs across a whole-cluster recovery
+    (2026-07-13 audit). Peers are independent (each worker writes only its
+    own record via atomic_update — same pattern as
+    ``_reconnect_peers_to_restarted_node``), and per-peer failures are
+    logged, not raised: a stuck peer must not block the device re-admit.
+    """
+    db_controller = DBController()
+    snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
+
+    def _connect_peer(peer_id):
+        try:
+            peer = db_controller.get_storage_node_by_id(peer_id)
+            remote_devices = storage_node_ops._connect_to_remote_devs(
+                peer, only_node_id=snode.get_id())
+            db_controller.atomic_update(
+                peer, lambda n, rd=remote_devices: setattr(n, "remote_devices", rd))
+        except Exception as e:
+            logger.warning(
+                f"Peer {peer_id} reconnect to node {snode.get_id()} devices "
+                f"failed: {e}")
+
+    logger.info("Make other nodes connect to the node devices")
+    threads = []
+    for node in snodes:
+        if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
+            continue
+        th = threading.Thread(
+            target=_connect_peer, args=(node.get_id(),),
+            name=f"dev-online-connect-{node.get_id()[:8]}")
+        th.start()
+        threads.append(th)
+    for th in threads:
+        th.join()
+
+
+def device_set_state(device_id, state, cause=CAUSE_OTHER, connect_peers=True):
     db_controller = DBController()
     try:
         dev = db_controller.get_storage_device_by_id(device_id)
@@ -262,16 +306,8 @@ def device_set_state(device_id, state, cause=CAUSE_OTHER):
         _atomic_device_set(db_controller, snode.get_id(), device_id, _apply)
         device_events.device_status_change(device, device.status, device.previous_status)
 
-    if state == NVMeDevice.STATUS_ONLINE:
-        logger.info("Make other nodes connect to the node devices")
-        snodes = db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
-        for node in snodes:
-            if node.get_id() == snode.get_id() or node.status != StorageNode.STATUS_ONLINE:
-                continue
-            remote_devices = storage_node_ops._connect_to_remote_devs(node)
-            db_controller.atomic_update(
-                db_controller.get_storage_node_by_id(node.get_id()),
-                lambda n, rd=remote_devices: setattr(n, "remote_devices", rd))
+    if state == NVMeDevice.STATUS_ONLINE and connect_peers:
+        connect_peers_to_node_devices(snode)
 
     distr_controller.send_dev_status_event(device, device.status)
 
@@ -324,8 +360,9 @@ def device_set_read_only(device_id, cause=CAUSE_OTHER):
     return device_set_state(device_id, NVMeDevice.STATUS_READONLY, cause=cause)
 
 
-def device_set_online(device_id, cause=CAUSE_OTHER):
-    ret = device_set_state(device_id, NVMeDevice.STATUS_ONLINE, cause=cause)
+def device_set_online(device_id, cause=CAUSE_OTHER, connect_peers=True):
+    ret = device_set_state(device_id, NVMeDevice.STATUS_ONLINE, cause=cause,
+                           connect_peers=connect_peers)
     if ret:
         logger.info("Adding task to device data migration")
         dev = DBController().get_storage_device_by_id(device_id)
@@ -409,11 +446,11 @@ def _def_create_device_stack(device_obj, snode, force=False, clear_data=False):
     subsystem_nqn = snode.subsystem + ":dev:" + alceml_id
     namespace_found = False
     subsys_found = False
-    ret = rpc_client.subsystem_list(subsystem_nqn)
+    ret = rpc_client.subsystem_get(subsystem_nqn)
     if ret :
         subsys_found = True
-        if ret[0]["namespaces"]:
-            for ns in ret[0]["namespaces"]:
+        if ret["namespaces"]:
+            for ns in ret["namespaces"]:
                 if ns['name'] == pt_name:
                     namespace_found = True
                     break
@@ -499,7 +536,7 @@ def restart_device(device_id, force=False):
     teardown_errors = []
     if device_obj.nvmf_nqn:
         try:
-            if teardown_client.subsystem_list(device_obj.nvmf_nqn):
+            if teardown_client.subsystem_get(device_obj.nvmf_nqn):
                 logger.info(f"Tearing down subsystem {device_obj.nvmf_nqn}")
                 teardown_client.subsystem_delete(device_obj.nvmf_nqn)
         except Exception as e:
@@ -713,7 +750,7 @@ def device_remove(device_id, force=True, cause=CAUSE_OTHER):
     logger.info("Removing device fabric")
     rpc_client = snode.rpc_client()
 
-    if rpc_client.subsystem_list(device.nvmf_nqn):
+    if rpc_client.subsystem_get(device.nvmf_nqn):
         logger.info("Removing device subsystem")
         ret = rpc_client.subsystem_delete(device.nvmf_nqn)
         if not ret:
@@ -997,6 +1034,12 @@ def device_set_failed(device_id):
     if task_id:
         logger.error(f"Restart task found: {task_id}, can not fail device")
         return False
+
+    for n in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
+        if tasks_controller.get_active_lvol_migration(n.get_id()):
+            msg = f"LVol migration tasks found on node: {n.get_id()}"
+            logger.error(msg)
+            return False
 
     ret = device_set_state(device_id, NVMeDevice.STATUS_FAILED)
     if not ret:
@@ -1325,3 +1368,17 @@ def new_device_from_failed(device_id):
         db_controller.get_storage_node_by_id(device_node.get_id()), _mut)
     logger.info(f"New device created from failed device: {device_id}, new device id: {new_device.get_id()}")
     return new_device.get_id()
+
+
+def get_device_health_info(device_id):
+    db_controller = DBController()
+    try:
+        device = db_controller.get_storage_device_by_id(device_id)
+        snode = db_controller.get_storage_node_by_id(device.node_id)
+    except KeyError as e:
+        logger.error(e)
+        return False
+
+    rpc_client = snode.rpc_client()
+    ret = rpc_client.bdev_nvme_get_controller_health_info(device.nvme_controller)
+    return json.dumps(ret, indent=2)

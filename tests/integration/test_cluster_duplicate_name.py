@@ -32,7 +32,7 @@ from pydantic import SecretStr
 
 from simplyblock_core import cluster_ops
 from simplyblock_core.db_controller import DBController
-from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.models.cluster import Cluster, DeployConfig
 
 
 # ---------------------------------------------------------------------------
@@ -64,6 +64,20 @@ def _seed_cluster(db, uuid="cluster-1", name="test-cluster", mode="docker"):
     c.status = Cluster.STATUS_ACTIVE
     c.write_to_db(db.kv_store)
     return c
+
+
+def _seed_deploy_config(db, mode="docker"):
+    """Persist a real DeployConfig to FDB, mirroring what create_cluster()
+    writes for a docker deployment (or what add_cluster() now bootstraps for
+    the first kubernetes cluster) — add_cluster() requires one to exist for
+    any cluster after the first."""
+    cfg = DeployConfig()
+    cfg.mode = mode
+    cfg.grafana_endpoint = "http://grafana.example"
+    cfg.grafana_secret = SecretStr("graf-secret")
+    cfg.db_connection = SecretStr("db-conn")
+    cfg.write_to_db(db.kv_store)
+    return cfg
 
 
 # ---------------------------------------------------------------------------
@@ -109,12 +123,15 @@ class TestAddClusterDuplicateName:
             _add_cluster("beta")
 
     def test_succeeds_and_persists_when_name_is_unique(self, db):
-        # An existing docker cluster makes add_cluster inherit its mode and
-        # skip the k8s/first-cluster provisioning branch entirely — no docker
-        # or deploy side-effects on this path, so nothing needs mocking.
+        # An existing docker cluster + its DeployConfig makes add_cluster
+        # inherit the shared mode/connection and skip the k8s/first-cluster
+        # provisioning branch entirely — only the grafana-user side-effect
+        # (a real HTTP call) needs mocking.
         _seed_cluster(db, uuid="cluster-1", name="other-cluster")
+        _seed_deploy_config(db)
 
-        new_id = _add_cluster("new-cluster")
+        with patch("simplyblock_core.cluster_ops._create_update_user"):
+            new_id = _add_cluster("new-cluster")
 
         stored = db.get_cluster_by_id(new_id)
         assert stored.cluster_name == "new-cluster"
@@ -125,11 +142,36 @@ class TestAddClusterDuplicateName:
         # field round-trips None as "None" through FDB, so assert on the
         # created id / cluster count rather than the stored name.)
         _seed_cluster(db, uuid="cluster-1", name="some-cluster")
+        _seed_deploy_config(db)
 
-        new_id = _add_cluster(None)
+        with patch("simplyblock_core.cluster_ops._create_update_user"):
+            new_id = _add_cluster(None)
 
         assert db.get_cluster_by_id(new_id).uuid == new_id
         assert len(db.get_clusters()) == 2
+
+    def test_bootstraps_deploy_config_for_first_cluster(self, db, monkeypatch):
+        # No clusters and no DeployConfig yet: add_cluster() must bootstrap
+        # kubernetes mode itself (deriving the FDB connection string,
+        # registering the mgmt node) and persist the result as the
+        # DeployConfig subsequent add_cluster() calls will read.
+        monkeypatch.delenv("ENABLE_MONITORING", raising=False)
+        with patch("simplyblock_core.cluster_ops.utils.get_fdb_cluster_string",
+                    return_value=SecretStr("fdb-conn-string")), \
+             patch("simplyblock_core.cluster_ops.mgmt_node_ops.add_mgmt_node") as mock_add_mgmt, \
+             patch("simplyblock_core.cluster_ops.utils.patch_prometheus_configmap"), \
+             patch("simplyblock_core.cluster_ops._create_update_user"):
+            new_id = _add_cluster("first-cluster")
+
+        mock_add_mgmt.assert_called_once_with("0.0.0.0", "kubernetes", new_id)
+
+        stored = db.get_cluster_by_id(new_id)
+        assert stored.mode == "kubernetes"
+        assert stored.db_connection.get_secret_value() == "fdb-conn-string"
+
+        cfg = db.get_deploy_config()
+        assert cfg.mode == "kubernetes"
+        assert cfg.db_connection.get_secret_value() == "fdb-conn-string"
 
 
 # ---------------------------------------------------------------------------

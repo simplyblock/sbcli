@@ -84,12 +84,17 @@ class TestContinueMigration:
 class TestCancelMigration:
 
     def test_cancels_migration(self, client, db, migration, migration_controller):
-        migration_controller.cancel_migration.return_value = (True, None)
+        migration_controller.cancel_migration.return_value = None
 
         response = client.delete(f'{BASE}/{MIGRATION_ID}/')
 
         assert response.status_code == 200
         assert response.json() == {'status': 'cancelled'}
-        # LVolMigration.get_id() is prefixed with the cluster id
-        migration_controller.cancel_migration.assert_called_once_with(
-            f'{CLUSTER_ID}/{MIGRATION_ID}')
+        migration_controller.cancel_migration.assert_called_once_with(MIGRATION_ID)
+
+    def test_cancel_inactive_returns_400(self, client, db, migration, migration_controller):
+        migration_controller.cancel_migration.side_effect = ValueError('Migration is not active')
+
+        response = client.delete(f'{BASE}/{MIGRATION_ID}/')
+
+        assert response.status_code == 400

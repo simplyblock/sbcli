@@ -63,7 +63,7 @@ def check_bdev(name, *, rpc_client=None, bdev_names=None) -> bool:
 
 def check_subsystem(nqn, *, rpc_client=None, nqns=None, ns_uuid=None) -> bool:
     if rpc_client:
-        subsystem = subsystems[0] if (subsystems := rpc_client.subsystem_list(nqn)) is not None else None
+        subsystem = rpc_client.subsystem_get(nqn)
     elif nqns:
         subsystem = nqns.get(nqn)
     else:
@@ -154,7 +154,7 @@ def _check_node_api(node):
         # Liveness probe: short timeout, fail fast on connect errors (a
         # rebooting host refuses connections; retrying with backoff only delays
         # detection). 90s was wildly oversized for an is_live() ping.
-        snode_api = node.client(timeout=5, retry=1, connect_retry=0)
+        snode_api = node.client(timeout=8, retry=1, connect_retry=0)
         logger.debug(f"Node API={node.api_endpoint}")
         ret, _ = snode_api.is_live()
         logger.debug(f"snode is alive: {ret}")
@@ -185,6 +185,22 @@ def check_port_on_node(snode, port_id):
     return not port_block.is_port_blocked(snode, port_id)
 
 
+def check_ports_on_node(snode, port_ids):
+    """Batch variant of :func:`check_port_on_node`: ONE
+    ``nvmf_get_blocked_ports`` fetch answers every port in ``port_ids``.
+    Returns ``{port: bool}`` (True = open). Falls back to per-port checks on
+    legacy nodes without the RPC. Raises on fetch failure — callers treat it
+    like the single-port failure path."""
+    from simplyblock_core import port_block
+    port_ids = list(port_ids)
+    if not port_ids:
+        return {}
+    blocked = port_block.get_blocked_ports_set(snode)
+    if blocked is None:
+        return {p: check_port_on_node(snode, p) for p in port_ids}
+    return {p: int(p) not in blocked for p in port_ids}
+
+
 def _check_node_ping(ip):
     res = utils.ping_host(ip)
     if res:
@@ -207,7 +223,7 @@ def _check_ping_from_node(ip, ifname, node):
     # node DOWN on that; the caller ignores None and re-evaluates next cycle.
     # (The previous mgmt-side ICMP fallback pinged the data IP from mgmt, which
     # is typically off the data VLAN -> always False -> spurious node-down.)
-    snodeapi = node.client(timeout=3, retry=1, connect_retry=0)
+    snodeapi = node.client(timeout=8, retry=1, connect_retry=0)
     try:
         ret, _ = snodeapi.ping_ip(ip, ifname)
         return bool(ret)
@@ -636,26 +652,28 @@ def check_node(node_id, with_devices=True):
             logger.info(f"Check: ping ip {data_nic.ip4_address} ... {ping_check}")
             data_nics_check &= ping_check
 
+    # Batched: collect every port first, answer them with ONE
+    # nvmf_get_blocked_ports fetch (was one full-list fetch per port).
+    _hc_ports = []
     for sec_attr in ['lvstore_stack_secondary', 'lvstore_stack_tertiary']:
         primary_id = getattr(snode, sec_attr, None)
         if primary_id:
             try:
                 n = db_controller.get_storage_node_by_id(primary_id)
-                sec_lvs_port = n.get_lvol_subsys_port(n.lvstore)
-                lvol_port_check = check_port_on_node(snode, sec_lvs_port)
-                logger.info(f"Check: node {snode.mgmt_ip}, port: {sec_lvs_port} ... {lvol_port_check}")
+                _hc_ports.append(n.get_lvol_subsys_port(n.lvstore))
             except KeyError:
                 logger.error("node not found")
-            except Exception as e:
-                _log_port_check_failure(db_controller, snode, sec_lvs_port, e)
 
     if not snode.is_secondary_node:
+        _hc_ports.append(snode.get_lvol_subsys_port(snode.lvstore))
+
+    if _hc_ports:
         try:
-            own_lvs_port = snode.get_lvol_subsys_port(snode.lvstore)
-            lvol_port_check = check_port_on_node(snode, own_lvs_port)
-            logger.info(f"Check: node {snode.mgmt_ip}, port: {own_lvs_port} ... {lvol_port_check}")
+            for _p, lvol_port_check in check_ports_on_node(snode, _hc_ports).items():
+                logger.info(f"Check: node {snode.mgmt_ip}, port: {_p} ... {lvol_port_check}")
         except Exception as e:
-            _log_port_check_failure(db_controller, snode, own_lvs_port, e)
+            for _p in _hc_ports:
+                _log_port_check_failure(db_controller, snode, _p, e)
 
     is_node_online = ping_check and node_api_check and node_rpc_check
 
@@ -775,7 +793,7 @@ def check_node(node_id, with_devices=True):
                     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
                     try:
                         sec1_rpc = second_node_1.rpc_client(timeout=8, retry=1)
-                        if snode.hublvol and not sec1_rpc.subsystem_list(snode.hublvol.nqn):
+                        if snode.hublvol and not sec1_rpc.subsystem_get(snode.hublvol.nqn):
                             logger.info("Secondary hublvol NQN missing on sec_1 %s, recreating",
                                         second_node_1.get_id())
                             second_node_1.create_secondary_hublvol(snode, cluster.nqn)

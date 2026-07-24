@@ -324,7 +324,7 @@ class TestDeleteBdevBlocking(unittest.TestCase):
         # async start
         primary_rpc.delete_lvol.assert_any_call("lvs/mybdev")
         # sync finalize
-        primary_rpc.delete_lvol.assert_any_call("lvs/mybdev", del_async=True)
+        primary_rpc.delete_lvol.assert_any_call("lvs/mybdev", sync=True)
 
     def test_already_deleted_status_2_still_finalizes(self):
         primary_rpc = MagicMock()
@@ -334,7 +334,7 @@ class TestDeleteBdevBlocking(unittest.TestCase):
         with patch('simplyblock_core.services.tasks_runner_lvol_migration.time'):
             runner._delete_bdev_blocking("lvs/mybdev", primary_rpc)
 
-        primary_rpc.delete_lvol.assert_any_call("lvs/mybdev", del_async=True)
+        primary_rpc.delete_lvol.assert_any_call("lvs/mybdev", sync=True)
 
     def test_secondary_rpc_called_on_sync_finalize(self):
         primary_rpc = MagicMock()
@@ -346,7 +346,7 @@ class TestDeleteBdevBlocking(unittest.TestCase):
         with patch('simplyblock_core.services.tasks_runner_lvol_migration.time'):
             runner._delete_bdev_blocking("lvs/mybdev", primary_rpc, secondary_rpc)
 
-        secondary_rpc.delete_lvol.assert_called_once_with("lvs/mybdev", del_async=True)
+        secondary_rpc.delete_lvol.assert_called_once_with("lvs/mybdev", sync=True)
 
     def test_no_secondary_rpc_does_not_call_secondary(self):
         primary_rpc = MagicMock()

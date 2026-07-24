@@ -29,6 +29,7 @@ class JobSchedule(BaseModel):
     # replacement for the in-memory restart drain queue (incident 2026-07-10).
     FN_LVOL_SYNC_OP = "lvol_sync_op"
     FN_LVOL_MIG = "lvol_migration"
+    FN_LVOL_BATCH_MIG = "lvol_batch_migration"
     FN_BACKUP = "s3_backup"
     FN_BACKUP_RESTORE = "s3_backup_restore"
     FN_BACKUP_MERGE = "s3_backup_merge"
@@ -37,6 +38,7 @@ class JobSchedule(BaseModel):
     # lvol delta to the target, flip ANA so the client fails over. Used for
     # migration commit and fail-back (fresh or recovered source).
     FN_REPLICATION_FINAL = "replication_final"
+    FN_FDB_BACKUP = "fdb_backup"
 
     canceled: bool = False
     cluster_id: str = ""

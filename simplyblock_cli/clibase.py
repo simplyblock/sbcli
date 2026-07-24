@@ -13,7 +13,7 @@ from simplyblock_core.exceptions import MigrationConflictError, PreconditionErro
 from simplyblock_core import storage_node_ops as storage_ops
 from simplyblock_core import mgmt_node_ops as mgmt_ops
 from simplyblock_core.controllers import pool_controller, lvol_controller, snapshot_controller, device_controller, \
-    tasks_controller, qos_controller, migration_controller, backup_controller
+    tasks_controller, qos_controller, migration_controller, backup_controller, fdb_backup_controller
 from simplyblock_core.controllers import health_controller
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.cluster import Cluster, HashicorpVaultSettings
@@ -237,19 +237,21 @@ class CLIWrapperBase:
                     f"--expansion: expected exactly 1 new storage node after "
                     f"add_node, found {len(new_snodes)}; cannot integrate")
                 return False
-            # Queue the integration as a background task rather than driving
-            # it inline: the rebalance runs the heavy SPDK recreate/teardown
-            # path (minutes), and the orchestrator persists a resume cursor
-            # so the runner survives a mgmt-node restart mid-expansion. The
-            # post-integration new-device-migration trigger now lives in the
-            # runner's success path (it must run after the rotation lands).
+            # add_node queues the integration task itself (so non-CLI entry
+            # points — web API, k8s node-add runner — get it too). This is
+            # only a fallback for the window where add_node succeeded but
+            # its queueing was skipped; add_cluster_expand_task refuses
+            # duplicates, so a falsy return here normally means add_node's
+            # task is already open — report it instead of failing.
             task_id = tasks_controller.add_cluster_expand_task(
                 cluster_id, new_snodes[0].get_id())
             if not task_id:
-                print("--expansion: an expansion task already exists for "
-                      "this cluster")
-                return False
-            print(f"--expansion: queued integration task {task_id} for "
+                task_id = tasks_controller.get_active_cluster_expand_task(
+                    cluster_id)
+                if not task_id:
+                    print("--expansion: failed to queue the integration task")
+                    return False
+            print(f"--expansion: integration task {task_id} queued for "
                   f"{new_snodes[0].get_id()}; monitor with `sbctl task list`")
 
         return out
@@ -444,6 +446,9 @@ class CLIWrapperBase:
 
     def storage_node__set(self, sub_command, args):
         return storage_ops.set_value(args.node_id, args.attr_name, args.attr_value)
+
+    def storage_node__get_device_health_info(self, sub_command, args):
+        return device_controller.get_device_health_info(args.device_id)
 
     def cluster__create(self, sub_command, args):
         return self.cluster_create(args)
@@ -776,6 +781,21 @@ class CLIWrapperBase:
         return lvol_controller.clone_lvol(args.volume_id, args.clone_name)
 
     def volume__migrate(self, sub_command, args):
+        if getattr(args, 'batch', False):
+            try:
+                group_id, connect_strings = migration_controller.create_batch_migration(
+                    args.volume_id,
+                    args.target_node_id,
+                    ctrl_loss_tmo=args.ctrl_loss_tmo,
+                    host_nqn=getattr(args, 'host_nqn', None),
+                )
+            except (MigrationConflictError, PreconditionError, ValueError) as e:
+                print(f"Error: {e}")
+                return False
+            print(f"Migration Group ID: {group_id}")
+            if connect_strings:
+                return "\n".join(c.connect for c in connect_strings)
+            return True
         try:
             migration_id, connect_strings = migration_controller.create_migration(
                 args.volume_id,
@@ -792,13 +812,25 @@ class CLIWrapperBase:
         return True
 
     def volume__migrate_continue(self, sub_command, args):
+        if getattr(args, 'batch', False):
+            try:
+                group_id = migration_controller.start_batch_migration(
+                    group_id=args.migration_id,
+                    max_retries=args.max_retries,
+                    deadline_seconds=args.deadline_seconds,
+                )
+            except (ValueError, MigrationConflictError, PreconditionError, RuntimeError) as e:
+                print(f"Error: {e}")
+                return False
+            print(f"Batch migration started: {group_id}")
+            return True
         try:
             migration_id = migration_controller.start_migration(
                 migration_id=args.migration_id,
                 max_retries=args.max_retries,
                 deadline_seconds=args.deadline_seconds,
             )
-        except ValueError as e:
+        except (ValueError, MigrationConflictError, PreconditionError, RuntimeError) as e:
             print(f"Error: {e}")
             return False
         print(f"Migration started: {migration_id}")
@@ -808,6 +840,14 @@ class CLIWrapperBase:
         return _format_result(migration_controller.list_migrations(cluster_id=args.cluster_id), json=args.json)
 
     def volume__migrate_cancel(self, sub_command, args):
+        if getattr(args, 'batch', False):
+            try:
+                migration_controller.cancel_batch_migration(args.migration_id)
+            except ValueError as e:
+                print(f"Error: {e}")
+                return False
+            print(f"Migration group {args.migration_id} cancelled")
+            return True
         try:
             migration_controller.cancel_migration(args.migration_id)
         except ValueError as e:
@@ -815,6 +855,34 @@ class CLIWrapperBase:
             return False
         print(f"Migration {args.migration_id} cancelled")
         return True
+
+    def volume__migrate_cleanup(self, sub_command, args):
+        try:
+            result = migration_controller.cleanup_migration_target(args.migration_id)
+        except ValueError as e:
+            print(f"Error: {e}")
+            return False
+        deleted   = result.get("deleted", [])
+        not_found = result.get("not_found", [])
+        errs      = result.get("errors", [])
+        if deleted:
+            print(f"Deleted ({len(deleted)}):")
+            for item in deleted:
+                print(f"  {item}")
+        if not_found:
+            print(f"Already gone ({len(not_found)}):")
+            for item in not_found:
+                print(f"  {item}")
+        if errs:
+            print(f"Errors ({len(errs)}):")
+            for item in errs:
+                print(f"  {item}")
+        if not deleted and not errs:
+            print("Nothing left to clean up on target.")
+        return not errs
+
+    def volume__migrate_group_list(self, sub_command, args):
+        return _format_result(migration_controller.list_batch_migrations(cluster_id=args.cluster_id), json=args.json)
 
     def control_plane__add(self, sub_command, args):
         cluster_id = args.cluster_id
@@ -1072,6 +1140,21 @@ class CLIWrapperBase:
         else:
             print(f"Switched to external backup source: {target}")
         return True
+
+    def db_backup__create(self, sub_command, args):
+        return fdb_backup_controller.add_backup_task(args.cluster_id)
+
+    def db_backup__list(self, sub_command, args):
+        return fdb_backup_controller.list_backups(args.cluster_id)
+
+    def db_backup__status(self, sub_command, args):
+        return fdb_backup_controller.backup_status()
+
+    def db_backup__restore(self, sub_command, args):
+        return fdb_backup_controller.backup_restore(args.name, args.cluster_id)
+
+    def db_backup__config(self, sub_command, args):
+        return fdb_backup_controller.backup_configure(args.cluster_id, args.backup_path, args.backup_frequency, args.bucket_name, args.region_name, args.backup_credentials)
 
     def storage_node_list_devices(self, args):
         data = storage_ops.list_storage_devices(args.node_id)

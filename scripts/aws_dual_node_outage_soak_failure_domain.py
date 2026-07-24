@@ -113,7 +113,16 @@ def parse_args():
                              "storage_nodes in the cluster metadata.")
     parser.add_argument("--volume-size", default="200G", help="Volume size to create per storage node.")
     parser.add_argument("--runtime", type=int, default=72000, help="fio runtime in seconds.")
-    parser.add_argument("--restart-timeout", type=int, default=900, help="Seconds to wait for restarted nodes.")
+    parser.add_argument(
+        "--restart-timeout", type=int, default=3600,
+        help=(
+            "Seconds to wait for restarted nodes to return online. Auto-restart "
+            "is serialized cluster-wide (one node in_restart at a time) and each "
+            "node currently takes ~60-90s, so a whole-domain reboot of N nodes "
+            "needs ~N*90s: at 16 nodes/domain that is ~24 min. Default 3600s (1h) "
+            "covers a full domain (and most of a full cluster) with margin; the "
+            "wait still raises if recovery genuinely stalls."),
+    )
     parser.add_argument("--rebalance-timeout", type=int, default=7200, help="Seconds to wait for rebalancing.")
     parser.add_argument("--poll-interval", type=int, default=10, help="Poll interval for health checks.")
     parser.add_argument(

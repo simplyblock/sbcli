@@ -94,6 +94,7 @@ CONTROL_PLANE_SERVICES_DOCKER = [
     "TasksRunnerRestart",
     "TasksRunnerMigration",
     "TasksRunnerLVolMigration",
+    "TasksRunnerBatchMigration",
     "TasksRunnerFailedMigration",
     "TasksRunnerClusterStatus",
     "TasksRunnerNewDeviceMigration",

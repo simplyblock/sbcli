@@ -31,6 +31,7 @@ class CLIWrapper(CLIWrapperBase):
         self.init_snapshot()
         self.init_backup()
         self.init_qos()
+        self.init_db_backup()
         super().__init__()
 
     def init_storage_node(self):
@@ -88,6 +89,7 @@ class CLIWrapper(CLIWrapperBase):
         self.init_storage_node__repair_lvstore(subparser)
         if self.developer_mode:
             self.init_storage_node__lvs_dump_tree(subparser)
+        self.init_storage_node__get_device_health_info(subparser)
 
 
     def init_storage_node__deploy(self, subparser):
@@ -357,6 +359,10 @@ class CLIWrapper(CLIWrapperBase):
     def init_storage_node__lvs_dump_tree(self, subparser):
         subcommand = self.add_sub_command(subparser, 'lvs-dump-tree', 'Dump lvstore tree for debugging.')
         subcommand.add_argument('node_id', help='The storage node id.', type=str)
+
+    def init_storage_node__get_device_health_info(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'get-device-health-info', 'Returns the device health information from SPDK.')
+        subcommand.add_argument('device_id', help='The device node id.', type=str)
 
 
     def init_cluster(self):
@@ -633,14 +639,13 @@ class CLIWrapper(CLIWrapperBase):
         self.init_volume__suspend(subparser)
         self.init_volume__resume(subparser)
         self.init_volume__clone_lvol(subparser)
+        self.init_volume__migrate(subparser)
+        self.init_volume__migrate_continue(subparser)
+        self.init_volume__migrate_list(subparser)
+        self.init_volume__migrate_cancel(subparser)
         if self.developer_mode:
-            self.init_volume__migrate(subparser)
-        if self.developer_mode:
-            self.init_volume__migrate_continue(subparser)
-        if self.developer_mode:
-            self.init_volume__migrate_list(subparser)
-        if self.developer_mode:
-            self.init_volume__migrate_cancel(subparser)
+            self.init_volume__migrate_cleanup(subparser)
+        self.init_volume__migrate_group_list(subparser)
 
 
     def init_volume__add(self, subparser):
@@ -792,17 +797,19 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('clone_name', help='The new logical volume clone name.', type=str)
 
     def init_volume__migrate(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'migrate', 'Pre-create the target NVMe-oF subsystem for a volume migration. Returns a migration ID and NVMe connect strings (inaccessible ANA state). Connect the client, then run migrate-continue.')
-        subcommand.add_argument('volume_id', help='The volume ID to migrate.', type=str)
+        subcommand = self.add_sub_command(subparser, 'migrate', 'Pre-create the target NVMe-oF subsystem for a volume migration. Returns a migration ID (or group ID with --batch) and NVMe connect strings (inaccessible ANA state). Connect the client, then run migrate-continue.')
+        subcommand.add_argument('volume_id', help='The volume ID to migrate. With --batch, any member of the shared-namespace subsystem.', type=str)
         subcommand.add_argument('target_node_id', help='The target storage node ID.', type=str)
         subcommand.add_argument('--ctrl-loss-tmo', help='NVMe ctrl-loss-tmo in seconds. Default: `3600`.', type=int, default=3600, dest='ctrl_loss_tmo')
         subcommand.add_argument('--host-nqn', help='Host NQN for DH-HMAC-CHAP authentication (required when volume has allowed hosts).', type=str, dest='host_nqn')
+        subcommand.add_argument('--batch', help='Migrate all lvols sharing the same NVMe-oF subsystem as a coordinated group.', dest='batch', action='store_true')
 
     def init_volume__migrate_continue(self, subparser):
         subcommand = self.add_sub_command(subparser, 'migrate-continue', 'Advance a pre-created migration to the snapshot-copy phase and launch the task runner.')
-        subcommand.add_argument('migration_id', help='The migration ID returned by migrate.', type=str)
+        subcommand.add_argument('migration_id', help='The migration ID returned by migrate (or group ID with --batch).', type=str)
         subcommand.add_argument('--max-retries', help='Maximum retry attempts before aborting. Default: `10`.', type=int, default=10, dest='max_retries')
         subcommand.add_argument('--deadline', help='Migration deadline in seconds (0 = no deadline). Default: `14400`.', type=int, default=14400, dest='deadline_seconds')
+        subcommand.add_argument('--batch', help='ID is a batch migration group ID.', dest='batch', action='store_true')
 
     def init_volume__migrate_list(self, subparser):
         subcommand = self.add_sub_command(subparser, 'migrate-list', 'List volume migrations.')
@@ -811,7 +818,17 @@ class CLIWrapper(CLIWrapperBase):
 
     def init_volume__migrate_cancel(self, subparser):
         subcommand = self.add_sub_command(subparser, 'migrate-cancel', 'Cancel an active volume migration.')
+        subcommand.add_argument('migration_id', help='The migration id (or group ID with --batch).', type=str)
+        subcommand.add_argument('--batch', help='ID is a batch migration group ID.', dest='batch', action='store_true')
+
+    def init_volume__migrate_cleanup(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'migrate-cleanup', 'Idempotently remove all objects a migration created on the target. Safe to run at any time; already-removed objects are reported as not_found.')
         subcommand.add_argument('migration_id', help='The migration id.', type=str)
+
+    def init_volume__migrate_group_list(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'migrate-group-list', 'List batch (shared-namespace) migration groups.')
+        subcommand.add_argument('--cluster-id', help='Filter by cluster ID.', type=str, dest='cluster_id')
+        subcommand.add_argument('--json', help='Print output in JSON format.', dest='json', action='store_true')
 
 
     def init_control_plane(self):
@@ -1094,6 +1111,41 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('cluster_id', help='The cluster id.', type=str, default='')
 
 
+    def init_db_backup(self):
+        subparser = self.add_command('db-backup', 'FDB Backup operations')
+        self.init_db_backup__create(subparser)
+        self.init_db_backup__list(subparser)
+        self.init_db_backup__status(subparser)
+        self.init_db_backup__restore(subparser)
+        self.init_db_backup__config(subparser)
+
+
+    def init_db_backup__create(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'create', 'Creates an fdb backup')
+        subcommand.add_argument('cluster_id', help='Cluster ID to create db backup for', type=str)
+
+    def init_db_backup__list(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'list', 'Lists all fdb backups')
+        subcommand.add_argument('cluster_id', help='Cluster ID to restore db backup to', type=str)
+
+    def init_db_backup__status(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'status', 'get backup status')
+
+    def init_db_backup__restore(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'restore', 'restore a backup')
+        subcommand.add_argument('name', help='backup class name', type=str)
+        subcommand.add_argument('cluster_id', help='Cluster ID to restore db backup to', type=str)
+
+    def init_db_backup__config(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'config', 'Set backup configuration')
+        subcommand.add_argument('cluster_id', help='Cluster ID to configure db backup for', type=str)
+        subcommand.add_argument('--backup-path', help='local backup path, defaults to /etc/foundationdb/backup', type=str, dest='backup_path')
+        subcommand.add_argument('--backup-frequency', help='backup frequency, can be 3h, 1d', type=str, dest='backup_frequency')
+        subcommand.add_argument('--s3-bucket', help='AWS S3 bucket name', type=str, dest='bucket_name')
+        subcommand.add_argument('--s3-region', help='AWS S3 region', type=str, dest='region_name')
+        subcommand.add_argument('--s3-credentials', help='AWS S3 API key and secret, should be supplied like this: [API_KEY]:[API_SECRET]', type=str, dest='backup_credentials')
+
+
     def run(self):
         args = self.parser.parse_args()
         if args.debug:
@@ -1260,6 +1312,8 @@ class CLIWrapper(CLIWrapperBase):
                         ret = False
                     else:
                         ret = self.storage_node__lvs_dump_tree(sub_command, args)
+                elif sub_command in ['get-device-health-info']:
+                    ret = self.storage_node__get_device_health_info(sub_command, args)
                 else:
                     self.parser.print_help()
 
@@ -1409,29 +1463,21 @@ class CLIWrapper(CLIWrapperBase):
                 elif sub_command in ['clone-lvol']:
                     ret = self.volume__clone_lvol(sub_command, args)
                 elif sub_command in ['migrate']:
-                    if not self.developer_mode:
-                        print("This command is private.")
-                        ret = False
-                    else:
-                        ret = self.volume__migrate(sub_command, args)
+                    ret = self.volume__migrate(sub_command, args)
                 elif sub_command in ['migrate-continue']:
-                    if not self.developer_mode:
-                        print("This command is private.")
-                        ret = False
-                    else:
-                        ret = self.volume__migrate_continue(sub_command, args)
+                    ret = self.volume__migrate_continue(sub_command, args)
                 elif sub_command in ['migrate-list']:
-                    if not self.developer_mode:
-                        print("This command is private.")
-                        ret = False
-                    else:
-                        ret = self.volume__migrate_list(sub_command, args)
+                    ret = self.volume__migrate_list(sub_command, args)
                 elif sub_command in ['migrate-cancel']:
+                    ret = self.volume__migrate_cancel(sub_command, args)
+                elif sub_command in ['migrate-cleanup']:
                     if not self.developer_mode:
                         print("This command is private.")
                         ret = False
                     else:
-                        ret = self.volume__migrate_cancel(sub_command, args)
+                        ret = self.volume__migrate_cleanup(sub_command, args)
+                elif sub_command in ['migrate-group-list']:
+                    ret = self.volume__migrate_group_list(sub_command, args)
                 else:
                     self.parser.print_help()
 
@@ -1539,6 +1585,21 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.qos__list(sub_command, args)
                 elif sub_command in ['delete']:
                     ret = self.qos__delete(sub_command, args)
+                else:
+                    self.parser.print_help()
+
+            elif args.command in ['db-backup']:
+                sub_command = args_dict['db-backup']
+                if sub_command in ['create']:
+                    ret = self.db_backup__create(sub_command, args)
+                elif sub_command in ['list']:
+                    ret = self.db_backup__list(sub_command, args)
+                elif sub_command in ['status']:
+                    ret = self.db_backup__status(sub_command, args)
+                elif sub_command in ['restore']:
+                    ret = self.db_backup__restore(sub_command, args)
+                elif sub_command in ['config']:
+                    ret = self.db_backup__config(sub_command, args)
                 else:
                     self.parser.print_help()
 

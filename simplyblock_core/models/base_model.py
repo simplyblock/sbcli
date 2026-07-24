@@ -2,7 +2,7 @@
 import pprint
 
 import json
-from inspect import ismethod
+from inspect import ismethod, isfunction
 import sys
 from typing import Mapping, Type, Union
 from collections import ChainMap
@@ -51,12 +51,47 @@ class BaseModel(object):
     def get_id(self):
         return self.uuid
 
+    @classmethod
+    def _annotated_attrs(cls):
+        """Per-class cache of ``[(attr, type)]`` for all public annotated data
+        attributes.
+
+        The annotation walk (``all_annotations`` -> ``inspect.get_annotations``
+        over the full MRO) and the method/underscore filter are class-level
+        constants, yet they used to be re-derived on EVERY object
+        construction, ``to_dict`` and ``keys()`` call — measured at 6.8 ms of
+        GIL-held CPU per fat StorageNode (97 nested device models) and
+        ~216 ms per ``get_storage_nodes_by_cluster_id`` (32 nodes). Across
+        ~30 control-plane threads this reflection convoy inflated every RPC
+        round-trip (6 ms at the proxy -> 135 ms CP-observed, n=3837) and
+        every FDB transaction (0.8-1.4 s inside restart port-block windows),
+        pushing client-port blocks past the 6 s nvmf ack-timeout reject
+        (2026-07-21 FD-reboot: 7 volumes EIO'd).
+
+        Only the reflection is cached. Defaults still come from
+        ``getattr(self, attr)`` at call time in :meth:`get_attrs_map`, so
+        ``from_dict`` on a populated instance keeps its merge semantics and
+        no new sharing of mutable defaults is introduced. The filter checks
+        both ``ismethod`` and ``isfunction``: on an instance a class function
+        appears as a bound method, but on the class (where we now evaluate)
+        it is a plain function.
+        """
+        cached = cls.__dict__.get('_annotated_attrs_cache')
+        if cached is None:
+            cached = [
+                (s, t) for s, t in cls.all_annotations().items()
+                if not s.startswith("_")
+                and not ismethod(getattr(cls, s, None))
+                and not isfunction(getattr(cls, s, None))
+            ]
+            cls._annotated_attrs_cache = cached  # type: ignore[attr-defined]
+        return cached
+
     def get_attrs_map(self):
-        _attribute_map = {}
-        for s , t in self.all_annotations().items():
-            if not s.startswith("_") and not ismethod(getattr(self, s)):
-                _attribute_map[s]= {"type": t, "default": getattr(self, s)}
-        return _attribute_map
+        return {
+            s: {"type": t, "default": getattr(self, s)}
+            for s, t in self.__class__._annotated_attrs()
+        }
 
     def get_db_id(self, use_this_id=None):
         if use_this_id:
@@ -174,15 +209,80 @@ class BaseModel(object):
     def to_str(self):
         return pprint.pformat(self.to_dict())
 
+    # Per-chunk row count for one range-read transaction. An unbounded
+    # get_range_startswith over a large prefix (e.g. the job-task table during
+    # a mass test) is a single FDB transaction: once it exceeds the 5s
+    # transaction limit it fails with 1031 and the binding's on_error retry
+    # restarts the SAME full scan — it never completes, and on 2026-07-16 it
+    # killed TasksNodeAddRunner at cluster start.
+    #
+    # This is a CHUNK size, not a result cap: read_from_db() below continues
+    # key-range pagination until the prefix is exhausted and always returns
+    # the complete result set. Every key that exists for the whole duration
+    # of the scan is returned exactly once. What the chunking does trade away
+    # (when kv_store is a Database, so each chunk is its own transaction) is
+    # single-snapshot isolation: a row created/deleted WHILE the scan runs
+    # may or may not be included — the same guarantee class as any paginated
+    # enumeration. Callers whose invariants depend on concurrent mutations
+    # (e.g. free-slot accounting over all lvols) must enforce them at claim
+    # time (atomic claim / re-validation), not at scan time — a single-txn
+    # snapshot is equally stale by the time it is acted upon. When kv_store
+    # is a Transaction the loop runs inside that one transaction and keeps
+    # snapshot semantics (and its 5s budget) unchanged.
+    _READ_CHUNK_SIZE = 2000
+
+    @staticmethod
+    def _next_prefix(prefix: bytes) -> bytes:
+        """Smallest key strictly greater than every key starting with
+        ``prefix`` (equivalent of fdb's ``strinc``, implemented locally: the
+        fdb binding injects its API at ``fdb.api_version()`` time, so mypy
+        cannot see ``fdb.KeySelector``/``fdb.impl``, and ``fdb.impl`` is
+        private anyway)."""
+        stripped = prefix.rstrip(b'\xff')
+        if not stripped:
+            raise ValueError('prefix consists solely of 0xff bytes')
+        return stripped[:-1] + bytes([stripped[-1] + 1])
+
     def read_from_db(self, kv_store, id="", limit=0, reverse=False):
         if not kv_store:
             from simplyblock_core.db_controller import DBController
             kv_store = DBController().kv_store
         try:
             objects = []
-            prefix = self.get_db_id(id)
-            for k, v in kv_store.get_range_startswith(prefix.strip().encode('utf-8'),  limit=limit, reverse=reverse):
-                objects.append(self.__class__().from_dict(json.loads(v)))
+            prefix = self.get_db_id(id).strip().encode('utf-8')
+
+            if (limit and limit <= self._READ_CHUNK_SIZE) or not hasattr(kv_store, 'get_range'):
+                # Single scan: either the read is bounded and small (one
+                # transaction is fine), or the store does not support raw
+                # key-range reads — the unit-tier fdb stub and the fake
+                # stores in tests implement only get_range_startswith.
+                for k, v in kv_store.get_range_startswith(prefix, limit=limit, reverse=reverse):
+                    objects.append(self.__class__().from_dict(json.loads(v)))
+                return objects
+
+            # Chunked pagination over [prefix, next_prefix(prefix)) with plain
+            # byte keys (begin inclusive, end exclusive — the binding turns
+            # them into KeySelectors). Continuation: forward moves begin to
+            # the successor of the last key seen (key + b'\x00' is the
+            # smallest key strictly greater than key); reverse moves the
+            # exclusive end down onto the last (smallest) key seen.
+            begin = prefix
+            end = self._next_prefix(prefix)
+            while True:
+                n = self._READ_CHUNK_SIZE
+                if limit:
+                    n = min(n, limit - len(objects))
+                    if n <= 0:
+                        break
+                kvs = list(kv_store.get_range(begin, end, limit=n, reverse=reverse))
+                for kv in kvs:
+                    objects.append(self.__class__().from_dict(json.loads(kv.value)))
+                if len(kvs) < n:
+                    break
+                if reverse:
+                    end = bytes(kvs[-1].key)
+                else:
+                    begin = bytes(kvs[-1].key) + b'\x00'
             return objects
         except Exception as e:
             from simplyblock_core import utils
@@ -203,6 +303,27 @@ class BaseModel(object):
             kv_store = DBController().kv_store
         try:
             prefix = self.get_db_id()
+            if self.name == "StorageNode":
+                # Tripwire (2026-07-21 d3fc2c16 incident): a full-object write
+                # of a STALE StorageNode copy silently resurrected
+                # status=in_restart within 2.5s of the restart's committed
+                # ONLINE flip — no event, no log — and the runner's
+                # _reset_if_transient then killed SPDK on a healthy node.
+                # Every full node write now names its caller so the next
+                # occurrence identifies the writer instantly. Full-object
+                # node writes are rare (hot paths use atomic_update); prefer
+                # atomic_update for ANY new node-record mutation.
+                import os.path
+                import traceback
+                from simplyblock_core import utils
+                frames = [
+                    f"{os.path.basename(fs.filename)}:{fs.lineno}:{fs.name}"
+                    for fs in traceback.extract_stack(limit=6)[:-1]
+                ]
+                utils.get_logger(__name__).info(
+                    "[NODE-WRITE] full-object write of %s status=%s by %s",
+                    self.get_id(), getattr(self, "status", "?"),
+                    " <- ".join(reversed(frames)))
             st = json.dumps(self.to_dict(unwrap_secrets=True))
             kv_store.set(prefix.encode(), st.encode())
             return True
