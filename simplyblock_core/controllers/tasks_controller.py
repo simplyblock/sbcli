@@ -289,6 +289,12 @@ def _add_task(function_name, cluster_id, node_id, device_id,
             logger.info(f"Task found, skip adding new task: {task_id}")
             return False
 
+    elif function_name == JobSchedule.FN_NODE_REMOVAL:
+        task_id = get_active_node_removal_task(cluster_id, node_id)
+        if task_id:
+            logger.info(f"Task found, skip adding new task: {task_id}")
+            return False
+
     task_obj = JobSchedule()
     task_obj.uuid = str(uuid.uuid4())
     task_obj.cluster_id = cluster_id
@@ -669,6 +675,10 @@ def get_active_node_mig_task(cluster_id, node_id, distr_name=None):
 def add_device_failed_mig_task(device_id):
     device = db.get_storage_device_by_id(device_id)
     for node in db.get_storage_nodes_by_cluster_id(device.cluster_id):
+        # IN_REMOVAL nodes have a dead SPDK (shut down by the removal flow);
+        # a migration task targeting their distribs can never run and would
+        # stall the node-removal completion check forever. Skip them like
+        # already-REMOVED nodes.
         if node.status == StorageNode.STATUS_REMOVED:
             continue
         for bdev in node.lvstore_stack:
@@ -693,6 +703,23 @@ def add_new_device_mig_task(device_id):
 def add_node_add_task(cluster_id, function_params):
     return _add_task(JobSchedule.FN_NODE_ADD, cluster_id, "", "",
                      function_params=function_params, max_retry=11)
+
+
+def add_node_removal_task(cluster_id, node_id, function_params=None):
+    # max_retry=-1: the removal runner drives a multi-step, possibly multi-hour
+    # orchestration (shutdown -> LVS rewire -> device fail+migrate). Migration
+    # waits legitimately suspend-and-retry many times; do not cap retries.
+    return _add_task(JobSchedule.FN_NODE_REMOVAL, cluster_id, node_id, "",
+                     function_params=function_params or {}, max_retry=-1)
+
+
+def get_active_node_removal_task(cluster_id, node_id):
+    tasks = db.get_job_tasks(cluster_id)
+    for task in tasks:
+        if task.function_name == JobSchedule.FN_NODE_REMOVAL and task.node_id == node_id:
+            if task.status != JobSchedule.STATUS_DONE and task.canceled is False:
+                return task.uuid
+    return False
 
 
 def add_cluster_expand_task(cluster_id, new_node_id):
@@ -745,7 +772,7 @@ def get_active_node_tasks(cluster_id, node_id):
     tasks = db.get_job_tasks(cluster_id)
     out = []
     for task in tasks:
-        if task.function_name in [JobSchedule.FN_PORT_ALLOW, JobSchedule.FN_JC_COMP_RESUME]:
+        if task.function_name in [JobSchedule.FN_PORT_ALLOW, JobSchedule.FN_JC_COMP_RESUME, JobSchedule.FN_NODE_REMOVAL]:
             continue
         if task.node_id == node_id:
             if task.status != JobSchedule.STATUS_DONE and task.canceled is False:

@@ -316,29 +316,6 @@ class TestDetachRemoteControllersFromPeers(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 3. suspend_storage_node / resume_storage_node are deprecated noops
-# ---------------------------------------------------------------------------
-
-
-class TestSuspendAndResumeAreNoops(unittest.TestCase):
-    """Old `sn suspend` and `sn resume` callers must still get a True
-    return so external automation doesn't break, but the body must do
-    nothing — in particular it must not touch FirewallClient."""
-
-    def test_suspend_is_noop(self):
-        from simplyblock_core import storage_node_ops as sno
-        with patch.object(sno, "port_block") as pb:
-            self.assertTrue(sno.suspend_storage_node("any-node-id"))
-            pb.set_port.assert_not_called()
-
-    def test_resume_is_noop(self):
-        from simplyblock_core import storage_node_ops as sno
-        with patch.object(sno, "port_block") as pb:
-            self.assertTrue(sno.resume_storage_node("any-node-id"))
-            pb.set_port.assert_not_called()
-
-
-# ---------------------------------------------------------------------------
 # 4. shutdown_storage_node graceful path
 # ---------------------------------------------------------------------------
 

@@ -128,6 +128,9 @@ class JMDevice(NVMeDevice):
     # the per-leg member partitions. Empty for single-device (no-raid) JMs.
     jm_leg_bdevs: List[str] = []
     jm_leg_members: List = []
+    # When attaching this JM to a node, override the device name on that node.
+    # This is needed when a JM device is removed and needed to be replaced, but the name must be the same.
+    override_name_on_node: dict[str, str] = {} # node_id: new_name
 
 
 class RemoteDevice(BaseModel):

@@ -62,7 +62,7 @@ class Settings(BaseSettings):
                 "and the response stream has no type information to mask by."
             )
         ),
-    ] = False
+    ] = True
 
     @model_validator(mode="after")
     def validate_tls_files(self):

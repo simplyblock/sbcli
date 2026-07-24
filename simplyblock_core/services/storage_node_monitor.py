@@ -657,6 +657,7 @@ def _spawn_recovery_shutdown(node):
 
     def _run():
         try:
+
             storage_node_ops.shutdown_storage_node(
                 node_id, force=True, keep_auto_restart=True)
         except Exception as e:

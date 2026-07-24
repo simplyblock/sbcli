@@ -102,7 +102,7 @@ def check_node(snode):
     # (reconnecting remote devices, repairing multipath, recreating hublvols) —
     # but their node/device health is reported as "not applicable" (None),
     # never true/false.
-    report_health = snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]
+    report_health = snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN, StorageNode.STATUS_SUSPENDED]
 
     # 1- check node ping
     ping_check = health_controller._check_node_ping(snode.mgmt_ip)

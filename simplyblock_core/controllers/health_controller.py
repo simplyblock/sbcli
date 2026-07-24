@@ -526,7 +526,7 @@ def _check_node_lvstore(
                                         dev = db_controller.get_storage_device_by_id(result['UUID'])
                                         dev_node = db_controller.get_storage_node_by_id(dev.node_id)
                                         if dev.status == NVMeDevice.STATUS_ONLINE and dev_node.status in [
-                                            StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN, StorageNode.STATUS_UNREACHABLE]:
+                                            StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN, StorageNode.STATUS_UNREACHABLE, StorageNode.STATUS_SUSPENDED]:
                                             try:
                                                 remote_bdev = storage_node_ops.connect_device(
                                                     f"remote_{dev.alceml_bdev}", dev, node)
@@ -731,7 +731,7 @@ def check_node(node_id, with_devices=True):
             logger.info(f"Node remote JMs: {len(snode.remote_jm_devices)}")
             for remote_device in snode.remote_jm_devices:
 
-                name = f'remote_{remote_device.jm_bdev}n1'
+                name = remote_device.remote_bdev
                 bdev_info = rpc_client.get_bdevs(name)
                 logger.log(INFO if bdev_info else ERROR,
                            f"Checking bdev: {name} ... " + ('ok' if bdev_info else 'failed'))

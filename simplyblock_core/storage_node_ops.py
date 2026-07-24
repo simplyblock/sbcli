@@ -1,4 +1,5 @@
 # coding=utf- 8
+import copy
 import datetime
 import json
 import math
@@ -26,7 +27,6 @@ from simplyblock_core.controllers import lvol_controller, storage_events, snapsh
     device_controller, tasks_controller, health_controller, tcp_ports_events, qos_controller
 from simplyblock_core.controllers.host_auth import _reapply_allowed_hosts
 from simplyblock_core.db_controller import DBController
-from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
@@ -1479,7 +1479,7 @@ def _connect_to_remote_devs(
     remote_devices = []
     existing_remote_devices = {dev.get_id(): dev for dev in this_node.remote_devices}
 
-    allowed_node_statuses = [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN]
+    allowed_node_statuses = [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN, StorageNode.STATUS_SUSPENDED]
     allowed_dev_statuses = [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY, NVMeDevice.STATUS_CANNOT_ALLOCATE]
 
     if force_connect_restarting_nodes:
@@ -2065,10 +2065,15 @@ def _connect_to_remote_jm_devs(this_node, jm_ids=None, only_node_id=None):
         remote_device.status = NVMeDevice.STATUS_ONLINE
         remote_device.nvmf_multipath = org_dev.nvmf_multipath
         expected_bdev = f"remote_{org_dev.jm_bdev}n1"
+        controller_name = f"remote_{org_dev.jm_bdev}"
+        if org_dev.override_name_on_node and this_node.get_id() in org_dev.override_name_on_node:
+            new_name = org_dev.override_name_on_node[this_node.get_id()]
+            expected_bdev = f"remote_{new_name}n1"
+            controller_name = f"remote_{new_name}"
         connect_failed = False
         try:
             remote_device.remote_bdev = str(connect_device(
-                f"remote_{org_dev.jm_bdev}", org_dev, this_node,
+                controller_name, org_dev, this_node,
                 attach_timeout=1,
             ))
         except (RuntimeError, RPCException):
@@ -3273,6 +3278,32 @@ def delete_storage_node(node_id, force=False):
 
 
 def remove_storage_node(node_id, force_remove=False, force_migrate=False):
+    """Start the online removal of a storage node from its cluster.
+
+    This is the inverse of cluster expansion (add_node). It validates the
+    preconditions, then queues a background FN_NODE_REMOVAL task; the
+    tasks_runner_node_removal service drives the multi-step, possibly
+    multi-hour orchestration (see ``node_removal_orchestrate``):
+
+        shutdown -> in_removal -> rewire LVS replicas -> remove/fail/migrate
+        devices -> removed
+
+    Preconditions (all enforced here, before anything is queued):
+      * the target node is ONLINE;
+      * every other (non-removed) node in the cluster is ONLINE;
+      * FTT headroom allows losing this node (``_check_ftt_allows_node_removal``);
+      * the node hosts NO LVols and NO snapshots (the operator migrates those
+        separately, at a higher level — see the design decision for this
+        feature);
+      * any secondary/tertiary replica this node hosts for OTHER primaries has
+        a valid host-disjoint relocation target.
+
+    ``force_remove`` only bypasses the active-task guard (cancelling them).
+    ``force_migrate`` is accepted for signature compatibility and ignored:
+    LVol migration is no longer part of node removal.
+
+    Returns the new task uuid on success, or False on a rejected precondition.
+    """
     db_controller = DBController()
     try:
         snode = db_controller.get_storage_node_by_id(node_id)
@@ -3280,94 +3311,427 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
         logger.exception("Can not find storage node")
         return False
 
-    if snode.status == StorageNode.STATUS_ONLINE:
-        logger.warning(f"Can not remove online node: {node_id}")
+    # Idempotent re-entry: a removal already in flight just returns its task.
+    existing = tasks_controller.get_active_node_removal_task(snode.cluster_id, node_id)
+    if existing:
+        logger.info(f"Node removal already in progress for {node_id} (task {existing})")
+        return existing
+
+    if snode.status == StorageNode.STATUS_REMOVED:
+        logger.warning(f"Node already removed: {node_id}")
+        return False
+
+    if snode.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:
+        logger.error(
+            f"Can not remove node {node_id}: it must be ONLINE or SUSPENDED to start removal "
+            f"(current status: {snode.status}). Removal shuts the node down itself.")
+        return False
+
+    # All other nodes must be online — removal rewires LVS replicas and drives
+    # device migration across the surviving nodes, which requires every peer up.
+    not_online = [
+        n for n in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
+        if n.get_id() != node_id
+        and n.status not in (StorageNode.STATUS_ONLINE, StorageNode.STATUS_REMOVED)
+    ]
+    if not_online:
+        offending = ", ".join(f"{n.get_id()}({n.status})" for n in not_online)
+        logger.error(
+            f"Can not remove node {node_id}: all nodes must be online. "
+            f"Not-online node(s): {offending}")
+        return False
+
+    allowed, reason = _check_ftt_allows_node_removal(node_id, db_controller)
+    if not allowed:
+        logger.error(f"Can not remove node {node_id}: {reason}")
+        return False
+
+    lvols = db_controller.get_lvols_by_node_id(node_id)
+    if lvols:
+        logger.error(
+            f"Can not remove node {node_id}: {len(lvols)} LVol(s) present. "
+            f"Migrate or delete them first.")
+        return False
+
+    node_snaps = [
+        sn for sn in db_controller.get_snapshots()
+        if sn.lvol.node_id == node_id and sn.deleted is False
+    ]
+    if node_snaps:
+        logger.error(
+            f"Can not remove node {node_id}: {len(node_snaps)} snapshot(s) present. "
+            f"Remove them first.")
         return False
 
     tasks = tasks_controller.get_active_node_tasks(snode.cluster_id, snode.get_id())
     if tasks:
-        logger.warning(f"Task found: {len(tasks)}, can not remove storage node, or use --force")
+        logger.warning(f"Task found: {len(tasks)}, can not remove storage node, or use --force-remove")
         if force_remove is False:
             return False
         for task in tasks:
             tasks_controller.cancel_task(task.uuid)
 
-    lvols = db_controller.get_lvols_by_node_id(node_id)
-    if lvols:
-        if force_migrate:
-            for lvol in lvols:
+    # Case-B feasibility: every replica this node hosts for another primary must
+    # have somewhere host-disjoint to go. Catches e.g. 2-node clusters where the
+    # tertiary cannot be re-placed without violating anti-affinity.
+    feasible, reason = _check_replica_relocation_feasible(snode, db_controller)
+    if not feasible:
+        logger.error(f"Can not remove node {node_id}: {reason}")
+        return False
+
+    task_id = tasks_controller.add_node_removal_task(
+        snode.cluster_id, node_id, {"force_remove": force_remove})
+    if not task_id:
+        logger.error(f"Failed to queue node-removal task for {node_id}")
+        return False
+    logger.info(f"Node removal queued for {node_id}: task {task_id}")
+    return task_id
+
+
+def _check_replica_relocation_feasible(removed_node, db_controller):
+    """Pre-flight Case-B check: a secondary/tertiary replica hosted on
+    ``removed_node`` for some OTHER primary must have a valid relocation target.
+    Returns (feasible: bool, reason: str)."""
+    for backref, picker in (
+            ("lvstore_stack_secondary", "secondary"),
+            ("lvstore_stack_tertiary", "tertiary")):
+        primary_id = getattr(removed_node, backref)
+        if not primary_id:
+            continue
+        try:
+            primary = db_controller.get_storage_node_by_id(primary_id)
+        except KeyError:
+            # The primary is gone; nothing to relocate, just bookkeeping.
+            continue
+        if not _pick_replica_relocation_node(primary, removed_node, picker, db_controller):
+            return False, (
+                f"no host-disjoint node available to re-host the {picker} replica "
+                f"of primary {primary_id} (currently on the node being removed)")
+    return True, ""
+
+
+def _pick_replica_relocation_node(primary, removed_node, role, db_controller):
+    """Choose a node to re-host ``primary``'s ``role`` (secondary|tertiary)
+    replica, currently on ``removed_node``. Returns a node id or None.
+    Reuses the existing anti-affinity-aware placement helpers."""
+    exclude_ids = [removed_node.get_id()]
+    if role == "secondary":
+        if primary.tertiary_node_id and primary.tertiary_node_id != removed_node.get_id():
+            exclude_ids.append(primary.tertiary_node_id)
+        cands = get_secondary_nodes(primary, exclude_ids=exclude_ids, removed_node=removed_node)
+    else:
+        exclude_mgmt_ips = []
+        if primary.secondary_node_id and primary.secondary_node_id != removed_node.get_id():
+            exclude_ids.append(primary.secondary_node_id)
+            try:
+                sec = db_controller.get_storage_node_by_id(primary.secondary_node_id)
+                exclude_mgmt_ips.append(sec.mgmt_ip)
+            except KeyError:
                 pass
-                # lvol_controller.migrate(lvol_id)
-        elif force_remove:
-            for lvol in lvols:
-                try:
-                    lvol_controller.delete_lvol(lvol, force_delete=True)
-                except (PreconditionError, RuntimeError):
-                    logger.warning("Failed to delete volume", exc_info=True)
-        else:
-            logger.warning("LVols found on the storage node, use --force-remove or --force-migrate")
+        cands = get_secondary_nodes_2(
+            primary, exclude_ids=exclude_ids, exclude_mgmt_ips=exclude_mgmt_ips)
+    return cands[0] if cands else None
+
+
+def node_removal_orchestrate(node_id, force_remove=False):
+    """Idempotent, resumable orchestration driven by tasks_runner_node_removal.
+
+    Returns True only when the node has been fully removed (status REMOVED).
+    Returns False to signal "incomplete, retry later" (e.g. device migration
+    still in progress) — the runner suspends the task and revisits it.
+
+    Every phase is guarded so a re-entry after a crash/retry skips already
+    completed work.
+    """
+    db_controller = DBController()
+    try:
+        snode = db_controller.get_storage_node_by_id(node_id)
+    except KeyError:
+        logger.error(f"node_removal_orchestrate: node {node_id} not found")
+        return False
+
+    if snode.status == StorageNode.STATUS_REMOVED:
+        return True
+
+    # Phase 1 — shut the node down (graceful). Skipped on re-entry.
+    if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:
+        logger.info(f"[REMOVAL] {node_id}: phase 1 — shutdown")
+        ret = shutdown_storage_node(node_id, force=force_remove)
+        if isinstance(ret, tuple):
+            ret, reason = ret
+            if not ret:
+                logger.error(f"[REMOVAL] {node_id}: shutdown failed: {reason}")
+                return False
+        elif not ret:
+            logger.error(f"[REMOVAL] {node_id}: shutdown failed")
+            return False
+        snode = db_controller.get_storage_node_by_id(node_id)
+
+    # Phase 3a — tear down the (empty) secondary/tertiary replicas of THIS
+    # node's own primary LVS, on the peers that host them (Case A).
+    logger.info(f"[REMOVAL] {node_id}: phase 3a — tear down own replicas")
+    if not _teardown_replicas_of_primary(snode):
+        return False
+
+    # Phase 3b — relocate replicas this node hosts for OTHER primaries (Case B).
+    logger.info(f"[REMOVAL] {node_id}: phase 3b — relocate hosted replicas")
+    if not _relocate_replicas_hosted_on(snode):
+        return False
+
+    # Phase 5 — finalize (swarm leave, gpt cleanup) and flip to removed.
+    logger.info(f"[REMOVAL] {node_id}: phase 4 — finalize")
+    _finalize_node_removal(snode)
+    set_node_status(node_id, StorageNode.STATUS_REMOVED, caused_by="remove")
+    snode = db_controller.get_storage_node_by_id(node_id)
+    # storage_events.snode_status_change(
+    #     snode, StorageNode.STATUS_REMOVED, StorageNode.STATUS_IN_REMOVAL, caused_by="remove")
+
+    # Phase 4 — remove + fail devices, then wait for failure-migration to finish.
+    logger.info(f"[REMOVAL] {node_id}: phase 5 — devices remove/fail/migrate")
+    if not _decommission_node_devices(snode):
+        return False
+
+    logger.info(f"[REMOVAL] {node_id}: done")
+    return True
+
+
+def _teardown_replicas_of_primary(removed_node):
+    """Case A: the primary LVS lives on ``removed_node`` (now shut down).
+    Delete its secondary/tertiary replicas from the peers that host them and
+    clear the cross-reference bookkeeping. The node has no LVols (enforced at
+    entry), so the replicas hold only the empty lvstore + hublvol."""
+    db_controller = DBController()
+    removed_node = db_controller.get_storage_node_by_id(removed_node.get_id())
+    cluster = db_controller.get_cluster_by_id(removed_node.cluster_id)
+
+    for field, backref in (
+            ("secondary_node_id", "lvstore_stack_secondary"),
+            ("tertiary_node_id", "lvstore_stack_tertiary")):
+        peer_id = getattr(removed_node, field)
+        if not peer_id:
+            continue
+        try:
+            peer = db_controller.get_storage_node_by_id(peer_id)
+        except KeyError:
+            removed_node = db_controller.get_storage_node_by_id(removed_node.get_id())
+            setattr(removed_node, field, "")
+            removed_node.write_to_db()
+            continue
+
+        if peer.status == StorageNode.STATUS_ONLINE:
+            _delete_replica_on_peer(peer, removed_node, cluster)
+
+        # Clear the peer's back-reference if it still points at us.
+        peer = db_controller.get_storage_node_by_id(peer_id)
+        if getattr(peer, backref) == removed_node.get_id():
+            setattr(peer, backref, "")
+            peer.write_to_db()
+
+        removed_node = db_controller.get_storage_node_by_id(removed_node.get_id())
+        setattr(removed_node, field, "")
+        removed_node.write_to_db()
+
+    return True
+
+
+def _delete_replica_on_peer(peer, primary, cluster):
+    """Best-effort teardown of ``primary``'s replica lvstore (+ hublvol) on the
+    online ``peer``. RPC failures are logged, not fatal: the peer is healthy and
+    a lingering empty bdev is harmless, while blocking removal on it is not."""
+    rpc_client = peer.rpc_client()
+    lvstore = primary.lvstore
+    if not lvstore:
+        return
+    try:
+        nqn = peer.hublvol_nqn_for_lvstore(cluster.nqn, lvstore)
+        if rpc_client.subsystem_list(nqn):
+            rpc_client.subsystem_delete(nqn)
+    except Exception as e:
+        logger.warning(f"hublvol subsystem teardown for {lvstore} on {peer.get_id()} failed: {e}")
+    try:
+        rpc_client.bdev_lvol_delete_hublvol(lvstore)
+    except Exception as e:
+        logger.warning(f"hublvol bdev teardown for {lvstore} on {peer.get_id()} failed: {e}")
+    try:
+        # deepcopy: _remove_bdev_stack stamps bdev['status']; don't mutate the
+        # primary's stored stack definition.
+        _remove_bdev_stack(copy.deepcopy(primary.lvstore_stack), rpc_client)
+    except Exception as e:
+        logger.warning(f"replica bdev-stack teardown for {lvstore} on {peer.get_id()} failed: {e}")
+
+
+def _relocate_replicas_hosted_on(removed_node):
+    """Case B: ``removed_node`` holds a secondary and/or tertiary replica for
+    other primaries. Re-host each on a fresh, anti-affinity-valid node so the
+    owning primary keeps its fault tolerance after this node leaves."""
+    db_controller = DBController()
+
+    removed_node = db_controller.get_storage_node_by_id(removed_node.get_id())
+    if removed_node.lvstore_stack_secondary:
+        if not _relocate_one_replica(removed_node, removed_node.lvstore_stack_secondary, "secondary"):
             return False
 
-    snaps = db_controller.get_snapshots()
-    node_snaps = []
-    for sn in snaps:
-        if sn.lvol.node_id == node_id and sn.deleted is False:
-            node_snaps.append(sn)
-
-    if node_snaps:
-        if force_migrate:
-            logger.error("Not implemented!")
-            return False
-        elif force_remove:
-            for sn in node_snaps:
-                snapshot_controller.delete(sn.get_id())
-        else:
-            logger.error("Snapshots found on the storage node, use --force-remove or --force-migrate")
+    removed_node = db_controller.get_storage_node_by_id(removed_node.get_id())
+    if removed_node.lvstore_stack_tertiary:
+        if not _relocate_one_replica(removed_node, removed_node.lvstore_stack_tertiary, "tertiary"):
             return False
 
-    if snode.nvme_devices:
-        for dev in snode.nvme_devices:
-            if dev.status == NVMeDevice.STATUS_ONLINE:
-                distr_controller.disconnect_device(dev)
+    return True
 
-    if snode.jm_device and snode.jm_device.get_id() and snode.jm_device.status in [JMDevice.STATUS_ONLINE,
-                                                                                   JMDevice.STATUS_UNAVAILABLE]:
-        logger.info("Removing JM")
-        device_controller.remove_jm_device(snode.jm_device.get_id(), force=True)
 
-    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+def _relocate_one_replica(removed_node, primary_id, role):
+    """Re-host ``primary_id``'s ``role`` replica off ``removed_node``.
+
+    Idempotent: the back-reference on ``removed_node`` is cleared only AFTER the
+    replica is successfully rebuilt on the new node, so a retry resumes cleanly.
+    """
+    db_controller = DBController()
+    field = "secondary_node_id" if role == "secondary" else "tertiary_node_id"
+    backref = "lvstore_stack_secondary" if role == "secondary" else "lvstore_stack_tertiary"
+
+    try:
+        primary = db_controller.get_storage_node_by_id(primary_id)
+    except KeyError:
+        # Primary gone — nothing to rebuild, just drop the stale back-reference.
+        _clear_replica_backref(removed_node, backref)
+        return True
+
+    # Choose (or recover) the relocation target. If the primary's pointer still
+    # names the removed node we must pick a fresh one and commit the forward
+    # bookkeeping; on a retry it already names the new node, so reuse it.
+    new_id = getattr(primary, field)
+    if not new_id or new_id == removed_node.get_id():
+        new_id = _pick_replica_relocation_node(primary, removed_node, role, db_controller)
+        if not new_id:
+            logger.error(
+                f"[REMOVAL] no relocation target for {role} replica of {primary_id}")
+            return False
+        primary = db_controller.get_storage_node_by_id(primary_id)
+        setattr(primary, field, new_id)
+        primary.write_to_db()
+        new_node = db_controller.get_storage_node_by_id(new_id)
+        setattr(new_node, backref, primary.get_id())
+        new_node.write_to_db()
+
+    new_node = db_controller.get_storage_node_by_id(new_id)
+    primary = db_controller.get_storage_node_by_id(primary_id)
+
+    # Build the replica on the new node. The primary is online and remains the
+    # leader, so recreate_lvstore_on_non_leader wires distribs/raid/lvstore,
+    # role + ANA, and the hublvol connection exactly as the restart path does.
+    ret = recreate_lvstore_on_non_leader(new_node, primary, primary)
+    if not ret:
+        logger.error(
+            f"[REMOVAL] failed to rebuild {role} replica of {primary_id} on {new_id}, will retry")
+        return False
+
+    _clear_replica_backref(removed_node, backref)
+    return True
+
+
+def _clear_replica_backref(removed_node, backref):
+    db_controller = DBController()
+    removed_node = db_controller.get_storage_node_by_id(removed_node.get_id())
+    if getattr(removed_node, backref):
+        setattr(removed_node, backref, "")
+        removed_node.write_to_db()
+
+
+def _decommission_node_devices(removed_node):
+    """Remove, fail and migrate every data device on ``removed_node``.
+
+    Drives each device ONLINE/UNAVAILABLE -> REMOVED -> FAILED (which queues the
+    failure-migration tasks on the surviving online nodes), then waits for them
+    all to reach FAILED_AND_MIGRATED. Returns True only once every data device
+    is migrated; False means "still migrating, retry later"."""
+    db_controller = DBController()
+    removed_node = db_controller.get_storage_node_by_id(removed_node.get_id())
+
+    if (removed_node.jm_device and removed_node.jm_device.get_id()
+            and removed_node.jm_device.status in (JMDevice.STATUS_ONLINE, JMDevice.STATUS_UNAVAILABLE)):
+        logger.info(f"[REMOVAL] {removed_node.get_id()}: removing JM device")
+        device_controller.remove_jm_device(removed_node.jm_device.get_id(), force=True)
+        # look for other nodes who use this JM and replace it
+        for node in db_controller.get_storage_nodes_by_cluster_id(removed_node.cluster_id):
+            if node.jm_ids and removed_node.jm_device.get_id() in node.jm_ids:
+                node.jm_ids.remove(removed_node.jm_device.get_id())
+                jm_ids = get_sorted_ha_jms(node)
+                logger.debug(f"online_jms: {str(jm_ids)}")
+                new_jm_dev = ""
+                for jm_id in jm_ids:
+                    if jm_id not in node.jm_ids:
+                        new_jm_dev = jm_id
+                        break
+                if new_jm_dev:
+                    d = db_controller.get_jm_device_by_id(new_jm_dev)
+                    jm_node = db_controller.get_storage_node_by_id(d.node_id)
+                    jm_node.jm_device.override_name_on_node[node.get_id()]=removed_node.jm_device.jm_bdev
+                    jm_node.write_to_db()
+                    node.jm_ids.append(new_jm_dev)
+                    node.remote_jm_devices = _connect_to_remote_jm_devs(node, node.jm_ids)
+                    node.write_to_db()
+                else:
+                    logger.error(f"no jm_id found for {node.get_id()}")
+
+    removed_node = db_controller.get_storage_node_by_id(removed_node.get_id())
+    for dev in removed_node.nvme_devices:
+        if dev.status in (NVMeDevice.STATUS_JM, NVMeDevice.STATUS_FAILED_AND_MIGRATED):
+            continue
+        if dev.status in (NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_UNAVAILABLE):
+            # force=True tolerates the dead local SPDK (it was killed at shutdown);
+            # the meaningful work — disconnect from peers + DB state — still runs.
+            # device_controller.device_remove(dev.get_id(), force=True)
+            device_controller.device_set_state(dev.get_id(), NVMeDevice.STATUS_REMOVED)
+
+        fresh = db_controller.get_storage_device_by_id(dev.get_id())
+        if fresh.status == NVMeDevice.STATUS_REMOVED:
+            device_controller.device_set_failed(dev.get_id())
+
+    # Completion gate: every non-JM device migrated.
+    removed_node = db_controller.get_storage_node_by_id(removed_node.get_id())
+    for dev in removed_node.nvme_devices:
+        if dev.status in (NVMeDevice.STATUS_JM, NVMeDevice.STATUS_FAILED_AND_MIGRATED):
+            continue
+        logger.info(
+            f"[REMOVAL] {removed_node.get_id()}: device {dev.get_id()} "
+            f"status={dev.status}, migration not complete")
+        # return False
+
+    return True
+
+
+def _finalize_node_removal(removed_node):
+    """Best-effort host cleanup before the node is flipped to REMOVED: leave the
+    docker swarm and wipe GPT partitions. Mirrors the tail of the legacy
+    offline-removal path."""
+    db_controller = DBController()
+    removed_node = db_controller.get_storage_node_by_id(removed_node.get_id())
+    cluster = db_controller.get_cluster_by_id(removed_node.cluster_id)
 
     if cluster.mode == "docker":
         logger.info("Leaving swarm...")
         try:
-            cluster_docker = utils.get_docker_client(snode.cluster_id)
+            cluster_docker = utils.get_docker_client(removed_node.cluster_id)
             for node in cluster_docker.nodes.list():
-                if node.attrs["Status"] and snode.mgmt_ip in node.attrs["Status"]["Addr"]:
+                if node.attrs["Status"] and removed_node.mgmt_ip in node.attrs["Status"]["Addr"]:
                     node.remove(force=True)
         except Exception:
             pass
 
     try:
-        if health_controller._check_node_api(snode):
+        if health_controller._check_node_api(removed_node):
             logger.info("Stopping SPDK container")
-            snode_api = snode.client(timeout=20)
-            snode_api.spdk_process_kill(snode.rpc_port, snode.cluster_id)
+            snode_api = removed_node.client(timeout=20)
+            snode_api.spdk_process_kill(removed_node.rpc_port, removed_node.cluster_id)
             snode_api.leave_swarm()
             pci_address = []
-            for dev in snode.nvme_devices:
+            for dev in removed_node.nvme_devices:
                 if dev.pcie_address not in pci_address:
                     ret = snode_api.delete_dev_gpt_partitions(dev.pcie_address)
                     logger.debug(ret)
                     pci_address.append(dev.pcie_address)
     except Exception as e:
         logger.exception(e)
-
-    set_node_status(node_id, StorageNode.STATUS_REMOVED)
-
-    for dev in snode.nvme_devices:
-        if dev.status in [NVMeDevice.STATUS_JM, NVMeDevice.STATUS_FAILED_AND_MIGRATED]:
-            continue
-        device_controller.device_set_failed(dev.get_id())
 
     logger.info("done")
 
@@ -4466,7 +4830,7 @@ def list_storage_nodes(cluster_id=None):
             "Status": node.status,
             # Health is only meaningful for ONLINE/DOWN nodes; otherwise N/A.
             "Health": node.health_check if node.status in (
-                StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN) else "-",
+                StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN, StorageNode.STATUS_SUSPENDED) else "-",
             "Up time": utils.strfdelta(uptime) if (uptime := node.uptime()) is not None else "",
             "CPU": f"{len(utils.hexa_to_cpu_list(node.spdk_cpu_mask))}",
             "MEM": utils.humanbytes(node.spdk_mem),
@@ -4514,7 +4878,7 @@ def list_storage_devices(node_id):
             "IO Err": device.io_error,
             # Device health is only meaningful when its node is ONLINE/DOWN.
             "Health": device.health_check if snode.status in (
-                StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN) else "-"
+                StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN, StorageNode.STATUS_SUSPENDED) else "-"
         })
 
     for bdev in snode.lvstore_stack:
@@ -4543,7 +4907,7 @@ def list_storage_devices(node_id):
             "Status": snode.jm_device.status,
             "IO Err": snode.jm_device.io_error,
             "Health": snode.jm_device.health_check if snode.status in (
-                StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN) else "-"
+                StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN, StorageNode.STATUS_SUSPENDED) else "-"
         })
 
     for remote_device in snode.remote_devices:
@@ -5135,44 +5499,80 @@ def shutdown_storage_node(node_id, force=False, keep_auto_restart=False):
     return True
 
 
-def suspend_storage_node(node_id, force=False, change_node_status=True):
-    """Deprecated: the suspension phase is no longer a precursor to
-    graceful shutdown. Kept as a noop-stub so any external automation
-    still calling `sbctl sn suspend` doesn't hard-fail.
-
-    Earlier revisions blocked sec/tert + own-primary lvstore ports via
-    iptables-`REJECT --reject-with tcp-reset` here, then transitioned
-    the node to STATUS_SUSPENDED. That fence cannot stop SPDK's lvol
-    layer from resubmitting failed-redirect IO inside the dying node
-    as if it were new host IO, which races the surviving sec/tert
-    peer's auto-promotion and produces a writer conflict (incident
-    2026-05-19, jm_vuid=4818). The new shutdown_storage_node() drops
-    the entire suspension phase and instead relies on:
-      (a) device-unavailable events to peers (already part of the
-          old flow, retained in shutdown_storage_node),
-      (b) bdev_nvme_detach_controller on every peer's remote_alceml
-          / remote_jm controller pointing at the dying node (new
-          Loop 2 in shutdown_storage_node), and
-      (c) a hard SPDK kill — every condition we used to "drain" is
-          now resolved post-kill by the peers' normal recovery path.
+def suspend_storage_node(node_id: str, force=False):
     """
-    logger.warning(
-        "sn suspend is deprecated: the suspension phase has been removed "
-        "from graceful shutdown (see shutdown_storage_node docstring). "
-        "Treating call as no-op for node %s.",
-        node_id,
-    )
+    Suspends a storage node by changing its status to suspended if the node is in an online state.
+
+    This would exclude this node from lvol host selection, see: lvol_controller._get_next_3_nodes
+
+    Parameters
+    ----------
+    node_id : int
+        The unique identifier of the storage node to be suspended.
+    force : bool, optional
+        A flag to indicate whether to forcibly suspend the node. Currently unused, defaults to False.
+
+    Returns
+    -------
+    bool
+        Returns True if the node was successfully suspended, or False if the operation failed.
+    """
+    db_controller = DBController()
+    try:
+        snode = db_controller.get_storage_node_by_id(node_id)
+    except KeyError:
+        logger.exception("This storage node is not part of the cluster")
+        return False
+
+    logger.info("Node found: %s in state: %s", snode.hostname, snode.status)
+    if snode.status != StorageNode.STATUS_ONLINE:
+        logger.error("Node is not in online state")
+        return False
+
+    logger.info("Setting node status to suspended")
+    set_node_status(snode.get_id(), StorageNode.STATUS_SUSPENDED)
+
+    snode = db_controller.get_storage_node_by_id(node_id)
+    snode.auto_restart_disabled = True
+    snode.write_to_db(db_controller.kv_store)
+
+    logger.info("Done")
     return True
 
 
 def resume_storage_node(node_id):
-    """Deprecated: counterpart to suspend_storage_node, which is now a
-    noop. There is nothing to resume."""
-    logger.warning(
-        "sn resume is deprecated: the suspension phase has been removed "
-        "from graceful shutdown. Treating call as no-op for node %s.",
-        node_id,
-    )
+    """
+    Resumes a storage node currently in a suspended state.
+
+    This function sets the node status to online.
+
+    Parameters:
+    node_id: int
+        The unique identifier of the storage node to resume.
+
+    Returns:
+    bool
+        True if the storage node was successfully resumed, False otherwise.
+    """
+    db_controller = DBController()
+    try:
+        snode = db_controller.get_storage_node_by_id(node_id)
+    except KeyError:
+        logger.error("This storage node is not part of the cluster")
+        return False
+
+    logger.info("Node found: %s in state: %s", snode.hostname, snode.status)
+    if snode.status != StorageNode.STATUS_SUSPENDED:
+        logger.error("Node is not in suspended state")
+        return False
+
+    logger.info("Setting node status to online")
+    set_node_status(snode.get_id(), StorageNode.STATUS_ONLINE)
+    snode = db_controller.get_storage_node_by_id(node_id)
+    snode.auto_restart_disabled = False
+    snode.write_to_db(db_controller.kv_store)
+
+    logger.info("Done")
     return True
 
 
@@ -8852,12 +9252,15 @@ def get_node_jm_names(current_node, remote_node=None):
                     continue
 
             jm_dev = DBController().get_jm_device_by_id(jm_id)
-            jm_list.append(f"remote_{jm_dev.jm_bdev}n1")
+            if jm_dev.override_name_on_node and current_node.get_id() in jm_dev.override_name_on_node:
+                jm_list.append(f"remote_{jm_dev.override_name_on_node[current_node.get_id()]}n1")
+            else:
+                jm_list.append(f"remote_{jm_dev.jm_bdev}n1")
 
     return jm_list[:current_node.ha_jm_count]
 
 
-def get_secondary_nodes(current_node, exclude_ids=None):
+def get_secondary_nodes(current_node, exclude_ids=None, removed_node=None):
     if exclude_ids is None:
         exclude_ids = []
     db_controller = DBController()
@@ -8891,6 +9294,9 @@ def get_secondary_nodes(current_node, exclude_ids=None):
                     nodes.append(node.get_id())
                     if nod_found:
                         return [node.get_id()]
+
+                elif removed_node and node.get_id() == removed_node.secondary_node_id:
+                    nodes.append(node.get_id())
 
         return nodes
 
@@ -9182,20 +9588,19 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
 
         sec_node.write_to_db()
 
-    # Create hublvol on primary after all secondaries have their stacks
+    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+    try:
+        snode.create_hublvol(cluster_nqn=cluster.nqn)
+    except RPCException as e:
+        logger.error("Error establishing hublvol: %s", e.message)
+        # return False
+
+    try:
+        snode.create_transfer_hublvol()
+    except RPCException as e:
+        logger.error("Error creating transfer hublvol: %s", e.message)
+
     if secondary_ids:
-        cluster = db_controller.get_cluster_by_id(snode.cluster_id)
-        try:
-            snode.create_hublvol(cluster_nqn=cluster.nqn)
-        except RPCException as e:
-            logger.error("Error establishing hublvol: %s", e.message)
-            # return False
-
-        try:
-            snode.create_transfer_hublvol()
-        except RPCException as e:
-            logger.error("Error creating transfer hublvol: %s", e.message)
-
         # Create secondary hublvol on sec_1 so tertiary can multipath.
         # sec_1 is the CONFIGURED secondary — never secondary_ids[0], which
         # is the tertiary whenever secondary_node_id is unset (e.g. demoted
