@@ -1362,7 +1362,6 @@ class K8sUtils:
                                  target_worker_node: str = None,
                                  reattach_volume: bool = False,
                                  new_ssd_pcie: list[str] | None = None,
-                                 force: bool = False,
                                  namespace: str = None):
         """Create a StorageNodeOps CR to trigger a node operation.
 
@@ -1387,9 +1386,6 @@ class K8sUtils:
             Whether to reattach volumes after the operation.
         new_ssd_pcie : list[str] | None
             PCIe addresses for new SSDs on the target worker.
-        force : bool
-            Force the operation (only applicable to ``shutdown``
-            and ``restart``).
         namespace : str | None
             Override namespace (default ``self.namespace``).
         """
@@ -1403,8 +1399,6 @@ class K8sUtils:
             spec_lines += f"  targetWorkerNode: {target_worker_node}\n"
         if reattach_volume:
             spec_lines += "  reattachVolume: true\n"
-        if force:
-            spec_lines += "  force: true\n"
         if new_ssd_pcie:
             spec_lines += "  newSsdPcie:\n"
             for pcie in new_ssd_pcie:
@@ -1540,44 +1534,56 @@ class K8sUtils:
         )
 
     def patch_storage_node_add_workers(self, new_workers: list,
-                                        name: str = "simplyblock-node",
+                                        storage_node_set_ref: str = "simplyblock-node",
                                         namespace: str = None):
-        """Patch StorageNode CRD to add new worker nodes.
+        """Add worker nodes by creating StorageNode CRs directly.
 
-        Uses JSON Patch (RFC 6902) to append each worker name to
-        ``spec.workerNodes``.  Workers must be added in counts of at
-        least 2.
+        For each worker, a ``StorageNode`` CR is created with
+        ``spec.overrides.expand: true``.  The operator detects the
+        new CR and handles provisioning automatically — no separate
+        ``StorageCluster`` expand patch is needed.
 
         Parameters
         ----------
         new_workers : list[str]
             Kubernetes node names to add (e.g. ``["worker-4", "worker-5"]``).
-        name : str
-            StorageNode CR name (default ``simplyblock-node``).
+        storage_node_set_ref : str
+            Name of the parent StorageNodeSet
+            (default ``simplyblock-node``).
         namespace : str | None
             Override namespace (default ``self.namespace``).
         """
         ns = namespace or self.namespace
-        patch_ops = ",".join(
-            f'{{"op":"add","path":"/spec/workerNodes/-","value":"{w}"}}'
-            for w in new_workers
-        )
-        cmd = (
-            f"kubectl patch storagenodesets.storage.simplyblock.io {name} "
-            f"-n {ns} --type=json -p '[{patch_ops}]'"
-        )
-        self.logger.info(
-            f"[K8sUtils] Patching StorageNodeSet '{name}' to add workers: {new_workers}"
-        )
-        out, err = self._exec_kubectl(cmd)
-        return out, err
+        for worker in new_workers:
+            cr_name = f"{storage_node_set_ref}-expand-{worker}"
+            yaml_content = (
+                "apiVersion: storage.simplyblock.io/v1alpha1\n"
+                "kind: StorageNode\n"
+                "metadata:\n"
+                f"  name: {cr_name}\n"
+                f"  namespace: {ns}\n"
+                "spec:\n"
+                f"  storageNodeSetRef: {storage_node_set_ref}\n"
+                f"  workerNode: {worker}\n"
+                "  socketIndex: 0\n"
+                "  overrides:\n"
+                "    expand: true\n"
+            )
+            self.logger.info(
+                f"[K8sUtils] Creating StorageNode CR '{cr_name}' "
+                f"for worker '{worker}' (expand=true)"
+            )
+            self.apply_yaml(yaml_content, namespace=ns)
 
     def patch_storage_cluster_expand(self, name: str = "simplyblock-cluster",
                                       namespace: str = None):
         """Patch StorageCluster CRD to trigger cluster expansion.
 
-        Sets ``spec.action`` to ``expand`` which the operator watches
-        and acts upon.
+        .. note::
+           With the new StorageNode CR model, expansion is triggered
+           automatically when a StorageNode CR is created with
+           ``overrides.expand: true``.  This method is retained for
+           backward compatibility but may no longer be needed.
 
         Parameters
         ----------
