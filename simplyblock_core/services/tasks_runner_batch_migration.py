@@ -340,33 +340,44 @@ def _flip_ana_to_optimized(group, member_migrations, src_node, src_rpc, tgt_node
                 time.sleep(1.0)
         return False
 
+    def _flip_all(rpc, ips, port, trtype, state, label):
+        for _ip in ips:
+            _flip(rpc, _ip, port, trtype, state, label)
+
+    def _flip_all_required(rpc, ips, port, trtype, state, label, attempts=3):
+        ok = True
+        for _ip in ips:
+            if not _flip_required(rpc, _ip, port, trtype, state, label, attempts):
+                ok = False
+        return ok
+
     if not overlap_ids:
         # Step 1 (no-overlap): TGT primary → optimized
         primary_tgt = tgt_paths[0]
-        if not _flip_required(primary_tgt['rpc'], primary_tgt['ip'], primary_tgt['port'],
-                               primary_tgt['trtype'], "optimized",
-                               f"TGT-{primary_tgt['node_id'][:8]}"):
+        if not _flip_all_required(primary_tgt['rpc'], primary_tgt['ips'], primary_tgt['port'],
+                                   primary_tgt['trtype'], "optimized",
+                                   f"TGT-{primary_tgt['node_id'][:8]}"):
             logger.error(
                 f"Group {group.uuid[:8]}: ANA flip TGT primary→optimized failed; "
                 f"clients may be on degraded path")
 
         # Step 2: TGT secondary/tertiary → non_optimized
         for i, tp in enumerate(tgt_paths[1:], 1):
-            _flip(tp['rpc'], tp['ip'], tp['port'], tp['trtype'], "non_optimized", f"TGT-rep{i}")
+            _flip_all(tp['rpc'], tp['ips'], tp['port'], tp['trtype'], "non_optimized", f"TGT-rep{i}")
 
         # Step 3: all SRC paths → inaccessible
         for src in src_paths:
-            _flip(src['rpc'], src['ip'], src['port'], src['trtype'],
-                  "inaccessible", f"SRC-{src['node_id'][:8]}")
+            _flip_all(src['rpc'], src['ips'], src['port'], src['trtype'],
+                      "inaccessible", f"SRC-{src['node_id'][:8]}")
     else:
         # Step 1: first non-overlap TGT → optimized before making any SRC inaccessible
         non_overlap_tgt = next(
             (t for t in tgt_paths if t['node_id'] not in overlap_ids), None)
         if non_overlap_tgt:
-            if not _flip_required(non_overlap_tgt['rpc'], non_overlap_tgt['ip'],
-                                   non_overlap_tgt['port'], non_overlap_tgt['trtype'],
-                                   "optimized",
-                                   f"TGT-{non_overlap_tgt['node_id'][:8]}(pre)"):
+            if not _flip_all_required(non_overlap_tgt['rpc'], non_overlap_tgt['ips'],
+                                       non_overlap_tgt['port'], non_overlap_tgt['trtype'],
+                                       "optimized",
+                                       f"TGT-{non_overlap_tgt['node_id'][:8]}(pre)"):
                 logger.error(
                     f"Group {group.uuid[:8]}: ANA flip non-overlap TGT→optimized failed; "
                     f"proceeding anyway")
@@ -374,14 +385,14 @@ def _flip_ana_to_optimized(group, member_migrations, src_node, src_rpc, tgt_node
         # Step 2: overlap SRC paths → inaccessible at SRC port
         for src in src_paths:
             if src['node_id'] in overlap_ids:
-                _flip(src['rpc'], src['ip'], src['port'], src['trtype'],
-                      "inaccessible", f"SRC-{src['node_id'][:8]}(overlap)")
+                _flip_all(src['rpc'], src['ips'], src['port'], src['trtype'],
+                          "inaccessible", f"SRC-{src['node_id'][:8]}(overlap)")
 
         # Step 3: non-overlap SRC paths → inaccessible
         for src in src_paths:
             if src['node_id'] not in overlap_ids:
-                _flip(src['rpc'], src['ip'], src['port'], src['trtype'],
-                      "inaccessible", f"SRC-{src['node_id'][:8]}")
+                _flip_all(src['rpc'], src['ips'], src['port'], src['trtype'],
+                          "inaccessible", f"SRC-{src['node_id'][:8]}")
 
         # Step 4: namespace swap on overlap TGT paths.
         # Each member has its own namespace in the shared NQN. We look up each
@@ -456,29 +467,30 @@ def _flip_ana_to_optimized(group, member_migrations, src_node, src_rpc, tgt_node
 
         # Step 5: all TGT paths → correct ANA state at TGT port
         primary_tgt = tgt_paths[0]
-        if not _flip_required(primary_tgt['rpc'], primary_tgt['ip'], primary_tgt['port'],
-                               primary_tgt['trtype'], "optimized",
-                               f"TGT-{primary_tgt['node_id'][:8]}"):
+        if not _flip_all_required(primary_tgt['rpc'], primary_tgt['ips'], primary_tgt['port'],
+                                   primary_tgt['trtype'], "optimized",
+                                   f"TGT-{primary_tgt['node_id'][:8]}"):
             logger.error(
                 f"Group {group.uuid[:8]}: ANA flip TGT primary→optimized (step 5) failed")
         for tgt in tgt_paths[1:]:
-            _flip(tgt['rpc'], tgt['ip'], tgt['port'], tgt['trtype'],
-                  "non_optimized", f"TGT-{tgt['node_id'][:8]}")
+            _flip_all(tgt['rpc'], tgt['ips'], tgt['port'], tgt['trtype'],
+                      "non_optimized", f"TGT-{tgt['node_id'][:8]}")
 
         # Step 6: remove old SRC-port listener from overlap TGT nodes if port changed
         for tgt in tgt_paths:
             if tgt['node_id'] in overlap_ids:
                 old_port = src_port_by_id.get(tgt['node_id'])
                 if old_port and old_port != tgt['port']:
-                    try:
-                        tgt['rpc'].listeners_del(nqn, tgt['trtype'], tgt['ip'], old_port)
-                        logger.info(
-                            f"Group {group.uuid[:8]}: removed old SRC listener "
-                            f"{tgt['ip']}:{old_port} from overlap {tgt['node_id'][:8]}")
-                    except Exception as e:
-                        logger.warning(
-                            f"Group {group.uuid[:8]}: remove old SRC listener "
-                            f"{tgt['node_id'][:8]} (non-fatal): {e}")
+                    for _ip in tgt['ips']:
+                        try:
+                            tgt['rpc'].listeners_del(nqn, tgt['trtype'], _ip, old_port)
+                            logger.info(
+                                f"Group {group.uuid[:8]}: removed old SRC listener "
+                                f"{_ip}:{old_port} from overlap {tgt['node_id'][:8]}")
+                        except Exception as e:
+                            logger.warning(
+                                f"Group {group.uuid[:8]}: remove old SRC listener "
+                                f"{tgt['node_id'][:8]} (non-fatal): {e}")
 
 
 def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, src_rpc, tgt_rpc):
