@@ -20,7 +20,7 @@ import random
 import string
 from datetime import datetime
 
-from e2e_tests.backup.test_backup_restore import BackupTestBase, _rand_suffix
+from e2e_tests.backup.test_backup_restore import BackupTestBase
 from logger_config import setup_logger
 from utils.common_utils import sleep_n_sec
 
@@ -166,7 +166,7 @@ class TestBackupAfterNodeAdd(BackupTestBase):
 
         # ── TC-BCK-ADD-002: Add node ─────────────────────────────────
         self.logger.info("TC-BCK-ADD-002: Adding storage node")
-        new_node_ids = self._add_node_and_wait(initial_node_ids, initial_pod_count)
+        self._add_node_and_wait(initial_node_ids, initial_pod_count)
 
         # ── TC-BCK-ADD-003: Verify pre-expansion backup still valid ──
         self.logger.info("TC-BCK-ADD-003: Verifying pre-expansion backup")

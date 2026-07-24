@@ -21,10 +21,9 @@ from __future__ import annotations
 
 import random
 import string
-import time
 from datetime import datetime
 
-from e2e_tests.backup.test_backup_restore import BackupTestBase, _rand_suffix
+from e2e_tests.backup.test_backup_restore import BackupTestBase
 from logger_config import setup_logger
 from utils.common_utils import sleep_n_sec
 
@@ -340,8 +339,8 @@ class TestBackupDuringMigration(BackupTestBase):
         dm_name, dm_id = self._create_lvol(name="bck_during_mig")
         _, dm_mount = self._connect_and_mount(dm_name, dm_id)
         self._run_fio(dm_mount, runtime=30)
-        pre_checksums = self._get_checksums(self.fio_node, dm_mount)
-        self.logger.info(f"Pre-migration checksums captured")
+        self._get_checksums(self.fio_node, dm_mount)
+        self.logger.info("Pre-migration checksums captured")
 
         # ── Step 2: Baseline backup ───────────────────────────────────
         self.logger.info("Step 2: Baseline snapshot+backup")
@@ -453,7 +452,7 @@ class TestBackupDuringMigration(BackupTestBase):
         if not inflight_failed:
             _, dm_mount_post = self._connect_and_mount(dm_name, dm_id, format_disk=False)
         else:
-            dm_mount_post = dm_mount
+            _ = dm_mount  # dm_mount_post not needed beyond this point
 
         snap_post = self._create_snapshot(dm_id, "snap_post_confirm", backup=True)
         backup_post = self._last_backup_id or snap_post

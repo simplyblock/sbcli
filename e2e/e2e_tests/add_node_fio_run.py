@@ -166,8 +166,8 @@ class TestAddNodesDuringFioRun(TestClusterBase):
                     status="in_expansion",
                     timeout=60
                 )
-            except Exception as e:
-                self.logger.info(f"Cluster is not in expansion state, Checking if online!!")
+            except Exception:
+                self.logger.info("Cluster is not in expansion state, Checking if online!!")
 
         for node in self.storage_nodes:
             self.ssh_obj.restart_docker_logging(
@@ -561,8 +561,8 @@ class TestAddK8sNodesDuringFioRun(TestClusterBase):
                     status="in_expansion",
                     timeout=60
                 )
-            except Exception as e:
-                self.logger.error(f"Cluster is not in expansion state, Checking if online!!")
+            except Exception:
+                self.logger.error("Cluster is not in expansion state, Checking if online!!")
 
         self.runner_k8s_log.restart_logging()
 

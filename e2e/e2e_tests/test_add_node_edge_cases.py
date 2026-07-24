@@ -15,13 +15,12 @@ Both tests support Docker (SSH) and K8s-native (CRD) modes.
 
 from __future__ import annotations
 
-import os
 import random
 import string
 import threading
 from datetime import datetime
 
-from e2e_tests.cluster_test_base import TestClusterBase, generate_random_sequence
+from e2e_tests.cluster_test_base import TestClusterBase
 from logger_config import setup_logger
 from utils.common_utils import sleep_n_sec
 
