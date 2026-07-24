@@ -608,7 +608,10 @@ def _build_paths(src_node, tgt_node, src_rpc, tgt_rpc):
     """Build ordered path lists for source and target nodes and compute overlap.
 
     Returns (src_paths, tgt_paths, overlap_ids) where each path entry is:
-        {'node', 'rpc', 'ip', 'trtype', 'port', 'node_id'}
+        {'node', 'rpc', 'ip', 'ips', 'trtype', 'port', 'node_id'}
+
+    'ip' is the primary NIC (from _get_migration_nic); 'ips' is the full list
+    of fabric-matching NIC IPs on that node (one listener per NIC).
 
     Port is role-specific: SRC entries use src_node.lvstore; TGT entries use
     tgt_node.lvstore.  Adding tertiary support = append one more entry to each
@@ -616,8 +619,16 @@ def _build_paths(src_node, tgt_node, src_rpc, tgt_rpc):
     """
     def _entry(node, rpc, lvstore):
         trtype, ip = _get_migration_nic(node)
+        fabric = trtype.lower()
+        ips = [
+            nic.ip4_address
+            for nic in (node.data_nics or [])
+            if nic.ip4_address and nic.trtype and nic.trtype.lower() == fabric
+        ]
+        if not ips:
+            ips = [ip] if ip else []
         return {
-            'node': node, 'rpc': rpc, 'ip': ip, 'trtype': trtype,
+            'node': node, 'rpc': rpc, 'ip': ip, 'ips': ips, 'trtype': trtype,
             'port': node.get_lvol_subsys_port(lvstore),
             'node_id': node.get_id(),
         }
@@ -756,8 +767,9 @@ def _ensure_target_nvmf_state(migration, lvol, src_node, tgt_node, src_rpc, tgt_
                     max_namespaces=constants.LVO_MAX_NAMESPACES_PER_SUBSYS)
                 if lvol.allowed_hosts:
                     _reapply_allowed_hosts(lvol, path['node'], rpc)
-                rpc.listeners_create(nqn, path['trtype'], path['ip'], path['port'],
-                                     ana_state="inaccessible")
+                for _ip in path['ips']:
+                    rpc.listeners_create(nqn, path['trtype'], _ip, path['port'],
+                                         ana_state="inaccessible")
                 ns = rpc.nvmf_subsystem_add_ns(nqn, ns_composite, lvol.uuid, lvol.guid)
                 if not ns:
                     logger.warning(
@@ -786,25 +798,25 @@ def _ensure_target_nvmf_state(migration, lvol, src_node, tgt_node, src_rpc, tgt_
             migration.error_message = f"could not query listeners on {label} target node: {e}"
             return _WAIT
 
-        listener_present = any(
-            (ls.get('address', {}).get('traddr') == path['ip']
-             and str(ls.get('address', {}).get('trsvcid')) == str(path['port']))
-            for ls in listeners)
-
-        if not listener_present:
-            logger.warning(
-                f"_ensure_target_nvmf_state: listener {path['ip']}:{path['port']} "
-                f"missing on {label} target node {node_id[:8]} (likely node "
-                f"restart) — recreating as inaccessible")
-            try:
-                rpc.listeners_create(nqn, path['trtype'], path['ip'], path['port'],
-                                     ana_state="inaccessible")
-            except Exception as e:
+        listener_addrs = {
+            (ls.get('address', {}).get('traddr'), str(ls.get('address', {}).get('trsvcid')))
+            for ls in listeners
+        }
+        for _ip in path['ips']:
+            if (_ip, str(path['port'])) not in listener_addrs:
                 logger.warning(
-                    f"_ensure_target_nvmf_state: listener recreate failed on "
-                    f"{label} {node_id[:8]}: {e}")
-                migration.error_message = f"failed to recreate target listener on {label} node: {e}"
-                return _WAIT
+                    f"_ensure_target_nvmf_state: listener {_ip}:{path['port']} "
+                    f"missing on {label} target node {node_id[:8]} (likely node "
+                    f"restart) — recreating as inaccessible")
+                try:
+                    rpc.listeners_create(nqn, path['trtype'], _ip, path['port'],
+                                         ana_state="inaccessible")
+                except Exception as e:
+                    logger.warning(
+                        f"_ensure_target_nvmf_state: listener recreate failed on "
+                        f"{label} {node_id[:8]}: {e}")
+                    migration.error_message = f"failed to recreate target listener on {label} node: {e}"
+                    return _WAIT
 
         # Namespace check — only on nodes whose namespace lifecycle we own;
         # overlap nodes legitimately still point at the SRC bdev pre-cutover
@@ -1700,6 +1712,17 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                 time.sleep(1.0)
         return False
 
+    def _flip_all(rpc, ips, port, trtype, state, label):
+        for _ip in ips:
+            _flip(rpc, _ip, port, trtype, state, label)
+
+    def _flip_all_required(rpc, ips, port, trtype, state, label, attempts=3):
+        ok = True
+        for _ip in ips:
+            if not _flip_required(rpc, _ip, port, trtype, state, label, attempts):
+                ok = False
+        return ok
+
     def _revert_src_replicas(reason):
         # Final migration didn't complete — put SRC secondary/tertiary back
         # into the read path (their pre-freeze state) so clients keep
@@ -1711,8 +1734,8 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             f"{reason}; reverting SRC secondary/tertiary to non_optimized: "
             f"lvol={lvol.uuid}")
         for p in src_replica_paths:
-            _flip(p['rpc'], p['ip'], p['port'], p['trtype'],
-                  "non_optimized", f"SRC-{p['node_id'][:8]}(revert)")
+            _flip_all(p['rpc'], p['ips'], p['port'], p['trtype'],
+                      "non_optimized", f"SRC-{p['node_id'][:8]}(revert)")
 
     # --- Crash recovery: Done handler was interrupted mid-run ---
     # bdev_lvol_final_migration is synchronous — it blocks until SPDK completes.
@@ -1874,8 +1897,8 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                 f"[IO-FREEZE] {_now_ms()} setting SRC secondary/tertiary "
                 f"inaccessible pre-final-migration: lvol={lvol.uuid}")
             for p in src_replica_paths:
-                _flip(p['rpc'], p['ip'], p['port'], p['trtype'],
-                      "inaccessible", f"SRC-{p['node_id'][:8]}(pre-freeze)")
+                _flip_all(p['rpc'], p['ips'], p['port'], p['trtype'],
+                          "inaccessible", f"SRC-{p['node_id'][:8]}(pre-freeze)")
 
         # Step 5: start final migration — synchronous: blocks until SPDK completes
         # the IO drain and delta copy.  Returns success/failure directly; no polling needed.
@@ -1995,31 +2018,31 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         # Step 1 (no-overlap): TGT primary must be confirmed optimized before
         # making SRC inaccessible — otherwise clients lose all I/O paths.
         primary_tgt = tgt_paths[0]
-        if not _flip_required(primary_tgt['rpc'], primary_tgt['ip'], primary_tgt['port'],
-                               primary_tgt['trtype'], "optimized",
-                               f"TGT-{primary_tgt['node_id'][:8]}"):
+        if not _flip_all_required(primary_tgt['rpc'], primary_tgt['ips'], primary_tgt['port'],
+                                   primary_tgt['trtype'], "optimized",
+                                   f"TGT-{primary_tgt['node_id'][:8]}"):
             return False, False, (
                 "ANA flip: TGT primary→optimized failed after retries "
                 "— aborting to keep SRC paths accessible")
 
         # Secondary TGT paths best-effort — clients survive without them
         for tgt in tgt_paths[1:]:
-            _flip(tgt['rpc'], tgt['ip'], tgt['port'], tgt['trtype'],
-                  "non_optimized", f"TGT-{tgt['node_id'][:8]}")
+            _flip_all(tgt['rpc'], tgt['ips'], tgt['port'], tgt['trtype'],
+                      "non_optimized", f"TGT-{tgt['node_id'][:8]}")
 
         # Step 3 (no-overlap): all SRC paths → inaccessible
         for src in src_paths:
-            _flip(src['rpc'], src['ip'], src['port'], src['trtype'],
-                  "inaccessible", f"SRC-{src['node_id'][:8]}")
+            _flip_all(src['rpc'], src['ips'], src['port'], src['trtype'],
+                      "inaccessible", f"SRC-{src['node_id'][:8]}")
     else:
         # Step 1: first non-overlap TGT → optimized. Must succeed before
         # making any SRC path inaccessible.
         non_overlap_tgt = next(
             (t for t in tgt_paths if t['node_id'] not in overlap_ids), None)
         if non_overlap_tgt:
-            if not _flip_required(non_overlap_tgt['rpc'], non_overlap_tgt['ip'],
-                                   non_overlap_tgt['port'], non_overlap_tgt['trtype'],
-                                   "optimized", f"TGT-{non_overlap_tgt['node_id'][:8]}(pre)"):
+            if not _flip_all_required(non_overlap_tgt['rpc'], non_overlap_tgt['ips'],
+                                       non_overlap_tgt['port'], non_overlap_tgt['trtype'],
+                                       "optimized", f"TGT-{non_overlap_tgt['node_id'][:8]}(pre)"):
                 return False, False, (
                     "ANA flip: non-overlap TGT primary→optimized failed after retries "
                     "— aborting to keep SRC paths accessible")
@@ -2027,14 +2050,14 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         # Step 2: overlap SRC paths → inaccessible at SRC port
         for src in src_paths:
             if src['node_id'] in overlap_ids:
-                _flip(src['rpc'], src['ip'], src['port'], src['trtype'],
-                      "inaccessible", f"SRC-{src['node_id'][:8]}(overlap)")
+                _flip_all(src['rpc'], src['ips'], src['port'], src['trtype'],
+                          "inaccessible", f"SRC-{src['node_id'][:8]}(overlap)")
 
         # Step 3: non-overlap SRC paths → inaccessible
         for src in src_paths:
             if src['node_id'] not in overlap_ids:
-                _flip(src['rpc'], src['ip'], src['port'], src['trtype'],
-                      "inaccessible", f"SRC-{src['node_id'][:8]}")
+                _flip_all(src['rpc'], src['ips'], src['port'], src['trtype'],
+                          "inaccessible", f"SRC-{src['node_id'][:8]}")
 
         # Step 4: namespace swap on overlap TGT paths (SRC bdev → tgt_ns_bdev).
         # For crypto, tgt_ns_bdev is crypto_LVOL_xxxxm which was created during
@@ -2047,27 +2070,28 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         # Step 5: all TGT paths → correct ANA state at TGT port.
         # Primary required; secondaries best-effort.
         primary_tgt = tgt_paths[0]
-        if not _flip_required(primary_tgt['rpc'], primary_tgt['ip'], primary_tgt['port'],
-                               primary_tgt['trtype'], "optimized",
-                               f"TGT-{primary_tgt['node_id'][:8]}"):
+        if not _flip_all_required(primary_tgt['rpc'], primary_tgt['ips'], primary_tgt['port'],
+                                   primary_tgt['trtype'], "optimized",
+                                   f"TGT-{primary_tgt['node_id'][:8]}"):
             return False, False, (
                 "ANA flip: TGT primary→optimized (step 5) failed after retries")
         for tgt in tgt_paths[1:]:
-            _flip(tgt['rpc'], tgt['ip'], tgt['port'], tgt['trtype'],
-                  "non_optimized", f"TGT-{tgt['node_id'][:8]}")
+            _flip_all(tgt['rpc'], tgt['ips'], tgt['port'], tgt['trtype'],
+                      "non_optimized", f"TGT-{tgt['node_id'][:8]}")
 
     # Step 6: overlap TGT paths → remove old SRC listener if port changed
     for tgt in tgt_paths:
         if tgt['node_id'] in overlap_ids:
             old_port = src_port_by_id.get(tgt['node_id'])
             if old_port and old_port != tgt['port']:
-                try:
-                    tgt['rpc'].listeners_del(nqn, tgt['trtype'], tgt['ip'], old_port)
-                    logger.info(
-                        f"Removed old SRC listener {tgt['ip']}:{old_port} "
-                        f"from overlap node {tgt['node_id'][:8]}")
-                except Exception as e:
-                    logger.warning(f"Remove old SRC listener (non-fatal): {e}")
+                for _ip in tgt['ips']:
+                    try:
+                        tgt['rpc'].listeners_del(nqn, tgt['trtype'], _ip, old_port)
+                        logger.info(
+                            f"Removed old SRC listener {_ip}:{old_port} "
+                            f"from overlap node {tgt['node_id'][:8]}")
+                    except Exception as e:
+                        logger.warning(f"Remove old SRC listener (non-fatal): {e}")
 
     # Save source snap bdev names before apply_migration_to_db updates
     # them — PHASE_CLEANUP_SOURCE uses this map to derive the correct
