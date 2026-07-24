@@ -50,6 +50,7 @@ from simplyblock_core.controllers.host_auth import _reapply_allowed_hosts
 from simplyblock_core.kms import create_kms_connection, lvol_dek_path, pool_kek_name
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_migration import LVolMigration
 from simplyblock_core.models.lvol_migration_group import LVolMigrationGroup
 from simplyblock_core.models.lvol_model import LVol
@@ -125,7 +126,7 @@ def start_migration(migration_id,
     cluster = db.get_cluster_by_id(migration.cluster_id)
     if cluster.status != Cluster.STATUS_ACTIVE:
         raise PreconditionError(f"Cluster {cluster.get_id()} is not active (status={cluster.status})")
-    if cluster.is_re_balancing:
+    if not _can_add_lvol_migration(cluster.get_id()):
         raise PreconditionError(f"Cluster {cluster.get_id()} is rebalancing; wait for it to finish before migrating")
 
     for node_id in (source_node_id, target_node_id):
@@ -963,7 +964,7 @@ def create_migration(lvol_id, target_node_id,
     cluster = db.get_cluster_by_id(tgt_node.cluster_id)
     if cluster.status != Cluster.STATUS_ACTIVE:
         raise PreconditionError(f"Cluster {cluster.get_id()} is not active (status={cluster.status})")
-    if cluster.is_re_balancing:
+    if not _can_add_lvol_migration(cluster.get_id()):
         raise PreconditionError(f"Cluster {cluster.get_id()} is rebalancing; wait for it to finish before migrating")
 
     for node_id in (src_node_id, target_node_id):
@@ -1526,3 +1527,24 @@ def list_batch_migrations(cluster_id=None):
             "error_message":  g.error_message,
         })
     return result
+
+
+def _can_add_lvol_migration(cluster_id):
+    rebalancing_task_names = {
+        JobSchedule.FN_DEV_MIG,
+        JobSchedule.FN_NEW_DEV_MIG,
+        JobSchedule.FN_FAILED_DEV_MIG,
+        JobSchedule.FN_BALANCING_AFTER_NODE_RESTART,
+        JobSchedule.FN_BALANCING_AFTER_DEV_REMOVE,
+        JobSchedule.FN_BALANCING_AFTER_DEV_EXPANSION,
+    }
+    active_rebalancing_tasks = 0
+    for task in db.get_job_tasks(cluster_id):
+        if task.canceled:
+            continue
+        if task.status == JobSchedule.STATUS_DONE:
+            continue
+        if task.function_name in rebalancing_task_names:
+            active_rebalancing_tasks += 1
+
+    return bool(active_rebalancing_tasks==0)
