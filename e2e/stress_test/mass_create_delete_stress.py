@@ -280,6 +280,48 @@ class _MassCreateDeleteMixin:
         )
         return limit
 
+    # ── HA chain health pre-check ─────────────────────────────────────────
+
+    def _assert_ha_nodes_online(self, phase_label: str):
+        """Fail fast if any storage node is not online.
+
+        Checks all non-secondary storage nodes. If any are offline/crashed,
+        delete operations will hang waiting for SPDK to process the delete.
+        Raising immediately saves 30+ minutes of futile polling.
+        """
+        try:
+            data = self.sbcli_utils.get_storage_nodes()
+        except Exception as exc:
+            self.logger.warning(
+                f"[{phase_label}] Could not fetch storage nodes: {exc}"
+            )
+            return  # best-effort — don't block the phase on API failure
+
+        down_nodes = []
+        for node in data.get("results", []):
+            if node.get("is_secondary_node"):
+                continue
+            status = node.get("status", "unknown")
+            if status not in ("online", "suspended"):
+                down_nodes.append(
+                    f"{node.get('hostname', 'unknown')}"
+                    f" ({node.get('uuid', '?')[:8]}): {status}"
+                )
+
+        if down_nodes:
+            msg = (
+                f"[{phase_label}] Cannot proceed — "
+                f"{len(down_nodes)} storage node(s) not online: "
+                + "; ".join(down_nodes)
+            )
+            self.logger.error(msg)
+            raise RuntimeError(msg)
+
+        self.logger.info(
+            f"[{phase_label}] All storage nodes online — "
+            f"proceeding with deletion"
+        )
+
     # ── Batch execution (from large_scale_lvol_stress.py) ──────────────────
 
     def _batch_exec(self, items, task_fn, op_name: str,
@@ -1861,6 +1903,8 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
     # ── Phase 4: Delete lvols (free subsystem slots for clones) ──────────
 
     def _phase_4_delete_lvols(self):
+        self._assert_ha_nodes_online("Phase 4")
+
         # Kill lvol FIO (started in Phase 2, left running)
         # Include fio_node for fallback FIO processes
         kill_clients = set(
@@ -2129,6 +2173,8 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
             self.logger.info("[Phase 7] No clones — skipping")
             return
 
+        self._assert_ha_nodes_online("Phase 7")
+
         self.logger.info(
             f"=== Phase 7: Delete {len(self._clone_registry)} clones ==="
         )
@@ -2211,24 +2257,28 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
             )
 
     def _wait_lvols_deleted(
-        self, names: list, label: str, timeout: int = 1800
+        self, names: list, label: str, timeout: int = 1800,
+        stall_timeout: int = 1800,
     ):
         """Wait for lvols/clones to disappear from the API.
 
         Polls list_lvols() periodically (single call, not per-lvol) every
         30s until all named items are gone or timeout is reached.
         Re-issues DELETE for any stuck items every 60s.
+        Gives up early if no progress for *stall_timeout* seconds.
         """
         deadline = time.monotonic() + timeout
         remaining = set(names)
         re_delete_interval = 60  # re-issue DELETE every 60s
         last_re_delete = time.monotonic()
+        last_progress = time.monotonic()
 
         self.logger.info(
             f"[{label}] Waiting for {len(remaining)} items to be deleted "
-            f"(timeout={timeout}s)"
+            f"(timeout={timeout}s, stall_timeout={stall_timeout}s)"
         )
 
+        stalled = False
         while remaining and time.monotonic() < deadline:
             try:
                 current_lvols = self.sbcli_utils.list_lvols()
@@ -2246,9 +2296,20 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
                     f"[{label}] {len(just_deleted)} more deleted, "
                     f"{len(still_present)} remaining"
                 )
+                last_progress = time.monotonic()
             remaining = still_present
 
             if not remaining:
+                break
+
+            # Stall detection: nodes likely down
+            if time.monotonic() - last_progress > stall_timeout:
+                self.logger.warning(
+                    f"[{label}] No progress for {stall_timeout}s "
+                    f"with {len(remaining)} items remaining — "
+                    f"nodes likely down"
+                )
+                stalled = True
                 break
 
             # Re-issue DELETE for stuck items every re_delete_interval
@@ -2276,9 +2337,12 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
             self._metrics[f"{label}_delete_timeout_remaining"] = len(
                 remaining
             )
+            reason = "stalled (nodes likely down)" if stalled else (
+                f"timed out after {timeout}s"
+            )
             msg = (
-                f"[{label}] Timeout: {len(remaining)}/{len(names)} items "
-                f"still exist after {timeout}s"
+                f"[{label}] {len(remaining)}/{len(names)} items "
+                f"still exist — {reason}"
             )
             self.logger.error(msg)
             raise RuntimeError(msg)
@@ -2291,6 +2355,8 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
         if not self._snapshot_registry:
             self.logger.info("[Phase 8] No snapshots — skipping")
             return
+
+        self._assert_ha_nodes_online("Phase 8")
 
         snap_names = list(self._snapshot_registry.keys())
         self.logger.info(
@@ -2353,15 +2419,21 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
         timeout = self.CLEANUP_TIMEOUT
         self.logger.info(f"=== Cleanup (timeout={timeout}s) ===")
 
-        steps = [
-            ("delete_all_clones", self.sbcli_utils.delete_all_clones),
-            ("delete_all_snapshots", self.sbcli_utils.delete_all_snapshots),
-            ("delete_all_lvols", self.sbcli_utils.delete_all_lvols),
-            ("delete_all_storage_pools", self.sbcli_utils.delete_all_storage_pools),
-        ]
-
         def _run_cleanup():
+            deadline = time.time() + timeout
+            steps = [
+                ("delete_all_clones", self.sbcli_utils.delete_all_clones),
+                ("delete_all_snapshots", self.sbcli_utils.delete_all_snapshots),
+                ("delete_all_lvols", self.sbcli_utils.delete_all_lvols),
+                ("delete_all_storage_pools", self.sbcli_utils.delete_all_storage_pools),
+            ]
             for label, fn in steps:
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    self.logger.warning(
+                        f"[cleanup] Global deadline reached, skipping {label}"
+                    )
+                    break
                 try:
                     fn()
                 except Exception as exc:
@@ -3342,6 +3414,8 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
     # ── Phase 4: Delete PVCs (free subsystem slots for clones) ──────────
 
     def _phase_4_delete_lvols(self):
+        self._assert_ha_nodes_online("Phase 4")
+
         # Kill FIO jobs (started in Phase 2, left running)
         for job_name in list(self._fio_jobs.keys()):
             try:
@@ -3664,6 +3738,8 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
             self.logger.info("[Phase 7] No clones — skipping")
             return
 
+        self._assert_ha_nodes_online("Phase 7")
+
         clone_names = list(self._clone_registry.keys())
         self.logger.info(
             f"=== Phase 7: Delete {len(clone_names)} clone PVCs "
@@ -3708,6 +3784,8 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
         if not self._snapshot_registry:
             self.logger.info("[Phase 8] No snapshots — skipping")
             return
+
+        self._assert_ha_nodes_online("Phase 8")
 
         self.logger.info(
             f"=== Phase 8: Delete {len(self._snapshot_registry)} "

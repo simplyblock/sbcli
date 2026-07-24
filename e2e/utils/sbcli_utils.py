@@ -486,8 +486,13 @@ class SbcliUtils:
         
         self.post_request(api_url="/lvol", body=body, retry=retry)
 
-    def delete_lvol(self, lvol_name, max_attempt=120, skip_error=False):
-        """Deletes lvol with given name
+    def delete_lvol(self, lvol_name, max_attempt=120, skip_error=False, deadline=None):
+        """Deletes lvol with given name.
+
+        Args:
+            deadline: Optional absolute time.time() deadline. Overrides the
+                default 15-minute per-lvol timeout when set by callers like
+                delete_all_lvols that enforce a shared global timeout.
         """
         try:
             lvol_id = self.get_lvol_id(lvol_name=lvol_name)
@@ -515,14 +520,14 @@ class SbcliUtils:
 
         lvols = self.list_lvols()
         attempt = 0
-        deadline = time.time() + 15 * 60  # hard 15-minute wallclock timeout
+        if deadline is None:
+            deadline = time.time() + 15 * 60  # hard 15-minute wallclock timeout
         while True:
             if lvol_name not in list(lvols.keys()):
                 self.logger.info(f"Lvol {lvol_name} deleted successfully!!")
                 return True
             if time.time() > deadline:
-                elapsed = 15
-                msg = f"Lvol {lvol_name} not deleted after {elapsed} min wallclock timeout"
+                msg = f"Lvol {lvol_name} not deleted before deadline"
                 if skip_error:
                     self.logger.warning(msg)
                     return False
@@ -559,11 +564,15 @@ class SbcliUtils:
             sleep_n_sec(5)
             lvols = self.list_lvols()
 
-    def delete_all_clones(self, max_workers=10):
+    def delete_all_clones(self, max_workers=10, timeout=1800, stall_timeout=1800):
         """Delete all clone lvols (lvols with cloned_from_snap set).
 
         Must be called BEFORE delete_all_snapshots, because SPDK refuses
         to delete a snapshot that still has clones.
+
+        Uses fire-then-bulk-wait: issues DELETE for all clones in parallel,
+        then polls list_lvols() in a single loop until all are gone.
+        Gives up if no progress is made for *stall_timeout* seconds.
         """
         data = None
         for attempt in range(3):
@@ -587,35 +596,139 @@ class SbcliUtils:
             return
         self.logger.info(f"Deleting {len(clone_names)} clones (max_workers={max_workers})")
 
-        def _del(name):
-            try:
-                self.delete_lvol(lvol_name=name, skip_error=True)
-            except Exception as e:
-                self.logger.warning(f"Clone delete failed (continuing): {name}, err={e}")
+        # Phase A: fire DELETE for every clone without waiting
+        clone_ids = {
+            lvol_info.get("lvol_name"): lvol_info.get("id")
+            for lvol_info in data.get("results", [])
+            if lvol_info.get("cloned_from_snap")
+        }
+        self._fire_delete_lvols(clone_ids, max_workers)
 
-        with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            futs = {pool.submit(_del, n): n for n in clone_names}
-            for f in as_completed(futs):
-                f.result()  # propagate unexpected errors
+        # Phase B: bulk-wait
+        self._wait_lvols_gone(
+            clone_names, label="clone_wait",
+            timeout=timeout, stall_timeout=stall_timeout,
+        )
 
-    def delete_all_lvols(self, max_workers=10):
-        """Deletes all lvols in parallel."""
+    def delete_all_lvols(self, max_workers=10, timeout=1800, stall_timeout=1800):
+        """Deletes all lvols using fire-then-bulk-wait.
+
+        Issues DELETE for every lvol in parallel, then polls list_lvols()
+        in a single loop until all are gone or *timeout* is reached.
+        Gives up early if no lvols are deleted for *stall_timeout* seconds
+        (indicates all nodes hosting these lvols are down).
+        """
         lvols = self.list_lvols()
-        names = list(lvols.keys())
-        if not names:
+        if not lvols:
             return
+        names = list(lvols.keys())
         self.logger.info(f"Deleting {len(names)} lvols (max_workers={max_workers})")
 
-        def _del(name):
+        # Phase A: fire DELETE for every lvol without waiting
+        self._fire_delete_lvols(lvols, max_workers)
+
+        # Phase B: bulk-wait
+        self._wait_lvols_gone(
+            names, label="lvol_wait",
+            timeout=timeout, stall_timeout=stall_timeout,
+        )
+
+    def _fire_delete_lvols(self, name_to_id: dict, max_workers: int = 10):
+        """Issue DELETE for each lvol without waiting for completion."""
+        def _fire(name):
+            lvol_id = name_to_id.get(name)
+            if not lvol_id:
+                return
             try:
-                self.delete_lvol(lvol_name=name, skip_error=True)
+                self.delete_request(
+                    api_url=f"/lvol/{lvol_id}", treat_404_as_success=True,
+                )
             except Exception as e:
-                self.logger.warning(f"Lvol delete failed (continuing): {name}, err={e}")
+                self.logger.warning(f"[fire_delete] {name}: {e}")
 
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            futs = {pool.submit(_del, n): n for n in names}
+            futs = {pool.submit(_fire, n): n for n in name_to_id}
             for f in as_completed(futs):
                 f.result()
+
+    def _wait_lvols_gone(
+        self, names: list, label: str = "lvol_wait",
+        timeout: int = 1800, stall_timeout: int = 180,
+        re_delete_interval: int = 120,
+    ):
+        """Wait for lvols to disappear from the API.
+
+        Polls list_lvols() every 30s (single call, not per-lvol).
+        Re-issues DELETE for stuck items every *re_delete_interval* seconds.
+        Gives up early if no progress for *stall_timeout* seconds.
+        """
+        deadline = time.time() + timeout
+        remaining = set(names)
+        last_progress = time.time()
+        last_re_delete = time.time()
+
+        self.logger.info(
+            f"[{label}] Waiting for {len(remaining)} lvols to be deleted "
+            f"(timeout={timeout}s, stall_timeout={stall_timeout}s)"
+        )
+
+        while remaining and time.time() < deadline:
+            try:
+                current = self.list_lvols()
+            except Exception as exc:
+                self.logger.warning(f"[{label}] list_lvols failed: {exc}")
+                sleep_n_sec(10)
+                continue
+
+            still_present = remaining & set(current.keys())
+            just_deleted = remaining - still_present
+            if just_deleted:
+                self.logger.info(
+                    f"[{label}] {len(just_deleted)} more deleted, "
+                    f"{len(still_present)} remaining"
+                )
+                last_progress = time.time()
+            remaining = still_present
+
+            if not remaining:
+                break
+
+            # Stall detection: if no lvols were deleted for stall_timeout,
+            # the backend nodes are likely down — stop waiting.
+            if time.time() - last_progress > stall_timeout:
+                self.logger.warning(
+                    f"[{label}] No progress for {stall_timeout}s with "
+                    f"{len(remaining)} lvols remaining — giving up "
+                    f"(nodes likely down)"
+                )
+                break
+
+            # Re-issue DELETE for stuck items
+            now = time.time()
+            if now - last_re_delete >= re_delete_interval:
+                self.logger.info(
+                    f"[{label}] Re-issuing DELETE for "
+                    f"{len(remaining)} stuck lvols"
+                )
+                for name in list(remaining)[:200]:
+                    lvol_id = current.get(name)
+                    if lvol_id:
+                        try:
+                            self.delete_request(
+                                api_url=f"/lvol/{lvol_id}",
+                                treat_404_as_success=True,
+                            )
+                        except Exception:
+                            pass
+                last_re_delete = now
+
+            sleep_n_sec(30)
+
+        if remaining:
+            self.logger.warning(
+                f"[{label}] Finished with {len(remaining)}/{len(names)} "
+                f"lvols still present"
+            )
 
     def get_lvol_id(self, lvol_name):
         """Return lvol by lvol name
