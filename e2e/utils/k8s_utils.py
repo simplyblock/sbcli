@@ -1206,6 +1206,49 @@ class K8sUtils:
         )
         return out.strip()
 
+    def get_pod_status_detail(self, pod_name: str,
+                              namespace: str = None) -> dict:
+        """Return pod phase and container-level waiting reason.
+
+        Returns a dict with keys:
+          - ``phase``: Pod phase (Pending, Running, Succeeded, Failed, Unknown)
+          - ``reason``: Human-readable waiting reason if any container is
+            stuck (e.g. ``PodInitializing``, ``ContainerCreating``,
+            ``CrashLoopBackOff``, ``ErrImagePull``).  Empty string when
+            no container is in a waiting state.
+          - ``message``: Optional detail message from the waiting state.
+        """
+        ns = namespace or self.namespace
+        # Phase
+        phase_out, _ = self._exec_kubectl(
+            f"kubectl get pod {pod_name} -n {ns} "
+            f"-o jsonpath='{{.status.phase}}' 2>/dev/null || true",
+            supress_logs=True,
+        )
+        phase = phase_out.strip() or "Unknown"
+
+        # Container waiting reason (init + regular containers)
+        # jsonpath: check initContainerStatuses first, then containerStatuses
+        reason = ""
+        message = ""
+        for path in (
+            ".status.initContainerStatuses[?(@.state.waiting)].state.waiting",
+            ".status.containerStatuses[?(@.state.waiting)].state.waiting",
+        ):
+            out, _ = self._exec_kubectl(
+                f"kubectl get pod {pod_name} -n {ns} "
+                f"-o jsonpath='{{range {path}}}{{.reason}}|{{.message}}{{end}}'"
+                f" 2>/dev/null || true",
+                supress_logs=True,
+            )
+            parts = out.strip().split("|", 1)
+            if parts[0]:
+                reason = parts[0]
+                message = parts[1] if len(parts) > 1 else ""
+                break
+
+        return {"phase": phase, "reason": reason, "message": message}
+
     def get_pod_logs(self, pod_name: str, namespace: str = None,
                      tail: int = 200) -> str:
         """Get pod logs (last *tail* lines)."""
@@ -1319,6 +1362,7 @@ class K8sUtils:
                                  target_worker_node: str = None,
                                  reattach_volume: bool = False,
                                  new_ssd_pcie: list[str] | None = None,
+                                 force: bool = False,
                                  namespace: str = None):
         """Create a StorageNodeOps CR to trigger a node operation.
 
@@ -1343,6 +1387,9 @@ class K8sUtils:
             Whether to reattach volumes after the operation.
         new_ssd_pcie : list[str] | None
             PCIe addresses for new SSDs on the target worker.
+        force : bool
+            Force the operation (only applicable to ``shutdown``
+            and ``restart``).
         namespace : str | None
             Override namespace (default ``self.namespace``).
         """
@@ -1356,6 +1403,8 @@ class K8sUtils:
             spec_lines += f"  targetWorkerNode: {target_worker_node}\n"
         if reattach_volume:
             spec_lines += "  reattachVolume: true\n"
+        if force:
+            spec_lines += "  force: true\n"
         if new_ssd_pcie:
             spec_lines += "  newSsdPcie:\n"
             for pcie in new_ssd_pcie:
@@ -1747,10 +1796,39 @@ class K8sUtils:
         Returns True if valid.  Raises RuntimeError on failure.
         """
         ns = namespace or self.namespace
+
+        # Quick pre-check: if the pod is stuck in PodInitializing or similar,
+        # report that immediately instead of waiting the full timeout.
+        pod_name_pre = self.get_job_pod_name(job_name, namespace=ns)
+        if pod_name_pre:
+            detail = self.get_pod_status_detail(pod_name_pre, namespace=ns)
+            reason = detail.get("reason", "")
+            if reason in (
+                "PodInitializing", "ContainerCreating",
+                "ErrImagePull", "ImagePullBackOff",
+            ):
+                raise RuntimeError(
+                    f"FIO Job '{job_name}' pod '{pod_name_pre}' never "
+                    f"started: {reason} — {detail.get('message', '')}"
+                )
+
         status = self.wait_job_complete(job_name, namespace=ns, timeout=timeout)
         if status != "succeeded":
+            # Include pod status detail in the error for diagnostics
+            diag = ""
+            pod_name_diag = self.get_job_pod_name(job_name, namespace=ns)
+            if pod_name_diag:
+                detail = self.get_pod_status_detail(
+                    pod_name_diag, namespace=ns
+                )
+                diag = (
+                    f" (pod phase={detail.get('phase')}, "
+                    f"reason={detail.get('reason')}, "
+                    f"msg={detail.get('message', '')!r})"
+                )
             raise RuntimeError(
-                f"FIO Job '{job_name}' did not succeed (status={status})"
+                f"FIO Job '{job_name}' did not succeed "
+                f"(status={status}){diag}"
             )
         pod_names = self.get_job_pod_names(job_name, namespace=ns)
         if not pod_names:
