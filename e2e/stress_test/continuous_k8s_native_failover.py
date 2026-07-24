@@ -2291,6 +2291,10 @@ class K8sNativeFailoverTest(TestClusterBase):
         Creates a ``StorageNodeOps`` with ``action: shutdown`` targeting
         the StorageNode CR that corresponds to *node* (UUID).  The
         operator handles the shutdown; no direct pod kill or sbcli call.
+
+        If the StorageNodeOps phase doesn't reach ``Succeeded`` (e.g.
+        ``Completed`` or an unexpected value) but the node is actually
+        offline, a warning is logged and execution continues.
         """
         self._ensure_k8s_utils()
         cr_name = self.k8s_utils.resolve_storage_node_cr_name(node)
@@ -2304,8 +2308,26 @@ class K8sNativeFailoverTest(TestClusterBase):
             f"[K8s] operator_shutdown: created StorageNodeOps "
             f"'{ops_name}' for node {node} (CR={cr_name})"
         )
-        # Wait for the operator to complete the shutdown
-        self.k8s_utils.wait_storage_node_ops_done(ops_name, timeout=600)
+        try:
+            self.k8s_utils.wait_storage_node_ops_done(ops_name, timeout=600)
+        except (TimeoutError, AssertionError) as exc:
+            # Phase may not be "Succeeded" — check actual node status
+            self.logger.warning(
+                f"[K8s] operator_shutdown: StorageNodeOps '{ops_name}' "
+                f"did not reach Succeeded: {exc}"
+            )
+            try:
+                nd = self.sbcli_utils.get_storage_node_details(node)
+                status = nd[0].get("status") if nd else None
+            except Exception:
+                status = None
+            if status == "offline":
+                self.logger.warning(
+                    f"[K8s] operator_shutdown: node {node} is offline "
+                    f"despite unexpected ops phase — continuing"
+                )
+            else:
+                raise
         self.logger.info(f"[K8s] operator_shutdown: node {node} is now offline")
 
     def _operator_restart_node(self, node: str):
@@ -2313,6 +2335,10 @@ class K8sNativeFailoverTest(TestClusterBase):
 
         Creates a ``StorageNodeOps`` with ``action: restart`` targeting
         the StorageNode CR that corresponds to *node* (UUID).
+
+        If the StorageNodeOps phase doesn't reach ``Succeeded`` but the
+        node is actually online, a warning is logged and execution
+        continues.
         """
         self._ensure_k8s_utils()
         cr_name = self.k8s_utils.resolve_storage_node_cr_name(node)
@@ -2326,7 +2352,25 @@ class K8sNativeFailoverTest(TestClusterBase):
             f"[K8s] operator_restart: created StorageNodeOps "
             f"'{ops_name}' for node {node} (CR={cr_name})"
         )
-        self.k8s_utils.wait_storage_node_ops_done(ops_name, timeout=600)
+        try:
+            self.k8s_utils.wait_storage_node_ops_done(ops_name, timeout=600)
+        except (TimeoutError, AssertionError) as exc:
+            self.logger.warning(
+                f"[K8s] operator_restart: StorageNodeOps '{ops_name}' "
+                f"did not reach Succeeded: {exc}"
+            )
+            try:
+                nd = self.sbcli_utils.get_storage_node_details(node)
+                status = nd[0].get("status") if nd else None
+            except Exception:
+                status = None
+            if status == "online":
+                self.logger.warning(
+                    f"[K8s] operator_restart: node {node} is online "
+                    f"despite unexpected ops phase — continuing"
+                )
+            else:
+                raise
         self.logger.info(f"[K8s] operator_restart: node {node} is back online")
 
     def perform_n_plus_k_outages(self):
