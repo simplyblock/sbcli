@@ -15,6 +15,7 @@ Outage types:
   graceful_shutdown                 → sbcli sn shutdown via kubectl exec
   interface_full_network_interrupt  → self-restoring iptables via kubectl exec into SPDK pod
                                       (privileged + hostNetwork:true — no SSH needed)
+  operator_shutdown                 → StorageNodeOps CR with action=shutdown (operator-driven)
 
 Loop structure mirrors RandomMultiClientMultiFailoverTest.run():
   1. Create StorageClass + VolumeSnapshotClass + Pool
@@ -103,7 +104,7 @@ class K8sNativeFailoverTest(TestClusterBase):
         # self.outage_types2 = ["container_stop", "graceful_shutdown", "interface_full_network_interrupt"]
 
         self.outage_types = ["graceful_shutdown"]
-        self.outage_types2 = ["container_stop", "graceful_shutdown"]
+        self.outage_types2 = ["container_stop", "graceful_shutdown", "operator_shutdown"]
 
 
         # ── Tracking dicts ──
@@ -2284,6 +2285,52 @@ class K8sNativeFailoverTest(TestClusterBase):
         )
         return duration
 
+    def _operator_shutdown_node(self, node: str, force: bool = True):
+        """Shut down a storage node via a StorageNodeOps CR.
+
+        Creates a ``StorageNodeOps`` with ``action: shutdown`` targeting
+        the StorageNode CR that corresponds to *node* (UUID).  The
+        operator handles the shutdown; no direct pod kill or sbcli call.
+        """
+        self._ensure_k8s_utils()
+        cr_name = self.k8s_utils.resolve_storage_node_cr_name(node)
+        ops_name = f"shutdown-{_rand_seq(8)}"
+        self.k8s_utils.create_storage_node_ops(
+            name=ops_name,
+            storage_node_ref=cr_name,
+            action="shutdown",
+            force=force,
+        )
+        self.logger.info(
+            f"[K8s] operator_shutdown: created StorageNodeOps "
+            f"'{ops_name}' for node {node} (CR={cr_name}, force={force})"
+        )
+        # Wait for the operator to complete the shutdown
+        self.k8s_utils.wait_storage_node_ops_done(ops_name, timeout=600)
+        self.logger.info(f"[K8s] operator_shutdown: node {node} is now offline")
+
+    def _operator_restart_node(self, node: str, force: bool = True):
+        """Restart a storage node via a StorageNodeOps CR.
+
+        Creates a ``StorageNodeOps`` with ``action: restart`` targeting
+        the StorageNode CR that corresponds to *node* (UUID).
+        """
+        self._ensure_k8s_utils()
+        cr_name = self.k8s_utils.resolve_storage_node_cr_name(node)
+        ops_name = f"restart-{_rand_seq(8)}"
+        self.k8s_utils.create_storage_node_ops(
+            name=ops_name,
+            storage_node_ref=cr_name,
+            action="restart",
+            force=force,
+        )
+        self.logger.info(
+            f"[K8s] operator_restart: created StorageNodeOps "
+            f"'{ops_name}' for node {node} (CR={cr_name}, force={force})"
+        )
+        self.k8s_utils.wait_storage_node_ops_done(ops_name, timeout=600)
+        self.logger.info(f"[K8s] operator_restart: node {node} is back online")
+
     def perform_n_plus_k_outages(self):
         """Select K nodes and trigger outages simultaneously.
 
@@ -2345,6 +2392,8 @@ class K8sNativeFailoverTest(TestClusterBase):
                 elif outage_type == "interface_full_network_interrupt":
                     duration = random.choice([30, 300, 600])
                     node_outage_dur = self._k8s_network_outage(node_ip, duration)
+                elif outage_type == "operator_shutdown":
+                    self._operator_shutdown_node(node)
                 self.log_outage_event(node, outage_type, "Outage started")
             except Exception as e:
                 self.logger.error(f"Outage {outage_type} on node {node} failed: {e}")
@@ -2511,6 +2560,12 @@ class K8sNativeFailoverTest(TestClusterBase):
             self.log_outage_event(
                 node, outage_type, "Node recovered (network restored)"
             )
+
+        elif outage_type == "operator_shutdown":
+            # Recovery via StorageNodeOps restart CR
+            self._operator_restart_node(node)
+            self.sbcli_utils.wait_for_storage_node_status(node, "online", timeout=300)
+            self.log_outage_event(node, outage_type, "Node restarted (operator)")
 
         # Health check deferred to after all outage nodes are online
         self.outage_end_time = int(datetime.now().timestamp())
@@ -2819,6 +2874,14 @@ class K8sNativeFailoverTest(TestClusterBase):
             # Use a single shared deadline so stuck jobs don't multiply the wait
             deadline = time.time() + timeout
             still_running = set(all_jobs)
+            # Track how long each job's pod has been stuck in init
+            # (key=job_name, value=first_seen_timestamp)
+            stuck_init_since: dict[str, float] = {}
+            # Max time a pod can stay in PodInitializing before we
+            # give up on it (volume mount failure, image pull, etc.)
+            POD_INIT_TIMEOUT = 600  # 10 minutes
+            failed_jobs: set[str] = set()
+
             while still_running and time.time() < deadline:
                 for job_name in list(still_running):
                     try:
@@ -2830,6 +2893,55 @@ class K8sNativeFailoverTest(TestClusterBase):
                                 f"[wait_fio] Job {job_name}: {status}"
                             )
                             still_running.discard(job_name)
+                            stuck_init_since.pop(job_name, None)
+                            if status == "failed":
+                                failed_jobs.add(job_name)
+                            continue
+                    except Exception:
+                        pass
+
+                    # Job still pending — check if pod is stuck in init
+                    try:
+                        pod_name = self.k8s_utils.get_job_pod_name(job_name)
+                        if not pod_name:
+                            continue
+                        pod_detail = self.k8s_utils.get_pod_status_detail(
+                            pod_name
+                        )
+                        reason = pod_detail.get("reason", "")
+                        phase = pod_detail.get("phase", "")
+                        if reason in (
+                            "PodInitializing",
+                            "ContainerCreating",
+                            "ErrImagePull",
+                            "ImagePullBackOff",
+                            "CrashLoopBackOff",
+                        ) or phase == "Pending":
+                            now = time.time()
+                            if job_name not in stuck_init_since:
+                                stuck_init_since[job_name] = now
+                                self.logger.warning(
+                                    f"[wait_fio] Job {job_name} pod "
+                                    f"{pod_name} stuck: "
+                                    f"phase={phase} reason={reason} "
+                                    f"msg={pod_detail.get('message', '')}"
+                                )
+                            elapsed = now - stuck_init_since[job_name]
+                            if elapsed > POD_INIT_TIMEOUT:
+                                self.logger.error(
+                                    f"[wait_fio] Job {job_name} pod "
+                                    f"{pod_name} stuck in {reason or phase}"
+                                    f" for {int(elapsed)}s — marking "
+                                    f"as failed (likely volume mount "
+                                    f"or image pull failure)"
+                                )
+                                still_running.discard(job_name)
+                                stuck_init_since.pop(job_name, None)
+                                failed_jobs.add(job_name)
+                        else:
+                            # Pod is running or in a transient state —
+                            # clear any stale init tracking
+                            stuck_init_since.pop(job_name, None)
                     except Exception:
                         pass
                 if still_running:
@@ -2844,6 +2956,12 @@ class K8sNativeFailoverTest(TestClusterBase):
                 self.logger.warning(
                     f"[wait_fio] {len(still_running)} jobs did not complete "
                     f"within {timeout}s: {sorted(still_running)}"
+                )
+                failed_jobs.update(still_running)
+            if failed_jobs:
+                self.logger.error(
+                    f"[wait_fio] {len(failed_jobs)} jobs failed or stuck: "
+                    f"{sorted(failed_jobs)}"
                 )
             self.logger.info("[wait_fio] All K8s FIO Jobs finished.")
 
@@ -5281,10 +5399,11 @@ class K8sNativeScaleBreakTest(K8sNativeFailoverTest):
         self.npcs = 1
         self.OUTAGE_DURATION = 450      # 7.5 min
 
-        # Only graceful_shutdown for now — safe for FIO pods on same worker
-        # (shuts down storage node process, not K8s worker itself)
-        self.outage_types = ["graceful_shutdown"]
-        self.outage_types2 = ["graceful_shutdown"]
+        # graceful_shutdown and operator_shutdown are safe for FIO pods on
+        # same worker (they shut down the storage node process, not the K8s
+        # worker itself).
+        self.outage_types = ["graceful_shutdown", "operator_shutdown"]
+        self.outage_types2 = ["graceful_shutdown", "operator_shutdown"]
         # TODO: Add "container_stop" and "interface_full_network_interrupt"
         #       when running on OpenShift (separated compute/storage workers).
         #       Network outage on a worker kills FIO pods there → false failure.
@@ -5347,7 +5466,7 @@ class K8sNativeScaleBreakTest(K8sNativeFailoverTest):
     # ── Outage helpers ────────────────────────────────────────────────────
 
     def _perform_single_outage(self) -> tuple[str, str]:
-        """Pick one random storage node and trigger a graceful shutdown.
+        """Pick one random storage node and trigger an outage.
 
         Returns (node_uuid, outage_type)
         """
@@ -5363,7 +5482,10 @@ class K8sNativeScaleBreakTest(K8sNativeFailoverTest):
         self.collect_outage_diagnostics(f"pre_outage_{node[:8]}")
         self.outage_start_time = int(datetime.now().timestamp())
 
-        self._graceful_shutdown_node(node)
+        if outage_type == "operator_shutdown":
+            self._operator_shutdown_node(node)
+        else:
+            self._graceful_shutdown_node(node)
         self.log_outage_event(node, outage_type, "Outage started")
 
         return node, outage_type

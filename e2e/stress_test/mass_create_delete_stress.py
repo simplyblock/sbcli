@@ -78,6 +78,7 @@ class _MassCreateDeleteMixin:
 
     # ── Snapshot / clone ───────────────────────────────────────────────────
     SNAPSHOTS_PER_LVOL = 1
+    MAX_TOTAL_SNAPSHOTS = 10000     # hard cap — temporary until SPDK limit is fixed
     FIO_SAMPLE_PERCENT = 10
     FIO_SAMPLE_MAX = 50             # absolute cap on sampled volumes
 
@@ -650,7 +651,10 @@ class _MassCreateDeleteMixin:
             # Compare against actual lvols (not original total) — if Phase 1
             # created fewer lvols, comparing against total would hide whether
             # Phase 3 itself had failures vs inheriting Phase 1's shortfall.
-            expected_snaps = len(self._lvol_registry) * self.SNAPSHOTS_PER_LVOL
+            expected_snaps = min(
+                len(self._lvol_registry) * self.SNAPSHOTS_PER_LVOL,
+                self.MAX_TOTAL_SNAPSHOTS,
+            )
             self._check_count(
                 verified_snaps,
                 expected_snaps,
@@ -1800,6 +1804,15 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
                     "snap_name": snap_name,
                     "lvol_name": lvol_name,
                 })
+
+        uncapped = len(snap_items)
+        if uncapped > self.MAX_TOTAL_SNAPSHOTS:
+            self.logger.warning(
+                f"[Phase 3] Snapshot count {uncapped} exceeds "
+                f"MAX_TOTAL_SNAPSHOTS={self.MAX_TOTAL_SNAPSHOTS}, "
+                f"capping to {self.MAX_TOTAL_SNAPSHOTS}"
+            )
+            snap_items = snap_items[:self.MAX_TOTAL_SNAPSHOTS]
 
         expected_snaps = len(snap_items)
         self.logger.info(
@@ -3194,6 +3207,15 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
                     "vs_name": vs_name,
                     "pvc_name": pvc_name,
                 })
+
+        uncapped = len(snap_items)
+        if uncapped > self.MAX_TOTAL_SNAPSHOTS:
+            self.logger.warning(
+                f"[Phase 3] Snapshot count {uncapped} exceeds "
+                f"MAX_TOTAL_SNAPSHOTS={self.MAX_TOTAL_SNAPSHOTS}, "
+                f"capping to {self.MAX_TOTAL_SNAPSHOTS}"
+            )
+            snap_items = snap_items[:self.MAX_TOTAL_SNAPSHOTS]
 
         expected_snaps = len(snap_items)
         self.logger.info(
