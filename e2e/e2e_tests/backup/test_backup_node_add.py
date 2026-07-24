@@ -88,13 +88,12 @@ class TestBackupAfterNodeAdd(BackupTestBase):
         self.storage_nodes.append(ip)
 
     def _add_node_k8s(self, worker_name: str, initial_pod_count: int):
-        """Add a single worker via CRD patch."""
+        """Add a single worker by creating a StorageNode CR."""
         from utils.k8s_utils import K8sUtils
         mgmt_node = self.mgmt_nodes[0] if self.mgmt_nodes else ""
         k8s_utils = K8sUtils(ssh_obj=self.ssh_obj, mgmt_node=mgmt_node)
         k8s_utils.patch_storage_node_add_workers(new_workers=[worker_name])
         sleep_n_sec(10)
-        k8s_utils.patch_storage_cluster_expand()
         k8s_utils.wait_spdk_pods_ready(
             expected_count=initial_pod_count + 1, timeout=900
         )
@@ -328,7 +327,6 @@ class TestBackupWithFioOnNewNode(BackupTestBase):
         k8s_utils = K8sUtils(ssh_obj=self.ssh_obj, mgmt_node=mgmt_node)
         k8s_utils.patch_storage_node_add_workers(new_workers=[worker_name])
         sleep_n_sec(10)
-        k8s_utils.patch_storage_cluster_expand()
         k8s_utils.wait_spdk_pods_ready(
             expected_count=initial_pod_count + 1, timeout=900
         )

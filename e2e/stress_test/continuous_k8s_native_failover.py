@@ -2285,7 +2285,7 @@ class K8sNativeFailoverTest(TestClusterBase):
         )
         return duration
 
-    def _operator_shutdown_node(self, node: str, force: bool = True):
+    def _operator_shutdown_node(self, node: str):
         """Shut down a storage node via a StorageNodeOps CR.
 
         Creates a ``StorageNodeOps`` with ``action: shutdown`` targeting
@@ -2299,17 +2299,16 @@ class K8sNativeFailoverTest(TestClusterBase):
             name=ops_name,
             storage_node_ref=cr_name,
             action="shutdown",
-            force=force,
         )
         self.logger.info(
             f"[K8s] operator_shutdown: created StorageNodeOps "
-            f"'{ops_name}' for node {node} (CR={cr_name}, force={force})"
+            f"'{ops_name}' for node {node} (CR={cr_name})"
         )
         # Wait for the operator to complete the shutdown
         self.k8s_utils.wait_storage_node_ops_done(ops_name, timeout=600)
         self.logger.info(f"[K8s] operator_shutdown: node {node} is now offline")
 
-    def _operator_restart_node(self, node: str, force: bool = True):
+    def _operator_restart_node(self, node: str):
         """Restart a storage node via a StorageNodeOps CR.
 
         Creates a ``StorageNodeOps`` with ``action: restart`` targeting
@@ -2322,11 +2321,10 @@ class K8sNativeFailoverTest(TestClusterBase):
             name=ops_name,
             storage_node_ref=cr_name,
             action="restart",
-            force=force,
         )
         self.logger.info(
             f"[K8s] operator_restart: created StorageNodeOps "
-            f"'{ops_name}' for node {node} (CR={cr_name}, force={force})"
+            f"'{ops_name}' for node {node} (CR={cr_name})"
         )
         self.k8s_utils.wait_storage_node_ops_done(ops_name, timeout=600)
         self.logger.info(f"[K8s] operator_restart: node {node} is back online")

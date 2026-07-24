@@ -366,17 +366,14 @@ class K8sNativeAddNodeTest(TestClusterBase):
 
         sleep_n_sec(30)
 
-        # ── Step 5: Expand cluster via CRD patches ───────────────────────
-        self.logger.info("Step 5: Patching StorageNode CRD to add new workers")
+        # ── Step 5: Expand cluster by creating StorageNode CRs ──────────
+        self.logger.info("Step 5: Creating StorageNode CRs for new workers")
         timestamp = int(datetime.now().timestamp())
 
         self.k8s_utils.patch_storage_node_add_workers(
             new_workers=self.new_worker_nodes,
         )
         sleep_n_sec(10)
-
-        self.logger.info("Step 5b: Patching StorageCluster CRD to trigger expansion")
-        self.k8s_utils.patch_storage_cluster_expand()
 
         # ── Step 6: Wait for expansion ───────────────────────────────────
         self.logger.info("Step 6: Waiting for expansion to complete")
