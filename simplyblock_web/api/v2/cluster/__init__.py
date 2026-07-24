@@ -77,8 +77,6 @@ class ClusterParams(BaseModel):
     cr_name: str = ""
     cr_namespace: str = ""
     cr_plural: str = ""
-    cluster_ip: str = ""
-    grafana_secret: SecretStr = SecretStr("")
     client_data_nic: str = ""
     max_fault_tolerance: int = 1
     nvmf_base_port: int = 4420
