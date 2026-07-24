@@ -50,7 +50,7 @@ jobs:
         cache: 'pip'
 
     - name: Install linter
-      run: pip install ruff
+      run: pip install ruff==0.15.20
 
     - name: Execute linter
       run: ruff check
