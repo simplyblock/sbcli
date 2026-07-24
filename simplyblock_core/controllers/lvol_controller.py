@@ -939,6 +939,18 @@ def _create_bdev_stack(lvol, snode, is_primary=True):
         elif type == "bdev_lvol":
             if is_primary:
                 ret = rpc_client.create_lvol(**params)
+                if not ret:
+                    # The bdev may already exist from a prior pass through
+                    # this function (the subsystem-full retry in
+                    # add_lvol_on_node re-enters _create_bdev_stack after
+                    # the bdev was created but nvmf_subsystem_add_ns
+                    # failed).  The idempotency probe above uses the bare
+                    # stack name which doesn't resolve for lvol bdevs
+                    # (SPDK registers them as lvstore/lvol_name).
+                    existing = rpc_client.get_bdevs(
+                        f"{lvol.lvs_name}/{name}")
+                    if existing:
+                        ret = existing
             else:
                 ret = rpc_client.bdev_lvol_register(
                     lvol.lvol_bdev, lvol.lvs_name, lvol.lvol_uuid, lvol.blobid, lvol.lvol_priority_class)
@@ -946,6 +958,11 @@ def _create_bdev_stack(lvol, snode, is_primary=True):
         elif type == "bdev_lvol_clone":
             if is_primary:
                 ret = rpc_client.lvol_clone(**params)
+                if not ret:
+                    existing = rpc_client.get_bdevs(
+                        f"{lvol.lvs_name}/{name}")
+                    if existing:
+                        ret = existing
             else:
                 ret = rpc_client.bdev_lvol_clone_register(
                     lvol.lvol_bdev, lvol.snapshot_name, lvol.lvol_uuid, lvol.blobid)
