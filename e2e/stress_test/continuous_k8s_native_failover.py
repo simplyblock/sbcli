@@ -579,13 +579,15 @@ class K8sNativeFailoverTest(TestClusterBase):
                 f"  - operator: Exists\n"
                 f"  containers:\n"
                 f"  - name: dmesg\n"
-                f"    image: busybox\n"
+                f"    image: busybox:1.37\n"
+                f"    imagePullPolicy: IfNotPresent\n"
                 f"    command: ['sh', '-c',\n"
                 f"              'dmesg -T; echo === FOLLOW ===; dmesg -Tw 2>/dev/null || while true; do sleep 30; dmesg -T; done']\n"
                 f"    securityContext:\n"
                 f"      privileged: true\n"
                 f"  - name: journalctl\n"
-                f"    image: busybox\n"
+                f"    image: busybox:1.37\n"
+                f"    imagePullPolicy: IfNotPresent\n"
                 f"    command: ['sh', '-c',\n"
                 f"              'nsenter -t 1 -m -u -i -n -- sh -c \"journalctl -kb --no-pager 2>/dev/null; echo === FOLLOW ===; journalctl -kf --no-pager\" 2>/dev/null || echo \"=== journalctl unavailable (Talos?), falling back to dmesg ===\"; dmesg -T; echo === FOLLOW ===; dmesg -Tw 2>/dev/null || while true; do sleep 30; dmesg -T; done']\n"
                 f"    securityContext:\n"
@@ -2869,7 +2871,7 @@ class K8sNativeFailoverTest(TestClusterBase):
 
     # ── Wait for FIO completion ─────────────────────────────────────────────
 
-    def wait_for_fio_complete(self, timeout: int = None):
+    def wait_for_fio_complete(self, timeout: int = None) -> set[str]:
         """Wait for all active FIO workloads to finish naturally.
 
         Client mode: poll fio processes on client hosts until none remain.
@@ -2877,6 +2879,9 @@ class K8sNativeFailoverTest(TestClusterBase):
 
         Args:
             timeout: Max seconds to wait. Defaults to FIO_RUNTIME + 300.
+
+        Returns:
+            Set of job names that failed or were stuck (empty on full success).
         """
         if timeout is None:
             timeout = self.FIO_RUNTIME + 4000
@@ -2895,6 +2900,7 @@ class K8sNativeFailoverTest(TestClusterBase):
                 self.fio_node, [], timeout=timeout
             )
             self.logger.info("[wait_fio] All client FIO processes finished.")
+            return set()
         else:
             self._ensure_k8s_utils()
             # Collect all job names to wait for
@@ -3006,6 +3012,7 @@ class K8sNativeFailoverTest(TestClusterBase):
                     f"{sorted(failed_jobs)}"
                 )
             self.logger.info("[wait_fio] All K8s FIO Jobs finished.")
+            return failed_jobs
 
     # ── FIO Validation ───────────────────────────────────────────────────────
 
@@ -3074,7 +3081,8 @@ class K8sNativeFailoverTest(TestClusterBase):
             f"  - operator: Exists\n"
             f"  containers:\n"
             f"  - name: copier\n"
-            f"    image: busybox\n"
+            f"    image: busybox:1.37\n"
+            f"    imagePullPolicy: IfNotPresent\n"
             f"    command: ['sleep', '300']\n"
             f"    volumeMounts:\n"
             f"    - mountPath: /spdkvol\n"
@@ -5551,10 +5559,21 @@ class K8sNativeScaleBreakTest(K8sNativeFailoverTest):
 
     # ── Summary ───────────────────────────────────────────────────────────
 
-    def _log_scale_break_summary(self, break_reason: str | None):
+    def _log_scale_break_summary(self, break_reason: str | None,
+                                capacity_reached: bool = False):
         """Log a formatted summary table of all iterations."""
+        all_passed = all(
+            r["status"] == "PASS" for r in self.iteration_results
+        )
         self.logger.info("=" * 70)
-        self.logger.info("SCALE BREAK TEST SUMMARY")
+        if capacity_reached and all_passed:
+            self.logger.info(
+                "SCALE BREAK TEST SUMMARY — PASSED (capacity reached)"
+            )
+        elif all_passed:
+            self.logger.info("SCALE BREAK TEST SUMMARY — PASSED")
+        else:
+            self.logger.info("SCALE BREAK TEST SUMMARY — FAILED")
         self.logger.info("=" * 70)
         self.logger.info(
             f"{'Iter':<6} {'Pods':<8} {'Status':<8} {'Duration':<12} Reason"
@@ -5566,7 +5585,15 @@ class K8sNativeScaleBreakTest(K8sNativeFailoverTest):
                 f"{r['duration_s']}s{'':<7} {r['reason']}"
             )
         self.logger.info("-" * 70)
-        if break_reason:
+        if capacity_reached and all_passed:
+            max_pods = max(
+                (r["pod_count"] for r in self.iteration_results), default=0
+            )
+            self.logger.info(
+                f"MAX LVOL REACHED: {max_pods} lvols — "
+                f"all passed final FIO validation"
+            )
+        elif break_reason:
             self.logger.info(f"BREAKING POINT: {break_reason}")
         else:
             self.logger.info(
@@ -5661,6 +5688,7 @@ class K8sNativeScaleBreakTest(K8sNativeFailoverTest):
         target_pods = self.initial_pod_count
         test_failed = False
         break_reason = None
+        capacity_reached = False
 
         try:
             while True:
@@ -5694,14 +5722,19 @@ class K8sNativeScaleBreakTest(K8sNativeFailoverTest):
 
                 actual_count = len(self.pvc_details)
                 if actual_count < target_pods:
+                    # Capacity exhaustion — not a failure yet.
+                    # Run a final FIO validation on all existing lvols
+                    # to determine pass/fail.
+                    capacity_reached = True
                     break_reason = (
-                        f"PVC provisioning shortfall: "
+                        f"Capacity reached: "
                         f"{actual_count}/{target_pods} PVCs created"
                     )
-                    self.logger.error(
-                        f"[scale_break] BREAK: {break_reason}"
+                    self.logger.info(
+                        f"[scale_break] {break_reason} — "
+                        f"running final FIO validation on "
+                        f"{actual_count} existing lvols"
                     )
-                    test_failed = True
                     break
 
                 # Restart FIO on ALL PVCs for synchronized start
@@ -5732,10 +5765,24 @@ class K8sNativeScaleBreakTest(K8sNativeFailoverTest):
                 # ── Phase 5: Wait for FIO completion ──
                 fio_timeout = self.FIO_RUNTIME + 600
                 try:
-                    self.wait_for_fio_complete(timeout=fio_timeout)
+                    failed_jobs = self.wait_for_fio_complete(
+                        timeout=fio_timeout
+                    )
                 except Exception as exc:
                     break_reason = (
                         f"FIO wait timed out at {target_pods} pods: {exc}"
+                    )
+                    self.logger.error(
+                        f"[scale_break] BREAK: {break_reason}"
+                    )
+                    test_failed = True
+                    break
+
+                if failed_jobs:
+                    break_reason = (
+                        f"FIO jobs failed/stuck at {target_pods} pods: "
+                        f"{len(failed_jobs)} jobs — "
+                        f"{sorted(failed_jobs)[:5]}"
                     )
                     self.logger.error(
                         f"[scale_break] BREAK: {break_reason}"
@@ -5820,6 +5867,91 @@ class K8sNativeScaleBreakTest(K8sNativeFailoverTest):
                 iteration += 1
                 target_pods *= 2
 
+            # ── Final FIO validation when capacity was reached ──
+            if capacity_reached and not test_failed:
+                actual_count = len(self.pvc_details)
+                self.logger.info(
+                    f"[scale_break] Capacity reached at {actual_count} "
+                    f"lvols — restarting FIO on all existing lvols for "
+                    f"final validation"
+                )
+                self._compute_fio_size()
+                self.restart_fio(iteration=iteration)
+                sleep_n_sec(30)
+
+                fio_timeout = self.FIO_RUNTIME + 600
+                try:
+                    failed_jobs = self.wait_for_fio_complete(
+                        timeout=fio_timeout
+                    )
+                except Exception as exc:
+                    break_reason = (
+                        f"Final FIO wait failed after capacity reached: "
+                        f"{exc}"
+                    )
+                    self.logger.error(
+                        f"[scale_break] {break_reason}"
+                    )
+                    test_failed = True
+
+                if not test_failed and failed_jobs:
+                    break_reason = (
+                        f"Final FIO jobs failed/stuck after capacity "
+                        f"reached: {len(failed_jobs)} jobs — "
+                        f"{sorted(failed_jobs)[:5]}"
+                    )
+                    self.logger.error(
+                        f"[scale_break] {break_reason}"
+                    )
+                    test_failed = True
+
+                if not test_failed:
+                    try:
+                        self.validate_fio_jobs()
+                    except (RuntimeError, AssertionError) as exc:
+                        break_reason = (
+                            f"Final FIO validation failed after capacity "
+                            f"reached: {exc}"
+                        )
+                        self.logger.error(
+                            f"[scale_break] {break_reason}"
+                        )
+                        test_failed = True
+
+                if not test_failed:
+                    try:
+                        self.check_core_dump()
+                    except Exception as exc:
+                        break_reason = (
+                            f"Core dump after capacity reached: {exc}"
+                        )
+                        self.logger.error(
+                            f"[scale_break] {break_reason}"
+                        )
+                        test_failed = True
+
+                # Record final validation iteration
+                iter_duration = int(time.time() - iter_start)
+                status = "FAIL" if test_failed else "PASS"
+                self.iteration_results.append({
+                    "iteration": iteration,
+                    "pod_count": actual_count,
+                    "status": status,
+                    "duration_s": iter_duration,
+                    "reason": (
+                        break_reason if test_failed
+                        else f"CAPACITY REACHED — all {actual_count} "
+                             f"lvols passed final FIO validation"
+                    ),
+                })
+
+                if not test_failed:
+                    self.logger.info(
+                        f"=== PASS: Capacity reached at {actual_count} "
+                        f"lvols — all existing lvols passed final FIO "
+                        f"validation ==="
+                    )
+
         except Exception as exc:
             if not break_reason:
                 break_reason = f"Unhandled exception: {exc}"
@@ -5827,7 +5959,7 @@ class K8sNativeScaleBreakTest(K8sNativeFailoverTest):
             self.logger.error(f"[scale_break] Unhandled: {exc}")
             traceback.print_exc()
         finally:
-            self._log_scale_break_summary(break_reason)
+            self._log_scale_break_summary(break_reason, capacity_reached)
             if not test_failed:
                 self._cleanup_all_k8s_resources()
 

@@ -1027,7 +1027,8 @@ class K8sUtils:
         if cleanup_before_fio:
             init_containers_list.append(
                 "      - name: cleanup-old-fio\n"
-                "        image: busybox\n"
+                "        image: busybox:1.37\n"
+                "        imagePullPolicy: IfNotPresent\n"
                 "        command: [\"sh\", \"-c\", \"rm -f /spdkvol/*fio*\"]\n"
                 "        volumeMounts:\n"
                 "        - mountPath: /spdkvol\n"
