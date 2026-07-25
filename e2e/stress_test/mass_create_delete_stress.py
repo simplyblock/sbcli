@@ -78,7 +78,7 @@ class _MassCreateDeleteMixin:
 
     # ── Snapshot / clone ───────────────────────────────────────────────────
     SNAPSHOTS_PER_LVOL = 1
-    MAX_TOTAL_SNAPSHOTS = 10000     # hard cap — temporary until SPDK limit is fixed
+    MAX_TOTAL_SNAPSHOTS = 21000
     FIO_SAMPLE_PERCENT = 10
     FIO_SAMPLE_MAX = 50             # absolute cap on sampled volumes
 
