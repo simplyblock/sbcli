@@ -39,6 +39,7 @@ import threading
 import time
 import traceback
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 
 from e2e_tests.cluster_test_base import TestClusterBase
@@ -5461,6 +5462,15 @@ class K8sNativeScaleBreakTest(K8sNativeFailoverTest):
         # No lvol cap — we WANT to push to breaking
         self.MAX_TOTAL_LVOLS = 9999
 
+        # Parallel PVC creation config
+        self.CREATE_BATCH_SIZE = 50       # PVCs per batch
+        self.CREATE_MAX_WORKERS = 10      # threads per batch
+        self.CREATE_BATCH_PAUSE = 10      # seconds between batches
+        self.BOUND_WAIT_TIMEOUT = 3600    # 1h hard cap for all PVCs to bind
+        self.BOUND_STALL_TIMEOUT = 300    # stop if no new PVCs bind for 5 min
+        self.BOUND_POLL_INTERVAL = 15     # seconds between bound checks
+        self.FIO_START_WORKERS = 10       # threads for FIO job creation
+
         # Per-iteration results tracking
         self.iteration_results: list[dict] = []
 
@@ -5512,6 +5522,238 @@ class K8sNativeScaleBreakTest(K8sNativeFailoverTest):
         result = super()._compute_fio_size(extra_jobs)
         self.FIO_RUNTIME = saved_runtime
         return result
+
+    # ── Parallel PVC creation ─────────────────────────────────────────────
+
+    def create_pvcs_with_fio(self, count: int, node_ids: list[str] = None,
+                             storage_class: str = None):
+        """Create PVCs and start FIO using parallel batches.
+
+        Overrides the parent's sequential loop with a 3-phase approach:
+          A. Fire PVCs in parallel batches (ThreadPoolExecutor)
+          B. Bulk wait for Bound (single kubectl query per poll)
+          C. Start FIO jobs in parallel
+        """
+        self._ensure_k8s_utils()
+        existing_count = len(self.pvc_details)
+
+        # ── Generate PVC names and StorageClass assignments ──
+        pvc_specs: list[tuple[str, str, str]] = []  # (name, sc, fs_type)
+        for i in range(count):
+            pvc_name = f"pvc-{_rand_seq(12)}"
+            if storage_class:
+                sc_name = storage_class
+            elif self.tls_enabled and (existing_count + i) % 2 == 1:
+                sc_name = self.CRYPTO_STORAGE_CLASS_NAME
+            else:
+                sc_name = random.choice([
+                    self.STORAGE_CLASS_NAME,
+                    self.XFS_STORAGE_CLASS_NAME,
+                ])
+            fs_type = "xfs" if sc_name == self.XFS_STORAGE_CLASS_NAME else "ext4"
+            pvc_specs.append((pvc_name, sc_name, fs_type))
+
+        pvc_names = [s[0] for s in pvc_specs]
+        # Map name → (sc, fs_type) for Phase C
+        sc_map = {s[0]: (s[1], s[2]) for s in pvc_specs}
+
+        # ── Phase A: Fire PVCs in parallel batches ──
+        self.logger.info(
+            f"[scale_break] Phase A: Firing {count} PVCs in batches of "
+            f"{self.CREATE_BATCH_SIZE} (workers={self.CREATE_MAX_WORKERS})"
+        )
+        fired: list[str] = []
+        errors = 0
+
+        for batch_start in range(0, len(pvc_names), self.CREATE_BATCH_SIZE):
+            batch = pvc_names[batch_start:batch_start + self.CREATE_BATCH_SIZE]
+            with ThreadPoolExecutor(
+                max_workers=self.CREATE_MAX_WORKERS
+            ) as pool:
+                futures = {}
+                for name in batch:
+                    target_node = None
+                    if node_ids:
+                        idx = pvc_names.index(name)
+                        if idx < len(node_ids):
+                            target_node = node_ids[idx]
+                    sc_name = sc_map[name][0]
+                    futures[pool.submit(
+                        self.k8s_utils.create_pvc,
+                        name, self.pvc_size, sc_name,
+                        node_id=target_node,
+                    )] = name
+                for f in as_completed(futures, timeout=300):
+                    name = futures[f]
+                    try:
+                        f.result(timeout=60)
+                        fired.append(name)
+                    except Exception as exc:
+                        errors += 1
+                        self.logger.warning(
+                            f"[scale_break] PVC fire failed for "
+                            f"{name}: {exc}"
+                        )
+
+            done = min(batch_start + len(batch), len(pvc_names))
+            self.logger.info(
+                f"[scale_break] Phase A: Fired {done}/{count} "
+                f"(ok={len(fired)}, errors={errors})"
+            )
+            # Pause between batches (not after last)
+            if batch_start + self.CREATE_BATCH_SIZE < len(pvc_names):
+                time.sleep(self.CREATE_BATCH_PAUSE)
+
+        self.logger.info(
+            f"[scale_break] Phase A done: {len(fired)}/{count} PVCs fired"
+        )
+        if not fired:
+            return
+
+        # ── Phase B: Bulk wait for Bound ──
+        self.logger.info(
+            f"[scale_break] Phase B: Waiting for {len(fired)} PVCs to "
+            f"bind (timeout={self.BOUND_WAIT_TIMEOUT}s, "
+            f"stall={self.BOUND_STALL_TIMEOUT}s)"
+        )
+        ns = self.k8s_utils.namespace
+        deadline = time.time() + self.BOUND_WAIT_TIMEOUT
+        target = set(fired)
+        bound: set[str] = set()
+        last_progress_time = time.time()
+        last_bound_count = 0
+
+        while time.time() < deadline and len(bound) < len(target):
+            try:
+                out, _ = self.k8s_utils._exec_kubectl(
+                    f"kubectl get pvc -n {ns} --no-headers "
+                    f"-o custom-columns=NAME:.metadata.name,"
+                    f"STATUS:.status.phase "
+                    f"2>/dev/null || true",
+                    supress_logs=True,
+                )
+                for line in (out or "").strip().splitlines():
+                    parts = line.split()
+                    if (len(parts) >= 2 and parts[1] == "Bound"
+                            and parts[0] in target):
+                        bound.add(parts[0])
+            except Exception as exc:
+                self.logger.warning(
+                    f"[scale_break] Bulk PVC query failed: {exc}"
+                )
+
+            current_count = len(bound)
+            pending = len(target) - current_count
+
+            if current_count > last_bound_count:
+                last_progress_time = time.time()
+                last_bound_count = current_count
+
+            if pending > 0:
+                stall_elapsed = round(time.time() - last_progress_time)
+                self.logger.info(
+                    f"[scale_break] Phase B: {current_count}/{len(target)} "
+                    f"Bound, {pending} pending "
+                    f"(stall={stall_elapsed}s/{self.BOUND_STALL_TIMEOUT}s)"
+                )
+                if stall_elapsed >= self.BOUND_STALL_TIMEOUT:
+                    self.logger.warning(
+                        f"[scale_break] Binding stalled — no new PVCs "
+                        f"bound for {stall_elapsed}s, stopping wait"
+                    )
+                    break
+                time.sleep(self.BOUND_POLL_INTERVAL)
+
+        self.logger.info(
+            f"[scale_break] Phase B done: {len(bound)}/{len(target)} Bound"
+        )
+
+        # Clean up unbound PVCs
+        unbound = target - bound
+        if unbound:
+            self.logger.warning(
+                f"[scale_break] Cleaning up {len(unbound)} unbound PVCs"
+            )
+            for name in unbound:
+                try:
+                    self.k8s_utils.delete_pvc(name)
+                except Exception:
+                    pass
+
+        if not bound:
+            return
+
+        # ── Phase C: Start FIO jobs in parallel ──
+        self.logger.info(
+            f"[scale_break] Phase C: Starting FIO jobs on "
+            f"{len(bound)} bound PVCs "
+            f"(workers={self.FIO_START_WORKERS})"
+        )
+        details_lock = threading.Lock()
+
+        def _start_fio_for_pvc(pvc_name: str):
+            sc_name, fs_type = sc_map[pvc_name]
+            job_name = f"fio-{pvc_name}"
+            cm_name = f"fiocfg-{pvc_name}"
+
+            node_id = self._get_pvc_node_id(pvc_name)
+            avoid = (
+                self._get_k8s_node_for_storage_node(node_id)
+                if node_id else None
+            )
+            fio_config, warmup_config = self._build_fio_config(pvc_name)
+            try:
+                self.k8s_utils.create_fio_job(
+                    job_name, pvc_name, cm_name, fio_config,
+                    image=self.FIO_IMAGE,
+                    avoid_node=avoid,
+                    warmup_config=warmup_config,
+                )
+            except Exception as exc:
+                self.logger.warning(
+                    f"[scale_break] FIO Job creation failed for "
+                    f"{pvc_name}: {exc}"
+                )
+
+            with details_lock:
+                self.pvc_details[pvc_name] = {
+                    "job_name": job_name,
+                    "configmap_name": cm_name,
+                    "snapshots": [],
+                    "node_id": node_id,
+                    "storage_class": sc_name,
+                    "fs_type": fs_type,
+                }
+                if node_id:
+                    self.node_vs_pvc.setdefault(
+                        node_id, []
+                    ).append(pvc_name)
+
+        with ThreadPoolExecutor(
+            max_workers=self.FIO_START_WORKERS
+        ) as pool:
+            fio_futures = {
+                pool.submit(_start_fio_for_pvc, name): name
+                for name in sorted(bound)
+            }
+            for f in as_completed(fio_futures, timeout=600):
+                name = fio_futures[f]
+                try:
+                    f.result(timeout=120)
+                except Exception as exc:
+                    self.logger.warning(
+                        f"[scale_break] FIO start failed for "
+                        f"{name}: {exc}"
+                    )
+
+        self.logger.info(
+            f"[scale_break] Phase C done: {len(self.pvc_details)} PVCs "
+            f"with FIO jobs registered"
+        )
+        self.k8s_utils.log_fio_pvc_mapping(
+            self.pvc_details, self.clone_details,
+            snapshot_details=self.snapshot_details,
+        )
 
     # ── Outage helpers ────────────────────────────────────────────────────
 
@@ -5960,8 +6202,10 @@ class K8sNativeScaleBreakTest(K8sNativeFailoverTest):
             traceback.print_exc()
         finally:
             self._log_scale_break_summary(break_reason, capacity_reached)
-            if not test_failed:
-                self._cleanup_all_k8s_resources()
+            # Always clean up FIO jobs, configmaps, and PVCs — even on
+            # failure — so the pipeline cleanup script doesn't have to
+            # force-delete hundreds of leftover resources.
+            self._cleanup_all_k8s_resources()
 
         if test_failed:
             raise RuntimeError(

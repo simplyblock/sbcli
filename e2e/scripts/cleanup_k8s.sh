@@ -224,6 +224,14 @@ done
 kubectl $KUBECTL_TIMEOUT delete clusterrole simplyblock-storage-node-role --ignore-not-found 2>/dev/null || true
 kubectl $KUBECTL_TIMEOUT delete clusterrolebinding simplyblock-storage-node-binding --ignore-not-found 2>/dev/null || true
 
+# Delete webhook configurations (cluster-scoped, not removed by namespace delete)
+for WH in $(kubectl $KUBECTL_TIMEOUT get mutatingwebhookconfiguration --no-headers -o custom-columns=:metadata.name 2>/dev/null | grep -i simplyblock 2>/dev/null); do
+  kubectl $KUBECTL_TIMEOUT delete mutatingwebhookconfiguration "$WH" --ignore-not-found 2>/dev/null || true
+done
+for WH in $(kubectl $KUBECTL_TIMEOUT get validatingwebhookconfiguration --no-headers -o custom-columns=:metadata.name 2>/dev/null | grep -i simplyblock 2>/dev/null); do
+  kubectl $KUBECTL_TIMEOUT delete validatingwebhookconfiguration "$WH" --ignore-not-found 2>/dev/null || true
+done
+
 echo "=== Phase 4b: Cleanup leftover secrets, SAs, and kube-system resources ==="
 kubectl -n $NAMESPACE $KUBECTL_TIMEOUT delete secret simplyblock-csi-secret-v2 --ignore-not-found 2>/dev/null || true
 kubectl -n $NAMESPACE $KUBECTL_TIMEOUT delete sa simplyblock-storage-node-sa --ignore-not-found 2>/dev/null || true
