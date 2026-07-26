@@ -848,12 +848,14 @@ jobs:
             NEW_NODES_ARGS=(--new_nodes ${NEW_NODE_IPS})
           fi
           # Build extra cluster args for inter-test reset
+          # These are passed directly to 'sbcli cluster create' so use
+          # the same flag syntax (standalone flags, no true/false value).
           RESET_EXTRA_CLUSTER_ARGS="${EXTRA_CLUSTER_ARGS:-}"
           if [[ "${{ inputs.BOOTSTRAP_ENABLE_NODE_AFFINITY }}" == "true" ]]; then
-            RESET_EXTRA_CLUSTER_ARGS="${RESET_EXTRA_CLUSTER_ARGS} --enable-node-affinity true"
+            RESET_EXTRA_CLUSTER_ARGS="${RESET_EXTRA_CLUSTER_ARGS} --enable-node-affinity"
           fi
           if [[ "${{ inputs.BOOTSTRAP_IS_SINGLE_NODE }}" == "true" ]]; then
-            RESET_EXTRA_CLUSTER_ARGS="${RESET_EXTRA_CLUSTER_ARGS} --is-single-node true"
+            RESET_EXTRA_CLUSTER_ARGS="${RESET_EXTRA_CLUSTER_ARGS} --is-single-node"
           fi
 
           EXTRA_ARGS=()
