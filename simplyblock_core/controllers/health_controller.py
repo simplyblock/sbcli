@@ -181,7 +181,7 @@ def _log_port_check_failure(db_controller, snode, port, exc):
 
 
 def check_port_on_node(snode, port_id):
-    from simplyblock_core import port_block
+    from simplyblock_core.utils import port_block
     return not port_block.is_port_blocked(snode, port_id)
 
 
@@ -191,7 +191,7 @@ def check_ports_on_node(snode, port_ids):
     Returns ``{port: bool}`` (True = open). Falls back to per-port checks on
     legacy nodes without the RPC. Raises on fetch failure — callers treat it
     like the single-port failure path."""
-    from simplyblock_core import port_block
+    from simplyblock_core.utils import port_block
     port_ids = list(port_ids)
     if not port_ids:
         return {}
