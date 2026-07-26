@@ -13,7 +13,7 @@ from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.mgmt_node import MgmtNode
-from simplyblock_core.models.nvme_connect import NvmeConnectEntry
+from simplyblock_core.utils.nvme import NvmeConnectEntry
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot

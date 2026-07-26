@@ -82,5 +82,43 @@ class TestHostConnectAuthFromEntry(unittest.TestCase):
         self.assertNotIn("HOST-DH", rendering)
 
 
+class TestHostConnectAuthResolve(unittest.TestCase):
+    def _lvol(self, allowed_hosts, pool_uuid="pool-1", uuid="lvol-1"):
+        return SimpleNamespace(allowed_hosts=allowed_hosts, pool_uuid=pool_uuid, get_id=lambda: uuid)
+
+    def _db(self, pool):
+        return SimpleNamespace(get_pool_by_id=lambda _uuid: pool)
+
+    def test_no_allowed_hosts_returns_none(self):
+        lvol = self._lvol(allowed_hosts=[])
+        self.assertIsNone(HostConnectAuth.resolve(lvol, "nqn.host:a", self._db(_pool(False))))
+
+    def test_no_allowed_hosts_ignores_host_nqn(self):
+        lvol = self._lvol(allowed_hosts=[])
+        self.assertIsNone(HostConnectAuth.resolve(lvol, None, self._db(_pool(False))))
+
+    def test_allowed_hosts_without_host_nqn_raises(self):
+        lvol = self._lvol(allowed_hosts=[{"nqn": "nqn.host:a"}])
+        with self.assertRaises(ValueError):
+            HostConnectAuth.resolve(lvol, None, self._db(_pool(False)))
+
+    def test_unknown_host_nqn_raises(self):
+        lvol = self._lvol(allowed_hosts=[{"nqn": "nqn.host:a"}])
+        with self.assertRaises(ValueError):
+            HostConnectAuth.resolve(lvol, "nqn.host:z", self._db(_pool(False)))
+
+    def test_matching_host_delegates_to_from_entry(self):
+        lvol = self._lvol(allowed_hosts=[{"nqn": "nqn.host:a", "psk": "HOST-PSK"}])
+        auth = HostConnectAuth.resolve(lvol, "nqn.host:a", self._db(_pool(False)))
+        self.assertEqual(auth.nqn, "nqn.host:a")
+        self.assertEqual(auth.psk.get_secret_value(), "HOST-PSK")
+
+    def test_matching_host_dhchap_pool_uses_pool_keys(self):
+        lvol = self._lvol(allowed_hosts=[{"nqn": "nqn.host:a"}])
+        pool = _pool(True, dhchap_key="POOL-DH", dhchap_ctrlr_key="POOL-CTRL")
+        auth = HostConnectAuth.resolve(lvol, "nqn.host:a", self._db(pool))
+        self.assertEqual(auth.dhchap_key.get_secret_value(), "POOL-DH")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -17,9 +17,8 @@ from simplyblock_core.controllers.host_auth import (
     _get_dhchap_group, _register_dhchap_keys_on_node, _register_pool_dhchap_keys_on_node)
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
-from simplyblock_core.models.nvme_connect import NvmeConnectEntry
 from simplyblock_core.models.pool import Pool
-from simplyblock_core.utils.nvme import HostConnectAuth
+from simplyblock_core.utils.nvme import HostConnectAuth, build_nvme_connect_entry
 from simplyblock_core.models.lvol_model import LVol, LVolReplication
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
@@ -2111,20 +2110,10 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
         logger.exception("Failed to get lvol by id: %s", uuid)
         return False, "Failed to find volume"
 
-    # Look up host entry for secrets when host_nqn is provided
-    host_entry = None
-    if lvol.allowed_hosts:
-        if not host_nqn:
-            return False, f"Volume {uuid} has allowed hosts configured; --host-nqn is required"
-        matched_entry = next((h for h in lvol.allowed_hosts if h["nqn"] == host_nqn), None)
-        if matched_entry is None:
-            return False, f"Host NQN {host_nqn} not found in allowed hosts for volume {uuid}"
-        pool = db_controller.get_pool_by_id(lvol.pool_uuid)
-        host_entry = HostConnectAuth.from_entry(matched_entry, pool)
-    elif host_nqn:
-        # host_nqn provided but no allowed_hosts — volume allows any host,
-        # so just pass host_nqn through without secrets
-        pass
+    try:
+        host_entry = HostConnectAuth.resolve(lvol, host_nqn, db_controller)
+    except ValueError as e:
+        return False, str(e)
 
     node = db_controller.get_storage_node_by_id(lvol.node_id)
     cluster = db_controller.get_cluster_by_id(node.cluster_id)
@@ -2161,52 +2150,16 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
             if nic.ip4_address and lvol.fabric == nic.trtype.lower():
                 transport = nic.trtype.lower()
 
-            if transport == "tcp":
-                keep_alive_to = constants.LVOL_NVME_KEEP_ALIVE_TO_TCP
-            else:
-                keep_alive_to = constants.LVOL_NVME_KEEP_ALIVE_TO
-
-            client_data_nic_str = ""
-            if  cluster.client_data_nic:
-                client_data_nic_str = f"--host-iface={cluster.client_data_nic}"
-
-            tls_str = ""
-            host_auth_str = ""
-            if host_entry:
-                host_auth_str = f" --hostnqn={host_nqn}"
-                if host_entry.psk.get_secret_value():
-                    tls_str = " --tls"
-                if host_entry.dhchap_key.get_secret_value():
-                    host_auth_str += f" --dhchap-secret={host_entry.dhchap_key.get_secret_value()}"
-                if host_entry.dhchap_ctrlr_key.get_secret_value():
-                    host_auth_str += f" --dhchap-ctrl-secret={host_entry.dhchap_ctrlr_key.get_secret_value()}"
-            elif host_nqn:
-                host_auth_str = f" --hostnqn={host_nqn}"
-
-            connect_cmd = (
-                f"sudo nvme connect --reconnect-delay={constants.LVOL_NVME_CONNECT_RECONNECT_DELAY} "
-                f"--ctrl-loss-tmo={ctrl_loss_tmo} "
-                f"--fast_io_fail_tmo={constants.LVOL_NVME_CONNECT_FAST_IO_FAIL_TO} "
-                f"--nr-io-queues={cluster.client_qpair_count} "
-                f"--keep-alive-tmo={keep_alive_to} "
-                f"--transport={transport} --traddr={ip} --trsvcid={port} --nqn={lvol.nqn} "
-                f"{client_data_nic_str}{tls_str}{host_auth_str}"
-            )
-
-            out.append(NvmeConnectEntry(
-                ns_id=lvol.ns_id,
+            out.append(build_nvme_connect_entry(
                 transport=transport,
                 ip=ip,
                 port=port,
                 nqn=lvol.nqn,
-                reconnect_delay=constants.LVOL_NVME_CONNECT_RECONNECT_DELAY,
                 ctrl_loss_tmo=ctrl_loss_tmo,
-                fast_io_fail_tmo=constants.LVOL_NVME_CONNECT_FAST_IO_FAIL_TO,
-                nr_io_queues=cluster.client_qpair_count,
-                keep_alive_tmo=keep_alive_to,
-                host_iface=cluster.client_data_nic or "",
-                connect=connect_cmd,
-                tls=bool(host_entry and host_entry.psk.get_secret_value()),
+                cluster=cluster,
+                host_entry=host_entry,
+                host_nqn=host_nqn,
+                ns_id=lvol.ns_id,
                 allowed_hosts=[h["nqn"] for h in lvol.allowed_hosts] if lvol.allowed_hosts else [],
             ))
     return out, None
