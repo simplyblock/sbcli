@@ -5684,10 +5684,12 @@ class K8sNativeScaleBreakTest(K8sNativeFailoverTest):
             return
 
         # ── Phase C: Start FIO jobs in parallel ──
+        fio_timeout = max(600, len(bound) * 5)
         self.logger.info(
             f"[scale_break] Phase C: Starting FIO jobs on "
             f"{len(bound)} bound PVCs "
-            f"(workers={self.FIO_START_WORKERS})"
+            f"(workers={self.FIO_START_WORKERS}, "
+            f"timeout={fio_timeout}s)"
         )
         details_lock = threading.Lock()
 
@@ -5736,7 +5738,7 @@ class K8sNativeScaleBreakTest(K8sNativeFailoverTest):
                 pool.submit(_start_fio_for_pvc, name): name
                 for name in sorted(bound)
             }
-            for f in as_completed(fio_futures, timeout=600):
+            for f in as_completed(fio_futures, timeout=fio_timeout):
                 name = fio_futures[f]
                 try:
                     f.result(timeout=120)
@@ -5953,7 +5955,7 @@ class K8sNativeScaleBreakTest(K8sNativeFailoverTest):
                         self.create_pvcs_with_fio(new_count)
                     except Exception as exc:
                         break_reason = (
-                            f"PVC creation failed at {target_pods} pods: "
+                            f"PVC/FIO setup failed at {target_pods} pods: "
                             f"{exc}"
                         )
                         self.logger.error(
