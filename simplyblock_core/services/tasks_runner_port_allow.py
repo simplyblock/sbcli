@@ -2,7 +2,8 @@
 import time
 
 
-from simplyblock_core import db_controller, utils, storage_node_ops, distr_controller, port_block
+from simplyblock_core import db_controller, utils, storage_node_ops, distr_controller
+from simplyblock_core.utils import port_block
 from simplyblock_core.controllers import (
     tcp_ports_events, health_controller, tasks_controller, storage_events, device_controller,
 )

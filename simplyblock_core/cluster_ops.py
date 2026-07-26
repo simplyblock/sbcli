@@ -18,7 +18,7 @@ from docker.errors import DockerException
 from pydantic import SecretStr
 
 from simplyblock_core import utils, scripts, constants, mgmt_node_ops, storage_node_ops
-from simplyblock_core import port_block
+from simplyblock_core.utils import port_block
 from simplyblock_core.controllers import backup_controller, cluster_events, device_controller, qos_controller, tasks_controller, tcp_ports_events
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import Cluster, HashicorpVaultSettings, DeployConfig
