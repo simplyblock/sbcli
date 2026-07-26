@@ -1125,7 +1125,10 @@ jobs:
             --migrate_to_worker "${{ github.event.inputs.migrate_to_worker }}" \
             ${NEW_SSD_PCIE_ARG} ${REATTACH_VOL_ARG} \
             --ndcs $NDCS --npcs $NPCS --bs $BS --chunk_bs $CHUNK_BS \
-            --run_k8s True 2>&1 | tee output.log
+            --run_k8s True \
+            --namespace simplyblock \
+            --helm_chart_path "$GITHUB_WORKSPACE/simplyblock-operator/helm-charts/charts/simplyblock-operator" \
+            2>&1 | tee output.log
         env:
           NDCS: ${{ env.NDCS }}
           NPCS: ${{ env.NPCS }}

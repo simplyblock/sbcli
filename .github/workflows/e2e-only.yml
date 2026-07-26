@@ -379,6 +379,10 @@ jobs:
             "${NEW_NODES_ARGS[@]}" \
             --ndcs "${NDCS}" \
             --npcs "${NPCS}" \
+            --storage_ips "${STORAGE_PRIVATE_IPS}" \
+            --mgmt_ip "$(echo "${MNODES}" | awk '{print $1}')" \
+            --client_ips "${CLIENT_IP}" \
+            --sbcli_branch "${SBCLI_BRANCH}" \
             2>&1 | tee output.log
 
       - name: Copy raw output.log to each test's NFS folder

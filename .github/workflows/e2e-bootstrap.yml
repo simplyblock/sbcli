@@ -853,6 +853,14 @@ jobs:
             --ndcs "${NDCS}" \
             --npcs "${NPCS}" \
             --run_ha true \
+            --storage_ips "${STORAGE_PRIVATE_IPS}" \
+            --mgmt_ip "$(echo "${MNODES}" | awk '{print $1}')" \
+            --client_ips "${CLIENT_IP}" \
+            --ha_jm_count "${BOOTSTRAP_HA_JM_COUNT}" \
+            --journal_partition "${BOOTSTRAP_JOURNAL_PARTITION}" \
+            --max_subsys "${BOOTSTRAP_MAX_SUBSYS}" \
+            --data_nic "${BOOTSTRAP_DATA_NIC}" \
+            --sbcli_branch "${SBCLI_BRANCH}" \
             2>&1 | tee output.log
 
       - name: Copy raw output.log to each test's NFS folder
