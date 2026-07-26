@@ -58,6 +58,7 @@ from simplyblock_core.models.nvme_connect import NvmeConnectEntry
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.utils import convert_size, lvol_tgt_bdev_name
+from simplyblock_core.utils.nvme import HostConnectAuth
 
 # Note: JobSchedule is not imported directly here; task creation is delegated to
 # tasks_controller.add_lvol_mig_task() which handles event logging consistently.
@@ -794,12 +795,12 @@ def _build_connect_entries(node, port, lvol, nqn, ctrl_loss_tmo, cluster, host_e
         tls_str = host_auth_str = ""
         if host_entry:
             host_auth_str = f" --hostnqn={host_nqn}"
-            if host_entry.get("psk"):
+            if host_entry.psk.get_secret_value():
                 tls_str = " --tls"
-            if host_entry.get("dhchap_key"):
-                host_auth_str += f" --dhchap-secret={host_entry['dhchap_key']}"
-            if host_entry.get("dhchap_ctrlr_key"):
-                host_auth_str += f" --dhchap-ctrl-secret={host_entry['dhchap_ctrlr_key']}"
+            if host_entry.dhchap_key.get_secret_value():
+                host_auth_str += f" --dhchap-secret={host_entry.dhchap_key.get_secret_value()}"
+            if host_entry.dhchap_ctrlr_key.get_secret_value():
+                host_auth_str += f" --dhchap-ctrl-secret={host_entry.dhchap_ctrlr_key.get_secret_value()}"
         elif host_nqn:
             host_auth_str = f" --hostnqn={host_nqn}"
         connect_cmd = (
@@ -824,7 +825,7 @@ def _build_connect_entries(node, port, lvol, nqn, ctrl_loss_tmo, cluster, host_e
             keep_alive_tmo=keep_alive_tmo,
             host_iface=cluster.client_data_nic or "",
             connect=connect_cmd,
-            tls=bool(host_entry and host_entry.get("psk")),
+            tls=bool(host_entry and host_entry.psk.get_secret_value()),
         ))
     return entries
 
@@ -1225,14 +1226,13 @@ def create_migration(lvol_id, target_node_id,
 
     # ── 4. Build connect strings for the target node ──────────────────────────
     host_entry = None
-    if lvol.allowed_hosts and host_nqn:
-        for h in lvol.allowed_hosts:
-            if h["nqn"] == host_nqn:
-                host_entry = h
-                break
-
-    if lvol.allowed_hosts and not host_nqn:
-        raise ValueError(f"Volume {lvol_id} has allowed hosts configured; --host-nqn is required")
+    if lvol.allowed_hosts:
+        if not host_nqn:
+            raise ValueError(f"Volume {lvol_id} has allowed hosts configured; --host-nqn is required")
+        matched_entry = next((h for h in lvol.allowed_hosts if h["nqn"] == host_nqn), None)
+        if matched_entry:
+            pool = db.get_pool_by_id(lvol.pool_uuid)
+            host_entry = HostConnectAuth.from_entry(matched_entry, pool)
 
     out = []
     for _n, _, _p, _ in tgt_entries:

@@ -19,6 +19,7 @@ from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_connect import NvmeConnectEntry
 from simplyblock_core.models.pool import Pool
+from simplyblock_core.utils.nvme import HostConnectAuth
 from simplyblock_core.models.lvol_model import LVol, LVolReplication
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
@@ -2115,15 +2116,11 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
     if lvol.allowed_hosts:
         if not host_nqn:
             return False, f"Volume {uuid} has allowed hosts configured; --host-nqn is required"
-        for h in lvol.allowed_hosts:
-            if h["nqn"] == host_nqn:
-                host_entry = h
-                pool = db_controller.get_pool_by_id(lvol.pool_uuid)
-                host_entry["dhchap_key"] = pool.dhchap_key.get_secret_value()
-                host_entry["dhchap_ctrlr_key"] = pool.dhchap_ctrlr_key.get_secret_value()
-                break
-        if not host_entry:
+        matched_entry = next((h for h in lvol.allowed_hosts if h["nqn"] == host_nqn), None)
+        if matched_entry is None:
             return False, f"Host NQN {host_nqn} not found in allowed hosts for volume {uuid}"
+        pool = db_controller.get_pool_by_id(lvol.pool_uuid)
+        host_entry = HostConnectAuth.from_entry(matched_entry, pool)
     elif host_nqn:
         # host_nqn provided but no allowed_hosts — volume allows any host,
         # so just pass host_nqn through without secrets
@@ -2177,12 +2174,12 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
             host_auth_str = ""
             if host_entry:
                 host_auth_str = f" --hostnqn={host_nqn}"
-                if host_entry.get("psk"):
+                if host_entry.psk.get_secret_value():
                     tls_str = " --tls"
-                if host_entry.get("dhchap_key"):
-                    host_auth_str += f" --dhchap-secret={host_entry['dhchap_key']}"
-                if host_entry.get("dhchap_ctrlr_key"):
-                    host_auth_str += f" --dhchap-ctrl-secret={host_entry['dhchap_ctrlr_key']}"
+                if host_entry.dhchap_key.get_secret_value():
+                    host_auth_str += f" --dhchap-secret={host_entry.dhchap_key.get_secret_value()}"
+                if host_entry.dhchap_ctrlr_key.get_secret_value():
+                    host_auth_str += f" --dhchap-ctrl-secret={host_entry.dhchap_ctrlr_key.get_secret_value()}"
             elif host_nqn:
                 host_auth_str = f" --hostnqn={host_nqn}"
 
@@ -2209,7 +2206,7 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
                 keep_alive_tmo=keep_alive_to,
                 host_iface=cluster.client_data_nic or "",
                 connect=connect_cmd,
-                tls=bool(host_entry and host_entry.get("psk")),
+                tls=bool(host_entry and host_entry.psk.get_secret_value()),
                 allowed_hosts=[h["nqn"] for h in lvol.allowed_hosts] if lvol.allowed_hosts else [],
             ))
     return out, None
