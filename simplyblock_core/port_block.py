@@ -8,24 +8,12 @@ the legacy iptables-based FirewallClient.
 """
 import logging
 
+import jc
+
+from simplyblock_core.rpc_client import RPCErrorCode, RPCException
 from simplyblock_core.fw_api_client import FirewallClient
 
 logger = logging.getLogger(__name__)
-
-
-def _is_method_not_found(exc):
-    """Identify a JSON-RPC 'Method not found' error.
-
-    Matches the standard -32601 code and the common ``method ... not
-    found`` text variants emitted by SPDK / spdk_http_proxy.
-    """
-    msg = str(exc).lower()
-    return (
-        "-32601" in msg
-        or "method not found" in msg
-        or "no method named" in msg
-        or "unknown method" in msg
-    )
 
 
 def set_port(node, port, block, is_reject=False, timeout=5, retry=2):
@@ -40,8 +28,8 @@ def set_port(node, port, block, is_reject=False, timeout=5, retry=2):
         if block:
             return rpc.nvmf_port_block(port, is_reject=is_reject)
         return rpc.nvmf_port_unblock(port)
-    except Exception as exc:
-        if not _is_method_not_found(exc):
+    except RPCException as exc:
+        if exc.code != RPCErrorCode.method_not_found:
             raise
         logger.info(
             "nvmf_port_%s RPC not available on %s; falling back to iptables",
@@ -66,8 +54,8 @@ def get_blocked_ports_set(node, timeout=5, retry=5):
     rpc = node.rpc_client(timeout=timeout, retry=retry)
     try:
         blocked = rpc.nvmf_get_blocked_ports()
-    except Exception as exc:
-        if not _is_method_not_found(exc):
+    except RPCException as exc:
+        if exc.code != RPCErrorCode.method_not_found:
             raise
         return None
     if not blocked:
@@ -82,28 +70,18 @@ def is_port_blocked(node, port_id, timeout=5, retry=5):
     Tries SPDK ``nvmf_get_blocked_ports`` first; on method-not-found
     falls back to parsing iptables output via ``FirewallClient``.
     """
-    rpc = node.rpc_client(timeout=timeout, retry=retry)
     try:
-        blocked = rpc.nvmf_get_blocked_ports()
-    except Exception as exc:
-        if not _is_method_not_found(exc):
+        return port_id in node.rpc_client(timeout=timeout, retry=retry).nvmf_get_blocked_ports()
+    except RPCException as exc:
+        if exc.code != RPCErrorCode.method_not_found:
             raise
-        return _is_port_blocked_iptables(node, port_id, timeout, retry)
-
-    if not blocked:
-        return False
-    entries = blocked.get("blocked_ports", []) if isinstance(blocked, dict) else []
-    for entry in entries:
-        if int(entry.get("port", -1)) == int(port_id):
-            return True
-    return False
+        return  _is_port_blocked_iptables(node, port_id, timeout, retry)
 
 
 def _is_port_blocked_iptables(node, port_id, timeout, retry):
     """Legacy iptables-based check via FirewallClient + jc parsing."""
-    import jc
     fw = FirewallClient(node, timeout=timeout, retry=retry)
-    iptables_output, _ = fw.get_firewall(node.rpc_port)
+    iptables_output, error = fw.get_firewall(node.rpc_port)
     if isinstance(iptables_output, str):
         iptables_output = [iptables_output]
     for rules in iptables_output:
