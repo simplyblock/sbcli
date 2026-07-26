@@ -24,6 +24,7 @@ import sys
 _NOT_SERVICES = frozenset({
     "hub_controller_manager",
     "replication_final_step",
+    "task_runner_base",
 })
 
 
