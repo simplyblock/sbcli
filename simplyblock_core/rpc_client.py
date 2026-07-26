@@ -1,5 +1,6 @@
 import errno
 import json
+from enum import IntEnum
 from json import JSONDecodeError
 from typing import Any, Optional
 
@@ -73,6 +74,15 @@ _response_schema = {
         },
     },
 }
+
+
+class RPCErrorCode(IntEnum):
+    invalid_state = -1
+    invalid_request = -32600
+    method_not_found = -32601
+    invalid_params = -32602
+    internal_error = -32603
+    parser_error = -32700
 
 
 class RPCException(Exception):
@@ -1607,34 +1617,17 @@ class RPCClient:
         }
         return self._request2("jc_compression", params)
 
-    def _request_raise(self, method, params=None):
-        """Like ``_request`` but surfaces the JSON-RPC ``error`` instead of
-        swallowing it. ``_request`` returns only the ``result`` half of the
-        tuple, so a method-not-found (-32601) collapses to a silent ``None``;
-        callers that branch on the error (e.g. ``port_block``'s RPC-then-
-        iptables fallback) need it raised. Transport failures still arrive as
-        ``RPCException("connection error")`` from ``_request2``.
-        """
-        result, error = self._request2(method, params)
-        if error is not None:
-            raise RPCException(**error)
-        return result
-
     def nvmf_port_block(self, port, is_reject=False):
-        params = {
-            "port": port,
-            "reject": bool(is_reject),
-        }
-        return self._request_raise("nvmf_port_block", params)
+        return self._request3("nvmf_port_block",
+            port=port,
+            reject=is_reject,
+        )
 
     def nvmf_port_unblock(self, port):
-        params = {
-            "port": port,
-        }
-        return self._request_raise("nvmf_port_unblock", params)
+        return self._request3("nvmf_port_unblock", port=port)
 
     def nvmf_get_blocked_ports(self):
-        return self._request_raise("nvmf_get_blocked_ports")
+        return self._request3("nvmf_get_blocked_ports")
 
     def bdev_raid_get_bdevs(self):
         params = {
