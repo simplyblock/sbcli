@@ -847,6 +847,23 @@ jobs:
           if [[ -n "${NEW_NODE_IPS:-}" ]]; then
             NEW_NODES_ARGS=(--new_nodes ${NEW_NODE_IPS})
           fi
+          # Build extra cluster args for inter-test reset
+          RESET_EXTRA_CLUSTER_ARGS="${EXTRA_CLUSTER_ARGS:-}"
+          if [[ "${{ inputs.BOOTSTRAP_ENABLE_NODE_AFFINITY }}" == "true" ]]; then
+            RESET_EXTRA_CLUSTER_ARGS="${RESET_EXTRA_CLUSTER_ARGS} --enable-node-affinity true"
+          fi
+          if [[ "${{ inputs.BOOTSTRAP_IS_SINGLE_NODE }}" == "true" ]]; then
+            RESET_EXTRA_CLUSTER_ARGS="${RESET_EXTRA_CLUSTER_ARGS} --is-single-node true"
+          fi
+
+          EXTRA_ARGS=()
+          if [[ -n "${RESET_EXTRA_CLUSTER_ARGS}" ]]; then
+            EXTRA_ARGS+=(--extra_cluster_args "${RESET_EXTRA_CLUSTER_ARGS}")
+          fi
+          if [[ -n "${EXTRA_SN_ARGS:-}" ]]; then
+            EXTRA_ARGS+=(--extra_sn_args "${EXTRA_SN_ARGS}")
+          fi
+
           python3 -u e2e.py \
             "${TESTNAME_ARGS[@]}" \
             "${NEW_NODES_ARGS[@]}" \
@@ -861,6 +878,7 @@ jobs:
             --max_subsys "${BOOTSTRAP_MAX_SUBSYS}" \
             --data_nic "${BOOTSTRAP_DATA_NIC}" \
             --sbcli_branch "${SBCLI_BRANCH}" \
+            "${EXTRA_ARGS[@]}" \
             2>&1 | tee output.log
 
       - name: Copy raw output.log to each test's NFS folder

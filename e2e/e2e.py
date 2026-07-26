@@ -112,6 +112,13 @@ def main():
                         help="Path to simplyblock helm chart directory "
                              "(auto-detected from GITHUB_WORKSPACE if not set).",
                         default="")
+    parser.add_argument('--extra_cluster_args', type=str,
+                        help="Extra args appended to 'sbcli cluster create' "
+                             "(e.g. '--enable-node-affinity true').",
+                        default=os.environ.get("EXTRA_CLUSTER_ARGS", ""))
+    parser.add_argument('--extra_sn_args', type=str,
+                        help="Extra args for storage node add-node.",
+                        default=os.environ.get("EXTRA_SN_ARGS", ""))
 
     args = parser.parse_args()
 
@@ -667,6 +674,8 @@ def _docker_cluster_reset(args, new_nodes, logger):
         f" --parity-chunks-per-stripe {args.npcs}"
         f" --ifname {args.ifname}"
     )
+    if args.extra_cluster_args:
+        create_cmd += f" {args.extra_cluster_args}"
     _ssh_exec(ssh_obj, mgmt_ip, create_cmd, logger, ignore_errors=False)
 
     # Extract cluster_id
@@ -689,6 +698,8 @@ def _docker_cluster_reset(args, new_nodes, logger):
     )
     if args.spdk_image:
         add_cmd_base += f" --spdk-image {args.spdk_image}"
+    if args.extra_sn_args:
+        add_cmd_base += f" {args.extra_sn_args}"
 
     for node in storage_ips:
         logger.info(f"[reset]   Adding storage node {node}...")
