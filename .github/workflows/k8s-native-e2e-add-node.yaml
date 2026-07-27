@@ -1355,6 +1355,19 @@ jobs:
           TEST_TIME_MINS: ${{ env.TEST_TIME_MINS }}
           TEST_TIME_SECS: ${{ env.TEST_TIME_SECS }}
 
+      - name: Save summary for aggregation
+        if: always()
+        shell: bash
+        run: cp "$GITHUB_STEP_SUMMARY" "$RUNNER_TEMP/test-summary.md"
+
+      - name: Upload summary artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-summary-${{ inputs.testname || 'K8sNativeAddNodeTest' }}
+          path: ${{ runner.temp }}/test-summary.md
+          retention-days: 7
+
       - name: Send Slack Notification
         if: always() && (inputs.send_slack_notification || 'true') == 'true'
         shell: bash

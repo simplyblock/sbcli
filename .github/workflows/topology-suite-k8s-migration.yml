@@ -220,3 +220,42 @@ jobs:
       client_ips: ${{ inputs.client_ips || '' }}
       nfs_mountpoint: ${{ inputs.nfs_mountpoint || '/mnt/nfs_share/' }}
     secrets: inherit
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Job 3: Combine per-test summaries into a single parent summary
+  # ─────────────────────────────────────────────────────────────────────────
+  combine-summary:
+    name: Combined Summary
+    needs: [setup-matrix, run-tests]
+    if: always()
+    runs-on: [self-hosted]
+    steps:
+      - name: Download all summary artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: test-summary-*
+          path: summaries/
+
+      - name: Combine summaries
+        shell: bash
+        run: |
+          {
+            echo "# K8s Migration Topology Suite — Combined Results"
+            echo ""
+            echo "**Tests:** ${{ needs.setup-matrix.outputs.test_count }} | **Overall:** ${{ needs.run-tests.result }}"
+            echo ""
+            found=0
+            for dir in summaries/test-summary-*/; do
+              [[ -d "$dir" ]] || continue
+              if [[ -f "${dir}test-summary.md" ]]; then
+                found=$((found + 1))
+                echo "---"
+                echo ""
+                cat "${dir}test-summary.md"
+                echo ""
+              fi
+            done
+            if [[ "$found" -eq 0 ]]; then
+              echo "> No individual test summaries were found."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
