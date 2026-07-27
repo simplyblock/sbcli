@@ -92,8 +92,42 @@ def _register_dhchap_keys_on_node(snode, host_nqn, host_entry, rpc_client):
     return key_names
 
 
-def _reapply_allowed_hosts(lvol, snode, rpc_client):
-    """Re-register allowed hosts (with DHCHAP keys) on a subsystem after recreation."""
+def add_host_to_subsystem(rpc_client, snode, nqn, host_entry, pool, dhchap_group,
+                          pool_key_names=None):
+    """Register *host_entry*'s keys on *snode* and add it to subsystem *nqn*.
+
+    A DHCHAP pool shares one key pair held on the pool; other volumes carry any
+    keys per-host on the allowed-hosts entry. ``pool_key_names`` lets a caller
+    that already registered the pool keys reuse them across hosts on the node.
+    """
+    if pool and pool.dhchap:
+        if pool_key_names is None:
+            pool_key_names = _register_pool_dhchap_keys_on_node(pool, snode, rpc_client)
+        return rpc_client.subsystem_add_host(
+            nqn, host_entry["nqn"],
+            dhchap_key=pool_key_names.get("dhchap_key"),
+            dhchap_ctrlr_key=pool_key_names.get("dhchap_ctrlr_key"),
+            dhchap_group=dhchap_group,
+        )
+    if any(host_entry.get(k) for k in ("dhchap_key", "dhchap_ctrlr_key", "psk")):
+        key_names = _register_dhchap_keys_on_node(snode, host_entry["nqn"], host_entry, rpc_client)
+        return rpc_client.subsystem_add_host(
+            nqn, host_entry["nqn"],
+            psk=key_names.get("psk"),
+            dhchap_key=key_names.get("dhchap_key"),
+            dhchap_ctrlr_key=key_names.get("dhchap_ctrlr_key"),
+            dhchap_group=dhchap_group,
+        )
+    return rpc_client.subsystem_add_host(nqn, host_entry["nqn"])
+
+
+def apply_allowed_hosts_on_node(lvol, snode, *, timeout=None, retry=None):
+    """Register keys and add every allowed host of *lvol* to its subsystem on *snode*.
+
+    Run after a subsystem is (re)created — on initial placement, restart/rejoin,
+    and migration. ``timeout``/``retry`` tighten the derived RPC client for the
+    failure-recovery callers that need bounded RPCs.
+    """
     db_ctrl = DBController()
     cluster = db_ctrl.get_cluster_by_id(snode.cluster_id)
     pool = None
@@ -102,31 +136,16 @@ def _reapply_allowed_hosts(lvol, snode, rpc_client):
             pool = db_ctrl.get_pool_by_id(lvol.pool_uuid)
         except KeyError:
             pass
+    rpc_kwargs = {}
+    if timeout is not None:
+        rpc_kwargs["timeout"] = timeout
+    if retry is not None:
+        rpc_kwargs["retry"] = retry
+    rpc_client = snode.rpc_client(**rpc_kwargs)
     dhchap_group = _get_dhchap_group(cluster, pool)
-    pool_key_names = {}
-    if pool and pool.dhchap:
-        pool_key_names = _register_pool_dhchap_keys_on_node(pool, snode, rpc_client)
+    pool_key_names = (_register_pool_dhchap_keys_on_node(pool, snode, rpc_client)
+                      if pool and pool.dhchap else {})
     for host_entry in lvol.allowed_hosts:
         logger.info("adding allowed host %s to subsystem %s", host_entry["nqn"], lvol.nqn)
-        # DHCHAP pools share one key pair held on the pool; non-DHCHAP volumes
-        # carry any keys per-host on the allowed-hosts entry itself.
-        if pool and pool.dhchap:
-            rpc_client.subsystem_add_host(
-                lvol.nqn, host_entry["nqn"],
-                dhchap_key=pool_key_names.get("dhchap_key"),
-                dhchap_ctrlr_key=pool_key_names.get("dhchap_ctrlr_key"),
-                dhchap_group=dhchap_group,
-            )
-        else:
-            has_keys = any(host_entry.get(k) for k in ("dhchap_key", "dhchap_ctrlr_key", "psk"))
-            if has_keys:
-                key_names = _register_dhchap_keys_on_node(snode, host_entry["nqn"], host_entry, rpc_client)
-                rpc_client.subsystem_add_host(
-                    lvol.nqn, host_entry["nqn"],
-                    psk=key_names.get("psk"),
-                    dhchap_key=key_names.get("dhchap_key"),
-                    dhchap_ctrlr_key=key_names.get("dhchap_ctrlr_key"),
-                    dhchap_group=dhchap_group,
-                )
-            else:
-                rpc_client.subsystem_add_host(lvol.nqn, host_entry["nqn"])
+        add_host_to_subsystem(rpc_client, snode, lvol.nqn, host_entry, pool, dhchap_group,
+                              pool_key_names)

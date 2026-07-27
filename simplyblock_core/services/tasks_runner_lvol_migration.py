@@ -92,7 +92,7 @@ from simplyblock_core.utils import convert_size
 from simplyblock_core.controllers import (
     migration_controller, migration_events, snapshot_controller, tasks_controller, tasks_events
 )
-from simplyblock_core.controllers.host_auth import _reapply_allowed_hosts
+from simplyblock_core.controllers.host_auth import apply_allowed_hosts_on_node
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_migration import LVolMigration
@@ -755,7 +755,7 @@ def _ensure_target_nvmf_state(migration, lvol, src_node, tgt_node, src_rpc, tgt_
                     nqn, lvol.ha_type, lvol.uuid, min_cntlid=random.randint(lo, hi),
                     max_namespaces=constants.LVO_MAX_NAMESPACES_PER_SUBSYS)
                 if lvol.allowed_hosts:
-                    _reapply_allowed_hosts(lvol, path['node'], rpc)
+                    apply_allowed_hosts_on_node(lvol, path['node'], timeout=5, retry=2)
                 rpc.listeners_create(nqn, path['trtype'], path['ip'], path['port'],
                                      ana_state="inaccessible")
                 ns = rpc.nvmf_subsystem_add_ns(nqn, ns_composite, lvol.uuid, lvol.guid)

@@ -46,7 +46,7 @@ from datetime import datetime
 from simplyblock_core import constants
 from simplyblock_core.controllers import migration_events, tasks_controller
 from simplyblock_core.exceptions import MigrationConflictError, PreconditionError
-from simplyblock_core.controllers.host_auth import _reapply_allowed_hosts
+from simplyblock_core.controllers.host_auth import apply_allowed_hosts_on_node
 from simplyblock_core.kms import create_kms_connection, lvol_dek_path, pool_kek_name
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import Cluster
@@ -1164,7 +1164,7 @@ def create_migration(lvol_id, target_node_id,
 
             if lvol.allowed_hosts:
                 try:
-                    _reapply_allowed_hosts(lvol, _node, _rpc)
+                    apply_allowed_hosts_on_node(lvol, _node)
                 except Exception as _e:
                     logger.warning(
                         f"create_migration: allowed_hosts reapply on "

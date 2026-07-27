@@ -25,7 +25,7 @@ from simplyblock_core import jm_raid
 from simplyblock_core.constants import LINUX_DRV_MASS_STORAGE_NVME_TYPE_ID, LINUX_DRV_MASS_STORAGE_ID
 from simplyblock_core.controllers import lvol_controller, storage_events, snapshot_controller, device_events, \
     device_controller, tasks_controller, health_controller, tcp_ports_events, qos_controller
-from simplyblock_core.controllers.host_auth import _reapply_allowed_hosts
+from simplyblock_core.controllers.host_auth import apply_allowed_hosts_on_node
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.job_schedule import JobSchedule
@@ -7107,7 +7107,7 @@ def _recreate_lvstore_on_non_leader_impl(snode, leader_node, primary_node, activ
                                               max_namespaces=lvol.max_namespace_per_subsys,
                                               allow_any_host=allow_any)
         if lvol.allowed_hosts:
-            _reapply_allowed_hosts(lvol, snode, snode_rpc_client)
+            apply_allowed_hosts_on_node(lvol, snode)
 
     leader_lvs_port = primary_node.get_lvol_subsys_port(primary_node.lvstore)
 
@@ -8161,7 +8161,7 @@ def _recreate_lvstore_impl(snode, force=False, lvs_primary=None, activation_mode
             if ret:
                 created_subsystems.append(lvol.nqn)
         if lvol.allowed_hosts:
-            _reapply_allowed_hosts(lvol, snode, rpc_client)
+            apply_allowed_hosts_on_node(lvol, snode)
 
     # ANA failback only when the original primary is coming back (not takeover)
     if not is_takeover and lvs_node.secondary_node_id and lvol_list:
@@ -9075,7 +9075,6 @@ def repair_lvol_registration_on_non_leader(lvol, sec_node, secondary_index):
 
     Returns ``(ok, err)``.
     """
-    from simplyblock_core.controllers.host_auth import _reapply_allowed_hosts
 
     # Never touch an LVS whose state is owned by a restart / activation /
     # expansion — the owning flow re-registers lvols itself.
@@ -9108,7 +9107,7 @@ def repair_lvol_registration_on_non_leader(lvol, sec_node, secondary_index):
             max_namespaces=lvol.max_namespace_per_subsys,
             allow_any_host=allow_any)
         if lvol.allowed_hosts:
-            _reapply_allowed_hosts(lvol, sec_node, rpc_client)
+            apply_allowed_hosts_on_node(lvol, sec_node, timeout=10, retry=2)
 
     return add_lvol_thread(lvol, sec_node, lvol_ana_state="non_optimized")
 
