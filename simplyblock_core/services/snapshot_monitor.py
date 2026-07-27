@@ -25,40 +25,22 @@ def set_snapshot_health_check(snap, health_check_status):
     snap.write_to_db()
 
 
-def process_snap_delete_finish(snap, leader_node):
+def process_snap_delete_finish(snap, completed_node):
+    """Phase-2 of the delete protocol (sync deletes + DB finalize).
+
+    ``completed_node`` is the node where the phase-1 async delete was issued
+    (``snap.deletion_status``) and has been CONFIRMED complete by a
+    delete-status poll. It is authoritative regardless of where leadership
+    sits NOW: phase-2 runs per-node and needs no leader. The previous
+    re-detection of leadership here (and the async re-issue whenever
+    ``deletion_status`` pointed elsewhere) turned every leadership move into
+    another phase-1 — run 20260725: leadership flapped for an hour, the
+    monitor re-fired async deletes each cycle (18k phase-1, zero phase-2)
+    and raised "Failed to get leader node" 244k times while sync deletes
+    that needed no leader were never sent."""
     logger.info(f"Snapshot deleted successfully, id: {snap.get_id()}")
 
-    # check leadership
     snode = db.get_storage_node_by_id(snap.lvol.node_id)
-    sec_nodes = []
-    for peer_id in [snode.secondary_node_id, snode.tertiary_node_id]:
-        if peer_id:
-            try:
-                sec_nodes.append(db.get_storage_node_by_id(peer_id))
-            except KeyError:
-                pass
-    leader_node = None
-    snode = db.get_storage_node_by_id(snode.get_id())
-    if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
-        ret = snode.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
-        if not ret:
-            raise Exception("Failed to get LVol info")
-        lvs_info = ret[0]
-        if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
-            leader_node = snode
-
-    if not leader_node:
-        for sec_node in sec_nodes:
-            if sec_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
-                ret = sec_node.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
-                if ret:
-                    lvs_info = ret[0]
-                    if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
-                        leader_node = sec_node
-                        break
-
-    if not leader_node:
-        raise Exception("Failed to get leader node")
 
     # special_delete (SPDK migration_flag) is set ONLY when the SAME snapshot
     # exists on more than one node (lvol migration placed a copy elsewhere).
@@ -66,30 +48,22 @@ def process_snap_delete_finish(snap, leader_node):
     # home-node-only snapshot; it is NOT grown by local clones. Do not use the
     # blob open_ref>1, which local clones bump and a clone-entry leak strands.
     special_delete = len(snap.instances) > 0
-    if snap.deletion_status != leader_node.get_id():
-        ret, _ = leader_node.rpc_client().delete_lvol(snap.snap_bdev, sync=False, special_delete=special_delete)
-        if not ret:
-            logger.error(f"Failed to delete snap from node: {snode.get_id()}")
-        snap = db.get_snapshot_by_id(snap.get_id())
-        snap.deletion_status = leader_node.get_id()
-        snap.write_to_db()
-        return
 
-    # 3-1 async delete lvol bdev from primary
-    primary_node = db.get_storage_node_by_id(leader_node.get_id())
+    primary_node = db.get_storage_node_by_id(completed_node.get_id())
 
-    # Collect all non-leader secondary nodes
+    # Every LVS member other than the phase-1 node owes a sync delete (the
+    # sync pass clears the peers' lvol registrations; it is per-node and
+    # needs no leadership).
     non_leaders = []
     secondary_ids = []
     if snode.secondary_node_id:
         secondary_ids.append(snode.secondary_node_id)
     if snode.tertiary_node_id:
         secondary_ids.append(snode.tertiary_node_id)
-    # If the host node itself is not the leader, it's also a non-leader
-    if snode.get_id() != leader_node.get_id():
+    if snode.get_id() != primary_node.get_id():
         non_leaders.append(db.get_storage_node_by_id(snode.get_id()))
     for sec_id in secondary_ids:
-        if sec_id != leader_node.get_id():
+        if sec_id != primary_node.get_id():
             non_leaders.append(db.get_storage_node_by_id(sec_id))
 
     if primary_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
@@ -151,17 +125,55 @@ def set_snap_offline(snap):
     sn.write_to_db()
 
 
+# Rate-limited leaderless diagnostics: lvs_name -> (last_warn_monotonic,
+# suppressed_count). Run 20260725: the per-snapshot "Failed to get leader
+# node" raise fired 244,072 times in one hour — one line per in-deletion
+# snapshot per cycle — while phase-2 work that needed no leader sat undone.
+_leaderless_warn_memo: dict = {}
+_LEADERLESS_WARN_INTERVAL_SEC = 60
+
+
+def _warn_leaderless(lvs_name):
+    now = time.monotonic()
+    last, suppressed = _leaderless_warn_memo.get(lvs_name, (0.0, 0))
+    if now - last >= _LEADERLESS_WARN_INTERVAL_SEC:
+        logger.warning(
+            f"No confirmed leader for {lvs_name} — snapshot deletes needing "
+            f"phase-1 are deferred ({suppressed} similar messages suppressed "
+            f"in the last {_LEADERLESS_WARN_INTERVAL_SEC}s)")
+        _leaderless_warn_memo[lvs_name] = (now, 0)
+    else:
+        _leaderless_warn_memo[lvs_name] = (last, suppressed + 1)
+
+
+def _poll_delete_status(node, bdev_name):
+    """Delete-status poll on ``node``; returns the status int or None when the
+    node cannot answer (unreachable / bad state)."""
+    if node is None or node.status not in [
+            StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED,
+            StorageNode.STATUS_DOWN]:
+        return None
+    try:
+        return node.rpc_client().bdev_lvol_get_lvol_delete_status(bdev_name)
+    except Exception as e:
+        logger.error(f"delete-status poll for {bdev_name} on "
+                     f"{node.get_id()[:8]} failed: {e}")
+        return None
+
+
 def process_snap_delete(snap, snode, all_mini_lvols=None):
     # check leadership
     leader_node = None
     if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED,
                         StorageNode.STATUS_DOWN]:
-        ret = snode.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
-        if not ret:
-            raise Exception("Failed to get LVol store info")
-        lvs_info = ret[0]
-        if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
-            leader_node = snode
+        try:
+            ret = snode.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
+        except Exception:
+            ret = None
+        if ret:
+            lvs_info = ret[0]
+            if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
+                leader_node = snode
 
     if not leader_node:
         for peer_id in [snode.secondary_node_id, snode.tertiary_node_id]:
@@ -174,16 +186,16 @@ def process_snap_delete(snap, snode, all_mini_lvols=None):
             if sec_node.status not in [StorageNode.STATUS_ONLINE,
                                        StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
                 continue
-            ret = sec_node.rpc_client().bdev_lvol_get_lvstores(sec_node.lvstore)
+            try:
+                ret = sec_node.rpc_client().bdev_lvol_get_lvstores(sec_node.lvstore)
+            except Exception:
+                continue
             if not ret:
                 continue
             lvs_info = ret[0]
             if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
                 leader_node = sec_node
                 break
-
-    if not leader_node:
-        raise Exception("Failed to get leader node")
 
     if all_mini_lvols is None:
         all_mini_lvols = db.get_mini_lvols()
@@ -193,11 +205,33 @@ def process_snap_delete(snap, snode, all_mini_lvols=None):
                 logger.error("Cannot delete snapshot while it's clone is in deletion")
                 return False
 
-    if snap.deletion_status == "" or snap.deletion_status != leader_node.get_id():
+    if not leader_node:
+        # Phase-2 needs NO leader: sync deletes run per-node and the
+        # delete-status poll targets the recorded phase-1 node. Only phase-1
+        # (async on the leader) has to wait for leadership. Run 20260725: the
+        # unconditional raise here deadlocked 18k snapshot deletes for the
+        # whole leadership flap even though their phase-1 had completed.
+        if snap.deletion_status:
+            try:
+                recorded_node = db.get_storage_node_by_id(snap.deletion_status)
+            except KeyError:
+                recorded_node = None
+            st = _poll_delete_status(recorded_node, snap.snap_bdev)
+            if st in (0, 2, -2, 3):  # completed / gone / done-but-leadership-moved
+                process_snap_delete_finish(snap, recorded_node)
+                return True
+            if st == 1:
+                logger.info(f"Snap deletion in progress, id: {snap.get_id()}")
+                return True
+        _warn_leaderless(snap.lvol.lvs_name)
+        return False
+
+    special_delete = len(snap.instances) > 0
+    if snap.deletion_status == "":
+        # Phase-1: async delete on the confirmed leader.
         # See note above: special_delete only for a snapshot copied to another
         # node by lvol migration (snap.instances non-empty), never for a local
         # clone or a stranded blob open_ref.
-        special_delete = len(snap.instances) > 0
         ret, _ = leader_node.rpc_client().delete_lvol(snap.snap_bdev, sync=False, special_delete=special_delete)
         if not ret:
             logger.error(f"Failed to delete snap from node: {snode.get_id()}")
@@ -207,6 +241,42 @@ def process_snap_delete(snap, snode, all_mini_lvols=None):
         snap.write_to_db()
 
         time.sleep(1)
+
+    elif snap.deletion_status != leader_node.get_id():
+        # Leadership moved AFTER phase-1 was issued elsewhere. Never blindly
+        # re-issue on the new leader — run 20260725: leadership flapped for an
+        # hour and every monitor cycle re-fired phase-1 (18k async deletes,
+        # zero phase-2). The recorded node stays authoritative for its own
+        # async: re-issue ONLY when it provably lost it (status 4 = no async
+        # request exists there / node gone).
+        try:
+            recorded_node = db.get_storage_node_by_id(snap.deletion_status)
+        except KeyError:
+            recorded_node = None
+        st = _poll_delete_status(recorded_node, snap.snap_bdev)
+        if st in (0, 2, -2, 3):
+            process_snap_delete_finish(snap, recorded_node)
+            return True
+        if st == 1:
+            logger.info(f"Snap deletion in progress, id: {snap.get_id()}")
+            return True
+        if st == 4 or recorded_node is None:
+            logger.warning(
+                f"Phase-1 of {snap.snap_bdev} lost on recorded node "
+                f"{snap.deletion_status[:8]} (status {st}) — re-issuing on "
+                f"current leader {leader_node.get_id()[:8]}")
+            ret, _ = leader_node.rpc_client().delete_lvol(snap.snap_bdev, sync=False, special_delete=special_delete)
+            if not ret:
+                logger.error(f"Failed to delete snap from node: {leader_node.get_id()}")
+                return False
+            snap = db.get_snapshot_by_id(snap.get_id())
+            snap.deletion_status = leader_node.get_id()
+            snap.write_to_db()
+            time.sleep(1)
+        else:
+            # Transient poll error on the recorded node — retry next cycle
+            # rather than risking a duplicate phase-1.
+            return False
 
     try:
         ret = leader_node.rpc_client().bdev_lvol_get_lvol_delete_status(snap.snap_bdev)
