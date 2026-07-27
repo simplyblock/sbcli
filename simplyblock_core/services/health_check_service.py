@@ -71,6 +71,43 @@ def set_device_health_check(cluster_id, device, health_check_status):
                     return
 
 
+# Per-node memo of the last remote-device sweep: node_id -> (topology_epoch,
+# monotonic ts). sync_remote_devices_from_spdk pays one SPDK inventory RPC per
+# call; running it on EVERY pass for EVERY node is pure idle load once the
+# topology is stable (run 20260725: the sweep fired every ~40-50s per SPDK
+# instance around the clock). The sweep only changes its answer when peer
+# node/device topology changes, so gate it on a topology epoch with a forced
+# floor so drift (manual attach, missed event) is still reconciled.
+_remote_sweep_memo: dict = {}
+
+
+def _peer_topology_epoch(snode, cluster_nodes):
+    """Cheap fingerprint of everything sync_remote_devices_from_spdk reads:
+    peer node ids+statuses and their device ids+statuses+alceml names."""
+    parts = []
+    for peer in cluster_nodes:
+        if peer.get_id() == snode.get_id():
+            continue
+        parts.append(peer.get_id())
+        parts.append(peer.status)
+        for dev in peer.nvme_devices:
+            parts.append(dev.get_id())
+            parts.append(dev.status)
+            parts.append(dev.alceml_bdev or "")
+    return hash(tuple(parts))
+
+
+def _remote_sweep_due(snode, cluster_nodes):
+    epoch = _peer_topology_epoch(snode, cluster_nodes)
+    memo = _remote_sweep_memo.get(snode.get_id())
+    now = time.monotonic()
+    if memo is not None and memo[0] == epoch and \
+            (now - memo[1]) < constants.HEALTH_CHECK_REMOTE_SWEEP_FORCE_SEC:
+        return False
+    _remote_sweep_memo[snode.get_id()] = (epoch, now)
+    return True
+
+
 def check_node(snode):
 
     try:
@@ -165,8 +202,11 @@ def check_node(snode):
             if device.status == NVMeDevice.STATUS_ONLINE:
                 node_devices_check &= passed
 
-        if storage_node_ops.sync_remote_devices_from_spdk(snode):
-            snode = db.get_storage_node_by_id(snode.get_id())
+        # Topology-gated: the sweep pays an SPDK inventory RPC; skip it while
+        # peer topology is unchanged (forced floor keeps drift bounded).
+        if _remote_sweep_due(snode, db.get_storage_nodes_by_cluster_id(snode.cluster_id)):
+            if storage_node_ops.sync_remote_devices_from_spdk(snode):
+                snode = db.get_storage_node_by_id(snode.get_id())
 
         # Reconcile against cluster topology. node.remote_devices is rebuilt
         # as "whatever was reachable at that moment" by the restart /

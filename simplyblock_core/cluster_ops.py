@@ -1,5 +1,4 @@
 # coding=utf-8
-import datetime
 import json
 import os
 import socket
@@ -8,6 +7,7 @@ import threading
 import time
 import uuid
 import typing as t
+from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import docker
@@ -427,7 +427,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
 
     cluster.db_connection = db_connection  # type: ignore[assignment]
     cluster.status = Cluster.STATUS_UNREADY
-    cluster.create_dt = str(datetime.datetime.now())
+    cluster.create_dt = str(datetime.now())
 
     cluster.write_to_db(db_controller.kv_store)
 
@@ -596,7 +596,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
 
     cluster.backup_local_path = os.path.join(constants.KVD_DB_BACKUP_PATH, cluster.uuid)
     cluster.status = Cluster.STATUS_UNREADY
-    cluster.create_dt = str(datetime.datetime.now())
+    cluster.create_dt = str(datetime.now())
     cluster.write_to_db(db_controller.kv_store)
     cluster_events.cluster_create(cluster)
 
@@ -779,7 +779,7 @@ def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                 fresh = db_controller.get_cluster_by_id(cl_id)
                 if fresh.status != Cluster.STATUS_IN_ACTIVATION:
                     continue
-                now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                now_iso = datetime.now(timezone.utc).isoformat()
                 db_controller.atomic_update(
                     fresh, lambda c, v=now_iso: setattr(c, "activation_heartbeat", v))
             except Exception:
@@ -1513,7 +1513,7 @@ def set_cluster_status(cl_id, status) -> None:
         # (incident 2026-06-25). Stamped inside the CAS so it is written
         # atomically with the status flip.
         if status == Cluster.STATUS_IN_ACTIVATION:
-            fresh.in_activation_since = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            fresh.in_activation_since = datetime.now(timezone.utc).isoformat()
             fresh.activation_heartbeat = fresh.in_activation_since
         elif captured['old'] == Cluster.STATUS_IN_ACTIVATION:
             fresh.in_activation_since = ""
@@ -2181,7 +2181,7 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                         logger.info(f"Updating deployment {deploy.metadata.name} image to {service_image}")
                         c.image = service_image
                         annotations = deploy.spec.template.metadata.annotations or {}
-                        annotations["pod.kubernetes.io/restartedAt"] = datetime.datetime.utcnow().isoformat()
+                        annotations["pod.kubernetes.io/restartedAt"] = datetime.now(timezone.utc).isoformat()
                         deploy.spec.template.metadata.annotations = annotations
                         apps_v1.patch_namespaced_deployment(
                             name=deploy.metadata.name,
@@ -2214,7 +2214,7 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                         logger.info(f"Updating daemonset {ds.metadata.name} image to {service_image}")
                         c.image = service_image
                         annotations = ds.spec.template.metadata.annotations or {}
-                        annotations["pod.kubernetes.io/restartedAt"] = datetime.datetime.utcnow().isoformat()
+                        annotations["pod.kubernetes.io/restartedAt"] = datetime.now(timezone.utc).isoformat()
                         ds.spec.template.metadata.annotations = annotations
                         apps_v1.patch_namespaced_daemon_set(
                             name=ds.metadata.name,
