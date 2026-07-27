@@ -13,7 +13,7 @@ from simplyblock_core.models.lvol_model import LVol, LVolReplication
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.cluster import Cluster
-from simplyblock_core.models.nvme_connect import NvmeConnectEntry
+from simplyblock_core.utils.nvme import NvmeConnectEntry
 
 
 def _src_lvol():

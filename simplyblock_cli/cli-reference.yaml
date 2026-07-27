@@ -83,17 +83,17 @@ commands:
             type: str
             default: ""
           - name: "--device-model"
-            help: "NVMe SSD model string, example: --model PM1628, --device-model and --size-range must be set together."
+            help: "NVMe SSD model string, example: --model PM1628. Can be used alone to filter by model, or combined with --size-range to further filter by size."
             description: >
-              NVMe SSD model string, example: --model PM1628,  --device-model and --size-range must be set together
+              NVMe SSD model string, example: --model PM1628. Can be used alone to filter NVMe devices by model, or combined with --size-range: if both are given, only devices matching both filters are selected.
             dest: device_model
             required: false
             type: str
             default: ""
           - name: "--size-range"
-            help: "NVMe SSD device size range separated by -, can be X(m,g,t) or bytes as integer, example: --size-range 50G-1T or --size-range 1232345-67823987, --device-model and --size-range must be set together."
+            help: "NVMe SSD device size range separated by -, can be X(m,g,t) or bytes as integer, example: --size-range 50G-1T or --size-range 1232345-67823987. Can be used alone to filter by size, or combined with --device-model to further filter by model."
             description: >
-              NVMe SSD device size range separated by -, can be X(m,g,t) or bytes as integer, example: --size-range 50G-1T or --size-range 1232345-67823987,  --device-model and --size-range must be set together
+              NVMe SSD device size range separated by -, can be X(m,g,t) or bytes as integer, example: --size-range 50G-1T or --size-range 1232345-67823987. Can be used alone to filter NVMe devices by size range, or combined with --device-model: if both are given, only devices matching both filters are selected.
             dest: size_range
             required: false
             type: str

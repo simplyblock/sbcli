@@ -1035,26 +1035,6 @@ def get_next_port(cluster_id):
     return get_next_nvmf_port(cluster_id)
 
 
-def get_next_rpc_port(cluster_id):
-    from simplyblock_core.db_controller import DBController
-    db_controller = DBController()
-
-    _, rpc_base, _ = _get_cluster_port_config(cluster_id)
-    used_ports = []
-    for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
-        if node.rpc_port > 0:
-            used_ports.append(node.rpc_port)
-
-    for i in range(1000):
-        next_port = rpc_base + i
-        if next_port not in used_ports:
-            return next_port
-
-    return 0
-
-
-
-
 def get_next_lvstore_ports(cluster_id):
     """Allocate two consecutive NVMe-oF ports for a new lvstore (lvol_subsys + hublvol)."""
     nvmf_base, _, _ = _get_cluster_port_config(cluster_id)
@@ -1546,7 +1526,7 @@ def detect_nvmes(pci_allowed, pci_blocked, device_model, size_range, nvme_names)
         for pci in pci_addresses:
             pci_utils.ensure_driver(pci, 'nvme', override=True)
         logger.debug(f"Found nvme devices are {pci_addresses}")
-    elif device_model and size_range:
+    elif device_model or size_range:
         pci_addresses = query_nvme_ssd_by_model_and_size(device_model, size_range)
         logger.debug(f"Found nvme devices are {pci_addresses}")
         pci_allowed = pci_addresses
@@ -3367,27 +3347,25 @@ def get_nvme_list_verbose() -> str:
 
 
 def query_nvme_ssd_by_model_and_size(model: str, size_range: str) -> list:
-    if not model:
-        print("No model specified.")
-        return []
-    if not size_range:
-        print("No size range specified.")
+    if not model and not size_range:
+        print("No model or size range specified.")
         return []
 
     size_from = 0
     size_to = 0
-    try:
-        range_split = size_range.split('-')
-        if len(range_split) == 1:
-            size_from = parse_size(range_split[0])
-        elif len(range_split) == 2:
-            size_from = parse_size(range_split[0])
-            size_to = parse_size(range_split[1])
-        else:
-            raise ValueError("Invalid size range")
-    except Exception as e:
-        print(e)
-        return []
+    if size_range:
+        try:
+            range_split = size_range.split('-')
+            if len(range_split) == 1:
+                size_from = parse_size(range_split[0])
+            elif len(range_split) == 2:
+                size_from = parse_size(range_split[0])
+                size_to = parse_size(range_split[1])
+            else:
+                raise ValueError("Invalid size range")
+        except Exception as e:
+            print(e)
+            return []
 
     json_string = get_nvme_list_verbose()
     data = json.loads(json_string)
@@ -3397,14 +3375,13 @@ def query_nvme_ssd_by_model_and_size(model: str, size_range: str) -> list:
         for subsystem in device_entry.get('Subsystems', []):
             for controller in subsystem.get('Controllers', []):
                 model_number = controller.get("ModelNumber")
-                if model_number != model:
+                if model and model_number != model:
                     continue
                 address = controller.get("Address")
                 if len(controller.get("Namespaces")) > 0:
                     size = controller.get("Namespaces")[0].get("PhysicalSize")
-                    if size > size_from:
-                        if size_to > 0 and size < size_to:
-                            pci_lst.append(address)
+                    if not size_range or (size > size_from and (size_to == 0 or size < size_to)):
+                        pci_lst.append(address)
     return pci_lst
 
 

@@ -54,10 +54,10 @@ from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_migration import LVolMigration
 from simplyblock_core.models.lvol_migration_group import LVolMigrationGroup
 from simplyblock_core.models.lvol_model import LVol
-from simplyblock_core.models.nvme_connect import NvmeConnectEntry
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.utils import convert_size, lvol_tgt_bdev_name
+from simplyblock_core.utils.nvme import HostConnectAuth, build_nvme_connect_entry
 
 # Note: JobSchedule is not imported directly here; task creation is delegated to
 # tasks_controller.add_lvol_mig_task() which handles event logging consistently.
@@ -787,44 +787,15 @@ def _build_connect_entries(node, port, lvol, nqn, ctrl_loss_tmo, cluster, host_e
         ip = nic.ip4_address
         if not ip or nic.trtype.lower() != lvol.fabric:
             continue
-        trtype = nic.trtype.lower()
-        keep_alive_tmo = (constants.LVOL_NVME_KEEP_ALIVE_TO_TCP
-                          if trtype == "tcp" else constants.LVOL_NVME_KEEP_ALIVE_TO)
-        client_data_nic_str = f"--host-iface={cluster.client_data_nic}" if cluster.client_data_nic else ""
-        tls_str = host_auth_str = ""
-        if host_entry:
-            host_auth_str = f" --hostnqn={host_nqn}"
-            if host_entry.get("psk"):
-                tls_str = " --tls"
-            if host_entry.get("dhchap_key"):
-                host_auth_str += f" --dhchap-secret={host_entry['dhchap_key']}"
-            if host_entry.get("dhchap_ctrlr_key"):
-                host_auth_str += f" --dhchap-ctrl-secret={host_entry['dhchap_ctrlr_key']}"
-        elif host_nqn:
-            host_auth_str = f" --hostnqn={host_nqn}"
-        connect_cmd = (
-            f"sudo nvme connect"
-            f" --reconnect-delay={constants.LVOL_NVME_CONNECT_RECONNECT_DELAY}"
-            f" --ctrl-loss-tmo={ctrl_loss_tmo}"
-            f" --fast_io_fail_tmo={constants.LVOL_NVME_CONNECT_FAST_IO_FAIL_TO}"
-            f" --nr-io-queues={cluster.client_qpair_count}"
-            f" --keep-alive-tmo={keep_alive_tmo}"
-            f" --transport={trtype} --traddr={ip} --trsvcid={port} --nqn={nqn}"
-            f" {client_data_nic_str}{tls_str}{host_auth_str}"
-        )
-        entries.append(NvmeConnectEntry(
-            transport=trtype,
+        entries.append(build_nvme_connect_entry(
+            transport=nic.trtype.lower(),
             ip=ip,
             port=port,
             nqn=nqn,
-            reconnect_delay=constants.LVOL_NVME_CONNECT_RECONNECT_DELAY,
             ctrl_loss_tmo=ctrl_loss_tmo,
-            fast_io_fail_tmo=constants.LVOL_NVME_CONNECT_FAST_IO_FAIL_TO,
-            nr_io_queues=cluster.client_qpair_count,
-            keep_alive_tmo=keep_alive_tmo,
-            host_iface=cluster.client_data_nic or "",
-            connect=connect_cmd,
-            tls=bool(host_entry and host_entry.get("psk")),
+            cluster=cluster,
+            host_entry=host_entry,
+            host_nqn=host_nqn,
         ))
     return entries
 
@@ -1224,15 +1195,7 @@ def create_migration(lvol_id, target_node_id,
                 f"create_migration: subsystem {nqn} ready on {_node_id[:8]}")
 
     # ── 4. Build connect strings for the target node ──────────────────────────
-    host_entry = None
-    if lvol.allowed_hosts and host_nqn:
-        for h in lvol.allowed_hosts:
-            if h["nqn"] == host_nqn:
-                host_entry = h
-                break
-
-    if lvol.allowed_hosts and not host_nqn:
-        raise ValueError(f"Volume {lvol_id} has allowed hosts configured; --host-nqn is required")
+    host_entry = HostConnectAuth.resolve(lvol, host_nqn, db)
 
     out = []
     for _n, _, _p, _ in tgt_entries:

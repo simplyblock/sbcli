@@ -136,7 +136,7 @@ def parse_arguments() -> argparse.Namespace:
     )
     parser.add_argument(
         '--device-model',
-        help='NVMe SSD model string, example: --model PM1628, --device-model and --size-range must be set together',
+        help='NVMe SSD model string, example: --model PM1628. Can be used alone to filter by model, or combined with --size-range to further filter by size.',
         type=str,
         default='',
         dest='device_model',
@@ -144,7 +144,7 @@ def parse_arguments() -> argparse.Namespace:
     )
     parser.add_argument(
         '--size-range',
-        help='NVMe SSD device size range separated by -, can be X(m,g,t) or bytes as integer, example: --size-range 50G-1T or --size-range 1232345-67823987, --device-model and --size-range must be set together',
+        help='NVMe SSD device size range separated by -, can be X(m,g,t) or bytes as integer, example: --size-range 50G-1T or --size-range 1232345-67823987. Can be used alone to filter by size, or combined with --device-model to further filter by model.',
         type=str,
         default='',
         dest='size_range',

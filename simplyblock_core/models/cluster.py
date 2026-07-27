@@ -247,6 +247,7 @@ class DeployConfig(BaseModel):
     db_connection: SecretStr = SecretStr("")
     grafana_secret: SecretStr = SecretStr("")
     mode: str = "docker"
+    disable_monitoring: bool = False
 
     def get_id(self):
         return "uuid"
