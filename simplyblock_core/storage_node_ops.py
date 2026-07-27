@@ -6414,6 +6414,157 @@ def _count_fabric_disconnected_nodes(all_nodes, lvs_peer_ids=None):
     return count
 
 
+def _leadership_moving_tasks_active(cluster_id, node_ids):
+    """True when a port-allow or restart task is active on any LVS member.
+
+    Those flows own leadership movement (the port-allow failback demotes the
+    acting leader and lets the primary self-promote on the first redirected
+    IO); a concurrent recovery grant fights them — run 20260725 21:18-21:22:
+    take-leadership grants on the primary vs port-allow demotes on the acting
+    leader, flapping LVS_1 leadership for minutes. When the task state cannot
+    be read, err on NOT granting."""
+    try:
+        db = DBController()
+        for task in db.get_job_tasks(cluster_id):
+            if task.function_name not in (JobSchedule.FN_PORT_ALLOW,
+                                          JobSchedule.FN_NODE_RESTART):
+                continue
+            if task.node_id in node_ids and \
+                    task.status != JobSchedule.STATUS_DONE and not task.canceled:
+                return True
+    except Exception as e:
+        logger.warning("Cannot verify port-allow/restart task state for "
+                       "leaderless recovery (%s) — refusing to grant", e)
+        return True
+    return False
+
+
+def _taker_jm_quorum_ok(taker):
+    """True when the prospective leadership taker's JC reports at least the
+    JM write quorum (2) ready. Granting leadership to a primary whose JMs are
+    excluded is pointless and harmful: it self-demotes on the next quorum
+    check and the grant/demote cycle flaps (run 20260725: LVS_1 primary
+    self-demoted at 20:46/20:55 on JM quorum loss, every subsequent grant
+    lasted seconds)."""
+    if not taker.jm_vuid:
+        return False
+    try:
+        st = taker.rpc_client(timeout=5, retry=1).jc_get_jm_status(taker.jm_vuid)
+    except Exception as e:
+        logger.warning("jc_get_jm_status on %s failed: %s — refusing to grant "
+                       "leadership", taker.get_id()[:8], e)
+        return False
+    if not st:
+        return False
+    ready = sum(1 for v in st.values() if v)
+    if ready < 2:
+        logger.warning("taker %s has only %d ready JM(s) — refusing to grant "
+                       "leadership", taker.get_id()[:8], ready)
+        return False
+    return True
+
+
+def _recover_leaderless_lvs(cluster_id, all_nodes, lvs_name, preferred_taker):
+    """Recovery for a leaderless-but-healthy LVS — WITHOUT the control plane
+    forcing leadership except as a guarded last resort.
+
+    Design constraint (see tasks_runner_port_allow._failback_leadership_to_primary,
+    incident 2026-07-06 LVS_13): a management-forced ``leader=True`` skips the
+    primary's LVS update (blob-md reload) and can serve stale blob metadata —
+    extent-metadata corruption. The sanctioned mechanism is: verified-open
+    hublvols from the followers to the primary, then the primary promotes
+    ITSELF on the first redirected IO. Run 20260725 additionally showed the
+    unguarded per-call grant firing from every API worker at once (7 grants/s
+    from 5 WebAppAPI containers) while port-allow demoted the acting leader.
+
+    Sequence, single-flight cluster-wide:
+      0. FDB test-and-set lock keyed ``takeleader/<lvs>``; deliberately never
+         released, so the lock TTL (LVSTORE_MUTATION_LOCK_TTL_SEC) doubles as
+         the recovery cooldown across all processes.
+      1. Verify/repair follower->primary hublvols (redirect path); bounded
+         wait for the primary's self-promotion via redirected IO.
+      2. Last-resort grant ONLY if still leaderless AND no port-allow/restart
+         task is active on any LVS member AND the taker's JM quorum is intact;
+         then verify the grant took.
+
+    Returns the confirmed leader node or None (callers fail fast; the
+    no-leader negative cache bounds re-entry)."""
+    from simplyblock_core.controllers.lvol_controller import is_node_leader
+
+    db = DBController()
+    owner = f"{socket.gethostname()}-{os.getpid()}-{threading.get_ident()}"
+    won, holder = db.acquire_lvstore_lock(
+        cluster_id, f"takeleader/{lvs_name}", owner)
+    if not won:
+        logger.warning(
+            "leaderless recovery for %s already ran/running within the last "
+            "%ss (holder %s) — failing fast", lvs_name,
+            constants.LVSTORE_MUTATION_LOCK_TTL_SEC, holder)
+        return None
+
+    taker = preferred_taker
+    member_ids = [n.get_id() for n in all_nodes]
+
+    # 1- repair the redirect paths so the primary CAN self-promote.
+    for peer in all_nodes:
+        if peer.get_id() == taker.get_id():
+            continue
+        if peer.status not in (StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN):
+            continue
+        try:
+            health_controller._check_sec_node_hublvol(
+                peer, auto_fix=True, primary_node_id=taker.get_id())
+        except Exception as e:
+            logger.warning("hublvol verify/repair %s -> %s failed: %s",
+                           peer.get_id()[:8], taker.get_id()[:8], e)
+
+    # Bounded wait: with hublvols open, the first redirected IO triggers the
+    # primary's LVS update and self-promotion (the sanctioned path).
+    for _ in range(5):
+        for node in all_nodes:
+            try:
+                if is_node_leader(node, lvs_name):
+                    logger.info("Leadership for %s restored on %s (self-"
+                                "promotion)", lvs_name, node.get_id()[:8])
+                    return node
+            except Exception:
+                continue
+        time.sleep(1)
+
+    # 2- last-resort grant, heavily guarded (control-plane-only workloads
+    # never generate the redirected IO that triggers self-promotion).
+    if _leadership_moving_tasks_active(cluster_id, member_ids):
+        logger.warning("leaderless recovery for %s: port-allow/restart task "
+                       "active on an LVS member — leaving leadership movement "
+                       "to it", lvs_name)
+        return None
+    if not _taker_jm_quorum_ok(taker):
+        return None
+    logger.warning(
+        "LVS %s still leaderless after hublvol repair and no handoff task is "
+        "active — last-resort: instructing %s to take leadership",
+        lvs_name, taker.get_id())
+    try:
+        taker.rpc_client(timeout=5, retry=2).bdev_lvol_set_leader(
+            lvs_name, leader=True)
+    except Exception as e:
+        logger.error("take-leadership RPC on %s for %s failed: %s",
+                     taker.get_id(), lvs_name, e)
+        return None
+    for _ in range(5):
+        try:
+            if is_node_leader(taker, lvs_name):
+                logger.info("Leadership for %s restored on %s",
+                            lvs_name, taker.get_id())
+                return taker
+        except Exception:
+            pass
+        time.sleep(1)
+    logger.error("take-leadership on %s for %s did not take effect — "
+                 "refusing to route", taker.get_id(), lvs_name)
+    return None
+
+
 def find_leader_with_failover(all_nodes, lvs_name):
     """Detect the current leader and failover if needed — with a no-leader
     fail-fast gate.
@@ -6548,11 +6699,14 @@ def _find_leader_with_failover_impl(all_nodes, lvs_name):
     # 2026-07-10 21:52, LVS_7: primary+sec+tert all leadership=False, all
     # healthy). The forced-handoff below cannot repair it: the signal only
     # asks a leader to DROP leadership, nobody holds it, and the JC never
-    # elects while the primary is alive — so every operation against the LVS
-    # live-locked in signal/verify/refuse cycles. Recovery: instruct the
-    # configured primary to TAKE leadership and verify it took.
+    # elects while the primary is alive. Recovery is delegated to
+    # _recover_leaderless_lvs: hublvol repair + self-promotion first, a
+    # heavily-guarded single-flight grant only as last resort — the previous
+    # unguarded per-call set_leader(True) here fired from every API worker at
+    # once and fought the port-allow handoff (run 20260725), and a CP-forced
+    # grant risks stale blob metadata (incident 2026-07-06 LVS_13).
     if _is_node_rpc_responsive(leader, lvs_name):
-        # Last-moment sweep: abort the grant if anyone became leader meanwhile.
+        # Last-moment sweep: abort the recovery if anyone became leader meanwhile.
         for node in all_nodes:
             try:
                 if is_node_leader(node, lvs_name):
@@ -6568,30 +6722,11 @@ def _find_leader_with_failover_impl(all_nodes, lvs_name):
                 _is_fabric_connected(taker)
                 and _is_node_rpc_responsive(taker, lvs_name)):
             taker = leader
-        logger.warning(
-            "LVS %s has no leader on any node but all are healthy — "
-            "instructing %s to take leadership", lvs_name, taker.get_id())
-        try:
-            taker.rpc_client(timeout=5, retry=2).bdev_lvol_set_leader(
-                lvs_name, leader=True)
-        except Exception as e:
-            logger.error("take-leadership RPC on %s for %s failed: %s",
-                         taker.get_id(), lvs_name, e)
-        else:
-            for _ in range(5):
-                try:
-                    if is_node_leader(taker, lvs_name):
-                        logger.info("Leadership for %s restored on %s",
-                                    lvs_name, taker.get_id())
-                        leader_cache.put(cache_key, taker.get_id())
-                        return taker, [n for n in all_nodes
-                                       if n.get_id() != taker.get_id()]
-                except Exception:
-                    pass
-                time.sleep(1)
-            logger.error(
-                "take-leadership on %s for %s did not take effect — "
-                "refusing to route", taker.get_id(), lvs_name)
+        recovered = _recover_leaderless_lvs(cluster_id, all_nodes, lvs_name, taker)
+        if recovered is not None:
+            leader_cache.put(cache_key, recovered.get_id())
+            return recovered, [n for n in all_nodes
+                               if n.get_id() != recovered.get_id()]
         return None, []
 
     # Leader unconfirmed — check if fabric is healthy
