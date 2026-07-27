@@ -383,6 +383,7 @@ INTENTIONALLY_UNBOUNDED = {
     "tasks_runner_failed_migration.py": "created with max_retry=-1; retry gated on resource recovery",
     "tasks_runner_new_dev_migration.py": "created with max_retry=-1; retry gated on resource recovery",
     "tasks_runner_lvol_migration.py": "created with max_retry=-1; retry gated on resource recovery",
+    "tasks_runner_node_removal.py": "created with max_retry=-1; multi-hour removal gated on failure-migration completion",
 }
 
 _INCREMENTS_RETRY = re.compile(r"\.retry\s*\+=\s*1")
