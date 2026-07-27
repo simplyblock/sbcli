@@ -126,17 +126,16 @@ class CLIWrapperBase:
             pci_allowed = [str(x) for x in args.pci_allowed.split(',')]
         if args.pci_blocked:
             pci_blocked = [str(x) for x in args.pci_blocked.split(',')]
-        if (args.device_model and not args.size_range) or (not args.device_model and args.size_range):
-            self.parser.error("device_model and size_range must be set together")
         if args.nvme_names:
             nvme_names = [str(x) for x in args.nvme_names.split(',')]
         use_pci_allowed = bool(args.pci_allowed)
         use_pci_blocked = bool(args.pci_blocked)
-        use_model_range = bool(args.device_model and args.size_range)
+        use_model_range = bool(args.device_model or args.size_range)
         if sum([use_pci_allowed, use_pci_blocked, use_model_range]) > 1:
             self.parser.error(
-                "Options --pci-allowed, --pci-blocked, and "
-                "(--device-model with --size-range) are mutually exclusive; choose only one."
+                "Choose only one device selection method: --pci-allowed, --pci-blocked, or "
+                "--device-model/--size-range (--device-model and --size-range may be combined "
+                "with each other, but not with --pci-allowed or --pci-blocked)."
             )
         cores_percentage = int(args.cores_percentage)
         if args.calculate_hp_only:
