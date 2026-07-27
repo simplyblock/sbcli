@@ -1333,7 +1333,7 @@ class TestClusterBase:
                 )
                 self.ssh_obj.exec_command(
                     node,
-                    f"dmesg -T >& {node_log_dir}/dmesg_{node}{suffix}.txt"
+                    f"{{ dmesg -T 2>/dev/null || dmesg; }} >& {node_log_dir}/dmesg_{node}{suffix}.txt"
                 )
                 self.logger.info(f"[k8s collect_mgmt] journalctl+dmesg collected for client {node}")
             except Exception as e:
@@ -1483,7 +1483,7 @@ class TestClusterBase:
             base_path = os.path.join(self.docker_logs_path, node)
             cmd = f"journalctl -k --no-tail >& {base_path}/jounalctl_{node}-final.txt"
             self.ssh_obj.exec_command(node, cmd, timeout=120, max_retries=1)
-            cmd = f"dmesg -T >& {base_path}/dmesg_{node}-final.txt"
+            cmd = f"{{ dmesg -T 2>/dev/null || dmesg; }} >& {base_path}/dmesg_{node}-final.txt"
             self.ssh_obj.exec_command(node, cmd, timeout=120, max_retries=1)
 
         try:

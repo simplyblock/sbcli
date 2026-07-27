@@ -501,9 +501,9 @@ class K8sNativeFailoverTest(TestClusterBase):
 
     # ── Node-level dmesg / journalctl collection ────────────────────────
     #
-    # Primary : Privileged pods with ``nsenter`` streaming ``dmesg -Tw``
+    # Primary : Privileged pods with ``nsenter`` streaming host dmesg
     #           on every node.  Works on Talos, vanilla K8s, and OpenShift.
-    # Fallback: ``oc debug node/<n> -- chroot /host dmesg -T`` when on
+    # Fallback: ``oc debug node/<n> -- chroot /host dmesg`` when on
     #           OpenShift and the collector pod is unreachable (e.g. the
     #           node was under outage and the pod hasn't restarted yet).
     #
@@ -539,7 +539,7 @@ class K8sNativeFailoverTest(TestClusterBase):
     def _start_dmesg_collectors(self):
         """Deploy a privileged pod on each K8s node that streams host dmesg.
 
-        The **dmesg** container runs ``dmesg -Tw`` directly from busybox.
+        The **dmesg** container uses ``nsenter`` to run the host's dmesg.
         Since the pod is ``privileged: true``, the kernel ring buffer is
         accessible without ``nsenter`` — it is global to the host kernel.
 
@@ -583,14 +583,14 @@ class K8sNativeFailoverTest(TestClusterBase):
                 f"    image: busybox:1.37\n"
                 f"    imagePullPolicy: IfNotPresent\n"
                 f"    command: ['sh', '-c',\n"
-                f"              'dmesg -T; echo === FOLLOW ===; dmesg -Tw 2>/dev/null || while true; do sleep 30; dmesg -T; done']\n"
+                f"              'nsenter -t 1 -m -u -i -n -- dmesg -T 2>/dev/null || dmesg; echo === FOLLOW ===; nsenter -t 1 -m -u -i -n -- dmesg -Tw 2>/dev/null || while true; do sleep 30; nsenter -t 1 -m -u -i -n -- dmesg -T 2>/dev/null || dmesg; done']\n"
                 f"    securityContext:\n"
                 f"      privileged: true\n"
                 f"  - name: journalctl\n"
                 f"    image: busybox:1.37\n"
                 f"    imagePullPolicy: IfNotPresent\n"
                 f"    command: ['sh', '-c',\n"
-                f"              'nsenter -t 1 -m -u -i -n -- sh -c \"journalctl -kb --no-pager 2>/dev/null; echo === FOLLOW ===; journalctl -kf --no-pager\" 2>/dev/null || echo \"=== journalctl unavailable (Talos?), falling back to dmesg ===\"; dmesg -T; echo === FOLLOW ===; dmesg -Tw 2>/dev/null || while true; do sleep 30; dmesg -T; done']\n"
+                f"              'nsenter -t 1 -m -u -i -n -- sh -c \"journalctl -kb --no-pager 2>/dev/null; echo === FOLLOW ===; journalctl -kf --no-pager\" 2>/dev/null || echo \"=== journalctl unavailable (Talos?), falling back to dmesg ===\"; nsenter -t 1 -m -u -i -n -- dmesg -T 2>/dev/null || dmesg; echo === FOLLOW ===; nsenter -t 1 -m -u -i -n -- dmesg -Tw 2>/dev/null || while true; do sleep 30; nsenter -t 1 -m -u -i -n -- dmesg -T 2>/dev/null || dmesg; done']\n"
                 f"    securityContext:\n"
                 f"      privileged: true\n"
                 f"  restartPolicy: Always\n"
@@ -652,7 +652,7 @@ class K8sNativeFailoverTest(TestClusterBase):
                                      label: str):
         """Fallback: collect dmesg/journalctl via ``oc debug node/``."""
         for cmd_name, host_cmd in [
-            ("dmesg", "dmesg -T"),
+            ("dmesg", "dmesg -T 2>/dev/null || dmesg"),
             ("journalctl", "journalctl -b --no-pager"),
         ]:
             fname = f"{cmd_name}_{node}_{label}.log"

@@ -3331,13 +3331,22 @@ class SshUtils:
         Returns:
             list: List of filtered dmesg log lines.
         """
-        # Get dmesg logs in ISO format
+        # Get dmesg logs in ISO format; fall back to plain dmesg on
+        # minimal hosts (e.g. BusyBox) where --time-format is unsupported.
         cmd = "sudo dmesg --time-format=iso"
         output, error = self.exec_command(node_ip, cmd)
 
         if error:
-            self.logger.error(f"Error fetching dmesg logs from {node_ip}: {error}")
-            return []
+            self.logger.warning(
+                f"dmesg --time-format=iso failed on {node_ip}, "
+                f"falling back to plain dmesg (time filtering disabled): {error}"
+            )
+            output, error2 = self.exec_command(node_ip, "sudo dmesg")
+            if error2:
+                self.logger.error(f"Error fetching dmesg logs from {node_ip}: {error2}")
+                return []
+            # Plain dmesg has no ISO timestamps, return all lines unfiltered
+            return output.splitlines() if output else []
 
         logs_in_window = []
         start_time = datetime.fromisoformat(start_iso)
@@ -3385,11 +3394,13 @@ class SshUtils:
             f"sudo tmux new-session -d -s journalctl_full_log "
             f"'bash -c \"sudo journalctl -f -o short-precise >> {journalctl_full_log} 2>&1\"'"
         )
-        # Refresh full dmesg snapshot every 30 s (overwrite avoids duplication)
+        # Refresh full dmesg snapshot every 30 s (overwrite avoids duplication).
+        # Use dmesg -T for human-readable timestamps; fall back to plain
+        # dmesg on minimal hosts (e.g. BusyBox) where -T is unsupported.
         self.exec_command(
             node_ip,
             f"sudo tmux new-session -d -s dmesg_full_log "
-            f"'bash -c \"while true; do sudo dmesg -T > {dmesg_full_log}; sleep 30; done\"'"
+            f"'bash -c \"while true; do {{ sudo dmesg -T 2>/dev/null || sudo dmesg; }} > {dmesg_full_log}; sleep 30; done\"'"
         )
 
     def reset_iptables_in_spdk(self, node_ip):
