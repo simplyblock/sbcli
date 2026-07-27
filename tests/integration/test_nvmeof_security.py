@@ -24,6 +24,7 @@ from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.rpc_client import RPCException
 from simplyblock_core.utils import (
 
 
@@ -495,7 +496,7 @@ class TestAddHostToLvol(unittest.TestCase):
         MockDBCtrl.return_value = mock_db
 
         mock_rpc_inst = MagicMock()
-        mock_rpc_inst.subsystem_add_host.return_value = False
+        mock_rpc_inst.subsystem_add_host.side_effect = RPCException("add host failed", code=-1)
         MockRPC.return_value = mock_rpc_inst
         mock_register.return_value = {"dhchap_key": "kn"}
 

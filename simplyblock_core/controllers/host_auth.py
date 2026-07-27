@@ -1,6 +1,7 @@
 # coding=utf-8
 from simplyblock_core import constants, utils
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.rpc_client import RPCException
 
 logger = utils.get_logger(__name__)
 
@@ -48,16 +49,12 @@ def _register_pool_dhchap_keys_on_node(pool, snode, rpc_client):
                          key_name, snode.get_id(), error)
             continue
         key_path = result
-        ret, err = rpc_client._request2("keyring_file_add_key",
-                                        {"name": key_name, "path": key_path})
-        if not ret and err:
-            if err.get("code") == -17:
-                logger.info("Pool key %s already in SPDK keyring on node %s, reusing",
-                            key_name, snode.get_id())
-            else:
-                logger.error("Failed to register pool key %s in SPDK keyring on node %s: %s",
-                             key_name, snode.get_id(), err.get("message", err))
-                continue
+        try:
+            rpc_client.keyring_file_add_key(key_name, key_path, allow_existing=True)
+        except RPCException as e:
+            logger.error("Failed to register pool key %s in SPDK keyring on node %s: %s",
+                         key_name, snode.get_id(), e)
+            continue
         key_names[key_type] = key_name
 
     return key_names
@@ -84,18 +81,12 @@ def _register_dhchap_keys_on_node(snode, host_nqn, host_entry, rpc_client):
             logger.error("Failed to write key file %s on node %s: %s", key_name, snode.get_id(), error)
             continue
         key_path = result
-        # Register in SPDK keyring — "File exists" (code -17) means the key
-        # is already registered, which is fine (e.g. same host on another volume).
-        ret, err = rpc_client._request2("keyring_file_add_key",
-                                        {"name": key_name, "path": key_path})
-        if not ret and err:
-            if err.get("code") == -17:
-                logger.info("Key %s already in SPDK keyring on node %s, reusing",
-                            key_name, snode.get_id())
-            else:
-                logger.error("Failed to register key %s in SPDK keyring on node %s: %s",
-                             key_name, snode.get_id(), err.get("message", err))
-                continue
+        try:
+            rpc_client.keyring_file_add_key(key_name, key_path, allow_existing=True)
+        except RPCException as e:
+            logger.error("Failed to register key %s in SPDK keyring on node %s: %s",
+                         key_name, snode.get_id(), e)
+            continue
         key_names[key_type] = key_name
 
     return key_names

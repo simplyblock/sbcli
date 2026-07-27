@@ -18,6 +18,7 @@ from simplyblock_core.controllers.host_auth import (
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.pool import Pool
+from simplyblock_core.rpc_client import RPCException
 from simplyblock_core.utils.nvme import HostConnectAuth, build_nvme_connect_entry
 from simplyblock_core.models.lvol_model import LVol, LVolReplication
 from simplyblock_core.models.snapshot import SnapShot
@@ -3464,13 +3465,14 @@ def add_host_to_lvol(lvol_id, host_nqn):
                 continue
             rpc_client = snode.rpc_client()
             pool_key_names = _register_pool_dhchap_keys_on_node(pool, snode, rpc_client)
-            ret = rpc_client.subsystem_add_host(
-                lvol.nqn, host_nqn,
-                dhchap_key=pool_key_names.get("dhchap_key"),
-                dhchap_ctrlr_key=pool_key_names.get("dhchap_ctrlr_key"),
-                dhchap_group=dhchap_group,
-            )
-            if not ret:
+            try:
+                rpc_client.subsystem_add_host(
+                    lvol.nqn, host_nqn,
+                    dhchap_key=pool_key_names.get("dhchap_key"),
+                    dhchap_ctrlr_key=pool_key_names.get("dhchap_ctrlr_key"),
+                    dhchap_group=dhchap_group,
+                )
+            except RPCException:
                 return False, f"Failed to add host {host_nqn} on node {node_id}"
     else:
         # Legacy per-host key generation from pool.sec_options
@@ -3497,18 +3499,19 @@ def add_host_to_lvol(lvol_id, host_nqn):
             if snode.status != StorageNode.STATUS_ONLINE:
                 continue
             rpc_client = snode.rpc_client()
-            if has_keys:
-                key_names = _register_dhchap_keys_on_node(snode, host_nqn, entry, rpc_client)
-                ret = rpc_client.subsystem_add_host(
-                    lvol.nqn, host_nqn,
-                    psk=key_names.get("psk"),
-                    dhchap_key=key_names.get("dhchap_key"),
-                    dhchap_ctrlr_key=key_names.get("dhchap_ctrlr_key"),
-                    dhchap_group=dhchap_group,
-                )
-            else:
-                ret = rpc_client.subsystem_add_host(lvol.nqn, host_nqn)
-            if not ret:
+            try:
+                if has_keys:
+                    key_names = _register_dhchap_keys_on_node(snode, host_nqn, entry, rpc_client)
+                    rpc_client.subsystem_add_host(
+                        lvol.nqn, host_nqn,
+                        psk=key_names.get("psk"),
+                        dhchap_key=key_names.get("dhchap_key"),
+                        dhchap_ctrlr_key=key_names.get("dhchap_ctrlr_key"),
+                        dhchap_group=dhchap_group,
+                    )
+                else:
+                    rpc_client.subsystem_add_host(lvol.nqn, host_nqn)
+            except RPCException:
                 return False, f"Failed to add host {host_nqn} on node {node_id}"
 
     lvol.allowed_hosts.append(entry)

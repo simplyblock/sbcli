@@ -272,7 +272,7 @@ class RPCClient:
             params["dhchap_ctrlr_key"] = dhchap_ctrlr_key
         if dhchap_group:
             params["dhchap_group"] = dhchap_group
-        return self._request("nvmf_subsystem_add_host", params)
+        return self._request3("nvmf_subsystem_add_host", **params)
 
     def subsystem_remove_host(self, nqn, host):
         params = {"nqn": nqn, "host": host}
