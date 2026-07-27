@@ -45,13 +45,12 @@ class MockSPDKHandler(socketserver.BaseRequestHandler):
             except (ValueError, UnicodeDecodeError):
                 continue
 
-            result = self.server.dispatch(req)
+            resp = self.server.dispatch_full(req)
             if 'id' not in req:
                 # fire-and-forget
                 break
 
-            resp = json.dumps({"jsonrpc": "2.0", "id": req["id"], "result": result})
-            self.request.sendall(resp.encode('ascii'))
+            self.request.sendall(json.dumps(resp).encode('ascii'))
             break
 
 
@@ -65,15 +64,41 @@ class MockSPDKServer(socketserver.ThreadingUnixStreamServer):
         self._ready = ready
         self._delay = delay
         self._call_log = []
+        self._param_log = []
+        self._keyring = {}  # name -> path, mimicking SPDK's keyring state
         self._lock = threading.Lock()
         super().__init__(sock_path, MockSPDKHandler)
 
-    def dispatch(self, req):
+    def dispatch_full(self, req):
+        """Return a complete JSON-RPC response dict (result or error)."""
         method = req.get("method", "")
+        params = req.get("params") or {}
+        req_id = req.get("id")
         with self._lock:
             self._call_log.append(method)
+            self._param_log.append((method, params))
         if self._delay > 0:
             time.sleep(self._delay)
+
+        if method == "keyring_file_add_key":
+            name = params.get("name")
+            if name in self._keyring:
+                return {"jsonrpc": "2.0", "id": req_id,
+                        "error": {"code": -17, "message": "File exists"}}
+            self._keyring[name] = params.get("path")
+            return {"jsonrpc": "2.0", "id": req_id, "result": True}
+        if method == "keyring_file_remove_key":
+            name = params.get("name")
+            if name not in self._keyring:
+                return {"jsonrpc": "2.0", "id": req_id,
+                        "error": {"code": -2, "message": "No such file or directory"}}
+            del self._keyring[name]
+            return {"jsonrpc": "2.0", "id": req_id, "result": True}
+
+        return {"jsonrpc": "2.0", "id": req_id, "result": self.dispatch(req)}
+
+    def dispatch(self, req):
+        method = req.get("method", "")
         if method == "spdk_get_version":
             return {"version": "24.01", "fields": {}}
         if method == "bdev_get_bdevs":
@@ -86,6 +111,16 @@ class MockSPDKServer(socketserver.ThreadingUnixStreamServer):
     def call_log(self):
         with self._lock:
             return list(self._call_log)
+
+    @property
+    def param_log(self):
+        with self._lock:
+            return list(self._param_log)
+
+    @property
+    def keyring(self):
+        with self._lock:
+            return dict(self._keyring)
 
 
 def _start_mock_spdk(sock_path, **kwargs):
@@ -262,6 +297,157 @@ class TestProxyE2E(unittest.TestCase):
             self._post("spdk_get_version")
         time.sleep(0.2)
         self.assertEqual(len(self._mod.ServerHandler.server_session), 0)
+
+
+class TestProxyKeyringInterception(unittest.TestCase):
+    """End-to-end tests for the keyring_add_key interception: full HTTP
+    round-trip through the real proxy against a mock SPDK unix socket."""
+
+    KEY_MATERIAL = "DHHC-1:00:c2VjcmV0LWtleS1tYXRlcmlhbA==:"
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmpdir = tempfile.mkdtemp()
+        cls._sock_path = os.path.join(cls._tmpdir, "spdk_keyring.sock")
+        cls._key_dir = os.path.join(cls._tmpdir, "keys")
+        cls._http_port = 18201
+
+        cls._spdk_server = _start_mock_spdk(cls._sock_path)
+        time.sleep(0.1)
+
+        cls._proxy_thread, cls._stop_event, cls._mod = _start_proxy(
+            cls._sock_path, cls._http_port, max_concurrent=4, timeout=5)
+        cls._mod.SPDK_PROXY_KEY_DIR = cls._key_dir
+
+        for _ in range(30):
+            try:
+                r = requests.post(
+                    f"http://127.0.0.1:{cls._http_port}/",
+                    data=json.dumps({"id": 1, "method": "spdk_get_version"}),
+                    auth=("test", "test"),
+                    timeout=2,
+                )
+                if r.status_code == 200:
+                    break
+            except requests.ConnectionError:
+                pass  # proxy may still be starting up
+            time.sleep(0.2)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._stop_event.set()
+        cls._spdk_server.shutdown()
+        cls._spdk_server.server_close()
+        import shutil
+        shutil.rmtree(cls._tmpdir, ignore_errors=True)
+
+    def setUp(self):
+        self._spdk_server._keyring.clear()
+        self._spdk_server._call_log.clear()
+        self._spdk_server._param_log.clear()
+        import shutil
+        shutil.rmtree(self._key_dir, ignore_errors=True)
+
+    def _post(self, method, params=None, req_id=1):
+        payload = {"id": req_id, "method": method}
+        if params:
+            payload["params"] = params
+        return requests.post(
+            f"http://127.0.0.1:{self._http_port}/",
+            data=json.dumps(payload),
+            auth=("test", "test"),
+            timeout=5,
+        )
+
+    def test_keyring_add_key_roundtrip(self):
+        r = self._post("keyring_add_key", {"name": "key_e2e", "key": self.KEY_MATERIAL})
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.json().get("result"))
+
+        # File written into the proxy key dir with the exact material
+        key_path = os.path.join(self._key_dir, "key_e2e")
+        self.assertTrue(os.path.isfile(key_path))
+        with open(key_path) as f:
+            self.assertEqual(f.read(), self.KEY_MATERIAL)
+        self.assertEqual(os.stat(key_path).st_mode & 0o777, 0o600)
+
+        # SPDK saw the rewritten call: path instead of key material
+        adds = [p for m, p in self._spdk_server.param_log if m == "keyring_file_add_key"]
+        self.assertEqual(adds, [{"name": "key_e2e", "path": key_path}])
+        self.assertEqual(self._spdk_server.keyring, {"key_e2e": key_path})
+        for _, params in self._spdk_server.param_log:
+            self.assertNotIn(self.KEY_MATERIAL, json.dumps(params))
+
+    def test_duplicate_add_same_material_returns_eexist(self):
+        self._post("keyring_add_key", {"name": "key_dup", "key": self.KEY_MATERIAL})
+        r = self._post("keyring_add_key", {"name": "key_dup", "key": self.KEY_MATERIAL})
+        self.assertEqual(r.json()["error"]["code"], -17)
+        # File kept: the key is still valid and registered
+        self.assertTrue(os.path.isfile(os.path.join(self._key_dir, "key_dup")))
+
+    def test_duplicate_add_different_material_is_rejected(self):
+        self._post("keyring_add_key", {"name": "key_conflict", "key": self.KEY_MATERIAL})
+        r = self._post("keyring_add_key",
+                       {"name": "key_conflict", "key": "DHHC-1:00:b3RoZXI=:"})
+        self.assertEqual(r.json()["error"]["code"], -32000)
+        with open(os.path.join(self._key_dir, "key_conflict")) as f:
+            self.assertEqual(f.read(), self.KEY_MATERIAL)
+
+    def test_remove_deletes_file(self):
+        self._post("keyring_add_key", {"name": "key_rm", "key": self.KEY_MATERIAL})
+        key_path = os.path.join(self._key_dir, "key_rm")
+        self.assertTrue(os.path.isfile(key_path))
+
+        r = self._post("keyring_file_remove_key", {"name": "key_rm"})
+        self.assertTrue(r.json().get("result"))
+        self.assertFalse(os.path.exists(key_path))
+        self.assertEqual(self._spdk_server.keyring, {})
+
+    def test_capabilities_answered_locally(self):
+        r = self._post("proxy_get_capabilities", req_id=42)
+        data = r.json()
+        self.assertEqual(data["id"], 42)
+        self.assertIn("keyring_add_key", data["result"]["interceptors"])
+        self.assertNotIn("proxy_get_capabilities", self._spdk_server.call_log)
+
+    def test_register_dhchap_keys_on_node_uses_interception(self):
+        """The controller helper takes the keyring_add_key path end-to-end:
+        RPCClient -> real proxy -> interceptor -> mock SPDK, with no SNodeAPI."""
+        from pydantic import SecretStr
+
+        from simplyblock_core.controllers.host_auth import _register_dhchap_keys_on_node
+        from simplyblock_core.models.storage_node import StorageNode
+        from simplyblock_core.rpc_client import RPCClient
+        from simplyblock_core.utils import generate_dhchap_key
+
+        snode = StorageNode()
+        snode.uuid = "node-keyring-e2e"
+        # Unreachable SNodeAPI: proves the fallback path is not taken.
+        snode.api_endpoint = "127.0.0.1:1"
+
+        rpc_client = RPCClient("127.0.0.1", self._http_port, "test", SecretStr("test"))
+
+        host_nqn = "nqn.2014-08.org.nvmexpress:uuid:proxy-e2e-host"
+        host_entry = {
+            "nqn": host_nqn,
+            "dhchap_key": generate_dhchap_key(),
+            "dhchap_ctrlr_key": generate_dhchap_key(),
+        }
+
+        key_names = _register_dhchap_keys_on_node(snode, host_nqn, host_entry, rpc_client)
+
+        self.assertIn("dhchap_key", key_names)
+        self.assertIn("dhchap_ctrlr_key", key_names)
+        for key_type, key_name in key_names.items():
+            key_path = os.path.join(self._key_dir, key_name)
+            self.assertEqual(self._spdk_server.keyring[key_name], key_path)
+            with open(key_path) as f:
+                self.assertEqual(f.read(), host_entry[key_type])
+        # Key material never reached SPDK's params
+        for _, params in self._spdk_server.param_log:
+            payload = json.dumps(params)
+            self.assertNotIn(host_entry["dhchap_key"], payload)
+            self.assertNotIn(host_entry["dhchap_ctrlr_key"], payload)
 
 
 class TestProxyReadinessGate(unittest.TestCase):

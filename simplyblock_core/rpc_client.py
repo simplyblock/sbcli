@@ -235,6 +235,11 @@ class RPCClient:
     def keyring_file_add_key(self, name: str, path: str, *, allow_existing: bool = False):
         """Register a file-based key in SPDK's keyring by path.
 
+        Deprecated: requires the key file to be placed on the node beforehand
+        (via the deprecated SNodeAPI write_key_file endpoint). Use
+        keyring_add_key instead, which delivers the key material through the
+        spdk-proxy without touching persistent storage.
+
         Args:
             name: Key name for the SPDK keyring.
             path: Path to the key file on the storage node.
@@ -244,6 +249,34 @@ class RPCClient:
         """
         try:
             return self._request3("keyring_file_add_key", name=name, path=path)
+        except RPCException as e:
+            if allow_existing and e.code == -17:
+                logger.debug("Key %s already in SPDK keyring, reusing", name)
+                return None
+            raise
+
+    def keyring_add_key(self, name: str, key: SecretStr, *, allow_existing: bool = False):
+        """Register a key in SPDK's keyring, delivering the material inline.
+
+        Intercepted by the spdk-proxy, which writes the key to a memory-backed
+        secrets directory shared with the SPDK container and forwards a
+        keyring_file_add_key referencing that file. A proxy that predates
+        interception forwards this to SPDK, which rejects the unknown method
+        with -32601; callers fall back to keyring_file_add_key in that case.
+
+        Args:
+            name: Key name for the SPDK keyring.
+            key: The key material (e.g. DHCHAP/PSK key in its wire format).
+            allow_existing: When True, silently succeed if the key is already
+                registered with the same material (SPDK errno -17). When False
+                (default) an existing key raises RPCException.
+
+        Raises:
+            RPCException: On proxy or SPDK errors, including a key of the same
+                name existing with different material.
+        """
+        try:
+            return self._request3("keyring_add_key", name=name, key=key)
         except RPCException as e:
             if allow_existing and e.code == -17:
                 logger.debug("Key %s already in SPDK keyring, reusing", name)

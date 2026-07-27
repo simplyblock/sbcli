@@ -2,8 +2,11 @@
 """
 test_dhchap_e2e.py – end-to-end tests for DHCHAP key registration flow.
 
-Uses a real SNodeAPI (running locally) and a mock SPDK JSON-RPC server.
-The test exercises the full path:
+Uses a real SNodeAPI (running locally) and a mock SPDK JSON-RPC server. The
+mock rejects the virtual keyring_add_key with -32601, impersonating SPDK behind
+an OLD spdk-proxy without interception support, so this suite exercises the
+deprecated on-disk fallback path (the in-memory keyring_add_key path is covered
+by test_spdk_proxy_e2e.py against the real proxy):
 
   1. generate_dhchap_key() produces DHHC-1:01:...: keys
   2. SNodeClient.write_key_file() writes key to storage node via SNodeAPI
@@ -64,6 +67,14 @@ class MockSPDKHandler(BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
     def _dispatch(self, method, params):
+        if method == "keyring_add_key":
+            # This mock impersonates SPDK reached through an OLD proxy (no
+            # interception support): the virtual keyring_add_key method is
+            # forwarded verbatim and rejected with "Method not found", so
+            # controller helpers fall back to the deprecated write_key_file +
+            # keyring_file_add_key path.
+            return {"error": {"code": -32601, "message": "Method not found"}}
+
         if method == "keyring_file_add_key":
             name = params.get("name")
             path = params.get("path")

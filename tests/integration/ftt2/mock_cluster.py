@@ -522,6 +522,8 @@ _FTT2_DISPATCH = {
     'lvol_crypto_key_create':                _lvol_crypto_key_create,
     'lvol_crypto_create':                    _lvol_crypto_create,
     'keyring_file_add_key':                  _keyring_file_add_key,
+    'keyring_add_key':                       _STATIC_TRUE,
+    'keyring_file_remove_key':               _STATIC_TRUE,
 
     # LVol operations
     'bdev_lvol_create':                      _bdev_lvol_create,

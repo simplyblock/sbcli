@@ -27,6 +27,10 @@ spec:
       emptyDir:
         medium: Memory
         sizeLimit: 1Gi
+    - name: spdk-secrets
+      emptyDir:
+        medium: Memory
+        sizeLimit: 16Mi
     - name: host-sys
       hostPath:
         path: /sys
@@ -128,6 +132,8 @@ spec:
           mountPath: /etc/simplyblock
         - name: var-crash
           mountPath: /var/crash
+        - name: spdk-secrets
+          mountPath: /var/run/secrets/simplyblock
       resources:
         limits:
           hugepages-2Mi: {{ MEM_MEGA }}Mi
@@ -154,6 +160,8 @@ spec:
           mountPath: /mnt/ramdisk
         - name: tmp-simplyblock
           mountPath: /var/run/simplyblock
+        - name: spdk-secrets
+          mountPath: /var/run/secrets/simplyblock
         {% if TLS_SERVE or TLS_CONNECT != "disabled" %}
         - name: tls
           mountPath: /etc/simplyblock/tls
@@ -172,6 +180,8 @@ spec:
           value: "True"
         - name: TIMEOUT
           value: "300"
+        - name: SPDK_PROXY_KEY_DIR
+          value: "/var/run/secrets/simplyblock/keys"
         - name: SB_TLS_SERVE
           value: "{{ TLS_SERVE }}"
         - name: SB_TLS_CONNECT

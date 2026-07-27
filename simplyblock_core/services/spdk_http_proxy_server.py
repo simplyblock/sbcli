@@ -4,6 +4,7 @@ import base64
 import json
 import logging
 import os
+import re
 import socket
 import sys
 import threading
@@ -204,6 +205,145 @@ def _rpc_call_inner(req, req_data, req_time, sock_timeout):
             pass
 
 
+KEY_NAME_RE = re.compile(r'^[a-zA-Z0-9_-]+$')
+
+
+def _jsonrpc_error(req_id, code, message):
+    return json.dumps({'jsonrpc': '2.0', 'id': req_id, 'error': {'code': code, 'message': message}})
+
+
+def _response_error(response):
+    """Extract the JSON-RPC error object from a raw response string, if any."""
+    if response is None:
+        return None
+    try:
+        parsed = json.loads(response)
+    except ValueError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    return parsed.get('error')
+
+
+def _key_path(name):
+    return os.path.join(SPDK_PROXY_KEY_DIR, name)
+
+
+def _remove_key_file(name):
+    try:
+        os.unlink(_key_path(name))
+    except FileNotFoundError:
+        pass  # ignore error for idempotency
+
+
+def _handle_keyring_add_key(req_data, client_timeout):
+    """Virtual method {name, key}: write the key material to the memory-backed
+    secrets dir and forward a rewritten keyring_file_add_key {name, path} to
+    SPDK. Key material must never be forwarded or logged (rpc_call logs params).
+    """
+    req_id = req_data.get('id')
+    params = req_data.get('params') or {}
+    name = params.get('name')
+    key = params.get('key')
+    if not isinstance(name, str) or not KEY_NAME_RE.match(name):
+        return _jsonrpc_error(req_id, -32602, 'Invalid key name')
+    if not isinstance(key, str) or not key or not key.isascii():
+        return _jsonrpc_error(req_id, -32602, 'Invalid key material')
+
+    path = _key_path(name)
+    pre_existing = os.path.exists(path)
+    if pre_existing:
+        with open(path, encoding='ascii') as f:
+            if f.read() != key:
+                return _jsonrpc_error(
+                    req_id, -32000,
+                    f"Key '{name}' already exists with different material; remove it first")
+    else:
+        os.makedirs(SPDK_PROXY_KEY_DIR, mode=0o700, exist_ok=True)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            os.write(fd, key.encode('ascii'))
+        finally:
+            os.close(fd)
+    logger.info(f"Intercepted keyring_add_key for key {name}")
+
+    fwd = {k: v for k, v in req_data.items() if k != 'params'}
+    fwd['method'] = 'keyring_file_add_key'
+    fwd['params'] = {'name': name, 'path': path}
+    try:
+        response = rpc_call(json.dumps(fwd).encode('ascii'), client_timeout)
+    except Exception:
+        # The forward failed outright (e.g. SPDK timeout). A key file freshly
+        # written on behalf of this request must not linger on the shared volume.
+        if not pre_existing:
+            _remove_key_file(name)
+        raise
+
+    error = _response_error(response)
+    if error is not None and error.get('code') != -17 and not pre_existing:
+        # We wrote the key file for this request but SPDK rejected it with
+        # something other than "already exists": never leave an orphaned secret.
+        _remove_key_file(name)
+    # On -17 the key is registered in SPDK, so its backing file must stay: the
+    # client's allow_existing treats -17 as reuse. A pre-existing file with
+    # matching content is likewise kept whether SPDK reports success (keyring
+    # lost, e.g. SPDK restarted while the tmpfs survived) or -17.
+    return response
+
+
+def _handle_keyring_file_remove_key(req_data, client_timeout):
+    """Pass keyring_file_remove_key through to SPDK, then delete the key file
+    so removed keys don't linger in the secrets dir."""
+    params = req_data.get('params') or {}
+    name = params.get('name')
+    response = rpc_call(json.dumps(req_data).encode('ascii'), client_timeout)
+    if isinstance(name, str) and KEY_NAME_RE.match(name):
+        error = _response_error(response)
+        if error is None or error.get('code') == -2:  # removed, or unknown to SPDK
+            _remove_key_file(name)
+    return response
+
+
+def _handle_proxy_get_capabilities(req_data, client_timeout):
+    """Answered locally: lets clients probe whether this proxy supports
+    interception before sending any key material (older proxies forward this
+    to SPDK and return 'Method not found' without logging secrets)."""
+    return json.dumps({
+        'jsonrpc': '2.0',
+        'id': req_data.get('id'),
+        'result': {'interceptors': sorted(RPC_INTERCEPTORS.keys())},
+    })
+
+
+RPC_INTERCEPTORS = {
+    'keyring_add_key': _handle_keyring_add_key,
+    'keyring_file_remove_key': _handle_keyring_file_remove_key,
+    'proxy_get_capabilities': _handle_proxy_get_capabilities,
+}
+
+
+def dispatch_rpc(data_string, client_timeout=None):
+    """Route a JSON-RPC payload through a method interceptor if one is
+    registered, otherwise forward it to SPDK unchanged.
+
+    Interception happens before rpc_call so secret-bearing params are
+    rewritten before any request logging.
+    """
+    try:
+        req_data = json.loads(data_string.decode('ascii'))
+        method = req_data.get('method') if isinstance(req_data, dict) else None
+    except (ValueError, UnicodeDecodeError):
+        return rpc_call(data_string, client_timeout)
+    handler = RPC_INTERCEPTORS.get(method) if isinstance(method, str) else None
+    if handler is None:
+        return rpc_call(data_string, client_timeout)
+    try:
+        return handler(req_data, client_timeout)
+    except OSError as e:
+        logger.error(f"Interceptor for {method} failed: {e}")
+        return _jsonrpc_error(req_data.get('id'), -32000, f'proxy interceptor error: {e}')
+
+
 class ServerHandler(BaseHTTPRequestHandler):
     server_session: list[int] = []
     key = ""
@@ -261,7 +401,7 @@ class ServerHandler(BaseHTTPRequestHandler):
             logger.info(f"read_line_time_diff: {time_diff}")
             read_line_time_diff[read_line_time_start] = time_diff
             try:
-                response = rpc_call(data_string, self.headers.get('X-RPC-Timeout'))
+                response = dispatch_rpc(data_string, self.headers.get('X-RPC-Timeout'))
                 if response is not None:
                     self.do_HEAD()
                     self.wfile.write(bytes(response.encode(encoding='ascii')))
@@ -304,6 +444,11 @@ MAX_CONCURRENT_SPDK = int(get_env_var("MAX_CONCURRENT_SPDK", is_required=False, 
 # instead of being aborted; small enough that abandoned/stuck RPCs free their
 # slot quickly. See _resolve_sock_timeout.
 SPDK_TIMEOUT_MARGIN = float(get_env_var("SPDK_TIMEOUT_MARGIN", is_required=False, default=2))
+# Directory for key files written by the keyring_add_key interceptor. Must be
+# a memory-backed volume shared with the SPDK container so key material never
+# touches persistent storage.
+SPDK_PROXY_KEY_DIR = get_env_var("SPDK_PROXY_KEY_DIR", is_required=False,
+                                 default="/var/run/secrets/simplyblock/keys")
 is_threading_enabled = get_env_var("MULTI_THREADING_ENABLED", is_required=False, default=False)
 server_ip = get_env_var("SERVER_IP", is_required=True, default="")
 rpc_port = get_env_var("RPC_PORT", is_required=True)
