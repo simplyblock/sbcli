@@ -1035,26 +1035,6 @@ def get_next_port(cluster_id):
     return get_next_nvmf_port(cluster_id)
 
 
-def get_next_rpc_port(cluster_id):
-    from simplyblock_core.db_controller import DBController
-    db_controller = DBController()
-
-    _, rpc_base, _ = _get_cluster_port_config(cluster_id)
-    used_ports = []
-    for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
-        if node.rpc_port > 0:
-            used_ports.append(node.rpc_port)
-
-    for i in range(1000):
-        next_port = rpc_base + i
-        if next_port not in used_ports:
-            return next_port
-
-    return 0
-
-
-
-
 def get_next_lvstore_ports(cluster_id):
     """Allocate two consecutive NVMe-oF ports for a new lvstore (lvol_subsys + hublvol)."""
     nvmf_base, _, _ = _get_cluster_port_config(cluster_id)

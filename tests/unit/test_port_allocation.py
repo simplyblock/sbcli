@@ -294,66 +294,6 @@ class TestLegacyPortWrappers(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Test get_next_rpc_port
-# ---------------------------------------------------------------------------
-
-class TestGetNextRpcPort(unittest.TestCase):
-
-    @patch("simplyblock_core.utils._get_cluster_port_config")
-    @patch("simplyblock_core.db_controller.DBController")
-    def test_empty_cluster_returns_base(self, mock_db_cls, mock_config):
-        from simplyblock_core.utils import get_next_rpc_port
-        mock_config.return_value = (4420, 8080, 50001)
-        mock_db_cls.return_value.get_storage_nodes_by_cluster_id.return_value = []
-        self.assertEqual(get_next_rpc_port("c1"), 8080)
-
-    @patch("simplyblock_core.utils._get_cluster_port_config")
-    @patch("simplyblock_core.db_controller.DBController")
-    def test_skips_used_rpc_ports(self, mock_db_cls, mock_config):
-        from simplyblock_core.utils import get_next_rpc_port
-        mock_config.return_value = (4420, 8080, 50001)
-        nodes = [_node("n1", rpc_port=8080), _node("n2", rpc_port=8081)]
-        mock_db_cls.return_value.get_storage_nodes_by_cluster_id.return_value = nodes
-        self.assertEqual(get_next_rpc_port("c1"), 8082)
-
-    @patch("simplyblock_core.utils._get_cluster_port_config")
-    @patch("simplyblock_core.db_controller.DBController")
-    def test_custom_rpc_base(self, mock_db_cls, mock_config):
-        from simplyblock_core.utils import get_next_rpc_port
-        mock_config.return_value = (4420, 9000, 50001)
-        mock_db_cls.return_value.get_storage_nodes_by_cluster_id.return_value = []
-        self.assertEqual(get_next_rpc_port("c1"), 9000)
-
-    @patch("simplyblock_core.utils._get_cluster_port_config")
-    @patch("simplyblock_core.db_controller.DBController")
-    def test_fills_rpc_gaps(self, mock_db_cls, mock_config):
-        from simplyblock_core.utils import get_next_rpc_port
-        mock_config.return_value = (4420, 8080, 50001)
-        nodes = [_node("n1", rpc_port=8080), _node("n2", rpc_port=8082)]  # gap at 8081
-        mock_db_cls.return_value.get_storage_nodes_by_cluster_id.return_value = nodes
-        self.assertEqual(get_next_rpc_port("c1"), 8081)
-
-    @patch("simplyblock_core.utils._get_cluster_port_config")
-    @patch("simplyblock_core.db_controller.DBController")
-    def test_returns_zero_when_exhausted(self, mock_db_cls, mock_config):
-        from simplyblock_core.utils import get_next_rpc_port
-        mock_config.return_value = (4420, 8080, 50001)
-        # All 1000 ports in range are used
-        nodes = [_node(f"n{i}", rpc_port=8080 + i) for i in range(1000)]
-        mock_db_cls.return_value.get_storage_nodes_by_cluster_id.return_value = nodes
-        self.assertEqual(get_next_rpc_port("c1"), 0)
-
-    @patch("simplyblock_core.utils._get_cluster_port_config")
-    @patch("simplyblock_core.db_controller.DBController")
-    def test_ignores_zero_rpc_ports(self, mock_db_cls, mock_config):
-        from simplyblock_core.utils import get_next_rpc_port
-        mock_config.return_value = (4420, 8080, 50001)
-        nodes = [_node("n1", rpc_port=0)]
-        mock_db_cls.return_value.get_storage_nodes_by_cluster_id.return_value = nodes
-        self.assertEqual(get_next_rpc_port("c1"), 8080)
-
-
-# ---------------------------------------------------------------------------
 # Test get_next_fw_port (SNodeAPI — per-storage-node, unique per SPDK)
 # ---------------------------------------------------------------------------
 
