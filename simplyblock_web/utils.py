@@ -52,11 +52,7 @@ def _to_jsonable(obj):
     if isinstance(obj, (SecretStr, SecretBytes)):
         return obj.get_secret_value()
     if isinstance(obj, BaseModel):
-        # Pydantic v2: model_dump; v1: dict()
-        try:
-            return obj.model_dump()
-        except AttributeError:
-            return obj.dict()
+        return obj.model_dump()
     if isinstance(obj, dict):
         return {k: _to_jsonable(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):

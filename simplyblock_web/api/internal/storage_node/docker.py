@@ -3,8 +3,9 @@
 import json
 import math
 import os
-from pathlib import Path
+import subprocess
 import time
+from pathlib import Path
 from typing import List, Optional, Union
 
 import cpuinfo
@@ -455,13 +456,11 @@ def write_key_file(body: WriteKeyFileBody):
 
 
 def set_cluster_id(cluster_id):
-    ret = os.popen(f"echo {cluster_id} > {cluster_id_file}").read().strip()
-    return ret
+    Path(cluster_id_file).write_text(cluster_id)
 
 
 def delete_cluster_id():
-    out, _, _ = shell_utils.run_command(f"rm -f {cluster_id_file}")
-    return out
+    Path(cluster_id_file).unlink(missing_ok=True)
 
 
 def get_node_lsblk():
@@ -941,11 +940,12 @@ class PingQuery(BaseModel):
 })
 def ping_ip(query: PingQuery):
     try:
-        ping_response = os.system(f"ping -c 3 -W 1 {query.ip} > /dev/null 2>&1")
-        link_is_up = False
-        with open(f"/sys/class/net/{query.ifname}/carrier") as f:
-            link_is_up = f.read().strip() == "1"
-        return utils.get_response(ping_response == 0 and link_is_up)
+        subprocess.check_call(
+            ["ping", "-c", "3", "-W", "1", query.ip],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return utils.get_response(Path(f"/sys/class/net/{query.ifname}/carrier").read_text().strip() == "1")
     except Exception as e:
         logger.error(e)
         return utils.get_response(False, str(e))

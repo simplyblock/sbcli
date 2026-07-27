@@ -5,6 +5,7 @@ import json
 import math
 import platform
 import socket
+import subprocess
 
 import psutil
 from concurrent.futures import ThreadPoolExecutor
@@ -5830,10 +5831,9 @@ def deploy(ifname, isolate_cores=False):
     logger.info("Config Validated successfully.")
 
     logger.info("NVMe SSD devices found on node:")
-    stream = os.popen(
-        f"lspci -Dnn | grep -i '\\[{LINUX_DRV_MASS_STORAGE_ID:02}{LINUX_DRV_MASS_STORAGE_NVME_TYPE_ID:02}\\]'")
-    for line in stream.readlines():
-        logger.info(line.strip())
+    for line in subprocess.check_output(["lspci", "-Dnn"], text=True).splitlines():
+        if f"[{LINUX_DRV_MASS_STORAGE_ID:02x}{LINUX_DRV_MASS_STORAGE_NVME_TYPE_ID:02x}]".lower() in line.lower():
+            logger.info(line.strip())
 
     logger.info("Installing dependencies...")
     scripts.install_deps(mode="docker")
