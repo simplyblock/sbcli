@@ -15,3 +15,6 @@ dist
 .tox
 
 AGENTS.local.md
+
+# Local-only agent configs, not shared via git
+.claude/agents/
