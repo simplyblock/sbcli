@@ -663,6 +663,18 @@ class _MassCreateDeleteMixin:
             _check_phase_time("Phase 3", t0, expected_snaps)
             _check_deadline("Phase 3")
 
+            # Phase 3b: Kill one storage node, wait for recovery
+            self.logger.info(
+                "=== Phase 3b: Node outage #1 (before lvol delete) ==="
+            )
+            t0 = time.time()
+            outage_1_host = self._phase_node_outage("3b_node_outage_1")
+            self.logger.info(
+                f"[Phase 3b] Node outage #1 complete "
+                f"in {self._phase_durations.get('3b_node_outage_1', '?')}s"
+            )
+            _check_deadline("Phase 3b")
+
             # Phase 4: Delete lvols to free subsystem slots for clones.
             # Lvols can be deleted even with snapshots — orphaned
             # snapshots remain valid for cloning.
@@ -724,6 +736,18 @@ class _MassCreateDeleteMixin:
                 f"[Phase 7] Clones deleted "
                 f"in {self._phase_durations['7_delete_clones']}s"
             )
+
+            # Phase 7b: Kill another storage node, wait for recovery
+            self.logger.info(
+                "=== Phase 7b: Node outage #2 (before snapshot delete) ==="
+            )
+            t0 = time.time()
+            self._phase_node_outage("7b_node_outage_2", exclude_host_ip=outage_1_host)
+            self.logger.info(
+                f"[Phase 7b] Node outage #2 complete "
+                f"in {self._phase_durations.get('7b_node_outage_2', '?')}s"
+            )
+            _check_deadline("Phase 7b")
 
             # Phase 8: Mass-delete all snapshots
             t0 = time.time()
@@ -787,6 +811,81 @@ class _MassCreateDeleteMixin:
 
     def _phase_cleanup(self):
         raise NotImplementedError
+
+    # ── Node outage helper ─────────────────────────────────────────────────
+
+    def _pick_node_on_different_host(self, exclude_host_ip: str | None = None):
+        """Return a node dict that lives on a different host than *exclude_host_ip*.
+
+        Falls back to the first available node if all nodes share the same host.
+        """
+        nodes = self.sbcli_utils.get_storage_nodes()["results"]
+        if not nodes:
+            return None
+        if exclude_host_ip:
+            candidates = [n for n in nodes if n["mgmt_ip"] != exclude_host_ip]
+            if candidates:
+                return candidates[0]
+        return nodes[0]
+
+    def _phase_node_outage(self, label: str, exclude_host_ip: str | None = None):
+        """Kill one storage node's container and wait for auto-restart.
+
+        Picks a storage node on a **different host** than *exclude_host_ip*
+        (falls back to any node if only one host exists).  Kills it, waits
+        for offline/unreachable, then waits for it to come back online.
+        Times each transition for the summary.
+
+        Returns the host IP of the killed node so the next outage can
+        exclude it.
+
+        Works in both Docker (stop_spdk_process) and K8s (restart_spdk_pod)
+        modes via the same attributes the parent classes expose.
+        """
+        target = self._pick_node_on_different_host(exclude_host_ip)
+        if not target:
+            self.logger.warning(f"[{label}] No storage nodes found — skipping outage")
+            return exclude_host_ip
+        node_uuid = target["id"]
+        node_ip = target["mgmt_ip"]
+        rpc_port = target.get("rpc_port", 0)
+        self.logger.info(
+            f"[{label}] Killing storage node {node_uuid} ({node_ip}) ..."
+        )
+
+        # Kill the node
+        t_kill = time.time()
+        if getattr(self, "k8s_test", False):
+            self.k8s_utils.restart_spdk_pod(node_ip)
+        else:
+            self.ssh_obj.stop_spdk_process(node_ip, rpc_port, self.cluster_id)
+        kill_dur = round(time.time() - t_kill, 1)
+        self.logger.info(f"[{label}] Kill command took {kill_dur}s")
+
+        # Wait for offline / unreachable
+        t_offline = time.time()
+        self.sbcli_utils.wait_for_storage_node_status(
+            node_uuid, ["offline", "unreachable"], timeout=600,
+        )
+        offline_dur = round(time.time() - t_offline, 1)
+        self.logger.info(
+            f"[{label}] Node reached offline/unreachable in {offline_dur}s"
+        )
+
+        # Wait for auto-restart → online
+        t_online = time.time()
+        self.sbcli_utils.wait_for_storage_node_status(
+            node_uuid, "online", timeout=900,
+        )
+        recovery_dur = round(time.time() - t_online, 1)
+        total_dur = round(time.time() - t_kill, 1)
+        self.logger.info(
+            f"[{label}] Node back online in {recovery_dur}s "
+            f"(total outage: {total_dur}s)"
+        )
+
+        self._phase_durations[label] = total_dur
+        return node_ip
 
     # ── Summary ────────────────────────────────────────────────────────────
 
@@ -1084,6 +1183,7 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
                         "time_based": True,
                         "runtime": self.FIO_RUNTIME,
                         "randseed": randseed,
+                        "use_latency": False,
                     },
                 )
                 fio_thread.start()
@@ -1158,6 +1258,7 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
                 "time_based": True,
                 "runtime": self.FIO_RUNTIME,
                 "randseed": randseed,
+                "use_latency": False,
             },
         )
         fio_thread.start()
@@ -1619,6 +1720,7 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
                 "time_based": True,
                 "runtime": self.FIO_RUNTIME,
                 "randseed": randseed,
+                "use_latency": False,
             },
         )
         fio_thread.start()
