@@ -748,7 +748,7 @@ jobs:
             spdkImage: "${SPDK_IMAGE}"
             spdkProxyImage: "${SB_REPO}:${SB_TAG}"
             pcieModel: "SAMSUNG MZQLB1T9HAJR-00007"
-            driveSizeRange: "1.7T-2T"
+            driveSizeRange: "${DRIVE_SIZE_RANGE}"
             mgmtIfname: ${MGMT_IFC}
             dataIfname:
               - ${DATA_NICS}
@@ -810,7 +810,7 @@ jobs:
             spdkImage: "${SPDK_IMAGE}"
             spdkProxyImage: "${SB_REPO}:${SB_TAG}"
             pcieModel: "SAMSUNG MZQLB1T9HAJR-00007"
-            driveSizeRange: "1.7T-2T"
+            driveSizeRange: "${DRIVE_SIZE_RANGE}"
             mgmtIfname: ${MGMT_IFC}
             dataIfname:
               - ${DATA_NICS}

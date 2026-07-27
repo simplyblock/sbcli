@@ -748,6 +748,7 @@ jobs:
           CORE_PERCENTAGE="${{ inputs.cluster_environment == 'aws-openshift' && '50' || inputs.cluster_environment == 'openshift-local' && '50' || inputs.cluster_environment == 'openshift-baremetal' && '50' || inputs.cluster_environment == 'local' && '35' || '65' }}"
           SKIP_KUBELET_CONFIG="${{ (inputs.cluster_environment == 'aws-openshift' || inputs.cluster_environment == 'openshift-local' || inputs.cluster_environment == 'openshift-baremetal') && 'false' || 'true' }}"
           FORCE_FORMAT_4K="${{ (inputs.cluster_environment == 'aws-openshift' || inputs.cluster_environment == 'openshift-local' || inputs.cluster_environment == 'openshift-baremetal') && 'true' || 'false' }}"
+          DRIVE_SIZE_RANGE="${{ inputs.cluster_environment == 'openshift-baremetal' && '1500G-2000G' || '1.7T-2T' }}"
 
           # Build workerNodes YAML list from initial worker nodes only
           WORKER_YAML=""
@@ -817,7 +818,7 @@ jobs:
             spdkImage: "${SPDK_IMAGE}"
             spdkProxyImage: "${SB_REPO}:${SB_TAG}"
             pcieModel: "SAMSUNG MZQLB1T9HAJR-00007"
-            driveSizeRange: "1.7T-2T"
+            driveSizeRange: "${DRIVE_SIZE_RANGE}"
             mgmtIfname: ${MGMT_IFC}
             dataIfname:
               - ${DATA_NICS}
