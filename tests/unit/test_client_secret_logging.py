@@ -58,7 +58,8 @@ def test_rpc_client_request_body_carries_unwrapped_param(rpc_client, caplog):
     assert "ctor-secret" not in _captured_logs_text(caplog)
 
 
-def test_rpc_client_response_body_hidden_by_default(rpc_client, caplog):
+def test_rpc_client_response_body_hidden_when_flag_off(rpc_client, caplog, monkeypatch):
+    monkeypatch.setenv("SB_LOG_RESPONSE_BODIES", "false")
     rpc_client._fake_session.post.return_value = _make_json_response({
         "jsonrpc": "2.0", "id": 1, "result": {"sensitive": "RESPVALUE"},
     })
@@ -106,7 +107,8 @@ def test_snode_request_wire_unwraps_secrets(snode_client, caplog):
     assert "PWVALUE" not in _captured_logs_text(caplog)
 
 
-def test_snode_response_body_hidden_by_default(snode_client, caplog):
+def test_snode_response_body_hidden_when_flag_off(snode_client, caplog, monkeypatch):
+    monkeypatch.setenv("SB_LOG_RESPONSE_BODIES", "false")
     snode_client._fake_session.request.return_value = _make_json_response({"results": {"x": "RESPVAL"}})
     with caplog.at_level(logging.DEBUG):
         snode_client._request("GET", "info")
