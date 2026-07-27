@@ -803,7 +803,7 @@ def main():
             except Exception as e:
                 logger.error(f"Orphaned-node watchdog failed for cluster {cl.get_id()}: {e}")
 
-    time.sleep(constants.TASK_EXEC_INTERVAL_SEC)
+        time.sleep(constants.TASK_EXEC_INTERVAL_SEC)
 
 
 if __name__ == "__main__":
