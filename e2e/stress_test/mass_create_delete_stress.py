@@ -737,12 +737,14 @@ class _MassCreateDeleteMixin:
                 f"in {self._phase_durations['7_delete_clones']}s"
             )
 
-            # Phase 7b: Kill another storage node, wait for recovery
+            # Phase 7b: Kill a node on a DIFFERENT host than outage #1
             self.logger.info(
                 "=== Phase 7b: Node outage #2 (before snapshot delete) ==="
             )
             t0 = time.time()
-            self._phase_node_outage("7b_node_outage_2", exclude_host_ip=outage_1_host)
+            self._phase_node_outage(
+                "7b_node_outage_2", exclude_host_ip=outage_1_host,
+            )
             self.logger.info(
                 f"[Phase 7b] Node outage #2 complete "
                 f"in {self._phase_durations.get('7b_node_outage_2', '?')}s"
