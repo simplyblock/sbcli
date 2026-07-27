@@ -767,6 +767,7 @@ jobs:
           CORE_PERCENTAGE="${{ inputs.cluster_environment == 'aws-openshift' && '50' || inputs.cluster_environment == 'openshift-local' && '50' || inputs.cluster_environment == 'openshift-baremetal' && '50' || inputs.cluster_environment == 'local' && '35' || '65' }}"
           SKIP_KUBELET_CONFIG="${{ (inputs.cluster_environment == 'aws-openshift' || inputs.cluster_environment == 'openshift-local' || inputs.cluster_environment == 'openshift-baremetal') && 'false' || 'true' }}"
           FORCE_FORMAT_4K="${{ (inputs.cluster_environment == 'aws-openshift' || inputs.cluster_environment == 'openshift-local' || inputs.cluster_environment == 'openshift-baremetal') && 'true' || 'false' }}"
+          DRIVE_SIZE_RANGE="${{ inputs.cluster_environment == 'openshift-baremetal' && '1500G-2000G' || '1.7T-2T' }}"
 
           # Build workerNodes YAML list from all worker nodes
           WORKER_YAML=""
@@ -836,7 +837,7 @@ jobs:
             spdkImage: "${SPDK_IMAGE}"
             spdkProxyImage: "${SB_REPO}:${SB_TAG}"
             pcieModel: "SAMSUNG MZQLB1T9HAJR-00007"
-            driveSizeRange: "1.7T-2T"
+            driveSizeRange: "${DRIVE_SIZE_RANGE}"
             mgmtIfname: ${MGMT_IFC}
             dataIfname:
               - ${DATA_NICS}
@@ -1384,6 +1385,19 @@ jobs:
           TEST_TIME_HOURS: ${{ env.TEST_TIME_HOURS }}
           TEST_TIME_MINS: ${{ env.TEST_TIME_MINS }}
           TEST_TIME_SECS: ${{ env.TEST_TIME_SECS }}
+
+      - name: Save summary for aggregation
+        if: always()
+        shell: bash
+        run: cp "$GITHUB_STEP_SUMMARY" "$RUNNER_TEMP/test-summary.md"
+
+      - name: Upload summary artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-summary-${{ inputs.testname || 'K8sNativeNodeMigrationTest' }}
+          path: ${{ runner.temp }}/test-summary.md
+          retention-days: 7
 
       - name: Send Slack Notification
         if: always() && (inputs.send_slack_notification || 'true') == 'true'

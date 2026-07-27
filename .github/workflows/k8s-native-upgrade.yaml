@@ -379,11 +379,15 @@ jobs:
           SKIP_KUBELET_CONFIG="false"
           CORE_PERCENTAGE="30"
           FORCE_FORMAT_4K="false"
+          DRIVE_SIZE_RANGE="1.7T-2T"
           CLUSTER_ENV="${{ github.event.inputs.cluster_environment || 'local' }}"
           if [ "$CLUSTER_ENV" = "aws-openshift" ] || [ "$CLUSTER_ENV" = "openshift-local" ] || [ "$CLUSTER_ENV" = "openshift-baremetal" ]; then
             OPENSHIFT_CLUSTER="true"
             SKIP_KUBELET_CONFIG="true"
             CORE_PERCENTAGE="50"
+          fi
+          if [ "$CLUSTER_ENV" = "openshift-baremetal" ]; then
+            DRIVE_SIZE_RANGE="1500G-2000G"
           fi
 
           # Build vault settings (conditional on TLS)
@@ -435,7 +439,7 @@ jobs:
             spdkImage: "${SPDK_IMAGE}"
             spdkProxyImage: "${SB_REPO}:${SB_TAG}"
             pcieModel: "SAMSUNG MZQLB1T9HAJR-00007"
-            driveSizeRange: "1.7T-2T"
+            driveSizeRange: "${DRIVE_SIZE_RANGE}"
             mgmtIfname: ${MGMT_IFC}
             dataIfname:
               - ${DATA_NICS}

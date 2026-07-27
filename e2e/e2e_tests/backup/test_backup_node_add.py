@@ -144,6 +144,7 @@ class TestBackupAfterNodeAdd(BackupTestBase):
 
     def run(self):
         self.logger.info("Starting Test: Backup After Node Add")
+        self.fio_node = self.fio_node[0]
 
         # ── TC-BCK-ADD-001: Setup + pre-expansion backup ─────────────
         self.logger.info("TC-BCK-ADD-001: Create lvol, write data, backup")
@@ -333,6 +334,7 @@ class TestBackupWithFioOnNewNode(BackupTestBase):
 
     def run(self):
         self.logger.info("Starting Test: Backup With FIO On New Node")
+        self.fio_node = self.fio_node[0]
 
         nodes_to_add = self.new_worker_nodes if self.k8s_test else self.new_nodes
         assert len(nodes_to_add) >= 1, "At least 1 new node required"

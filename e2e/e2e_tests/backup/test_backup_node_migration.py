@@ -116,6 +116,7 @@ class TestBackupAfterNodeMigration(BackupTestBase):
 
     def run(self):
         self.logger.info("Starting Test: Backup After Node Migration")
+        self.fio_node = self.fio_node[0]
 
         # Validate prerequisites
         if self.k8s_test:
@@ -321,6 +322,7 @@ class TestBackupDuringMigration(BackupTestBase):
 
     def run(self):
         self.logger.info("Starting Test: Backup During Migration")
+        self.fio_node = self.fio_node[0]
 
         if self.k8s_test:
             assert self.migrate_to_worker, (
