@@ -1,10 +1,12 @@
-"""Batched bdev-presence probes (2026-07-21 follow-up).
+"""Batched bdev-presence probes (2026-07-21, revised 2026-07-27).
 
 FD recovery issued +31,710 excess filtered ``bdev_get_bdevs`` — one RPC per
-device per reconcile pass. The sweeps now fetch ONE unfiltered dump per pass
-and answer membership locally, falling back to per-device probes when the
-dump fails. Filtered get_bdevs matches by name OR alias, so the batch set
-must include aliases.
+device per reconcile pass. The sweeps then fetched ONE unfiltered bdev dump
+per pass — which run 20260725 showed scaling with lvol+snapshot count (~21k
+bdevs, 18s+ JSON serialization on the SPDK app thread, KATO starvation, JC
+aborts). The sweeps now fetch ONE ``bdev_nvme_get_controllers`` inventory per
+pass (scales with attached controllers only) and answer remote_*n1 membership
+locally, falling back to per-device filtered probes when the inventory fails.
 """
 import types
 
@@ -13,50 +15,64 @@ from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.nvme_device import NVMeDevice
 
 
-def _dump_entry(name, aliases=()):
-    return {"name": name, "aliases": list(aliases)}
-
-
 class TestFetchBdevNameSet:
-    def test_names_and_aliases_included(self):
-        rpc = types.SimpleNamespace(get_bdevs=lambda name=None: [
-            _dump_entry("remote_a1n1"),
-            _dump_entry("uuid-123", aliases=["LVS_1/lvol1", "alias2"]),
+    def test_controller_and_namespace_names_included(self):
+        rpc = types.SimpleNamespace(bdev_nvme_controller_list=lambda: [
+            {"name": "remote_a1"},
+            {"name": "remote_jm_x"},
         ])
         names = storage_node_ops._fetch_bdev_name_set(rpc)
-        assert names == {"remote_a1n1", "uuid-123", "LVS_1/lvol1", "alias2"}
+        assert names == {"remote_a1", "remote_a1n1",
+                         "remote_jm_x", "remote_jm_xn1"}
 
     def test_failure_returns_none(self):
-        def boom(name=None):
+        def boom():
             raise RuntimeError("rpc down")
         assert storage_node_ops._fetch_bdev_name_set(
-            types.SimpleNamespace(get_bdevs=boom)) is None
+            types.SimpleNamespace(bdev_nvme_controller_list=boom)) is None
 
-    def test_empty_dump_returns_none(self):
-        # An empty/falsy dump is indistinguishable from a failed RPC layer —
-        # callers must fall back rather than treat every bdev as absent.
+    def test_empty_inventory_returns_none(self):
+        # An empty/falsy inventory is indistinguishable from a failed RPC
+        # layer — callers must fall back rather than treat every bdev as
+        # absent.
         assert storage_node_ops._fetch_bdev_name_set(
-            types.SimpleNamespace(get_bdevs=lambda name=None: [])) is None
+            types.SimpleNamespace(bdev_nvme_controller_list=lambda: [])) is None
+
+    def test_never_calls_unfiltered_get_bdevs(self):
+        # The regression this guards: the batch probe must NEVER pay the
+        # full bdev dump (app-thread serialization scales with object count).
+        def dump_forbidden(name=None, all_bdevs=False):
+            if name is None:
+                raise AssertionError("unfiltered bdev dump on the batch path")
+            return []
+        rpc = types.SimpleNamespace(
+            bdev_nvme_controller_list=lambda: [{"name": "remote_a1"}],
+            get_bdevs=dump_forbidden)
+        assert storage_node_ops._fetch_bdev_name_set(rpc) == {
+            "remote_a1", "remote_a1n1"}
 
 
 class _CountingRpc:
-    """get_bdevs stub: unfiltered call returns the dump, filtered call
-    consults the same truth; counts each kind."""
+    """Inventory + filtered-probe stub sharing one truth set of namespace
+    bdev names (``remote_<x>n1``); counts each kind of call."""
 
     def __init__(self, present):
         self.present = set(present)
-        self.dump_calls = 0
+        self.inventory_calls = 0
         self.filtered_calls = 0
-        self.fail_dump = False
+        self.fail_inventory = False
 
-    def get_bdevs(self, name=None):
-        if name is None:
-            self.dump_calls += 1
-            if self.fail_dump:
-                raise RuntimeError("dump failed")
-            return [_dump_entry(n) for n in sorted(self.present)]
+    def bdev_nvme_controller_list(self, name=None):
+        self.inventory_calls += 1
+        if self.fail_inventory:
+            raise RuntimeError("inventory failed")
+        # Controller name = namespace bdev name minus the trailing "n1".
+        return [{"name": n[:-2]} for n in sorted(self.present)]
+
+    def get_bdevs(self, name=None, all_bdevs=False):
+        assert name is not None, "unfiltered bdev dump on a sweep path"
         self.filtered_calls += 1
-        return [_dump_entry(name)] if name in self.present else []
+        return [{"name": name}] if name in self.present else []
 
 
 def _coverage_env(monkeypatch, rpc):
@@ -83,13 +99,13 @@ def _coverage_env(monkeypatch, rpc):
 
 
 class TestCoverageProbeBatching:
-    def test_one_dump_no_filtered_probes(self, monkeypatch):
+    def test_one_inventory_no_filtered_probes(self, monkeypatch):
         rpc = _CountingRpc({"remote_alc_1n1", "remote_alc_2n1"})
         snode = _coverage_env(monkeypatch, rpc)
         missing = storage_node_ops._verify_online_device_coverage(
             snode, repair=False)
         assert missing == []
-        assert rpc.dump_calls == 1
+        assert rpc.inventory_calls == 1
         assert rpc.filtered_calls == 0
 
     def test_missing_detected_via_batch(self, monkeypatch):
@@ -100,9 +116,9 @@ class TestCoverageProbeBatching:
         assert missing == ["remote_alc_2n1"]
         assert rpc.filtered_calls == 0
 
-    def test_fallback_to_filtered_on_dump_failure(self, monkeypatch):
+    def test_fallback_to_filtered_on_inventory_failure(self, monkeypatch):
         rpc = _CountingRpc({"remote_alc_1n1"})
-        rpc.fail_dump = True
+        rpc.fail_inventory = True
         snode = _coverage_env(monkeypatch, rpc)
         missing = storage_node_ops._verify_online_device_coverage(
             snode, repair=False)
@@ -117,7 +133,7 @@ class TestCoverageProbeBatching:
             m1 = storage_node_ops._verify_online_device_coverage(
                 snode, repair=False)
             fb = _CountingRpc(present)
-            fb.fail_dump = True
+            fb.fail_inventory = True
             snode = _coverage_env(monkeypatch, fb)
             m2 = storage_node_ops._verify_online_device_coverage(
                 snode, repair=False)
@@ -125,7 +141,7 @@ class TestCoverageProbeBatching:
 
 
 class TestSyncRemoteDevicesBatching:
-    def test_sync_uses_single_dump(self, monkeypatch):
+    def test_sync_uses_single_inventory(self, monkeypatch):
         rpc = _CountingRpc({"remote_alc_pn1"})
         dev = types.SimpleNamespace(
             status=NVMeDevice.STATUS_ONLINE, alceml_bdev="alc_p",
@@ -153,5 +169,5 @@ class TestSyncRemoteDevicesBatching:
             rpc_client=lambda timeout, retry: rpc)
         changed = storage_node_ops.sync_remote_devices_from_spdk(this)
         assert changed is True
-        assert rpc.dump_calls == 1
+        assert rpc.inventory_calls == 1
         assert rpc.filtered_calls == 0

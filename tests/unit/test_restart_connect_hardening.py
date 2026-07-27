@@ -164,6 +164,11 @@ class TestVerifyOnlineDeviceCoverage(unittest.TestCase):
         self.addCleanup(patcher_reconcile.stop)
         self.mock_reconcile.return_value = ["refreshed-records"]
 
+        # Batched probe uses the controllers inventory (2026-07-27); an empty
+        # inventory means "fetch failed -> per-device filtered get_bdevs
+        # fallback", which is the behavior most tests here stub via get_bdevs.
+        self.rpc.bdev_nvme_controller_list.return_value = []
+
     def _set_cluster(self, *peers):
         self.mock_db.get_storage_nodes_by_cluster_id.return_value = [
             self.snode, *peers]
@@ -172,7 +177,8 @@ class TestVerifyOnlineDeviceCoverage(unittest.TestCase):
         peer = _make_node("node-b")
         peer.nvme_devices = [_make_dev("dev-1", "node-b")]
         self._set_cluster(peer)
-        self.rpc.get_bdevs.return_value = [{"name": "remote_alceml_dev-1n1"}]
+        self.rpc.bdev_nvme_controller_list.return_value = [
+            {"name": "remote_alceml_dev-1"}]
 
         missing = storage_node_ops._verify_online_device_coverage(self.snode)
 
@@ -198,13 +204,13 @@ class TestVerifyOnlineDeviceCoverage(unittest.TestCase):
         dev = _make_dev("dev-1", "node-b")
         peer.nvme_devices = [dev]
         self._set_cluster(peer)
-        # Probes are batched (one unfiltered dump per pass, 2026-07-21):
-        # pass 1 dump lacks the expected bdev; post-repair dump has it. The
-        # dumps must be non-empty — an empty dump is treated as a failed
-        # fetch and falls back to per-device filtered probes.
-        self.rpc.get_bdevs.side_effect = [
-            [{"name": "some_other_bdev"}],
-            [{"name": "remote_alceml_dev-1n1"}],
+        # Probes are batched (one controllers inventory per pass, 2026-07-27):
+        # pass 1 inventory lacks the expected controller; post-repair it has
+        # it. The inventories must be non-empty — an empty one is treated as
+        # a failed fetch and falls back to per-device filtered probes.
+        self.rpc.bdev_nvme_controller_list.side_effect = [
+            [{"name": "some_other_ctrl"}],
+            [{"name": "remote_alceml_dev-1"}],
         ]
 
         missing = storage_node_ops._verify_online_device_coverage(self.snode)

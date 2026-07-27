@@ -569,11 +569,23 @@ class RPCClient:
         }
         return self._request2("bdev_lvol_delete", params)
 
-    def get_bdevs(self, name=None):
-        params = None
+    def get_bdevs(self, name=None, all_bdevs=False):
+        """Filtered by default. An unfiltered dump serializes EVERY bdev on
+        the SPDK app thread and scales with lvol+snapshot count — run
+        20260725 (~21k object bdevs): 18s+ per dump, KATO starved, JC/JM
+        exclusions, node aborts. Cold paths that genuinely need the full
+        inventory (node-add on a near-empty node) must declare it with
+        ``all_bdevs=True``; anything periodic must pass a ``name`` or use
+        ``bdev_nvme_controller_list`` (scales with attached controllers)."""
         if name:
-            params = {"name": name}
-        return self._request("bdev_get_bdevs", params)
+            return self._request("bdev_get_bdevs", {"name": name})
+        if not all_bdevs:
+            logger.warning(
+                "unfiltered bdev_get_bdevs without all_bdevs=True — full "
+                "dumps wedge the SPDK app thread at scale; pass a name, use "
+                "bdev_nvme_controller_list, or declare all_bdevs=True "
+                "(cold paths only)")
+        return self._request("bdev_get_bdevs", None)
 
     def resize_lvol(self, lvol_bdev, blockcnt):
         params = {

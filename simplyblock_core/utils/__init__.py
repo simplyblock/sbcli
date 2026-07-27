@@ -1336,7 +1336,8 @@ def addNvmeDevices(rpc_client, snode, devs):
         if pcie in ctr_map:
             nvme_controller = ctr_map[pcie]
             nvme_bdevs = []
-            bdevs = rpc_client.get_bdevs()
+            # Node-add cold path: full dump is fine, the node carries no lvols yet.
+            bdevs = rpc_client.get_bdevs(all_bdevs=True)
             if bdevs is None:
                 # None is an RPC failure (timeout / non-200), not an empty
                 # list; fail loudly instead of crashing on a None iteration.

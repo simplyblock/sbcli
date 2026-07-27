@@ -6,7 +6,7 @@ CLUSTER_ID = "10293de0-b91c-4618-b17a-5c3e688686f4"
 
 def bdev_names(node):
     try:
-        return {b["name"] for b in node.rpc_client().get_bdevs() or []}
+        return {b["name"] for b in node.rpc_client().get_bdevs(all_bdevs=True) or []}
     except Exception as exc:
         print(f"RPC_FAIL node={node.get_id()} ip={node.mgmt_ip} err={exc}")
         return None

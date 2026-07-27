@@ -82,6 +82,11 @@ HEALTH_CHECK_INTERVAL_SEC = 30
 # STATUS_ONLINE.  Accelerates observation of recovery transitions without
 # adding polling cost to healthy nodes.
 HEALTH_CHECK_FAST_INTERVAL_SEC = 5
+# Remote-device sweep gate (run 20260725): sync_remote_devices_from_spdk pays
+# one SPDK inventory RPC per node per pass; while peer topology is unchanged
+# the sweep is skipped, but never longer than this floor, so drift that no
+# topology event announces (manual attach, missed event) is still reconciled.
+HEALTH_CHECK_REMOTE_SWEEP_FORCE_SEC = 600
 
 GRAYLOG_CHECK_INTERVAL_SEC = 60
 

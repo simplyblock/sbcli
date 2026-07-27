@@ -807,7 +807,8 @@ def get_next_physical_device_order(snode, exclude_node_id=None):
 
 def _search_for_partitions(rpc_client, nvme_device):
     partitioned_devices = []
-    bdevs = rpc_client.get_bdevs()
+    # Node-add cold path: full dump is fine here, the node carries no lvols yet.
+    bdevs = rpc_client.get_bdevs(all_bdevs=True)
     if bdevs is None:
         raise RPCException(f"get_bdevs failed on {rpc_client.host}")
     for bdev in bdevs:
@@ -1202,7 +1203,8 @@ def _prepare_cluster_devices_partitions(snode, devices):
 
     # create jm device
     jm_devices = []
-    bdevs = snode.rpc_client().get_bdevs()
+    # Node-add cold path: full dump is fine here, the node carries no lvols yet.
+    bdevs = snode.rpc_client().get_bdevs(all_bdevs=True)
     if bdevs is None:
         # None means the RPC failed (timeout / non-200), not "no bdevs".
         # Without this guard the comprehension below crashes with an opaque
@@ -1643,36 +1645,47 @@ def _connect_to_remote_devs(
 
 
 def _fetch_bdev_name_set(rpc_client):
-    """One unfiltered ``bdev_get_bdevs`` -> set of every bdev name and alias
-    on the node, or ``None`` if the dump could not be fetched (caller falls
-    back to per-name probes).
+    """One ``bdev_nvme_get_controllers`` inventory -> set of every attached
+    NVMe controller name plus its namespace bdev name (``<controller>n1``),
+    or ``None`` if the inventory could not be fetched (caller falls back to
+    per-name probes).
 
     Purpose: the reconcile sweeps used to probe presence with ONE filtered
     ``get_bdevs(name)`` RPC PER DEVICE — measured +31,710 excess get_bdevs
     during the 2026-07-21 16-node FD recovery, each paying the full CP
-    round-trip. One dump per sweep answers every membership question
-    locally. This is the inverse of the 2026-07-16 O(N^2)-dumps problem:
-    that was a full dump PER DEVICE; this is a single dump reused for N
-    checks. Freshness is the same TOCTOU class as the sequential per-device
-    probes it replaces (a sweep was never atomic).
+    round-trip. One inventory per sweep answers every membership question
+    locally.
 
-    Membership must mirror filtered-get_bdevs semantics, which matches by
-    name OR alias — so aliases are included in the set.
+    Why controllers and NOT an unfiltered ``bdev_get_bdevs``: the full bdev
+    dump serializes EVERY bdev on the SPDK app thread and its size scales
+    with lvol+snapshot count, not device count. Run 20260725 (3k lvols +
+    18k snapshots): one dump took 18s+, starving keep-alive handling on the
+    app thread -> KATO storms -> JC/JM exclusions -> node aborts. The
+    controllers inventory scales with attached controllers only (~cluster
+    devices + JMs) regardless of object count. Every consumer of this set
+    tests ``remote_<...>n1`` namespace-bdev names of nvme-attached
+    controllers, so the controller inventory answers the same question.
+
+    Approximation: controller present => its ``n1`` namespace bdev present.
+    A controller wedged without its namespace is rare and still caught by
+    the exact per-device ``check_bdev`` probes in the health pass; a false
+    positive here never blocks the repair path (which re-probes exact names).
+    Freshness is the same TOCTOU class as the sequential per-device probes
+    this replaces (a sweep was never atomic).
     """
     try:
-        ret = rpc_client.get_bdevs()
+        ret = rpc_client.bdev_nvme_controller_list()
     except Exception as e:
-        logger.debug("bdev dump for batched probe failed: %s", e)
+        logger.debug("controller inventory for batched probe failed: %s", e)
         return None
     if not ret:
         return None
     names = set()
-    for b in ret:
-        n = b.get("name")
+    for c in ret:
+        n = c.get("name")
         if n:
             names.add(n)
-        for a in (b.get("aliases") or []):
-            names.add(a)
+            names.add(f"{n}n1")
     return names
 
 
