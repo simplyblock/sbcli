@@ -3701,15 +3701,14 @@ def _decommission_node_devices(removed_node):
         if fresh.status == NVMeDevice.STATUS_REMOVED:
             device_controller.device_set_failed(dev.get_id())
 
-    # Completion gate: every non-JM device migrated.
     removed_node = db_controller.get_storage_node_by_id(removed_node.get_id())
     for dev in removed_node.nvme_devices:
         if dev.status in (NVMeDevice.STATUS_JM, NVMeDevice.STATUS_FAILED_AND_MIGRATED):
             continue
         logger.info(
             f"[REMOVAL] {removed_node.get_id()}: device {dev.get_id()} "
-            f"status={dev.status}, migration not complete")
-        # return False
+            f"status={dev.status}, migration not complete"
+        )
 
     return True
 
