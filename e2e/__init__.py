@@ -40,6 +40,10 @@ from e2e_tests.add_node_fio_run import (
 )
 from e2e_tests.k8s_native_add_node import K8sNativeAddNodeTest
 from e2e_tests.k8s_native_node_migration import K8sNativeNodeMigrationTest
+from e2e_tests.test_add_node_edge_cases import (
+    TestSequentialNodeAdd,
+    TestAddNodeSnapshotCloneOnNewNode,
+)
 from e2e_tests.reboot_on_another_node_fio_run import TestRestartNodeOnAnotherHost
 from e2e_tests.mgmt_restart_fio_run import TestMgmtNodeReboot
 from e2e_tests.single_node_vm_reboot import TestRebootNodeHost
@@ -65,7 +69,7 @@ from stress_test.continuous_failover_ha_2node import RandomMultiClient2NodeFailo
 from stress_test.continuous_failover_ha_rdma import RandomRDMAFailoverTest
 from stress_test.continuous_failover_ha_rdma_multi_outage import RandomRDMAMultiFailoverTest
 from stress_test.continuous_failover_ha_k8s import RandomK8sMultiOutageFailoverTest
-from stress_test.continuous_k8s_native_failover import K8sNativeFailoverTest, K8sNativeBasicFailoverTest, K8sNativeResilientFailoverTest, K8sNativeQuickFailoverTest
+from stress_test.continuous_k8s_native_failover import K8sNativeFailoverTest, K8sNativeBasicFailoverTest, K8sNativeResilientFailoverTest, K8sNativeQuickFailoverTest, K8sNativeScaleBreakTest
 from stress_test.continuous_failover_ha_multi_client_quick_outage import (
     RandomRapidFailoverNoGap,
     RandomRapidFailoverNoGapV2WithMigration,
@@ -103,6 +107,7 @@ from stress_test.mass_create_delete_stress import (
     MassCreateDeletePersistent_1x500_Docker,
     MassCreateDeletePersistent_30x100_Docker,
     MassCreateDeletePersistent_300x10_Docker,
+    MassCreateDeletePersistent_300x10_6Snap_Docker,
     MassCreateDeletePersistent_500x1_Docker,
     MassCreateDeletePersistent_3000x1_Docker,
     MassCreateDeletePersistent_1x500_K8s,
@@ -162,6 +167,61 @@ from e2e_tests.security.test_lvol_security import (
 from e2e_tests.upgrade_tests.major_upgrade import TestMajorUpgrade, TestMajorUpgradeSingleNode
 from e2e_tests.upgrade_tests.k8s_major_upgrade import K8sNativeMajorUpgrade
 
+# ── Phase 1 functional E2E tests ─────────────────────────────────────
+from e2e_tests.test_lvol_basic import TestLvolBasicCRUD
+from e2e_tests.test_lvol_stats import TestLvolCapacityIOStats
+from e2e_tests.test_lvol_negative import TestLvolNegativeCases
+from e2e_tests.test_snapshot_negative import TestSnapshotNegativeCases
+# from e2e_tests.test_pool_attributes import TestPoolAttributes  # DISABLED: QoS crash
+from e2e_tests.test_pool_enable_disable import TestPoolEnableDisable
+from e2e_tests.test_pool_negative import TestPoolNegativeCases
+from e2e_tests.test_node_suspend_resume import TestNodeSuspendResume          # DEPRECATED: sn suspend/resume are no-ops
+from e2e_tests.test_pool_disable_io import TestPoolDisableIO
+from e2e_tests.test_negative_cases import TestCrossResourceNegative
+from e2e_tests.test_namespace_placement import TestNamespacePlacement
+from e2e_tests.test_namespace_fio import TestNamespaceFio
+from e2e_tests.test_namespace_limits import TestNamespaceLimits
+from e2e_tests.test_namespace_negative import TestNamespaceNegative
+from e2e_tests.test_volume_suspend_resume import TestVolumeSuspendResume      # UNCERTAIN: volume suspend/resume may not be wired
+from e2e_tests.test_volume_clone_lvol import TestVolumeCloneLvol
+from e2e_tests.test_node_anti_affinity import TestNodeAntiAffinity            # UNCERTAIN: requires --strict-node-anti-affinity cluster flag
+
+# ── Phase 2 functional E2E tests ─────────────────────────────────────
+from e2e_tests.test_lvol_inflate import TestLvolInflate
+from e2e_tests.test_lvol_migration_load import TestLvolMigrationLoad
+from e2e_tests.test_storage_node_stats import TestStorageNodeStats
+from e2e_tests.test_storage_node_ports import TestStorageNodePorts
+from e2e_tests.test_cluster_stats import TestClusterStats
+from e2e_tests.test_cluster_tasks import TestClusterTasks
+from e2e_tests.test_cluster_secret import TestClusterSecret
+from e2e_tests.test_qos_class import TestQosClass                            # DEPRECATED: QoS class API not verified
+from e2e_tests.test_qos_enforcement import TestQosEnforcement                # DEPRECATED: QoS enforcement API not verified
+from e2e_tests.test_pool_stats import TestPoolStats
+from e2e_tests.test_cluster_graceful_shutdown import TestClusterGracefulShutdown
+from e2e_tests.test_multi_client_connect import TestMultiClientConnect
+from e2e_tests.test_pool_dhchap import TestPoolDhchap
+from e2e_tests.test_pool_capacity_limits import TestPoolCapacityLimits
+from e2e_tests.test_namespace_e2e import TestNamespaceE2E
+from e2e_tests.test_device_restart import TestDeviceRestart
+from e2e_tests.test_volume_priority import TestVolumePriority                # UNCERTAIN: volume priority enforcement unclear
+from e2e_tests.test_shared_placement import TestSharedPlacement              # UNCERTAIN: requires cluster set-shared-placement
+from e2e_tests.test_qpair_tuning import TestQpairTuning                     # UNCERTAIN: requires RDMA-enabled cluster
+from e2e_tests.test_capacity_thresholds import TestCapacityThresholds
+
+# ── Phase 3 functional E2E tests (new coverage gaps) ────────────────
+from e2e_tests.test_health_checks import TestHealthChecks
+from e2e_tests.test_snapshot_lifecycle import TestSnapshotLifecycle
+from e2e_tests.test_migration_lifecycle import TestMigrationLifecycle
+from e2e_tests.test_storage_node_listing import TestStorageNodeListing
+from e2e_tests.test_device_capacity_io import TestDeviceCapacityIO
+from e2e_tests.test_lvol_connect_lifecycle import TestLvolConnectLifecycle
+from e2e_tests.test_volume_qos_dynamic import TestVolumeQosDynamic
+from e2e_tests.test_cluster_operations import TestClusterOperations
+from e2e_tests.test_concurrent_operations import TestConcurrentOperations
+from e2e_tests.test_pool_host_management import TestPoolHostManagement
+from e2e_tests.test_lvol_placement import TestLvolPlacement
+from e2e_tests.test_node_shutdown_restart import TestNodeShutdownRestart
+
 from e2e_tests.backup.test_backup_restore import (
     TestBackupBasicPositive,
     TestBackupRestoreDataIntegrity,
@@ -169,6 +229,7 @@ from e2e_tests.backup.test_backup_restore import (
     TestBackupNegative,
     TestBackupCryptoLvol,
     TestBackupCustomGeometry,
+    TestBackupRetentionMergeAfterDelete,
     TestBackupDeleteAndRestore,
     TestBackupCrossClusterRestore,  # NOT in get_backup_tests(); run explicitly only
     # Extra coverage tests (TC-BCK-100..148)
@@ -198,6 +259,15 @@ from e2e_tests.backup.test_backup_restore import (
     TestBackupInterruptedRestore,
 )
 
+from e2e_tests.backup.test_backup_node_add import (
+    TestBackupAfterNodeAdd,
+    TestBackupWithFioOnNewNode,
+)
+from e2e_tests.backup.test_backup_node_migration import (
+    TestBackupAfterNodeMigration,
+    TestBackupDuringMigration,
+)
+
 from stress_test.continuous_backup_stress import (
     BackupStressParallelSnapshots,
     BackupStressTcpFailover,
@@ -206,6 +276,9 @@ from stress_test.continuous_backup_stress import (
     BackupStressPolicyRetention,
     BackupStressRestoreConcurrent,
     BackupStressMarathon,
+    BackupStressLargeScale,
+    BackupStressFilesystemSecurityMix,
+    BackupStressRetentionMergeCycles,
 )
 
 
@@ -239,6 +312,8 @@ ALL_TESTS = [
     TestAddK8sNodesDuringFioRun,
     K8sNativeAddNodeTest,
     K8sNativeNodeMigrationTest,
+    TestSequentialNodeAdd,
+    TestAddNodeSnapshotCloneOnNewNode,
     K8sNativeMajorUpgrade,
     # Security E2E tests
     TestLvolSecurityCombinations,
@@ -268,6 +343,7 @@ ALL_TESTS = [
     RandomRDMAFailoverTest,
     RandomRDMAMultiFailoverTest,
     # Backup E2E tests
+    TestBackupRetentionMergeAfterDelete,
     TestBackupBasicPositive,
     TestBackupRestoreDataIntegrity,
     TestBackupPolicy,
@@ -299,6 +375,11 @@ ALL_TESTS = [
     TestBackupUpgradeCompatibility,
     TestBackupRestoreEdgeCases,
     TestBackupSourceSwitch,
+    # Backup node-add / node-migration edge cases
+    TestBackupAfterNodeAdd,
+    TestBackupWithFioOnNewNode,
+    TestBackupAfterNodeMigration,
+    TestBackupDuringMigration,
     # Backup stress tests
     BackupStressParallelSnapshots,
     BackupStressTcpFailover,
@@ -317,6 +398,7 @@ ALL_TESTS = [
     K8sNativeNamespacedFailoverTest,
     K8sNativeRapidLifecycleTest,
     K8sNativeMountVerifiedFailoverTest,
+    K8sNativeScaleBreakTest,
     TestParallelNamespaceLvolDocker,
     TestParallelNamespaceLvolK8s,
     BulkLvolDeleteDocker,
@@ -338,6 +420,7 @@ ALL_TESTS = [
     MassCreateDeletePersistent_1x500_Docker,
     MassCreateDeletePersistent_30x100_Docker,
     MassCreateDeletePersistent_300x10_Docker,
+    MassCreateDeletePersistent_300x10_6Snap_Docker,
     MassCreateDeletePersistent_500x1_Docker,
     MassCreateDeletePersistent_3000x1_Docker,
     MassCreateDeletePersistent_1x500_K8s,
@@ -364,6 +447,58 @@ ALL_TESTS = [
     TestMultiNodeVMRebootDocker,
     MgmtNodeNetworkOutageTest,
     MgmtNodeRebootTest,
+    # ── Phase 1 functional E2E tests ─────────────────────────────────
+    TestLvolBasicCRUD,
+    TestLvolCapacityIOStats,
+    TestLvolNegativeCases,
+    TestSnapshotNegativeCases,
+    # TestPoolAttributes,  # DISABLED: QoS causes SPDK crash (corrupted double-linked list in bdev_set_qos_limit_done)
+    TestPoolEnableDisable,
+    TestPoolNegativeCases,
+    TestNodeSuspendResume,
+    TestPoolDisableIO,
+    TestCrossResourceNegative,
+    TestNamespacePlacement,
+    TestNamespaceFio,
+    TestNamespaceLimits,
+    TestNamespaceNegative,
+    TestVolumeSuspendResume,
+    TestVolumeCloneLvol,
+    TestNodeAntiAffinity,
+    # ── Phase 2 functional E2E tests ─────────────────────────────────
+    TestLvolInflate,
+    TestLvolMigrationLoad,
+    TestStorageNodeStats,
+    TestStorageNodePorts,
+    TestClusterStats,
+    TestClusterTasks,
+    TestClusterSecret,
+    TestQosClass,
+    TestQosEnforcement,
+    TestPoolStats,
+    TestClusterGracefulShutdown,
+    TestMultiClientConnect,
+    TestPoolDhchap,
+    TestPoolCapacityLimits,
+    TestNamespaceE2E,
+    TestDeviceRestart,
+    TestVolumePriority,
+    TestSharedPlacement,
+    TestQpairTuning,
+    TestCapacityThresholds,
+    # ── Phase 3 functional E2E tests (new coverage gaps) ───────────────
+    TestHealthChecks,
+    TestSnapshotLifecycle,
+    TestMigrationLifecycle,
+    TestStorageNodeListing,
+    TestDeviceCapacityIO,
+    TestLvolConnectLifecycle,
+    TestVolumeQosDynamic,
+    TestClusterOperations,
+    TestConcurrentOperations,
+    TestPoolHostManagement,
+    TestLvolPlacement,
+    TestNodeShutdownRestart,
 ]
 
 def get_all_tests(custom=True, ha_test=False):
@@ -395,6 +530,61 @@ def get_all_tests(custom=True, ha_test=False):
         # TestSnapshotBatchCloneLVOLs,
         # TestManyClonesFromSameSnapshot,
         # TestDeviceNodeRestart
+
+        # ── Phase 1 functional E2E tests ─────────────────────────────
+        # TestLvolBasicCRUD,
+        # TestLvolCapacityIOStats,
+        # TestLvolNegativeCases,
+        # TestSnapshotNegativeCases,
+        # # TestPoolAttributes,  # DISABLED: QoS causes SPDK crash (corrupted double-linked list in bdev_set_qos_limit_done)
+        # TestPoolEnableDisable,
+        # TestPoolNegativeCases,
+        # # TestNodeSuspendResume,          # DEPRECATED: sn suspend/resume are no-ops in CLI
+        # TestPoolDisableIO,
+        # TestCrossResourceNegative,
+        # TestNamespacePlacement,
+        # TestNamespaceFio,
+        # TestNamespaceLimits,
+        # TestNamespaceNegative,
+        # # TestVolumeSuspendResume,        # UNCERTAIN: volume suspend/resume may not be wired to API
+        # TestVolumeCloneLvol,
+        # # TestNodeAntiAffinity,           # UNCERTAIN: requires --strict-node-anti-affinity cluster flag
+
+        # # ── Phase 2 functional E2E tests ─────────────────────────────
+        # TestLvolInflate,
+        # TestLvolMigrationLoad,
+        # TestStorageNodeStats,
+        # TestStorageNodePorts,
+        # TestClusterStats,
+        # TestClusterTasks,
+        # TestClusterSecret,
+        # # TestQosClass,                   # DEPRECATED: QoS class API not verified
+        # # TestQosEnforcement,             # DEPRECATED: QoS enforcement API not verified
+        # TestPoolStats,
+        # TestClusterGracefulShutdown,
+        # TestMultiClientConnect,
+        # TestPoolDhchap,
+        # TestPoolCapacityLimits,
+        # TestNamespaceE2E,
+        # TestDeviceRestart,
+        # # TestVolumePriority,             # UNCERTAIN: volume priority enforcement unclear
+        # # TestSharedPlacement,            # UNCERTAIN: requires cluster set-shared-placement
+        # # TestQpairTuning,               # UNCERTAIN: requires RDMA-enabled cluster
+        # TestCapacityThresholds,
+
+        # # ── Phase 3 functional E2E tests (new coverage gaps) ───────────
+        # TestHealthChecks,
+        # TestSnapshotLifecycle,
+        # TestMigrationLifecycle,
+        # TestStorageNodeListing,
+        # TestDeviceCapacityIO,
+        # TestLvolConnectLifecycle,
+        # # TestVolumeQosDynamic,
+        # TestClusterOperations,
+        # TestConcurrentOperations,
+        # TestPoolHostManagement,
+        # TestLvolPlacement,
+        # TestNodeShutdownRestart,
     ]
     # tests += [
     #     # Security E2E tests
@@ -478,6 +668,7 @@ def get_stress_tests():
         K8sNativeNamespacedFailoverTest,
         K8sNativeRapidLifecycleTest,
         K8sNativeMountVerifiedFailoverTest,
+        K8sNativeScaleBreakTest,
         TestParallelNamespaceLvolDocker,
         TestParallelNamespaceLvolK8s,
         BulkLvolDeleteDocker,
@@ -499,6 +690,7 @@ def get_stress_tests():
         MassCreateDeletePersistent_1x500_Docker,
         MassCreateDeletePersistent_30x100_Docker,
         MassCreateDeletePersistent_300x10_Docker,
+        MassCreateDeletePersistent_300x10_6Snap_Docker,
         MassCreateDeletePersistent_500x1_Docker,
         MassCreateDeletePersistent_3000x1_Docker,
         MassCreateDeletePersistent_1x500_K8s,
@@ -548,6 +740,7 @@ def get_monitoring_tests():
         MassCreateDeletePersistent_1x500_Docker,
         MassCreateDeletePersistent_30x100_Docker,
         MassCreateDeletePersistent_300x10_Docker,
+        MassCreateDeletePersistent_300x10_6Snap_Docker,
         MassCreateDeletePersistent_500x1_Docker,
         MassCreateDeletePersistent_3000x1_Docker,
         MassCreateDeletePersistent_1x500_K8s,
@@ -575,6 +768,8 @@ def get_monitoring_tests():
 
 def get_backup_tests():
     return [
+        # Regression: retention merge after delete must run first (clean S3 bucket)
+        TestBackupRetentionMergeAfterDelete,
         # E2E backup tests
         TestBackupBasicPositive,
         TestBackupRestoreDataIntegrity,
@@ -608,6 +803,11 @@ def get_backup_tests():
         TestBackupInterruptedBackup,
         TestBackupInterruptedRestore,
         TestBackupConcurrentIO,
+        # Backup node-add / node-migration edge cases
+        TestBackupAfterNodeAdd,
+        TestBackupWithFioOnNewNode,
+        TestBackupAfterNodeMigration,
+        TestBackupDuringMigration,
     ]
 
 
@@ -620,6 +820,9 @@ def get_backup_stress_tests():
         BackupStressPolicyRetention,
         BackupStressRestoreConcurrent,
         BackupStressMarathon,
+        BackupStressLargeScale,
+        BackupStressFilesystemSecurityMix,
+        BackupStressRetentionMergeCycles,
     ]
 
 
@@ -637,3 +840,12 @@ def get_load_tests():
         TestLvolOutageLoadTest
     ]
     return tests
+
+
+def get_parity_tests():
+    """API parity audit — CLI vs v1 vs v2 three-way comparison."""
+    try:
+        from e2e_tests.test_api_parity_audit import TestAPIParityAudit
+        return [TestAPIParityAudit]
+    except ImportError:
+        return []

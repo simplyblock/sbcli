@@ -18,7 +18,7 @@ Environment variables:
     CLUSTER_SECRET     Graylog admin password / cluster secret (required)
     START_TIME         UTC start time, ISO-8601 (optional; defaults to now - DURATION_MINUTES)
     DURATION_MINUTES   Window length in minutes (default: 60)
-    DEPLOY_MODE        "docker" (default) or "kubernetes"
+    DEPLOY_MODE        "docker" (default), "kubernetes", or "k8s-native"
     OUTPUT_DIR         Where to write per-container .log files (default: ./graylog_test_output)
     OPENSEARCH_IP      Dedicated OpenSearch IP (optional; defaults to MGMT_IP)
     GRAYLOG_IP         Dedicated Graylog IP (optional; defaults to MGMT_IP)
@@ -91,14 +91,16 @@ FROM_MS = int(start_dt.timestamp() * 1000)
 TO_MS = int(end_dt.timestamp() * 1000)
 
 # URLs — use dedicated IPs when set, otherwise fall back to MGMT_IP
-if DEPLOY_MODE == "kubernetes":
+_K8S_MODES = ("kubernetes", "k8s-native")
+
+if DEPLOY_MODE in _K8S_MODES:
     GRAYLOG_BASE = f"http://{GRAYLOG_IP}:9000/api"
 else:
     GRAYLOG_BASE = f"http://{GRAYLOG_IP}/graylog/api"
 
 OPENSEARCH_BASE = f"http://{OPENSEARCH_IP}/opensearch"
 
-CNAME_FIELD = "kubernetes_container_name" if DEPLOY_MODE == "kubernetes" else "container_name"
+CNAME_FIELD = "kubernetes_container_name" if DEPLOY_MODE in _K8S_MODES else "container_name"
 
 PAGE_SIZE = 1000
 MAX_RESULT_WINDOW = 100_000

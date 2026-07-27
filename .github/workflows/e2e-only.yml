@@ -379,6 +379,10 @@ jobs:
             "${NEW_NODES_ARGS[@]}" \
             --ndcs "${NDCS}" \
             --npcs "${NPCS}" \
+            --storage_ips "${STORAGE_PRIVATE_IPS}" \
+            --mgmt_ip "$(echo "${MNODES}" | awk '{print $1}')" \
+            --client_ips "${CLIENT_IP}" \
+            --sbcli_branch "${SBCLI_BRANCH}" \
             2>&1 | tee output.log
 
       - name: Copy raw output.log to each test's NFS folder
@@ -897,6 +901,8 @@ jobs:
             echo '```'
             echo ""
             echo "</details>"
+            echo ""
+            echo "> **Note:** Graylog/OpenSearch logs are currently being collected and will be available in the NFS log directory shortly."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Send Slack Notification
@@ -1007,6 +1013,7 @@ jobs:
               "",
               f":link: *Run:* <{run_url}|View on GitHub>",
               f":file_folder: *Final Logs:* `{log_dir}`",
+              f":hourglass_flowing_sand: _Logs are being collected and will be available shortly._",
           ]
 
           payload = {"text": "\n".join(lines)}

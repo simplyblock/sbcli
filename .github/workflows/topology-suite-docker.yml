@@ -1,0 +1,214 @@
+name: Docker Topology Suite (Per-Test Bootstrap)
+run-name: "Topology Docker | ${{ inputs.SBCLI_BRANCH }} | ${{ inputs.TEST_CLASSES }} | NDCS:${{ inputs.BOOTSTRAP_DATA_CHUNKS }} NPCS:${{ inputs.BOOTSTRAP_PARITY_CHUNKS }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      # =========================
+      # Test selection
+      # =========================
+      TEST_CLASSES:
+        description: "Comma-separated topology test class names (each gets its own full bootstrap cycle)"
+        required: true
+        default: "TestAddNodesDuringFioRun,TestSequentialNodeAdd,TestAddNodeSnapshotCloneOnNewNode,TestBackupAfterNodeAdd,TestBackupWithFioOnNewNode"
+
+      # =========================
+      # Cluster / Lab inputs
+      # =========================
+      STORAGE_PRIVATE_IPS:
+        description: "Space-separated storage node IPs (also used for cleanup)"
+        required: true
+        default: "192.168.10.205 192.168.10.206 192.168.10.207 192.168.10.208"
+      API_INVOKE_URL:
+        description: "API invoke URL"
+        required: true
+        default: "http://192.168.10.211/"
+      BASTION_IP:
+        description: "Bastion IP"
+        required: true
+        default: "192.168.10.211"
+      MNODES:
+        description: "Management node(s) IPs (only remote ops; runner itself is not touched)"
+        required: true
+        default: "192.168.10.211"
+      GRAFANA_ENDPOINT:
+        description: "Grafana endpoint"
+        required: true
+        default: "http://192.168.10.211/grafana"
+      SBCLI_BRANCH:
+        description: "sbcli repo branch to clone for tests"
+        required: true
+        default: "main"
+      CUSTOM_IMAGES:
+        description: "Image overrides: set spdk and/or docker values, leave as \"\" to skip."
+        default: 'spdk="" docker=""'
+        required: false
+
+      # =========================
+      # SSH / client inputs
+      # =========================
+      SSH_USER:
+        description: "SSH user"
+        required: true
+        default: "root"
+      KEY_PATH:
+        description: "SSH private key path on runner"
+        required: true
+        default: "/home/ec2-user/.ssh/simplyblock-us-east-2.pem"
+      CLIENTNODES:
+        description: "Space-separated client node IPs"
+        required: true
+        default: "192.168.10.165 192.168.10.166"
+
+      # =========================
+      # Cleanup inputs
+      # =========================
+      NFS_MOUNTPOINT:
+        description: "NFS mountpoint to unmount everywhere"
+        required: true
+        default: "/mnt/nfs_share"
+
+      # =========================
+      # Bootstrap params
+      # =========================
+      BOOTSTRAP_MAX_SUBSYS:
+        description: "bootstrap: --max-subsys"
+        required: true
+        default: "300"
+      BOOTSTRAP_DATA_CHUNKS:
+        description: "bootstrap: --data-chunks-per-stripe (also ndcs)"
+        required: true
+        default: "2"
+      BOOTSTRAP_PARITY_CHUNKS:
+        description: "bootstrap: --parity-chunks-per-stripe (also npcs)"
+        required: true
+        default: "2"
+      BOOTSTRAP_JOURNAL_PARTITION:
+        description: "bootstrap: --journal-partition"
+        required: true
+        default: "1"
+      BOOTSTRAP_DATA_NIC:
+        description: "bootstrap: --data-nics (space or comma-separated; default eth1)"
+        required: true
+        default: "eth1"
+      BOOTSTRAP_HA_JM_COUNT:
+        description: "bootstrap: --ha-jm-count"
+        required: true
+        default: "3"
+      BOOTSTRAP_IS_SINGLE_NODE:
+        description: "Bootstrap: deploy as single-node (--is-single-node)"
+        type: boolean
+        required: false
+        default: false
+      BOOTSTRAP_ENABLE_NODE_AFFINITY:
+        description: "Bootstrap: enable node affinity (--enable-node-affinity)"
+        type: boolean
+        required: false
+        default: false
+      EXTRA_CLUSTER_ARGS:
+        description: "Additional arguments for cluster create command"
+        required: false
+        type: string
+      EXTRA_SN_ARGS:
+        description: "Additional arguments for storage-node add-node command"
+        required: false
+        type: string
+
+      # =========================
+      # Add-node inputs
+      # =========================
+      NEW_NODE_IPS:
+        description: "Space-separated IPs of spare nodes (cleaned but NOT added to cluster). Used for add-node/migration tests."
+        required: true
+        type: string
+
+      # =========================
+      # Security inputs
+      # =========================
+      CLUSTER_SECURITY:
+        description: "Cluster setup mode."
+        required: false
+        type: choice
+        default: "none"
+        options:
+          - none
+          - backup
+
+concurrency:
+  group: simplyblock-topology-docker-${{ inputs.MNODES }}
+  cancel-in-progress: false
+
+# ============================================================================
+# JOBS
+# ============================================================================
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────
+  # Job 1: Parse TEST_CLASSES into a JSON matrix
+  # ─────────────────────────────────────────────────────────────────────────
+  setup-matrix:
+    name: Parse test list
+    runs-on: [self-hosted]
+    outputs:
+      test_matrix: ${{ steps.parse.outputs.matrix }}
+      test_count: ${{ steps.parse.outputs.count }}
+    steps:
+      - name: Convert TEST_CLASSES to JSON array
+        id: parse
+        shell: bash
+        run: |
+          set -euo pipefail
+          IFS=',' read -ra tests <<< "${{ inputs.TEST_CLASSES }}"
+          json="["
+          first=true
+          for i in "${!tests[@]}"; do
+            t=$(echo "${tests[$i]}" | xargs)
+            [[ -z "$t" ]] && continue
+            [[ "$first" == "true" ]] && first=false || json+=","
+            json+="\"$t\""
+          done
+          json+="]"
+          echo "matrix=${json}" >> "$GITHUB_OUTPUT"
+          echo "count=${#tests[@]}" >> "$GITHUB_OUTPUT"
+          echo "Parsed ${#tests[@]} topology tests: ${json}"
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Job 2: Sequential test runs — full bootstrap + test per entry
+  # Each matrix entry calls the reusable e2e-bootstrap workflow, which does:
+  #   pre-clean → bootstrap → run e2e test → post-clean → log collection
+  # ─────────────────────────────────────────────────────────────────────────
+  run-tests:
+    name: "Topology: ${{ matrix.test }}"
+    needs: setup-matrix
+    strategy:
+      matrix:
+        test: ${{ fromJson(needs.setup-matrix.outputs.test_matrix) }}
+      max-parallel: 1
+      fail-fast: false
+    uses: ./.github/workflows/e2e-bootstrap.yml
+    with:
+      TEST_CLASS: ${{ matrix.test }}
+      RUN_LABEL: ${{ matrix.test }}
+      STORAGE_PRIVATE_IPS: ${{ inputs.STORAGE_PRIVATE_IPS }}
+      API_INVOKE_URL: ${{ inputs.API_INVOKE_URL }}
+      BASTION_IP: ${{ inputs.BASTION_IP }}
+      MNODES: ${{ inputs.MNODES }}
+      GRAFANA_ENDPOINT: ${{ inputs.GRAFANA_ENDPOINT }}
+      SBCLI_BRANCH: ${{ inputs.SBCLI_BRANCH }}
+      CUSTOM_IMAGES: ${{ inputs.CUSTOM_IMAGES }}
+      SSH_USER: ${{ inputs.SSH_USER }}
+      KEY_PATH: ${{ inputs.KEY_PATH }}
+      CLIENTNODES: ${{ inputs.CLIENTNODES }}
+      NFS_MOUNTPOINT: ${{ inputs.NFS_MOUNTPOINT }}
+      BOOTSTRAP_MAX_SUBSYS: ${{ inputs.BOOTSTRAP_MAX_SUBSYS }}
+      BOOTSTRAP_DATA_CHUNKS: ${{ inputs.BOOTSTRAP_DATA_CHUNKS }}
+      BOOTSTRAP_PARITY_CHUNKS: ${{ inputs.BOOTSTRAP_PARITY_CHUNKS }}
+      BOOTSTRAP_JOURNAL_PARTITION: ${{ inputs.BOOTSTRAP_JOURNAL_PARTITION }}
+      BOOTSTRAP_HA_JM_COUNT: ${{ inputs.BOOTSTRAP_HA_JM_COUNT }}
+      BOOTSTRAP_DATA_NIC: ${{ inputs.BOOTSTRAP_DATA_NIC }}
+      BOOTSTRAP_IS_SINGLE_NODE: ${{ inputs.BOOTSTRAP_IS_SINGLE_NODE == true }}
+      BOOTSTRAP_ENABLE_NODE_AFFINITY: ${{ inputs.BOOTSTRAP_ENABLE_NODE_AFFINITY == true }}
+      EXTRA_CLUSTER_ARGS: ${{ inputs.EXTRA_CLUSTER_ARGS || '' }}
+      EXTRA_SN_ARGS: ${{ inputs.EXTRA_SN_ARGS || '' }}
+      NEW_NODE_IPS: ${{ inputs.NEW_NODE_IPS }}
+      CLUSTER_SECURITY: ${{ inputs.CLUSTER_SECURITY || 'none' }}
+    secrets: inherit

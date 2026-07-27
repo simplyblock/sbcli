@@ -65,9 +65,7 @@ class TestSingleNodeFailure(TestClusterBase):
             pool_name=self.pool_name,
             size="10G",
         )
-        lvols = self.sbcli_utils.list_lvols()
-        assert self.lvol_name in list(lvols.keys()), \
-            f"Lvol {self.lvol_name} not present in list of lvols post add: {lvols}"
+        self._verify_lvol_exists_dual(self.lvol_name)
 
         device, mount = self._connect_and_mount_dual(
             self.lvol_name, mount_path=self.mount_path
@@ -194,6 +192,9 @@ class TestSingleNodeFailure(TestClusterBase):
             if isinstance(fio_handle, threading.Thread):
                 fio_handle.join()
 
+        self._validate_fio_dual(fio_handle, log_path=self.log_path)
+        self._cleanup_fio_k8s(fio_handle)
+
         self.logger.info("Taking snapshot 2")
         snapshot_id_2 = self._create_snapshot_dual(
             self.lvol_name, f"{self.snapshot_name}_2"
@@ -214,11 +215,10 @@ class TestSingleNodeFailure(TestClusterBase):
         _, cl2_mount = self._create_clone_dual(
             snapshot_id=snapshot_id_2,
             clone_name=f"{self.lvol_name}_cl_2",
+            size="25Gi",
             mount_path=f"{clone_mount_file}_2" if not self.k8s_test else None,
             format_disk=False,
         )
-
-        self._validate_fio_dual(fio_handle, log_path=self.log_path)
 
         self._resize_lvol_dual(f"{self.lvol_name}_cl_1", "30G")
         sleep_n_sec(10)
@@ -308,13 +308,7 @@ class TestHASingleNodeFailure(TestClusterBase):
             lvol_name = f"LVOL_{i}"
             self.add_lvol_and_run_fio(lvol_name)
 
-        no_lvol_node = None
-        for node in self.sbcli_utils.get_storage_nodes()['results'][::-1]:
-            if node['lvols'] > 0 and node['is_secondary_node'] is False:
-                no_lvol_node = node
-                break
-
-        no_lvol_node_uuid = no_lvol_node['uuid']
+        no_lvol_node_uuid, no_lvol_node = self._get_node_with_lvols_dual()
         node_ip = no_lvol_node["mgmt_ip"]
 
         self.validations(node_uuid=no_lvol_node_uuid,
@@ -410,16 +404,14 @@ class TestHASingleNodeFailure(TestClusterBase):
 
         host_id = self.sbcli_utils.get_node_without_lvols()
 
-        self._create_lvol_dual(
+        _, lvol_id = self._create_lvol_dual(
             lvol_name=self.lvol_name,
             pool_name=self.pool_name,
             size="10G",
             host_id=host_id,
         )
 
-        lvols = self.sbcli_utils.list_lvols()
-        assert self.lvol_name in list(lvols.keys()), \
-            f"Lvol {self.lvol_name} not present in list of lvols post add: {lvols}"
+        self._verify_lvol_exists_dual(self.lvol_name)
 
         device, mount = self._connect_and_mount_dual(
             self.lvol_name, mount_path=mount_path, fs_type='xfs'
@@ -434,4 +426,4 @@ class TestHASingleNodeFailure(TestClusterBase):
             time_based=True,
         )
         self.fio_handles.append(fio_handle)
-        return lvols[self.lvol_name]
+        return lvol_id

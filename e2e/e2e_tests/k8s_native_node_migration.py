@@ -2,7 +2,7 @@
 K8s-native node migration E2E test.
 
 Migrates a randomly chosen storage node to a user-specified worker node
-by patching the StorageNode CRD with action=restart.  FIO runs as K8s
+by creating a StorageNodeOps CR with action=migrate.  FIO runs as K8s
 Jobs throughout the migration to verify I/O is not interrupted.
 
 No SSH to worker nodes is required (Talos-compatible).
@@ -54,6 +54,17 @@ class K8sNativeNodeMigrationTest(TestClusterBase):
         if isinstance(self.migrate_to_worker, str):
             self.migrate_to_worker = self.migrate_to_worker.strip()
 
+        # New SSD PCIe addresses for the target worker (comma-separated string)
+        new_ssd_pcie_raw = kwargs.get("new_ssd_pcie", "")
+        if isinstance(new_ssd_pcie_raw, str) and new_ssd_pcie_raw.strip():
+            self.new_ssd_pcie = [addr.strip() for addr in new_ssd_pcie_raw.split(",") if addr.strip()]
+        else:
+            self.new_ssd_pcie = []
+
+        # Whether to reattach volumes after migration
+        reattach_raw = kwargs.get("reattach_volume", "")
+        self.reattach_volume = str(reattach_raw).strip().lower() in ("true", "1", "yes")
+
         # K8s resource naming
         self.STORAGE_CLASS_NAME = "simplyblock-csi-sc"
         self.XFS_STORAGE_CLASS_NAME = "simplyblock-csi-sc-xfs"
@@ -74,6 +85,8 @@ class K8sNativeNodeMigrationTest(TestClusterBase):
         self.clone_details: dict[str, dict] = {}
 
         self.logger.info(f"Migrate to worker: {self.migrate_to_worker}")
+        self.logger.info(f"New SSD PCIe addresses: {self.new_ssd_pcie}")
+        self.logger.info(f"Reattach volumes: {self.reattach_volume}")
 
     # ── Setup ─────────────────────────────────────────────────────────────────
 
@@ -89,7 +102,6 @@ class K8sNativeNodeMigrationTest(TestClusterBase):
                 self.mgmt_nodes, self.storage_nodes = self.sbcli_utils.get_all_nodes_ip()
                 self.sbcli_utils.list_lvols()
                 self.sbcli_utils.list_storage_pools()
-                self._validate_storage_node_health()
                 break
             except Exception as e:
                 self.logger.debug(f"API call failed: {e}")
@@ -99,6 +111,8 @@ class K8sNativeNodeMigrationTest(TestClusterBase):
                     raise
                 self.logger.info(f"Retrying base APIs. Attempt: {30 - retry + 1}")
                 sleep_n_sec(10)
+
+        self._validate_storage_node_health()
 
         self.client_machines = []
         self.fio_node = []
@@ -146,6 +160,12 @@ class K8sNativeNodeMigrationTest(TestClusterBase):
         # Clean up leftover K8s resources from any previous run
         self.k8s_utils.cleanup_stale_fio_resources()
         sleep_n_sec(5)
+
+        # Capture pre-test cluster state for comparison with post-test diagnostics
+        try:
+            self.collect_management_details(suffix="_pre_test")
+        except Exception as e:
+            self.logger.warning(f"Pre-test diagnostics collection failed: {e}")
 
     # ── FIO config ────────────────────────────────────────────────────────────
 
@@ -218,6 +238,7 @@ class K8sNativeNodeMigrationTest(TestClusterBase):
 
     def run(self):
         self.logger.info("Starting Test: K8s Native Node Migration During FIO")
+        self.start_nvme_iostat_monitor()
 
         assert self.migrate_to_worker, (
             "migrate_to_worker is required — provide --migrate_to_worker <k8s-node-name>"
@@ -370,33 +391,36 @@ class K8sNativeNodeMigrationTest(TestClusterBase):
 
         migration_timestamp = int(datetime.now().timestamp())
 
-        self.k8s_utils.patch_storage_node_migrate(
+        ops_name, storage_node_cr = self.k8s_utils.patch_storage_node_migrate(
             node_uuid=migrate_node_uuid,
             target_worker=self.migrate_to_worker,
+            new_ssd_pcie=self.new_ssd_pcie if self.new_ssd_pcie else None,
+            reattach_volume=self.reattach_volume,
         )
 
-        # Verify the CRD patch was applied
-        verify_out, _ = self.k8s_utils._exec_kubectl(
-            f"kubectl get storagenodesets.storage.simplyblock.io simplyblock-node "
-            f"-n {self.k8s_utils.namespace} "
-            f"-o jsonpath='{{.spec.action}} {{.spec.nodeUUID}} {{.spec.workerNode}}'"
+        # Verify the StorageNodeOps CR was created
+        ops_json = self.k8s_utils.get_resource_json(
+            "storagenodeops.storage.simplyblock.io", ops_name,
+            namespace=self.k8s_utils.namespace,
         )
-        self.logger.info(f"CRD spec after patch: {verify_out}")
-        assert migrate_node_uuid in verify_out, (
-            f"CRD patch verification failed: nodeUUID {migrate_node_uuid} "
-            f"not found in CRD spec: {verify_out}"
+        ops_spec = ops_json.get("spec", {})
+        self.logger.info(f"StorageNodeOps spec after create: {ops_spec}")
+        assert ops_spec.get("action") == "migrate", (
+            f"StorageNodeOps verification failed: expected action=migrate, "
+            f"got: {ops_spec}"
         )
-        assert self.migrate_to_worker in verify_out, (
-            f"CRD patch verification failed: workerNode '{self.migrate_to_worker}' "
-            f"not found in CRD spec: {verify_out}"
+        assert ops_spec.get("storageNodeRef") == storage_node_cr, (
+            f"StorageNodeOps verification failed: expected "
+            f"storageNodeRef={storage_node_cr}, got: {ops_spec}"
         )
 
         # ── Step 5: Wait for migration to complete ────────────────────────
-        self.logger.info("Step 5: Waiting for migration to complete")
+        self.logger.info("Step 5: Waiting for StorageNodeOps to complete")
 
-        sleep_n_sec(30)
+        # Wait for the StorageNodeOps CR to reach Succeeded
+        self.k8s_utils.wait_storage_node_ops_done(ops_name, timeout=600)
 
-        # Wait for node to come back online
+        # Also verify via sbcli that node is back online
         self.sbcli_utils.wait_for_storage_node_status(
             node_id=migrate_node_uuid,
             status="online",

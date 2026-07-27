@@ -1,4 +1,6 @@
+import time
 import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from http import HTTPStatus
 from logger_config import setup_logger
 from utils.common_utils import sleep_n_sec
@@ -410,13 +412,19 @@ class SbcliUtils:
             self.logger.info(f"Deleting pool: {name}")
             self.delete_storage_pool(pool_name=name)
 
-    def list_lvols(self):
+    def list_lvols(self, exclude_in_deletion=False):
         """Return all lvols
+
+        Args:
+            exclude_in_deletion: If True, skip lvols whose status is
+                ``in_deletion``.  Useful for verification after creation
+                where a rolled-back lvol may still be in the DB briefly.
         """
         lvol_data = dict()
         data = self.get_request(api_url="/lvol")
-        # self.logger.info(f"LVOL List: {data}")
         for lvol_info in data["results"]:
+            if exclude_in_deletion and lvol_info.get("status") == "in_deletion":
+                continue
             lvol_data[lvol_info["lvol_name"]] = lvol_info["id"]
         self.logger.debug(f"LVOL List: {lvol_data}")
         return lvol_data
@@ -449,7 +457,7 @@ class SbcliUtils:
                  max_namespace_per_subsys=None, namespace=None):
         """Adds lvol with given params
         """
-        lvols = self.list_lvols()
+        lvols = self.list_lvols(exclude_in_deletion=True)
         for name in list(lvols.keys()):
             if name == lvol_name:
                 self.logger.info(f"LVOL {lvol_name} already exists. Exiting")
@@ -484,8 +492,13 @@ class SbcliUtils:
         
         self.post_request(api_url="/lvol", body=body, retry=retry)
 
-    def delete_lvol(self, lvol_name, max_attempt=120, skip_error=False):
-        """Deletes lvol with given name
+    def delete_lvol(self, lvol_name, max_attempt=120, skip_error=False, deadline=None):
+        """Deletes lvol with given name.
+
+        Args:
+            deadline: Optional absolute time.time() deadline. Overrides the
+                default 15-minute per-lvol timeout when set by callers like
+                delete_all_lvols that enforce a shared global timeout.
         """
         try:
             lvol_id = self.get_lvol_id(lvol_name=lvol_name)
@@ -513,21 +526,40 @@ class SbcliUtils:
 
         lvols = self.list_lvols()
         attempt = 0
+        if deadline is None:
+            deadline = time.time() + 15 * 60  # hard 15-minute wallclock timeout
         while True:
             if lvol_name not in list(lvols.keys()):
                 self.logger.info(f"Lvol {lvol_name} deleted successfully!!")
                 return True
+            if time.time() > deadline:
+                msg = f"Lvol {lvol_name} not deleted before deadline"
+                if skip_error:
+                    self.logger.warning(msg)
+                    return False
+                raise Exception(msg)
             if attempt % 12 == 0:
                 try:
                     cur_state = self.get_lvol_details(lvol_id=lvol_id)[0]["status"]
                 except Exception as _:
                     self.logger.info(f"Lvol {lvol_name} is not in the lvol list as error. Checking again!")
                     lvols = self.list_lvols()
+                    attempt += 1
+                    sleep_n_sec(5)
                     continue
                 if cur_state in ("online", "in_deletion"):
                     self.logger.info(f"Lvol {lvol_name} in {cur_state} state. Retrying Delete!")
-                    data = self.delete_request(api_url=f"/lvol/{lvol_id}", treat_404_as_success=True)
-                    self.logger.info(f"Delete lvol resp: {data}")
+                    try:
+                        data = self.delete_request(api_url=f"/lvol/{lvol_id}", treat_404_as_success=True)
+                        self.logger.info(f"Delete lvol resp: {data}")
+                    except Exception as e:
+                        if skip_error:
+                            self.logger.warning(
+                                f"delete_lvol retry DELETE for {lvol_name} ({lvol_id}) failed: {e}. "
+                                f"Continuing with skip_error=True"
+                            )
+                        else:
+                            raise
             if attempt > max_attempt:
                 if skip_error:
                     return False
@@ -538,31 +570,171 @@ class SbcliUtils:
             sleep_n_sec(5)
             lvols = self.list_lvols()
 
-    def delete_all_clones(self):
+    def delete_all_clones(self, max_workers=10, timeout=1800, stall_timeout=1800):
         """Delete all clone lvols (lvols with cloned_from_snap set).
 
         Must be called BEFORE delete_all_snapshots, because SPDK refuses
         to delete a snapshot that still has clones.
-        """
-        data = self.get_request(api_url="/lvol")
-        for lvol_info in data.get("results", []):
-            if lvol_info.get("cloned_from_snap"):
-                name = lvol_info.get("lvol_name")
-                self.logger.info(f"Deleting clone lvol: {name}")
-                try:
-                    self.delete_lvol(lvol_name=name, skip_error=True)
-                except Exception as e:
-                    self.logger.warning(
-                        f"Clone delete failed (continuing): {name}, err={e}"
-                    )
 
-    def delete_all_lvols(self):
-        """Deletes all lvols
+        Uses fire-then-bulk-wait: issues DELETE for all clones in parallel,
+        then polls list_lvols() in a single loop until all are gone.
+        Gives up if no progress is made for *stall_timeout* seconds.
+        """
+        data = None
+        for attempt in range(3):
+            try:
+                data = self.get_request(api_url="/lvol")
+                break
+            except Exception as e:
+                self.logger.warning(
+                    f"delete_all_clones: /lvol list attempt {attempt+1} failed: {e}"
+                )
+                time.sleep(5)
+        if data is None:
+            self.logger.warning("delete_all_clones: could not list lvols after 3 attempts, skipping")
+            return
+        clone_names = [
+            lvol_info.get("lvol_name")
+            for lvol_info in data.get("results", [])
+            if lvol_info.get("cloned_from_snap")
+        ]
+        if not clone_names:
+            return
+        self.logger.info(f"Deleting {len(clone_names)} clones (max_workers={max_workers})")
+
+        # Phase A: fire DELETE for every clone without waiting
+        clone_ids = {
+            lvol_info.get("lvol_name"): lvol_info.get("id")
+            for lvol_info in data.get("results", [])
+            if lvol_info.get("cloned_from_snap")
+        }
+        self._fire_delete_lvols(clone_ids, max_workers)
+
+        # Phase B: bulk-wait
+        self._wait_lvols_gone(
+            clone_names, label="clone_wait",
+            timeout=timeout, stall_timeout=stall_timeout,
+        )
+
+    def delete_all_lvols(self, max_workers=10, timeout=1800, stall_timeout=1800):
+        """Deletes all lvols using fire-then-bulk-wait.
+
+        Issues DELETE for every lvol in parallel, then polls list_lvols()
+        in a single loop until all are gone or *timeout* is reached.
+        Gives up early if no lvols are deleted for *stall_timeout* seconds
+        (indicates all nodes hosting these lvols are down).
         """
         lvols = self.list_lvols()
-        for name in list(lvols.keys()):
-            self.logger.info(f"Deleting lvol: {name}")
-            self.delete_lvol(lvol_name=name)
+        if not lvols:
+            return
+        names = list(lvols.keys())
+        self.logger.info(f"Deleting {len(names)} lvols (max_workers={max_workers})")
+
+        # Phase A: fire DELETE for every lvol without waiting
+        self._fire_delete_lvols(lvols, max_workers)
+
+        # Phase B: bulk-wait
+        self._wait_lvols_gone(
+            names, label="lvol_wait",
+            timeout=timeout, stall_timeout=stall_timeout,
+        )
+
+    def _fire_delete_lvols(self, name_to_id: dict, max_workers: int = 10):
+        """Issue DELETE for each lvol without waiting for completion."""
+        def _fire(name):
+            lvol_id = name_to_id.get(name)
+            if not lvol_id:
+                return
+            try:
+                self.delete_request(
+                    api_url=f"/lvol/{lvol_id}", treat_404_as_success=True,
+                )
+            except Exception as e:
+                self.logger.warning(f"[fire_delete] {name}: {e}")
+
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futs = {pool.submit(_fire, n): n for n in name_to_id}
+            for f in as_completed(futs):
+                f.result()
+
+    def _wait_lvols_gone(
+        self, names: list, label: str = "lvol_wait",
+        timeout: int = 1800, stall_timeout: int = 180,
+        re_delete_interval: int = 120,
+    ):
+        """Wait for lvols to disappear from the API.
+
+        Polls list_lvols() every 30s (single call, not per-lvol).
+        Re-issues DELETE for stuck items every *re_delete_interval* seconds.
+        Gives up early if no progress for *stall_timeout* seconds.
+        """
+        deadline = time.time() + timeout
+        remaining = set(names)
+        last_progress = time.time()
+        last_re_delete = time.time()
+
+        self.logger.info(
+            f"[{label}] Waiting for {len(remaining)} lvols to be deleted "
+            f"(timeout={timeout}s, stall_timeout={stall_timeout}s)"
+        )
+
+        while remaining and time.time() < deadline:
+            try:
+                current = self.list_lvols()
+            except Exception as exc:
+                self.logger.warning(f"[{label}] list_lvols failed: {exc}")
+                sleep_n_sec(10)
+                continue
+
+            still_present = remaining & set(current.keys())
+            just_deleted = remaining - still_present
+            if just_deleted:
+                self.logger.info(
+                    f"[{label}] {len(just_deleted)} more deleted, "
+                    f"{len(still_present)} remaining"
+                )
+                last_progress = time.time()
+            remaining = still_present
+
+            if not remaining:
+                break
+
+            # Stall detection: if no lvols were deleted for stall_timeout,
+            # the backend nodes are likely down — stop waiting.
+            if time.time() - last_progress > stall_timeout:
+                self.logger.warning(
+                    f"[{label}] No progress for {stall_timeout}s with "
+                    f"{len(remaining)} lvols remaining — giving up "
+                    f"(nodes likely down)"
+                )
+                break
+
+            # Re-issue DELETE for stuck items
+            now = time.time()
+            if now - last_re_delete >= re_delete_interval:
+                self.logger.info(
+                    f"[{label}] Re-issuing DELETE for "
+                    f"{len(remaining)} stuck lvols"
+                )
+                for name in list(remaining)[:200]:
+                    lvol_id = current.get(name)
+                    if lvol_id:
+                        try:
+                            self.delete_request(
+                                api_url=f"/lvol/{lvol_id}",
+                                treat_404_as_success=True,
+                            )
+                        except Exception:
+                            pass
+                last_re_delete = now
+
+            sleep_n_sec(30)
+
+        if remaining:
+            self.logger.warning(
+                f"[{label}] Finished with {len(remaining)}/{len(names)} "
+                f"lvols still present"
+            )
 
     def get_lvol_id(self, lvol_name):
         """Return lvol by lvol name
@@ -1061,11 +1233,16 @@ class SbcliUtils:
         """
         return self.list_snapshots().get(snap_name)
 
-    def delete_snapshot(self, snap_name: str = None, snap_id: str = None, max_attempt: int = 60, skip_error: bool = False):
+    def delete_snapshot(self, snap_name: str = None, snap_id: str = None,
+                        max_attempt: int = 60, skip_error: bool = False,
+                        wait: bool = True):
         """
         Delete snapshot by name or id (API).
         Endpoint: DELETE /snapshot/{snap_id}
-        Also waits until snapshot disappears from list.
+
+        If *wait* is True (default), polls until the snapshot disappears.
+        If *wait* is False, issues the DELETE and returns immediately
+        (fire-and-forget mode for bulk deletion).
         """
         if not snap_id:
             if not snap_name:
@@ -1080,6 +1257,9 @@ class SbcliUtils:
 
         resp = self.delete_request(api_url=f"/snapshot/{snap_id}", treat_404_as_success=True)
         self.logger.info(f"Delete snapshot resp: {resp}")
+
+        if not wait:
+            return
 
         # wait for removal
         attempt = 0
@@ -1100,16 +1280,96 @@ class SbcliUtils:
             return
         raise Exception(f"Snapshot did not get deleted in time. snap_name={snap_name}, snap_id={snap_id}")
 
-    def delete_all_snapshots(self):
+    def delete_all_snapshots(self, max_workers=10):
         """
-        Convenience cleanup via API.
+        Convenience cleanup via API — fire-and-forget parallel deletion
+        followed by a single bulk-wait loop.
         """
         snaps = self.list_snapshots()
-        for snap_name in list(snaps.keys()):
+        snap_names = list(snaps.keys())
+        if not snap_names:
+            return
+        self.logger.info(f"Deleting {len(snap_names)} snapshots (max_workers={max_workers})")
+
+        # Phase A: fire DELETE for every snapshot without waiting
+        def _fire(name):
             try:
-                self.delete_snapshot(snap_name=snap_name, skip_error=True)
+                sid = snaps.get(name)
+                self.delete_snapshot(snap_id=sid, skip_error=True, wait=False)
             except Exception as e:
-                self.logger.info(f"Snapshot delete failed (continuing): {snap_name}, err={e}")
+                self.logger.info(f"Snapshot delete failed (continuing): {name}, err={e}")
+
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futs = {pool.submit(_fire, n): n for n in snap_names}
+            for f in as_completed(futs):
+                f.result()
+
+        # Phase B: bulk-wait until all snapshots disappear
+        self.wait_snapshots_deleted(snap_names, timeout=1800)
+
+    def wait_snapshots_deleted(
+        self, names: list, timeout: int = 1800, re_delete_interval: int = 120,
+    ):
+        """Wait for snapshots to disappear from the API.
+
+        Polls list_snapshots() every 30s (single call, not per-snapshot)
+        and re-issues DELETE for stuck items periodically.
+        """
+        deadline = time.time() + timeout
+        remaining = set(names)
+        last_re_delete = time.time()
+
+        self.logger.info(
+            f"[snap_wait] Waiting for {len(remaining)} snapshots "
+            f"to be deleted (timeout={timeout}s)"
+        )
+
+        while remaining and time.time() < deadline:
+            try:
+                current = self.list_snapshots()
+            except Exception as exc:
+                self.logger.warning(f"[snap_wait] list_snapshots failed: {exc}")
+                sleep_n_sec(10)
+                continue
+
+            still_present = remaining & set(current.keys())
+            just_deleted = remaining - still_present
+            if just_deleted:
+                self.logger.info(
+                    f"[snap_wait] {len(just_deleted)} more deleted, "
+                    f"{len(still_present)} remaining"
+                )
+            remaining = still_present
+
+            if not remaining:
+                break
+
+            # Re-issue DELETE for stuck items
+            now = time.time()
+            if now - last_re_delete >= re_delete_interval:
+                self.logger.info(
+                    f"[snap_wait] Re-issuing DELETE for "
+                    f"{len(remaining)} stuck snapshots"
+                )
+                for name in list(remaining)[:200]:
+                    sid = current.get(name)
+                    if sid:
+                        try:
+                            self.delete_request(
+                                api_url=f"/snapshot/{sid}",
+                                treat_404_as_success=True,
+                            )
+                        except Exception:
+                            pass
+                last_re_delete = time.time()
+
+            sleep_n_sec(30)
+
+        if remaining:
+            self.logger.warning(
+                f"[snap_wait] Timed out with {len(remaining)} "
+                f"snapshots still present"
+            )
 
     # ── Pool-level host management (DHCHAP) ─────────────────────────────────
 

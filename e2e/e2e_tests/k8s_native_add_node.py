@@ -94,7 +94,6 @@ class K8sNativeAddNodeTest(TestClusterBase):
                 self.mgmt_nodes, self.storage_nodes = self.sbcli_utils.get_all_nodes_ip()
                 self.sbcli_utils.list_lvols()
                 self.sbcli_utils.list_storage_pools()
-                self._validate_storage_node_health()
                 break
             except Exception as e:
                 self.logger.debug(f"API call failed: {e}")
@@ -104,6 +103,8 @@ class K8sNativeAddNodeTest(TestClusterBase):
                     raise
                 self.logger.info(f"Retrying base APIs. Attempt: {30 - retry + 1}")
                 sleep_n_sec(10)
+
+        self._validate_storage_node_health()
 
         self.client_machines = []
         self.fio_node = []
@@ -223,6 +224,7 @@ class K8sNativeAddNodeTest(TestClusterBase):
 
     def run(self):
         self.logger.info("Starting Test: K8s Native Add Node During FIO")
+        self.start_nvme_iostat_monitor()
 
         assert len(self.new_worker_nodes) >= 1, (
             "At least 1 new worker node required"
@@ -364,17 +366,14 @@ class K8sNativeAddNodeTest(TestClusterBase):
 
         sleep_n_sec(30)
 
-        # ── Step 5: Expand cluster via CRD patches ───────────────────────
-        self.logger.info("Step 5: Patching StorageNode CRD to add new workers")
+        # ── Step 5: Expand cluster by creating StorageNode CRs ──────────
+        self.logger.info("Step 5: Creating StorageNode CRs for new workers")
         timestamp = int(datetime.now().timestamp())
 
         self.k8s_utils.patch_storage_node_add_workers(
             new_workers=self.new_worker_nodes,
         )
         sleep_n_sec(10)
-
-        self.logger.info("Step 5b: Patching StorageCluster CRD to trigger expansion")
-        self.k8s_utils.patch_storage_cluster_expand()
 
         # ── Step 6: Wait for expansion ───────────────────────────────────
         self.logger.info("Step 6: Waiting for expansion to complete")

@@ -1167,7 +1167,6 @@ class TestLvolDirFillStress(TestClusterBase):
                 self.mgmt_nodes, self.storage_nodes = self.sbcli_utils.get_all_nodes_ip()
                 self.sbcli_utils.list_lvols()
                 self.sbcli_utils.list_storage_pools()
-                self._validate_storage_node_health()
                 break
             except Exception as e:
                 retry -= 1
@@ -1175,6 +1174,8 @@ class TestLvolDirFillStress(TestClusterBase):
                     raise
                 self.logger.info(f"API retry {30 - retry}/30: {e}")
                 sleep_n_sec(2)
+
+        self._validate_storage_node_health()
 
         # SSH connect to every storage node and bump aio-max-nr (fio needs headroom)
         for node in self.storage_nodes:

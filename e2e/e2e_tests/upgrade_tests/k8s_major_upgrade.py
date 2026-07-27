@@ -208,7 +208,6 @@ class K8sNativeMajorUpgrade(TestClusterBase):
                 )
                 self.sbcli_utils.list_lvols()
                 self.sbcli_utils.list_storage_pools()
-                self._validate_storage_node_health()
                 break
             except Exception as e:
                 self.logger.debug(f"API call failed: {e}")
@@ -218,6 +217,8 @@ class K8sNativeMajorUpgrade(TestClusterBase):
                     raise
                 self.logger.info(f"Retrying base APIs. Attempt: {30 - retry + 1}")
                 sleep_n_sec(10)
+
+        self._validate_storage_node_health()
 
         self.client_machines = []
         self.fio_node = []
@@ -611,13 +612,14 @@ class K8sNativeMajorUpgrade(TestClusterBase):
             )
             restart_ts = int(datetime.now().timestamp())
 
-            self.k8s_utils.patch_storage_node_restart(
+            ops_name, _ = self.k8s_utils.patch_storage_node_restart(
                 node_uuid=node_id,
                 spdk_image=self.target_spdk_image or None,
                 spdk_proxy_image=self.target_spdk_proxy_image or None,
             )
 
-            sleep_n_sec(30)
+            # Wait for the StorageNodeOps CR to reach Succeeded
+            self.k8s_utils.wait_storage_node_ops_done(ops_name, timeout=600)
             self.k8s_utils.wait_spdk_pods_ready(
                 expected_count=len(storage_node_list), timeout=600
             )
@@ -907,6 +909,10 @@ spec:
         self.logger.info(f"Cluster {cluster_id} CR refs patched")
 
         # Patch each storage node
+        # TODO: Once confirmed with operator team, cr_plural may need to
+        # change from "storagenodesets" to "storagenodes" and cr_name to
+        # the individual StorageNode CR name (resolved via
+        # k8s_utils.resolve_storage_node_cr_name()).
         for node in storage_node_list:
             node_id = node["id"]
             self.k8s_utils.exec_sbcli(
