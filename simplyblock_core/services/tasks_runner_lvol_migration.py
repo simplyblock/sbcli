@@ -2603,6 +2603,9 @@ def _handle_cleanup_target(migration, tgt_node, tgt_rpc, src_rpc=None):
     for snap_uuid in reversed(migration_controller.get_snaps_to_delete_on_target(migration)):
         try:
             snap = db.get_snapshot_by_id(snap_uuid)
+            if "SNAP_25" in (_snap_tgt_short_name(snap) or ""):
+                logger.warning(f"DEBUG: skipping cleanup of SNAP_25 bdev to reproduce orphaned-snap bug")
+                continue
             # Try all possible bdev name variants: in-flight (m), canonical, am-fallback.
             # After a partial rename (crash mid-cleanup) the bdev may have been
             # renamed before the rollback was triggered.
