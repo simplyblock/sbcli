@@ -112,6 +112,17 @@ class _MassCreateDeleteMixin:
     PER_ITEM_TIME_BUDGET = 6         # seconds per PVC / snapshot / clone
     PHASE_TIME_FLOOR = 1800          # minimum 30 min even for tiny runs
 
+    # ── Node outage toggle ─────────────────────────────────────────────────
+    # When False (default), Phase 3b/7b node outages are skipped so tests
+    # exercise pure capacity create/delete without restarts.
+    ENABLE_NODE_OUTAGE = False
+
+    # ── Entity cap ───────────────────────────────────────────────────────
+    # 0 = no limit (use NUM_SUBSYSTEMS × NS_PER_SUBSYSTEM as-is).
+    # >0 = cap total entities (lvols + snapshots) and compute:
+    #   max_lvols = MAX_ENTITY_COUNT // (1 + SNAPSHOTS_PER_LVOL)
+    MAX_ENTITY_COUNT = 0
+
     # ── Persistent retry mode ─────────────────────────────────────────────
     # Subclasses set PERSISTENT_RETRY = True to retry failed items until
     # all expected entities are created or a terminal error is hit.
@@ -509,8 +520,31 @@ class _MassCreateDeleteMixin:
     # ── 8-phase orchestrator ───────────────────────────────────────────────
 
     def _run_mass_create_delete_test(self):
-        total = self.NUM_SUBSYSTEMS * self.NS_PER_SUBSYSTEM
         self._init_mixin_state()
+
+        # Apply entity cap: reduce NUM_SUBSYSTEMS / NS_PER_SUBSYSTEM on the
+        # instance so all phase methods automatically use the capped values.
+        original_total = self.NUM_SUBSYSTEMS * self.NS_PER_SUBSYSTEM
+        if self.MAX_ENTITY_COUNT > 0:
+            max_lvols = self.MAX_ENTITY_COUNT // (1 + self.SNAPSHOTS_PER_LVOL)
+            if max_lvols < original_total:
+                self.logger.info(
+                    f"[Entity cap] Reducing lvol target from "
+                    f"{original_total} to {max_lvols} "
+                    f"(MAX_ENTITY_COUNT={self.MAX_ENTITY_COUNT}, "
+                    f"SNAPSHOTS_PER_LVOL={self.SNAPSHOTS_PER_LVOL})"
+                )
+                # Distribute evenly across subsystems
+                effective_per_sub = max(1, max_lvols // self.NUM_SUBSYSTEMS)
+                effective_num_sub = self.NUM_SUBSYSTEMS
+                # If max_lvols < NUM_SUBSYSTEMS, reduce subsystem count too
+                if effective_per_sub == 1 and max_lvols < self.NUM_SUBSYSTEMS:
+                    effective_num_sub = max_lvols
+                # Shadow class attrs on the instance
+                self.NS_PER_SUBSYSTEM = effective_per_sub
+                self.NUM_SUBSYSTEMS = effective_num_sub
+
+        total = self.NUM_SUBSYSTEMS * self.NS_PER_SUBSYSTEM
         max_dur = getattr(self, 'MAX_TEST_DURATION', 6 * 3600)
         max_dur_h = round(max_dur / 3600, 1)
         self.logger.info(
@@ -664,16 +698,22 @@ class _MassCreateDeleteMixin:
             _check_deadline("Phase 3")
 
             # Phase 3b: Kill one storage node, wait for recovery
-            self.logger.info(
-                "=== Phase 3b: Node outage #1 (before lvol delete) ==="
-            )
-            t0 = time.time()
-            outage_1_host = self._phase_node_outage("3b_node_outage_1")
-            self.logger.info(
-                f"[Phase 3b] Node outage #1 complete "
-                f"in {self._phase_durations.get('3b_node_outage_1', '?')}s"
-            )
-            _check_deadline("Phase 3b")
+            outage_1_host = None
+            if self.ENABLE_NODE_OUTAGE:
+                self.logger.info(
+                    "=== Phase 3b: Node outage #1 (before lvol delete) ==="
+                )
+                t0 = time.time()
+                outage_1_host = self._phase_node_outage("3b_node_outage_1")
+                self.logger.info(
+                    f"[Phase 3b] Node outage #1 complete "
+                    f"in {self._phase_durations.get('3b_node_outage_1', '?')}s"
+                )
+                _check_deadline("Phase 3b")
+            else:
+                self.logger.info(
+                    "[Phase 3b] Node outage SKIPPED (ENABLE_NODE_OUTAGE=False)"
+                )
 
             # Phase 4: Delete lvols to free subsystem slots for clones.
             # Lvols can be deleted even with snapshots — orphaned
@@ -737,18 +777,21 @@ class _MassCreateDeleteMixin:
                 f"in {self._phase_durations['7_delete_clones']}s"
             )
 
-            # Phase 7b: Kill a node on a DIFFERENT host than outage #1
-            self.logger.info(
-                "=== Phase 7b: Node outage #2 (before snapshot delete) ==="
-            )
-            t0 = time.time()
-            self._phase_node_outage(
-                "7b_node_outage_2", exclude_host_ip=outage_1_host,
-            )
-            self.logger.info(
-                f"[Phase 7b] Node outage #2 complete "
-                f"in {self._phase_durations.get('7b_node_outage_2', '?')}s"
-            )
+            # Phase 7b: Kill another storage node, wait for recovery
+            if self.ENABLE_NODE_OUTAGE:
+                self.logger.info(
+                    "=== Phase 7b: Node outage #2 (before snapshot delete) ==="
+                )
+                t0 = time.time()
+                self._phase_node_outage("7b_node_outage_2", exclude_host_ip=outage_1_host)
+                self.logger.info(
+                    f"[Phase 7b] Node outage #2 complete "
+                    f"in {self._phase_durations.get('7b_node_outage_2', '?')}s"
+                )
+            else:
+                self.logger.info(
+                    "[Phase 7b] Node outage SKIPPED (ENABLE_NODE_OUTAGE=False)"
+                )
             _check_deadline("Phase 7b")
 
             # Phase 8: Mass-delete all snapshots
@@ -4300,3 +4343,81 @@ class MassCreateDeletePersistent_3000x1_K8s(_MassCreateDeleteK8s):
     PERSISTENT_RETRY = True
     NUM_SUBSYSTEMS = 1
     NS_PER_SUBSYSTEM = 3000
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Restart variants: 6000 entity cap, node outages enabled, persistent retry.
+#  Tests node restart resilience at controlled scale.  Entity cap ensures
+#  total entities (lvols + snapshots) never exceed MAX_ENTITY_COUNT.
+#
+#  max_lvols = MAX_ENTITY_COUNT // (1 + SNAPSHOTS_PER_LVOL)
+#
+#  | SNAPSHOTS_PER_LVOL | max_lvols | peak entities              |
+#  |--------------------|-----------|----------------------------|
+#  | 1                  | 3000      | 3000 lvols + 3000 snaps    |
+#  | 6                  | 857       | 857 lvols + 5142 snaps     |
+#  | 10                 | 545       | 545 lvols + 5450 snaps     |
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Docker restart variants
+
+class MassCreateDeleteRestart_300x10_Docker(_MassCreateDeleteDocker):
+    """300x10 ratio, 1 snap/lvol, entity cap 6000, with node outages."""
+    ENABLE_NODE_OUTAGE = True
+    PERSISTENT_RETRY = True
+    MAX_ENTITY_COUNT = 6000
+    NUM_SUBSYSTEMS = 10
+    NS_PER_SUBSYSTEM = 300
+    SNAPSHOTS_PER_LVOL = 1
+
+
+class MassCreateDeleteRestart_300x10_6Snap_Docker(_MassCreateDeleteDocker):
+    """300x10 ratio, 6 snaps/lvol, entity cap 6000 -> 857 lvols, with node outages."""
+    ENABLE_NODE_OUTAGE = True
+    PERSISTENT_RETRY = True
+    MAX_ENTITY_COUNT = 6000
+    NUM_SUBSYSTEMS = 10
+    NS_PER_SUBSYSTEM = 300
+    SNAPSHOTS_PER_LVOL = 6
+
+
+class MassCreateDeleteRestart_300x10_10Snap_Docker(_MassCreateDeleteDocker):
+    """300x10 ratio, 10 snaps/lvol, entity cap 6000 -> 545 lvols, with node outages."""
+    ENABLE_NODE_OUTAGE = True
+    PERSISTENT_RETRY = True
+    MAX_ENTITY_COUNT = 6000
+    NUM_SUBSYSTEMS = 10
+    NS_PER_SUBSYSTEM = 300
+    SNAPSHOTS_PER_LVOL = 10
+
+
+# K8s restart variants
+
+class MassCreateDeleteRestart_300x10_K8s(_MassCreateDeleteK8s):
+    """300x10 ratio, 1 snap/lvol, entity cap 6000, with node outages."""
+    ENABLE_NODE_OUTAGE = True
+    PERSISTENT_RETRY = True
+    MAX_ENTITY_COUNT = 6000
+    NUM_SUBSYSTEMS = 10
+    NS_PER_SUBSYSTEM = 300
+    SNAPSHOTS_PER_LVOL = 1
+
+
+class MassCreateDeleteRestart_300x10_6Snap_K8s(_MassCreateDeleteK8s):
+    """300x10 ratio, 6 snaps/lvol, entity cap 6000 -> 857 PVCs, with node outages."""
+    ENABLE_NODE_OUTAGE = True
+    PERSISTENT_RETRY = True
+    MAX_ENTITY_COUNT = 6000
+    NUM_SUBSYSTEMS = 10
+    NS_PER_SUBSYSTEM = 300
+    SNAPSHOTS_PER_LVOL = 6
+
+
+class MassCreateDeleteRestart_300x10_10Snap_K8s(_MassCreateDeleteK8s):
+    """300x10 ratio, 10 snaps/lvol, entity cap 6000 -> 545 PVCs, with node outages."""
+    ENABLE_NODE_OUTAGE = True
+    PERSISTENT_RETRY = True
+    MAX_ENTITY_COUNT = 6000
+    NUM_SUBSYSTEMS = 10
+    NS_PER_SUBSYSTEM = 300
+    SNAPSHOTS_PER_LVOL = 10
