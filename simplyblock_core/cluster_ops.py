@@ -97,6 +97,7 @@ def _add_graylog_input(cluster_ip, password: SecretStr):
         'Content-Type': 'application/json',
     }
 
+    last_error = None
     while retries > 0:
         payload = json.dumps({
             "title": "spdk log input",
@@ -113,18 +114,30 @@ def _add_graylog_input(cluster_ip, password: SecretStr):
             "global": True
         })
 
-        response = session.post(input_url, headers=headers, data=payload)
+        try:
+            response = session.post(input_url, headers=headers, data=payload)
+        except requests.exceptions.RequestException as e:
+            # Graylog may still be starting (fresh cluster bootstrap) — a
+            # refused/failed connection must retry the same as a bad status
+            # code, not crash add_cluster() on the very first attempt.
+            last_error = str(e)
+            logger.debug("Graylog input POST failed, waiting for graylog to come up: %s", e)
+            retries -= 1
+            time.sleep(5)
+            continue
+
         if response.status_code == 201:
             logger.info("Graylog input created...")
             reachable = True
             break
 
+        last_error = f"status {response.status_code}"
         logger.debug("Graylog input POST returned status %s", response.status_code)
         retries -= 1
         time.sleep(5)
 
     if not reachable:
-        logger.error("Failed to create graylog input (status %s)", response.status_code)
+        logger.error("Failed to create graylog input (%s)", last_error)
         return False
 
     inputs_response = session.get(input_url, headers=headers)
@@ -167,30 +180,44 @@ def _add_graylog_input(cluster_ip, password: SecretStr):
 def _set_max_result_window(cluster_ip, max_window=100000):
 
     url_existing_indices = f"{cluster_ip}/_all/_settings"
+    headers = {
+        'Content-Type': 'application/json',
+    }
 
     retries = 30
-    reachable=False
+    reachable = False
+    last_error = None
     while retries > 0:
         payload_existing = json.dumps({
             "settings": {
                 "index.max_result_window": max_window
             }
         })
-        headers = {
-            'Content-Type': 'application/json',
-        }
-        response = requests.put(url_existing_indices, headers=headers, data=payload_existing)
+        try:
+            response = requests.put(url_existing_indices, headers=headers, data=payload_existing)
+        except requests.exceptions.RequestException as e:
+            # OpenSearch may still be starting (fresh cluster bootstrap) — a
+            # refused/failed connection must retry the same as a bad status
+            # code, not crash add_cluster() on the very first attempt
+            # (2026-07-28: cluster create failed outright with an unhandled
+            # ConnectionError because opensearch wasn't listening yet).
+            last_error = str(e)
+            logger.debug("waiting for opensearch cluster to come up: %s", e)
+            retries -= 1
+            time.sleep(5)
+            continue
         if response.status_code == 200:
             logger.info("Settings updated for existing indices.")
-            reachable=True
+            reachable = True
             break
+        last_error = response.text
         logger.debug(response.status_code)
         logger.debug("waiting for opensearch cluster to come up")
         retries -= 1
         time.sleep(5)
 
     if not reachable:
-        logger.error(f"Failed to update settings for existing indices: {response.text}")
+        logger.error(f"Failed to update settings for existing indices: {last_error}")
         return False
 
     url_template = f"{cluster_ip}/_template/all_indices_template"
@@ -200,7 +227,11 @@ def _set_max_result_window(cluster_ip, max_window=100000):
             "index.max_result_window": max_window
         }
     })
-    response_template = requests.put(url_template, headers=headers, data=payload_template)
+    try:
+        response_template = requests.put(url_template, headers=headers, data=payload_template)
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Failed to create template for future indices: {e}")
+        return False
     if response_template.status_code == 200:
         logger.info("Template created for future indices.")
         return True
