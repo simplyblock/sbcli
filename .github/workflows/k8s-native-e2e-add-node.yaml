@@ -13,7 +13,7 @@ on:
         default: 'main'
       simplyblock_image:
         type: string
-        default: 'latest'
+        default: 'main'
       simplyblock_repository:
         type: string
         default: 'docker.io/simplyblock/simplyblock'
@@ -22,7 +22,7 @@ on:
         default: 'docker.io/simplyblock/simplyblock-operator'
       operator_tag:
         type: string
-        default: 'latest'
+        default: 'main'
       csi_repository:
         type: string
         default: 'docker.io/simplyblock/spdkcsi'
@@ -31,7 +31,7 @@ on:
         default: 'latest'
       spdk_image:
         type: string
-        default: 'docker.io/simplyblock/spdk:latest'
+        default: 'docker.io/simplyblock/spdk:main-latest'
       worker_nodes:
         type: string
         required: true
@@ -88,7 +88,7 @@ on:
       simplyblock_image:
         description: 'Simplyblock image tag'
         required: true
-        default: 'latest'
+        default: 'main'
       simplyblock_repository:
         description: 'Simplyblock image repository'
         required: false
@@ -100,7 +100,7 @@ on:
       operator_tag:
         description: 'Operator image tag'
         required: false
-        default: 'latest'
+        default: 'main'
       csi_repository:
         description: 'CSI driver image repository (leave empty for chart default)'
         required: false
@@ -112,7 +112,7 @@ on:
       spdk_image:
         description: 'SPDK container image'
         required: true
-        default: 'docker.io/simplyblock/spdk:latest'
+        default: 'docker.io/simplyblock/spdk:main-latest'
       worker_nodes:
         description: 'Comma-separated initial K8s worker node names'
         required: true
@@ -576,7 +576,7 @@ jobs:
             --set image.simplyblock.repository="${{ inputs.simplyblock_repository || 'docker.io/simplyblock/simplyblock' }}" \
             --set image.simplyblock.tag="${{ inputs.simplyblock_image }}" \
             --set image.operator.repository="${{ inputs.operator_repository || 'docker.io/simplyblock/simplyblock-operator' }}" \
-            --set image.operator.tag="${{ inputs.operator_tag || 'latest' }}" \
+            --set image.operator.tag="${{ inputs.operator_tag || 'main' }}" \
             --set csiConfig.simplybk.ip="http://simplyblock-webappapi.simplyblock:5000" \
             --set prometheus.server.persistentVolume.storageClass=local-hostpath \
             --set controlplane.observability.enabled=true \

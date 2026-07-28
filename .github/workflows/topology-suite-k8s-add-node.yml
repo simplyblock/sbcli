@@ -200,7 +200,7 @@ jobs:
       max_lvol: ${{ inputs.max_lvol || '30' }}
       ssh_user: ${{ inputs.ssh_user || 'root' }}
       key_path: ${{ inputs.key_path }}
-      send_slack_notification: ${{ inputs.send_slack_notification }}
+      send_slack_notification: false
       cluster_params: ${{ inputs.cluster_params || 'ndcs=2,npcs=2,bs=4096,chunk_bs=4096,partitions=1,jm_count=4' }}
       cluster_environment: ${{ inputs.cluster_environment || 'local' }}
       skip_nfs: ${{ inputs.skip_nfs || 'false' }}
@@ -248,3 +248,88 @@ jobs:
               echo "> No individual test summaries were found."
             fi
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Send Combined Slack Notification
+        if: always() && (inputs.send_slack_notification || true) == true
+        shell: bash
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          OVERALL_STATUS: ${{ needs.run-tests.result }}
+          SLACK_RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          TEST_COUNT: ${{ needs.setup-matrix.outputs.test_count }}
+          TEST_CLASSES: ${{ inputs.TEST_CLASSES }}
+          CLUSTER_ENV: ${{ inputs.cluster_environment || 'local' }}
+        run: |
+          python3 - <<'PYEOF'
+          import json, os, re, sys, urllib.request
+
+          webhook = os.environ.get("SLACK_WEBHOOK_URL", "")
+          if not webhook:
+              print("No SLACK_WEBHOOK_URL set, skipping.")
+              sys.exit(0)
+
+          overall  = os.environ.get("OVERALL_STATUS", "unknown")
+          run_url  = os.environ.get("SLACK_RUN_URL", "")
+          branch   = os.environ.get("GITHUB_REF_NAME", "?")
+          count    = os.environ.get("TEST_COUNT", "?")
+          classes  = os.environ.get("TEST_CLASSES", "")
+          env_name = os.environ.get("CLUSTER_ENV", "?")
+
+          ok     = overall == "success"
+          icon   = ":white_check_mark:" if ok else ":x:"
+          status = "SUCCESS" if ok else "FAILURE"
+          mention = "" if ok else " <!channel>"
+
+          # Parse per-test results from downloaded summary artifacts
+          test_lines = []
+          summary_dir = "summaries"
+          if os.path.isdir(summary_dir):
+              for d in sorted(os.listdir(summary_dir)):
+                  md_path = os.path.join(summary_dir, d, "test-summary.md")
+                  if not os.path.isfile(md_path):
+                      continue
+                  content = open(md_path).read()
+                  # Extract test name from "## ... Summary — <TestName>"
+                  name_m = re.search(r'Summary\s*[-—]\s*(\S+)', content)
+                  tname = name_m.group(1) if name_m else d
+                  # Extract result
+                  res_m = re.search(r'\*\*Result:\*\*\s*(\S+)', content)
+                  result = res_m.group(1) if res_m else "?"
+                  r_icon = ":white_check_mark:" if "pass" in result.lower() or "success" in result.lower() else ":x:"
+                  # Extract counts
+                  total_m  = re.search(r'\*\*Total:\*\*\s*(\d+)', content)
+                  passed_m = re.search(r'\*\*Passed:\*\*\s*(\d+)', content)
+                  failed_m = re.search(r'\*\*Failed:\*\*\s*(\d+)', content)
+                  total  = total_m.group(1) if total_m else "?"
+                  passed = passed_m.group(1) if passed_m else "?"
+                  failed = failed_m.group(1) if failed_m else "?"
+                  test_lines.append(f"  {r_icon} `{tname}` — {passed}/{total} passed, {failed} failed")
+
+          lines = [
+              f"{icon} *SimplyBlock K8s Add-Node Topology Suite*{mention}",
+              f"*Status:* {status}  |  *Environment:* `{env_name}`",
+              f"*Branch:* `{branch}`  |  *Tests:* {count}",
+              "",
+          ]
+          if test_lines:
+              lines.append("*Per-test results:*")
+              lines.extend(test_lines)
+          else:
+              lines.append("_(no per-test summaries found)_")
+          lines += [
+              "",
+              f":link: *Run:* <{run_url}|View on GitHub>",
+          ]
+          payload = {"text": "\n".join(lines)}
+          req = urllib.request.Request(
+              webhook,
+              data=json.dumps(payload).encode(),
+              headers={"Content-Type": "application/json"},
+          )
+          try:
+              urllib.request.urlopen(req, timeout=15)
+              print("Combined Slack notification sent.")
+          except Exception as exc:
+              print(f"WARN: Slack notification failed: {exc}", file=sys.stderr)
+          PYEOF

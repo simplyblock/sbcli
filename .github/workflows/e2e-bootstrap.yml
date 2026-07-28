@@ -82,6 +82,10 @@ on:
         type: string
         default: ""
         description: "Space-separated IPs of spare nodes (cleaned but NOT added to cluster). Used for add-node/migration tests."
+      send_slack_notification:
+        type: boolean
+        default: true
+        description: "Send Slack notification on completion. Set to false when called from topology suites that send their own combined notification."
   workflow_dispatch:
     inputs:
       # =========================
@@ -1416,7 +1420,7 @@ jobs:
           retention-days: 7
 
       - name: Send Slack Notification
-        if: always()
+        if: always() && inputs.send_slack_notification != false
         shell: bash
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

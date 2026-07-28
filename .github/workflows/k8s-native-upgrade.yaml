@@ -21,7 +21,7 @@ on:
       base_spdk_image:
         description: 'Base SPDK container image (for initial deployment)'
         required: true
-        default: 'docker.io/simplyblock/spdk:latest'
+        default: 'docker.io/simplyblock/spdk:main-latest'
 
       # ── Target version (upgrade destination) ──
       target_simplyblock_image:
