@@ -2516,18 +2516,13 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 # confirmed dead — a failed kill followed by record removal
                 # orphans the pod (holds CPU/hugepages, blocks the retry).
                 # Retry; keep the record and fail the add if it won't die.
-                killed = False
-                for attempt in range(6):
-                    try:
-                        existing.client(timeout=20).spdk_process_kill(existing.rpc_port, existing.cluster_id)
-                        killed = True
-                        break
-                    except Exception:
-                        logger.warning(
-                            f"Failed to kill SPDK for stale in_creation node "
-                            f"{existing.get_id()} (attempt {attempt + 1}/6)", exc_info=True)
-                        time.sleep(5)
-                if not killed:
+                # _kill_spdk_until_dead independently polls spdk_process_is_up
+                # rather than trusting spdk_process_kill's own return value —
+                # that endpoint could report success on a delete that silently
+                # failed or timed out, which is exactly how a pod outlived its
+                # own DB record and starved every later add on the same host
+                # (worker-3, 2026-07-28).
+                if not _kill_spdk_until_dead(existing):
                     logger.error(
                         f"Could not kill SPDK for stale in_creation node {existing.get_id()}; "
                         f"keeping its DB record to avoid orphaning the pod — failing add for retry")
@@ -2658,18 +2653,11 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 # pod (Pending, node stuck in in_creation; worker-3, 2026-07-13).
                 # Retry the kill; if it never succeeds, keep the record and fail
                 # the add so a later attempt cleans the pair rather than orphaning.
-                killed = False
-                for attempt in range(6):
-                    try:
-                        n.client(timeout=20).spdk_process_kill(n.rpc_port, n.cluster_id)
-                        killed = True
-                        break
-                    except Exception:
-                        logger.warning(
-                            f"Failed to kill SPDK for stale in_creation node "
-                            f"{n.get_id()} (attempt {attempt + 1}/6)", exc_info=True)
-                        time.sleep(5)
-                if not killed:
+                # _kill_spdk_until_dead independently polls spdk_process_is_up
+                # rather than trusting spdk_process_kill's own return value —
+                # that endpoint could report success on a delete that silently
+                # failed or timed out.
+                if not _kill_spdk_until_dead(n):
                     logger.error(
                         f"Could not kill SPDK for stale in_creation node {n.get_id()}; "
                         f"keeping its DB record to avoid orphaning the pod — failing add for retry")
@@ -2920,16 +2908,43 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         rpc_client = snode.rpc_client(timeout=3 * 60, retry=10)
 
         # 1- set iobuf options
-        if (snode.iobuf_small_pool_count or snode.iobuf_large_pool_count or
-                snode.iobuf_small_bufsize or snode.iobuf_large_bufsize):
-            ret = rpc_client.iobuf_set_options(
-                snode.iobuf_small_pool_count, snode.iobuf_large_pool_count,
-                snode.iobuf_small_bufsize, snode.iobuf_large_bufsize)
-            if not ret:
-                logger.error("Failed to set iobuf options")
-                return False
-        rpc_client.bdev_set_options(0, 0, 0, 0)
-        rpc_client.accel_set_options()
+        try:
+            if (snode.iobuf_small_pool_count or snode.iobuf_large_pool_count or
+                    snode.iobuf_small_bufsize or snode.iobuf_large_bufsize):
+                ret = rpc_client.iobuf_set_options(
+                    snode.iobuf_small_pool_count, snode.iobuf_large_pool_count,
+                    snode.iobuf_small_bufsize, snode.iobuf_large_bufsize)
+                if not ret:
+                    logger.error("Failed to set iobuf options")
+                    return False
+            rpc_client.bdev_set_options(0, 0, 0, 0)
+            rpc_client.accel_set_options()
+        except Exception as e:
+            # First contact with the just-created SPDK pod (write_to_db above
+            # persisted the in_creation record). If the pod never comes up —
+            # most commonly stuck Pending on a host without enough free
+            # CPU/hugepages/memory — left alone it strands here: both the pod
+            # and this record would otherwise sit untouched for a full retry
+            # cycle (the next add-node attempt's stale-record cleanup, ~9 min
+            # later) while the Pending pod contributes nothing but occupies a
+            # scheduling slot. Worse, if that later cleanup's kill call ever
+            # fails silently, the pod outlives even that and permanently
+            # starves every future add on the same host (worker-3,
+            # 2026-07-28). Clean up immediately instead of waiting.
+            logger.error(f"Storage node {snode.get_id()} did not come up after creation: {e}")
+            # _kill_spdk_until_dead independently polls spdk_process_is_up
+            # rather than trusting spdk_process_kill's own return value.
+            if _kill_spdk_until_dead(snode):
+                try:
+                    storage_events.snode_delete(snode)
+                except Exception:
+                    logger.warning("snode_delete event failed for unreachable node", exc_info=True)
+                snode.remove(db_controller.kv_store)
+            else:
+                logger.error(
+                    f"Could not kill unreachable SPDK pod for {snode.get_id()}; "
+                    f"keeping its DB record to avoid orphaning the pod")
+            return False
 
         snode.write_to_db(kv_store)
 

@@ -550,41 +550,50 @@ def spdk_process_start(body: SPDKParams):
 })
 def spdk_process_kill(query: utils.RPCPortParams):
     k8s_core_v1 = core_utils.get_k8s_core_client()
+    namespace = node_utils_k8s.get_namespace()
+    if not query.cluster_id:
+        return utils.get_response(False, "param required: cluster_id")
+
+    first_six_cluster_id = core_utils.first_six_chars(query.cluster_id)
+    pod_name = f"snode-spdk-pod-{query.rpc_port}-{first_six_cluster_id}"
     try:
-        namespace = node_utils_k8s.get_namespace()
-        if not query.cluster_id:
-            return utils.get_response(False, "param required: cluster_id")
-
-        first_six_cluster_id = core_utils.first_six_chars(query.cluster_id)
-        pod_name = f"snode-spdk-pod-{query.rpc_port}-{first_six_cluster_id}"
-        resp = k8s_core_v1.delete_namespaced_pod(pod_name, namespace)
-
-        fluent_pod_name = f"simplyblock-fluentd-{query.rpc_port}-{first_six_cluster_id}"
-        try:
-            k8s_core_v1.read_namespaced_pod(fluent_pod_name, namespace)
-            logger.info(f"Deleting fluent pod {fluent_pod_name}")
-            k8s_core_v1.delete_namespaced_pod(fluent_pod_name, namespace)
-        except ApiException as e:
-            if e.status != 404:
-                raise
-
-        retries = 10
-        while retries > 0:
-            resp = k8s_core_v1.list_namespaced_pod(namespace)
-            found = False
-            for pod in resp.items:
-                if pod.metadata.name.startswith(pod_name):
-                    found = True
-
-            if found:
-                logger.info("Container found, waiting...")
-                retries -= 1
-                time.sleep(3)
-            else:
-                break
-
+        k8s_core_v1.delete_namespaced_pod(pod_name, namespace)
     except ApiException as e:
-        logger.info(e.body)
+        if e.status != 404:
+            # A genuine delete failure (not "already gone") must be reported
+            # to the caller — add_node()'s stale-record cleanup only drops
+            # its DB record once this call confirms the pod is dead; treating
+            # a swallowed failure as success orphans the pod (it keeps
+            # holding the host's CPU/hugepages/memory, silently starving
+            # every later add-node attempt on that host — worker-3,
+            # 2026-07-28).
+            logger.error(f"Failed to delete pod {pod_name}: {e.body}")
+            return utils.get_response(False, f"Failed to delete pod {pod_name}: {e.body}")
+
+    fluent_pod_name = f"simplyblock-fluentd-{query.rpc_port}-{first_six_cluster_id}"
+    try:
+        k8s_core_v1.read_namespaced_pod(fluent_pod_name, namespace)
+        logger.info(f"Deleting fluent pod {fluent_pod_name}")
+        k8s_core_v1.delete_namespaced_pod(fluent_pod_name, namespace)
+    except ApiException as e:
+        if e.status != 404:
+            # Best-effort companion log pod; don't fail the whole call over it.
+            logger.warning(f"Failed to delete fluent pod {fluent_pod_name}: {e.body}")
+
+    max_retries = 10
+    found = True
+    for attempt in range(max_retries):
+        resp = k8s_core_v1.list_namespaced_pod(namespace)
+        found = any(pod.metadata.name.startswith(pod_name) for pod in resp.items)
+        if not found:
+            break
+        logger.info("Container found, waiting...")
+        if attempt < max_retries - 1:
+            time.sleep(3)
+
+    if found:
+        logger.error(f"Pod {pod_name} still present {max_retries * 3}s after delete")
+        return utils.get_response(False, f"Pod {pod_name} did not terminate in time")
 
     return utils.get_response(True)
 
