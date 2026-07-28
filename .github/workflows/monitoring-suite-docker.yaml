@@ -94,7 +94,7 @@ on:
       BOOTSTRAP_HA_JM_COUNT:
         description: "bootstrap: --ha-jm-count"
         required: true
-        default: "3"
+        default: "4"
       BOOTSTRAP_IS_SINGLE_NODE:
         description: "Bootstrap: deploy as single-node (--is-single-node)"
         type: boolean

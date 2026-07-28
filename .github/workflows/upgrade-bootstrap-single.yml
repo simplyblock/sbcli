@@ -63,7 +63,7 @@ on:
         default: "1"
       BOOTSTRAP_HA_JM_COUNT:
         type: string
-        default: "3"
+        default: "4"
       BOOTSTRAP_HA_TYPE:
         type: string
         default: "single"
@@ -152,7 +152,7 @@ on:
       BOOTSTRAP_HA_JM_COUNT:
         description: "bootstrap: --ha-jm-count"
         required: true
-        default: "3"
+        default: "4"
       BOOTSTRAP_HA_TYPE:
         description: "bootstrap: --ha-type (single-node cluster type)"
         required: true
@@ -214,7 +214,7 @@ jobs:
       BOOTSTRAP_DATA_CHUNKS:       ${{ inputs.BOOTSTRAP_DATA_CHUNKS || '2' }}
       BOOTSTRAP_PARITY_CHUNKS:     ${{ inputs.BOOTSTRAP_PARITY_CHUNKS || '2' }}
       BOOTSTRAP_JOURNAL_PARTITION: ${{ inputs.BOOTSTRAP_JOURNAL_PARTITION || '1' }}
-      BOOTSTRAP_HA_JM_COUNT:       ${{ inputs.BOOTSTRAP_HA_JM_COUNT || '3' }}
+      BOOTSTRAP_HA_JM_COUNT:       ${{ inputs.BOOTSTRAP_HA_JM_COUNT || '4' }}
       BOOTSTRAP_HA_TYPE:           ${{ inputs.BOOTSTRAP_HA_TYPE || 'single' }}
       BOOTSTRAP_DATA_NIC:          ${{ inputs.BOOTSTRAP_DATA_NIC || 'eth1' }}
 

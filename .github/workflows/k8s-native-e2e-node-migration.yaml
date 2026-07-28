@@ -1,5 +1,5 @@
 name: "K8s Native E2E - Node Migration (use topology-suite-k8s-migration.yml for multi-test runs)"
-run-name: "K8s Native E2E - Node Migration | ${{ inputs.cluster_environment || 'local' }} | ${{ inputs.testname || 'K8sNativeNodeMigrationTest' }} | ${{ inputs.cluster_params || 'ndcs=2,npcs=2,bs=4096,chunk_bs=4096,partitions=4,jm_count=4' }}"
+run-name: "K8s Native E2E - Node Migration | ${{ inputs.cluster_environment || 'local' }} | ${{ inputs.testname || 'K8sNativeNodeMigrationTest' }} | ${{ inputs.cluster_params || 'ndcs=2,npcs=2,bs=4096,chunk_bs=4096,partitions=1,jm_count=4' }}"
 
 on:
   workflow_call:
@@ -62,7 +62,7 @@ on:
         default: true
       cluster_params:
         type: string
-        default: 'ndcs=2,npcs=2,bs=4096,chunk_bs=4096,partitions=4,jm_count=4'
+        default: 'ndcs=2,npcs=2,bs=4096,chunk_bs=4096,partitions=1,jm_count=4'
       cluster_environment:
         type: string
         default: 'openshift-baremetal'
@@ -157,9 +157,9 @@ on:
         default: true
         type: boolean
       cluster_params:
-        description: 'Cluster config: ndcs=2,npcs=2,bs=4096,chunk_bs=4096,partitions=4,jm_count=4'
+        description: 'Cluster config: ndcs=2,npcs=2,bs=4096,chunk_bs=4096,partitions=1,jm_count=4'
         required: false
-        default: 'ndcs=2,npcs=2,bs=4096,chunk_bs=4096,partitions=4,jm_count=4'
+        default: 'ndcs=2,npcs=2,bs=4096,chunk_bs=4096,partitions=1,jm_count=4'
       cluster_environment:
         description: 'Target cluster environment'
         required: true
@@ -299,7 +299,7 @@ jobs:
 
       - name: Set parameters
         run: |
-          PARAMS="${{ inputs.cluster_params || 'ndcs=2,npcs=2,bs=4096,chunk_bs=4096,partitions=4,jm_count=4' }}"
+          PARAMS="${{ inputs.cluster_params || 'ndcs=2,npcs=2,bs=4096,chunk_bs=4096,partitions=1,jm_count=4' }}"
           for pair in $(echo "$PARAMS" | tr ',' ' '); do
             key=$(echo "$pair" | cut -d= -f1)
             val=$(echo "$pair" | cut -d= -f2)
@@ -1307,6 +1307,11 @@ jobs:
 
           dur_fmt="${TEST_TIME_HOURS:-0}h ${TEST_TIME_MINS:-0}m ${TEST_TIME_SECS:-0}s"
 
+          # Extract test-specific log path from output.log
+          TEST_LOG_PATH="$(grep 'Logs Path:' "${out_log}" 2>/dev/null \
+            | tail -n 1 | sed 's/\x1b\[[0-9;]*m//g' | sed 's/.*Logs Path: *//' \
+            | sed 's/[[:space:]]*$//' || true)"
+
           total_cases="$(grep -E 'Number of Total Cases:' "${out_log}" 2>/dev/null | tail -n 1 | grep -oE '[0-9]+$' || echo '?')"
           passed_cnt="$(grep -E 'Number of Passed Cases:' "${out_log}" 2>/dev/null | tail -n 1 | grep -oE '[0-9]+$' || echo '?')"
           failed_cnt="$(grep -E 'Number of Failed Cases:' "${out_log}" 2>/dev/null | tail -n 1 | grep -oE '[0-9]+$' || echo '?')"
@@ -1371,6 +1376,7 @@ jobs:
             fi
             echo ""
             echo "### NFS Log Locations"
+            echo "- **Test logs:** \`${TEST_LOG_PATH:-not detected}\`"
             echo "- **RUN_BASE_DIR:** \`${RUN_BASE_DIR:-not detected}\`"
             echo "- Graylog logs: \`${RUN_BASE_DIR:-<run_dir>}/graylog_collected/\`"
             if [[ -n "${RUN_BASE_DIR:-}" && -d "${RUN_BASE_DIR}" ]]; then
@@ -1472,10 +1478,41 @@ jobs:
               ]
           else:
               lines.append("_(test counts not found in log)_")
+          # --- Per-test results ---
+          test_log_paths = []
+          if os.path.isfile(out_log):
+              ansi_re = re.compile(r'\x1b\[[0-9;]*m')
+              test_results = []
+              for raw_line in content.splitlines():
+                  cl = ansi_re.sub('', raw_line)
+                  if 'Logs Path:' in cl:
+                      p = cl.split('Logs Path:')[-1].strip()
+                      if p:
+                          test_log_paths.append(p)
+                  if not re.search(r'(PASSED|FAILED|SKIPPED) CASE', cl):
+                      continue
+                  m = re.search(r'Test[A-Za-z0-9_]+', cl)
+                  if not m:
+                      continue
+                  name = m.group(0)
+                  if   'PASSED CASE'  in cl: test_results.append(('PASSED',  name))
+                  elif 'FAILED CASE'  in cl: test_results.append(('FAILED',  name))
+                  elif 'SKIPPED CASE' in cl: test_results.append(('SKIPPED', name))
+              if test_results:
+                  lines.append("")
+                  lines.append("*Test Results:*")
+                  icons = {'PASSED': ':white_check_mark:', 'FAILED': ':x:', 'SKIPPED': ':fast_forward:'}
+                  for st, nm in test_results:
+                      lines.append(f"{icons.get(st, ':grey_question:')} `{nm}`")
+
+          lines += [""]
+          if test_log_paths:
+              for tlp in test_log_paths:
+                  lines.append(f":open_file_folder: *Test Logs:* `{tlp}`")
           lines += [
-              "",
+              f":file_folder: *E2E Run Dir:* `{log_dir}`",
+              f":scroll: *Graylog:* `{log_dir}/graylog_collected/`",
               f":link: *Run:* <{run_url}|View on GitHub>",
-              f":file_folder: *Final Logs:* `{log_dir}`",
               f":hourglass_flowing_sand: _Logs are being collected and will be available shortly._",
           ]
           payload = {"text": "\n".join(lines)}

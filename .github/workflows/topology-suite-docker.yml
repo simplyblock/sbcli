@@ -86,7 +86,7 @@ on:
       BOOTSTRAP_JOURNAL_PARTITION:
         description: "bootstrap: --journal-partition"
         required: true
-        default: "4"
+        default: "1"
       BOOTSTRAP_DATA_NIC:
         description: "bootstrap: --data-nics (space or comma-separated; default eth1)"
         required: true
@@ -94,7 +94,7 @@ on:
       BOOTSTRAP_HA_JM_COUNT:
         description: "bootstrap: --ha-jm-count"
         required: true
-        default: "3"
+        default: "4"
       BOOTSTRAP_IS_SINGLE_NODE:
         description: "Bootstrap: deploy as single-node (--is-single-node)"
         type: boolean
@@ -237,6 +237,37 @@ jobs:
             echo ""
             echo "**Tests:** ${{ needs.setup-matrix.outputs.test_count }} | **Overall:** ${{ needs.run-tests.result }}"
             echo ""
+
+            # Extract and display consolidated log directories
+            echo "## Log Directories"
+            echo ""
+            log_found=0
+            for dir in summaries/test-summary-*/; do
+              [[ -d "$dir" ]] || continue
+              [[ -f "${dir}test-summary.md" ]] || continue
+              content="$(cat "${dir}test-summary.md")"
+              tname="$(echo "$content" | grep -oP 'Summary\s*[—-]\s*\K\S+' | head -1)"
+              [[ -z "$tname" ]] && tname="$(basename "$dir")"
+              test_log="$(echo "$content" | grep -oP '\*\*Test logs:\*\*\s*`\K[^`]+' | head -1)"
+              run_dir="$(echo "$content" | grep -oP '\*\*(RUN_BASE_DIR|Run dir):\*\*\s*`\K[^`]+' | head -1)"
+              if [[ -n "$test_log" || -n "$run_dir" ]]; then
+                log_found=$((log_found + 1))
+                echo "**${tname}**"
+                [[ -n "$test_log" ]] && echo "- Test logs: \`${test_log}\`"
+                if [[ -n "$run_dir" ]]; then
+                  run_dir="${run_dir%/}"
+                  echo "- E2E run dir: \`${run_dir}/\`"
+                  echo "- Graylog: \`${run_dir}/graylog_collected/\`"
+                fi
+                echo ""
+              fi
+            done
+            if [[ "$log_found" -eq 0 ]]; then
+              echo "> No log directories detected."
+              echo ""
+            fi
+
+            # Append individual test summaries
             found=0
             for dir in summaries/test-summary-*/; do
               [[ -d "$dir" ]] || continue
@@ -302,7 +333,19 @@ jobs:
                   total  = total_m.group(1) if total_m else "?"
                   passed = passed_m.group(1) if passed_m else "?"
                   failed = failed_m.group(1) if failed_m else "?"
-                  test_lines.append(f"  {r_icon} `{tname}` — {passed}/{total} passed, {failed} failed")
+                  # Extract test logs path (from e2e framework)
+                  test_log_m = re.search(r'\*\*Test logs:\*\*\s*`([^`]+)`', content)
+                  test_log_path = test_log_m.group(1) if test_log_m else None
+                  # Extract RUN_BASE_DIR / Run dir path (workflow run directory)
+                  log_m = re.search(r'\*\*(?:RUN_BASE_DIR|Run dir):\*\*\s*`([^`]+)`', content)
+                  run_dir_path = log_m.group(1).rstrip('/') if log_m else None
+                  line = f"  {r_icon} `{tname}` — {passed}/{total} passed, {failed} failed"
+                  if test_log_path:
+                      line += f"\n        :open_file_folder: `{test_log_path}`"
+                  if run_dir_path:
+                      line += f"\n        :file_folder: `{run_dir_path}/`"
+                      line += f"\n        :scroll: `{run_dir_path}/graylog_collected/`"
+                  test_lines.append(line)
 
           lines = [
               f"{icon} *SimplyBlock Docker Topology Suite*{mention}",

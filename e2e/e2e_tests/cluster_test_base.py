@@ -3719,18 +3719,34 @@ class TestClusterBase:
     
     def check_core_dump(self):
         if self.k8s_test:
-            # Core dumps in K8s live inside the spdk-container at /etc/simplyblock/
             k8s_obj = getattr(self.sbcli_utils, 'k8s', None)
             if not k8s_obj:
                 self.logger.info("check_core_dump: k8s_utils not available, skipping.")
                 return
+
             for node_ip in self.storage_nodes:
                 files = k8s_obj.list_files_in_spdk_pod(node_ip, "/etc/simplyblock/")
                 self.logger.info(f"Files in /etc/simplyblock (spdk pod for {node_ip}): {files}")
                 if any("core" in f for f in files) and not any("tmp_cores" in f for f in files):
                     cur_date = datetime.now().strftime("%Y-%m-%d")
                     self.logger.info(f"Core dump found in SPDK pod for node {node_ip} at {cur_date}")
+
+                    # Copy core dumps from inside the SPDK pod to the log dir
+                    if self.docker_logs_path:
+                        try:
+                            k8s_obj.copy_core_dumps_from_spdk_pod(
+                                node_ip, self.docker_logs_path
+                            )
+                        except Exception as exc:
+                            self.logger.warning(
+                                f"[coredump] Failed to copy in-pod core dumps "
+                                f"for {node_ip}: {exc}"
+                            )
+
+            # Collect host-level core dumps from K8s node hosts
+            self._check_host_core_dumps_k8s(k8s_obj)
             return
+
         for node in self.storage_nodes:
             files = self.ssh_obj.list_files(node, "/etc/simplyblock/")
             self.logger.info(f"Files in /etc/simplyblock: {files}")
@@ -3744,6 +3760,33 @@ class TestClusterBase:
             if "core" in files and "tmp_cores" not in files:
                 cur_date = datetime.now().strftime("%Y-%m-%d")
                 self.logger.info(f"Core file found on management node {node} at {cur_date}")
+
+    def _check_host_core_dumps_k8s(self, k8s_obj):
+        """Collect host-level core dumps from all storage node K8s hosts.
+
+        Saves coredumpctl output and core dump files to
+        ``<docker_logs_path>/host_core_dumps/``.
+        """
+        if not self.docker_logs_path:
+            self.logger.info(
+                "[coredump] docker_logs_path not set, skipping host core dump check"
+            )
+            return
+
+        coredump_dir = os.path.join(self.docker_logs_path, "host_core_dumps")
+        os.makedirs(coredump_dir, exist_ok=True)
+        max_size_mb = int(os.environ.get("CORE_DUMP_MAX_SIZE_MB", "500"))
+
+        for node_ip in self.storage_nodes:
+            try:
+                k8s_obj.collect_host_core_dumps(
+                    node_ip, coredump_dir, max_size_mb=max_size_mb
+                )
+            except Exception as exc:
+                self.logger.warning(
+                    f"[coredump] Host core dump collection failed for "
+                    f"{node_ip}: {exc}"
+                )
 
     def get_latest_cluster_util(self):
         result = self.sbcli_utils.get_cluster_capacity()

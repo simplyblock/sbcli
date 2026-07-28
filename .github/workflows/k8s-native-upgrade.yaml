@@ -74,9 +74,9 @@ on:
         required: false
         default: 'br-ex:enp2s0f0'
       cluster_params:
-        description: 'Cluster config: ndcs=2,npcs=2,bs=4096,chunk_bs=4096,partitions=4,jm_count=4,max_lvol=30'
+        description: 'Cluster config: ndcs=2,npcs=2,bs=4096,chunk_bs=4096,partitions=1,jm_count=4,max_lvol=30'
         required: false
-        default: 'ndcs=2,npcs=2,bs=4096,chunk_bs=4096,partitions=4,jm_count=4,max_lvol=30'
+        default: 'ndcs=2,npcs=2,bs=4096,chunk_bs=4096,partitions=1,jm_count=4,max_lvol=30'
       cluster_environment:
         description: 'Target cluster environment'
         required: true
@@ -239,7 +239,7 @@ jobs:
       # ── Parse cluster params ──
       - name: Parse cluster parameters
         run: |
-          PARAMS="${{ github.event.inputs.cluster_params || 'ndcs=2,npcs=2,bs=4096,chunk_bs=4096,partitions=4,jm_count=4' }}"
+          PARAMS="${{ github.event.inputs.cluster_params || 'ndcs=2,npcs=2,bs=4096,chunk_bs=4096,partitions=1,jm_count=4' }}"
           for kv in $(echo "$PARAMS" | tr ',' '\n'); do
             key=$(echo "$kv" | cut -d= -f1 | tr '[:lower:]' '[:upper:]')
             val=$(echo "$kv" | cut -d= -f2)

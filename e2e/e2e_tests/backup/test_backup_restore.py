@@ -1243,6 +1243,16 @@ class BackupTestBase(TestClusterBase):
             )
         self.common_utils.validate_fio_test(self.fio_node, log_file=log_file)
 
+        # Flush filesystem metadata (inode sizes, block maps, journal) to
+        # disk so that subsequent SPDK-level snapshots capture a fully
+        # consistent on-disk state.  --direct=1 only bypasses the page
+        # cache for data I/O; ext4/xfs metadata still goes through the
+        # buffer cache and journal, which may not be committed yet.
+        target = mount or name_or_mount
+        self.ssh_obj.exec_command(
+            self.fio_node, f"sync -f {target} 2>/dev/null; sync")
+        self.logger.debug(f"Post-FIO sync completed for {target}")
+
     # ── table parser ──────────────────────────────────────────────────────────
 
     @staticmethod

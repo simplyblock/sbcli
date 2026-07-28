@@ -339,6 +339,11 @@ def main():
             logger.error(f"Error During Teardown for test: {test.__name__}")
             logger.error(traceback.format_exc())
         finally:
+            # Print log path FIRST — before any file copies or core dump
+            # checks that might break/hang.  The workflow summary parses
+            # "Logs Path:" from output.log to build the per-test table.
+            test_obj.get_logs_path()
+
             # Copy e2e/logs/ folder to NFS so automation logs are accessible post-run
             log_path = getattr(test_obj, "docker_logs_path", "")
             if log_path:
@@ -394,7 +399,6 @@ def main():
                         "Cannot execute more tests as cluster is not stable. Exiting"
                     )
                     break
-            test_obj.get_logs_path()
 
             # ── Inter-test cluster reset ──────────────────────────────
             # When two consecutive topology-modifying tests are queued,
