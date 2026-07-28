@@ -18,30 +18,30 @@ on:
       STORAGE_PRIVATE_IPS:
         description: "Space-separated storage node IPs (also used for cleanup)"
         required: true
-        default: "192.168.10.205 192.168.10.206 192.168.10.207 192.168.10.208"
+        default: "192.168.10.201 192.168.10.202 192.168.10.203 192.168.10.204"
       API_INVOKE_URL:
         description: "API invoke URL"
         required: true
-        default: "http://192.168.10.211/"
+        default: "http://192.168.10.210/"
       BASTION_IP:
         description: "Bastion IP"
         required: true
-        default: "192.168.10.211"
+        default: "192.168.10.210"
       MNODES:
         description: "Management node(s) IPs (only remote ops; runner itself is not touched)"
         required: true
-        default: "192.168.10.211"
+        default: "192.168.10.210"
       GRAFANA_ENDPOINT:
         description: "Grafana endpoint"
         required: true
-        default: "http://192.168.10.211/grafana"
+        default: "http://192.168.10.210/grafana"
       SBCLI_BRANCH:
         description: "sbcli repo branch to clone for tests"
         required: true
         default: "main"
       CUSTOM_IMAGES:
         description: "Image overrides: set spdk and/or docker values, leave as \"\" to skip."
-        default: 'spdk="" docker=""'
+        default: 'spdk="simplyblock/spdk:main-latest" docker="simplyblock/simplyblock:main"'
         required: false
 
       # =========================
@@ -78,7 +78,7 @@ on:
       BOOTSTRAP_DATA_CHUNKS:
         description: "bootstrap: --data-chunks-per-stripe (also ndcs)"
         required: true
-        default: "2"
+        default: "1"
       BOOTSTRAP_PARITY_CHUNKS:
         description: "bootstrap: --parity-chunks-per-stripe (also npcs)"
         required: true
@@ -86,7 +86,7 @@ on:
       BOOTSTRAP_JOURNAL_PARTITION:
         description: "bootstrap: --journal-partition"
         required: true
-        default: "1"
+        default: "4"
       BOOTSTRAP_DATA_NIC:
         description: "bootstrap: --data-nics (space or comma-separated; default eth1)"
         required: true
@@ -104,7 +104,7 @@ on:
         description: "Bootstrap: enable node affinity (--enable-node-affinity)"
         type: boolean
         required: false
-        default: false
+        default: true
       EXTRA_CLUSTER_ARGS:
         description: "Additional arguments for cluster create command"
         required: false
@@ -129,7 +129,7 @@ on:
         description: "Cluster setup mode."
         required: false
         type: choice
-        default: "none"
+        default: "backup"
         options:
           - none
           - backup
@@ -210,7 +210,7 @@ jobs:
       EXTRA_CLUSTER_ARGS: ${{ inputs.EXTRA_CLUSTER_ARGS || '' }}
       EXTRA_SN_ARGS: ${{ inputs.EXTRA_SN_ARGS || '' }}
       NEW_NODE_IPS: ${{ inputs.NEW_NODE_IPS }}
-      CLUSTER_SECURITY: ${{ inputs.CLUSTER_SECURITY || 'none' }}
+      CLUSTER_SECURITY: ${{ inputs.CLUSTER_SECURITY || 'backup' }}
     secrets: inherit
 
   # ─────────────────────────────────────────────────────────────────────────

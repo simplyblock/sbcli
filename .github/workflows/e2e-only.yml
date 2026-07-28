@@ -10,22 +10,22 @@ on:
       STORAGE_PRIVATE_IPS:
         description: "Space-separated storage node IPs (also used for cleanup)"
         required: true
-        default: "192.168.10.205 192.168.10.206 192.168.10.207 192.168.10.208"
+        default: "192.168.10.201 192.168.10.202 192.168.10.203 192.168.10.204"
 
       API_INVOKE_URL:
         description: "API invoke URL"
         required: true
-        default: "http://192.168.10.211/"
+        default: "http://192.168.10.210/"
 
       BASTION_IP:
         description: "Bastion IP"
         required: true
-        default: "192.168.10.211"
+        default: "192.168.10.210"
 
       MNODES:
         description: "Management node(s) IPs (only remote ops; runner itself is not touched)"
         required: true
-        default: "192.168.10.211"
+        default: "192.168.10.210"
 
       SBCLI_BRANCH:
         description: "sbcli repo branch to clone for tests"
@@ -67,7 +67,7 @@ on:
       BOOTSTRAP_DATA_CHUNKS:
         description: "Number of data chunks (ndcs)"
         required: true
-        default: "2"
+        default: "1"
 
       BOOTSTRAP_PARITY_CHUNKS:
         description: "Number of parity chunks (npcs)"

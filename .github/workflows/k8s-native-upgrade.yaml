@@ -21,7 +21,7 @@ on:
       base_spdk_image:
         description: 'Base SPDK container image (for initial deployment)'
         required: true
-        default: 'simplyblock/spdk:main-latest'
+        default: 'docker.io/simplyblock/spdk:latest'
 
       # ── Target version (upgrade destination) ──
       target_simplyblock_image:
@@ -49,11 +49,11 @@ on:
       simplyblock_repository:
         description: 'Simplyblock image repository'
         required: false
-        default: 'public.ecr.aws/simply-block/simplyblock'
+        default: 'docker.io/simplyblock/simplyblock'
       operator_repository:
         description: 'Operator image repository'
         required: false
-        default: 'simplyblock/simplyblock-operator'
+        default: 'docker.io/simplyblock/simplyblock-operator'
       csi_image:
         description: 'CSI driver image (repo,tag — leave empty for chart default)'
         required: false
@@ -68,18 +68,19 @@ on:
       worker_nodes:
         description: 'Comma-separated K8s worker node names'
         required: true
+        default: 'worker-0.ocp.simplyblock.ai,worker-1.ocp.simplyblock.ai,worker-2.ocp.simplyblock.ai,worker-3.ocp.simplyblock.ai,worker-4.ocp.simplyblock.ai,worker-5.ocp.simplyblock.ai'
       ifc_names:
         description: 'Network interfaces (mgmt_ifc:data_nics)'
         required: false
-        default: 'ens18:enp1s0'
+        default: 'br-ex:enp2s0f0'
       cluster_params:
-        description: 'Cluster config: ndcs=2,npcs=2,bs=4096,chunk_bs=4096,partitions=1,jm_count=4,max_lvol=30'
+        description: 'Cluster config: ndcs=2,npcs=2,bs=4096,chunk_bs=4096,partitions=4,jm_count=4,max_lvol=30'
         required: false
-        default: 'ndcs=2,npcs=2,bs=4096,chunk_bs=4096,partitions=1,jm_count=4,max_lvol=30'
+        default: 'ndcs=2,npcs=2,bs=4096,chunk_bs=4096,partitions=4,jm_count=4,max_lvol=30'
       cluster_environment:
         description: 'Target cluster environment'
         required: true
-        default: 'local'
+        default: 'openshift-baremetal'
         type: choice
         options:
           - local
@@ -238,7 +239,7 @@ jobs:
       # ── Parse cluster params ──
       - name: Parse cluster parameters
         run: |
-          PARAMS="${{ github.event.inputs.cluster_params || 'ndcs=2,npcs=2,bs=4096,chunk_bs=4096,partitions=1,jm_count=4' }}"
+          PARAMS="${{ github.event.inputs.cluster_params || 'ndcs=2,npcs=2,bs=4096,chunk_bs=4096,partitions=4,jm_count=4' }}"
           for kv in $(echo "$PARAMS" | tr ',' '\n'); do
             key=$(echo "$kv" | cut -d= -f1 | tr '[:lower:]' '[:upper:]')
             val=$(echo "$kv" | cut -d= -f2)
@@ -247,7 +248,7 @@ jobs:
 
       - name: Parse network interfaces
         run: |
-          IFC_STR="${{ github.event.inputs.ifc_names || 'ens18:enp1s0' }}"
+          IFC_STR="${{ github.event.inputs.ifc_names || 'br-ex:enp2s0f0' }}"
           MGMT_IFC=$(echo "$IFC_STR" | cut -d: -f1)
           DATA_NICS=$(echo "$IFC_STR" | cut -d: -f2)
           echo "MGMT_IFC=$MGMT_IFC" >> "$GITHUB_ENV"
@@ -318,9 +319,9 @@ jobs:
             --set operator.enabled=true \
             --set controlplane.csiHostpathDriver.enabled=true \
             --set controlplane.storageclass.name=local-hostpath \
-            --set image.simplyblock.repository="${{ github.event.inputs.simplyblock_repository || 'public.ecr.aws/simply-block/simplyblock' }}" \
+            --set image.simplyblock.repository="${{ github.event.inputs.simplyblock_repository || 'docker.io/simplyblock/simplyblock' }}" \
             --set image.simplyblock.tag="${{ github.event.inputs.base_simplyblock_image }}" \
-            --set image.operator.repository="${{ github.event.inputs.operator_repository || 'simplyblock/simplyblock-operator' }}" \
+            --set image.operator.repository="${{ github.event.inputs.operator_repository || 'docker.io/simplyblock/simplyblock-operator' }}" \
             --set image.operator.tag="${{ github.event.inputs.base_simplyblock_image }}" \
             --set csiConfig.simplybk.ip="http://simplyblock-webappapi.simplyblock:5000" \
             --set prometheus.server.persistentVolume.storageClass=local-hostpath \
@@ -361,7 +362,7 @@ jobs:
         if: ${{ github.event.inputs.use_existing_cluster != 'true' && github.event.inputs.upgrade_type != 'r25-to-r2x' }}
         run: |
           NAMESPACE=simplyblock
-          SB_REPO="${{ github.event.inputs.simplyblock_repository || 'public.ecr.aws/simply-block/simplyblock' }}"
+          SB_REPO="${{ github.event.inputs.simplyblock_repository || 'docker.io/simplyblock/simplyblock' }}"
           SB_TAG="${{ github.event.inputs.base_simplyblock_image }}"
           SPDK_IMAGE="${{ github.event.inputs.base_spdk_image }}"
           MAX_LVOL="${MAX_LVOL:-30}"
@@ -449,7 +450,7 @@ jobs:
             dataIfname:
               - ${DATA_NICS}
             maxLogicalVolumeCount: ${MAX_LVOL}
-          ${RESERVED_CPU_YAML}
+${RESERVED_CPU_YAML}
             partitions: ${PARTITIONS}
             corePercentage: ${CORE_PERCENTAGE}
             journalManager:
@@ -950,8 +951,8 @@ jobs:
           TARGET_SPDK_IMAGE: ${{ github.event.inputs.target_spdk_image }}
           TARGET_SPDK_PROXY_IMAGE: ${{ github.event.inputs.target_spdk_proxy_image }}
           OPERATOR_TAG: ${{ github.event.inputs.operator_tag }}
-          SIMPLYBLOCK_REPO: ${{ github.event.inputs.simplyblock_repository || 'public.ecr.aws/simply-block/simplyblock' }}
-          OPERATOR_REPO: ${{ github.event.inputs.operator_repository || 'simplyblock/simplyblock-operator' }}
+          SIMPLYBLOCK_REPO: ${{ github.event.inputs.simplyblock_repository || 'docker.io/simplyblock/simplyblock' }}
+          OPERATOR_REPO: ${{ github.event.inputs.operator_repository || 'docker.io/simplyblock/simplyblock-operator' }}
           TLS_ENABLED: ${{ github.event.inputs.tls_enabled }}
           CSI_REPOSITORY: ${{ env.CSI_REPOSITORY }}
           CSI_TAG: ${{ env.CSI_TAG }}

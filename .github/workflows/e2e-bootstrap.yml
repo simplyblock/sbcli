@@ -6,25 +6,25 @@ on:
     inputs:
       STORAGE_PRIVATE_IPS:
         type: string
-        default: "192.168.10.205 192.168.10.206 192.168.10.207 192.168.10.208"
+        default: "192.168.10.201 192.168.10.202 192.168.10.203 192.168.10.204"
       API_INVOKE_URL:
         type: string
-        default: "http://192.168.10.211/"
+        default: "http://192.168.10.210/"
       BASTION_IP:
         type: string
-        default: "192.168.10.211"
+        default: "192.168.10.210"
       MNODES:
         type: string
-        default: "192.168.10.211"
+        default: "192.168.10.210"
       GRAFANA_ENDPOINT:
         type: string
-        default: "http://192.168.10.211/grafana"
+        default: "http://192.168.10.210/grafana"
       SBCLI_BRANCH:
         type: string
         default: "R25.10-Hotfix"
       CUSTOM_IMAGES:
         type: string
-        default: 'spdk="" docker=""'
+        default: 'spdk="simplyblock/spdk:main-latest" docker="simplyblock/simplyblock:main"'
       SSH_USER:
         type: string
         default: "root"
@@ -42,13 +42,13 @@ on:
         default: "300"
       BOOTSTRAP_DATA_CHUNKS:
         type: string
-        default: "2"
+        default: "1"
       BOOTSTRAP_PARITY_CHUNKS:
         type: string
         default: "2"
       BOOTSTRAP_JOURNAL_PARTITION:
         type: string
-        default: "1"
+        default: "4"
       BOOTSTRAP_HA_JM_COUNT:
         type: string
         default: "4"
@@ -60,7 +60,7 @@ on:
         default: false
       BOOTSTRAP_ENABLE_NODE_AFFINITY:
         type: boolean
-        default: false
+        default: true
       EXTRA_CLUSTER_ARGS:
         type: string
         default: ""
@@ -76,7 +76,7 @@ on:
         description: "Optional label appended to artifact names to avoid collisions when called multiple times in the same workflow run (e.g. 'run1', 'run2')"
       CLUSTER_SECURITY:
         type: string
-        default: "none"
+        default: "backup"
         description: "Cluster setup mode. 'backup' writes s3-backup.json and passes --use-backup to cluster create."
       NEW_NODE_IPS:
         type: string
@@ -90,27 +90,27 @@ on:
       STORAGE_PRIVATE_IPS:
         description: "Space-separated storage node IPs (also used for cleanup)"
         required: true
-        default: "192.168.10.205 192.168.10.206 192.168.10.207 192.168.10.208"
+        default: "192.168.10.201 192.168.10.202 192.168.10.203 192.168.10.204"
 
       API_INVOKE_URL:
         description: "API invoke URL"
         required: true
-        default: "http://192.168.10.211/"
+        default: "http://192.168.10.210/"
 
       BASTION_IP:
         description: "Bastion IP"
         required: true
-        default: "192.168.10.211"
+        default: "192.168.10.210"
 
       MNODES:
         description: "Management node(s) IPs (only remote ops; runner itself is not touched)"
         required: true
-        default: "192.168.10.211"
+        default: "192.168.10.210"
 
       GRAFANA_ENDPOINT:
         description: "Grafana endpoint"
         required: true
-        default: "http://192.168.10.211/grafana"
+        default: "http://192.168.10.210/grafana"
 
       SBCLI_BRANCH:
         description: "sbcli repo branch to clone for tests"
@@ -119,7 +119,7 @@ on:
 
       CUSTOM_IMAGES:
         description: "Image overrides: set spdk and/or docker values, leave as \"\" to skip."
-        default: 'spdk="" docker=""'
+        default: 'spdk="simplyblock/spdk:main-latest" docker="simplyblock/simplyblock:main"'
         required: false
 
       # =========================
@@ -157,7 +157,7 @@ on:
       BOOTSTRAP_DATA_CHUNKS:
         description: "bootstrap: --data-chunks-per-stripe (also ndcs)"
         required: true
-        default: "2"
+        default: "1"
       BOOTSTRAP_PARITY_CHUNKS:
         description: "bootstrap: --parity-chunks-per-stripe (also npcs)"
         required: true
@@ -165,7 +165,7 @@ on:
       BOOTSTRAP_JOURNAL_PARTITION:
         description: "bootstrap: --journal-partition"
         required: true
-        default: "1"
+        default: "4"
       BOOTSTRAP_HA_JM_COUNT:
         description: "bootstrap: --ha-jm-count"
         required: true
@@ -183,7 +183,7 @@ on:
         description: "Bootstrap: enable node affinity (--enable-node-affinity)"
         type: boolean
         required: false
-        default: false
+        default: true
       EXTRA_CLUSTER_ARGS:
         description: |
           Additional arguments to pass to cluster create command (optional)
@@ -213,7 +213,7 @@ on:
         description: "Cluster setup mode. 'backup' writes s3-backup.json and passes --use-backup to cluster create."
         required: false
         type: choice
-        default: "none"
+        default: "backup"
         options:
           - none
           - backup
@@ -238,16 +238,16 @@ jobs:
 
     env:
       # Cluster/lab env
-      STORAGE_PRIVATE_IPS: ${{ inputs.STORAGE_PRIVATE_IPS || '192.168.10.205 192.168.10.206 192.168.10.207 192.168.10.208' }}
-      API_INVOKE_URL: ${{ inputs.API_INVOKE_URL || 'http://192.168.10.211/' }}
-      API_BASE_URL: ${{ inputs.API_INVOKE_URL || 'http://192.168.10.211/' }}
-      BASTION_IP: ${{ inputs.BASTION_IP || '192.168.10.211' }}
-      BASTION_SERVER: ${{ inputs.BASTION_IP || '192.168.10.211' }}
-      MNODES: ${{ inputs.MNODES || '192.168.10.211' }}
+      STORAGE_PRIVATE_IPS: ${{ inputs.STORAGE_PRIVATE_IPS || '192.168.10.201 192.168.10.202 192.168.10.203 192.168.10.204' }}
+      API_INVOKE_URL: ${{ inputs.API_INVOKE_URL || 'http://192.168.10.210/' }}
+      API_BASE_URL: ${{ inputs.API_INVOKE_URL || 'http://192.168.10.210/' }}
+      BASTION_IP: ${{ inputs.BASTION_IP || '192.168.10.210' }}
+      BASTION_SERVER: ${{ inputs.BASTION_IP || '192.168.10.210' }}
+      MNODES: ${{ inputs.MNODES || '192.168.10.210' }}
       NR_HUGEPAGES: '2048'
       EXTRA_CLUSTER_ARGS: ${{ inputs.EXTRA_CLUSTER_ARGS || '' }}
       EXTRA_SN_ARGS: ${{ inputs.EXTRA_SN_ARGS || '' }}
-      GRAFANA_ENDPOINT: ${{ inputs.GRAFANA_ENDPOINT || 'http://192.168.10.211/grafana' }}
+      GRAFANA_ENDPOINT: ${{ inputs.GRAFANA_ENDPOINT || 'http://192.168.10.210/grafana' }}
       SBCLI_CMD: "sbctl"
       SBCLI_BRANCH: ${{ inputs.SBCLI_BRANCH || 'R25.10-Hotfix' }}
 
@@ -262,17 +262,17 @@ jobs:
 
       # Bootstrap params
       BOOTSTRAP_MAX_SUBSYS: ${{ inputs.BOOTSTRAP_MAX_SUBSYS || '300' }}
-      BOOTSTRAP_DATA_CHUNKS: ${{ inputs.BOOTSTRAP_DATA_CHUNKS || '2' }}
+      BOOTSTRAP_DATA_CHUNKS: ${{ inputs.BOOTSTRAP_DATA_CHUNKS || '1' }}
       BOOTSTRAP_PARITY_CHUNKS: ${{ inputs.BOOTSTRAP_PARITY_CHUNKS || '2' }}
-      BOOTSTRAP_JOURNAL_PARTITION: ${{ inputs.BOOTSTRAP_JOURNAL_PARTITION || '1' }}
+      BOOTSTRAP_JOURNAL_PARTITION: ${{ inputs.BOOTSTRAP_JOURNAL_PARTITION || '4' }}
       BOOTSTRAP_HA_JM_COUNT: ${{ inputs.BOOTSTRAP_HA_JM_COUNT || '4' }}
       BOOTSTRAP_DATA_NIC: ${{ inputs.BOOTSTRAP_DATA_NIC || 'eth1' }}
 
       # E2E derived from bootstrap chunks
-      NDCS: ${{ inputs.BOOTSTRAP_DATA_CHUNKS || '2' }}
+      NDCS: ${{ inputs.BOOTSTRAP_DATA_CHUNKS || '1' }}
       NPCS: ${{ inputs.BOOTSTRAP_PARITY_CHUNKS || '2' }}
       TEST_CLASS: ${{ inputs.TEST_CLASS || '' }}
-      CLUSTER_SECURITY: ${{ inputs.CLUSTER_SECURITY || 'none' }}
+      CLUSTER_SECURITY: ${{ inputs.CLUSTER_SECURITY || 'backup' }}
       NEW_NODE_IPS: ${{ inputs.NEW_NODE_IPS || '' }}
 
       # Secrets
