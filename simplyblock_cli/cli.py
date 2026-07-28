@@ -1076,11 +1076,11 @@ class CLIWrapper(CLIWrapperBase):
     def init_db_backup__config(self, subparser):
         subcommand = self.add_sub_command(subparser, 'config', 'Set backup configuration')
         subcommand.add_argument('cluster_id', help='Cluster ID to configure db backup for', type=str)
-        subcommand.add_argument('--backup-path', help='local backup path, defaults to /etc/foundationdb/backup', type=str, dest='backup_path')
-        subcommand.add_argument('--backup-frequency', help='backup frequency, can be 3h, 1d', type=str, dest='backup_frequency')
-        subcommand.add_argument('--s3-bucket', help='AWS S3 bucket name', type=str, dest='bucket_name')
-        subcommand.add_argument('--s3-region', help='AWS S3 region', type=str, dest='region_name')
-        subcommand.add_argument('--s3-credentials', help='AWS S3 API key and secret, should be supplied like this: [API_KEY]:[API_SECRET]', type=str, dest='backup_credentials')
+        argument = subcommand.add_argument('--backup-path', help='local backup path, defaults to /etc/foundationdb/backup', type=str, dest='backup_path')
+        argument = subcommand.add_argument('--backup-frequency', help='backup frequency, can be 3h, 1d', type=str, dest='backup_frequency')
+        argument = subcommand.add_argument('--s3-bucket', help='AWS S3 bucket name', type=str, dest='bucket_name')
+        argument = subcommand.add_argument('--s3-region', help='AWS S3 region', type=str, dest='region_name')
+        argument = subcommand.add_argument('--s3-credentials', help='AWS S3 API key and secret, should be supplied like this: [API_KEY]:[API_SECRET]', type=str, dest='backup_credentials')
 
 
     def run(self):
