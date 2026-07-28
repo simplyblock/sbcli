@@ -390,6 +390,11 @@ jobs:
             DRIVE_SIZE_RANGE="1500G-2000G"
           fi
 
+          RESERVED_CPU_YAML=""
+          if [ "$CLUSTER_ENV" = "openshift-baremetal" ]; then
+            RESERVED_CPU_YAML='            reservedSystemCPU: "0,1,10,11,16,17,26,27"'
+          fi
+
           # Build vault settings (conditional on TLS)
           VAULT_SETTINGS=""
           if [ "${{ github.event.inputs.tls_enabled }}" = "true" ]; then
@@ -444,6 +449,7 @@ jobs:
             dataIfname:
               - ${DATA_NICS}
             maxLogicalVolumeCount: ${MAX_LVOL}
+          ${RESERVED_CPU_YAML}
             partitions: ${PARTITIONS}
             corePercentage: ${CORE_PERCENTAGE}
             journalManager:

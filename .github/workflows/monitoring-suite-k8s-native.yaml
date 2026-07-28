@@ -620,6 +620,11 @@ jobs:
           FORCE_FORMAT_4K="${{ (github.event.inputs.cluster_environment == 'aws-openshift' || github.event.inputs.cluster_environment == 'openshift-local' || github.event.inputs.cluster_environment == 'openshift-baremetal') && 'true' || 'false' }}"
           DRIVE_SIZE_RANGE="${{ github.event.inputs.cluster_environment == 'openshift-baremetal' && '1500G-2000G' || '1.7T-2T' }}"
 
+          RESERVED_CPU_YAML=""
+          if [ "${{ github.event.inputs.cluster_environment }}" = "openshift-baremetal" ]; then
+            RESERVED_CPU_YAML='            reservedSystemCPU: "0,1,10,11,16,17,26,27"'
+          fi
+
           WORKER_YAML=""
           IFS=',' read -ra NODES <<< "${{ github.event.inputs.worker_nodes }}"
           for NODE in "${NODES[@]}"; do
@@ -690,6 +695,7 @@ jobs:
             dataIfname:
               - ${DATA_NICS}
             maxLogicalVolumeCount: ${MAX_LVOL}
+          ${RESERVED_CPU_YAML}
             partitions: ${PARTITIONS}
             corePercentage: ${CORE_PERCENTAGE}
             journalManager:
