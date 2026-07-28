@@ -504,6 +504,54 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
                 hashicorp_vault_settings : t.Optional[HashicorpVaultSettings] = None,
                 enable_failure_domain=False,
 ) -> str:
+    """Thin wrapper around _add_cluster_impl() that serializes create calls
+    for the same name behind a ClusterCreateLock.
+
+    The duplicate-name check inside _add_cluster_impl is a plain
+    read-then-write with no atomicity: concurrent/retried create calls for the
+    same name can all pass it before any of them has committed (observed
+    2026-07-28: a control-plane readiness flap made the operator retry
+    cluster-create in a burst, producing 6 separate clusters named
+    "simplyblock-cluster" instead of one). Acquiring this lock first — and
+    only for named creates, matching the check it protects — closes that
+    window without touching _add_cluster_impl's body. Kept as an explicit,
+    identically-shaped signature (not *args/**kwargs) since existing callers
+    pass ``name`` positionally.
+    """
+    kwargs = dict(
+        blk_size=blk_size, page_size_in_blocks=page_size_in_blocks, cap_warn=cap_warn, cap_crit=cap_crit,
+        prov_cap_warn=prov_cap_warn, prov_cap_crit=prov_cap_crit, distr_ndcs=distr_ndcs, distr_npcs=distr_npcs,
+        distr_bs=distr_bs, distr_chunk_bs=distr_chunk_bs, ha_type=ha_type, enable_node_affinity=enable_node_affinity,
+        qpair_count=qpair_count, max_queue_size=max_queue_size, inflight_io_threshold=inflight_io_threshold,
+        strict_node_anti_affinity=strict_node_anti_affinity, is_single_node=is_single_node, name=name,
+        cr_name=cr_name, cr_namespace=cr_namespace, cr_plural=cr_plural, fabric=fabric,
+        client_data_nic=client_data_nic, max_fault_tolerance=max_fault_tolerance, backup_config=backup_config,
+        nvmf_base_port=nvmf_base_port, rpc_base_port=rpc_base_port, snode_api_port=snode_api_port,
+        hashicorp_vault_settings=hashicorp_vault_settings, enable_failure_domain=enable_failure_domain,
+    )
+    if not name:
+        return _add_cluster_impl(**kwargs)
+
+    owner = f"{socket.gethostname()}-{os.getpid()}-{uuid.uuid4()}"
+    acquired, holder = db_controller.acquire_cluster_create_lock(name, owner)
+    if not acquired:
+        raise ValueError(f"A cluster with the name '{name}' already exists or is currently being created "
+                          f"(held by {holder})")
+    try:
+        return _add_cluster_impl(**kwargs)
+    finally:
+        db_controller.release_cluster_create_lock(name, owner)
+
+
+def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn, prov_cap_crit,
+                distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity, qpair_count,
+                max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name, cr_name=None,
+                cr_namespace=None, cr_plural=None, fabric="tcp",
+                client_data_nic="", max_fault_tolerance=1, backup_config=None,
+                nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001,
+                hashicorp_vault_settings : t.Optional[HashicorpVaultSettings] = None,
+                enable_failure_domain=False,
+) -> str:
 
     clusters = db_controller.get_clusters()
     if name and clusters:

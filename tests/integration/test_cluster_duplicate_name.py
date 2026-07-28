@@ -25,6 +25,7 @@ only for ``create_cluster`` — whose duplicate-name guard is the sole part
 exercised for the "raises" case, so those mocks never engage there.
 """
 
+import threading
 from unittest.mock import patch
 
 import pytest
@@ -172,6 +173,43 @@ class TestAddClusterDuplicateName:
         cfg = db.get_deploy_config()
         assert cfg.mode == "kubernetes"
         assert cfg.db_connection.get_secret_value() == "fdb-conn-string"
+
+    def test_concurrent_calls_for_same_name_create_only_one_cluster(self, db):
+        # Reproduces the 2026-07-28 incident directly: a control-plane
+        # readiness flap let the operator's retries race through
+        # add_cluster()'s duplicate-name check simultaneously, producing 6
+        # separate clusters named "simplyblock-cluster" instead of one. Fire
+        # several concurrent add_cluster() calls for the same name (the
+        # first-cluster bootstrap path — no pre-existing cluster/DeployConfig,
+        # matching the real incident) and assert the ClusterCreateLock lets
+        # exactly one through.
+        results = []
+        errors = []
+
+        def worker():
+            try:
+                results.append(_add_cluster("race-cluster"))
+            except ValueError as e:
+                errors.append(e)
+
+        with patch("simplyblock_core.cluster_ops.utils.get_fdb_cluster_string",
+                    return_value=SecretStr("fdb-conn-string")), \
+             patch("simplyblock_core.cluster_ops.mgmt_node_ops.add_mgmt_node"), \
+             patch("simplyblock_core.cluster_ops.utils.patch_prometheus_configmap"), \
+             patch("simplyblock_core.cluster_ops._create_update_user"):
+            threads = [threading.Thread(target=worker) for _ in range(5)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+
+        assert len(results) == 1, f"expected exactly 1 success, got {len(results)}: {results}"
+        assert len(errors) == 4, f"expected exactly 4 rejections, got {len(errors)}: {errors}"
+        assert all("race-cluster" in str(e) for e in errors)
+
+        matching = [c for c in db.get_clusters() if c.cluster_name == "race-cluster"]
+        assert len(matching) == 1
+        assert matching[0].get_id() == results[0]
 
 
 # ---------------------------------------------------------------------------
