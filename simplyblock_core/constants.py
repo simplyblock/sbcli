@@ -152,6 +152,20 @@ TASK_LEASE_TTL_SEC = 180
 CLUSTER_ADD_LOCK_HEARTBEAT_SEC = 30
 CLUSTER_ADD_LOCK_TTL_SEC = 120
 
+# Cluster creation concurrency: add_cluster()'s duplicate-name check
+# (does a cluster named X already exist?) is otherwise a plain read-then-write
+# with no atomicity, so concurrent/retried create calls for the same name can
+# all pass the check before any of them has committed — observed 2026-07-28:
+# a control-plane readiness flap caused the operator to retry cluster-create
+# ~6 times in a burst, producing 6 separate "simplyblock-cluster" records
+# instead of one. A ClusterCreateLock keyed by name serializes create attempts
+# for that name; no heartbeat (create is a single synchronous call, not a
+# long-lived section), just a generous TTL so a crashed holder's lock is
+# eventually reclaimable. Sized above add_cluster's worst realistic runtime
+# (the first-cluster bootstrap path retries opensearch/graylog up to ~150s
+# each, sequentially).
+CLUSTER_CREATE_LOCK_TTL_SEC = 600
+
 # How long a queued add_node waits for the lock before failing for retry.
 # "Short" is relative: one mesh section takes minutes on a 32-node cluster,
 # and parallel deploys queue up to (workers - 1) adds behind the holder, so

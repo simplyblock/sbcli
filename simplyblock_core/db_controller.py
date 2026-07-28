@@ -8,7 +8,7 @@ import fdb
 from typing import Any, List, Optional
 
 from simplyblock_core import constants
-from simplyblock_core.models.cluster import Cluster, ClusterAddNodeLock, PortReservation, DeployConfig
+from simplyblock_core.models.cluster import Cluster, ClusterAddNodeLock, ClusterCreateLock, PortReservation, DeployConfig
 from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol, LVolReplication, LVolMini
@@ -554,6 +554,56 @@ class DBController(metaclass=Singleton):
             return
         transactional = fdb.transactional(DBController._release_cluster_add_lock_tx)
         transactional(self, self.kv_store, cluster_id, owner)
+
+    # ---- Cluster create-by-name lock (Single FDB Transaction) ----
+
+    def _try_acquire_cluster_create_lock_tx(self, tr, name, owner, now):
+        lock = ClusterCreateLock()
+        lock.name = name
+        key = lock.get_db_id().encode()
+        raw = tr.get(key).wait()
+        if raw.present():
+            existing = ClusterCreateLock().from_dict(json.loads(raw))
+            fresh = (now - existing.acquired_at) <= constants.CLUSTER_CREATE_LOCK_TTL_SEC
+            if existing.owner and existing.owner != owner and fresh:
+                return False, existing.owner
+            # Stale (holder presumed dead/finished) or already ours: (re)take it.
+        lock.owner = owner
+        lock.acquired_at = now
+        tr[key] = json.dumps(lock.to_dict()).encode()
+        return True, None
+
+    def acquire_cluster_create_lock(self, name, owner):
+        """Atomically acquire the create-by-name lock for ``name``.
+
+        Returns (True, None) if ``owner`` now holds the lock (newly acquired,
+        reclaimed from a stale holder, or already held by this owner), or
+        (False, current_owner) if a live holder owns it.
+        """
+        if not self.kv_store:
+            return False, "No DB connection"
+        now = int(time.time())
+        transactional = fdb.transactional(DBController._try_acquire_cluster_create_lock_tx)
+        return transactional(self, self.kv_store, name, owner, now)
+
+    def _release_cluster_create_lock_tx(self, tr, name, owner):
+        lock = ClusterCreateLock()
+        lock.name = name
+        key = lock.get_db_id().encode()
+        raw = tr.get(key).wait()
+        if not raw.present():
+            return
+        existing = ClusterCreateLock().from_dict(json.loads(raw))
+        if existing.owner == owner:
+            del tr[key]
+
+    def release_cluster_create_lock(self, name, owner):
+        """Release the lock only if still owned by ``owner`` (owner-scoped, so a
+        late release never deletes a lock another caller has since reclaimed)."""
+        if not self.kv_store:
+            return
+        transactional = fdb.transactional(DBController._release_cluster_create_lock_tx)
+        transactional(self, self.kv_store, name, owner)
 
     # ---- Per-lvstore snapshot-mutation lock (Single FDB Transaction) ----
 

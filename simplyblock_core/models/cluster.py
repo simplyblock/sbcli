@@ -219,6 +219,32 @@ class ClusterAddNodeLock(BaseModel):
         return self.cluster_id or self.uuid
 
 
+class ClusterCreateLock(BaseModel):
+    """Mutex serializing add_cluster() calls for a given cluster name.
+
+    add_cluster()'s duplicate-name check reads all clusters and raises if one
+    already carries the requested name — a plain read-then-write with no
+    atomicity, so concurrent/retried create calls for the same name can all
+    pass the check before any of them has committed (observed 2026-07-28: a
+    control-plane readiness flap made the operator retry cluster-create in a
+    burst, producing 6 separate clusters named "simplyblock-cluster" instead
+    of one).
+
+    Keyed by ``name`` so only one create can be in flight for a given name at
+    a time. No heartbeat — add_cluster() is a single synchronous call, not a
+    long-lived section like node-add's mesh wiring — just a generous TTL
+    (``CLUSTER_CREATE_LOCK_TTL_SEC``) so a crashed holder's lock is eventually
+    reclaimable by a genuine retry.
+    """
+
+    name: str = ""
+    owner: str = ""
+    acquired_at: int = 0
+
+    def get_id(self):
+        return self.name or self.uuid
+
+
 class PortReservation(BaseModel):
     """Short-lived reservation of an NVMe-oF port during node add.
 
