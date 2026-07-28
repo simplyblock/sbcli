@@ -775,7 +775,7 @@ jobs:
 
           RESERVED_CPU_YAML=""
           if [ "${{ inputs.cluster_environment }}" = "openshift-baremetal" ]; then
-            RESERVED_CPU_YAML='            reservedSystemCPU: "0,1,10,11,16,17,26,27"'
+            RESERVED_CPU_YAML='  reservedSystemCPU: "0,1,10,11,16,17,26,27"'
           fi
 
           # Build workerNodes YAML list from all worker nodes
@@ -851,7 +851,7 @@ jobs:
             dataIfname:
               - ${DATA_NICS}
             maxLogicalVolumeCount: ${MAX_LVOL}
-${RESERVED_CPU_YAML}
+          ${RESERVED_CPU_YAML}
             partitions: ${PARTITIONS}
             corePercentage: ${CORE_PERCENTAGE}
             journalManager:
