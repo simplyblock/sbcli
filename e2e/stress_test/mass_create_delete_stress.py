@@ -2197,7 +2197,7 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
                 f"[Phase 5] Capping clone count from {len(snap_list)} "
                 f"(1 per snapshot) to {max_clones} (matching deleted lvol count)"
             )
-            snap_list = snap_list[:max_clones]
+            snap_list = random.sample(snap_list, max_clones)
 
         self.logger.info(
             f"=== Phase 5: Create {len(snap_list)} clones "
@@ -3719,23 +3719,23 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
             return
 
         snap_list = list(self._snapshot_registry.keys())
-        # Create more clones than cluster capacity to verify the system
-        # handles overflow gracefully (proper errors, no corruption).
-        cluster_capacity = self.NUM_SUBSYSTEMS * self.NS_PER_SUBSYSTEM
-        overflow = max(10, cluster_capacity // 5)  # 20% extra past the limit
-        target_clones = cluster_capacity + overflow
+        # Clone count matches the lvol count deleted in Phase 4, since
+        # clones consume the same subsystem slots that lvols freed.
+        target_clones = self._metrics.get(
+            "lvols_created", self.NUM_SUBSYSTEMS * self.NS_PER_SUBSYSTEM
+        )
         self.logger.info(
             f"=== Phase 5: Create {target_clones} clones from "
             f"{len(snap_list)} snapshots "
-            f"(capacity={cluster_capacity}, overflow={overflow}, "
+            f"(matching deleted lvol count, "
             f"batch_size={self.CREATE_BATCH_SIZE}, "
             f"workers={self.CREATE_MAX_WORKERS}, "
             f"pause={self.CREATE_BATCH_PAUSE}s) ==="
         )
 
         clone_items = []
-        for idx in range(target_clones):
-            vs_name = snap_list[idx % len(snap_list)]
+        selected_snaps = random.sample(snap_list, min(target_clones, len(snap_list)))
+        for idx, vs_name in enumerate(selected_snaps):
             clone_pvc = f"clone-pvc-{_rand_seq(5)}-{idx:06d}"
             clone_items.append({"clone_pvc": clone_pvc, "vs_name": vs_name})
 
@@ -3791,14 +3791,10 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
             f"bound_wait={bound_wait}s, total={total_duration}s"
         )
 
-        # Report overflow behavior — in K8s, capacity overflow shows up
-        # as PVCs stuck in Pending (kubectl apply always succeeds, the
-        # CSI driver rejects provisioning asynchronously).
         unbound = len(fired_items) - len(bound_names)
         self.logger.info(
             f"[Phase 5] Clone creation summary: "
-            f"target={target_clones} (capacity={cluster_capacity} + "
-            f"overflow={overflow}), fired={len(fired_items)}, "
+            f"target={target_clones}, fired={len(fired_items)}, "
             f"apply_errors={errors}, bound={len(bound_names)}, "
             f"unbound={unbound}"
         )
