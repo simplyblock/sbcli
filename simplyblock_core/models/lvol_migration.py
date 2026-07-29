@@ -39,6 +39,7 @@ class LVolMigration(BaseModel):
     PHASE_LVOL_MIGRATE = 'lvol_migrate'
     PHASE_CLEANUP_SOURCE = 'cleanup_source'
     PHASE_CLEANUP_TARGET = 'cleanup_target'
+    PHASE_FAILOVER_WAIT = 'failover_wait'
     PHASE_COMPLETED = 'completed'
 
     _STATUS_CODE_MAP = {
@@ -129,6 +130,16 @@ class LVolMigration(BaseModel):
     retry_count: int = 0
     max_retries: int = constants.LVOL_MIG_MAX_RETRIES
     canceled: bool = False
+
+    # --- Node-failover restart tracking (independent of retry_count) ---
+    # Counts how many times a target-node-offline event has triggered a full
+    # cleanup-and-restart cycle.  Capped at 1: a second node failure causes the
+    # migration to be marked FAILED instead of attempting another restart.
+    node_failover_attempts: int = 0
+    # Set to True when PHASE_CLEANUP_TARGET was entered because of a node-offline
+    # failover (not a max-retry or cancel).  Tells the done-handler to transition
+    # to PHASE_FAILOVER_WAIT instead of STATUS_FAILED.
+    failover_pending: bool = False
 
     # Set when this migration is part of a batch (shared-namespace) migration.
     # References an LVolMigrationGroup.uuid.  Empty for standalone migrations.
