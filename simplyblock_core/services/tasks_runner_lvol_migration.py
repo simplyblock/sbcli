@@ -2904,8 +2904,13 @@ def task_runner(task):
             task.write_to_db(db.kv_store)
             migration_events.migration_phase_changed(migration)
             return False
-        return _suspend_task(
-            task, migration, f"target node not online (status={tgt_node.status})")
+        if migration.phase != LVolMigration.PHASE_CLEANUP_TARGET:
+            # cleanup_target is exempt: lvol/snap deletes go through target
+            # LVS leadership and do not require the target to be reachable;
+            # subsystem teardown failures are tolerable because subsystems are
+            # lost on node restart anyway.
+            return _suspend_task(
+                task, migration, f"target node not online (status={tgt_node.status})")
 
     # --- Cluster health ---
     cluster = db.get_cluster_by_id(migration.cluster_id)
