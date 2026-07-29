@@ -4308,6 +4308,14 @@ class MassCreateDeletePersistent_300x10_6Snap_Docker(_MassCreateDeleteDocker):
     SNAPSHOTS_PER_LVOL = 6
 
 
+class MassCreateDeletePersistent_300x10_10Snap_Docker(_MassCreateDeleteDocker):
+    """300 ns/sub × 10 subsystems = 3000 lvols, 10 snapshots each = 30000 snapshots (persistent retry)."""
+    PERSISTENT_RETRY = True
+    NUM_SUBSYSTEMS = 10
+    NS_PER_SUBSYSTEM = 300
+    SNAPSHOTS_PER_LVOL = 10
+
+
 # K8s persistent variants
 
 class MassCreateDeletePersistent_1x500_K8s(_MassCreateDeleteK8s):
@@ -4343,6 +4351,22 @@ class MassCreateDeletePersistent_3000x1_K8s(_MassCreateDeleteK8s):
     PERSISTENT_RETRY = True
     NUM_SUBSYSTEMS = 1
     NS_PER_SUBSYSTEM = 3000
+
+
+class MassCreateDeletePersistent_300x10_6Snap_K8s(_MassCreateDeleteK8s):
+    """300 ns/sub × 10 subsystems = 3000 PVCs, 6 snapshots each = 18000 snapshots (persistent retry)."""
+    PERSISTENT_RETRY = True
+    NUM_SUBSYSTEMS = 10
+    NS_PER_SUBSYSTEM = 300
+    SNAPSHOTS_PER_LVOL = 6
+
+
+class MassCreateDeletePersistent_300x10_10Snap_K8s(_MassCreateDeleteK8s):
+    """300 ns/sub × 10 subsystems = 3000 PVCs, 10 snapshots each = 30000 snapshots (persistent retry)."""
+    PERSISTENT_RETRY = True
+    NUM_SUBSYSTEMS = 10
+    NS_PER_SUBSYSTEM = 300
+    SNAPSHOTS_PER_LVOL = 10
 
 
 # ─────────────────────────────────────────────────────────────────────────────

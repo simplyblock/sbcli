@@ -850,7 +850,7 @@ class BackupTestBase(TestClusterBase):
                         # Detect product-side failures marked as "done"
                         # (e.g. "S3 transfer failed on data plane (attempt 3)")
                         if "failed" in result.lower():
-                            raise AssertionError(
+                            assert False, (
                                 f"Restore task for {lvol_name} completed with "
                                 f"failure: {result}"
                             )
@@ -861,20 +861,22 @@ class BackupTestBase(TestClusterBase):
                         sleep_n_sec(60)
                         return
                     if status == "failed":
-                        raise AssertionError(
+                        assert False, (
                             f"Restore task for {lvol_name} failed: {result}"
                         )
                     self.logger.info(
                         f"[restore] Restore task status: {status} "
                         f"({int(deadline - time.time())}s remaining)"
                     )
+            except AssertionError:
+                raise
             except Exception as e:
                 self.logger.warning(f"[restore] Could not check restore task status: {e}")
             sleep_n_sec(_POLL)
 
-        self.logger.warning(
-            f"[restore] Restore task for {lvol_name} did not reach 'done' "
-            f"within {timeout}s — proceeding with connect/mount anyway."
+        assert False, (
+            f"Restore task for {lvol_name} did not reach 'done' "
+            f"within {timeout}s — failing test."
         )
 
     def _validate_backup_fields(self, backup: dict, lvol_name: str = None,
