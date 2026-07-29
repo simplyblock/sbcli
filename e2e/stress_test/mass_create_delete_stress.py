@@ -2189,12 +2189,22 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
             self.logger.info("[Phase 5] No valid snapshot IDs — skipping")
             return
 
+        # Cap clones at the number of lvols deleted in Phase 4, since
+        # clones consume the same subsystem slots that lvols freed.
+        max_clones = self._metrics.get("lvols_created", len(snap_list))
+        if len(snap_list) > max_clones:
+            self.logger.info(
+                f"[Phase 5] Capping clone count from {len(snap_list)} "
+                f"(1 per snapshot) to {max_clones} (matching deleted lvol count)"
+            )
+            snap_list = snap_list[:max_clones]
+
         self.logger.info(
-            f"=== Phase 5: Create 1 clone per snapshot "
-            f"({len(snap_list)} clones) ==="
+            f"=== Phase 5: Create {len(snap_list)} clones "
+            f"(1 per snapshot, capped at lvol count) ==="
         )
 
-        # Create exactly 1 clone per snapshot (capped at snapshot count)
+        # Create clones from selected snapshots
         clone_names_fired = []
         clone_idx = [0]
         hit_limit = [False]
