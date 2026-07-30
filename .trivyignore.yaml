@@ -1,0 +1,16 @@
+# Findings ignored here are not fixable from our side: they live inside
+# pip's own vendored dependency bundle (pip/_vendor), shipped by pip itself
+# for its internal use (dependency resolution, HTTP caching) during
+# `pip install`. They are not imported or reachable by the running
+# simplyblock control-plane application. As of pip 26.2 (the latest
+# release), pip still vendors these versions — see
+# https://github.com/pypa/pip/blob/main/src/pip/_vendor/vendor.txt
+# Re-check on the next pip release; drop the entry once pip bumps the
+# vendored version past the fix.
+vulnerabilities:
+  # msgpack 1.1.2 vendored by pip; fixed upstream in 1.2.1
+  - id: GHSA-6v7p-g79w-8964
+  # setuptools 70.3.0 pinned in pip's vendor.txt; fixed upstream in 78.1.1
+  - id: CVE-2025-47273
+  # setuptools 70.3.0 pinned in pip's vendor.txt; fixed upstream in 83.0.0
+  - id: CVE-2026-59890

@@ -10,6 +10,14 @@ sbcli*
 .env
 .env.*
 
+# Ignore test/tooling caches and virtualenvs (not needed at runtime;
+# these can carry outdated, vulnerable copies of pip/setuptools/wheel
+# that trip up the Trivy image scan)
+.tox
+.mypy_cache
+.ruff_cache
+.pytest_cache
+
 # Ignore Docker-related files
 Dockerfile
 docker-compose.yml
