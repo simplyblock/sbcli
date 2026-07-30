@@ -2737,64 +2737,34 @@ def _handle_cleanup_target(migration, tgt_node, tgt_rpc, src_rpc=None):
     migration.target_lvol_bdev = ""
     migration.target_subsystem_nqn = ""
     # For a failover restart, preserve target_subsystem_node_ids so that
-    # _ensure_target_nvmf_state knows it owns the subsystem and must recreate
-    # it (instead of returning _WAIT indefinitely on a "not our subsystem" path).
-    # For terminal failures (cancel / max-retries) we clear it normally.
-    if not migration.failover_pending:
-        migration.target_subsystem_node_ids = []
+    migration.target_subsystem_node_ids = []
     migration.target_snap_bdevs = []
     migration.write_to_db(db.kv_store)
     return True, False, None
 
 
 # ---------------------------------------------------------------------------
-# Failover-restart helpers
+# Helpers
 # ---------------------------------------------------------------------------
 
-def _reset_migration_for_restart(migration):
-    """Reset per-run progress fields so PHASE_SNAP_COPY starts clean.
-
-    Called after PHASE_CLEANUP_TARGET completes due to a node-offline failover.
-    The target-side inventory fields (target_snap_bdevs, target_lvol_bdev, etc.)
-    are already cleared by _handle_cleanup_target before it returns done=True,
-    so this function only needs to reset the snapshot-progress state.
-
-    Does NOT touch retry_count or node_failover_attempts — those are preserved
-    across the restart.
-    """
-    migration.snaps_migrated = []
-    migration.next_snap_index = 0
-    migration.intermediate_snaps = []
-    migration.intermediate_snap_rounds = 0
-    migration.snap_migration_plan = []  # rebuilt from scratch by _handle_snap_copy
-    migration.current_job_id = ""
-    migration.transfer_context = {}
-    migration.error_message = ""
-
-
-def _handle_failover_wait(migration, src_node, tgt_node, cluster):
-    """Poll until recovery conditions are met, then signal restart.
-
-    Returns (done, suspend, error) per the standard phase-handler convention.
-    When done=True, task_runner's phase-advance logic transitions to
-    PHASE_SNAP_COPY (set as next_phase in the dispatch block) and tail-recurses
-    to restart the migration from scratch.
-    """
-    reasons = []
-    if src_node.status != StorageNode.STATUS_ONLINE:
-        reasons.append(f"src node not online ({src_node.status})")
-    if tgt_node.status != StorageNode.STATUS_ONLINE:
-        reasons.append(f"tgt node not online ({tgt_node.status})")
-    if cluster.status != Cluster.STATUS_ACTIVE:
-        reasons.append(f"cluster not active ({cluster.status})")
-    if reasons:
-        migration.error_message = "waiting for recovery: " + "; ".join(reasons)
-        return False, True, _WAIT
-    logger.info(
-        f"Migration {migration.uuid[:8]}: recovery conditions met; "
-        f"restarting from PHASE_SNAP_COPY"
-    )
-    return True, False, None
+def _budget_suspend(task, migration, migration_id, error_msg):
+    """Charge retry budget and suspend; redirect to cleanup_target when exhausted."""
+    migration.retry_count += 1
+    migration.error_message = error_msg
+    task.retry += 1
+    task.function_result = error_msg
+    if migration.retry_count >= migration.max_retries:
+        logger.error(
+            f"Migration {migration_id} exceeded max retries "
+            f"({migration.max_retries}); entering cleanup_target"
+        )
+        migration.phase = LVolMigration.PHASE_CLEANUP_TARGET
+        migration.current_job_id = ""
+        migration.write_to_db(db.kv_store)
+        task.write_to_db(db.kv_store)
+        migration_events.migration_phase_changed(migration)
+        return False
+    return _suspend_task(task, migration, error_msg)
 
 
 # ---------------------------------------------------------------------------
@@ -2853,62 +2823,46 @@ def task_runner(task):
     try:
         src_node = db.get_storage_node_by_id(migration.source_node_id)
     except KeyError:
-        return _suspend_task(task, migration, "source node not found")
+        return _budget_suspend(task, migration, migration_id, "source node not found")
 
     try:
         tgt_node = db.get_storage_node_by_id(migration.target_node_id)
     except KeyError:
-        return _suspend_task(task, migration, "target node not found")
+        return _budget_suspend(task, migration, migration_id, "target node not found")
 
-    # For cleanup_target we only need the target node to be reachable.
-    if migration.phase != LVolMigration.PHASE_CLEANUP_TARGET:
+    # Cleanup phases proceed regardless of node status: deletes go through LVS
+    # leadership, so a downed node doesn't block the cleanup path.
+    _is_cleanup_phase = migration.phase in (
+        LVolMigration.PHASE_CLEANUP_TARGET, LVolMigration.PHASE_CLEANUP_SOURCE)
+    if not _is_cleanup_phase:
         if src_node.status not in (StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED):
-            return _suspend_task(
-                task, migration, f"source node not online (status={src_node.status})")
+            return _budget_suspend(
+                task, migration, migration_id,
+                f"source node not online (status={src_node.status})")
 
     if tgt_node.status != StorageNode.STATUS_ONLINE:
-        # If the target goes offline during an active migration phase, redirect
-        # to PHASE_CLEANUP_TARGET immediately rather than waiting in-place.
-        # First offline event (node_failover_attempts == 0): set failover_pending
-        #   so cleanup transitions to PHASE_FAILOVER_WAIT → one restart attempt.
-        # Subsequent offline events (node_failover_attempts >= 1): do NOT set
-        #   failover_pending — cleanup ends in STATUS_FAILED (no second restart).
         if (migration.phase in (LVolMigration.PHASE_SNAP_COPY,
                                 LVolMigration.PHASE_LVOL_MIGRATE)
                 and not migration.canceled):
-            if migration.node_failover_attempts == 0:
-                logger.warning(
-                    f"Migration {migration_id}: target node offline "
-                    f"(status={tgt_node.status}) during {migration.phase}; "
-                    f"triggering failover cleanup (attempt 1/1)"
-                )
-                migration.failover_pending = True
-                migration.node_failover_attempts += 1
-                migration.error_message = (
-                    f"target node offline (status={tgt_node.status}); "
-                    f"entered failover cleanup"
-                )
-            else:
-                logger.warning(
-                    f"Migration {migration_id}: target node offline again "
-                    f"(status={tgt_node.status}) during {migration.phase}; "
-                    f"failover budget exhausted — entering terminal cleanup"
-                )
-                migration.error_message = (
-                    f"target node offline again (status={tgt_node.status}); "
-                    f"failover already used — migration failed"
-                )
+            # Target went offline mid-migration — clean up and fail.
+            # The user may start a fresh migration once the cluster recovers.
+            logger.warning(
+                f"Migration {migration_id}: target node offline "
+                f"(status={tgt_node.status}) during {migration.phase}; "
+                f"entering cleanup"
+            )
+            migration.error_message = (
+                f"target node offline (status={tgt_node.status}); migration failed"
+            )
             migration.phase = LVolMigration.PHASE_CLEANUP_TARGET
             migration.current_job_id = ""
             migration.write_to_db(db.kv_store)
             task.write_to_db(db.kv_store)
             migration_events.migration_phase_changed(migration)
             return False
-        if migration.phase != LVolMigration.PHASE_CLEANUP_TARGET:
-            # cleanup_target is exempt: lvol/snap deletes go through target
-            # LVS leadership and do not require the target to be reachable;
-            # subsystem teardown failures are tolerable because subsystems are
-            # lost on node restart anyway.
+        if not _is_cleanup_phase:
+            # cleanup phases are exempt: deletes go through LVS leadership;
+            # subsystems are lost on node restart anyway.
             return _suspend_task(
                 task, migration, f"target node not online (status={tgt_node.status})")
 
@@ -2939,6 +2893,7 @@ def task_runner(task):
     phase = migration.phase
     done = suspend = False
     error = None
+    next_phase = ""
 
     # --- Target-restart reconciliation ---
     # Before cutover, nothing else re-verifies that the target subsystem/
@@ -2953,7 +2908,7 @@ def task_runner(task):
         try:
             lvol = db.get_lvol_by_id(migration.lvol_id)
         except KeyError:
-            return _suspend_task(task, migration, f"LVol {migration.lvol_id} not found")
+            return _budget_suspend(task, migration, migration.get_id(), f"LVol {migration.lvol_id} not found")
 
         nvmf_wait = _ensure_target_nvmf_state(migration, lvol, src_node, tgt_node, src_rpc, tgt_rpc)
         if nvmf_wait is _WAIT:
@@ -2980,11 +2935,7 @@ def task_runner(task):
 
         elif phase == LVolMigration.PHASE_CLEANUP_TARGET:
             done, suspend, error = _handle_cleanup_target(migration, tgt_node, tgt_rpc, src_rpc=src_rpc)
-            next_phase = ""  # terminal failure path (unless failover_pending)
-
-        elif phase == LVolMigration.PHASE_FAILOVER_WAIT:
-            done, suspend, error = _handle_failover_wait(migration, src_node, tgt_node, cluster)
-            next_phase = LVolMigration.PHASE_SNAP_COPY
+            next_phase = ""  # terminal — done-handler always sets STATUS_FAILED/CANCELLED
 
         else:
             _fail_task(task, migration, f"unknown phase: {phase}")
@@ -3001,30 +2952,20 @@ def task_runner(task):
                 and phase in (LVolMigration.PHASE_SNAP_COPY,
                               LVolMigration.PHASE_LVOL_MIGRATE)
                 and not migration.canceled):
-            if migration.node_failover_attempts == 0:
-                logger.warning(
-                    f"Migration {migration_id}: target offline after RPC error "
-                    f"(status={_fresh_tgt.status}); triggering failover cleanup (attempt 1/1)"
-                )
-                migration.failover_pending = True
-                migration.node_failover_attempts += 1
-                migration.error_message = f"target node offline during {phase}: {exc}"
-            else:
-                logger.warning(
-                    f"Migration {migration_id}: target offline again after RPC error "
-                    f"(status={_fresh_tgt.status}); failover budget exhausted — terminal cleanup"
-                )
-                migration.error_message = (
-                    f"target node offline again during {phase}: {exc}; "
-                    f"failover already used — migration failed"
-                )
+            logger.warning(
+                f"Migration {migration_id}: target offline after RPC error "
+                f"(status={_fresh_tgt.status}); entering cleanup"
+            )
+            migration.error_message = f"target node offline during {phase}: {exc}"
             migration.phase = LVolMigration.PHASE_CLEANUP_TARGET
             migration.current_job_id = ""
             migration.write_to_db(db.kv_store)
             task.write_to_db(db.kv_store)
             migration_events.migration_phase_changed(migration)
             return False
-        return _suspend_task(task, migration, str(exc))
+        # Not a node-offline event — treat as a retryable operation failure
+        # and let the retry budget decide whether to continue or clean up.
+        error = str(exc)
 
     # --- Handle error / suspend ---
     if error is _WAIT:
@@ -3073,25 +3014,6 @@ def task_runner(task):
             return True
 
         elif phase == LVolMigration.PHASE_CLEANUP_TARGET:
-            if migration.failover_pending and not migration.canceled:
-                # Target cleanup was triggered by a node-offline failover event.
-                # Reset all per-run progress state and enter PHASE_FAILOVER_WAIT,
-                # which will poll until cluster health is fully restored before
-                # restarting the migration from PHASE_SNAP_COPY.
-                migration.failover_pending = False
-                _reset_migration_for_restart(migration)
-                migration.phase = LVolMigration.PHASE_FAILOVER_WAIT
-                migration.status = LVolMigration.STATUS_SUSPENDED
-                migration.write_to_db(db.kv_store)
-                task.status = JobSchedule.STATUS_SUSPENDED
-                task.write_to_db(db.kv_store)
-                logger.info(
-                    f"Migration {migration_id}: target cleaned up after failover; "
-                    f"entering FAILOVER_WAIT (attempt {migration.node_failover_attempts}/1)"
-                )
-                return False
-
-            # Normal failure-path terminal state (max-retries or cancel)
             migration.status = LVolMigration.STATUS_FAILED if not migration.canceled \
                 else LVolMigration.STATUS_CANCELLED
             migration.completed_at = int(time.time())
