@@ -485,14 +485,14 @@ def calculate_core_allocations(vcpu_list, alceml_count=2):
         assigned["jm_cpu_core"] = vcpu[1:2]
         assigned["jc_singleton_core"] = vcpu[2:3]
         assigned["alceml_cpu_cores"] = vcpu[3:4]
-        assigned["lvol_poller_core"] = vcpu[0:1] if colocate_lvs else vcpu[4:5]
+        assigned["lvol_poller_core"] = vcpu[2:3] if colocate_lvs else vcpu[4:5]
     elif (len(vcpu_list) < 22):
         vcpu = reserve_n(5 if colocate_lvs else 6)
         assigned["app_thread_core"] = vcpu[0:1]
         assigned["jm_cpu_core"] = vcpu[1:2]
         assigned["jc_singleton_core"] = vcpu[2:3]
         assigned["alceml_cpu_cores"] = vcpu[3:5]
-        assigned["lvol_poller_core"] = vcpu[0:1] if colocate_lvs else vcpu[5:6]
+        assigned["lvol_poller_core"] = vcpu[2:3] if colocate_lvs else vcpu[5:6]
     else:
         # base threads: app, jm, jc (+ own lvol_poller unless co-located) (+ dedicated compression)
         base = 3 if colocate_lvs else 4
@@ -504,7 +504,7 @@ def calculate_core_allocations(vcpu_list, alceml_count=2):
         assigned["jc_singleton_core"] = vcpus[2:3]
         idx = 3
         if colocate_lvs:
-            assigned["lvol_poller_core"] = vcpus[0:1]
+            assigned["lvol_poller_core"] = vcpus[2:3]
         else:
             assigned["lvol_poller_core"] = vcpus[idx:idx + 1]
             idx += 1
