@@ -2594,7 +2594,7 @@ def _handle_cleanup_target(migration, tgt_node, tgt_rpc, src_rpc=None):
     """
     # TEMP: artificial delay for concurrency test — remove before merging.
     logger.info("[TEST] CLEANUP_TARGET sleeping 300s")
-    time.sleep(300)
+    time.sleep(15)
 
     # Immediately detach the hub controller on failure/cancel — don't leave it
     # connected to a target whose snapshots we're about to roll back.
