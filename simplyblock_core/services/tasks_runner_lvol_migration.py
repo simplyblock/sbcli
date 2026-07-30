@@ -83,6 +83,7 @@ the 3-second service-loop gap between phases.
 """
 
 import datetime
+import os
 import random
 import time
 from typing import Optional
@@ -2411,71 +2412,72 @@ def _rename_migrated_bdevs(migration, tgt_node, tgt_rpc, tgt_sec_rpc=None, tgt_t
 
 def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
     """
-    Delete snapshots from the source node that are exclusively owned by the
-    migrated volume, then tear down the source NVMe-oF subsystem, delete the
-    source lvol bdev, and update DB records.
+    Best-effort source cleanup after a successful migration.  The lvol is
+    already live on the target — this phase only removes source-side artifacts
+    and updates DB records.
 
-    Each snapshot deletion uses _delete_bdev_blocking (async-start → poll →
-    sync-finalize on primary and secondary) which blocks until the bdev is
-    gone.  This avoids snapshot_controller.delete() clone-check soft-delete
-    behaviour.  apply_migration_to_db() is called AFTER all deletes complete.
+    All failures are logged and collected; the migration is always marked done
+    regardless of cleanup outcome.  Never suspends, never transitions to
+    CLEANUP_TARGET.
 
-    Returns (done: bool, suspend: bool, error: str|None).
+    Returns (True, False, None) always.
     """
     ctx = migration.transfer_context or {}
+    _warnings: list = []
 
     # --- First entry: initialize cleanup state ---
     if ctx.get('stage') != 'cleanup_src':
-        # Preserve the target lvol UUID and bdev name written by PHASE_LVOL_MIGRATE
-        # so we can update lvol.lvol_uuid / lvol.lvol_bdev in the DB after cleanup.
         tgt_lvol_uuid = ctx.get('tgt_lvol_uuid')
         tgt_lvol_bdev = ctx.get('tgt_lvol_bdev')
-        # Carry the pre-apply source bdev names so cleanup deletes hit the correct
-        # bdevs even after apply_migration_to_db renamed them to target names in DB.
         source_snap_bdevs_saved = ctx.get('source_snap_bdevs', {})
         source_lvol_bdev_saved  = ctx.get('source_lvol_bdev', '')
         if not source_lvol_bdev_saved:
-            return False, False, (
-                "source_lvol_bdev missing from transfer_context — cannot safely "
-                "identify source bdev; apply_migration_to_db may have already "
-                "renamed lvol.lvol_bdev to the target name")
+            logger.error(
+                "source_lvol_bdev missing from transfer_context; "
+                "source bdev deletion will be skipped")
+            _warnings.append("source_lvol_bdev not in ctx; source bdev not deleted")
 
-        to_delete = migration_controller.get_snaps_safe_to_delete_on_source(migration)
-
-        # Verify each snapshot to be deleted physically exists on the target
-        # before we remove anything from the source.  Bdevs may carry the
-        # migration suffix (SNAP_Xm), canonical name (SNAP_X), or the
-        # post-rename fallback (SNAP_Xam) — check all three so that a
-        # crash-recovery re-run after a partial rename still passes.
-        tgt_lvols = tgt_rpc.bdev_lvol_get_lvols(tgt_node.lvstore) or []
-        tgt_names = {e.get('name', '').split('/')[-1] for e in tgt_lvols}
-        for snap_uuid in to_delete:
-            try:
-                snap = db.get_snapshot_by_id(snap_uuid)
-                # snap.snap_bdev was updated to the target path by apply_migration_to_db;
-                # use it as the primary lookup, then fall back to derived names.
-                _snap_bdev = snap.snap_bdev or ''
-                _primary = _snap_bdev.split('/', 1)[1] if '/' in _snap_bdev else _snap_bdev
-                _m_name = _snap_tgt_short_name(snap)
-                _canonical = _snap_short_name(snap)
-                _am_name = _canonical + _MIGRATION_BDEV_SUFFIX_DONE
-                if not any(n in tgt_names for n in (_primary, _m_name, _canonical, _am_name)):
-                    return False, False, (
-                        f"Target missing snapshot {_m_name} ({snap_uuid}) "
-                        "— aborting source cleanup to prevent data loss"
-                    )
-            except KeyError:
-                pass  # already gone from DB; safe to skip
+        # Build the safe-to-delete list, cross-checking each snap exists on the
+        # target before we touch the source.  If the target is unreachable, skip
+        # all source snap deletions to avoid accidental data loss.
+        _snaps_to_delete_src: list = []
+        try:
+            to_delete_all = migration_controller.get_snaps_safe_to_delete_on_source(migration)
+            tgt_lvols = tgt_rpc.bdev_lvol_get_lvols(tgt_node.lvstore) or []
+            tgt_names = {e.get('name', '').split('/')[-1] for e in tgt_lvols}
+            for snap_uuid in to_delete_all:
+                try:
+                    snap = db.get_snapshot_by_id(snap_uuid)
+                    _snap_bdev = snap.snap_bdev or ''
+                    _primary  = _snap_bdev.split('/', 1)[1] if '/' in _snap_bdev else _snap_bdev
+                    _m_name   = _snap_tgt_short_name(snap)
+                    _canonical = _snap_short_name(snap)
+                    _am_name  = _canonical + _MIGRATION_BDEV_SUFFIX_DONE
+                    if any(n in tgt_names for n in (_primary, _m_name, _canonical, _am_name)):
+                        _snaps_to_delete_src.append(snap_uuid)
+                    else:
+                        logger.warning(
+                            f"Target missing snapshot {_m_name} ({snap_uuid}); "
+                            "skipping source delete to protect data")
+                        _warnings.append(f"target missing snap {_m_name}; source copy kept")
+                except KeyError:
+                    pass  # already gone from DB; safe to skip
+        except Exception as _ve:
+            logger.warning(
+                f"Could not verify snapshots on target ({_ve}); "
+                "skipping all source snap deletions")
+            _warnings.append(f"snap target-verification failed: {_ve}")
+            _snaps_to_delete_src = []
 
         ctx = {
             'stage': 'cleanup_src',
             'tgt_lvol_uuid': tgt_lvol_uuid,
             'tgt_lvol_bdev': tgt_lvol_bdev,
-            # Carry hub_ctrl_name through the ctx rebuild so the deferred
-            # hub detach at the end of cleanup can still find it.
             'hub_ctrl_name': (migration.transfer_context or {}).get('hub_ctrl_name'),
             'source_snap_bdevs': source_snap_bdevs_saved,
             'source_lvol_bdev':  source_lvol_bdev_saved,
+            'snaps_to_delete':   _snaps_to_delete_src,
+            'cleanup_warnings':  _warnings,
         }
         migration.transfer_context = ctx
         migration.write_to_db(db.kv_store)
@@ -2485,19 +2487,15 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
     src_ter = _get_source_tertiary_node(src_node)
     src_ter_rpc = _make_rpc(src_ter) if src_ter else None
 
-    # --- Delete source snapshots (blocking, idempotent) ---
-    # Recompute to_delete here so re-entries after crash work without stored pending list.
-    # _delete_bdev_blocking handles "not found" (status 2) gracefully, so double-deletes
-    # from a crash-recovery re-run are safe.
-    to_delete = migration_controller.get_snaps_safe_to_delete_on_source(migration)
+    # --- Delete source snapshots (best-effort, leader-routed) ---
+    # Use the verified list from first-entry; on crash-recovery re-run (ctx already
+    # at 'cleanup_src') snaps_to_delete was saved, so re-deletes are safe (idempotent).
     source_snap_bdevs = ctx.get('source_snap_bdevs', {})
-    for snap_uuid in to_delete:
+    for snap_uuid in ctx.get('snaps_to_delete', []):
         try:
             snap = db.get_snapshot_by_id(snap_uuid)
-            if snap_uuid in source_snap_bdevs:
-                bdev_name = source_snap_bdevs[snap_uuid]
-            else:
-                bdev_name = f"{src_node.lvstore}/{_snap_short_name(snap)}"
+            bdev_name = (source_snap_bdevs.get(snap_uuid)
+                         or f"{src_node.lvstore}/{_snap_short_name(snap)}")
             try:
                 _delete_bdev_blocking(bdev_name, src_rpc,
                                       secondary_rpc=src_sec_rpc, tertiary_rpc=src_ter_rpc,
@@ -2505,24 +2503,15 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
                                       lvs_name=src_node.lvstore)
                 logger.info(f"Deleted source bdev {bdev_name}")
             except Exception as e:
-                logger.warning(f"delete source bdev {bdev_name} (non-fatal): {e}")
+                logger.warning(f"delete source bdev {bdev_name}: {e}")
         except KeyError:
             logger.warning(f"Source snapshot {snap_uuid} not found in DB; skipping")
 
-    # --- All deletes finished: hub detach then NVMe-oF teardown ---
-    #
-    # Teardown order:
-    #   Step 7: detach hub controller on SRC — severs the SRC→TGT mirror link.
-    #           Must happen BEFORE deleting the source subsystem so that
-    #           bdev_nvme_detach_controller can still reach the hub bdev.
-    #   Step 8: delete source primary NVMe-oF subsystem.
-    #   Then:   delete source lvol bdev.
+    # --- Source NVMe-oF subsystem teardown (best-effort) ---
     lvol = None
     try:
         lvol = db.get_lvol_by_id(migration.lvol_id)
         logger.info(f"Step 8: removing source NVMe-oF subsystem {lvol.nqn}")
-        # Overlap nodes had their subsystem taken over by the target — skip delete.
-        # Non-overlap source nodes own their subsystem exclusively; delete it.
         _src_paths_cu, _, _overlap_ids_cu = _build_paths(
             src_node, tgt_node, src_rpc, tgt_rpc)
         for _sp in _src_paths_cu:
@@ -2533,33 +2522,23 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
             else:
                 migration_controller.cleanup_subsystem_or_ns(lvol.nqn, lvol.uuid, True, _sp['rpc'])
     except Exception as e:
-        logger.warning(f"Source subsystem cleanup failed (non-fatal): {e}")
+        logger.warning(f"Source subsystem cleanup failed: {e}")
 
-    # Explicitly delete the source lvol bdev.  bdev_lvol_final_migration may
-    # have already freed it on the SPDK side — _delete_bdev_blocking handles
-    # that gracefully (status 2 = not-found is treated as complete).
-    if lvol is not None:
+    # --- Source lvol bdev deletion (best-effort, leader-routed) ---
+    # Use the saved pre-apply name; apply_migration_to_db already renamed
+    # lvol.lvol_bdev in the DB to the target name, so we must not use lvol.lvol_bdev.
+    src_bdev_short = ctx.get('source_lvol_bdev')
+    if lvol is not None and src_bdev_short:
+        src_lvol_composite = f"{src_node.lvstore}/{src_bdev_short}"
         try:
-            # Use the saved pre-apply bdev name; apply_migration_to_db already
-            # renamed lvol.lvol_bdev to the target 'm'-suffix name in DB.
-            src_bdev_short = ctx.get('source_lvol_bdev')
-            if not src_bdev_short:
-                raise RuntimeError(
-                    "source_lvol_bdev missing from ctx at delete site — "
-                    "refusing to fall back to lvol.lvol_bdev which may point to target")
-            src_lvol_composite = f"{src_node.lvstore}/{src_bdev_short}"
-            # Set migration flag so SPDK drops only the blob reference without
-            # freeing the physical clusters — data now lives on the target.
-            try:
-                src_rpc.bdev_lvol_set_migration_flag(src_lvol_composite)
-                if src_sec_rpc:
-                    src_sec_rpc.bdev_lvol_set_migration_flag(src_lvol_composite)
-                if src_ter_rpc:
-                    src_ter_rpc.bdev_lvol_set_migration_flag(src_lvol_composite)
-            except Exception as _mf_err:
-                logger.warning(
-                    f"bdev_lvol_set_migration_flag for source lvol failed "
-                    f"(non-fatal): {_mf_err}")
+            src_rpc.bdev_lvol_set_migration_flag(src_lvol_composite)
+            if src_sec_rpc:
+                src_sec_rpc.bdev_lvol_set_migration_flag(src_lvol_composite)
+            if src_ter_rpc:
+                src_ter_rpc.bdev_lvol_set_migration_flag(src_lvol_composite)
+        except Exception as _mf_err:
+            logger.warning(f"bdev_lvol_set_migration_flag failed: {_mf_err}")
+        try:
             _delete_bdev_blocking(
                 src_lvol_composite, src_rpc,
                 secondary_rpc=src_sec_rpc, tertiary_rpc=src_ter_rpc,
@@ -2567,23 +2546,23 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
                 lvs_name=src_node.lvstore)
             logger.info(f"Deleted source lvol bdev {src_lvol_composite}")
         except Exception as e:
-            logger.warning(f"Source lvol delete failed (non-fatal): {e}")
+            logger.warning(f"Source lvol delete failed: {e}")
 
+    # --- DB update ---
     tgt_lvol_uuid = ctx.get('tgt_lvol_uuid')
     tgt_lvol_bdev = ctx.get('tgt_lvol_bdev')
     migration.transfer_context = {}
+    _warnings = list(ctx.get('cleanup_warnings', []))
     if not _apply_migration_to_db(
             migration, tgt_lvol_uuid=tgt_lvol_uuid, tgt_lvol_bdev=tgt_lvol_bdev):
-        return False, False, "Failed to update DB records after source cleanup"
+        logger.error("apply_migration_to_db failed; lvol DB record may still point to source")
+        _warnings.append("DB update failed; lvol record may still reference source node")
 
+    # --- Target-side artifact cleanup: intermediate snaps + bdev renames ---
     tgt_sec, _ = _get_target_secondary_node(tgt_node, src_node.get_id())
     tgt_sec_rpc = _make_rpc(tgt_sec) if tgt_sec else None
     tgt_ter, _ = _get_target_tertiary_node(tgt_node, src_node.get_id())
     tgt_ter_rpc = _make_rpc(tgt_ter) if tgt_ter else None
-
-    # Delete intermediate (shrink) snapshots from the target — they are migration
-    # artifacts and do not need to be preserved. No migration flag so SPDK
-    # coalesces and frees their clusters into the child bdev.
     try:
         if migration.intermediate_snaps:
             _delete_intermediate_snaps_on_target(
@@ -2592,7 +2571,13 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
                 tgt_lvs_name=tgt_node.lvstore)
         _rename_migrated_bdevs(migration, tgt_node, tgt_rpc, tgt_sec_rpc, tgt_ter_rpc)
     except Exception as e:
-        return False, False, str(e)
+        logger.warning(f"Target artifact cleanup (rename/intermediate snaps) failed: {e}")
+        _warnings.append(f"target rename/intermediate-snap cleanup failed: {e}")
+
+    # Record any partial-cleanup notes and always mark done.
+    if _warnings:
+        migration.error_message = "source cleanup partial: " + "; ".join(str(w) for w in _warnings)
+        migration.write_to_db(db.kv_store)
 
     return True, False, None
 
@@ -2608,6 +2593,14 @@ def _handle_cleanup_target(migration, tgt_node, tgt_rpc, src_rpc=None):
 
     Returns (done: bool, suspend: bool, error: str|None).
     """
+    # TEST HOOK: set SBCLI_TEST_CLEANUP_TARGET_SLEEP=<seconds> on the control
+    # plane to artificially extend cleanup duration (e.g. for concurrency tests).
+    # Remove before merging to main.
+    _test_sleep = int(os.environ.get("SBCLI_TEST_CLEANUP_TARGET_SLEEP", "0"))
+    if _test_sleep > 0:
+        logger.info(f"[TEST] CLEANUP_TARGET sleeping {_test_sleep}s (SBCLI_TEST_CLEANUP_TARGET_SLEEP)")
+        time.sleep(_test_sleep)
+
     # Immediately detach the hub controller on failure/cancel — don't leave it
     # connected to a target whose snapshots we're about to roll back.
     hub_manager.detach_now(migration.source_node_id, tgt_node.get_id(), src_rpc=src_rpc)
@@ -2684,7 +2677,16 @@ def _handle_cleanup_target(migration, tgt_node, tgt_rpc, src_rpc=None):
                                           lvs_name=tgt_node.lvstore)
                     logger.info(f"Deleted target lvol {_bdev_to_delete}")
                 except Exception as e:
-                    logger.warning(f"delete target lvol {_bdev_to_delete} (non-fatal): {e}")
+                    _emsg = str(e).lower()
+                    if "not found" in _emsg or "no such" in _emsg or "enoent" in _emsg:
+                        logger.info(f"Target lvol {_bdev_to_delete} already gone")
+                    else:
+                        # Transient failure (e.g. LVS leaderless while node restarts).
+                        # Suspend and retry; do NOT mark cleanup done with orphaned bdevs.
+                        migration.error_message = f"delete {_bdev_to_delete}: {e}"
+                        logger.warning(
+                            f"delete target lvol {_bdev_to_delete} (transient, will retry): {e}")
+                        return False, True, None
 
         ctx = {'stage': 'cleanup_tgt'}
         migration.transfer_context = ctx
@@ -2752,7 +2754,15 @@ def _handle_cleanup_target(migration, tgt_node, tgt_rpc, src_rpc=None):
                                   lvs_name=tgt_node.lvstore)
             logger.info(f"Deleted target snapshot bdev {bdev_name}")
         except Exception as e:
-            logger.warning(f"delete target snapshot bdev {bdev_name} (non-fatal): {e}")
+            _emsg = str(e).lower()
+            if "not found" in _emsg or "no such" in _emsg or "enoent" in _emsg:
+                logger.info(f"Target snapshot bdev {bdev_name} already gone")
+            else:
+                # Transient failure (e.g. LVS leaderless while node restarts).
+                migration.error_message = f"delete {bdev_name}: {e}"
+                logger.warning(
+                    f"delete target snapshot bdev {bdev_name} (transient, will retry): {e}")
+                return False, True, None
 
     migration.transfer_context = {}
     migration.target_lvol_bdev = ""
@@ -2984,10 +2994,13 @@ def task_runner(task):
             task.write_to_db(db.kv_store)
             migration_events.migration_phase_changed(migration)
             return False
-        # During cleanup, RPC failures are transient connectivity waits (node
-        # restarting or secondary taking over leadership).  Don't charge the
-        # retry budget — suspend and let the runner retry when the node recovers.
-        if phase == LVolMigration.PHASE_CLEANUP_TARGET:
+        # During CLEANUP_TARGET, RPC failures are transient connectivity waits
+        # (node restarting or secondary taking over leadership).  Don't charge
+        # the retry budget — suspend and let the runner retry when the node recovers.
+        # Note: CLEANUP_SOURCE never raises here (all its exceptions are handled
+        # internally) — this guard is a safety net only.
+        if phase in (LVolMigration.PHASE_CLEANUP_TARGET,
+                     LVolMigration.PHASE_CLEANUP_SOURCE):
             return _suspend_task(task, migration, str(exc))
         # Not a node-offline event — treat as a retryable operation failure
         # and let the retry budget decide whether to continue or clean up.
@@ -3007,6 +3020,14 @@ def task_runner(task):
         task.function_result = error
 
         if migration.retry_count >= migration.max_retries:
+            if phase not in (LVolMigration.PHASE_SNAP_COPY,
+                             LVolMigration.PHASE_LVOL_MIGRATE):
+                # Already past the migration — never redirect to CLEANUP_TARGET.
+                # CLEANUP_SOURCE failures must not roll back a completed migration.
+                logger.error(
+                    f"Migration {migration_id} exceeded max retries in phase "
+                    f"{phase}; suspending for operator review (not entering cleanup_target)")
+                return _suspend_task(task, migration, error)
             logger.error(
                 f"Migration {migration_id} exceeded max retries "
                 f"({migration.max_retries}); entering cleanup_target"
