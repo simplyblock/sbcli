@@ -2666,16 +2666,25 @@ def _handle_cleanup_target(migration, tgt_node, tgt_rpc, src_rpc=None):
                         logger.warning(f"cleanup target {_label} subsystem {_nqn_to_clean}: {e}")
 
         # Delete target migration bdev — prefer ctx composite, fall back to derived name.
+        # The existence check uses the primary; on connection failure (node offline or
+        # restarting) we assume the bdev may still exist and attempt the delete anyway.
+        # _delete_bdev_blocking uses execute_on_leader_with_failover so the request is
+        # routed to the current LVS leader even when the primary is down.
         _bdev_to_delete = tgt_lvol_composite or _pre_bdev
-        if _bdev_to_delete and tgt_rpc.get_bdevs(_bdev_to_delete):
+        if _bdev_to_delete:
             try:
-                _delete_bdev_blocking(_bdev_to_delete, tgt_rpc,
-                                      secondary_rpc=tgt_sec_rpc, tertiary_rpc=tgt_ter_rpc,
-                                      all_nodes=[n for n in [tgt_node, tgt_sec, tgt_ter] if n],
-                                      lvs_name=tgt_node.lvstore)
-                logger.info(f"Deleted target lvol {_bdev_to_delete}")
-            except Exception as e:
-                logger.warning(f"delete target lvol {_bdev_to_delete} (non-fatal): {e}")
+                _bdev_present = bool(tgt_rpc.get_bdevs(_bdev_to_delete))
+            except Exception:
+                _bdev_present = True  # primary unreachable; attempt delete via leader failover
+            if _bdev_present:
+                try:
+                    _delete_bdev_blocking(_bdev_to_delete, tgt_rpc,
+                                          secondary_rpc=tgt_sec_rpc, tertiary_rpc=tgt_ter_rpc,
+                                          all_nodes=[n for n in [tgt_node, tgt_sec, tgt_ter] if n],
+                                          lvs_name=tgt_node.lvstore)
+                    logger.info(f"Deleted target lvol {_bdev_to_delete}")
+                except Exception as e:
+                    logger.warning(f"delete target lvol {_bdev_to_delete} (non-fatal): {e}")
 
         ctx = {'stage': 'cleanup_tgt'}
         migration.transfer_context = ctx
@@ -2715,10 +2724,22 @@ def _handle_cleanup_target(migration, tgt_node, tgt_rpc, src_rpc=None):
                 f"Target bdev {_stored_path} protected (referenced by sibling); skipping")
             continue
         _am_name = _short_base + _MIGRATION_BDEV_SUFFIX_DONE
-        bdev_name = next(
-            (f"{_lvstore}/{n}" for n in (_short_m, _short_base, _am_name)
-             if tgt_rpc.get_bdevs(f"{_lvstore}/{n}")),
-            None)
+        # Find which name variant the bdev lives under.  If the primary is
+        # unreachable (node offline or restarting), assume it may still exist
+        # under the original name and route the delete via the LVS leader.
+        bdev_name = None
+        _primary_unreachable = False
+        for _n in (_short_m, _short_base, _am_name):
+            _cand = f"{_lvstore}/{_n}"
+            try:
+                if tgt_rpc.get_bdevs(_cand):
+                    bdev_name = _cand
+                    break
+            except Exception:
+                _primary_unreachable = True
+                break
+        if _primary_unreachable and bdev_name is None:
+            bdev_name = f"{_lvstore}/{_short_m}"  # default; delete is idempotent on not-found
         if not bdev_name:
             logger.info(
                 f"Target bdev {_stored_path} not found in any variant; "
@@ -2963,6 +2984,11 @@ def task_runner(task):
             task.write_to_db(db.kv_store)
             migration_events.migration_phase_changed(migration)
             return False
+        # During cleanup, RPC failures are transient connectivity waits (node
+        # restarting or secondary taking over leadership).  Don't charge the
+        # retry budget — suspend and let the runner retry when the node recovers.
+        if phase == LVolMigration.PHASE_CLEANUP_TARGET:
+            return _suspend_task(task, migration, str(exc))
         # Not a node-offline event — treat as a retryable operation failure
         # and let the retry budget decide whether to continue or clean up.
         error = str(exc)
