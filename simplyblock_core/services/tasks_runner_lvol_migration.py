@@ -83,7 +83,6 @@ the 3-second service-loop gap between phases.
 """
 
 import datetime
-import os
 import random
 import time
 from typing import Optional
@@ -2593,13 +2592,9 @@ def _handle_cleanup_target(migration, tgt_node, tgt_rpc, src_rpc=None):
 
     Returns (done: bool, suspend: bool, error: str|None).
     """
-    # TEST HOOK: set SBCLI_TEST_CLEANUP_TARGET_SLEEP=<seconds> on the control
-    # plane to artificially extend cleanup duration (e.g. for concurrency tests).
-    # Remove before merging to main.
-    _test_sleep = int(os.environ.get("SBCLI_TEST_CLEANUP_TARGET_SLEEP", "0"))
-    if _test_sleep > 0:
-        logger.info(f"[TEST] CLEANUP_TARGET sleeping {_test_sleep}s (SBCLI_TEST_CLEANUP_TARGET_SLEEP)")
-        time.sleep(_test_sleep)
+    # TEMP: artificial delay for concurrency test — remove before merging.
+    logger.info("[TEST] CLEANUP_TARGET sleeping 300s")
+    time.sleep(300)
 
     # Immediately detach the hub controller on failure/cancel — don't leave it
     # connected to a target whose snapshots we're about to roll back.
