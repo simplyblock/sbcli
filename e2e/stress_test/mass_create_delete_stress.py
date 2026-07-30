@@ -4457,30 +4457,30 @@ class MassCreateDeletePersistent_300x10_10Snap_K8s(_MassCreateDeleteK8s):
 # Docker restart variants
 
 class MassCreateDeleteRestart_300x10_Docker(_MassCreateDeleteDocker):
-    """300x10 ratio, 1 snap/lvol, entity cap 6000, with node outages."""
+    """300x10 ratio, 1 snap/lvol, entity cap 9000, with node outages."""
     ENABLE_NODE_OUTAGE = True
     PERSISTENT_RETRY = True
-    MAX_ENTITY_COUNT = 6000
+    MAX_ENTITY_COUNT = 9000
     NUM_SUBSYSTEMS = 10
     NS_PER_SUBSYSTEM = 300
     SNAPSHOTS_PER_LVOL = 1
 
 
 class MassCreateDeleteRestart_300x10_6Snap_Docker(_MassCreateDeleteDocker):
-    """300x10 ratio, 6 snaps/lvol, entity cap 6000 -> 857 lvols, with node outages."""
+    """300x10 ratio, 6 snaps/lvol, entity cap 9000 -> 1285 lvols, with node outages."""
     ENABLE_NODE_OUTAGE = True
     PERSISTENT_RETRY = True
-    MAX_ENTITY_COUNT = 6000
+    MAX_ENTITY_COUNT = 9000
     NUM_SUBSYSTEMS = 10
     NS_PER_SUBSYSTEM = 300
     SNAPSHOTS_PER_LVOL = 6
 
 
 class MassCreateDeleteRestart_300x10_10Snap_Docker(_MassCreateDeleteDocker):
-    """300x10 ratio, 10 snaps/lvol, entity cap 6000 -> 545 lvols, with node outages."""
+    """300x10 ratio, 10 snaps/lvol, entity cap 9000 -> 818 lvols, with node outages."""
     ENABLE_NODE_OUTAGE = True
     PERSISTENT_RETRY = True
-    MAX_ENTITY_COUNT = 6000
+    MAX_ENTITY_COUNT = 9000
     NUM_SUBSYSTEMS = 10
     NS_PER_SUBSYSTEM = 300
     SNAPSHOTS_PER_LVOL = 10
@@ -4489,30 +4489,30 @@ class MassCreateDeleteRestart_300x10_10Snap_Docker(_MassCreateDeleteDocker):
 # K8s restart variants
 
 class MassCreateDeleteRestart_300x10_K8s(_MassCreateDeleteK8s):
-    """300x10 ratio, 1 snap/lvol, entity cap 6000, with node outages."""
+    """300x10 ratio, 1 snap/lvol, entity cap 9000, with node outages."""
     ENABLE_NODE_OUTAGE = True
     PERSISTENT_RETRY = True
-    MAX_ENTITY_COUNT = 6000
+    MAX_ENTITY_COUNT = 9000
     NUM_SUBSYSTEMS = 10
     NS_PER_SUBSYSTEM = 300
     SNAPSHOTS_PER_LVOL = 1
 
 
 class MassCreateDeleteRestart_300x10_6Snap_K8s(_MassCreateDeleteK8s):
-    """300x10 ratio, 6 snaps/lvol, entity cap 6000 -> 857 PVCs, with node outages."""
+    """300x10 ratio, 6 snaps/lvol, entity cap 9000 -> 1285 PVCs, with node outages."""
     ENABLE_NODE_OUTAGE = True
     PERSISTENT_RETRY = True
-    MAX_ENTITY_COUNT = 6000
+    MAX_ENTITY_COUNT = 9000
     NUM_SUBSYSTEMS = 10
     NS_PER_SUBSYSTEM = 300
     SNAPSHOTS_PER_LVOL = 6
 
 
 class MassCreateDeleteRestart_300x10_10Snap_K8s(_MassCreateDeleteK8s):
-    """300x10 ratio, 10 snaps/lvol, entity cap 6000 -> 545 PVCs, with node outages."""
+    """300x10 ratio, 10 snaps/lvol, entity cap 9000 -> 818 PVCs, with node outages."""
     ENABLE_NODE_OUTAGE = True
     PERSISTENT_RETRY = True
-    MAX_ENTITY_COUNT = 6000
+    MAX_ENTITY_COUNT = 9000
     NUM_SUBSYSTEMS = 10
     NS_PER_SUBSYSTEM = 300
     SNAPSHOTS_PER_LVOL = 10
