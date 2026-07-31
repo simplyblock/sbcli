@@ -3017,7 +3017,6 @@ def task_runner(task):
         # Real operation failure – increment retry counter.
         migration.retry_count += 1
         migration.error_message = error
-        task.retry += 1
         task.function_result = error
 
         if migration.retry_count >= migration.max_retries:
@@ -3033,6 +3032,7 @@ def task_runner(task):
                 f"Migration {migration_id} exceeded max retries "
                 f"({migration.max_retries}); entering cleanup_target"
             )
+            task.retry += 1
             migration.phase = LVolMigration.PHASE_CLEANUP_TARGET
             migration.current_job_id = ""
             migration.write_to_db(db.kv_store)
