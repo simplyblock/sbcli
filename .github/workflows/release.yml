@@ -68,7 +68,7 @@ jobs:
           spdk_tag: ${{ needs.get_spdk_hash.outputs.short_sha }}
 
       - name: Build package
-        run: python setup.py sdist
+        run: python -m build
 
       - name: Publish package to pypi
         uses: pypa/gh-action-pypi-publish@release/v1

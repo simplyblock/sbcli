@@ -3,3 +3,4 @@ pytest
 pytest-timeout
 requests
 testcontainers>=4.0
+tomli; python_version < "3.11"  # tests/unit/test_packaging.py reads pyproject.toml

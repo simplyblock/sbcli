@@ -1,6 +1,76 @@
 [build-system]
-requires = ['setuptools>70']
+requires = ['setuptools>=77']
 build-backend = 'setuptools.build_meta'
+
+[project]
+name = "sbctl"
+dynamic = ["version"]
+description = "CLI for managing SimplyBlock cluster"
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "simplyblock", email = "developers@simplyblock.io" }]
+dependencies = [
+    "foundationdb==7.3.63",
+    "hvac",
+    "requests",
+    "prettytable>=3.10.0",
+    "docker",
+    "psutil",
+    "py-cpuinfo",
+    "pytest",
+    "mock",
+    "flask",
+    "kubernetes==35.0.0",
+    "PyYAML",
+    "urllib3",
+    "graypy==2.1.0",
+    "boto3",
+    "jinja2",
+    "argcomplete",
+    "jc",
+    "prometheus-client",
+    "ec2-metadata",
+    "flask-swagger-ui",
+    "sentry-sdk[flask]>=1.40",
+    "flask-openapi3",
+    "jsonschema",
+    "fastapi",
+    "uvicorn",
+    "prometheus_api_client",
+    "paramiko",
+    "pydantic-settings",
+    "botocore",
+]
+
+[project.urls]
+Homepage = "https://www.simplyblock.io/"
+Source = "https://github.com/simplyblock/sbcli"
+
+# `sbcli-dev` is a compatibility alias for SBCLI_CMD-based tooling.
+[project.scripts]
+sbctl = "simplyblock_cli.cli:main"
+sbcli-dev = "simplyblock_cli.cli:main"
+
+# setuptools resolves a non-literal `attr:` by importing the module, which is safe
+# here only because constants.py imports nothing outside the stdlib.
+[tool.setuptools.dynamic]
+version = { attr = "simplyblock_core.constants.SIMPLY_BLOCK_VERSION" }
+
+# namespaces = false is not the default for this directive, and without it
+# simplyblock_cli/scripts and simplyblock_cli/tests would ship as namespace
+# packages.
+[tool.setuptools.packages.find]
+include = ["simplyblock_cli*", "simplyblock_core*", "simplyblock_web*"]
+namespaces = false
+
+# Nothing else ships these: there is no MANIFEST.in, so a resource absent from
+# this table is absent from the sdist and therefore from the wheel. workers/ is
+# listed as data because it has no __init__.py.
+[tool.setuptools.package-data]
+simplyblock_core = ["env_var", "scripts/**/*", "services/*", "workers/*"]
+simplyblock_web = ["static/*", "templates/*", "api/v1/static/*"]
 
 [tool.ruff]
 extend-exclude = ['simplyblock_cli/cli.py']

@@ -9,6 +9,7 @@ e2e/logs/*.log!
 sbcli*
 build
 dist
+*.egg-info/
 
 .ruff_cache
 .env

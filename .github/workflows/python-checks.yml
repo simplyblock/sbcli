@@ -74,6 +74,6 @@ jobs:
 
     - name: Execute type checker
       run: |
-        pip install -r requirements.txt
+        pip install -e .
         pip install -r type-requirements.txt
         mypy simplyblock_web simplyblock_cli simplyblock_core

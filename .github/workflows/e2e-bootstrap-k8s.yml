@@ -311,6 +311,7 @@ jobs:
             docker rm -f \$(docker ps -aq) || true
             docker system prune -af || true
             pip uninstall -y '${SBCLI_CMD}' || true
+            pip uninstall -y sbctl || true
             rm -rf /usr/local/bin/sbc* || true"
           for ip in $STORAGE_PRIVATE_IPS; do
             run_remote "$ip" "set -euxo pipefail
@@ -320,6 +321,7 @@ jobs:
               docker rm -f \$(docker ps -aq) || true
               docker system prune -af || true
               pip uninstall -y '${SBCLI_CMD}' || true
+              pip uninstall -y sbctl || true
               rm -rf /usr/local/bin/sbc* || true"
             sleep 10
           done

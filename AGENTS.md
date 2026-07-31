@@ -9,9 +9,32 @@ Simplyblock Control Plane and CLI (`sbctl`) — a Kubernetes-native distributed 
 ## Build & Install
 
 ```bash
-pip install -e .                    # Editable install
-pip install -r requirements.txt     # Install dependencies
+pip install -e .                    # Editable install, with dependencies
+python -m build                     # Build the sdist and wheel
+tox run -e lock                     # Regenerate pylock.toml after a dependency change
 ```
+
+## Packaging
+
+`pyproject.toml` is the only declaration of what this distribution is and what it needs —
+there is no `setup.py` and no `requirements.txt`. Two things follow:
+
+- **`[project.dependencies]` carries ranges; `pylock.toml` carries pins.** The lock is a
+  PEP 751 file generated from those ranges and read by nothing but `docker/Dockerfile`. It is
+  compiled `--universal` so it carries wheels for both architectures the image is built for —
+  a lock resolved for one platform sends the other to `pip`'s source fallback, which has no
+  compiler. Everything else (tox, CI, `pip install -e .`)
+  installs the project and resolves the ranges per interpreter. Upstream releases do not
+  drift in: a recompile prefers the committed pins, and upgrades are opt-in
+  (`tox run -e lock -- --upgrade`).
+- **Non-`.py` runtime resources ship only if `[tool.setuptools.package-data]` lists them.**
+  `simplyblock_core/env_var`, `scripts/`, `services/`, `workers/`, the web templates and
+  static files are all there because a glob names them. Adding a new resource directory
+  means adding a glob — `tests/unit/test_packaging.py` guards the ones that already exist.
+
+The distribution name is static (`sbctl`); `python-publish.yml` rewrites it to `sbcli-dev`
+for the development channel, because PEP 621 forbids a dynamic `name`. The version stays
+dynamic and is read from `simplyblock_core/env_var`, which `release.yml` seds.
 
 ## Testing
 

@@ -159,11 +159,28 @@ jobs:
           fi
           printf 'matrix={"include":[%s]}\n' "$(IFS=,; echo "${include[*]}")" >> "$GITHUB_OUTPUT"
 
+  lock:
+    name: Dependency lock is current
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Recompile and check for drift
+        run: |
+          uv pip compile pyproject.toml --format pylock.toml --universal --python-version 3.12 -o pylock.toml
+          if ! git diff --exit-code pylock.toml; then
+            echo "::error title=Stale lock::pylock.toml does not match pyproject.toml -- run 'tox run -e lock' and commit the result"
+            exit 1
+          fi
+
   # One leg per architecture, each pushing an untagged per-arch manifest identified
   # only by its digest. `merge` turns those into the tagged manifest lists.
   build:
     name: Build
-    needs: prepare
+    needs: [prepare, lock]
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false

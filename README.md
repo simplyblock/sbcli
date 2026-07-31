@@ -19,6 +19,18 @@ The `sbctl` tooling can be installed using our pypi package [sbctl](https://pypi
 pip install --upgrade sbctl
 ```
 
+### Shell completion
+
+`sbctl` ships argcomplete-based completion, which has to be activated once per user:
+
+```bash
+activate-global-python-argcomplete --user
+```
+
+Add `source ~/.bash_completion` to your `~/.bashrc` if your shell does not already read it.
+Earlier versions did this from a post-install hook; installing a package no longer edits
+your shell configuration.
+
 ## Repository Components
 
 This repository contains the source code for the Simplyblock Control Plane core services and the command line interface

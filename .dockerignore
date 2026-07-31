@@ -38,8 +38,8 @@ docs
 docker
 docker-compose-*.yml
 
-# scratch files and notes. README.md is re-included because setup.py reads it for
-# long_description, so `pip install .` in the runtime stage fails without it.
+# scratch files and notes. README.md is re-included because pyproject.toml names
+# it as the `readme`, so `pip install .` in the runtime stage fails without it.
 *.log
 *.tmp
 *.swp

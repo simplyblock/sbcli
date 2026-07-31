@@ -74,8 +74,15 @@ jobs:
         version: ${{ github.event.release.tag_name }}
         spdk_tag: ${{ needs.get_spdk_hash.outputs.short_sha }}
 
+    # PEP 621 forbids a dynamic `name`. Console scripts are unaffected -- both
+    # names are declared unconditionally.
+    - name: Rename distribution for the development channel
+      run: |
+        sed -i 's/^name = "sbctl"/name = "sbcli-dev"/' pyproject.toml
+        grep -q '^name = "sbcli-dev"$' pyproject.toml
+
     - name: Build package
-      run: python setup.py sdist
+      run: python -m build
     - name: Publish package to pypi
       uses: pypa/gh-action-pypi-publish@release/v1
       with:
