@@ -44,6 +44,7 @@ from simplyblock_core.controllers import migration_controller, tasks_events
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_migration_group import LVolMigrationGroup
+from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCException
 from simplyblock_core.services.hub_controller_manager import hub_manager
 from simplyblock_core.services.tasks_runner_lvol_migration import (
@@ -610,9 +611,23 @@ def _all_workers_terminal(group):
 
 
 def _handle_cleanup_source_barrier(group):
-    """Return True once all workers have signalled cleanup_source_done."""
+    """Return True once all workers have signalled cleanup_source_done.
+
+    Workers that are already terminal (DONE/FAILED/CANCELLED) without having
+    signalled are counted as complete — they will never signal, so waiting for
+    them would block the orchestrator indefinitely.
+    """
     expected = {rec['migration_id'] for rec in group.members}
-    return expected.issubset(set(group.cleanup_source_done))
+    done_set = set(group.cleanup_source_done)
+    remaining = expected - done_set
+    for mid in list(remaining):
+        try:
+            m = db.get_migration_by_id(mid)
+            if not m.is_active():
+                done_set.add(mid)
+        except KeyError:
+            done_set.add(mid)
+    return expected.issubset(done_set)
 
 
 def _delete_source_subsystem(group, src_node, src_rpc, tgt_node, tgt_rpc):
@@ -661,8 +676,7 @@ def _delete_target_subsystem(group, src_node, src_rpc, tgt_node, tgt_rpc):
     nqn = group.target_nqn
 
     try:
-        member_migrations = [db.get_migration_by_id(mid) for mid in group.migration_ids]
-        _, _, overlap_ids = _build_paths(group, member_migrations, src_node, tgt_node)
+        _, _, overlap_ids = _build_paths(src_node, tgt_node, src_rpc, tgt_rpc)
     except Exception as e:
         logger.warning(
             f"Group {group.uuid[:8]}: _build_paths in _delete_target_subsystem (non-fatal): {e}")
@@ -774,52 +788,103 @@ def task_runner(task):
 
     phase = group.phase
 
-    # ── PHASE_SNAP_COPY: wait for all workers, then reconstruct tree ───────────
-    if phase == LVolMigrationGroup.PHASE_SNAP_COPY:
-        done, err = _handle_snap_copy_barrier(group, member_migrations, tgt_node, tgt_rpc)
-        if err:
-            task.function_result = err
-            task.status = JobSchedule.STATUS_SUSPENDED
-            task.write_to_db(db.kv_store)
-            logger.error(f"Group {group_id[:8]}: snap_copy barrier error: {err}")
-            return False
-        if not done:
-            task.write_to_db(db.kv_store)
-            return False
-
-        group.phase = LVolMigrationGroup.PHASE_INTERMEDIATE
-        group.write_to_db(db.kv_store)
-        logger.info(f"Group {group_id[:8]}: advanced to INTERMEDIATE")
-        task.write_to_db(db.kv_store)
-        return False
-
-    # ── PHASE_INTERMEDIATE: wait for intermediates, then batch_final_step ──────
-    if phase == LVolMigrationGroup.PHASE_INTERMEDIATE:
-        batch_ok, err = _handle_intermediate_barrier(
-            group, member_migrations, src_node, tgt_node, src_rpc, tgt_rpc)
-
-        if err:
-            task.function_result = err
-            task.status = JobSchedule.STATUS_SUSPENDED
-            task.write_to_db(db.kv_store)
-            logger.error(f"Group {group_id[:8]}: intermediate barrier error: {err}")
-            return False
-
-        if batch_ok is None:
-            # Still waiting for workers.
-            task.write_to_db(db.kv_store)
-            return False
-
-        group.batch_result = batch_ok
-        if batch_ok:
-            group.phase = LVolMigrationGroup.PHASE_CLEANUP_SOURCE
-            logger.info(
-                f"Group {group_id[:8]}: batch_final_step succeeded → CLEANUP_SOURCE")
-        else:
+    # If source or target went offline during data-transfer phases, enter
+    # CLEANUP_TARGET immediately — same fast-path as the single-lvol runner.
+    _data_transfer_phases = (LVolMigrationGroup.PHASE_SNAP_COPY,
+                             LVolMigrationGroup.PHASE_INTERMEDIATE)
+    if phase in _data_transfer_phases:
+        fresh_tgt = db.get_storage_node_by_id(group.target_node_id)
+        if fresh_tgt.status != StorageNode.STATUS_ONLINE:
+            logger.warning(
+                f"Group {group_id[:8]}: target node offline "
+                f"(status={fresh_tgt.status}) during {phase}; entering cleanup_target")
             group.phase = LVolMigrationGroup.PHASE_CLEANUP_TARGET
-            logger.error(
-                f"Group {group_id[:8]}: batch_final_step failed → CLEANUP_TARGET")
-        group.write_to_db(db.kv_store)
+            group.error_message = (
+                f"target node offline (status={fresh_tgt.status}); batch migration failed")
+            group.write_to_db(db.kv_store)
+            task.function_result = group.error_message
+            task.write_to_db(db.kv_store)
+            return False
+
+        fresh_src = db.get_storage_node_by_id(group.source_node_id)
+        if fresh_src.status not in (StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED):
+            logger.warning(
+                f"Group {group_id[:8]}: source node unavailable "
+                f"(status={fresh_src.status}) during {phase}; suspending")
+            task.retry += 1
+            if task.max_retry >= 0 and task.retry >= task.max_retry:
+                task.function_result = (
+                    f"max retry reached ({task.retry}/{task.max_retry}): "
+                    f"source node unavailable (status={fresh_src.status})")
+                task.status = JobSchedule.STATUS_DONE
+                task.write_to_db(db.kv_store)
+                return True
+            task.function_result = f"source node unavailable (status={fresh_src.status})"
+            task.status = JobSchedule.STATUS_SUSPENDED
+            task.write_to_db(db.kv_store)
+            return False
+
+    try:
+        # ── PHASE_SNAP_COPY: wait for all workers, then reconstruct tree ─────────
+        if phase == LVolMigrationGroup.PHASE_SNAP_COPY:
+            done, err = _handle_snap_copy_barrier(group, member_migrations, tgt_node, tgt_rpc)
+            if err:
+                task.function_result = err
+                task.status = JobSchedule.STATUS_SUSPENDED
+                task.write_to_db(db.kv_store)
+                logger.error(f"Group {group_id[:8]}: snap_copy barrier error: {err}")
+                return False
+            if not done:
+                task.write_to_db(db.kv_store)
+                return False
+
+            group.phase = LVolMigrationGroup.PHASE_INTERMEDIATE
+            group.write_to_db(db.kv_store)
+            logger.info(f"Group {group_id[:8]}: advanced to INTERMEDIATE")
+            task.write_to_db(db.kv_store)
+            return False
+
+        # ── PHASE_INTERMEDIATE: wait for intermediates, then batch_final_step ────
+        if phase == LVolMigrationGroup.PHASE_INTERMEDIATE:
+            batch_ok, err = _handle_intermediate_barrier(
+                group, member_migrations, src_node, tgt_node, src_rpc, tgt_rpc)
+
+            if err:
+                task.function_result = err
+                task.status = JobSchedule.STATUS_SUSPENDED
+                task.write_to_db(db.kv_store)
+                logger.error(f"Group {group_id[:8]}: intermediate barrier error: {err}")
+                return False
+
+            if batch_ok is None:
+                # Still waiting for workers.
+                task.write_to_db(db.kv_store)
+                return False
+
+            group.batch_result = batch_ok
+            if batch_ok:
+                group.phase = LVolMigrationGroup.PHASE_CLEANUP_SOURCE
+                logger.info(
+                    f"Group {group_id[:8]}: batch_final_step succeeded → CLEANUP_SOURCE")
+            else:
+                group.phase = LVolMigrationGroup.PHASE_CLEANUP_TARGET
+                logger.error(
+                    f"Group {group_id[:8]}: batch_final_step failed → CLEANUP_TARGET")
+            group.write_to_db(db.kv_store)
+            task.write_to_db(db.kv_store)
+            return False
+
+    except RPCException as exc:
+        logger.warning(f"Group {group_id[:8]}: RPC error in phase {phase}: {exc}")
+        fresh_tgt = db.get_storage_node_by_id(group.target_node_id)
+        if fresh_tgt.status != StorageNode.STATUS_ONLINE:
+            logger.warning(
+                f"Group {group_id[:8]}: target offline during {phase}; entering cleanup_target")
+            group.phase = LVolMigrationGroup.PHASE_CLEANUP_TARGET
+            group.error_message = f"target node offline during {phase}: {exc}"
+            group.write_to_db(db.kv_store)
+        task.function_result = str(exc)
+        task.status = JobSchedule.STATUS_SUSPENDED
         task.write_to_db(db.kv_store)
         return False
 
@@ -875,7 +940,7 @@ def task_runner(task):
 # Runner main loop
 # ---------------------------------------------------------------------------
 
-if __name__ == "__main__":
+def main():
     logger.info("Starting Batch Migration orchestrator task runner...")
 
     while True:
@@ -894,3 +959,7 @@ if __name__ == "__main__":
                     task_runner(task)
 
         time.sleep(3)
+
+
+if __name__ == "__main__":
+    main()
