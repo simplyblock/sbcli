@@ -262,10 +262,15 @@ jobs:
             *.cache-from=type=gha,scope=${{ matrix.arch }}
             *.cache-to=${{ env.CACHE_TO }}
 
+      # Through the environment, not `${{ }}` interpolation: bake's metadata
+      # embeds provenance, which carries the commit message. An apostrophe in a
+      # commit message closes the shell quote and the remainder is executed.
       - name: Export digest
+        env:
+          METADATA: ${{ steps.bake.outputs.metadata }}
         run: |
           set -euo pipefail
-          digest="$(jq -er '.controlplane["containerimage.digest"]' <<< '${{ steps.bake.outputs.metadata }}')"
+          digest="$(jq -er '.controlplane["containerimage.digest"]' <<< "$METADATA")"
           mkdir -p /tmp/digests
           touch "/tmp/digests/${digest#sha256:}"
 
