@@ -1,0 +1,378 @@
+name: Build images
+
+# Replaces docker-image.yml, docker-image-2.yml, docker-image-quay.yml and
+# docker-base-image.yml. Every target, tag, platform and cache setting lives in
+# docker/docker-bake.hcl, so `docker buildx bake` on a laptop produces the same
+# references this workflow pushes.
+#
+# The auxiliary images (docker-alpine-tools.yml, docker-helm-deployer.yml) keep
+# their own workflows: they share no base image, package manager, stage or cache
+# with the control plane, and are triggered manually rather than by a commit here.
+
+on:
+  push:
+    branches:
+      - '**'
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: "Platforms to build"
+        required: false
+        default: linux/amd64,linux/arm64
+        type: choice
+        options:
+          - linux/amd64,linux/arm64
+          - linux/amd64
+          - linux/arm64
+      push_to_docker:
+        description: "Push to docker.io"
+        required: false
+        default: true
+        type: boolean
+      push_to_ecr:
+        description: "Push to public.ecr.aws"
+        required: false
+        default: true
+        type: boolean
+      push_to_quay:
+        description: "Push to quay.io"
+        required: false
+        default: false
+        type: boolean
+      cache_key:
+        description: "Override CACHE_KEY to force a cold base-os rebuild (blank = the weekly bucket)"
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  # One in-flight build per ref: a newer push supersedes an older one, since they
+  # race to move the same mutable `:<branch>` tag.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Everything shared is computed once, here. That matters for more than tidiness:
+  # docker-bake.hcl derives CACHE_KEY from timestamp(), so letting each matrix leg
+  # evaluate it independently would let a run straddling a bucket boundary build its
+  # two architectures from different package sets.
+  prepare:
+    name: Prepare
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.vars.outputs.tag }}
+      short_sha: ${{ steps.vars.outputs.short_sha }}
+      vcs_ref: ${{ steps.vars.outputs.vcs_ref }}
+      cache_key: ${{ steps.vars.outputs.cache_key }}
+      registries: ${{ steps.vars.outputs.registries }}
+      matrix: ${{ steps.vars.outputs.matrix }}
+      output: ${{ steps.vars.outputs.output }}
+      cache_write: ${{ steps.vars.outputs.cache_write }}
+    env:
+      PLATFORMS_IN: ${{ inputs.platforms || 'linux/amd64,linux/arm64' }}
+      # The push_to_* inputs exist only for workflow_dispatch; every other trigger
+      # gets the historical default of docker.io + ECR Public.
+      PUSH_DOCKER: ${{ github.event_name != 'workflow_dispatch' || inputs.push_to_docker }}
+      PUSH_ECR: ${{ github.event_name != 'workflow_dispatch' || inputs.push_to_ecr }}
+      PUSH_QUAY: ${{ github.event_name == 'workflow_dispatch' && inputs.push_to_quay }}
+      CACHE_KEY_IN: ${{ inputs.cache_key || '' }}
+      CACHE_REF: simplyblock/simplyblock-buildcache
+    steps:
+      - id: vars
+        run: |
+          set -euo pipefail
+
+          # Tag: branch name with '/' flattened, or pr-<n> for a pull-request ref.
+          # Unchanged from the workflows this replaces -- e2e-docker.yml,
+          # release.yml, simplyblock_core/env_var, the Swarm compose files and the
+          # helm charts all key off these exact names.
+          if [[ "${GITHUB_REF}" == refs/pull/* ]]; then
+            ref="${GITHUB_REF#refs/pull/}"
+            tag="pr-${ref%/merge}"
+          else
+            tag="$(echo "${GITHUB_REF#refs/*/}" | sed 's|/|-|g')"
+          fi
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+
+          sha="${{ github.event.pull_request.head.sha || github.sha }}"
+          echo "short_sha=$(printf '%s' "$sha" | head -c 8)" >> "$GITHUB_OUTPUT"
+          echo "vcs_ref=${sha}" >> "$GITHUB_OUTPUT"
+
+          # Blank means "the weekly bucket that docker-bake.hcl would compute". It
+          # is resolved once here, rather than per leg, so both architectures are
+          # built from the same package set even across a bucket rollover. Keep this
+          # in step with weekstamp() in docker/docker-bake.hcl.
+          if [[ -n "${CACHE_KEY_IN}" ]]; then
+            cache_key="${CACHE_KEY_IN}"
+          else
+            cache_key="$(date -u +%Y-%m)-$(( ($(date -u +%-d) - 1) / 7 ))"
+          fi
+          echo "cache_key=${cache_key}" >> "$GITHUB_OUTPUT"
+
+          registries=()
+          [[ "${PUSH_DOCKER}" == "true" ]] && registries+=("simplyblock")
+          [[ "${PUSH_ECR}" == "true" ]] && registries+=("public.ecr.aws/simply-block")
+          [[ "${PUSH_QUAY}" == "true" ]] && registries+=("quay.io/simplyblock-io")
+          if [[ ${#registries[@]} -eq 0 ]]; then
+            echo "::error::no registry selected -- enable at least one of push_to_docker/push_to_ecr/push_to_quay"
+            exit 1
+          fi
+          registries_csv="$(IFS=,; echo "${registries[*]}")"
+          echo "registries=${registries_csv}" >> "$GITHUB_OUTPUT"
+
+          # name-canonical + push-by-digest publish the per-arch manifests without
+          # tags; the merge job assembles the tagged manifest lists from them. The
+          # quoted name= is required: without it bake parses the comma between
+          # repositories as the start of the next output key.
+          repos=()
+          for r in "${registries[@]}"; do repos+=("${r}/simplyblock"); done
+          repos_csv="$(IFS=,; echo "${repos[*]}")"
+          echo "output=type=image,\"name=${repos_csv}\",push-by-digest=true,name-canonical=true,push=true" >> "$GITHUB_OUTPUT"
+
+          # Only the default branch writes the shared cache; feature branches read
+          # it. A per-branch write would churn the cache reference for everyone
+          # else's benefit and nobody's.
+          if [[ "${GITHUB_REF}" == "refs/heads/main" ]]; then
+            echo "cache_write=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "cache_write=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          # One matrix leg per requested platform, each on a runner of that
+          # architecture. Building arm64 natively rather than under QEMU is what
+          # removes the need for a pre-baked base image; cross-compilation is not an
+          # option here because the arm64 stage has to execute dnf, rpm scriptlets
+          # and pip as arm64 code.
+          include=()
+          case ",${PLATFORMS_IN}," in
+            *,linux/amd64,*) include+=('{"platform":"linux/amd64","arch":"amd64","runner":"ubuntu-latest"}') ;;
+          esac
+          case ",${PLATFORMS_IN}," in
+            *,linux/arm64,*) include+=('{"platform":"linux/arm64","arch":"arm64","runner":"ubuntu-24.04-arm"}') ;;
+          esac
+          if [[ ${#include[@]} -eq 0 ]]; then
+            echo "::error::no platform selected"
+            exit 1
+          fi
+          printf 'matrix={"include":[%s]}\n' "$(IFS=,; echo "${include[*]}")" >> "$GITHUB_OUTPUT"
+
+  # One leg per architecture, each pushing an untagged per-arch manifest identified
+  # only by its digest. `merge` turns those into the tagged manifest lists.
+  build:
+    name: Build
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    env:
+      # Bake binds environment variables to like-named `variable` blocks in
+      # docker/docker-bake.hcl, which is why these are not passed on the command
+      # line.
+      TAG: ${{ needs.prepare.outputs.tag }}
+      SHORT_SHA: ${{ needs.prepare.outputs.short_sha }}
+      VCS_REF: ${{ needs.prepare.outputs.vcs_ref }}
+      CACHE_KEY: ${{ needs.prepare.outputs.cache_key }}
+      REGISTRIES: ${{ needs.prepare.outputs.registries }}
+      CACHE_REF: simplyblock/simplyblock-buildcache
+    steps:
+      - uses: actions/checkout@v4
+
+      # Docker Hub is also where the layer cache lives, so log in whenever we read
+      # it, not only when publishing there. Anonymous Hub pulls from shared runner
+      # IPs hit rate limits.
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: hamdysimplyblock
+          password: ${{ secrets.DOCKER_PASS }}
+
+      - name: Configure AWS credentials
+        if: contains(needs.prepare.outputs.registries, 'public.ecr.aws')
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID_HAMDI }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY_HAMDI }}
+          aws-region: us-east-1
+
+      - name: Login to ECR Public
+        if: contains(needs.prepare.outputs.registries, 'public.ecr.aws')
+        uses: aws-actions/amazon-ecr-login@v2
+        with:
+          registry-type: public
+
+      - name: Login to Quay.io
+        if: contains(needs.prepare.outputs.registries, 'quay.io')
+        uses: docker/login-action@v3
+        with:
+          registry: quay.io
+          username: ${{ secrets.QUAY_USERNAME }}
+          password: ${{ secrets.QUAY_PASSWORD }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # The cache is written per-architecture: two legs writing one registry ref
+      # would race and clobber each other. Composed here rather than in `prepare`
+      # because the arch is only known per matrix leg, and GitHub's expression
+      # syntax has no string-replace function to patch it in later.
+      - name: Resolve cache policy
+        run: |
+          set -euo pipefail
+          if [[ "${{ needs.prepare.outputs.cache_write }}" == "true" ]]; then
+            echo "CACHE_TO=type=registry,ref=${CACHE_REF}:main-${{ matrix.arch }},mode=max" >> "$GITHUB_ENV"
+          else
+            echo "CACHE_TO=" >> "$GITHUB_ENV"
+          fi
+
+      # mode=max exports the intermediate stage layers too, so base-os and
+      # python-deps are cached and not just the final image -- that is what actually
+      # replaces the published base image.
+      - name: Build and push by digest
+        id: bake
+        uses: docker/bake-action@v7
+        with:
+          files: docker/docker-bake.hcl
+          targets: controlplane
+          set: |
+            *.platform=${{ matrix.platform }}
+            *.tags=
+            *.output=${{ needs.prepare.outputs.output }}
+            *.cache-from=type=registry,ref=${{ env.CACHE_REF }}:main-${{ matrix.arch }}
+            *.cache-from=type=gha,scope=${{ matrix.arch }}
+            *.cache-to=${{ env.CACHE_TO }}
+
+      - name: Export digest
+        run: |
+          set -euo pipefail
+          digest="$(jq -er '.controlplane["containerimage.digest"]' <<< '${{ steps.bake.outputs.metadata }}')"
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # Assemble one multi-arch manifest list per tag, per registry. The tag list is
+  # read back out of docker-bake.hcl so it stays defined in exactly one place.
+  merge:
+    name: Merge manifests
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ needs.prepare.outputs.tag }}
+      SHORT_SHA: ${{ needs.prepare.outputs.short_sha }}
+      REGISTRIES: ${{ needs.prepare.outputs.registries }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: hamdysimplyblock
+          password: ${{ secrets.DOCKER_PASS }}
+
+      - name: Configure AWS credentials
+        if: contains(needs.prepare.outputs.registries, 'public.ecr.aws')
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID_HAMDI }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY_HAMDI }}
+          aws-region: us-east-1
+
+      - name: Login to ECR Public
+        if: contains(needs.prepare.outputs.registries, 'public.ecr.aws')
+        uses: aws-actions/amazon-ecr-login@v2
+        with:
+          registry-type: public
+
+      - name: Login to Quay.io
+        if: contains(needs.prepare.outputs.registries, 'quay.io')
+        uses: docker/login-action@v3
+        with:
+          registry: quay.io
+          username: ${{ secrets.QUAY_USERNAME }}
+          password: ${{ secrets.QUAY_PASSWORD }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Create manifest lists
+        run: |
+          set -euo pipefail
+
+          digests=(/tmp/digests/*)
+          if [[ ! -e "${digests[0]}" ]]; then
+            echo "::error::no digests were produced by the build legs"
+            exit 1
+          fi
+          echo "collected ${#digests[@]} per-arch digest(s)"
+
+          mapfile -t all_tags < <(docker buildx bake -f docker/docker-bake.hcl \
+                                    controlplane --print \
+                                  | jq -r '.target.controlplane.tags[]')
+          if [[ ${#all_tags[@]} -eq 0 ]]; then
+            echo "::error::docker-bake.hcl produced no tags"
+            exit 1
+          fi
+
+          # Each registry holds its own copy of the per-arch manifests, so the list
+          # is assembled per registry from that registry's own digests.
+          IFS=',' read -ra registries <<< "${REGISTRIES}"
+          for registry in "${registries[@]}"; do
+            repo="${registry}/simplyblock"
+
+            refs=()
+            for d in "${digests[@]}"; do
+              refs+=("${repo}@sha256:$(basename "$d")")
+            done
+
+            args=() names=()
+            for t in "${all_tags[@]}"; do
+              if [[ "$t" == "${repo}:"* ]]; then
+                args+=("-t" "$t")
+                names+=("$t")
+              fi
+            done
+            if [[ ${#names[@]} -eq 0 ]]; then
+              echo "::error::no tags in docker-bake.hcl matched ${repo}"
+              exit 1
+            fi
+
+            docker buildx imagetools create "${args[@]}" "${refs[@]}"
+
+            for name in "${names[@]}"; do
+              echo "::notice title=Image::${name}"
+              echo "- \`${name}\`" >> "$GITHUB_STEP_SUMMARY"
+            done
+          done
+
+      # The top risk of the push-by-digest pattern is a merge that silently drops an
+      # architecture, so assert the published lists really are multi-arch.
+      - name: Verify the manifest lists
+        run: |
+          set -euo pipefail
+          IFS=',' read -ra registries <<< "${REGISTRIES}"
+          for registry in "${registries[@]}"; do
+            ref="${registry}/simplyblock:${TAG}"
+            echo "== ${ref}"
+            platforms="$(docker buildx imagetools inspect "${ref}" --raw \
+              | jq -r '[.manifests[].platform | select(.os != "unknown") | "\(.os)/\(.architecture)"] | sort | join(",")')"
+            echo "   platforms: ${platforms}"
+            if [[ -z "${platforms}" ]]; then
+              echo "::error::${ref} is not a manifest list"
+              exit 1
+            fi
+          done

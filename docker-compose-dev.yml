@@ -1,3 +1,17 @@
+# Both application services run the same image. Declaring it once, here, means
+# `docker compose build` describes one build rather than two identical ones, and
+# gives the image an explicit name instead of a generated one.
+x-app: &app
+  image: simplyblock/simplyblock:dev
+  build:
+    context: .
+    dockerfile: docker/Dockerfile
+  environment:
+    - FLASK_DEBUG=False
+    - FLASK_ENV=production
+  depends_on:
+    - fdb-server
+
 services:
   fdb-server:
     image: foundationdb/foundationdb:7.3.63
@@ -12,28 +26,14 @@ services:
       - "fdb-logs:/var/fdb/logs"
 
   mgmt-server:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile
+    <<: *app
     command: "python3 simplyblock_web/app.py"
     volumes:
       - "fdb-config:/etc/foundationdb"
-    environment:
-      - FLASK_DEBUG=False
-      - FLASK_ENV=production
-    depends_on:
-      - fdb-server
 
   storage-node:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile
-    command: "python simplyblock_web/node_webapp.py storage_node"
-    environment:
-      - FLASK_DEBUG=False
-      - FLASK_ENV=production
-    depends_on:
-      - fdb-server
+    <<: *app
+    command: "python3 simplyblock_web/node_webapp.py storage_node"
 
 volumes:
   fdb-data:

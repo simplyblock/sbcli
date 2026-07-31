@@ -73,6 +73,12 @@ sudo docker compose -f docker-compose-dev.yml up --build -d
 
 Requires FoundationDB 7.3.3 client library installed on the host for the Python bindings.
 
+## Container Images
+
+`docker/Dockerfile` is a multi-stage build and `docker/docker-bake.hcl` is the single source of
+truth for targets, tags, platforms and cache policy — CI and local builds both go through
+`docker buildx bake`. See `docker/AGENTS.md` before editing anything under `docker/`.
+
 ## Agent Instructions Layout
 
 `AGENTS.md` is the source of truth at every level. Tool-specific files are symlinks:
@@ -90,6 +96,8 @@ simplyblock_web/AGENTS.md         ← Web API-specific instructions
 simplyblock_web/CLAUDE.md → AGENTS.md
 tests/AGENTS.md                   ← Test-suite layout, tiers, fixtures
 tests/CLAUDE.md → AGENTS.md
+docker/AGENTS.md                  ← Image build: bake, CACHE_KEY, Dockerfile constraints
+docker/CLAUDE.md → AGENTS.md
 
 .agents/skills/                    ← shared skills (source of truth)
   tox-verify.md                    ← tox verification workflow
