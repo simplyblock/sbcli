@@ -811,9 +811,16 @@ def task_runner(task):
             logger.warning(
                 f"Group {group_id[:8]}: source node unavailable "
                 f"(status={fresh_src.status}) during {phase}; suspending")
+            task.retry += 1
+            if task.max_retry >= 0 and task.retry >= task.max_retry:
+                task.function_result = (
+                    f"max retry reached ({task.retry}/{task.max_retry}): "
+                    f"source node unavailable (status={fresh_src.status})")
+                task.status = JobSchedule.STATUS_DONE
+                task.write_to_db(db.kv_store)
+                return True
             task.function_result = f"source node unavailable (status={fresh_src.status})"
             task.status = JobSchedule.STATUS_SUSPENDED
-            task.retry += 1
             task.write_to_db(db.kv_store)
             return False
 
@@ -933,7 +940,7 @@ def task_runner(task):
 # Runner main loop
 # ---------------------------------------------------------------------------
 
-if __name__ == "__main__":
+def main():
     logger.info("Starting Batch Migration orchestrator task runner...")
 
     while True:
@@ -952,3 +959,7 @@ if __name__ == "__main__":
                     task_runner(task)
 
         time.sleep(3)
+
+
+if __name__ == "__main__":
+    main()

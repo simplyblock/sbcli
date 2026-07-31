@@ -35,6 +35,7 @@ import pytest
 from simplyblock_core.models.backup import Backup
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
+from simplyblock_core.models.lvol_migration_group import LVolMigrationGroup
 from simplyblock_core.models.storage_node import StorageNode
 
 
@@ -357,6 +358,39 @@ def _spec_restart(runner, monkeypatch):
     return task
 
 
+def _spec_batch_migration(runner, monkeypatch):
+    task = _make_task(JobSchedule.FN_LVOL_BATCH_MIG, group_id="grp-1")
+    db, _cluster, _ = _wire_base(runner, monkeypatch, task)
+
+    group = MagicMock()
+    group.phase = LVolMigrationGroup.PHASE_SNAP_COPY
+    group.source_node_id = "src-1"
+    group.target_node_id = "tgt-1"
+    group.cluster_id = "cl-1"
+    group.members = [{"migration_id": "mig-1"}]
+    db.get_migration_group_by_id.return_value = group
+    # The main loop calls get_active_batch_migration_tasks, not get_job_tasks.
+    db.get_active_batch_migration_tasks.return_value = [task]
+
+    # Source is offline (retry path); target is online (not the fast-fail path).
+    src_node = MagicMock()
+    src_node.status = StorageNode.STATUS_OFFLINE
+    src_node.get_id.return_value = "src-1"
+    tgt_node = MagicMock()
+    tgt_node.status = StorageNode.STATUS_ONLINE
+    tgt_node.get_id.return_value = "tgt-1"
+
+    def _get_node(node_id):
+        if node_id == "src-1":
+            return src_node
+        return tgt_node
+
+    db.get_storage_node_by_id.side_effect = _get_node
+    # _make_rpc is imported into the runner module; stub it so no real connections.
+    monkeypatch.setattr(runner, "_make_rpc", MagicMock())
+    return task
+
+
 # name -> spec for the runners driven through their real main() loop.
 _MAIN_DRIVEN_SPECS = {
     "tasks_runner_cluster_expand.py": _spec_cluster_expand,
@@ -364,6 +398,7 @@ _MAIN_DRIVEN_SPECS = {
     "tasks_runner_replication_final.py": _spec_replication_final,
     "tasks_runner_jc_comp.py": _spec_jc_comp,
     "tasks_runner_restart.py": _spec_restart,
+    "tasks_runner_batch_migration.py": _spec_batch_migration,
 }
 
 # Retry-driven runners covered by a dedicated test elsewhere rather than the
