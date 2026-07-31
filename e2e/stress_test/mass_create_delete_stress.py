@@ -43,6 +43,7 @@ import math
 import os
 import random
 import string
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -833,9 +834,19 @@ class _MassCreateDeleteMixin:
                 self.logger.warning(
                     f"Failed to collect management details before cleanup: {exc}"
                 )
-            t0 = time.time()
-            self._phase_cleanup()
-            self._phase_durations["cleanup"] = round(time.time() - t0, 1)
+            # Skip cleanup if preserve_resources_on_failure is set and
+            # we have soft failures or an exception was raised (test failed).
+            _has_failure = bool(self._soft_failures) or sys.exc_info()[1] is not None
+            if _has_failure and getattr(self, 'preserve_resources_on_failure', False):
+                self.logger.info(
+                    "[cleanup] Skipping internal cleanup — "
+                    "preserve_resources_on_failure is set and test failed. "
+                    "Resources left for debugging."
+                )
+            else:
+                t0 = time.time()
+                self._phase_cleanup()
+                self._phase_durations["cleanup"] = round(time.time() - t0, 1)
             self._print_summary()
             self._write_monitoring_json()
 
@@ -2700,7 +2711,7 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
     DELETE_STALL_TIMEOUT = 600  # 10 min stall for delete verification (CSI serialises)
 
     # ── Max test duration ─────────────────────────────────────────────────
-    MAX_TEST_DURATION = 6 * 3600  # 6 hours hard cap for entire test
+    MAX_TEST_DURATION = 10 * 3600  # 10 hours hard cap for entire test
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -4062,12 +4073,21 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
 
     # ── Cleanup safety net ─────────────────────────────────────────────────
 
-    CLEANUP_TIMEOUT = 1800  # 30 min max for entire cleanup phase
+    CLEANUP_TIMEOUT = 3600  # 1 hour max for entire cleanup phase
 
     def _phase_cleanup(self):
         self.logger.info("=== Cleanup ===")
         cleanup_deadline = time.time() + self.CLEANUP_TIMEOUT
         ns = self.k8s_utils.namespace
+
+        def _deadline_exceeded(step_name):
+            if time.time() > cleanup_deadline:
+                self.logger.warning(
+                    f"[cleanup] Deadline exceeded at step: {step_name}, "
+                    f"skipping remaining cleanup steps"
+                )
+                return True
+            return False
 
         # 1. Delete FIO jobs
         try:
@@ -4080,37 +4100,97 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
             pass
 
         # 2. Delete clone lvols via API (with retry)
-        try:
-            self.sbcli_utils.delete_all_clones()
-        except Exception as exc:
-            self.logger.warning(f"[cleanup] delete_all_clones: {exc}")
+        if not _deadline_exceeded("delete_clones"):
+            try:
+                self.sbcli_utils.delete_all_clones()
+            except Exception as exc:
+                self.logger.warning(f"[cleanup] delete_all_clones: {exc}")
 
-        # 3. Delete VolumeSnapshots in batches with progress monitoring
-        self._cleanup_delete_volumesnapshots_batched(ns, cleanup_deadline)
+        # 3. Delete VolumeSnapshots via kubectl (primary path — fast, batched)
+        if not _deadline_exceeded("delete_volumesnapshots"):
+            self._cleanup_delete_volumesnapshots_batched(ns, cleanup_deadline)
 
-        # 4. Delete backend snapshots via API
-        try:
-            self.sbcli_utils.delete_all_snapshots()
-        except Exception as exc:
-            self.logger.warning(f"[cleanup] delete_all_snapshots: {exc}")
+        # 4. Delete backend snapshots via sbctl (only for stragglers
+        #    that kubectl couldn't reach — respects cleanup deadline)
+        if not _deadline_exceeded("delete_backend_snapshots"):
+            try:
+                self._cleanup_delete_backend_snapshots_with_deadline(
+                    cleanup_deadline
+                )
+            except Exception as exc:
+                self.logger.warning(f"[cleanup] delete_backend_snapshots: {exc}")
 
         # 5. Delete backend lvols via API
-        try:
-            self.sbcli_utils.delete_all_lvols()
-        except Exception as exc:
-            self.logger.warning(f"[cleanup] delete_all_lvols: {exc}")
+        if not _deadline_exceeded("delete_backend_lvols"):
+            try:
+                self.sbcli_utils.delete_all_lvols()
+            except Exception as exc:
+                self.logger.warning(f"[cleanup] delete_all_lvols: {exc}")
 
         # 6. Delete remaining PVCs in batches with timeout
-        self._cleanup_delete_pvcs_batched(ns, cleanup_deadline)
+        if not _deadline_exceeded("delete_pvcs"):
+            self._cleanup_delete_pvcs_batched(ns, cleanup_deadline)
 
         # 7. Delete storage pools
+        if not _deadline_exceeded("delete_storage_pools"):
+            try:
+                self.sbcli_utils.delete_all_storage_pools()
+            except Exception as exc:
+                self.logger.warning(f"[cleanup] delete_all_storage_pools: {exc}")
+
+    def _cleanup_delete_backend_snapshots_with_deadline(self, deadline):
+        """Delete backend snapshots via sbctl, respecting the cleanup deadline.
+
+        Unlike sbcli_utils.delete_all_snapshots() which loops unbounded,
+        this method stops when the deadline is reached.
+        """
         try:
-            self.sbcli_utils.delete_all_storage_pools()
+            snapshots = self.sbcli_utils.list_snapshots()
         except Exception as exc:
-            self.logger.warning(f"[cleanup] delete_all_storage_pools: {exc}")
+            self.logger.warning(
+                f"[cleanup] list backend snapshots failed: {exc}"
+            )
+            return
+
+        snap_names = list(snapshots.keys()) if isinstance(snapshots, dict) else []
+        if not snap_names:
+            self.logger.info("[cleanup] No backend snapshots to delete")
+            return
+
+        total = len(snap_names)
+        deleted = 0
+        self.logger.info(
+            f"[cleanup] Deleting {total} backend snapshots via sbctl "
+            f"(deadline in {round(deadline - time.time())}s)"
+        )
+
+        for snap_name in snap_names:
+            if time.time() > deadline:
+                self.logger.warning(
+                    f"[cleanup] Backend snapshot deletion stopped at deadline: "
+                    f"{deleted}/{total} deleted, {total - deleted} remaining"
+                )
+                return
+            try:
+                self.sbcli_utils.delete_snapshot(
+                    snap_name=snap_name, skip_error=True
+                )
+                deleted += 1
+            except Exception as exc:
+                self.logger.info(
+                    f"[cleanup] Backend snapshot delete skip: {snap_name}: {exc}"
+                )
+            if deleted % 100 == 0:
+                self.logger.info(
+                    f"[cleanup] Backend snapshot progress: {deleted}/{total}"
+                )
 
     def _cleanup_delete_volumesnapshots_batched(self, ns, deadline):
-        """Delete VolumeSnapshots in batches instead of --all to avoid hanging."""
+        """Delete VolumeSnapshots via kubectl in batches.
+
+        Uses larger batches (200) for throughput, with per-batch timeouts.
+        Falls back to ``kubectl delete --all`` if the deadline is hit.
+        """
         try:
             out, _ = self.k8s_utils._exec_kubectl(
                 f"kubectl get volumesnapshots -n {ns} --no-headers "
@@ -4128,7 +4208,7 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
 
         total = len(vs_names)
         self.logger.info(f"[cleanup] Deleting {total} volumesnapshots in batches")
-        batch_size = 50
+        batch_size = 200
         deleted = 0
 
         for i in range(0, total, batch_size):
@@ -4140,8 +4220,8 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
                 # Force-delete remaining with --all and a kubectl timeout
                 try:
                     self.k8s_utils._exec_kubectl(
-                        f"timeout 120 kubectl delete volumesnapshots --all "
-                        f"-n {ns} --timeout=60s 2>/dev/null || true"
+                        f"timeout 300 kubectl delete volumesnapshots --all "
+                        f"-n {ns} --timeout=120s 2>/dev/null || true"
                     )
                 except Exception:
                     pass
@@ -4152,7 +4232,7 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
             try:
                 self.k8s_utils._exec_kubectl(
                     f"kubectl delete volumesnapshot {names_str} -n {ns} "
-                    f"--ignore-not-found=true --timeout=120s 2>/dev/null || true",
+                    f"--ignore-not-found=true --timeout=300s 2>/dev/null || true",
                     supress_logs=True,
                 )
                 deleted += len(batch)
@@ -4162,19 +4242,20 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
                 )
                 deleted += len(batch)  # count as attempted
 
-            # Log progress with remaining snapshot count
-            try:
-                remaining_out, _ = self.k8s_utils._exec_kubectl(
-                    f"kubectl get volumesnapshots -n {ns} --no-headers 2>/dev/null | wc -l",
-                    supress_logs=True,
+            # Log progress every 4 batches (800 snapshots)
+            if (deleted // batch_size) % 4 == 0 or i + batch_size >= total:
+                try:
+                    remaining_out, _ = self.k8s_utils._exec_kubectl(
+                        f"kubectl get volumesnapshots -n {ns} --no-headers 2>/dev/null | wc -l",
+                        supress_logs=True,
+                    )
+                    remaining = int(remaining_out.strip())
+                except Exception:
+                    remaining = total - deleted
+                self.logger.info(
+                    f"[cleanup] Snapshot progress: {deleted}/{total} attempted, "
+                    f"{remaining} remaining in cluster"
                 )
-                remaining = int(remaining_out.strip())
-            except Exception:
-                remaining = total - deleted
-            self.logger.info(
-                f"[cleanup] Snapshot progress: {deleted}/{total} attempted, "
-                f"{remaining} remaining in cluster"
-            )
 
     # PVC name prefixes created by this test — only these are safe to delete.
     _TEST_PVC_PREFIXES = ("mcd-pvc-", "clone-pvc-")
