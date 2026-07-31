@@ -2890,10 +2890,16 @@ def task_runner(task):
                 task, migration, f"target node not online (status={tgt_node.status})")
 
     # --- Cluster health ---
+    # Cleanup phases are exempt: they do all deletions through LVS leadership
+    # (which routes to the secondary when the primary is down) and the DB update
+    # needs no node RPC at all.  Suspending cleanup on cluster health means a
+    # completed migration stays stuck if the source node goes through a brief
+    # STATUS_UNREADY / STATUS_IN_ACTIVATION window during recovery.
     cluster = db.get_cluster_by_id(migration.cluster_id)
     if cluster.status not in (Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED):
-        return _suspend_task(
-            task, migration, f"cluster not active (status={cluster.status})")
+        if not _is_cleanup_phase:
+            return _suspend_task(
+                task, migration, f"cluster not active (status={cluster.status})")
 
     # Expansion-first ordering: defer while a cluster expansion is open —
     # even between the expand task's retries, when the cluster status is
