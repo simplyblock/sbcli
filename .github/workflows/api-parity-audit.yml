@@ -52,4 +52,6 @@ jobs:
       MNODES: ${{ inputs.MNODES || '192.168.10.210' }}
       SBCLI_BRANCH: ${{ inputs.sbcli_branch || 'main' }}
       CUSTOM_IMAGES: ${{ inputs.CUSTOM_IMAGES || 'spdk="simplyblock/spdk:main-latest" docker="simplyblock/simplyblock:main"' }}
+      send_slack_notification: ${{ inputs.send_slack_notification || github.event_name == 'schedule' }}
+      BOOTSTRAP_MAX_SUBSYS: "40"
     secrets: inherit
