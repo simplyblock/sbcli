@@ -1,4 +1,5 @@
 name: End-to-end test docker
+run-name: "E2E Docker | ${{ github.ref_name }} | ${{ inputs.cluster || 'c141' }}${{ inputs.test_case_to_run && format(' | {0}', inputs.test_case_to_run) || '' }}"
 
 on:
   push:

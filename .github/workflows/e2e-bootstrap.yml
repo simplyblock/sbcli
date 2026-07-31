@@ -1,5 +1,5 @@
 name: Bootstrap Cluster + Run E2E Tests
-run-name: "E2E Bootstrap | ${{ inputs.SBCLI_BRANCH }} | ${{ inputs.MNODES }}"
+run-name: "E2E Bootstrap | ${{ inputs.SBCLI_BRANCH }} | ${{ inputs.MNODES }}${{ inputs.TEST_CLASS && format(' | {0}', inputs.TEST_CLASS) || '' }}"
 
 on:
   workflow_call:
@@ -166,6 +166,12 @@ on:
         description: "bootstrap: --parity-chunks-per-stripe (also npcs)"
         required: true
         default: "2"
+
+      send_slack_notification:
+        description: "Send Slack notification on completion"
+        required: false
+        default: true
+        type: boolean
       BOOTSTRAP_JOURNAL_PARTITION:
         description: "bootstrap: --journal-partition"
         required: true
