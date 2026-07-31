@@ -21,22 +21,19 @@ on:
         description: "sbcli branch / version tag to upgrade to (e.g. main)"
       STORAGE_PRIVATE_IPS:
         type: string
-        default: "192.168.10.205 192.168.10.206 192.168.10.207 192.168.10.208"
+        default: "192.168.10.201 192.168.10.202 192.168.10.203 192.168.10.204"
       API_INVOKE_URL:
         type: string
-        default: "http://192.168.10.211/"
+        default: "http://192.168.10.210/"
       BASTION_IP:
         type: string
-        default: "192.168.10.211"
+        default: "192.168.10.210"
       MNODES:
         type: string
-        default: "192.168.10.211"
-      NR_HUGEPAGES:
-        type: string
-        default: "2048"
+        default: "192.168.10.210"
       GRAFANA_ENDPOINT:
         type: string
-        default: "http://192.168.10.211/grafana"
+        default: "http://192.168.10.210/grafana"
       SSH_USER:
         type: string
         default: "root"
@@ -54,7 +51,7 @@ on:
         default: "300"
       BOOTSTRAP_DATA_CHUNKS:
         type: string
-        default: "2"
+        default: "1"
       BOOTSTRAP_PARITY_CHUNKS:
         type: string
         default: "2"
@@ -75,7 +72,17 @@ on:
         default: false
       BOOTSTRAP_ENABLE_NODE_AFFINITY:
         type: boolean
-        default: false
+        default: true
+      EXTRA_CLUSTER_ARGS:
+        type: string
+        default: ""
+      EXTRA_SN_ARGS:
+        type: string
+        default: ""
+      CLUSTER_SECURITY:
+        type: string
+        default: "backup"
+        description: "Cluster setup mode. 'backup' writes s3-backup.json and passes --use-backup to cluster create."
       TEST_CLASS:
         type: string
         default: "major_upgrade"
@@ -99,27 +106,23 @@ on:
       STORAGE_PRIVATE_IPS:
         description: "Space-separated storage node IPs (also used for cleanup)"
         required: true
-        default: "192.168.10.205 192.168.10.206 192.168.10.207 192.168.10.208"
+        default: "192.168.10.201 192.168.10.202 192.168.10.203 192.168.10.204"
       API_INVOKE_URL:
         description: "API invoke URL"
         required: true
-        default: "http://192.168.10.211/"
+        default: "http://192.168.10.210/"
       BASTION_IP:
         description: "Bastion IP"
         required: true
-        default: "192.168.10.211"
+        default: "192.168.10.210"
       MNODES:
         description: "Management node(s) IPs"
         required: true
-        default: "192.168.10.211"
-      NR_HUGEPAGES:
-        description: "Hugepages"
-        required: true
-        default: "2048"
+        default: "192.168.10.210"
       GRAFANA_ENDPOINT:
         description: "Grafana endpoint"
         required: true
-        default: "http://192.168.10.211/grafana"
+        default: "http://192.168.10.210/grafana"
       SSH_USER:
         description: "SSH user"
         required: true
@@ -141,11 +144,11 @@ on:
         required: true
         default: "300"
       BOOTSTRAP_DATA_CHUNKS:
-        description: "bootstrap: --data-chunks-per-stripe"
+        description: "bootstrap: --data-chunks-per-stripe (also ndcs)"
         required: true
-        default: "2"
+        default: "1"
       BOOTSTRAP_PARITY_CHUNKS:
-        description: "bootstrap: --parity-chunks-per-stripe"
+        description: "bootstrap: --parity-chunks-per-stripe (also npcs)"
         required: true
         default: "2"
       BOOTSTRAP_JOURNAL_PARTITION:
@@ -161,19 +164,39 @@ on:
         required: true
         default: "ha"
       BOOTSTRAP_DATA_NIC:
-        description: "bootstrap: --data-nics"
+        description: "bootstrap: --data-nics (network interface for data traffic)"
         required: true
         default: "eth1"
       BOOTSTRAP_IS_SINGLE_NODE:
-        description: "Bootstrap: deploy as single-node"
+        description: "Bootstrap: deploy as single-node (--is-single-node)"
         type: boolean
         required: false
         default: false
       BOOTSTRAP_ENABLE_NODE_AFFINITY:
-        description: "Bootstrap: enable node affinity"
+        description: "Bootstrap: enable node affinity (--enable-node-affinity)"
         type: boolean
         required: false
-        default: false
+        default: true
+      EXTRA_CLUSTER_ARGS:
+        description: |
+          Additional arguments to pass to cluster create command (optional)
+          Example: --log-del-interval 10 --cap-warn 80
+        required: false
+        type: string
+      EXTRA_SN_ARGS:
+        description: |
+          Additional arguments to pass to storage-node add-node command (optional)
+          Example: --spdk-debug --enable-test-device
+        required: false
+        type: string
+      CLUSTER_SECURITY:
+        description: "Cluster setup mode. 'backup' writes s3-backup.json and passes --use-backup to cluster create."
+        required: false
+        type: choice
+        default: "backup"
+        options:
+          - none
+          - backup
       TEST_CLASS:
         description: "Upgrade test class name (--testname); leave empty to run all upgrade tests"
         required: false
@@ -198,14 +221,14 @@ jobs:
       CUSTOM_IMAGES:       ${{ inputs.CUSTOM_IMAGES || 'base_spdk="" target_spdk="" base_docker="" target_docker=""' }}
 
       # Cluster/lab env
-      STORAGE_PRIVATE_IPS:     ${{ inputs.STORAGE_PRIVATE_IPS || '192.168.10.205 192.168.10.206 192.168.10.207 192.168.10.208' }}
-      API_INVOKE_URL:   ${{ inputs.API_INVOKE_URL || 'http://192.168.10.211/' }}
-      API_BASE_URL:     ${{ inputs.API_INVOKE_URL || 'http://192.168.10.211/' }}
-      BASTION_IP:       ${{ inputs.BASTION_IP || '192.168.10.211' }}
-      BASTION_SERVER:   ${{ inputs.BASTION_IP || '192.168.10.211' }}
-      MNODES:           ${{ inputs.MNODES || '192.168.10.211' }}
-      NR_HUGEPAGES:     ${{ inputs.NR_HUGEPAGES || '2048' }}
-      GRAFANA_ENDPOINT: ${{ inputs.GRAFANA_ENDPOINT || 'http://192.168.10.211/grafana' }}
+      STORAGE_PRIVATE_IPS:     ${{ inputs.STORAGE_PRIVATE_IPS || '192.168.10.201 192.168.10.202 192.168.10.203 192.168.10.204' }}
+      API_INVOKE_URL:   ${{ inputs.API_INVOKE_URL || 'http://192.168.10.210/' }}
+      API_BASE_URL:     ${{ inputs.API_INVOKE_URL || 'http://192.168.10.210/' }}
+      BASTION_IP:       ${{ inputs.BASTION_IP || '192.168.10.210' }}
+      BASTION_SERVER:   ${{ inputs.BASTION_IP || '192.168.10.210' }}
+      MNODES:           ${{ inputs.MNODES || '192.168.10.210' }}
+      NR_HUGEPAGES:     '2048'
+      GRAFANA_ENDPOINT: ${{ inputs.GRAFANA_ENDPOINT || 'http://192.168.10.210/grafana' }}
       SBCLI_CMD:        sbctl
 
       # SSH/client env
@@ -219,12 +242,15 @@ jobs:
 
       # Bootstrap params
       BOOTSTRAP_MAX_SUBSYS:          ${{ inputs.BOOTSTRAP_MAX_SUBSYS || '300' }}
-      BOOTSTRAP_DATA_CHUNKS:       ${{ inputs.BOOTSTRAP_DATA_CHUNKS || '2' }}
+      BOOTSTRAP_DATA_CHUNKS:       ${{ inputs.BOOTSTRAP_DATA_CHUNKS || '1' }}
       BOOTSTRAP_PARITY_CHUNKS:     ${{ inputs.BOOTSTRAP_PARITY_CHUNKS || '2' }}
       BOOTSTRAP_JOURNAL_PARTITION: ${{ inputs.BOOTSTRAP_JOURNAL_PARTITION || '1' }}
       BOOTSTRAP_HA_JM_COUNT:       ${{ inputs.BOOTSTRAP_HA_JM_COUNT || '4' }}
       BOOTSTRAP_HA_TYPE:           ${{ inputs.BOOTSTRAP_HA_TYPE || 'ha' }}
       BOOTSTRAP_DATA_NIC:          ${{ inputs.BOOTSTRAP_DATA_NIC || 'eth1' }}
+      EXTRA_CLUSTER_ARGS: ${{ inputs.EXTRA_CLUSTER_ARGS || '' }}
+      EXTRA_SN_ARGS: ${{ inputs.EXTRA_SN_ARGS || '' }}
+      CLUSTER_SECURITY: ${{ inputs.CLUSTER_SECURITY || 'backup' }}
 
       TEST_CLASS: ${{ inputs.TEST_CLASS || 'major_upgrade' }}
 
@@ -549,6 +575,27 @@ jobs:
           git clone https://github.com/simplyblock-io/simplyBlockDeploy.git simplyBlockDeploy
           test -f simplyBlockDeploy/bare-metal/bootstrap-cluster.sh
 
+      - name: Write cluster security/backup config to mgmt node
+        shell: bash
+        run: |
+          set -euxo pipefail
+          if [[ "${CLUSTER_SECURITY:-none}" == "none" || -z "${CLUSTER_SECURITY:-}" ]]; then
+            echo "CLUSTER_SECURITY=none; skipping."
+            exit 0
+          fi
+          mgmt_ip="$(echo "${MNODES}" | awk '{print $1}')"
+          if [[ "${CLUSTER_SECURITY}" == "backup" ]]; then
+            echo "Writing /root/s3-backup.json to ${mgmt_ip}..."
+            S3_BACKUP_JSON='{"access_key_id":"minioadmin","secret_access_key":"minioadmin","local_endpoint":"http://192.168.10.164:9000","snapshot_backups":true,"with_compression":false,"secondary_target":0,"local_testing":true}'
+            sshpass -p "${SSH_PASSWORD}" ssh \
+              -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              "${SSH_USER}@${mgmt_ip}" \
+              "echo '${S3_BACKUP_JSON}' > /root/s3-backup.json && echo 'Written:' && cat /root/s3-backup.json"
+            echo "EXTRA_CLUSTER_ARGS=${EXTRA_CLUSTER_ARGS} --use-backup /root/s3-backup.json" >> "$GITHUB_ENV"
+            echo "Appended --use-backup /root/s3-backup.json to EXTRA_CLUSTER_ARGS"
+          fi
+
       - name: Bootstrap cluster (BASE_SBCLI_BRANCH=${{ inputs.BASE_SBCLI_BRANCH }})
         shell: bash
         run: |
@@ -568,6 +615,31 @@ jobs:
             extra_args+=( --enable-node-affinity true )
           fi
 
+          # Parse overrides from EXTRA_SN_ARGS
+          if [[ -n "${EXTRA_SN_ARGS:-}" ]]; then
+            if nr_val=$(printf '%s' "${EXTRA_SN_ARGS}" | grep -oP '(?<=--nr-hugepages )\S+' | head -1) && [[ -n "${nr_val}" ]]; then
+              echo "Overriding NR_HUGEPAGES from ${NR_HUGEPAGES} to ${nr_val} (from EXTRA_SN_ARGS)"
+              echo "NR_HUGEPAGES=${nr_val}" >> "$GITHUB_ENV"
+              NR_HUGEPAGES="${nr_val}"
+            fi
+          fi
+
+          # Parse overrides from EXTRA_CLUSTER_ARGS
+          HA_TYPE="${BOOTSTRAP_HA_TYPE}"
+          if [[ -n "${EXTRA_CLUSTER_ARGS:-}" ]]; then
+            if ha_val=$(printf '%s' "${EXTRA_CLUSTER_ARGS}" | grep -oP '(?<=--ha-type )\S+' | head -1) && [[ -n "${ha_val}" ]]; then
+              echo "Overriding HA_TYPE from ${HA_TYPE} to ${ha_val} (from EXTRA_CLUSTER_ARGS)"
+              HA_TYPE="${ha_val}"
+            fi
+          fi
+
+          if [[ -n "${EXTRA_CLUSTER_ARGS:-}" ]]; then
+            extra_args+=( --extra-cluster-args "${EXTRA_CLUSTER_ARGS}" )
+          fi
+          if [[ -n "${EXTRA_SN_ARGS:-}" ]]; then
+            extra_args+=( --extra-sn-args "${EXTRA_SN_ARGS}" )
+          fi
+
           set +e
           ./bootstrap-cluster.sh \
             --sbcli-cmd "${SBCLI_CMD}" \
@@ -576,7 +648,7 @@ jobs:
             --parity-chunks-per-stripe "${BOOTSTRAP_PARITY_CHUNKS}" \
             --journal-partition "${BOOTSTRAP_JOURNAL_PARTITION}" \
             --ha-jm-count "${BOOTSTRAP_HA_JM_COUNT}" \
-            --ha-type "${BOOTSTRAP_HA_TYPE}" \
+            --ha-type "${HA_TYPE}" \
             --data-nics "${BOOTSTRAP_DATA_NIC}" \
             "${extra_args[@]}" | tee bootstrap.log
           rc=${PIPESTATUS[0]}
