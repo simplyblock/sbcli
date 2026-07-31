@@ -1,29 +1,55 @@
-# Ignore build and dependency directories
-dist
+# docker/Dockerfile does `COPY . /app`, so anything not excluded here ships inside
+# the image. This is deliberately not derived from .gitignore: the tool caches
+# below are untracked *and* large (.tox alone is ~2.4 GB locally), and they were
+# previously copied into every locally built image.
+
+# VCS, CI and agent tooling
+.git
+.github
+.agents
+.claude
+.idea
+.vscode
+
+# virtualenvs and tool caches
+.tox
+.venv
+venv
+**/.venv
+.mypy_cache
+.ruff_cache
+.pytest_cache
+**/__pycache__
+**/*.py[cod]
+
+# build outputs
 build
+dist
+**/*.egg-info
 sbcli*
 
-# Ignore logs
+# not shipped in the runtime image
+tests
+e2e
+docs
+
+# container definitions. The Dockerfile is read from the host by the builder
+# rather than from the context, so excluding this directory is safe.
+docker
+docker-compose-*.yml
+
+# scratch files and notes. README.md is re-included because setup.py reads it for
+# long_description, so `pip install .` in the runtime stage fails without it.
 *.log
-
-# Ignore environment files
-.env
-.env.*
-
-# Ignore Docker-related files
-Dockerfile
-docker-compose.yml
-
-# Ignore temporary files
 *.tmp
 *.swp
 *.bak
+*.md
+!README.md
+cluster_metadata.json
 
-# Ignore OS-specific files
+# environment and OS junk
+.env
+.env.*
 .DS_Store
 Thumbs.db
-
-# git folder
-.git
-
-# Ignore generated sbcli files
