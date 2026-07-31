@@ -12,7 +12,9 @@ license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "simplyblock", email = "developers@simplyblock.io" }]
 dependencies = [
-    "foundationdb==7.3.63",
+    # Any 7.3.x serves the API version db_controller.py requests
+    # (constants.KVD_DB_VERSION = 730); 7.4 would not.
+    "foundationdb~=7.3.63",
     "hvac",
     "requests",
     "prettytable>=3.10.0",
@@ -22,10 +24,13 @@ dependencies = [
     "pytest",
     "mock",
     "flask",
-    "kubernetes==35.0.0",
+    # 36.0.0 sends no Authorization header in-cluster: load_incluster_config()
+    # and the generated client disagreed on the api_key name. Fixed in 36.0.1
+    # (kubernetes-client/python#2595).
+    "kubernetes>=35,!=36.0.0",
     "PyYAML",
     "urllib3",
-    "graypy==2.1.0",
+    "graypy",
     "boto3",
     "jinja2",
     "argcomplete",

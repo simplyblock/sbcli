@@ -73,6 +73,11 @@ Force a cold rebuild with `CACHE_KEY=$(date +%s) docker buildx bake ...`, or by 
   why the bootstrap pins `pip==` and asserts support with a `grep` rather than letting a
   `CACHE_KEY` rollover move the reader unnoticed. The application itself is a second,
   `--no-deps` install: a local directory has no hash and cannot appear in a lock.
+- **`FDB_VERSION` and the `foundationdb` binding must share a series.** The series fixes the
+  API version `db_controller.py` requests (`KVD_DB_VERSION = 730`), so 7.3.63 bindings on a
+  7.3.69 client library are fine and 7.4 anything is not. `python-deps` asserts it at build
+  time; the FoundationDB server in the compose files and `tests/integration/conftest.py`
+  tracks the same series and cannot be checked here.
 - **No `RUN --mount=type=cache`.** Cache mounts are not exported to the `gha` or `registry`
   cache backends, so on a fresh CI runner they are never populated.
 - Per-arch logic uses `TARGETARCH` (not `TARGETPLATFORM`, which misses variants like

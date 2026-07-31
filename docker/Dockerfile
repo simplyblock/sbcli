@@ -172,7 +172,19 @@ COPY pylock.toml ./
 # loudly with `Cannot uninstall <pkg>: no RECORD file was found` -- which is the
 # signal to add it to the removal in base-os, rather than silently shadowing it and
 # leaving the stale version visible to the security scanners.
-RUN python3 -m pip install -r pylock.toml
+#
+# The series determines the API version db_controller.py requests, so the binding
+# and the client library RPM must share it. Patch numbers may differ, and do.
+ARG FDB_VERSION
+RUN set -eux; \
+    python3 -m pip install -r pylock.toml; \
+    binding="$(python3 -c 'import importlib.metadata as m; print(m.version("foundationdb"))')"; \
+    if [ "${binding%.*}" != "${FDB_VERSION%.*}" ]; then \
+      echo "foundationdb binding ${binding} and client library ${FDB_VERSION} are different series." >&2; \
+      echo "Bump [project.dependencies] in pyproject.toml and re-run 'tox run -e lock', or move" >&2; \
+      echo "FDB_VERSION back. The server (compose files, tests/integration/conftest.py) tracks it too." >&2; \
+      exit 1; \
+    fi
 
 
 FROM python-deps AS runtime
