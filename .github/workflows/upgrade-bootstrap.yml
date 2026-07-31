@@ -254,6 +254,10 @@ jobs:
 
       TEST_CLASS: ${{ inputs.TEST_CLASS || 'major_upgrade' }}
 
+      # Target images (overridden by CUSTOM_IMAGES target_spdk/target_docker)
+      TARGET_SPDK_IMAGE:   'simplyblock/spdk:main-latest'
+      TARGET_DOCKER_IMAGE: 'public.ecr.aws/simply-block/simplyblock:main-latest'
+
       # Secrets
       SSH_PASSWORD:      ${{ secrets.SSH_PASSWORD }}
       SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
