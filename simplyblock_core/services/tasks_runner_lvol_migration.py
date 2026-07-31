@@ -2781,10 +2781,13 @@ def _budget_suspend(task, migration, migration_id, error_msg):
             f"({migration.max_retries}); entering cleanup_target"
         )
         task.retry += 1
+        task.status = JobSchedule.STATUS_SUSPENDED
         migration.phase = LVolMigration.PHASE_CLEANUP_TARGET
         migration.current_job_id = ""
-        migration.write_to_db(db.kv_store)
+        # Write task first so the runner can always re-enter and attempt cleanup,
+        # even if the migration write below fails.
         task.write_to_db(db.kv_store)
+        migration.write_to_db(db.kv_store)
         migration_events.migration_phase_changed(migration)
         return False
     return _suspend_task(task, migration, error_msg)
@@ -2859,26 +2862,6 @@ def task_runner(task):
         LVolMigration.PHASE_CLEANUP_TARGET, LVolMigration.PHASE_CLEANUP_SOURCE)
     if not _is_cleanup_phase:
         if src_node.status not in (StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED):
-            if migration.phase in (LVolMigration.PHASE_SNAP_COPY,
-                                   LVolMigration.PHASE_LVOL_MIGRATE):
-                # Source offline during data-transfer: migration cannot continue.
-                # Enter cleanup_target immediately — same fast-path as when the
-                # target goes offline (see below).  Burning retries here is wrong
-                # because snap_copy / lvol_migrate require the source to be alive;
-                # waiting for it to come back doesn't help.
-                logger.warning(
-                    f"Migration {migration_id}: source node offline "
-                    f"(status={src_node.status}) during {migration.phase}; "
-                    f"entering cleanup_target immediately")
-                migration.error_message = (
-                    f"source node offline (status={src_node.status}); migration failed")
-                migration.phase = LVolMigration.PHASE_CLEANUP_TARGET
-                migration.current_job_id = ""
-                migration.write_to_db(db.kv_store)
-                task.function_result = migration.error_message
-                task.write_to_db(db.kv_store)
-                migration_events.migration_phase_changed(migration)
-                return False
             return _budget_suspend(
                 task, migration, migration_id,
                 f"source node not online (status={src_node.status})")
