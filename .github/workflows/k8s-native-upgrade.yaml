@@ -60,9 +60,9 @@ on:
 
       # ── R25-to-R2x config (only used when upgrade_type = r25-to-r2x) ──
       r25_base_config:
-        description: 'R25 base config: sbcli_branch=p2p-migration,csi_ref=v0.2.4,csi_tag=v0.2.4,sn_tag=v0.1.8'
+        description: 'R25 base config: sbcli_branch=remove_snode_init_container,csi_ref=v0.2.4,csi_tag=v0.2.4,sn_tag=v0.1.8'
         required: false
-        default: 'sbcli_branch=p2p-migration,csi_ref=v0.2.4,csi_tag=v0.2.4,sn_tag=v0.1.8'
+        default: 'sbcli_branch=remove_snode_init_container,csi_ref=v0.2.4,csi_tag=v0.2.4,sn_tag=v0.1.8'
 
       # ── Cluster config ──
       worker_nodes:
@@ -166,8 +166,8 @@ jobs:
           echo "TARGET_HELM_BRANCH=${TARGET_HELM}" >> "$GITHUB_ENV"
 
           # Parse r25_base_config (format: "sbcli_branch=X,csi_ref=Y,csi_tag=Z,sn_tag=W")
-          R25_CFG="${{ github.event.inputs.r25_base_config || 'sbcli_branch=p2p-migration,csi_ref=v0.2.4,csi_tag=v0.2.4,sn_tag=v0.1.8' }}"
-          R25_SBCLI_BRANCH=$(echo "$R25_CFG" | grep -oP 'sbcli_branch=\K[^,]+' || echo 'p2p-migration')
+          R25_CFG="${{ github.event.inputs.r25_base_config || 'sbcli_branch=remove_snode_init_container,csi_ref=v0.2.4,csi_tag=v0.2.4,sn_tag=v0.1.8' }}"
+          R25_SBCLI_BRANCH=$(echo "$R25_CFG" | grep -oP 'sbcli_branch=\K[^,]+' || echo 'remove_snode_init_container')
           R25_CSI_REF=$(echo "$R25_CFG" | grep -oP 'csi_ref=\K[^,]+' || echo 'v0.2.4')
           R25_CSI_TAG=$(echo "$R25_CFG" | grep -oP 'csi_tag=\K[^,]+' || echo 'v0.2.4')
           R25_SN_TAG=$(echo "$R25_CFG" | grep -oP 'sn_tag=\K[^,]+' || echo 'v0.1.8')
@@ -552,7 +552,7 @@ jobs:
 
       # ── CSI-based bootstrap (r25-to-r2x upgrade, R25 base) ──
       # R25 uses two separate Helm charts:
-      #   1. sbcli chart (from sbcli repo p2p-migration branch) — control plane
+      #   1. sbcli chart (from sbcli repo remove_snode_init_container branch) — control plane
       #   2. spdk-csi chart (from simplyblock-operator mono-repo csi-driver/) — storage nodes + CSI driver
 
       - name: Install sbcli control plane chart (R25)
