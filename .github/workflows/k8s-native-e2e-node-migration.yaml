@@ -16,22 +16,22 @@ on:
         default: 'main'
       simplyblock_repository:
         type: string
-        default: 'docker.io/simplyblock/simplyblock'
+        default: 'public.ecr.aws/simply-block/simplyblock'
       operator_repository:
         type: string
-        default: 'docker.io/simplyblock/simplyblock-operator'
+        default: 'simplyblock/simplyblock-operator'
       operator_tag:
         type: string
         default: 'main'
       csi_repository:
         type: string
-        default: 'docker.io/simplyblock/spdkcsi'
+        default: 'simplyblock/spdkcsi'
       csi_tag:
         type: string
         default: 'latest'
       spdk_image:
         type: string
-        default: 'docker.io/simplyblock/spdk:main-latest'
+        default: 'simplyblock/spdk:main-latest'
       worker_nodes:
         type: string
         required: true
@@ -98,11 +98,11 @@ on:
       simplyblock_repository:
         description: 'Simplyblock image repository'
         required: false
-        default: 'docker.io/simplyblock/simplyblock'
+        default: 'public.ecr.aws/simply-block/simplyblock'
       operator_repository:
         description: 'Operator image repository'
         required: false
-        default: 'docker.io/simplyblock/simplyblock-operator'
+        default: 'simplyblock/simplyblock-operator'
       operator_tag:
         description: 'Operator image tag'
         required: false
@@ -110,7 +110,7 @@ on:
       csi_repository:
         description: 'CSI driver image repository (leave empty for chart default)'
         required: false
-        default: 'docker.io/simplyblock/spdkcsi'
+        default: 'simplyblock/spdkcsi'
       csi_tag:
         description: 'CSI driver image tag (leave empty for chart default)'
         required: false
@@ -118,7 +118,7 @@ on:
       spdk_image:
         description: 'SPDK container image'
         required: true
-        default: 'docker.io/simplyblock/spdk:main-latest'
+        default: 'simplyblock/spdk:main-latest'
       worker_nodes:
         description: 'Comma-separated K8s worker node names for the cluster'
         required: true
@@ -592,9 +592,9 @@ jobs:
             --set operator.enabled=true \
             --set controlplane.csiHostpathDriver.enabled=true \
             --set controlplane.storageclass.name=local-hostpath \
-            --set image.simplyblock.repository="${{ inputs.simplyblock_repository || 'docker.io/simplyblock/simplyblock' }}" \
+            --set image.simplyblock.repository="${{ inputs.simplyblock_repository || 'public.ecr.aws/simply-block/simplyblock' }}" \
             --set image.simplyblock.tag="${{ inputs.simplyblock_image }}" \
-            --set image.operator.repository="${{ inputs.operator_repository || 'docker.io/simplyblock/simplyblock-operator' }}" \
+            --set image.operator.repository="${{ inputs.operator_repository || 'simplyblock/simplyblock-operator' }}" \
             --set image.operator.tag="${{ inputs.operator_tag || 'main' }}" \
             --set csiConfig.simplybk.ip="http://simplyblock-webappapi.simplyblock:5000" \
             --set prometheus.server.persistentVolume.storageClass=local-hostpath \
@@ -762,7 +762,7 @@ jobs:
           MGMT_IFC="${IFC_NAMES%%:*}"
           DATA_NICS="${IFC_NAMES#*:}"
           MAX_LVOL="${{ inputs.max_lvol || '30' }}"
-          SB_REPO="${{ inputs.simplyblock_repository || 'docker.io/simplyblock/simplyblock' }}"
+          SB_REPO="${{ inputs.simplyblock_repository || 'public.ecr.aws/simply-block/simplyblock' }}"
           SB_TAG="${{ inputs.simplyblock_image }}"
           SPDK_IMAGE="${{ inputs.spdk_image }}"
           PARTITIONS="${PARTITIONS:-0}"

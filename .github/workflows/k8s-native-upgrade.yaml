@@ -21,7 +21,7 @@ on:
       base_spdk_image:
         description: 'Base SPDK container image (for initial deployment)'
         required: true
-        default: 'docker.io/simplyblock/spdk:main-latest'
+        default: 'simplyblock/spdk:main-latest'
 
       # ── Target version (upgrade destination) ──
       target_simplyblock_image:
@@ -49,11 +49,11 @@ on:
       simplyblock_repository:
         description: 'Simplyblock image repository'
         required: false
-        default: 'docker.io/simplyblock/simplyblock'
+        default: 'public.ecr.aws/simply-block/simplyblock'
       operator_repository:
         description: 'Operator image repository'
         required: false
-        default: 'docker.io/simplyblock/simplyblock-operator'
+        default: 'simplyblock/simplyblock-operator'
       csi_image:
         description: 'CSI driver image (repo,tag — leave empty for chart default)'
         required: false
@@ -319,9 +319,9 @@ jobs:
             --set operator.enabled=true \
             --set controlplane.csiHostpathDriver.enabled=true \
             --set controlplane.storageclass.name=local-hostpath \
-            --set image.simplyblock.repository="${{ github.event.inputs.simplyblock_repository || 'docker.io/simplyblock/simplyblock' }}" \
+            --set image.simplyblock.repository="${{ github.event.inputs.simplyblock_repository || 'public.ecr.aws/simply-block/simplyblock' }}" \
             --set image.simplyblock.tag="${{ github.event.inputs.base_simplyblock_image }}" \
-            --set image.operator.repository="${{ github.event.inputs.operator_repository || 'docker.io/simplyblock/simplyblock-operator' }}" \
+            --set image.operator.repository="${{ github.event.inputs.operator_repository || 'simplyblock/simplyblock-operator' }}" \
             --set image.operator.tag="${{ github.event.inputs.base_simplyblock_image }}" \
             --set csiConfig.simplybk.ip="http://simplyblock-webappapi.simplyblock:5000" \
             --set prometheus.server.persistentVolume.storageClass=local-hostpath \
@@ -362,7 +362,7 @@ jobs:
         if: ${{ github.event.inputs.use_existing_cluster != 'true' && github.event.inputs.upgrade_type != 'r25-to-r2x' }}
         run: |
           NAMESPACE=simplyblock
-          SB_REPO="${{ github.event.inputs.simplyblock_repository || 'docker.io/simplyblock/simplyblock' }}"
+          SB_REPO="${{ github.event.inputs.simplyblock_repository || 'public.ecr.aws/simply-block/simplyblock' }}"
           SB_TAG="${{ github.event.inputs.base_simplyblock_image }}"
           SPDK_IMAGE="${{ github.event.inputs.base_spdk_image }}"
           MAX_LVOL="${MAX_LVOL:-30}"
@@ -952,8 +952,8 @@ jobs:
           TARGET_SPDK_IMAGE: ${{ github.event.inputs.target_spdk_image }}
           TARGET_SPDK_PROXY_IMAGE: ${{ github.event.inputs.target_spdk_proxy_image }}
           OPERATOR_TAG: ${{ github.event.inputs.operator_tag }}
-          SIMPLYBLOCK_REPO: ${{ github.event.inputs.simplyblock_repository || 'docker.io/simplyblock/simplyblock' }}
-          OPERATOR_REPO: ${{ github.event.inputs.operator_repository || 'docker.io/simplyblock/simplyblock-operator' }}
+          SIMPLYBLOCK_REPO: ${{ github.event.inputs.simplyblock_repository || 'public.ecr.aws/simply-block/simplyblock' }}
+          OPERATOR_REPO: ${{ github.event.inputs.operator_repository || 'simplyblock/simplyblock-operator' }}
           TLS_ENABLED: ${{ github.event.inputs.tls_enabled }}
           CSI_REPOSITORY: ${{ env.CSI_REPOSITORY }}
           CSI_TAG: ${{ env.CSI_TAG }}
