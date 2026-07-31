@@ -929,6 +929,7 @@ jobs:
           export CSI_REPOSITORY="${CSI_REPOSITORY}"
           export CSI_TAG="${CSI_TAG}"
           export WORKER_NODES="${WORKER_NODES}"
+          export HELM_RELEASE_SBCLI="${HELM_RELEASE_SBCLI}"
 
           TESTNAME_ARG=""
           if [ -n "${TESTNAME}" ]; then
@@ -958,6 +959,7 @@ jobs:
           CSI_TAG: ${{ env.CSI_TAG }}
           WORKER_NODES: ${{ github.event.inputs.worker_nodes }}
           TESTNAME: ${{ github.event.inputs.testname || 'K8sNativeMajorUpgrade' }}
+          HELM_RELEASE_SBCLI: ${{ github.event.inputs.upgrade_type == 'r25-to-r2x' && 'sbcli' || '' }}
           NDCS: ${{ env.NDCS }}
           NPCS: ${{ env.NPCS }}
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}

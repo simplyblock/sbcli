@@ -495,6 +495,16 @@ for snode in db_controller.get_storage_nodes():
             snode.pollers_mask = utils.generate_mask(snode.poller_cpu_cores)
 
     snode.write_to_db()
+
+print("Creating mini lvol objects")
+for lvol in db_controller.get_all_lvols():
+    lvol.write_to_db()
+
+print("Creating mini Snapshots objects")
+for snap in db_controller.get_snapshots():
+    snap.write_to_db()
+
+print("done")
 """
 
     def _run_r25_to_r26_migration(self, node: str):
@@ -515,12 +525,22 @@ for snode in db_controller.get_storage_nodes():
         self.logger.info(f"[{node}] R25->R26 DB migration complete")
 
     def _is_r25_to_r26_upgrade(self) -> bool:
-        """Check if this is an R25.x -> R26.x upgrade based on version strings."""
-        if not self.base_version or not self.target_version:
+        """Check if this is an R25.x -> R26+ upgrade based on version strings.
+
+        Triggers when the base version starts with 'r25' and the target is
+        anything other than R25 (e.g. 'main', 'R26.x', 'R26.2.8', etc.).
+        """
+        if not self.base_version:
             return False
         base_lower = self.base_version.lower()
-        target_lower = self.target_version.lower()
-        return base_lower.startswith("r25") and target_lower.startswith("r26")
+        if not base_lower.startswith("r25"):
+            return False
+        # Target is also R25 → minor hotfix, no migration needed
+        if self.target_version:
+            target_lower = self.target_version.lower()
+            if target_lower.startswith("r25"):
+                return False
+        return True
 
     def _update_node_env(self, node: str):
         """
