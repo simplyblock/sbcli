@@ -4263,9 +4263,14 @@ class TestBackupPolicyVersionsOne(BackupTestBase):
         # TC-BCK-157: verify only 1 backup retained
         # Phase 1: wait until we see at least one 'merging' or 'merged' entry
         #          (confirms the retention pruner has started working).
+        #          In K8s mode the StorageBackup CRD phase never becomes
+        #          "merging"/"merged" — merges happen via internal tasks and
+        #          the CRD is deleted once done.  So we also detect pruning
+        #          activity by watching the backup count decrease.
         # Phase 2: wait until no 'merging'/'merged' entries remain for this
         #          lvol, then assert ≤ 1 active backup.
         _MERGING_STATUSES = {"merging", "merged"}
+        initial_count = None
         self.logger.info("TC-BCK-157: Phase 1 — waiting for merging to start …")
         phase1_deadline = time.time() + 300  # up to 5 min for pruner to kick in
         saw_merging = False
@@ -4275,14 +4280,18 @@ class TestBackupPolicyVersionsOne(BackupTestBase):
                 b for b in backups
                 if any(lvol_name in str(v) or lvol_id in str(v) for v in b.values())
             ]
+            if initial_count is None:
+                initial_count = len(lvol_all)
             merging_entries = [
                 b for b in lvol_all
                 if str(b.get("Status") or b.get("status") or "").lower() in _MERGING_STATUSES
             ]
-            if merging_entries:
+            # Detect merging by status field (Docker) or count decrease (K8s)
+            if merging_entries or len(lvol_all) < initial_count:
                 self.logger.info(
-                    f"TC-BCK-157: Detected {len(merging_entries)} merging/merged "
-                    f"entry(ies) — pruning has started")
+                    f"TC-BCK-157: Detected pruning activity — "
+                    f"{len(merging_entries)} merging/merged, "
+                    f"count {len(lvol_all)}/{initial_count}")
                 saw_merging = True
                 break
             self.logger.info(f"TC-BCK-157: No merging yet, {len(lvol_all)} backups total")

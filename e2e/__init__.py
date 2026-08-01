@@ -292,6 +292,7 @@ from stress_test.continuous_backup_stress import (
 
 
 from load_tests.lvol_outage_load import TestLvolOutageLoadTest
+from e2e_tests.test_api_parity_audit import TestAPIParityAudit
 
 
 ALL_TESTS = [
@@ -517,6 +518,8 @@ ALL_TESTS = [
     TestPoolHostManagement,
     TestLvolPlacement,
     TestNodeShutdownRestart,
+    # API parity audit
+    TestAPIParityAudit,
 ]
 
 def get_all_tests(custom=True, ha_test=False):
