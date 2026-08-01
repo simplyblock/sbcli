@@ -930,6 +930,22 @@ jobs:
             fi
           done
 
+      - name: Copy parity report to logs dir for artifact upload
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          DEST="sbcli/e2e/logs/parity_report"
+          mkdir -p "${DEST}"
+          FOUND=0
+          for f in ${NFS_MOUNTPOINT}/api_parity_audit-*/api_parity_report.html \
+                   ${NFS_MOUNTPOINT}/api_parity_audit-*/api_parity_findings.json; do
+            if [ -f "$f" ]; then
+              cp "$f" "${DEST}/" && echo "Copied $f" && FOUND=1
+            fi
+          done
+          [ "${FOUND}" -eq 0 ] && echo "No parity report files found (test may not have run)" || true
+
       - name: Post-test cleanup (kill tmux on mgmt/storage; kill fio on clients)
         if: always()
         shell: bash
