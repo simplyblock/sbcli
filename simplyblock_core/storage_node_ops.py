@@ -3881,7 +3881,7 @@ def restart_storage_node(
         # only logs this one line, leaving the actual raise point (e.g. a
         # remote-JM/device connect timing out when a same-failure-domain peer
         # is also down) undiagnosable from the logs.
-        logger.error("restart_storage_node raised unexpectedly", exc_info=True)
+        logger.exception("restart_storage_node raised unexpectedly")
     finally:
         _hb_stop.set()
         # Trust the DB. If the impl raised after the ONLINE write was

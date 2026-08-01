@@ -274,7 +274,7 @@ def main() -> None:
         logger.error(f"Argument error: {e}")
         sys.exit(1)
     except Exception as e:
-        logger.error(f"Error: {e}", exc_info=True)
+        logger.exception(f"Error: {e}")
         sys.exit(1)
 
 

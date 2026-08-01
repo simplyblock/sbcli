@@ -96,7 +96,7 @@ def task_runner(task: JobSchedule):
                 params["tgt_lvol_composite"], params["tgt_map_id"],
                 params["tgt_snap_composite"], operation=params.get("operation", "replicate"))
         except Exception as e:
-            logger.error(f"Cutover raised: {e}", exc_info=True)
+            logger.exception(f"Cutover raised: {e}")
             return _finalize(task, False, str(e))
         return _finalize(task, ok, err)
     return True
@@ -121,7 +121,7 @@ def main():
                 try:
                     res = task_runner(task)
                 except Exception as e:
-                    logger.error(f"replication-final task {task.uuid} failed: {e}", exc_info=True)
+                    logger.exception(f"replication-final task {task.uuid} failed: {e}")
                     res = False
                 if not res:
                     time.sleep(3)

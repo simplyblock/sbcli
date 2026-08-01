@@ -1522,7 +1522,7 @@ def detect_nvmes(pci_allowed, pci_blocked, device_model, size_range, nvme_names)
         # Check for unmatched addresses
         unmatched = user_pci_set - ssd_pci_set
         if unmatched:
-            logger.warn(f"Invalid PCI addresses: {', '.join(unmatched)}")
+            logger.warning(f"Invalid PCI addresses: {', '.join(unmatched)}")
             pci_addresses = user_pci_set & ssd_pci_set
         else:
             pci_addresses = list(user_pci_set)
