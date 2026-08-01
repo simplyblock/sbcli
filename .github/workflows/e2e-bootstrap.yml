@@ -1439,6 +1439,42 @@ jobs:
             echo "> **Note:** Graylog/OpenSearch logs are currently being collected and will be available in the NFS log directory shortly."
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Append Parity Audit Summary
+        if: always() && env.TEST_CLASS == 'TestAPIParityAudit'
+        shell: bash
+        run: |
+          set +e
+          JSON_FILE="$(find sbcli/e2e/logs -name 'api_parity_findings.json' 2>/dev/null | head -1 || true)"
+          if [[ -n "${JSON_FILE}" && -f "${JSON_FILE}" ]]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "### API Parity Audit Findings" >> "$GITHUB_STEP_SUMMARY"
+            python3 -c "
+          import json, sys
+          with open(sys.argv[1]) as f:
+              findings = json.load(f)
+          total = len(findings)
+          errors = sum(1 for f in findings if f.get('severity') == 'error')
+          warnings = sum(1 for f in findings if f.get('severity') == 'warning')
+          info = sum(1 for f in findings if f.get('severity') == 'info')
+          print('| Severity | Count |')
+          print('|----------|-------|')
+          print(f'| **Total** | {total} |')
+          print(f'| Errors   | {errors} |')
+          print(f'| Warnings | {warnings} |')
+          print(f'| Info     | {info} |')
+          print()
+          if errors > 0:
+              print('> :warning: **Errors found** -- download the api-parity-report artifact for the full HTML report.')
+          else:
+              print('> :white_check_mark: No errors detected.')
+          " "${JSON_FILE}" >> "$GITHUB_STEP_SUMMARY" || \
+            echo "> :warning: Failed to parse parity findings JSON." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "### API Parity Audit Findings" >> "$GITHUB_STEP_SUMMARY"
+            echo "> :warning: No findings JSON found -- audit may have failed before producing output." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Save summary for aggregation
         if: always()
         shell: bash
