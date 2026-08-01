@@ -60,18 +60,19 @@ on:
 
       # ── R25-to-R2x config (only used when upgrade_type = r25-to-r2x) ──
       r25_base_config:
-        description: 'R25 base config: sbcli_branch=p2p-migration,csi_ref=v0.2.4,csi_tag=v0.2.4,sn_tag=v0.1.8'
+        description: 'R25 base config: sbcli_branch=remove_snode_init_container,csi_ref=v0.2.4,csi_tag=v0.2.4,sn_tag=v0.1.8'
         required: false
-        default: 'sbcli_branch=p2p-migration,csi_ref=v0.2.4,csi_tag=v0.2.4,sn_tag=v0.1.8'
+        default: 'sbcli_branch=remove_snode_init_container,csi_ref=v0.2.4,csi_tag=v0.2.4,sn_tag=v0.1.8'
 
       # ── Cluster config ──
       worker_nodes:
         description: 'Comma-separated K8s worker node names'
         required: true
+        default: 'worker-0.ocp.simplyblock.ai,worker-1.ocp.simplyblock.ai,worker-2.ocp.simplyblock.ai,worker-3.ocp.simplyblock.ai,worker-4.ocp.simplyblock.ai,worker-5.ocp.simplyblock.ai'
       ifc_names:
         description: 'Network interfaces (mgmt_ifc:data_nics)'
         required: false
-        default: 'ens18:enp1s0'
+        default: 'br-ex:enp2s0f0'
       cluster_params:
         description: 'Cluster config: ndcs=2,npcs=2,bs=4096,chunk_bs=4096,partitions=1,jm_count=4,max_lvol=30'
         required: false
@@ -79,7 +80,7 @@ on:
       cluster_environment:
         description: 'Target cluster environment'
         required: true
-        default: 'local'
+        default: 'openshift-baremetal'
         type: choice
         options:
           - local
@@ -165,8 +166,8 @@ jobs:
           echo "TARGET_HELM_BRANCH=${TARGET_HELM}" >> "$GITHUB_ENV"
 
           # Parse r25_base_config (format: "sbcli_branch=X,csi_ref=Y,csi_tag=Z,sn_tag=W")
-          R25_CFG="${{ github.event.inputs.r25_base_config || 'sbcli_branch=p2p-migration,csi_ref=v0.2.4,csi_tag=v0.2.4,sn_tag=v0.1.8' }}"
-          R25_SBCLI_BRANCH=$(echo "$R25_CFG" | grep -oP 'sbcli_branch=\K[^,]+' || echo 'p2p-migration')
+          R25_CFG="${{ github.event.inputs.r25_base_config || 'sbcli_branch=remove_snode_init_container,csi_ref=v0.2.4,csi_tag=v0.2.4,sn_tag=v0.1.8' }}"
+          R25_SBCLI_BRANCH=$(echo "$R25_CFG" | grep -oP 'sbcli_branch=\K[^,]+' || echo 'remove_snode_init_container')
           R25_CSI_REF=$(echo "$R25_CFG" | grep -oP 'csi_ref=\K[^,]+' || echo 'v0.2.4')
           R25_CSI_TAG=$(echo "$R25_CFG" | grep -oP 'csi_tag=\K[^,]+' || echo 'v0.2.4')
           R25_SN_TAG=$(echo "$R25_CFG" | grep -oP 'sn_tag=\K[^,]+' || echo 'v0.1.8')
@@ -247,7 +248,7 @@ jobs:
 
       - name: Parse network interfaces
         run: |
-          IFC_STR="${{ github.event.inputs.ifc_names || 'ens18:enp1s0' }}"
+          IFC_STR="${{ github.event.inputs.ifc_names || 'br-ex:enp2s0f0' }}"
           MGMT_IFC=$(echo "$IFC_STR" | cut -d: -f1)
           DATA_NICS=$(echo "$IFC_STR" | cut -d: -f2)
           echo "MGMT_IFC=$MGMT_IFC" >> "$GITHUB_ENV"
@@ -392,7 +393,7 @@ jobs:
 
           RESERVED_CPU_YAML=""
           if [ "$CLUSTER_ENV" = "openshift-baremetal" ]; then
-            RESERVED_CPU_YAML='            reservedSystemCPU: "0,1,10,11,16,17,26,27"'
+            RESERVED_CPU_YAML='  reservedSystemCPU: "0,1,10,11,16,17,26,27"'
           fi
 
           # Build vault settings (conditional on TLS)
@@ -551,7 +552,7 @@ jobs:
 
       # ── CSI-based bootstrap (r25-to-r2x upgrade, R25 base) ──
       # R25 uses two separate Helm charts:
-      #   1. sbcli chart (from sbcli repo p2p-migration branch) — control plane
+      #   1. sbcli chart (from sbcli repo remove_snode_init_container branch) — control plane
       #   2. spdk-csi chart (from simplyblock-operator mono-repo csi-driver/) — storage nodes + CSI driver
 
       - name: Install sbcli control plane chart (R25)
@@ -928,6 +929,7 @@ jobs:
           export CSI_REPOSITORY="${CSI_REPOSITORY}"
           export CSI_TAG="${CSI_TAG}"
           export WORKER_NODES="${WORKER_NODES}"
+          export HELM_RELEASE_SBCLI="${HELM_RELEASE_SBCLI}"
 
           TESTNAME_ARG=""
           if [ -n "${TESTNAME}" ]; then
@@ -957,6 +959,7 @@ jobs:
           CSI_TAG: ${{ env.CSI_TAG }}
           WORKER_NODES: ${{ github.event.inputs.worker_nodes }}
           TESTNAME: ${{ github.event.inputs.testname || 'K8sNativeMajorUpgrade' }}
+          HELM_RELEASE_SBCLI: ${{ github.event.inputs.upgrade_type == 'r25-to-r2x' && 'sbcli' || '' }}
           NDCS: ${{ env.NDCS }}
           NPCS: ${{ env.NPCS }}
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}

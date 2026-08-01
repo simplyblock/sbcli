@@ -156,7 +156,7 @@ class K8sNativeMajorUpgrade(TestClusterBase):
 
         # Helm release names (for uninstall during migration)
         self.helm_release_spdk_csi = os.environ.get("HELM_RELEASE_SPDK_CSI", "spdk-csi")
-        self.helm_release_sbcli = os.environ.get("HELM_RELEASE_SBCLI", "")
+        self.helm_release_sbcli = os.environ.get("HELM_RELEASE_SBCLI", "sbcli")
 
         # CR names
         self.cluster_cr_name = os.environ.get("CLUSTER_CR_NAME", _DEFAULT_CLUSTER_CR)

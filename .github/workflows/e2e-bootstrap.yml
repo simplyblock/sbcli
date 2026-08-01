@@ -1,30 +1,30 @@
 name: Bootstrap Cluster + Run E2E Tests
-run-name: "E2E Bootstrap | ${{ inputs.SBCLI_BRANCH }} | ${{ inputs.MNODES }}"
+run-name: "E2E Bootstrap | ${{ inputs.SBCLI_BRANCH }} | ${{ inputs.MNODES }}${{ inputs.TEST_CLASS && format(' | {0}', inputs.TEST_CLASS) || '' }}"
 
 on:
   workflow_call:
     inputs:
       STORAGE_PRIVATE_IPS:
         type: string
-        default: "192.168.10.205 192.168.10.206 192.168.10.207 192.168.10.208"
+        default: "192.168.10.201 192.168.10.202 192.168.10.203 192.168.10.204"
       API_INVOKE_URL:
         type: string
-        default: "http://192.168.10.211/"
+        default: "http://192.168.10.210/"
       BASTION_IP:
         type: string
-        default: "192.168.10.211"
+        default: "192.168.10.210"
       MNODES:
         type: string
-        default: "192.168.10.211"
+        default: "192.168.10.210"
       GRAFANA_ENDPOINT:
         type: string
-        default: "http://192.168.10.211/grafana"
+        default: "http://192.168.10.210/grafana"
       SBCLI_BRANCH:
         type: string
         default: "R25.10-Hotfix"
       CUSTOM_IMAGES:
         type: string
-        default: 'spdk="" docker=""'
+        default: 'spdk="simplyblock/spdk:main-latest" docker="simplyblock/simplyblock:main"'
       SSH_USER:
         type: string
         default: "root"
@@ -42,7 +42,7 @@ on:
         default: "300"
       BOOTSTRAP_DATA_CHUNKS:
         type: string
-        default: "2"
+        default: "1"
       BOOTSTRAP_PARITY_CHUNKS:
         type: string
         default: "2"
@@ -60,7 +60,7 @@ on:
         default: false
       BOOTSTRAP_ENABLE_NODE_AFFINITY:
         type: boolean
-        default: false
+        default: true
       EXTRA_CLUSTER_ARGS:
         type: string
         default: ""
@@ -76,12 +76,16 @@ on:
         description: "Optional label appended to artifact names to avoid collisions when called multiple times in the same workflow run (e.g. 'run1', 'run2')"
       CLUSTER_SECURITY:
         type: string
-        default: "none"
+        default: "backup"
         description: "Cluster setup mode. 'backup' writes s3-backup.json and passes --use-backup to cluster create."
       NEW_NODE_IPS:
         type: string
         default: ""
         description: "Space-separated IPs of spare nodes (cleaned but NOT added to cluster). Used for add-node/migration tests."
+      send_slack_notification:
+        type: boolean
+        default: true
+        description: "Send Slack notification on completion. Set to false when called from topology suites that send their own combined notification."
   workflow_dispatch:
     inputs:
       # =========================
@@ -90,27 +94,27 @@ on:
       STORAGE_PRIVATE_IPS:
         description: "Space-separated storage node IPs (also used for cleanup)"
         required: true
-        default: "192.168.10.205 192.168.10.206 192.168.10.207 192.168.10.208"
+        default: "192.168.10.201 192.168.10.202 192.168.10.203 192.168.10.204"
 
       API_INVOKE_URL:
         description: "API invoke URL"
         required: true
-        default: "http://192.168.10.211/"
+        default: "http://192.168.10.210/"
 
       BASTION_IP:
         description: "Bastion IP"
         required: true
-        default: "192.168.10.211"
+        default: "192.168.10.210"
 
       MNODES:
         description: "Management node(s) IPs (only remote ops; runner itself is not touched)"
         required: true
-        default: "192.168.10.211"
+        default: "192.168.10.210"
 
       GRAFANA_ENDPOINT:
         description: "Grafana endpoint"
         required: true
-        default: "http://192.168.10.211/grafana"
+        default: "http://192.168.10.210/grafana"
 
       SBCLI_BRANCH:
         description: "sbcli repo branch to clone for tests"
@@ -119,7 +123,7 @@ on:
 
       CUSTOM_IMAGES:
         description: "Image overrides: set spdk and/or docker values, leave as \"\" to skip."
-        default: 'spdk="" docker=""'
+        default: 'spdk="simplyblock/spdk:main-latest" docker="simplyblock/simplyblock:main"'
         required: false
 
       # =========================
@@ -157,11 +161,17 @@ on:
       BOOTSTRAP_DATA_CHUNKS:
         description: "bootstrap: --data-chunks-per-stripe (also ndcs)"
         required: true
-        default: "2"
+        default: "1"
       BOOTSTRAP_PARITY_CHUNKS:
         description: "bootstrap: --parity-chunks-per-stripe (also npcs)"
         required: true
         default: "2"
+
+      send_slack_notification:
+        description: "Send Slack notification on completion"
+        required: false
+        default: true
+        type: boolean
       BOOTSTRAP_JOURNAL_PARTITION:
         description: "bootstrap: --journal-partition"
         required: true
@@ -183,7 +193,7 @@ on:
         description: "Bootstrap: enable node affinity (--enable-node-affinity)"
         type: boolean
         required: false
-        default: false
+        default: true
       EXTRA_CLUSTER_ARGS:
         description: |
           Additional arguments to pass to cluster create command (optional)
@@ -213,7 +223,7 @@ on:
         description: "Cluster setup mode. 'backup' writes s3-backup.json and passes --use-backup to cluster create."
         required: false
         type: choice
-        default: "none"
+        default: "backup"
         options:
           - none
           - backup
@@ -238,16 +248,16 @@ jobs:
 
     env:
       # Cluster/lab env
-      STORAGE_PRIVATE_IPS: ${{ inputs.STORAGE_PRIVATE_IPS || '192.168.10.205 192.168.10.206 192.168.10.207 192.168.10.208' }}
-      API_INVOKE_URL: ${{ inputs.API_INVOKE_URL || 'http://192.168.10.211/' }}
-      API_BASE_URL: ${{ inputs.API_INVOKE_URL || 'http://192.168.10.211/' }}
-      BASTION_IP: ${{ inputs.BASTION_IP || '192.168.10.211' }}
-      BASTION_SERVER: ${{ inputs.BASTION_IP || '192.168.10.211' }}
-      MNODES: ${{ inputs.MNODES || '192.168.10.211' }}
+      STORAGE_PRIVATE_IPS: ${{ inputs.STORAGE_PRIVATE_IPS || '192.168.10.201 192.168.10.202 192.168.10.203 192.168.10.204' }}
+      API_INVOKE_URL: ${{ inputs.API_INVOKE_URL || 'http://192.168.10.210/' }}
+      API_BASE_URL: ${{ inputs.API_INVOKE_URL || 'http://192.168.10.210/' }}
+      BASTION_IP: ${{ inputs.BASTION_IP || '192.168.10.210' }}
+      BASTION_SERVER: ${{ inputs.BASTION_IP || '192.168.10.210' }}
+      MNODES: ${{ inputs.MNODES || '192.168.10.210' }}
       NR_HUGEPAGES: '2048'
       EXTRA_CLUSTER_ARGS: ${{ inputs.EXTRA_CLUSTER_ARGS || '' }}
       EXTRA_SN_ARGS: ${{ inputs.EXTRA_SN_ARGS || '' }}
-      GRAFANA_ENDPOINT: ${{ inputs.GRAFANA_ENDPOINT || 'http://192.168.10.211/grafana' }}
+      GRAFANA_ENDPOINT: ${{ inputs.GRAFANA_ENDPOINT || 'http://192.168.10.210/grafana' }}
       SBCLI_CMD: "sbctl"
       SBCLI_BRANCH: ${{ inputs.SBCLI_BRANCH || 'R25.10-Hotfix' }}
 
@@ -262,17 +272,17 @@ jobs:
 
       # Bootstrap params
       BOOTSTRAP_MAX_SUBSYS: ${{ inputs.BOOTSTRAP_MAX_SUBSYS || '300' }}
-      BOOTSTRAP_DATA_CHUNKS: ${{ inputs.BOOTSTRAP_DATA_CHUNKS || '2' }}
+      BOOTSTRAP_DATA_CHUNKS: ${{ inputs.BOOTSTRAP_DATA_CHUNKS || '1' }}
       BOOTSTRAP_PARITY_CHUNKS: ${{ inputs.BOOTSTRAP_PARITY_CHUNKS || '2' }}
       BOOTSTRAP_JOURNAL_PARTITION: ${{ inputs.BOOTSTRAP_JOURNAL_PARTITION || '1' }}
       BOOTSTRAP_HA_JM_COUNT: ${{ inputs.BOOTSTRAP_HA_JM_COUNT || '4' }}
       BOOTSTRAP_DATA_NIC: ${{ inputs.BOOTSTRAP_DATA_NIC || 'eth1' }}
 
       # E2E derived from bootstrap chunks
-      NDCS: ${{ inputs.BOOTSTRAP_DATA_CHUNKS || '2' }}
+      NDCS: ${{ inputs.BOOTSTRAP_DATA_CHUNKS || '1' }}
       NPCS: ${{ inputs.BOOTSTRAP_PARITY_CHUNKS || '2' }}
       TEST_CLASS: ${{ inputs.TEST_CLASS || '' }}
-      CLUSTER_SECURITY: ${{ inputs.CLUSTER_SECURITY || 'none' }}
+      CLUSTER_SECURITY: ${{ inputs.CLUSTER_SECURITY || 'backup' }}
       NEW_NODE_IPS: ${{ inputs.NEW_NODE_IPS || '' }}
 
       # Secrets
@@ -920,6 +930,22 @@ jobs:
             fi
           done
 
+      - name: Copy parity report to logs dir for artifact upload
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          DEST="sbcli/e2e/logs/parity_report"
+          mkdir -p "${DEST}"
+          FOUND=0
+          for f in ${NFS_MOUNTPOINT}/api_parity_audit-*/api_parity_report.html \
+                   ${NFS_MOUNTPOINT}/api_parity_audit-*/api_parity_findings.json; do
+            if [ -f "$f" ]; then
+              cp "$f" "${DEST}/" && echo "Copied $f" && FOUND=1
+            fi
+          done
+          [ "${FOUND}" -eq 0 ] && echo "No parity report files found (test may not have run)" || true
+
       - name: Post-test cleanup (kill tmux on mgmt/storage; kill fio on clients)
         if: always()
         shell: bash
@@ -1377,7 +1403,18 @@ jobs:
               echo ""
             fi
 
+            echo "### NFS Log Locations"
+            if [[ ${#log_path_arr[@]} -gt 0 ]]; then
+              for lp in "${log_path_arr[@]}"; do
+                echo "- **Test logs:** \`${lp}\`"
+              done
+            else
+              echo "- **Test logs:** \`not detected\`"
+            fi
             if [[ -n "${RUN_BASE_DIR:-}" ]]; then
+              echo "- **RUN_BASE_DIR:** \`${RUN_BASE_DIR}/\`"
+              echo "- Graylog logs: \`${RUN_BASE_DIR}/graylog_collected/\`"
+              echo ""
               echo "<details><summary>Run Artifacts (NFS)</summary>"
               echo ""
               echo "- **Run dir:** \`${RUN_BASE_DIR}/\`"
@@ -1386,8 +1423,8 @@ jobs:
               echo "- Distrib dumps: \`${RUN_BASE_DIR}/<storage_ip>/finaldistrib_bdev_logs/\`"
               echo ""
               echo "</details>"
-              echo ""
             fi
+            echo ""
 
             echo "<details><summary>Mgmt Artifacts (cluster state at end of run)</summary>"
             echo ""
@@ -1401,6 +1438,42 @@ jobs:
             echo ""
             echo "> **Note:** Graylog/OpenSearch logs are currently being collected and will be available in the NFS log directory shortly."
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Append Parity Audit Summary
+        if: always() && env.TEST_CLASS == 'TestAPIParityAudit'
+        shell: bash
+        run: |
+          set +e
+          JSON_FILE="$(find sbcli/e2e/logs -name 'api_parity_findings.json' 2>/dev/null | head -1 || true)"
+          if [[ -n "${JSON_FILE}" && -f "${JSON_FILE}" ]]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "### API Parity Audit Findings" >> "$GITHUB_STEP_SUMMARY"
+            python3 -c "
+          import json, sys
+          with open(sys.argv[1]) as f:
+              findings = json.load(f)
+          total = len(findings)
+          errors = sum(1 for f in findings if f.get('severity') == 'error')
+          warnings = sum(1 for f in findings if f.get('severity') == 'warning')
+          info = sum(1 for f in findings if f.get('severity') == 'info')
+          print('| Severity | Count |')
+          print('|----------|-------|')
+          print(f'| **Total** | {total} |')
+          print(f'| Errors   | {errors} |')
+          print(f'| Warnings | {warnings} |')
+          print(f'| Info     | {info} |')
+          print()
+          if errors > 0:
+              print('> :warning: **Errors found** -- download the api-parity-report artifact for the full HTML report.')
+          else:
+              print('> :white_check_mark: No errors detected.')
+          " "${JSON_FILE}" >> "$GITHUB_STEP_SUMMARY" || \
+            echo "> :warning: Failed to parse parity findings JSON." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "### API Parity Audit Findings" >> "$GITHUB_STEP_SUMMARY"
+            echo "> :warning: No findings JSON found -- audit may have failed before producing output." >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Save summary for aggregation
         if: always()
@@ -1416,7 +1489,7 @@ jobs:
           retention-days: 7
 
       - name: Send Slack Notification
-        if: always()
+        if: always() && inputs.send_slack_notification != false
         shell: bash
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

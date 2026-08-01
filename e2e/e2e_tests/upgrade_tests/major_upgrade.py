@@ -381,7 +381,7 @@ class TestMajorUpgrade(TestClusterBase):
         pkg = f"git+https://github.com/simplyblock-io/sbcli.git@{self.target_version}"
         cmd = f"pip install '{pkg}' --upgrade --force-reinstall"
         self.logger.info(f"[{node}] Installing sbcli: {cmd}")
-        self.ssh_obj.exec_command(node, cmd)
+        self.ssh_obj.exec_command(node, cmd, raise_on_error=True)
 
     def _start_fio_tmux(self, node: str, mount_path: str, log_file: str, name: str, runtime: int):
         self.ssh_obj.make_directory(node, os.path.dirname(log_file))
@@ -495,6 +495,16 @@ for snode in db_controller.get_storage_nodes():
             snode.pollers_mask = utils.generate_mask(snode.poller_cpu_cores)
 
     snode.write_to_db()
+
+print("Creating mini lvol objects")
+for lvol in db_controller.get_all_lvols():
+    lvol.write_to_db()
+
+print("Creating mini Snapshots objects")
+for snap in db_controller.get_snapshots():
+    snap.write_to_db()
+
+print("done")
 """
 
     def _run_r25_to_r26_migration(self, node: str):
@@ -514,13 +524,22 @@ for snode in db_controller.get_storage_nodes():
         self.ssh_obj.exec_command(node, f"rm -f {remote_path}")
         self.logger.info(f"[{node}] R25->R26 DB migration complete")
 
-    def _is_r25_to_r26_upgrade(self) -> bool:
-        """Check if this is an R25.x -> R26.x upgrade based on version strings."""
+    def _needs_db_migration(self) -> bool:
+        """Check if DB migration is needed for this upgrade.
+
+        The migration re-writes storage node, lvol, and snapshot objects
+        to pick up new fields.  It is idempotent, so it is safe to run on
+        every cross-version upgrade.  The only case we skip is a same-minor
+        hotfix (e.g. R25.10-Hotfix → R25.10-Hotfix2).
+        """
         if not self.base_version or not self.target_version:
-            return False
+            return True
         base_lower = self.base_version.lower()
         target_lower = self.target_version.lower()
-        return base_lower.startswith("r25") and target_lower.startswith("r26")
+        # Same base prefix → minor hotfix, skip migration
+        if base_lower == target_lower:
+            return False
+        return True
 
     def _update_node_env(self, node: str):
         """
@@ -873,15 +892,15 @@ for snode in db_controller.get_storage_nodes():
         sleep_n_sec(60)
 
         # ----------------------------------------------------------------
-        # Step 9b: Run R25 -> R26 DB migration (if applicable)
+        # Step 9b: Run DB migration (re-writes snode/lvol/snapshot objects)
         # ----------------------------------------------------------------
-        if self._is_r25_to_r26_upgrade():
-            self.logger.info("Step 9b: Running R25->R26 DB migration script on mgmt node")
+        if self._needs_db_migration():
+            self.logger.info("Step 9b: Running DB migration script on mgmt node")
             self._run_r25_to_r26_migration(self.mgmt_nodes[0])
             sleep_n_sec(self.step_sleep)
         else:
             self.logger.info(
-                f"Step 9b: Skipping R25->R26 migration "
+                f"Step 9b: Skipping DB migration "
                 f"(base={self.base_version}, target={self.target_version})"
             )
 

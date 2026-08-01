@@ -6,7 +6,7 @@ import shutil
 import subprocess
 import time
 import traceback
-from __init__ import get_all_tests, get_security_tests, get_backup_tests, get_backup_stress_tests, ALL_TESTS
+from __init__ import get_all_tests, get_security_tests, get_backup_tests, get_backup_stress_tests, get_parity_tests, ALL_TESTS
 from logger_config import setup_logger
 from exceptions.custom_exception import (
     TestNotFoundException,
@@ -139,6 +139,8 @@ def main():
         test_class_run = get_backup_tests()
     elif args.testname and args.testname.strip().lower() == "backup-stress":
         test_class_run = get_backup_stress_tests()
+    elif args.testname and args.testname.strip().lower() == "parity":
+        test_class_run = get_parity_tests()
     elif args.testname is None or len(args.testname.strip()) == 0:
         for cls in tests:
             if cls.__name__ == "TestAddNodesDuringFioRun":
@@ -339,6 +341,11 @@ def main():
             logger.error(f"Error During Teardown for test: {test.__name__}")
             logger.error(traceback.format_exc())
         finally:
+            # Print log path FIRST — before any file copies or core dump
+            # checks that might break/hang.  The workflow summary parses
+            # "Logs Path:" from output.log to build the per-test table.
+            test_obj.get_logs_path()
+
             # Copy e2e/logs/ folder to NFS so automation logs are accessible post-run
             log_path = getattr(test_obj, "docker_logs_path", "")
             if log_path:
@@ -394,7 +401,6 @@ def main():
                         "Cannot execute more tests as cluster is not stable. Exiting"
                     )
                     break
-            test_obj.get_logs_path()
 
             # ── Inter-test cluster reset ──────────────────────────────
             # When two consecutive topology-modifying tests are queued,

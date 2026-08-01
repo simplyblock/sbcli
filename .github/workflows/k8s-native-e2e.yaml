@@ -27,9 +27,11 @@ on:
       csi_repository:
         description: 'CSI driver image repository (leave empty for chart default)'
         required: false
+        default: 'simplyblock/spdkcsi'
       csi_tag:
         description: 'CSI driver image tag (leave empty for chart default)'
         required: false
+        default: 'latest'
       spdk_image:
         description: 'SPDK container image'
         required: true
@@ -37,10 +39,11 @@ on:
       worker_nodes:
         description: 'Comma-separated K8s worker node names'
         required: true
+        default: 'worker-0.ocp.simplyblock.ai,worker-1.ocp.simplyblock.ai,worker-2.ocp.simplyblock.ai,worker-3.ocp.simplyblock.ai,worker-4.ocp.simplyblock.ai,worker-5.ocp.simplyblock.ai'
       ifc_names:
         description: 'Network interfaces (mgmt_ifc:data_nics)'
         required: false
-        default: 'ens18:enp1s0'
+        default: 'br-ex:enp2s0f0'
       max_lvol:
         description: 'Max logical volume count per storage node'
         required: false
@@ -86,7 +89,7 @@ on:
       cluster_environment:
         description: 'Target cluster environment'
         required: true
-        default: 'local'
+        default: 'openshift-baremetal'
         type: choice
         options:
           - local
@@ -118,7 +121,7 @@ on:
       preserve_resources_on_failure:
         description: 'Preserve PVCs, FIO pods, snapshots on test failure for debugging'
         required: false
-        default: false
+        default: true
         type: boolean
       run_ha_test:
         description: 'Run HA test variants (TestHASingleNodeFailure, etc.)'
@@ -769,7 +772,7 @@ jobs:
         if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
         run: |
           NAMESPACE=simplyblock
-          IFC_NAMES="${{ github.event.inputs.ifc_names || 'ens18:enp1s0' }}"
+          IFC_NAMES="${{ github.event.inputs.ifc_names || 'br-ex:enp2s0f0' }}"
           MGMT_IFC="${IFC_NAMES%%:*}"
           DATA_NICS="${IFC_NAMES#*:}"
           MAX_LVOL="${{ github.event.inputs.max_lvol || '30' }}"
@@ -786,7 +789,7 @@ jobs:
 
           RESERVED_CPU_YAML=""
           if [ "${{ github.event.inputs.cluster_environment }}" = "openshift-baremetal" ]; then
-            RESERVED_CPU_YAML='            reservedSystemCPU: "0,1,10,11,16,17,26,27"'
+            RESERVED_CPU_YAML='  reservedSystemCPU: "0,1,10,11,16,17,26,27"'
           fi
 
           # Build workerNodes YAML list from comma-separated input
@@ -1488,6 +1491,13 @@ jobs:
             fi
             echo ""
             echo "### NFS Log Locations"
+            # Show all test log paths
+            for _tname in "${!test_log_paths[@]}"; do
+              echo "- **Test logs:** \`${test_log_paths[$_tname]}\`"
+            done
+            if [[ ${#test_log_paths[@]} -eq 0 ]]; then
+              echo "- **Test logs:** \`not detected\`"
+            fi
             echo "- **RUN_BASE_DIR:** \`${RUN_BASE_DIR:-not detected}\`"
             echo "- Graylog logs: \`${RUN_BASE_DIR:-<run_dir>}/graylog_collected/\`"
             if [[ -n "${RUN_BASE_DIR:-}" && -d "${RUN_BASE_DIR}" ]]; then
@@ -1601,10 +1611,25 @@ jobs:
                   for st, nm in test_results:
                       lines.append(f"{icons.get(st, ':grey_question:')} `{nm}`")
 
+          # Extract test log paths from output.log
+          test_log_paths = []
+          if os.path.isfile(out_log):
+              ansi_re = re.compile(r'\x1b\[[0-9;]*m')
+              for raw_line in content.splitlines():
+                  cl = ansi_re.sub('', raw_line)
+                  if 'Logs Path:' in cl:
+                      p = cl.split('Logs Path:')[-1].strip()
+                      if p:
+                          test_log_paths.append(p)
+
+          lines += [""]
+          if test_log_paths:
+              for tlp in test_log_paths:
+                  lines.append(f":open_file_folder: *Test Logs:* `{tlp}`")
           lines += [
-              "",
+              f":file_folder: *E2E Run Dir:* `{log_dir}`",
+              f":scroll: *Graylog:* `{log_dir}/graylog_collected/`",
               f":link: *Run:* <{run_url}|View on GitHub>",
-              f":file_folder: *Final Logs:* `{log_dir}`",
               f":hourglass_flowing_sand: _Logs are being collected and will be available shortly._",
           ]
           payload = {"text": "\n".join(lines)}

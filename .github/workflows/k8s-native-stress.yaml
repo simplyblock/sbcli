@@ -27,9 +27,11 @@ on:
       csi_repository:
         description: 'CSI driver image repository (leave empty for chart default)'
         required: false
+        default: 'simplyblock/spdkcsi'
       csi_tag:
         description: 'CSI driver image tag (leave empty for chart default)'
         required: false
+        default: 'latest'
       spdk_image:
         description: 'SPDK container image'
         required: true
@@ -37,10 +39,11 @@ on:
       worker_nodes:
         description: 'Comma-separated K8s worker node names'
         required: true
+        default: 'worker-0.ocp.simplyblock.ai,worker-1.ocp.simplyblock.ai,worker-2.ocp.simplyblock.ai,worker-3.ocp.simplyblock.ai,worker-4.ocp.simplyblock.ai,worker-5.ocp.simplyblock.ai'
       ifc_names:
         description: 'Network interfaces (mgmt_ifc:data_nics)'
         required: false
-        default: 'ens18:enp1s0'
+        default: 'br-ex:enp2s0f0'
       max_lvol:
         description: 'Max logical volume count per storage node'
         required: false
@@ -77,7 +80,7 @@ on:
       cluster_environment:
         description: 'Target cluster environment'
         required: true
-        default: 'local'
+        default: 'openshift-baremetal'
         type: choice
         options:
           - local
@@ -109,7 +112,7 @@ on:
       preserve_resources_on_failure:
         description: 'Preserve PVCs, FIO pods, snapshots on test failure for debugging'
         required: false
-        default: false
+        default: true
         type: boolean
 
 jobs:
@@ -665,7 +668,7 @@ jobs:
         if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
         run: |
           NAMESPACE=simplyblock
-          IFC_NAMES="${{ github.event.inputs.ifc_names || 'ens18:enp1s0' }}"
+          IFC_NAMES="${{ github.event.inputs.ifc_names || 'br-ex:enp2s0f0' }}"
           MGMT_IFC="${IFC_NAMES%%:*}"
           DATA_NICS="${IFC_NAMES#*:}"
           MAX_LVOL="${{ github.event.inputs.max_lvol || '30' }}"
@@ -682,7 +685,7 @@ jobs:
 
           RESERVED_CPU_YAML=""
           if [ "${{ github.event.inputs.cluster_environment }}" = "openshift-baremetal" ]; then
-            RESERVED_CPU_YAML='            reservedSystemCPU: "0,1,10,11,16,17,26,27"'
+            RESERVED_CPU_YAML='  reservedSystemCPU: "0,1,10,11,16,17,26,27"'
           fi
 
           # Build workerNodes YAML list from comma-separated input
@@ -1272,6 +1275,11 @@ jobs:
 
           dur_fmt="${TEST_TIME_HOURS:-0}h ${TEST_TIME_MINS:-0}m ${TEST_TIME_SECS:-0}s"
 
+          # Extract test-specific log path from output.log
+          TEST_LOG_PATH="$(grep 'Logs Path:' "${out_log}" 2>/dev/null \
+            | tail -n 1 | sed 's/\x1b\[[0-9;]*m//g' | sed 's/.*Logs Path: *//' \
+            | sed 's/[[:space:]]*$//' || true)"
+
           # --- test result counts ---
           total_cases="$(grep -E 'Number of Total Cases:' "${out_log}" 2>/dev/null | tail -n 1 | grep -oE '[0-9]+$' || echo '?')"
           passed_cnt="$(grep -E 'Number of Passed Cases:' "${out_log}" 2>/dev/null | tail -n 1 | grep -oE '[0-9]+$' || echo '?')"
@@ -1336,6 +1344,7 @@ jobs:
             fi
             echo ""
             echo "### NFS Log Locations"
+            echo "- **Test logs:** \`${TEST_LOG_PATH:-not detected}\`"
             echo "- **RUN_BASE_DIR:** \`${RUN_BASE_DIR:-not detected}\`"
             echo "- Graylog logs: \`${RUN_BASE_DIR:-<run_dir>}/graylog_collected/\`"
             if [[ -n "${RUN_BASE_DIR:-}" && -d "${RUN_BASE_DIR}" ]]; then
@@ -1425,10 +1434,41 @@ jobs:
               ]
           else:
               lines.append("_(test counts not found in log)_")
+          # --- Per-test results ---
+          test_log_paths = []
+          if os.path.isfile(out_log):
+              ansi_re = re.compile(r'\x1b\[[0-9;]*m')
+              test_results = []
+              for raw_line in content.splitlines():
+                  cl = ansi_re.sub('', raw_line)
+                  if 'Logs Path:' in cl:
+                      p = cl.split('Logs Path:')[-1].strip()
+                      if p:
+                          test_log_paths.append(p)
+                  if not re.search(r'(PASSED|FAILED|SKIPPED) CASE', cl):
+                      continue
+                  m = re.search(r'Test[A-Za-z0-9_]+', cl)
+                  if not m:
+                      continue
+                  name = m.group(0)
+                  if   'PASSED CASE'  in cl: test_results.append(('PASSED',  name))
+                  elif 'FAILED CASE'  in cl: test_results.append(('FAILED',  name))
+                  elif 'SKIPPED CASE' in cl: test_results.append(('SKIPPED', name))
+              if test_results:
+                  lines.append("")
+                  lines.append("*Test Results:*")
+                  icons = {'PASSED': ':white_check_mark:', 'FAILED': ':x:', 'SKIPPED': ':fast_forward:'}
+                  for st, nm in test_results:
+                      lines.append(f"{icons.get(st, ':grey_question:')} `{nm}`")
+
+          lines += [""]
+          if test_log_paths:
+              for tlp in test_log_paths:
+                  lines.append(f":open_file_folder: *Test Logs:* `{tlp}`")
           lines += [
-              "",
+              f":file_folder: *E2E Run Dir:* `{log_dir}`",
+              f":scroll: *Graylog:* `{log_dir}/graylog_collected/`",
               f":link: *Run:* <{run_url}|View on GitHub>",
-              f":file_folder: *Final Logs:* `{log_dir}`",
               f":hourglass_flowing_sand: _Logs are being collected and will be available shortly._",
           ]
           payload = {"text": "\n".join(lines)}

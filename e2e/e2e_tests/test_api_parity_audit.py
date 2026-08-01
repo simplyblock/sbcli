@@ -94,10 +94,71 @@ class TestAPIParityAudit(TestClusterBase):
             extra_meta={"branch": os.environ.get("GITHUB_REF_NAME", "local")},
         )
         self.logger.info(f"HTML report written to {html_path}")
+
+        # ── Print detailed summary to log ──────────────────────────────
+        errors = [f for f in self.findings if f["severity"] == "error"]
+        warnings = [f for f in self.findings if f["severity"] == "warning"]
+        infos = [f for f in self.findings if f["severity"] == "info"]
+
+        self.logger.info("=" * 70)
+        self.logger.info("API PARITY AUDIT SUMMARY")
+        self.logger.info("=" * 70)
         self.logger.info(
-            f"Audit complete: {len(self.findings)} findings "
-            f"({sum(1 for f in self.findings if f['severity']=='error')} errors, "
-            f"{sum(1 for f in self.findings if f['severity']=='warning')} warnings)"
+            f"Total findings: {len(self.findings)}  |  "
+            f"Errors: {len(errors)}  |  "
+            f"Warnings: {len(warnings)}  |  "
+            f"Info: {len(infos)}"
+        )
+
+        # Group findings by category for readable output
+        by_category = {}
+        for f in self.findings:
+            by_category.setdefault(f["category"], []).append(f)
+
+        for cat, items in sorted(by_category.items()):
+            self.logger.info(f"\n--- {cat.upper()} ({len(items)} findings) ---")
+            for f in items:
+                op = f.get("operation", "?")
+                sev = f["severity"].upper()
+                if cat == "missing_field":
+                    field = f.get("field", "?")
+                    cli = "Y" if f.get("cli") else "N"
+                    v1 = "Y" if f.get("v1") else "N"
+                    v2 = "Y" if f.get("v2") else "N"
+                    self.logger.info(
+                        f"  [{sev}] {op} field={field}  "
+                        f"CLI={cli}  v1={v1}  v2={v2}"
+                    )
+                elif cat == "value_mismatch":
+                    field = f.get("field", "?")
+                    self.logger.info(
+                        f"  [{sev}] {op} field={field}  "
+                        f"CLI={f.get('cli')}  v1={f.get('v1')}  v2={f.get('v2')}"
+                    )
+                elif cat == "count_mismatch":
+                    self.logger.info(
+                        f"  [{sev}] {op}  "
+                        f"CLI={f.get('cli')}  v1={f.get('v1')}  v2={f.get('v2')}"
+                    )
+                elif cat == "interface_error":
+                    self.logger.info(
+                        f"  [{sev}] {op} iface={f.get('interface')}  "
+                        f"detail={f.get('detail', '')}"
+                    )
+                elif cat == "audit_crash":
+                    detail = f.get("detail", "")
+                    # Show just the last line of the traceback
+                    last_line = detail.strip().splitlines()[-1] if detail.strip() else ""
+                    self.logger.info(f"  [{sev}] {op}: {last_line}")
+                else:
+                    self.logger.info(f"  [{sev}] {op}: {f.get('detail', '')}")
+
+        self.logger.info("=" * 70)
+
+        # Fail the test if there are error-level findings
+        assert len(errors) == 0, (
+            f"API parity audit found {len(errors)} error(s). "
+            f"See report: {html_path}"
         )
 
     # ── finding helpers ───────────────────────────────────────────────
@@ -328,7 +389,7 @@ class TestAPIParityAudit(TestClusterBase):
         self.logger.info("[audit] cluster.iostats")
         cid = self.cluster_id
         cli = self._run_cli(f"cluster get-io-stats {cid} --json")
-        v1 = self.sbcli_utils.get_io_stats()
+        v1 = self.sbcli_utils.get_io_stats(cid)
         v2_status, v2_body = self.v2.get_cluster_iostats(cid)
 
         # IO stats are time-varying, so only compare field presence
