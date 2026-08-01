@@ -145,8 +145,6 @@
 #     main()
 
 
-#!/usr/bin/env python3
-
 """
 FIO Corruption Analysis Script
 - Connects to a remote machine via SSH
