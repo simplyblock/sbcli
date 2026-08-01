@@ -1543,8 +1543,28 @@ class K8sUtils:
     def create_volume_snapshot(self, name: str, pvc_name: str,
                                snapshot_class: str = "simplyblock-csi-snapshotclass",
                                namespace: str = None):
-        """Create a VolumeSnapshot from a PVC."""
+        """Create a VolumeSnapshot from a PVC.
+
+        If a stale VolumeSnapshot with the same name already exists (e.g.
+        from a previous test run that did not clean up), it is deleted
+        first to avoid ``persistentVolumeClaimName is immutable`` errors
+        from ``kubectl apply``.
+        """
         ns = namespace or self.namespace
+        # Remove any stale VolumeSnapshot with the same name to avoid
+        # immutable-field collisions from a prior test.
+        existing = self.get_resource_json("volumesnapshot", name, namespace=ns)
+        if existing:
+            existing_pvc = (existing.get("spec", {})
+                           .get("source", {})
+                           .get("persistentVolumeClaimName", ""))
+            if existing_pvc != pvc_name:
+                self.logger.warning(
+                    f"[K8sUtils] Stale VolumeSnapshot '{name}' found "
+                    f"(source PVC '{existing_pvc}' != '{pvc_name}'), "
+                    f"deleting before re-creating"
+                )
+                self.delete_volume_snapshot(name, namespace=ns, wait=True)
         yaml_content = (
             f"apiVersion: snapshot.storage.k8s.io/v1\n"
             f"kind: VolumeSnapshot\n"
@@ -1584,11 +1604,23 @@ class K8sUtils:
             f"[K8sUtils] VolumeSnapshot '{name}' not ready within {timeout}s"
         )
 
-    def delete_volume_snapshot(self, name: str, namespace: str = None):
-        """Delete a VolumeSnapshot."""
+    def delete_volume_snapshot(self, name: str, namespace: str = None,
+                               wait: bool = False):
+        """Delete a VolumeSnapshot.
+
+        When *wait* is True the call blocks until the VolumeSnapshot is fully
+        removed, preventing stale-object collisions in subsequent tests.
+        """
         ns = namespace or self.namespace
-        self.logger.info(f"[K8sUtils] Deleting VolumeSnapshot '{name}'")
-        self.delete_resource("volumesnapshot", name, namespace=ns)
+        self.logger.info(f"[K8sUtils] Deleting VolumeSnapshot '{name}'"
+                         f"{' (waiting)' if wait else ''}")
+        if wait:
+            self._exec_kubectl(
+                f"kubectl delete volumesnapshot {name} -n {ns} "
+                f"--ignore-not-found --wait=true --timeout=120s"
+            )
+        else:
+            self.delete_resource("volumesnapshot", name, namespace=ns)
 
     def has_client_nodes(self) -> bool:
         """Return True if any K8s node has the 'client' role label."""
@@ -1900,9 +1932,9 @@ class K8sUtils:
             # Delete clone PVCs (prefixed clone-)
             f"kubectl get pvc -n {ns} --no-headers -o custom-columns=NAME:.metadata.name "
             f"2>/dev/null | grep '^clone-' | xargs -r kubectl delete pvc -n {ns} --ignore-not-found",
-            # Delete VolumeSnapshots (prefixed snap-)
+            # Delete VolumeSnapshots (prefixed snap- or snapshot-)
             f"kubectl get volumesnapshot -n {ns} --no-headers -o custom-columns=NAME:.metadata.name "
-            f"2>/dev/null | grep '^snap-' | xargs -r kubectl delete volumesnapshot -n {ns} --ignore-not-found",
+            f"2>/dev/null | grep -E '^(snap-|snapshot-)' | xargs -r kubectl delete volumesnapshot -n {ns} --ignore-not-found --wait=true",
             # Delete test PVCs (various prefixes)
             f"kubectl get pvc -n {ns} --no-headers -o custom-columns=NAME:.metadata.name "
             f"2>/dev/null | grep -E '^(pvc-|mig-pvc-|add-pvc-)' | xargs -r kubectl delete pvc -n {ns} --ignore-not-found",
@@ -2872,11 +2904,24 @@ class K8sUtils:
                 checksums[parts[1]] = parts[0]
         return checksums
 
-    def delete_pod(self, pod_name: str, namespace: str = None):
-        """Delete a pod."""
+    def delete_pod(self, pod_name: str, namespace: str = None,
+                   wait: bool = False):
+        """Delete a pod.
+
+        When *wait* is True the call blocks until the pod is fully removed,
+        preventing name-collision races when a new pod with the same name is
+        created shortly after deletion.
+        """
         ns = namespace or self.namespace
-        self.logger.info(f"[K8sUtils] Deleting pod '{pod_name}'")
-        self.delete_resource("pod", pod_name, namespace=ns)
+        self.logger.info(f"[K8sUtils] Deleting pod '{pod_name}'"
+                         f"{' (waiting)' if wait else ''}")
+        if wait:
+            self._exec_kubectl(
+                f"kubectl delete pod {pod_name} -n {ns} "
+                f"--ignore-not-found --wait=true --timeout=60s"
+            )
+        else:
+            self.delete_resource("pod", pod_name, namespace=ns)
 
     def verify_pvc_mount(self, pvc_name: str, namespace: str = None,
                          timeout: int = 120) -> tuple:
