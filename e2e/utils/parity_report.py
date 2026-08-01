@@ -70,7 +70,7 @@ def generate_html_report(findings, output_dir, cluster_id="", extra_meta=None):
 _CSS = """
 body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
        margin: 0; padding: 20px; background: #f5f5f5; color: #333; }
-.container { max-width: 1200px; margin: 0 auto; }
+.container { max-width: 1400px; margin: 0 auto; }
 h1 { color: #1a1a2e; border-bottom: 3px solid #16213e; padding-bottom: 10px; }
 h2 { color: #16213e; margin-top: 30px; }
 .meta { color: #666; font-size: 0.9em; margin-bottom: 20px; }
@@ -87,7 +87,8 @@ table { border-collapse: collapse; width: 100%; margin-bottom: 20px;
         box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
 th { background: #16213e; color: #fff; padding: 10px 14px; text-align: left;
      font-weight: 600; font-size: 0.85em; text-transform: uppercase; }
-td { padding: 8px 14px; border-bottom: 1px solid #eee; font-size: 0.9em; }
+td { padding: 8px 14px; border-bottom: 1px solid #eee; font-size: 0.9em;
+     vertical-align: top; }
 tr:hover { background: #f8f9fa; }
 .sev-error { color: #e74c3c; font-weight: bold; }
 .sev-warning { color: #f39c12; font-weight: bold; }
@@ -101,13 +102,23 @@ tr:hover { background: #f8f9fa; }
 .badge-info { background: #e8f4fd; color: #3498db; }
 .mono { font-family: 'SF Mono', 'Consolas', monospace; font-size: 0.85em; }
 .empty { color: #999; font-style: italic; }
+.detail-box { background: #f8f9fa; border: 1px solid #e9ecef; border-radius: 4px;
+              padding: 6px 10px; font-family: 'SF Mono', 'Consolas', monospace;
+              font-size: 0.82em; white-space: pre-wrap; word-break: break-all;
+              max-height: 200px; overflow-y: auto; margin-top: 4px; }
+.api-call { color: #0d6efd; font-family: 'SF Mono', 'Consolas', monospace;
+            font-size: 0.82em; }
+.http-status { font-weight: bold; }
+.http-ok { color: #27ae60; }
+.http-err { color: #e74c3c; }
+.id-list { font-size: 0.8em; color: #666; }
 """
 
 
 def _esc(s):
     """HTML-escape a string."""
     if s is None:
-        return '<span class="empty">—</span>'
+        return '<span class="empty">\u2014</span>'
     s = str(s)
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
@@ -127,6 +138,26 @@ def _presence(val):
     if val is False:
         return '<span class="cross">&#10007;</span>'
     return _esc(val)
+
+
+def _http_status_html(status):
+    """Render an HTTP status code with color coding."""
+    if status is None or status == "":
+        return '<span class="empty">\u2014</span>'
+    status = int(status) if status else 0
+    cls = "http-ok" if 200 <= status < 300 else "http-err"
+    return f'<span class="http-status {cls}">{status}</span>'
+
+
+def _id_list_html(ids):
+    """Render a list of IDs as a compact display."""
+    if not ids:
+        return ""
+    if isinstance(ids, list):
+        items = [str(i)[:12] for i in ids[:5]]
+        suffix = f" +{len(ids) - 5} more" if len(ids) > 5 else ""
+        return f'<span class="id-list">[{", ".join(items)}{suffix}]</span>'
+    return _esc(ids)
 
 
 def _build_html(findings, errors, warnings, infos, categories, ts,
@@ -162,13 +193,14 @@ def _build_html(findings, errors, warnings, infos, categories, ts,
     not_tested = [f for f in findings if f.get("category") == "not_tested"]
     if not_tested:
         parts.append("<h2>Operations Not Tested</h2>")
-        parts.append("<table><tr><th>Operation</th><th>CLI</th><th>v1</th><th>v2</th><th>Reason</th></tr>")
+        parts.append(
+            "<table><tr><th>Severity</th><th>Operation</th>"
+            "<th>Reason</th></tr>"
+        )
         for f in not_tested:
             parts.append(
-                f'<tr><td class="mono">{_esc(f.get("operation"))}</td>'
-                f"<td>{_presence(f.get('cli'))}</td>"
-                f"<td>{_presence(f.get('v1'))}</td>"
-                f"<td>{_presence(f.get('v2'))}</td>"
+                f"<tr><td>{_badge(f['severity'])}</td>"
+                f'<td class="mono">{_esc(f.get("operation"))}</td>'
                 f'<td>{_esc(f.get("detail"))}</td></tr>'
             )
         parts.append("</table>")
@@ -211,14 +243,24 @@ def _build_html(findings, errors, warnings, infos, categories, ts,
     iface_errors = [f for f in findings if f.get("category") == "interface_error"]
     if iface_errors:
         parts.append("<h2>Interface Errors (one interface returned an error)</h2>")
-        parts.append("<table><tr><th>Severity</th><th>Operation</th><th>Interface</th>"
-                     "<th>Detail</th></tr>")
+        parts.append(
+            "<table><tr><th>Severity</th><th>Operation</th><th>Interface</th>"
+            "<th>Detail</th><th>API Call</th><th>HTTP Status</th>"
+            "<th>Response</th></tr>"
+        )
         for f in iface_errors:
+            resp_preview = f.get("response_preview", "")
+            resp_html = ""
+            if resp_preview:
+                resp_html = f'<div class="detail-box">{_esc(resp_preview)}</div>'
             parts.append(
                 f"<tr><td>{_badge(f['severity'])}</td>"
                 f'<td class="mono">{_esc(f.get("operation"))}</td>'
                 f'<td>{_esc(f.get("interface"))}</td>'
-                f'<td>{_esc(f.get("detail"))}</td></tr>'
+                f'<td>{_esc(f.get("detail"))}</td>'
+                f'<td class="api-call">{_esc(f.get("api_call", ""))}</td>'
+                f'<td>{_http_status_html(f.get("http_status"))}</td>'
+                f"<td>{resp_html}</td></tr>"
             )
         parts.append("</table>")
 
@@ -226,15 +268,22 @@ def _build_html(findings, errors, warnings, infos, categories, ts,
     counts = [f for f in findings if f.get("category") == "count_mismatch"]
     if counts:
         parts.append("<h2>Count Mismatches (different number of items returned)</h2>")
-        parts.append("<table><tr><th>Severity</th><th>Operation</th>"
-                     "<th>CLI count</th><th>v1 count</th><th>v2 count</th></tr>")
+        parts.append(
+            "<table><tr><th>Severity</th><th>Operation</th>"
+            "<th>CLI count</th><th>v1 count</th><th>v2 count</th>"
+            "<th>CLI IDs (sample)</th><th>v1 IDs (sample)</th>"
+            "<th>v2 IDs (sample)</th></tr>"
+        )
         for f in counts:
             parts.append(
                 f"<tr><td>{_badge(f['severity'])}</td>"
                 f'<td class="mono">{_esc(f.get("operation"))}</td>'
                 f'<td>{_esc(f.get("cli"))}</td>'
                 f'<td>{_esc(f.get("v1"))}</td>'
-                f'<td>{_esc(f.get("v2"))}</td></tr>'
+                f'<td>{_esc(f.get("v2"))}</td>'
+                f'<td>{_id_list_html(f.get("cli_ids"))}</td>'
+                f'<td>{_id_list_html(f.get("v1_ids"))}</td>'
+                f'<td>{_id_list_html(f.get("v2_ids"))}</td></tr>'
             )
         parts.append("</table>")
 
@@ -258,7 +307,7 @@ def _build_html(findings, errors, warnings, infos, categories, ts,
         parts.append("</table>")
 
     if not findings:
-        parts.append('<p class="empty">No findings — all interfaces are in parity.</p>')
+        parts.append('<p class="empty">No findings \u2014 all interfaces are in parity.</p>')
 
     parts.append("</div></body></html>")
     return "\n".join(parts)
