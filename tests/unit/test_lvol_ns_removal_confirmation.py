@@ -1,4 +1,3 @@
-# coding=utf-8
 """Namespace removal must be CONFIRMED before the bdev is deleted.
 
 Online-expand incident 2026-06-12 (CI 27398880537): ``nvmf_subsystem_remove_ns``

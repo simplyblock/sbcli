@@ -1,6 +1,4 @@
-# coding=utf-8
 import datetime
-from typing import List
 
 from simplyblock_core.models.base_model import BaseModel
 
@@ -40,7 +38,7 @@ class Backup(BaseModel):
     completed_at: int = 0
     error_message: str = ""
     # Security params from the source lvol (for cross-cluster restore)
-    allowed_hosts: List[dict] = []
+    allowed_hosts: list[dict] = []
     # S3 metadata written to metadata bucket
     s3_metadata: dict = {}
     encrypted: bool = False

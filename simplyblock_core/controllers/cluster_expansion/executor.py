@@ -1,4 +1,3 @@
-# coding=utf-8
 """SPDK-driven :class:`MoveExecutor` for single-node cluster expansion.
 
 This module is the seam between the orchestrator's pure cursor/persistence

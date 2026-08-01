@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_dhchap_pool_level.py – unit tests for pool-level DH-HMAC-CHAP configuration.
 

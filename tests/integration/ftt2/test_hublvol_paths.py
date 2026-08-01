@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_hublvol_paths.py – Integration tests for hublvol NVMe multipath setup.
 

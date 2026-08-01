@@ -1,4 +1,3 @@
-# coding=utf-8
 """Shared mock factories for unit tests."""
 
 from unittest.mock import MagicMock

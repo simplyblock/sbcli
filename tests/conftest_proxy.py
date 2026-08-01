@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 conftest_proxy.py – helper to import spdk_http_proxy_server safely in tests.
 

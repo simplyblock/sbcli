@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_failover_failback_combinations.py – comprehensive tests for all
 failover/failback combinations with FTT=1 and FTT=2.

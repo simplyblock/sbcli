@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_expansion_preconditions.py — unit tests for the expansion pre-flight
 checks in ``simplyblock_core/controllers/cluster_expansion/preconditions.py``.

@@ -1,4 +1,3 @@
-# coding=utf-8
 """Unit tests for /api/v2/clusters/{id}/storage-nodes endpoints (storage_node_ops mocked)."""
 
 from tests.unit.web.api.v2._factories import CLUSTER_ID, STORAGE_NODE_ID, TASK_ID

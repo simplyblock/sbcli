@@ -1,4 +1,5 @@
-from typing import Annotated, Any, Callable, Literal, Optional
+from typing import Annotated, Any, Literal, Optional
+from collections.abc import Callable
 from urllib.parse import urlparse
 from uuid import UUID
 

@@ -1,5 +1,5 @@
 from threading import Thread
-from typing import Annotated, List, Literal, Optional
+from typing import Annotated, Literal, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -88,7 +88,7 @@ class ClusterParams(BaseModel):
 
 
 @api.get('/', name='clusters:list')
-def list() -> List[ClusterDTO]:
+def list_() -> list[ClusterDTO]:
     data = []
     for cluster in db.get_clusters():
         stat_obj = None

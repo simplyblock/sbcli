@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 tasks_runner_batch_migration.py – main orchestrator for batch (shared-namespace)
 lvol migration.

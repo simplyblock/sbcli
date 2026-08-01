@@ -1,4 +1,3 @@
-# coding=utf-8
 from simplyblock_core import constants, utils
 from simplyblock_core.db_controller import DBController
 

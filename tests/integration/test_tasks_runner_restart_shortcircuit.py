@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_tasks_runner_restart_shortcircuit.py — regression tests for the
 FN_NODE_RESTART task-runner short-circuit in

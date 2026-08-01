@@ -1,4 +1,3 @@
-# coding=utf-8
 """Unit tests for the snapshot/clone delete-race fixes.
 
 Three fixes covered:

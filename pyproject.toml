@@ -60,22 +60,12 @@ ignore = [
     "TRY201",
     "TRY203",
     "TRY401",
-    "UP004",
-    "UP006",
-    "UP007",
+    "UP007",  # Enable when 3.9 support is dropped
     "UP008",
-    "UP009",
-    "UP018",
-    "UP022",
-    "UP024",
     "UP031",
-    "UP032",
-    "UP034",
     "UP035",
-    "UP036",
-    "UP037",
-    "UP041",
-    "UP045",
+    "UP036",  # Enable when 3.9 support is dropped
+    "UP045",  # Enable when 3.9 support is dropped
 ]
 
 [tool.ruff.lint.per-file-ignores]

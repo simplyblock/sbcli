@@ -1,7 +1,5 @@
-# coding=utf-8
 import datetime
 import time
-from typing import List
 
 from simplyblock_core import constants
 from simplyblock_core.models.base_model import BaseModel
@@ -61,21 +59,21 @@ class LVolMigration(BaseModel):
 
     # Ordered list of snapshot UUIDs to copy, oldest → newest.
     # Built once at migration start from the volume's snapshot chain.
-    snap_migration_plan: List[str] = []
+    snap_migration_plan: list[str] = []
 
     # Snapshot UUIDs that are available on the target node (either transferred by
     # this migration or already present from a prior migration of a related volume).
-    snaps_migrated: List[str] = []
+    snaps_migrated: list[str] = []
 
     # Subset of snaps_migrated that were already present on the target node when
     # this migration started (e.g. copied by an earlier migration of a clone).
     # These must NEVER be deleted during CLEANUP_TARGET rollback.
-    snaps_preexisting_on_target: List[str] = []
+    snaps_preexisting_on_target: list[str] = []
 
     # Snapshot UUIDs of intermediate ("shrink") snapshots taken on the source
     # during migration to progressively reduce the live delta. These are
     # created by the migration process itself and must be cleaned up afterward.
-    intermediate_snaps: List[str] = []
+    intermediate_snaps: list[str] = []
 
     # ── Target inventory: objects created on the target by this migration ───
     # Populated incrementally as objects are created so that the cleanup
@@ -91,13 +89,13 @@ class LVolMigration(BaseModel):
     # Node IDs (get_id() form) where we called subsystem_create during
     # create_migration().  Overlap nodes are excluded — their subsystem
     # belongs to the source role and must NOT be deleted on cleanup.
-    target_subsystem_node_ids: List[str] = []
+    target_subsystem_node_ids: list[str] = []
 
     # Full composite bdev paths created on the target by this migration
     # (e.g. "LVS_TGT/SNAP_xxx_m").  Excludes pre-existing bdevs so the
     # cleanup endpoint knows exactly what this migration created.
     # Cleared to [] after cleanup (normal CLEANUP_TARGET or manual endpoint).
-    target_snap_bdevs: List[str] = []
+    target_snap_bdevs: list[str] = []
 
     # In-progress RPC job ID for the currently executing data-plane operation
     # (either a snapshot copy or the final lvol migrate). Empty when idle.
@@ -138,7 +136,7 @@ class LVolMigration(BaseModel):
     # mode but whose add_clone + convert have NOT yet been performed (the main
     # orchestrator reconstructs the tree after all workers reach snap_copy_done).
     # Unused for standalone migrations.
-    snaps_transferred_group: List[str] = []
+    snaps_transferred_group: list[str] = []
 
     def get_id(self):
         # Prefix with cluster_id so that FDB range queries can filter by cluster.

@@ -1,4 +1,3 @@
-# coding=utf-8
 from typing import TYPE_CHECKING, Optional
 
 from pydantic import BaseModel, ConfigDict, SecretStr

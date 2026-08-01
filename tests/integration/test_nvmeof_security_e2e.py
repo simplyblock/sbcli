@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_nvmeof_security_e2e.py – end-to-end tests for NVMe-oF TLS host access
 control using mock RPC servers.

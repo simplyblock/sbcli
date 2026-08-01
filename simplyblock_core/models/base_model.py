@@ -1,16 +1,16 @@
-# coding=utf-8
 import pprint
 
 import json
 from inspect import ismethod, isfunction
 import sys
-from typing import Mapping, Type, Union
+from typing import Union
+from collections.abc import Mapping
 from collections import ChainMap
 
 from pydantic import SecretBytes, SecretStr
 
 
-class BaseModel(object):
+class BaseModel:
 
     _STATUS_CODE_MAP: dict = {}
 
@@ -30,7 +30,7 @@ class BaseModel(object):
         self.from_dict(data)
 
     @classmethod
-    def all_annotations(cls) -> Mapping[str, Type]:
+    def all_annotations(cls) -> Mapping[str, type]:
         """Returns a dictionary-like ChainMap that includes annotations for all
            attributes defined in cls or inherited from superclasses."""
         if sys.version_info >= (3, 10):

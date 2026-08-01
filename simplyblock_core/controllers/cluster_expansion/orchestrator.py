@@ -1,4 +1,3 @@
-# coding=utf-8
 """Orchestrator for single-node cluster expansion.
 
 Consumes a list of :class:`~simplyblock_core.controllers.cluster_expansion.planner.RoleMove`
@@ -36,7 +35,7 @@ the mismatch to the operator than to misinterpret a future schema.
 """
 
 from abc import ABC, abstractmethod
-from typing import List, Optional
+from typing import Optional
 
 from simplyblock_core import utils
 from simplyblock_core.controllers.cluster_expansion.planner import (
@@ -83,7 +82,7 @@ class NoopMoveExecutor(MoveExecutor):
     """
 
     def __init__(self) -> None:
-        self.executed: List[RoleMove] = []
+        self.executed: list[RoleMove] = []
 
     def execute(self, move: RoleMove) -> None:
         self.executed.append(move)
@@ -93,7 +92,7 @@ def execute_expand_plan(
     cluster,
     executor: MoveExecutor,
     *,
-    planned_moves: Optional[List[RoleMove]] = None,
+    planned_moves: Optional[list[RoleMove]] = None,
     new_node_id: Optional[str] = None,
 ) -> None:
     """Drive the expansion to completion, persisting cursor progress as we go.

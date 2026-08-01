@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_subsystem_limit.py – unit tests for subsystem-based limit checks.
 

@@ -1,4 +1,3 @@
-# coding=utf-8
 """Snapshot-delete phase-2 semantics (run 20260725).
 
 Phase-1 (async delete) is leader-only; phase-2 (per-node sync deletes) needs

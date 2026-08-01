@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from ipaddress import IPv4Address
-from typing import List, Literal, Optional, cast
+from typing import Literal, Optional, cast
 from uuid import UUID
 
 from fastapi import Request
@@ -167,7 +167,7 @@ class DeviceDTO(BaseModel):
     cluster_device_order: util.Unsigned
     io_error: bool
     is_partition: bool
-    nvmf_ips: List[IPv4Address]
+    nvmf_ips: list[IPv4Address]
     nvmf_nqn: str = ""
     nvmf_port: int = 0
     capacity: CapacityStatDTO
@@ -227,7 +227,7 @@ class StoragePoolDTO(BaseModel):
     max_w_mbytes: util.Unsigned
     capacity: CapacityStatDTO
     dhchap: bool = False
-    allowed_hosts: List[str] = []
+    allowed_hosts: list[str] = []
 
     @staticmethod
     def from_model(model: Pool, stat_obj: Optional[StatsObject] = None):
@@ -405,7 +405,7 @@ class VolumeDTO(BaseModel):
     priority_class: util.Unsigned
     namespace: str
     fabric: str
-    nodes: List[util.UrlPath]
+    nodes: list[util.UrlPath]
     port: util.Port
     size: util.Unsigned
     ndcs: int
@@ -424,7 +424,7 @@ class VolumeDTO(BaseModel):
     max_rw_mbytes: util.Unsigned
     max_r_mbytes: util.Unsigned
     max_w_mbytes: util.Unsigned
-    allowed_hosts: List[str]
+    allowed_hosts: list[str]
     policy: str
     capacity: CapacityStatDTO
     rep_info: Optional[dict] = None
@@ -513,7 +513,7 @@ class BackupDTO(BaseModel):
     status: str
     prev_backup_id: str
     size: int
-    allowed_hosts: List[dict]
+    allowed_hosts: list[dict]
     created_at: int
     completed_at: int
     source_cluster_id: str
@@ -577,7 +577,7 @@ class MigrationDTO(BaseModel):
     connect_strings: list[NvmeConnectEntry] = []
 
     @staticmethod
-    def from_model(model: LVolMigration, connect_strings: Optional[List[NvmeConnectEntry]] = None):
+    def from_model(model: LVolMigration, connect_strings: Optional[list[NvmeConnectEntry]] = None):
         return MigrationDTO(
             id=UUID(model.uuid),
             lvol_id=model.lvol_id,
@@ -611,7 +611,7 @@ class MigrationGroupDTO(BaseModel):
     connect_strings: list[NvmeConnectEntry] = []
 
     @staticmethod
-    def from_model(model: LVolMigrationGroup, connect_strings: Optional[List[NvmeConnectEntry]] = None):
+    def from_model(model: LVolMigrationGroup, connect_strings: Optional[list[NvmeConnectEntry]] = None):
         return MigrationGroupDTO(
             id=UUID(model.uuid),
             cluster_id=model.cluster_id,

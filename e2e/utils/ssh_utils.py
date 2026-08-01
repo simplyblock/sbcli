@@ -16,9 +16,8 @@ import string
 import re
 import subprocess
 import shlex
-import socket
 from collections import defaultdict
-from typing import Optional, List
+from typing import Optional
 # import importlib
 # from glob import glob
 from utils.placement_dump_check import PlacementDump
@@ -32,7 +31,7 @@ if _key_name:
 elif os.environ.get("K8S_LOCAL_KUBECTL", "").lower() in ("1", "true", "yes"):
     SSH_KEY_LOCATION = ""
 else:
-    raise EnvironmentError(
+    raise OSError(
         "KEY_NAME env var is required for SSH access to nodes. "
         "Set KEY_NAME or use K8S_LOCAL_KUBECTL=1 for k8s-native tests."
     )
@@ -96,14 +95,14 @@ class SshUtils:
         self.ssh_pass = None
         self.distrib_dump_paths = {}
 
-    def _candidate_usernames(self, explicit_user) -> List[str]:
+    def _candidate_usernames(self, explicit_user) -> list[str]:
         if explicit_user:
             if isinstance(explicit_user, (list, tuple)):
                 return list(explicit_user)
             return [str(explicit_user)]
         return ["ec2-user", "ubuntu", "rocky", "root"]
     
-    def _load_private_keys(self) -> List[paramiko.PKey]:
+    def _load_private_keys(self) -> list[paramiko.PKey]:
         """
         Try Ed25519 then RSA. If SSH_KEY_LOCATION/env points to a file, use it.
         Else try ~/.ssh/id_ed25519 and ~/.ssh/id_rsa. If SSH_KEY_PATH is a dir, load all files from it.
@@ -302,14 +301,14 @@ class SshUtils:
         self.ssh_pass = None
         self.distrib_dump_paths = {}
 
-    def _candidate_usernames(self, explicit_user) -> List[str]:
+    def _candidate_usernames(self, explicit_user) -> list[str]:
         if explicit_user:
             if isinstance(explicit_user, (list, tuple)):
                 return list(explicit_user)
             return [str(explicit_user)]
         return ["ec2-user", "ubuntu", "rocky", "root"]
     
-    def _load_private_keys(self) -> List[paramiko.PKey]:
+    def _load_private_keys(self) -> list[paramiko.PKey]:
         """
         Try Ed25519 then RSA. If SSH_KEY_LOCATION/env points to a file, use it.
         Else try ~/.ssh/id_ed25519 and ~/.ssh/id_rsa. If SSH_KEY_PATH is a dir, load all files from it.
@@ -804,7 +803,7 @@ class SshUtils:
 
                     return out, err
 
-                except (EOFError, paramiko.SSHException, paramiko.buffered_pipe.PipeTimeout, socket.error) as e:
+                except (OSError, EOFError, paramiko.SSHException, paramiko.buffered_pipe.PipeTimeout) as e:
                     retry += 1
                     self.logger.error(f"SSH command failed ({type(e).__name__}): {e}. Retrying ({retry}/{max_retries})...")
                     time.sleep(min(2 * retry, 5))
@@ -3744,7 +3743,7 @@ class SshUtils:
                 else:
                     self.logger.info("[HOST] nfs-utils already installed.")
 
-                result = subprocess.run(check_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                result = subprocess.run(check_cmd, shell=True, capture_output=True)
                 if result.returncode != 0:
                     self.logger.info(f"[HOST] NFS not mounted — mounting {nfs_server}:{nfs_path}...")
                     subprocess.run(mount_cmd, shell=True, check=True)
@@ -4235,7 +4234,7 @@ class RunnerK8sLog:
         Check if tmux is installed on the runner. If not, install it.
         """
         try:
-            subprocess.run(["tmux", "-V"], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            subprocess.run(["tmux", "-V"], check=True, capture_output=True)
             print("tmux is already installed.")
         except (subprocess.CalledProcessError, FileNotFoundError):
             print("tmux is not installed. Installing now...")
@@ -4335,7 +4334,7 @@ class RunnerK8sLog:
                     try:
                         subprocess.run(
                             ["tmux", "kill-session", "-t", existing["session"]],
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            capture_output=True,
                         )
                         self.logger.info(f"Killed old tmux session '{existing['session']}' for {key}")
                     except Exception:
@@ -4397,7 +4396,7 @@ class RunnerK8sLog:
                     if session:
                         subprocess.run(
                             ["tmux", "send-keys", "-t", session, "C-c", ""],
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            capture_output=True,
                         )
         except Exception:
             pass
@@ -4407,7 +4406,7 @@ class RunnerK8sLog:
 
         subprocess.run(
             ["tmux", "kill-server"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            capture_output=True,
         )
         self.logger.info("Stopped all Kubernetes logging processes.")
 
@@ -4615,7 +4614,7 @@ class RunnerK8sLog:
         try:
             result = subprocess.run(
                 ["tmux", "has-session", "-t", session_name],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                capture_output=True,
             )
             return result.returncode == 0
         except Exception:
@@ -4719,7 +4718,7 @@ class RunnerK8sLog:
                                 try:
                                     subprocess.run(
                                         ["tmux", "kill-session", "-t", stream_info["session"]],
-                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                        capture_output=True,
                                     )
                                 except Exception:
                                     pass

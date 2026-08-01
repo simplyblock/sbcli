@@ -1,10 +1,11 @@
-from typing import Callable, List, Optional
+from typing import Optional
+from collections.abc import Callable
 
 import requests
 
 
 def get_cloud_info() -> Optional[dict]:
-    getters: List[Callable[[], Optional[dict]]] = [_google_info, _amazon_info, _equinix_info]
+    getters: list[Callable[[], Optional[dict]]] = [_google_info, _amazon_info, _equinix_info]
     return next((
         info
         for getter in getters

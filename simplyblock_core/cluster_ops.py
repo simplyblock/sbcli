@@ -1,4 +1,3 @@
-# coding=utf-8
 import json
 import os
 import socket
@@ -978,8 +977,8 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     records = db_controller.get_cluster_capacity(cluster)
     max_size = records[0]['size_total']
 
-    used_nodes_as_sec: t.List[str] = []
-    used_nodes_as_tertiary: t.List[str] = []
+    used_nodes_as_sec: list[str] = []
+    used_nodes_as_tertiary: list[str] = []
     snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     if cluster.ha_type == "ha":
         for snode in snodes:
@@ -1041,8 +1040,8 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     # Port allocation inside create_lvstore is separately serialized by
     # storage_node_ops._lvstore_port_alloc_lock.
     snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
-    pass1_recreate_ids: t.List[str] = []
-    pass1_create_ids: t.List[str] = []
+    pass1_recreate_ids: list[str] = []
+    pass1_create_ids: list[str] = []
     for snode in snodes:
         if snode.is_secondary_node:  # pass
             continue
@@ -1086,8 +1085,8 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
         return storage_node_ops.recreate_lvstore(snode, activation_mode=True)
 
     if pass1_recreate_ids:
-        pass1_results: t.Dict[str, t.Any] = {}
-        pass1_errors: t.List[ValueError] = []
+        pass1_results: dict[str, t.Any] = {}
+        pass1_errors: list[ValueError] = []
         workers = min(constants.CLUSTER_ACTIVATION_MAX_PARALLEL_NODES, len(pass1_recreate_ids))
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="activate-p1") as pool:
             futures = {pool.submit(_recreate_primary_lvs, nid): nid for nid in pass1_recreate_ids}
@@ -1115,8 +1114,8 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
         # itself plus its secondary/tertiary. Locks are acquired in sorted-id
         # order so two creates with intersecting sets serialize deadlock-free
         # while disjoint pairs run concurrently.
-        pass1_create_lock_ids: t.Dict[str, t.List[str]] = {}
-        pass1_create_locks: t.Dict[str, threading.Lock] = {}
+        pass1_create_lock_ids: dict[str, list[str]] = {}
+        pass1_create_locks: dict[str, threading.Lock] = {}
         for nid in pass1_create_ids:
             n = db_controller.get_storage_node_by_id(nid)
             touched = {nid}
@@ -1141,8 +1140,8 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                 for lk in reversed(locks):
                     lk.release()
 
-        create_results: t.Dict[str, t.Any] = {}
-        create_errors: t.List[ValueError] = []
+        create_results: dict[str, t.Any] = {}
+        create_errors: list[ValueError] = []
         workers = min(constants.CLUSTER_ACTIVATION_MAX_PARALLEL_NODES, len(pass1_create_ids))
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="activate-p1c") as pool:
             futures = {pool.submit(_create_primary_lvs, nid): nid for nid in pass1_create_ids}
@@ -1165,7 +1164,7 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     # is_secondary_node filter only matched dedicated secondary-only nodes,
     # skipping the ring participants entirely.
     snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
-    pass2_ids: t.List[str] = []
+    pass2_ids: list[str] = []
     for snode in snodes:
         if snode.status != StorageNode.STATUS_ONLINE:
             continue
@@ -1177,7 +1176,7 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     # secondary and tertiary, and the leader port-block plus the
     # lvstore_status writes on that primary are not concurrency-safe.
     # Pre-created per-primary locks serialize exactly that, nothing more.
-    pass2_primary_locks: t.Dict[str, threading.Lock] = {}
+    pass2_primary_locks: dict[str, threading.Lock] = {}
     for node_id in pass2_ids:
         for p in db_controller.get_primary_storage_nodes_by_secondary_node_id(node_id):
             pass2_primary_locks.setdefault(p.get_id(), threading.Lock())
@@ -1261,7 +1260,7 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
         return True
 
     if pass2_ids:
-        pass2_errors: t.List[ValueError] = []
+        pass2_errors: list[ValueError] = []
         workers = min(constants.CLUSTER_ACTIVATION_MAX_PARALLEL_NODES, len(pass2_ids))
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="activate-p2") as pool:
             futures = {pool.submit(_recreate_non_leader_lvs, nid): nid for nid in pass2_ids}
@@ -1290,7 +1289,7 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     # the primary and its peers, so each worker holds the locks of every node
     # it touches. Locks are pre-created and acquired in sorted-id order so two
     # workers sharing a peer cannot deadlock.
-    pass3_node_locks: t.Dict[str, threading.Lock] = {
+    pass3_node_locks: dict[str, threading.Lock] = {
         n.get_id(): threading.Lock() for n in snodes}
 
     def _wire_hublvols(node_id) -> None:
@@ -1305,7 +1304,7 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
         if not secondary_ids:
             return
 
-        held: t.List[threading.Lock] = []
+        held: list[threading.Lock] = []
         try:
             for nid in sorted({node_id, *secondary_ids}):
                 lock = pass3_node_locks.setdefault(nid, threading.Lock())
@@ -1548,7 +1547,7 @@ def cluster_expand(cl_id) -> None:
     logger.info("Cluster expanded successfully")
 
 
-def get_cluster_status(cl_id) -> t.List[dict]:
+def get_cluster_status(cl_id) -> list[dict]:
     db_controller.get_cluster_by_id(cl_id)  # ensure exists
 
     return sorted([
@@ -1808,7 +1807,7 @@ def set_shared_placement(cl_id, enable=True, force=False) -> bool:
     return True
 
 
-def list() -> t.List[dict]:
+def list_() -> list[dict]:
     cls = db_controller.get_clusters()
     mt = db_controller.get_mgmt_nodes()
 
@@ -2037,7 +2036,7 @@ def list_all_info(cluster_id) -> str:
     return out
 
 
-def get_capacity(cluster_id, history, records_count=20) -> t.List[dict]:
+def get_capacity(cluster_id, history, records_count=20) -> list[dict]:
     try:
         _ = db_controller.get_cluster_by_id(cluster_id)
     except KeyError:
@@ -2058,7 +2057,7 @@ def get_capacity(cluster_id, history, records_count=20) -> t.List[dict]:
     return utils.process_records(records, records_count, keys=cap_stats_keys)
 
 
-def get_iostats_history(cluster_id, history_string, records_count=20, with_sizes=False) -> t.List[dict]:
+def get_iostats_history(cluster_id, history_string, records_count=20, with_sizes=False) -> list[dict]:
     try:
         _ = db_controller.get_cluster_by_id(cluster_id)
     except KeyError:
@@ -2151,7 +2150,7 @@ def change_cluster_name(cluster_id, new_name) -> None:
     logger.info(f"Cluster has been renamed: {old_name} -> {new_name}")
 
 
-def get_logs(cluster_id, limit=50, **kwargs) -> t.List[dict]:
+def get_logs(cluster_id, limit=50, **kwargs) -> list[dict]:
     db_controller.get_cluster_by_id(cluster_id)  # ensure exists
 
     events = db_controller.get_events(cluster_id, limit=limit, reverse=True)

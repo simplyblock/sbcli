@@ -1,5 +1,5 @@
 from threading import Thread
-from typing import List, Optional
+from typing import Optional
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -20,7 +20,7 @@ db = DBController()
 
 
 @api.get('/', name='clusters:storage-nodes:list')
-def list(cluster: Cluster) -> List[StorageNodeDTO]:
+def list_(cluster: Cluster) -> list[StorageNodeDTO]:
     data = []
     for storage_node in db.get_storage_nodes_by_cluster_id(cluster.get_id()):
         node_stat_obj = None
@@ -39,7 +39,7 @@ class StorageNodeParams(BaseModel):
     test_device: Optional[bool] = False
     spdk_image: Optional[str] = ""
     spdk_debug: bool = False
-    data_nics: List[str] = []
+    data_nics: list[str] = []
     namespace: str = 'default'
     id_device_by_nqn: Optional[bool] = False
     jm_percent: util.Percent = 3
@@ -243,7 +243,7 @@ class _RestartParams(BaseModel):
     force: bool = False
     reattach_volume: bool = False
     node_address: Optional[str] = None
-    new_ssd_pcie: List[str] = []
+    new_ssd_pcie: list[str] = []
 
 
 @instance_api.post('/start', name='clusters:storage-nodes:start', status_code=202, responses={202: {"content": None}})  # Same as restart for now

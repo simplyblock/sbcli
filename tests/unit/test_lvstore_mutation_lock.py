@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_lvstore_mutation_lock.py – unit tests for the per-lvstore snapshot-mutation
 lock.

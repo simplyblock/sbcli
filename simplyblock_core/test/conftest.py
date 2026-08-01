@@ -1,4 +1,3 @@
-# coding=utf-8
 """Stub the native ``fdb`` module so the unit-tier tests under this directory
 can run without ``libfdb_c`` or a live FoundationDB cluster.
 

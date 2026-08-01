@@ -1,4 +1,3 @@
-# coding=utf-8
 """Leaderless-LVS recovery must not force leadership from the control plane
 (run 20260725; design constraint from incident 2026-07-06 LVS_13).
 

@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 tasks_runner_lvol_migration.py – background task runner for live volume migration.
 

@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_ctl.py – CLI tool to inspect and manipulate control-plane DB objects
 during a live migration test run.

@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_delete_lvol_subsystem_order.py — pins the pre-leader subsystem-teardown
 contract in ``lvol_controller.delete_lvol`` for HA lvols.

@@ -1,4 +1,3 @@
-# coding=utf-8
 """Tripwire: no bare (unfiltered, undeclared) ``get_bdevs()`` calls in
 production code.
 

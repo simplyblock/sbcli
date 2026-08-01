@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_spdk_process_is_up.py — regression tests for the SPDK Unix-socket
 probe in ``simplyblock_web.api.internal.storage_node.docker.spdk_process_is_up``.

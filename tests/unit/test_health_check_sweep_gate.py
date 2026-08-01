@@ -1,4 +1,3 @@
-# coding=utf-8
 """Health-check remote-device sweep gate (run 20260725).
 
 sync_remote_devices_from_spdk pays one SPDK inventory RPC per node per pass;

@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 hub_controller_manager.py — lifecycle manager for migration hub NVMe-oF controllers.
 

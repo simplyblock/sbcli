@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 lvol_migration_group.py – coordination record for a batch migration of all
 lvols within a shared NVMe-oF namespace subsystem.
@@ -30,7 +29,7 @@ COMPLETED
 """
 
 import datetime
-from typing import List, Optional
+from typing import Optional
 
 from simplyblock_core.models.base_model import BaseModel
 
@@ -67,7 +66,7 @@ class LVolMigrationGroup(BaseModel):
 
     # Ordered list of {ns_id: int, migration_id: str} dicts sorted by ns_id
     # ascending.  This is the order bdev_lvol_batch_final_step expects.
-    members: List[dict] = []
+    members: list[dict] = []
 
     # Static snap-ownership map: snap_uuid → migration_id.
     # Computed once at group creation from all members' snapshot chains.
@@ -78,14 +77,14 @@ class LVolMigrationGroup(BaseModel):
 
     # migration_ids that finished transferring their owned snaps and are now
     # waiting for the INTERMEDIATE phase signal from the main orchestrator.
-    snap_copy_done: List[str] = []
+    snap_copy_done: list[str] = []
 
     # migration_ids that have taken and transferred their single intermediate
     # snapshot and are waiting for batch_result.
-    intermediates_done: List[str] = []
+    intermediates_done: list[str] = []
 
     # migration_ids that have completed CLEANUP_SOURCE.
-    cleanup_source_done: List[str] = []
+    cleanup_source_done: list[str] = []
 
     # Written by the main orchestrator after bdev_lvol_batch_final_step.
     # None = call not yet made; True = success; False = failure.
@@ -124,6 +123,6 @@ class LVolMigrationGroup(BaseModel):
             return None
         return min(self.members, key=lambda m: m['ns_id'])['migration_id']
 
-    def ordered_migration_ids(self) -> List[str]:
+    def ordered_migration_ids(self) -> list[str]:
         """migration_ids sorted by ns_id ascending — the SPDK batch order."""
         return [m['migration_id'] for m in sorted(self.members, key=lambda m: m['ns_id'])]

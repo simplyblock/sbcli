@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_soak_outage_gap.py — unit tests for the mixed-churn soak's
 inter-outage gap policy.

@@ -1,4 +1,3 @@
-# coding=utf-8
 """Unit tests for /api/v2/.../volumes/{id}/migrations endpoints (migration_controller mocked)."""
 
 from simplyblock_core import constants

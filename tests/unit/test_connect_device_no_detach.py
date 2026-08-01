@@ -1,4 +1,3 @@
-# coding=utf-8
 """connect_device must never detach a controller.
 
 The old code issued ``bdev_nvme_detach_controller`` when it observed a

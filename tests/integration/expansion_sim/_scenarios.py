@@ -1,4 +1,3 @@
-# coding=utf-8
 """Baseline cluster-state builders for the expansion simulator.
 
 Each scenario builder writes a freshly-activated cluster to FDB AND
@@ -14,7 +13,6 @@ FTT2 (2+2) and 8-node baselines.
 from __future__ import annotations
 
 import datetime
-from typing import List, Tuple
 
 from tests.integration.expansion_sim._rpc_sim import (
     BdevSim,
@@ -113,7 +111,7 @@ def _make_node_record(uuid: str, cluster_id: str,
     return n
 
 
-def _populate_sim_for_primary(sim: RpcServerSim, node, primary_lvstore_stack: List[dict]):
+def _populate_sim_for_primary(sim: RpcServerSim, node, primary_lvstore_stack: list[dict]):
     """Reflect the post-activation state of a primary node in its
     simulator: lvstore bdev, hublvol bdev, hublvol subsystem with listener,
     and cluster_id-derived JM bdev. Phase 1 keeps this minimal."""
@@ -146,7 +144,7 @@ def _populate_sim_for_primary(sim: RpcServerSim, node, primary_lvstore_stack: Li
             sim.bdevs[name] = BdevSim(name=name, type=btype, params=dict(bdev_dict))
 
 
-def build_4_node_ftt1_baseline(cluster_sim: ClusterSim, db) -> Tuple[str, List[str], str]:
+def build_4_node_ftt1_baseline(cluster_sim: ClusterSim, db) -> tuple[str, list[str], str]:
     """4-node FTT1 cluster + a 5th node ready to be added.
 
     Layout (as cluster_activate would produce):

@@ -1,10 +1,9 @@
-# encoding: utf-8
 import json
 import logging
 import os
 import time
 import traceback
-from typing import List, Optional, Union
+from typing import Optional, Union
 
 import cpuinfo
 from flask_openapi3 import APIBlueprint
@@ -213,7 +212,7 @@ class SPDKParams(BaseModel):
     rpc_port: int = Field(ge=1, lt=65536)
     rpc_username: str
     rpc_password: str
-    ssd_pcie: List[str] = Field([])
+    ssd_pcie: list[str] = Field([])
     l_cores: str
     namespace: Optional[str]
     total_mem: Union[int, str] = Field('')

@@ -15,7 +15,7 @@ import time
 import subprocess
 import random
 import threading
-from typing import Optional, Tuple
+from typing import Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import paramiko
@@ -149,7 +149,7 @@ def connect_ssh(target_ip, bastion_ip=None, retries=3, delay=5) -> paramiko.SSHC
             time.sleep(delay)
     raise Exception(f"[ERROR] Failed to connect to {target_ip} after {retries} retries.")
 
-def exec_command(ssh: paramiko.SSHClient, command: str, retries=3) -> Tuple[str, str]:
+def exec_command(ssh: paramiko.SSHClient, command: str, retries=3) -> tuple[str, str]:
     for attempt in range(retries):
         try:
             print(f"[INFO] Executing: {command}")

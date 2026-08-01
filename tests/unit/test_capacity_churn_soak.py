@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_capacity_churn_soak.py — unit tests for the pure control logic of the
 capacity/namespace churn soak (scripts/aws_capacity_namespace_churn_soak.py).

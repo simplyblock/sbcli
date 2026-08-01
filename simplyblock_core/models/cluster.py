@@ -1,6 +1,5 @@
-# coding=utf-8
 import os.path
-from typing import List, Optional
+from typing import Optional
 
 from pydantic import SecretStr
 
@@ -80,7 +79,7 @@ class Cluster(BaseModel):
     inflight_io_threshold: int = 4
     iscsi: str = ""
     max_queue_size: int = 128
-    model_ids: List[str] = []
+    model_ids: list[str] = []
     cluster_name: str = None # type: ignore[assignment]
     nqn: str = ""
     page_size_in_blocks: int = 2097152

@@ -2,7 +2,7 @@ import base64
 import hmac
 import json
 import logging
-from typing import Annotated, Optional, Tuple
+from typing import Annotated, Optional
 from json.decoder import JSONDecodeError
 from uuid import UUID
 
@@ -44,7 +44,7 @@ def _urlsafe_b64decode_unpadded(encoded: str) -> bytes:
     return base64.urlsafe_b64decode(encoded + padding)
 
 
-def _insecure_decode_jwt(token: str) -> Tuple[dict, dict, bytes]:
+def _insecure_decode_jwt(token: str) -> tuple[dict, dict, bytes]:
     """Decodes the given JWT without verifying its authenticty
 
     Attempts to decode the given JWT. *Not* meant for validation, the signature is not verified.

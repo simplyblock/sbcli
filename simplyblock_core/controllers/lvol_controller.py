@@ -1,11 +1,10 @@
-# coding=utf-8
 import copy
 import random
 import sys
 import time
 import uuid
 from datetime import datetime
-from typing import List, Tuple, Optional
+from typing import Optional
 
 from simplyblock_core import utils, constants
 from simplyblock_core.controllers import snapshot_controller, pool_controller, lvol_events, tasks_controller, \
@@ -261,7 +260,7 @@ def _get_next_3_nodes(cluster_id, lvol_size=0, all_lvols=None, namespaced=False)
     utils.print_table_dict(node_start_end)
     #############
 
-    selected_node_ids: List[str] = []
+    selected_node_ids: list[str] = []
     while len(selected_node_ids) < min(len(node_stats), 3):
         r_index = random.randint(0, n_start)
         print(f"Random is {r_index}/{n_start}")
@@ -304,7 +303,7 @@ def is_hex(s: str) -> bool:
     except ValueError:
         return False
 
-def validate_aes_xts_keys(key1: str, key2: str) -> Tuple[bool, str]:
+def validate_aes_xts_keys(key1: str, key2: str) -> tuple[bool, str]:
     """
     Key Length: each key should be either 128 or 256 bits long.
     since hex values of the keys are expected, the key lengths should be either 32 or 64

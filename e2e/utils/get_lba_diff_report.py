@@ -228,7 +228,7 @@ def main():
     length_bytes = int(os.environ.get("FIO_LENGTH_BYTES", "32768"))
 
     if not all([remote_host, fio_file_path]):
-        raise EnvironmentError("One or more required environment variables are missing.")
+        raise OSError("One or more required environment variables are missing.")
 
     ssh_key_path = os.path.join(Path.home(), ".ssh", "simplyblock-us-east-2.pem")
     ssh = create_ssh_client(remote_host, ssh_key_path)

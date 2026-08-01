@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import Optional
 
 from fastapi import APIRouter, Response
 
@@ -13,7 +13,7 @@ db = DBController()
 
 
 @api.get('/', name='clusters:storage_nodes:devices:list')
-def list(cluster: Cluster, storage_node: StorageNode) -> List[DeviceDTO]:
+def list_(cluster: Cluster, storage_node: StorageNode) -> list[DeviceDTO]:
     data = []
     for device in storage_node.nvme_devices:
         stat_obj = None

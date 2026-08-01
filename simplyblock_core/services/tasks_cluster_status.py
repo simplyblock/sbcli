@@ -29,7 +29,7 @@ def setup_logger():
 
 def execute_command(command):
     """Execute a shell command and return the result."""
-    result = subprocess.run(command, shell=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    result = subprocess.run(command, shell=True, text=True, capture_output=True)
     return result
 
 def run_cluster_commands(cluster_id: str):

@@ -1,7 +1,6 @@
-# coding=utf-8
 import time
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional
+from typing import Optional
 from uuid import uuid4
 
 from pydantic import SecretStr
@@ -27,9 +26,9 @@ class StorageNode(BaseNodeObject):
     RESTART_PHASE_POST_UNBLOCK = "post_unblock"
 
 
-    alceml_cpu_cores: List[int] = []
+    alceml_cpu_cores: list[int] = []
     alceml_cpu_index: int = 0
-    alceml_worker_cpu_cores: List[int] = []
+    alceml_worker_cpu_cores: list[int] = []
     alceml_worker_cpu_index: int = 0
     api_endpoint: str = ""
     app_thread_mask: str = ""
@@ -49,8 +48,8 @@ class StorageNode(BaseNodeObject):
     cpu: int = 0
     cpu_hz: int = 0
     ctrl_secret: SecretStr = SecretStr("")
-    data_nics: List[IFace] = []
-    distrib_cpu_cores: List[int] = []
+    data_nics: list[IFace] = []
+    distrib_cpu_cores: list[int] = []
     distrib_cpu_index: int = 0
     distrib_cpu_mask: str = ""
     enable_ha_jm: bool = False
@@ -63,7 +62,7 @@ class StorageNode(BaseNodeObject):
     host_secret: SecretStr = SecretStr("")
     hostname: str = ""
     hugepages: int = 0
-    ib_devices: List[IFace] = []
+    ib_devices: list[IFace] = []
     id_device_by_nqn: bool = False
     iobuf_large_bufsize: int = 0
     iobuf_large_pool_count: int = 0
@@ -78,9 +77,9 @@ class StorageNode(BaseNodeObject):
     jm_vuid: int = 0
     lvols: int = 0
     lvstore: str = ""
-    lvstore_stack: List[dict] = []
-    lvstore_stack_secondary: List[dict] = []
-    lvstore_stack_tertiary: List[dict] = []
+    lvstore_stack: list[dict] = []
+    lvstore_stack_secondary: list[dict] = []
+    lvstore_stack_tertiary: list[dict] = []
     lvol_subsys_port: int = 9090
     lvstore_ports: dict = {}  # {lvs_name: {"lvol_subsys_port": N, "hublvol_port": M}}
     max_lvol: int = 0
@@ -94,7 +93,7 @@ class StorageNode(BaseNodeObject):
     number_of_devices: int = 0
     number_of_distribs: int = 4
     number_of_alceml_devices: int = 0
-    nvme_devices: List[NVMeDevice] = []
+    nvme_devices: list[NVMeDevice] = []
     online_since: str = ""
     # ISO timestamp of when this node entered STATUS_DOWN (cleared on any other
     # status). Used to apply a grace window before a DOWN node counts toward the
@@ -107,20 +106,20 @@ class StorageNode(BaseNodeObject):
     # 2026-06-18).
     shutdown_since: str = ""
     partitions_count: int = 0  # Unused
-    poller_cpu_cores: List[int] = []
-    ssd_pcie: List = []
+    poller_cpu_cores: list[int] = []
+    ssd_pcie: list = []
     pollers_mask: str = ""
     primary_ip: str = ""
     raid: str = ""
-    remote_devices: List[RemoteDevice] = []
-    remote_jm_devices: List[RemoteJMDevice] = []
+    remote_devices: list[RemoteDevice] = []
+    remote_jm_devices: list[RemoteJMDevice] = []
     rpc_password: SecretStr = SecretStr("")
     rpc_port: int = -1
     rpc_username: str = ""
     secondary_node_id: str = ""
     tertiary_node_id: str = ""
     sequential_number: int = 0  # Unused
-    jm_ids: List[str] = []
+    jm_ids: list[str] = []
     spdk_cpu_mask: str = ""
     l_cores: str = ""
     spdk_debug: bool = False

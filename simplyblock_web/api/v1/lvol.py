@@ -1,4 +1,3 @@
-# encoding: utf-8
 
 import logging
 
@@ -87,7 +86,7 @@ def lvol_capacity(uuid, history):
 
 @bp.route('/lvol', methods=['POST'])
 def add_lvol():
-    """"
+    """
     Params:
         | name (required) | LVol name or id
         | size (required) | LVol size: 10M, 10G, 10(bytes)
@@ -104,7 +103,7 @@ def add_lvol():
         | uid             | use this UUID for this LVol
         | pvc_name        | set PVC name for this LVol
         | fabric          | Lvol fabric
-    """""
+    """
 
     cl_data = request.get_json()
     if 'size' not in cl_data:

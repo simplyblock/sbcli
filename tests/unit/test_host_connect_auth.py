@@ -1,4 +1,3 @@
-# coding=utf-8
 """Tests for HostConnectAuth.from_entry — the single place that resolves the
 credentials a client must present, shared by the lvol and migration connect
 paths.

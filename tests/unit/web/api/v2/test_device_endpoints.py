@@ -1,4 +1,3 @@
-# coding=utf-8
 """Unit tests for /api/v2/.../storage-nodes/{id}/devices endpoints (device_controller mocked)."""
 
 import pytest

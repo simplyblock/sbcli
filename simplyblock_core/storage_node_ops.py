@@ -9,7 +9,7 @@ import subprocess
 
 import psutil
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, List, Optional
+from typing import Any, Optional
 
 import threading
 
@@ -579,7 +579,7 @@ def _connect_device_attach(name, device, node, rpc_client, attach_rpc_client,
         # Wait transients out; on a controller that stays transient past
         # the budget, raise so the calling task suspends and retries.
         _TRANSIENT_STATES = ("failed", "resetting", "deleting", "reconnect_is_delayed")
-        states: List[str] = []
+        states: list[str] = []
         for _attempt in range(5):
             if not ret:
                 # The module destructed the controller on its own; the
@@ -4978,7 +4978,7 @@ def list_storage_devices(node_id):
             "Status": remote_jm_device.status,
         })
 
-    data: dict[str, List[Any]] = {
+    data: dict[str, list[Any]] = {
         "Storage Devices": storage_devices,
         "JM Devices": jm_devices,
         "Remote Devices": remote_devices,
@@ -9593,7 +9593,7 @@ def get_secondary_nodes_2(current_node, exclude_ids=None, exclude_mgmt_ips=None,
 def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blocks, max_size):
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
-    lvstore_stack: List[dict] = []
+    lvstore_stack: list[dict] = []
     distrib_list = []
     distrib_vuids = []
     # Fixed size per distrib, reported up to the raid0/lvstore layer,

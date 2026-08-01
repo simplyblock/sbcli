@@ -1,4 +1,3 @@
-# coding=utf-8
 """Unit tests for ``tasks_runner_cluster_expand.process_task``.
 
 No FDB / SPDK: ``integrate_new_node_into_cluster`` and the DB handle are

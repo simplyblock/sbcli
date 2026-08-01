@@ -1,4 +1,4 @@
-from typing import Annotated, List, Optional
+from typing import Annotated, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -19,7 +19,7 @@ db = DBController()
 
 
 @api.get('/', name='clusters:migration-groups:list')
-def list_migration_groups(cluster: Cluster) -> List[MigrationGroupDTO]:
+def list_migration_groups(cluster: Cluster) -> list[MigrationGroupDTO]:
     groups = db.get_migration_groups(cluster.get_id())
     return [MigrationGroupDTO.from_model(g) for g in reversed(groups)]
 

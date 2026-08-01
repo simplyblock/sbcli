@@ -1,4 +1,3 @@
-# coding=utf-8
 """Cross-cluster replication cutover (the "final step").
 
 Used by migration-commit and fail-back. Freezes source I/O, transfers the final

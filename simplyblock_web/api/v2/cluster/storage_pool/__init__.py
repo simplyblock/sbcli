@@ -1,4 +1,4 @@
-from typing import Annotated, List, Optional
+from typing import Annotated, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -21,7 +21,7 @@ db = DBController()
 
 
 @api.get('/', name='clusters:storage-pools:list')
-def list(cluster: Cluster) -> List[StoragePoolDTO]:
+def list_(cluster: Cluster) -> list[StoragePoolDTO]:
     return [StoragePoolDTO.from_model(pool, None) for pool in db.get_pools(cluster.get_id())]
 
 

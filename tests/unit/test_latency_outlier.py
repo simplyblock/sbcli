@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_latency_outlier.py — unit tests for the per-device latency-deviation
 warning in ``simplyblock_core.services.capacity_and_stats_collector``.

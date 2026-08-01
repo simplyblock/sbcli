@@ -1,4 +1,3 @@
-# coding=utf-8
 """Unit tests for /api/v2/clusters endpoints (cluster_ops mocked)."""
 
 import pytest

@@ -1,4 +1,3 @@
-# coding=utf-8
 """Unit tests for RPCClient wrapper methods (e.g. get_bdevs, subsystem_list,
 subsystem_get). Coverage is partial — add cases here as wrappers grow."""
 

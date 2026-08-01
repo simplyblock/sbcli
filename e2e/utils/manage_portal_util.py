@@ -2,7 +2,7 @@
 import os
 import requests
 from datetime import datetime, timezone
-from typing import Tuple, Optional
+from typing import Optional
 
 SUPABASE_TOKEN = os.getenv("SUPABASE_ANON_KEY")
 if not SUPABASE_TOKEN:
@@ -63,7 +63,7 @@ def resolve_environment_id_from_ip(mgmt_ip: str) -> Optional[str]:
     except Exception:
         return None
 
-def detect_fe_be_tags(ssh_obj, client_ip: str) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
+def detect_fe_be_tags(ssh_obj, client_ip: str) -> tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
     cmd = "sudo docker images --digests --format '{{.Repository}} {{.Tag}} {{.Digest}}'"
     out, _ = ssh_obj.exec_command(client_ip, cmd)
 

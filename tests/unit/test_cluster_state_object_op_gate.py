@@ -1,4 +1,3 @@
-# coding=utf-8
 """Cluster-state gate on object operations (lvol delete/resize, snapshot delete).
 
 A cluster in in_activation/suspended/unready/inactive cannot complete object

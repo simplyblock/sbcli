@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import Optional
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
@@ -19,7 +19,7 @@ db = DBController()
 
 
 @api.get('/', name='clusters:backups:list')
-def list_backups(cluster: Cluster) -> List[BackupDTO]:
+def list_backups(cluster: Cluster) -> list[BackupDTO]:
     backups = db.get_backups(cluster.get_id())
     backups = sorted(backups, key=lambda b: (b.created_at, b.uuid), reverse=True)
     return [BackupDTO.from_model(b) for b in backups]
@@ -145,7 +145,7 @@ policy_api = APIRouter()
 
 
 @policy_api.get('/', name='clusters:backup-policies:list')
-def list_policies(cluster: Cluster) -> List[BackupPolicyDTO]:
+def list_policies(cluster: Cluster) -> list[BackupPolicyDTO]:
     policies = db.get_backup_policies(cluster.get_id())
     return [BackupPolicyDTO.from_model(p) for p in policies]
 

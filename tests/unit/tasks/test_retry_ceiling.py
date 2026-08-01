@@ -1,4 +1,3 @@
-# coding=utf-8
 """Behavioural regression tests for task-runner retry ceilings.
 
 Background: an S3 backup whose ``bdev_lvol_s3_backup`` RPC crashed SPDK was

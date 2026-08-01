@@ -1,4 +1,3 @@
-# coding=utf-8
 import time
 
 from simplyblock_core import constants, db_controller, storage_node_ops, utils

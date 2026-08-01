@@ -3017,7 +3017,7 @@ class TestBackupCrossClusterRestore(BackupTestBase):
             ] if not val
         ]
         if missing:
-            raise EnvironmentError(
+            raise OSError(
                 f"TC-BCK-070: cross-cluster restore requires env vars: "
                 f"{', '.join(missing)}")
 

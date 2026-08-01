@@ -1,4 +1,3 @@
-# coding=utf-8
 """Pure planning logic for cluster expansion (FTT1 and FTT2).
 
 When new node(s) are added to a cluster that already has its (primary,
@@ -41,7 +40,7 @@ Two entry points:
   caller needs to express the host topology explicitly.
 """
 
-from typing import Dict, List, NamedTuple, Optional, Tuple
+from typing import NamedTuple, Optional
 
 
 # Role names match the wire protocol used by bdev_lvol_set_lvs_opts.
@@ -96,7 +95,7 @@ class RoleMove(NamedTuple):
         return self.from_node_id == ""
 
 
-def _host_rotation_layout(hosts: List[List[str]], ftt: int):
+def _host_rotation_layout(hosts: list[list[str]], ftt: int):
     """Yield ``(lvs_primary_id, sec_id, tert_id_or_empty)`` for a host
     rotation.
 
@@ -123,7 +122,7 @@ def _host_rotation_layout(hosts: List[List[str]], ftt: int):
                    (tert_host[s] if tert_host is not None else ""))
 
 
-def _rotation_layout(node_ids: List[str], ftt: int):
+def _rotation_layout(node_ids: list[str], ftt: int):
     """1-node-per-host rotation. Special case of :func:`_host_rotation_layout`.
 
     Kept as a thin wrapper so existing callers and tests that imported this
@@ -132,7 +131,7 @@ def _rotation_layout(node_ids: List[str], ftt: int):
     yield from _host_rotation_layout([[n] for n in node_ids], ftt)
 
 
-def _validate_topology(topology: List[List[str]], label: str) -> None:
+def _validate_topology(topology: list[list[str]], label: str) -> None:
     """Reject obviously-malformed host topologies before they reach the
     rotation helper. Enforced invariants:
 
@@ -162,12 +161,12 @@ def _validate_topology(topology: List[List[str]], label: str) -> None:
 
 
 def compute_role_diff_topology(
-    current_topology: List[List[str]],
-    new_topology: List[List[str]],
+    current_topology: list[list[str]],
+    new_topology: list[list[str]],
     ftt: int,
     *,
-    current_layout: Optional[Dict[str, Tuple[str, str]]] = None,
-) -> List[RoleMove]:
+    current_layout: Optional[dict[str, tuple[str, str]]] = None,
+) -> list[RoleMove]:
     """Plan the role moves to integrate one or more new hosts.
 
     Parameters
@@ -260,8 +259,8 @@ def compute_role_diff_topology(
             new_topology, ftt)
     }
 
-    phase_a: List[RoleMove] = []
-    phase_b: List[RoleMove] = []
+    phase_a: list[RoleMove] = []
+    phase_b: list[RoleMove] = []
 
     for primary_id, (new_sec, new_tert) in desired.items():
         if primary_id in newcomers:
@@ -285,10 +284,10 @@ def compute_role_diff_topology(
 
 
 def compute_role_diff(
-    existing_node_ids: List[str],
+    existing_node_ids: list[str],
     new_node_id: str,
     ftt: int,
-) -> List[RoleMove]:
+) -> list[RoleMove]:
     """Plan the role moves to integrate ``new_node_id`` into the cluster.
 
     This is the **1-node-per-host** special case of
@@ -389,7 +388,7 @@ def move_from_dict(data: dict) -> RoleMove:
     )
 
 
-def make_expand_state(new_node_id: str, moves: List[RoleMove]) -> dict:
+def make_expand_state(new_node_id: str, moves: list[RoleMove]) -> dict:
     """Build the initial ``Cluster.expand_state`` for a fresh expansion.
 
     Parameters
@@ -421,7 +420,7 @@ def is_expand_in_progress(state: dict) -> bool:
     return bool(state) and state.get("phase") == EXPAND_PHASE_IN_PROGRESS
 
 
-def pending_moves(state: dict) -> List[RoleMove]:
+def pending_moves(state: dict) -> list[RoleMove]:
     """Return the moves at and after ``state['cursor']`` — the work that
     remains. Returns an empty list when the expansion is finished or the
     state is empty/aborted."""

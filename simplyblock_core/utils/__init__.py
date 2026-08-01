@@ -1,4 +1,3 @@
-# coding=utf-8
 import glob
 import json
 import logging
@@ -13,7 +12,8 @@ import sys
 import uuid
 import time
 from datetime import datetime, timezone
-from typing import Union, Any, Optional, Tuple, List, Dict, Iterable
+from typing import Union, Any, Optional
+from collections.abc import Iterable
 
 from pydantic import SecretStr
 from docker import DockerClient
@@ -294,7 +294,7 @@ def print_table_dict(node_stats):
     print(print_table(d))
 
 
-def generate_rpc_user_and_pass() -> Tuple[str, SecretStr]:
+def generate_rpc_user_and_pass() -> tuple[str, SecretStr]:
     def _generate_string(length):
         return ''.join(random.SystemRandom().choice(
             string.ascii_letters + string.digits) for _ in range(length))
@@ -684,7 +684,7 @@ def make_async_handler(target_handler):
     import atexit
     import queue as _queue
     import logging.handlers as _lh
-    log_queue: "_queue.Queue" = _queue.Queue(-1)  # unbounded; enqueue never blocks a worker
+    log_queue: _queue.Queue = _queue.Queue(-1)  # unbounded; enqueue never blocks a worker
     listener = _lh.QueueListener(log_queue, target_handler, respect_handler_level=False)
     listener.start()
     atexit.register(listener.stop)
@@ -1614,11 +1614,11 @@ def get_core_indexes(core_to_index, list_of_cores):
 
 
 def build_unisolated_stride(
-        all_cores: List[int],
+        all_cores: list[int],
         num_unisolated: int,
         client_qpair_count: int,
         pool_stride: int = 2,
-) -> List[int]:
+) -> list[int]:
     """
     Build a list of 'unisolated' CPUs by picking from per-qpair pools.
 
@@ -1667,7 +1667,7 @@ def build_unisolated_stride(
         sib_i = i + half if i < half else i - half
         return cores[sib_i]
 
-    out: List[int] = []
+    out: list[int] = []
     used = set()
 
     def add_cpu(cpu: int) -> bool:
@@ -2681,7 +2681,7 @@ def patch_cr_node_status(
         name: str,
         node_uuid: str,
         node_mgmt_ip: str,
-        updates: Optional[Dict[str, Any]] = None,
+        updates: Optional[dict[str, Any]] = None,
         remove: bool = False,
 ) -> bool:
     """
@@ -2818,9 +2818,9 @@ def patch_cr_lvol_status(
         namespace: str,
         name: str,
         lvol_uuid: Optional[str] = None,
-        updates: Optional[Dict[str, Any]] = None,
+        updates: Optional[dict[str, Any]] = None,
         remove: bool = False,
-        add: Optional[Dict[str, Any]] = None,
+        add: Optional[dict[str, Any]] = None,
 ):
     """
     Patch status.lvols[*] for an LVOL CustomResource.
@@ -2980,7 +2980,7 @@ def label_node_as_mgmt_plane(node_name: str):
         raise RuntimeError(f"Failed to label node '{node_name}': {e.reason} - {e.body}")
 
 
-def get_mgmt_ip(node_info: Any, iface_names: Union[str, list[str]]) -> Optional[Tuple[str, str]]:
+def get_mgmt_ip(node_info: Any, iface_names: Union[str, list[str]]) -> Optional[tuple[str, str]]:
     if isinstance(node_info, (bytes, bytearray)):
         try:
             node_info = json.loads(node_info.decode("utf-8"))
@@ -3210,7 +3210,7 @@ def find_lbaf_id(json_data: str, target_ms: int, target_ds: int) -> int:
         print("Error: Invalid JSON format provided.")
         return 0
 
-    lbafs_list: List[Dict[str, int]] = data.get('lbafs', [])
+    lbafs_list: list[dict[str, int]] = data.get('lbafs', [])
 
     # LBAF IDs are 1-based, so we use enumerate starting from 1
     for index, lbaf in enumerate(lbafs_list, start=0):
@@ -3388,7 +3388,7 @@ def query_nvme_ssd_by_model_and_size(model: str, size_range: str) -> list:
     return pci_lst
 
 
-def query_nvme_ssd_by_namespace_names(nvme_names: Iterable[str]) -> List[str]:
+def query_nvme_ssd_by_namespace_names(nvme_names: Iterable[str]) -> list[str]:
     """
     Match NVMe devices by namespace names (e.g. nvme0n1, nvme1n1) using nvme list -v JSON output.
     Returns a de-duplicated list of PCI addresses (e.g. 0000:00:03.0).
@@ -3403,7 +3403,7 @@ def query_nvme_ssd_by_namespace_names(nvme_names: Iterable[str]) -> List[str]:
     json_string = get_nvme_list_verbose()  # should return the JSON string shown in your example
     data = json.loads(json_string)
 
-    out: List[str] = []
+    out: list[str] = []
     seen = set()
 
     for dev in data.get("Devices", []):

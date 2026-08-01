@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_node_online_device_readmit.py — regression tests for the 2026-07-02
 suspend series (three cluster suspensions, one mechanism).

@@ -16,7 +16,7 @@ def __run_script(args: list):
             logger.debug(output.strip())
     except subprocess.CalledProcessError as e:
         logger.debug(f"Command failed with return code: {e.returncode}")
-        logger.debug((f"Captured output:\n {e.output}"))
+        logger.debug(f"Captured output:\n {e.output}")
         raise
 
 

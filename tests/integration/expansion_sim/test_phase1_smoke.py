@@ -1,4 +1,3 @@
-# coding=utf-8
 """Phase 1 smoke tests — incremental setup checks. Each test exercises a
 slice of the fixtures so we can pinpoint where a regression hides."""
 

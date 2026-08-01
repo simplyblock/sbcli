@@ -1,4 +1,3 @@
-# coding=utf-8
 """Pin the post-2026-05-02 ordering of the drain vs. leadership-drop in
 ``recreate_lvstore``.
 

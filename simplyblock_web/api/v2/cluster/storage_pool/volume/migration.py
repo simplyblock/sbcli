@@ -1,4 +1,4 @@
-from typing import Annotated, List, Optional
+from typing import Annotated, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -18,7 +18,7 @@ api = APIRouter()
 
 
 @api.get('/', name='clusters:storage-pools:volumes:migrations:list')
-def list_migrations(cluster: Cluster) -> List[MigrationDTO]:
+def list_migrations(cluster: Cluster) -> list[MigrationDTO]:
     db = DBController()
     migrations = db.get_migrations(cluster.get_id())
     return [MigrationDTO.from_model(m) for m in reversed(migrations)]

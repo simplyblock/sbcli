@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_unit_controller.py – unit tests for migration_controller pure-logic functions.
 

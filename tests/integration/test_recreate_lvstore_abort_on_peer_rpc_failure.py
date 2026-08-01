@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_recreate_lvstore_abort_on_peer_rpc_failure.py
 

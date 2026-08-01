@@ -1,5 +1,3 @@
-# coding=utf-8
-import builtins
 import contextlib
 import logging as lg
 import math
@@ -738,7 +736,7 @@ def list_snapshots(cluster_id=None, node_id=None, lvol_id=None,pool_id_or_name=N
             migrating_lvols.append(m.lvol_id)
     # Build snap_id → clone list in one pass instead of rescanning all lvols
     # for every snapshot (was O(M×N) in-memory).
-    clones_by_snap: dict[str, builtins.list[str]] = {}
+    clones_by_snap: dict[str, list[str]] = {}
     for lv in db_controller.get_mini_lvols():
         if lv.cloned_from_snap:
             clones_by_snap.setdefault(lv.cloned_from_snap, []).append(lv.get_id())

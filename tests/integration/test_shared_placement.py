@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_shared_placement.py — unit tests for the cluster-wide shared_placement
 upgrade procedure.

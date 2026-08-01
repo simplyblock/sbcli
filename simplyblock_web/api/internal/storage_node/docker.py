@@ -1,11 +1,10 @@
-# encoding: utf-8
 import json
 import math
 import os
 import subprocess
 import time
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import Optional, Union
 
 import cpuinfo
 import docker
@@ -76,7 +75,7 @@ class SPDKParams(BaseModel):
     rpc_port: int = Field(constants.RPC_PORT_RANGE_START, ge=1, le=65536)
     rpc_username: str
     rpc_password: str
-    ssd_pcie: Optional[List[str]] = Field(None)
+    ssd_pcie: Optional[list[str]] = Field(None)
     spdk_debug: Optional[bool] = Field(False)
     l_cores: Optional[str] = Field(None)
     spdk_mem: int = Field(core_utils.parse_size('4GiB'))
@@ -707,7 +706,7 @@ class PersistNodeConfigParams(BaseModel):
     max_lvol: Optional[int] = Field(None, ge=0)
     huge_page_memory: Optional[int] = Field(None, ge=0)
     numa_node: Optional[int] = Field(None, ge=0)
-    ssd_list: Optional[List[str]] = Field(None)
+    ssd_list: Optional[list[str]] = Field(None)
 
 
 @api.post('/persist_node_config', responses={
@@ -966,7 +965,7 @@ def read_allowed_list():
 
 
 class CoresParams(BaseModel):
-    cores: Optional[List[int]] = Field(default=None)
+    cores: Optional[list[int]] = Field(default=None)
     number_of_alceml_devices: Optional[int] = Field(None, ge=0)
 
 

@@ -1,4 +1,3 @@
-# coding=utf-8
 """
 test_fd_dead_recovery.py — unit tests for the failure-domain parallel
 restart gate (fd_dead_recovery_allowed).

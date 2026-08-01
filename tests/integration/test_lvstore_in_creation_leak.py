@@ -1,4 +1,3 @@
-# coding=utf-8
 """Regression tests for the leaked lvstore_status="in_creation" incident
 (2026-07-07 13:52): a failed replica-rebuild phase in restart_storage_node
 left the PEER primary's lvstore_status as "in_creation"; check_node skips all

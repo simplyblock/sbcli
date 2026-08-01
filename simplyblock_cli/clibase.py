@@ -464,7 +464,7 @@ class CLIWrapperBase:
         return True
 
     def cluster__list(self, sub_command, args):
-        data = cluster_ops.list()
+        data = cluster_ops.list_()
 
         if args.json:
             return utils.dump_json(data, indent=2, unwrap_secrets=True)

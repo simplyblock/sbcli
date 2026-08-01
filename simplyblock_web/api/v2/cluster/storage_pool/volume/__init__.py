@@ -1,4 +1,4 @@
-from typing import Annotated, List, Literal, Optional, Union
+from typing import Annotated, Literal, Optional, Union
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -20,7 +20,7 @@ db = DBController()
 
 
 @api.get('/', name='clusters:storage-pools:volumes:list')
-def list(request: Request, cluster: Cluster, pool: StoragePool) -> List[VolumeDTO]:
+def list_(request: Request, cluster: Cluster, pool: StoragePool) -> list[VolumeDTO]:
     data = []
     for lvol in db.get_lvols_by_pool_id(pool.get_id()):
         stat_obj = None
@@ -42,7 +42,7 @@ class _CreateParams(BaseModel):
     pvc_name: Optional[str] = None
     ndcs: util.Unsigned = 0
     npcs: util.Unsigned = 0
-    allowed_hosts: Optional[List[str]] = None
+    allowed_hosts: Optional[list[str]] = None
     fabric: str = "tcp"
     # None → resolved by add_lvol_ha: a shareable default for namespaced
     # volumes, 1 otherwise.
@@ -274,7 +274,7 @@ def iostats(cluster: Cluster, pool: StoragePool, volume: Volume, history: Option
 
 
 @instance_api.get('/snapshots', name='clusters:storage-pools:volumes:snapshots:list')
-def snapshot(request: Request, cluster: Cluster, pool: StoragePool, volume: Volume) -> List[SnapshotDTO]:
+def snapshot(request: Request, cluster: Cluster, pool: StoragePool, volume: Volume) -> list[SnapshotDTO]:
     return [
         SnapshotDTO.from_model(snapshot, request, cluster_id=cluster.get_id(), pool_id=pool.get_id())
         for snapshot
@@ -331,7 +331,7 @@ def replication_failback(cluster: Cluster, pool: StoragePool, volume: Volume, bo
 
 
 @instance_api.get('/list_replication_tasks', name='clusters:storage-pools:volumes:list_replication_tasks')
-def list_replication_tasks(cluster: Cluster, pool: StoragePool, volume: Volume) -> List[TaskDTO]:
+def list_replication_tasks(cluster: Cluster, pool: StoragePool, volume: Volume) -> list[TaskDTO]:
     tasks = lvol_controller.list_replication_tasks(volume.get_id())
     return [TaskDTO.from_model(task) for task in tasks]
 
@@ -377,7 +377,7 @@ def clone(
 
 
 @instance_api.get('/backups', name='clusters:storage-pools:volumes:backups:list')
-def backups(volume: Volume) -> List[BackupDTO]:
+def backups(volume: Volume) -> list[BackupDTO]:
     rows = db.get_backups_by_lvol_id(volume.get_id())
     rows = sorted(rows, key=lambda b: (b.created_at, b.uuid), reverse=True)
     return [BackupDTO.from_model(b) for b in rows]
