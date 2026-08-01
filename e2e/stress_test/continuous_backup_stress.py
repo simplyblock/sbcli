@@ -872,8 +872,10 @@ class BackupStressMarathon(BackupStressBase):
         self.test_name = "backup_stress_marathon"
         self.num_rounds = 20   # set to 100 for a full stress run
         self.num_lvols = 3
-        self._weights = ["backup"] * 10 + ["restore"] * 5 + \
-                        ["delete_and_backup"] * 3 + ["verify"] * 2
+        # DISABLED: backup delete not supported (SFAM-2792)
+        # self._weights = ["backup"] * 10 + ["restore"] * 5 + \
+        #                 ["delete_and_backup"] * 3 + ["verify"] * 2
+        self._weights = ["backup"] * 10 + ["restore"] * 5 + ["verify"] * 2
 
     # ── internal helpers ──────────────────────────────────────────────────
 
@@ -911,31 +913,30 @@ class BackupStressMarathon(BackupStressBase):
         except Exception as e:
             self.logger.error(f"[round {round_num}] RESTORE {lvol_key} failed: {e}")
 
-    def _do_delete_and_backup(self, state: dict, lvol_key: str, round_num: int) -> None:
-        info = state["lvols"][lvol_key]
-        self.logger.info(
-            f"[round {round_num}] DELETE_AND_BACKUP {lvol_key} "
-            f"(deleting {len(info['backup_ids'])} backup(s))")
-        try:
-            self._delete_backups(info["id"])
-            info["backup_ids"].clear()
-            sleep_n_sec(5)
-            # Verify backup list is clean for this lvol
-            remaining = [
-                b for b in self._list_backups()
-                if lvol_key in " ".join(str(v) for v in b.values())
-            ]
-            assert len(remaining) == 0, \
-                f"[round {round_num}] backups not fully deleted for {lvol_key}: {remaining}"
-            # Immediately take a fresh backup to confirm chain re-starts cleanly
-            sn = f"mara_fresh_{lvol_key}_{round_num}_{_rand_suffix()}"
-            self._create_snapshot(info["id"], sn, backup=True)
-            bk_id = self._wait_for_backup_by_snap(sn, f"marathon[{round_num}]")
-            info["backup_ids"].append(bk_id)
-            self.logger.info(
-                f"[round {round_num}] DELETE_AND_BACKUP {lvol_key}: fresh backup {bk_id} ✓")
-        except Exception as e:
-            self.logger.error(f"[round {round_num}] DELETE_AND_BACKUP {lvol_key} error: {e}")
+    # DISABLED: backup delete not supported (SFAM-2792)
+    # def _do_delete_and_backup(self, state: dict, lvol_key: str, round_num: int) -> None:
+    #     info = state["lvols"][lvol_key]
+    #     self.logger.info(
+    #         f"[round {round_num}] DELETE_AND_BACKUP {lvol_key} "
+    #         f"(deleting {len(info['backup_ids'])} backup(s))")
+    #     try:
+    #         self._delete_backups(info["id"])
+    #         info["backup_ids"].clear()
+    #         sleep_n_sec(5)
+    #         remaining = [
+    #             b for b in self._list_backups()
+    #             if lvol_key in " ".join(str(v) for v in b.values())
+    #         ]
+    #         assert len(remaining) == 0, \
+    #             f"[round {round_num}] backups not fully deleted for {lvol_key}: {remaining}"
+    #         sn = f"mara_fresh_{lvol_key}_{round_num}_{_rand_suffix()}"
+    #         self._create_snapshot(info["id"], sn, backup=True)
+    #         bk_id = self._wait_for_backup_by_snap(sn, f"marathon[{round_num}]")
+    #         info["backup_ids"].append(bk_id)
+    #         self.logger.info(
+    #             f"[round {round_num}] DELETE_AND_BACKUP {lvol_key}: fresh backup {bk_id} ✓")
+    #     except Exception as e:
+    #         self.logger.error(f"[round {round_num}] DELETE_AND_BACKUP {lvol_key} error: {e}")
 
     def _do_verify(self, state: dict, round_num: int) -> None:
         if not state["restored"]:
@@ -1008,9 +1009,10 @@ class BackupStressMarathon(BackupStressBase):
             elif action == "restore":
                 self._do_restore(state, lvol_key, round_num)
                 restore_count += 1
-            elif action == "delete_and_backup":
-                self._do_delete_and_backup(state, lvol_key, round_num)
-                delete_count += 1
+            # DISABLED: backup delete not supported (SFAM-2792)
+            # elif action == "delete_and_backup":
+            #     self._do_delete_and_backup(state, lvol_key, round_num)
+            #     delete_count += 1
             elif action == "verify":
                 self._do_verify(state, round_num)
                 verify_count += 1
