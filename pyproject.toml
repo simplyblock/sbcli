@@ -21,8 +21,7 @@ ignore = [
     "DTZ005",
     "DTZ006",
     "DTZ007",
-    "FA100",
-    "FLY002",
+    "FLY002",  # Prefer joins over format strings 
     "I001",
     "ISC004",
     "LOG015",
