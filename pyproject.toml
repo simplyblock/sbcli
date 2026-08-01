@@ -33,9 +33,6 @@ ignore = [
     "I001",
     "ISC004",
     "LOG015",
-    "PERF101",
-    "PERF102",
-    "PERF402",
     "PIE790",
     "PIE807",
     "PIE808",
@@ -92,6 +89,10 @@ ignore = [
     "UP041",
     "UP045",
 ]
+
+[tool.ruff.lint.per-file-ignores]
+"e2e/*" = ["PERF102", "PERF402"]
+
 
 [tool.mypy]
 check_untyped_defs = true

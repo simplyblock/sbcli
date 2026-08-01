@@ -504,15 +504,16 @@ def _bdev_lvol_get_lvols(s: NodeState, p: dict):
     lvs_name = _req(p, 'lvs_name')
     if lvs_name != s.lvstore:
         return []
-    result = []
-    for composite, entry in s.all_bdevs().items():
-        result.append({
+    result = [
+        {
             'name': entry['composite'],
             'lvol_name': entry['name'],
             'uuid': entry['uuid'],
             'blobid': entry['blobid'],
             'map_id': entry.get('map_id'),
-        })
+        }
+        for entry in s.all_bdevs().values()
+    ]
     return result
 
 

@@ -413,7 +413,7 @@ class SoakRunner:
                 role = lvs.get("role")
                 if name and role and uuid:
                     lvs_roles.setdefault(name, {})[role] = uuid
-        for lvs_name, roles in lvs_roles.items():
+        for roles in lvs_roles.values():
             pri = roles.get("primary")
             sec = roles.get("secondary")
             if pri and sec and pri != sec:

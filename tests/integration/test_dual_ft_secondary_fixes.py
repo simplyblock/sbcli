@@ -295,10 +295,10 @@ class TestRecreateLvstoreDualSecondary(unittest.TestCase):
 
         # Both sec1 (node-2) and sec2 (node-3) should have firewall blocked/allowed
         # Collect all firewall_set_port calls
-        fw_calls = []
-        for fw in fw_instances:
-            for c in fw.firewall_set_port.call_args_list:
-                fw_calls.append(c)
+        fw_calls = [c
+            for fw in fw_instances
+            for c in fw.firewall_set_port.call_args_list
+        ]
 
         # There should be block + allow calls for BOTH secondaries = 4 total
         self.assertEqual(len(fw_calls), 4,

@@ -8491,7 +8491,7 @@ def _recreate_lvstore_impl(snode, force=False, lvs_primary=None, activation_mode
         _persist_deferred_node_fields()
         _release_hub_locks()
         _kill_app()
-        for peer in list(blocked_peers):
+        for peer in blocked_peers:
             _unblock_peer_port(peer)
         _release_block_gate()
         _flush_port_events()
