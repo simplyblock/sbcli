@@ -2973,6 +2973,37 @@ class K8sNativeFailoverTest(TestClusterBase):
                                     f"as failed (likely volume mount "
                                     f"or image pull failure)"
                                 )
+                                # Capture kubectl describe pod for
+                                # debugging why the pod is stuck
+                                try:
+                                    ns = self.namespace
+                                    desc_out, _ = self.k8s_utils._exec_kubectl(
+                                        f"kubectl describe pod {pod_name}"
+                                        f" -n {ns}",
+                                        timeout=30,
+                                    )
+                                    if desc_out:
+                                        desc_dir = os.path.join(
+                                            self.docker_logs_path,
+                                            "stuck_pod_describes",
+                                        )
+                                        os.makedirs(desc_dir, exist_ok=True)
+                                        desc_file = os.path.join(
+                                            desc_dir,
+                                            f"{pod_name}_describe.txt",
+                                        )
+                                        with open(desc_file, "w") as f:
+                                            f.write(desc_out)
+                                        self.logger.info(
+                                            f"[wait_fio] Saved describe"
+                                            f" for stuck pod {pod_name}"
+                                            f" → {desc_file}"
+                                        )
+                                except Exception as e:
+                                    self.logger.warning(
+                                        f"[wait_fio] Failed to describe"
+                                        f" stuck pod {pod_name}: {e}"
+                                    )
                                 still_running.discard(job_name)
                                 stuck_init_since.pop(job_name, None)
                                 failed_jobs.add(job_name)
@@ -2995,6 +3026,38 @@ class K8sNativeFailoverTest(TestClusterBase):
                     f"[wait_fio] {len(still_running)} jobs did not complete "
                     f"within {timeout}s: {sorted(still_running)}"
                 )
+                # Capture kubectl describe for timed-out pods
+                for job_name in still_running:
+                    try:
+                        pod_name = self.k8s_utils.get_job_pod_name(job_name)
+                        if not pod_name:
+                            continue
+                        ns = self.namespace
+                        desc_out, _ = self.k8s_utils._exec_kubectl(
+                            f"kubectl describe pod {pod_name} -n {ns}",
+                            timeout=30,
+                        )
+                        if desc_out:
+                            desc_dir = os.path.join(
+                                self.docker_logs_path,
+                                "stuck_pod_describes",
+                            )
+                            os.makedirs(desc_dir, exist_ok=True)
+                            desc_file = os.path.join(
+                                desc_dir,
+                                f"{pod_name}_describe.txt",
+                            )
+                            with open(desc_file, "w") as f:
+                                f.write(desc_out)
+                            self.logger.info(
+                                f"[wait_fio] Saved describe for "
+                                f"timed-out pod {pod_name} → {desc_file}"
+                            )
+                    except Exception as e:
+                        self.logger.warning(
+                            f"[wait_fio] Failed to describe "
+                            f"timed-out pod for {job_name}: {e}"
+                        )
                 failed_jobs.update(still_running)
             if failed_jobs:
                 self.logger.error(
