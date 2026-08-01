@@ -36,7 +36,7 @@ class TestFetchBdevNameSet:
         # layer — callers must fall back rather than treat every bdev as
         # absent.
         assert storage_node_ops._fetch_bdev_name_set(
-            types.SimpleNamespace(bdev_nvme_controller_list=lambda: [])) is None
+            types.SimpleNamespace(bdev_nvme_controller_list=list)) is None
 
     def test_never_calls_unfiltered_get_bdevs(self):
         # The regression this guards: the batch probe must NEVER pay the
