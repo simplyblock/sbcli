@@ -820,7 +820,7 @@ class TestLvolMemory:
         # Read milestones
         try:
             self.milestones = [
-                tuple(map(float, line.split())) for line in open("milestones.txt").readlines()
+                tuple(map(float, line.split())) for line in open("milestones.txt")
             ]
         except OSError:
             self.milestones = []

@@ -19,7 +19,7 @@ def _post_install():
             found = False
             if os.path.exists(os.environ.get("HOME")+"/.bashrc"):
                 with open(os.environ.get("HOME")+"/.bashrc", "r") as bashrc:
-                    for line in bashrc.readlines():
+                    for line in bashrc:
                         line = line.strip()
                         if not line.startswith("#") and f"source {path}" in line:
                             found = True
