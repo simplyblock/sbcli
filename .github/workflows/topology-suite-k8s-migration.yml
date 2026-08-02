@@ -143,6 +143,14 @@ on:
         description: 'NFS mountpoint on client nodes'
         required: false
         default: '/mnt/nfs_share/'
+      cluster_security:
+        description: "Cluster setup mode. 'backup' deploys MinIO and enables backup on StorageCluster. Auto-enabled for backup test names."
+        required: false
+        type: choice
+        default: "none"
+        options:
+          - none
+          - backup
 
 concurrency:
   group: k8s-topology-migration-${{ inputs.cluster_environment || 'openshift-baremetal' }}
@@ -221,6 +229,7 @@ jobs:
       tls_enabled: ${{ inputs.tls_enabled }}
       client_ips: ${{ inputs.client_ips || '' }}
       nfs_mountpoint: ${{ inputs.nfs_mountpoint || '/mnt/nfs_share/' }}
+      cluster_security: ${{ inputs.cluster_security || 'none' }}
     secrets: inherit
 
   # ─────────────────────────────────────────────────────────────────────────
