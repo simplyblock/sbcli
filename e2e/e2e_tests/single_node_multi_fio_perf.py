@@ -107,10 +107,10 @@ class TestLvolFioBase(TestClusterBase):
                 fio_result = json.loads(json_content)
             except json.JSONDecodeError as e:
                 print(f"Error decoding JSON: {e}")
-                return None
+                return
         else:
             print("No JSON content found in the file.")
-            return None
+            return
         # fio_result = json.loads(output)
         self.logger.info(f"FIO output for {lvol_name}: {fio_result}")
 
