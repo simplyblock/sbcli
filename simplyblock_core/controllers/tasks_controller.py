@@ -872,13 +872,18 @@ def get_active_lvol_mig_task_on_node(cluster_id, node_id):
 
 
 def add_lvol_mig_task(migration):
-    """Create the JobSchedule task that drives a live volume migration."""
+    """Create the JobSchedule task that drives a live volume migration.
+
+    max_retry=-1 disables the backup runner's retry-count kill switch.
+    The migration runner has its own internal ceiling via migration.retry_count;
+    the backup runner's time-based timeout is the only external backstop.
+    """
     return _add_task(
         JobSchedule.FN_LVOL_MIG,
         migration.cluster_id,
         migration.source_node_id,
         "",
-        max_retry=migration.max_retries,
+        max_retry=-1,
         function_params={
             "migration_id": migration.uuid,
             "lvol_id": migration.lvol_id,

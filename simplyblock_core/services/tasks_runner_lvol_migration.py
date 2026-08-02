@@ -2753,18 +2753,14 @@ def _handle_cleanup_target(migration, tgt_node, tgt_rpc, src_rpc=None):
 # ---------------------------------------------------------------------------
 
 def _budget_suspend(task, migration, migration_id, error_msg):
-    """Charge retry budget and suspend; redirect to cleanup_target when exhausted.
-
-    Ceiling fires at max_retries // 2 so cleanup_target has the remaining
-    budget before the backup runner kills at task.max_retry == max_retries.
-    """
+    """Charge retry budget and suspend; redirect to cleanup_target when exhausted."""
     migration.retry_count += 1
     migration.error_message = error_msg
     task.function_result = error_msg
-    if migration.retry_count >= migration.max_retries // 2:
+    if migration.retry_count >= migration.max_retries:
         logger.error(
-            f"Migration {migration_id} exceeded retry ceiling "
-            f"({migration.retry_count}/{migration.max_retries // 2}); entering cleanup_target"
+            f"Migration {migration_id} exceeded max retries "
+            f"({migration.max_retries}); entering cleanup_target"
         )
         task.retry += 1
         task.status = JobSchedule.STATUS_SUSPENDED
@@ -3003,7 +2999,7 @@ def task_runner(task):
         migration.error_message = error
         task.function_result = error
 
-        if migration.retry_count >= migration.max_retries // 2:
+        if migration.retry_count >= migration.max_retries:
             if phase not in (LVolMigration.PHASE_SNAP_COPY,
                              LVolMigration.PHASE_LVOL_MIGRATE):
                 # Already past the migration — never redirect to CLEANUP_TARGET.
@@ -3013,8 +3009,8 @@ def task_runner(task):
                     f"{phase}; suspending for operator review (not entering cleanup_target)")
                 return _suspend_task(task, migration, error)
             logger.error(
-                f"Migration {migration_id} exceeded retry ceiling "
-                f"({migration.retry_count}/{migration.max_retries // 2}); entering cleanup_target"
+                f"Migration {migration_id} exceeded max retries "
+                f"({migration.max_retries}); entering cleanup_target"
             )
             task.retry += 1
             migration.phase = LVolMigration.PHASE_CLEANUP_TARGET
