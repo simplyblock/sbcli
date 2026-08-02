@@ -488,20 +488,9 @@ jobs:
             kubectl label node "$NODE" simplyblock.io/role=mgmt-plane --overwrite
           done
 
-      - name: Label new worker nodes
-        if: ${{ inputs.use_existing_cluster != 'true' }}
-        run: |
-          CLUSTER_ENV="${{ inputs.cluster_environment || 'local' }}"
-          IFS=',' read -ra NODES <<< "${{ inputs.new_worker_nodes }}"
-          for NODE in "${NODES[@]}"; do
-            if [ "$CLUSTER_ENV" = "local" ] || [ "$CLUSTER_ENV" = "openshift-local" ]; then
-              echo "Labeling new node $NODE with zone=default (local cluster)"
-              kubectl label node "$NODE" topology.kubernetes.io/zone=default --overwrite
-            else
-              echo "Skipping zone label for new node $NODE (cloud cluster: $CLUSTER_ENV)"
-            fi
-            kubectl label node "$NODE" simplyblock.io/role=mgmt-plane --overwrite
-          done
+      # NOTE: new_worker_nodes are NOT labeled here. They must remain
+      # unlabeled so the DaemonSet does not schedule storage-node pods on them
+      # before the test adds them to the cluster via StorageNodeSet CR update.
 
       # ── Prepare namespace ───────────────────────────────────────────────────
 
