@@ -141,11 +141,11 @@ def check_node(snode):
     report_health = snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN, StorageNode.STATUS_SUSPENDED]
 
     # 1- check node ping
-    ping_check = health_controller._check_node_ping(snode.mgmt_ip)
+    ping_check = utils.ping_host(snode.mgmt_ip)
     logger.info(f"Check: ping mgmt ip {snode.mgmt_ip} ... {ping_check}")
 
     # 2- check node API
-    node_api_check = health_controller._check_node_api(snode)
+    node_api_check = utils.ping_host(snode)
     logger.info(f"Check: node API {snode.mgmt_ip}:5000 ... {node_api_check}")
 
     # 3- check node RPC

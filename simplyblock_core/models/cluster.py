@@ -181,9 +181,7 @@ class Cluster(BaseModel):
         from simplyblock_core.db_controller import DBController
         db_controller = DBController()
         qos_classes = db_controller.get_qos(self.get_id())
-        if len(qos_classes) > 1:
-            return True
-        return False
+        return len(qos_classes) > 1
 
     def get_backup_path(self, path=""):
         if self.backup_s3_bucket and self.backup_s3_cred:

@@ -1454,7 +1454,7 @@ def check_node(snode):
         return True
 
     # 1- check node ping
-    ping_check = health_controller._check_node_ping(snode.mgmt_ip)
+    ping_check = utils.ping_host(snode.mgmt_ip)
     logger.info(f"Check: ping mgmt ip {snode.mgmt_ip} ... {ping_check}")
     if not ping_check:
         logger.info(f"Check: ping mgmt ip {snode.mgmt_ip} ... {ping_check}: FAILED")

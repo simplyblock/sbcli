@@ -537,9 +537,7 @@ print("done")
         base_lower = self.base_version.lower()
         target_lower = self.target_version.lower()
         # Same base prefix → minor hotfix, skip migration
-        if base_lower == target_lower:
-            return False
-        return True
+        return base_lower != target_lower
 
     def _update_node_env(self, node: str):
         """

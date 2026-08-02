@@ -200,14 +200,6 @@ def check_ports_on_node(snode, port_ids):
     return {p: int(p) not in blocked for p in port_ids}
 
 
-def _check_node_ping(ip):
-    res = utils.ping_host(ip)
-    if res:
-        return True
-    else:
-        return False
-
-
 def _check_ping_from_node(ip, ifname, node):
     # Fail fast on connect errors and don't stack retries: this SnodeAPI call
     # runs in the monitor's per-node check cycle, and against a rebooting host
@@ -633,7 +625,7 @@ def check_node(node_id, with_devices=True):
     # passed = True
 
     # 1- check node ping
-    ping_check = _check_node_ping(snode.mgmt_ip)
+    ping_check = utils.ping_host(snode.mgmt_ip)
     logger.info(f"Check: ping mgmt ip {snode.mgmt_ip} ... {ping_check}")
 
     # 2- check node API

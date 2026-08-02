@@ -5,7 +5,7 @@ from datetime import datetime
 
 
 from simplyblock_core import constants, db_controller, utils
-from simplyblock_core.controllers import mgmt_events, health_controller
+from simplyblock_core.controllers import mgmt_events
 from simplyblock_core.models.mgmt_node import MgmtNode
 
 
@@ -127,11 +127,11 @@ def main():
                     continue
 
                 # 1- check node ping
-                ping_check = health_controller._check_node_ping(node.mgmt_ip)
+                ping_check = utils.ping_host(node.mgmt_ip)
                 logger.info(f"Check: ping mgmt ip {node.mgmt_ip} ... {ping_check}")
                 if not ping_check:
                     time.sleep(1)
-                    ping_check = health_controller._check_node_ping(node.mgmt_ip)
+                    ping_check = utils.ping_host(node.mgmt_ip)
                     logger.info(f"Check 2: ping mgmt ip {node.mgmt_ip} ... {ping_check}")
 
                 if not ping_check:

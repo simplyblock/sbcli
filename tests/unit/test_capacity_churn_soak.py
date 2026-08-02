@@ -106,10 +106,8 @@ class TestSizeSteering(unittest.TestCase):
         cumulative average toward --avg-size (5 GiB)."""
         random.seed(1234)
         runner = _fake_runner()
-        seq = 0
-        for _ in range(2500):
+        for seq in range(2500):
             size = MOD.SoakRunner._pick_volume_size(runner)
-            seq += 1
             vol = MOD.VolumeState(seq=seq, name=f"v{seq}", size=size, client_name="client0")
             vol.volume_id = f"id{seq}"
             runner.volumes[vol.volume_id] = vol

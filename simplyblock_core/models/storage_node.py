@@ -825,9 +825,7 @@ class StorageNode(BaseNodeObject):
         from simplyblock_core.db_controller import DBController
         db_controller = DBController()
         lock = db_controller.get_lvol_del_lock(self.get_id())
-        if lock:
-            return True
-        return False
+        return bool(lock)
 
     def lvol_del_sync_lock(self) -> bool:
         from simplyblock_core.db_controller import DBController

@@ -1895,14 +1895,14 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
             "There are no enough SSD devices on system, you may run 'sbctl sn clean-devices', to clean devices stored in /etc/simplyblock/sn_config_file")
         return False, False
     if force:
-        nvme_devices = " ".join([f"/dev/{d}n1" for d in nvmes.keys()])
+        nvme_devices = " ".join([f"/dev/{d}n1" for d in nvmes])
         logger.warning(f"Formating Nvme devices {nvme_devices}")
         answer = input("Type YES/Y to continue: ").strip().lower()
         if answer not in ("yes", "y"):
             logger.warning("Aborted by user.")
             exit(1)
         logger.info("OK, continuing formating...")
-        for nvme_device in nvmes.keys():
+        for nvme_device in nvmes:
             nvme_device_path = f"/dev/{nvme_device}n1"
             clean_partitions(nvme_device_path)
             nvme_json_string = get_idns(nvme_device_path)

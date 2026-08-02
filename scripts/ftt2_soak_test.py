@@ -206,7 +206,7 @@ def check_fio_errors(mounts, client_ip, logger):
     return True
 
 
-def wait_for_migration_complete(cluster_uuid, logger, timeout=600):
+def wait_for_migration_complete(cluster_uuid, logger, timeout=600) -> bool:
     """Wait for data migration to complete across all nodes."""
     logger.info("Waiting for data migration to complete...")
     deadline = time.time() + timeout
@@ -293,10 +293,7 @@ def perform_outage(cluster_uuid, nodes, client_ip, mounts, logger):
         return False
 
     # Wait for data migration
-    if not wait_for_migration_complete(cluster_uuid, logger):
-        return False
-
-    return True
+    return wait_for_migration_complete(cluster_uuid, logger)
 
 
 # ---------------------------------------------------------------------------
