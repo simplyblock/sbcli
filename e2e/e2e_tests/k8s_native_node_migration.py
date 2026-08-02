@@ -414,6 +414,13 @@ class K8sNativeNodeMigrationTest(TestClusterBase):
             f"storageNodeRef={storage_node_cr}, got: {ops_spec}"
         )
 
+        # Wait for operator to update per-node-config ConfigMap for the
+        # migration target before deleting stale pods — prevents MAX_LVOL=0
+        # crash in s-node-api-config-generator init container.
+        self.k8s_utils.wait_for_per_node_config(
+            self.migrate_to_worker, timeout=120
+        )
+
         # Delete any stale storage-node pods on the migration target worker
         # so the DaemonSet recreates them with the correct configuration
         self.k8s_utils.delete_storage_node_pods_on_worker(

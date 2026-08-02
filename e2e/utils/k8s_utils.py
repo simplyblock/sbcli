@@ -2951,14 +2951,52 @@ class K8sUtils:
         else:
             self.delete_resource("pod", pod_name, namespace=ns)
 
+    def wait_for_per_node_config(self, worker_node: str,
+                                  configmap_name: str = "simplyblock-node-per-node-config",
+                                  namespace: str = None,
+                                  timeout: int = 120):
+        """Wait until the per-node-config ConfigMap has an entry for *worker_node*.
+
+        The operator updates this ConfigMap when it reconciles a StorageNode CR.
+        The DaemonSet pod's ``node-env-writer`` init container reads the entry
+        to set ``MAX_LVOL``, ``MAX_SIZE``, etc.  If the pod starts before the
+        entry exists it gets ``MAX_LVOL=0`` and crashes.
+
+        Args:
+            worker_node: The K8s node name (e.g. ``worker-4.ocp.simplyblock.ai``).
+            configmap_name: Name of the per-node-config ConfigMap.
+            namespace: K8s namespace (defaults to ``self.namespace``).
+            timeout: Max seconds to wait.
+        """
+        import time
+        ns = namespace or self.namespace
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            cm = self.get_resource_json("configmap", configmap_name, namespace=ns)
+            data = cm.get("data", {})
+            if worker_node in data:
+                self.logger.info(
+                    f"[K8sUtils] per-node-config has entry for '{worker_node}': "
+                    f"{data[worker_node][:120]}..."
+                )
+                return
+            self.logger.info(
+                f"[K8sUtils] Waiting for per-node-config entry for "
+                f"'{worker_node}' (keys: {list(data.keys())})..."
+            )
+            time.sleep(10)
+        self.logger.warning(
+            f"[K8sUtils] per-node-config entry for '{worker_node}' not found "
+            f"after {timeout}s — proceeding anyway (pod may still fail)"
+        )
+
     def delete_storage_node_pods_on_worker(self, worker_node: str,
                                            namespace: str = None):
         """Delete storage-node DaemonSet pods running on a specific worker.
 
-        Call this right after creating a StorageNode CR for the worker so that
-        any stale pods (stuck in CrashLoopBackOff from a previous run) are
-        removed.  The DaemonSet will recreate them with the correct
-        StorageNodeSet configuration.
+        Call this after the per-node-config ConfigMap has been updated for the
+        worker (use ``wait_for_per_node_config`` first) so the DaemonSet
+        recreates the pod with the correct configuration.
         """
         ns = namespace or self.namespace
         cmd = (

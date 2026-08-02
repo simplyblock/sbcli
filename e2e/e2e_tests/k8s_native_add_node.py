@@ -387,7 +387,11 @@ class K8sNativeAddNodeTest(TestClusterBase):
             self.k8s_utils.patch_storage_node_add_workers(
                 new_workers=[worker],
             )
-            sleep_n_sec(5)
+
+            # Wait for the operator to populate the per-node-config ConfigMap
+            # for this worker.  Without this, the DaemonSet pod starts with
+            # MAX_LVOL=0 and crashes in s-node-api-config-generator.
+            self.k8s_utils.wait_for_per_node_config(worker, timeout=120)
 
             # Delete any stale storage-node pods on this worker so the
             # DaemonSet recreates them with the correct configuration
