@@ -151,8 +151,10 @@ def validate_add_lvol_func(name, size, host_id_or_name, pool_id_or_name,
     if pool.pool_max_size > 0:
         total = pool_controller.get_pool_total_capacity(pool.get_id(), all_lvols=all_lvols, all_snaps=all_snaps)
         if total + size > pool.pool_max_size:
-            return False, f"Invalid LVol size: {utils.humanbytes(size)} " \
-                          f"Pool max size has reached {utils.humanbytes(total+size)} of {utils.humanbytes(pool.pool_max_size)}"
+            return False, (
+                f"Invalid LVol size: {utils.humanbytes(size)} "
+                f"Pool max size has reached {utils.humanbytes(total+size)} of {utils.humanbytes(pool.pool_max_size)}"
+            )
 
     # Name uniqueness via the per-pool name index (O(1)) instead of scanning
     # every lvol in the DB.

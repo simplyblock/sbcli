@@ -23,8 +23,6 @@ ignore = [
     "DTZ007",
     "FLY002",  # Prefer joins over format strings 
     "I001",
-    "ISC004",
-    "LOG015",
     "PLC0206",
     "PLR0402",
     "PLR1704",
@@ -66,7 +64,8 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"e2e/*" = ["PERF102", "PERF402"]
+"e2e/*" = ["PERF102", "PERF402", "ISC004", "LOG015"]
+"scripts/*" = ["ISC004", "LOG015"]
 
 
 [tool.mypy]

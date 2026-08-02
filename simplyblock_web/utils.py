@@ -1,5 +1,4 @@
 import base64
-import logging
 import random
 import re
 import string
@@ -11,7 +10,10 @@ from pydantic import BaseModel, Field, SecretBytes, SecretStr, model_validator
 from werkzeug.exceptions import HTTPException
 
 from simplyblock_core import constants
+from simplyblock_core.utils import get_logger
 from simplyblock_core.utils.pci import PCIAddress
+
+logger = get_logger()
 
 
 IP_PATTERN = re.compile(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$')
@@ -123,7 +125,7 @@ def get_cluster_id(request):
                         cluster_secret = tkn.split(":")[1]
                 except Exception:
                     # Exception message can carry the decoded b64 payload.
-                    logging.exception("Failed to decode Basic Auth header")
+                    logger.exception("Failed to decode Basic Auth header")
                     return
 
             return cluster_id

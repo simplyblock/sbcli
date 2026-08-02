@@ -1,6 +1,5 @@
 import datetime
 import os
-import logging
 import uuid
 import time
 import requests
@@ -14,9 +13,9 @@ from simplyblock_core import utils, scripts, constants
 from simplyblock_core.controllers import mgmt_events
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.mgmt_node import MgmtNode
+from simplyblock_core.utils import get_logger
 
-logger = logging.getLogger()
-
+logger = get_logger()
 
 
 def deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret: SecretStr, mode):
@@ -250,8 +249,8 @@ def list_mgmt_nodes():
     data = []
 
     for node in nodes:
-        logging.debug(node)
-        logging.debug("*" * 20)
+        logger.debug(node)
+        logger.debug("*" * 20)
         data.append({
             "UUID": node.get_id(),
             "Hostname": node.hostname,
@@ -270,7 +269,7 @@ def remove_mgmt_node(uuid):
         logger.error(e)
         return False
 
-    logging.info("Removing mgmt node")
+    logger.info("Removing mgmt node")
     snode.remove(db_controller.kv_store)
     if snode.mode == "docker":
         logger.info("Leaving swarm...")
@@ -281,5 +280,5 @@ def remove_mgmt_node(uuid):
         utils.load_kube_config_with_fallback()
         
     mgmt_events.mgmt_remove(snode)
-    logging.info("done")
+    logger.info("done")
 

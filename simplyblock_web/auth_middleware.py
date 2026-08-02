@@ -1,7 +1,6 @@
 
 import base64
 import hmac
-import logging
 from functools import wraps
 from typing import Any, TypeVar, Union, cast
 from collections.abc import Callable
@@ -10,6 +9,9 @@ from flask import request, Response
 from werkzeug.wrappers import Response as WerkzeugResponse
 
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.utils import get_logger
+
+logger = get_logger()
 
 # Type variable for the decorated function
 F = TypeVar('F', bound=Callable[..., Any])
@@ -58,7 +60,7 @@ def token_required(f: F) -> Callable[..., ResponseType]:
                     except Exception:
                         # The exception message itself can carry the b64
                         # payload — log only the traceback.
-                        logging.exception("Failed to decode Basic Auth")
+                        logger.exception("Failed to decode Basic Auth")
 
         # Authentication headers
         headers: dict[str, str] = {"WWW-Authenticate": 'Basic realm="Login Required"'}
@@ -111,7 +113,7 @@ def token_required(f: F) -> Callable[..., ResponseType]:
         except Exception:
             # The exception message can carry decoded credentials — keep the
             # traceback for ops, drop the message from the client response.
-            logging.exception("Authentication error")
+            logger.exception("Authentication error")
             return (
                 {
                     "message": "Something went wrong",
