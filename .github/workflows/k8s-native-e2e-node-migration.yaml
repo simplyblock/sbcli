@@ -638,7 +638,7 @@ jobs:
       # ── Deploy CSI stack ────────────────────────────────────────────────────
 
       - name: Install cert-manager (TLS prerequisite)
-        if: ${{ inputs.use_existing_cluster != 'true' && inputs.tls_enabled == 'true' }}
+        if: ${{ inputs.use_existing_cluster != 'true' && inputs.tls_enabled }}
         run: |
           helm repo add jetstack https://charts.jetstack.io
           helm repo update
@@ -780,7 +780,7 @@ jobs:
           done
 
       - name: Setup KMS (vault) for encryption
-        if: ${{ inputs.use_existing_cluster != 'true' && inputs.tls_enabled == 'true' }}
+        if: ${{ inputs.use_existing_cluster != 'true' && inputs.tls_enabled }}
         run: |
           # Ensure vault namespace from previous run is fully terminated before installing.
           echo "Checking if vault namespace is still terminating..."
