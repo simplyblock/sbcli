@@ -850,7 +850,16 @@ def get_backup_tests():
         TestBackupInterruptedBackup,
         TestBackupInterruptedRestore,
         TestBackupConcurrentIO,
-        # Backup node-add / node-migration edge cases
+    ]
+
+
+def get_backup_topology_tests():
+    """Backup tests that modify cluster topology (add-node / migration).
+
+    These require extra infrastructure (NEW_NODE_IPS, migrate_to_worker)
+    and must run in dedicated topology pipelines, not the regular backup suite.
+    """
+    return [
         TestBackupAfterNodeAdd,
         TestBackupWithFioOnNewNode,
         TestBackupAfterNodeMigration,

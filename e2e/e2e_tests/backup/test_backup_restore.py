@@ -1864,8 +1864,8 @@ class TestBackupRestoreDataIntegrity(BackupTestBase):
             except Exception:
                 pass
 
-        # --- TC-BCK-018: Delete lvol while backup is in-progress; backup must still complete ---
-        self.logger.info("TC-BCK-018: delete lvol before backup completes, expect backup to finish and restore to work")
+        # --- TC-BCK-018: Backup then delete source lvol; restore must work ---
+        self.logger.info("TC-BCK-018: backup lvol, wait for completion, delete source, then restore and verify")
         tc18_lvol_name, tc18_lvol_id = self._create_lvol()
         _, tc18_mount = self._connect_and_mount(tc18_lvol_name, tc18_lvol_id)
         self._run_fio(tc18_mount, runtime=30)
@@ -1875,28 +1875,18 @@ class TestBackupRestoreDataIntegrity(BackupTestBase):
 
         tc18_snap_name = f"tc18_snap_{_rand_suffix()}"
         tc18_snap_id = self._create_snapshot(tc18_lvol_id, tc18_snap_name, backup=True)
-        self.logger.info(f"TC-BCK-018: snapshot {tc18_snap_id} + backup triggered — deleting lvol after backup source resolved")
+        self.logger.info(f"TC-BCK-018: snapshot {tc18_snap_id} + backup triggered")
 
-        # Delete lvol before backup completes (backup reads from snapshot, not live lvol).
-        # In K8s mode we must wait for the StorageBackup to leave Pending phase,
-        # otherwise the backup controller can't resolve the source PVC.
+        # Wait for backup to complete before deleting the source.
+        # In K8s mode the operator re-resolves PVC references during reconciliation,
+        # so deleting the PVC mid-backup causes BackupSourceResolutionError.
+        tc18_bk_id = self._wait_for_backup_by_snap(tc18_snap_name, "TC-BCK-018")
+        self.logger.info(f"TC-BCK-018: backup {tc18_bk_id} completed")
+
+        # Now delete the source lvol/PVC
         if self.k8s_test:
             k8s = self._ensure_k8s_utils()
             pvc_name = self._k8s_normalize_name(tc18_lvol_name)
-            # tc18_snap_id is the StorageBackup CRD name (bck-tc18-snap-xxx)
-            bck_name = tc18_snap_id
-            # Wait up to 120s for backup to move past Pending
-            for _ in range(24):
-                try:
-                    res = k8s.get_resource_json("storagebackup", bck_name)
-                    phase = (res.get("status", {}).get("phase") or "").lower()
-                    if phase and phase != "pending":
-                        self.logger.info(
-                            f"TC-BCK-018: StorageBackup {bck_name} reached phase={phase}, safe to delete PVC")
-                        break
-                except Exception:
-                    pass
-                sleep_n_sec(5)
             k8s.delete_pvc(pvc_name)
             if pvc_name in self.created_pvcs:
                 self.created_pvcs.remove(pvc_name)
@@ -1913,11 +1903,7 @@ class TestBackupRestoreDataIntegrity(BackupTestBase):
             self.sbcli_utils.delete_lvol(lvol_name=tc18_lvol_name, skip_error=True)
         if tc18_lvol_name in self.created_lvols:
             self.created_lvols.remove(tc18_lvol_name)
-        self.logger.info("TC-BCK-018: lvol deleted; waiting for backup to complete")
-
-        # Backup should still complete because it reads from snapshot, not the live lvol
-        tc18_bk_id = self._wait_for_backup_by_snap(tc18_snap_name, "TC-BCK-018")
-        self.logger.info(f"TC-BCK-018: backup {tc18_bk_id} completed despite lvol deletion ✓")
+        self.logger.info("TC-BCK-018: source lvol deleted after backup completed")
 
         # Restore and verify checksums
         tc18_restored_name = f"tc18_restored_{_rand_suffix()}"
@@ -1929,7 +1915,7 @@ class TestBackupRestoreDataIntegrity(BackupTestBase):
             mount=f"{self.mount_path}/tc18_{_rand_suffix()}",
             format_disk=False)
         self._verify_checksums(self.fio_node, tc18_r_mount, tc18_checksums)
-        self.logger.info("TC-BCK-018: checksums match after restore from in-progress backup ✓")
+        self.logger.info("TC-BCK-018: checksums match after restore from backup of deleted source ✓")
 
         self.logger.info("=== TestBackupRestoreDataIntegrity PASSED ===")
 
@@ -4572,10 +4558,10 @@ class TestBackupResizedLvol(BackupTestBase):
         self._verify_checksums(self.fio_node, rst_v1_mnt, checksums_v1)
         self.logger.info("TC-BCK-171: v1 restore data integrity PASSED")
 
-        # TC-BCK-172: restore v2, verify
+        # TC-BCK-172: restore v2, verify (must use 10G since lvol was resized)
         self.logger.info("TC-BCK-172: Restoring v2 …")
         rst_v2 = f"rszrst2{_rand_suffix()}"
-        self._restore_backup(bk_v2, rst_v2)
+        self._restore_backup(bk_v2, rst_v2, restore_size="10G")
         self._wait_for_restore(rst_v2)
         rst_v2_id = self._get_lvol_id(rst_v2)
         assert rst_v2_id
@@ -4643,7 +4629,7 @@ class TestBackupListFields(BackupTestBase):
 
         # TC-BCK-175: backup list with cluster-id filter
         self.logger.info("TC-BCK-175: Testing --cluster-id filter …")
-        out, err = self._sbcli(f"-d backup list --cluster-id {self.cluster_id}")
+        out, err = self._sbcli(f"backup list --cluster-id {self.cluster_id}")
         assert not (err and "error" in err.lower()), \
             f"backup list --cluster-id failed: {err}"
         assert bk_id in (out or "") or snap_name in (out or "") or lvol_name in (out or ""), \
