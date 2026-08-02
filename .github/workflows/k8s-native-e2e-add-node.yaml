@@ -118,7 +118,7 @@ on:
         required: true
         default: 'worker-0.ocp.simplyblock.ai,worker-1.ocp.simplyblock.ai,worker-2.ocp.simplyblock.ai,worker-3.ocp.simplyblock.ai,worker-4.ocp.simplyblock.ai,worker-5.ocp.simplyblock.ai'
       new_worker_nodes:
-        description: 'Comma-separated new K8s worker node names to add during test (at least 2, multiples of 2)'
+        description: 'Comma-separated new K8s worker node names to add during test (at least 1)'
         required: true
       ifc_names:
         description: 'Network interfaces (mgmt_ifc:data_nics)'

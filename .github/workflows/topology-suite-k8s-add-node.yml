@@ -53,7 +53,7 @@ on:
         description: 'Comma-separated initial K8s worker node names'
         required: true
       new_worker_nodes:
-        description: 'Comma-separated new K8s worker node names to add during test (at least 2, multiples of 2)'
+        description: 'Comma-separated new K8s worker node names to add during test (at least 1)'
         required: true
 
       # =========================
