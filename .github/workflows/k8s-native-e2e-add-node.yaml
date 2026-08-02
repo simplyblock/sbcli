@@ -436,6 +436,27 @@ jobs:
             echo "Done with $NODE"
           done
 
+          # Also reset hugepages on new_worker_nodes (may have been used in a previous run)
+          IFS=',' read -ra NEW_NODES <<< "${{ inputs.new_worker_nodes }}"
+          for NODE in "${NEW_NODES[@]}"; do
+            NODE=$(echo "$NODE" | xargs)
+            [[ -z "$NODE" ]] && continue
+            echo "Resetting hugepages on new node $NODE..."
+            if [[ "$CLUSTER_ENV" == *"openshift"* ]]; then
+              oc debug node/"$NODE" -- chroot /host bash -c \
+                "echo 0 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages" 2>/dev/null || true
+              oc debug node/"$NODE" -- chroot /host systemctl restart kubelet 2>/dev/null || true
+            else
+              kubectl debug node/"$NODE" -q --image=busybox:latest -- chroot /host sh -c \
+                "echo 0 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages" 2>/dev/null || true
+              kubectl debug node/"$NODE" -q --image=busybox:latest -- chroot /host sh -c \
+                "systemctl restart kubelet" 2>/dev/null || true
+            fi
+            echo "Removing simplyblock labels from new node $NODE..."
+            kubectl label node "$NODE" simplyblock.io/role- 2>/dev/null || true
+            echo "Done with new node $NODE"
+          done
+
           echo "=== Cleanup complete ==="
 
       - name: Cleanup old cert-manager deployment
