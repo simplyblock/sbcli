@@ -2188,6 +2188,11 @@ class K8sUtils:
         new CR and handles provisioning automatically — no separate
         ``StorageCluster`` expand patch is needed.
 
+        Device configuration (``driveSizeRange``, ``pcieModel``) is
+        read from the parent StorageNodeSet and included in the
+        ``overrides`` block so the init container can find the correct
+        SSD devices on the new worker.
+
         Parameters
         ----------
         new_workers : list[str]
@@ -2199,8 +2204,31 @@ class K8sUtils:
             Override namespace (default ``self.namespace``).
         """
         ns = namespace or self.namespace
+
+        # Read device config from parent StorageNodeSet
+        sns_json = self.get_resource_json(
+            "storagenodeset.storage.simplyblock.io",
+            storage_node_set_ref,
+            namespace=ns,
+        )
+        sns_spec = sns_json.get("spec", {})
+        drive_size_range = sns_spec.get("driveSizeRange", "")
+        pcie_model = sns_spec.get("pcieModel", "")
+        if drive_size_range or pcie_model:
+            self.logger.info(
+                f"[K8sUtils] Read device config from StorageNodeSet "
+                f"'{storage_node_set_ref}': driveSizeRange={drive_size_range!r}, "
+                f"pcieModel={pcie_model!r}"
+            )
+
         for worker in new_workers:
             cr_name = f"{storage_node_set_ref}-expand-{worker}"
+            overrides = "    expand: true\n"
+            if drive_size_range:
+                overrides += f'    driveSizeRange: "{drive_size_range}"\n'
+            if pcie_model:
+                overrides += f'    pcieModel: "{pcie_model}"\n'
+
             yaml_content = (
                 "apiVersion: storage.simplyblock.io/v1alpha1\n"
                 "kind: StorageNode\n"
@@ -2212,7 +2240,7 @@ class K8sUtils:
                 f"  workerNode: {worker}\n"
                 "  socketIndex: 0\n"
                 "  overrides:\n"
-                "    expand: true\n"
+                f"{overrides}"
             )
             self.logger.info(
                 f"[K8sUtils] Creating StorageNode CR '{cr_name}' "
