@@ -414,6 +414,12 @@ class K8sNativeNodeMigrationTest(TestClusterBase):
             f"storageNodeRef={storage_node_cr}, got: {ops_spec}"
         )
 
+        # Delete any stale storage-node pods on the migration target worker
+        # so the DaemonSet recreates them with the correct configuration
+        self.k8s_utils.delete_storage_node_pods_on_worker(
+            self.migrate_to_worker
+        )
+
         # ── Step 5: Wait for migration to complete ────────────────────────
         self.logger.info("Step 5: Waiting for StorageNodeOps to complete")
 

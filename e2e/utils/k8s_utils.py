@@ -2923,6 +2923,48 @@ class K8sUtils:
         else:
             self.delete_resource("pod", pod_name, namespace=ns)
 
+    def delete_storage_node_pods_on_worker(self, worker_node: str,
+                                           namespace: str = None):
+        """Delete storage-node DaemonSet pods running on a specific worker.
+
+        Call this right after creating a StorageNode CR for the worker so that
+        any stale pods (stuck in CrashLoopBackOff from a previous run) are
+        removed.  The DaemonSet will recreate them with the correct
+        StorageNodeSet configuration.
+        """
+        ns = namespace or self.namespace
+        cmd = (
+            f"kubectl get pods -n {ns} "
+            f"--field-selector spec.nodeName={worker_node} "
+            f"--no-headers -o custom-columns=NAME:.metadata.name"
+        )
+        out, _ = self._exec_kubectl(cmd, supress_logs=True)
+        deleted = 0
+        for line in (out or "").strip().splitlines():
+            pod_name = line.strip()
+            if not pod_name:
+                continue
+            if "simplyblock-storage-node-ds" in pod_name:
+                self.logger.info(
+                    f"[K8sUtils] Deleting stale storage-node pod "
+                    f"'{pod_name}' on worker '{worker_node}'"
+                )
+                self._exec_kubectl(
+                    f"kubectl delete pod {pod_name} -n {ns} "
+                    f"--force --grace-period=0 --ignore-not-found"
+                )
+                deleted += 1
+        if deleted:
+            self.logger.info(
+                f"[K8sUtils] Deleted {deleted} stale storage-node pod(s) "
+                f"on worker '{worker_node}'"
+            )
+        else:
+            self.logger.info(
+                f"[K8sUtils] No stale storage-node pods found on "
+                f"worker '{worker_node}'"
+            )
+
     def verify_pvc_mount(self, pvc_name: str, namespace: str = None,
                          timeout: int = 120) -> tuple:
         """Create a temporary pod to verify a PVC is mountable.

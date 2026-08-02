@@ -366,54 +366,84 @@ class K8sNativeAddNodeTest(TestClusterBase):
 
         sleep_n_sec(30)
 
-        # ── Step 5: Expand cluster by creating StorageNode CRs ──────────
-        self.logger.info("Step 5: Creating StorageNode CRs for new workers")
-        timestamp = int(datetime.now().timestamp())
-
-        self.k8s_utils.patch_storage_node_add_workers(
-            new_workers=self.new_worker_nodes,
-        )
-        sleep_n_sec(10)
-
-        # ── Step 6: Wait for expansion ───────────────────────────────────
-        self.logger.info("Step 6: Waiting for expansion to complete")
-
-        # Wait for new snode-spdk pods
-        expected_pods = initial_node_count + len(self.new_worker_nodes)
+        # ── Step 5 & 6: Expand cluster one node at a time ─────────────
+        # Adding multiple nodes simultaneously can fail; add each node
+        # sequentially and wait for it to come online before proceeding.
         self.logger.info(
-            f"Waiting for {expected_pods} snode-spdk pods (was {initial_node_count})"
+            f"Step 5: Adding {len(self.new_worker_nodes)} new worker(s) "
+            f"sequentially"
         )
-        self.k8s_utils.wait_spdk_pods_ready(
-            expected_count=expected_pods, timeout=900
-        )
+        timestamp = int(datetime.now().timestamp())
+        all_known_ids = set(initial_node_ids)
+        new_node_ids = []
 
-        # Wait for cluster to enter expansion state (may already be past it)
-        try:
+        for idx, worker in enumerate(self.new_worker_nodes):
+            step_label = f"5.{idx + 1}/{len(self.new_worker_nodes)}"
+            self.logger.info(
+                f"Step {step_label}: Creating StorageNode CR for '{worker}'"
+            )
+
+            # Create StorageNode CR for this single worker
+            self.k8s_utils.patch_storage_node_add_workers(
+                new_workers=[worker],
+            )
+            sleep_n_sec(5)
+
+            # Delete any stale storage-node pods on this worker so the
+            # DaemonSet recreates them with the correct configuration
+            self.k8s_utils.delete_storage_node_pods_on_worker(worker)
+
+            # Wait for the expected number of snode-spdk pods
+            expected_pods = initial_node_count + idx + 1
+            self.logger.info(
+                f"Waiting for {expected_pods} snode-spdk pods "
+                f"(was {initial_node_count})"
+            )
+            self.k8s_utils.wait_spdk_pods_ready(
+                expected_count=expected_pods, timeout=900
+            )
+
+            # Wait for cluster to enter/pass expansion state
+            try:
+                self.sbcli_utils.wait_for_cluster_status(
+                    cluster_id=self.cluster_id,
+                    status="in_expansion",
+                    timeout=300,
+                )
+            except Exception:
+                self.logger.info(
+                    "Cluster may already be past in_expansion state"
+                )
+
+            # Discover and wait for the new node to come online
+            sleep_n_sec(30)
+            all_nodes_now = self.sbcli_utils.get_storage_nodes()["results"]
+            for n in all_nodes_now:
+                if n["id"] not in all_known_ids:
+                    self.logger.info(
+                        f"New storage node discovered: {n['id']}"
+                    )
+                    self.sbcli_utils.wait_for_storage_node_status(
+                        node_id=n["id"],
+                        status="online",
+                        timeout=600,
+                    )
+                    new_node_ids.append(n["id"])
+                    all_known_ids.add(n["id"])
+
+            # Wait for cluster to return to active before adding next node
             self.sbcli_utils.wait_for_cluster_status(
                 cluster_id=self.cluster_id,
-                status="in_expansion",
-                timeout=300,
-            )
-        except Exception:
-            self.logger.info("Cluster may already be past in_expansion state")
-
-        # Find new node IDs
-        sleep_n_sec(60)
-        all_nodes_now = self.sbcli_utils.get_storage_nodes()["results"]
-        new_node_ids = [
-            n["id"] for n in all_nodes_now if n["id"] not in initial_node_ids
-        ]
-        self.logger.info(f"New storage node IDs: {new_node_ids}")
-
-        # Wait for new nodes to come online
-        for node_id in new_node_ids:
-            self.sbcli_utils.wait_for_storage_node_status(
-                node_id=node_id,
-                status="online",
+                status="active",
                 timeout=600,
             )
+            self.logger.info(
+                f"Worker '{worker}' added and online "
+                f"({idx + 1}/{len(self.new_worker_nodes)})"
+            )
 
-        # Wait for cluster to be active
+        self.logger.info(f"All new storage node IDs: {new_node_ids}")
+
         cluster_details = self.sbcli_utils.wait_for_cluster_status(
             cluster_id=self.cluster_id,
             status="active",

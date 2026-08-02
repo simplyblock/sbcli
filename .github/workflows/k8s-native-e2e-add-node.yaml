@@ -424,11 +424,17 @@ jobs:
             if [[ "$CLUSTER_ENV" == *"openshift"* ]]; then
               oc debug node/"$NODE" -- chroot /host bash -c \
                 "echo 0 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages" 2>/dev/null || true
+              echo "Cleaning stale simplyblock config on $NODE..."
+              oc debug node/"$NODE" -- chroot /host bash -c \
+                "rm -rf /etc/simplyblock" 2>/dev/null || true
               echo "Restarting kubelet on $NODE..."
               oc debug node/"$NODE" -- chroot /host systemctl restart kubelet 2>/dev/null || true
             else
               kubectl debug node/"$NODE" -q --image=busybox:latest -- chroot /host sh -c \
                 "echo 0 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages" 2>/dev/null || true
+              echo "Cleaning stale simplyblock config on $NODE..."
+              kubectl debug node/"$NODE" -q --image=busybox:latest -- chroot /host sh -c \
+                "rm -rf /etc/simplyblock" 2>/dev/null || true
               echo "Restarting kubelet on $NODE..."
               kubectl debug node/"$NODE" -q --image=busybox:latest -- chroot /host sh -c \
                 "systemctl restart kubelet" 2>/dev/null || true
@@ -436,7 +442,7 @@ jobs:
             echo "Done with $NODE"
           done
 
-          # Also reset hugepages on new_worker_nodes (may have been used in a previous run)
+          # Also reset hugepages and clean config on new_worker_nodes (may have been used in a previous run)
           IFS=',' read -ra NEW_NODES <<< "${{ inputs.new_worker_nodes }}"
           for NODE in "${NEW_NODES[@]}"; do
             NODE=$(echo "$NODE" | xargs)
@@ -445,10 +451,16 @@ jobs:
             if [[ "$CLUSTER_ENV" == *"openshift"* ]]; then
               oc debug node/"$NODE" -- chroot /host bash -c \
                 "echo 0 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages" 2>/dev/null || true
+              echo "Cleaning stale simplyblock config on new node $NODE..."
+              oc debug node/"$NODE" -- chroot /host bash -c \
+                "rm -rf /etc/simplyblock" 2>/dev/null || true
               oc debug node/"$NODE" -- chroot /host systemctl restart kubelet 2>/dev/null || true
             else
               kubectl debug node/"$NODE" -q --image=busybox:latest -- chroot /host sh -c \
                 "echo 0 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages" 2>/dev/null || true
+              echo "Cleaning stale simplyblock config on new node $NODE..."
+              kubectl debug node/"$NODE" -q --image=busybox:latest -- chroot /host sh -c \
+                "rm -rf /etc/simplyblock" 2>/dev/null || true
               kubectl debug node/"$NODE" -q --image=busybox:latest -- chroot /host sh -c \
                 "systemctl restart kubelet" 2>/dev/null || true
             fi
