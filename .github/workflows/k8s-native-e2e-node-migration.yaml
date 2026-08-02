@@ -204,14 +204,8 @@ on:
         description: 'NFS mountpoint on client nodes'
         required: false
         default: '/mnt/nfs_share/'
-      cluster_security:
-        description: "Cluster setup mode. 'backup' deploys MinIO and enables backup on StorageCluster. Auto-enabled for backup/backup-topology test names."
-        required: false
-        type: choice
-        default: "none"
-        options:
-          - none
-          - backup
+      # cluster_security is available via workflow_call only (25 input limit).
+      # For workflow_dispatch, backup is auto-enabled when testname contains "Backup".
 
 jobs:
   e2e-node-migration:
