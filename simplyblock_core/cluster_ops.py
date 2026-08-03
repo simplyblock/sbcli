@@ -2205,9 +2205,9 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
         service_names = []
         image_parts = ["simplyblock-io/simplyblock:", "simplyblock/simplyblock:", "simply-block/simplyblock:"]
         for service in cluster_docker.services.list():
-            service_image=service.attrs['Spec']['Labels']['com.docker.stack.image']
+            container_image=service.attrs['Spec']['Labels']['com.docker.stack.image']
             for part in image_parts:
-                if part in service_image:
+                if part in container_image:
                     if service.name in ["app_CachingNodeMonitor", "app_CachedLVolStatsCollector"]:
                         logger.info(f"Removing service {service.name}")
                         service.remove()
