@@ -23,7 +23,7 @@ from simplyblock_core.storage_node_ops import _check_ftt_allows_node_removal
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _cluster(ha_type="ha", npcs=1, ndcs=2, ft=1, rebalancing=False):
+def _cluster(ha_type="ha", npcs=1, ndcs=2, ft=1, rebalancing=False, enable_failure_domain=False):
     cl = Cluster()
     cl.uuid = "cluster-1"
     cl.ha_type = ha_type
@@ -31,12 +31,14 @@ def _cluster(ha_type="ha", npcs=1, ndcs=2, ft=1, rebalancing=False):
     cl.distr_ndcs = ndcs
     cl.max_fault_tolerance = ft
     cl.is_re_balancing = rebalancing
+    cl.enable_failure_domain = enable_failure_domain
     cl.status = Cluster.STATUS_ACTIVE
     return cl
 
 
 def _node(node_id, status=StorageNode.STATUS_ONLINE, cluster_id="cluster-1",
-          secondary_id="", secondary_id_2="", jm_vuid=8881, lvstore="LVS_1"):
+          secondary_id="", secondary_id_2="", jm_vuid=8881, lvstore="LVS_1",
+          failure_domain=-1):
     n = MagicMock(spec=StorageNode)
     n.uuid = node_id
     n.get_id = MagicMock(return_value=node_id)
@@ -47,6 +49,7 @@ def _node(node_id, status=StorageNode.STATUS_ONLINE, cluster_id="cluster-1",
     n.jm_vuid = jm_vuid
     n.lvstore = lvstore
     n.mgmt_ip = f"10.0.0.{hash(node_id) % 256}"
+    n.failure_domain = failure_domain
     # rpc_client mock: journal replication not active by default
     rpc = MagicMock()
     rpc.bdev_lvol_get_lvstores = MagicMock(return_value=[{"name": lvstore}])
@@ -571,6 +574,127 @@ class TestNpcs2Ft1Additional(unittest.TestCase):
         db = _db(cl, nodes)
         allowed, reason = _check_ftt_allows_node_removal("n1", db)
         self.assertFalse(allowed)
+
+
+# ---------------------------------------------------------------------------
+# Failure-domain-aware capacity check
+#
+# With FD enabled, the capacity cap (npcs) counts distinct affected failure
+# domains instead of raw not-online nodes, mirroring the operator's
+# fdDrainGate (nodedrain_controller.go) -- piling onto an already-affected
+# domain is always free; a *new* domain is gated on distinct-domain count
+# when there are >= ndcs+npcs domains, or on the plain node-count cap
+# otherwise (under-provisioned).
+# ---------------------------------------------------------------------------
+
+class TestFailureDomainAwareCapacity(unittest.TestCase):
+
+    def test_piling_onto_active_domain_always_allowed(self):
+        """Two nodes already down in domain 1 (at cap already) -- removing a
+        THIRD node also in domain 1 must still be allowed."""
+        cl = _cluster(npcs=2, ndcs=2, ft=2, enable_failure_domain=True)
+        nodes = [
+            _node("n1", failure_domain=1),
+            _node("n2", status=StorageNode.STATUS_OFFLINE, failure_domain=1),
+            _node("n3", status=StorageNode.STATUS_OFFLINE, failure_domain=1),
+            _node("n4", failure_domain=2),
+            _node("n5", failure_domain=3),
+            _node("n6", failure_domain=4),
+        ]
+        db = _db(cl, nodes)
+        allowed, _ = _check_ftt_allows_node_removal("n1", db)
+        self.assertTrue(allowed)
+
+    def test_well_provisioned_new_domain_blocked_at_cap(self):
+        """ndcs=2/npcs=2 needs 4 domains for full isolation; 4 are available.
+        Domains 1 and 2 already have not-online nodes (cap=npcs=2 domains
+        active) -- removing a node in a THIRD domain must be blocked."""
+        cl = _cluster(npcs=2, ndcs=2, ft=2, enable_failure_domain=True)
+        nodes = [
+            _node("n1", failure_domain=3),
+            _node("n2", status=StorageNode.STATUS_OFFLINE, failure_domain=1),
+            _node("n3", status=StorageNode.STATUS_OFFLINE, failure_domain=2),
+            _node("n4", failure_domain=4),
+            _node("n5", failure_domain=1),
+            _node("n6", failure_domain=2),
+        ]
+        db = _db(cl, nodes)
+        allowed, reason = _check_ftt_allows_node_removal("n1", db)
+        self.assertFalse(allowed)
+        self.assertIn("domain", reason)
+
+    def test_well_provisioned_new_domain_within_cap_allowed(self):
+        """Same layout, but only ONE domain active so far -- opening a
+        second domain is still within the npcs=2 domain budget."""
+        cl = _cluster(npcs=2, ndcs=2, ft=2, enable_failure_domain=True)
+        nodes = [
+            _node("n1", failure_domain=3),
+            _node("n2", status=StorageNode.STATUS_OFFLINE, failure_domain=1),
+            _node("n3", failure_domain=2),
+            _node("n4", failure_domain=4),
+        ]
+        db = _db(cl, nodes)
+        allowed, _ = _check_ftt_allows_node_removal("n1", db)
+        self.assertTrue(allowed)
+
+    def test_under_provisioned_second_domain_within_node_budget_allowed(self):
+        """ndcs=2/npcs=2 needs 4 domains, but only 2 exist -- under-provisioned.
+        One node down in domain 1; removing a node in domain 2 (opening a
+        second domain) is still allowed while raw not-online count (1) is
+        under the npcs=2 node budget."""
+        cl = _cluster(npcs=2, ndcs=2, ft=2, enable_failure_domain=True)
+        nodes = [
+            _node("n1", failure_domain=2),
+            _node("n2", status=StorageNode.STATUS_OFFLINE, failure_domain=1),
+            _node("n3", failure_domain=1),
+            _node("n4", failure_domain=2),
+        ]
+        db = _db(cl, nodes)
+        allowed, _ = _check_ftt_allows_node_removal("n1", db)
+        self.assertTrue(allowed)
+
+    def test_under_provisioned_second_domain_blocked_at_node_budget(self):
+        """Same under-provisioned layout, but the node-count budget (npcs=2)
+        is already spent -- opening a second domain must now be blocked."""
+        cl = _cluster(npcs=2, ndcs=2, ft=2, enable_failure_domain=True)
+        nodes = [
+            _node("n1", failure_domain=2),
+            _node("n2", status=StorageNode.STATUS_OFFLINE, failure_domain=1),
+            _node("n3", status=StorageNode.STATUS_OFFLINE, failure_domain=1),
+            _node("n4", failure_domain=2),
+        ]
+        db = _db(cl, nodes)
+        allowed, reason = _check_ftt_allows_node_removal("n1", db)
+        self.assertFalse(allowed)
+        self.assertIn("insufficient failure domains", reason)
+
+    def test_fd_enabled_but_node_unassigned_falls_back_to_node_count(self):
+        """FD enabled cluster-wide, but this specific node has no domain
+        assignment (-1) -- must fall back to the plain node-count cap."""
+        cl = _cluster(npcs=1, ndcs=2, ft=1, enable_failure_domain=True)
+        nodes = [
+            _node("n1", failure_domain=-1),
+            _node("n2", status=StorageNode.STATUS_OFFLINE, failure_domain=1),
+            _node("n3", failure_domain=1),
+        ]
+        db = _db(cl, nodes)
+        allowed, reason = _check_ftt_allows_node_removal("n1", db)
+        self.assertFalse(allowed)
+        self.assertIn("not-online", reason)
+
+    def test_fd_disabled_ignores_domains_uses_node_count(self):
+        """enable_failure_domain=False: domain tags present but irrelevant --
+        behaves exactly like the non-FD npcs=1 case."""
+        cl = _cluster(npcs=1, ndcs=2, ft=1, enable_failure_domain=False)
+        nodes = [
+            _node("n1", failure_domain=1),
+            _node("n2", status=StorageNode.STATUS_OFFLINE, failure_domain=2),
+            _node("n3", failure_domain=3),
+        ]
+        db = _db(cl, nodes)
+        allowed, reason = _check_ftt_allows_node_removal("n1", db)
+        self.assertFalse(allowed)
+        self.assertIn("FTT=1", reason)
 
 
 # ---------------------------------------------------------------------------
