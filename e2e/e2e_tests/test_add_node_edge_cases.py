@@ -114,7 +114,11 @@ class TestSequentialNodeAdd(TestClusterBase):
         k8s_utils = K8sUtils(ssh_obj=self.ssh_obj, mgmt_node=mgmt_node)
 
         k8s_utils.patch_storage_node_add_workers(new_workers=[worker_name])
-        sleep_n_sec(10)
+
+        # Wait for operator to populate per-node-config ConfigMap for this
+        # worker before restarting pods — prevents MAX_LVOL=0 crash.
+        k8s_utils.wait_for_per_node_config(worker_name, timeout=120)
+        k8s_utils.delete_storage_node_pods_on_worker(worker_name)
 
         expected_pods = initial_pod_count + 1
         self.logger.info(f"Waiting for {expected_pods} snode-spdk pods")
@@ -430,7 +434,8 @@ class TestAddNodeSnapshotCloneOnNewNode(TestClusterBase):
             mgmt_node = self.mgmt_nodes[0] if self.mgmt_nodes else ""
             k8s_utils = K8sUtils(ssh_obj=self.ssh_obj, mgmt_node=mgmt_node)
             k8s_utils.patch_storage_node_add_workers(new_workers=[nodes_to_add[0]])
-            sleep_n_sec(10)
+            k8s_utils.wait_for_per_node_config(nodes_to_add[0], timeout=120)
+            k8s_utils.delete_storage_node_pods_on_worker(nodes_to_add[0])
             k8s_utils.wait_spdk_pods_ready(
                 expected_count=initial_pod_count + 1, timeout=900
             )

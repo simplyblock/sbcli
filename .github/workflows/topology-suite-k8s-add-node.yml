@@ -332,17 +332,21 @@ jobs:
                   if not os.path.isfile(md_path):
                       continue
                   content = open(md_path).read()
-                  # Extract test name from "## ... Summary — <TestName>"
+                  # Extract test name — try "Summary — <Name>" first,
+                  # fall back to "Test class: `<Name>`" (e2e-bootstrap format)
                   name_m = re.search(r'Summary\s*[-—]\s*(\S+)', content)
+                  if not name_m:
+                      name_m = re.search(r'\*\*Test class:\*\*\s*`([^`]+)`', content)
                   tname = name_m.group(1) if name_m else d
-                  # Extract result
-                  res_m = re.search(r'\*\*Result:\*\*\s*(\S+)', content)
-                  result = res_m.group(1) if res_m else "?"
-                  r_icon = ":white_check_mark:" if "pass" in result.lower() or "success" in result.lower() else ":x:"
-                  # Extract counts
-                  total_m  = re.search(r'\*\*Total:\*\*\s*(\d+)', content)
-                  passed_m = re.search(r'\*\*Passed:\*\*\s*(\d+)', content)
-                  failed_m = re.search(r'\*\*Failed:\*\*\s*(\d+)', content)
+                  # Extract result — handle both "SUCCESS"/"FAILED" and emoji prefixed "✅ SUCCESS"
+                  res_m = re.search(r'\*\*Result:\*\*\s*(.+?)(?:\s*[&<\n]|$)', content)
+                  result = res_m.group(1).strip() if res_m else "?"
+                  r_icon = ":white_check_mark:" if "success" in result.lower() else ":x:"
+                  # Extract counts — handle both inline "**Total:** N" and
+                  # table format "| ✅ Passed | N |" from e2e-bootstrap
+                  total_m  = re.search(r'\*\*Total[:\*]*\*?\*?\s*\|?\s*\*?\*?(\d+)', content)
+                  passed_m = re.search(r'(?:\*\*Passed:\*\*|[✅] Passed)\s*\|?\s*(\d+)', content)
+                  failed_m = re.search(r'(?:\*\*Failed:\*\*|[❌] Failed)\s*\|?\s*(\d+)', content)
                   total  = total_m.group(1) if total_m else "?"
                   passed = passed_m.group(1) if passed_m else "?"
                   failed = failed_m.group(1) if failed_m else "?"

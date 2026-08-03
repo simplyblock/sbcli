@@ -1515,7 +1515,7 @@ jobs:
           retention-days: 7
 
       - name: Send Slack Notification
-        if: always() && (inputs.send_slack_notification || 'true') == 'true'
+        if: always() && inputs.send_slack_notification != false
         shell: bash
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
