@@ -391,46 +391,20 @@ class K8sNativeNodeMigrationTest(TestClusterBase):
 
         migration_timestamp = int(datetime.now().timestamp())
 
-        # ── Step 4a: Prepare the migration target worker ─────────────────
-        # The operator expects a Running storage-node pod on the target
-        # worker BEFORE it processes the StorageNodeOps CR.  Add the target
-        # worker to the StorageNodeSet (via StorageNode CR with expand=true)
-        # so the operator labels it, populates the ConfigMap, and the
-        # DaemonSet schedules a healthy pod.
-        self.logger.info(
-            f"Step 4a: Adding migration target '{self.migrate_to_worker}' "
-            f"to StorageNodeSet before migration"
-        )
-        self.k8s_utils.patch_storage_node_add_workers(
-            new_workers=[self.migrate_to_worker],
-        )
-
-        # Wait for the operator to populate the per-node-config ConfigMap
+        # Ensure the storage-node pod on the migration target is healthy
+        # BEFORE creating the StorageNodeOps CR.  If worker-5 was labelled
+        # during cluster setup the DaemonSet will have scheduled a pod, but
+        # the operator may not have populated the per-node-config ConfigMap
+        # entry yet — causing the init container to crash with MAX_LVOL=0.
+        # Fix the pod now so the operator finds a healthy pod when it starts
+        # the migration and can resolve DNS immediately.
         self.k8s_utils.wait_for_per_node_config(
             self.migrate_to_worker, timeout=120
         )
-
-        # Delete any stale/crashing storage-node pods on the target so the
-        # DaemonSet recreates them with the correct ConfigMap values
         self.k8s_utils.delete_storage_node_pods_on_worker(
             self.migrate_to_worker
         )
 
-        # Wait for the new snode-spdk pod to come up on the target
-        expected_spdk_pods = len(online_nodes) + 1
-        self.logger.info(
-            f"Waiting for {expected_spdk_pods} snode-spdk pods "
-            f"(target worker included)"
-        )
-        self.k8s_utils.wait_spdk_pods_ready(
-            expected_count=expected_spdk_pods, timeout=900
-        )
-
-        # ── Step 4b: Create the migration StorageNodeOps CR ──────────────
-        self.logger.info(
-            f"Step 4b: Creating StorageNodeOps to migrate node "
-            f"{migrate_node_uuid} to '{self.migrate_to_worker}'"
-        )
         ops_name, storage_node_cr = self.k8s_utils.patch_storage_node_migrate(
             node_uuid=migrate_node_uuid,
             target_worker=self.migrate_to_worker,
