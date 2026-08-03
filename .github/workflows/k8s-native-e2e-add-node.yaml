@@ -640,6 +640,37 @@ jobs:
 
           echo "=== MinIO and backup credentials setup complete ==="
 
+      - name: Start MinIO trace logging
+        if: >-
+          ${{
+            inputs.use_existing_cluster != 'true' &&
+            (inputs.cluster_security == 'backup' ||
+             inputs.testname == 'backup-topology' ||
+             contains(inputs.testname, 'Backup'))
+          }}
+        run: |
+          set -euxo pipefail
+
+          # 1. Install mc (MinIO Client)
+          curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o /usr/local/bin/mc
+          chmod +x /usr/local/bin/mc
+
+          # 2. Port-forward MinIO service to localhost
+          kubectl -n minio port-forward svc/minio 9000:9000 &
+          echo "MC_PORT_FWD_PID=$!" >> "$GITHUB_ENV"
+          sleep 3
+
+          # 3. Configure mc alias
+          mc alias set myminio http://localhost:9000 minioadmin minioadmin123
+
+          # 4. Start admin trace in background
+          MINIO_TRACE_LOG="/tmp/minio-trace-${GITHUB_RUN_ID}.log"
+          echo "MINIO_TRACE_LOG=${MINIO_TRACE_LOG}" >> "$GITHUB_ENV"
+          nohup mc admin trace -v --all myminio > "${MINIO_TRACE_LOG}" 2>&1 &
+          echo "MC_TRACE_PID=$!" >> "$GITHUB_ENV"
+
+          echo "=== MinIO trace logging started (PID=$!, log=${MINIO_TRACE_LOG}) ==="
+
       - name: Wait before helm install
         if: ${{ inputs.use_existing_cluster != 'true' }}
         run: sleep 30
@@ -1868,6 +1899,35 @@ jobs:
         env:
           CLUSTER_ID: ${{ env.CLUSTER_ID }}
           MON_SECRET: ${{ secrets.MON_SECRET }}
+      - name: Stop MinIO trace logging and save
+        if: always()
+        run: |
+          set +e
+          if [ -n "${MC_TRACE_PID:-}" ]; then
+            echo "Stopping MinIO trace (PID=${MC_TRACE_PID})..."
+            kill "${MC_TRACE_PID}" 2>/dev/null || true
+            wait "${MC_TRACE_PID}" 2>/dev/null || true
+          fi
+          if [ -n "${MC_PORT_FWD_PID:-}" ]; then
+            kill "${MC_PORT_FWD_PID}" 2>/dev/null || true
+          fi
+          if [ -f "${MINIO_TRACE_LOG:-}" ]; then
+            LINES=$(wc -l < "${MINIO_TRACE_LOG}")
+            SIZE=$(du -h "${MINIO_TRACE_LOG}" | cut -f1)
+            echo "=== MinIO trace log: ${LINES} lines, ${SIZE} ==="
+            cp "${MINIO_TRACE_LOG}" e2e/minio-trace.log 2>/dev/null || true
+          else
+            echo "No MinIO trace log found (backup tests may not have run)"
+          fi
+
+      - name: Upload MinIO trace log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minio-trace-${{ github.run_id }}
+          path: e2e/minio-trace.log
+          if-no-files-found: ignore
+
       - name: Cleanup build folder
         if: always()
         run: |

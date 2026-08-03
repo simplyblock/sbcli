@@ -666,6 +666,17 @@ jobs:
           echo "CLUSTER_SECRET=${CLUSTER_SECRET}" >> $GITHUB_ENV
           echo "R25_ADMIN_POD=${ADMIN_POD}" >> $GITHUB_ENV
 
+      - name: Label worker nodes for R25 storage plane
+        if: ${{ github.event.inputs.use_existing_cluster != 'true' && github.event.inputs.upgrade_type == 'r25-to-r2x' }}
+        run: |
+          set -euxo pipefail
+          echo "=== Labeling worker nodes for R25 storage plane ==="
+          IFS=',' read -ra NODES <<< "${{ github.event.inputs.worker_nodes }}"
+          for NODE in "${NODES[@]}"; do
+            kubectl label node "$NODE" io.simplyblock.node-type=simplyblock-storage-plane --overwrite
+            echo "Labeled $NODE with io.simplyblock.node-type=simplyblock-storage-plane"
+          done
+
       - name: Install spdk-csi chart for R25 storage nodes
         if: ${{ github.event.inputs.use_existing_cluster != 'true' && github.event.inputs.upgrade_type == 'r25-to-r2x' }}
         run: |

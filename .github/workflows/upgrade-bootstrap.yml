@@ -749,6 +749,29 @@ jobs:
           echo "TEST_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
           echo "TEST_START_HUMAN=$(date -u +'%Y-%m-%d %H:%M:%S UTC')" >> "$GITHUB_ENV"
 
+      - name: Start MinIO trace logging
+        if: ${{ env.CLUSTER_SECURITY == 'backup' }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          # 1. Install mc (MinIO Client)
+          if ! command -v mc &>/dev/null; then
+            curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o /usr/local/bin/mc
+            chmod +x /usr/local/bin/mc
+          fi
+
+          # 2. Configure mc alias to external MinIO
+          mc alias set myminio http://192.168.10.164:9000 minioadmin minioadmin
+
+          # 3. Start admin trace in background
+          MINIO_TRACE_LOG="/tmp/minio-trace-${GITHUB_RUN_ID}.log"
+          echo "MINIO_TRACE_LOG=${MINIO_TRACE_LOG}" >> "$GITHUB_ENV"
+          nohup mc admin trace -v --all myminio > "${MINIO_TRACE_LOG}" 2>&1 &
+          echo "MC_TRACE_PID=$!" >> "$GITHUB_ENV"
+
+          echo "=== MinIO trace logging started (PID=$!, log=${MINIO_TRACE_LOG}) ==="
+
       - name: Run upgrade e2e tests (major_upgrade)
         shell: bash
         working-directory: sbcli/e2e
@@ -1350,6 +1373,25 @@ jobs:
               print(f"WARN: Slack notification failed: {exc}", file=sys.stderr)
           PYEOF
 
+      - name: Stop MinIO trace logging and save
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          if [ -n "${MC_TRACE_PID:-}" ]; then
+            echo "Stopping MinIO trace (PID=${MC_TRACE_PID})..."
+            kill "${MC_TRACE_PID}" 2>/dev/null || true
+            wait "${MC_TRACE_PID}" 2>/dev/null || true
+          fi
+          if [ -f "${MINIO_TRACE_LOG:-}" ]; then
+            LINES=$(wc -l < "${MINIO_TRACE_LOG}")
+            SIZE=$(du -h "${MINIO_TRACE_LOG}" | cut -f1)
+            echo "=== MinIO trace log: ${LINES} lines, ${SIZE} ==="
+            cp "${MINIO_TRACE_LOG}" sbcli/e2e/minio-trace.log 2>/dev/null || true
+          else
+            echo "No MinIO trace log found (backup tests may not have run)"
+          fi
+
       - name: Upload logs (always)
         if: always()
         uses: actions/upload-artifact@v4
@@ -1358,6 +1400,7 @@ jobs:
           path: |
             simplyBlockDeploy/bare-metal/bootstrap.log
             sbcli/e2e/output.log
+            sbcli/e2e/minio-trace.log
             sbcli/e2e/logs/**
           if-no-files-found: warn
 

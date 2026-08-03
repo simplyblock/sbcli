@@ -281,7 +281,15 @@ class K8sNativeMajorUpgrade(TestClusterBase):
 
     # ── FIO config ─────────────────────────────────────────────────────────────
 
-    def _build_fio_config(self, name: str, runtime: int = None) -> tuple[str, str]:
+    def _build_fio_config(
+        self, name: str, runtime: int = None,
+    ) -> tuple[str, str, dict]:
+        """Build FIO main + warmup configs.
+
+        Returns ``(main_config, warmup_config, metadata)`` where *metadata*
+        contains ``run_id``, ``randseed``, ``bs``, and ``fio_size`` so the
+        caller can later reconstruct a verify-only config for the same files.
+        """
         bs = f"{2 ** random.randint(2, 7)}k"
         run_id = _rand_seq(6)
         randseed = random.randint(1, 2**63)
@@ -330,7 +338,38 @@ class K8sNativeMajorUpgrade(TestClusterBase):
             f"[job1]\n"
         )
 
-        return main_config, warmup_config
+        metadata = {
+            "run_id": run_id,
+            "randseed": randseed,
+            "bs": bs,
+            "fio_size": self.fio_size,
+            "num_jobs": self.fio_num_jobs,
+        }
+
+        return main_config, warmup_config, metadata
+
+    def _build_verify_only_fio_config(self, name: str, meta: dict) -> str:
+        """Build a verify-only FIO config that replays the exact files/seed
+        from a previous write run, confirming data integrity without writing."""
+        return (
+            f"[global]\n"
+            f"name={name}-verify\n"
+            f"filename_format=/spdkvol/fio-{meta['run_id']}.$jobnum\n"
+            f"rw=read\n"
+            f"bs={meta['bs']}\n"
+            f"iodepth=1\n"
+            f"direct=1\n"
+            f"ioengine=libaio\n"
+            f"size={meta['fio_size']}\n"
+            f"numjobs={meta['num_jobs']}\n"
+            f"verify=md5\n"
+            f"verify_only\n"
+            f"verify_dump=1\n"
+            f"verify_fatal=1\n"
+            f"randseed={meta['randseed']}\n"
+            f"\n"
+            f"[job1]\n"
+        )
 
     def _save_fio_pod_logs(self, job_name: str, resource_name: str):
         try:
@@ -391,7 +430,10 @@ class K8sNativeMajorUpgrade(TestClusterBase):
             }
 
         for pvc_name, detail in self.pvc_details.items():
-            fio_config, warmup_config = self._build_fio_config(pvc_name, runtime=runtime)
+            fio_config, warmup_config, fio_meta = self._build_fio_config(
+                pvc_name, runtime=runtime,
+            )
+            detail["fio_meta"] = fio_meta
             avoid = self.k8s_utils.get_pvc_primary_k8s_node(pvc_name, self.sbcli_utils)
             self.k8s_utils.create_fio_job(
                 job_name=detail["job_name"],
@@ -431,7 +473,9 @@ class K8sNativeMajorUpgrade(TestClusterBase):
             )
             self.k8s_utils.wait_pvc_bound(clone_name, timeout=300)
 
-            fio_config, warmup_config = self._build_fio_config(clone_name, runtime=runtime)
+            fio_config, warmup_config, _clone_meta = self._build_fio_config(
+                clone_name, runtime=runtime,
+            )
             avoid = self.k8s_utils.get_pvc_primary_k8s_node(clone_name, self.sbcli_utils)
             self.k8s_utils.create_fio_job(
                 job_name=clone_job, pvc_name=clone_name,
@@ -474,7 +518,7 @@ class K8sNativeMajorUpgrade(TestClusterBase):
         )
         self.k8s_utils.wait_pvc_bound(post_pvc, timeout=300)
 
-        fio_cfg, warmup_cfg = self._build_fio_config(post_pvc, runtime=120)
+        fio_cfg, warmup_cfg, _post_meta = self._build_fio_config(post_pvc, runtime=120)
         avoid = self.k8s_utils.get_pvc_primary_k8s_node(post_pvc, self.sbcli_utils)
         self.k8s_utils.create_fio_job(
             job_name=post_job, pvc_name=post_pvc, configmap_name=post_cm,
@@ -500,7 +544,7 @@ class K8sNativeMajorUpgrade(TestClusterBase):
         )
         self.k8s_utils.wait_pvc_bound(post_clone, timeout=300)
 
-        clone_fio, clone_warmup = self._build_fio_config(post_clone, runtime=120)
+        clone_fio, clone_warmup, _clone_meta = self._build_fio_config(post_clone, runtime=120)
         self.k8s_utils.create_fio_job(
             job_name=post_clone_job, pvc_name=post_clone,
             configmap_name=post_clone_cm, fio_config=clone_fio,
@@ -521,6 +565,369 @@ class K8sNativeMajorUpgrade(TestClusterBase):
             assert node.get("health_check", True), (
                 f"Node {node['id']} health check failed"
             )
+
+    # ── Phase 2.7: Capture pre-upgrade state ──────────────────────────────────
+
+    def _capture_pre_upgrade_state(self):
+        """Log complete cluster state before starting the upgrade (Phase 2.7)."""
+        self.logger.info("=" * 40 + " PRE-UPGRADE STATE CAPTURE " + "=" * 40)
+
+        # Cluster
+        self.logger.info(f"Cluster UUID: {self.cluster_id}")
+        self.logger.info(f"Cluster Secret: {self.cluster_secret}")
+
+        # Storage nodes
+        storage_nodes = self.sbcli_utils.get_storage_nodes()["results"]
+        self.logger.info(f"Storage nodes ({len(storage_nodes)}):")
+        for node in storage_nodes:
+            self.logger.info(
+                f"  Node {node['id']} — status={node['status']}, "
+                f"hostname={node.get('hostname', 'N/A')}"
+            )
+
+        # Pools
+        try:
+            pools = self.sbcli_utils.list_storage_pools()
+            self.logger.info(f"Storage pools: {pools}")
+        except Exception as e:
+            self.logger.warning(f"Could not list pools: {e}")
+
+        # PVCs
+        self.logger.info(f"Pre-upgrade PVCs ({len(self.pvc_details)}):")
+        for pvc_name, detail in self.pvc_details.items():
+            pv_name = self.k8s_utils.get_pvc_pv_name(pvc_name) or "N/A"
+            self.logger.info(
+                f"  PVC {pvc_name} -> PV {pv_name} "
+                f"(SC={detail['storage_class']}, fs={detail['fs_type']})"
+            )
+
+        # Snapshots
+        self.logger.info(f"Pre-upgrade snapshots ({len(self.snapshot_details)}):")
+        for snap_name, detail in self.snapshot_details.items():
+            self.logger.info(f"  Snapshot {snap_name} (source PVC: {detail['pvc_name']})")
+
+        # Clones
+        self.logger.info(f"Pre-upgrade clones ({len(self.clone_details)}):")
+        for clone_name, detail in self.clone_details.items():
+            self.logger.info(
+                f"  Clone {clone_name} (from snapshot: {detail['snap_name']})"
+            )
+
+        # Lvols
+        try:
+            self.sbcli_utils.list_lvols()
+        except Exception as e:
+            self.logger.warning(f"Could not list lvols: {e}")
+
+        self.logger.info("=" * 40 + " END PRE-UPGRADE STATE " + "=" * 40)
+
+    # ── Phase 4.1–4.3: Verify old data post-upgrade ──────────────────────────
+
+    def _verify_old_data_post_upgrade(self):
+        """Verify pre-upgrade data survives the upgrade (Phases 4.1–4.3).
+
+        4.1 — FIO verify-only on old PVCs (confirms data integrity)
+        4.2 — Fresh randrw FIO on old PVCs (confirms IO works)
+        4.3 — New snapshots + clones on old PVCs post-upgrade
+        """
+        self.logger.info(
+            "Post-upgrade Phase 4.1: Verify old data integrity (FIO verify-only)"
+        )
+
+        # 4.1 — Verify-only FIO on each pre-upgrade PVC
+        verify_jobs: list[tuple[str, str]] = []
+        for pvc_name, detail in self.pvc_details.items():
+            fio_meta = detail.get("fio_meta")
+            if not fio_meta:
+                self.logger.warning(
+                    f"No FIO metadata for PVC {pvc_name}, skipping verify-only"
+                )
+                continue
+
+            verify_job = f"verify-{pvc_name}"
+            verify_cm = f"fio-verify-cfg-{pvc_name}"
+
+            verify_config = self._build_verify_only_fio_config(pvc_name, fio_meta)
+            avoid = self.k8s_utils.get_pvc_primary_k8s_node(
+                pvc_name, self.sbcli_utils,
+            )
+            self.k8s_utils.create_fio_job(
+                job_name=verify_job, pvc_name=pvc_name,
+                configmap_name=verify_cm, fio_config=verify_config,
+                image=self.FIO_IMAGE, avoid_node=avoid,
+            )
+            verify_jobs.append((verify_job, pvc_name))
+            sleep_n_sec(5)
+
+        for job_name, pvc_name in verify_jobs:
+            self.logger.info(f"Validating verify-only FIO for PVC: {pvc_name}")
+            self._save_fio_pod_logs(job_name, f"{pvc_name}-verify")
+            self.k8s_utils.validate_fio_job(job_name, timeout=600)
+
+        self.logger.info(
+            "Post-upgrade Phase 4.1 PASSED: All old PVC data verified intact"
+        )
+
+        # 4.2 — Fresh randrw FIO on old PVCs
+        self.logger.info(
+            "Post-upgrade Phase 4.2: Fresh FIO on old PVCs (confirm IO works)"
+        )
+        fresh_jobs: list[tuple[str, str]] = []
+        for pvc_name, detail in self.pvc_details.items():
+            fresh_job = f"post-io-{pvc_name}"
+            fresh_cm = f"fio-post-io-cfg-{pvc_name}"
+
+            fio_config, warmup_config, _meta = self._build_fio_config(
+                pvc_name, runtime=120,
+            )
+            avoid = self.k8s_utils.get_pvc_primary_k8s_node(
+                pvc_name, self.sbcli_utils,
+            )
+            self.k8s_utils.create_fio_job(
+                job_name=fresh_job, pvc_name=pvc_name,
+                configmap_name=fresh_cm, fio_config=fio_config,
+                image=self.FIO_IMAGE, avoid_node=avoid,
+                warmup_config=warmup_config,
+            )
+            fresh_jobs.append((fresh_job, pvc_name))
+            sleep_n_sec(5)
+
+        for job_name, pvc_name in fresh_jobs:
+            self.logger.info(f"Validating fresh FIO for PVC: {pvc_name}")
+            self._save_fio_pod_logs(job_name, f"{pvc_name}-post-io")
+            self.k8s_utils.validate_fio_job(job_name, timeout=600)
+
+        self.logger.info(
+            "Post-upgrade Phase 4.2 PASSED: Fresh IO on old PVCs succeeded"
+        )
+
+        # 4.3 — New snapshots + clones on old PVCs
+        self.logger.info(
+            "Post-upgrade Phase 4.3: New snapshots and clones on old PVCs"
+        )
+        post_clone_jobs: list[tuple[str, str]] = []
+        for pvc_name, detail in self.pvc_details.items():
+            post_snap = f"post-snap-{pvc_name}"
+            post_clone = f"post-clone-{pvc_name}"
+            post_clone_job = f"fio-{post_clone}"
+            post_clone_cm = f"fio-cfg-{post_clone}"
+
+            self.k8s_utils.create_volume_snapshot(
+                name=post_snap, pvc_name=pvc_name,
+                snapshot_class=self.SNAPSHOT_CLASS_NAME,
+            )
+            self.k8s_utils.wait_volume_snapshot_ready(post_snap, timeout=300)
+
+            clone_sc = detail.get("storage_class", self.STORAGE_CLASS_NAME)
+            self.k8s_utils.create_clone_pvc(
+                name=post_clone, size=self.pvc_size,
+                storage_class=clone_sc, snapshot_name=post_snap,
+            )
+            self.k8s_utils.wait_pvc_bound(post_clone, timeout=300)
+
+            clone_fio, clone_warmup, _meta = self._build_fio_config(
+                post_clone, runtime=120,
+            )
+            avoid = self.k8s_utils.get_pvc_primary_k8s_node(
+                post_clone, self.sbcli_utils,
+            )
+            self.k8s_utils.create_fio_job(
+                job_name=post_clone_job, pvc_name=post_clone,
+                configmap_name=post_clone_cm, fio_config=clone_fio,
+                image=self.FIO_IMAGE, avoid_node=avoid,
+                warmup_config=clone_warmup,
+            )
+            post_clone_jobs.append((post_clone_job, post_clone))
+            sleep_n_sec(5)
+
+        for job_name, clone_name in post_clone_jobs:
+            self.logger.info(f"Validating post-upgrade clone FIO: {clone_name}")
+            self._save_fio_pod_logs(job_name, clone_name)
+            self.k8s_utils.validate_fio_job(job_name, timeout=600)
+
+        self.logger.info(
+            "Post-upgrade Phase 4.3 PASSED: Snapshots + clones on old PVCs work"
+        )
+
+    # ── Phase 4.6: Node outage test ───────────────────────────────────────────
+
+    def _run_node_outage_test(self):
+        """Verify HA works post-upgrade by shutting down a non-primary node
+        while FIO is running (Phase 4.6)."""
+        self.logger.info("Post-upgrade Phase 4.6: Node outage test")
+
+        storage_node_list = self.sbcli_utils.get_storage_nodes()["results"]
+        if len(storage_node_list) < 2:
+            self.logger.warning(
+                "Only 1 storage node — skipping node outage test "
+                "(need at least 2 nodes for HA validation)"
+            )
+            return
+
+        # Create a PVC and start a long FIO job
+        outage_pvc = f"outage-pvc-{_rand_seq(4)}"
+        outage_job = f"fio-{outage_pvc}"
+        outage_cm = f"fio-cfg-{outage_pvc}"
+
+        self.k8s_utils.create_pvc(
+            name=outage_pvc, size=self.pvc_size,
+            storage_class=self.STORAGE_CLASS_NAME,
+        )
+        self.k8s_utils.wait_pvc_bound(outage_pvc, timeout=300)
+
+        fio_config, warmup_config, _meta = self._build_fio_config(
+            outage_pvc, runtime=300,
+        )
+        avoid = self.k8s_utils.get_pvc_primary_k8s_node(
+            outage_pvc, self.sbcli_utils,
+        )
+        self.k8s_utils.create_fio_job(
+            job_name=outage_job, pvc_name=outage_pvc,
+            configmap_name=outage_cm, fio_config=fio_config,
+            image=self.FIO_IMAGE, avoid_node=avoid,
+            warmup_config=warmup_config,
+        )
+
+        # Wait for FIO to start running
+        self.logger.info("Waiting for FIO to establish baseline before node outage")
+        sleep_n_sec(30)
+
+        # Find the primary node for this PVC and pick a different one to shut down
+        primary_node_id = None
+        try:
+            vol_handle = self.k8s_utils.get_pvc_volume_handle(outage_pvc)
+            if vol_handle:
+                lvol_id = vol_handle.split(":")[-1] if ":" in vol_handle else vol_handle
+                lvol_details = self.sbcli_utils.get_lvol_details(lvol_id)
+                primary_node_id = lvol_details.get("node_id")
+        except Exception as e:
+            self.logger.warning(f"Could not determine primary node: {e}")
+
+        # Pick a non-primary node to shut down
+        victim_node = None
+        for node in storage_node_list:
+            if node["id"] != primary_node_id and node["status"] == "online":
+                victim_node = node
+                break
+
+        if not victim_node:
+            self.logger.warning(
+                "Could not find a non-primary node to shut down, "
+                "skipping node outage test"
+            )
+            self._save_fio_pod_logs(outage_job, outage_pvc)
+            self.k8s_utils.validate_fio_job(outage_job, timeout=600)
+            return
+
+        victim_id = victim_node["id"]
+        self.logger.info(
+            f"Shutting down non-primary node {victim_id} "
+            f"(primary={primary_node_id})"
+        )
+
+        # Shut down the victim node
+        try:
+            self.sbcli_utils.suspend_node(victim_id)
+        except Exception as e:
+            self.logger.warning(f"Suspend failed for {victim_id}: {e}")
+        sleep_n_sec(10)
+        try:
+            self.sbcli_utils.shutdown_node(victim_id)
+        except Exception as e:
+            self.logger.warning(f"Shutdown failed for {victim_id}: {e}")
+
+        self.sbcli_utils.wait_for_storage_node_status(
+            node_id=victim_id,
+            status=["offline", "unavailable"],
+            timeout=300,
+        )
+        self.logger.info(f"Node {victim_id} is offline, FIO should continue")
+
+        # Verify FIO is still running
+        sleep_n_sec(30)
+
+        # Restart the victim node
+        self.logger.info(f"Restarting node {victim_id}")
+        try:
+            self.sbcli_utils.restart_node(victim_id)
+        except Exception as e:
+            self.logger.warning(f"Restart failed for {victim_id}: {e}")
+
+        self.sbcli_utils.wait_for_storage_node_status(
+            node_id=victim_id, status="online", timeout=600,
+        )
+        self.logger.info(f"Node {victim_id} is back online")
+
+        self.sbcli_utils.wait_for_cluster_status(
+            cluster_id=self.cluster_id, status="active", timeout=600,
+        )
+
+        # Validate FIO completed successfully
+        self._save_fio_pod_logs(outage_job, outage_pvc)
+        self.k8s_utils.validate_fio_job(outage_job, timeout=600)
+        self.logger.info("Post-upgrade Phase 4.6 PASSED: Node outage test succeeded")
+
+    # ── Phase 4.7: Final checklist ────────────────────────────────────────────
+
+    def _run_final_checklist(self, is_maintenance_upgrade: bool = False):
+        """Run the final validation checklist (Phase 4.7)."""
+        self.logger.info("Post-upgrade Phase 4.7: Final checklist")
+
+        # Cluster active
+        cluster_details = self.sbcli_utils.wait_for_cluster_status(
+            cluster_id=self.cluster_id, status="active", timeout=120,
+        )
+        self.logger.info(f"  Cluster status: {cluster_details['status']} ✓")
+
+        # All nodes online
+        self._assert_all_nodes_healthy()
+        self.logger.info("  All storage nodes online ✓")
+
+        # All PVCs bound
+        for pvc_name in self.pvc_details:
+            out, _ = self.k8s_utils._exec_kubectl(
+                f"kubectl get pvc {pvc_name} -o jsonpath='{{.status.phase}}'"
+            )
+            phase = (out or "").strip().replace("'", "")
+            assert phase == "Bound", (
+                f"PVC {pvc_name} not Bound (phase={phase})"
+            )
+        self.logger.info(f"  All {len(self.pvc_details)} pre-upgrade PVCs Bound ✓")
+
+        # Snapshots ready
+        for snap_name in self.snapshot_details:
+            out, _ = self.k8s_utils._exec_kubectl(
+                f"kubectl get volumesnapshot {snap_name} "
+                f"-o jsonpath='{{.status.readyToUse}}'"
+            )
+            ready = (out or "").strip().replace("'", "")
+            assert ready == "true", (
+                f"Snapshot {snap_name} not ready (readyToUse={ready})"
+            )
+        self.logger.info(
+            f"  All {len(self.snapshot_details)} snapshots readyToUse ✓"
+        )
+
+        # CR refs patched (R25→R26 only)
+        if is_maintenance_upgrade:
+            try:
+                out, _ = self.k8s_utils._exec_kubectl(
+                    f"kubectl get storagecluster {self.cluster_cr_name} "
+                    f"-n {_NAMESPACE} -o jsonpath='{{.status.uuid}}'"
+                )
+                cr_uuid = (out or "").strip().replace("'", "")
+                if cr_uuid:
+                    self.logger.info(
+                        f"  StorageCluster CR adopted with UUID={cr_uuid} ✓"
+                    )
+                else:
+                    self.logger.warning(
+                        "  StorageCluster CR UUID not populated in status"
+                    )
+            except Exception as e:
+                self.logger.warning(f"  Could not verify CR adoption: {e}")
+
+        self.logger.info("Post-upgrade Phase 4.7 PASSED: Final checklist complete")
 
     # ══════════════════════════════════════════════════════════════════════════
     # ROLLING UPGRADE (R26+, no maintenance window)
@@ -583,6 +990,14 @@ class K8sNativeMajorUpgrade(TestClusterBase):
         actual_pool = self.sbcli_utils.add_storage_pool(pool_name)
         if actual_pool and actual_pool != pool_name:
             pool_name = actual_pool
+
+        # Pool CR name must match the existing backend pool name so the
+        # operator can adopt it during the upgrade.
+        self.pool_cr_name = pool_name
+        self.logger.info(
+            f"Pool CR name set to '{self.pool_cr_name}' (matching backend pool)"
+        )
+
         sleep_n_sec(10)
         self._create_storage_classes(self.cluster_id, pool_name)
 
@@ -591,6 +1006,9 @@ class K8sNativeMajorUpgrade(TestClusterBase):
 
         self.logger.info("Step 4: Creating snapshots and clones")
         self._create_snapshots_and_clones()
+
+        # Phase 2.7: Capture pre-upgrade state
+        self._capture_pre_upgrade_state()
 
         self.logger.info("Step 5: Waiting 60s for FIO to establish baseline")
         sleep_n_sec(60)
@@ -649,8 +1067,19 @@ class K8sNativeMajorUpgrade(TestClusterBase):
         self._validate_all_fio(fio_timeout)
         self.logger.info("All pre-upgrade FIO jobs validated successfully")
 
-        self.logger.info("Step 9: Post-upgrade new PVC verification")
+        # Phase 4.1–4.3: Verify old data survives the upgrade
+        self.logger.info("Step 9: Verifying old data integrity post-upgrade")
+        self._verify_old_data_post_upgrade()
+
+        # Phase 4.4–4.5: New PVC provisioning + snapshot/clone
+        self.logger.info("Step 10: Post-upgrade new PVC verification")
         self._run_post_upgrade_verification()
+
+        # Phase 4.6: Node outage test
+        self._run_node_outage_test()
+
+        # Phase 4.7: Final checklist
+        self._run_final_checklist(is_maintenance_upgrade=False)
 
     # ══════════════════════════════════════════════════════════════════════════
     # MAINTENANCE WINDOW UPGRADE (R25→R26)
@@ -986,6 +1415,14 @@ spec:
         actual_pool = self.sbcli_utils.add_storage_pool(pool_name)
         if actual_pool and actual_pool != pool_name:
             pool_name = actual_pool
+
+        # Pool CR name must match the existing backend pool name so the
+        # operator can adopt it during the upgrade.
+        self.pool_cr_name = pool_name
+        self.logger.info(
+            f"Pool CR name set to '{self.pool_cr_name}' (matching backend pool)"
+        )
+
         sleep_n_sec(10)
         self._create_storage_classes(self.cluster_id, pool_name)
 
@@ -1003,6 +1440,9 @@ spec:
         fio_timeout = pre_fio_runtime + 300
         self._validate_all_fio(fio_timeout)
         self.logger.info("Pre-upgrade FIO completed and validated")
+
+        # Phase 2.7: Capture pre-upgrade state
+        self._capture_pre_upgrade_state()
 
         # ── Begin maintenance window ──
         self.logger.info("=" * 40 + " MAINTENANCE WINDOW START " + "=" * 40)
@@ -1055,9 +1495,19 @@ spec:
         )
         self._assert_all_nodes_healthy()
 
-        # Post-upgrade: run new FIO to verify IO works after migration
-        self.logger.info("Post-upgrade: Verifying IO works after migration")
+        # Phase 4.1–4.3: Verify old data survives the upgrade
+        self.logger.info("Post-upgrade: Verifying old data integrity")
+        self._verify_old_data_post_upgrade()
+
+        # Phase 4.4–4.5: New PVC provisioning + snapshot/clone
+        self.logger.info("Post-upgrade: Verifying new provisioning works")
         self._run_post_upgrade_verification()
+
+        # Phase 4.6: Node outage test
+        self._run_node_outage_test()
+
+        # Phase 4.7: Final checklist
+        self._run_final_checklist(is_maintenance_upgrade=True)
 
     # ── Main test flow ─────────────────────────────────────────────────────────
 

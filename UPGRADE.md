@@ -67,46 +67,54 @@ Cluster ID:     <CLUSTER_UUID>
 Cluster Secret: <CLUSTER_SECRET>
 ```
 
-### 1.3 Add Storage Nodes
+### 1.3 Label Worker Nodes for Storage Plane
 
-Still inside the admin pod, add each worker node:
-
-```bash
-sbcli-dev sn add <WORKER_NODE_IP> \
-  --mgmt-ifname ens18 \
-  --data-nics enp1s0
-```
-
-Repeat for each worker node. Then configure and deploy:
+The R25 spdk-csi chart uses the `io.simplyblock.node-type` label to discover which
+worker nodes should run storage node pods. Label all workers before installing the chart:
 
 ```bash
-sbcli-dev sn configure <NODE_UUID> --max-lvol 30
-sbcli-dev sn deploy <NODE_UUID> --spdk-image <R25_SPDK_IMAGE>
+for NODE in <worker-node-1> <worker-node-2> <worker-node-3>; do
+    kubectl label node "$NODE" io.simplyblock.node-type=simplyblock-storage-plane --overwrite
+done
 ```
 
-Wait for all storage nodes to come online:
+### 1.4 Install the `spdk-csi` Helm Chart (Includes Storage Node Creation)
+
+This deploys the CSI driver and creates storage nodes via `storagenode.create=true`.
+Use the cluster UUID, secret, and pool name from step 1.2.
+
+```bash
+helm install -n simplyblock --create-namespace spdk-csi ./ \
+  --set csiConfig.simplybk.uuid=<CLUSTER_UUID> \
+  --set csiConfig.simplybk.ip=http://simplyblock-webappapi.simplyblock:5000 \
+  --set csiSecret.simplybk.secret=<CLUSTER_SECRET> \
+  --set logicalVolume.pool_name=testing1 \
+  --set image.simplyblock.tag=remove_snode_init_container \
+  --set image.csi.tag=v0.2.4 \
+  --set logicalVolume.numDataChunks=1 \
+  --set logicalVolume.numParityChunks=1 \
+  --set storageclass.volumeBindingMode=Immediate \
+  --set cachingnode.create=false \
+  --set logicalVolume.encryption=false \
+  --set storagenode.ifname=ens18 \
+  --set storagenode.create=true \
+  --set storagenode.numPartitions=0 \
+  --set image.storageNode.tag=v0.1.8
+```
+
+Wait for all pods (CSI + storage nodes) to be ready:
+
+```bash
+kubectl wait --for=condition=Ready pods -l app=spdk-csi -n simplyblock --timeout=300s
+```
+
+Verify storage nodes are online:
 
 ```bash
 sbcli-dev sn list
 ```
 
-**Expected**: All nodes show `online` status.
-
-### 1.4 Install the `spdk-csi` Helm Chart
-
-This deploys the CSI driver that connects K8s PVCs to simplyblock volumes.
-
-```bash
-helm upgrade --install spdk-csi ./charts/spdk-csi \
-  --namespace simplyblock \
-  --set csiConfig.simplybk.ip=http://simplyblock-webappapi.simplyblock:5000
-```
-
-Wait for CSI pods:
-
-```bash
-kubectl wait --for=condition=Ready pods -l app=spdk-csi -n simplyblock --timeout=300s
-```
+**Expected**: All storage nodes show `online` status.
 
 ### 1.5 Verify R25.x Cluster
 
@@ -440,12 +448,19 @@ done
 Apply the StorageCluster, Pool, and StorageNodeSet CRs. The operator detects the upgrade
 secret and adopts the existing cluster.
 
+> **IMPORTANT — CR names must match existing backend names:**
+> - The **Pool CR** `metadata.name` must match the existing pool name in the R25 cluster
+>   (e.g., if the pool was created as `testing1` via `sbcli-dev pool add testing1`, the
+>   Pool CR must use `name: testing1`). This allows the operator to adopt the existing pool.
+> - The **StorageCluster CR** `metadata.name` must be consistent with the upgrade secret
+>   name from Step 5 (`simplyblock-<CR_NAME>-upgrade`).
+
 ```yaml
 # storagecluster.yaml
 apiVersion: storage.simplyblock.io/v1alpha1
 kind: StorageCluster
 metadata:
-  name: simplyblock-cluster
+  name: simplyblock-cluster   # Must match upgrade secret: simplyblock-<name>-upgrade
   namespace: simplyblock
 spec:
   fabricType: tcp
@@ -465,7 +480,7 @@ spec:
 apiVersion: storage.simplyblock.io/v1alpha1
 kind: Pool
 metadata:
-  name: simplyblock-pool
+  name: <EXISTING_POOL_NAME>       # Must match the pool name from R25 (e.g., testing1)
   namespace: simplyblock
 spec:
   clusterName: simplyblock-cluster
