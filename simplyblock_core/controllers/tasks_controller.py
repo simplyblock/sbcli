@@ -893,12 +893,19 @@ def add_lvol_mig_task(migration):
 
 
 def add_batch_mig_task(group):
-    """Create the JobSchedule task that drives a batch (shared-namespace) migration."""
+    """Create the JobSchedule task that drives a batch (shared-namespace) migration.
+
+    max_retry=-1 disables the backup runner's retry-count kill switch.
+    The batch orchestrator uses its own internal ceiling via task.retry vs
+    constants.LVOL_MIG_MAX_RETRIES; the backup runner's time-based timeout
+    is the only external backstop.
+    """
     return _add_task(
         JobSchedule.FN_LVOL_BATCH_MIG,
         group.cluster_id,
         group.source_node_id,
         "",
+        max_retry=-1,
         function_params={
             "group_id": group.uuid,
             "target_node_id": group.target_node_id,

@@ -39,8 +39,8 @@ PHASE_CLEANUP_TARGET (orchestrator: wait + target teardown)
 import time
 from typing import Optional
 
-from simplyblock_core import db_controller as db_mod, utils
-from simplyblock_core.controllers import migration_controller, tasks_events
+from simplyblock_core import constants, db_controller as db_mod, utils
+from simplyblock_core.controllers import migration_controller, migration_events, tasks_controller, tasks_events
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_migration_group import LVolMigrationGroup
@@ -55,6 +55,7 @@ from simplyblock_core.services.tasks_runner_lvol_migration import (
     _get_source_tertiary_node,
     _lvol_tgt_bdev_name,
     _build_paths,
+    _ensure_target_nvmf_state,
 )
 
 logger = utils.get_logger(__name__)
@@ -715,17 +716,27 @@ def _delete_target_subsystem(group, src_node, src_rpc, tgt_node, tgt_rpc):
 # ---------------------------------------------------------------------------
 
 def _batch_budget_suspend(task, group, group_id, error_msg):
-    """Charge retry budget and suspend; redirect to cleanup_target when exhausted."""
+    """Charge retry budget and suspend; redirect to cleanup_target when exhausted.
+
+    Uses constants.LVOL_MIG_MAX_RETRIES as the internal ceiling, independent of
+    task.max_retry (which is set to -1 to disable the backup runner's kill switch).
+    """
     task.retry += 1
     task.function_result = error_msg
-    if task.max_retry >= 0 and task.retry >= task.max_retry:
+    if task.retry >= constants.LVOL_MIG_MAX_RETRIES:
         logger.error(
-            f"Group {group_id[:8]}: max retry reached "
-            f"({task.retry}/{task.max_retry}); entering cleanup_target: {error_msg}"
+            f"Group {group_id[:8]}: max retries ({constants.LVOL_MIG_MAX_RETRIES}) "
+            f"exceeded; entering cleanup_target: {error_msg}"
         )
         group.phase = LVolMigrationGroup.PHASE_CLEANUP_TARGET
         group.error_message = error_msg
         group.write_to_db(db.kv_store)
+        for rec in group.members:
+            try:
+                mig = db.get_migration_by_id(rec['migration_id'])
+                migration_events.migration_phase_changed(mig)
+            except Exception:
+                pass
     task.status = JobSchedule.STATUS_SUSPENDED
     task.write_to_db(db.kv_store)
     return False
@@ -797,6 +808,13 @@ def task_runner(task):
             task.write_to_db(db.kv_store)
             return False
 
+    if tasks_controller.get_active_cluster_expand_task(task.cluster_id):
+        if not _is_cleanup_phase:
+            task.function_result = "cluster expansion in progress, deferring"
+            task.status = JobSchedule.STATUS_SUSPENDED
+            task.write_to_db(db.kv_store)
+            return False
+
     if task.status in (JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED):
         task.status = JobSchedule.STATUS_RUNNING
         task.write_to_db(db.kv_store)
@@ -840,6 +858,35 @@ def task_runner(task):
             return _batch_budget_suspend(
                 task, group, group_id,
                 f"source node unavailable (status={fresh_src.status})")
+
+    # --- Deadline check (GAP F2) ---
+    if not _is_cleanup_phase and member_migrations:
+        first_mig = member_migrations[0]
+        if first_mig.has_deadline_passed():
+            logger.warning(f"Group {group_id[:8]}: migration deadline exceeded; entering cleanup_target")
+            group.phase = LVolMigrationGroup.PHASE_CLEANUP_TARGET
+            group.error_message = "migration deadline exceeded"
+            group.write_to_db(db.kv_store)
+            task.function_result = "migration deadline exceeded"
+            task.status = JobSchedule.STATUS_SUSPENDED
+            task.write_to_db(db.kv_store)
+            return False
+
+    # --- Target NVMe-oF state reconciliation (GAP D) ---
+    # Mirror the solo runner's per-tick subsystem/listener/namespace repair.
+    # Use the first member migration (all workers share the same NQN and subsystem).
+    if phase in (LVolMigrationGroup.PHASE_SNAP_COPY, LVolMigrationGroup.PHASE_INTERMEDIATE):
+        if member_migrations:
+            first_mig = member_migrations[0]
+            try:
+                first_lvol = db.get_lvol_by_id(first_mig.lvol_id)
+                nvmf_err = _ensure_target_nvmf_state(
+                    first_mig, first_lvol, src_node, tgt_node, src_rpc, tgt_rpc)
+                if nvmf_err:
+                    logger.warning(f"Group {group_id[:8]}: target NVMe-oF state check failed: {nvmf_err}")
+                    return _batch_budget_suspend(task, group, group_id, nvmf_err)
+            except Exception as e:
+                logger.warning(f"Group {group_id[:8]}: _ensure_target_nvmf_state error (non-fatal): {e}")
 
     try:
         # ── PHASE_SNAP_COPY: wait for all workers, then reconstruct tree ─────────
