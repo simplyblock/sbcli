@@ -5239,10 +5239,56 @@ def _check_ftt_allows_node_removal(node_id, db_controller):
     if jm_replication_active:
         not_online_count += 1
 
-    if npcs == 1:
+    # Capacity cap is npcs uniformly (the erasure code tolerates losing up to
+    # npcs of its ndcs+npcs chunks regardless of the *declared* ft, which only
+    # narrows npcs=2 down to a stricter per-pair constraint below).
+    capacity_cap = npcs
+
+    fd_on = cluster.enable_failure_domain and snode.failure_domain >= 0
+    blocked_by_capacity = False
+    capacity_reason = ""
+
+    if fd_on:
+        # Placement guarantees at most one erasure-coding chunk per domain
+        # once there are >= ndcs+npcs distinct domains, so losing up to npcs
+        # *domains* at once is then tolerated the same way losing up to npcs
+        # *nodes* is tolerated without FD -- piling onto an already-affected
+        # domain costs nothing extra (mirrors that domain going down outright).
+        # Below that domain count, at least one domain necessarily carries
+        # more than one chunk, so a *new* domain falls back to the plain
+        # node-count cap instead of a second free domain slot. See the
+        # analogous fdDrainGate in the operator's nodedrain_controller.go.
+        domains_available = len({n.failure_domain for n in snodes if n.failure_domain >= 0})
+        domains_needed = ndcs + npcs
+        active_domains = {n.failure_domain for n in not_online_nodes if n.failure_domain >= 0}
+        # jm_replication_active can't be attributed to a specific domain (the
+        # probe only says "some online node's journal is behind"), so treat
+        # it conservatively as always adding a new, unaccounted-for domain.
+        active_domain_count = len(active_domains) + (1 if jm_replication_active else 0)
+        my_domain = snode.failure_domain
+
+        if my_domain not in active_domains:
+            if domains_needed > 0 and domains_available >= domains_needed:
+                if active_domain_count >= capacity_cap:
+                    blocked_by_capacity = True
+                    capacity_reason = (
+                        f"FTT={ft} (npcs={npcs}): cannot remove node, failure domain {my_domain} "
+                        f"not yet active; {active_domain_count}/{capacity_cap} domains active"
+                        f"{' (including in-progress journal replication)' if jm_replication_active else ''}"
+                    )
+            elif active_domain_count > 0 and not_online_count >= capacity_cap:
+                blocked_by_capacity = True
+                capacity_reason = (
+                    f"FTT={ft} (npcs={npcs}): insufficient failure domains "
+                    f"({domains_available} available, {domains_needed} needed for full isolation) "
+                    f"to remove node in failure domain {my_domain}; "
+                    f"{not_online_count}/{capacity_cap} nodes active"
+                )
+    elif npcs == 1:
         # FTT=1: no room at all if anything is already not online or journal replicating
         if not_online_count > 0:
-            return False, (
+            blocked_by_capacity = True
+            capacity_reason = (
                 f"FTT=1 (npcs=1): cannot remove node, cluster already has "
                 f"{len(not_online_nodes)} not-online node(s)"
                 f"{' and journal replication in progress' if jm_replication_active else ''}"
@@ -5252,53 +5298,59 @@ def _check_ftt_allows_node_removal(node_id, db_controller):
         if ft >= 2:
             # FTT=2: room for one not-online node, block if already have one+
             if not_online_count >= 2:
-                return False, (
+                blocked_by_capacity = True
+                capacity_reason = (
                     f"FTT=2 (npcs=2): cannot remove node, cluster already has "
                     f"{len(not_online_nodes)} not-online node(s)"
                     f"{' and journal replication in progress' if jm_replication_active else ''}"
                 )
         else:
             # npcs=2, ft=1: like FTT=2 for capacity, but additionally
-            # cannot remove both primary and its secondary
+            # cannot remove both primary and its secondary (checked below).
             if not_online_count >= 2:
-                return False, (
+                blocked_by_capacity = True
+                capacity_reason = (
                     f"npcs=2/ft=1: cannot remove node, cluster already has "
                     f"{len(not_online_nodes)} not-online node(s)"
                     f"{' and journal replication in progress' if jm_replication_active else ''}"
                 )
 
-            # Check primary-secondary pair constraint:
-            # If the node being removed is a primary, check its secondary is online.
-            # If the node being removed is a secondary, check its primary is online.
-            for not_online_node in not_online_nodes:
-                # Is any not-online node the secondary of the node we're removing?
-                if snode.secondary_node_id == not_online_node.get_id():
-                    return False, (
-                        f"npcs=2/ft=1: cannot remove node {node_id}, "
-                        f"its secondary {not_online_node.get_id()} is not online "
-                        f"(status: {not_online_node.status})"
-                    )
-                if snode.tertiary_node_id == not_online_node.get_id():
-                    return False, (
-                        f"npcs=2/ft=1: cannot remove node {node_id}, "
-                        f"its secondary {not_online_node.get_id()} is not online "
-                        f"(status: {not_online_node.status})"
-                    )
+    if blocked_by_capacity:
+        return False, capacity_reason
 
-            # Is the node we're removing a secondary of any not-online primary?
-            for not_online_node in not_online_nodes:
-                if not_online_node.secondary_node_id == node_id:
-                    return False, (
-                        f"npcs=2/ft=1: cannot remove node {node_id}, "
-                        f"it is secondary of not-online primary {not_online_node.get_id()} "
-                        f"(status: {not_online_node.status})"
-                    )
-                if not_online_node.tertiary_node_id == node_id:
-                    return False, (
-                        f"npcs=2/ft=1: cannot remove node {node_id}, "
-                        f"it is secondary of not-online primary {not_online_node.get_id()} "
-                        f"(status: {not_online_node.status})"
-                    )
+    if npcs == 2 and ft == 1:
+        # npcs=2, ft=1: beyond the capacity cap above, cannot remove both a
+        # primary and its own secondary/tertiary at once -- a per-relationship
+        # constraint, orthogonal to failure domains.
+        for not_online_node in not_online_nodes:
+            # Is any not-online node the secondary of the node we're removing?
+            if snode.secondary_node_id == not_online_node.get_id():
+                return False, (
+                    f"npcs=2/ft=1: cannot remove node {node_id}, "
+                    f"its secondary {not_online_node.get_id()} is not online "
+                    f"(status: {not_online_node.status})"
+                )
+            if snode.tertiary_node_id == not_online_node.get_id():
+                return False, (
+                    f"npcs=2/ft=1: cannot remove node {node_id}, "
+                    f"its secondary {not_online_node.get_id()} is not online "
+                    f"(status: {not_online_node.status})"
+                )
+
+        # Is the node we're removing a secondary of any not-online primary?
+        for not_online_node in not_online_nodes:
+            if not_online_node.secondary_node_id == node_id:
+                return False, (
+                    f"npcs=2/ft=1: cannot remove node {node_id}, "
+                    f"it is secondary of not-online primary {not_online_node.get_id()} "
+                    f"(status: {not_online_node.status})"
+                )
+            if not_online_node.tertiary_node_id == node_id:
+                return False, (
+                    f"npcs=2/ft=1: cannot remove node {node_id}, "
+                    f"it is secondary of not-online primary {not_online_node.get_id()} "
+                    f"(status: {not_online_node.status})"
+                )
 
     return True, ""
 
