@@ -500,7 +500,7 @@ MIG_PARALLEL_JOBS = 64
 MIG_JOB_SIZE = 64
 
 # Live volume migration constants
-LVOL_MIG_MAX_RETRIES = 5          # max retry attempts before aborting
+LVOL_MIG_MAX_RETRIES = 5          # max retries before entering cleanup_target
 LVOL_MIG_DEADLINE_SEC = 3600  # 1-hour deadline (0 = no deadline)
 LVOL_MIG_MAX_INTERMEDIATE_SNAPS = 3        # max recursive "shrink" snapshot rounds
 LVOL_MIG_INTERMEDIATE_SNAP_THRESHOLD_BYTES = 500 * 1024 * 1024  # 500 MiB — skip if delta is smaller
