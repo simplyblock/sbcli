@@ -740,8 +740,12 @@ def get_logger(name=""):
         # client-port-block window (2026-07-20 FD-0 reboot: block 2s -> 20s).
         # The QueueHandler removes that contention without dropping lines or
         # changing the level; falls back to the direct handler on setup error.
+        # Filter is on the logger, not the handler: it must run synchronously
+        # on the emitting thread to read the caller's contextvars.ContextVar,
+        # before the record crosses into the QueueHandler/listener thread
+        # below (which has no access to the emitting thread's context).
+        logg.addFilter(RequestIdFilter())
         logger_handler = logging.StreamHandler(stream=sys.stderr)
-        logger_handler.addFilter(RequestIdFilter())
         logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(thread)d: [%(request_id)s] %(levelname)s: %(message)s'))
         try:
             logg.addHandler(make_async_handler(logger_handler))
