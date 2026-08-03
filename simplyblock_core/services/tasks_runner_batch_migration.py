@@ -724,12 +724,14 @@ def _batch_budget_suspend(task, group, group_id, error_msg):
     task.retry += 1
     task.function_result = error_msg
     if task.retry >= constants.LVOL_MIG_MAX_RETRIES:
-        logger.error(
-            f"Group {group_id[:8]}: max retries ({constants.LVOL_MIG_MAX_RETRIES}) "
-            f"exceeded; entering cleanup_target: {error_msg}"
+        ceiling_msg = (
+            f"Group {group_id[:8]}: max retry ({constants.LVOL_MIG_MAX_RETRIES}) "
+            f"reached; entering cleanup_target: {error_msg}"
         )
+        logger.error(ceiling_msg)
         group.phase = LVolMigrationGroup.PHASE_CLEANUP_TARGET
-        group.error_message = error_msg
+        group.error_message = ceiling_msg
+        task.function_result = ceiling_msg
         group.write_to_db(db.kv_store)
         for rec in group.members:
             try:
