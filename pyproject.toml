@@ -6,6 +6,7 @@ build-backend = 'setuptools.build_meta'
 extend-exclude = ['simplyblock_cli/cli.py']
 
 [tool.ruff.lint]
+extend-select = ["FAST"]
 ignore = [
     "B006",
     "B008",
@@ -18,6 +19,7 @@ ignore = [
     "DTZ005",
     "DTZ006",
     "DTZ007",
+    "FAST003",  # Reports false-positives due to multi-file dependencies
     "FLY002",  # Prefer joins over format strings 
     "I001",
     "PLC0206",

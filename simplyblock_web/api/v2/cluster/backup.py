@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Annotated, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
@@ -76,8 +76,8 @@ def import_backups(cluster: Cluster, parameters: _ImportParams):
 @api.get('/export', name='clusters:backups:export')
 def export_backups(
     cluster: Cluster,
-    backup_id: Optional[str] = Query(None, description="Export only the chain containing this backup UUID"),
-    lvol_name: Optional[str] = Query(None, description="Export all completed backups for this lvol name"),
+    backup_id: Annotated[Optional[str], Query(description="Export only the chain containing this backup UUID")] = None,
+    lvol_name: Annotated[Optional[str], Query(description="Export all completed backups for this lvol name")] = None,
 ):
     lvol_name_filter = lvol_name
     if backup_id and not lvol_name_filter:
