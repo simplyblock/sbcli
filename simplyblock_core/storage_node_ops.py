@@ -9746,6 +9746,78 @@ def get_secondary_nodes(current_node, exclude_ids=None, removed_node=None):
     return []
 
 
+def splice_stranded_secondary(stranded_node) -> bool:
+    """Fold a node get_secondary_nodes() could not place into the pairing
+    graph already built by the in-progress cluster_activate() pass.
+
+    get_secondary_nodes() walks primaries in order, greedily picking the most
+    domain/host-disjoint unclaimed candidate for each. That greedy walk has no
+    mechanism to guarantee the resulting secondary_node_id/lvstore_stack_secondary
+    edges close a cycle spanning every online node: it can close a cycle over a
+    strict subset and leave the remaining node(s) with zero unclaimed
+    candidates, even though a perfect pairing trivially exists whenever there
+    are 2+ online nodes (observed 2026-08-03: 12 nodes across 3 failure
+    domains formed an 11-node cycle, stranding the 12th and aborting
+    activation).
+
+    Rather than reworking the greedy walk into a global matching solver, this
+    repairs the one failure mode it has: pick any already-formed edge P->X
+    (P.secondary_node_id == X.get_id()) and splice the stranded node in
+    between, P->stranded->X. This always succeeds as long as at least one
+    edge already exists (guaranteed once 2+ pairings have been made this
+    activation pass) and turns the cycle that edge belongs to into one that
+    also covers the stranded node, without disturbing any other node. Prefers
+    an edge where both P and X differ from the stranded node's failure domain
+    (falling back to a host-disjoint-only edge), mirroring get_secondary_nodes'
+    own anti-affinity tiering.
+    """
+    db_controller = DBController()
+    all_nodes = db_controller.get_storage_nodes_by_cluster_id(stranded_node.cluster_id)
+    edges = [n for n in all_nodes if n.secondary_node_id and n.get_id() != stranded_node.get_id()]
+
+    def _host_disjoint(p, x):
+        return p.mgmt_ip != stranded_node.mgmt_ip and x.mgmt_ip != stranded_node.mgmt_ip
+
+    def _domain_mismatch_score(p, x):
+        if stranded_node.failure_domain < 0:
+            return 0
+        return sum(1 for n in (p, x) if n.failure_domain != stranded_node.failure_domain)
+
+    best = None
+    best_score = -1
+    for p in edges:
+        x = db_controller.get_storage_node_by_id(p.secondary_node_id)
+        if not x or x.get_id() == stranded_node.get_id() or not _host_disjoint(p, x):
+            continue
+        score = _domain_mismatch_score(p, x)
+        if score > best_score:
+            best_score, best = score, (p, x)
+
+    if best is None:
+        return False
+
+    p, x = best
+    logger.warning(
+        "get_secondary_nodes found no candidate for node %s; splicing it into "
+        "the existing pairing %s -> %s (domain-mismatch score %d/2).",
+        stranded_node.get_id(), p.get_id(), x.get_id(), best_score)
+
+    p = db_controller.get_storage_node_by_id(p.get_id())
+    p.secondary_node_id = stranded_node.get_id()
+    p.write_to_db()
+
+    stranded_node = db_controller.get_storage_node_by_id(stranded_node.get_id())
+    stranded_node.lvstore_stack_secondary = p.get_id()
+    stranded_node.secondary_node_id = x.get_id()
+    stranded_node.write_to_db()
+
+    x = db_controller.get_storage_node_by_id(x.get_id())
+    x.lvstore_stack_secondary = stranded_node.get_id()
+    x.write_to_db()
+
+    return True
+
+
 def get_secondary_nodes_2(current_node, exclude_ids=None, exclude_mgmt_ips=None,
                           exclude_failure_domains=None, exclude_physical_labels=None):
     """Get candidate nodes for second secondary assignment (dual fault tolerance).
@@ -9834,6 +9906,86 @@ def get_secondary_nodes_2(current_node, exclude_ids=None, exclude_mgmt_ips=None,
                     "falling back to host-disjoint placement.", current_node.get_id())
             return result
     return []
+
+
+def splice_stranded_tertiary(stranded_node) -> bool:
+    """Tertiary-assignment counterpart to splice_stranded_secondary.
+
+    get_secondary_nodes_2()'s greedy walk has the identical dead-end risk as
+    get_secondary_nodes(): it can close a tertiary-pairing cycle over a
+    subset of online nodes and strand the rest, even though a valid
+    assignment exists — this can surface on any cluster with
+    max_fault_tolerance >= 2 (e.g. a 2+2 layout), the same way
+    splice_stranded_secondary's bug surfaced on the plain secondary pass.
+
+    Splices the stranded node into an already-formed tertiary edge P->X
+    (P.tertiary_node_id == X.get_id()), same idea as the secondary case:
+    P->stranded->X. The extra wrinkle here is that a tertiary must be
+    host-disjoint from BOTH a primary and that primary's OWN secondary (a
+    single host outage must not take out two of the four HA journal members)
+    — so splicing changes what "valid" means on both sides of the edge, and
+    each side is re-checked against the other's current secondary_node_id,
+    not just against each other.
+    """
+    db_controller = DBController()
+    all_nodes = db_controller.get_storage_nodes_by_cluster_id(stranded_node.cluster_id)
+    by_id = {n.get_id(): n for n in all_nodes}
+    stranded_sec = by_id.get(stranded_node.secondary_node_id) if stranded_node.secondary_node_id else None
+
+    def _valid_tertiary(primary, primary_sec, candidate):
+        if candidate.get_id() == primary.get_id():
+            return False
+        if candidate.mgmt_ip == primary.mgmt_ip:
+            return False
+        if primary_sec and candidate.mgmt_ip == primary_sec.mgmt_ip:
+            return False
+        return True
+
+    def _domain_mismatch_score(*nodes):
+        if stranded_node.failure_domain < 0:
+            return 0
+        return sum(1 for n in nodes if n.failure_domain != stranded_node.failure_domain)
+
+    edges = [n for n in all_nodes if n.tertiary_node_id and n.get_id() != stranded_node.get_id()]
+
+    best = None
+    best_score = -1
+    for p in edges:
+        x = by_id.get(p.tertiary_node_id)
+        if not x or x.get_id() == stranded_node.get_id():
+            continue
+        p_sec = by_id.get(p.secondary_node_id) if p.secondary_node_id else None
+        if not _valid_tertiary(p, p_sec, stranded_node):
+            continue
+        if not _valid_tertiary(stranded_node, stranded_sec, x):
+            continue
+        score = _domain_mismatch_score(p, x)
+        if score > best_score:
+            best_score, best = score, (p, x)
+
+    if best is None:
+        return False
+
+    p, x = best
+    logger.warning(
+        "get_secondary_nodes_2 found no candidate for node %s; splicing it into "
+        "the existing tertiary pairing %s -> %s (domain-mismatch score %d/2).",
+        stranded_node.get_id(), p.get_id(), x.get_id(), best_score)
+
+    p = db_controller.get_storage_node_by_id(p.get_id())
+    p.tertiary_node_id = stranded_node.get_id()
+    p.write_to_db()
+
+    stranded_node = db_controller.get_storage_node_by_id(stranded_node.get_id())
+    stranded_node.lvstore_stack_tertiary = p.get_id()
+    stranded_node.tertiary_node_id = x.get_id()
+    stranded_node.write_to_db()
+
+    x = db_controller.get_storage_node_by_id(x.get_id())
+    x.lvstore_stack_tertiary = stranded_node.get_id()
+    x.write_to_db()
+
+    return True
 
 
 def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blocks, max_size):
