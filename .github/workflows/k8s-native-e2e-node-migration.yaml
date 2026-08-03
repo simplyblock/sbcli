@@ -492,6 +492,25 @@ jobs:
           kubectl wait --for=delete namespace/vault --timeout=120s 2>/dev/null || true
           echo "=== KMS cleanup complete ==="
 
+      # ── Remove stale labels from previous runs ──────────────────────────────
+
+      - name: Remove stale storagenodeset labels from all worker nodes
+        if: ${{ inputs.use_existing_cluster != 'true' }}
+        run: |
+          echo "Removing stale io.simplyblock.storagenodeset label from all worker nodes..."
+          # Remove from initial workers
+          IFS=',' read -ra NODES <<< "${{ inputs.worker_nodes }}"
+          # Include the migration target
+          MIGRATE_NODE="${{ inputs.migrate_to_worker }}"
+          if [ -n "$MIGRATE_NODE" ]; then
+            NODES+=("$MIGRATE_NODE")
+          fi
+          for NODE in "${NODES[@]}"; do
+            echo "Removing storagenodeset label from $NODE"
+            kubectl label node "$NODE" io.simplyblock.storagenodeset- 2>/dev/null || true
+          done
+          echo "Stale label cleanup complete."
+
       # ── Label nodes ─────────────────────────────────────────────────────────
 
       - name: Label worker nodes
