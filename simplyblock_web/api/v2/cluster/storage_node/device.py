@@ -1,4 +1,4 @@
-from typing import Optional
+from __future__ import annotations
 
 from fastapi import APIRouter, Response
 
@@ -54,7 +54,7 @@ def restart(cluster: Cluster, storage_node: StorageNode, device: Device, force: 
 @instance_api.get('/capacity', name='clusters:storage_nodes:devices:capacity')
 def capacity(
         cluster: Cluster, storage_node: StorageNode, device: Device,
-        history: Optional[str] = None
+        history: str | None = None
 ):
     records_or_false = device_controller.get_device_capacity(device.get_id(), history, parse_sizes=False)
     if not records_or_false:
@@ -65,7 +65,7 @@ def capacity(
 @instance_api.get('/iostats', name='clusters:storage_nodes:devices:iostats')
 def iostats(
         cluster: Cluster, storage_node: StorageNode, device: Device,
-        history: Optional[str] = None
+        history: str | None = None
 ):
     records_or_false = device_controller.get_device_iostats(device.get_id(), history, parse_sizes=False)
     if not records_or_false:

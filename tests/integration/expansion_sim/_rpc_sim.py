@@ -24,7 +24,7 @@ from __future__ import annotations
 import logging
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +103,7 @@ class RpcServerSim:
         # JM membership view: which JMs (by remote_jm_<id>n1 key) the JC
         # currently sees. Phase 1 just defaults to all known peers True.
         self.jm_status: dict[int, dict[str, bool]] = defaultdict(dict)
-        self.cluster_sim: Optional[ClusterSim] = None
+        self.cluster_sim: ClusterSim | None = None
 
     # -- Bdev operations ----------------------------------------------------
 
@@ -373,10 +373,10 @@ class ClusterSim:
         self._by_endpoint[(sim.mgmt_ip, sim.rpc_port)] = sim
         sim.cluster_sim = self
 
-    def get_by_endpoint(self, mgmt_ip: str, rpc_port: int) -> Optional[RpcServerSim]:
+    def get_by_endpoint(self, mgmt_ip: str, rpc_port: int) -> RpcServerSim | None:
         return self._by_endpoint.get((mgmt_ip, int(rpc_port)))
 
-    def get_by_node_id(self, node_id: str) -> Optional[RpcServerSim]:
+    def get_by_node_id(self, node_id: str) -> RpcServerSim | None:
         return self.servers.get(node_id)
 
     def node_ids(self) -> list[str]:
@@ -392,10 +392,10 @@ class RpcRouter:
     installed via :func:`set_active_cluster_sim` (per-test session).
     """
 
-    _active_cluster: Optional[ClusterSim] = None
+    _active_cluster: ClusterSim | None = None
 
     @classmethod
-    def set_active_cluster(cls, sim: Optional[ClusterSim]) -> None:
+    def set_active_cluster(cls, sim: ClusterSim | None) -> None:
         cls._active_cluster = sim
 
     def __init__(self, mgmt_ip: str, rpc_port: int,
@@ -471,16 +471,16 @@ class FirewallClientSim:
     signature.
     """
 
-    _active_cluster: Optional[ClusterSim] = None
+    _active_cluster: ClusterSim | None = None
 
     @classmethod
-    def set_active_cluster(cls, sim: Optional[ClusterSim]) -> None:
+    def set_active_cluster(cls, sim: ClusterSim | None) -> None:
         cls._active_cluster = sim
 
     def __init__(self, snode, timeout=None, retry=None):
         self.snode = snode
 
-    def _server(self) -> Optional[RpcServerSim]:
+    def _server(self) -> RpcServerSim | None:
         active = type(self)._active_cluster
         if active is None:
             return None

@@ -1,8 +1,9 @@
+from __future__ import annotations
 import errno
 import json
 from enum import IntEnum
 from json import JSONDecodeError
-from typing import Any, Optional
+from typing import Any
 
 import jsonschema
 import requests
@@ -86,7 +87,7 @@ class RPCErrorCode(IntEnum):
 
 
 class RPCException(Exception):
-    def __init__(self, message: str, code: Optional[int] = None, data: Any = None):
+    def __init__(self, message: str, code: int | None = None, data: Any = None):
         super().__init__(message, code, data)
         self.code = code
         self.message = message
@@ -220,7 +221,7 @@ class RPCClient:
     def subsystem_list(self) -> list[dict]:
         return self._request3("nvmf_get_subsystems")
 
-    def subsystem_get(self, nqn: str) -> Optional[dict]:
+    def subsystem_get(self, nqn: str) -> dict | None:
         try:
             return single_or_none(self._request3("nvmf_get_subsystems", nqn=nqn))
         except RPCException as e:

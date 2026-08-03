@@ -1,10 +1,11 @@
 #!/usr/bin/env python
 
+from __future__ import annotations
 import argparse
 import logging
 import os
 import sys
-from typing import Optional, cast
+from typing import cast
 
 from kubernetes.client import ApiException, CoreV1Api
 
@@ -34,7 +35,7 @@ def _is_pod_present_for_node() -> bool:
     """
     k8s_core_v1: CoreV1Api = cast(CoreV1Api, utils.get_k8s_core_client())
     namespace: str = node_utils_k8s.get_namespace()
-    node_name: Optional[str] = os.environ.get("HOSTNAME")
+    node_name: str | None = os.environ.get("HOSTNAME")
 
     if not node_name:
         raise RuntimeError("HOSTNAME environment variable not set")

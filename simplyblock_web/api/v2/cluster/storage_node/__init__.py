@@ -1,5 +1,5 @@
+from __future__ import annotations
 from threading import Thread
-from typing import Optional
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -34,14 +34,14 @@ def list_(cluster: Cluster) -> list[StorageNodeDTO]:
 class StorageNodeParams(BaseModel):
     node_address: str
     interface_name: str
-    max_snapshots: Optional[int] = 500
-    ha_jm: Optional[bool] = True
-    test_device: Optional[bool] = False
-    spdk_image: Optional[str] = ""
+    max_snapshots: int | None = 500
+    ha_jm: bool | None = True
+    test_device: bool | None = False
+    spdk_image: str | None = ""
     spdk_debug: bool = False
     data_nics: list[str] = []
     namespace: str = 'default'
-    id_device_by_nqn: Optional[bool] = False
+    id_device_by_nqn: bool | None = False
     jm_percent: util.Percent = 3
     partitions: int = 1
     iobuf_small_pool_count: int = 0
@@ -49,11 +49,11 @@ class StorageNodeParams(BaseModel):
     cr_name: str = ""
     cr_namespace: str = ""
     cr_plural: str = ""
-    ha_jm_count: Optional[int] = None
+    ha_jm_count: int | None = None
     format_4k: bool = False
-    spdk_proxy_image: Optional[str] = None
-    spdk_sys_mem: Optional[str] = None
-    failure_domain: Optional[int] = None
+    spdk_proxy_image: str | None = None
+    spdk_sys_mem: str | None = None
+    failure_domain: int | None = None
     expand: bool = False
 
 
@@ -132,7 +132,7 @@ def delete(
 
 
 @instance_api.get('/capacity', name='clusters:storage-nodes:capacity')
-def capacity(cluster: Cluster, storage_node: StorageNode, history: Optional[str] = None):
+def capacity(cluster: Cluster, storage_node: StorageNode, history: str | None = None):
     records_or_false = storage_node_ops.get_node_iostats_history(
         storage_node.get_id(),
         history,
@@ -145,7 +145,7 @@ def capacity(cluster: Cluster, storage_node: StorageNode, history: Optional[str]
 
 
 @instance_api.get('/iostats', name='clusters:storage-nodes:iostats')
-def iostats(cluster: Cluster, storage_node: StorageNode, history: Optional[str] = None):
+def iostats(cluster: Cluster, storage_node: StorageNode, history: str | None = None):
     records_or_false = storage_node_ops.get_node_iostats_history(
             storage_node.get_id(),
             history,
@@ -242,7 +242,7 @@ def shutdown(cluster: Cluster, storage_node: StorageNode, force: bool = False) -
 class _RestartParams(BaseModel):
     force: bool = False
     reattach_volume: bool = False
-    node_address: Optional[str] = None
+    node_address: str | None = None
     new_ssd_pcie: list[str] = []
 
 

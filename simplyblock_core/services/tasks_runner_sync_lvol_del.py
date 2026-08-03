@@ -1,6 +1,6 @@
+from __future__ import annotations
 import sys
 import time
-from typing import Optional
 
 from simplyblock_core import db_controller, utils
 from simplyblock_core.controllers import snapshot_controller, tasks_controller
@@ -13,7 +13,7 @@ logger = utils.get_logger(__name__)
 # get DB controller
 db = db_controller.DBController()
 
-def get_primary_node(task) -> Optional[StorageNode]:
+def get_primary_node(task) -> StorageNode | None:
     if "primary_node" in task.function_params:
         return db.get_storage_node_by_id(task.function_params["primary_node"])
 

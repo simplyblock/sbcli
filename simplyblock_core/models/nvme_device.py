@@ -1,4 +1,4 @@
-from typing import Optional
+from __future__ import annotations
 
 from simplyblock_core.models.base_model import BaseModel
 
@@ -36,7 +36,7 @@ class NVMeDevice(BaseModel):
     cluster_id: str = ""
     device_name: str = ""
     # None => not applicable (owning node not in ONLINE/DOWN)
-    health_check: Optional[bool] = True
+    health_check: bool | None = True
     io_error: bool = False
     is_partition: bool = False
     model_id: str = ""

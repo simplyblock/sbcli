@@ -1,4 +1,5 @@
-from typing import Annotated, Any, Literal, Optional
+from __future__ import annotations
+from typing import Annotated, Any, Literal
 from collections.abc import Callable
 from urllib.parse import urlparse
 from uuid import UUID
@@ -41,7 +42,7 @@ def creation_response(
     route_name: str,
     route_kwargs: dict[str, UUID],
     get_full: Callable[[UUID], BaseModel],
-    extra_headers: Optional[dict[str, str]] = None,
+    extra_headers: dict[str, str] | None = None,
 ) -> Response:
     headers = {"Location": str(request.app.url_path_for(route_name, **route_kwargs))}
     if extra_headers:

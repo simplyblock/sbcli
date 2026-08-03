@@ -19,6 +19,7 @@ Subsequent poll calls (`bdev_lvol_get_lvol_delete_status`,
 `bdev_lvol_transfer_stat`) compare ``time.time()`` against ``complete_at`` and
 return in-progress / done accordingly.
 """
+from __future__ import annotations
 
 import json
 import logging
@@ -27,7 +28,7 @@ import threading
 import time
 import uuid as _uuid_mod
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -489,7 +490,7 @@ def _bdev_lvol_snapshot_register(s: NodeState, p: dict):
 # ---- get bdevs / lvols ----
 
 def _bdev_get_bdevs(s: NodeState, p: dict):
-    name: Optional[str] = p.get('name')
+    name: str | None = p.get('name')
     all_bdevs = {**s.all_bdevs(), **s.nvme_bdevs}
     if name:
         composite = name if name in all_bdevs else s.composite(name)
@@ -853,8 +854,8 @@ class MockRpcServer:
         self.rpc_username = rpc_username
         self.rpc_password = rpc_password
         self.state = NodeState(lvstore)
-        self._server: Optional[_MockHTTPServer] = None
-        self._thread: Optional[threading.Thread] = None
+        self._server: _MockHTTPServer | None = None
+        self._thread: threading.Thread | None = None
 
     def start(self):
         self._server = _MockHTTPServer(

@@ -7,6 +7,7 @@ Parallel MinIO uploader with:
 - Robust JSON embedding via SFTP (no giant heredocs)
 - Remote uploader accepts [src, key] OR {"src":..., "key":...}
 """
+from __future__ import annotations
 
 import os
 import json
@@ -15,7 +16,6 @@ import time
 import subprocess
 import random
 import threading
-from typing import Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import paramiko
@@ -210,7 +210,7 @@ def _sleep_backoff(attempt: int):
     delay = delay * (0.5 + random.random())  # jitter
     time.sleep(delay)
 
-def upload_file_with_retry(local_path: str, key: str, progress: Optional[GlobalByteProgress]):
+def upload_file_with_retry(local_path: str, key: str, progress: GlobalByteProgress | None):
     last_err = None
     for attempt in range(UPLOAD_RETRIES):
         try:

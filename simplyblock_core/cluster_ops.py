@@ -1,3 +1,4 @@
+from __future__ import annotations
 import json
 import os
 import socket
@@ -261,7 +262,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    tls_secret, ingress_host_source, dns_name, fabric, is_single_node, client_data_nic,
                    nvmeof_tls_config=None, max_fault_tolerance=1, backup_config=None,
                    nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001, container_image_prefix=None,
-                   hashicorp_vault_settings : t.Optional[HashicorpVaultSettings] = None,
+                   hashicorp_vault_settings : HashicorpVaultSettings | None = None,
                    enable_failure_domain=False,
                    enable_hang_device=False,
 ) -> str:
@@ -500,7 +501,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
                 cr_namespace=None, cr_plural=None, fabric="tcp",
                 client_data_nic="", max_fault_tolerance=1, backup_config=None,
                 nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001,
-                hashicorp_vault_settings : t.Optional[HashicorpVaultSettings] = None,
+                hashicorp_vault_settings : HashicorpVaultSettings | None = None,
                 enable_failure_domain=False,
 ) -> str:
     """Thin wrapper around _add_cluster_impl() that serializes create calls
@@ -548,7 +549,7 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
                 cr_namespace=None, cr_plural=None, fabric="tcp",
                 client_data_nic="", max_fault_tolerance=1, backup_config=None,
                 nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001,
-                hashicorp_vault_settings : t.Optional[HashicorpVaultSettings] = None,
+                hashicorp_vault_settings : HashicorpVaultSettings | None = None,
                 enable_failure_domain=False,
 ) -> str:
 

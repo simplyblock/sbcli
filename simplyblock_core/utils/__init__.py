@@ -1,3 +1,4 @@
+from __future__ import annotations
 import glob
 import json
 import logging
@@ -12,7 +13,7 @@ import sys
 import uuid
 import time
 from datetime import datetime, timezone
-from typing import Union, Any, Optional
+from typing import Any
 from collections.abc import Iterable
 
 from pydantic import SecretStr
@@ -774,7 +775,7 @@ def _parse_unit(unit: str, mode: str = 'si/iec', strict: bool = True) -> tuple[i
     )
 
 
-def parse_size(size: Union[str, int], mode: str = 'si/iec', assume_unit: str = '', strict: bool = False) -> int:
+def parse_size(size: str | int, mode: str = 'si/iec', assume_unit: str = '', strict: bool = False) -> int:
     """Parse the given data size
 
     If passed and not explicitly given, 'assume_unit' will be assumed.
@@ -820,7 +821,7 @@ def get_total_cpu_cores(mapping: str) -> int:
     return len(items)
 
 
-def convert_size(size: Union[int, str], unit: str, round_up: bool = False) -> int:
+def convert_size(size: int | str, unit: str, round_up: bool = False) -> int:
     """Convert the given number of bytes to target unit
 
     Accepts both decimal (kB, MB, ...) and binary (KiB, MiB, ...) units.
@@ -2681,7 +2682,7 @@ def patch_cr_node_status(
         name: str,
         node_uuid: str,
         node_mgmt_ip: str,
-        updates: Optional[dict[str, Any]] = None,
+        updates: dict[str, Any] | None = None,
         remove: bool = False,
 ) -> bool:
     """
@@ -2817,10 +2818,10 @@ def patch_cr_lvol_status(
         plural: str,
         namespace: str,
         name: str,
-        lvol_uuid: Optional[str] = None,
-        updates: Optional[dict[str, Any]] = None,
+        lvol_uuid: str | None = None,
+        updates: dict[str, Any] | None = None,
         remove: bool = False,
-        add: Optional[dict[str, Any]] = None,
+        add: dict[str, Any] | None = None,
 ):
     """
     Patch status.lvols[*] for an LVOL CustomResource.
@@ -2980,7 +2981,7 @@ def label_node_as_mgmt_plane(node_name: str):
         raise RuntimeError(f"Failed to label node '{node_name}': {e.reason} - {e.body}")
 
 
-def get_mgmt_ip(node_info: Any, iface_names: Union[str, list[str]]) -> Optional[tuple[str, str]]:
+def get_mgmt_ip(node_info: Any, iface_names: str | list[str]) -> tuple[str, str] | None:
     if isinstance(node_info, (bytes, bytearray)):
         try:
             node_info = json.loads(node_info.decode("utf-8"))

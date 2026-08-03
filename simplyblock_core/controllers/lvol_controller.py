@@ -1,10 +1,10 @@
+from __future__ import annotations
 import copy
 import random
 import sys
 import time
 import uuid
 from datetime import datetime
-from typing import Optional
 
 from simplyblock_core import utils, constants
 from simplyblock_core.controllers import snapshot_controller, pool_controller, lvol_events, tasks_controller, \
@@ -3600,7 +3600,7 @@ def get_namespaces_per_lvol(lvol):
     return ns_count
 
 
-def get_next_available_subsystem_on_node(node_id, all_lvols=None)-> Optional[LVol]:
+def get_next_available_subsystem_on_node(node_id, all_lvols=None)-> LVol | None:
     db_controller = DBController()
     if not all_lvols:
         all_lvols = db_controller.get_mini_lvols()

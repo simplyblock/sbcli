@@ -39,8 +39,9 @@ Two entry points:
   Use this for multi-node-per-host clusters (``p>=2``) or whenever the
   caller needs to express the host topology explicitly.
 """
+from __future__ import annotations
 
-from typing import NamedTuple, Optional
+from typing import NamedTuple
 
 
 # Role names match the wire protocol used by bdev_lvol_set_lvs_opts.
@@ -165,7 +166,7 @@ def compute_role_diff_topology(
     new_topology: list[list[str]],
     ftt: int,
     *,
-    current_layout: Optional[dict[str, tuple[str, str]]] = None,
+    current_layout: dict[str, tuple[str, str]] | None = None,
 ) -> list[RoleMove]:
     """Plan the role moves to integrate one or more new hosts.
 

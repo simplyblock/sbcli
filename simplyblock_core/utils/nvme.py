@@ -1,4 +1,5 @@
-from typing import TYPE_CHECKING, Optional
+from __future__ import annotations
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict, SecretStr
 
@@ -31,7 +32,7 @@ class NvmeConnectEntry(BaseModel):
     tls: bool = False
     connect: str
     # Present only for lvol connect (not migration pre-connect)
-    ns_id: Optional[int] = None
+    ns_id: int | None = None
     allowed_hosts: list[str] = []
 
 
@@ -44,7 +45,7 @@ class HostConnectAuth(BaseModel):
     dhchap_ctrlr_key: SecretStr = SecretStr("")
 
     @classmethod
-    def from_entry(cls, entry: dict, pool: "Optional[Pool]") -> "HostConnectAuth":
+    def from_entry(cls, entry: dict, pool: Pool | None) -> HostConnectAuth:
         """Resolve the effective auth for one matched allowed-hosts ``entry``."""
         if pool is not None and pool.dhchap:
             return cls(
@@ -60,8 +61,8 @@ class HostConnectAuth(BaseModel):
         )
 
     @classmethod
-    def resolve(cls, lvol: "LVol", host_nqn: Optional[str],
-                db: "DBController") -> "Optional[HostConnectAuth]":
+    def resolve(cls, lvol: LVol, host_nqn: str | None,
+                db: DBController) -> HostConnectAuth | None:
         """Resolve the connecting host's auth for *lvol*.
 
         Returns None when the volume allows any host. Raises ValueError when the
@@ -85,11 +86,11 @@ def build_nvme_connect_entry(
     port: int,
     nqn: str,
     ctrl_loss_tmo: int,
-    cluster: "Cluster",
-    host_entry: Optional[HostConnectAuth],
-    host_nqn: Optional[str],
-    ns_id: Optional[int] = None,
-    allowed_hosts: Optional[list] = None,
+    cluster: Cluster,
+    host_entry: HostConnectAuth | None,
+    host_nqn: str | None,
+    ns_id: int | None = None,
+    allowed_hosts: list | None = None,
 ) -> NvmeConnectEntry:
     """Build one ``NvmeConnectEntry`` for a resolved (transport, ip, port) target.
 

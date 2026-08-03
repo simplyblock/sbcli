@@ -37,7 +37,6 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 from simplyblock_core.controllers.cluster_expansion.planner import (
     ROLE_PRIMARY,
@@ -174,7 +173,7 @@ class RpcEvent:
     rpc: str                   # function name (matches log entry)
     detail: str = ""           # short context (lvol id, bdev name, etc.)
     duration_ms: float = 0.0   # how long this RPC took (p50)
-    move_index: Optional[int] = None  # which move emitted this RPC
+    move_index: int | None = None  # which move emitted this RPC
     role: str = ""             # role being created / re-homed / created-primary
     phase: str = ""            # "pre_block" | "blocked" | "post_unblock" | "" (Phase B)
 
@@ -287,7 +286,7 @@ def _seq_sibling_reattach(sibling_id: str, primary_id: str,
 
 def _emit(events: list[RpcEvent], t: float, target: str, rpc: str,
           detail: str, timing: dict[str, float],
-          move_index: Optional[int] = None,
+          move_index: int | None = None,
           role: str = "", phase: str = "") -> float:
     """Append an event with its p50 cost and return the new ``t``."""
     cost = rpc_cost_ms(timing, rpc)

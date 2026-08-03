@@ -1,4 +1,5 @@
-from typing import Annotated, Optional
+from __future__ import annotations
+from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
@@ -50,7 +51,7 @@ class _RestoreParams(BaseModel):
     backup_id: str
     lvol_name: str
     pool: str
-    target_node_id: Optional[str] = None
+    target_node_id: str | None = None
 
 
 @api.post('/restore', name='clusters:backups:restore', status_code=202)
@@ -76,8 +77,8 @@ def import_backups(cluster: Cluster, parameters: _ImportParams):
 @api.get('/export', name='clusters:backups:export')
 def export_backups(
     cluster: Cluster,
-    backup_id: Annotated[Optional[str], Query(description="Export only the chain containing this backup UUID")] = None,
-    lvol_name: Annotated[Optional[str], Query(description="Export all completed backups for this lvol name")] = None,
+    backup_id: Annotated[str | None, Query(description="Export only the chain containing this backup UUID")] = None,
+    lvol_name: Annotated[str | None, Query(description="Export all completed backups for this lvol name")] = None,
 ):
     lvol_name_filter = lvol_name
     if backup_id and not lvol_name_filter:
@@ -152,9 +153,9 @@ def list_policies(cluster: Cluster) -> list[BackupPolicyDTO]:
 
 class _PolicyCreateParams(BaseModel):
     name: str
-    versions: Optional[int] = 0
-    age: Optional[str] = ""
-    schedule: Optional[str] = ""
+    versions: int | None = 0
+    age: str | None = ""
+    schedule: str | None = ""
 
 
 @policy_api.post('/', name='clusters:backup-policies:create', status_code=201, responses={201: {"content": None}})

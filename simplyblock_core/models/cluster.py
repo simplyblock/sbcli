@@ -1,5 +1,5 @@
+from __future__ import annotations
 import os.path
-from typing import Optional
 
 from pydantic import SecretStr
 
@@ -157,7 +157,7 @@ class Cluster(BaseModel):
     rpc_base_port: int = 8080
     snode_api_port: int = 50001
     container_image_prefix: str = ""
-    hashicorp_vault_settings: Optional[HashicorpVaultSettings] = None
+    hashicorp_vault_settings: HashicorpVaultSettings | None = None
 
     # Single-node-expansion resumability cursor. Empty dict means no expansion
     # is in flight. Populated/advanced/cleared via the helpers in

@@ -80,11 +80,11 @@ when it must wait for an async data-plane transfer.  Phase transitions also
 happen immediately via a tail-recursive call to ``task_runner``, eliminating
 the 3-second service-loop gap between phases.
 """
+from __future__ import annotations
 
 import datetime
 import random
 import time
-from typing import Optional
 
 from simplyblock_core import db_controller as db_mod, utils, constants
 from simplyblock_core.utils import convert_size
@@ -1072,8 +1072,8 @@ def _setup_snap_transfer(snap, snap_index, src_node, tgt_node,
 
 
 def _post_process_snap(snap: SnapShot, tgt_node: StorageNode, tgt_rpc: RPCClient, migration: LVolMigration,
-                       transfer: dict, tgt_sec:Optional[StorageNode]=None, sec_rpc: Optional[RPCClient]=None,
-                       tgt_ter:Optional[StorageNode]=None, ter_rpc: Optional[RPCClient]=None):
+                       transfer: dict, tgt_sec:StorageNode | None=None, sec_rpc: RPCClient | None=None,
+                       tgt_ter:StorageNode | None=None, ter_rpc: RPCClient | None=None):
     """
     Post-transfer steps for a single snapshot whose data has been fully copied:
       add_clone → convert (on primary, then mirrored on secondary) → cleanup.
@@ -2599,7 +2599,7 @@ def _handle_cleanup_target(migration, tgt_node, tgt_rpc, src_rpc=None):
 
         # Derive the migration bdev name in case it was pre-created but not yet
         # recorded in transfer_context (i.e. failure before LVOL_MIGRATE saved ctx).
-        _pre_nqn: Optional[str] = None
+        _pre_nqn: str | None = None
         try:
             _lvol = db.get_lvol_by_id(migration.lvol_id)
             _pre_bdev = f"{tgt_node.lvstore}/{_lvol_tgt_bdev_name(_lvol.lvol_bdev)}"

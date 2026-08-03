@@ -83,11 +83,12 @@ Volume sizes follow the same format as the CLI: ``"1G"`` (gigabytes),
 ``"512M"`` (mebibytes), ``"1073741824"`` (raw bytes).  The loader converts
 them to bytes using the same ``utils.parse_size()`` function the CLI uses.
 """
+from __future__ import annotations
 
 import json
 import time
 import uuid as _uuid_mod
-from typing import Any, Optional
+from typing import Any
 
 from simplyblock_core.models.hublvol import HubLVol
 from simplyblock_core.models.iface import IFace
@@ -521,7 +522,7 @@ def _make_pool(pool_uuid: str, spec: dict, cluster_id: str) -> Pool:
 
 def _make_lvol(lvol_uuid: str, spec: dict, node: StorageNode,
                cluster_id: str, pool_uuid: str,
-               shared_nqn: Optional[str]) -> LVol:
+               shared_nqn: str | None) -> LVol:
     size_bytes = parse_size(str(spec.get('size', '1G')))
     max_size_bytes = parse_size(str(spec.get('max_size', '1000T')))
     nqn = shared_nqn or f"nqn.2023-02.io.simplyblock:{lvol_uuid[:8]}"

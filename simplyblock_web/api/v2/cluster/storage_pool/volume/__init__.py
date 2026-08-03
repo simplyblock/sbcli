@@ -1,4 +1,5 @@
-from typing import Annotated, Literal, Optional, Union
+from __future__ import annotations
+from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -35,36 +36,36 @@ class _CreateParams(BaseModel):
     max_rw_mbytes: util.Unsigned = 0
     max_r_mbytes: util.Unsigned = 0
     max_w_mbytes: util.Unsigned = 0
-    ha_type: Optional[Literal['single', 'ha']] = None
-    host_id: Optional[str] = None
+    ha_type: Literal['single', 'ha'] | None = None
+    host_id: str | None = None
     priority_class: Literal[0, 1] = 0
-    namespaced: Optional[bool] = False
-    pvc_name: Optional[str] = None
+    namespaced: bool | None = False
+    pvc_name: str | None = None
     ndcs: util.Unsigned = 0
     npcs: util.Unsigned = 0
-    allowed_hosts: Optional[list[str]] = None
+    allowed_hosts: list[str] | None = None
     fabric: str = "tcp"
     # None → resolved by add_lvol_ha: a shareable default for namespaced
     # volumes, 1 otherwise.
-    max_namespace_per_subsys: Optional[int] = None
+    max_namespace_per_subsys: int | None = None
     do_replicate: bool = False
-    replication_cluster_id: Optional[str] = None
+    replication_cluster_id: str | None = None
     encrypt: bool = False
 
 
 class _CloneParams(BaseModel):
     name: str
-    snapshot_id: Annotated[Optional[str], Field(pattern=core_utils.UUID_PATTERN)]
+    snapshot_id: Annotated[str | None, Field(pattern=core_utils.UUID_PATTERN)]
     size: util.Size = 0
-    pvc_name: Optional[str] = None
-    pvc_namespace: Optional[str] = None
+    pvc_name: str | None = None
+    pvc_namespace: str | None = None
     delete_snap_on_lvol_delete: bool = False
 
 
 @api.post('/', name='clusters:storage-pools:volumes:create', status_code=201, responses={201: {"content": None}})
 def add(
         request: Request, cluster: Cluster, pool: StoragePool,
-        parameters: RootModel[Union[_CreateParams, _CloneParams]],
+        parameters: RootModel[_CreateParams | _CloneParams],
         response_format: util.CreationResponseFormatParameter = "empty",
 ) -> Response:
     data = parameters.root
@@ -129,7 +130,7 @@ def add(
 
 
 class ReplicateLVolParams(BaseModel):
-    lvol_id: Optional[str] = None
+    lvol_id: str | None = None
 
 
 @api.post('/replicate_lvol_on_source_cluster', name='clusters:storage-pools:replicate_lvol_on_source_cluster')
@@ -148,12 +149,12 @@ def get(request: Request, cluster: Cluster, pool: StoragePool, volume: Volume) -
 
 
 class UpdatableLVolParams(BaseModel):
-    name: Optional[str] = None
+    name: str | None = None
     max_rw_iops: util.Unsigned = 0
     max_rw_mbytes: util.Unsigned = 0
     max_r_mbytes: util.Unsigned = 0
     max_w_mbytes: util.Unsigned = 0
-    size: Optional[util.Size] = None
+    size: util.Size | None = None
 
 
 @instance_api.put('/', name='clusters:storage-pools:volumes:update', status_code=204, responses={204: {"content": None}})
@@ -245,7 +246,7 @@ def replication_stop(cluster: Cluster, pool: StoragePool, volume: Volume) -> Res
     return Response(status_code=204)
 
 @instance_api.get('/connect', name='clusters:storage-pools:volumes:connect')
-def connect(cluster: Cluster, pool: StoragePool, volume: Volume, host_nqn: Optional[str] = None):
+def connect(cluster: Cluster, pool: StoragePool, volume: Volume, host_nqn: str | None = None):
     details, err = lvol_controller.connect_lvol(volume.get_id(), host_nqn=host_nqn)
     if err:
         return Response(status_code=404, content=err)
@@ -253,7 +254,7 @@ def connect(cluster: Cluster, pool: StoragePool, volume: Volume, host_nqn: Optio
 
 
 @instance_api.get('/capacity', name='clusters:storage-pools:volumes:capacity')
-def capacity(cluster: Cluster, pool: StoragePool, volume: Volume, history: Optional[str] = None):
+def capacity(cluster: Cluster, pool: StoragePool, volume: Volume, history: str | None = None):
     records_or_false = lvol_controller.get_capacity(volume.get_id(), history, parse_sizes=False)
     if records_or_false == False:  # noqa
         raise ValueError('Failed to compute capacity')
@@ -261,7 +262,7 @@ def capacity(cluster: Cluster, pool: StoragePool, volume: Volume, history: Optio
 
 
 @instance_api.get('/iostats', name='clusters:storage-pools:volumes:iostats')
-def iostats(cluster: Cluster, pool: StoragePool, volume: Volume, history: Optional[str] = None):
+def iostats(cluster: Cluster, pool: StoragePool, volume: Volume, history: str | None = None):
     records_or_false = lvol_controller.get_io_stats(
         volume.get_id(),
         history,
@@ -322,7 +323,7 @@ def replication_commit(cluster: Cluster, pool: StoragePool, volume: Volume):
 
 
 class FailbackParams(BaseModel):
-    source_cluster_id: Optional[str] = None
+    source_cluster_id: str | None = None
 
 
 @instance_api.post('/replication_failback', name='clusters:storage-pools:volumes:replication_failback')
@@ -355,8 +356,8 @@ def resume(cluster: Cluster, pool: StoragePool, volume: Volume) -> bool:
 def clone(
         request: Request, cluster: Cluster, pool: StoragePool, volume: Volume,
         clone_name: str,
-        new_size: Optional[str] = None,
-        pvc_name: Optional[str] = None,
+        new_size: str | None = None,
+        pvc_name: str | None = None,
 ) -> Response:
     size = None
     if new_size is not None:

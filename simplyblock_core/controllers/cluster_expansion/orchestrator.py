@@ -33,9 +33,9 @@ If the persisted state's schema version does not match the current code's
 expected version, the orchestrator refuses to touch it — better to surface
 the mismatch to the operator than to misinterpret a future schema.
 """
+from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Optional
 
 from simplyblock_core import utils
 from simplyblock_core.controllers.cluster_expansion.planner import (
@@ -92,8 +92,8 @@ def execute_expand_plan(
     cluster,
     executor: MoveExecutor,
     *,
-    planned_moves: Optional[list[RoleMove]] = None,
-    new_node_id: Optional[str] = None,
+    planned_moves: list[RoleMove] | None = None,
+    new_node_id: str | None = None,
 ) -> None:
     """Drive the expansion to completion, persisting cursor progress as we go.
 

@@ -1,3 +1,4 @@
+from __future__ import annotations
 import time
 import paramiko
 # paramiko.common.logging.basicConfig(level=paramiko.common.DEBUG)
@@ -17,7 +18,6 @@ import re
 import subprocess
 import shlex
 from collections import defaultdict
-from typing import Optional
 # import importlib
 # from glob import glob
 from utils.placement_dump_check import PlacementDump
@@ -134,7 +134,7 @@ class SshUtils:
             raise FileNotFoundError("No usable SSH private key found and SSH_PASS not set.")
         return keys
 
-    def _try_connect(self, host: str, username: str, pkey: Optional[paramiko.PKey], password: Optional[str], sock=None, timeout=30):
+    def _try_connect(self, host: str, username: str, pkey: paramiko.PKey | None, password: str | None, sock=None, timeout=30):
         cli = paramiko.SSHClient()
         cli.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         cli.connect(
@@ -340,7 +340,7 @@ class SshUtils:
             raise FileNotFoundError("No usable SSH private key found and SSH_PASS not set.")
         return keys
 
-    def _try_connect(self, host: str, username: str, pkey: Optional[paramiko.PKey], password: Optional[str], sock=None, timeout=30):
+    def _try_connect(self, host: str, username: str, pkey: paramiko.PKey | None, password: str | None, sock=None, timeout=30):
         cli = paramiko.SSHClient()
         cli.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         cli.connect(

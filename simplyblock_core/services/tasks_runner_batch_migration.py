@@ -34,9 +34,9 @@ PHASE_CLEANUP_TARGET (orchestrator: wait + target teardown)
     After all workers are DONE/FAILED/CANCELLED, orchestrator deletes the target
     NVMe-oF subsystem and marks group FAILED/CANCELLED.
 """
+from __future__ import annotations
 
 import time
-from typing import Optional
 
 from simplyblock_core import constants, db_controller as db_mod, utils
 from simplyblock_core.controllers import migration_controller, migration_events, tasks_controller, tasks_events
@@ -73,7 +73,7 @@ def _get_migration_nic(node):
     return trtype, node.mgmt_ip
 
 
-def _reconstruct_snap_tree(group, member_migrations, tgt_node, tgt_rpc) -> Optional[str]:
+def _reconstruct_snap_tree(group, member_migrations, tgt_node, tgt_rpc) -> str | None:
     """
     After all workers have transferred their owned snaps (without add_clone/convert),
     reconstruct the full ancestry tree on the target in correct order.

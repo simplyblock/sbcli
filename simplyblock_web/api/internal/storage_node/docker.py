@@ -1,10 +1,10 @@
+from __future__ import annotations
 import json
 import math
 import os
 import subprocess
 import time
 from pathlib import Path
-from typing import Optional, Union
 
 import cpuinfo
 import docker
@@ -75,21 +75,21 @@ class SPDKParams(BaseModel):
     rpc_port: int = Field(constants.RPC_PORT_RANGE_START, ge=1, le=65536)
     rpc_username: str
     rpc_password: str
-    ssd_pcie: Optional[list[str]] = Field(None)
-    spdk_debug: Optional[bool] = Field(False)
-    l_cores: Optional[str] = Field(None)
+    ssd_pcie: list[str] | None = Field(None)
+    spdk_debug: bool | None = Field(False)
+    l_cores: str | None = Field(None)
     spdk_mem: int = Field(core_utils.parse_size('4GiB'))
-    total_mem: Optional[Union[int, str]] = Field('')
-    multi_threading_enabled: Optional[bool] = Field(False)
-    timeout: Optional[int] = Field(5 * 60)
-    spdk_image: Optional[str] = Field(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
-    spdk_proxy_image: Optional[str] = Field(constants.SIMPLY_BLOCK_DOCKER_IMAGE)
-    cluster_ip: Optional[str] = Field(default=None, pattern=utils.IP_PATTERN)
+    total_mem: int | str | None = Field('')
+    multi_threading_enabled: bool | None = Field(False)
+    timeout: int | None = Field(5 * 60)
+    spdk_image: str | None = Field(constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
+    spdk_proxy_image: str | None = Field(constants.SIMPLY_BLOCK_DOCKER_IMAGE)
+    cluster_ip: str | None = Field(default=None, pattern=utils.IP_PATTERN)
     cluster_mode: str
-    socket: Optional[int] = Field(None, ge=0)
+    socket: int | None = Field(None, ge=0)
     firewall_port: int = Field(constants.FW_PORT_START)
     cluster_id: str
-    mcp_max_unavailable: Optional[int] = Field(None)  # OpenShift-only (MCP); ignored here
+    mcp_max_unavailable: int | None = Field(None)  # OpenShift-only (MCP); ignored here
 
 
 @api.post('/spdk_process_start', responses={
@@ -703,10 +703,10 @@ def bind_device_to_spdk(body: utils.DeviceParams):
 
 
 class PersistNodeConfigParams(BaseModel):
-    max_lvol: Optional[int] = Field(None, ge=0)
-    huge_page_memory: Optional[int] = Field(None, ge=0)
-    numa_node: Optional[int] = Field(None, ge=0)
-    ssd_list: Optional[list[str]] = Field(None)
+    max_lvol: int | None = Field(None, ge=0)
+    huge_page_memory: int | None = Field(None, ge=0)
+    numa_node: int | None = Field(None, ge=0)
+    ssd_list: list[str] | None = Field(None)
 
 
 @api.post('/persist_node_config', responses={
@@ -965,8 +965,8 @@ def read_allowed_list():
 
 
 class CoresParams(BaseModel):
-    cores: Optional[list[int]] = Field(default=None)
-    number_of_alceml_devices: Optional[int] = Field(None, ge=0)
+    cores: list[int] | None = Field(default=None)
+    number_of_alceml_devices: int | None = Field(None, ge=0)
 
 
 @api.post('/recalculate_cores_distribution', responses={

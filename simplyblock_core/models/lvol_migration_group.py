@@ -27,9 +27,9 @@ CLEANUP_TARGET  (failure / cancel path)
 COMPLETED
     All N migrations finished successfully.
 """
+from __future__ import annotations
 
 import datetime
-from typing import Optional
 
 from simplyblock_core.models.base_model import BaseModel
 
@@ -88,7 +88,7 @@ class LVolMigrationGroup(BaseModel):
 
     # Written by the main orchestrator after bdev_lvol_batch_final_step.
     # None = call not yet made; True = success; False = failure.
-    batch_result: Optional[bool] = None
+    batch_result: bool | None = None
 
     # Current orchestration phase — drives worker state transitions.
     phase: str = PHASE_PRECREATE
@@ -117,7 +117,7 @@ class LVolMigrationGroup(BaseModel):
     def member_count(self) -> int:
         return len(self.members)
 
-    def leader_migration_id(self) -> Optional[str]:
+    def leader_migration_id(self) -> str | None:
         """migration_id of the member with the lowest ns_id (the master lvol)."""
         if not self.members:
             return None

@@ -3,6 +3,7 @@ requires = ['setuptools>70']
 build-backend = 'setuptools.build_meta'
 
 [tool.ruff]
+target-version = "py39"
 extend-exclude = ['simplyblock_cli/cli.py']
 
 [tool.ruff.lint]
@@ -53,12 +54,10 @@ ignore = [
     "TRY201",
     "TRY203",
     "TRY401",
-    "UP007",  # Enable when 3.9 support is dropped
     "UP008",
     "UP031",
     "UP035",
     "UP036",  # Enable when 3.9 support is dropped
-    "UP045",  # Enable when 3.9 support is dropped
 ]
 
 [tool.ruff.lint.per-file-ignores]

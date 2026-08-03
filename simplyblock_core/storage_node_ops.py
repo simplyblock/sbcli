@@ -1,4 +1,5 @@
 # coding=utf- 8
+from __future__ import annotations
 import copy
 import datetime
 import json
@@ -9,7 +10,7 @@ import subprocess
 
 import psutil
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Optional
+from typing import Any
 
 import threading
 
@@ -498,7 +499,7 @@ def _collect_attached_ips(ctrlr_list):
     return attached
 
 
-def connect_device(name: str, device: NVMeDevice, node: StorageNode, attach_timeout: Optional[float] = None):
+def connect_device(name: str, device: NVMeDevice, node: StorageNode, attach_timeout: float | None = None):
     """Connect snode to device
 
     This only performs the actual operation between both involved SPDK instances,
@@ -1438,7 +1439,7 @@ def _connect_device_thread(name: str, device: NVMeDevice, node: StorageNode):
     except Exception:
         # Unknown owner / DB hiccup: keep the full best-effort retry.
         pass
-    last_err: Optional[Exception] = None
+    last_err: Exception | None = None
     for attempt in attempts:
         try:
             connect_device(name, device, node)
@@ -1458,7 +1459,7 @@ def _connect_device_thread(name: str, device: NVMeDevice, node: StorageNode):
 def _connect_to_remote_devs(
         this_node: StorageNode, /,
         reattach: bool = True, force_connect_restarting_nodes: bool = False,
-        only_node_id: Optional[str] = None
+        only_node_id: str | None = None
 ):
     """Connect ``this_node`` to remote data devices and return the refreshed
     remote-device records.

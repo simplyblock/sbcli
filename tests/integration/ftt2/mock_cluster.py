@@ -8,6 +8,7 @@ Extends the ClusterMockRpcServer from test_dual_ft_e2e with:
   - Configurable inflight-IO responses
   - Node availability simulation (can make RPCs fail for offline/unreachable nodes)
 """
+from __future__ import annotations
 
 import json
 import logging
@@ -15,7 +16,6 @@ import threading
 import time
 import uuid as _uuid_mod
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -647,8 +647,8 @@ class FTT2MockRpcServer:
         self.port = port
         self.node_id = node_id
         self.state = FTT2NodeState(node_id, lvstore)
-        self._server: Optional[_FTT2HTTPServer] = None
-        self._thread: Optional[threading.Thread] = None
+        self._server: _FTT2HTTPServer | None = None
+        self._thread: threading.Thread | None = None
 
     def start(self):
         self._server = _FTT2HTTPServer(
@@ -697,7 +697,7 @@ class FTT2MockRpcServer:
         """Remove the RPC hook."""
         self.state._rpc_hook = None
 
-    def get_rpc_calls(self, method: Optional[str] = None) -> list:
+    def get_rpc_calls(self, method: str | None = None) -> list:
         """Get logged RPC calls, optionally filtered by method."""
         with self.state.lock:
             if method:
@@ -708,7 +708,7 @@ class FTT2MockRpcServer:
         """Check if a specific RPC method was called."""
         return any(m == method for _, m, _ in self.state.rpc_log)
 
-    def get_leadership(self, lvs_name: str) -> Optional[bool]:
+    def get_leadership(self, lvs_name: str) -> bool | None:
         """Get current leadership state for an LVS."""
         return self.state.leadership.get(lvs_name)
 

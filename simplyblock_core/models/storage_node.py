@@ -1,6 +1,6 @@
+from __future__ import annotations
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Optional
 from uuid import uuid4
 
 from pydantic import SecretStr
@@ -57,7 +57,7 @@ class StorageNode(BaseNodeObject):
     enable_test_device: bool = False
     # None => health check is not applicable (node not in ONLINE/DOWN);
     # health is only measured/shown for ONLINE or DOWN nodes.
-    health_check: Optional[bool] = True
+    health_check: bool | None = True
     host_nqn: str = ""
     host_secret: SecretStr = SecretStr("")
     hostname: str = ""
@@ -865,7 +865,7 @@ class StorageNode(BaseNodeObject):
         time.sleep(0.250)
         return True
 
-    def uptime(self) -> Optional[timedelta]:
+    def uptime(self) -> timedelta | None:
         return (
             datetime.now(timezone.utc) - datetime.fromisoformat(self.online_since)
             if self.online_since and self.status == StorageNode.STATUS_ONLINE
