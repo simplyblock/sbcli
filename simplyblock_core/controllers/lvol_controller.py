@@ -903,14 +903,6 @@ def _create_bdev_stack(lvol, snode, is_primary=True):
         type = bdev['type']
         name = bdev['name']
         params = bdev['params']
-        # Idempotency probe per stack bdev. A by-name bdev_get_bdevs resolves
-        # names, aliases and uuids server-side and returns [] / an -ENODEV
-        # error (→ None) when absent — equivalent to the previous full-dump
-        # membership test, but O(1) instead of serializing every bdev on the
-        # node into the response (the dump grows with lvol count and was the
-        # single largest cost of mass creates).
-        if rpc_client.get_bdevs(name):
-            continue
 
         ret = None
         if type == "bmap_init":
