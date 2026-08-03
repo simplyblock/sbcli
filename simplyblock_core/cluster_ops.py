@@ -1062,6 +1062,18 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     used_nodes_as_sec: t.List[str] = []
     used_nodes_as_tertiary: t.List[str] = []
     snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
+    # Process primaries grouped by failure domain. get_secondary_nodes/
+    # get_secondary_nodes_2 (and their splice repairs) already sort their own
+    # candidate scan by domain, which alone is enough to keep the assignment
+    # domain-disjoint when domains are evenly sized. But once any node needs
+    # splice-repair (uneven domain sizes, some conflict unavoidable), the
+    # repair works off whatever partial assignment already exists -- so which
+    # primary gets processed first still changes the outcome. Grouping here
+    # too makes the result deterministic instead of order-dependent in that
+    # case. A no-op when FD is disabled (all nodes share one failure_domain).
+    # Fresh FD+HA activation bypasses this fallback via fd_desired_layout,
+    # but reactivation and non-HA/non-fresh paths still rely on it.
+    snodes = sorted(snodes, key=lambda n: n.failure_domain)
     if cluster.ha_type == "ha":
         for snode in snodes:
             # Do not assign secondary to removed node
@@ -1081,16 +1093,21 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                     secondary_nodes = [fd_desired_layout[snode.get_id()][0]]
                 else:
                     secondary_nodes = storage_node_ops.get_secondary_nodes(snode)
-                if not secondary_nodes:
+                if secondary_nodes:
+                    snode = db_controller.get_storage_node_by_id(snode.get_id())
+                    snode.secondary_node_id = secondary_nodes[0]
+                    snode.write_to_db()
+                    sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+                    sec_node.lvstore_stack_secondary = snode.get_id()
+                    sec_node.write_to_db()
+                elif not storage_node_ops.splice_stranded_secondary(snode):
+                    # get_secondary_nodes()'s greedy walk closed a cycle that
+                    # excludes this node, and there isn't even one existing
+                    # pairing left to splice it into (only possible this early
+                    # in the pass, before 2+ pairings exist).
                     set_cluster_status(cl_id, ols_status)
                     raise ValueError("Failed to activate cluster, No enough secondary nodes")
-
                 snode = db_controller.get_storage_node_by_id(snode.get_id())
-                snode.secondary_node_id = secondary_nodes[0]
-                snode.write_to_db()
-                sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-                sec_node.lvstore_stack_secondary = snode.get_id()
-                sec_node.write_to_db()
                 used_nodes_as_sec.append(snode.secondary_node_id)
 
             # Assign second secondary when max_fault_tolerance >= 2
@@ -1109,15 +1126,19 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                         exclude_failure_domains=[sec_node.failure_domain],
                         exclude_physical_labels=[sec_node.physical_label],
                     )
-                if not secondary_nodes_2:
+                if secondary_nodes_2:
+                    snode.tertiary_node_id = secondary_nodes_2[0]
+                    snode.write_to_db()
+                    sec_node_2 = db_controller.get_storage_node_by_id(snode.tertiary_node_id)
+                    sec_node_2.lvstore_stack_tertiary = snode.get_id()
+                    sec_node_2.write_to_db()
+                elif not storage_node_ops.splice_stranded_tertiary(snode):
+                    # get_secondary_nodes_2()'s greedy walk closed a cycle that
+                    # excludes this node, and there isn't even one existing
+                    # tertiary pairing left to splice it into.
                     set_cluster_status(cl_id, ols_status)
                     raise ValueError("Failed to activate cluster, not enough nodes for dual fault tolerance")
-
-                snode.tertiary_node_id = secondary_nodes_2[0]
-                snode.write_to_db()
-                sec_node_2 = db_controller.get_storage_node_by_id(snode.tertiary_node_id)
-                sec_node_2.lvstore_stack_tertiary = snode.get_id()
-                sec_node_2.write_to_db()
+                snode = db_controller.get_storage_node_by_id(snode.get_id())
                 used_nodes_as_tertiary.append(snode.tertiary_node_id)
 
     # Pass 1: bring up the primary LVS on every online primary node.
