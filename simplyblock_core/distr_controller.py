@@ -25,27 +25,39 @@ def _remote_device_from_device(device, status, remote_bdev=None):
 
 
 def _persist_target_device_event(device, status, target_node):
+    # Atomic CAS on the node row, NOT read + full-object write_to_db: this
+    # runs once per cluster node per device event, so a 16-node restart wave
+    # has many concurrent read-modify-write cycles against the same node
+    # records. The full-object write silently reverted a node's freshly
+    # committed in_restart -> online status flip to in_restart, which blinded
+    # every guard downstream (2026-07-29 double restart). The mutator only
+    # touches the device entries; a concurrent status/field update on the
+    # same node survives.
     db_controller = DBController()
+
+    def _mutate(node):
+        if node.get_id() == device.node_id:
+            for dev in node.nvme_devices:
+                if dev.get_id() == device.get_id():
+                    dev.status = status
+                    break
+        else:
+            new_remote_devices = []
+            found = False
+            for rem_dev in node.remote_devices:
+                if rem_dev.get_id() == device.get_id():
+                    rem_dev.status = status
+                    if not rem_dev.remote_bdev and status == NVMeDevice.STATUS_ONLINE:
+                        rem_dev.remote_bdev = f"remote_{device.alceml_bdev}n1"
+                    found = True
+                new_remote_devices.append(rem_dev)
+            if not found and status == NVMeDevice.STATUS_ONLINE:
+                new_remote_devices.append(_remote_device_from_device(device, status))
+            node.remote_devices = new_remote_devices
+        return True
+
     node = db_controller.get_storage_node_by_id(target_node.get_id())
-    if node.get_id() == device.node_id:
-        for dev in node.nvme_devices:
-            if dev.get_id() == device.get_id():
-                dev.status = status
-                break
-    else:
-        new_remote_devices = []
-        found = False
-        for rem_dev in node.remote_devices:
-            if rem_dev.get_id() == device.get_id():
-                rem_dev.status = status
-                if not rem_dev.remote_bdev and status == NVMeDevice.STATUS_ONLINE:
-                    rem_dev.remote_bdev = f"remote_{device.alceml_bdev}n1"
-                found = True
-            new_remote_devices.append(rem_dev)
-        if not found and status == NVMeDevice.STATUS_ONLINE:
-            new_remote_devices.append(_remote_device_from_device(device, status))
-        node.remote_devices = new_remote_devices
-    node.write_to_db(db_controller.kv_store)
+    db_controller.atomic_update(node, _mutate)
 
 
 def send_node_status_event(node, node_status, target_node=None):

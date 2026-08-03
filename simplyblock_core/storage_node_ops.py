@@ -5255,9 +5255,14 @@ def _detach_remote_controllers_from_peers(snode, db_controller):
     return detached[0]
 
 
-def check_node_shutdown_preconditions(node_id, force=False):
+def check_node_shutdown_preconditions(node_id, force=False, current_restart_task_id=None):
     """Read-only validation of everything that can refuse a graceful node
     shutdown. Returns (allowed, reason).
+
+    current_restart_task_id: bare task uuid (NOT JobSchedule.get_id()'s
+    composite key) of the caller's own NODE_RESTART task, when the caller IS
+    that task's cleanup shutdown. Exempts the task from the restart-task
+    guard below — it is this shutdown's driver, not a competing restart.
 
     Exists so API endpoints can evaluate the guards SYNCHRONOUSLY and return
     an actionable error (409) to the caller. Previously these checks only ran
@@ -5294,7 +5299,7 @@ def check_node_shutdown_preconditions(node_id, force=False):
             logger.warning("%s — proceeding with force", reason)
 
     task_id = tasks_controller.get_active_node_restart_task(snode.cluster_id, snode.get_id())
-    if task_id:
+    if task_id and task_id != current_restart_task_id:
         reason = f"Restart task found: {task_id}, can not shutdown storage node"
         if force is False:
             logger.error(reason)
@@ -5335,8 +5340,13 @@ def check_node_shutdown_preconditions(node_id, force=False):
     return True, ""
 
 
-def shutdown_storage_node(node_id, force=False, keep_auto_restart=False):
+def shutdown_storage_node(node_id, force=False, keep_auto_restart=False,
+                          current_restart_task_id=None):
     """Gracefully terminate a storage node.
+
+    current_restart_task_id: bare uuid of the caller's own NODE_RESTART task
+    when this shutdown is that task's cleanup step (see
+    check_node_shutdown_preconditions).
 
     keep_auto_restart=True is used by the suspend-recovery auto-shutdown
     (storage_node_monitor): it brings the node down WITHOUT marking it
@@ -5416,7 +5426,8 @@ def shutdown_storage_node(node_id, force=False, keep_auto_restart=False):
     # this for its own non-force shutdown endpoint, where the policy
     # decision belongs.
 
-    allowed, _reason = check_node_shutdown_preconditions(node_id, force=force)
+    allowed, _reason = check_node_shutdown_preconditions(
+        node_id, force=force, current_restart_task_id=current_restart_task_id)
     if not allowed:
         return False
 
@@ -5531,7 +5542,18 @@ def shutdown_storage_node(node_id, force=False, keep_auto_restart=False):
 
     # Step 6: status → offline + ANA failover bookkeeping.
     logger.info("Setting node status to offline")
-    set_node_status(node_id, StorageNode.STATUS_OFFLINE)
+    if not set_node_status(node_id, StorageNode.STATUS_OFFLINE):
+        # The FSM refused the flip — typically the record reads RESTARTING,
+        # i.e. a restart transition owns this node. SPDK is already killed at
+        # this point, but the shutdown has NOT fully committed; reporting
+        # success anyway let a restart proceed on top of a half-committed
+        # shutdown (2026-07-29 double restart). Fail the shutdown and let the
+        # caller retry once the conflicting transition ends (or
+        # _reset_if_transient / the orphan watchdog reconciles the record).
+        logger.error(
+            "Node shutdown incomplete for %s: OFFLINE transition was refused",
+            node_id)
+        return False
 
     snode = db_controller.get_storage_node_by_id(node_id)
     try:

@@ -110,6 +110,10 @@ def test_restart_node_max_retry_finishes_and_marks_offline(monkeypatch):
     node.status = StorageNode.STATUS_ONLINE
     fake_db = MagicMock()
     fake_db.get_storage_node_by_id.return_value = node
+    # Mirror DBController.atomic_update's contract: apply the mutator to the
+    # (fresh) object and return it. The restart runner's task writes go
+    # through this instead of write_to_db (stale-copy lost-update fix).
+    fake_db.atomic_update.side_effect = lambda obj, fn: (fn(obj), obj)[1]
     monkeypatch.setattr(restart_runner, "db", fake_db)
 
     sops = MagicMock()
