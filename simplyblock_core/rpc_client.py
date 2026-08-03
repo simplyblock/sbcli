@@ -1769,7 +1769,7 @@ class RPCClient:
     def bdev_s3_create(self, name, secondary_target=0, with_compression=False,
                        snapshot_backups=True, local_testing=False, local_endpoint="",
                        access_key_id="", secret_access_key="",
-                       bdb_lcpu_mask=0, s3_lcpu_mask=0, s3_thread_pool_size=0):
+                       bdb_lcpu_mask=0, s3_lcpu_mask=0, s3_thread_pool_size=0, s3_sdk_trace_enabled=True):
         """Create the S3 bdev device.
         Must be called before bdev_lvol_s3_bdev to attach it to an lvstore.
         Args:
@@ -1790,6 +1790,7 @@ class RPCClient:
             "secondary_target": secondary_target,
             "with_compression": with_compression,
             "snapshot_backups": snapshot_backups,
+            "s3_sdk_trace_enabled": s3_sdk_trace_enabled,
         }
         if local_testing:
             params["local_testing"] = True
