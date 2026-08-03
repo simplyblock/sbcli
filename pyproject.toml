@@ -15,9 +15,6 @@ ignore = [
     "B018",
     "B023",
     "BLE001",
-    "C401",
-    "C408",
-    "C414",
     "DTZ005",
     "DTZ006",
     "DTZ007",
@@ -63,8 +60,12 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"e2e/*" = ["PERF102", "PERF402", "ISC004", "LOG015"]
+"e2e/*" = ["C401", "C408", "C414", "ISC004", "LOG015", "PERF102", "PERF402"]
 "scripts/*" = ["ISC004", "LOG015"]
+
+[tool.ruff.lint.flake8-comprehensions]
+# Less performant but more readable
+allow-dict-calls-with-keyword-arguments = true
 
 
 [tool.mypy]
