@@ -416,7 +416,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
             if len(nodes) > 0:
                 host_node = nodes[0]
             else:
-                return False, f"Can not find storage node: {host_id_or_name}"
+                raise KeyError(f"Can not find storage node: {host_id_or_name}")
         if host_node.lvol_sync_del():
             logger.info(f"LVol sync delete task on node: {host_node.get_id()}, proceeding anyway")
 
