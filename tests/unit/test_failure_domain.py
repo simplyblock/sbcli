@@ -24,6 +24,7 @@ Tests cover:
 All external dependencies (FDB, RPC) are mocked.
 """
 
+import random
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -870,6 +871,125 @@ class TestPlacementPhysicalLabel(unittest.TestCase):
         assert "c3" in result
         assert "c1" not in result  # secondary's label
         assert "c2" not in result  # primary's label
+
+
+# ===========================================================================
+# 9. Domain-grouped ordering eliminates pairing order-sensitivity
+#
+# Two independent things had to be fixed for the pairing loop to stop being
+# order-sensitive:
+#
+#   1. get_secondary_nodes/get_secondary_nodes_2/splice_stranded_secondary/
+#      splice_stranded_tertiary each fetch their own candidate list fresh via
+#      db_controller.get_storage_nodes_by_cluster_id() and scan/score it in
+#      that order -- so their domain-disjointness used to depend on whatever
+#      order the DB happened to return nodes in, regardless of caller. All
+#      four now sort their fetched node list by failure_domain first.
+#   2. Even with (1) fixed, _cluster_activate's own pairing loop still
+#      determines which primary is processed first, and once a domain-size
+#      imbalance forces splice-repair, the repair works off whatever partial
+#      assignment already exists -- so the CALLER's processing order still
+#      changes the outcome. _cluster_activate now also sorts its local
+#      `snodes` by failure_domain before the loop.
+#
+# Verified here by running the full secondary+tertiary pairing sequence with
+# the DB mock returning nodes in an arbitrary (shuffled) order -- proving (1)
+# -- while the caller-side loop mirrors _cluster_activate's own domain sort
+# -- proving (1)+(2) together give a fully order-independent result.
+# ===========================================================================
+
+class TestDomainGroupedCandidateScanOrderIndependence(unittest.TestCase):
+
+    def _mock_db(self, cluster, nodes):
+        mock_db = MagicMock()
+        by_id = {n.get_id(): n for n in nodes}
+        mock_db.get_cluster_by_id.return_value = cluster
+        mock_db.get_storage_nodes_by_cluster_id.return_value = nodes
+        mock_db.get_storage_node_by_id.side_effect = lambda nid: by_id.get(nid)
+        return mock_db
+
+    @staticmethod
+    def _build_nodes(domain_sizes):
+        nodes = []
+        idx = 0
+        for fd, size in enumerate(domain_sizes, start=1):
+            for _ in range(size):
+                idx += 1
+                nodes.append(_node(f"n{idx}", f"10.0.0.{idx}", failure_domain=fd))
+        return nodes
+
+    def _run_pairing(self, db_order_nodes, cluster):
+        """Mirrors _cluster_activate's secondary+tertiary pairing loop
+        (cluster_ops.py), including its own failure_domain sort of the
+        processing order. `db_order_nodes` is deliberately left in an
+        arbitrary order to represent whatever get_storage_nodes_by_cluster_id
+        naturally returns -- proving get_secondary_nodes/_2's own internal
+        sort is what keeps candidate scanning domain-grouped regardless."""
+        import simplyblock_core.storage_node_ops as ops
+        by_id = {n.get_id(): n for n in db_order_nodes}
+        for n in db_order_nodes:
+            n.write_to_db = MagicMock()
+
+        processing_order = sorted(db_order_nodes, key=lambda n: n.failure_domain)
+
+        with patch("simplyblock_core.storage_node_ops.DBController",
+                   return_value=self._mock_db(cluster, db_order_nodes)):
+            for snode in processing_order:
+                secs = ops.get_secondary_nodes(snode)
+                if secs:
+                    snode.secondary_node_id = secs[0]
+                    by_id[secs[0]].lvstore_stack_secondary = snode.get_id()
+                else:
+                    assert ops.splice_stranded_secondary(snode), f"{snode.get_id()} stranded on secondary"
+
+            used_tertiary = []
+            for snode in processing_order:
+                sec = by_id[snode.secondary_node_id]
+                t2 = ops.get_secondary_nodes_2(
+                    snode,
+                    exclude_ids=[snode.secondary_node_id] + used_tertiary,
+                    exclude_mgmt_ips=[sec.mgmt_ip],
+                    exclude_failure_domains=[sec.failure_domain],
+                    exclude_physical_labels=[sec.physical_label],
+                )
+                if t2:
+                    snode.tertiary_node_id = t2[0]
+                    by_id[t2[0]].lvstore_stack_tertiary = snode.get_id()
+                    used_tertiary.append(t2[0])
+                else:
+                    assert ops.splice_stranded_tertiary(snode), f"{snode.get_id()} stranded on tertiary"
+                    used_tertiary.append(snode.tertiary_node_id)
+
+        conflicts = 0
+        for n in db_order_nodes:
+            sec = by_id[n.secondary_node_id]
+            ter = by_id[n.tertiary_node_id]
+            if len({n.failure_domain, sec.failure_domain, ter.failure_domain}) != 3:
+                conflicts += 1
+        return conflicts
+
+    def test_equal_domains_conflict_free_across_many_arbitrary_db_orders(self):
+        cluster = _cluster(True, distr_npcs=2)
+        cluster.distr_ndcs = 2
+        for seed in range(50):
+            nodes = self._build_nodes([4, 4, 4])
+            random.Random(seed).shuffle(nodes)  # arbitrary "DB return" order
+            conflicts = self._run_pairing(nodes, cluster)
+            assert conflicts == 0, f"seed={seed} produced {conflicts} conflicts"
+
+    def test_unequal_domains_conflict_count_is_deterministic(self):
+        # 4/5/4: a full zero-conflict assignment is mathematically impossible
+        # (domains aren't equal size), but the combined sort (candidate scan
+        # + processing order) makes the resulting conflict count the same
+        # regardless of the arbitrary DB return order.
+        cluster = _cluster(True, distr_npcs=2)
+        cluster.distr_ndcs = 2
+        counts = set()
+        for seed in range(20):
+            nodes = self._build_nodes([4, 5, 4])
+            random.Random(seed).shuffle(nodes)
+            counts.add(self._run_pairing(nodes, cluster))
+        assert len(counts) == 1, f"expected one consistent conflict count, got {counts}"
 
 
 if __name__ == "__main__":
