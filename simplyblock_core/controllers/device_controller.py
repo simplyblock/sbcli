@@ -4,7 +4,7 @@ import time
 import logging
 import uuid
 
-from simplyblock_core import distr_controller, utils, storage_node_ops
+from simplyblock_core import constants, distr_controller, utils, storage_node_ops
 from simplyblock_core.controllers import device_events, tasks_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
@@ -563,7 +563,34 @@ def restart_device(device_id, force=False):
         except Exception as e:
             logger.error(f"Failed to log teardown-warning event for {device_id}: {e}")
 
-    if not snode.rpc_client().bdev_nvme_controller_list(device_obj.nvme_controller):
+    if device_obj.bdev_type == "aio":
+        # lblk mode: the base bdev is an AIO bdev over a kernel block device.
+        # Re-resolve serial-first (kernel names shift), recreate if gone.
+        if not snode.rpc_client().get_bdevs(device_obj.nvme_bdev):
+            try:
+                filename = device_obj.by_id_path or device_obj.device_path
+                try:
+                    inventory, _ = snode.client(timeout=30, retry=1).get_blockdevices()
+                    for blk in inventory or []:
+                        if blk.get("serial") == device_obj.serial_number:
+                            filename = blk.get("by_id_path") or blk.get("device_path")
+                            device_obj.device_path = blk.get("device_path", device_obj.device_path)
+                            device_obj.by_id_path = blk.get("by_id_path", device_obj.by_id_path)
+                            break
+                except Exception as e:
+                    logger.warning(f"blockdevices inventory failed, using stored path: {e}")
+                if not filename:
+                    logger.error(f"No block device path known for {device_id}")
+                    return False
+                snode.rpc_client().bdev_aio_create(device_obj.nvme_bdev, filename)
+                snode.rpc_client().bdev_examine(device_obj.nvme_bdev)
+                snode.rpc_client().bdev_wait_for_examine()
+                snode.rpc_client().bdev_set_qd_sampling_period(
+                    device_obj.nvme_bdev, constants.AIO_QD_SAMPLING_PERIOD_US)
+            except Exception as e:
+                logger.error(e)
+                return False
+    elif not snode.rpc_client().bdev_nvme_controller_list(device_obj.nvme_controller):
         try:
             ret = snode.client(timeout=30, retry=1).bind_device_to_spdk(device_obj.pcie_address)
             logger.debug(ret)
@@ -983,12 +1010,24 @@ def reset_storage_device(dev_id):
     logger.info("Resetting device")
     rpc_client = snode.rpc_client()
 
-    controller_name = device.nvme_controller
-    response = rpc_client.reset_device(controller_name)
-    if not response:
-        logger.error(f"Failed to reset NVMe BDev {controller_name}")
-        return False
-    time.sleep(3)
+    if device.bdev_type == "aio":
+        # No controller-reset primitive for AIO bdevs, and deleting/
+        # recreating the bdev here would cascade a REMOVE through the
+        # alceml stack. Liveness-probe instead: bdev present => clear the
+        # error state below (device_set_online also forgives flaps);
+        # bdev gone => fail so the tasks framework escalates to
+        # restart_device, whose full stack rebuild is the real recovery.
+        if not rpc_client.get_bdevs(device.nvme_bdev):
+            logger.error(f"AIO bdev {device.nvme_bdev} is gone; reset cannot "
+                         f"recover it — restart the device instead")
+            return False
+    else:
+        controller_name = device.nvme_controller
+        response = rpc_client.reset_device(controller_name)
+        if not response:
+            logger.error(f"Failed to reset NVMe BDev {controller_name}")
+            return False
+        time.sleep(3)
 
     # set io_error flag False
     device_set_io_error(dev_id, False)
@@ -1333,18 +1372,47 @@ def new_device_from_failed(device_id):
         logger.error("Device is already added back from failed")
         return False
 
-    if not device_node.rpc_client().bdev_nvme_controller_list(device.nvme_controller):
-        try:
-            ret = device_node.client(timeout=30, retry=1).bind_device_to_spdk(device.pcie_address)
-            logger.debug(ret)
-            device_node.rpc_client().bdev_nvme_controller_attach(device.nvme_controller, device.pcie_address)
-        except Exception as e:
-            logger.error(e)
+    if device.bdev_type == "aio":
+        # lblk mode: ensure the AIO bdev exists again (serial-first
+        # re-resolution against the live host; stored path as fallback).
+        if not device_node.rpc_client().get_bdevs(device.nvme_bdev):
+            try:
+                filename = device.by_id_path or device.device_path
+                try:
+                    inventory, _ = device_node.client(timeout=30, retry=1).get_blockdevices()
+                    for blk in inventory or []:
+                        if blk.get("serial") == device.serial_number:
+                            filename = blk.get("by_id_path") or blk.get("device_path")
+                            break
+                except Exception as e:
+                    logger.warning(f"blockdevices inventory failed, using stored path: {e}")
+                if not filename:
+                    logger.error(f"No block device path known for {device_id}")
+                    return False
+                device_node.rpc_client().bdev_aio_create(device.nvme_bdev, filename)
+                device_node.rpc_client().bdev_examine(device.nvme_bdev)
+                device_node.rpc_client().bdev_wait_for_examine()
+                device_node.rpc_client().bdev_set_qd_sampling_period(
+                    device.nvme_bdev, constants.AIO_QD_SAMPLING_PERIOD_US)
+            except Exception as e:
+                logger.error(e)
+                return False
+        if not device_node.rpc_client().get_bdevs(device.nvme_bdev):
+            logger.error(f"Failed to find AIO bdev {device.nvme_bdev}")
             return False
+    else:
+        if not device_node.rpc_client().bdev_nvme_controller_list(device.nvme_controller):
+            try:
+                ret = device_node.client(timeout=30, retry=1).bind_device_to_spdk(device.pcie_address)
+                logger.debug(ret)
+                device_node.rpc_client().bdev_nvme_controller_attach(device.nvme_controller, device.pcie_address)
+            except Exception as e:
+                logger.error(e)
+                return False
 
-    if not device_node.rpc_client().bdev_nvme_controller_list(device.nvme_controller):
-        logger.error(f"Failed to find device nvme controller {device.nvme_controller}")
-        return False
+        if not device_node.rpc_client().bdev_nvme_controller_list(device.nvme_controller):
+            logger.error(f"Failed to find device nvme controller {device.nvme_controller}")
+            return False
 
     new_device = NVMeDevice(device.to_dict())
     new_device.uuid = str(uuid.uuid4())
@@ -1378,6 +1446,16 @@ def get_device_health_info(device_id):
     except KeyError as e:
         logger.error(e)
         return False
+
+    if device.bdev_type == "aio":
+        # SMART is not reachable through SPDK for AIO bdevs; host-side
+        # smartctl via the node agent is a possible follow-up.
+        return json.dumps({
+            "bdev_type": "aio",
+            "device_path": device.device_path,
+            "smart": None,
+            "message": "SMART data is not available through SPDK for AIO devices",
+        }, indent=2)
 
     rpc_client = snode.rpc_client()
     ret = rpc_client.bdev_nvme_get_controller_health_info(device.nvme_controller)
