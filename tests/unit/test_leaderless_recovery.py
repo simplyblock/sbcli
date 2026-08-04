@@ -1,23 +1,28 @@
 # coding=utf-8
-"""Leaderless-LVS recovery must not force leadership from the control plane
-(run 20260725; design constraint from incident 2026-07-06 LVS_13).
+"""Leaderless-LVS recovery must NEVER force leadership from the control plane.
 
-Guards under test on storage_node_ops._recover_leaderless_lvs:
+Design rule (2026-08-04, incident sb_logs_20260730_195000_30m LVS_9):
+leadership is granted by RPC only where it is structurally required and
+race-free — lvstore creation, activation, and the restart flow's fenced
+demote->grant handoff. Recovery paths repair the redirect topology and wait
+for IO-driven self-promotion; if the LVS stays leaderless they fail fast.
+The former guarded "last-resort grant" is gone: on 2026-07-30 it raced the
+restart flow's own handoff into a writer conflict (LVS_9), and earlier runs
+showed CP-forced grants risking stale blob metadata (2026-07-06 LVS_13) and
+grant/demote flapping (run 20260725).
+
+Contract under test on storage_node_ops._recover_leaderless_lvs:
   - single-flight: no recovery without winning the FDB takeleader lock;
-  - self-promotion preferred: hublvol repair + wait, no set_leader when a
-    node promotes itself;
-  - last-resort grant suppressed while a port-allow / restart task is active
-    on any LVS member (it owns leadership movement);
-  - last-resort grant suppressed when the taker's JM quorum is not intact
-    (a grant would self-demote and flap);
-  - grant fires (and is verified) only when every guard passes.
+  - hublvol repair + bounded self-promotion wait, returning whichever node
+    promoted itself;
+  - bdev_lvol_set_leader is NEVER called, no matter the outcome;
+  - still-leaderless after the wait -> None (callers fail fast).
 """
 import types
 import unittest
 from unittest.mock import MagicMock, patch
 
 from simplyblock_core import storage_node_ops
-from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.storage_node import StorageNode
 
 
@@ -78,52 +83,28 @@ class TestRecoverLeaderlessLvs(unittest.TestCase):
         # The redirect path was repaired for the follower first.
         self.mock_hub.assert_called_once()
 
-    def test_no_grant_while_port_allow_task_active(self):
-        self.db.get_job_tasks.return_value = [types.SimpleNamespace(
-            function_name=JobSchedule.FN_PORT_ALLOW, node_id="peer-2",
-            status="running", canceled=False)]
-        self.assertIsNone(self._run())
-        self.taker._rpc.bdev_lvol_set_leader.assert_not_called()
-
-    def test_no_grant_while_restart_task_active(self):
-        self.db.get_job_tasks.return_value = [types.SimpleNamespace(
-            function_name=JobSchedule.FN_NODE_RESTART, node_id="primary-1",
-            status="running", canceled=False)]
-        self.assertIsNone(self._run())
-        self.taker._rpc.bdev_lvol_set_leader.assert_not_called()
-
-    def test_no_grant_when_task_state_unreadable(self):
-        self.db.get_job_tasks.side_effect = RuntimeError("fdb 1031")
-        self.assertIsNone(self._run())
-        self.taker._rpc.bdev_lvol_set_leader.assert_not_called()
-
-    def test_no_grant_without_jm_quorum(self):
-        self.taker._rpc.jc_get_jm_status.return_value = {
-            "jm1": True, "remote_jm2": False, "remote_jm3": False}
-        self.assertIsNone(self._run())
-        self.taker._rpc.bdev_lvol_set_leader.assert_not_called()
-
-    def test_no_grant_when_jm_status_unreadable(self):
-        self.taker._rpc.jc_get_jm_status.side_effect = RuntimeError("timeout")
-        self.assertIsNone(self._run())
-        self.taker._rpc.bdev_lvol_set_leader.assert_not_called()
-
-    def test_last_resort_grant_fires_and_is_verified(self):
-        calls = {"granted": False}
-
-        def grant(lvs, leader=False, bs_nonleadership=False):
-            calls["granted"] = True
-            return True
-
-        self.taker._rpc.bdev_lvol_set_leader.side_effect = grant
+    def test_peer_self_promotion_is_accepted(self):
+        # Whichever node promoted itself is returned — the CP does not
+        # second-guess the data plane's choice.
         self.mock_is_leader.side_effect = (
-            lambda node, lvs: calls["granted"] and node.get_id() == "primary-1")
+            lambda node, lvs: node.get_id() == "peer-2")
         result = self._run()
-        self.assertIs(result, self.taker)
-        self.taker._rpc.bdev_lvol_set_leader.assert_called_once_with(
-            "LVS_1", leader=True)
+        self.assertIs(result, self.peer)
+        self.taker._rpc.bdev_lvol_set_leader.assert_not_called()
+        self.peer._rpc.bdev_lvol_set_leader.assert_not_called()
 
-    def test_unverified_grant_returns_none(self):
-        # Grant RPC accepted but leadership never confirmed -> refuse to route.
+    def test_still_leaderless_returns_none_without_grant(self):
+        # No node ever self-promotes: recovery must fail fast and must NOT
+        # fall back to a control-plane grant (the removed last resort).
         self.assertIsNone(self._run())
-        self.taker._rpc.bdev_lvol_set_leader.assert_called_once()
+        self.taker._rpc.bdev_lvol_set_leader.assert_not_called()
+        self.peer._rpc.bdev_lvol_set_leader.assert_not_called()
+
+    def test_hublvol_repair_failure_does_not_trigger_grant(self):
+        self.mock_hub.side_effect = RuntimeError("repair failed")
+        self.assertIsNone(self._run())
+        self.taker._rpc.bdev_lvol_set_leader.assert_not_called()
+
+
+if __name__ == "__main__":
+    unittest.main()
