@@ -10,7 +10,7 @@ from typing import List, Tuple, Optional
 from simplyblock_core import utils, constants
 from simplyblock_core.controllers import snapshot_controller, pool_controller, lvol_events, tasks_controller, \
     snapshot_events
-from simplyblock_core.db_controller import DBController
+from simplyblock_core.db_controller import DBController, SubsystemCapacityError
 from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.kms import KMSException, create_kms_connection, lvol_dek_path, pool_kek_name
 from simplyblock_core.controllers.host_auth import (
@@ -326,7 +326,14 @@ def validate_aes_xts_keys(key1: str, key2: str) -> Tuple[bool, str]:
 
 
 def _resolve_lvol_subsystem(lvol, host_node, cl, namespaced, all_lvols):
-    """Pick the subsystem NQN for a new lvol.
+    """ADVISORY pre-check of the subsystem pick for a new lvol — fails the
+    create early (before KMS keys etc.) when the node has no room at all.
+
+    The AUTHORITATIVE pick happens later, inside the FDB transaction of
+    ``DBController.claim_lvol_ns_slot`` at record-write time, which recounts
+    occupancy and persists the record atomically (two concurrent creates
+    otherwise both grab the same last free namespace slot). Whatever this
+    function assigns to ``lvol.nqn``/``lvol.namespace`` is overwritten there.
 
     A namespaced lvol joins an existing subsystem on the host node when one
     has a free namespace slot; otherwise (and for non-namespaced lvols) a new
@@ -670,20 +677,21 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         lvol.lvol_type += ',crypto'
         lvol.top_bdev = lvol.crypto_bdev
 
-    # Process allowed hosts (for host restriction and/or DH-HMAC-CHAP
-    # authentication). Only when this lvol owns a new subsystem — a namespaced
-    # lvol that joined an existing subsystem (lvol.namespace set) inherits
-    # that subsystem's host configuration.
-    if not lvol.namespace:
-        if pool.dhchap:
-            # Pool-level DHCHAP: inherit allowed hosts from pool (no per-host key generation)
-            lvol.allowed_hosts = [{"nqn": h} for h in pool.allowed_hosts]
-        elif allowed_hosts:
-            # Legacy per-lvol host restriction with pool.sec_options key generation
-            host_entries = _build_host_entries(allowed_hosts, pool.sec_options or None)
-            if isinstance(host_entries, tuple):
-                return host_entries  # (False, error_message)
-            lvol.allowed_hosts = host_entries
+    # Allowed hosts / DH-HMAC-CHAP config that applies only if this lvol ends
+    # up OWNING a new subsystem — a namespaced lvol that joins an existing
+    # subsystem inherits that subsystem's host configuration instead. Computed
+    # up front (key generation can fail with a user-facing error); whether it
+    # applies is decided inside the slot-claim transaction below.
+    standalone_allowed_hosts = None
+    if pool.dhchap:
+        # Pool-level DHCHAP: inherit allowed hosts from pool (no per-host key generation)
+        standalone_allowed_hosts = [{"nqn": h} for h in pool.allowed_hosts]
+    elif allowed_hosts:
+        # Legacy per-lvol host restriction with pool.sec_options key generation
+        host_entries = _build_host_entries(allowed_hosts, pool.sec_options or None)
+        if isinstance(host_entries, tuple):
+            return host_entries  # (False, error_message)
+        standalone_allowed_hosts = host_entries
 
     # Set pool_uuid before write_to_db and add_lvol_on_node so that
     # add_lvol_on_node can look up the pool for DHCHAP key registration.
@@ -715,13 +723,25 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
                 logger.exception(msg)
                 return False, msg
 
-    lvol.write_to_db(db_controller.kv_store)
+    # ONE FDB transaction: pick the namespace slot and persist the record
+    # (STATUS_IN_CREATION) together. The record itself is the slot claim, so
+    # a concurrent create/clone conflict-retries and recounts with this
+    # record visible instead of racing it for the same last slot
+    # (_resolve_lvol_subsystem above was only the advisory early-fail check).
+    try:
+        db_controller.claim_lvol_ns_slot(
+            lvol, host_node, bool(namespaced),
+            standalone_nqn=cl.nqn + ":lvol:" + lvol.uuid,
+            standalone_allowed_hosts=standalone_allowed_hosts)
+    except SubsystemCapacityError as e:
+        logger.error(str(e))
+        return False, str(e)
 
     if ha_type == "single":
         if host_node.status == StorageNode.STATUS_ONLINE:
             lvol_bdev, error = add_lvol_on_node(lvol, host_node)
             if error:
-                lvol.remove(db_controller.kv_store)
+                db_controller.release_lvol_ns_slot(lvol)
                 return False, error
 
             lvol.nodes = [host_node.get_id()]
@@ -730,7 +750,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         else:
             msg = f"Host node in not online: {host_node.get_id()}"
             logger.error(msg)
-            lvol.remove(db_controller.kv_store)
+            db_controller.release_lvol_ns_slot(lvol)
             return False, msg
 
     if ha_type == "ha":
@@ -757,7 +777,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         if primary_node is None:
             msg = "No leader available for lvol create"
             logger.error(msg)
-            lvol.remove(db_controller.kv_store)
+            db_controller.release_lvol_ns_slot(lvol)
             return False, msg
 
         precheck_started = time.time()
@@ -769,7 +789,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
             if action == "reject":
                 msg = f"Cannot create lvol: non-leader {nl.get_id()[:8]} unreachable but fabric healthy"
                 logger.error(msg)
-                lvol.remove(db_controller.kv_store)
+                db_controller.release_lvol_ns_slot(lvol)
                 return False, msg
             elif action == "proceed":
                 secondary_nodes.append(nl)
@@ -818,7 +838,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
                     "the record in in_deletion for the monitor to complete",
                     lvol.get_id())
             else:
-                lvol.remove(db_controller.kv_store)
+                db_controller.release_lvol_ns_slot(lvol)
             return False, str(result)
 
         lvol_bdev = result
@@ -1182,22 +1202,20 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
     if  err:
         if err and err["code"] == -32602 and lvol.namespace and lvol.node_id == snode.get_id():
             logger.info("Error adding namespace to subsystem, finding new subsystem for namespaced lvol")
-            all_lvols = DBController().get_mini_lvols()
-            result = get_next_available_subsystem_on_node(lvol.node_id, all_lvols)
-            if result:
-                lvol.nqn = result.nqn
-                lvol.namespace = result.uuid
-                lvol.max_namespace_per_subsys = result.max_namespace_per_subsys
-            else:
-                subsys_count = count_lvol_subsystems(snode, all_lvols)
-                if subsys_count >= snode.max_lvol:
-                    error = f"Too many subsystems on node: {snode.get_id()}, max subsystems reached: {snode.max_lvol}"
-                    logger.error(error)
-                    return _fail_after_bdev(lvol, rpc_client, error)
-
-                cluster = DBController().get_cluster_by_id(snode.cluster_id)
-                lvol.nqn = cluster.nqn + ":lvol:" + lvol.uuid
-                lvol.namespace = ""
+            # Re-claim transactionally, excluding the subsystem SPDK just
+            # rejected (the DB count said it had room — SPDK is the authority
+            # on its own namespace table). The lvol's record is rewritten in
+            # the same transaction, so its slot moves atomically from the
+            # rejected subsystem to the new one (or to a standalone one).
+            cluster = DBController().get_cluster_by_id(snode.cluster_id)
+            try:
+                DBController().claim_lvol_ns_slot(
+                    lvol, snode, True,
+                    standalone_nqn=cluster.nqn + ":lvol:" + lvol.uuid,
+                    exclude_nqns={lvol.nqn})
+            except SubsystemCapacityError as e:
+                logger.error(str(e))
+                return _fail_after_bdev(lvol, rpc_client, str(e))
             return add_lvol_on_node(lvol, snode, is_primary=is_primary, secondary_index=secondary_index)
         else:
             return _fail_after_bdev(
@@ -1684,7 +1702,7 @@ def delete_lvol(lvol: LVol, *, force_delete: bool = False, lock: bool = True) ->
     if snode is None:
         logger.error(f"lvol node id not found: {lvol.node_id}")
 
-        lvol.remove(db_controller.kv_store)
+        db_controller.release_lvol_ns_slot(lvol)
 
         # if lvol is clone and snapshot is deleted, then delete snapshot
         if lvol.cloned_from_snap:
@@ -2849,7 +2867,7 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
     lvol_bdev, error = add_lvol_on_node(new_lvol, target_node)
     if error:
         logger.error(error)
-        new_lvol.remove(db_controller.kv_store)
+        db_controller.release_lvol_ns_slot(new_lvol)
         return None, error
 
     new_lvol.lvol_uuid = lvol_bdev['uuid']
@@ -2873,7 +2891,7 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
             ret = delete_lvol_from_node(new_lvol, target_node)
             if not ret:
                 logger.error("")
-            new_lvol.remove(db_controller.kv_store)
+            db_controller.release_lvol_ns_slot(new_lvol)
             return None, error
 
     return new_lvol, None
@@ -3054,7 +3072,7 @@ def replication_commit(lvol_id):
     if tgt_map_id is None:
         logger.error(f"Could not resolve target map_id for {new_lvol.lvol_bdev}")
         delete_lvol_from_node(new_lvol, target_node)
-        new_lvol.remove(db_controller.kv_store)
+        db_controller.release_lvol_ns_slot(new_lvol)
         return False, "Could not resolve target map_id"
 
     lvol_replication = LVolReplication()
@@ -3368,7 +3386,7 @@ def replicate_lvol_on_source_cluster(lvol_id, cluster_id=None, pool_uuid=None):
     lvol_bdev, error = add_lvol_on_node(new_lvol, source_node)
     if error:
         logger.error(error)
-        new_lvol.remove(db_controller.kv_store)
+        db_controller.release_lvol_ns_slot(new_lvol)
         return False, error
 
     new_lvol.lvol_uuid = lvol_bdev['uuid']
@@ -3383,7 +3401,7 @@ def replicate_lvol_on_source_cluster(lvol_id, cluster_id=None, pool_uuid=None):
             ret = delete_lvol_from_node(new_lvol, source_node)
             if not ret:
                 logger.error("")
-            new_lvol.remove(db_controller.kv_store)
+            db_controller.release_lvol_ns_slot(new_lvol)
             return False, error
 
     new_lvol.status = LVol.STATUS_ONLINE
@@ -3599,10 +3617,15 @@ def get_namespaces_per_lvol(lvol):
     return ns_count
 
 
-def get_next_available_subsystem_on_node(node_id, all_lvols=None)-> Optional[LVol]:
-    db_controller = DBController()
-    if not all_lvols:
-        all_lvols = db_controller.get_mini_lvols()
+def get_next_available_subsystem_on_node(node_id, all_lvols=None, exclude_nqns=None)-> Optional[LVol]:
+    """``exclude_nqns`` skips subsystems the caller knows are unusable even
+    though the DB count says they have room (SPDK rejected the add with
+    -32602 — SPDK is the authority on its own namespace table)."""
+    # `is None`, NOT falsy: an empty list from an in-transaction snapshot read
+    # must stay authoritative — re-reading here would escape the caller's
+    # transaction (claim_lvol_ns_slot passes the snapshot it counted from).
+    if all_lvols is None:
+        all_lvols = DBController().get_mini_lvols()
 
     # Count active namespaces per NQN in a single pass instead of issuing a
     # separate DB read for every subsystem root (was O(N²)).
@@ -3619,6 +3642,8 @@ def get_next_available_subsystem_on_node(node_id, all_lvols=None)-> Optional[LVo
         if lvol.node_id != node_id:
             continue
         if lvol.status in [LVol.STATUS_IN_DELETION, LVol.STATUS_DELETED, LVol.STATUS_IN_CREATION]:
+            continue
+        if exclude_nqns and lvol.nqn in exclude_nqns:
             continue
         if lvol.nqn in ns_counts and ns_counts.get(lvol.nqn, 0) < lvol.max_namespace_per_subsys:
             if lvol not in ret:

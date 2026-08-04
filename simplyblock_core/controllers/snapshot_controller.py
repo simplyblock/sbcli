@@ -17,7 +17,7 @@ from simplyblock_core import constants, utils
 from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.kms import create_kms_connection, lvol_dek_path, pool_kek_name
 from simplyblock_core.kms._exceptions import KMSException
-from simplyblock_core.db_controller import DBController
+from simplyblock_core.db_controller import DBController, SubsystemCapacityError
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot
@@ -1151,9 +1151,9 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
             logger.warning(f"Cluster provisioned cap warning, util: {cluster_size_prov_util}% of cluster util: {cluster.prov_cap_warn}")
 
 
-    # Resolve the namespace slot early so we can (a) skip the subsystem limit
-    # check when the clone fits into an existing subsystem, and (b) reuse the
-    # result below instead of calling get_next_available_subsystem_on_node twice.
+    # ADVISORY early capacity check only — the authoritative namespace-slot
+    # pick happens transactionally in claim_lvol_ns_slot at record-write time
+    # (two concurrent clones/creates otherwise race for the same last slot).
     _available_subsys = lvol_controller.get_next_available_subsystem_on_node(snode.get_id(), all_lvols=all_lvols) if namespaced else None
 
     if not _available_subsys:
@@ -1196,17 +1196,8 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     lvol.nqn = cluster.nqn + ":lvol:" + lvol.uuid
     lvol.max_namespace_per_subsys = snap.lvol.max_namespace_per_subsys
 
-    if namespaced:
-        # reuse the slot resolved above — avoids a second DB read
-        if _available_subsys:
-            lvol.nqn = _available_subsys.nqn
-            lvol.namespace = _available_subsys.uuid
-            lvol.max_namespace_per_subsys = _available_subsys.max_namespace_per_subsys
-
     if pvc_name:
         lvol.pvc_name = pvc_name
-    if pvc_namespace and not lvol.namespace:
-        lvol.namespace = pvc_namespace
 
     lvol.status = LVol.STATUS_IN_CREATION
     lvol.bdev_stack = [
@@ -1269,7 +1260,18 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
                 logger.exception(msg)
                 return False, msg
 
-    lvol.write_to_db(db_controller.kv_store)
+    # ONE FDB transaction: pick the namespace slot and persist the record
+    # (STATUS_IN_CREATION) together — the record is the slot claim, so
+    # concurrent clones/creates conflict-retry instead of double-booking the
+    # subsystem's last free namespace slot.
+    try:
+        db_controller.claim_lvol_ns_slot(
+            lvol, snode, bool(namespaced),
+            standalone_nqn=cluster.nqn + ":lvol:" + lvol.uuid,
+            standalone_namespace=pvc_namespace or "")
+    except SubsystemCapacityError as e:
+        logger.error(str(e))
+        return False, str(e)
 
     if lvol.ha_type == "single":
         lvol_bdev, error = lvol_controller.add_lvol_on_node(lvol, snode)
@@ -1305,7 +1307,7 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
             msg = (f"No leader available for LVS {lvol.lvs_name} — "
                    f"rejecting clone until leadership is re-established")
             logger.error(msg)
-            lvol.remove(db_controller.kv_store)
+            db_controller.release_lvol_ns_slot(lvol)
             return False, msg
 
         # Assign each non-leader a stable index so its subsystem is created
@@ -1331,7 +1333,7 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
             if action == "reject":
                 msg = f"Cannot clone: non-leader {candidate.get_id()[:8]} unreachable but fabric healthy"
                 logger.error(msg)
-                lvol.remove(db_controller.kv_store)
+                db_controller.release_lvol_ns_slot(lvol)
                 return False, msg
             elif action == "proceed":
                 secondary_nodes.append(candidate)
@@ -1359,7 +1361,7 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
                     if error:
                         logger.error(error)
                         if lvol.status != LVol.STATUS_IN_DELETION:
-                            lvol.remove(db_controller.kv_store)
+                            db_controller.release_lvol_ns_slot(lvol)
                         return False, error
                     lvol.lvol_uuid = lvol_bdev['uuid']
                     lvol.blobid = lvol_bdev['driver_specific']['lvol']['blobid']
@@ -1373,11 +1375,11 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
                     if error:
                         logger.error(error)
                         if lvol.status != LVol.STATUS_IN_DELETION:
-                            lvol.remove(db_controller.kv_store)
+                            db_controller.release_lvol_ns_slot(lvol)
                         return False, error
         except PreconditionError as e:
             if lvol.status != LVol.STATUS_IN_DELETION:
-                lvol.remove(db_controller.kv_store)
+                db_controller.release_lvol_ns_slot(lvol)
             return False, str(e)
 
     lvol.status = LVol.STATUS_ONLINE
