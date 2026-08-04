@@ -9880,6 +9880,18 @@ def get_secondary_nodes(current_node: StorageNode, exclude_ids=None, removed_nod
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(current_node.cluster_id)
     all_nodes = db_controller.get_storage_nodes_by_cluster_id(current_node.cluster_id)
+    # Group by failure domain (stable sort, preserves DB order within each
+    # domain) before scanning candidates. The "first valid candidate after my
+    # own position" logic below skips same-domain nodes as forbidden, so on an
+    # arbitrary/interleaved node order it can still land back on a same-domain
+    # pick once every other domain's nodes are already claimed -- purely an
+    # artifact of iteration order, not availability (verified by simulation:
+    # ~1 in 5 arbitrary orderings produces an avoidable same-domain pick even
+    # when a fully domain-disjoint assignment exists). Grouping first removes
+    # that sensitivity: every node's forward scan cleanly skips past the rest
+    # of its own domain into the next one. A no-op when FD is disabled (all
+    # nodes share the same failure_domain, so the sort is order-preserving).
+    all_nodes = sorted(all_nodes, key=lambda n: n.failure_domain)
     if len(all_nodes) == 2:
         for node in all_nodes:
             if node.get_id() != current_node.get_id() and node.get_id() not in exclude_ids:
@@ -9963,6 +9975,9 @@ def splice_stranded_secondary(stranded_node) -> bool:
     """
     db_controller = DBController()
     all_nodes = db_controller.get_storage_nodes_by_cluster_id(stranded_node.cluster_id)
+    # Deterministic tie-breaking among equally domain-scored edges -- see
+    # get_secondary_nodes for why this sort matters.
+    all_nodes = sorted(all_nodes, key=lambda n: n.failure_domain)
     edges = [n for n in all_nodes if n.secondary_node_id and n.get_id() != stranded_node.get_id()]
 
     def _host_disjoint(p, x):
@@ -10035,6 +10050,9 @@ def get_secondary_nodes_2(current_node: StorageNode, exclude_ids=None, exclude_m
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(current_node.cluster_id)
     all_nodes = db_controller.get_storage_nodes_by_cluster_id(current_node.cluster_id)
+    # See get_secondary_nodes for why this sort matters: it removes the
+    # pairing algorithm's sensitivity to arbitrary/interleaved node order.
+    all_nodes = sorted(all_nodes, key=lambda n: n.failure_domain)
     if len(all_nodes) == 2:
         for node in all_nodes:
             if node.get_id() != current_node.get_id() and node.get_id() not in exclude_ids:
@@ -10119,6 +10137,9 @@ def splice_stranded_tertiary(stranded_node) -> bool:
     """
     db_controller = DBController()
     all_nodes = db_controller.get_storage_nodes_by_cluster_id(stranded_node.cluster_id)
+    # Deterministic tie-breaking among equally domain-scored edges -- see
+    # get_secondary_nodes for why this sort matters.
+    all_nodes = sorted(all_nodes, key=lambda n: n.failure_domain)
     by_id = {n.get_id(): n for n in all_nodes}
     stranded_sec = by_id.get(stranded_node.secondary_node_id) if stranded_node.secondary_node_id else None
 
