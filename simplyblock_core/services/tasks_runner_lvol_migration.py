@@ -771,7 +771,7 @@ def _ensure_target_nvmf_state(migration, lvol, src_node, tgt_node, src_rpc, tgt_
                 lo, hi = _CNTLID_RANGES.get(label, (3, 500))
                 rpc.subsystem_create(
                     nqn, lvol.ha_type, lvol.uuid, min_cntlid=random.randint(lo, hi),
-                    max_namespaces=constants.LVO_MAX_NAMESPACES_PER_SUBSYS)
+                    max_namespaces=lvol.max_namespace_per_subsys)
                 if lvol.allowed_hosts:
                     _reapply_allowed_hosts(lvol, path['node'], rpc)
                 for _ip in path['ips']:

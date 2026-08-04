@@ -1159,7 +1159,7 @@ def create_migration(lvol_id, target_node_id,
                     _min_cntlid = _min_cntlid + 10000
                 _rpc.subsystem_create(
                     nqn, lvol.ha_type, lvol.uuid, min_cntlid=_min_cntlid,
-                    max_namespaces=constants.LVO_MAX_NAMESPACES_PER_SUBSYS)
+                    max_namespaces=lvol.max_namespace_per_subsys)
                 _subsystem_created_node_ids.append(_node_id)
 
             if lvol.allowed_hosts:
