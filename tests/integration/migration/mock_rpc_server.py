@@ -55,6 +55,7 @@ class NodeState:
 
     def __init__(self, lvstore: str):
         self.lvstore = lvstore
+        self.lvstore_uuid = str(_uuid_mod.uuid4())
 
         # composite_name (e.g. "lvs/myvol") → bdev dict
         self.lvols: Dict[str, dict] = {}
@@ -211,6 +212,7 @@ class _RpcError(Exception):
 # ---------------------------------------------------------------------------
 
 _METHOD_ERROR_CODES: Dict[str, list] = {
+    "bdev_lvol_get_lvstores":        [-1, -19],        # generic, ENODEV
     "bdev_lvol_create":              [-1, -22, -17],   # generic, EINVAL, EEXIST
     "bdev_lvol_delete":              [-1, -2, -22],    # generic, ENOENT, EINVAL
     "bdev_lvol_get_lvol_delete_status": [-1, -2],
@@ -253,6 +255,33 @@ def _req(params: dict, key: str, required=True) -> Any:
             raise _RpcError(-22, f"Missing required param: {key}")
         return None
     return params[key]
+
+
+# ---- lvstore ----
+
+def _bdev_lvol_get_lvstores(s: NodeState, p: dict):
+    """Fork-extended lvstore dump. Migration gates every target-side lvol
+    create on ``lvs_primary`` + ``"lvs leadership"`` via
+    _ensure_lvstore_primary_leader (commit 5c4c2ff2, LVS_16 corruption
+    guard) — this handler went missing when that guard landed, which failed
+    every migration test at start_migration with "Lvstore ... not found".
+    The mock node is by construction the sole primary/leader of its
+    lvstore, so report exactly that; an unknown lvs_name returns an empty
+    list, which the guard maps to the not-found error."""
+    name = _req(p, 'lvs_name', required=False)
+    if name and name != s.lvstore:
+        return []
+    return [{
+        "uuid": s.lvstore_uuid,
+        "name": s.lvstore,
+        "base_bdev": f"{s.lvstore}_base",
+        "total_data_clusters": 1 << 20,
+        "free_clusters": 1 << 20,
+        "block_size": 4096,
+        "cluster_size": 2097152,
+        "lvs_primary": True,
+        "lvs leadership": True,
+    }]
 
 
 # ---- lvol lifecycle ----
@@ -777,6 +806,7 @@ def _spdk_get_version(s: NodeState, p: dict):
 
 _DISPATCH = {
     'spdk_get_version':                      _spdk_get_version,
+    'bdev_lvol_get_lvstores':                _bdev_lvol_get_lvstores,
     'bdev_lvol_create':                      _bdev_lvol_create,
     'bdev_lvol_delete':                      _bdev_lvol_delete,
     'bdev_lvol_get_lvol_delete_status':      _bdev_lvol_get_lvol_delete_status,
