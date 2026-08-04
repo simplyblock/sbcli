@@ -934,6 +934,12 @@ jobs:
             RESERVED_CPU_YAML='  reservedSystemCPU: "0,1,10,11,16,17,26,27"'
           fi
 
+          PCIE_MODEL_YAML=""
+          CLUSTER_ENV="${{ inputs.cluster_environment }}"
+          if [ "$CLUSTER_ENV" != "openshift-baremetal" ] && [ "$CLUSTER_ENV" != "openshift-local" ]; then
+            PCIE_MODEL_YAML='  pcieModel: "SAMSUNG MZQLB1T9HAJR-00007"'
+          fi
+
           # Build workerNodes YAML list from initial worker nodes only
           WORKER_YAML=""
           IFS=',' read -ra NODES <<< "${{ inputs.worker_nodes }}"
@@ -1017,6 +1023,7 @@ jobs:
             clusterImage: "${SB_REPO}:${SB_TAG}"
             spdkImage: "${SPDK_IMAGE}"
             spdkProxyImage: "${SB_REPO}:${SB_TAG}"
+          ${PCIE_MODEL_YAML}
             driveSizeRange: "${DRIVE_SIZE_RANGE}"
             mgmtIfname: ${MGMT_IFC}
             dataIfname:

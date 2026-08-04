@@ -407,6 +407,11 @@ jobs:
             RESERVED_CPU_YAML='  reservedSystemCPU: "0,1,10,11,16,17,26,27"'
           fi
 
+          PCIE_MODEL_YAML=""
+          if [ "$CLUSTER_ENV" != "openshift-baremetal" ] && [ "$CLUSTER_ENV" != "openshift-local" ]; then
+            PCIE_MODEL_YAML='  pcieModel: "SAMSUNG MZQLB1T9HAJR-00007"'
+          fi
+
           # Build vault settings (conditional on TLS)
           VAULT_SETTINGS=""
           if [ "${{ github.event.inputs.tls_enabled }}" = "true" ]; then
@@ -455,6 +460,7 @@ jobs:
             clusterImage: "${SB_REPO}:${SB_TAG}"
             spdkImage: "${SPDK_IMAGE}"
             spdkProxyImage: "${SB_REPO}:${SB_TAG}"
+          ${PCIE_MODEL_YAML}
             driveSizeRange: "${DRIVE_SIZE_RANGE}"
             mgmtIfname: ${MGMT_IFC}
             dataIfname:
