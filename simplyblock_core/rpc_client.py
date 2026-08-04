@@ -1618,10 +1618,10 @@ class RPCClient:
         return self._request2("jc_compression", params)
 
     def nvmf_port_block(self, port, is_reject=False):
-        return self._request3("nvmf_port_block",
-            port=port,
-            reject=is_reject,
-        )
+        params = {"port": port}
+        if is_reject:
+            params["reject"] = is_reject
+        return self._request3("nvmf_port_block", **params)
 
     def nvmf_port_unblock(self, port):
         return self._request3("nvmf_port_unblock", port=port)
