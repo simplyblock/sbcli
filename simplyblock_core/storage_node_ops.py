@@ -6466,21 +6466,67 @@ def _count_fabric_disconnected_nodes(all_nodes, lvs_peer_ids=None):
     return count
 
 
-def _recover_leaderless_lvs(cluster_id, all_nodes, lvs_name, preferred_taker):
-    """Recovery for a leaderless-but-healthy LVS — WITHOUT the control plane
-    ever forcing leadership.
+def _leadership_moving_tasks_active(cluster_id, node_ids):
+    """True when a port-allow or restart task is active on any LVS member.
 
-    Design rule (2026-08-04, incident sb_logs_20260730_195000_30m LVS_9):
-    leadership is granted by RPC ONLY where it is structurally required and
-    race-free — lvstore creation, activation, and the restart flow's fenced
-    demote->grant handoff (recreate_lvstore ### 7). Recovery paths must not
-    grant: the 2026-07-30 last-resort grant put the secondary in the writer
-    seat ~75s before the primary's restart handed leadership back, and the
-    restart's own grant is what the design sanctions. Earlier motivation
-    still holds too: a management-forced ``leader=True`` outside the restart
-    flow skips the primary's LVS update (blob-md reload) and can serve stale
-    blob metadata (incident 2026-07-06 LVS_13), and the unguarded per-call
-    grant fired from every API worker at once (run 20260725).
+    Those flows own leadership movement (the restart flow's fenced
+    demote->grant handoff; the port-allow failback demotes the acting leader
+    and lets the primary self-promote); a concurrent recovery grant fights
+    them — run 20260725 21:18-21:22: take-leadership grants on the primary
+    vs port-allow demotes on the acting leader, flapping LVS_1 leadership
+    for minutes; 2026-07-30 LVS_9: a recovery grant seated the secondary as
+    writer moments before the primary's restart handoff. When the task
+    state cannot be read, err on NOT granting."""
+    try:
+        db = DBController()
+        for task in db.get_job_tasks(cluster_id):
+            if task.function_name not in (JobSchedule.FN_PORT_ALLOW,
+                                          JobSchedule.FN_NODE_RESTART):
+                continue
+            if task.node_id in node_ids and \
+                    task.status != JobSchedule.STATUS_DONE and not task.canceled:
+                return True
+    except Exception as e:
+        logger.warning("Cannot verify port-allow/restart task state for "
+                       "leaderless recovery (%s) — refusing to grant", e)
+        return True
+    return False
+
+
+def _taker_jm_quorum_ok(taker):
+    """True when the prospective leadership taker's JC reports at least the
+    JM write quorum (2) ready. Granting leadership to a primary whose JMs are
+    excluded is pointless and harmful: it self-demotes on the next quorum
+    check and the grant/demote cycle flaps (run 20260725: LVS_1 primary
+    self-demoted at 20:46/20:55 on JM quorum loss, every subsequent grant
+    lasted seconds)."""
+    if not taker.jm_vuid:
+        return False
+    try:
+        st = taker.rpc_client(timeout=5, retry=1).jc_get_jm_status(taker.jm_vuid)
+    except Exception as e:
+        logger.warning("jc_get_jm_status on %s failed: %s — refusing to grant "
+                       "leadership", taker.get_id()[:8], e)
+        return False
+    if not st:
+        return False
+    ready = sum(1 for v in st.values() if v)
+    if ready < 2:
+        logger.warning("taker %s has only %d ready JM(s) — refusing to grant "
+                       "leadership", taker.get_id()[:8], ready)
+        return False
+    return True
+
+
+def _recover_leaderless_lvs(cluster_id, all_nodes, lvs_name, preferred_taker):
+    """Recovery for a leaderless-but-healthy LVS.
+
+    Leadership placement is otherwise the restart/creation/activation flows'
+    job; this recovery runs only when an object operation needs a leader and
+    none exists. It never flips the leadership flag blind: the 2026-07-06
+    LVS_13 incident showed a bare ``set_leader(True)`` skips the primary's
+    blob-md reload and can serve stale metadata, and run 20260725 showed
+    unguarded grants flapping against the port-allow handoff.
 
     Sequence, single-flight cluster-wide:
       0. FDB test-and-set lock keyed ``takeleader/<lvs>``; deliberately never
@@ -6488,11 +6534,16 @@ def _recover_leaderless_lvs(cluster_id, all_nodes, lvs_name, preferred_taker):
          the recovery cooldown across all processes.
       1. Verify/repair follower->primary hublvols (redirect path); bounded
          wait for the primary's self-promotion via redirected IO.
+      2. Still leaderless (control-plane-only workloads never generate the
+         redirected IO that triggers self-promotion), and only if no
+         port-allow/restart task owns leadership movement on any member and
+         the taker's JM quorum is intact: ``bdev_lvol_update_lvstore`` on the
+         taker — an explicit blob-md reload from disk, the same update the
+         IO-driven promotion performs — and, only after the reload succeeded,
+         ``set_leader(True)``; then verify the grant took.
 
-    If the LVS is still leaderless after that, return None: callers fail
-    fast (the no-leader negative cache bounds re-entry) and object
-    operations are rejected until either client IO triggers the primary's
-    self-promotion or a node restart re-places leadership."""
+    Returns the confirmed leader node or None (callers fail fast; the
+    no-leader negative cache bounds re-entry)."""
     from simplyblock_core.controllers.lvol_controller import is_node_leader
 
     db = DBController()
@@ -6507,6 +6558,7 @@ def _recover_leaderless_lvs(cluster_id, all_nodes, lvs_name, preferred_taker):
         return None
 
     taker = preferred_taker
+    member_ids = [n.get_id() for n in all_nodes]
 
     # 1- repair the redirect paths so the primary CAN self-promote.
     for peer in all_nodes:
@@ -6534,11 +6586,50 @@ def _recover_leaderless_lvs(cluster_id, all_nodes, lvs_name, preferred_taker):
                 continue
         time.sleep(1)
 
+    # 2- reload-then-grant, guarded. The explicit bdev_lvol_update_lvstore
+    # replays the same blob-md reload the IO-driven promotion does, so the
+    # subsequent set_leader cannot serve stale metadata.
+    if _leadership_moving_tasks_active(cluster_id, member_ids):
+        logger.warning("leaderless recovery for %s: port-allow/restart task "
+                       "active on an LVS member — leaving leadership movement "
+                       "to it", lvs_name)
+        return None
+    if not _taker_jm_quorum_ok(taker):
+        return None
     logger.warning(
-        "LVS %s still leaderless after hublvol repair — NOT granting "
-        "leadership from the control plane (leadership moves only via "
-        "IO-driven self-promotion or the restart flow); operations are "
-        "rejected until a leader is re-established", lvs_name)
+        "LVS %s still leaderless after hublvol repair and no handoff task is "
+        "active — reloading lvstore metadata on %s before granting leadership",
+        lvs_name, taker.get_id())
+    try:
+        if not taker.rpc_client(timeout=10, retry=1).bdev_lvol_update_lvstore(
+                lvs_name):
+            logger.error("bdev_lvol_update_lvstore on %s for %s returned "
+                         "False — refusing to grant leadership on top of "
+                         "un-reloaded metadata", taker.get_id(), lvs_name)
+            return None
+    except Exception as e:
+        logger.error("bdev_lvol_update_lvstore on %s for %s failed: %s — "
+                     "refusing to grant leadership", taker.get_id(),
+                     lvs_name, e)
+        return None
+    try:
+        taker.rpc_client(timeout=5, retry=2).bdev_lvol_set_leader(
+            lvs_name, leader=True)
+    except Exception as e:
+        logger.error("take-leadership RPC on %s for %s failed: %s",
+                     taker.get_id(), lvs_name, e)
+        return None
+    for _ in range(5):
+        try:
+            if is_node_leader(taker, lvs_name):
+                logger.info("Leadership for %s restored on %s (metadata "
+                            "reloaded first)", lvs_name, taker.get_id())
+                return taker
+        except Exception:
+            pass
+        time.sleep(1)
+    logger.error("take-leadership on %s for %s did not take effect — "
+                 "refusing to route", taker.get_id(), lvs_name)
     return None
 
 
@@ -6678,13 +6769,13 @@ def _find_leader_with_failover_impl(all_nodes, lvs_name):
     # asks a leader to DROP leadership, nobody holds it, and the JC never
     # elects while the primary is alive. Recovery is delegated to
     # _recover_leaderless_lvs: hublvol repair + bounded self-promotion wait,
-    # NO control-plane grant (design rule 2026-08-04: leadership is forced
-    # only by lvstore creation/activation and the restart flow's fenced
-    # handoff). The previous unguarded per-call set_leader(True) here fired
-    # from every API worker at once and fought the port-allow handoff (run
-    # 20260725); a CP-forced grant also risks stale blob metadata (incident
-    # 2026-07-06 LVS_13), and the guarded last-resort grant raced the restart
-    # handoff into a writer conflict (2026-07-30 LVS_9).
+    # then a guarded reload-then-grant (bdev_lvol_update_lvstore before
+    # set_leader, so the grant never serves stale blob metadata — incident
+    # 2026-07-06 LVS_13). The previous unguarded per-call set_leader(True)
+    # here fired from every API worker at once and fought the port-allow
+    # handoff (run 20260725), and a bare grant raced the restart handoff
+    # into a writer conflict (2026-07-30 LVS_9) — hence the single-flight
+    # lock, the moving-task guard, and the mandatory metadata reload.
     if _is_node_rpc_responsive(leader, lvs_name):
         # Last-moment sweep: abort the recovery if anyone became leader meanwhile.
         for node in all_nodes:

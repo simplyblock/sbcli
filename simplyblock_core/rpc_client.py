@@ -1397,6 +1397,17 @@ class RPCClient:
             "bs_nonleadership": bs_nonleadership,
         })
 
+    def bdev_lvol_update_lvstore(self, lvs):
+        """Reload the lvstore's blob metadata from disk (spdk_lvs_update_live).
+
+        Pure md refresh — does NOT change leadership. Must be called on a
+        non-leader LVS (the SPDK side asserts leader == false). Used before a
+        control-plane leadership grant so the grant never serves stale blob
+        metadata (the 2026-07-06 LVS_13 hazard of a bare set_leader)."""
+        return self._request("bdev_lvol_update_lvstore", {
+            "uuid" if utils.UUID_PATTERN.match(lvs) else "lvs_name": lvs,
+        })
+
     def bdev_lvol_set_lvs_signal(self, lvs):
         """Send a fabric-level signal to an LVS to drop leadership.
 
