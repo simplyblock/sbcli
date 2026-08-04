@@ -112,6 +112,11 @@ class StorageNode(BaseNodeObject):
     partitions_count: int = 0  # Unused
     poller_cpu_cores: list[int] = default_factory(list)
     ssd_pcie: list = default_factory(list)
+    # lblk cluster mode: the configured block-device selection for this node,
+    # entries {name, serial, by_id, size, numa}. Parallel to ssd_pcie (which
+    # stays empty in lblk mode). Persisted so restart re-resolves devices
+    # (serial-first) without depending on the host config file.
+    lblk_devices: list[dict] = default_factory(list)
     pollers_mask: str = ""
     primary_ip: str = ""
     raid: str = ""
