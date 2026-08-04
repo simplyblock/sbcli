@@ -2434,6 +2434,25 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         ip_iface = utils.get_mgmt_ip(node_info, iface_name)
         mgmt_ip = ip_iface[0] if ip_iface else None
 
+        # A host's failure domain is immutable for the lifetime of its node
+        # records: re-adding / adding another slot with a different domain id
+        # would be an in-place FD migration, which is not supported (remove
+        # the node, restore balance, then re-add it in the target domain).
+        if cluster.enable_failure_domain and mgmt_ip:
+            for _n in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+                if (_n.status != StorageNode.STATUS_REMOVED
+                        and _n.mgmt_ip == mgmt_ip
+                        and _n.failure_domain >= 0
+                        and _n.failure_domain != failure_domain_id):
+                    logger.error(
+                        f"Host {mgmt_ip} already belongs to failure domain "
+                        f"{_n.failure_domain} (node {_n.get_id()}); adding it "
+                        f"with --failure-domain {failure_domain_id} would "
+                        f"migrate it between domains, which is not supported. "
+                        f"Remove the node first, restore balance, then re-add "
+                        f"it in the target domain.")
+                    return False
+
         cloud_instance = node_info['cloud_instance']
         if not cloud_instance:
             # Create a static cloud instance from node info
@@ -2564,8 +2583,17 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         # permanently block its own retry (2026-07-17, node f6308adb).
         if expansion:
             from simplyblock_core.controllers.cluster_expansion.preconditions import (
-                check_expansion_preconditions)
+                check_expansion_preconditions, check_fd_admission_for_add)
             ok, reason = check_expansion_preconditions(cluster, db_controller)
+            if not ok:
+                logger.error(f"Cannot start expansion node-add: {reason}")
+                return False
+            # Failure-domain admission (+/-1 rule): the post-add per-domain
+            # host split must stay balanced within one host. Re-checked with
+            # the newcomer in the DB by integrate_new_node_into_cluster.
+            ok, reason = check_fd_admission_for_add(
+                cluster, db_controller, failure_domain_id,
+                new_mgmt_ip=mgmt_ip)
             if not ok:
                 logger.error(f"Cannot start expansion node-add: {reason}")
                 return False
@@ -3412,6 +3440,17 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
         for task in tasks:
             tasks_controller.cancel_task(task.uuid)
 
+    # Failure-domain admission: the post-removal per-domain host split must
+    # stay within the +/-1 balance rule and keep >=2 hosts per domain.
+    # Enforced only once the cluster has an HA layout to protect.
+    from simplyblock_core.controllers.cluster_expansion.preconditions import (
+        check_fd_admission_for_remove)
+    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+    ok, reason = check_fd_admission_for_remove(cluster, db_controller, snode)
+    if not ok:
+        logger.error(f"Can not remove node {node_id}: {reason}")
+        return False
+
     # Case-B feasibility: every replica this node hosts for another primary must
     # have somewhere host-disjoint to go. Catches e.g. 2-node clusters where the
     # tertiary cannot be re-placed without violating anti-affinity.
@@ -3454,13 +3493,23 @@ def _check_replica_relocation_feasible(removed_node, db_controller):
 def _pick_replica_relocation_node(primary, removed_node, role, db_controller):
     """Choose a node to re-host ``primary``'s ``role`` (secondary|tertiary)
     replica, currently on ``removed_node``. Returns a node id or None.
-    Reuses the existing anti-affinity-aware placement helpers."""
+    Reuses the existing anti-affinity-aware placement helpers.
+
+    With failure domains enabled, the >=1-cross-domain-role invariant is
+    enforced HARD here (not best-effort): if the primary's OTHER non-leader
+    role does not already live in a different domain than the primary, the
+    replacement must — otherwise a full-domain outage would leave the LVS
+    with zero surviving paths. Returning None makes
+    ``_check_replica_relocation_feasible`` refuse the removal up front.
+    """
     exclude_ids = [removed_node.get_id()]
     if role == "secondary":
+        other_id = primary.tertiary_node_id
         if primary.tertiary_node_id and primary.tertiary_node_id != removed_node.get_id():
             exclude_ids.append(primary.tertiary_node_id)
         cands = get_secondary_nodes(primary, exclude_ids=exclude_ids, removed_node=removed_node)
     else:
+        other_id = primary.secondary_node_id
         exclude_mgmt_ips = []
         if primary.secondary_node_id and primary.secondary_node_id != removed_node.get_id():
             exclude_ids.append(primary.secondary_node_id)
@@ -3471,7 +3520,33 @@ def _pick_replica_relocation_node(primary, removed_node, role, db_controller):
                 pass
         cands = get_secondary_nodes_2(
             primary, exclude_ids=exclude_ids, exclude_mgmt_ips=exclude_mgmt_ips)
-    return cands[0] if cands else None
+    if not cands:
+        return None
+
+    cluster = db_controller.get_cluster_by_id(primary.cluster_id)
+    if (getattr(cluster, "enable_failure_domain", False)
+            and primary.failure_domain >= 0):
+        other_cross = False
+        if other_id and other_id != removed_node.get_id():
+            try:
+                other = db_controller.get_storage_node_by_id(other_id)
+                other_cross = (other.failure_domain >= 0
+                               and other.failure_domain != primary.failure_domain)
+            except KeyError:
+                pass
+        if not other_cross:
+            # The replacement is the primary's only cross-domain role —
+            # same-domain candidates are not acceptable.
+            for cand_id in cands:
+                try:
+                    cand = db_controller.get_storage_node_by_id(cand_id)
+                except KeyError:
+                    continue
+                if (cand.failure_domain >= 0
+                        and cand.failure_domain != primary.failure_domain):
+                    return cand_id
+            return None
+    return cands[0]
 
 
 def node_removal_orchestrate(node_id, force_remove=False):
