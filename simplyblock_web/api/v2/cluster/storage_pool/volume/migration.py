@@ -10,7 +10,7 @@ from simplyblock_core.db_controller import DBController
 from simplyblock_core.exceptions import MigrationConflictError, PreconditionError
 from simplyblock_web import utils
 
-from ...._dependencies import Cluster, Volume
+from ...._dependencies import Cluster, Migration, Volume
 from ...._dtos import BatchMigrationDTO, MigrationDTO
 from ....util import CreationResponseFormatParameter, creation_response
 
@@ -195,7 +195,7 @@ def cancel_migration(
 
 
 @instance_api.post('/cleanup-target', name='cluster:storage-pools:volumes:migrations:cleanup-target', status_code=200)
-def cleanup_migration_target(_cluster: Cluster, volume: Volume, migration_id: UUID):
+def cleanup_migration_target(_cluster: Cluster, migration: Migration):
     """
     Idempotently remove every object this migration created on the target node(s).
 
@@ -203,12 +203,6 @@ def cleanup_migration_target(_cluster: Cluster, volume: Volume, migration_id: UU
     already cleaned up rather than as errors.  Returns a report of what was
     deleted, what was already gone, and any RPC errors encountered.
     """
-    try:
-        migration = _db.get_migration_by_id(str(migration_id))
-    except KeyError:
-        raise HTTPException(404, f'Migration {migration_id} not found')
-    if migration.lvol_id != volume.get_id():
-        raise HTTPException(404, f'Migration {migration_id} not found')
     try:
         result = migration_controller.cleanup_migration_target(migration.uuid)
     except ValueError as e:
