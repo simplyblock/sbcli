@@ -56,13 +56,16 @@ def main():
         except Exception as exp:
             logger.error(traceback.format_exc())
             errors[f"{test.__name__}"] = [exp]
+            stop_after_teardown = True
+        else:
+            stop_after_teardown = False
         try:
             if not args.run_k8s:
                 test_obj.stop_docker_logs_collect()
             else:
                 test_obj.stop_k8s_log_collect()
             test_obj.fetch_all_nodes_distrib_log()
-            if i == (len(test_class_run) - 1) or check_for_dumps():
+            if i == (len(test_class_run) - 1) or stop_after_teardown or check_for_dumps():
                 test_obj.collect_management_details()
             if not args.run_k8s:
                 all_nodes = test_obj._get_all_nodes()
@@ -75,6 +78,10 @@ def main():
             logger.error(f"Error During Teardown for test: {test.__name__}")
             logger.error(traceback.format_exc())
         finally:
+            if stop_after_teardown:
+                logger.info("Previous test failed. "
+                            "Cannot execute more upgrade tests as cluster state is unknown. Exiting")
+                break
             if check_for_dumps():
                 logger.info("Found a core dump during test execution. "
                             "Cannot execute more tests as cluster is not stable. Exiting")
