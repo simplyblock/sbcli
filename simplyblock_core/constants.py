@@ -267,13 +267,27 @@ INSTANCE_STORAGE_DATA = {
 
 MAX_SNAP_COUNT = 100
 
-# Per-SPDK-instance object cap: each vCPU in the instance's core mask serves
-# at most this many objects (lvols + clones + snapshots), counted against
-# their primary node. 8 cores (the minimum) -> 16k objects, 32 cores -> 64k.
-# Guards the data plane against object-count overload (run 20260712-231123:
+# Hard per-lvstore object cap: an lvstore serves at most this many objects
+# (lvols + clones + snapshots), counted against the lvstore's owning node.
+# Enforced on every create path (lvol create, snapshot create, clone). A node
+# that temporarily serves a second LVS (takeover / acting leader) gets an
+# independent budget per LVS — the limit protects each lvstore's blobstore
+# and journal, not the host. Replaces the earlier per-core cap
+# (cores x 2000); object-count overload precedent: run 20260712-231123,
 # ~68k objects on one 12-core instance drove swap thrash and a JC-quartet
-# abort).
-MAX_OBJECTS_PER_CORE = 2000
+# abort.
+MAX_OBJECTS_PER_LVSTORE = 6000
+
+# Hard cap on namespaces (lvols) sharing one nvmf subsystem. The DEFAULT for
+# namespaced creates stays LVO_MAX_NAMESPACES_PER_SUBSYS; this is the ceiling
+# a caller-supplied max_namespace_per_subsys may not exceed, and it also
+# bounds joins into legacy subsystems recorded with a larger max.
+MAX_NAMESPACES_PER_SUBSYSTEM = 50
+
+# Hard cap on lvol subsystems per node (primary subsystems; namespaced
+# volumes share one). Applied as a ceiling over the node's configured
+# max_lvol: effective limit = min(max_lvol, this).
+MAX_SUBSYSTEMS_PER_NODE = 75
 
 SPDK_PROXY_MULTI_THREADING_ENABLED=True
 SPDK_PROXY_TIMEOUT=60*5

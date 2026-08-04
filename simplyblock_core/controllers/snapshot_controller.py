@@ -423,10 +423,10 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
         logger.error(msg)
         return False, msg
 
-    # Per-core object cap (lvols + clones + snapshots per SPDK instance).
+    # Hard per-lvstore object cap (lvols + clones + snapshots).
     from simplyblock_core.controllers import lvol_controller as _lvol_ctrl
     from simplyblock_core.utils.ttl_cache import cached_mini_lvols, cached_mini_snapshots
-    limit_error = _lvol_ctrl.check_node_object_limit(
+    limit_error = _lvol_ctrl.check_lvstore_object_limit(
         snode, cached_mini_lvols(db_controller),
         cached_mini_snapshots(db_controller))
     if limit_error:
@@ -1092,10 +1092,10 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     if cluster.status not in [cluster.STATUS_ACTIVE, cluster.STATUS_DEGRADED]:
         return False, f"Cluster is not active, status: {cluster.status}"
 
-    # Per-core object cap (lvols + clones + snapshots per SPDK instance).
+    # Hard per-lvstore object cap (lvols + clones + snapshots).
     from simplyblock_core.controllers import lvol_controller as _lvol_ctrl
     from simplyblock_core.utils.ttl_cache import cached_mini_lvols, cached_mini_snapshots
-    limit_error = _lvol_ctrl.check_node_object_limit(
+    limit_error = _lvol_ctrl.check_lvstore_object_limit(
         snode, cached_mini_lvols(db_controller),
         cached_mini_snapshots(db_controller))
     if limit_error:

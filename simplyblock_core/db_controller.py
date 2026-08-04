@@ -831,13 +831,17 @@ class DBController(metaclass=Singleton):
                 # A joined lvol inherits the subsystem root's host config.
                 lvol.allowed_hosts = []
         else:
-            if lvol_controller.count_lvol_subsystems(host_node, minis) >= host_node.max_lvol:
+            node_max = lvol_controller.max_subsystems_for_node(host_node)
+            if lvol_controller.count_lvol_subsystems(host_node, minis) >= node_max:
                 raise SubsystemCapacityError(
                     f"Too many subsystems on node: {host_node.get_id()}, "
-                    f"max subsystems reached: {host_node.max_lvol}")
+                    f"max subsystems reached: {node_max}")
             lvol.nqn = standalone_nqn
             lvol.namespace = standalone_namespace
-            lvol.max_namespace_per_subsys = standalone_max_ns
+            # Hard per-subsystem ceiling — a caller/legacy value above the
+            # cap must not seed a new subsystem that would accept more joins.
+            lvol.max_namespace_per_subsys = min(
+                standalone_max_ns, constants.MAX_NAMESPACES_PER_SUBSYSTEM)
             if standalone_allowed_hosts is not None:
                 lvol.allowed_hosts = standalone_allowed_hosts
 

@@ -189,6 +189,14 @@ def count_lvol_subsystems(node, all_lvols=None):
     })
 
 
+def max_subsystems_for_node(node):
+    """Effective per-node subsystem limit: the node's configured ``max_lvol``
+    bounded by the hard cluster-wide cap MAX_SUBSYSTEMS_PER_NODE. min() keeps
+    the legacy semantics of a smaller (or zero) max_lvol while guaranteeing
+    no node ever serves more than the hard cap."""
+    return min(node.max_lvol, constants.MAX_SUBSYSTEMS_PER_NODE)
+
+
 def _get_next_3_nodes(cluster_id, lvol_size=0, all_lvols=None, namespaced=False):
     db_controller = DBController()
     snodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
@@ -206,7 +214,7 @@ def _get_next_3_nodes(cluster_id, lvol_size=0, all_lvols=None, namespaced=False)
             subsys_count = count_lvol_subsystems(node, all_lvols)
             has_ns_slot = bool(
                 namespaced and get_next_available_subsystem_on_node(node.get_id(), all_lvols))
-            if subsys_count >= node.max_lvol and not has_ns_slot:
+            if subsys_count >= max_subsystems_for_node(node) and not has_ns_slot:
                 # At subsystem capacity, and (for namespaced creates) no
                 # existing subsystem on the node has a free namespace slot.
                 nodes_at_capacity[node.get_id()] = subsys_count
@@ -353,41 +361,36 @@ def _resolve_lvol_subsystem(lvol, host_node, cl, namespaced, all_lvols):
             return True, ""
 
     subsys_count = count_lvol_subsystems(host_node, all_lvols)
-    if subsys_count >= host_node.max_lvol:
+    if subsys_count >= max_subsystems_for_node(host_node):
         return False, (f"Too many subsystems on node: {host_node.get_id()}, "
-                       f"max subsystems reached: {host_node.max_lvol}")
+                       f"max subsystems reached: {max_subsystems_for_node(host_node)}")
     return True, ""
 
 
-def check_node_object_limit(host_node, all_lvols, all_snaps, new_objects=1):
-    """Per-SPDK-instance object cap: every vCPU in the node's core mask serves
-    at most constants.MAX_OBJECTS_PER_CORE objects (lvols, clones, snapshots),
-    so an 8-core instance (the minimum) takes 16k objects, a 32-core one 64k.
+def check_lvstore_object_limit(host_node, all_lvols, all_snaps, new_objects=1):
+    """Hard per-lvstore object cap: an lvstore serves at most
+    constants.MAX_OBJECTS_PER_LVSTORE objects (lvols, clones, snapshots).
+    Enforced on every create path — lvol create, snapshot create, clone.
 
-    Objects are counted against their primary node (lvol.node_id /
-    snap.lvol.node_id). Replica registrations on secondary/tertiary are not
-    counted — the HA layout is symmetric, so the primary count is the
-    per-instance load proxy and counting replicas would just triple every
-    node's number against a limit meant per instance.
+    Objects are counted against their owning node (lvol.node_id /
+    snap.lvol.node_id), and each node owns exactly one lvstore, so the
+    owning-node count IS the per-lvstore count. This also gives the intended
+    takeover semantics for free: when one host temporarily serves a second
+    LVS (acting leader for a peer), that LVS's objects still count against
+    its own budget, so each active lvstore on the host may hold the full
+    limit independently. Replica registrations on secondary/tertiary are
+    not counted — the same object would otherwise count against three
+    lvstores it does not live in.
 
     ``all_lvols`` and ``all_snaps`` accept mini or full records — both minis
     carry everything used here (``.node_id`` / ``.status`` on lvols,
     ``.lvol.node_id`` on snapshots). Prefer minis: full SnapShot records
-    embed the complete LVol dict and made this advisory check cost a
-    multi-second full-table scan per create at 10k+ snapshots.
+    embed the complete LVol dict and made this check cost a multi-second
+    full-table scan per create at 10k+ snapshots (run 20260721).
 
-    Returns None when within the limit, an error message otherwise. Nodes
-    without a parseable core mask are not limited (the mask is set at node
-    add; missing means we cannot know the budget).
+    Returns None when within the limit, an error message otherwise.
     """
-    try:
-        cores = len(utils.hexa_to_cpu_list(host_node.spdk_cpu_mask)) \
-            if host_node.spdk_cpu_mask else 0
-    except (ValueError, TypeError):
-        cores = 0
-    if cores <= 0:
-        return None
-    limit = cores * constants.MAX_OBJECTS_PER_CORE
+    limit = constants.MAX_OBJECTS_PER_LVSTORE
     node_id = host_node.get_id()
     lvol_count = sum(1 for lv in all_lvols
                      if lv.node_id == node_id and lv.status != LVol.STATUS_DELETED)
@@ -395,10 +398,9 @@ def check_node_object_limit(host_node, all_lvols, all_snaps, new_objects=1):
                      if s.lvol and s.lvol.node_id == node_id and not s.deleted)
     total = lvol_count + snap_count
     if total + new_objects > limit:
-        return (f"Object limit reached on node {node_id}: {total} objects "
-                f"(lvols/clones: {lvol_count}, snapshots: {snap_count}) with "
-                f"{cores} SPDK cores allows at most {limit} "
-                f"({constants.MAX_OBJECTS_PER_CORE} per core)")
+        return (f"Object limit reached on lvstore of node {node_id}: {total} "
+                f"objects (lvols/clones: {lvol_count}, snapshots: "
+                f"{snap_count}); the hard limit is {limit} per lvstore")
     return None
 
 
@@ -414,6 +416,11 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         # never be joined by later namespaced lvols, silently degenerating to
         # one-subsystem-per-lvol — default to a shareable capacity instead.
         max_namespace_per_subsys = constants.LVO_MAX_NAMESPACES_PER_SUBSYS if namespaced else 1
+    if max_namespace_per_subsys > constants.MAX_NAMESPACES_PER_SUBSYSTEM:
+        return False, (
+            f"max_namespace_per_subsys={max_namespace_per_subsys} exceeds the "
+            f"hard limit of {constants.MAX_NAMESPACES_PER_SUBSYSTEM} "
+            f"namespaces per subsystem")
     host_node = None
     if host_id_or_name:
         try:
@@ -599,7 +606,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
             return False, "No nodes found with enough resources to create the LVol"
         host_node = nodes[0]
 
-    limit_error = check_node_object_limit(host_node, all_lvols, all_snaps)
+    limit_error = check_lvstore_object_limit(host_node, all_lvols, all_snaps)
     if limit_error:
         logger.error(limit_error)
         return False, limit_error
@@ -2763,8 +2770,9 @@ def clone_lvol(lvol_id, clone_name, new_size=None, pvc_name=None):
     if not _available_subsys:
         snode = db_controller.get_storage_node_by_id(lvol.node_id)
         subsys_count = count_lvol_subsystems(snode, all_lvols)
-        if subsys_count >= snode.max_lvol:
-            error = f"Too many subsystems on node: {snode.get_id()}, max subsystems reached: {snode.max_lvol}"
+        if subsys_count >= max_subsystems_for_node(snode):
+            error = (f"Too many subsystems on node: {snode.get_id()}, "
+                     f"max subsystems reached: {max_subsystems_for_node(snode)}")
             logger.error(error)
             return False, error
 
@@ -3645,7 +3653,12 @@ def get_next_available_subsystem_on_node(node_id, all_lvols=None, exclude_nqns=N
             continue
         if exclude_nqns and lvol.nqn in exclude_nqns:
             continue
-        if lvol.nqn in ns_counts and ns_counts.get(lvol.nqn, 0) < lvol.max_namespace_per_subsys:
+        # The subsystem's recorded max is bounded by the hard per-subsystem
+        # cap: legacy subsystems created with a larger max stop accepting
+        # joins at the cap.
+        subsys_max = min(lvol.max_namespace_per_subsys,
+                         constants.MAX_NAMESPACES_PER_SUBSYSTEM)
+        if lvol.nqn in ns_counts and ns_counts.get(lvol.nqn, 0) < subsys_max:
             if lvol not in ret:
                 ret.append(lvol)
 
