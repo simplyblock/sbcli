@@ -697,7 +697,6 @@ jobs:
             clusterImage: "${SB_REPO}:${SB_TAG}"
             spdkImage: "${SPDK_IMAGE}"
             spdkProxyImage: "${SB_REPO}:${SB_TAG}"
-            pcieModel: "SAMSUNG MZQLB1T9HAJR-00007"
             driveSizeRange: "${DRIVE_SIZE_RANGE}"
             mgmtIfname: ${MGMT_IFC}
             dataIfname:
