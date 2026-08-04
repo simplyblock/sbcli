@@ -125,6 +125,7 @@ class ClusterDTO(BaseModel):
     node_affinity: bool
     anti_affinity: bool
     enable_failure_domain: bool
+    device_mode: str
     secret: SecretStr
     tls_enabled: bool
     max_fault_tolerance: int
@@ -154,6 +155,7 @@ class ClusterDTO(BaseModel):
             node_affinity=model.enable_node_affinity,
             anti_affinity=model.strict_node_anti_affinity,
             enable_failure_domain=model.enable_failure_domain,
+            device_mode=model.device_mode,
             secret=model.secret,
             tls_enabled=model.tls,
             max_fault_tolerance=model.max_fault_tolerance,
@@ -172,6 +174,8 @@ class DeviceDTO(BaseModel):
     serial_number: str
     nvme_controller: str
     pcie_address: str
+    bdev_type: str = "nvme"
+    device_path: str = ""
     status: str
     # None => health check not applicable (owning node not ONLINE/DOWN)
     health_check: Optional[bool]
@@ -195,6 +199,8 @@ class DeviceDTO(BaseModel):
             serial_number=model.serial_number,
             nvme_controller=model.nvme_controller,
             pcie_address=model.pcie_address,
+            bdev_type=model.bdev_type,
+            device_path=model.device_path,
             status=model.status,
             health_check=model.health_check,
             retries_exhausted=model.retries_exhausted,

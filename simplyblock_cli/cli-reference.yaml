@@ -84,8 +84,31 @@ commands:
             required: false
             type: str
             default: ""
+          - name: "--lblk"
+            help: "Configure the node with Linux block devices (lblk cluster mode) instead of NVMe PCIe devices: eligible unmounted, unheld, unpartitioned whole disks are wrapped in SPDK AIO bdevs. Select devices with --blk-names, --blk-names-exclude or --blk-serials; without a selector, every eligible disk is used."
+            dest: lblk
+            type: bool
+            action: store_true
+          - name: "--blk-names"
+            help: "Comma separated list of block device names to use, like sdb,sdc (requires --lblk). Requested devices must be eligible; a busy device is an error."
+            dest: blk_names
+            required: false
+            type: str
+            default: ""
+          - name: "--blk-names-exclude"
+            help: "Comma separated list of block device names to exclude, like sda (requires --lblk). All other eligible disks are used."
+            dest: blk_names_exclude
+            required: false
+            type: str
+            default: ""
+          - name: "--blk-serials"
+            help: "Comma separated list of block device serial numbers (or WWNs) to use (requires --lblk)."
+            dest: blk_serials
+            required: false
+            type: str
+            default: ""
           - name: "--force"
-            help: "Force format detected or passed nvme pci address to 4K and clean partitions."
+            help: "Force format detected or passed nvme pci address to 4K and clean partitions. With --lblk: mark partitioned disks eligible; the partition wipe happens at add-node with --force-format."
             dest: force
             type: bool
             action: store_true
@@ -157,6 +180,12 @@ commands:
           - name: "--enable-journal-device"
             help: "Enables the use of a separate (the smallest) NVMe device of the node for the journal. Otherwise, the journal uses a maximum of 3% of total available raw disk space across all NVMe devices."
             dest: enable_journal_device
+            type: bool
+            default: false
+            action: store_true
+          - name: "--force-format"
+            help: "lblk cluster mode only: wipe partition tables and filesystem signatures from configured block devices that carry partitions (wipefs). Without this flag, partitioned devices are not eligible."
+            dest: force_format
             type: bool
             default: false
             action: store_true
@@ -974,6 +1003,14 @@ commands:
             dest: enable_failure_domain
             type: bool
             action: store_true
+          - name: "--device-mode"
+            help: "Storage-device mode for the whole cluster. 'nvme' (default): NVMe PCIe devices auto-detected and attached via the SPDK nvme driver. 'lblk': arbitrary Linux block devices wrapped in SPDK AIO bdevs; devices are selected at 'sn configure' by name or serial number. Deploy-time only; inter-node fabric (nvme-tcp/rdma) is unaffected."
+            dest: device_mode
+            type: str
+            choices:
+              - nvme
+              - lblk
+            default: nvme
           - name: "--name"
             help: >
               Assigns a name to the newly created cluster.
@@ -1180,6 +1217,14 @@ commands:
             dest: enable_failure_domain
             type: bool
             action: store_true
+          - name: "--device-mode"
+            help: "Storage-device mode for the whole cluster. 'nvme' (default): NVMe PCIe devices auto-detected and attached via the SPDK nvme driver. 'lblk': arbitrary Linux block devices wrapped in SPDK AIO bdevs; devices are selected at 'sn configure' by name or serial number. Deploy-time only; inter-node fabric (nvme-tcp/rdma) is unaffected."
+            dest: device_mode
+            type: str
+            choices:
+              - nvme
+              - lblk
+            default: nvme
           - name: "--name"
             help: >
               Assigns a name to the newly created cluster.
