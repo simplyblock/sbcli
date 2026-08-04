@@ -1008,9 +1008,24 @@ def _fail_after_bdev(lvol, rpc_client, msg):
     the SPDK clone-blob in place, which then blocks the parent snapshot delete
     with "vbdev_lvol_destroy: ... has N clones". Logs but does not raise on
     rollback failure so the caller still sees the original error."""
+    db_controller = DBController()
     try:
-        _remove_bdev_stack(lvol.bdev_stack[::-1], rpc_client)
+        primary_node = db_controller.get_storage_node_by_id(lvol.node_id)
+        primary_rpc_client = primary_node.rpc_client(timeout=5)
+        existing_on_primary = primary_rpc_client.get_bdevs(f"{lvol.lvs_name}/{lvol.lvol_bdev}")
+        if not existing_on_primary:
+            for sn_id in lvol.nodes:
+                if sn_id != lvol.node_id:
+                    rpc_client = db_controller.get_storage_node_by_id(sn_id).rpc_client()
+                    existing_on_secondary = rpc_client.get_bdevs(f"{lvol.lvs_name}/{lvol.lvol_bdev}")
+                    if existing_on_secondary:
+                        # register on primary
+                        rpc_client.bdev_lvol_register(
+                            existing_on_secondary[0], lvol.lvs_name, lvol.lvol_uuid, lvol.blobid, lvol.lvol_priority_class)
+                        break
+
         lvol.status = LVol.STATUS_IN_DELETION
+        lvol.deletion_status = ""
         lvol.write_to_db(DBController().kv_store)
     except Exception:
         logger.exception("rollback of bdev stack failed for %s", lvol.get_id())
