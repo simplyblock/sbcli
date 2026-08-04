@@ -148,6 +148,184 @@ def get_spdk_devices():
     return []
 
 
+def _read_sysfs(path: str) -> str:
+    try:
+        with open(path, "r") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def _disk_holders(name: str) -> List[str]:
+    """Union of /sys/block/<d>/holders and every partition's holders —
+    catches LVM PVs, md members and dm-crypt without a mountpoint."""
+    import os
+    holders: List[str] = []
+    base = f"/sys/block/{name}"
+    try:
+        holders.extend(os.listdir(f"{base}/holders"))
+    except OSError:
+        pass
+    try:
+        for entry in os.listdir(base):
+            if entry.startswith(name):
+                try:
+                    holders.extend(os.listdir(f"{base}/{entry}/holders"))
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return sorted(set(holders))
+
+
+def _disk_by_id_path(name: str) -> str:
+    """Preferred stable /dev/disk/by-id symlink for a whole disk: wwn-* first,
+    then any other non-partition link. Empty when none exists."""
+    import os
+    by_id_dir = "/dev/disk/by-id"
+    target = f"/dev/{name}"
+    candidates: List[str] = []
+    try:
+        for entry in os.listdir(by_id_dir):
+            if "-part" in entry:
+                continue
+            path = os.path.join(by_id_dir, entry)
+            try:
+                if os.path.realpath(path) == target:
+                    candidates.append(path)
+            except OSError:
+                continue
+    except OSError:
+        return ""
+    if not candidates:
+        return ""
+    candidates.sort(key=lambda p: (0 if "/wwn-" in p.replace("\\", "/") else 1, p))
+    return candidates[0]
+
+
+def _root_disk_names() -> List[str]:
+    """Kernel names of the disk(s) backing the root filesystem."""
+    out, _, rc = shell_utils.run_command("findmnt -no SOURCE /")
+    if rc != 0 or not out.strip():
+        return []
+    source = out.strip().splitlines()[0]
+    # Walk PKNAME upwards (handles /dev/sda2, dm/LVM roots, etc.).
+    out, _, rc = shell_utils.run_command(f"lsblk -no PKNAME,NAME {source}")
+    names = set()
+    if rc == 0:
+        for line in out.splitlines():
+            for token in line.split():
+                names.add(token.strip())
+    if source.startswith("/dev/"):
+        names.add(source[len("/dev/"):])
+    return sorted(n for n in names if n)
+
+
+def _subtree_mounted(dev: dict) -> bool:
+    if dev.get("mountpoint"):
+        return True
+    return any(_subtree_mounted(child) for child in dev.get("children") or [])
+
+
+def get_block_devices_info() -> List[dict]:
+    """Inventory of whole-disk block devices for the lblk cluster mode.
+
+    One dict per lsblk TYPE=disk entry, carrying everything the control
+    plane needs for eligibility filtering, identity (serial-first) and AIO
+    bdev creation. Sizes are bytes (lsblk -b). Serial falls back to WWN;
+    devices with neither get a synthetic-stable id derived from
+    hostname|by-id-or-name|size so identity survives reboots.
+    """
+    import hashlib
+    import socket
+
+    logger.debug("function:get_block_devices_info start")
+    out, err, rc = shell_utils.run_command(
+        "lsblk -J -b -o NAME,TYPE,SIZE,SERIAL,WWN,MOUNTPOINT,MODEL,ROTA,RO,VENDOR,PKNAME")
+    if rc != 0:
+        logger.error("Error running lsblk: %s", err)
+        return []
+    try:
+        data = json.loads(out)
+    except json.JSONDecodeError as e:
+        logger.error("Failed to parse lsblk output: %s", e)
+        return []
+
+    root_disks = _root_disk_names()
+    hostname = socket.gethostname()
+    devices: List[dict] = []
+    for dev in data.get("blockdevices", []):
+        if dev.get("type") != "disk":
+            continue
+        name = dev.get("name", "")
+        children = dev.get("children") or []
+        by_id_path = _disk_by_id_path(name)
+        serial = (dev.get("serial") or "").strip()
+        wwn = (dev.get("wwn") or "").strip()
+        if not serial:
+            serial = wwn
+        synthetic = False
+        if not serial:
+            seed = f"{hostname}|{by_id_path or name}|{dev.get('size') or 0}"
+            serial = "SYN-" + hashlib.sha1(seed.encode()).hexdigest()[:16]
+            synthetic = True
+        devices.append({
+            "name": name,
+            "device_path": f"/dev/{name}",
+            "type": dev.get("type"),
+            "size": int(dev.get("size") or 0),
+            "serial": serial,
+            "serial_synthetic": synthetic,
+            "wwn": wwn,
+            "model": (dev.get("model") or "").strip(),
+            "vendor": (dev.get("vendor") or "").strip(),
+            "rota": bool(dev.get("rota")),
+            "ro": bool(dev.get("ro")),
+            "has_partitions": any(c.get("type") == "part" for c in children),
+            "mounted_in_subtree": _subtree_mounted(dev),
+            "holders": _disk_holders(name),
+            "is_root_disk": name in root_disks,
+            "by_id_path": by_id_path,
+            "numa_node": int(_read_sysfs(f"/sys/block/{name}/device/numa_node") or -1),
+        })
+    logger.debug("function:get_block_devices_info end")
+    return devices
+
+
+def wipe_block_device_signatures(device_name: str) -> Tuple[bool, str]:
+    """Wipe partition-table / filesystem signatures from a whole disk
+    (`--force-format` on lblk add-node). Re-validates that the device is not
+    busy before touching it: any mountpoint in the subtree or any holder
+    refuses the wipe. Wipes partitions first, then the disk itself."""
+    import re as _re
+    if not _re.match(r"^[a-zA-Z0-9_\-]+$", device_name):
+        return False, f"invalid device name {device_name!r}"
+    for dev in get_block_devices_info():
+        if dev["name"] == device_name:
+            if dev["mounted_in_subtree"]:
+                return False, f"device {device_name} has mounted filesystems"
+            if dev["holders"]:
+                return False, (f"device {device_name} is held by "
+                               f"{dev['holders']}")
+            if dev["is_root_disk"]:
+                return False, f"device {device_name} backs the root filesystem"
+            break
+    else:
+        return False, f"device {device_name} not found"
+
+    out, _, rc = shell_utils.run_command(
+        f"lsblk -nro NAME -x NAME /dev/{device_name}")
+    if rc != 0:
+        return False, f"lsblk failed for {device_name}"
+    # Children (partitions) first, whole disk last.
+    names = [n for n in out.split() if n and n != device_name]
+    for name in names + [device_name]:
+        _, err, rc = shell_utils.run_command(f"wipefs -a /dev/{name}")
+        if rc != 0:
+            return False, f"wipefs /dev/{name} failed: {err}"
+    return True, ""
+
+
 def _get_mem_info():
     logger.debug("function:_get_mem_info start")
     out, err, rc = shell_utils.run_command("cat /proc/meminfo")

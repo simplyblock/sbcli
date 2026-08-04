@@ -216,6 +216,16 @@ class SNodeClient:
         params = {"device_pci": device_pci}
         return self._request("POST", "bind_device_to_spdk", params)
 
+    def get_blockdevices(self):
+        """Whole-disk inventory for the lblk cluster mode."""
+        return self._request("GET", "blockdevices")
+
+    def wipe_block_device(self, device_name):
+        """--force-format for lblk add-node: wipe partition/FS signatures
+        from a whole disk (refused when busy)."""
+        return self._request("POST", "wipe_block_device",
+                             {"device_name": device_name})
+
     def spdk_process_is_up(self, rpc_port, cluster_id):
         params = {"rpc_port": rpc_port, "cluster_id": cluster_id}
         return self._request("GET", "spdk_process_is_up", params)
