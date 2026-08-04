@@ -322,6 +322,11 @@ jobs:
           set +e
           NAMESPACE=simplyblock
 
+          # Run the operator's own cleanup script first (thorough helm + CR cleanup)
+          if [ -x "$GITHUB_WORKSPACE/simplyblock-operator/helm-charts/scripts/cleanup-simplyblock.sh" ]; then
+            bash $GITHUB_WORKSPACE/simplyblock-operator/helm-charts/scripts/cleanup-simplyblock.sh -f $NAMESPACE || true
+          fi
+
           # Run the shared cleanup script (handles etcd overload with
           # --request-timeout, bulk deletes, and parallel finalizer patching)
           bash $GITHUB_WORKSPACE/e2e/scripts/cleanup_k8s.sh $NAMESPACE
