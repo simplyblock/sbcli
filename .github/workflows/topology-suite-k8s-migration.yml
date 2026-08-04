@@ -143,14 +143,10 @@ on:
         description: 'NFS mountpoint on client nodes'
         required: false
         default: '/mnt/nfs_share/'
-      preserve_resources_on_failure:
-        description: 'Preserve PVCs, FIO pods, snapshots on test failure for debugging'
-        required: false
-        default: true
-        type: boolean
       # cluster_security removed from workflow_dispatch (25 input limit).
       # Backup is auto-enabled when testname contains "Backup".
       # Use workflow_call (via topology suite parent) to pass cluster_security explicitly.
+      # preserve_resources_on_failure also omitted (25 input limit); defaults to true in child.
 
 concurrency:
   group: k8s-topology-migration-${{ inputs.cluster_environment || 'openshift-baremetal' }}
@@ -229,7 +225,7 @@ jobs:
       tls_enabled: ${{ inputs.tls_enabled }}
       client_ips: ${{ inputs.client_ips || '' }}
       nfs_mountpoint: ${{ inputs.nfs_mountpoint || '/mnt/nfs_share/' }}
-      preserve_resources_on_failure: ${{ inputs.preserve_resources_on_failure }}
+      preserve_resources_on_failure: true
       # cluster_security defaults to 'none' in child; backup auto-enabled when testname contains "Backup"
     secrets: inherit
 
