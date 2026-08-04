@@ -15,6 +15,7 @@ from simplyblock_core.models.lvol_migration import LVolMigration
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.models.cluster import Cluster
 
 # Module under test (import after patching, but top-level import is fine since
 # we patch the db attribute before each individual call).
@@ -295,11 +296,13 @@ class TestSnapAncestryHelpers(unittest.TestCase):
         return mock_db
 
     def test_protect_removes_snap_and_parents(self):
+        # Protection is now expressed as candidate_set -= _collect_snap_ancestry()
+        # (see get_snaps_safe_to_delete_on_source Rule 2).
         s1 = _snap("s1", "lvol", "node", ref_id="")
         s2 = _snap("s2", "lvol", "node", ref_id="s1")
         candidate_set = {"s1", "s2", "s3"}
         with patch.object(ctl, 'db', self._snap_db({"s1": s1, "s2": s2})):
-            ctl._protect_snap_and_ancestors("s2", candidate_set)
+            candidate_set -= ctl._collect_snap_ancestry("s2")
         assert "s1" not in candidate_set
         assert "s2" not in candidate_set
         assert "s3" in candidate_set
@@ -307,24 +310,22 @@ class TestSnapAncestryHelpers(unittest.TestCase):
     def test_protect_handles_missing_snap(self):
         candidate_set = {"s1"}
         with patch.object(ctl, 'db', self._snap_db({})):
-            # Should not raise even if snap not found
-            ctl._protect_snap_and_ancestors("s1", candidate_set)
-        # s1 gets discarded before the KeyError break
+            # Should not raise even if snap not found; the snap itself is
+            # still collected before the KeyError breaks the ancestry walk.
+            candidate_set -= ctl._collect_snap_ancestry("s1")
         assert "s1" not in candidate_set
 
     def test_collect_adds_snap_and_parents(self):
         s1 = _snap("s1", "lvol", "node", ref_id="")
         s2 = _snap("s2", "lvol", "node", ref_id="s1")
-        out_set = set()
         with patch.object(ctl, 'db', self._snap_db({"s1": s1, "s2": s2})):
-            ctl._collect_snap_ancestry("s2", out_set)
+            out_set = ctl._collect_snap_ancestry("s2")
         assert out_set == {"s1", "s2"}
 
     def test_collect_handles_cycle(self):
         s1 = _snap("s1", "lvol", "node", ref_id="s1")
-        out_set = set()
         with patch.object(ctl, 'db', self._snap_db({"s1": s1})):
-            ctl._collect_snap_ancestry("s1", out_set)
+            out_set = ctl._collect_snap_ancestry("s1")
         assert out_set == {"s1"}
 
 
@@ -358,10 +359,25 @@ class TestGetSnapsSafeToDeleteOnSource(unittest.TestCase):
                          snap_plan=["s1", "s_other"])
         s1 = _snap("s1", "lvol-1", "node-src")
         s_other = _snap("s_other", "lvol-other", "node-src")
+        # lvol-other is still on the source node, so its snap must stay.
+        other_owner = _lvol("lvol-other", "node-src")
+        with patch.object(ctl, 'db', self._make_db(
+                {"s1": s1, "s_other": s_other}, [other_owner])):
+            result = ctl.get_snaps_safe_to_delete_on_source(mig)
+        assert "s_other" not in result
+        assert "s1" in result
+
+    def test_snap_of_migrated_away_volume_is_candidate(self):
+        # The owner already migrated off the source: nothing on SRC owns the
+        # snap any more, so it is eligible for cleanup.
+        mig = _migration(lvol_id="lvol-1", source_node="node-src",
+                         snap_plan=["s1", "s_other"])
+        s1 = _snap("s1", "lvol-1", "node-src")
+        s_other = _snap("s_other", "lvol-other", "node-src")
         with patch.object(ctl, 'db', self._make_db(
                 {"s1": s1, "s_other": s_other}, [])):
             result = ctl.get_snaps_safe_to_delete_on_source(mig)
-        assert "s_other" not in result
+        assert "s_other" in result
         assert "s1" in result
 
     def test_snap_referenced_by_clone_is_protected(self):
@@ -608,6 +624,12 @@ class TestStartMigrationPreconditions(unittest.TestCase):
             src_node if nid == src_node.uuid else tgt_node
         )
         mock_db.get_snapshots_by_node_id.return_value = []
+        # cluster preconditions: active status, no rebalancing tasks
+        cluster = Cluster()
+        cluster.uuid = "cluster-1"
+        cluster.status = Cluster.STATUS_ACTIVE
+        mock_db.get_cluster_by_id.return_value = cluster
+        mock_db.get_job_tasks.return_value = []
         return mock_db
 
     def test_reject_migration_not_found(self):
@@ -687,6 +709,7 @@ class TestStartMigrationPreconditions(unittest.TestCase):
              patch('simplyblock_core.controllers.migration_controller.tasks_controller') as tc, \
              patch('simplyblock_core.controllers.migration_controller.migration_events'):
             tc.add_lvol_mig_task.return_value = "task-uuid"
+            tc.get_active_node_mig_task.return_value = None
             result = ctl.start_migration("mig-uuid")
 
         assert result == "mig-uuid"

@@ -187,7 +187,7 @@ class TestGetTargetSecondaryNode(unittest.TestCase):
 
     def test_no_secondary_configured(self):
         tgt = _node(secondary_node_id="")
-        sec_node, err = runner._get_target_secondary_node(tgt)
+        sec_node, err = runner._get_target_secondary_node(tgt, None)
         assert sec_node is None
         assert err is None
 
@@ -199,7 +199,7 @@ class TestGetTargetSecondaryNode(unittest.TestCase):
         mock_db.get_storage_node_by_id.return_value = sec
 
         with patch.object(runner, 'db', mock_db):
-            sec_node, err = runner._get_target_secondary_node(tgt)
+            sec_node, err = runner._get_target_secondary_node(tgt, None)
 
         assert sec_node is sec
         assert err is None
@@ -212,7 +212,7 @@ class TestGetTargetSecondaryNode(unittest.TestCase):
         mock_db.get_storage_node_by_id.return_value = sec
 
         with patch.object(runner, 'db', mock_db):
-            sec_node, err = runner._get_target_secondary_node(tgt)
+            sec_node, err = runner._get_target_secondary_node(tgt, None)
 
         assert sec_node is None
         assert err is None
@@ -225,7 +225,7 @@ class TestGetTargetSecondaryNode(unittest.TestCase):
         mock_db.get_storage_node_by_id.return_value = sec
 
         with patch.object(runner, 'db', mock_db):
-            sec_node, err = runner._get_target_secondary_node(tgt)
+            sec_node, err = runner._get_target_secondary_node(tgt, None)
 
         assert sec_node is None
         assert err is not None
@@ -238,10 +238,38 @@ class TestGetTargetSecondaryNode(unittest.TestCase):
         mock_db.get_storage_node_by_id.side_effect = KeyError("sec-missing")
 
         with patch.object(runner, 'db', mock_db):
-            sec_node, err = runner._get_target_secondary_node(tgt)
+            sec_node, err = runner._get_target_secondary_node(tgt, None)
 
         assert sec_node is None
         assert err is None
+
+    def test_suspended_secondary_that_is_migration_source_returned(self):
+        # Overlap drain: the source being drained is still the target's
+        # secondary — migration must continue through it.
+        tgt = _node(secondary_node_id="sec-1")
+        sec = _node(uuid="sec-1", status=StorageNode.STATUS_SUSPENDED)
+
+        mock_db = MagicMock()
+        mock_db.get_storage_node_by_id.return_value = sec
+
+        with patch.object(runner, 'db', mock_db):
+            sec_node, err = runner._get_target_secondary_node(tgt, "sec-1")
+
+        assert sec_node is sec
+        assert err is None
+
+    def test_suspended_secondary_not_source_blocks(self):
+        tgt = _node(secondary_node_id="sec-1")
+        sec = _node(uuid="sec-1", status=StorageNode.STATUS_SUSPENDED)
+
+        mock_db = MagicMock()
+        mock_db.get_storage_node_by_id.return_value = sec
+
+        with patch.object(runner, 'db', mock_db):
+            sec_node, err = runner._get_target_secondary_node(tgt, "other-src")
+
+        assert sec_node is None
+        assert err is not None
 
 
 # ---------------------------------------------------------------------------
@@ -319,22 +347,27 @@ class TestDeleteBdevBlocking(unittest.TestCase):
 
         with patch('simplyblock_core.services.tasks_runner_lvol_migration.time') as mock_time:
             mock_time.sleep = MagicMock()
+            mock_time.monotonic.side_effect = [0.0, 1.0, 2.0, 3.0]
             runner._delete_bdev_blocking("lvs/mybdev", primary_rpc)
 
-        # async start
-        primary_rpc.delete_lvol.assert_any_call("lvs/mybdev")
+        # async start (source-cleanup default: special_delete, no coalescing)
+        primary_rpc.delete_lvol.assert_any_call(
+            "lvs/mybdev", sync=False, special_delete=True)
         # sync finalize
-        primary_rpc.delete_lvol.assert_any_call("lvs/mybdev", sync=True)
+        primary_rpc.delete_lvol.assert_any_call(
+            "lvs/mybdev", sync=True, special_delete=False)
 
     def test_already_deleted_status_2_still_finalizes(self):
         primary_rpc = MagicMock()
         primary_rpc.delete_lvol.return_value = (True, None)
         primary_rpc.bdev_lvol_get_lvol_delete_status.return_value = 2  # not found
 
-        with patch('simplyblock_core.services.tasks_runner_lvol_migration.time'):
+        with patch('simplyblock_core.services.tasks_runner_lvol_migration.time') as mock_time:
+            mock_time.monotonic.side_effect = [0.0, 1.0, 2.0, 3.0]
             runner._delete_bdev_blocking("lvs/mybdev", primary_rpc)
 
-        primary_rpc.delete_lvol.assert_any_call("lvs/mybdev", sync=True)
+        primary_rpc.delete_lvol.assert_any_call(
+            "lvs/mybdev", sync=True, special_delete=False)
 
     def test_secondary_rpc_called_on_sync_finalize(self):
         primary_rpc = MagicMock()
@@ -343,10 +376,12 @@ class TestDeleteBdevBlocking(unittest.TestCase):
 
         secondary_rpc = MagicMock()
 
-        with patch('simplyblock_core.services.tasks_runner_lvol_migration.time'):
+        with patch('simplyblock_core.services.tasks_runner_lvol_migration.time') as mock_time:
+            mock_time.monotonic.side_effect = [0.0, 1.0, 2.0, 3.0]
             runner._delete_bdev_blocking("lvs/mybdev", primary_rpc, secondary_rpc)
 
-        secondary_rpc.delete_lvol.assert_called_once_with("lvs/mybdev", sync=True)
+        secondary_rpc.delete_lvol.assert_called_once_with(
+            "lvs/mybdev", sync=True, special_delete=False)
 
     def test_no_secondary_rpc_does_not_call_secondary(self):
         primary_rpc = MagicMock()

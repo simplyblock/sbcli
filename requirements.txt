@@ -14,7 +14,7 @@ urllib3
 graypy==2.1.0
 boto3
 jinja2
-argcomplete
+argcomplete<3.7.1  # 3.7.1 (2026-08-04) uses PEP 604 unions at runtime, breaks py3.9
 jc
 prometheus-client
 ec2-metadata

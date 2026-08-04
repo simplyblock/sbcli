@@ -1310,7 +1310,9 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                     if sec_err:
                         migration.error_message = sec_err
                         migration.write_to_db(db.kv_store)
-                        return False, True, sec_err
+                        # transient replica state: suspend (via error_message),
+                        # don't charge the retry budget toward cleanup_target
+                        return False, True, None
                     if tgt_sec:
                         sec_rpc = _make_rpc(tgt_sec)
                 elif snap.lvol.ha_type == "ha3":
@@ -1318,14 +1320,17 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                     if sec_err:
                         migration.error_message = sec_err
                         migration.write_to_db(db.kv_store)
-                        return False, True, sec_err
+                        # transient replica state: suspend (via error_message),
+                        # don't charge the retry budget toward cleanup_target
+                        return False, True, None
                     if tgt_sec:
                         sec_rpc = _make_rpc(tgt_sec)
                     tgt_ter, ter_err = _get_target_tertiary_node(tgt_node, src_node.get_id())
                     if ter_err:
                         migration.error_message = ter_err
                         migration.write_to_db(db.kv_store)
-                        return False, True, ter_err
+                        # transient replica state: suspend, don't charge retries
+                        return False, True, None
                     if tgt_ter:
                         ter_rpc = _make_rpc(tgt_ter)
                 break  # one check is enough
@@ -1542,7 +1547,9 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             if sec_err:
                 migration.error_message = sec_err
                 migration.write_to_db(db.kv_store)
-                return False, True, sec_err
+                # transient replica state: suspend (via error_message),
+                # don't charge the retry budget toward cleanup_target
+                return False, True, None
             if tgt_sec:
                 sec_rpc = _make_rpc(tgt_sec)
         if snap.lvol.ha_type == "ha3":
@@ -1550,7 +1557,8 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             if ter_err:
                 migration.error_message = ter_err
                 migration.write_to_db(db.kv_store)
-                return False, True, ter_err
+                # transient replica state: suspend, don't charge retries
+                return False, True, None
             if tgt_ter:
                 ter_rpc = _make_rpc(tgt_ter)
 
@@ -1847,7 +1855,9 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             if sec_err:
                 migration.error_message = sec_err
                 migration.write_to_db(db.kv_store)
-                return False, True, sec_err
+                # transient replica state: suspend (via error_message),
+                # don't charge the retry budget toward cleanup_target
+                return False, True, None
 
         # --- Start the final migration ---
 
