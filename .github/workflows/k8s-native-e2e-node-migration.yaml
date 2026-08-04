@@ -85,6 +85,10 @@ on:
         type: string
         default: 'none'
         description: "Cluster setup mode. 'backup' deploys MinIO and enables backup on StorageCluster."
+      preserve_resources_on_failure:
+        type: boolean
+        default: true
+        description: 'Preserve PVCs, FIO pods, snapshots on test failure for debugging'
   workflow_dispatch:
     inputs:
       testname:
@@ -204,6 +208,11 @@ on:
         description: 'NFS mountpoint on client nodes'
         required: false
         default: '/mnt/nfs_share/'
+      preserve_resources_on_failure:
+        description: 'Preserve PVCs, FIO pods, snapshots on test failure for debugging'
+        required: false
+        default: true
+        type: boolean
       # cluster_security is available via workflow_call only (25 input limit).
       # For workflow_dispatch, backup is auto-enabled when testname contains "Backup".
 
@@ -1370,10 +1379,15 @@ jobs:
             REATTACH_VOL_ARG="--reattach_volume True"
           fi
 
+          PRESERVE_ARG=""
+          if [ "${{ inputs.preserve_resources_on_failure }}" = "true" ]; then
+            PRESERVE_ARG="--preserve_resources_on_failure True"
+          fi
+
           python3 -u e2e.py \
             --testname "${{ inputs.testname || 'K8sNativeNodeMigrationTest' }}" \
             --migrate_to_worker "${{ inputs.migrate_to_worker }}" \
-            ${NEW_SSD_PCIE_ARG} ${REATTACH_VOL_ARG} \
+            ${NEW_SSD_PCIE_ARG} ${REATTACH_VOL_ARG} ${PRESERVE_ARG} \
             --ndcs $NDCS --npcs $NPCS --bs $BS --chunk_bs $CHUNK_BS \
             --run_k8s True \
             --namespace simplyblock \
