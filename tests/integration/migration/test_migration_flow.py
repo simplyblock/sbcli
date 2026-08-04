@@ -770,7 +770,14 @@ class TestFourNodeFourSnapshotMigration:
           every task_runner() call and suspends the task.  Once n1 is restored
           the task resumes from the current phase and completes.
 
-        - n2 (tgt offline): same pattern – runner suspends until tgt is back.
+        - n2 (tgt offline): DIFFERENT policy — a target observed offline during
+          SNAP_COPY/LVOL_MIGRATE deliberately fails the migration into
+          cleanup_target (a restarted target may have lost migration state, so
+          the runner rolls back rather than resuming; see the pre-tick status
+          gate in tasks_runner_lvol_migration).  Whether the outage is observed
+          at all depends on tick timing, so BOTH outcomes are legitimate:
+          STATUS_DONE (window missed) or STATUS_FAILED with a completed clean
+          rollback (volume still served from the source).
 
         - n3 / n4 (passive nodes): the migration runner never contacts them, so
           the outage has no effect on migration progress; STATUS_DONE is reached
@@ -812,10 +819,21 @@ class TestFourNodeFourSnapshotMigration:
         t.join(timeout=10.0)
         assert offline_cycle_done.is_set(), "Offline-cycle thread did not finish"
 
-        _assert_migration_done(mig_id)
-
+        m = db.get_migration_by_id(mig_id)
         updated_lvol = db.get_lvol_by_id(lvol.uuid)
-        assert updated_lvol.node_id == tgt_node.uuid
+        if (offline_sym == "n2"
+                and m.status == LVolMigration.STATUS_FAILED
+                and "target node offline" in (m.error_message or "")):
+            # Target outage was observed by a runner tick: the deliberate
+            # policy is fail + clean rollback, not suspend/resume. Verify the
+            # rollback actually completed and the volume stayed on the source.
+            assert m.phase == LVolMigration.PHASE_CLEANUP_TARGET, (
+                f"Expected completed cleanup_target rollback, got phase={m.phase}")
+            assert updated_lvol.node_id == ctx.node_uuid("n1"), (
+                "Rolled-back volume must still be served from the source node")
+        else:
+            _assert_migration_done(mig_id)
+            assert updated_lvol.node_id == tgt_node.uuid
 
         # Whichever node was taken offline must be back online now.
         node_fresh = db.get_storage_node_by_id(offline_uuid)
