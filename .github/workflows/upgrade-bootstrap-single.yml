@@ -82,7 +82,7 @@ on:
         description: "Cluster setup mode. 'backup' writes s3-backup.json and passes --use-backup to cluster create."
       TEST_CLASS:
         type: string
-        default: "major_upgrade_single"
+        default: "TestMajorUpgradeSingleNode"
       RUN_LABEL:
         type: string
         default: ""
@@ -193,7 +193,7 @@ on:
         description: "Upgrade test class name; defaults to single-node variant (no FIO during upgrade)"
         required: false
         type: string
-        default: "major_upgrade_single"
+        default: "TestMajorUpgradeSingleNode"
 
 concurrency:
   group: simplyblock-lab-upgrade-single
@@ -244,7 +244,7 @@ jobs:
       EXTRA_SN_ARGS: ${{ inputs.EXTRA_SN_ARGS || '' }}
       CLUSTER_SECURITY: ${{ inputs.CLUSTER_SECURITY || 'backup' }}
 
-      TEST_CLASS: ${{ inputs.TEST_CLASS || 'major_upgrade_single' }}
+      TEST_CLASS: ${{ inputs.TEST_CLASS || 'TestMajorUpgradeSingleNode' }}
 
       # Target images (overridden by CUSTOM_IMAGES target_spdk/target_docker)
       TARGET_SPDK_IMAGE:   'simplyblock/spdk:main-latest'
@@ -748,12 +748,18 @@ jobs:
 
           # 1. Install mc (MinIO Client)
           if ! command -v mc &>/dev/null; then
-            curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o /usr/local/bin/mc
-            chmod +x /usr/local/bin/mc
+            if curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o /usr/local/bin/mc 2>/dev/null; then
+              chmod +x /usr/local/bin/mc
+            else
+              curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o /tmp/mc
+              chmod +x /tmp/mc
+              export PATH="/tmp:$PATH"
+              echo "/tmp" >> "$GITHUB_PATH"
+            fi
           fi
 
           # 2. Configure mc alias to external MinIO
-          mc alias set myminio http://192.168.10.164:9000 minioadmin minioadmin
+          mc alias set myminio http://192.168.10.164:9000 "${MINIO_ACCESS_KEY}" "${MINIO_SECRET_KEY}"
 
           # 3. Start admin trace in background
           MINIO_TRACE_LOG="/tmp/minio-trace-${GITHUB_RUN_ID}.log"

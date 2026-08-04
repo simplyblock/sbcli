@@ -620,12 +620,18 @@ jobs:
 
           # 1. Install mc (MinIO Client)
           if ! command -v mc &>/dev/null; then
-            curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o /usr/local/bin/mc
-            chmod +x /usr/local/bin/mc
+            if curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o /usr/local/bin/mc 2>/dev/null; then
+              chmod +x /usr/local/bin/mc
+            else
+              curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o /tmp/mc
+              chmod +x /tmp/mc
+              export PATH="/tmp:$PATH"
+              echo "/tmp" >> "$GITHUB_PATH"
+            fi
           fi
 
           # 2. Configure mc alias to external MinIO
-          mc alias set myminio http://192.168.10.164:9000 minioadmin minioadmin
+          mc alias set myminio http://192.168.10.164:9000 "${MINIO_ACCESS_KEY}" "${MINIO_SECRET_KEY}"
 
           # 3. Start admin trace in background
           MINIO_TRACE_LOG="/tmp/minio-trace-${GITHUB_RUN_ID}.log"
