@@ -21,7 +21,7 @@ _db = DBController()
 @api.get('/', name='clusters:storage-pools:volumes:migrations:list')
 def list_migrations(
     cluster: Cluster,
-    batch: bool = Query(False, description='List batch migrations instead of solo migrations'),
+    batch: Annotated[bool, Query(description='List batch migrations instead of solo migrations')] = False,
 ) -> List:
     if batch:
         groups = _db.get_migration_groups(cluster.get_id())
@@ -102,7 +102,7 @@ def get_migration(
     cluster: Cluster,
     volume: Volume,
     migration_id: UUID,
-    batch: bool = Query(False, description='Treat the ID as a batch migration ID'),
+    batch: Annotated[bool, Query(description='Treat the ID as a batch migration ID')] = False,
 ) -> Union[MigrationDTO, BatchMigrationDTO]:
     if batch:
         try:
@@ -170,7 +170,7 @@ def cancel_migration(
     cluster: Cluster,
     volume: Volume,
     migration_id: UUID,
-    batch: bool = Query(False, description='Treat the ID as a batch migration ID'),
+    batch: Annotated[bool, Query(description='Treat the ID as a batch migration ID')] = False,
 ):
     try:
         if batch:
