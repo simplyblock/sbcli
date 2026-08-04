@@ -135,15 +135,34 @@ class CLIWrapperBase:
             pci_blocked = [str(x) for x in args.pci_blocked.split(',')]
         if args.nvme_names:
             nvme_names = [str(x) for x in args.nvme_names.split(',')]
+        lblk = getattr(args, 'lblk', False)
+        blk_names = getattr(args, 'blk_names', None)
+        blk_names_exclude = getattr(args, 'blk_names_exclude', None)
+        blk_serials = getattr(args, 'blk_serials', None)
         use_pci_allowed = bool(args.pci_allowed)
         use_pci_blocked = bool(args.pci_blocked)
         use_model_range = bool(args.device_model or args.size_range)
-        if sum([use_pci_allowed, use_pci_blocked, use_model_range]) > 1:
+        use_lblk = bool(lblk or blk_names or blk_names_exclude or blk_serials)
+        if sum([use_pci_allowed, use_pci_blocked, use_model_range, use_lblk]) > 1:
             self.parser.error(
-                "Choose only one device selection method: --pci-allowed, --pci-blocked, or "
+                "Choose only one device selection method: --pci-allowed, --pci-blocked, "
                 "--device-model/--size-range (--device-model and --size-range may be combined "
-                "with each other, but not with --pci-allowed or --pci-blocked)."
+                "with each other, but not with --pci-allowed or --pci-blocked), or --lblk with "
+                "its --blk-* selectors."
             )
+        lblk_selection = None
+        if use_lblk:
+            if not lblk:
+                self.parser.error("--blk-names/--blk-names-exclude/--blk-serials require --lblk")
+            if sum([bool(blk_names), bool(blk_names_exclude), bool(blk_serials)]) > 1:
+                self.parser.error(
+                    "Choose only one block-device selection method: --blk-names, "
+                    "--blk-names-exclude, or --blk-serials.")
+            lblk_selection = {
+                "names": [str(x) for x in blk_names.split(',')] if blk_names else None,
+                "names_exclude": [str(x) for x in blk_names_exclude.split(',')] if blk_names_exclude else None,
+                "serials": [str(x) for x in blk_serials.split(',')] if blk_serials else None,
+            }
         # The core split is decided by the cluster's vcpu-count when the node
         # is added or restarted; here the default heuristic lays out a usable
         # baseline for a host that does not belong to a cluster yet.
@@ -158,7 +177,8 @@ class CLIWrapperBase:
             max_lvol, max_prov, sockets_to_use, args.nodes_per_socket,
             pci_allowed, pci_blocked, force=args.force, device_model=args.device_model,
             size_range=args.size_range, vcpu_count=vcpu_count, nvme_names=nvme_names,
-            calculate_hp_only=args.calculate_hp_only, number_of_devices=number_of_devices)
+            calculate_hp_only=args.calculate_hp_only, number_of_devices=number_of_devices,
+            lblk_selection=lblk_selection)
 
     def storage_node__deploy_cleaner(self, sub_command, args):
         storage_ops.deploy_cleaner()
@@ -228,6 +248,7 @@ class CLIWrapperBase:
                 spdk_sys_mem=spdk_sys_mem,
                 expansion=expansion,
                 failure_domain=failure_domain,
+                force_format=getattr(args, 'force_format', False),
             )
         except Exception as e:
             print(e)
@@ -1311,6 +1332,7 @@ class CLIWrapperBase:
         is_single_node = args.is_single_node
         client_data_nic = args.client_data_nic
         enable_failure_domain = getattr(args, 'enable_failure_domain', False)
+        device_mode = getattr(args, 'device_mode', 'nvme')
 
         max_fault_tolerance = min(distr_npcs, 2) if distr_npcs >= 1 else 1
 
@@ -1327,6 +1349,7 @@ class CLIWrapperBase:
             nvmf_base_port=args.nvmf_base_port, rpc_base_port=args.rpc_base_port, snode_api_port=args.snode_api_port,
             hashicorp_vault_settings=HashicorpVaultSettings({"base_url": args.hashicorp_vault_url}) if args.hashicorp_vault_url else None,
             enable_failure_domain=enable_failure_domain,
+            device_mode=device_mode,
         )
 
     def cluster_create(self, args):
@@ -1364,6 +1387,7 @@ class CLIWrapperBase:
         fabric = args.fabric
         client_data_nic = args.client_data_nic
         enable_failure_domain = getattr(args, 'enable_failure_domain', False)
+        device_mode = getattr(args, 'device_mode', 'nvme')
         # Private (developer-mode-only) arg: absent unless sbctl was run with --dev.
         enable_hang_device = getattr(args, "enable_hang_device", False)
 
@@ -1386,6 +1410,7 @@ class CLIWrapperBase:
             nvmf_base_port=args.nvmf_base_port, rpc_base_port=args.rpc_base_port, snode_api_port=args.snode_api_port,
             hashicorp_vault_settings=HashicorpVaultSettings({"base_url": args.hashicorp_vault_url}) if args.hashicorp_vault_url else None,
             enable_failure_domain=enable_failure_domain,
+            device_mode=device_mode,
             enable_hang_device=enable_hang_device,
             max_subsys=args.max_subsys or 0,
             hugepages_mem=utils.parse_size(args.hugepages_mem) if args.hugepages_mem else 0,

@@ -237,8 +237,15 @@ def process_device_event(event, logger):
                     logger.info(f"event was fired {time_delta.total_seconds()} seconds ago, target remote controller ok, skipping")
                     event.status = f'skipping_late_by_{int(time_delta.total_seconds())}s_but_controller_ok'
                     return
-                ret, err = event_node_obj.rpc_client().bdev_nvme_controller_list_2(device_obj.nvme_controller)
-                if err and err['code'] == 22:
+                if device_obj.bdev_type == "aio":
+                    # AIO devices have no nvme controller — probe the base
+                    # bdev instead: bdev gone => the late event is real.
+                    ret, err = event_node_obj.rpc_client().get_bdevs_2(device_obj.nvme_bdev)
+                    controller_missing = bool(err) or not ret
+                else:
+                    ret, err = event_node_obj.rpc_client().bdev_nvme_controller_list_2(device_obj.nvme_controller)
+                    controller_missing = bool(err) and err['code'] == 22
+                if controller_missing:
                     logger.info(f"event was fired {time_delta.total_seconds()} seconds ago, checking controller filed")
                     event.status = f'late_by_{int(time_delta.total_seconds())}s'
                 else:

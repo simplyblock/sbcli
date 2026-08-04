@@ -2388,7 +2388,8 @@ def _cluster_add_lock_heartbeat(db_controller, cluster_id, owner, stop_event):
             return
 
 
-def _classify_existing_endpoint_record(db_controller, cluster_id, node_addr, ssd_pcie):
+def _classify_existing_endpoint_record(db_controller, cluster_id, node_addr, ssd_pcie,
+                                       lblk_serials=None):
     """Classify a pre-existing storage-node record for ``node_addr`` that owns
     one of the joining node's SSDs, before an add-node proceeds.
 
@@ -2396,6 +2397,9 @@ def _classify_existing_endpoint_record(db_controller, cluster_id, node_addr, ssd
     the registration (runs 20260712/20260715: orphaned adds completed after
     their channels were reset mid-command); the caller's retry then finds the
     record already present and must not fail permanently on it.
+
+    Device ownership is tested by PCIe overlap (nvme mode) or by configured
+    block-device serial overlap (lblk mode, ``lblk_serials``).
 
     Returns one of:
     - (None, None): no record for this endpoint owns any of these SSDs.
@@ -2416,10 +2420,18 @@ def _classify_existing_endpoint_record(db_controller, cluster_id, node_addr, ssd
     first: a cleanup is always needed when one exists, independent of
     whether another match is already online.
     """
+    lblk_serials = set(lblk_serials or [])
+
+    def _owns_devices(node):
+        pcie_overlap = any(ssd in node.ssd_pcie for ssd in ssd_pcie or [])
+        serial_overlap = bool(lblk_serials and lblk_serials.intersection(
+            e.get("serial") for e in (node.lblk_devices or [])))
+        return pcie_overlap or serial_overlap
+
     matches = [
         node
         for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id)
-        if node.api_endpoint == node_addr and any(ssd in node.ssd_pcie for ssd in ssd_pcie)
+        if node.api_endpoint == node_addr and _owns_devices(node)
     ]
     for node in matches:
         if node.status == StorageNode.STATUS_IN_CREATION:
@@ -2438,7 +2450,8 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
              num_partitions_per_dev=0, jm_percent=0, enable_test_device=False,
              namespace=None, enable_ha_jm=False, cr_name=None, cr_namespace=None, cr_plural=None,
              id_device_by_nqn=False, partition_size="", ha_jm_count=None, format_4k=False,
-             spdk_proxy_image=None, spdk_sys_mem=None, expansion=False, failure_domain=None):
+             spdk_proxy_image=None, spdk_sys_mem=None, expansion=False, failure_domain=None,
+             force_format=False):
     snode_api = SNodeClient(node_addr)
     node_info, _ = snode_api.info()
     if node_info.get("nodes_config") and node_info["nodes_config"].get("nodes"):
@@ -2638,10 +2651,37 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 f"using {constants.MAX_SUBSYSTEMS_PER_NODE}")
             max_lvol = constants.MAX_SUBSYSTEMS_PER_NODE
         ssd_pcie = node_config.get("ssd_pcis")
+        lblk_configured = node_config.get("lblk_devices") or []
 
-        if ssd_pcie:
+        lblk_mode = cluster.device_mode == constants.DEVICE_MODE_LBLK
+        if lblk_mode:
+            if not lblk_configured:
+                logger.error(
+                    "This cluster runs in lblk device mode but the node config "
+                    "carries no 'lblk_devices'; run 'sn configure --lblk ...' first.")
+                return False
+            if ssd_pcie:
+                logger.error("lblk device mode: the node config must not carry "
+                             "'ssd_pcis' entries")
+                return False
+            # Phase 1: lblk requires journal-on-device (the GPT-partition JM
+            # mode detaches/re-attaches NVMe controllers to re-examine).
+            if num_partitions_per_dev != 0 and jm_percent != 0:
+                logger.error("lblk device mode requires --enable-journal-device "
+                             "(journal on a dedicated device); partitioned "
+                             "journal mode is not supported")
+                return False
+        elif lblk_configured and not ssd_pcie:
+            logger.error(
+                "The node config carries 'lblk_devices' but this cluster runs "
+                f"in {cluster.device_mode} device mode; re-run 'sn configure' "
+                "without --lblk or create the cluster with --device-mode lblk.")
+            return False
+
+        if ssd_pcie or lblk_configured:
             action, existing = _classify_existing_endpoint_record(
-                db_controller, cluster_id, node_addr, ssd_pcie)
+                db_controller, cluster_id, node_addr, ssd_pcie,
+                lblk_serials=[e.get("serial") for e in lblk_configured])
             if action == "cleanup":
                 # Repeated partial attempts can leave several stale records
                 # for the same endpoint; we clean one per task retry.
@@ -2843,11 +2883,41 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         results = None
         l_cores = node_config.get("l-cores")
         spdk_cpu_mask = node_config.get("cpu_mask")
-        for ssd in ssd_pcie:
-            if format_4k:
-                snode_api.format_device_with_4k(ssd)
+        lblk_resolved = []
+        if lblk_mode:
+            # No driver rebind in lblk mode — the AIO bdev needs the device
+            # on its kernel driver. Resolve the configured selection against
+            # the live host (serial-first), then --force-format wipes
+            # partitioned disks (re-validated host-side: busy => refused).
+            blk_inventory, err = snode_api.get_blockdevices()
+            if not blk_inventory:
+                logger.error(f"Failed to list block devices on {node_addr}: {err}")
+                return False
+            lblk_resolved, missing = utils.resolve_lblk_entries(
+                lblk_configured, blk_inventory)
+            if missing:
+                logger.error(
+                    f"Configured block device(s) not found on host: "
+                    f"{[(e.get('name'), e.get('serial')) for e in missing]}")
+                return False
+            for blk_info in lblk_resolved:
+                if blk_info.get("has_partitions"):
+                    if not force_format:
+                        logger.error(
+                            f"Block device {blk_info['name']} is partitioned; "
+                            f"pass --force-format to wipe it, or exclude it")
+                        return False
+                    ret, err = snode_api.wipe_block_device(blk_info["name"])
+                    if not ret:
+                        logger.error(f"Failed to wipe block device "
+                                     f"{blk_info['name']}: {err}")
+                        return False
+        else:
+            for ssd in ssd_pcie:
+                if format_4k:
+                    snode_api.format_device_with_4k(ssd)
+                    snode_api.bind_device_to_spdk(ssd)
                 snode_api.bind_device_to_spdk(ssd)
-            snode_api.bind_device_to_spdk(ssd)
 
         if not spdk_proxy_image:
             spdk_proxy_image = cluster.container_image_prefix + constants.SIMPLY_BLOCK_DOCKER_IMAGE
@@ -2863,7 +2933,14 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 namespace, mgmt_ip, rpc_port, rpc_user, rpc_pass,
                 multi_threading_enabled=constants.SPDK_PROXY_MULTI_THREADING_ENABLED,
                 timeout=constants.SPDK_PROXY_TIMEOUT,
-                ssd_pcie=ssd_pcie, total_mem=total_mem, system_mem=minimum_sys_memory, cluster_mode=cluster.mode,
+                # lblk mode: never pass an empty PCI allowlist — DPDK treats
+                # it as allow-all and SPDK's nvme driver could claim kernel
+                # NVMe disks (the k8s path passes PCI_ALLOWED="" today). The
+                # host-bridge placeholder is a valid BDF that never matches a
+                # storage device.
+                ssd_pcie=(ssd_pcie if not lblk_mode
+                          else [constants.LBLK_PCI_ALLOWED_PLACEHOLDER]),
+                total_mem=total_mem, system_mem=minimum_sys_memory, cluster_mode=cluster.mode,
                 socket=node_socket, cluster_id=cluster_id, spdk_proxy_image=spdk_proxy_image,
                 mcp_max_unavailable=mcp_max_unavailable)
             time.sleep(5)
@@ -2974,7 +3051,10 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         snode.cr_name = cr_name
         snode.cr_namespace = cr_namespace
         snode.cr_plural = cr_plural
-        snode.ssd_pcie = ssd_pcie
+        snode.ssd_pcie = ssd_pcie if not lblk_mode else []
+        # lblk mode: persist the configured selection (with serial identity)
+        # so restart can re-resolve devices without the host config file.
+        snode.lblk_devices = lblk_configured if lblk_mode else []
         snode.hostname = hostname
         snode.host_nqn = subsystem_nqn
         snode.subsystem = subsystem_nqn
@@ -3210,13 +3290,16 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         #     snode.ssd_pcie = node_info['spdk_pcie_list']
         #     snode.write_to_db()
         # discover devices
-        if not snode.ssd_pcie:
-            node_info, _ = snode_api.info()
-            ssds = node_info['spdk_pcie_list']
+        if lblk_mode:
+            nvme_devs = utils.addAioDevices(rpc_client, snode, lblk_resolved)
         else:
-            ssds = snode.ssd_pcie
+            if not snode.ssd_pcie:
+                node_info, _ = snode_api.info()
+                ssds = node_info['spdk_pcie_list']
+            else:
+                ssds = snode.ssd_pcie
 
-        nvme_devs = addNvmeDevices(rpc_client, snode, ssds)
+            nvme_devs = addNvmeDevices(rpc_client, snode, ssds)
         if nvme_devs:
 
             for nvme in nvme_devs:
@@ -3972,6 +4055,8 @@ def _finalize_node_removal(removed_node: StorageNode):
             snode_api.leave_swarm()
             pci_address = []
             for dev in removed_node.nvme_devices:
+                if dev.bdev_type == "aio":
+                    continue  # no PCIe identity; lblk devices are wiped via wipe_block_device
                 if dev.pcie_address not in pci_address:
                     ret = snode_api.delete_dev_gpt_partitions(dev.pcie_address)
                     logger.debug(ret)
@@ -4408,6 +4493,11 @@ def _restart_storage_node_impl(
         snode.hostname = node_info['hostname']
 
         if snode.num_partitions_per_dev == 0 and reattach_volume:
+            if snode.lblk_devices:
+                # EBS re-homing + PCI rebinding is nvme-mode machinery;
+                # lblk devices re-resolve by serial at discovery below.
+                logger.error("--reattach-volume is not supported on lblk-mode nodes")
+                return False
             new_cloud_instance_id = node_info['cloud_instance']['id']
             detached_volumes = node_utils.detach_ebs_volumes(snode.cloud_instance_id)
             if not detached_volumes:
@@ -4575,9 +4665,16 @@ def _restart_storage_node_impl(
     if not snode.spdk_proxy_image:
         snode.spdk_proxy_image = cluster.container_image_prefix + constants.SIMPLY_BLOCK_DOCKER_IMAGE
 
+    lblk_mode = cluster.device_mode == constants.DEVICE_MODE_LBLK
+
     results = None
     try:
         if new_ssd_pcie and type(new_ssd_pcie) is list:
+            if lblk_mode:
+                # Phase 1: growing an lblk node's device set goes through
+                # `sn configure --lblk` + re-add, not restart-time PCI binds.
+                logger.error("--ssd-pcie is not supported on lblk-mode clusters")
+                return False
             for new_ssd in new_ssd_pcie:
                 if new_ssd not in snode.ssd_pcie:
                     try:
@@ -4594,7 +4691,11 @@ def _restart_storage_node_impl(
             snode.l_cores, snode.spdk_mem, snode.spdk_image, spdk_debug, cluster_ip, fdb_connection,
             snode.namespace, snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password,
             multi_threading_enabled=constants.SPDK_PROXY_MULTI_THREADING_ENABLED, timeout=constants.SPDK_PROXY_TIMEOUT,
-            ssd_pcie=snode.ssd_pcie, total_mem=total_mem, system_mem=minimum_sys_memory, cluster_mode=cluster.mode,
+            # lblk: placeholder allowlist — an empty list means allow-all to
+            # DPDK and SPDK's nvme driver could claim kernel NVMe disks.
+            ssd_pcie=(snode.ssd_pcie if not lblk_mode
+                      else [constants.LBLK_PCI_ALLOWED_PLACEHOLDER]),
+            total_mem=total_mem, system_mem=minimum_sys_memory, cluster_mode=cluster.mode,
             socket=snode.socket, cluster_id=snode.cluster_id,
             spdk_proxy_image=snode.spdk_proxy_image)
 
@@ -4743,18 +4844,38 @@ def _restart_storage_node_impl(
             return False
 
     node_info, _ = snode_api.info()
-    if not snode.ssd_pcie:
-        ssds = node_info['spdk_pcie_list']
+    if lblk_mode:
+        # Re-resolve the persisted selection against the live host,
+        # SERIAL-FIRST (kernel names shift across reboots; the stored name
+        # is only the fallback for serial-less devices), then rebuild the
+        # AIO bdevs. A missing device degrades to STATUS_REMOVED in the
+        # reconcile below — same semantics as a missing NVMe controller.
+        blk_inventory, blk_err = snode_api.get_blockdevices()
+        if not blk_inventory:
+            logger.error(f"Failed to list block devices: {blk_err}")
+            return False
+        lblk_resolved, lblk_missing = utils.resolve_lblk_entries(
+            snode.lblk_devices, blk_inventory)
+        for entry in lblk_missing:
+            logger.warning(f"Configured block device {entry.get('name')} "
+                           f"(serial {entry.get('serial')}) not found on host")
+        nvme_devs = utils.addAioDevices(rpc_client, snode, lblk_resolved)
+        if not nvme_devs:
+            logger.error("No eligible block devices were found!")
+            return False
     else:
-        ssds = []
-        for ssd in snode.ssd_pcie:
-            if ssd in node_info['spdk_pcie_list']:
-                ssds.append(ssd)
+        if not snode.ssd_pcie:
+            ssds = node_info['spdk_pcie_list']
+        else:
+            ssds = []
+            for ssd in snode.ssd_pcie:
+                if ssd in node_info['spdk_pcie_list']:
+                    ssds.append(ssd)
 
-    nvme_devs = addNvmeDevices(rpc_client, snode, ssds)
-    if not nvme_devs:
-        logger.error("No NVMe devices was found!")
-        return False
+        nvme_devs = addNvmeDevices(rpc_client, snode, ssds)
+        if not nvme_devs:
+            logger.error("No NVMe devices was found!")
+            return False
 
     logger.info(f"Devices found: {len(nvme_devs)}")
     logger.debug(nvme_devs)
@@ -4779,8 +4900,15 @@ def _restart_storage_node_impl(
             if not db_dev.is_partition and not found_dev.is_partition:
                 db_dev.device_name = found_dev.device_name
                 db_dev.nvme_bdev = found_dev.nvme_bdev
-                db_dev.nvme_controller = found_dev.nvme_controller
-                db_dev.pcie_address = found_dev.pcie_address
+                if found_dev.bdev_type == "aio":
+                    # AIO devices have no controller/PCIe identity; refresh
+                    # the re-resolved kernel path instead.
+                    db_dev.bdev_type = "aio"
+                    db_dev.device_path = found_dev.device_path
+                    db_dev.by_id_path = found_dev.by_id_path
+                else:
+                    db_dev.nvme_controller = found_dev.nvme_controller
+                    db_dev.pcie_address = found_dev.pcie_address
 
             # if db_dev.status in [ NVMeDevice.STATUS_ONLINE]:
             #     db_dev.status = NVMeDevice.STATUS_UNAVAILABLE
@@ -5212,7 +5340,9 @@ def list_storage_devices(node_id):
             "Name": device.alceml_name,
             "Size": utils.humanbytes(device.size),
             "Serial Number": device.serial_number,
-            "PCIe": device.pcie_address,
+            # lblk (aio) devices have no PCIe identity — show the kernel path.
+            "PCIe": (device.pcie_address if device.bdev_type != "aio"
+                     else device.device_path),
             "Status": device.status,
             "IO Err": device.io_error,
             # Device health is only meaningful when its node is ONLINE/DOWN.
@@ -5864,6 +5994,8 @@ def shutdown_storage_node(node_id, force=False, keep_auto_restart=False,
         return False
     pci_address = []
     for dev in snode.nvme_devices:
+        if dev.bdev_type == "aio":
+            continue  # lblk devices never left their kernel driver
         if dev.pcie_address not in pci_address:
             try:
                 ret = snode.client(timeout=30, retry=1).bind_device_to_nvme(dev.pcie_address)
@@ -6167,7 +6299,7 @@ def upgrade_automated_deployment_config():
 
 def generate_automated_deployment_config(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_allowed, pci_blocked,
                                          vcpu_count=0, force=False, device_model="", size_range="", nvme_names=None, k8s=False,
-                                         calculate_hp_only=False, number_of_devices=0):
+                                         calculate_hp_only=False, number_of_devices=0, lblk_selection=None):
     # Reject an over-cap max_lvol here rather than only in the CLI: this is the
     # single entry point shared by `sn configure` and the k8s node-configure
     # job, and the value it writes into NODES_CONFIG_FILE becomes the node's
@@ -6189,13 +6321,16 @@ def generate_automated_deployment_config(max_lvol, max_prov, sockets_to_use, nod
         if total_cores < 6:
             raise ValueError("Error: Not enough CPU cores to deploy storage node. Minimum 6 cores required.")
 
-        # load vfio_pci and uio_pci_generic
-        utils.load_kernel_module("vfio_pci")
-        utils.load_kernel_module("uio_pci_generic")
+        if lblk_selection is None:
+            # load vfio_pci and uio_pci_generic (nvme mode only — lblk keeps
+            # devices on their kernel driver, SPDK accesses them via AIO)
+            utils.load_kernel_module("vfio_pci")
+            utils.load_kernel_module("uio_pci_generic")
 
         nodes_config, system_info = utils.generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket,
                                                            pci_allowed, pci_blocked, vcpu_count, force=force,
-                                                           device_model=device_model, size_range=size_range, nvme_names=nvme_names)
+                                                           device_model=device_model, size_range=size_range, nvme_names=nvme_names,
+                                                           lblk_selection=lblk_selection)
         if not nodes_config or not nodes_config.get("nodes"):
             return False
         utils.store_config_file(nodes_config, constants.NODES_CONFIG_FILE, create_read_only_file=True)

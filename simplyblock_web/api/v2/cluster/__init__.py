@@ -89,6 +89,7 @@ class ClusterParams(BaseModel):
     max_subsys: util.Unsigned
     hugepages_mem: util.Size
     spdk_vcpu_count: util.Unsigned
+    device_mode: Literal["nvme", "lblk"] = "nvme"
 
     @model_validator(mode="after")
     def validate_erasure_coding_scheme(self):
