@@ -967,11 +967,12 @@ print("done")
             )
             sleep_n_sec(self.step_sleep)
 
-            # Restart with target spdk image
-            self.logger.info(f"[SN {snode}] Restarting with spdk-image={self.spdk_image}")
+            # Restart with target spdk image and proxy image
+            proxy_flag = f" --spdk-proxy-image {self.target_docker_image}" if self.target_docker_image else ""
+            self.logger.info(f"[SN {snode}] Restarting with spdk-image={self.spdk_image}, spdk-proxy-image={self.target_docker_image or '(default)'}")
             self.ssh_obj.exec_command(
                 self.mgmt_nodes[0],
-                f"{self.sbctl_cmd} --dev -d sn restart {node_id} --spdk-image {self.spdk_image}",
+                f"{self.sbctl_cmd} --dev -d sn restart {node_id} --spdk-image {self.spdk_image}{proxy_flag}",
                 raise_on_error=True,
             )
             try:

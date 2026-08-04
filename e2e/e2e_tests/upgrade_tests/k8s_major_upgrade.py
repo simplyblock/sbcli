@@ -1373,9 +1373,12 @@ spec:
             spdk_flag = ""
             if self.target_spdk_image:
                 spdk_flag = f" --spdk-image {self.target_spdk_image}"
+            proxy_flag = ""
+            if self.target_spdk_proxy_image:
+                proxy_flag = f" --spdk-proxy-image {self.target_spdk_proxy_image}"
 
             self.k8s_utils.exec_sbcli(
-                f"{sbcli} -d --dev sn restart {node_id}{spdk_flag}"
+                f"{sbcli} -d --dev sn restart {node_id}{spdk_flag}{proxy_flag}"
             )
 
             # Wait for node online
