@@ -3597,6 +3597,42 @@ def _fail_task(task, migration_or_msg, reason=None):
 
 
 # ---------------------------------------------------------------------------
+_STATUS_NEW_TIMEOUT_SECONDS = 300  # 5 minutes
+
+
+def _cancel_stale_new_migrations(cluster_id):
+    """Auto-cancel migrations stuck in STATUS_NEW for longer than the timeout.
+
+    A migration in STATUS_NEW is waiting for the operator to call
+    migrate-continue (start_migration).  If it hasn't been continued within
+    5 minutes, cancel it so resources on the target node are released and the
+    operator gets a clear signal to retry from scratch.
+    """
+    now = datetime.datetime.now()
+    for migration in db.get_migrations(cluster_id):
+        if migration.status != LVolMigration.STATUS_NEW:
+            continue
+        if not migration.create_dt:
+            continue
+        try:
+            created = datetime.datetime.fromisoformat(migration.create_dt)
+        except ValueError:
+            continue
+        age_seconds = (now - created).total_seconds()
+        if age_seconds > _STATUS_NEW_TIMEOUT_SECONDS:
+            logger.warning(
+                f"Migration {migration.uuid} (lvol={migration.lvol_id}) has been "
+                f"in STATUS_NEW for {age_seconds:.0f}s (>{_STATUS_NEW_TIMEOUT_SECONDS}s); "
+                "auto-cancelling"
+            )
+            try:
+                migration_controller.cancel_migration(migration.uuid)
+            except Exception as e:
+                logger.error(
+                    f"Failed to auto-cancel stale migration {migration.uuid}: {e}"
+                )
+
+
 # Runner main loop
 # ---------------------------------------------------------------------------
 
@@ -3615,6 +3651,7 @@ if __name__ == "__main__":
             logger.error("No clusters found!")
         else:
             for cl in clusters:
+                _cancel_stale_new_migrations(cl.get_id())
                 for task in db.get_active_migration_tasks(cl.get_id()):
                     # Lease gate: skip a task another live runner host owns, so
                     # two replicas can't both drive the same migration's
