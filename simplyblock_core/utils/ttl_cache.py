@@ -15,6 +15,7 @@ should call ``invalidate`` so their own process re-reads immediately.
 
 import threading
 import time
+import weakref
 from typing import Any, Callable
 
 _NOT_SET = object()
@@ -25,10 +26,17 @@ class TTLCache:
     # giving up and computing on its own (leader crashed / hung on FDB).
     _INFLIGHT_WAIT_SEC = 60.0
 
+    #: Every live cache, so ``invalidate_all()`` can reach caches declared
+    #: outside this module (``storage_node_monitor._status_probe_cache``) as
+    #: well as the ones below. Weak so a cache that goes out of scope is not
+    #: kept alive by the registry.
+    _instances: "weakref.WeakSet[TTLCache]" = weakref.WeakSet()
+
     def __init__(self):
         self._data: dict[Any, tuple[float, Any]] = {}
         self._lock = threading.Lock()
         self._inflight: dict[Any, threading.Event] = {}
+        TTLCache._instances.add(self)
 
     def get(self, key, ttl: float):
         """Return the cached value for ``key`` if younger than ``ttl`` seconds,
@@ -108,6 +116,20 @@ class TTLCache:
             with self._lock:
                 self._inflight.pop(key, None)
             event.set()
+
+
+def invalidate_all() -> None:
+    """Drop every entry from every live TTLCache.
+
+    For test isolation: these caches are process-global and keyed on ids that
+    tests reuse ('node-1', 'LVS_1', ...), so a verdict computed in one test is
+    served to the next. Enumerating the caches at the call site does not work —
+    it has silently missed new ones twice (``no_leader_cache`` here and
+    ``storage_node_monitor._status_probe_cache``), which made a whole test class
+    fail on stale values while each test passed alone.
+    """
+    for cache in list(TTLCache._instances):
+        cache.invalidate()
 
 
 # Shared instances, one per concern, so unrelated keys never collide and

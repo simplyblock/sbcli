@@ -19,7 +19,7 @@ from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.hublvol import HubLVol
 
-
+from tests._mocks import assert_hublvol_wired
 
 
 # ---------------------------------------------------------------------------
@@ -383,10 +383,10 @@ class TestRecreateLvstoreDualSecondary(unittest.TestCase):
         # lvs_node is passed so the peer wires up the correct LVS metadata
         # (commit 2c99806d). On a non-takeover primary restart lvs_node is
         # the restarting primary itself (snode).
-        nodes["node-2"].connect_to_hublvol.assert_called_once_with(
-            snode, failover_node=None, role="secondary", rpc_timeout=0.2, lvs_node=snode)
-        nodes["node-3"].connect_to_hublvol.assert_called_once_with(
-            snode, failover_node=None, role="tertiary", rpc_timeout=0.2, lvs_node=snode)
+        assert_hublvol_wired(nodes["node-2"].connect_to_hublvol, snode,
+                             role="secondary", lvs_node=snode)
+        assert_hublvol_wired(nodes["node-3"].connect_to_hublvol, snode,
+                             role="tertiary", lvs_node=snode)
         nodes["node-3"].add_hublvol_failover_path.assert_called_once_with(
             snode, nodes["node-2"])
 
@@ -411,6 +411,11 @@ class TestRecreateLvstoreDualSecondary(unittest.TestCase):
 
         nodes = self._build_4node_cluster()
         db = mock_db_cls.return_value
+        # The peer's lvstore_status is flipped back to "ready" through
+        # atomic_update (a full-object write would clobber the peer's
+        # concurrent field updates). An unconfigured MagicMock swallows the
+        # mutator, so apply it the way the real DBController does.
+        db.atomic_update.side_effect = lambda obj, fn: (fn(obj), obj)[1]
 
         write_db_calls = {}
         for nid, n in nodes.items():
@@ -539,7 +544,8 @@ class TestRecreateLvstoreDualSecondary(unittest.TestCase):
         self.assertTrue(result)
 
         # Online sec1 should have connect_to_hublvol called
-        nodes["node-2"].connect_to_hublvol.assert_called_once()
+        assert_hublvol_wired(nodes["node-2"].connect_to_hublvol, snode,
+                             role="secondary", lvs_node=snode)
         # Offline sec2 should NOT have connect_to_hublvol called
         nodes["node-3"].connect_to_hublvol.assert_not_called()
 

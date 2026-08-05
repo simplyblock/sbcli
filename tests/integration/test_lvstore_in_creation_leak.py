@@ -39,24 +39,27 @@ class TestRestorePeerLvstoreStatus(unittest.TestCase):
     def _db(self, node):
         db = MagicMock()
         db.get_storage_node_by_id.return_value = node
+        # The restore persists through atomic_update (a full-object write here
+        # would clobber concurrent updates to the peer's other fields). An
+        # unconfigured MagicMock swallows the mutator instead of running it, so
+        # apply it the way the real DBController does.
+        db.atomic_update.side_effect = lambda obj, fn: (fn(obj), obj)[1]
         return db
 
     def test_restores_leaked_in_creation(self):
         from simplyblock_core import storage_node_ops as ops
         node = _node()
-        node.write_to_db = MagicMock()
         db = self._db(node)
         ops._restore_peer_lvstore_status_ready("peer-1", db)
         self.assertEqual(node.lvstore_status, "ready")
-        node.write_to_db.assert_called_once()
+        db.atomic_update.assert_called_once()
 
     def test_leaves_other_status_alone(self):
         from simplyblock_core import storage_node_ops as ops
         node = _node(lvstore_status="ready")
-        node.write_to_db = MagicMock()
         db = self._db(node)
         ops._restore_peer_lvstore_status_ready("peer-1", db)
-        node.write_to_db.assert_not_called()
+        db.atomic_update.assert_not_called()
 
     def test_missing_node_is_noop(self):
         from simplyblock_core import storage_node_ops as ops

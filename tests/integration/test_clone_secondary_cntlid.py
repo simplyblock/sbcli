@@ -148,6 +148,10 @@ class TestCloneSecondaryCntlidIndex(unittest.TestCase):
         lvol_ctrl.add_lvol_on_node.side_effect = _record_add
         # Leader detection iterates candidates and breaks on the first truthy
         # result; the host (primary) is first, so a blanket True elects it.
+        # Stubbed on BOTH the rebound module attribute and the real module:
+        # _find_lvs_leader re-imports lvol_controller inside the function, so
+        # it never sees this rebind and would otherwise probe for real, find no
+        # leader, and reject the clone.
         lvol_ctrl.is_node_leader.return_value = True
         lvol_ctrl.get_next_available_subsystem_on_node.return_value = None
         # clone() now counts the node's lvol subsystems directly via the data
@@ -157,6 +161,8 @@ class TestCloneSecondaryCntlidIndex(unittest.TestCase):
 
         with patch.object(snapshot_controller, "lvol_controller", lvol_ctrl), \
              patch.object(snapshot_controller, "snapshot_events", MagicMock()), \
+             patch("simplyblock_core.controllers.lvol_controller.is_node_leader",
+                   return_value=True), \
              patch.object(snapshot_controller.utils, "get_random_vuid",
                           return_value=12345), \
              patch("simplyblock_core.storage_node_ops.check_non_leader_for_operation",

@@ -32,6 +32,35 @@ from simplyblock_core.models.storage_node import StorageNode
 # ---------------------------------------------------------------------------
 
 
+def _seed_device_mesh(nodes):
+    """Give every node a connected remote-device record for every other node's
+    devices.
+
+    ``cluster_activate`` gates on ``_wait_for_full_device_connectivity``, which
+    requires the full cross-node mesh before it will build distribs on top of
+    it. Without this the activation under test aborts at that gate and never
+    reaches pass 2, so the port-block assertions see no calls at all.
+    """
+    for node in nodes:
+        node.remote_devices = [
+            _remote_of(peer, dev)
+            for peer in nodes if peer.get_id() != node.get_id()
+            for dev in peer.nvme_devices
+        ]
+
+
+def _remote_of(owner, dev):
+    """A connected remote-device record on a peer for ``owner``'s ``dev``. The
+    uuid must match the owning device's — the mesh is keyed on device id."""
+    from simplyblock_core.models.nvme_device import RemoteDevice
+
+    rd = RemoteDevice()
+    rd.uuid = dev.get_id()
+    rd.remote_bdev = f"remote_{dev.get_id()}"
+    rd.node_id = owner.get_id()
+    return rd
+
+
 def _node(uuid, status=StorageNode.STATUS_ONLINE, lvstore="LVS_A",
           jm_vuid=1, primary_secondary=None, primary_tertiary=None,
           mgmt_ip="10.0.0.1", rpc_port=8080, n_devices=4):
@@ -115,6 +144,8 @@ class TestActivatePortBlockWrapper(unittest.TestCase):
         """
         from simplyblock_core import cluster_ops
 
+        _seed_device_mesh([primary, secondary])
+
         db = MagicMock()
         db.get_cluster_by_id.return_value = cluster
         db.get_storage_nodes_by_cluster_id.return_value = [primary, secondary]
@@ -189,7 +220,10 @@ class TestActivatePortBlockWrapper(unittest.TestCase):
             patch.object(cluster_ops.storage_node_ops, "get_secondary_nodes_2",
                          lambda *a, **kw: []),
             patch.object(cluster_ops, "set_cluster_status", lambda *a, **kw: None),
-            patch.object(cluster_ops, "time", MagicMock()),
+            # Only sleep. Replacing the whole module makes time.time() return a
+            # MagicMock, so the activation path's `time.time() >= deadline`
+            # comparisons raise TypeError instead of running.
+            patch.object(cluster_ops.time, "sleep", MagicMock()),
             # qos: prevent FDB writes
             patch.object(cluster_ops.qos_controller, "get_qos_weights_list",
                          lambda *a, **kw: []),
@@ -342,8 +376,14 @@ class TestSuspendIsDeprecatedNoop(unittest.TestCase):
         snode = _node("node-A", lvstore="LVS_A", status=StorageNode.STATUS_ONLINE)
 
         with patch.object(storage_node_ops, "port_block") as pb, \
+                patch.object(storage_node_ops, "set_node_status"), \
                 patch.object(storage_node_ops, "DBController") as _db:
-            _db.get_storage_node_by_id.return_value = snode
+            # The callee does DBController().get_storage_node_by_id(...), so the
+            # node has to hang off the INSTANCE mock. Stubbing the class mock
+            # left the callee reading a bare MagicMock status, failing its
+            # is-online check and returning early — the assertion below then
+            # passed without the suspend path ever running.
+            _db.return_value.get_storage_node_by_id.return_value = snode
             self.assertTrue(
                 storage_node_ops.suspend_storage_node(snode.get_id()))
             pb.set_port.assert_not_called()
@@ -354,8 +394,9 @@ class TestSuspendIsDeprecatedNoop(unittest.TestCase):
         snode = _node("node-A", lvstore="LVS_A", status=StorageNode.STATUS_SUSPENDED)
 
         with patch.object(storage_node_ops, "port_block") as pb, \
+                patch.object(storage_node_ops, "set_node_status"), \
                 patch.object(storage_node_ops, "DBController") as _db:
-            _db.get_storage_node_by_id.return_value = snode
+            _db.return_value.get_storage_node_by_id.return_value = snode
             self.assertTrue(
                 storage_node_ops.resume_storage_node(snode.get_id()))
             pb.set_port.assert_not_called()
