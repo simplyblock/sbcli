@@ -1795,12 +1795,24 @@ def node_config_device_count(node) -> int:
     return len(node.get("lblk_devices") or []) or len(node.get("ssd_pcis") or [])
 
 
+# Sys-memory sizing intent (see generate_automated_deployment_config):
+# "RAM 4GB min. Plus 0.2% of the storage." The nvme path nominally adds the
+# FULL device capacity but in practice always measures 0 — capacity is read
+# via `nvme list` AFTER the devices were unbound from the kernel driver. The
+# lblk path knows the real sizes, so it applies the documented 0.2% factor
+# (2026-08-05 AWS run: summing full capacity demanded 102 GiB sys memory for
+# 2x50G EBS volumes on 32 GiB hosts and failed every `sn configure --lblk`).
+SYS_MEMORY_STORAGE_FACTOR = 0.002
+
+
 def node_config_min_sys_memory(node) -> int:
-    """Minimum system memory for a node-config entry: 2 GiB + total device
-    capacity. lblk entries carry their sizes; nvme goes through nvme-cli."""
+    """Minimum system memory for a node-config entry: 2 GiB + 0.2% of total
+    device capacity. lblk entries carry their sizes; nvme goes through
+    nvme-cli."""
     lblk = node.get("lblk_devices") or []
     if lblk:
-        total = 2147483648 + sum(int(e.get("size") or 0) for e in lblk)
+        capacity = sum(int(e.get("size") or 0) for e in lblk)
+        total = 2147483648 + int(capacity * SYS_MEMORY_STORAGE_FACTOR)
         logger.debug(f"Minimum system memory is {humanbytes(total)}")
         return int(total)
     return calculate_minimum_sys_memory(node.get("ssd_pcis") or [])
