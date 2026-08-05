@@ -596,6 +596,7 @@ jobs:
           set -euxo pipefail
           echo "=== Installing R25 sbcli control plane chart ==="
           cd $GITHUB_WORKSPACE/sbcli-r25/simplyblock_core/scripts/charts/
+          helm dependency build .
           helm upgrade --install sbcli \
             --namespace simplyblock \
             --create-namespace \
@@ -720,6 +721,7 @@ jobs:
 
           echo "=== Installing R25 spdk-csi chart ==="
           cd $GITHUB_WORKSPACE/simplyblock-operator/csi-driver/charts/spdk-csi/latest/spdk-csi/
+          helm dependency build . 2>/dev/null || true
 
           helm install -n $NAMESPACE spdk-csi ./ \
             --set csiConfig.simplybk.uuid="${CLUSTER_ID}" \
