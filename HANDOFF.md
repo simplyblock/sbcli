@@ -21,29 +21,29 @@ ad4768462  Introduce generic task runner         (B0)
 <A5/A3/A2/A1 commits below>
 ```
 
-## Status: Phase A done, B0 done, B1–B3 done
+## Status: Phase A done, B0 done, 8 of 13 runners migrated
 
-Migrated onto the driver (7): `fdb_backup`, `jc_comp`, `replication_final`,
-`sync_lvol_del`, `backup`, `cluster_expand`, `node_add`.
+Migrated onto the driver: `fdb_backup`, `jc_comp`, `replication_final`,
+`sync_lvol_del`, `backup`, `cluster_expand`, `node_add`, `restart`.
 
-**Remaining (B4…B9), in order:**
+**Remaining, in order:**
 
-4. migration trio — `migration`, `new_dev_migration`, `failed_migration`
+1. migration trio — `migration`, `new_dev_migration`, `failed_migration`
    (serial; `get_active_node_mig_task` / same-node-sibling gating becomes
-   `is_eligible`)
-5. `port_allow` (large; its `is_eligible` omits the `IN_ACTIVATION` check — the
+   `is_eligible`). Note `tasks_controller.defer_if_cluster_expanding` writes
+   task state from inside these handlers — it becomes a `TaskDefer` (or an
+   `is_eligible` clause) and the helper goes away.
+2. `port_allow` (large; its `is_eligible` omits the `IN_ACTIVATION` check — the
    documented opt-out — and keeps the recovery logic)
-6. `restart` (concurrency + per-node `exclusion_key`; `is_auto_restart_paused`
-   and `fd_dead_recovery_allowed` become part of `is_eligible`)
-7. `lvol_migration` (largest; migrate the loop/lease/retry shell only, leave the
-   snapshot-copy state machine intact)
-8. `node_removal` (serial, already leased, unbounded)
-9. `batch_migration` (migrate the loop/lease shell, leave group orchestration)
+3. `node_removal` (serial, already leased, unbounded)
 
-## What the driver grew during B1–B3
+**Deferred to a follow-up PR:** `lvol_migration` and `batch_migration` — under
+active upstream rewrite (~17 commits in the last window, several still labelled
+`TEMP:`). Migrating them now guarantees repeated conflicts for no benefit.
 
-Beyond what the plan describes, `task_runner_base` gained two things the
-migrations needed:
+## What the driver grew during the migrations
+
+Beyond what the plan describes, `task_runner_base` gained:
 
 - **`function_result` is cleared before each handler attempt**, so a task that
   fails and later succeeds doesn't finish carrying the stale failure message.
@@ -54,6 +54,22 @@ migrations needed:
   `sync_lvol_del` frees the primary's del-sync lock there, `backup` fails/
   un-merges the backup resource there. Both are written to be no-ops when the
   handler already finished the resource.
+- **All task writes are compare-and-set** (`_commit`), never full-object
+  `write_to_db`. This is not a refinement — the original driver reproduced the
+  lost update behind upstream's 2026-07-29 double-restart incident, and held the
+  stale copy for the whole handler duration. See the plan's "Upstream
+  reconciliation (2026-08)".
+- **One dispatch path**: serialized execution submits to the pool and waits
+  rather than running inline, so the inflight registry is the single
+  mutual-exclusion authority. `RunnerSpec.serialize` is a per-task predicate,
+  because restart picks its mode from live cluster state.
+- **`checkpoint(task, **params)`** — persist handler progress mid-handler, for a
+  destructive step that must not repeat after a crash. Doubles as the
+  cancellation probe before the next destructive step.
+- **`RunnerSpec.on_cycle(cluster)`** — per-cluster upkeep attached to no task
+  (restart's orphaned-node watchdog).
+- **`RunnerSpec.backoff(retry)`** — override the default curve where a runner
+  has a tuned one (restart's 1-minute lead-in).
 
 ## Gotchas
 
@@ -75,7 +91,8 @@ migrations needed:
 
 ```bash
 tox run-parallel -e lint,types
-tox run -e unit -- tests/unit/tasks/ tests/unit/test_lvol_sync_op_task.py
+tox run -e unit -- tests/unit/tasks/ tests/unit/test_lvol_sync_op_task.py \
+                   tests/unit/test_task_cancellation.py
 tox run -e unit                    # full unit tier, ~45s, currently green
 ```
 
