@@ -1,4 +1,3 @@
-# coding=utf-8
 """Unit tests for the shared task-runner driver (``task_runner_base``).
 
 These exercise the per-task lifecycle (``_process``) and the dispatch loop
@@ -60,7 +59,7 @@ def test_void_return_marks_done(monkeypatch):
     task = _task()
     _wire(monkeypatch, task)
     handler = MagicMock(return_value=None)
-    _runner(handler)._process(task, MagicMock())
+    _runner(handler)._process(task, MagicMock(), [])
     handler.assert_called_once_with(task)
     assert task.status == JobSchedule.STATUS_DONE
 
@@ -70,7 +69,7 @@ def test_handler_runs_under_lease_heartbeat(monkeypatch):
     _wire(monkeypatch, task)
     hb = MagicMock()
     monkeypatch.setattr(trb.tasks_controller, "task_lease_heartbeat", hb)
-    _runner(MagicMock(return_value=None))._process(task, MagicMock())
+    _runner(MagicMock(return_value=None))._process(task, MagicMock(), [])
     hb.assert_called_once_with(task)
     hb.return_value.__enter__.assert_called_once()
     hb.return_value.__exit__.assert_called_once()
@@ -84,7 +83,7 @@ def test_defer_suspends_without_consuming_retry(monkeypatch):
         raise trb.TaskDefer("node not online")
 
     runner = _runner(handler)
-    runner._process(task, MagicMock())
+    runner._process(task, MagicMock(), [])
     assert task.status == JobSchedule.STATUS_SUSPENDED
     assert task.retry == 2
     assert task.function_result == "node not online"
@@ -99,7 +98,7 @@ def test_retry_suspends_consumes_retry_and_backs_off(monkeypatch):
         raise trb.TaskRetry("rpc failed")
 
     runner = _runner(handler)
-    runner._process(task, MagicMock())
+    runner._process(task, MagicMock(), [])
     assert task.status == JobSchedule.STATUS_SUSPENDED
     assert task.retry == 2
     assert runner._next_attempt["task-1"] > time.time()
@@ -113,7 +112,7 @@ def test_unexpected_exception_is_treated_as_retry(monkeypatch):
         raise RuntimeError("boom")
 
     runner = _runner(handler)
-    runner._process(task, MagicMock())  # must not raise
+    runner._process(task, MagicMock(), [])  # must not raise
     assert task.status == JobSchedule.STATUS_SUSPENDED
     assert task.retry == 1
 
@@ -125,7 +124,7 @@ def test_success_message_comes_from_the_handler(monkeypatch):
     def handler(t):
         t.function_result = "Backup created"
 
-    _runner(handler)._process(task, MagicMock())
+    _runner(handler)._process(task, MagicMock(), [])
     assert task.status == JobSchedule.STATUS_DONE
     assert task.function_result == "Backup created"
 
@@ -135,7 +134,7 @@ def test_previous_failure_result_does_not_survive_a_later_success(monkeypatch):
     task.function_result = "rpc failed"
     _wire(monkeypatch, task)
 
-    _runner(MagicMock(return_value=None))._process(task, MagicMock())
+    _runner(MagicMock(return_value=None))._process(task, MagicMock(), [])
     assert task.status == JobSchedule.STATUS_DONE
     assert task.function_result == "completed"
 
@@ -147,7 +146,7 @@ def test_abort_marks_done_with_reason(monkeypatch):
     def handler(_task):
         raise trb.TaskAbort("missing param")
 
-    _runner(handler)._process(task, MagicMock())
+    _runner(handler)._process(task, MagicMock(), [])
     assert task.status == JobSchedule.STATUS_DONE
     assert task.function_result == "missing param"
 
@@ -161,7 +160,7 @@ def test_ineligible_skips_without_claim_or_write(monkeypatch):
     monkeypatch.setattr(trb.tasks_controller, "claim_task", claim)
     handler = MagicMock()
 
-    _runner(handler, is_eligible=lambda t, c: False)._process(task, MagicMock())
+    _runner(handler, is_eligible=lambda t, c: False)._process(task, MagicMock(), [])
 
     handler.assert_not_called()
     claim.assert_not_called()
@@ -173,7 +172,7 @@ def test_default_eligible_runs(monkeypatch):
     task = _task()
     _wire(monkeypatch, task)
     handler = MagicMock(return_value=None)
-    _runner(handler)._process(task, MagicMock())
+    _runner(handler)._process(task, MagicMock(), [])
     handler.assert_called_once()
 
 
@@ -181,7 +180,7 @@ def test_lease_denied_skips(monkeypatch):
     task = _task()
     _wire(monkeypatch, task, claim=False)
     handler = MagicMock()
-    _runner(handler)._process(task, MagicMock())
+    _runner(handler)._process(task, MagicMock(), [])
     handler.assert_not_called()
     assert task.status == JobSchedule.STATUS_NEW
 
@@ -192,7 +191,7 @@ def test_canceled_marks_done_without_handler(monkeypatch):
     task = _task(canceled=True)
     _wire(monkeypatch, task)
     handler = MagicMock()
-    _runner(handler)._process(task, MagicMock())
+    _runner(handler)._process(task, MagicMock(), [])
     handler.assert_not_called()
     assert task.status == JobSchedule.STATUS_DONE
     assert task.function_result == "canceled"
@@ -202,7 +201,7 @@ def test_max_retry_marks_done_without_handler(monkeypatch):
     task = _task(retry=8, max_retry=8)
     _wire(monkeypatch, task)
     handler = MagicMock()
-    _runner(handler)._process(task, MagicMock())
+    _runner(handler)._process(task, MagicMock(), [])
     handler.assert_not_called()
     assert task.status == JobSchedule.STATUS_DONE
     assert "max retry" in task.function_result
@@ -212,7 +211,7 @@ def test_negative_max_retry_is_unbounded(monkeypatch):
     task = _task(retry=100, max_retry=-1)
     _wire(monkeypatch, task)
     handler = MagicMock(return_value=None)
-    _runner(handler)._process(task, MagicMock())
+    _runner(handler)._process(task, MagicMock(), [])
     handler.assert_called_once()  # ceiling never binds for max_retry < 0
     assert task.status == JobSchedule.STATUS_DONE
 
@@ -242,7 +241,8 @@ def test_run_dispatches_only_matching_non_done(monkeypatch):
 
     runner = _runner(MagicMock())
     dispatched = []
-    monkeypatch.setattr(runner, "_dispatch", lambda t, c: dispatched.append(t.uuid))
+    monkeypatch.setattr(runner, "_dispatch",
+                        lambda t, c, tasks: dispatched.append(t.uuid))
 
     with pytest.raises(_StopLoop):
         runner.run()

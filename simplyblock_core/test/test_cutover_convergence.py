@@ -22,6 +22,7 @@ from unittest.mock import MagicMock, patch
 
 from simplyblock_core import constants
 from simplyblock_core.services import tasks_runner_replication_final as runner
+from simplyblock_core.services.task_runner_base import TaskDefer, TaskRetry
 
 
 class _Task:
@@ -110,14 +111,19 @@ class TestConvergence(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
 
-        done, err = runner._shrink_step(task, _lvol())
-        return done, err, task, taken, clock
+        # Handing over to the freeze is a plain return; yielding the pass or
+        # failing is a raise. `outcome is None` therefore means "freeze now".
+        outcome = None
+        try:
+            runner._shrink_step(task, _lvol())
+        except (TaskDefer, TaskRetry) as e:
+            outcome = e
+        return outcome, task, taken, clock
 
     def test_a_fast_round_while_holding_the_lvstore_hands_over(self):
         """Converged AND exclusive -> freeze immediately."""
-        done, err, task, taken, _ = self._run([0.5])
-        self.assertTrue(done)
-        self.assertIsNone(err)
+        outcome, task, taken, _ = self._run([0.5])
+        self.assertIsNone(outcome)
         self.assertIn("converged", task.function_result)
         self.assertEqual(taken, [], "a fast first round needs no further rounds")
 
@@ -141,9 +147,8 @@ class TestConvergence(unittest.TestCase):
 
     def test_a_slow_round_takes_another_snapshot_without_leaving_the_pass(self):
         """The whole point: rounds follow each other in milliseconds."""
-        done, err, task, taken, clock = self._run([3.0, 3.0, 0.4])
-        self.assertTrue(done)
-        self.assertIsNone(err)
+        outcome, task, taken, clock = self._run([3.0, 3.0, 0.4])
+        self.assertIsNone(outcome)
         self.assertEqual(taken, [1, 2],
                          "each slow round must be followed immediately by the next")
         self.assertIn("converged", task.function_result)
@@ -154,9 +159,8 @@ class TestConvergence(unittest.TestCase):
 
     def test_it_gives_up_after_the_round_cap_and_freezes_anyway(self):
         """Written faster than it replicates: freeze rather than loop forever."""
-        done, err, task, taken, _ = self._run([3.0] * 20, max_rounds=3)
-        self.assertTrue(done, "the cap must hand over, not fail the cutover")
-        self.assertIsNone(err)
+        outcome, task, taken, _ = self._run([3.0] * 20, max_rounds=3)
+        self.assertIsNone(outcome, "the cap must hand over, not fail the cutover")
         self.assertIn("not converged", task.function_result)
 
     def test_the_cap_freezes_under_the_claim_it_already_holds(self):
@@ -165,9 +169,8 @@ class TestConvergence(unittest.TestCase):
         The claim was taken on entry to the endgame, so reaching the round cap
         needs no further acquisition -- it just stops converging and freezes.
         """
-        done, err, task, taken, _ = self._run([3.0] * 20, max_rounds=3)
-        self.assertTrue(done)
-        self.assertIsNone(err)
+        outcome, task, taken, _ = self._run([3.0] * 20, max_rounds=3)
+        self.assertIsNone(outcome)
         self.assertIn("not converged", task.function_result)
 
     def test_a_vanished_snapshot_is_an_error(self):
@@ -176,9 +179,9 @@ class TestConvergence(unittest.TestCase):
         task = _Task(shrink_snap_id="S0", shrink_round=1,
                      shrink_deadline=10 ** 12, lvol_id="LV1")
         with patch.object(runner, "_shrink_round_done", return_value=None):
-            done, err = runner._shrink_step(task, _lvol())
-        self.assertFalse(done)
-        self.assertIn("disappeared", err)
+            with self.assertRaises(TaskRetry) as caught:
+                runner._shrink_step(task, _lvol())
+        self.assertIn("disappeared", str(caught.exception))
 
     def test_the_deadline_still_bounds_the_phase(self):
         """The deadline bounds the phase by handing over to the freeze, not by
@@ -187,9 +190,7 @@ class TestConvergence(unittest.TestCase):
         task = _Task(shrink_snap_id="S0", shrink_round=1,
                      shrink_deadline=0, lvol_id="LV1")
         with patch.object(runner, "_shrink_round_done", return_value=False):
-            done, err = runner._shrink_step(task, _lvol())
-        self.assertTrue(done)
-        self.assertIsNone(err)
+            runner._shrink_step(task, _lvol())   # returns => hands over
 
     def test_it_yields_the_pass_when_the_budget_runs_out(self):
         """A very slow transfer must not hog the runner forever."""
@@ -201,10 +202,10 @@ class TestConvergence(unittest.TestCase):
              patch.object(runner.time, "sleep", clock.sleep), \
              patch.object(runner, "_shrink_round_done", return_value=False), \
              patch.object(constants, "REPL_CUTOVER_CONVERGE_BUDGET_SEC", 5):
-            done, err = runner._shrink_step(task, _lvol())
-        self.assertFalse(done)
-        self.assertIsNone(err, "yielding the pass is not a failure")
-        self.assertIn("waiting", task.function_result)
+            # Yielding the pass is a defer, not a failure: no retry is consumed.
+            with self.assertRaises(TaskDefer) as caught:
+                runner._shrink_step(task, _lvol())
+        self.assertIn("waiting", str(caught.exception))
 
 
 class TestProceedGate(unittest.TestCase):
@@ -225,13 +226,14 @@ class TestProceedGate(unittest.TestCase):
 
     def test_the_wait_is_guarded_by_the_flag(self):
         import inspect
-        src = inspect.getsource(runner.task_runner)
-        self.assertIn("constants.REPL_CUTOVER_PROCEED_REQUIRED", src)
+        self.assertIn("constants.REPL_CUTOVER_PROCEED_REQUIRED",
+                      inspect.getsource(runner._await_cutover_proceed))
         # Compare against the actual freeze CALL SITE, not the first "run_cutover"
         # occurrence — the string also appears earlier in a comment about the
         # retry path, which is not the freeze.
+        src = inspect.getsource(runner.task_runner)
         self.assertLess(
-            src.index("REPL_CUTOVER_PROCEED_REQUIRED"),
+            src.index("_await_cutover_proceed"),
             src.index("replication_final_step.run_cutover"),
             "the gate must be evaluated before the freeze")
 
@@ -443,10 +445,9 @@ class TestRoundOneIsMeasured(unittest.TestCase):
              patch.object(runner, "_take_shrink_snapshot", side_effect=_take), \
              patch.object(constants, "REPL_CUTOVER_MIN_INLINE_SEC", 0), \
              patch.object(constants, "REPL_CUTOVER_CONVERGE_BUDGET_SEC", 0):
-            done, err = runner._shrink_step(task, _lvol())
+            with self.assertRaises(TaskDefer):
+                runner._shrink_step(task, _lvol())
 
-        self.assertFalse(done, "an unmeasured round must not end the shrink phase")
-        self.assertIsNone(err)
         self.assertEqual(taken, [1],
                          "it must take another round instead of freezing")
 
@@ -488,13 +489,11 @@ class TestCutoverQueue(unittest.TestCase):
 
     def test_no_owner_means_the_lvstore_is_free(self):
         me = self._task("T1")
-        self.db.get_job_tasks.return_value = [me]
-        self.assertIsNone(runner._lvs_cutover_owner(me, "LVS_1"))
+        self.assertIsNone(runner._lvs_cutover_owner(me, "LVS_1", [me]))
 
     def test_an_active_claim_owns_the_lvstore(self):
         me, other = self._task("T1"), self._task("T2", lvs="LVS_1")
-        self.db.get_job_tasks.return_value = [me, other]
-        owner = runner._lvs_cutover_owner(me, "LVS_1")
+        owner = runner._lvs_cutover_owner(me, "LVS_1", [me, other])
         self.assertIsNotNone(owner)
         self.assertEqual(owner.get_id(), "T2")
 
@@ -504,8 +503,7 @@ class TestCutoverQueue(unittest.TestCase):
         for dead in (self._task("T2", lvs="LVS_1",
                                 status=JobSchedule.STATUS_DONE),
                      self._task("T3", lvs="LVS_1", canceled=True)):
-            self.db.get_job_tasks.return_value = [me, dead]
-            self.assertIsNone(runner._lvs_cutover_owner(me, "LVS_1"),
+            self.assertIsNone(runner._lvs_cutover_owner(me, "LVS_1", [me, dead]),
                               "a dead task must not hold the lvstore forever")
 
     def test_the_earliest_claim_wins_deterministically(self):
@@ -513,13 +511,12 @@ class TestCutoverQueue(unittest.TestCase):
         me = self._task("T1")
         early = self._task("T2", lvs="LVS_1", created="2026-01-01")
         late = self._task("T3", lvs="LVS_1", created="2026-06-01")
-        self.db.get_job_tasks.return_value = [me, late, early]
-        self.assertEqual(runner._lvs_cutover_owner(me, "LVS_1").get_id(), "T2")
+        self.assertEqual(
+            runner._lvs_cutover_owner(me, "LVS_1", [me, late, early]).get_id(), "T2")
 
     def test_a_claim_on_another_lvstore_is_irrelevant(self):
         me, other = self._task("T1"), self._task("T2", lvs="LVS_9")
-        self.db.get_job_tasks.return_value = [me, other]
-        self.assertIsNone(runner._lvs_cutover_owner(me, "LVS_1"))
+        self.assertIsNone(runner._lvs_cutover_owner(me, "LVS_1", [me, other]))
 
     def test_circular_stall_is_broken_when_both_tasks_hold_the_claim(self):
         """Both tasks race and both write cutover_lvs — only one wins.
@@ -538,16 +535,16 @@ class TestCutoverQueue(unittest.TestCase):
         # Simulate the post-race DB state: both have cutover_lvs set.
         early = self._task("T1", lvs="LVS_1", created="2026-01-01")
         late = self._task("T2", lvs="LVS_1", created="2026-06-01")
-        self.db.get_job_tasks.return_value = [early, late]
+        tasks = [early, late]
 
         # From T1's perspective: T1 is the earliest claimant → it is the owner.
         self.assertIsNone(
-            runner._lvs_cutover_owner(early, "LVS_1"),
+            runner._lvs_cutover_owner(early, "LVS_1", tasks),
             "the earliest claimant must see itself as the winner (None), "
             "not defer to the only other claimant")
 
         # From T2's perspective: T1 is the earliest claimant → T2 must yield.
-        owner_seen_by_late = runner._lvs_cutover_owner(late, "LVS_1")
+        owner_seen_by_late = runner._lvs_cutover_owner(late, "LVS_1", tasks)
         self.assertIsNotNone(owner_seen_by_late,
                              "the later claimant must see an owner")
         self.assertEqual(owner_seen_by_late.get_id(), "T1",
@@ -627,14 +624,12 @@ class TestQueuedCutoverDoesNotStarve(unittest.TestCase):
 
     def test_it_queues_without_burning_a_retry_or_its_deadline(self):
         me, owner = self._me(), self._owner()
-        self.db.get_job_tasks.return_value = [me, owner]
 
-        result = runner.task_runner(me)
+        with self.assertRaises(TaskDefer) as caught:
+            runner.task_runner(me, [me, owner])
 
-        self.assertFalse(result)
-        self.assertEqual(me.status, self.JobSchedule.STATUS_SUSPENDED)
         self.assertEqual(me.retry, 0, "queueing is not a failure")
-        self.assertIn("queued for lvstore", me.function_result)
+        self.assertIn("queued for lvstore", str(caught.exception))
         self.assertGreater(
             me.function_params["shrink_deadline"], 10 ** 9,
             "the deadline must be pushed out while queued, or the task dies of "
@@ -646,10 +641,9 @@ class TestQueuedCutoverDoesNotStarve(unittest.TestCase):
         me, owner = self._me(), self._owner()
         owner.function_params["cutover_group"] = "CL/G1"
         with patch.object(runner, "_group_id_for_lvol", return_value="CL/G1"):
-            self.db.get_job_tasks.return_value = [me, owner]
             # It proceeds into the shrink phase, which this fixture makes raise.
             with self.assertRaises(AssertionError):
-                runner.task_runner(me)
+                runner.task_runner(me, [me, owner])
 
 
 class TestCutoverFailuresAreVisible(unittest.TestCase):
@@ -678,20 +672,25 @@ class TestCutoverFailuresAreVisible(unittest.TestCase):
     def test_a_failed_attempt_is_logged_and_remembered(self):
         task = self._task()
         with self.assertLogs(runner.logger, level="WARNING") as logs:
-            runner._finalize(task, False, "target subsystem is full")
+            with self.assertRaises(TaskRetry):
+                runner._cutover_failed(task, "target subsystem is full")
         self.assertIn("target subsystem is full", "\n".join(logs.output))
         self.assertEqual(task.function_params["last_error"],
                          "target subsystem is full")
 
     def test_giving_up_reports_the_cause_not_just_the_symptom(self):
-        from simplyblock_core.models.job_schedule import JobSchedule
+        """The ceiling lives in the driver now, so the driver is what must
+        carry the cause into the give-up message. _cutover_failed leaves the
+        reason in function_result for it to find."""
+        from simplyblock_core.services.task_runner_base import _give_up_reason
+
         task = self._task(retry=8)
-        task.function_params["last_error"] = "target subsystem is full"
-        task.function_params.update({"src_node_id": "N1", "tgt_node_id": "N2"})
-        with self.assertLogs(runner.logger, level="ERROR") as logs:
-            runner.task_runner(task)
-        self.assertEqual(task.status, JobSchedule.STATUS_DONE)
-        self.assertIn("target subsystem is full", task.function_result,
+        with self.assertRaises(TaskRetry) as caught:
+            runner._cutover_failed(task, "target subsystem is full")
+
+        # What the driver's _fail() persists onto the row from that exception.
+        task.function_result = str(caught.exception)
+
+        self.assertIn("target subsystem is full", _give_up_reason(task),
                       "'max retry reached' alone names a symptom and hides the "
                       "cause")
-        self.assertIn("target subsystem is full", "\n".join(logs.output))
