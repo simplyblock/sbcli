@@ -784,17 +784,22 @@ jobs:
               sbcli-dev cluster list 2>&1) || true
             echo "Cluster list output: $LIST_OUTPUT"
             CLUSTER_ID=$(echo "$LIST_OUTPUT" | awk 'NR==4{print $2}')
-            CLUSTER_SECRET=$(echo "$LIST_OUTPUT" | awk 'NR==4{print $NF}')
-          else
-            CLUSTER_SECRET=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
-              sbcli-dev cluster list --json 2>/dev/null \
-              | jq -r '.[0].secret // empty') || true
           fi
 
           if [ -z "$CLUSTER_ID" ] || [ "$CLUSTER_ID" = "+" ]; then
             echo "ERROR: Failed to parse cluster ID"
             kubectl -n $NAMESPACE exec "$ADMIN_POD" -- sbcli-dev cluster list 2>&1 || true
             exit 1
+          fi
+
+          # Get cluster secret using dedicated command
+          CLUSTER_SECRET=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
+            sbcli-dev cluster get-secret "$CLUSTER_ID" 2>/dev/null | tr -d '[:space:]') || true
+          if [ -z "$CLUSTER_SECRET" ]; then
+            echo "WARNING: Failed to get cluster secret via get-secret, trying JSON fallback"
+            CLUSTER_SECRET=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
+              sbcli-dev cluster list --json 2>/dev/null \
+              | jq -r '.[0].secret // empty') || true
           fi
 
           echo "R25 cluster created: CLUSTER_ID=$CLUSTER_ID"
@@ -904,14 +909,20 @@ jobs:
 
             if echo "$OUTPUT" | grep -qi "active"; then
               echo "R25 cluster is active!"
-              # Re-capture cluster ID/secret in case they changed
+              # Re-capture cluster ID
               CLUSTER_ID=$(echo "$OUTPUT" | awk 'NR==4{print $2}')
-              CLUSTER_SECRET=$(echo "$OUTPUT" | awk 'NR==4{print $NF}')
               if [ -z "$CLUSTER_ID" ] || [ "$CLUSTER_ID" = "+" ]; then
                 JSON_OUT=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
                   sbcli-dev cluster list --json 2>&1) || true
                 CLUSTER_ID=$(echo "$JSON_OUT" | jq -r '.[0].id // .[0].uuid // empty')
-                CLUSTER_SECRET=$(echo "$JSON_OUT" | jq -r '.[0].secret // empty')
+              fi
+              # Get cluster secret using dedicated command
+              CLUSTER_SECRET=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
+                sbcli-dev cluster get-secret "$CLUSTER_ID" 2>/dev/null | tr -d '[:space:]') || true
+              if [ -z "$CLUSTER_SECRET" ]; then
+                CLUSTER_SECRET=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
+                  sbcli-dev cluster list --json 2>/dev/null \
+                  | jq -r '.[0].secret // empty') || true
               fi
               echo "CLUSTER_ID=${CLUSTER_ID}" >> $GITHUB_ENV
               echo "CLUSTER_SECRET=${CLUSTER_SECRET}" >> $GITHUB_ENV
@@ -1025,12 +1036,18 @@ jobs:
             if echo "$OUTPUT" | grep -qi "active"; then
               echo "Cluster is active!"
               CLUSTER_ID=$(echo "$OUTPUT" | awk 'NR==4{print $2}')
-              CLUSTER_SECRET=$(echo "$OUTPUT" | awk 'NR==4{print $NF}')
               if [ -z "$CLUSTER_ID" ] || [ "$CLUSTER_ID" = "+" ]; then
                 JSON_OUT=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
                   sbctl cluster list --json 2>&1) || true
                 CLUSTER_ID=$(echo "$JSON_OUT" | jq -r '.[0].id // .[0].uuid // empty')
-                CLUSTER_SECRET=$(echo "$JSON_OUT" | jq -r '.[0].secret // empty')
+              fi
+              # Get cluster secret using dedicated command
+              CLUSTER_SECRET=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
+                sbctl cluster get-secret "$CLUSTER_ID" 2>/dev/null | tr -d '[:space:]') || true
+              if [ -z "$CLUSTER_SECRET" ]; then
+                CLUSTER_SECRET=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
+                  sbctl cluster list --json 2>/dev/null \
+                  | jq -r '.[0].secret // empty') || true
               fi
               echo "CLUSTER_ID=${CLUSTER_ID}" >> $GITHUB_ENV
               echo "CLUSTER_SECRET=${CLUSTER_SECRET}" >> $GITHUB_ENV
