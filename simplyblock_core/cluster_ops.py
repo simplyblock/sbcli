@@ -2290,21 +2290,28 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
             utils.create_docker_service(
                 cluster_docker=cluster_docker,
                 service_name="app_SnapshotMonitor",
-                service_file="python simplyblock_core/services/snapshot_monitor.py",
+                service_file="python3 simplyblock_core/services/snapshot_monitor.py",
                 service_image=service_image)
 
         if "app_TasksRunnerLVolSyncDelete" not in service_names:
             utils.create_docker_service(
                 cluster_docker=cluster_docker,
                 service_name="app_TasksRunnerLVolSyncDelete",
-                service_file="python simplyblock_core/services/tasks_runner_sync_lvol_del.py",
+                service_file="python3 simplyblock_core/services/tasks_runner_sync_lvol_del.py",
                 service_image=service_image)
 
         if "app_TasksRunnerJCCompResume" not in service_names:
             utils.create_docker_service(
                 cluster_docker=cluster_docker,
                 service_name="app_TasksRunnerJCCompResume",
-                service_file="python simplyblock_core/services/tasks_runner_jc_comp.py",
+                service_file="python3 simplyblock_core/services/tasks_runner_jc_comp.py",
+                service_image=service_image)
+
+        if "app_BackupService" not in service_names:
+            utils.create_docker_service(
+                cluster_docker=cluster_docker,
+                service_name="app_BackupService",
+                service_file="python3 simplyblock_core/services/tasks_runner_fdb_backup.py",
                 service_image=service_image)
 
         logger.info("Done updating mgmt cluster")
