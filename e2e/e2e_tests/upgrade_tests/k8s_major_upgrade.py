@@ -507,6 +507,32 @@ class K8sNativeMajorUpgrade(TestClusterBase):
             self._save_fio_pod_logs(detail["job_name"], clone_name)
             self.k8s_utils.validate_fio_job(detail["job_name"], timeout=timeout)
 
+    def _cleanup_fio_jobs_only(self):
+        """Delete FIO jobs and configmaps but leave PVCs/snapshots/clones intact.
+
+        Unlike ``k8s_utils.cleanup_stale_fio_resources()`` which also removes
+        clone PVCs, snapshots, and test PVCs, this only removes the FIO
+        workload resources so PVCs are freed for utility pod mounting.
+        """
+        ns = self.k8s_utils.namespace
+        cmds = [
+            # Delete FIO jobs by label
+            f"kubectl delete jobs -n {ns} -l app=fio-benchmark --ignore-not-found",
+            # Delete FIO configmaps
+            (
+                f"kubectl get configmaps -n {ns} --no-headers "
+                f"-o custom-columns=NAME:.metadata.name 2>/dev/null "
+                f"| grep -E '^(fiocfg-|fio-cfg-)' "
+                f"| xargs -r kubectl delete configmap -n {ns} --ignore-not-found"
+            ),
+        ]
+        for cmd in cmds:
+            try:
+                self.k8s_utils._exec_kubectl(cmd)
+            except Exception as exc:
+                self.logger.warning(f"FIO job cleanup step failed: {exc}")
+        self.logger.info("FIO jobs and configmaps cleaned up (PVCs preserved)")
+
     def _capture_pvc_checksums(self, pvc_names: list[str]) -> dict[str, dict]:
         """Capture MD5 checksums for all files on the given PVCs.
 
@@ -631,8 +657,8 @@ class K8sNativeMajorUpgrade(TestClusterBase):
                     "Continuing — non-fatal."
                 )
 
-        # Clean up clone FIO pods
-        self.k8s_utils.cleanup_stale_fio_resources()
+        # Clean up clone FIO jobs (preserve clone PVCs for checksums)
+        self._cleanup_fio_jobs_only()
         sleep_n_sec(5)
 
     def _run_post_upgrade_verification(self):
@@ -1600,9 +1626,9 @@ spec:
                 "Continuing with upgrade — this is non-fatal."
             )
 
-        # Clean up all FIO pods before taking snapshots
-        self.logger.info("Pre-upgrade: Cleaning up FIO pods")
-        self.k8s_utils.cleanup_stale_fio_resources()
+        # Clean up FIO jobs/pods (preserve PVCs for snapshots + checksums)
+        self.logger.info("Pre-upgrade: Cleaning up FIO jobs")
+        self._cleanup_fio_jobs_only()
         sleep_n_sec(10)
 
         self.logger.info("Pre-upgrade Step 4: Creating snapshots and clones")
