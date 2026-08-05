@@ -281,7 +281,7 @@ jobs:
 
       - name: Force cleanup old deployment
         if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
-        timeout-minutes: 10
+        timeout-minutes: 15
         run: |
           set +e
           NAMESPACE=simplyblock
@@ -297,11 +297,9 @@ jobs:
           echo "=== Phase 2: Strip finalizers from all simplyblock CRs and CRDs ==="
           for crd in $(kubectl get crd -o name 2>/dev/null | grep simplyblock); do
             crd_name="${crd#customresourcedefinition.apiextensions.k8s.io/}"
-            # Strip finalizers from all CR instances
             kubectl get "$crd_name" -A --no-headers -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name 2>/dev/null | while read -r ns name; do
               [ -n "$name" ] && kubectl patch "$crd_name" "$name" -n "$ns" --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null &
             done
-            # Strip finalizers from the CRD itself
             kubectl patch crd "$crd_name" --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null &
           done
           wait
@@ -313,11 +311,14 @@ jobs:
             kubectl delete crd "$crd_name" --ignore-not-found --force --grace-period=0 2>/dev/null || true
           done
 
-          echo "=== Phase 4: Strip finalizers from ALL resources in namespace ==="
+          echo "=== Phase 4: Strip finalizers + force delete ALL resources in namespace ==="
           if kubectl get namespace $NAMESPACE &>/dev/null; then
-            for kind in pods deployments statefulsets daemonsets services configmaps secrets serviceaccounts pvc pv jobs; do
+            for kind in pods deployments statefulsets daemonsets replicasets services configmaps secrets serviceaccounts pvc jobs; do
               kubectl get "$kind" -n $NAMESPACE --no-headers -o custom-columns=NAME:.metadata.name 2>/dev/null | while read -r name; do
-                [ -n "$name" ] && kubectl patch "$kind" "$name" -n $NAMESPACE --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null &
+                [ -n "$name" ] && {
+                  kubectl patch "$kind" "$name" -n $NAMESPACE --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null
+                  kubectl delete "$kind" "$name" -n $NAMESPACE --force --grace-period=0 --wait=false 2>/dev/null
+                } &
               done
             done
             wait
@@ -325,14 +326,21 @@ jobs:
 
           echo "=== Phase 5: Strip finalizers + force delete all PVs ==="
           for pv in $(kubectl get pv --no-headers 2>/dev/null | awk '{print $1}'); do
-            kubectl patch pv "$pv" --type=merge -p '{"metadata":{"finalizers":null,"spec":{"claimRef":null}}' 2>/dev/null || true
+            kubectl patch pv "$pv" --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
+            kubectl patch pv "$pv" --type=merge -p '{"spec":{"claimRef":null}}' 2>/dev/null || true
             kubectl delete pv "$pv" --ignore-not-found --force --grace-period=0 2>/dev/null &
           done
           wait
 
-          echo "=== Phase 6: Force delete namespaces ==="
+          echo "=== Phase 6: Force delete + finalize namespaces ==="
           kubectl delete namespace $NAMESPACE --force --grace-period=0 --wait=false 2>/dev/null || true
           kubectl delete namespace cert-manager --force --grace-period=0 --wait=false 2>/dev/null || true
+          # Immediately strip namespace finalizers via API
+          for ns in $NAMESPACE cert-manager; do
+            kubectl get namespace $ns -o json 2>/dev/null \
+              | jq '.spec.finalizers = []' \
+              | kubectl replace --raw "/api/v1/namespaces/$ns/finalize" -f - 2>/dev/null || true
+          done
 
           # Delete cert-manager CRDs
           kubectl delete crd certificaterequests.cert-manager.io certificates.cert-manager.io \
@@ -340,15 +348,15 @@ jobs:
             issuers.cert-manager.io orders.acme.cert-manager.io \
             --ignore-not-found --force --grace-period=0 2>/dev/null || true
 
-          echo "=== Phase 7: Reset hugepages + restart kubelet (parallel) ==="
+          echo "=== Phase 7: Reset hugepages + restart kubelet (parallel, 90s timeout) ==="
           IFS=',' read -ra NODES <<< "${{ github.event.inputs.worker_nodes }}"
           for NODE in "${NODES[@]}"; do
             (
               if [[ "$CLUSTER_ENV" == *"openshift"* ]]; then
-                timeout 60 oc debug node/"$NODE" -- chroot /host bash -c \
+                timeout 90 oc debug node/"$NODE" -- chroot /host bash -c \
                   "echo 0 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages && systemctl restart kubelet" 2>/dev/null || true
               else
-                timeout 60 kubectl debug node/"$NODE" -q --image=busybox:latest -- chroot /host sh -c \
+                timeout 90 kubectl debug node/"$NODE" -q --image=busybox:latest -- chroot /host sh -c \
                   "echo 0 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages && systemctl restart kubelet" 2>/dev/null || true
               fi
               echo "Done: $NODE"
@@ -356,23 +364,16 @@ jobs:
           done
           wait
 
-          echo "=== Phase 8: Wait for namespace gone ==="
-          for i in $(seq 1 6); do
+          echo "=== Phase 8: Verify namespace gone ==="
+          for i in $(seq 1 4); do
             if ! kubectl get namespace $NAMESPACE &>/dev/null; then
               echo "Namespace $NAMESPACE deleted"
               break
             fi
-            echo "Namespace still terminating ($i/6), force-finalizing..."
-            # Strip namespace-level finalizers via API
+            echo "Namespace still terminating ($i/4), force-finalizing..."
             kubectl get namespace $NAMESPACE -o json 2>/dev/null \
               | jq '.spec.finalizers = []' \
               | kubectl replace --raw "/api/v1/namespaces/$NAMESPACE/finalize" -f - 2>/dev/null || true
-            # Strip finalizers from blocking resources (skip events, endpoints, etc.)
-            for kind in pods deployments statefulsets daemonsets replicasets services configmaps secrets pvc pv jobs cronjobs; do
-              kubectl get "$kind" -n $NAMESPACE --no-headers -o name 2>/dev/null | while read -r obj; do
-                kubectl patch "$obj" -n $NAMESPACE --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
-              done
-            done
             sleep 5
           done
           echo "=== Cleanup complete ==="
