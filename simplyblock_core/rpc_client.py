@@ -1159,10 +1159,9 @@ class RPCClient:
             params["shared_placement"] = True
         if jm_cpu_mask:
             params["bdb_lcpu_mask"] = int(jm_cpu_mask, 16)
-        # Compression thread: enabled per-branch (constants.JM_COMPRESSION_THREAD_ENABLED).
-        # compression_cpu_mask is a hex mask string co-located with jc-singleton on
-        # nodes <32 vCPU, or a dedicated core on >=32 vCPU; the data plane wants it as
-        # an int, matching bdb_lcpu_mask above.
+        # Compression thread: currently always off (no caller passes True).
+        # compression_cpu_mask is a hex mask string; the data plane wants it
+        # as an int, matching bdb_lcpu_mask above.
         if compression_thread:
             params["compression_thread"] = True
             if compression_cpu_mask:
