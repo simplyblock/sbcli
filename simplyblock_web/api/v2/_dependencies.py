@@ -8,6 +8,7 @@ from simplyblock_core.models.backup import Backup as BackupModel, BackupPolicy
 from simplyblock_core.models.cluster import Cluster as ClusterModel
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_migration import LVolMigration
+from simplyblock_core.models.lvol_migration_group import LVolMigrationGroup
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.mgmt_node import MgmtNode
 from simplyblock_core.models.nvme_device import NVMeDevice
@@ -152,5 +153,36 @@ def _lookup_migration(migration_id: UUID, volume: Volume) -> LVolMigration:
 
 
 Migration = Annotated[LVolMigration, Depends(_lookup_migration)]
+
+
+def _lookup_subsystem(nqn: str, cluster: Cluster) -> str:
+    """Validate that `nqn` identifies a real shared-namespace subsystem in
+    this cluster and return it as-is.
+
+    NQNs are taken as an opaque, already-fully-qualified identifier rather
+    than reconstructed from cluster/lvol identity (e.g. f"{cluster.nqn}:lvol:
+    {lvol.uuid}") — there's no single reliable derivation of "the" NQN for a
+    shared subsystem across the codebase, so accepting it as-is here
+    sidesteps that inconsistency rather than fighting it.
+    """
+    if not any(lv.nqn == nqn for lv in _db.get_lvols(cluster.get_id())):
+        raise HTTPException(404, f'Subsystem {nqn} not found')
+    return nqn
+
+
+Subsystem = Annotated[str, Depends(_lookup_subsystem)]
+
+
+def _lookup_batch_migration(migration_id: UUID, cluster: Cluster, subsystem: Subsystem) -> LVolMigrationGroup:
+    try:
+        group = _db.get_migration_group_by_id(str(migration_id))
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    if group.cluster_id != cluster.get_id() or group.target_nqn != subsystem:
+        raise HTTPException(404, f'Batch migration {migration_id} not found')
+    return group
+
+
+BatchMigration = Annotated[LVolMigrationGroup, Depends(_lookup_batch_migration)]
 
 
