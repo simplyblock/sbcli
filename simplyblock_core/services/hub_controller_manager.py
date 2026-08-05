@@ -25,9 +25,26 @@ This module solves both:
     the moment a detach RPC is issued and any subsequent re-attach attempt.  If
     acquire() is called during the cooldown window it returns a transient error so
     the task runner retries on the next loop iteration (~3 s) until the gap passes.
+    This cooldown is enforced via a DB-backed record (HubDetachCooldown), NOT local
+    process memory: TasksRunnerLVolMigration and TasksRunnerBatchMigration are two
+    separate processes, each running its own HubControllerManager instance, and a
+    solo migration + a batch migration can both touch the same (src, tgt) hub at
+    the same time. A purely in-memory cooldown would only be honored by whichever
+    process happened to perform the detach, letting the other one re-attach inside
+    the disconnect-handshake window it never saw.
 
-Public API (called by tasks_runner_lvol_migration)
---------------------------------------------------
+Instantiation
+-------------
+There is deliberately no module-level singleton here. Each task-runner process
+(tasks_runner_lvol_migration.py, tasks_runner_batch_migration.py) constructs its
+own HubControllerManager once, near the top of the module, right next to that
+process's own DBController instance — see the `hub_manager = HubControllerManager(db)`
+line in each. Do not add one here: this module used to construct one at import
+time, which meant simply importing this module (even just to reuse an unrelated
+helper) silently created another live manager sharing no state with the real one.
+
+Public API (called by the task runners)
+----------------------------------------
   hub_manager.acquire(src_node_id, src_rpc, tgt_node, trtype)
       → attach (or reuse) the controller, refresh the idle timer
       → returns (ctrl_name, hub_bdev, error)
@@ -41,6 +58,7 @@ import time
 from typing import Optional
 
 from simplyblock_core import utils
+from simplyblock_core.models.hub_cooldown import HubDetachCooldown
 
 logger = utils.get_logger(__name__)
 
@@ -60,8 +78,12 @@ class HubControllerManager:
     """
     Thread-safe lifecycle manager for migration hub NVMe-oF controllers.
 
-    One instance (``hub_manager``) is created at module level and shared by
-    the entire migration task runner process.
+    Constructed explicitly, once, by each task-runner process (see this
+    module's docstring) — never a module-level singleton. The `_entries`
+    idle-controller cache below is process-local by design (each process
+    only needs to know what IT has attached), but the detach cooldown is
+    persisted via `HubDetachCooldown` (models/hub_cooldown.py) so it is
+    honored across every process that might race an attach against it.
     """
 
     # Minimum seconds between issuing a detach RPC and allowing any re-attach.
@@ -76,10 +98,13 @@ class HubControllerManager:
     # GC sweep period.
     GC_INTERVAL = 30
 
-    def __init__(self):
+    def __init__(self, db_controller=None):
+        if db_controller is None:
+            from simplyblock_core.db_controller import DBController
+            db_controller = DBController()
+        self._db = db_controller
         self._lock = threading.Lock()
         self._entries: dict = {}     # (src_node_id, tgt_node_id) → _HubEntry
-        self._detach_ts: dict = {}   # (src_node_id, tgt_node_id) → monotonic ts of last detach
         self._gc_thread: Optional[threading.Thread] = None
 
     # ------------------------------------------------------------------
@@ -184,12 +209,25 @@ class HubControllerManager:
     # Internal helpers
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _pair_key(key) -> str:
+        return f"{key[0]}:{key[1]}"
+
     def _cooldown_remaining(self, key) -> float:
-        """Return seconds remaining in the post-detach cooldown (0 if none)."""
-        ts = self._detach_ts.get(key, 0)
-        if ts == 0:
+        """Return seconds remaining in the post-detach cooldown (0 if none).
+
+        Reads the DB-backed HubDetachCooldown record rather than local state
+        — the most recent detach for this (src, tgt) pair may have been
+        issued by the OTHER task-runner process's HubControllerManager.
+        """
+        try:
+            records = HubDetachCooldown().read_from_db(self._db.kv_store, id=self._pair_key(key))
+        except Exception:
+            logger.exception("[HubMgr] failed to read detach-cooldown record; assuming no cooldown")
             return 0.0
-        elapsed = time.monotonic() - ts
+        if not records:
+            return 0.0
+        elapsed = time.time() - records[0].detach_ts
         return max(0.0, self.DETACH_COOLDOWN - elapsed)
 
     def _do_detach(self, key, entry: _HubEntry, rpc, reason: str):
@@ -207,8 +245,18 @@ class HubControllerManager:
         finally:
             # Record timestamp regardless of whether the RPC succeeded — the
             # controller state is unknown so enforce the cooldown either way.
-            with self._lock:
-                self._detach_ts[key] = time.monotonic()
+            # Wall-clock time.time(), not time.monotonic(): this record is
+            # read by whichever process's HubControllerManager calls acquire()
+            # next, which may not be this one.
+            try:
+                record = HubDetachCooldown()
+                record.pair_key = self._pair_key(key)
+                record.detach_ts = time.time()
+                record.write_to_db(self._db.kv_store)
+            except Exception:
+                logger.exception(
+                    f"[HubMgr] failed to persist detach-cooldown record for {self._pair_key(key)}"
+                )
 
     @staticmethod
     def _attach(src_rpc, tgt_node, trtype: str):
@@ -322,11 +370,10 @@ class HubControllerManager:
                 ]
                 evicted = [(key, self._entries.pop(key)) for key in to_evict]
 
-                # Prune stale detach timestamps older than DETACH_COOLDOWN.
-                stale = [k for k, ts in self._detach_ts.items()
-                         if (now - ts) > self.DETACH_COOLDOWN * 2]
-                for k in stale:
-                    del self._detach_ts[k]
+                # No local detach-timestamp dict to prune anymore — that state
+                # now lives in the DB-backed HubDetachCooldown record, one row
+                # per (src, tgt) pair, which is simply overwritten on the next
+                # detach rather than accumulating.
 
                 should_exit = not self._entries
 
@@ -342,7 +389,3 @@ class HubControllerManager:
                     self._gc_thread = None
                 logger.info("[HubMgr] GC thread exiting (no active entries)")
                 break   # restarted on next acquire()
-
-
-# Module-level singleton — imported and used by tasks_runner_lvol_migration
-hub_manager = HubControllerManager()

@@ -100,11 +100,17 @@ from simplyblock_core.models.lvol_migration_group import LVolMigrationGroup
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.rpc_client import RPCException, RPCClient
-from simplyblock_core.services.hub_controller_manager import hub_manager
+from simplyblock_core.services.hub_controller_manager import HubControllerManager
 from simplyblock_core.storage_node_ops import execute_on_leader_with_failover
 
 logger = utils.get_logger(__name__)
 db = db_mod.DBController()
+# Constructed explicitly here, once, rather than as a module-level singleton
+# inside hub_controller_manager.py — see that module's docstring. This
+# process's own manager; tasks_runner_batch_migration.py constructs its own
+# separate instance, and the two coordinate the detach cooldown via the
+# DB-backed HubDetachCooldown record, not shared memory.
+hub_manager = HubControllerManager(db)
 
 # Busy-poll settings for intermediate ("shrink") snapshot transfers.
 # Intermediate snapshots represent a small dirty delta so they should complete
