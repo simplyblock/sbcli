@@ -323,17 +323,6 @@ def _spec_node_add(runner, monkeypatch):
     return task
 
 
-def _spec_replication_final(runner, monkeypatch):
-    task = _make_task(
-        JobSchedule.FN_REPLICATION_FINAL,
-        lvol_id="lv-1", tgt_node_id="tgt-1", src_node_id="src-1")
-    db, _cluster, node = _wire_base(runner, monkeypatch, task)
-    # Target node never comes online -> cutover cannot proceed, retry each poll.
-    node.status = StorageNode.STATUS_OFFLINE
-    db.get_lvol_by_id.return_value = MagicMock()
-    return task
-
-
 def _spec_restart(runner, monkeypatch):
     task = _make_task(JobSchedule.FN_NODE_RESTART)
     _db, _cluster, node = _wire_base(runner, monkeypatch, task)
@@ -411,7 +400,6 @@ def _spec_batch_migration(runner, monkeypatch):
 _MAIN_DRIVEN_SPECS = {
     "tasks_runner_cluster_expand.py": _spec_cluster_expand,
     "tasks_runner_node_add.py": _spec_node_add,
-    "tasks_runner_replication_final.py": _spec_replication_final,
     "tasks_runner_restart.py": _spec_restart,
     "tasks_runner_batch_migration.py": _spec_batch_migration,
 }
@@ -434,6 +422,7 @@ _COVERED_ELSEWHERE = {
 _DRIVER_MIGRATED = {
     "tasks_runner_fdb_backup.py",
     "tasks_runner_jc_comp.py",
+    "tasks_runner_replication_final.py",
 }
 
 # Runners that increment task.retry but are intentionally UNBOUNDED: the
