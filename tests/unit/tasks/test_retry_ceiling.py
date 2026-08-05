@@ -192,17 +192,6 @@ def _wire_base(runner, monkeypatch, task):
 # tree, so a new retry-driven runner shows up as a failing case until a spec is
 # added here.
 
-def _spec_node_add(runner, monkeypatch):
-    task = _make_task(JobSchedule.FN_NODE_ADD)
-    _wire_base(runner, monkeypatch, task)
-    monkeypatch.setattr(runner, "ThreadPoolExecutor", _InlineExecutor)
-    monkeypatch.setattr(runner, "_inflight", set())
-    # add_node fails (returns falsy) every cycle.
-    monkeypatch.setattr(runner.storage_node_ops, "add_node",
-                        MagicMock(return_value=False))
-    return task
-
-
 def _spec_restart(runner, monkeypatch):
     task = _make_task(JobSchedule.FN_NODE_RESTART)
     _db, _cluster, node = _wire_base(runner, monkeypatch, task)
@@ -278,7 +267,6 @@ def _spec_batch_migration(runner, monkeypatch):
 
 # name -> spec for the runners driven through their real main() loop.
 _MAIN_DRIVEN_SPECS = {
-    "tasks_runner_node_add.py": _spec_node_add,
     "tasks_runner_restart.py": _spec_restart,
     "tasks_runner_batch_migration.py": _spec_batch_migration,
 }
@@ -303,6 +291,7 @@ _DRIVER_MIGRATED = {
     "tasks_runner_sync_lvol_del.py",
     "tasks_runner_backup.py",
     "tasks_runner_cluster_expand.py",
+    "tasks_runner_node_add.py",
 }
 
 # Runners that increment task.retry but are intentionally UNBOUNDED: the
