@@ -1,80 +1,87 @@
 # Task-runner rework — handoff
 
-Continuation notes for picking up the `rework-task-runners` branch on another
-machine. The full design lives in **`TASK_RUNNER_REWORK_PLAN.md`** (same dir) —
-read it first; this file is just the current state + how to continue.
+Continuation notes for the `rework-task-runners` branch. The full design lives
+in **`TASK_RUNNER_REWORK_PLAN.md`** (same dir) — read it first; this file is
+just the current state + how to continue.
 
 ## Where the work is
 
-Branch `rework-task-runners`, rebased onto `origin/main`. Five commits:
+Branch `rework-task-runners`, rebased onto `origin/main` (2026-08-05, commit
+`4cb16a20b`). Pre-rebase safety backup: branch `backup/rework-pre-rebase3`.
 
 ```
-6ea41859c  Introduce generic task runner            (B0: driver + lease heartbeat + tests)
-8458a5e44  Reclassify backup policy evaluation…      (A5: backup_merge -> backup_merge_service)
-6079ed010  Apply task lease consistently…            (A3: claim_task on the lease-less runners)
-4882cecac  Unify task retry semantics                (A2: canonical 0 <= max_retry <= retry)
-9da6cd5f7  Consistently crash task runners on DB…    (A1: remove DB-error masking)
+fa26b7121  Migrate node add runner…              (B3)
+f954be2b9  Migrate backup and cluster expand…    (B2)
+d6cc94478  Migrate lvol sync runner…             (B1d)
+b436fa79d  Migrate replication cutover runner…   (B1c)
+9c9118761  Migrate JC compression resume runner… (B1b)
+d17c20064  Migrate FDB backup runner…            (B1a)
+3899c2452  Reset task result before each handler attempt
+ad4768462  Introduce generic task runner         (B0)
+<A5/A3/A2/A1 commits below>
 ```
 
-Pre-rebase safety backup: branch `backup/rework-pre-rebase2` (`61cd76770`).
+## Status: Phase A done, B0 done, B1–B3 done
 
-## Status: Phase A done, B0 done, Phase B (migrations) NOT started
+Migrated onto the driver (7): `fdb_backup`, `jc_comp`, `replication_final`,
+`sync_lvol_del`, `backup`, `cluster_expand`, `node_add`.
 
-- **A1/A2/A3/A5** — done. **A4** was folded into Phase B (no commit — see plan).
-- **B0** — `simplyblock_core/services/task_runner_base.py` (the `TaskRunner`
-  driver: loop, single post-claim re-fetch, eligibility + lease pre-run gates,
-  `task_lease_heartbeat` around the handler, retry ceiling + backoff, serial /
-  opt-in concurrency) + `tests/unit/tasks/test_task_runner_base.py`. **Done.**
-- **B1…B9** — migrate each runner onto the driver, one commit each, in the order
-  listed in the plan (`fdb_backup, jc_comp, replication_final, sync_lvol_del` →
-  `backup, cluster_expand` → `node_add` → migration trio → `port_allow` →
-  `restart` → `lvol_migration` → `node_removal` → `batch_migration`). **Not started.**
+**Remaining (B4…B9), in order:**
 
-## Gotchas (read before continuing)
+4. migration trio — `migration`, `new_dev_migration`, `failed_migration`
+   (serial; `get_active_node_mig_task` / same-node-sibling gating becomes
+   `is_eligible`)
+5. `port_allow` (large; its `is_eligible` omits the `IN_ACTIVATION` check — the
+   documented opt-out — and keeps the recovery logic)
+6. `restart` (concurrency + per-node `exclusion_key`; `is_auto_restart_paused`
+   and `fd_dead_recovery_allowed` become part of `is_eligible`)
+7. `lvol_migration` (largest; migrate the loop/lease/retry shell only, leave the
+   snapshot-copy state machine intact)
+8. `node_removal` (serial, already leased, unbounded)
+9. `batch_migration` (migrate the loop/lease shell, leave group orchestration)
 
-- **`tests/unit/tasks/test_retry_ceiling.py` HANGS — and it hangs on `origin/main`
-  itself.** Upstream restructured the runners it drives (module-level loops,
-  `task_runner`→`process_task`) without updating it. Do NOT run the full
-  `tests/unit/tasks/` dir until it is skipped/removed. It exercises the old
-  `main()` loops that Phase B deletes; plan is to retire it as runners migrate.
-- **Upstream already reworked the runners**: renamed `task_runner`→`process_task`
-  and added `tasks_controller.task_lease_heartbeat` to the six long-blocking
-  runners. B0's driver already folds heartbeat in, so migrating a runner should
-  DELETE its per-runner `process_task` + `claim_task` + `task_lease_heartbeat`
-  boilerplate in favor of `serve(SPEC)`.
-- **Two new upstream runners** to migrate: `tasks_runner_node_removal.py`
-  (`FN_NODE_REMOVAL`) and `tasks_runner_batch_migration.py` (`FN_LVOL_BATCH_MIG`).
-- Each migrated `main()` collapses to `serve(SPEC)`; each handler becomes **void**
-  and signals via `TaskDefer` / `TaskRetry` / `TaskAbort` (see plan §B0). Keep the
-  handler importable — tests call it directly.
+## What the driver grew during B1–B3
 
-## Environment setup on the new machine
+Beyond what the plan describes, `task_runner_base` gained two things the
+migrations needed:
 
-```bash
-git fetch <remote>
-git checkout rework-task-runners
-pip install -e .                      # editable install
-# FoundationDB 7.3.3 client library (libfdb_c) must be installed on the host
-```
+- **`function_result` is cleared before each handler attempt**, so a task that
+  fails and later succeeds doesn't finish carrying the stale failure message.
+- **`RunnerSpec.on_finish(task)`** — cleanup called after the task reaches
+  STATUS_DONE and is written, on *every* terminal path (success, `TaskAbort`,
+  cancel, retry ceiling). Needed because a handler never sees the terminal
+  paths the driver owns, yet resources it holds must still be released:
+  `sync_lvol_del` frees the primary's del-sync lock there, `backup` fails/
+  un-merges the backup resource there. Both are written to be no-ops when the
+  handler already finished the resource.
 
-## Verification (was NOT runnable on the origin machine — offline)
+## Gotchas
 
-The origin box had no network and a wiped `.tox`, so lint/types/tox could not run
-there; the driver was verified with an ad-hoc stub harness only. **Re-run the real
-checks on the new machine:**
+- **`tests/unit/tasks/test_retry_ceiling.py` no longer hangs** — upstream fixed
+  it before this rebase. It parametrizes over runners *discovered from source*
+  by the presence of `.retry += 1`, so a runner migrating to the driver silently
+  drops out of it. Each migration therefore also moves the runner into that
+  file's `_DRIVER_MIGRATED` set, which is asserted to really have handed the
+  retry counter over (`test_migrated_runners_delegate_retry`).
+- Per-runner behaviour tests for migrated runners live in
+  **`tests/unit/tasks/test_runner_specs.py`** (one section per runner: handler
+  outcome vocabulary + eligibility + `on_finish`). Extend it as you migrate.
+- Several migrations fix latent bugs (a failure path that suspended without ever
+  incrementing retry, so a declared `max_retry` could never bind). Each is called
+  out in its commit message — keep doing that rather than folding them in
+  silently.
+
+## Verification
 
 ```bash
 tox run-parallel -e lint,types
-tox run -e unit -- tests/unit/tasks/test_task_runner_base.py \
-                   tests/unit/tasks/test_max_retry_semantics.py \
-                   tests/unit/test_task_lease.py \
-                   tests/unit/test_lvol_sync_op_task.py
-# NOTE: do not add tests/unit/tasks/test_retry_ceiling.py — it hangs (see gotchas)
+tox run -e unit -- tests/unit/tasks/ tests/unit/test_lvol_sync_op_task.py
+tox run -e unit                    # full unit tier, ~45s, currently green
 ```
 
-Follow the `tox-verify` skill / `AGENTS.md` for the full workflow.
+Do not run `tox run` (the integration tier is broken independently of this work).
 
 ## Before opening the PR
 
-Delete these two handoff files (`HANDOFF.md`, `TASK_RUNNER_REWORK_PLAN.md`) — they
-are transfer artifacts, not part of the change.
+Delete these two handoff files (`HANDOFF.md`, `TASK_RUNNER_REWORK_PLAN.md`) —
+they are transfer artifacts, not part of the change.
