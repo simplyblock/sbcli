@@ -32,7 +32,6 @@ from jinja2 import Environment, FileSystemLoader
 
 from simplyblock_core import constants
 from simplyblock_core import shell_utils
-from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_web import node_utils
 
@@ -858,50 +857,6 @@ def strfdelta_seconds(remainder: int) -> str:
     return out.strip()
 
 
-def handle_task_result(task: JobSchedule, res: dict, allowed_error_codes=None, allow_all_errors=False):
-    if res:
-        if not allowed_error_codes:
-            allowed_error_codes = [0]
-
-        res_data = res[0]
-        migration_status = res_data.get("status")
-        error_code = res_data.get("error", -1)
-        progress = res_data.get("progress", -1)
-        if migration_status == "completed":
-            if error_code == 0:
-                task.function_result = "Done"
-                task.status = JobSchedule.STATUS_DONE
-            elif error_code in allowed_error_codes or allow_all_errors:
-                task.function_result = f"mig completed with status: {error_code}"
-                task.status = JobSchedule.STATUS_DONE
-            else:
-                task.function_result = f"mig error: {error_code}, retrying"
-                task.retry += 1
-                task.status = JobSchedule.STATUS_SUSPENDED
-                del task.function_params['migration']
-
-            task.write_to_db()
-            return True
-
-        elif migration_status == "failed":
-            task.status = JobSchedule.STATUS_DONE
-            task.function_result = migration_status
-            task.write_to_db()
-            return True
-
-        elif migration_status == "none":
-            task.function_result = "mig retry after restart"
-            task.retry += 1
-            task.status = JobSchedule.STATUS_SUSPENDED
-            del task.function_params['migration']
-            task.write_to_db()
-            return True
-
-        else:
-            task.function_result = f"Status: {migration_status}, progress:{progress}"
-            task.write_to_db()
-    else:
-        logger.error("Failed to get mig status")
 
 
 logger = get_logger(__name__)

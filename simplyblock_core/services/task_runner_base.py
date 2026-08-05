@@ -18,8 +18,11 @@ that. The handler signals its outcome purely through ordinary Python control
 flow:
 
 - **return** (``None``) — the task is terminally complete → ``STATUS_DONE``.
-- **raise** :class:`TaskDefer` — not terminal: still in progress, or blocked on
-  external state. Re-poll next cycle; **no retry consumed**; no backoff.
+- **raise** :class:`TaskDefer` — cannot proceed yet, blocked on external state.
+  Suspend and re-poll next cycle; **no retry consumed**; no backoff.
+- **raise** :class:`TaskProgress` — the work is under way and this poll found it
+  unfinished. As TaskDefer, but the task stays RUNNING; runners that gate
+  mutual exclusion on a RUNNING sibling depend on that.
 - **raise** :class:`TaskRetry` (or any other, unexpected ``Exception``) — a
   retryable failure. Suspend, **consume a retry**, and back off before the next
   attempt.
@@ -65,8 +68,18 @@ _BACKOFF_CAP_SEC = constants.RESTART_TASK_EXEC_INTERVAL_MAX_SEC
 
 
 class TaskDefer(Exception):
-    """Handler signal: the task is not terminal — still in progress, or blocked
-    on external state. Re-poll next cycle without consuming a retry."""
+    """Handler signal: the task cannot proceed yet — blocked on external state.
+    Suspend and re-poll next cycle without consuming a retry."""
+
+
+class TaskProgress(Exception):
+    """Handler signal: the work is under way and this poll found it unfinished.
+
+    Like :class:`TaskDefer` it consumes no retry, but the task stays RUNNING
+    rather than being suspended. That distinction is load-bearing: the
+    migration family gates mutual exclusion on a sibling task being RUNNING
+    (tasks_controller.get_active_node_mig_task), so suspending a migration
+    between polls would let a second one start on the same node."""
 
 
 class TaskRetry(Exception):
@@ -342,6 +355,8 @@ class TaskRunner:
             # second host claim and double-drive the task.
             with tasks_controller.task_lease_heartbeat(task):
                 self.spec.handler(task)
+        except TaskProgress as e:
+            self._progress(task, str(e))
         except TaskDefer as e:
             self._defer(task, str(e))
         except TaskAbort as e:
@@ -394,6 +409,16 @@ class TaskRunner:
         except Exception as e:  # noqa: BLE001 - cleanup failure is not fatal
             logger.error(f"{self.spec.name}: task {task.uuid} on_finish failed: {e}")
             logger.exception(e)
+
+    def _progress(self, task: JobSchedule, reason: str) -> None:
+        if reason:
+            task.function_result = reason
+        # Status stays RUNNING — see TaskProgress. The commit still happens, to
+        # record the progress message and refresh the lease.
+        if self._cas(task, self._to(JobSchedule.STATUS_RUNNING)) is None:
+            self._forget(task.uuid)
+            return
+        self._clear_backoff(task.uuid)
 
     def _defer(self, task: JobSchedule, reason: str) -> None:
         if reason:

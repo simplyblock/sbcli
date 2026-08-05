@@ -854,27 +854,6 @@ def get_active_cluster_expand_task(cluster_id):
     return False
 
 
-def defer_task_for_expansion(task):
-    """Suspend ``task`` if a cluster expansion is in progress. Returns True
-    when deferred.
-
-    Migration-family runners call this right after their cluster-status
-    gate. The status gate alone is not enough: a node outage mid-expansion
-    suspends the cluster-expand task and restores the cluster status to
-    ACTIVE between its retries — without this gate the outage's recovery
-    migrations would start running in that window and then block the
-    expansion resume, inverting the required order (expansion completes
-    FIRST, then outage device migration, then expansion migration).
-    Deliberately does not consume a retry: this is a deferral, not a
-    failure."""
-    if not get_active_cluster_expand_task(task.cluster_id):
-        return False
-    task.function_result = "cluster expansion in progress, deferring"
-    task.status = JobSchedule.STATUS_SUSPENDED
-    task.write_to_db(db.kv_store)
-    return True
-
-
 def get_active_node_tasks(cluster_id, node_id):
     tasks = db.get_job_tasks(cluster_id)
     out = []

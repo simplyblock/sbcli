@@ -330,3 +330,147 @@ def test_cluster_expand_retries_an_incomplete_phase(cluster_expand):
 def test_cluster_expand_aborts_without_a_node(cluster_expand):
     with pytest.raises(trb.TaskAbort):
         cluster_expand.SPEC.handler(_task())
+
+
+# -- migration family -------------------------------------------------------
+
+@pytest.fixture
+def mig(monkeypatch):
+    import simplyblock_core.services.migration_task_common as common
+    monkeypatch.setattr(common, "db", MagicMock())
+    monkeypatch.setattr(common, "tasks_controller", MagicMock())
+    common.tasks_controller.get_active_node_mig_task.return_value = False
+    return common
+
+
+def _status(state, error=0, progress=50):
+    return [{"status": state, "error": error, "progress": progress}]
+
+
+def test_migration_completion_finishes_the_task(mig):
+    task = _task(distr_name="distr-1")
+    assert mig.report_migration_status(task, _status("completed")) is None
+    assert task.function_result == "Done"
+
+
+def test_migration_in_progress_keeps_the_task_running(mig):
+    """Not a defer: suspending between polls would drop the RUNNING status
+    that the family's mutual exclusion is keyed on."""
+    with pytest.raises(trb.TaskProgress):
+        mig.report_migration_status(_task(), _status("in_progress"))
+
+
+def test_migration_failure_is_terminal(mig):
+    with pytest.raises(trb.TaskAbort):
+        mig.report_migration_status(_task(), _status("failed"))
+
+
+def test_migration_error_restarts_from_scratch(mig):
+    """A disallowed error code drops the marker so the next attempt issues a
+    fresh migration instead of polling the one that errored."""
+    task = _task(migration={"name": "distr-1"})
+    with pytest.raises(trb.TaskRetry):
+        mig.report_migration_status(task, _status("completed", error=7))
+    assert "migration" not in task.function_params
+
+
+def test_migration_error_tolerated_when_devices_are_degraded(mig):
+    task = _task(migration={"name": "distr-1"})
+    assert mig.report_migration_status(task, _status("completed", error=7),
+                                       allow_all_errors=True) is None
+    assert task.function_params["migration"] == {"name": "distr-1"}
+
+
+def test_missing_migration_restarts_from_scratch(mig):
+    task = _task(migration={"name": "distr-1"})
+    with pytest.raises(trb.TaskRetry):
+        mig.report_migration_status(task, _status("none"))
+    assert "migration" not in task.function_params
+
+
+def test_empty_status_response_is_retryable(mig):
+    with pytest.raises(trb.TaskRetry):
+        mig.report_migration_status(_task(), None)
+
+
+# -- migration recovery gate ------------------------------------------------
+
+def test_recovery_gate_passes_a_whole_cluster(mig):
+    task = _task(**{mig.MIGRATION_WAIT_UNAVAILABLE_KEY: ["node:n1"]})
+    assert mig.require_recovery_progress(task, []) is None
+    assert mig.MIGRATION_WAIT_UNAVAILABLE_KEY not in task.function_params
+
+
+def test_recovery_gate_defers_while_nothing_changes(mig):
+    """Retrying against an unchanged outage would burn the budget and
+    terminate the migration before the cluster came back."""
+    task = _task(**{mig.MIGRATION_WAIT_UNAVAILABLE_KEY: ["node:n1"]})
+    with pytest.raises(trb.TaskDefer):
+        mig.require_recovery_progress(task, ["node:n1"])
+
+
+def test_recovery_gate_releases_on_a_recovery_event(mig):
+    task = _task(**{mig.MIGRATION_WAIT_UNAVAILABLE_KEY: ["node:n1", "dev:d1"]})
+    assert mig.require_recovery_progress(task, ["dev:d1"]) is None
+    assert task.function_params[mig.MIGRATION_WAIT_UNAVAILABLE_KEY] == ["dev:d1"]
+
+
+def test_recovery_gate_defers_on_a_first_outage(mig):
+    with pytest.raises(trb.TaskDefer):
+        mig.require_recovery_progress(_task(), ["node:n1"])
+
+
+# -- migration-family eligibility -------------------------------------------
+
+def test_sibling_gate_blocks_a_task_that_has_not_started(mig):
+    mig.tasks_controller.get_active_node_mig_task.return_value = "other-task"
+    assert mig.no_sibling_migration(_task(distr_name="distr-1")) is False
+
+
+def test_sibling_gate_releases_a_task_already_migrating(mig):
+    """Once its own migration is running the task IS the sibling others wait
+    on — gating it here would stall it forever."""
+    mig.tasks_controller.get_active_node_mig_task.return_value = "other-task"
+    task = _task(distr_name="distr-1", migration={"name": "distr-1"})
+    assert mig.no_sibling_migration(task) is True
+
+
+# -- failed migration -------------------------------------------------------
+
+@pytest.fixture
+def failed_migration(monkeypatch):
+    import simplyblock_core.services.tasks_runner_failed_migration as runner
+    monkeypatch.setattr(runner, "db", MagicMock())
+    monkeypatch.setattr(runner, "tasks_controller", MagicMock())
+    monkeypatch.setattr(runner, "device_controller", MagicMock())
+    return runner
+
+
+def test_failed_migration_tags_the_device_once_finished(failed_migration):
+    failed_migration.tasks_controller.get_failed_device_mig_task.return_value = False
+    task = _task(distr_name="distr-1", migration={"name": "distr-1"})
+    task.device_id = "dev-1"
+
+    failed_migration.SPEC.on_finish(task)
+
+    failed_migration.device_controller.device_set_failed_and_migrated.assert_called_once_with("dev-1")
+
+
+def test_failed_migration_leaves_the_device_alone_if_never_started(failed_migration):
+    failed_migration.tasks_controller.get_failed_device_mig_task.return_value = False
+    task = _task(distr_name="distr-1")
+    task.device_id = "dev-1"
+
+    failed_migration.SPEC.on_finish(task)
+
+    failed_migration.device_controller.device_set_failed_and_migrated.assert_not_called()
+
+
+def test_failed_migration_waits_for_the_last_task_on_the_device(failed_migration):
+    failed_migration.tasks_controller.get_failed_device_mig_task.return_value = "other-task"
+    task = _task(distr_name="distr-1", migration={"name": "distr-1"})
+    task.device_id = "dev-1"
+
+    failed_migration.SPEC.on_finish(task)
+
+    failed_migration.device_controller.device_set_failed_and_migrated.assert_not_called()

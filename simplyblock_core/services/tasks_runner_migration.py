@@ -1,153 +1,77 @@
 # coding=utf-8
-import time
-from datetime import datetime, timezone
-
 from simplyblock_core import db_controller, utils, constants
 from simplyblock_core.controllers import tasks_events, tasks_controller, lvol_controller
-from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.services import migration_task_common as mig
+from simplyblock_core.services.task_runner_base import (
+    RunnerSpec,
+    TaskAbort,
+    TaskDefer,
+    TaskRetry,
+    serve,
+)
 
 logger = utils.get_logger(__name__)
 
-MIGRATION_WAIT_UNAVAILABLE_KEY = "wait_unavailable_before_retry"
+# get DB controller
+db = db_controller.DBController()
+
+MIGRATION_WAIT_UNAVAILABLE_KEY = mig.MIGRATION_WAIT_UNAVAILABLE_KEY
 
 
-def _cluster_unavailable_state(cluster_id):
-    unavailable = []
+def _online_device_count(cluster_id, primaries_only=False):
+    online = 0
     for node in db.get_storage_nodes_by_cluster_id(cluster_id):
-        if node.status in [StorageNode.STATUS_IN_CREATION, StorageNode.STATUS_REMOVED]:
+        if primaries_only and node.is_secondary_node:
             continue
-        if node.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:
-            unavailable.append(f"node:{node.get_id()}")
         for dev in node.nvme_devices:
-            if dev.status in [NVMeDevice.STATUS_REMOVED, NVMeDevice.STATUS_FAILED_AND_MIGRATED]:
-                continue
-            if dev.status != NVMeDevice.STATUS_ONLINE:
-                unavailable.append(f"dev:{dev.get_id()}")
-    return sorted(unavailable)
+            if dev.status == NVMeDevice.STATUS_ONLINE:
+                online += 1
+    return online
 
 
-def _migration_retry_allowed(task, unavailable):
-    previous = sorted(task.function_params.get(MIGRATION_WAIT_UNAVAILABLE_KEY, []))
+def _wait_for_cluster_recovery(task):
+    """Gate a not-yet-started migration on the cluster being whole enough.
+
+    Whether waiting costs a retry depends on why: with nothing unavailable the
+    hold-up is transient and counts against the budget, but while nodes or
+    devices are down it is the recovery we are waiting on, and burning retries
+    against it would terminate the migration before the cluster came back.
+    """
+    unavailable = mig.cluster_unavailable_state(task.cluster_id)
     if not unavailable:
-        if previous:
-            task.function_params.pop(MIGRATION_WAIT_UNAVAILABLE_KEY, None)
-            task.write_to_db(db.kv_store)
-        return True
-
-    recovered = set(previous) - set(unavailable)
-    if previous and recovered:
-        task.function_params[MIGRATION_WAIT_UNAVAILABLE_KEY] = unavailable
-        task.write_to_db(db.kv_store)
-        logger.info(
-            "Migration retry allowed after recovery event for task %s: %s",
-            task.uuid,
-            sorted(recovered),
-        )
-        return True
-
-    task.function_params[MIGRATION_WAIT_UNAVAILABLE_KEY] = unavailable
-    task.function_result = (
-        "waiting for unavailable nodes/devices to recover before restarting migration: "
-        f"{unavailable}"
-    )
-    task.status = JobSchedule.STATUS_SUSPENDED
-    task.write_to_db(db.kv_store)
-    return False
+        raise TaskRetry(task.function_result or "waiting to start migration, retrying")
+    mig.require_recovery_progress(task, unavailable)
 
 
 def task_runner(task):
-
-    task = db.get_task_by_id(task.uuid)
-    try:
-        snode = db.get_storage_node_by_id(task.node_id)
-    except KeyError:
-        task.status = JobSchedule.STATUS_DONE
-        task.function_result = f"Node not found: {task.node_id}"
-        task.write_to_db(db.kv_store)
-        return True
-
-    if task.canceled:
-        task.function_result = "canceled"
-        task.status = JobSchedule.STATUS_DONE
-        task.write_to_db(db.kv_store)
-        return True
+    snode = mig.require_node(task)
 
     if snode.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:
         task.function_result = "node is not online, retrying"
-        task.status = JobSchedule.STATUS_SUSPENDED
-        unavailable = _cluster_unavailable_state(task.cluster_id)
-        if not unavailable:
-            task.retry += 1
-            task.write_to_db(db.kv_store)
-        else:
-            _migration_retry_allowed(task, unavailable)
-        return False
+        _wait_for_cluster_recovery(task)
+        raise TaskDefer("node is not online, retrying")
 
-    cluster = db.get_cluster_by_id(task.cluster_id)
-    if cluster.status not in Cluster.OPERABLE_STATUSES:
-        task.function_result = "cluster is not active, retrying"
-        task.status = JobSchedule.STATUS_SUSPENDED
-        task.retry += 1
-        task.write_to_db(db.kv_store)
-        return False
-
-    # Expansion-first ordering: no data migration runs while a cluster
-    # expansion is open — even between the expand task's retries, when the
-    # cluster status is momentarily ACTIVE (see defer_task_for_expansion).
-    if tasks_controller.defer_task_for_expansion(task):
-        return False
+    mig.require_active_cluster(task)
 
     if tasks_controller.get_active_lvol_migration(task.node_id):
-        task.function_result = "LVol migration tasks found, retrying"
-        task.status = JobSchedule.STATUS_SUSPENDED
-        task.retry += 1
-        task.write_to_db(db.kv_store)
-        return False
+        raise TaskRetry("LVol migration tasks found, retrying")
 
-    if task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED]:
-        current_online_devices = 0
-        unavailable = _cluster_unavailable_state(task.cluster_id)
-        for node in db.get_storage_nodes_by_cluster_id(task.cluster_id):
-            if node.is_secondary_node:  # pass
-                continue
-            for dev in node.nvme_devices:
-                if dev.status == NVMeDevice.STATUS_ONLINE:
-                    current_online_devices += 1
-            if node.status == StorageNode.STATUS_ONLINE and node.online_since:
-                try:
-                    diff = datetime.now(timezone.utc) - datetime.fromisoformat(node.online_since)
-                    if diff.total_seconds() < 60:
-                        task.function_result = "node is online < 1 min, retrying"
-                        task.status = JobSchedule.STATUS_SUSPENDED
-                        task.write_to_db(db.kv_store)
-                        return False
-                except Exception as e:
-                    logger.error(f"Failed to get online since: {e}")
+    if not mig.migration_started(task):
+        if not mig.nodes_settled(task.cluster_id, primaries_only=True):
+            raise TaskDefer("node is online < 1 min, retrying")
 
-        migration_devices = 0
-        if "migration_devices" in task.function_params:
-            migration_devices = task.function_params["migration_devices"]
+        online_devices = _online_device_count(task.cluster_id, primaries_only=True)
+        wanted = task.function_params.get("migration_devices", 0)
+        if online_devices < wanted:
+            task.function_result = (f"only {online_devices} devices online, waiting for "
+                                    f"more devices to be online")
+            _wait_for_cluster_recovery(task)
+            raise TaskDefer(task.function_result)
 
-        if current_online_devices < migration_devices:
-            task.function_result = f"only {current_online_devices} devices online, waiting for more devices to be online"
-            task.status = JobSchedule.STATUS_SUSPENDED
-            if not unavailable:
-                task.retry += 1
-                task.write_to_db(db.kv_store)
-            else:
-                _migration_retry_allowed(task, unavailable)
-            return False
-
-        if not _migration_retry_allowed(task, unavailable):
-            return False
-
-        task.status = JobSchedule.STATUS_RUNNING
-        task.function_result = ""
-        task.write_to_db(db.kv_store)
-
+        mig.require_recovery_progress(task, mig.cluster_unavailable_state(task.cluster_id))
 
     rpc_client = snode.rpc_client(timeout=5, retry=2)
 
@@ -155,173 +79,132 @@ def task_runner(task):
     # Migration IO triggers auto-leader promotion in the data plane, so
     # starting migration on a non-leader causes a split-brain write conflict.
     if not snode.is_secondary_node and not lvol_controller.is_node_leader(snode, snode.lvstore):
-        msg = f"Node {snode.get_id()} is not the leader for {snode.lvstore}, deferring migration"
-        logger.warning(msg)
-        task.function_result = msg
-        task.status = JobSchedule.STATUS_SUSPENDED
-        task.retry += 1
-        task.write_to_db(db.kv_store)
-        return False
+        raise TaskRetry(f"Node {snode.get_id()} is not the leader for {snode.lvstore}, "
+                        f"deferring migration")
 
-    if "migration" not in task.function_params:
-        current_online_devices = 0
-        for node in db.get_storage_nodes_by_cluster_id(task.cluster_id):
-            for dev in node.nvme_devices:
-                if dev.status == NVMeDevice.STATUS_ONLINE:
-                    current_online_devices += 1
+    if not mig.migration_started(task):
+        # Recorded alongside the start so a later poll can tell how much of the
+        # cluster the migration was sized against.
+        task.function_params["migration_devices"] = _online_device_count(task.cluster_id)
+        started = mig.start_migration(task, lambda: rpc_client.distr_migration_expansion_start(
+            task.function_params["distr_name"], mig.qos_high_priority(snode.cluster_id),
+            job_size=constants.MIG_JOB_SIZE, jobs=constants.MIG_PARALLEL_JOBS))
+        if started is None:
+            raise TaskAbort("canceled while starting migration")
+        task = started
 
-        distr_name = task.function_params["distr_name"]
-
-        qos_high_priority = False
-        if db.get_cluster_by_id(snode.cluster_id).is_qos_set():
-            qos_high_priority = True
-        try:
-            rsp = rpc_client.distr_migration_expansion_start(distr_name, qos_high_priority, job_size=constants.MIG_JOB_SIZE,
-                                                            jobs=constants.MIG_PARALLEL_JOBS)
-        except Exception as e:
-            logger.error(e)
-            rsp = False
-        if not rsp:
-            msg = "Failed to start device migration task, retry later"
-            logger.error(msg)
-            task.function_result =msg
-            task.status = JobSchedule.STATUS_SUSPENDED
-            unavailable = _cluster_unavailable_state(task.cluster_id)
-            if not unavailable:
-                task.retry += 1
-                task.write_to_db(db.kv_store)
-            else:
-                _migration_retry_allowed(task, unavailable)
-            return True
-        task.function_params['migration'] = {"name": distr_name}
-        task.function_params['migration_devices'] = current_online_devices
-        task.write_to_db(db.kv_store)
-
-    try:
-        if "migration" in task.function_params:
-            allow_all_errors = False
-            for node in db.get_storage_nodes_by_cluster_id(task.cluster_id):
-                for dev in node.nvme_devices:
-                    if dev.status in [NVMeDevice.STATUS_READONLY, NVMeDevice.STATUS_CANNOT_ALLOCATE, NVMeDevice.STATUS_FAILED]:
-                        allow_all_errors = True
-                        break
-
-            mig_info = task.function_params["migration"]
-            res = rpc_client.distr_migration_status(**mig_info)
-            return utils.handle_task_result(task, res, allow_all_errors=allow_all_errors)
-    except Exception as e:
-        logger.error("Failed to get migration task status")
-        logger.exception(e)
-        task.function_result = "Failed to get migration status"
-
-    task.retry += 1
-    task.write_to_db(db.kv_store)
-    return False
+    mig.poll_migration(task, rpc_client, allow_all_errors=mig.allow_all_migration_errors(
+        task.cluster_id, [NVMeDevice.STATUS_READONLY,
+                          NVMeDevice.STATUS_CANNOT_ALLOCATE,
+                          NVMeDevice.STATUS_FAILED]))
 
 
-# get DB controller
-db = db_controller.DBController()
+def _is_eligible(task, cluster):
+    """One migration at a time per node and distr.
+
+    Beyond the shared sibling rule, a device migration also waits behind a
+    SUSPENDED new-device migration for the same distr: that one is mid-flight
+    on the data plane even while its task is parked, and starting a second
+    migration over the same distr would collide with it.
+    """
+    if mig.migration_started(task):
+        return True
+
+    distr_name = task.function_params.get("distr_name")
+    for sibling in db.get_job_tasks(task.cluster_id):
+        if sibling.function_name not in [JobSchedule.FN_FAILED_DEV_MIG,
+                                         JobSchedule.FN_DEV_MIG,
+                                         JobSchedule.FN_NEW_DEV_MIG]:
+            continue
+        if sibling.node_id != task.node_id or sibling.canceled:
+            continue
+        if sibling.function_params.get("distr_name") != distr_name:
+            continue
+        if sibling.status == JobSchedule.STATUS_RUNNING:
+            return False
+        if (sibling.status == JobSchedule.STATUS_SUSPENDED
+                and sibling.function_name == JobSchedule.FN_NEW_DEV_MIG):
+            return False
+    return True
 
 
-def update_master_task(task, cl):
-    master_task = None
-    tasks = {t.uuid: t for t in db.get_job_tasks(cl.get_id(), reverse=False)}
-    for t in tasks.values():
-        if task.uuid in t.sub_tasks:
-            master_task = t
-            break
+def update_master_tasks(cluster_id):
+    """Roll every master task's sub-task statuses up into it.
 
-    def _set_master_task_status(master_task, status):
-        if master_task.status != status:
-            logger.info(f"_set_master_task_status: {status}")
-            master_task.status = status
-            master_task.function_result = status
-            master_task.write_to_db(db.kv_store)
-            tasks_events.task_updated(master_task)
+    Per cycle rather than per sub-task attempt: the roll-up reads all of a
+    master's sub-tasks anyway, so running it once a cycle both covers every
+    status change (not only the attempts that finish a sub-task) and drops the
+    redundant re-computation each sibling used to trigger.
+    """
+    tasks = {t.uuid: t for t in db.get_job_tasks(cluster_id, reverse=False)}
+    for master_task in list(tasks.values()):
+        if master_task.sub_tasks:
+            _roll_up(master_task, tasks)
 
+
+def _roll_up(master_task, tasks):
     status_map = {
         JobSchedule.STATUS_DONE: 0,
         JobSchedule.STATUS_NEW: 0,
         JobSchedule.STATUS_SUSPENDED: 0,
         JobSchedule.STATUS_RUNNING: 0,
     }
-    if master_task:
-        for sub_task_id in master_task.sub_tasks:
-            sub_task = tasks[sub_task_id]
-            status_map[sub_task.status] = status_map.get(sub_task.status, 0) + 1
+    for sub_task_id in master_task.sub_tasks:
+        sub_task = tasks.get(sub_task_id)
+        if sub_task is None:
+            return
+        status_map[sub_task.status] = status_map.get(sub_task.status, 0) + 1
 
-        logger.info(f"master_task.sub_tasks: {len(master_task.sub_tasks)}")
-        logger.info(f"status_map: {status_map}")
+    total = len(master_task.sub_tasks)
+    for status in (JobSchedule.STATUS_DONE, JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED):
+        if status_map[status] == total:
+            rolled_up = status
+            break
+    else:
+        rolled_up = JobSchedule.STATUS_RUNNING
 
-        if status_map[JobSchedule.STATUS_DONE] == len(master_task.sub_tasks):  # all tasks done
-            _set_master_task_status(master_task, JobSchedule.STATUS_DONE)
-        elif status_map[JobSchedule.STATUS_NEW] == len(master_task.sub_tasks):  # all tasks new
-            _set_master_task_status(master_task, JobSchedule.STATUS_NEW)
-        elif status_map[JobSchedule.STATUS_SUSPENDED] == len(master_task.sub_tasks):  # all tasks suspended
-            _set_master_task_status(master_task, JobSchedule.STATUS_SUSPENDED)
-        else:  # set running
-            _set_master_task_status(master_task, JobSchedule.STATUS_RUNNING)
-        return True
+    if master_task.status == rolled_up:
+        return
+    logger.info(f"_set_master_task_status: {rolled_up}")
+    master_task.status = rolled_up
+    master_task.function_result = rolled_up
+    master_task.write_to_db(db.kv_store)
+    tasks_events.task_updated(master_task)
+
+
+def resume_jc_compression(task):
+    """A finished migration frees the node for JC compression again."""
+    if tasks_controller.get_active_node_tasks(task.cluster_id, task.node_id):
+        return
+
+    logger.info("no task found on same node, resuming compression")
+    node = db.get_storage_node_by_id(task.node_id)
+    for peer in db.get_storage_nodes_by_cluster_id(node.cluster_id):
+        if peer.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:
+            logger.warning("Not all nodes are online, can not resume JC compression")
+    try:
+        _, err = node.rpc_client(timeout=5, retry=2).jc_suspend_compression(
+            jm_vuid=node.jm_vuid, suspend=False)
+        if err:
+            logger.info("Failed to resume JC compression adding task...")
+            tasks_controller.add_jc_comp_resume_task(task.cluster_id, task.node_id, node.jm_vuid)
+    except Exception as e:
+        logger.error(e)
+
+
+SPEC = RunnerSpec(
+    name="tasks-runner-migration",
+    function_names=[JobSchedule.FN_DEV_MIG],
+    handler=task_runner,
+    on_finish=resume_jc_compression,
+    on_cycle=lambda cluster: update_master_tasks(cluster.get_id()),
+    is_eligible=_is_eligible,
+    interval=3,
+)
 
 
 def main():
-    logger.info("Starting Tasks runner...")
-    while True:
-        clusters = db.get_clusters()
-        if not clusters:
-            logger.error("No clusters found!")
-        else:
-            for cl in clusters:
-                tasks = db.get_job_tasks(cl.get_id(), reverse=False)
-                for task in tasks:
-                    if task.function_name == JobSchedule.FN_DEV_MIG and task.status != JobSchedule.STATUS_DONE:
-                        task = db.get_task_by_id(task.uuid)
-                        if task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED]:
-                            active_task = False
-                            suspended_task= False
-                            for t in db.get_job_tasks(task.cluster_id):
-                                if t.function_name in [JobSchedule.FN_FAILED_DEV_MIG, JobSchedule.FN_DEV_MIG,
-                                                          JobSchedule.FN_NEW_DEV_MIG] and t.node_id == task.node_id:
-                                    if "distr_name" in t.function_params and t.function_params[
-                                        "distr_name"] == task.function_params['distr_name'] and t.canceled is False:
-                                        if t.status == JobSchedule.STATUS_RUNNING:
-                                            active_task = True
-                                        elif t.status == JobSchedule.STATUS_SUSPENDED and t.function_name == JobSchedule.FN_NEW_DEV_MIG:
-                                            suspended_task = True
-                                if active_task and suspended_task:
-                                    break
-                            if active_task or suspended_task:
-                                logger.info("task found on same node, retry")
-                                continue
-                        elif task.status == JobSchedule.STATUS_RUNNING:
-                            pass
-
-                        # Lease gate: skip a task another live runner host owns.
-                        if not tasks_controller.claim_task(task):
-                            logger.info(f"Migration task {task.uuid} owned by another runner host; skipping")
-                            continue
-                        with tasks_controller.task_lease_heartbeat(task):
-                            res = task_runner(task)
-                        update_master_task(task, cl)
-                        if res:
-                            node_task = tasks_controller.get_active_node_tasks(task.cluster_id, task.node_id)
-                            if not node_task:
-                                logger.info("no task found on same node, resuming compression")
-                                node = db.get_storage_node_by_id(task.node_id)
-                                for n in db.get_storage_nodes_by_cluster_id(node.cluster_id):
-                                    if n.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:
-                                        logger.warning("Not all nodes are online, can not resume JC compression")
-                                        continue
-                                rpc_client = node.rpc_client(timeout=5, retry=2)
-                                try:
-                                    ret, err = rpc_client.jc_suspend_compression(jm_vuid=node.jm_vuid, suspend=False)
-                                    if err:
-                                        logger.info("Failed to resume JC compression adding task...")
-                                        tasks_controller.add_jc_comp_resume_task(task.cluster_id, task.node_id, node.jm_vuid)
-                                except Exception as e:
-                                    logger.error(e)
-
-        time.sleep(3)
+    serve(SPEC)
 
 
 if __name__ == "__main__":
