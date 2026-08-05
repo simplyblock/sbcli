@@ -615,3 +615,37 @@ def test_failing_cycle_hook_does_not_stop_the_loop(monkeypatch):
     runner = _runner(MagicMock(), on_cycle=MagicMock(side_effect=RuntimeError("watchdog boom")))
     with pytest.raises(_StopLoop):   # reached the sleep, i.e. the cycle completed
         runner.run()
+
+
+# -- in-progress polling ----------------------------------------------------
+
+def test_progress_keeps_the_task_running(monkeypatch):
+    """A polled long-running operation must not be suspended between polls:
+    the migration family gates mutual exclusion on a sibling being RUNNING."""
+    task = _task(retry=2)
+    store = _wire(monkeypatch, task)
+
+    def handler(_task):
+        raise trb.TaskProgress("Status: in_progress, progress:42")
+
+    runner = _runner(handler)
+    runner._process(task, MagicMock())
+
+    assert store.row().status == JobSchedule.STATUS_RUNNING
+    assert store.row().retry == 2
+    assert store.row().function_result == "Status: in_progress, progress:42"
+    assert "task-1" not in runner._next_attempt
+
+
+def test_progress_does_not_resurrect_a_concurrently_canceled_task(monkeypatch):
+    task = _task()
+    store = _wire(monkeypatch, task)
+
+    def handler(_task):
+        store.concurrently(canceled=True, status=JobSchedule.STATUS_DONE)
+        raise trb.TaskProgress("still going")
+
+    _runner(handler)._process(task, MagicMock())
+
+    assert store.row().canceled is True
+    assert store.row().status == JobSchedule.STATUS_DONE
