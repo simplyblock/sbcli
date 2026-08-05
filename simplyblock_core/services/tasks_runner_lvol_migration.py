@@ -2947,7 +2947,7 @@ def task_runner(task):
 
     # Expansion-first ordering: defer while a cluster expansion is open —
     # even between the expand task's retries, when the cluster status is
-    # momentarily ACTIVE (see tasks_controller.defer_task_for_expansion).
+    # momentarily ACTIVE (see migration_task_common.require_active_cluster).
     if tasks_controller.get_active_cluster_expand_task(task.cluster_id):
         return _suspend_task(
             task, migration, "cluster expansion in progress, deferring",
