@@ -574,7 +574,7 @@ class K8sNativeMajorUpgrade(TestClusterBase):
 
         # Cluster
         self.logger.info(f"Cluster UUID: {self.cluster_id}")
-        self.logger.info(f"Cluster Secret: {self.cluster_secret}")
+        self.logger.info("Cluster Secret: ***")
 
         # Storage nodes
         storage_nodes = self.sbcli_utils.get_storage_nodes()["results"]
