@@ -22,16 +22,11 @@ def status():
     return utils.get_response("Live")
 
 
-MODES = [
-    "storage_node",
-    "storage_node_k8s",
-]
-
 parser = argparse.ArgumentParser()
-parser.add_argument("mode", choices=MODES)
+parser.add_argument("mode", choices=["storage_node", "storage_node_k8s"])
 
 
-if __name__ == '__main__':
+def main():
     args = parser.parse_args()
 
     mode = args.mode
@@ -43,3 +38,7 @@ if __name__ == '__main__':
 
     settings = Settings()
     app.run(host='0.0.0.0', debug=False, ssl_context=settings.make_server_ssl_context())
+
+
+if __name__ == '__main__':
+    main()
