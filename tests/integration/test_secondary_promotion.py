@@ -336,8 +336,14 @@ class TestSecondaryPromotion(unittest.TestCase):
             if c == call("LVS_100", leader=True):
                 self.fail("Should not promote secondary when primary is online")
 
-        # Should still connect to primary's hublvol
-        secondary.connect_to_hublvol.assert_called_once()
+        # Should still connect to primary's hublvol. Two calls happen per peer:
+        # an attach_only=True pre-attach hoisted out of the client-port-block
+        # window, then the real in-window connect — assert on the latter.
+        in_window = [c for c in secondary.connect_to_hublvol.call_args_list
+                     if not c.kwargs.get("attach_only")]
+        self.assertEqual(len(in_window), 1,
+                         f"expected one in-window connect_to_hublvol, got "
+                         f"{len(secondary.connect_to_hublvol.call_args_list)} calls")
 
     @patch("simplyblock_core.storage_node_ops._check_peer_disconnected", return_value=False)
     @patch("simplyblock_core.storage_node_ops._set_restart_phase")

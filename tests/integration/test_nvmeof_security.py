@@ -669,6 +669,12 @@ class TestConnectLvolTls(unittest.TestCase):
         mock_db.get_lvol_by_id.return_value = lvol
         mock_db.get_storage_node_by_id.return_value = node
         mock_db.get_cluster_by_id.return_value = cl
+        # No pool-level DHCHAP here — this case is per-host PSK. A MagicMock
+        # pool reads as dhchap-enabled, and HostConnectAuth.from_entry then
+        # takes the pool-key branch, which drops the entry's psk (and with it
+        # the --tls flag under test).
+        from simplyblock_core.models.pool import Pool
+        mock_db.get_pool_by_id.return_value = Pool()
         MockDBCtrl.return_value = mock_db
 
         result, _err = connect_lvol("lvol-1", host_nqn="nqn:host1")
@@ -1046,9 +1052,12 @@ class TestRecreateSubsystemSecurity(unittest.TestCase):
         mock_rpc_inst.subsystem_create.return_value = True
         mock_rpc_inst.bdev_examine.return_value = True
         mock_rpc_inst.bdev_wait_for_examine.return_value = True
-        # recreate_lvstore_on_non_leader now probes subsystem existence
-        # before creating. Return empty so the create path is exercised.
+        # recreate_lvstore_on_non_leader probes subsystem existence before
+        # creating — via subsystem_get, not subsystem_list. Unstubbed it
+        # returns a truthy MagicMock, so every lvol looked like it already
+        # existed and no subsystem_create ran at all.
         mock_rpc_inst.subsystem_list.return_value = []
+        mock_rpc_inst.subsystem_get.return_value = None
         # The inflight-IO drain check on the leader must not time out.
         mock_rpc_inst.bdev_distrib_check_inflight_io.return_value = False
         mock_rpc_inst.jc_suspend_compression.return_value = (True, None)

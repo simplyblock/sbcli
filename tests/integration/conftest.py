@@ -33,6 +33,7 @@ import shutil
 import tempfile
 import time
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -195,6 +196,38 @@ def pytest_report_header(config):
     if _skip_reason:
         return f"FoundationDB: UNAVAILABLE — {_skip_reason}"
     return f"FoundationDB: {os.environ.get('FDB_CLUSTER_FILE')}"
+
+
+@pytest.fixture(autouse=True)
+def _no_kubernetes():
+    """Seal the Kubernetes boundary for the whole tier.
+
+    Every k8s call in the codebase funnels through
+    ``utils.load_kube_config_with_fallback``, which tries in-cluster config and
+    then falls back to the developer's ``~/.kube/config``. Unpatched, control
+    paths that touch k8s (cluster activation calls
+    ``set_storage_mcp_max_unavailable``; the event controllers call
+    ``patch_cr_node_status``) issue REAL, untimed HTTPS requests to whatever
+    cluster that file names.
+
+    That made the tier's runtime a function of the developer's kubeconfig:
+    ``test_dual_ft_e2e`` ran in 9.8s the day the configured API server refused
+    fast, and 272s — six timeouts — once it started accepting connections
+    without answering. CI has no kubeconfig, so raising here is not a new
+    behaviour, it is the environment these tests were written against, pinned
+    so it holds everywhere. Callers already handle an unavailable config; that
+    is the branch they take on any non-k8s deployment.
+    """
+    from kubernetes.config.config_exception import ConfigException
+
+    from simplyblock_core import utils
+
+    def _refuse():
+        raise ConfigException(
+            "Kubernetes access is disabled in tests (tests/integration/conftest.py)")
+
+    with patch.object(utils, "load_kube_config_with_fallback", _refuse):
+        yield
 
 
 @pytest.fixture(scope="session", autouse=True)

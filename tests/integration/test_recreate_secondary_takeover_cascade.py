@@ -528,13 +528,15 @@ class TestRecreateLvstoreStep8bHublvolWiring(unittest.TestCase):
             return f"nqn-{primary_node.lvstore}"
 
         def fake_connect(self_node, primary_node, failover_node=None,
-                         role=None, timeout=None, lvs_node=None):
+                         role=None, timeout=None, lvs_node=None,
+                         attach_only=False):
             captured["connect_calls"].append({
                 "self_id": self_node.get_id(),
                 "primary_node_id": primary_node.get_id(),
                 "failover_id": failover_node.get_id() if failover_node else None,
                 "role": role,
                 "lvs_node_id": lvs_node.get_id() if lvs_node else None,
+                "attach_only": attach_only,
             })
             return True
 
@@ -561,10 +563,16 @@ class TestRecreateLvstoreStep8bHublvolWiring(unittest.TestCase):
             # see the standard self-first signature.
             n.create_secondary_hublvol = lambda primary_node, cluster_nqn, _self=n: \
                 fake_create_sec(_self, primary_node, cluster_nqn)
+            # Mirror connect_to_hublvol's real signature: it also takes the
+            # hublvol advisory lock and the attach_only flag used by the
+            # pre-block attach pass. A stub that rejects them turns the
+            # recreate into an "Abort restart" instead of recording the call.
             n.connect_to_hublvol = lambda primary_node, failover_node=None, role=None, \
-                                          timeout=None, rpc_timeout=None, lvs_node=None, _self=n: \
+                                          timeout=None, rpc_timeout=None, lvs_node=None, \
+                                          coordinator_lock=None, attach_only=False, _self=n: \
                 fake_connect(_self, primary_node, failover_node=failover_node,
-                             role=role, timeout=timeout, lvs_node=lvs_node)
+                             role=role, timeout=timeout, lvs_node=lvs_node,
+                             attach_only=attach_only)
             n.client = MagicMock(return_value=MagicMock())
 
         with patch("simplyblock_core.storage_node_ops._check_peer_disconnected",
@@ -636,11 +644,13 @@ class TestRecreateLvstoreStep8bHublvolWiring(unittest.TestCase):
         connect happens."""
         captured = self._run_step8b("tertiary")
 
-        connects = captured["connect_calls"]
-        # There is one peer (sec) — only one connect_to_hublvol expected.
+        # One peer (sec), connected twice: the attach_only=True pre-attach
+        # hoisted out of the client-port-block window, then the real in-window
+        # connect. Assert on the in-window one.
+        connects = [c for c in captured["connect_calls"] if not c["attach_only"]]
         self.assertEqual(len(connects), 1,
-                         f"Expected one connect_to_hublvol call (to sec_1), "
-                         f"got {connects}")
+                         f"Expected one in-window connect_to_hublvol call (to "
+                         f"sec_1), got {captured['connect_calls']}")
         c = connects[0]
         self.assertEqual(c["self_id"], "sec")
         self.assertEqual(c["primary_node_id"], "snode")
@@ -667,10 +677,10 @@ class TestRecreateLvstoreStep8bHublvolWiring(unittest.TestCase):
                          "create_secondary_hublvol must NOT be called when "
                          "snode itself is the topological secondary owner")
 
-        connects = captured["connect_calls"]
+        connects = [c for c in captured["connect_calls"] if not c["attach_only"]]
         self.assertEqual(len(connects), 1,
-                         f"Expected one connect_to_hublvol call (to tert), "
-                         f"got {connects}")
+                         f"Expected one in-window connect_to_hublvol call (to "
+                         f"tert), got {captured['connect_calls']}")
         c = connects[0]
         self.assertEqual(c["self_id"], "tert")
         self.assertEqual(c["role"], "tertiary",
