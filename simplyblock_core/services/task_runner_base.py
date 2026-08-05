@@ -88,6 +88,11 @@ class RunnerSpec:
     # exclusion_key() is equal never run at the same time (e.g. one restart per
     # node). Ignored when concurrency == 1.
     exclusion_key: Optional[Callable[[JobSchedule], Any]] = None
+    # Optional cleanup, called once the task has reached STATUS_DONE and been
+    # written — whichever way it got there (handler success, TaskAbort, cancel
+    # or retry ceiling). For releasing state the task held, which would
+    # otherwise leak on the terminal paths the handler never sees.
+    on_finish: Optional[Callable[[JobSchedule], None]] = None
 
     def __post_init__(self) -> None:
         if self.concurrency < 1:
@@ -233,16 +238,28 @@ class TaskRunner:
         task.status = JobSchedule.STATUS_DONE
         if not task.function_result:
             task.function_result = "completed"
-        task.write_to_db(db.kv_store)
-        self._forget(task.uuid)
+        self._write_terminal(task)
 
     def _finish(self, task: JobSchedule, result: str) -> None:
         """Terminal DONE for a non-handler-success reason (canceled, max retry,
         abort)."""
         task.function_result = result
         task.status = JobSchedule.STATUS_DONE
+        self._write_terminal(task)
+
+    def _write_terminal(self, task: JobSchedule) -> None:
         task.write_to_db(db.kv_store)
         self._forget(task.uuid)
+        if self.spec.on_finish is None:
+            return
+        # Cleanup runs after the terminal write, so a hook that inspects the
+        # task's own state (a lock held until no active task remains) sees it
+        # as finished. A failing hook must not take the loop down with it.
+        try:
+            self.spec.on_finish(task)
+        except Exception as e:  # noqa: BLE001 - cleanup failure is not fatal
+            logger.error(f"{self.spec.name}: task {task.uuid} on_finish failed: {e}")
+            logger.exception(e)
 
     def _defer(self, task: JobSchedule, reason: str) -> None:
         if reason:
