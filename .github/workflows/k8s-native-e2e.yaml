@@ -380,15 +380,15 @@ jobs:
           CLUSTER_ENV="${{ github.event.inputs.cluster_environment || 'local' }}"
           IFS=',' read -ra NODES <<< "${{ github.event.inputs.worker_nodes }}"
           for NODE in "${NODES[@]}"; do
-            echo "Resetting hugepages to 0 on $NODE..."
+            echo "Disconnecting stale NVMe-oF and resetting hugepages on $NODE..."
             if [[ "$CLUSTER_ENV" == *"openshift"* ]]; then
               oc debug node/"$NODE" -- chroot /host bash -c \
-                "echo 0 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages" 2>/dev/null || true
+                "nvme disconnect-all 2>/dev/null; echo 0 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages" 2>/dev/null || true
               echo "Restarting kubelet on $NODE..."
               oc debug node/"$NODE" -- chroot /host systemctl restart kubelet 2>/dev/null || true
             else
               kubectl debug node/"$NODE" -q --image=busybox:latest -- chroot /host sh -c \
-                "echo 0 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages" 2>/dev/null || true
+                "nvme disconnect-all 2>/dev/null; echo 0 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages" 2>/dev/null || true
               echo "Restarting kubelet on $NODE..."
               kubectl debug node/"$NODE" -q --image=busybox:latest -- chroot /host sh -c \
                 "systemctl restart kubelet" 2>/dev/null || true

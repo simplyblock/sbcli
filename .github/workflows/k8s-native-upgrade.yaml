@@ -367,16 +367,16 @@ jobs:
               fi
             done
 
-          echo "=== Phase 7: Reset hugepages + restart kubelet (parallel, 90s timeout) ==="
+          echo "=== Phase 7: Disconnect stale NVMe-oF, reset hugepages + restart kubelet (parallel, 90s timeout) ==="
           IFS=',' read -ra NODES <<< "${{ github.event.inputs.worker_nodes }}"
           for NODE in "${NODES[@]}"; do
             (
               if [[ "$CLUSTER_ENV" == *"openshift"* ]]; then
                 timeout 90 oc debug node/"$NODE" -- chroot /host bash -c \
-                  "echo 0 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages && systemctl restart kubelet" 2>/dev/null || true
+                  "nvme disconnect-all 2>/dev/null; echo 0 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages && systemctl restart kubelet" 2>/dev/null || true
               else
                 timeout 90 kubectl debug node/"$NODE" -q --image=busybox:latest -- chroot /host sh -c \
-                  "echo 0 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages && systemctl restart kubelet" 2>/dev/null || true
+                  "nvme disconnect-all 2>/dev/null; echo 0 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages && systemctl restart kubelet" 2>/dev/null || true
               fi
               echo "Done: $NODE"
             ) &
