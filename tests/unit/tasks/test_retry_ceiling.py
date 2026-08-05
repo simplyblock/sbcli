@@ -326,16 +326,6 @@ def _spec_replication_final(runner, monkeypatch):
     return task
 
 
-def _spec_jc_comp(runner, monkeypatch):
-    task = _make_task(JobSchedule.FN_JC_COMP_RESUME)
-    _wire_base(runner, monkeypatch, task)
-    # A task is always active on the same node -> resume is deferred, retry each
-    # poll (this is the branch that increments task.retry).
-    monkeypatch.setattr(runner.tasks_controller, "get_active_node_tasks",
-                        lambda *a, **k: [MagicMock()])
-    return task
-
-
 def _spec_restart(runner, monkeypatch):
     task = _make_task(JobSchedule.FN_NODE_RESTART)
     _db, _cluster, node = _wire_base(runner, monkeypatch, task)
@@ -408,7 +398,6 @@ _MAIN_DRIVEN_SPECS = {
     "tasks_runner_cluster_expand.py": _spec_cluster_expand,
     "tasks_runner_node_add.py": _spec_node_add,
     "tasks_runner_replication_final.py": _spec_replication_final,
-    "tasks_runner_jc_comp.py": _spec_jc_comp,
     "tasks_runner_restart.py": _spec_restart,
     "tasks_runner_batch_migration.py": _spec_batch_migration,
 }
@@ -419,6 +408,18 @@ _MAIN_DRIVEN_SPECS = {
 # ``process_task`` level by ``test_backup_*`` above.
 _COVERED_ELSEWHERE = {
     "tasks_runner_backup.py": "driven via process_task in test_backup_* above",
+}
+
+# Runners migrated onto the shared driver (``task_runner_base``). They no longer
+# own a loop or a retry counter — the driver enforces the ceiling for all of
+# them at once, covered by tests/unit/tasks/test_task_runner_base.py. They are
+# therefore not discovered by _retry_driven_runner_files(); listing them here
+# keeps that disappearance deliberate rather than silent, and
+# test_migrated_runners_delegate_retry below pins that they really did hand the
+# retry counter over.
+_DRIVER_MIGRATED = {
+    "tasks_runner_fdb_backup.py",
+    "tasks_runner_jc_comp.py",
 }
 
 # Runners that increment task.retry but are intentionally UNBOUNDED: the
@@ -492,6 +493,21 @@ def test_registries_are_not_stale():
     names = {p.name for p in _runner_files()}
     listed = (set(_MAIN_DRIVEN_SPECS)
               | set(_COVERED_ELSEWHERE)
-              | set(INTENTIONALLY_UNBOUNDED))
+              | set(INTENTIONALLY_UNBOUNDED)
+              | _DRIVER_MIGRATED)
     missing = listed - names
     assert not missing, f"listed runners no longer exist: {missing}"
+
+
+@pytest.mark.parametrize("name", sorted(_DRIVER_MIGRATED))
+def test_migrated_runners_delegate_retry(name):
+    """A runner listed as migrated must not have kept a retry counter of its
+    own: the driver owns task.retry, and a runner that still increments it
+    would be applying two ceilings at once."""
+    source = (Path(_runner_files()[0]).parent / name).read_text(encoding='utf-8')
+    assert not _INCREMENTS_RETRY.search(source), (
+        f"{name} is listed as migrated to task_runner_base but still increments "
+        "task.retry itself")
+    assert "serve(SPEC)" in source, (
+        f"{name} is listed as migrated to task_runner_base but does not run the "
+        "shared driver")
