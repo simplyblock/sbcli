@@ -1,12 +1,9 @@
 # coding=utf-8
-import time
-
-
-from simplyblock_core import db_controller, utils, constants
-from simplyblock_core.controllers import fdb_backup_controller, tasks_controller
-from simplyblock_core.controllers import fdb_backup_events
+from simplyblock_core import db_controller, utils
+from simplyblock_core.controllers import fdb_backup_controller
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.services.task_runner_base import RunnerSpec, TaskRetry, serve
 
 logger = utils.get_logger(__name__)
 
@@ -15,57 +12,22 @@ db = db_controller.DBController()
 
 
 def process_fdb_backup_task(task):
-    task = db.get_task_by_id(task.uuid)
-    if task.canceled:
-        task.function_result = "canceled"
-        task.status = JobSchedule.STATUS_DONE
-        task.write_to_db(db.kv_store)
-        return
+    if not fdb_backup_controller.create_backup(task.cluster_id):
+        raise TaskRetry("failed to create backup")
 
-    if 0 <= task.max_retry <= task.retry:
-        task.function_result = "max retry reached, stopping task"
-        task.status = JobSchedule.STATUS_DONE
-        task.write_to_db(db.kv_store)
-        fdb_backup_events.fdb_backup_failed(task.cluster_id, task.uuid)
-        return
+    task.function_result = "Backup created"
 
-    if task.status != JobSchedule.STATUS_RUNNING:
-        task.status = JobSchedule.STATUS_RUNNING
-        task.write_to_db(db.kv_store)
 
-    ret = fdb_backup_controller.create_backup(task.cluster_id)
-    if ret:
-        task.function_result = "Backup created"
-        task.status = JobSchedule.STATUS_DONE
-        task.write_to_db(db.kv_store)
-    else:
-        task.retry += 1
-        task.status = JobSchedule.STATUS_SUSPENDED
-        task.write_to_db(db.kv_store)
+SPEC = RunnerSpec(
+    name="tasks-runner-fdb-backup",
+    function_names=[JobSchedule.FN_FDB_BACKUP],
+    handler=process_fdb_backup_task,
+    is_eligible=lambda task, cluster: cluster.status != Cluster.STATUS_IN_ACTIVATION,
+)
 
 
 def main():
-    logger.info("Starting Tasks runner fdb backup...")
-
-    while True:
-        clusters = db.get_clusters()
-        if not clusters:
-            logger.error("No clusters found!")
-        else:
-            for cl in clusters:
-                if cl.status == Cluster.STATUS_IN_ACTIVATION:
-                    continue
-
-                tasks = db.get_job_tasks(cl.get_id())
-                for task in tasks:
-                    if task.status != JobSchedule.STATUS_DONE:
-                        if task.function_name == JobSchedule.FN_FDB_BACKUP:
-                            if not tasks_controller.claim_task(task):
-                                logger.info(f"FDB-backup task {task.uuid} owned by another runner host; skipping")
-                                continue
-                            process_fdb_backup_task(task)
-
-        time.sleep(constants.TASK_EXEC_INTERVAL_SEC)
+    serve(SPEC)
 
 
 if __name__ == "__main__":

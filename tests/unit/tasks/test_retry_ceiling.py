@@ -149,71 +149,6 @@ def test_no_process_poll_counts_as_a_retry(runner, monkeypatch):
 
 
 # --------------------------------------------------------------------------
-# FDB backup runner: terminates instead of looping forever.
-#
-# Same shape as the S3 backup runner above — its loop is also inline under
-# ``if __name__ == '__main__'`` (no ``def main()``), so it is driven at the
-# ``process_fdb_backup_task`` level here.
-# --------------------------------------------------------------------------
-
-@pytest.fixture
-def fdb_backup_runner(monkeypatch):
-    import simplyblock_core.services.tasks_runner_fdb_backup as runner
-    monkeypatch.setattr(runner, "fdb_backup_events", MagicMock())
-    monkeypatch.setattr(JobSchedule, "write_to_db", MagicMock())
-    return runner
-
-
-def _fdb_backup_task(retry, max_retry):
-    task = JobSchedule()
-    task.uuid = "task-1"
-    task.cluster_id = "cl-1"
-    task.function_name = JobSchedule.FN_FDB_BACKUP
-    task.function_params = {}
-    task.retry = retry
-    task.max_retry = max_retry
-    task.canceled = False
-    task.status = JobSchedule.STATUS_NEW
-    return task
-
-
-def test_fdb_backup_fails_when_max_retry_reached(fdb_backup_runner, monkeypatch):
-    """retry >= max_retry must finish the task instead of re-issuing the backup."""
-    fake_db = MagicMock()
-    task = _fdb_backup_task(retry=10, max_retry=10)
-    fake_db.get_task_by_id.return_value = task
-    monkeypatch.setattr(fdb_backup_runner, "db", fake_db)
-    create_backup = MagicMock()
-    monkeypatch.setattr(
-        fdb_backup_runner.fdb_backup_controller, "create_backup", create_backup)
-
-    fdb_backup_runner.process_fdb_backup_task(task)
-
-    assert task.status == JobSchedule.STATUS_DONE
-    assert "max retry" in task.function_result
-    create_backup.assert_not_called()
-    fdb_backup_runner.fdb_backup_events.fdb_backup_failed.assert_called_once_with(
-        task.cluster_id, task.uuid)
-
-
-def test_fdb_backup_runs_below_max_retry(fdb_backup_runner, monkeypatch):
-    """Below the ceiling the task still advances (dispatches its step)."""
-    fake_db = MagicMock()
-    task = _fdb_backup_task(retry=9, max_retry=10)
-    fake_db.get_task_by_id.return_value = task
-    monkeypatch.setattr(fdb_backup_runner, "db", fake_db)
-    create_backup = MagicMock(return_value=False)
-    monkeypatch.setattr(
-        fdb_backup_runner.fdb_backup_controller, "create_backup", create_backup)
-
-    fdb_backup_runner.process_fdb_backup_task(task)
-
-    create_backup.assert_called_once_with(task.cluster_id)
-    assert task.retry == 10
-    assert task.status == JobSchedule.STATUS_SUSPENDED
-
-
-# --------------------------------------------------------------------------
 # Drive-main harness: exercise each runner's real retry loop end-to-end.
 # --------------------------------------------------------------------------
 
@@ -498,8 +433,6 @@ _MAIN_DRIVEN_SPECS = {
 # ``process_task`` level by ``test_backup_*`` above.
 _COVERED_ELSEWHERE = {
     "tasks_runner_backup.py": "driven via process_task in test_backup_* above",
-    "tasks_runner_fdb_backup.py":
-        "driven via process_fdb_backup_task in test_fdb_backup_* above",
 }
 
 # Runners that increment task.retry but are intentionally UNBOUNDED: the
