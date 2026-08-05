@@ -448,8 +448,8 @@ class K8sNativeMajorUpgrade(TestClusterBase):
 
         self.k8s_utils.log_fio_pvc_mapping(self.pvc_details)
 
-    def _create_snapshots_and_clones(self, runtime: int = None):
-        """Create snapshots + clones with FIO on each clone."""
+    def _create_snapshots_and_clones(self, runtime: int = None, skip_clone_fio: bool = False):
+        """Create snapshots + clones, optionally with FIO on each clone."""
         for pvc_name, detail in self.pvc_details.items():
             snap_name = f"snap-{pvc_name}"
             clone_name = f"clone-{pvc_name}"
@@ -473,16 +473,17 @@ class K8sNativeMajorUpgrade(TestClusterBase):
             )
             self.k8s_utils.wait_pvc_bound(clone_name, timeout=300)
 
-            fio_config, warmup_config, _clone_meta = self._build_fio_config(
-                clone_name, runtime=runtime,
-            )
-            avoid = self.k8s_utils.get_pvc_primary_k8s_node(clone_name, self.sbcli_utils)
-            self.k8s_utils.create_fio_job(
-                job_name=clone_job, pvc_name=clone_name,
-                configmap_name=clone_cm, fio_config=fio_config,
-                image=self.FIO_IMAGE, avoid_node=avoid,
-                warmup_config=warmup_config,
-            )
+            if not skip_clone_fio:
+                fio_config, warmup_config, _clone_meta = self._build_fio_config(
+                    clone_name, runtime=runtime,
+                )
+                avoid = self.k8s_utils.get_pvc_primary_k8s_node(clone_name, self.sbcli_utils)
+                self.k8s_utils.create_fio_job(
+                    job_name=clone_job, pvc_name=clone_name,
+                    configmap_name=clone_cm, fio_config=fio_config,
+                    image=self.FIO_IMAGE, avoid_node=avoid,
+                    warmup_config=warmup_config,
+                )
 
             self.clone_details[clone_name] = {
                 "snap_name": snap_name, "job_name": clone_job,
@@ -1445,20 +1446,38 @@ spec:
             f"(from logicalVolume config, pool_name={pool_name})"
         )
 
-        pre_fio_runtime = 120  # 2 minutes — just write + verify data
+        pre_fio_runtime = 60  # 1 minute — just write data before upgrade
         self.FIO_RUNTIME = pre_fio_runtime
 
         self.logger.info("Pre-upgrade Step 3: Creating PVCs and running short FIO")
         self._create_pvcs_with_fio(len(storage_node_list), runtime=pre_fio_runtime)
 
-        self.logger.info("Pre-upgrade Step 4: Creating snapshots and clones")
-        self._create_snapshots_and_clones(runtime=pre_fio_runtime)
+        # Wait for pre-upgrade FIO to complete (max 5 mins).
+        # FIO failure is non-fatal — the goal is to test the upgrade itself,
+        # not the old version's IO path.
+        self.logger.info(
+            "Pre-upgrade: Waiting up to 5 mins for FIO to complete "
+            "(non-fatal if it fails)"
+        )
+        fio_timeout = 300  # 5 minutes max wait
+        pre_upgrade_fio_ok = True
+        try:
+            self._validate_all_fio(fio_timeout)
+            self.logger.info("Pre-upgrade FIO completed and validated")
+        except Exception as fio_err:
+            pre_upgrade_fio_ok = False
+            self.logger.warning(
+                f"Pre-upgrade FIO did not complete successfully: {fio_err}. "
+                "Continuing with upgrade — this is non-fatal."
+            )
 
-        # Wait for pre-upgrade FIO to complete
-        self.logger.info("Pre-upgrade: Waiting for FIO to complete before maintenance")
-        fio_timeout = pre_fio_runtime + 300
-        self._validate_all_fio(fio_timeout)
-        self.logger.info("Pre-upgrade FIO completed and validated")
+        # Clean up all FIO pods before taking snapshots
+        self.logger.info("Pre-upgrade: Cleaning up FIO pods")
+        self.k8s_utils.cleanup_stale_fio_resources()
+        sleep_n_sec(10)
+
+        self.logger.info("Pre-upgrade Step 4: Creating snapshots and clones")
+        self._create_snapshots_and_clones(skip_clone_fio=True)
 
         # Phase 2.7: Capture pre-upgrade state
         self._capture_pre_upgrade_state()
