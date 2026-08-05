@@ -8770,21 +8770,27 @@ def _recreate_lvstore_impl(snode, force=False, lvs_primary=None, activation_mode
                     _abort_restart_and_unblock(
                         f"Failed to port-block leader {current_leader.get_id()}: {e}")
 
+                repl_disabled = False
                 # c. suspend journal replication while the port is blocked
                 try:
                     repl_disabled = current_leader.rpc_client().jc_disable_replication(lvs_jm_vuid)
-                except Exception:
-                    try:
-                        logger.warning("Failed to disable replication on leader, trying other method")
-                        ret = current_leader.rpc_client().jc_get_jm_status(lvs_jm_vuid)
-                        repl_disabled = True
-                        for jm in ret:
-                            if ret[jm] is False:  # jm is not ready (has active replication task)
-                                repl_disabled = False
-                                break
-                    except Exception as e:
+                except RPCException as e:
+                    if e.code == -32601:  # method not found
+                        try:
+                            logger.warning("Failed to disable replication on leader, trying other method")
+                            ret = current_leader.rpc_client().jc_get_jm_status(lvs_jm_vuid)
+                            repl_disabled = True
+                            for jm in ret:
+                                if ret[jm] is False:  # jm is not ready (has active replication task)
+                                    repl_disabled = False
+                                    break
+                        except Exception as e:
+                            _abort_restart_and_unblock(
+                                f"jc_get_jm_status on leader {current_leader.get_id()} failed: {e}")
+                    else:
                         _abort_restart_and_unblock(
                             f"jc_disable_replication on leader {current_leader.get_id()} failed: {e}")
+
                 if repl_disabled:
                     replication_suspended = True
                     break
