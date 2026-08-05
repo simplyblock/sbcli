@@ -3470,6 +3470,55 @@ class K8sSbcliUtils:
             f"Operator may not have reconciled the pool."
         )
 
+    def add_storage_pool_direct(self, pool_name, cluster_id=None, sbcli_cmd=None):
+        """Create a pool directly via ``sbcli pool add`` (kubectl exec).
+
+        Unlike ``add_storage_pool()``, this does NOT create a Pool CRD —
+        it calls the CLI directly in the admin pod.  Use this for R25
+        clusters that have no operator to reconcile Pool CRDs.
+
+        sbcli_cmd: override the CLI binary name (e.g. "sbcli-dev" for R25).
+                   Defaults to self.sbcli_cmd.
+
+        Returns the pool name on success.
+        """
+        cli = sbcli_cmd or self.sbcli_cmd
+
+        def _list_pools():
+            items = self._run_json(f"{cli} pool list --json")
+            return {item["Name"]: item["UUID"] for item in items}
+
+        # 1. Check if sbcli already sees a pool
+        existing = _list_pools()
+        if existing:
+            actual = next(iter(existing))
+            self.logger.info(f"[pool] Using existing pool '{actual}'")
+            return actual
+
+        # 2. Create via CLI
+        cid = cluster_id or self.cluster_id
+        cmd = f"{cli} pool add {pool_name} {cid}"
+        self.logger.info(f"[pool] Creating pool directly via CLI: {cmd}")
+        out = self._run(cmd)
+        self.logger.info(f"[pool] pool add output: {out}")
+
+        # 3. Wait for pool to appear in pool list
+        for attempt in range(30):  # up to 150s
+            pools = _list_pools()
+            if pools:
+                actual = next(iter(pools))
+                self.logger.info(
+                    f"[pool] Pool '{actual}' visible after CLI create "
+                    f"(attempt {attempt})"
+                )
+                return actual
+            sleep_n_sec(5)
+
+        raise TimeoutError(
+            f"[pool] Pool '{pool_name}' not visible in sbcli after 150s "
+            f"following direct CLI creation."
+        )
+
     def pool_crd_exists(self, pool_name):
         """Check if a Pool CRD exists in K8s (with or without simplyblock- prefix).
 

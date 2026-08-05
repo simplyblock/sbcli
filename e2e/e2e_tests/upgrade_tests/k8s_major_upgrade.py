@@ -1415,7 +1415,10 @@ spec:
         # Pre-upgrade: short FIO to write + verify data, then stop
         self.logger.info("Pre-upgrade Step 2: Creating StorageClass / VolumeSnapshotClass")
         pool_name = self.pool_name
-        actual_pool = self.sbcli_utils.add_storage_pool(pool_name)
+        # R25 has no operator — create pool directly via sbcli CLI, not Pool CRD
+        actual_pool = self.sbcli_utils.add_storage_pool_direct(
+            pool_name, sbcli_cmd="sbcli-dev"
+        )
         if actual_pool and actual_pool != pool_name:
             pool_name = actual_pool
 
