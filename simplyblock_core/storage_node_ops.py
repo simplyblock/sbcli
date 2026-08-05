@@ -5986,17 +5986,11 @@ def shutdown_storage_node(node_id, force=False, keep_auto_restart=False,
         snode.write_to_db(db_controller.kv_store)
 
     # Step 2: cancel migration tasks while controllers are still up.
-    pending_tasks = db_controller.get_job_tasks(snode.cluster_id)
-    for task in pending_tasks:
-        if task.node_id != node_id or task.status == JobSchedule.STATUS_DONE:
-            continue
-        if task.function_name in [
-            JobSchedule.FN_DEV_MIG,
-            JobSchedule.FN_FAILED_DEV_MIG,
-            JobSchedule.FN_NEW_DEV_MIG,
-        ]:
-            task.canceled = True
-            task.write_to_db(db_controller.kv_store)
+    tasks_controller.cancel_node_tasks(snode.cluster_id, node_id, [
+        JobSchedule.FN_DEV_MIG,
+        JobSchedule.FN_FAILED_DEV_MIG,
+        JobSchedule.FN_NEW_DEV_MIG,
+    ])
 
     if not force:
         # Step 3 (Loop 1): broadcast device-unavailable events. The
