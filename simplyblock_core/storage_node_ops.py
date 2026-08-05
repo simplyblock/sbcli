@@ -5239,51 +5239,53 @@ def _check_ftt_allows_node_removal(node_id, db_controller):
     if jm_replication_active:
         not_online_count += 1
 
-    # Capacity cap is npcs uniformly (the erasure code tolerates losing up to
-    # npcs of its ndcs+npcs chunks regardless of the *declared* ft, which only
-    # narrows npcs=2 down to a stricter per-pair constraint below).
-    capacity_cap = npcs
-
     fd_on = cluster.enable_failure_domain and snode.failure_domain >= 0
     blocked_by_capacity = False
     capacity_reason = ""
 
     if fd_on:
-        # Placement guarantees at most one erasure-coding chunk per domain
-        # once there are >= ndcs+npcs distinct domains, so losing up to npcs
-        # *domains* at once is then tolerated the same way losing up to npcs
-        # *nodes* is tolerated without FD -- piling onto an already-affected
-        # domain costs nothing extra (mirrors that domain going down outright).
-        # Below that domain count, at least one domain necessarily carries
-        # more than one chunk, so a *new* domain falls back to the plain
-        # node-count cap instead of a second free domain slot. See the
-        # analogous fdDrainGate in the operator's nodedrain_controller.go.
+        # Placement spreads a stripe's ndcs+npcs chunks as evenly as possible
+        # across the domains that actually exist. With fewer domains than
+        # chunks, at least one domain holds ceil((ndcs+npcs)/domains) chunks
+        # -- that many nodes can go down within a SINGLE domain for free
+        # (mirrors that domain's worst-case chunk contribution going down
+        # outright, already priced in), but once a domain hits that many
+        # down, it has maxed its contribution to the npcs risk budget and a
+        # DIFFERENT domain can only add a node if the combined risk across
+        # every affected domain (each capped at chunks_per_domain) still
+        # leaves room. This reduces to the familiar "up to npcs whole domains
+        # are free" rule when there are >= ndcs+npcs domains (chunks_per_domain
+        # == 1). See the analogous fdDrainGate in nodedrain_controller.go.
         domains_available = len({n.failure_domain for n in snodes if n.failure_domain >= 0})
         domains_needed = ndcs + npcs
-        active_domains = {n.failure_domain for n in not_online_nodes if n.failure_domain >= 0}
-        # jm_replication_active can't be attributed to a specific domain (the
-        # probe only says "some online node's journal is behind"), so treat
-        # it conservatively as always adding a new, unaccounted-for domain.
-        active_domain_count = len(active_domains) + (1 if jm_replication_active else 0)
-        my_domain = snode.failure_domain
+        chunks_per_domain = -(-domains_needed // domains_available) if domains_available > 0 else domains_needed
 
-        if my_domain not in active_domains:
-            if domains_needed > 0 and domains_available >= domains_needed:
-                if active_domain_count >= capacity_cap:
-                    blocked_by_capacity = True
-                    capacity_reason = (
-                        f"FTT={ft} (npcs={npcs}): cannot remove node, failure domain {my_domain} "
-                        f"not yet active; {active_domain_count}/{capacity_cap} domains active"
-                        f"{' (including in-progress journal replication)' if jm_replication_active else ''}"
-                    )
-            elif active_domain_count > 0 and not_online_count >= capacity_cap:
+        domain_down_counts: dict[int, int] = {}
+        for node in not_online_nodes:
+            if node.failure_domain >= 0:
+                domain_down_counts[node.failure_domain] = domain_down_counts.get(node.failure_domain, 0) + 1
+
+        my_domain = snode.failure_domain
+        my_domain_down = domain_down_counts.get(my_domain, 0)
+
+        if my_domain_down < chunks_per_domain:
+            current_risk = sum(min(c, chunks_per_domain) for c in domain_down_counts.values())
+            # jm_replication_active can't be attributed to a specific domain
+            # (the probe only says "some online node's journal is behind"),
+            # so treat it conservatively as always adding a fresh risk unit.
+            if jm_replication_active:
+                current_risk += 1
+            if current_risk + 1 > npcs:
                 blocked_by_capacity = True
                 capacity_reason = (
-                    f"FTT={ft} (npcs={npcs}): insufficient failure domains "
-                    f"({domains_available} available, {domains_needed} needed for full isolation) "
-                    f"to remove node in failure domain {my_domain}; "
-                    f"{not_online_count}/{capacity_cap} nodes active"
+                    f"FTT={ft} (npcs={npcs}): cannot remove node in failure domain {my_domain}; "
+                    f"{current_risk}/{npcs} failure-domain risk budget already committed "
+                    f"({domains_available} domain(s) available, {chunks_per_domain} chunk(s)/domain worst case)"
+                    f"{' (including in-progress journal replication)' if jm_replication_active else ''}"
                 )
+        # else: this domain already holds >= chunks_per_domain down nodes --
+        # it has maxed its contribution to the risk budget, so one more node
+        # in the SAME domain adds no additional risk.
     elif npcs == 1:
         # FTT=1: no room at all if anything is already not online or journal replicating
         if not_online_count > 0:
