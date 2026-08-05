@@ -171,7 +171,7 @@ class TestClusterActivatePass4(unittest.TestCase):
         patches = [
             patch.object(cluster_ops, "db_controller", db),
             patch.object(cluster_ops, "DBController", return_value=db),
-            patch("simplyblock_core.port_block.set_port", lambda *a, **k: None),
+            patch("simplyblock_core.utils.port_block.set_port", lambda *a, **k: None),
             patch.object(cluster_ops.tcp_ports_events, "port_deny", lambda *a, **k: None),
             patch.object(cluster_ops.tcp_ports_events, "port_allowed", lambda *a, **k: None),
             patch.object(cluster_ops.tasks_controller, "add_port_allow_task", lambda *a, **k: None),

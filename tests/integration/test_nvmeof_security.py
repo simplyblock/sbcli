@@ -999,7 +999,7 @@ class TestRecreateSubsystemSecurity(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops._reapply_allowed_hosts")
     @patch("simplyblock_core.storage_node_ops.add_lvol_thread")
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
-    @patch("simplyblock_core.port_block.set_port")
+    @patch("simplyblock_core.utils.port_block.set_port")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
     @patch("simplyblock_core.storage_node_ops.tasks_controller")
     @patch("simplyblock_core.models.storage_node.RPCClient")

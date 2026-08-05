@@ -258,7 +258,7 @@ class _BasePortAllowTest(unittest.TestCase):
                 return_value=None,
             ),
             patch(
-                "simplyblock_core.port_block.set_port",
+                "simplyblock_core.utils.port_block.set_port",
                 side_effect=_set_port_side_effect,
             ),
             patch(
