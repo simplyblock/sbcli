@@ -8784,9 +8784,9 @@ def _recreate_lvstore_impl(snode, force=False, lvs_primary=None, activation_mode
                                 if ret[jm] is False:  # jm is not ready (has active replication task)
                                     repl_disabled = False
                                     break
-                        except Exception as e:
+                        except Exception as err:
                             _abort_restart_and_unblock(
-                                f"jc_get_jm_status on leader {current_leader.get_id()} failed: {e}")
+                                f"jc_get_jm_status on leader {current_leader.get_id()} failed: {err}")
                     else:
                         _abort_restart_and_unblock(
                             f"jc_disable_replication on leader {current_leader.get_id()} failed: {e}")
