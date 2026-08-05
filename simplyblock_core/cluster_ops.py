@@ -7,8 +7,9 @@ import threading
 import time
 import uuid
 import typing as t
-from datetime import datetime, timezone
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 
 import docker
 from kubernetes import client as k8s_client
@@ -998,13 +999,12 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                     _fd_fail(f"host {node.mgmt_ip} spans failure domains "
                              f"{host_fd[node.mgmt_ip]} and {node.failure_domain}; "
                              f"a host must sit entirely in one domain")
-            fd_host_counts: t.Dict[int, int] = {}
-            for ip, fd in host_fd.items():
-                fd_host_counts[fd] = fd_host_counts.get(fd, 0) + 1
+
+            fd_host_counts = Counter(host_fd.values())
             if len(fd_host_counts) < 2:
                 _fd_fail("failure domains are enabled but all hosts are in a "
                          "single domain; at least two domains are required")
-            if len(set(fd_host_counts.values())) != 1:
+            if len(fd_host_counts) != 1:
                 _fd_fail(
                     f"failure domains must hold an EQUAL number of hosts at "
                     f"activation; current split: "

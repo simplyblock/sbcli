@@ -34,6 +34,8 @@ drains first, then the expansion (new-device) migration runs
 (tasks_runner_new_dev_migration's recovery-before-expansion gate).
 """
 
+from collections import Counter
+
 from simplyblock_core import utils
 from simplyblock_core.controllers.cluster_expansion.planner import (
     fd_balance_violation,
@@ -125,10 +127,7 @@ def failure_domain_host_map(cluster, db_controller, exclude_node_ids=frozenset()
 
 
 def _fd_counts(host_fd):
-    counts = {}
-    for fd in host_fd.values():
-        counts[fd] = counts.get(fd, 0) + 1
-    return counts
+    return Counter(host_fd.values())
 
 
 def check_fd_admission_for_add(cluster, db_controller,
