@@ -317,22 +317,26 @@ jobs:
             kubectl delete crd "$crd_name" --ignore-not-found --timeout=30s 2>/dev/null || true
           done
 
-          # Reset hugepages and restart kubelet on worker nodes
+          # Reset hugepages and restart kubelet on worker nodes (parallel, with timeout)
           CLUSTER_ENV="${{ github.event.inputs.cluster_environment || 'local' }}"
           IFS=',' read -ra NODES <<< "${{ github.event.inputs.worker_nodes }}"
           for NODE in "${NODES[@]}"; do
-            echo "Resetting hugepages on $NODE..."
-            if [[ "$CLUSTER_ENV" == *"openshift"* ]]; then
-              oc debug node/"$NODE" -- chroot /host bash -c \
-                "echo 0 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages" 2>/dev/null || true
-              oc debug node/"$NODE" -- chroot /host systemctl restart kubelet 2>/dev/null || true
-            else
-              kubectl debug node/"$NODE" -q --image=busybox:latest -- chroot /host sh -c \
-                "echo 0 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages" 2>/dev/null || true
-              kubectl debug node/"$NODE" -q --image=busybox:latest -- chroot /host sh -c \
-                "systemctl restart kubelet" 2>/dev/null || true
-            fi
+            (
+              echo "Resetting hugepages on $NODE..."
+              if [[ "$CLUSTER_ENV" == *"openshift"* ]]; then
+                timeout 120 oc debug node/"$NODE" -- chroot /host bash -c \
+                  "echo 0 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages" 2>/dev/null || true
+                timeout 120 oc debug node/"$NODE" -- chroot /host systemctl restart kubelet 2>/dev/null || true
+              else
+                timeout 120 kubectl debug node/"$NODE" -q --image=busybox:latest -- chroot /host sh -c \
+                  "echo 0 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages" 2>/dev/null || true
+                timeout 120 kubectl debug node/"$NODE" -q --image=busybox:latest -- chroot /host sh -c \
+                  "systemctl restart kubelet" 2>/dev/null || true
+              fi
+              echo "Done with $NODE"
+            ) &
           done
+          wait
           echo "=== Cleanup complete ==="
 
       - name: Cleanup old cert-manager deployment
