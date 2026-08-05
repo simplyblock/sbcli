@@ -856,6 +856,7 @@ jobs:
             --set storagenode.ifname="${MGMT_IFC}" \
             --set storagenode.create=true \
             --set storagenode.numPartitions="${PARTITIONS}" \
+            --set storagenode.coresPercentage=50 \
             --set image.storageNode.tag="${STORAGENODE_TAG}"
 
           echo "spdk-csi chart installed"
