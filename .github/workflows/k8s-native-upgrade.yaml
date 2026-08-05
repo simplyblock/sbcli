@@ -399,6 +399,7 @@ jobs:
       - name: Install Helm Chart for simplyblock-operator (BASE version)
         if: ${{ github.event.inputs.use_existing_cluster != 'true' && github.event.inputs.upgrade_type != 'r25-to-r2x' }}
         run: |
+          set -euxo pipefail
           cd $GITHUB_WORKSPACE/simplyblock-operator/helm-charts/charts/simplyblock-operator/
 
           TLS_FLAGS=""
