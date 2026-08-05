@@ -7,10 +7,11 @@ CLI package for `sbctl`. Entry point: `simplyblock_cli.cli:main`.
 `cli.py` is **auto-generated** from `cli-reference.yaml` — never edit it directly. After changing commands or options in the YAML, regenerate:
 
 ```bash
-./simplyblock_cli/scripts/generate.sh
+tox run -e generate
 ```
 
-The generator (`scripts/cli-wrapper-gen.py`) reads the YAML and writes `cli.py`. CI verifies `cli.py` is up-to-date.
+The generator (`scripts/cli-wrapper-gen.py`) reads the YAML and writes `cli.py`. CI runs the same tox environment and
+fails if the regenerated `cli.py` differs from the checked-in one.
 
 ## Key Files
 
@@ -28,5 +29,5 @@ The generator (`scripts/cli-wrapper-gen.py`) reads the YAML and writes `cli.py`.
 ## Adding a CLI Command
 
 1. Add the command/subcommand definition in `cli-reference.yaml`.
-2. Run `./simplyblock_cli/scripts/generate.sh`.
+2. Run `tox run -e generate`.
 3. Implement the handler function in `clibase.py` following the naming convention above.
