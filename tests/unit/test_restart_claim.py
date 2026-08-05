@@ -22,8 +22,10 @@ The claim is an (owner-token, timestamp) pair on the StorageNode row:
 - the wrapper's failure cleanup (_kill_spdk_until_dead + OFFLINE flip) runs
   only when THIS call actually holds the claim — a refused attempt must not
   destroy the rightful owner's in-flight restart;
-- task_runner_node defers (no retry consumed) on a live foreign claim.
+- task_runner_node raises TaskDefer (no retry consumed) on a live foreign
+  claim.
 """
+import contextlib
 import datetime
 import json
 from unittest.mock import MagicMock
@@ -37,6 +39,8 @@ from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.storage_node import StorageNode
 
 import simplyblock_core.services.tasks_runner_restart as restart_runner
+from simplyblock_core.services import task_runner_base
+from simplyblock_core.services.task_runner_base import TaskAbort, TaskDefer, TaskRetry
 
 
 def _now():
@@ -312,7 +316,11 @@ def _runner_task(retry=0, max_retry=5, status=JobSchedule.STATUS_RUNNING):
 
 
 def test_runner_defers_without_retry_on_live_foreign_claim(monkeypatch):
-    claimed = _node(status=StorageNode.STATUS_RESTARTING,
+    # IN_SHUTDOWN, not RESTARTING: a node found RESTARTING without this task's
+    # own restart_issued marker is short-circuited earlier as redundant and
+    # never reaches the claim check. IN_SHUTDOWN is the shape the check was
+    # written for anyway — a CLI `sn restart` mid-shutdown holding the claim.
+    claimed = _node(status=StorageNode.STATUS_IN_SHUTDOWN,
                     claim_owner="cli:100:aa", claim_age_sec=3)
     task = _runner_task()
 
@@ -325,6 +333,9 @@ def test_runner_defers_without_retry_on_live_foreign_claim(monkeypatch):
     fake_db.get_storage_nodes_by_cluster_id.return_value = []
     fake_db.atomic_update.side_effect = lambda obj, fn: (fn(obj), obj)[1]
     monkeypatch.setattr(restart_runner, "db", fake_db)
+    # The handler's checkpoint/CAS writes go through task_runner_base's own db
+    # handle, not the runner module's.
+    monkeypatch.setattr(task_runner_base, "db", fake_db)
     monkeypatch.setattr(JobSchedule, "write_to_db", MagicMock())
 
     sops = MagicMock()
@@ -336,17 +347,18 @@ def test_runner_defers_without_retry_on_live_foreign_claim(monkeypatch):
     hc._check_ping_from_node.return_value = True
     monkeypatch.setattr(restart_runner, "health_controller", hc)
 
-    res = restart_runner.task_runner_node(task)
+    # TaskDefer is the driver's no-retry-consumed signal; the driver, not the
+    # handler, records the reason and suspends the task.
+    with pytest.raises(TaskDefer, match="claim held by cli:100:aa"):
+        restart_runner.task_runner_node(task)
 
-    assert res is False  # defer: outer loop backoff, retried later
     assert task.retry == 0  # no retry budget consumed
-    assert "claim held by cli:100:aa" in task.function_result
     sops.shutdown_storage_node.assert_not_called()
     sops.restart_storage_node.assert_not_called()
 
 
 def test_runner_proceeds_when_claim_stale(monkeypatch):
-    stale = _node(status=StorageNode.STATUS_RESTARTING,
+    stale = _node(status=StorageNode.STATUS_IN_SHUTDOWN,
                   claim_owner="cli:100:aa",
                   claim_age_sec=constants.RESTART_CLAIM_TTL_SEC + 30)
     task = _runner_task()
@@ -360,6 +372,9 @@ def test_runner_proceeds_when_claim_stale(monkeypatch):
     fake_db.get_storage_nodes_by_cluster_id.return_value = []
     fake_db.atomic_update.side_effect = lambda obj, fn: (fn(obj), obj)[1]
     monkeypatch.setattr(restart_runner, "db", fake_db)
+    # The handler's checkpoint/CAS writes go through task_runner_base's own db
+    # handle, not the runner module's.
+    monkeypatch.setattr(task_runner_base, "db", fake_db)
     monkeypatch.setattr(JobSchedule, "write_to_db", MagicMock())
 
     sops = MagicMock()
@@ -373,7 +388,12 @@ def test_runner_proceeds_when_claim_stale(monkeypatch):
     hc._check_ping_from_node.return_value = True
     monkeypatch.setattr(restart_runner, "health_controller", hc)
 
-    restart_runner.task_runner_node(task)
+    # Past the claim check the handler runs the full restart and ends on
+    # whatever the un-mocked completion check decides — irrelevant here, and
+    # suppressing it cannot mask a blocked claim: a blocked one raises
+    # TaskDefer before reaching the shutdown the assertion below requires.
+    with contextlib.suppress(TaskAbort, TaskDefer, TaskRetry):
+        restart_runner.task_runner_node(task)
 
     # The stale claim (dead driver) did not block the resume path: the
     # runner reached its cleanup shutdown step.
