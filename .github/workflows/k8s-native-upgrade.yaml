@@ -770,7 +770,12 @@ jobs:
             sbcli-dev -d --dev cluster create \
               --mgmt-ip "$MGMT_IP" \
               --mode kubernetes \
-              --disable-monitoring 2>&1) || true
+              --disable-monitoring \
+              --ndcs "${NDCS}" \
+              --npcs "${NPCS}" \
+              --bs "${BS}" \
+              --chunk-bs "${CHUNK_BS}" \
+              --jm-count "${JM_COUNT}" 2>&1) || true
           echo "Cluster create output: $CREATE_OUTPUT"
 
           # Parse cluster ID and secret from output
@@ -807,6 +812,12 @@ jobs:
           echo "CLUSTER_ID=${CLUSTER_ID}" >> $GITHUB_ENV
           echo "CLUSTER_SECRET=${CLUSTER_SECRET}" >> $GITHUB_ENV
           echo "R25_ADMIN_POD=${ADMIN_POD}" >> $GITHUB_ENV
+        env:
+          NDCS: ${{ env.NDCS }}
+          NPCS: ${{ env.NPCS }}
+          BS: ${{ env.BS }}
+          CHUNK_BS: ${{ env.CHUNK_BS }}
+          JM_COUNT: ${{ env.JM_COUNT }}
 
       - name: Label worker nodes for R25 storage plane
         if: ${{ github.event.inputs.use_existing_cluster != 'true' && github.event.inputs.upgrade_type == 'r25-to-r2x' }}
@@ -914,6 +925,28 @@ jobs:
             sleep 10
           done
 
+          echo "=== Waiting for storage nodes to register ==="
+          CLUSTER_ID="${CLUSTER_ID:-}"
+          if [ -z "$CLUSTER_ID" ]; then
+            CLUSTER_ID=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
+              sbcli-dev cluster list --json 2>/dev/null \
+              | jq -r '.[0].id // .[0].uuid // empty') || true
+          fi
+          for i in $(seq 1 60); do
+            SN_COUNT=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
+              sbcli-dev sn list --json 2>/dev/null | jq 'length' 2>/dev/null || echo "0")
+            echo "Storage nodes registered: $SN_COUNT/$EXPECTED_SNODES ($i/60)"
+            if [ "$SN_COUNT" -ge "$EXPECTED_SNODES" ]; then
+              echo "All storage nodes registered"
+              break
+            fi
+            sleep 10
+          done
+
+          echo "=== Activating R25 cluster (no auto-activate in R25) ==="
+          kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
+            sbcli-dev cluster activate "$CLUSTER_ID" 2>&1 || true
+
           echo "=== Polling cluster status (admin pod: $ADMIN_POD) ==="
           for i in $(seq 1 $MAX_POLL); do
             OUTPUT=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
@@ -949,6 +982,7 @@ jobs:
           exit 1
         env:
           R25_ADMIN_POD: ${{ env.R25_ADMIN_POD }}
+          CLUSTER_ID: ${{ env.CLUSTER_ID }}
 
       # ── Wait for cluster readiness (operator-based bootstrap only) ──
 
