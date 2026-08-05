@@ -263,10 +263,20 @@ jobs:
       - name: Setup KUBECONFIG
         run: |
           mkdir -p ~/.kube
-          echo "${{ secrets.K8S_KUBECONFIG }}" > ~/.kube/config_k8s
-          echo "KUBECONFIG=${HOME}/.kube/config_k8s" >> "$GITHUB_ENV"
-          export KUBECONFIG="${HOME}/.kube/config_k8s"
-          kubectl get nodes
+          # Try existing kubeconfig first (self-hosted runners may already have cluster access)
+          if kubectl get nodes &>/dev/null; then
+            echo "kubectl already works with existing kubeconfig"
+            kubectl get nodes
+          elif [ -n "${{ secrets.K8S_KUBECONFIG }}" ]; then
+            echo "Writing kubeconfig from K8S_KUBECONFIG secret"
+            echo "${{ secrets.K8S_KUBECONFIG }}" > ~/.kube/config_k8s
+            echo "KUBECONFIG=${HOME}/.kube/config_k8s" >> "$GITHUB_ENV"
+            export KUBECONFIG="${HOME}/.kube/config_k8s"
+            kubectl get nodes
+          else
+            echo "ERROR: No working kubeconfig found and K8S_KUBECONFIG secret is empty"
+            exit 1
+          fi
 
       - name: Remove stale storagenodeset labels from all worker nodes
         if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
