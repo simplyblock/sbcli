@@ -2434,6 +2434,25 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         ip_iface = utils.get_mgmt_ip(node_info, iface_name)
         mgmt_ip = ip_iface[0] if ip_iface else None
 
+        # A host's failure domain is immutable for the lifetime of its node
+        # records: re-adding / adding another slot with a different domain id
+        # would be an in-place FD migration, which is not supported (remove
+        # the node, restore balance, then re-add it in the target domain).
+        if cluster.enable_failure_domain and mgmt_ip:
+            for _n in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+                if (_n.status != StorageNode.STATUS_REMOVED
+                        and _n.mgmt_ip == mgmt_ip
+                        and _n.failure_domain >= 0
+                        and _n.failure_domain != failure_domain_id):
+                    logger.error(
+                        f"Host {mgmt_ip} already belongs to failure domain "
+                        f"{_n.failure_domain} (node {_n.get_id()}); adding it "
+                        f"with --failure-domain {failure_domain_id} would "
+                        f"migrate it between domains, which is not supported. "
+                        f"Remove the node first, restore balance, then re-add "
+                        f"it in the target domain.")
+                    return False
+
         cloud_instance = node_info['cloud_instance']
         if not cloud_instance:
             # Create a static cloud instance from node info
@@ -2564,8 +2583,17 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         # permanently block its own retry (2026-07-17, node f6308adb).
         if expansion:
             from simplyblock_core.controllers.cluster_expansion.preconditions import (
-                check_expansion_preconditions)
+                check_expansion_preconditions, check_fd_admission_for_add)
             ok, reason = check_expansion_preconditions(cluster, db_controller)
+            if not ok:
+                logger.error(f"Cannot start expansion node-add: {reason}")
+                return False
+            # Failure-domain admission (+/-1 rule): the post-add per-domain
+            # host split must stay balanced within one host. Re-checked with
+            # the newcomer in the DB by integrate_new_node_into_cluster.
+            ok, reason = check_fd_admission_for_add(
+                cluster, db_controller, failure_domain_id,
+                new_mgmt_ip=mgmt_ip)
             if not ok:
                 logger.error(f"Cannot start expansion node-add: {reason}")
                 return False
@@ -3412,6 +3440,17 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
         for task in tasks:
             tasks_controller.cancel_task(task.uuid)
 
+    # Failure-domain admission: the post-removal per-domain host split must
+    # stay within the +/-1 balance rule and keep >=2 hosts per domain.
+    # Enforced only once the cluster has an HA layout to protect.
+    from simplyblock_core.controllers.cluster_expansion.preconditions import (
+        check_fd_admission_for_remove)
+    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+    ok, reason = check_fd_admission_for_remove(cluster, db_controller, snode)
+    if not ok:
+        logger.error(f"Can not remove node {node_id}: {reason}")
+        return False
+
     # Case-B feasibility: every replica this node hosts for another primary must
     # have somewhere host-disjoint to go. Catches e.g. 2-node clusters where the
     # tertiary cannot be re-placed without violating anti-affinity.
@@ -3454,13 +3493,23 @@ def _check_replica_relocation_feasible(removed_node, db_controller):
 def _pick_replica_relocation_node(primary, removed_node, role, db_controller):
     """Choose a node to re-host ``primary``'s ``role`` (secondary|tertiary)
     replica, currently on ``removed_node``. Returns a node id or None.
-    Reuses the existing anti-affinity-aware placement helpers."""
+    Reuses the existing anti-affinity-aware placement helpers.
+
+    With failure domains enabled, the >=1-cross-domain-role invariant is
+    enforced HARD here (not best-effort): if the primary's OTHER non-leader
+    role does not already live in a different domain than the primary, the
+    replacement must — otherwise a full-domain outage would leave the LVS
+    with zero surviving paths. Returning None makes
+    ``_check_replica_relocation_feasible`` refuse the removal up front.
+    """
     exclude_ids = [removed_node.get_id()]
     if role == "secondary":
+        other_id = primary.tertiary_node_id
         if primary.tertiary_node_id and primary.tertiary_node_id != removed_node.get_id():
             exclude_ids.append(primary.tertiary_node_id)
         cands = get_secondary_nodes(primary, exclude_ids=exclude_ids, removed_node=removed_node)
     else:
+        other_id = primary.secondary_node_id
         exclude_mgmt_ips = []
         if primary.secondary_node_id and primary.secondary_node_id != removed_node.get_id():
             exclude_ids.append(primary.secondary_node_id)
@@ -3471,7 +3520,33 @@ def _pick_replica_relocation_node(primary, removed_node, role, db_controller):
                 pass
         cands = get_secondary_nodes_2(
             primary, exclude_ids=exclude_ids, exclude_mgmt_ips=exclude_mgmt_ips)
-    return cands[0] if cands else None
+    if not cands:
+        return None
+
+    cluster = db_controller.get_cluster_by_id(primary.cluster_id)
+    if (getattr(cluster, "enable_failure_domain", False)
+            and primary.failure_domain >= 0):
+        other_cross = False
+        if other_id and other_id != removed_node.get_id():
+            try:
+                other = db_controller.get_storage_node_by_id(other_id)
+                other_cross = (other.failure_domain >= 0
+                               and other.failure_domain != primary.failure_domain)
+            except KeyError:
+                pass
+        if not other_cross:
+            # The replacement is the primary's only cross-domain role —
+            # same-domain candidates are not acceptable.
+            for cand_id in cands:
+                try:
+                    cand = db_controller.get_storage_node_by_id(cand_id)
+                except KeyError:
+                    continue
+                if (cand.failure_domain >= 0
+                        and cand.failure_domain != primary.failure_domain):
+                    return cand_id
+            return None
+    return cands[0]
 
 
 def node_removal_orchestrate(node_id, force_remove=False):
@@ -5255,9 +5330,14 @@ def _detach_remote_controllers_from_peers(snode, db_controller):
     return detached[0]
 
 
-def check_node_shutdown_preconditions(node_id, force=False):
+def check_node_shutdown_preconditions(node_id, force=False, current_restart_task_id=None):
     """Read-only validation of everything that can refuse a graceful node
     shutdown. Returns (allowed, reason).
+
+    current_restart_task_id: bare task uuid (NOT JobSchedule.get_id()'s
+    composite key) of the caller's own NODE_RESTART task, when the caller IS
+    that task's cleanup shutdown. Exempts the task from the restart-task
+    guard below — it is this shutdown's driver, not a competing restart.
 
     Exists so API endpoints can evaluate the guards SYNCHRONOUSLY and return
     an actionable error (409) to the caller. Previously these checks only ran
@@ -5294,7 +5374,7 @@ def check_node_shutdown_preconditions(node_id, force=False):
             logger.warning("%s — proceeding with force", reason)
 
     task_id = tasks_controller.get_active_node_restart_task(snode.cluster_id, snode.get_id())
-    if task_id:
+    if task_id and task_id != current_restart_task_id:
         reason = f"Restart task found: {task_id}, can not shutdown storage node"
         if force is False:
             logger.error(reason)
@@ -5335,8 +5415,13 @@ def check_node_shutdown_preconditions(node_id, force=False):
     return True, ""
 
 
-def shutdown_storage_node(node_id, force=False, keep_auto_restart=False):
+def shutdown_storage_node(node_id, force=False, keep_auto_restart=False,
+                          current_restart_task_id=None):
     """Gracefully terminate a storage node.
+
+    current_restart_task_id: bare uuid of the caller's own NODE_RESTART task
+    when this shutdown is that task's cleanup step (see
+    check_node_shutdown_preconditions).
 
     keep_auto_restart=True is used by the suspend-recovery auto-shutdown
     (storage_node_monitor): it brings the node down WITHOUT marking it
@@ -5416,7 +5501,8 @@ def shutdown_storage_node(node_id, force=False, keep_auto_restart=False):
     # this for its own non-force shutdown endpoint, where the policy
     # decision belongs.
 
-    allowed, _reason = check_node_shutdown_preconditions(node_id, force=force)
+    allowed, _reason = check_node_shutdown_preconditions(
+        node_id, force=force, current_restart_task_id=current_restart_task_id)
     if not allowed:
         return False
 
@@ -5531,7 +5617,18 @@ def shutdown_storage_node(node_id, force=False, keep_auto_restart=False):
 
     # Step 6: status → offline + ANA failover bookkeeping.
     logger.info("Setting node status to offline")
-    set_node_status(node_id, StorageNode.STATUS_OFFLINE)
+    if not set_node_status(node_id, StorageNode.STATUS_OFFLINE):
+        # The FSM refused the flip — typically the record reads RESTARTING,
+        # i.e. a restart transition owns this node. SPDK is already killed at
+        # this point, but the shutdown has NOT fully committed; reporting
+        # success anyway let a restart proceed on top of a half-committed
+        # shutdown (2026-07-29 double restart). Fail the shutdown and let the
+        # caller retry once the conflicting transition ends (or
+        # _reset_if_transient / the orphan watchdog reconciles the record).
+        logger.error(
+            "Node shutdown incomplete for %s: OFFLINE transition was refused",
+            node_id)
+        return False
 
     snode = db_controller.get_storage_node_by_id(node_id)
     try:
@@ -6447,12 +6544,14 @@ def _count_fabric_disconnected_nodes(all_nodes, lvs_peer_ids=None):
 def _leadership_moving_tasks_active(cluster_id, node_ids):
     """True when a port-allow or restart task is active on any LVS member.
 
-    Those flows own leadership movement (the port-allow failback demotes the
-    acting leader and lets the primary self-promote on the first redirected
-    IO); a concurrent recovery grant fights them — run 20260725 21:18-21:22:
-    take-leadership grants on the primary vs port-allow demotes on the acting
-    leader, flapping LVS_1 leadership for minutes. When the task state cannot
-    be read, err on NOT granting."""
+    Those flows own leadership movement (the restart flow's fenced
+    demote->grant handoff; the port-allow failback demotes the acting leader
+    and lets the primary self-promote); a concurrent recovery grant fights
+    them — run 20260725 21:18-21:22: take-leadership grants on the primary
+    vs port-allow demotes on the acting leader, flapping LVS_1 leadership
+    for minutes; 2026-07-30 LVS_9: a recovery grant seated the secondary as
+    writer moments before the primary's restart handoff. When the task
+    state cannot be read, err on NOT granting."""
     try:
         db = DBController()
         for task in db.get_job_tasks(cluster_id):
@@ -6495,17 +6594,14 @@ def _taker_jm_quorum_ok(taker):
 
 
 def _recover_leaderless_lvs(cluster_id, all_nodes, lvs_name, preferred_taker):
-    """Recovery for a leaderless-but-healthy LVS — WITHOUT the control plane
-    forcing leadership except as a guarded last resort.
+    """Recovery for a leaderless-but-healthy LVS.
 
-    Design constraint (see tasks_runner_port_allow._failback_leadership_to_primary,
-    incident 2026-07-06 LVS_13): a management-forced ``leader=True`` skips the
-    primary's LVS update (blob-md reload) and can serve stale blob metadata —
-    extent-metadata corruption. The sanctioned mechanism is: verified-open
-    hublvols from the followers to the primary, then the primary promotes
-    ITSELF on the first redirected IO. Run 20260725 additionally showed the
-    unguarded per-call grant firing from every API worker at once (7 grants/s
-    from 5 WebAppAPI containers) while port-allow demoted the acting leader.
+    Leadership placement is otherwise the restart/creation/activation flows'
+    job; this recovery runs only when an object operation needs a leader and
+    none exists. It never flips the leadership flag blind: the 2026-07-06
+    LVS_13 incident showed a bare ``set_leader(True)`` skips the primary's
+    blob-md reload and can serve stale metadata, and run 20260725 showed
+    unguarded grants flapping against the port-allow handoff.
 
     Sequence, single-flight cluster-wide:
       0. FDB test-and-set lock keyed ``takeleader/<lvs>``; deliberately never
@@ -6513,9 +6609,13 @@ def _recover_leaderless_lvs(cluster_id, all_nodes, lvs_name, preferred_taker):
          the recovery cooldown across all processes.
       1. Verify/repair follower->primary hublvols (redirect path); bounded
          wait for the primary's self-promotion via redirected IO.
-      2. Last-resort grant ONLY if still leaderless AND no port-allow/restart
-         task is active on any LVS member AND the taker's JM quorum is intact;
-         then verify the grant took.
+      2. Still leaderless (control-plane-only workloads never generate the
+         redirected IO that triggers self-promotion), and only if no
+         port-allow/restart task owns leadership movement on any member and
+         the taker's JM quorum is intact: ``bdev_lvol_update_lvstore`` on the
+         taker — an explicit blob-md reload from disk, the same update the
+         IO-driven promotion performs — and, only after the reload succeeded,
+         ``set_leader(True)``; then verify the grant took.
 
     Returns the confirmed leader node or None (callers fail fast; the
     no-leader negative cache bounds re-entry)."""
@@ -6561,8 +6661,9 @@ def _recover_leaderless_lvs(cluster_id, all_nodes, lvs_name, preferred_taker):
                 continue
         time.sleep(1)
 
-    # 2- last-resort grant, heavily guarded (control-plane-only workloads
-    # never generate the redirected IO that triggers self-promotion).
+    # 2- reload-then-grant, guarded. The explicit bdev_lvol_update_lvstore
+    # replays the same blob-md reload the IO-driven promotion does, so the
+    # subsequent set_leader cannot serve stale metadata.
     if _leadership_moving_tasks_active(cluster_id, member_ids):
         logger.warning("leaderless recovery for %s: port-allow/restart task "
                        "active on an LVS member — leaving leadership movement "
@@ -6572,8 +6673,20 @@ def _recover_leaderless_lvs(cluster_id, all_nodes, lvs_name, preferred_taker):
         return None
     logger.warning(
         "LVS %s still leaderless after hublvol repair and no handoff task is "
-        "active — last-resort: instructing %s to take leadership",
+        "active — reloading lvstore metadata on %s before granting leadership",
         lvs_name, taker.get_id())
+    try:
+        if not taker.rpc_client(timeout=10, retry=1).bdev_lvol_update_lvstore(
+                lvs_name):
+            logger.error("bdev_lvol_update_lvstore on %s for %s returned "
+                         "False — refusing to grant leadership on top of "
+                         "un-reloaded metadata", taker.get_id(), lvs_name)
+            return None
+    except Exception as e:
+        logger.error("bdev_lvol_update_lvstore on %s for %s failed: %s — "
+                     "refusing to grant leadership", taker.get_id(),
+                     lvs_name, e)
+        return None
     try:
         taker.rpc_client(timeout=5, retry=2).bdev_lvol_set_leader(
             lvs_name, leader=True)
@@ -6584,8 +6697,8 @@ def _recover_leaderless_lvs(cluster_id, all_nodes, lvs_name, preferred_taker):
     for _ in range(5):
         try:
             if is_node_leader(taker, lvs_name):
-                logger.info("Leadership for %s restored on %s",
-                            lvs_name, taker.get_id())
+                logger.info("Leadership for %s restored on %s (metadata "
+                            "reloaded first)", lvs_name, taker.get_id())
                 return taker
         except Exception:
             pass
@@ -6730,11 +6843,14 @@ def _find_leader_with_failover_impl(all_nodes, lvs_name):
     # healthy). The forced-handoff below cannot repair it: the signal only
     # asks a leader to DROP leadership, nobody holds it, and the JC never
     # elects while the primary is alive. Recovery is delegated to
-    # _recover_leaderless_lvs: hublvol repair + self-promotion first, a
-    # heavily-guarded single-flight grant only as last resort — the previous
-    # unguarded per-call set_leader(True) here fired from every API worker at
-    # once and fought the port-allow handoff (run 20260725), and a CP-forced
-    # grant risks stale blob metadata (incident 2026-07-06 LVS_13).
+    # _recover_leaderless_lvs: hublvol repair + bounded self-promotion wait,
+    # then a guarded reload-then-grant (bdev_lvol_update_lvstore before
+    # set_leader, so the grant never serves stale blob metadata — incident
+    # 2026-07-06 LVS_13). The previous unguarded per-call set_leader(True)
+    # here fired from every API worker at once and fought the port-allow
+    # handoff (run 20260725), and a bare grant raced the restart handoff
+    # into a writer conflict (2026-07-30 LVS_9) — hence the single-flight
+    # lock, the moving-task guard, and the mandatory metadata reload.
     if _is_node_rpc_responsive(leader, lvs_name):
         # Last-moment sweep: abort the recovery if anyone became leader meanwhile.
         for node in all_nodes:
@@ -8656,12 +8772,27 @@ def _recreate_lvstore_impl(snode, force=False, lvs_primary=None, activation_mode
                     _abort_restart_and_unblock(
                         f"Failed to port-block leader {current_leader.get_id()}: {e}")
 
+                repl_disabled = False
                 # c. suspend journal replication while the port is blocked
                 try:
                     repl_disabled = current_leader.rpc_client().jc_disable_replication(lvs_jm_vuid)
-                except Exception as e:
-                    _abort_restart_and_unblock(
-                        f"jc_disable_replication on leader {current_leader.get_id()} failed: {e}")
+                except RPCException as e:
+                    if e.code == -32601:  # method not found
+                        try:
+                            logger.warning("Failed to disable replication on leader, trying other method")
+                            ret = current_leader.rpc_client().jc_get_jm_status(lvs_jm_vuid)
+                            repl_disabled = True
+                            for jm in ret:
+                                if ret[jm] is False:  # jm is not ready (has active replication task)
+                                    repl_disabled = False
+                                    break
+                        except Exception as ex:
+                            _abort_restart_and_unblock(
+                                f"jc_get_jm_status on leader {current_leader.get_id()} failed: {ex}")
+                    else:
+                        _abort_restart_and_unblock(
+                            f"jc_disable_replication on leader {current_leader.get_id()} failed: {e}")
+
                 if repl_disabled:
                     replication_suspended = True
                     break

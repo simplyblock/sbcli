@@ -31,13 +31,16 @@ from simplyblock_core.controllers.cluster_expansion.planner import (
     ROLE_SECONDARY,
     ROLE_TERTIARY,
     RoleMove,
+    compute_fd_layout_violations,
     compute_role_diff,
+    compute_role_diff_topology,
     is_expand_in_progress,
     pending_moves,
 )
 from simplyblock_core.controllers.cluster_expansion.preconditions import (
     affected_primary_node_ids,
     check_expansion_preconditions,
+    check_fd_balance_current,
     impacted_donor_node_ids,
 )
 from simplyblock_core.models.storage_node import StorageNode
@@ -348,6 +351,86 @@ def _disconnect_donor_outbound_hublvols(moves, db_controller):
                 f"{donor.get_id()} raised {e} (likely already detached)")
 
 
+def _rotation_order_from_layout(existing_ids, layout):
+    """Recover the actual rotation order by following ``secondary_node_id``
+    pointers (``layout``: primary -> (sec, tert)). Returns the order as a
+    list when the pointers form a single clean cycle over ``existing_ids``,
+    else None (drifted layout)."""
+    if not existing_ids:
+        return None
+    existing = set(existing_ids)
+    start = min(existing_ids)
+    order = [start]
+    seen = {start}
+    cur = start
+    while True:
+        nxt = layout.get(cur, ("", ""))[0]
+        if nxt == start:
+            return order if len(order) == len(existing) else None
+        if not nxt or nxt not in existing or nxt in seen:
+            return None
+        order.append(nxt)
+        seen.add(nxt)
+        cur = nxt
+
+
+def _plan_moves_with_failure_domains(cluster, db_controller,
+                                     existing_nodes, new_snode):
+    """FD-aware fresh plan.
+
+    Instead of trusting DB enumeration order, the rotation is recovered
+    from the actual secondary-pointer chain (so the diff stays minimal and
+    donors are named correctly even when DB order differs from the layout
+    the cluster was activated with). The newcomer's insertion point is then
+    chosen by trying each cyclic rotation of that order — cyclic rotations
+    preserve every existing adjacency, so they only vary WHERE the newcomer
+    splices in — and taking the first whose desired layout satisfies the
+    >=1-cross-domain-role invariant. No valid insertion point exists e.g.
+    for FTT1 growing to odd populations (the odd primary would keep no
+    cross-domain role at all); that is refused here, before any move runs.
+    """
+    fd_by_node = {n.get_id(): n.failure_domain for n in existing_nodes}
+    fd_by_node[new_snode.get_id()] = new_snode.failure_domain
+
+    # The flat rotation treats every node as its own host; with multi-slot
+    # hosts that would silently break host-disjointness, so refuse.
+    ips = [n.mgmt_ip for n in existing_nodes] + [new_snode.mgmt_ip]
+    if len(set(ips)) != len(ips):
+        raise RuntimeError(
+            "expansion on failure-domain clusters currently supports one "
+            "storage node per host (multi-slot hosts need the topology "
+            "planner)")
+
+    layout = {
+        n.get_id(): (n.secondary_node_id or "", n.tertiary_node_id or "")
+        for n in existing_nodes
+    }
+    existing_ids = [n.get_id() for n in existing_nodes]
+    order = _rotation_order_from_layout(existing_ids, layout)
+    if order is None:
+        logger.warning(
+            "integrate: secondary-pointer chain is not a single rotation "
+            "cycle (layout drift); planning against DB enumeration order — "
+            "the plan will also repair the drifted roles")
+        order = existing_ids
+
+    ftt = cluster.max_fault_tolerance
+    last_violations = None
+    for shift in range(len(order)):
+        rotated = order[shift:] + order[:shift]
+        new_topology = [[n] for n in rotated] + [[new_snode.get_id()]]
+        violations = compute_fd_layout_violations(new_topology, ftt, fd_by_node)
+        if not violations:
+            return compute_role_diff_topology(
+                [[n] for n in rotated], new_topology, ftt,
+                current_layout=layout)
+        last_violations = violations
+    raise RuntimeError(
+        "no newcomer placement satisfies the failure-domain invariant "
+        "(every LVS must keep at least one cross-domain role): "
+        + "; ".join(last_violations or ["<no candidates>"]))
+
+
 def integrate_new_node_into_cluster(cluster, new_snode, executor=None,
                                     db_controller=None,
                                     manage_cluster_status=False):
@@ -408,19 +491,32 @@ def integrate_new_node_into_cluster(cluster, new_snode, executor=None,
         # newcomer itself, which has just joined and has no lvstore yet).
         snodes = db_controller.get_storage_nodes_by_cluster_id(
             cluster.get_id())
-        existing = [n.get_id() for n in snodes
-                    if n.lvstore
-                    and n.status == StorageNode.STATUS_ONLINE
-                    and n.get_id() != new_snode.get_id()]
+        existing_nodes = [n for n in snodes
+                          if n.lvstore
+                          and n.status == StorageNode.STATUS_ONLINE
+                          and n.get_id() != new_snode.get_id()]
 
-        planned_moves = compute_role_diff(
-            existing, new_snode.get_id(), cluster.max_fault_tolerance)
+        if getattr(cluster, "enable_failure_domain", False):
+            # Re-check the +/-1 balance with the newcomer now in the DB
+            # (the add-time admission may be stale by task pickup time),
+            # then plan FD-aware: actual-chain rotation order + insertion
+            # point that keeps every LVS >=1 cross-domain role.
+            ok, reason = check_fd_balance_current(cluster, db_controller)
+            if not ok:
+                raise RuntimeError(
+                    f"expansion preconditions not met: {reason}")
+            planned_moves = _plan_moves_with_failure_domains(
+                cluster, db_controller, existing_nodes, new_snode)
+        else:
+            planned_moves = compute_role_diff(
+                [n.get_id() for n in existing_nodes], new_snode.get_id(),
+                cluster.max_fault_tolerance)
         moves_for_checks = planned_moves
 
         logger.info(
             f"integrate_new_node_into_cluster: planned {len(planned_moves)} "
             f"moves to integrate {new_snode.get_id()} into rotation of "
-            f"{len(existing)} existing primaries (FTT="
+            f"{len(existing_nodes)} existing primaries (FTT="
             f"{cluster.max_fault_tolerance})")
 
     # Full precondition sweep against the planned moves: cluster ACTIVE,

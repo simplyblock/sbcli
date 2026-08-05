@@ -1,16 +1,26 @@
 # coding=utf-8
-"""Leaderless-LVS recovery must not force leadership from the control plane
-(run 20260725; design constraint from incident 2026-07-06 LVS_13).
+"""Leaderless-LVS recovery: reload-then-grant, never a blind grant.
 
-Guards under test on storage_node_ops._recover_leaderless_lvs:
+Design (2026-08-04): when an object operation needs a leader and none
+exists, recovery repairs the redirect topology and waits for IO-driven
+self-promotion; if the LVS is still leaderless it may grant — but only
+after an explicit ``bdev_lvol_update_lvstore`` (blob-md reload from disk,
+the same update the IO-driven promotion performs). A bare
+``set_leader(True)`` can serve stale blob metadata (incident 2026-07-06
+LVS_13); an unguarded grant flapped against the port-allow handoff (run
+20260725) and raced the restart flow's fenced handoff into a writer
+conflict (2026-07-30 LVS_9).
+
+Contract under test on storage_node_ops._recover_leaderless_lvs:
   - single-flight: no recovery without winning the FDB takeleader lock;
-  - self-promotion preferred: hublvol repair + wait, no set_leader when a
-    node promotes itself;
-  - last-resort grant suppressed while a port-allow / restart task is active
-    on any LVS member (it owns leadership movement);
-  - last-resort grant suppressed when the taker's JM quorum is not intact
-    (a grant would self-demote and flap);
-  - grant fires (and is verified) only when every guard passes.
+  - self-promotion preferred: hublvol repair + wait, no RPCs beyond probing
+    when a node promotes itself;
+  - grant suppressed while a port-allow / restart task is active on any LVS
+    member (those flows own leadership movement);
+  - grant suppressed when the taker's JM quorum is not intact;
+  - the metadata reload runs STRICTLY BEFORE the grant, and a failed or
+    refused reload means no grant at all;
+  - the grant is verified before the taker is routed to.
 """
 import types
 import unittest
@@ -24,6 +34,7 @@ from simplyblock_core.models.storage_node import StorageNode
 def _node(node_id, lvstore="LVS_1", jm_vuid=7):
     rpc = MagicMock()
     rpc.jc_get_jm_status.return_value = {"jm1": True, "remote_jm2": True}
+    rpc.bdev_lvol_update_lvstore.return_value = True
     rpc.bdev_lvol_set_leader.return_value = True
     return types.SimpleNamespace(
         get_id=lambda: node_id, status=StorageNode.STATUS_ONLINE,
@@ -67,6 +78,7 @@ class TestRecoverLeaderlessLvs(unittest.TestCase):
         self.db.acquire_lvstore_lock.return_value = (False, "other-holder")
         self.assertIsNone(self._run())
         self.mock_hub.assert_not_called()
+        self.taker._rpc.bdev_lvol_update_lvstore.assert_not_called()
         self.taker._rpc.bdev_lvol_set_leader.assert_not_called()
 
     def test_self_promotion_wins_without_any_grant(self):
@@ -74,6 +86,7 @@ class TestRecoverLeaderlessLvs(unittest.TestCase):
             lambda node, lvs: node.get_id() == "primary-1")
         result = self._run()
         self.assertIs(result, self.taker)
+        self.taker._rpc.bdev_lvol_update_lvstore.assert_not_called()
         self.taker._rpc.bdev_lvol_set_leader.assert_not_called()
         # The redirect path was repaired for the follower first.
         self.mock_hub.assert_called_once()
@@ -83,6 +96,7 @@ class TestRecoverLeaderlessLvs(unittest.TestCase):
             function_name=JobSchedule.FN_PORT_ALLOW, node_id="peer-2",
             status="running", canceled=False)]
         self.assertIsNone(self._run())
+        self.taker._rpc.bdev_lvol_update_lvstore.assert_not_called()
         self.taker._rpc.bdev_lvol_set_leader.assert_not_called()
 
     def test_no_grant_while_restart_task_active(self):
@@ -108,22 +122,42 @@ class TestRecoverLeaderlessLvs(unittest.TestCase):
         self.assertIsNone(self._run())
         self.taker._rpc.bdev_lvol_set_leader.assert_not_called()
 
-    def test_last_resort_grant_fires_and_is_verified(self):
-        calls = {"granted": False}
+    def test_reload_runs_strictly_before_grant(self):
+        order = []
+        self.taker._rpc.bdev_lvol_update_lvstore.side_effect = (
+            lambda lvs: order.append("update") or True)
 
         def grant(lvs, leader=False, bs_nonleadership=False):
-            calls["granted"] = True
+            order.append("grant")
             return True
 
         self.taker._rpc.bdev_lvol_set_leader.side_effect = grant
         self.mock_is_leader.side_effect = (
-            lambda node, lvs: calls["granted"] and node.get_id() == "primary-1")
+            lambda node, lvs: "grant" in order and node.get_id() == "primary-1")
         result = self._run()
         self.assertIs(result, self.taker)
+        self.assertEqual(order, ["update", "grant"])
         self.taker._rpc.bdev_lvol_set_leader.assert_called_once_with(
             "LVS_1", leader=True)
 
-    def test_unverified_grant_returns_none(self):
-        # Grant RPC accepted but leadership never confirmed -> refuse to route.
+    def test_reload_failure_means_no_grant(self):
+        self.taker._rpc.bdev_lvol_update_lvstore.side_effect = (
+            RuntimeError("update failed"))
         self.assertIsNone(self._run())
+        self.taker._rpc.bdev_lvol_set_leader.assert_not_called()
+
+    def test_reload_refusal_means_no_grant(self):
+        self.taker._rpc.bdev_lvol_update_lvstore.return_value = False
+        self.assertIsNone(self._run())
+        self.taker._rpc.bdev_lvol_set_leader.assert_not_called()
+
+    def test_unverified_grant_returns_none(self):
+        # Reload + grant RPC accepted but leadership never confirmed ->
+        # refuse to route.
+        self.assertIsNone(self._run())
+        self.taker._rpc.bdev_lvol_update_lvstore.assert_called_once()
         self.taker._rpc.bdev_lvol_set_leader.assert_called_once()
+
+
+if __name__ == "__main__":
+    unittest.main()

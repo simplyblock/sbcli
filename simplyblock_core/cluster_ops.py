@@ -7,8 +7,9 @@ import threading
 import time
 import uuid
 import typing as t
-from datetime import datetime, timezone
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 
 import docker
 from kubernetes import client as k8s_client
@@ -957,6 +958,7 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     # survive losing a whole failure domain we need at least npcs+1 distinct
     # domains; with fewer, placement falls back to host-disjoint and a domain
     # outage may exceed the cluster's fault tolerance.
+    fd_desired_layout: t.Dict[str, t.Tuple[str, str]] = {}
     if cluster.enable_failure_domain:
         distinct_domains = {node.failure_domain for node in online_nodes if node.failure_domain >= 0}
         min_domains = cluster.distr_npcs + 1
@@ -967,6 +969,63 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                 "tolerate a full domain outage. Activating anyway with "
                 "best-effort placement.",
                 len(distinct_domains), sorted(distinct_domains) or "none", min_domains)
+
+        # Fresh activation is the only point where the whole HA layout is
+        # created at once, so the topology policy is enforced HARD here:
+        # every domain must hold the same number of hosts (the +/-1 rule of
+        # later expand/remove keeps oscillating around this balance), each
+        # host must sit entirely in one domain, and the host topology must
+        # be uniform. Roles are then assigned by an FD-interleaved rotation
+        # (secondary always lands cross-domain; the planner's rotation
+        # assumption becomes true by construction, which single-node
+        # expansion relies on). Re-activation (recovery of an existing
+        # layout) is deliberately NOT blocked: refusing to reactivate a
+        # drifted cluster would turn a policy violation into an outage.
+        if is_fresh_activation:
+            from simplyblock_core.controllers.cluster_expansion import planner as fd_planner
+
+            def _fd_fail(msg: str) -> None:
+                set_cluster_status(cl_id, ols_status)
+                raise ValueError(f"Failed to activate cluster: {msg}")
+
+            hosts: t.Dict[str, t.List] = {}
+            host_fd: t.Dict[str, int] = {}
+            for node in online_nodes:
+                if node.failure_domain < 0:
+                    _fd_fail(f"node {node.get_id()} has no failure-domain id; "
+                             f"all nodes need one on this cluster")
+                hosts.setdefault(node.mgmt_ip, []).append(node)
+                if host_fd.setdefault(node.mgmt_ip, node.failure_domain) != node.failure_domain:
+                    _fd_fail(f"host {node.mgmt_ip} spans failure domains "
+                             f"{host_fd[node.mgmt_ip]} and {node.failure_domain}; "
+                             f"a host must sit entirely in one domain")
+
+            fd_host_counts = Counter(host_fd.values())
+            if len(fd_host_counts) < 2:
+                _fd_fail("failure domains are enabled but all hosts are in a "
+                         "single domain; at least two domains are required")
+            if len(set(fd_host_counts.values())) != 1:
+                _fd_fail(
+                    f"failure domains must hold an EQUAL number of hosts at "
+                    f"activation; current split: "
+                    f"{ {fd: fd_host_counts[fd] for fd in sorted(fd_host_counts)} }. "
+                    f"Add or remove hosts to balance the domains, then activate.")
+            if cluster.ha_type == "ha":
+                host_order = fd_planner.fd_interleaved_host_order(
+                    [(ip, host_fd[ip]) for ip in hosts])
+                topology = [[n.get_id() for n in hosts[ip]] for ip in host_order]
+                try:
+                    fd_desired_layout = fd_planner.rotation_layout(
+                        topology, cluster.max_fault_tolerance)
+                except ValueError as e:
+                    _fd_fail(f"cannot build the failure-domain rotation: {e}")
+                violations = fd_planner.compute_fd_layout_violations(
+                    topology, cluster.max_fault_tolerance,
+                    {n.get_id(): n.failure_domain for n in online_nodes},
+                    layout=fd_desired_layout)
+                if violations:
+                    _fd_fail("failure-domain layout invariant violated: "
+                             + "; ".join(violations))
 
     for node in online_nodes:
         if cluster.is_single_node or len(online_nodes) <= 2:
@@ -991,7 +1050,12 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                 sec_node.write_to_db()
                 used_nodes_as_sec.append(snode.secondary_node_id)
             else:
-                secondary_nodes = storage_node_ops.get_secondary_nodes(snode)
+                if snode.get_id() in fd_desired_layout:
+                    # FD-interleaved rotation (fresh FD activation): the
+                    # secondary is cross-domain by construction.
+                    secondary_nodes = [fd_desired_layout[snode.get_id()][0]]
+                else:
+                    secondary_nodes = storage_node_ops.get_secondary_nodes(snode)
                 if not secondary_nodes:
                     set_cluster_status(cl_id, ols_status)
                     raise ValueError("Failed to activate cluster, No enough secondary nodes")
@@ -1008,13 +1072,18 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
             if cluster.max_fault_tolerance >= 2 and not snode.tertiary_node_id:
                 snode = db_controller.get_storage_node_by_id(snode.get_id())
                 sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-                secondary_nodes_2 = storage_node_ops.get_secondary_nodes_2(
-                    snode,
-                    exclude_ids=[snode.secondary_node_id] + used_nodes_as_tertiary,
-                    exclude_mgmt_ips=[sec_node.mgmt_ip],
-                    exclude_failure_domains=[sec_node.failure_domain],
-                    exclude_physical_labels=[sec_node.physical_label],
-                )
+                if fd_desired_layout.get(snode.get_id(), ("", ""))[1]:
+                    # FD-interleaved rotation: tertiary from the same
+                    # deterministic layout as the secondary above.
+                    secondary_nodes_2 = [fd_desired_layout[snode.get_id()][1]]
+                else:
+                    secondary_nodes_2 = storage_node_ops.get_secondary_nodes_2(
+                        snode,
+                        exclude_ids=[snode.secondary_node_id] + used_nodes_as_tertiary,
+                        exclude_mgmt_ips=[sec_node.mgmt_ip],
+                        exclude_failure_domains=[sec_node.failure_domain],
+                        exclude_physical_labels=[sec_node.physical_label],
+                    )
                 if not secondary_nodes_2:
                     set_cluster_status(cl_id, ols_status)
                     raise ValueError("Failed to activate cluster, not enough nodes for dual fault tolerance")
@@ -2221,21 +2290,28 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
             utils.create_docker_service(
                 cluster_docker=cluster_docker,
                 service_name="app_SnapshotMonitor",
-                service_file="python simplyblock_core/services/snapshot_monitor.py",
+                service_file="python3 simplyblock_core/services/snapshot_monitor.py",
                 service_image=service_image)
 
         if "app_TasksRunnerLVolSyncDelete" not in service_names:
             utils.create_docker_service(
                 cluster_docker=cluster_docker,
                 service_name="app_TasksRunnerLVolSyncDelete",
-                service_file="python simplyblock_core/services/tasks_runner_sync_lvol_del.py",
+                service_file="python3 simplyblock_core/services/tasks_runner_sync_lvol_del.py",
                 service_image=service_image)
 
         if "app_TasksRunnerJCCompResume" not in service_names:
             utils.create_docker_service(
                 cluster_docker=cluster_docker,
                 service_name="app_TasksRunnerJCCompResume",
-                service_file="python simplyblock_core/services/tasks_runner_jc_comp.py",
+                service_file="python3 simplyblock_core/services/tasks_runner_jc_comp.py",
+                service_image=service_image)
+
+        if "app_BackupService" not in service_names:
+            utils.create_docker_service(
+                cluster_docker=cluster_docker,
+                service_name="app_BackupService",
+                service_file="python3 simplyblock_core/services/tasks_runner_fdb_backup.py",
                 service_image=service_image)
 
         logger.info("Done updating mgmt cluster")
@@ -2461,7 +2537,7 @@ def delete_cluster(cl_id) -> None:
     cluster.remove(db_controller.kv_store)
     logger.info("Done")
 
-def set(cl_id, attr, value) -> bool:
+def set_(cl_id, attr, value) -> bool:
     cluster = db_controller.get_cluster_by_id(cl_id)
     key_splits = attr.split(".")
     key = key_splits[0]

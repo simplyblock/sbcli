@@ -17,17 +17,20 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
 
     - name: Set up Python
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@v7
       with:
         python-version: '3.9'
         cache: 'pip'
 
+    - name: Install tox
+      run: pip install tox
+
     - name: Checking cli.py status
       run: |
-        ./simplyblock_cli/scripts/generate.sh
+        tox run -e generate
         changes="$(git diff simplyblock_cli/cli.py)"
         if [[ "${changes}" ]]; then
           echo "cli.py has changed after regeneration. Stopping."
@@ -41,10 +44,10 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
 
     - name: Set up Python
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@v7
       with:
         python-version: '3.9'
         cache: 'pip'
@@ -61,10 +64,10 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
 
     - name: Set up Python
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@v7
       with:
         python-version: '3.9'
         cache: 'pip'

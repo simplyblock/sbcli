@@ -1397,6 +1397,17 @@ class RPCClient:
             "bs_nonleadership": bs_nonleadership,
         })
 
+    def bdev_lvol_update_lvstore(self, lvs):
+        """Reload the lvstore's blob metadata from disk (spdk_lvs_update_live).
+
+        Pure md refresh — does NOT change leadership. Must be called on a
+        non-leader LVS (the SPDK side asserts leader == false). Used before a
+        control-plane leadership grant so the grant never serves stale blob
+        metadata (the 2026-07-06 LVS_13 hazard of a bare set_leader)."""
+        return self._request("bdev_lvol_update_lvstore", {
+            "uuid" if utils.UUID_PATTERN.match(lvs) else "lvs_name": lvs,
+        })
+
     def bdev_lvol_set_lvs_signal(self, lvs):
         """Send a fabric-level signal to an LVS to drop leadership.
 
@@ -1575,7 +1586,7 @@ class RPCClient:
         params = {
             "jm_vuid": jm_vuid,
         }
-        return self._request("jc_disable_replication", params)
+        return self._request3("jc_disable_replication", **params)
 
     def bdev_distrib_check_inflight_io(self, jm_vuid):
         params = {
@@ -1618,10 +1629,10 @@ class RPCClient:
         return self._request2("jc_compression", params)
 
     def nvmf_port_block(self, port, is_reject=False):
-        return self._request3("nvmf_port_block",
-            port=port,
-            reject=is_reject,
-        )
+        params = {"port": port}
+        if is_reject:
+            params["reject"] = is_reject
+        return self._request3("nvmf_port_block", **params)
 
     def nvmf_port_unblock(self, port):
         return self._request3("nvmf_port_unblock", port=port)

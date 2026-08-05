@@ -262,6 +262,15 @@ def process_lvol_delete_try_again(lvol):
 
 
 def check_node(cluster, snode, all_lvols):
+    # Number of in-deletion lvols acted on this pass — the main loop uses it
+    # to shorten the inter-cycle sleep while a mass delete is draining.
+    deletions_processed = 0
+    # Per-pass leadership cache: the probe below costs 1-3 get_lvstores RPCs
+    # and used to run once PER LVOL — at mass-delete scale that alone adds
+    # tens of seconds per cycle. Leadership moves mid-pass are already
+    # handled by the poll's own error codes (-35/4), which reset
+    # deletion_status and re-resolve on the next cycle.
+    leader_cache: dict = {}
 
     for lvol in all_lvols:
         if lvol.node_id != snode.get_id():
@@ -316,33 +325,38 @@ def check_node(cluster, snode, all_lvols):
             if lvol.status != LVol.STATUS_IN_DELETION:
                 continue
 
-            # check leadership
-            leader_node = None
-            snode = db.get_storage_node_by_id(snode.get_id())
-            if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
-                ret = snode.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
-                if not ret:
-                    raise Exception("Failed to get LVol info")
-                lvs_info = ret[0]
-                if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
-                    leader_node = snode
+            deletions_processed += 1
 
-            if not leader_node:
-                for sec_id in lvol.nodes[1:]:
-                    try:
-                        _sec = db.get_storage_node_by_id(sec_id)
-                    except KeyError:
-                        continue
-                    if _sec.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
-                        ret = _sec.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
-                        if ret:
-                            lvs_info = ret[0]
-                            if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
-                                leader_node = _sec
-                                break
+            # check leadership (cached per pass, see leader_cache above)
+            cache_key = (snode.get_id(), tuple(lvol.nodes[1:]))
+            leader_node = leader_cache.get(cache_key)
+            if leader_node is None:
+                snode = db.get_storage_node_by_id(snode.get_id())
+                if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
+                    ret = snode.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
+                    if not ret:
+                        raise Exception("Failed to get LVol info")
+                    lvs_info = ret[0]
+                    if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
+                        leader_node = snode
 
-            if not leader_node:
-                raise Exception("Failed to get leader node")
+                if not leader_node:
+                    for sec_id in lvol.nodes[1:]:
+                        try:
+                            _sec = db.get_storage_node_by_id(sec_id)
+                        except KeyError:
+                            continue
+                        if _sec.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
+                            ret = _sec.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
+                            if ret:
+                                lvs_info = ret[0]
+                                if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
+                                    leader_node = _sec
+                                    break
+
+                if not leader_node:
+                    raise Exception("Failed to get leader node")
+                leader_cache[cache_key] = leader_node
 
             # Leader stickiness: while the node that owns the in-flight
             # async delete (deletion_status) is still reachable, keep
@@ -369,7 +383,13 @@ def check_node(cluster, snode, all_lvols):
                 with snapshot_controller.lvstore_op_lock(
                         cluster.get_id(), lvol.lvs_name, node_id=leader_node.get_id()):
                     lvol_controller.delete_lvol_from_node(lvol.get_id(), leader_node.get_id())
-                time.sleep(3)
+                # NOTE no inline sleep here: the loop is SERIAL over every
+                # in-deletion lvol, so a per-object pause multiplies into
+                # minutes of added latency for every object in a mass-delete
+                # wave (run 20260730: cycle times of 4-5 min, single deletes
+                # taking 5+ min end-to-end). The status poll below handles a
+                # still-running async delete (ret == 1) by simply retrying on
+                # the next cycle.
 
             try:
                 ret = leader_node.rpc_client().bdev_lvol_get_lvol_delete_status(
@@ -524,6 +544,7 @@ def check_node(cluster, snode, all_lvols):
         if passed:
             set_lvol_status(lvol, LVol.STATUS_ONLINE)
 
+    return deletions_processed
 
 
 # get DB controller
@@ -539,6 +560,7 @@ def main():
             logger.error(f"Failed to get clusters: {e}")
             time.sleep(3)
             continue
+        deletions_in_flight = 0
         for cluster in db.get_clusters():
 
             if cluster.status in [Cluster.STATUS_INACTIVE, Cluster.STATUS_UNREADY, Cluster.STATUS_IN_ACTIVATION]:
@@ -551,11 +573,20 @@ def main():
             all_lvols = db.get_mini_lvols()
             for snode in db.get_storage_nodes_by_cluster_id(cluster.get_id()):
                 try:
-                    check_node(cluster, snode, all_lvols)
+                    deletions_in_flight += check_node(cluster, snode, all_lvols) or 0
                 except Exception as e:
                     logger.error(e)
 
-        time.sleep(constants.LVOL_MONITOR_INTERVAL_SEC)
+        # Adaptive cadence: while deletes are draining, every full-interval
+        # sleep adds up to 30s of latency PER CHAIN HOP (a clone must fully
+        # finish before its snapshot becomes deletable, and that before the
+        # parent snapshot) — run 20260730: a 7-object delete chain took ~50
+        # minutes almost entirely in monitor waits. Re-scan quickly while
+        # in-deletion objects exist; idle clusters keep the low-load 30s.
+        if deletions_in_flight > 0:
+            time.sleep(constants.LVOL_MONITOR_DELETION_INTERVAL_SEC)
+        else:
+            time.sleep(constants.LVOL_MONITOR_INTERVAL_SEC)
 
 
 if __name__ == "__main__":

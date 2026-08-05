@@ -251,6 +251,10 @@ def _base_db(task):
     db.get_task_by_id.return_value = task
     db.get_cluster_by_id.return_value = cluster
     db.get_storage_nodes_by_cluster_id.return_value = [node]
+    # Mirror DBController.atomic_update's contract: apply the mutator to the
+    # (fresh) object and return it. The restart runner's task writes go
+    # through this instead of write_to_db (stale-copy lost-update fix).
+    db.atomic_update.side_effect = lambda obj, fn: (fn(obj), obj)[1]
     return db, cluster, node
 
 

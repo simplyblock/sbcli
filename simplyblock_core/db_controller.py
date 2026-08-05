@@ -42,6 +42,59 @@ class Singleton(type):
             return ins
 
 
+class SubsystemCapacityError(Exception):
+    """A namespace-slot claim would need a NEW subsystem but the node is
+    already at its ``max_lvol`` subsystem cap. Raised inside the claim
+    transaction before anything is written."""
+
+
+class _NoTxnValue(bytes):
+    """Duck-types an fdb Value (``present()``) for the transactionless
+    fallback store."""
+    _present = True
+
+    def present(self):
+        return self._present
+
+
+class _NoTxnFuture:
+    def __init__(self, value):
+        self._value = value
+
+    def wait(self):
+        return self._value
+
+
+class _NoTxnStore:
+    """Duck-types the small Transaction surface the namespace-slot claim and
+    release use (``get``/``set``/``clear``/``snapshot``) over a plain kv
+    store. Used only when the store has no transactions (the unit-tier fdb
+    stub and the fake stores in tests) — NOT atomic; production stores always
+    go through ``fdb.transactional``."""
+
+    def __init__(self, kv):
+        self._kv = kv
+
+    def get(self, key):
+        raw = self._kv.get(key) if self._kv is not None and hasattr(self._kv, 'get') else None
+        if raw is None:
+            value = _NoTxnValue(b'')
+            value._present = False
+        else:
+            value = _NoTxnValue(raw)
+        return _NoTxnFuture(value)
+
+    def set(self, key, value):
+        self._kv.set(key, value)
+
+    def clear(self, key):
+        self._kv.clear(key)
+
+    @property
+    def snapshot(self):
+        return self._kv
+
+
 
 class DBController(metaclass=Singleton):
 
@@ -740,6 +793,114 @@ class DBController(metaclass=Singleton):
         now = int(time.time())
         transactional = fdb.transactional(DBController._reserve_next_nvmf_port_tx)
         return transactional(self, self.kv_store, cluster_id, base_port, node_used, owner, now)
+
+    # ---- Namespaced-subsystem slot claim/release (Single FDB Transaction) ----
+
+    NS_SLOT_ALLOC_PREFIX = "ns_slot_alloc"
+
+    def _claim_lvol_ns_slot_tx(self, tr, lvol, host_node, namespaced,
+                               standalone_nqn, standalone_namespace,
+                               standalone_max_ns, standalone_allowed_hosts,
+                               exclude_nqns):
+        from simplyblock_core.controllers import lvol_controller
+
+        # Read-then-write of the per-node allocator key gives every claim on
+        # this node a read conflict with every other claim's commit: two
+        # concurrent creates cannot both commit against the same occupancy
+        # snapshot — the loser retries and recounts WITH the winner's record
+        # present. Releases don't bump the key: a stale claimer at worst sees
+        # a slot as still occupied, which is conservative.
+        alloc_key = f"{self.NS_SLOT_ALLOC_PREFIX}/{host_node.get_id()}".encode()
+        raw = tr.get(alloc_key).wait()
+        seq = int(bytes(raw).decode()) if raw.present() else 0
+
+        # Snapshot read: occupancy is recounted on every attempt, but without
+        # laying a conflict range over the whole lvol table — any unrelated
+        # lvol write cluster-wide would abort this transaction otherwise.
+        minis = LVolMini().read_from_db(tr.snapshot)
+
+        target = None
+        if namespaced:
+            target = lvol_controller.get_next_available_subsystem_on_node(
+                host_node.get_id(), minis, exclude_nqns=exclude_nqns)
+        if target is not None:
+            lvol.nqn = target.nqn
+            lvol.namespace = target.uuid
+            lvol.max_namespace_per_subsys = target.max_namespace_per_subsys
+            if standalone_allowed_hosts is not None:
+                # A joined lvol inherits the subsystem root's host config.
+                lvol.allowed_hosts = []
+        else:
+            node_max = lvol_controller.max_subsystems_for_node(host_node)
+            if lvol_controller.count_lvol_subsystems(host_node, minis) >= node_max:
+                raise SubsystemCapacityError(
+                    f"Too many subsystems on node: {host_node.get_id()}, "
+                    f"max subsystems reached: {node_max}")
+            lvol.nqn = standalone_nqn
+            lvol.namespace = standalone_namespace
+            # Hard per-subsystem ceiling — a caller/legacy value above the
+            # cap must not seed a new subsystem that would accept more joins.
+            lvol.max_namespace_per_subsys = min(
+                standalone_max_ns, constants.MAX_NAMESPACES_PER_SUBSYSTEM)
+            if standalone_allowed_hosts is not None:
+                lvol.allowed_hosts = standalone_allowed_hosts
+
+        tr.set(alloc_key, str(seq + 1).encode())
+        lvol.write_to_db(tr)
+        return target is not None
+
+    def claim_lvol_ns_slot(self, lvol, host_node, namespaced, standalone_nqn,
+                           standalone_namespace="", standalone_allowed_hosts=None,
+                           exclude_nqns=None):
+        """Pick the namespace slot for ``lvol`` AND persist its record
+        (STATUS_IN_CREATION) in ONE FDB transaction.
+
+        The record itself is the slot claim: occupancy is counted from lvol
+        records, so writing the record in the same transaction as the recount
+        closes the pick->write race where two concurrent creates/clones both
+        grabbed the last free namespace slot of a shared subsystem. Every
+        pick-dependent lvol field (nqn / namespace / max_namespace_per_subsys
+        / allowed_hosts) is (re)assigned inside the transaction so a conflict
+        retry is deterministic.
+
+        Returns True when the lvol joined an existing namespaced subsystem,
+        False when it owns a new standalone subsystem. Raises
+        SubsystemCapacityError when a new subsystem would exceed the node's
+        ``max_lvol`` cap (nothing is written in that case).
+
+        ``exclude_nqns`` skips subsystems the DB believes have room but SPDK
+        has rejected (-32602 re-claim in ``add_lvol_on_node``). The per-pool
+        name index is maintained outside the transaction (as on every other
+        write path) — idempotent, so a conflict retry rewrites the same entry.
+        """
+        standalone_max_ns = lvol.max_namespace_per_subsys
+        kv = self.kv_store
+        if kv is not None and hasattr(kv, 'create_transaction'):
+            transactional = fdb.transactional(DBController._claim_lvol_ns_slot_tx)
+            return transactional(self, kv, lvol, host_node, namespaced,
+                                 standalone_nqn, standalone_namespace,
+                                 standalone_max_ns, standalone_allowed_hosts,
+                                 exclude_nqns)
+        # Transactionless store (unit-tier fdb stub / fake stores in tests):
+        # same logic, not atomic.
+        return self._claim_lvol_ns_slot_tx(
+            _NoTxnStore(kv), lvol, host_node, namespaced, standalone_nqn,
+            standalone_namespace, standalone_max_ns, standalone_allowed_hosts,
+            exclude_nqns)
+
+    def _release_lvol_ns_slot_tx(self, tr, lvol):
+        lvol.remove(tr)
+
+    def release_lvol_ns_slot(self, lvol):
+        """Remove the lvol record (base + mini) in ONE FDB transaction. The
+        record IS the namespace-slot claim, so this releases the slot
+        atomically with the object removal — the rollback half of
+        ``claim_lvol_ns_slot`` (and the final record removal on delete)."""
+        kv = self.kv_store
+        if kv is not None and hasattr(kv, 'create_transaction'):
+            transactional = fdb.transactional(DBController._release_lvol_ns_slot_tx)
+            return transactional(self, kv, lvol)
+        return lvol.remove(kv)
 
     # ---- Generic atomic read-modify-write (Single FDB Transaction) ----
 
