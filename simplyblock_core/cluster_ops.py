@@ -976,14 +976,16 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
         set_cluster_status(cl_id, ols_status)
         raise
 
-    # Failure-domain coverage check (best-effort: warn, don't block). To
-    # survive losing a whole failure domain we need at least npcs+1 distinct
-    # domains; with fewer, placement falls back to host-disjoint and a domain
-    # outage may exceed the cluster's fault tolerance.
+    # Failure-domain coverage check (best-effort: warn, don't block). A 2-FD
+    # layout can never absorb a second independent failure once one domain
+    # is down, so the hard minimum below (enforced at fresh activation) is
+    # npcs+2, not npcs+1 -- this warning uses the same number so a
+    # reactivation that's short of it gets the same signal without being
+    # blocked (recovering a drifted layout must not turn into an outage).
     fd_desired_layout: t.Dict[str, t.Tuple[str, str]] = {}
     if cluster.enable_failure_domain:
         distinct_domains = {node.failure_domain for node in online_nodes if node.failure_domain >= 0}
-        min_domains = cluster.distr_npcs + 1
+        min_domains = cluster.distr_npcs + 2
         if len(distinct_domains) < min_domains:
             logger.warning(
                 "Failure-domain feature is enabled but only %d distinct failure "
@@ -1023,9 +1025,15 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                              f"a host must sit entirely in one domain")
 
             fd_host_counts = Counter(host_fd.values())
-            if len(fd_host_counts) < 2:
-                _fd_fail("failure domains are enabled but all hosts are in a "
-                         "single domain; at least two domains are required")
+            # See fd_activation_domain_count_violation's docstring: npcs+2
+            # domains, not just the bare rotation-correctness minimum, so a
+            # later single add/remove has a spare candidate instead of
+            # stranding another node's secondary/tertiary with none at all.
+            # This also subsumes the plain "at least two domains" floor.
+            domain_count_violation = fd_planner.fd_activation_domain_count_violation(
+                cluster.distr_npcs, len(fd_host_counts))
+            if domain_count_violation:
+                _fd_fail(domain_count_violation)
             if len(set(fd_host_counts.values())) != 1:
                 _fd_fail(
                     f"failure domains must hold an EQUAL number of hosts at "
