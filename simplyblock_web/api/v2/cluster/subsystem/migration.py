@@ -1,4 +1,4 @@
-from typing import Annotated, List, Optional
+from typing import Annotated, List, Optional, Union
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -66,7 +66,7 @@ def create_migration(
     except (ValueError, MigrationConflictError, PreconditionError, RuntimeError) as e:
         raise HTTPException(400, str(e))
 
-    route_kw = {
+    route_kw: dict[str, Union[UUID, str]] = {
         'cluster_id': UUID(cluster.uuid),
         'nqn': subsystem,
         'migration_id': UUID(group_id),

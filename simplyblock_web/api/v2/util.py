@@ -1,4 +1,4 @@
-from typing import Annotated, Any, Callable, Literal, Optional
+from typing import Annotated, Any, Callable, Literal, Optional, Union
 from urllib.parse import urlparse
 from uuid import UUID
 
@@ -38,7 +38,7 @@ def creation_response(
     response_format: CreationResponseFormat,
     entity_id: UUID,
     route_name: str,
-    route_kwargs: dict[str, UUID],
+    route_kwargs: dict[str, Union[UUID, str]],
     get_full: Callable[[UUID], BaseModel],
     extra_headers: Optional[dict[str, str]] = None,
 ) -> Response:
