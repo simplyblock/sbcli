@@ -443,28 +443,6 @@ def _spec_node_add(runner, monkeypatch):
     return task
 
 
-def _spec_replication_final(runner, monkeypatch):
-    # The endgame params are pre-set so each pass skips the shrink machinery
-    # and goes straight to run_cutover, which is mocked to fail every cycle.
-    # The target node stays ONLINE on purpose: an offline target deliberately
-    # does NOT burn task.retry (waiting out an outage is transient), so the
-    # ceiling must be driven by the work itself failing. Each failure walks
-    # the hub-attempt ladder (REPL_CUTOVER_MAX_HUB_ATTEMPTS cooldown attempts
-    # per burned retry); the fake clock's giant steps make every cooldown
-    # already elapsed by the next poll.
-    task = _make_task(
-        JobSchedule.FN_REPLICATION_FINAL,
-        lvol_id="lv-1", tgt_node_id="tgt-1", src_node_id="src-1",
-        tgt_lvol_composite="lvs_tgt/LVOL_1", tgt_map_id=1,
-        tgt_snap_composite="lvs_tgt/SNAP_1",
-        shrink_snap_id="S_endgame", shrink_round=0)
-    db, _cluster, _node = _wire_base(runner, monkeypatch, task)
-    db.get_lvol_by_id.return_value = MagicMock()
-    monkeypatch.setattr(runner.replication_final_step, "run_cutover",
-                        lambda *a, **k: (False, "boom"))
-    return task
-
-
 def _spec_restart(runner, monkeypatch):
     task = _make_task(JobSchedule.FN_NODE_RESTART)
     _db, _cluster, node = _wire_base(runner, monkeypatch, task)
@@ -542,7 +520,6 @@ def _spec_batch_migration(runner, monkeypatch):
 _MAIN_DRIVEN_SPECS = {
     "tasks_runner_cluster_expand.py": _spec_cluster_expand,
     "tasks_runner_node_add.py": _spec_node_add,
-    "tasks_runner_replication_final.py": _spec_replication_final,
     "tasks_runner_restart.py": _spec_restart,
     "tasks_runner_batch_migration.py": _spec_batch_migration,
 }
@@ -565,6 +542,7 @@ _COVERED_ELSEWHERE = {
 _DRIVER_MIGRATED = {
     "tasks_runner_fdb_backup.py",
     "tasks_runner_jc_comp.py",
+    "tasks_runner_replication_final.py",
 }
 
 # Runners that increment task.retry but are intentionally UNBOUNDED: the
