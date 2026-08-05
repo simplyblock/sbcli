@@ -8773,9 +8773,18 @@ def _recreate_lvstore_impl(snode, force=False, lvs_primary=None, activation_mode
                 # c. suspend journal replication while the port is blocked
                 try:
                     repl_disabled = current_leader.rpc_client().jc_disable_replication(lvs_jm_vuid)
-                except Exception as e:
-                    _abort_restart_and_unblock(
-                        f"jc_disable_replication on leader {current_leader.get_id()} failed: {e}")
+                except Exception:
+                    try:
+                        logger.warning("Failed to disable replication on leader, trying other method")
+                        ret = current_leader.rpc_client().jc_get_jm_status(lvs_jm_vuid)
+                        repl_disabled = True
+                        for jm in ret:
+                            if ret[jm] is False:  # jm is not ready (has active replication task)
+                                repl_disabled = False
+                                break
+                    except Exception as e:
+                        _abort_restart_and_unblock(
+                            f"jc_disable_replication on leader {current_leader.get_id()} failed: {e}")
                 if repl_disabled:
                     replication_suspended = True
                     break
