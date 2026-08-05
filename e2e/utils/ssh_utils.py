@@ -1901,7 +1901,7 @@ class SshUtils:
     #             filesystem.append(columns[0])
     #     return filesystem
 
-    def deploy_storage_node(self, node, max_lvol, max_prov_gb, ifname="eth0", branch='main'):
+    def deploy_storage_node(self, node, max_lvol, max_prov_gb, ifname="eth0", branch='main', nodes_per_socket=1):
         """
         Runs 'sn configure' and 'sn deploy' on the node with provided configuration.
 
@@ -1910,13 +1910,14 @@ class SshUtils:
             max_lvol (int): Maximum number of lvols.
             max_prov_gb (int): Maximum provision size in GB.
             ifname (str): Mgmt Interface (Default: eth0)
+            nodes_per_socket (int): Number of nodes per socket (Default: 1). Set to 2 for dual-node-per-host.
         """
         cmd = f"pip install --force-reinstall git+https://github.com/simplyblock-io/sbcli.git@{branch}"
         self.exec_command(node=node, command=cmd)
 
         time.sleep(10)
 
-        configure_cmd = f"{self.base_cmd} -d sn configure --max-subsys {max_lvol}"
+        configure_cmd = f"{self.base_cmd} -d sn configure --max-subsys {max_lvol} --nodes-per-socket {nodes_per_socket}"
         deploy_cmd = f"{self.base_cmd} sn deploy --ifname {ifname}"
         
         self.logger.info(f"Deploying storage node: {node}")

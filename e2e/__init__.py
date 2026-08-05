@@ -36,7 +36,9 @@ from e2e_tests.test_multi_node_outage import (
 
 from e2e_tests.add_node_fio_run import (
     TestAddNodesDuringFioRun,
-    TestAddK8sNodesDuringFioRun
+    TestAddK8sNodesDuringFioRun,
+    TestAddNodesDualNodePerHost,
+    TestAddK8sNodesDualNodePerHost,
 )
 from e2e_tests.k8s_native_add_node import K8sNativeAddNodeTest
 from e2e_tests.k8s_native_node_migration import K8sNativeNodeMigrationTest
@@ -173,8 +175,15 @@ from e2e_tests.security.test_lvol_security import (
     TestLvolSecurityMultiClientConcurrent,
 )
 
-from e2e_tests.upgrade_tests.major_upgrade import TestMajorUpgrade, TestMajorUpgradeSingleNode
-from e2e_tests.upgrade_tests.k8s_major_upgrade import K8sNativeMajorUpgrade
+from e2e_tests.upgrade_tests.major_upgrade import (
+    TestMajorUpgrade,
+    TestMajorUpgradeSingleNode,
+    TestMajorUpgradeDualNode,
+)
+from e2e_tests.upgrade_tests.k8s_major_upgrade import (
+    K8sNativeMajorUpgrade,
+    K8sNativeMajorUpgradeDualNode,
+)
 
 # ── Phase 1 functional E2E tests ─────────────────────────────────────
 from e2e_tests.test_lvol_basic import TestLvolBasicCRUD
@@ -306,6 +315,7 @@ ALL_TESTS = [
     TestSingleNodeOutage,
     TestSingleNodeFailure,
     TestAddNodesDuringFioRun,
+    TestAddNodesDualNodePerHost,
     TestRestartNodeOnAnotherHost,
     TestRebootNodeHost,
     TestMgmtNodeReboot,
@@ -323,11 +333,13 @@ ALL_TESTS = [
     TestHASingleNodeOutage,
     TestSingleNodeResizeLvolCone,
     TestAddK8sNodesDuringFioRun,
+    TestAddK8sNodesDualNodePerHost,
     K8sNativeAddNodeTest,
     K8sNativeNodeMigrationTest,
     TestSequentialNodeAdd,
     TestAddNodeSnapshotCloneOnNewNode,
     K8sNativeMajorUpgrade,
+    K8sNativeMajorUpgradeDualNode,
     # Security E2E tests
     TestLvolSecurityCombinations,
     TestLvolDynamicHostManagement,
@@ -887,7 +899,9 @@ def get_upgrade_tests():
     tests = [
         TestMajorUpgrade,
         TestMajorUpgradeSingleNode,
+        TestMajorUpgradeDualNode,
         K8sNativeMajorUpgrade,
+        K8sNativeMajorUpgradeDualNode,
     ]
     return tests
 

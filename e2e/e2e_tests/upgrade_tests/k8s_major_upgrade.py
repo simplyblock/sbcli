@@ -1550,3 +1550,320 @@ spec:
             f"{self.base_version} -> {self.target_version}"
         )
         self.logger.info("TEST CASE PASSED !!!")
+
+
+class K8sNativeMajorUpgradeDualNode(K8sNativeMajorUpgrade):
+    """K8s-native major upgrade for dual-node-per-host (nodesPerSocket=2).
+
+    Each worker runs 2 logical storage nodes. Rolling restarts are grouped
+    by worker so both nodes on a host are restarted together before moving
+    to the next host.
+
+    Dispatch the upgrade pipeline with:
+      EXTRA_SN_ARGS: "--nodes-per-socket 2"  (bootstrap creates 2 nodes/host)
+      TEST_CLASS: "K8sNativeMajorUpgradeDualNode"
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.test_name = "k8s_native_major_upgrade_dual_node"
+        self.nodes_per_socket = 2
+
+    # ── Helpers ────────────────────────────────────────────────────────
+
+    def _build_ip_to_node_ids(self):
+        """Build IP -> [node_id, ...] mapping from the storage-node API."""
+        sn_results = self.sbcli_utils.get_storage_nodes().get("results", [])
+        ip_to_ids = {}
+        for r in sn_results:
+            nid = r.get("id") or r.get("uuid") or r.get("node_id")
+            ip = r.get("ip") or r.get("mgmt_ip") or r.get("management_ip")
+            if nid and ip:
+                ip_to_ids.setdefault(ip, []).append(nid)
+        return ip_to_ids
+
+    def _get_unique_worker_ips(self, storage_node_list):
+        """Extract unique worker IPs from node list, preserving order."""
+        seen = set()
+        unique = []
+        for r in storage_node_list:
+            ip = r.get("ip") or r.get("mgmt_ip") or r.get("management_ip")
+            if ip and ip not in seen:
+                seen.add(ip)
+                unique.append(ip)
+        return unique
+
+    # ── Maintenance-window upgrade overrides ───────────────────────────
+
+    def _apply_custom_resources(self, storage_node_list):
+        """Override to include nodesPerSocket in StorageNodeSet spec."""
+        self.logger.info(
+            "Migration Step 7: Applying custom resources "
+            f"(nodesPerSocket={self.nodes_per_socket})"
+        )
+
+        # Build worker nodes YAML from environment or K8s
+        worker_yaml = ""
+        worker_nodes_env = os.environ.get("WORKER_NODES", "")
+        if worker_nodes_env:
+            for node in worker_nodes_env.split(","):
+                node = node.strip()
+                if node:
+                    worker_yaml += f"      - {node}\n"
+        else:
+            self.logger.warning(
+                "WORKER_NODES env not set, attempting to derive from K8s"
+            )
+            out, _ = self.k8s_utils._exec_kubectl(
+                "kubectl get nodes -l node-role.kubernetes.io/worker "
+                "-o jsonpath='{.items[*].metadata.name}' 2>/dev/null || "
+                "kubectl get nodes --no-headers "
+                "-o custom-columns=NAME:.metadata.name"
+            )
+            for node_name in (out or "").replace("'", "").split():
+                node_name = node_name.strip()
+                if node_name:
+                    worker_yaml += f"      - {node_name}\n"
+
+        sb_repo = self.simplyblock_repo
+        sb_tag = self.target_docker_image
+        spdk_image = self.target_spdk_image
+        mgmt_ifc = os.environ.get("MGMT_IFC", "ens18")
+        data_nics = os.environ.get("DATA_NICS", "enp1s0")
+        max_lvol = os.environ.get("MAX_LVOL", "30")
+
+        cr_yaml = f"""
+apiVersion: storage.simplyblock.io/v1alpha1
+kind: StorageCluster
+metadata:
+  name: {self.cluster_cr_name}
+  namespace: {_NAMESPACE}
+spec:
+  fabricType: tcp
+  isSingleNode: false
+  enableNodeAffinity: true
+  strictNodeAntiAffinity: false
+  stripe:
+    dataChunks: {self.ndcs}
+    parityChunks: {self.npcs}
+  warningThreshold:
+    capacity: 95
+    provisionedCapacity: 97
+  criticalThreshold:
+    capacity: 96
+    provisionedCapacity: 98
+---
+apiVersion: storage.simplyblock.io/v1alpha1
+kind: Pool
+metadata:
+  name: {self.pool_cr_name}
+  namespace: {_NAMESPACE}
+spec:
+  clusterName: {self.cluster_cr_name}
+---
+apiVersion: storage.simplyblock.io/v1alpha1
+kind: StorageNodeSet
+metadata:
+  name: {self.node_cr_name}
+  namespace: {_NAMESPACE}
+spec:
+  clusterName: {self.cluster_cr_name}
+  clusterImage: "{sb_repo}:{sb_tag}"
+  spdkImage: "{spdk_image}"
+  spdkProxyImage: "{sb_repo}:{sb_tag}"
+  mgmtIfname: {mgmt_ifc}
+  dataIfname:
+    - {data_nics}
+  maxLogicalVolumeCount: {max_lvol}
+  enableCpuTopology: true
+  nodesPerSocket: {self.nodes_per_socket}
+  workerNodes:
+{worker_yaml}"""
+
+        apply_cmd = f"cat <<'CREOF' | kubectl apply -f -\n{cr_yaml}\nCREOF"
+        out, err = self.k8s_utils._exec_kubectl(apply_cmd)
+        self.logger.info(f"CRs applied: {out}")
+        sleep_n_sec(10)
+
+    def _restart_nodes_sequentially(self, storage_node_list):
+        """Override to group restarts by worker (both nodes per host together)."""
+        ip_to_node_ids = self._build_ip_to_node_ids()
+        unique_ips = self._get_unique_worker_ips(storage_node_list)
+
+        self.logger.info(
+            f"Migration Step 10: Restarting nodes on {len(unique_ips)} workers "
+            f"(nodesPerSocket={self.nodes_per_socket})"
+        )
+
+        sbcli = "sbctl"
+        for worker_idx, host_ip in enumerate(unique_ips, 1):
+            nids = ip_to_node_ids.get(host_ip, [])
+            self.logger.info(
+                f"  Worker {worker_idx}/{len(unique_ips)} ({host_ip}): "
+                f"restarting {len(nids)} nodes: {nids}"
+            )
+
+            restart_ts = int(datetime.now().timestamp())
+
+            # Restart all nodes on this worker
+            for node_id in nids:
+                spdk_flag = ""
+                if self.target_spdk_image:
+                    spdk_flag = f" --spdk-image {self.target_spdk_image}"
+                proxy_flag = ""
+                if self.target_spdk_proxy_image:
+                    proxy_flag = (
+                        f" --spdk-proxy-image {self.target_spdk_proxy_image}"
+                    )
+                self.k8s_utils.exec_sbcli(
+                    f"{sbcli} -d --dev sn restart "
+                    f"{node_id}{spdk_flag}{proxy_flag}"
+                )
+
+            # Wait for all nodes on this worker to come online
+            for node_id in nids:
+                self.sbcli_utils.wait_for_storage_node_status(
+                    node_id=node_id, status="online", timeout=600,
+                )
+                self.logger.info(f"  Node {node_id} is back online")
+
+            # Wait for cluster active before next worker
+            self.sbcli_utils.wait_for_cluster_status(
+                cluster_id=self.cluster_id, status="active", timeout=600,
+            )
+
+            # Validate migration for all nodes on this worker
+            sleep_n_sec(30)
+            for node_id in nids:
+                self.validate_migration_for_node(
+                    restart_ts, 1200, node_id, 60, no_task_ok=True
+                )
+
+            if worker_idx < len(unique_ips):
+                sleep_n_sec(30)
+
+        self.logger.info("All storage nodes restarted successfully")
+
+    # ── Rolling upgrade override ───────────────────────────────────────
+
+    def _run_rolling_upgrade(self, storage_node_list):
+        """Override to group rolling restarts by worker node."""
+        self.FIO_RUNTIME = 3600  # 1 hour — FIO runs throughout
+
+        # Pre-upgrade: create PVCs, FIO, snapshots, clones (same as parent)
+        self.logger.info("Step 2: Creating StorageClass and VolumeSnapshotClass")
+        pool_name = self.pool_name
+        actual_pool = self.sbcli_utils.add_storage_pool(pool_name)
+        if actual_pool and actual_pool != pool_name:
+            pool_name = actual_pool
+
+        self.pool_cr_name = pool_name
+        self.logger.info(
+            f"Pool CR name set to '{self.pool_cr_name}' (matching backend pool)"
+        )
+
+        sleep_n_sec(10)
+        self._create_storage_classes(self.cluster_id, pool_name)
+
+        self.logger.info("Step 3: Creating PVCs and starting FIO Jobs")
+        self._create_pvcs_with_fio(len(storage_node_list))
+
+        self.logger.info("Step 4: Creating snapshots and clones")
+        self._create_snapshots_and_clones()
+
+        # Capture pre-upgrade state
+        self._capture_pre_upgrade_state()
+
+        self.logger.info("Step 5: Waiting 60s for FIO to establish baseline")
+        sleep_n_sec(60)
+
+        # Helm upgrade
+        self.logger.info("Step 6: Running helm upgrade for control plane")
+        self._helm_upgrade()
+        sleep_n_sec(30)
+
+        # Rolling restart — grouped by worker
+        self.logger.info(
+            "Step 7: Rolling storage node restart "
+            "(dual-node, grouped by worker)"
+        )
+        storage_node_list = self.sbcli_utils.get_storage_nodes()["results"]
+        ip_to_node_ids = self._build_ip_to_node_ids()
+        unique_ips = self._get_unique_worker_ips(storage_node_list)
+        total_nodes = len(storage_node_list)
+
+        for worker_idx, host_ip in enumerate(unique_ips, 1):
+            nids = ip_to_node_ids.get(host_ip, [])
+            self.logger.info(
+                f"Step 7.{worker_idx}: Restarting worker {host_ip} "
+                f"({worker_idx}/{len(unique_ips)}, "
+                f"{len(nids)} nodes: {nids})"
+            )
+
+            restart_ts = int(datetime.now().timestamp())
+
+            # Create StorageNodeOps for each node on this worker
+            ops_names = []
+            for node_id in nids:
+                ops_name, _ = self.k8s_utils.patch_storage_node_restart(
+                    node_uuid=node_id,
+                    spdk_image=self.target_spdk_image or None,
+                    spdk_proxy_image=self.target_spdk_proxy_image or None,
+                )
+                ops_names.append(ops_name)
+
+            # Wait for all StorageNodeOps to complete
+            for ops_name in ops_names:
+                self.k8s_utils.wait_storage_node_ops_done(
+                    ops_name, timeout=600
+                )
+
+            self.k8s_utils.wait_spdk_pods_ready(
+                expected_count=total_nodes, timeout=600
+            )
+
+            # Wait for all nodes on this worker to come online
+            for node_id in nids:
+                self.sbcli_utils.wait_for_storage_node_status(
+                    node_id=node_id, status="online", timeout=600,
+                )
+            self.logger.info(
+                f"All {len(nids)} nodes on worker {host_ip} are back online"
+            )
+
+            sleep_n_sec(30)
+            for node_id in nids:
+                self.validate_migration_for_node(
+                    restart_ts, 1200, node_id, 60, no_task_ok=True
+                )
+
+            if worker_idx < len(unique_ips):
+                sleep_n_sec(30)
+
+        self.logger.info("All storage nodes restarted successfully")
+        self.runner_k8s_log.restart_logging()
+
+        # Post-upgrade validation (same as parent)
+        self.logger.info("Step 8: Post-upgrade validation")
+        self._assert_all_nodes_healthy()
+        self.sbcli_utils.wait_for_cluster_status(
+            cluster_id=self.cluster_id, status="active", timeout=300,
+        )
+
+        fio_timeout = self.FIO_RUNTIME + 300
+        self._validate_all_fio(fio_timeout)
+        self.logger.info("All pre-upgrade FIO jobs validated successfully")
+
+        # Verify old data survives upgrade
+        self.logger.info("Step 9: Verifying old data integrity post-upgrade")
+        self._verify_old_data_post_upgrade()
+
+        # New PVC provisioning + snapshot/clone
+        self.logger.info("Step 10: Post-upgrade new PVC verification")
+        self._run_post_upgrade_verification()
+
+        # Node outage test
+        self._run_node_outage_test()
+
+        # Final checklist
+        self._run_final_checklist(is_maintenance_upgrade=False)

@@ -260,6 +260,14 @@ jobs:
 
       # ── Common steps (both upgrade types) ──
 
+      - name: Setup KUBECONFIG
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.K8S_KUBECONFIG }}" > ~/.kube/config_k8s
+          echo "KUBECONFIG=${HOME}/.kube/config_k8s" >> "$GITHUB_ENV"
+          export KUBECONFIG="${HOME}/.kube/config_k8s"
+          kubectl get nodes
+
       - name: Remove stale storagenodeset labels from all worker nodes
         if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
         run: |
@@ -289,7 +297,7 @@ jobs:
           echo "CSI hostpath data cleanup complete."
 
       - name: Install cert-manager (TLS prerequisite)
-        if: ${{ github.event.inputs.use_existing_cluster != 'true' && github.event.inputs.tls_enabled == 'true' }}
+        if: ${{ github.event.inputs.use_existing_cluster != 'true' && github.event.inputs.tls_enabled == 'true' && github.event.inputs.upgrade_type != 'r25-to-r2x' }}
         run: |
           helm repo add jetstack https://charts.jetstack.io
           helm repo update
