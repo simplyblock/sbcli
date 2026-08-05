@@ -131,6 +131,26 @@ def _cancel_atomically(
     return committed if performed["ok"] else None
 
 
+def _flag_canceled(fresh: JobSchedule) -> bool:
+    """Set only the canceled flag. Where the task has got to — status, retry,
+    owner, progress — stays as the runner left it; the runner reads the flag on
+    its next pass and finishes the task itself."""
+    if fresh.canceled:
+        return False
+    fresh.canceled = True
+    return True
+
+
+def _flag_canceled_if_pending(fresh: JobSchedule) -> bool:
+    """As _flag_canceled, but declines a task that has already finished. An
+    opportunistic bulk cancellation has nothing left to cancel there, and
+    flagging it would misreport a completed task as canceled. (An operator's
+    explicit cancel_task is deliberately not this strict.)"""
+    if fresh.status == JobSchedule.STATUS_DONE:
+        return False
+    return _flag_canceled(fresh)
+
+
 @contextlib.contextmanager
 def task_lease_heartbeat(task, owner=None):
     """Refresh this host's lease on `task` every TASK_LEASE_HEARTBEAT_SEC for
@@ -576,6 +596,29 @@ def cancel_pending_node_restart_tasks(cluster_id, node_id):
     return canceled
 
 
+def cancel_node_tasks(cluster_id, node_id, function_names):
+    """Flag the node's unfinished tasks of the given kinds canceled.
+
+    Used when a node is going away and the work queued against it is moot
+    (shutdown cancelling its migration tasks). Like every canceller this reads
+    in bulk and writes one row at a time, so each write goes through the CAS in
+    _cancel_atomically rather than putting the scan's copy back.
+
+    Returns how many tasks this call canceled.
+    """
+    canceled = 0
+    for task in db.get_job_tasks(cluster_id):
+        if task.node_id != node_id or task.function_name not in function_names:
+            continue
+        if task.status == JobSchedule.STATUS_DONE or task.canceled:
+            continue
+        if _cancel_atomically(task, _flag_canceled_if_pending) is None:
+            continue
+        canceled += 1
+        logger.info(f"Canceled task {task.get_id()} ({task.function_name}) on node {node_id}")
+    return canceled
+
+
 def list_tasks(cluster_id, is_json=False, limit=50, **kwargs):
     try:
         db.get_cluster_by_id(cluster_id)
@@ -648,14 +691,6 @@ def cancel_task(task_id):
     if task.device_id:
         device_controller.device_set_retries_exhausted(task.device_id, True)
 
-    def _flag_canceled(fresh):
-        if fresh.canceled:
-            return False
-        fresh.canceled = True
-
-    # Only the flag is set. Where the task has got to — status, retry, owner,
-    # progress — stays as the runner left it; the runner reads the flag on its
-    # next pass and finishes the task itself.
     committed = _cancel_atomically(task, _flag_canceled)
     if committed is not None:
         tasks_events.task_canceled(committed)
