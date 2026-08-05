@@ -825,7 +825,18 @@ jobs:
           NAMESPACE=simplyblock
 
           echo "=== Installing R25 spdk-csi chart ==="
-          cd $GITHUB_WORKSPACE/simplyblock-operator/csi-driver/charts/spdk-csi/latest/spdk-csi/
+          # v0.2.4 has charts/ at root; main moved it to csi-driver/charts/
+          if [ -d "$GITHUB_WORKSPACE/simplyblock-operator/csi-driver/charts/spdk-csi/latest/spdk-csi" ]; then
+            cd $GITHUB_WORKSPACE/simplyblock-operator/csi-driver/charts/spdk-csi/latest/spdk-csi/
+          elif [ -d "$GITHUB_WORKSPACE/simplyblock-operator/charts/spdk-csi/latest/spdk-csi" ]; then
+            cd $GITHUB_WORKSPACE/simplyblock-operator/charts/spdk-csi/latest/spdk-csi/
+          else
+            echo "ERROR: Cannot find spdk-csi chart directory"
+            ls -la $GITHUB_WORKSPACE/simplyblock-operator/
+            ls -la $GITHUB_WORKSPACE/simplyblock-operator/charts/ 2>/dev/null || true
+            ls -la $GITHUB_WORKSPACE/simplyblock-operator/csi-driver/ 2>/dev/null || true
+            exit 1
+          fi
           helm dependency build . 2>/dev/null || true
 
           helm install -n $NAMESPACE spdk-csi ./ \
