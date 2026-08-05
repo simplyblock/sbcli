@@ -874,7 +874,7 @@ jobs:
             --set csiConfig.simplybk.uuid="${CLUSTER_ID}" \
             --set csiConfig.simplybk.ip="http://simplyblock-webappapi.simplyblock:5000" \
             --set csiSecret.simplybk.secret="${CLUSTER_SECRET}" \
-            --set logicalVolume.pool_name="testing1" \
+            --set logicalVolume.pool_name="testpool" \
             --set image.simplyblock.tag="${BASE_SB_IMAGE}" \
             --set image.csi.tag="${CSI_DRIVER_TAG}" \
             --set logicalVolume.numDataChunks="${NDCS}" \
@@ -887,6 +887,8 @@ jobs:
             --set storagenode.create=true \
             --set storagenode.numPartitions="${PARTITIONS}" \
             --set storagenode.coresPercentage=50 \
+            --set storagenode.numDataChunks="${NDCS}" \
+            --set storagenode.numParityChunks="${NPCS}" \
             --set image.storageNode.tag="${STORAGENODE_TAG}"
 
           echo "spdk-csi chart installed"
