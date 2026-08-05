@@ -197,39 +197,90 @@ new module + unit tests, no runner changed yet. Provides:
   - `TaskAbort(reason)` → permanent / non-retryable (missing param, object not
     found, "not needed") → `STATUS_DONE` with a failure/short-circuit result.
     Replaces the handlers that currently mark DONE mid-body.
-- Execution: `concurrency == 1` runs inline (serial); `> 1` uses a
-  `ThreadPoolExecutor` with a per-task inflight set and an optional
-  `exclusion_key(task)` per-key inflight set + capped exponential backoff —
-  generalizing `node_add`/`restart`.
+- **Task writes are compare-and-set, never full-object writes** (revised after
+  the 2026-08 rebase — see "Upstream reconciliation" below). Every transition
+  runs as a mutator against the row as it stands (`db.atomic_update`), refusing
+  a row another actor has finished — and, for non-terminal transitions, one it
+  has canceled — and reporting whether it won. Only the two handler-owned
+  fields (`function_result`, `function_params`) are carried over from the
+  driver's copy. `on_finish` runs only for the winner of the terminal
+  transition.
+- Execution: **one dispatch path**. Every execution is submitted to the pool and
+  registered in the per-task inflight set (plus the optional
+  `exclusion_key(task)` per-key set); *serialized* execution submits and waits
+  on the future rather than running inline. Capped exponential backoff on
+  failure. Generalizes `node_add`/`restart`.
 - A `RunnerSpec` describing: `function_names`, `handler` (a void callable),
   `is_eligible` (default `lambda task, cluster: True`), `interval` (each runner
-  keeps its current cadence), `concurrency`, `exclusion_key`.
+  keeps its current cadence), `concurrency`, `exclusion_key`, `on_finish`,
+  `serialize` (per-task/per-cycle predicate; defaults to `concurrency == 1`).
 
 **B1…Bn — Migrate one runner per commit**, simplest → hardest, each preserving
 behavior and keeping the module-level handler importable for the existing tests:
 
-1. `fdb_backup`, `jc_comp`, `replication_final`, `sync_lvol_del` (trivial serial)
-2. `backup`, `cluster_expand`
-3. `node_add` (concurrency opt-in, no exclusion key)
-4. migration trio — `migration`, `new_dev_migration`, `failed_migration`
+1. ✅ `fdb_backup`, `jc_comp`, `replication_final`, `sync_lvol_del` (trivial serial)
+2. ✅ `backup`, `cluster_expand`
+3. ✅ `node_add` (concurrency opt-in, `node_addr` exclusion key)
+4. `restart` — **moved up** (was 6th). Concurrency + per-node exclusion; its
+   parallel-vs-serialized choice is the spec's `serialize` predicate
+   (`suspend_drain_complete` / `fd_dead_recovery_allowed`), and
+   `is_auto_restart_paused` becomes part of `is_eligible`. The driver's
+   `exclusion_key` + backoff subsumes `_node_inflight`/`_restart_next_attempt`,
+   and its `_task_finish`/`_task_update` CAS helpers are subsumed by the
+   driver's. Migrated first of the remainder because it is the runner that
+   defines the driver's hard requirements — if the design holds here it holds
+   everywhere.
+5. migration trio — `migration`, `new_dev_migration`, `failed_migration`
    (serial; `get_active_node_mig_task` / same-node-sibling gating becomes the
    spec's `is_eligible` predicate, not a concurrency `exclusion_key`)
-5. `port_allow` (large; its `is_eligible` omits the `IN_ACTIVATION` check — the
+6. `port_allow` (large; its `is_eligible` omits the `IN_ACTIVATION` check — the
    documented opt-out — and keeps the recovery logic)
-6. `restart` (concurrency + per-node exclusion + `fd_dead_recovery_allowed` /
-   `is_auto_restart_paused` gating; the driver's `exclusion_key` + backoff
-   subsumes `_node_inflight`/`_restart_next_attempt`. `is_auto_restart_paused`
-   becomes part of `is_eligible`)
-7. `lvol_migration` (largest; migrate the loop/lease/retry shell only, leave the
-   domain snapshot-copy state machine intact. Its pre-run guard chain — node
-   status, `cluster.status in (ACTIVE, DEGRADED)`, open cluster-expand task —
-   becomes the spec's `is_eligible` predicate; unbounded `max_retry=-1` is kept)
-8. `node_removal` (new upstream runner, `FN_NODE_REMOVAL`; already leased,
-   module-level loop, unbounded — a straightforward serial migration)
-9. `batch_migration` (new upstream runner, `FN_LVOL_BATCH_MIG`, ~884 lines;
-   migrate the loop/lease shell, leave its group orchestration intact)
+7. `node_removal` (`FN_NODE_REMOVAL`; already leased, module-level loop,
+   unbounded — a straightforward serial migration)
 
-**Upstream reconciliation (done during the 2026-07 rebase onto origin/main).**
+**Deferred to a follow-up PR** (see rebase-friendliness below — both are under
+active upstream development, and neither blocks the rest):
+
+- `lvol_migration` (largest; migrate the loop/lease/retry shell only, leave the
+  domain snapshot-copy state machine intact. Its pre-run guard chain — node
+  status, `cluster.status in (ACTIVE, DEGRADED)`, open cluster-expand task —
+  becomes the spec's `is_eligible` predicate; unbounded `max_retry=-1` is kept)
+- `batch_migration` (`FN_LVOL_BATCH_MIG`; migrate the loop/lease shell, leave
+  its group orchestration intact)
+
+**Upstream reconciliation (2026-08 rebase onto origin/main `4cb16a20b`).**
+Upstream landed `a61b00ad4` — *"fix(restart): stop double execution of a
+node-restart task (2026-07-29 incident)"* — which invalidates two of B0's
+original choices, both now corrected above:
+
+- **Full-object task writes are unsafe.** A `task.write_to_db()` of a copy read
+  before a long handler ran reverts whatever other actors committed meanwhile:
+  it un-canceled a task that `cancel_pending_node_restart_tasks` canceled when
+  the node came back ONLINE, and reclaimed a lease another host had taken. The
+  driver held that stale copy for the *entire* handler duration, i.e. the widest
+  possible window, and centralizing it would have propagated the defect to every
+  runner. All transitions are CAS now; the migrated runners needed no changes,
+  since none of them touch task state.
+- **A split dispatch path re-enters running tasks.** Restart chooses parallel vs
+  serialized per task per cycle from live cluster state (`suspend_drain_complete`,
+  `fd_dead_recovery_allowed`), and a mode flip mid-restart re-entered a task
+  still running on the pool because the inline branch consulted no inflight map.
+  Hence the single dispatch path and the `serialize` predicate: `concurrency`
+  cannot be a static number for restart.
+
+Also revised: B0 originally said handlers stop re-fetching. They stop
+re-fetching for *lifecycle* decisions, but a handler must re-read the task
+immediately before a destructive step — upstream added exactly that before
+restart's shutdown.
+
+**Rebase-friendliness (2026-08).** `lvol_migration` and `batch_migration` took
+~17 upstream commits in this window (cleanup state machine rewritten, multipath,
+retry ceilings removed), several still labelled `TEMP:`. B7/B9 are therefore
+deferred to a follow-up PR rather than rebased repeatedly against a moving
+target; `restart` moves up to be migrated first, since it is the runner that
+defines the driver's hard requirements.
+
+**Earlier upstream reconciliation (2026-07 rebase).**
 Upstream independently reworked the runners: renamed `task_runner`→`process_task`
 and added `tasks_controller.task_lease_heartbeat` (a lease-keepalive thread) to
 the six long-blocking runners. This is now **folded into the B0 driver** — the
