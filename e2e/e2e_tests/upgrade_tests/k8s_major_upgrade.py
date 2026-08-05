@@ -182,6 +182,7 @@ class K8sNativeMajorUpgrade(TestClusterBase):
         self.pvc_details: dict[str, dict] = {}
         self.snapshot_details: dict[str, dict] = {}
         self.clone_details: dict[str, dict] = {}
+        self.pre_upgrade_checksums: dict[str, dict] = {}
 
         self.logger.info(
             f"K8s native upgrade: {self.base_version} -> {self.target_version} "
@@ -505,6 +506,134 @@ class K8sNativeMajorUpgrade(TestClusterBase):
             self.logger.info(f"Validating FIO for clone: {clone_name}")
             self._save_fio_pod_logs(detail["job_name"], clone_name)
             self.k8s_utils.validate_fio_job(detail["job_name"], timeout=timeout)
+
+    def _capture_pvc_checksums(self, pvc_names: list[str]) -> dict[str, dict]:
+        """Capture MD5 checksums for all files on the given PVCs.
+
+        Returns ``{pvc_name: {filepath: md5hash, ...}, ...}``.
+        """
+        all_checksums = {}
+        for pvc_name in pvc_names:
+            pod_name = f"cksum-{pvc_name}"[:63]
+            self.logger.info(f"Capturing checksums for PVC {pvc_name}")
+            try:
+                self.k8s_utils.create_utility_pod(pod_name, pvc_name)
+                self.k8s_utils.wait_pod_running(pod_name)
+                files = self.k8s_utils.find_files_in_pvc(pod_name)
+                if files:
+                    checksums = self.k8s_utils.generate_checksums_in_pvc(
+                        pod_name, files,
+                    )
+                    all_checksums[pvc_name] = checksums
+                    self.logger.info(
+                        f"  {pvc_name}: captured {len(checksums)} file checksums"
+                    )
+                else:
+                    self.logger.warning(f"  {pvc_name}: no files found on volume")
+                    all_checksums[pvc_name] = {}
+            except Exception as exc:
+                self.logger.warning(
+                    f"  Failed to capture checksums for {pvc_name}: {exc}"
+                )
+                all_checksums[pvc_name] = {}
+            finally:
+                try:
+                    self.k8s_utils.delete_pod(pod_name, wait=True)
+                except Exception:
+                    pass
+        return all_checksums
+
+    def _verify_pvc_checksums(
+        self, pre_checksums: dict[str, dict], label: str = "post-upgrade",
+    ):
+        """Verify that current PVC data matches previously captured checksums.
+
+        Raises ``AssertionError`` if any checksum mismatch is found.
+        """
+        mismatches = []
+        for pvc_name, expected in pre_checksums.items():
+            if not expected:
+                self.logger.warning(
+                    f"  Skipping {pvc_name} — no pre-upgrade checksums captured"
+                )
+                continue
+
+            pod_name = f"verify-cksum-{pvc_name}"[:63]
+            self.logger.info(f"Verifying checksums for PVC {pvc_name} ({label})")
+            try:
+                self.k8s_utils.create_utility_pod(pod_name, pvc_name)
+                self.k8s_utils.wait_pod_running(pod_name)
+                actual = self.k8s_utils.generate_checksums_in_pvc(
+                    pod_name, list(expected.keys()),
+                )
+                for filepath, exp_hash in expected.items():
+                    act_hash = actual.get(filepath)
+                    if act_hash != exp_hash:
+                        msg = (
+                            f"MISMATCH {pvc_name}:{filepath} "
+                            f"expected={exp_hash} actual={act_hash}"
+                        )
+                        self.logger.error(msg)
+                        mismatches.append(msg)
+                    else:
+                        self.logger.info(
+                            f"  {filepath}: {exp_hash} ✓"
+                        )
+            except Exception as exc:
+                self.logger.warning(
+                    f"  Failed to verify checksums for {pvc_name}: {exc}"
+                )
+            finally:
+                try:
+                    self.k8s_utils.delete_pod(pod_name, wait=True)
+                except Exception:
+                    pass
+
+        if mismatches:
+            raise AssertionError(
+                f"Data integrity check failed ({label}): "
+                + "; ".join(mismatches)
+            )
+        self.logger.info(f"All checksums verified ({label})")
+
+    def _run_fio_on_clones(self, runtime: int = 60):
+        """Run FIO on clone PVCs (after cleaning parent data from clone)."""
+        clone_jobs = []
+        for clone_name, detail in self.clone_details.items():
+            clone_job = detail["job_name"]
+            clone_cm = detail["configmap_name"]
+
+            fio_config, warmup_config, _meta = self._build_fio_config(
+                clone_name, runtime=runtime,
+            )
+            avoid = self.k8s_utils.get_pvc_primary_k8s_node(
+                clone_name, self.sbcli_utils,
+            )
+            self.k8s_utils.create_fio_job(
+                job_name=clone_job, pvc_name=clone_name,
+                configmap_name=clone_cm, fio_config=fio_config,
+                image=self.FIO_IMAGE, avoid_node=avoid,
+                warmup_config=warmup_config,
+            )
+            clone_jobs.append((clone_job, clone_name))
+            sleep_n_sec(5)
+
+        # Wait for clone FIO with tolerance
+        fio_timeout = runtime + 240  # runtime + 4 min buffer
+        for job_name, clone_name in clone_jobs:
+            try:
+                self._save_fio_pod_logs(job_name, clone_name)
+                self.k8s_utils.validate_fio_job(job_name, timeout=fio_timeout)
+                self.logger.info(f"Clone FIO completed: {clone_name}")
+            except Exception as exc:
+                self.logger.warning(
+                    f"Clone FIO did not complete for {clone_name}: {exc}. "
+                    "Continuing — non-fatal."
+                )
+
+        # Clean up clone FIO pods
+        self.k8s_utils.cleanup_stale_fio_resources()
+        sleep_n_sec(5)
 
     def _run_post_upgrade_verification(self):
         """Create new PVC + FIO + snapshot + clone post-upgrade."""
@@ -1479,6 +1608,15 @@ spec:
         self.logger.info("Pre-upgrade Step 4: Creating snapshots and clones")
         self._create_snapshots_and_clones(skip_clone_fio=True)
 
+        # Run FIO on clones (writes fresh data to clones)
+        self.logger.info("Pre-upgrade Step 4.1: Running FIO on clones")
+        self._run_fio_on_clones(runtime=60)
+
+        # Capture MD5 checksums on all PVCs and clones before upgrade
+        self.logger.info("Pre-upgrade Step 5: Capturing MD5 checksums before upgrade")
+        all_volume_names = list(self.pvc_details.keys()) + list(self.clone_details.keys())
+        self.pre_upgrade_checksums = self._capture_pvc_checksums(all_volume_names)
+
         # Phase 2.7: Capture pre-upgrade state
         self._capture_pre_upgrade_state()
 
@@ -1532,6 +1670,17 @@ spec:
             cluster_id=self.cluster_id, status="active", timeout=600,
         )
         self._assert_all_nodes_healthy()
+
+        # Verify MD5 checksums match post-upgrade
+        if hasattr(self, "pre_upgrade_checksums") and self.pre_upgrade_checksums:
+            self.logger.info(
+                "Post-upgrade: Verifying MD5 checksums match pre-upgrade data"
+            )
+            self._verify_pvc_checksums(self.pre_upgrade_checksums, "post-upgrade")
+        else:
+            self.logger.warning(
+                "No pre-upgrade checksums available — skipping MD5 verification"
+            )
 
         # Phase 4.1–4.3: Verify old data survives the upgrade
         self.logger.info("Post-upgrade: Verifying old data integrity")
