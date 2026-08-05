@@ -83,6 +83,73 @@ def _default_eligible(task: JobSchedule, cluster: Any) -> bool:
     return True
 
 
+def _commit(task: JobSchedule, apply: Callable[[JobSchedule], None],
+            terminal: bool = False, context: str = "task-runner") -> Optional[JobSchedule]:
+    """Commit a change onto the task row as it exists NOW.
+
+    Never a full-object ``write_to_db`` of ``task``: that copy was read before
+    the handler ran, and a handler runs for minutes (node add, restart,
+    migration). Writing it back reinstates every field another actor changed
+    meanwhile — it un-cancels a task that ``cancel_pending_node_restart_tasks``
+    canceled when the node came back ONLINE, and reclaims a lease another host
+    has since taken. That pair of lost updates is what re-ran a restart against
+    an already-recovered node (2026-07-29 double restart).
+
+    Only the two fields a handler owns are carried over from ``task``:
+    ``function_result`` and ``function_params`` (where handlers record progress
+    like ``recovery_started`` / ``merge_started``, which must survive so the
+    next attempt does not repeat the step).
+
+    A terminal commit may finish a canceled task — that IS the cancellation
+    being carried out; a non-terminal one would be reviving it.
+
+    Returns the committed task, or None if another actor already owns the
+    outcome — the caller must stop driving it.
+    """
+    result = task.function_result
+    params = task.function_params
+    now = str(datetime.datetime.now(datetime.timezone.utc))
+    won = {"ok": False}
+
+    def _mutate(fresh: JobSchedule):
+        if fresh.status == JobSchedule.STATUS_DONE:
+            return False
+        if not terminal and fresh.canceled:
+            return False
+        fresh.function_result = result
+        fresh.function_params = params
+        apply(fresh)
+        fresh.updated_at = now
+        won["ok"] = True
+        return True
+
+    committed = db.atomic_update(task, _mutate)
+    if committed is None or not won["ok"]:
+        logger.info(f"{context}: task {task.uuid} was finished or canceled "
+                    f"concurrently; another actor owns the outcome")
+        return None
+    return committed
+
+
+def checkpoint(task: JobSchedule, **params) -> Optional[JobSchedule]:
+    """Record handler progress on the task, mid-handler.
+
+    For a long handler with a step that must not be repeated — a cleanup
+    shutdown, an issued transfer — mark it done the moment it succeeds rather
+    than when the handler returns, where a crash in between would lose the fact
+    and repeat the step on the next attempt.
+
+    Doubles as the cancellation probe such a handler needs anyway: returns the
+    fresh task to carry on with, or None if the task was canceled or finished
+    underneath it, in which case the handler must stop rather than proceed to
+    the next destructive step.
+    """
+    def _apply(fresh: JobSchedule) -> None:
+        fresh.function_params = dict(fresh.function_params, **params)
+
+    return _commit(task, _apply)
+
+
 @dataclass
 class RunnerSpec:
     """Describes one task runner. ``function_names`` and ``handler`` are the only
@@ -115,6 +182,11 @@ class RunnerSpec:
     # restart fans out only for a drained suspension or a fully-dead failure
     # domain) supplies a predicate instead of a fixed concurrency.
     serialize: Optional[Callable[[JobSchedule, Any], bool]] = None
+    # Optional per-cluster work, run once each cycle after that cluster's tasks
+    # are dispatched. For upkeep a runner owns that is not attached to any task
+    # — the restart runner's watchdog for nodes left in a transitional state
+    # with no task owning them. Failures are logged, never fatal.
+    on_cycle: Optional[Callable[[Any], None]] = None
 
     def __post_init__(self) -> None:
         if self.concurrency < 1:
@@ -156,7 +228,20 @@ class TaskRunner:
                             self._forget(task.uuid)
                             continue
                         self._dispatch(task, cl)
+                    self._run_cycle_hook(cl)
             time.sleep(self.spec.interval)
+
+    def _run_cycle_hook(self, cluster: Any) -> None:
+        if self.spec.on_cycle is None:
+            return
+        # Upkeep failing must not stop the loop from serving tasks — but a DB
+        # error still propagates, since that means the process should exit.
+        try:
+            self.spec.on_cycle(cluster)
+        except Exception as e:  # noqa: BLE001 - upkeep failure is not fatal
+            logger.error(f"{self.spec.name}: cycle hook failed for "
+                         f"cluster {cluster.get_id()}: {e}")
+            logger.exception(e)
 
     # -- dispatch -----------------------------------------------------------
 
@@ -269,52 +354,7 @@ class TaskRunner:
 
     def _cas(self, task: JobSchedule, apply: Callable[[JobSchedule], None],
              terminal: bool = False) -> Optional[JobSchedule]:
-        """Commit a lifecycle transition onto the task row as it exists NOW.
-
-        Never a full-object ``write_to_db`` of ``task``: the driver fetched that
-        copy before the handler ran, and a handler runs for minutes (node add,
-        restart, migration). Writing it back reinstates every field another
-        actor changed meanwhile — it un-cancels a task that
-        ``cancel_pending_node_restart_tasks`` canceled when the node came back
-        ONLINE, and reclaims a lease another host has since taken. That pair of
-        lost updates is what re-ran a restart against an already-recovered node
-        (2026-07-29 double restart).
-
-        Only the two fields a handler owns are carried over from ``task``:
-        ``function_result`` and ``function_params`` (where handlers record
-        progress like ``recovery_started`` / ``merge_started``, which must
-        survive so the next attempt does not re-issue the RPC).
-
-        Returns the committed task, or None if another actor already owns the
-        outcome — the caller must stop driving it.
-        """
-        result = task.function_result
-        params = task.function_params
-        now = str(datetime.datetime.now(datetime.timezone.utc))
-        won = {"ok": False}
-
-        def _mutate(fresh: JobSchedule):
-            if fresh.status == JobSchedule.STATUS_DONE:
-                return False
-            # A terminal transition is allowed to finish a canceled task —
-            # that IS the cancellation being carried out. A non-terminal one
-            # would be reviving it.
-            if not terminal and fresh.canceled:
-                return False
-            fresh.function_result = result
-            fresh.function_params = params
-            apply(fresh)
-            fresh.updated_at = now
-            won["ok"] = True
-            return True
-
-        committed = db.atomic_update(task, _mutate)
-        if committed is None or not won["ok"]:
-            logger.info(
-                f"{self.spec.name}: task {task.uuid} was finished or canceled "
-                f"concurrently; another actor owns the outcome")
-            return None
-        return committed
+        return _commit(task, apply, terminal=terminal, context=self.spec.name)
 
     @staticmethod
     def _to(status: str) -> Callable[[JobSchedule], None]:
