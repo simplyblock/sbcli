@@ -30,7 +30,12 @@ class TestSyncDeleteFailureEvent(unittest.TestCase):
 
     def _task(self, previous_result=""):
         task = MagicMock()
-        task.function_result = previous_result
+        task.uuid = "task-1"
+        # The task runner clears function_result before every attempt, so the
+        # "same failure again" check reads the runner's own last-message map.
+        sync_del._last_sync_del_failure.clear()
+        if previous_result:
+            sync_del._last_sync_del_failure[task.uuid] = previous_result
         return task
 
     def _node(self):

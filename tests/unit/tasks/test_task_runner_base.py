@@ -152,6 +152,53 @@ def test_abort_marks_done_with_reason(monkeypatch):
     assert task.function_result == "missing param"
 
 
+# -- terminal cleanup hook --------------------------------------------------
+
+@pytest.mark.parametrize("handler,expected", [
+    (MagicMock(return_value=None), "completed"),
+    (MagicMock(side_effect=trb.TaskAbort("gone")), "gone"),
+])
+def test_on_finish_runs_for_every_terminal_outcome(monkeypatch, handler, expected):
+    task = _task()
+    _wire(monkeypatch, task)
+    on_finish = MagicMock()
+
+    _runner(handler, on_finish=on_finish)._process(task, MagicMock())
+
+    on_finish.assert_called_once_with(task)
+    assert task.status == JobSchedule.STATUS_DONE
+    assert task.function_result == expected
+
+
+def test_on_finish_runs_when_the_handler_is_never_reached(monkeypatch):
+    task = _task(canceled=True)
+    _wire(monkeypatch, task)
+    on_finish = MagicMock()
+
+    _runner(MagicMock(), on_finish=on_finish)._process(task, MagicMock())
+    on_finish.assert_called_once_with(task)
+
+
+def test_on_finish_does_not_run_for_a_suspended_task(monkeypatch):
+    task = _task()
+    _wire(monkeypatch, task)
+    on_finish = MagicMock()
+
+    _runner(MagicMock(side_effect=trb.TaskDefer("later")),
+            on_finish=on_finish)._process(task, MagicMock())
+    on_finish.assert_not_called()
+
+
+def test_failing_on_finish_does_not_break_the_task(monkeypatch):
+    task = _task()
+    _wire(monkeypatch, task)
+
+    runner = _runner(MagicMock(return_value=None),
+                     on_finish=MagicMock(side_effect=RuntimeError("cleanup boom")))
+    runner._process(task, MagicMock())  # must not raise
+    assert task.status == JobSchedule.STATUS_DONE
+
+
 # -- pre-run skip-gates -----------------------------------------------------
 
 def test_ineligible_skips_without_claim_or_write(monkeypatch):
