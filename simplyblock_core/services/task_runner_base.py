@@ -26,10 +26,25 @@ flow:
 - **raise** :class:`TaskAbort` — a permanent, non-retryable stop (missing param,
   object gone, "not needed"). Finish the task (``STATUS_DONE``) with the reason.
 
+Two task fields ARE the handler's to set: ``function_result`` (the message the
+outcome is recorded with) and ``function_params`` (where a multi-cycle handler
+records progress — ``recovery_started``, ``merge_started``, ``fail_count``).
+Both are carried onto the row when the driver commits the outcome.
+
+A handler that does something destructive should re-read the task immediately
+before doing it. The driver's pre-run re-fetch is authoritative for the
+*lifecycle* decisions it makes, but it happens before the handler starts, and by
+the time a long handler reaches its point of no return the task may have been
+canceled.
+
 DB errors are deliberately NOT caught: an unhandled ``get_clusters`` /
 ``get_job_tasks`` failure propagates out of :func:`serve`, exits the process
 non-zero, and lets the orchestrator restart it with a fresh FDB connection.
+
+Task writes are compare-and-set, never full-object writes: see
+:meth:`TaskRunner._cas`.
 """
+import datetime
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -91,8 +106,15 @@ class RunnerSpec:
     # Optional cleanup, called once the task has reached STATUS_DONE and been
     # written — whichever way it got there (handler success, TaskAbort, cancel
     # or retry ceiling). For releasing state the task held, which would
-    # otherwise leak on the terminal paths the handler never sees.
+    # otherwise leak on the terminal paths the handler never sees. Runs only
+    # for the caller that won the terminal transition.
     on_finish: Optional[Callable[[JobSchedule], None]] = None
+    # Optional per-task, per-cycle "must this one run to completion before the
+    # loop moves on?". Defaults to serializing exactly when the pool has a
+    # single worker. A runner whose mode depends on live cluster state (node
+    # restart fans out only for a drained suspension or a fully-dead failure
+    # domain) supplies a predicate instead of a fixed concurrency.
+    serialize: Optional[Callable[[JobSchedule, Any], bool]] = None
 
     def __post_init__(self) -> None:
         if self.concurrency < 1:
@@ -105,10 +127,8 @@ class TaskRunner:
 
     def __init__(self, spec: RunnerSpec):
         self.spec = spec
-        self._executor = (
-            ThreadPoolExecutor(max_workers=spec.concurrency,
-                               thread_name_prefix=spec.name)
-            if spec.concurrency > 1 else None)
+        self._executor = ThreadPoolExecutor(max_workers=spec.concurrency,
+                                            thread_name_prefix=spec.name)
         self._lock = threading.Lock()
         # task uuid -> Future-in-flight guard (this host), so the dispatch loop
         # never hands the same task to two workers. Cross-host duplicate
@@ -147,10 +167,6 @@ class TaskRunner:
         if time.time() < self._next_attempt.get(uuid, 0):
             return
 
-        if self._executor is None:
-            self._process(task, cluster)
-            return
-
         with self._lock:
             if uuid in self._inflight:
                 return
@@ -160,7 +176,21 @@ class TaskRunner:
             self._inflight.add(uuid)
             if key is not None:
                 self._inflight_keys[key] = uuid
-        self._executor.submit(self._process_worker, task, cluster)
+
+        # Single dispatch path: serialized execution submits to the pool and
+        # waits, rather than running inline. A split — one branch registering
+        # in-flight and another not — is what let a dispatch-mode flip
+        # mid-restart re-enter a task that was still running, and force-shut an
+        # already-recovered node (2026-07-29 double restart). Going through the
+        # registry either way makes a flip harmless in both directions.
+        future = self._executor.submit(self._process_worker, task, cluster)
+        if self._serialized(task, cluster):
+            future.result()
+
+    def _serialized(self, task: JobSchedule, cluster: Any) -> bool:
+        if self.spec.serialize is not None:
+            return self.spec.serialize(task, cluster)
+        return self.spec.concurrency == 1
 
     def _process_worker(self, task: JobSchedule, cluster: Any) -> None:
         # A worker crash must be contained to this task, never kill the service
@@ -187,10 +217,10 @@ class TaskRunner:
             logger.info(f"{self.spec.name}: task {uuid} owned by another runner host; skipping")
             return
 
-        # Authoritative re-fetch AFTER the claim: claim_task mutated the DB copy
-        # (owner / updated_at) but not this local object, and write_to_db writes
-        # the whole object — reading the fresh, lease-stamped copy here is what
-        # keeps a later write from clobbering the owner.
+        # Authoritative re-fetch AFTER the claim: claim_task mutated the DB row
+        # (owner / updated_at) but not this local object, and the lifecycle
+        # decisions below — canceled, retry ceiling — must be made on the row as
+        # it stands, not on whatever the dispatch loop happened to read.
         task = db.get_task_by_id(uuid)
         if task is None or task.status == JobSchedule.STATUS_DONE:
             self._forget(uuid)
@@ -204,8 +234,11 @@ class TaskRunner:
             return
 
         if task.status != JobSchedule.STATUS_RUNNING:
-            task.status = JobSchedule.STATUS_RUNNING
-            task.write_to_db(db.kv_store)
+            running = self._cas(task, self._to(JobSchedule.STATUS_RUNNING))
+            if running is None:
+                self._forget(uuid)
+                return
+            task = running
 
         # Drop the previous attempt's result so a task that fails and later
         # succeeds does not finish carrying the stale failure message. Handlers
@@ -234,8 +267,62 @@ class TaskRunner:
 
     # -- outcome transitions (the only places task state is mutated) --------
 
+    def _cas(self, task: JobSchedule, apply: Callable[[JobSchedule], None],
+             terminal: bool = False) -> Optional[JobSchedule]:
+        """Commit a lifecycle transition onto the task row as it exists NOW.
+
+        Never a full-object ``write_to_db`` of ``task``: the driver fetched that
+        copy before the handler ran, and a handler runs for minutes (node add,
+        restart, migration). Writing it back reinstates every field another
+        actor changed meanwhile — it un-cancels a task that
+        ``cancel_pending_node_restart_tasks`` canceled when the node came back
+        ONLINE, and reclaims a lease another host has since taken. That pair of
+        lost updates is what re-ran a restart against an already-recovered node
+        (2026-07-29 double restart).
+
+        Only the two fields a handler owns are carried over from ``task``:
+        ``function_result`` and ``function_params`` (where handlers record
+        progress like ``recovery_started`` / ``merge_started``, which must
+        survive so the next attempt does not re-issue the RPC).
+
+        Returns the committed task, or None if another actor already owns the
+        outcome — the caller must stop driving it.
+        """
+        result = task.function_result
+        params = task.function_params
+        now = str(datetime.datetime.now(datetime.timezone.utc))
+        won = {"ok": False}
+
+        def _mutate(fresh: JobSchedule):
+            if fresh.status == JobSchedule.STATUS_DONE:
+                return False
+            # A terminal transition is allowed to finish a canceled task —
+            # that IS the cancellation being carried out. A non-terminal one
+            # would be reviving it.
+            if not terminal and fresh.canceled:
+                return False
+            fresh.function_result = result
+            fresh.function_params = params
+            apply(fresh)
+            fresh.updated_at = now
+            won["ok"] = True
+            return True
+
+        committed = db.atomic_update(task, _mutate)
+        if committed is None or not won["ok"]:
+            logger.info(
+                f"{self.spec.name}: task {task.uuid} was finished or canceled "
+                f"concurrently; another actor owns the outcome")
+            return None
+        return committed
+
+    @staticmethod
+    def _to(status: str) -> Callable[[JobSchedule], None]:
+        def _apply(task: JobSchedule) -> None:
+            task.status = status
+        return _apply
+
     def _succeed(self, task: JobSchedule) -> None:
-        task.status = JobSchedule.STATUS_DONE
         if not task.function_result:
             task.function_result = "completed"
         self._write_terminal(task)
@@ -244,19 +331,21 @@ class TaskRunner:
         """Terminal DONE for a non-handler-success reason (canceled, max retry,
         abort)."""
         task.function_result = result
-        task.status = JobSchedule.STATUS_DONE
         self._write_terminal(task)
 
     def _write_terminal(self, task: JobSchedule) -> None:
-        task.write_to_db(db.kv_store)
+        committed = self._cas(task, self._to(JobSchedule.STATUS_DONE), terminal=True)
         self._forget(task.uuid)
-        if self.spec.on_finish is None:
+        if committed is None or self.spec.on_finish is None:
+            # Losing the transition means someone else finished the task and
+            # owns its cleanup too; running it here would release the resource
+            # twice.
             return
         # Cleanup runs after the terminal write, so a hook that inspects the
         # task's own state (a lock held until no active task remains) sees it
         # as finished. A failing hook must not take the loop down with it.
         try:
-            self.spec.on_finish(task)
+            self.spec.on_finish(committed)
         except Exception as e:  # noqa: BLE001 - cleanup failure is not fatal
             logger.error(f"{self.spec.name}: task {task.uuid} on_finish failed: {e}")
             logger.exception(e)
@@ -264,17 +353,25 @@ class TaskRunner:
     def _defer(self, task: JobSchedule, reason: str) -> None:
         if reason:
             task.function_result = reason
-        task.status = JobSchedule.STATUS_SUSPENDED
-        task.write_to_db(db.kv_store)
+        if self._cas(task, self._to(JobSchedule.STATUS_SUSPENDED)) is None:
+            self._forget(task.uuid)
+            return
         self._clear_backoff(task.uuid)
 
     def _fail(self, task: JobSchedule, reason: str) -> None:
-        task.retry += 1
         task.function_result = reason
-        task.status = JobSchedule.STATUS_SUSPENDED
-        task.write_to_db(db.kv_store)
+
+        def _apply(fresh: JobSchedule) -> None:
+            fresh.retry += 1
+            fresh.status = JobSchedule.STATUS_SUSPENDED
+
+        committed = self._cas(task, _apply)
+        if committed is None:
+            self._forget(task.uuid)
+            return
+        # Back off on the committed retry count, not the stale local one.
         with self._lock:
-            self._next_attempt[task.uuid] = time.time() + self._backoff_delay(task.retry)
+            self._next_attempt[task.uuid] = time.time() + self._backoff_delay(committed.retry)
 
     # -- bookkeeping --------------------------------------------------------
 
