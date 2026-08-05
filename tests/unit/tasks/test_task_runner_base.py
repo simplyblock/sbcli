@@ -539,3 +539,79 @@ def test_run_propagates_db_error(monkeypatch):
 def test_spec_rejects_zero_concurrency():
     with pytest.raises(ValueError):
         trb.RunnerSpec(function_names=("fn",), handler=MagicMock(), concurrency=0)
+
+
+# -- handler progress checkpoints -------------------------------------------
+
+def test_checkpoint_persists_progress_immediately(monkeypatch):
+    """A destructive step records itself the moment it succeeds, so a crash
+    before the handler returns does not repeat it."""
+    task = _task()
+    store = _wire(monkeypatch, task)
+
+    fresh = trb.checkpoint(store.get_task_by_id("task-1"), cleanup_shutdown_done=True)
+
+    assert fresh.function_params["cleanup_shutdown_done"] is True
+    assert store.row().function_params["cleanup_shutdown_done"] is True
+
+
+def test_checkpoint_keeps_existing_params(monkeypatch):
+    task = _task()
+    task.function_params = {"node_addr": "1.2.3.4:5000"}
+    store = _wire(monkeypatch, task)
+
+    trb.checkpoint(store.get_task_by_id("task-1"), cleanup_shutdown_done=True)
+
+    assert store.row().function_params == {
+        "node_addr": "1.2.3.4:5000", "cleanup_shutdown_done": True}
+
+
+def test_checkpoint_reports_a_cancellation_under_the_handler(monkeypatch):
+    """The handler's cancellation probe: a task canceled mid-handler must not
+    go on to the next destructive step."""
+    task = _task()
+    store = _wire(monkeypatch, task)
+    store.concurrently(canceled=True)
+
+    assert trb.checkpoint(store.get_task_by_id("task-1"), step_done=True) is None
+    assert "step_done" not in store.row().function_params
+
+
+def test_checkpoint_reports_a_task_finished_under_the_handler(monkeypatch):
+    task = _task()
+    store = _wire(monkeypatch, task)
+    store.concurrently(status=JobSchedule.STATUS_DONE)
+
+    assert trb.checkpoint(store.get_task_by_id("task-1"), step_done=True) is None
+
+
+# -- per-cluster cycle hook -------------------------------------------------
+
+def test_cycle_hook_runs_once_per_cluster(monkeypatch):
+    cluster = MagicMock()
+    cluster.get_id.return_value = "cl-1"
+    db = MagicMock()
+    db.get_clusters.return_value = [cluster]
+    db.get_job_tasks.return_value = []
+    monkeypatch.setattr(trb, "db", db)
+    monkeypatch.setattr(trb.time, "sleep", MagicMock(side_effect=_StopLoop))
+    on_cycle = MagicMock()
+
+    with pytest.raises(_StopLoop):
+        _runner(MagicMock(), on_cycle=on_cycle).run()
+
+    on_cycle.assert_called_once_with(cluster)
+
+
+def test_failing_cycle_hook_does_not_stop_the_loop(monkeypatch):
+    cluster = MagicMock()
+    cluster.get_id.return_value = "cl-1"
+    db = MagicMock()
+    db.get_clusters.return_value = [cluster]
+    db.get_job_tasks.return_value = []
+    monkeypatch.setattr(trb, "db", db)
+    monkeypatch.setattr(trb.time, "sleep", MagicMock(side_effect=_StopLoop))
+
+    runner = _runner(MagicMock(), on_cycle=MagicMock(side_effect=RuntimeError("watchdog boom")))
+    with pytest.raises(_StopLoop):   # reached the sleep, i.e. the cycle completed
+        runner.run()
