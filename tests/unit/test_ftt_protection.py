@@ -579,12 +579,22 @@ class TestNpcs2Ft1Additional(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # Failure-domain-aware capacity check
 #
-# With FD enabled, the capacity cap (npcs) counts distinct affected failure
-# domains instead of raw not-online nodes, mirroring the operator's
-# fdDrainGate (nodedrain_controller.go) -- piling onto an already-affected
-# domain is always free; a *new* domain is gated on distinct-domain count
-# when there are >= ndcs+npcs domains, or on the plain node-count cap
-# otherwise (under-provisioned).
+# With FD enabled, the risk budget is npcs, spent per domain at a rate of
+# min(nodes_down_in_that_domain, chunks_per_domain), where chunks_per_domain
+# = ceil((ndcs+npcs)/domains_available). A domain that already has
+# chunks_per_domain nodes down has maxed its contribution -- further nodes in
+# THAT SAME domain are free -- but a node in a domain that hasn't maxed out
+# yet is only allowed if the combined risk across every affected domain still
+# leaves room in the npcs budget. This mirrors the operator's fdDrainGate
+# (nodedrain_controller.go) and reduces to "up to npcs whole domains are
+# free" when there are >= ndcs+npcs domains (chunks_per_domain == 1).
+#
+# Confirmed against the backend team's stated requirements (2026-08, Dmitrii
+# Iakovlev): for a 2+2 layout,
+#   - 2 failure domains: safe combos are "1 whole FD down" (any node count
+#     within it) OR "1 node in each of the 2 FDs" -- nothing beyond that.
+#   - 3 failure domains: only 1 FD may be fully down, not 2.
+#   - 4 failure domains: 2 FDs may be fully down (the well-provisioned case).
 # ---------------------------------------------------------------------------
 
 class TestFailureDomainAwareCapacity(unittest.TestCase):
@@ -666,7 +676,151 @@ class TestFailureDomainAwareCapacity(unittest.TestCase):
         db = _db(cl, nodes)
         allowed, reason = _check_ftt_allows_node_removal("n1", db)
         self.assertFalse(allowed)
-        self.assertIn("insufficient failure domains", reason)
+        self.assertIn("risk budget", reason)
+
+    # --- Dmitrii's confirmed scenarios: 2 FD / 2+2 ---------------------------
+    # chunks_per_domain = ceil(4/2) = 2. Safe: "1 whole FD" or "1 node per FD",
+    # nothing more -- verified against the specific combinations he ruled out.
+
+    def test_2fd_one_whole_fd_down_is_safe(self):
+        """Domain 1 already has 3-of-4 nodes down; the 4th is still allowed
+        (piling within a single domain, which may go fully down)."""
+        cl = _cluster(npcs=2, ndcs=2, ft=2, enable_failure_domain=True)
+        nodes = [
+            _node("n1", failure_domain=1),
+            _node("n2", status=StorageNode.STATUS_OFFLINE, failure_domain=1),
+            _node("n3", status=StorageNode.STATUS_OFFLINE, failure_domain=1),
+            _node("n4", status=StorageNode.STATUS_OFFLINE, failure_domain=1),
+            _node("n5", failure_domain=2), _node("n6", failure_domain=2),
+            _node("n7", failure_domain=2), _node("n8", failure_domain=2),
+        ]
+        db = _db(cl, nodes)
+        allowed, _ = _check_ftt_allows_node_removal("n1", db)
+        self.assertTrue(allowed)
+
+    def test_2fd_one_node_per_fd_is_safe(self):
+        """1 node down in domain 1; removing 1 node in domain 2 is safe."""
+        cl = _cluster(npcs=2, ndcs=2, ft=2, enable_failure_domain=True)
+        nodes = [
+            _node("n1", failure_domain=2),
+            _node("n2", status=StorageNode.STATUS_OFFLINE, failure_domain=1),
+            _node("n3", failure_domain=1),
+            _node("n4", failure_domain=2),
+        ]
+        db = _db(cl, nodes)
+        allowed, _ = _check_ftt_allows_node_removal("n1", db)
+        self.assertTrue(allowed)
+
+    def test_2fd_whole_fd_plus_other_fd_node_is_unsafe(self):
+        """Domain 1 fully down (4 nodes) -- a node in domain 2 must now be
+        blocked (not one of the two safe combinations)."""
+        cl = _cluster(npcs=2, ndcs=2, ft=2, enable_failure_domain=True)
+        nodes = [
+            _node("n1", failure_domain=2),
+            _node("n2", status=StorageNode.STATUS_OFFLINE, failure_domain=1),
+            _node("n3", status=StorageNode.STATUS_OFFLINE, failure_domain=1),
+            _node("n4", status=StorageNode.STATUS_OFFLINE, failure_domain=1),
+            _node("n5", status=StorageNode.STATUS_OFFLINE, failure_domain=1),
+            _node("n6", failure_domain=2), _node("n7", failure_domain=2), _node("n8", failure_domain=2),
+        ]
+        db = _db(cl, nodes)
+        allowed, _ = _check_ftt_allows_node_removal("n1", db)
+        self.assertFalse(allowed)
+
+    def test_2fd_one_per_fd_plus_second_node_in_same_fd_is_unsafe(self):
+        """1 node down in EACH of domains 1 and 2 already (the safe combo) --
+        piling a SECOND node onto domain 2 must now be blocked, even though
+        domain 2 is already 'active'. This is the exact gap the old
+        unconditional-piling logic missed."""
+        cl = _cluster(npcs=2, ndcs=2, ft=2, enable_failure_domain=True)
+        nodes = [
+            _node("n1", failure_domain=2),
+            _node("n2", status=StorageNode.STATUS_OFFLINE, failure_domain=1),
+            _node("n3", status=StorageNode.STATUS_OFFLINE, failure_domain=2),
+            _node("n4", failure_domain=1),
+        ]
+        db = _db(cl, nodes)
+        allowed, _ = _check_ftt_allows_node_removal("n1", db)
+        self.assertFalse(allowed)
+
+    def test_2fd_one_per_fd_plus_second_node_in_other_fd_is_unsafe(self):
+        """Same setup, but piling the extra node onto domain 1 (the first,
+        'already active' domain) instead of domain 2 -- also unsafe."""
+        cl = _cluster(npcs=2, ndcs=2, ft=2, enable_failure_domain=True)
+        nodes = [
+            _node("n1", failure_domain=1),
+            _node("n2", status=StorageNode.STATUS_OFFLINE, failure_domain=1),
+            _node("n3", status=StorageNode.STATUS_OFFLINE, failure_domain=2),
+            _node("n4", failure_domain=2),
+        ]
+        db = _db(cl, nodes)
+        allowed, _ = _check_ftt_allows_node_removal("n1", db)
+        self.assertFalse(allowed)
+
+    # --- Dmitrii's confirmed scenarios: 3 FD / 2+2 ---------------------------
+    # chunks_per_domain = ceil(4/3) = 2 -- same per-domain cap as 2 FD, but
+    # spread across 3 domains. Confirmed: 1 FD fully down is safe, 2 FDs is not.
+
+    def test_3fd_one_whole_fd_down_is_safe(self):
+        cl = _cluster(npcs=2, ndcs=2, ft=2, enable_failure_domain=True)
+        nodes = [
+            _node("n1", failure_domain=1),
+            _node("n2", status=StorageNode.STATUS_OFFLINE, failure_domain=1),
+            _node("n3", status=StorageNode.STATUS_OFFLINE, failure_domain=1),
+            _node("n4", status=StorageNode.STATUS_OFFLINE, failure_domain=1),
+            _node("n5", failure_domain=2), _node("n6", failure_domain=3),
+        ]
+        db = _db(cl, nodes)
+        allowed, _ = _check_ftt_allows_node_removal("n1", db)
+        self.assertTrue(allowed)
+
+    def test_3fd_two_whole_fds_down_is_unsafe(self):
+        """Domain 1 fully down already (2+ nodes, maxing its chunks_per_domain
+        budget) -- a node in domain 2 must be blocked."""
+        cl = _cluster(npcs=2, ndcs=2, ft=2, enable_failure_domain=True)
+        nodes = [
+            _node("n1", failure_domain=2),
+            _node("n2", status=StorageNode.STATUS_OFFLINE, failure_domain=1),
+            _node("n3", status=StorageNode.STATUS_OFFLINE, failure_domain=1),
+            _node("n4", failure_domain=2), _node("n5", failure_domain=3),
+        ]
+        db = _db(cl, nodes)
+        allowed, _ = _check_ftt_allows_node_removal("n1", db)
+        self.assertFalse(allowed)
+
+    # --- Dmitrii's confirmed scenarios: 4 FD / 2+2 (well-provisioned) --------
+    # chunks_per_domain = ceil(4/4) = 1. Confirmed: 2 whole FDs down is safe.
+
+    def test_4fd_two_whole_fds_down_is_safe(self):
+        """Domain 1 already has 3-of-4 nodes down (maxed, chunks_per_domain=1
+        means it only ever contributes 1 to the budget regardless of count);
+        removing a node in domain 2 -- opening the second domain -- is still
+        within the npcs=2 budget."""
+        cl = _cluster(npcs=2, ndcs=2, ft=2, enable_failure_domain=True)
+        nodes = [
+            _node("n1", failure_domain=2),
+            _node("n2", status=StorageNode.STATUS_OFFLINE, failure_domain=1),
+            _node("n3", status=StorageNode.STATUS_OFFLINE, failure_domain=1),
+            _node("n4", status=StorageNode.STATUS_OFFLINE, failure_domain=1),
+            _node("n5", failure_domain=2), _node("n6", failure_domain=3), _node("n7", failure_domain=4),
+        ]
+        db = _db(cl, nodes)
+        allowed, _ = _check_ftt_allows_node_removal("n1", db)
+        self.assertTrue(allowed)
+
+    def test_4fd_three_whole_fds_down_is_unsafe(self):
+        """Domains 1 and 2 already have a node down each (budget=2/2 spent);
+        removing a node in a THIRD domain (3) must be blocked."""
+        cl = _cluster(npcs=2, ndcs=2, ft=2, enable_failure_domain=True)
+        nodes = [
+            _node("n1", failure_domain=3),
+            _node("n2", status=StorageNode.STATUS_OFFLINE, failure_domain=1),
+            _node("n3", status=StorageNode.STATUS_OFFLINE, failure_domain=2),
+            _node("n4", failure_domain=4),
+        ]
+        db = _db(cl, nodes)
+        allowed, _ = _check_ftt_allows_node_removal("n1", db)
+        self.assertFalse(allowed)
 
     def test_fd_enabled_but_node_unassigned_falls_back_to_node_count(self):
         """FD enabled cluster-wide, but this specific node has no domain
