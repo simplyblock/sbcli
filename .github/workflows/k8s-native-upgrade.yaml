@@ -817,7 +817,8 @@ jobs:
             exit 1
           fi
 
-          # Get cluster secret using dedicated command
+          # Get cluster secret using dedicated command (disable tracing to avoid leaking secret)
+          set +x
           CLUSTER_SECRET=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
             sbcli-dev cluster get-secret "$CLUSTER_ID" 2>/dev/null | tr -d '[:space:]') || true
           if [ -z "$CLUSTER_SECRET" ]; then
@@ -826,6 +827,8 @@ jobs:
               sbcli-dev cluster list --json 2>/dev/null \
               | jq -r '.[0].secret // empty') || true
           fi
+          echo "::add-mask::${CLUSTER_SECRET}"
+          set -x
 
           echo "R25 cluster created: CLUSTER_ID=$CLUSTER_ID"
           echo "CLUSTER_ID=${CLUSTER_ID}" >> $GITHUB_ENV
@@ -884,7 +887,7 @@ jobs:
             --set logicalVolume.encryption=false \
             --set storagenode.ifname="${MGMT_IFC}" \
             --set storagenode.create=true \
-            --set storagenode.numPartitions=0 \
+            --set storagenode.numPartitions=1 \
             --set storagenode.coresPercentage=50 \
             --set image.storageNode.tag="${STORAGENODE_TAG}"
 
@@ -980,7 +983,8 @@ jobs:
                   sbcli-dev cluster list --json 2>&1) || true
                 CLUSTER_ID=$(echo "$JSON_OUT" | jq -r '.[0].id // .[0].uuid // empty')
               fi
-              # Get cluster secret using dedicated command
+              # Get cluster secret using dedicated command (disable tracing to avoid leaking secret)
+              set +x
               CLUSTER_SECRET=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
                 sbcli-dev cluster get-secret "$CLUSTER_ID" 2>/dev/null | tr -d '[:space:]') || true
               if [ -z "$CLUSTER_SECRET" ]; then
@@ -988,6 +992,8 @@ jobs:
                   sbcli-dev cluster list --json 2>/dev/null \
                   | jq -r '.[0].secret // empty') || true
               fi
+              echo "::add-mask::${CLUSTER_SECRET}"
+              set -x
               echo "CLUSTER_ID=${CLUSTER_ID}" >> $GITHUB_ENV
               echo "CLUSTER_SECRET=${CLUSTER_SECRET}" >> $GITHUB_ENV
               exit 0
@@ -1114,6 +1120,7 @@ jobs:
                   sbctl cluster list --json 2>/dev/null \
                   | jq -r '.[0].secret // empty') || true
               fi
+              echo "::add-mask::${CLUSTER_SECRET}"
               echo "CLUSTER_ID=${CLUSTER_ID}" >> $GITHUB_ENV
               echo "CLUSTER_SECRET=${CLUSTER_SECRET}" >> $GITHUB_ENV
               exit 0
