@@ -696,6 +696,7 @@ jobs:
             --namespace simplyblock \
             --create-namespace \
             --timeout 10m \
+            --set ingress-nginx.controller.admissionWebhooks.enabled=false \
             ./
           echo "sbcli control plane chart installed"
 
