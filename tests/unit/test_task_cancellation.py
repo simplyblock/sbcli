@@ -217,3 +217,51 @@ def test_cancel_pending_restart_skips_other_nodes_and_functions(store):
     assert s.row("task-1").canceled is True
     assert s.row("task-2").canceled is False
     assert s.row("task-3").canceled is False
+
+
+# -- cancel_node_tasks ------------------------------------------------------
+
+def test_cancel_node_tasks_does_not_wipe_the_lease(store):
+    """Node shutdown cancels the migration tasks queued against the node, off
+    the same kind of bulk read."""
+    s = store(_task(function_name=JobSchedule.FN_DEV_MIG))
+    s.runner_claims(owner="host-A", retry=2)
+
+    assert tasks_controller.cancel_node_tasks(
+        "cl-1", "node-1", [JobSchedule.FN_DEV_MIG]) == 1
+
+    row = s.row()
+    assert row.canceled is True
+    assert row.owner == "host-A"
+    assert row.status == JobSchedule.STATUS_RUNNING
+    assert row.retry == 2
+
+
+def test_cancel_node_tasks_leaves_a_finished_task_alone(store):
+    s = store(_task(function_name=JobSchedule.FN_DEV_MIG))
+    s.runner_claims(status=JobSchedule.STATUS_DONE, function_result="migrated")
+
+    assert tasks_controller.cancel_node_tasks(
+        "cl-1", "node-1", [JobSchedule.FN_DEV_MIG]) == 0
+
+    assert s.row().canceled is False
+    assert s.row().function_result == "migrated"
+
+
+def test_cancel_node_tasks_skips_other_nodes_and_functions(store):
+    s = store(
+        _task(uuid="task-1", node_id="node-1", function_name=JobSchedule.FN_DEV_MIG),
+        _task(uuid="task-2", node_id="node-1", function_name=JobSchedule.FN_NEW_DEV_MIG),
+        _task(uuid="task-3", node_id="node-2", function_name=JobSchedule.FN_DEV_MIG),
+        _task(uuid="task-4", node_id="node-1", function_name=JobSchedule.FN_NODE_RESTART),
+    )
+
+    assert tasks_controller.cancel_node_tasks(
+        "cl-1", "node-1",
+        [JobSchedule.FN_DEV_MIG, JobSchedule.FN_FAILED_DEV_MIG,
+         JobSchedule.FN_NEW_DEV_MIG]) == 2
+
+    assert s.row("task-1").canceled is True
+    assert s.row("task-2").canceled is True
+    assert s.row("task-3").canceled is False
+    assert s.row("task-4").canceled is False
