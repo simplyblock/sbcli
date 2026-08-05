@@ -716,7 +716,7 @@ jobs:
           ADMIN_POD=""
           for i in $(seq 1 30); do
             ADMIN_POD=$(kubectl -n $NAMESPACE get pods --no-headers 2>/dev/null \
-              | grep -i "webappapi\|admin\|sbcli" \
+              | grep -i "admin-control\|webappapi" \
               | grep "Running" | head -1 | awk '{print $1}') || true
             if [ -n "$ADMIN_POD" ]; then
               echo "Found admin pod: $ADMIN_POD"
@@ -862,7 +862,7 @@ jobs:
           # Re-resolve admin pod (it may have restarted)
           for i in $(seq 1 30); do
             NEW_POD=$(kubectl -n $NAMESPACE get pods --no-headers 2>/dev/null \
-              | grep -i "webappapi\|admin\|sbcli" \
+              | grep -i "admin-control\|webappapi" \
               | grep "Running" | head -1 | awk '{print $1}') || true
             if [ -n "$NEW_POD" ]; then
               ADMIN_POD="$NEW_POD"
