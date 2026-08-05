@@ -1,4 +1,3 @@
-# coding=utf-8
 """Shared driver for the task runners.
 
 A task runner is a long-lived service that polls FoundationDB for `JobSchedule`
@@ -34,7 +33,8 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Any, Callable, Optional, Sequence
+from typing import Any
+from collections.abc import Callable, Sequence
 
 from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.controllers import tasks_controller
@@ -68,13 +68,28 @@ def _default_eligible(task: JobSchedule, cluster: Any) -> bool:
     return True
 
 
+def _give_up_reason(task: JobSchedule) -> str:
+    """Why a task stopped, not merely that it did.
+
+    ``_fail`` leaves each attempt's reason in ``function_result``, so the row
+    still carries it when the ceiling is finally reached. "max retry reached"
+    on its own names a symptom and hides the cause: 160 failed cutover attempts
+    once ended as "max retry reached (8/8)" with the cause overwritten and
+    nothing logged, and three separate investigations could not name the
+    failing branch (run 20260827_194551).
+    """
+    last = task.function_result
+    return (f"max retry reached ({task.max_retry}) after: {last}"
+            if last else "max retry reached")
+
+
 @dataclass
 class RunnerSpec:
     """Describes one task runner. ``function_names`` and ``handler`` are the only
     required fields; the rest default to a simple serial runner."""
 
     function_names: Sequence[str]
-    handler: Callable[[JobSchedule], None]
+    handler: Callable[..., None]
     name: str = "task-runner"
     # Pure, side-effect-free "can I run this task right now?" predicate. The
     # default always-eligible keeps simple runners trivial. A task judged
@@ -87,7 +102,32 @@ class RunnerSpec:
     # Optional per-key mutual exclusion for concurrent mode: two tasks whose
     # exclusion_key() is equal never run at the same time (e.g. one restart per
     # node). Ignored when concurrency == 1.
-    exclusion_key: Optional[Callable[[JobSchedule], Any]] = None
+    exclusion_key: Callable[[JobSchedule], Any] | None = None
+    # Hand the cycle's task list to the handler as a second argument.
+    #
+    # A handler should reason about its own task, not its siblings. The cutover
+    # runner is the exception that forces this: its lvstore claim has to know
+    # which other tasks hold the same lvstore, and answering that from inside
+    # the handler costs a full task-table scan per unclaimed task per pass —
+    # over 30 days of history, since ``get_job_tasks`` returns DONE rows too and
+    # nothing prunes them sooner (``TASKS_RETENTION_PERIOD_SEC``). The driver
+    # has just read exactly that list, so handing it over removes the rescan for
+    # nothing.
+    #
+    # This is deliberately the interim shape. The claim is really a cross-host
+    # mutual exclusion, and it belongs here as a generalization of
+    # ``exclusion_key`` — one *cohort* per resource rather than one task, so a
+    # consistency group cuts over together — which would drop the coupling
+    # entirely and also subsume the per-task node scans in the jc-comp and
+    # migration runners. Until that exists, this flag keeps the cost off the DB
+    # and keeps the coupling in one declared place instead of spreading it.
+    wants_cycle_tasks: bool = False
+    # Poll interval for the next pass, computed from the tasks seen in this one.
+    # For a runner whose useful cadence depends on what is in flight: the cutover
+    # runner polls fast only while a cutover is converging, and at the ordinary
+    # cadence otherwise. ``interval`` stays the fallback and the unit of retry
+    # backoff.
+    dynamic_interval: Callable[[Sequence[JobSchedule]], float] | None = None
 
     def __post_init__(self) -> None:
         if self.concurrency < 1:
@@ -120,22 +160,31 @@ class TaskRunner:
             # DB errors are intentionally uncaught: they propagate out, exit the
             # process, and the orchestrator restarts us with a fresh FDB client.
             clusters = db.get_clusters()
+            seen: list = []
             if not clusters:
                 logger.error("No clusters found!")
             else:
                 for cl in clusters:
-                    for task in db.get_job_tasks(cl.get_id(), reverse=False):
+                    cluster_tasks = db.get_job_tasks(cl.get_id(), reverse=False)
+                    seen.extend(cluster_tasks)
+                    for task in cluster_tasks:
                         if task.function_name not in self.spec.function_names:
                             continue
                         if task.status == JobSchedule.STATUS_DONE:
                             self._forget(task.uuid)
                             continue
-                        self._dispatch(task, cl)
-            time.sleep(self.spec.interval)
+                        self._dispatch(task, cl, cluster_tasks)
+            time.sleep(self._interval_for(seen))
+
+    def _interval_for(self, tasks: Sequence[JobSchedule]) -> float:
+        if self.spec.dynamic_interval is None:
+            return self.spec.interval
+        return self.spec.dynamic_interval(tasks)
 
     # -- dispatch -----------------------------------------------------------
 
-    def _dispatch(self, task: JobSchedule, cluster: Any) -> None:
+    def _dispatch(self, task: JobSchedule, cluster: Any,
+                  cycle_tasks: Sequence[JobSchedule]) -> None:
         uuid = task.uuid
         # Backoff gate: a task not yet due is skipped so a waiting task does not
         # block the others behind it (the loop revisits every task each cycle).
@@ -143,7 +192,7 @@ class TaskRunner:
             return
 
         if self._executor is None:
-            self._process(task, cluster)
+            self._process(task, cluster, cycle_tasks)
             return
 
         with self._lock:
@@ -155,13 +204,14 @@ class TaskRunner:
             self._inflight.add(uuid)
             if key is not None:
                 self._inflight_keys[key] = uuid
-        self._executor.submit(self._process_worker, task, cluster)
+        self._executor.submit(self._process_worker, task, cluster, cycle_tasks)
 
-    def _process_worker(self, task: JobSchedule, cluster: Any) -> None:
+    def _process_worker(self, task: JobSchedule, cluster: Any,
+                        cycle_tasks: Sequence[JobSchedule]) -> None:
         # A worker crash must be contained to this task, never kill the service
         # loop or leave the task wedged in the in-flight set.
         try:
-            self._process(task, cluster)
+            self._process(task, cluster, cycle_tasks)
         except Exception as e:  # noqa: BLE001 - contain crash to this worker
             logger.error(f"{self.spec.name}: task {task.uuid} crashed in worker: {e}")
             logger.exception(e)
@@ -170,7 +220,8 @@ class TaskRunner:
 
     # -- per-task lifecycle -------------------------------------------------
 
-    def _process(self, task: JobSchedule, cluster: Any) -> None:
+    def _process(self, task: JobSchedule, cluster: Any,
+                 cycle_tasks: Sequence[JobSchedule]) -> None:
         uuid = task.uuid
 
         # Pre-run skip-gate 1 — eligibility (pure, no write): not ready yet.
@@ -195,7 +246,9 @@ class TaskRunner:
             self._finish(task, "canceled")
             return
         if 0 <= task.max_retry <= task.retry:
-            self._finish(task, "max retry reached")
+            reason = _give_up_reason(task)
+            logger.error(f"{self.spec.name}: task {uuid} gave up: {reason}")
+            self._finish(task, reason)
             return
 
         if task.status != JobSchedule.STATUS_RUNNING:
@@ -213,7 +266,10 @@ class TaskRunner:
             # refreshed only on task writes would go stale mid-handler and let a
             # second host claim and double-drive the task.
             with tasks_controller.task_lease_heartbeat(task):
-                self.spec.handler(task)
+                if self.spec.wants_cycle_tasks:
+                    self.spec.handler(task, cycle_tasks)
+                else:
+                    self.spec.handler(task)
         except TaskDefer as e:
             self._defer(task, str(e))
         except TaskAbort as e:

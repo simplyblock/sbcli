@@ -1,7 +1,16 @@
-"""D6 unit tests for the replication-final task runner lifecycle."""
+"""D6 unit tests for the replication-final task handler.
+
+The runner sits on the shared driver (``task_runner_base``), so the handler
+is void: it returns on success, raises ``TaskRetry`` for every outcome the
+driver should suspend and re-attempt, and ``TaskDefer`` while the delta-shrink
+phase waits on the target without burning a retry. Task status/retry transitions
+themselves belong to the driver and are covered by
+tests/unit/tasks/test_task_runner_base.py.
+"""
 import pytest
 
 from simplyblock_core.services import tasks_runner_replication_final as runner
+from simplyblock_core.services.task_runner_base import TaskDefer, TaskRetry
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol, LVolReplication
 from simplyblock_core.models.storage_node import StorageNode
@@ -82,19 +91,21 @@ def _install(monkeypatch, nodes, rep, cutover_ret):
     return calls
 
 
-def test_happy_path_marks_done_and_updates_state(monkeypatch):
+def test_happy_path_returns_and_updates_state(monkeypatch):
     rep = LVolReplication()
     rep.state = LVolReplication.STATE_CUTOVER_PENDING
     rep.cutover_proceed = True
     nodes = {"S1": _node("S1"), "T1": _node("T1")}
     calls = _install(monkeypatch, nodes, rep, (True, None))
 
-    res = runner.task_runner(_task())
+    task = _task()
+    assert runner.task_runner(task, []) is None
 
-    assert res is True
     assert len(calls) == 1
     assert calls[0][5] == "replicate"
     assert rep.state == LVolReplication.STATE_CUTOVER_DONE
+    assert task.function_result == "cutover done"
+    assert task.function_params["start_time"] <= task.function_params["end_time"]
 
 
 def test_failure_enters_hub_cooldown_without_burning_a_retry(monkeypatch):
@@ -110,11 +121,9 @@ def test_failure_enters_hub_cooldown_without_burning_a_retry(monkeypatch):
     _install(monkeypatch, nodes, rep, (False, "boom"))
 
     task = _task()
-    res = runner.task_runner(task)
+    with pytest.raises(TaskDefer, match="boom"):
+        runner.task_runner(task, [])
 
-    assert res is False
-    assert task.status == JobSchedule.STATUS_SUSPENDED
-    assert task.function_result == "boom"
     assert task.retry == 0, "a transient hub attempt must not burn task.retry"
     assert task.function_params["cutover_hub_attempts"] == 1
     assert task.function_params["cutover_retry_after"] > 0
@@ -123,7 +132,8 @@ def test_failure_enters_hub_cooldown_without_burning_a_retry(monkeypatch):
 def test_failure_burns_a_retry_once_hub_attempts_are_exhausted(monkeypatch):
     """Past the hub-attempt cap with the target node online, the failure is
     real: the cooldown state resets and one retry is burned, so the ceiling
-    in task_runner can eventually end a cutover that keeps failing."""
+    is real: the cooldown state resets and the driver burns a retry, so the
+    ceiling can eventually end a cutover that keeps failing."""
     from simplyblock_core import constants
     rep = LVolReplication()
     rep.cutover_proceed = True
@@ -131,39 +141,41 @@ def test_failure_burns_a_retry_once_hub_attempts_are_exhausted(monkeypatch):
     _install(monkeypatch, nodes, rep, (False, "boom"))
 
     task = _task(cutover_hub_attempts=constants.REPL_CUTOVER_MAX_HUB_ATTEMPTS)
-    res = runner.task_runner(task)
+    with pytest.raises(TaskRetry, match="boom"):
+        runner.task_runner(task, [])
 
-    assert res is False
-    assert task.status == JobSchedule.STATUS_SUSPENDED
-    assert task.retry == 1
     assert "cutover_hub_attempts" not in task.function_params
     assert "cutover_retry_after" not in task.function_params
 
 
-def test_max_retry_marks_done_without_cutover(monkeypatch):
-    rep = LVolReplication()
-    nodes = {"S1": _node("S1"), "T1": _node("T1")}
-    calls = _install(monkeypatch, nodes, rep, (True, None))
-
-    task = _task()
-    task.retry = 5  # == max_retry
-    res = runner.task_runner(task)
-
-    assert res is True
-    assert task.status == JobSchedule.STATUS_DONE
-    assert calls == []  # cutover never attempted
-
-
-def test_target_offline_suspends(monkeypatch):
+def test_target_offline_defers_without_burning_a_retry(monkeypatch):
+    """An offline target is transient: deferring waits it out, where retrying
+    would exhaust the ceiling long before the node comes back."""
     rep = LVolReplication()
     nodes = {"S1": _node("S1"), "T1": _node("T1", status=StorageNode.STATUS_OFFLINE)}
     calls = _install(monkeypatch, nodes, rep, (True, None))
 
-    task = _task()
-    res = runner.task_runner(task)
+    with pytest.raises(TaskDefer, match="target node not online"):
+        runner.task_runner(_task(), [])
+    assert calls == []
 
-    assert res is False
-    assert task.status == JobSchedule.STATUS_SUSPENDED
+
+def test_missing_source_node_is_retryable_without_cutover(monkeypatch):
+    rep = LVolReplication()
+    calls = _install(monkeypatch, {"T1": _node("T1")}, rep, (True, None))
+
+    with pytest.raises(TaskRetry, match="source node not found"):
+        runner.task_runner(_task(), [])
+    assert calls == []
+
+
+def test_missing_lvol_id_is_retryable(monkeypatch):
+    rep = LVolReplication()
+    nodes = {"S1": _node("S1"), "T1": _node("T1")}
+    calls = _install(monkeypatch, nodes, rep, (True, None))
+
+    with pytest.raises(TaskRetry, match="missing lvol_id"):
+        runner.task_runner(_task(lvol_id=""), [])
     assert calls == []
 
 
@@ -227,9 +239,8 @@ def test_shrink_waits_until_replicated(monkeypatch):
     runner, task = _mk(monkeypatch, {"S1": _ShrinkSnap(replicated=False)},
                        {"shrink_round": 1, "shrink_snap_id": "S1",
                         "shrink_deadline": 2**60})
-    done, err = runner._shrink_step(task, _ShrinkLvol())
-    assert (done, err) == (False, None)
-    assert "waiting" in task.function_result
+    with pytest.raises(TaskDefer, match="waiting"):
+        runner._shrink_step(task, _ShrinkLvol())
 
 
 def test_a_fast_round_converges_instead_of_taking_another(monkeypatch):
@@ -254,8 +265,7 @@ def test_a_fast_round_converges_instead_of_taking_another(monkeypatch):
     import simplyblock_core.controllers.snapshot_controller as sc
     monkeypatch.setattr(sc, "add", _add)
 
-    done, err = runner._shrink_step(task, _ShrinkLvol())
-    assert (done, err) == (True, None)
+    runner._shrink_step(task, _ShrinkLvol())  # returns => the freeze may start
     assert taken == [], "a converged round must not take another snapshot"
     assert "converged" in task.function_result
 
@@ -286,8 +296,8 @@ def test_shrink_takes_next_snapshot_immediately(monkeypatch):
     monkeypatch.setattr(constants, "REPL_CUTOVER_MIN_INLINE_SEC", 0)
     monkeypatch.setattr(constants, "REPL_CUTOVER_CONVERGE_BUDGET_SEC", 0)
 
-    done, err = runner._shrink_step(task, _ShrinkLvol())
-    assert (done, err) == (False, None)
+    with pytest.raises(TaskDefer):
+        runner._shrink_step(task, _ShrinkLvol())
     assert taken and taken[0][0] == "LV1"
     assert task.function_params["shrink_round"] == 2
     assert task.function_params["shrink_snap_id"] == "S2"
@@ -303,9 +313,8 @@ def test_shrink_hands_over_when_it_cannot_converge(monkeypatch):
                         "shrink_deadline": 2**60,
                         "cutover_lvs": "LVS_1",
                         "shrink_started_at": _time.time() - 60})
-    done, err = runner._shrink_step(task, _ShrinkLvol())
-    assert (done, err) == (True, None), \
-        "the round cap must hand over to the freeze, not fail the cutover"
+    # Returning (rather than raising) is what hands over to the freeze.
+    runner._shrink_step(task, _ShrinkLvol())
     assert "not converged" in task.function_result
 
 
@@ -317,6 +326,5 @@ def test_shrink_deadline_proceeds_to_cutover(monkeypatch):
     runner, task = _mk(monkeypatch, {"S1": _ShrinkSnap(replicated=False)},
                        {"shrink_round": 1, "shrink_snap_id": "S1",
                         "shrink_deadline": 1})
-    done, err = runner._shrink_step(task, _ShrinkLvol())
-    assert (done, err) == (True, None), \
-        "the deadline must hand over to the freeze, not fail the cutover"
+    # Returning (rather than raising) is what hands over to the freeze.
+    runner._shrink_step(task, _ShrinkLvol())
