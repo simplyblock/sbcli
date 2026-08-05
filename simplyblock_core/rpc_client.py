@@ -1586,7 +1586,7 @@ class RPCClient:
         params = {
             "jm_vuid": jm_vuid,
         }
-        return self._request3("jc_disable_replication", params)
+        return self._request3("jc_disable_replication", **params)
 
     def bdev_distrib_check_inflight_io(self, jm_vuid):
         params = {
