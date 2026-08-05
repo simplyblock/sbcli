@@ -1004,7 +1004,7 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
             if len(fd_host_counts) < 2:
                 _fd_fail("failure domains are enabled but all hosts are in a "
                          "single domain; at least two domains are required")
-            if len(fd_host_counts) != 1:
+            if len(set(fd_host_counts.values())) != 1:
                 _fd_fail(
                     f"failure domains must hold an EQUAL number of hosts at "
                     f"activation; current split: "
