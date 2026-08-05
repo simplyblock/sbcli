@@ -423,6 +423,7 @@ _DRIVER_MIGRATED = {
     "tasks_runner_fdb_backup.py",
     "tasks_runner_jc_comp.py",
     "tasks_runner_replication_final.py",
+    "tasks_runner_sync_lvol_del.py",
 }
 
 # Runners that increment task.retry but are intentionally UNBOUNDED: the
