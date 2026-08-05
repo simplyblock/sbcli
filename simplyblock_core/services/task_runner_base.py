@@ -202,6 +202,11 @@ class RunnerSpec:
     # — the restart runner's watchdog for nodes left in a transitional state
     # with no task owning them. Failures are logged, never fatal.
     on_cycle: Callable[[Any], None] | None = None
+    # Optional delay-before-next-attempt for a task that consumed a retry,
+    # given the new retry count. Defaults to interval * 2**(retry-1), capped.
+    # A runner whose recovery curve is tuned to its own workload (node restart
+    # holds a steady lead-in cadence before backing off) supplies its own.
+    backoff: Callable[[int], float] | None = None
     # Hand the cycle's task list to the handler as a second argument.
     #
     # A handler should reason about its own task, not its siblings. The cutover
@@ -475,6 +480,8 @@ class TaskRunner:
     def _backoff_delay(self, retry: int) -> float:
         if retry <= 0:
             return 0.0
+        if self.spec.backoff is not None:
+            return self.spec.backoff(retry)
         exp = min(retry - 1, 16)  # guard the shift against absurd retry counts
         return min(self.spec.interval * (2 ** exp), _BACKOFF_CAP_SEC)
 
