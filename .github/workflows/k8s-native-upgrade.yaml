@@ -789,12 +789,7 @@ jobs:
             sbcli-dev -d --dev cluster create \
               --mgmt-ip "$MGMT_IP" \
               --mode kubernetes \
-              --disable-monitoring \
-              --ndcs "${NDCS}" \
-              --npcs "${NPCS}" \
-              --bs "${BS}" \
-              --chunk-bs "${CHUNK_BS}" \
-              --jm-count "${JM_COUNT}" 2>&1) || true
+              --disable-monitoring 2>&1) || true
           echo "Cluster create output: $CREATE_OUTPUT"
 
           # Parse cluster ID and secret from output
@@ -834,12 +829,6 @@ jobs:
           echo "CLUSTER_ID=${CLUSTER_ID}" >> $GITHUB_ENV
           echo "CLUSTER_SECRET=${CLUSTER_SECRET}" >> $GITHUB_ENV
           echo "R25_ADMIN_POD=${ADMIN_POD}" >> $GITHUB_ENV
-        env:
-          NDCS: ${{ env.NDCS }}
-          NPCS: ${{ env.NPCS }}
-          BS: ${{ env.BS }}
-          CHUNK_BS: ${{ env.CHUNK_BS }}
-          JM_COUNT: ${{ env.JM_COUNT }}
 
       - name: Label worker nodes for R25 storage plane
         if: ${{ github.event.inputs.use_existing_cluster != 'true' && github.event.inputs.upgrade_type == 'r25-to-r2x' }}
