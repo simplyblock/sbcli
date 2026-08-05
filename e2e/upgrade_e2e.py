@@ -20,6 +20,9 @@ def main():
     parser.add_argument('--run_k8s', type=bool, help="Run K8s tests", default=False)
     parser.add_argument('--send_debug_notification', type=bool, help="Send notification for debug", default=False)
     parser.add_argument('--testname', type=str, help="The name of the test to run", default=None)
+    parser.add_argument('--preserve_resources_on_failure', type=bool,
+                        help="Skip K8s resource cleanup when test fails (preserve PVCs/pods for debugging)",
+                        default=True)
 
     args = parser.parse_args()
 
@@ -45,7 +48,8 @@ def main():
                         target_spdk_image=args.target_spdk_image,
                         target_docker_image=args.target_docker_image,
                         fio_debug=args.fio_debug,
-                        k8s_run=args.run_k8s)
+                        k8s_run=args.run_k8s,
+                        preserve_resources_on_failure=args.preserve_resources_on_failure)
         try:
             test_obj.setup()
             if i == 0:
