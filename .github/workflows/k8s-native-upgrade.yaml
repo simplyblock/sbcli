@@ -313,19 +313,24 @@ jobs:
             kubectl delete crd "$crd_name" --ignore-not-found --force --grace-period=0 2>/dev/null || true
           done
 
-          echo "=== Phase 4: Strip finalizers from all resources in namespace ==="
-          for kind in pods deployments statefulsets daemonsets services configmaps secrets serviceaccounts pvc jobs; do
-            kubectl get "$kind" -n $NAMESPACE --no-headers -o custom-columns=NAME:.metadata.name 2>/dev/null | while read -r name; do
-              [ -n "$name" ] && kubectl patch "$kind" "$name" -n $NAMESPACE --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null &
+          echo "=== Phase 4: Strip finalizers from ALL resources in namespace ==="
+          if kubectl get namespace $NAMESPACE &>/dev/null; then
+            for kind in pods deployments statefulsets daemonsets services configmaps secrets serviceaccounts pvc pv jobs; do
+              kubectl get "$kind" -n $NAMESPACE --no-headers -o custom-columns=NAME:.metadata.name 2>/dev/null | while read -r name; do
+                [ -n "$name" ] && kubectl patch "$kind" "$name" -n $NAMESPACE --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null &
+              done
             done
-          done
-          # PVs
-          for pv in $(kubectl get pv --no-headers 2>/dev/null | grep "$NAMESPACE/" | awk '{print $1}'); do
-            kubectl patch pv "$pv" --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null &
+            wait
+          fi
+
+          echo "=== Phase 5: Strip finalizers + force delete all PVs ==="
+          for pv in $(kubectl get pv --no-headers 2>/dev/null | awk '{print $1}'); do
+            kubectl patch pv "$pv" --type=merge -p '{"metadata":{"finalizers":null,"spec":{"claimRef":null}}' 2>/dev/null || true
+            kubectl delete pv "$pv" --ignore-not-found --force --grace-period=0 2>/dev/null &
           done
           wait
 
-          echo "=== Phase 5: Force delete namespace ==="
+          echo "=== Phase 6: Force delete namespaces ==="
           kubectl delete namespace $NAMESPACE --force --grace-period=0 --wait=false 2>/dev/null || true
           kubectl delete namespace cert-manager --force --grace-period=0 --wait=false 2>/dev/null || true
 
@@ -334,12 +339,6 @@ jobs:
             challenges.acme.cert-manager.io clusterissuers.cert-manager.io \
             issuers.cert-manager.io orders.acme.cert-manager.io \
             --ignore-not-found --force --grace-period=0 2>/dev/null || true
-
-          echo "=== Phase 6: Delete stale PVs ==="
-          for pv in $(kubectl get pv --no-headers 2>/dev/null | awk '{print $1}'); do
-            kubectl patch pv "$pv" --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
-            kubectl delete pv "$pv" --ignore-not-found --force --grace-period=0 2>/dev/null || true
-          done
 
           echo "=== Phase 7: Reset hugepages + restart kubelet (parallel) ==="
           IFS=',' read -ra NODES <<< "${{ github.event.inputs.worker_nodes }}"
@@ -358,18 +357,18 @@ jobs:
           wait
 
           echo "=== Phase 8: Wait for namespace gone ==="
-          for i in $(seq 1 30); do
+          for i in $(seq 1 12); do
             if ! kubectl get namespace $NAMESPACE &>/dev/null; then
               echo "Namespace $NAMESPACE deleted"
               break
             fi
-            # Keep stripping finalizers from anything blocking deletion
-            kubectl api-resources --verbs=list --namespaced -o name 2>/dev/null | while read -r res; do
-              kubectl get "$res" -n $NAMESPACE --no-headers -o name 2>/dev/null | while read -r obj; do
+            echo "Namespace still terminating ($i/12), stripping remaining finalizers..."
+            # Only strip if namespace still exists
+            for res in $(kubectl api-resources --verbs=list --namespaced -o name 2>/dev/null); do
+              for obj in $(kubectl get "$res" -n $NAMESPACE --no-headers -o name 2>/dev/null); do
                 kubectl patch "$obj" -n $NAMESPACE --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
               done
             done
-            echo "Namespace still terminating ($i/30)..."
             sleep 5
           done
           echo "=== Cleanup complete ==="
