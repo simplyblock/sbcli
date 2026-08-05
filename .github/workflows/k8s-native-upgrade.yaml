@@ -357,15 +357,19 @@ jobs:
           wait
 
           echo "=== Phase 8: Wait for namespace gone ==="
-          for i in $(seq 1 12); do
+          for i in $(seq 1 6); do
             if ! kubectl get namespace $NAMESPACE &>/dev/null; then
               echo "Namespace $NAMESPACE deleted"
               break
             fi
-            echo "Namespace still terminating ($i/12), stripping remaining finalizers..."
-            # Only strip if namespace still exists
-            for res in $(kubectl api-resources --verbs=list --namespaced -o name 2>/dev/null); do
-              for obj in $(kubectl get "$res" -n $NAMESPACE --no-headers -o name 2>/dev/null); do
+            echo "Namespace still terminating ($i/6), force-finalizing..."
+            # Strip namespace-level finalizers via API
+            kubectl get namespace $NAMESPACE -o json 2>/dev/null \
+              | jq '.spec.finalizers = []' \
+              | kubectl replace --raw "/api/v1/namespaces/$NAMESPACE/finalize" -f - 2>/dev/null || true
+            # Strip finalizers from blocking resources (skip events, endpoints, etc.)
+            for kind in pods deployments statefulsets daemonsets replicasets services configmaps secrets pvc pv jobs cronjobs; do
+              kubectl get "$kind" -n $NAMESPACE --no-headers -o name 2>/dev/null | while read -r obj; do
                 kubectl patch "$obj" -n $NAMESPACE --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
               done
             done
