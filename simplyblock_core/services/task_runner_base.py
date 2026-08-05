@@ -202,6 +202,11 @@ class TaskRunner:
             task.status = JobSchedule.STATUS_RUNNING
             task.write_to_db(db.kv_store)
 
+        # Drop the previous attempt's result so a task that fails and later
+        # succeeds does not finish carrying the stale failure message. Handlers
+        # that set a success message overwrite this; the rest get "completed".
+        task.function_result = ""
+
         try:
             # Heartbeat the lease for the duration of the handler: TASK_LEASE_TTL
             # is far shorter than a node-add / restart / migration, so a lease
