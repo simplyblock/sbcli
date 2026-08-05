@@ -348,6 +348,25 @@ jobs:
             issuers.cert-manager.io orders.acme.cert-manager.io \
             --ignore-not-found --force --grace-period=0 2>/dev/null || true
 
+          # Delete stale StorageClasses and VolumeSnapshotClasses from simplyblock CSI
+          kubectl get storageclass -o name 2>/dev/null \
+            | grep -v 'local-path\|local-hostpath\|gp2\|gp3\|standard' \
+            | while read -r sc; do
+              PROV=$(kubectl get "$sc" -o jsonpath='{.provisioner}' 2>/dev/null || true)
+              if [[ "$PROV" == *"simplyblock"* ]]; then
+                echo "Deleting stale $sc (provisioner=$PROV)"
+                kubectl delete "$sc" --ignore-not-found 2>/dev/null || true
+              fi
+            done
+          kubectl get volumesnapshotclass -o name 2>/dev/null \
+            | while read -r vsc; do
+              DRV=$(kubectl get "$vsc" -o jsonpath='{.driver}' 2>/dev/null || true)
+              if [[ "$DRV" == *"simplyblock"* ]]; then
+                echo "Deleting stale $vsc (driver=$DRV)"
+                kubectl delete "$vsc" --ignore-not-found 2>/dev/null || true
+              fi
+            done
+
           echo "=== Phase 7: Reset hugepages + restart kubelet (parallel, 90s timeout) ==="
           IFS=',' read -ra NODES <<< "${{ github.event.inputs.worker_nodes }}"
           for NODE in "${NODES[@]}"; do
