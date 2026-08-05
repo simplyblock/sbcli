@@ -247,9 +247,13 @@ class TestNodeConfigHelpers(unittest.TestCase):
     def test_device_count_missing_keys(self):
         self.assertEqual(utils.node_config_device_count({}), 0)
 
-    def test_min_sys_memory_lblk_sums_sizes(self):
-        node = {"lblk_devices": [{"size": 10}, {"size": 32}]}
-        self.assertEqual(utils.node_config_min_sys_memory(node), 2147483648 + 42)
+    def test_min_sys_memory_lblk_uses_capacity_factor(self):
+        node = {"lblk_devices": [{"size": 50 << 30}, {"size": 50 << 30}]}
+        expected = 2147483648 + int((100 << 30) * utils.SYS_MEMORY_STORAGE_FACTOR)
+        self.assertEqual(utils.node_config_min_sys_memory(node), expected)
+        # ~2.2 GiB total — NOT 2 GiB + full capacity (the bug the first AWS
+        # lblk deploy hit: 102 GiB demanded on 32 GiB hosts).
+        self.assertLess(utils.node_config_min_sys_memory(node), 3 << 30)
 
     def test_min_sys_memory_nvme_delegates(self):
         node = {"ssd_pcis": ["0000:00:1e.0"], "lblk_devices": []}
