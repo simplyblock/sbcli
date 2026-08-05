@@ -39,9 +39,9 @@ on:
         required: false
         default: ''
 
-      # ── Operator repo branches (base,target — e.g. "main,main" or "release-25,main") ──
-      operator_repo_branches:
-        description: 'Operator repo branches: base_branch,target_branch (e.g. main,main)'
+      # ── Helm repo branches (base,target — e.g. "main,main" or "release-25,main") ──
+      helm_repo_branches:
+        description: 'Helm chart repo branches: base_branch,target_branch (R25: base has CSI chart, R26+: base has operator chart)'
         required: true
         default: 'main,main'
 
@@ -159,8 +159,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Parse operator_repo_branches (format: "base_branch,target_branch")
-          IFS=',' read -r BASE_HELM TARGET_HELM <<< "${{ github.event.inputs.operator_repo_branches || 'main,main' }}"
+          # Parse helm_repo_branches (format: "base_branch,target_branch")
+          IFS=',' read -r BASE_HELM TARGET_HELM <<< "${{ github.event.inputs.helm_repo_branches || 'main,main' }}"
           TARGET_HELM="${TARGET_HELM:-$BASE_HELM}"
           echo "BASE_HELM_BRANCH=${BASE_HELM}" >> "$GITHUB_ENV"
           echo "TARGET_HELM_BRANCH=${TARGET_HELM}" >> "$GITHUB_ENV"
