@@ -2530,7 +2530,7 @@ def delete_cluster(cl_id) -> None:
     cluster.remove(db_controller.kv_store)
     logger.info("Done")
 
-def set(cl_id, attr, value) -> bool:
+def set_(cl_id, attr, value) -> bool:
     cluster = db_controller.get_cluster_by_id(cl_id)
     key_splits = attr.split(".")
     key = key_splits[0]
