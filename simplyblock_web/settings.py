@@ -46,6 +46,13 @@ class _CommaSupportedEnvSource(EnvSettingsSource):
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="sb_", case_sensitive=False)
 
+    port: Annotated[
+        int,
+        Field(
+            validation_alias=AliasChoices("sb_port", "flask_port"),
+            description="The port opened by the API server",
+        )
+    ]
     api_versions: Annotated[
         set[int],
         Field(

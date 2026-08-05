@@ -128,7 +128,7 @@ def main() -> None:
     config: Config = uvicorn.Config(
         app=app,
         host='0.0.0.0',
-        port=int(os.environ.get('FLASK_PORT', 5000)),
+        port=settings.port,
         log_level='debug',
         access_log=False,
         proxy_headers=True,
