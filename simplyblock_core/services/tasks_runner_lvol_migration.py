@@ -2585,6 +2585,15 @@ def _handle_cleanup_target(migration, tgt_node, tgt_rpc, src_rpc=None):
     Returns (done: bool, suspend: bool, error: str|None).
     """
 
+    # TEMPORARY DEBUG: configurable delay before cleanup begins, used to hold
+    # the cleanup window open for fault injection.  Remove once debugging is done.
+    if migration.cleanup_delay_seconds:
+        logger.info(
+            f"[DEBUG] sleeping {migration.cleanup_delay_seconds}s before cleanup_target "
+            f"(migration={migration.uuid})"
+        )
+        time.sleep(migration.cleanup_delay_seconds)
+
     # Immediately detach the hub controller on failure/cancel — don't leave it
     # connected to a target whose snapshots we're about to roll back.
     hub_manager.detach_now(migration.source_node_id, tgt_node.get_id(), src_rpc=src_rpc)

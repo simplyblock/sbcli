@@ -68,6 +68,9 @@ def get_migration(cluster: Cluster, migration: Migration) -> MigrationDTO:
 class _ContinueParams(BaseModel):
     max_retries: int = 10
     deadline_seconds: int = 14400
+    # TEMPORARY DEBUG: sleep this many seconds at the start of CLEANUP_TARGET.
+    # Remove once debugging is complete.
+    cleanup_delay_seconds: int = 0
 
 
 @instance_api.post('/continue', name='cluster:storage-pools:volumes:migrations:continue', status_code=200)
@@ -77,6 +80,7 @@ def continue_migration(cluster: Cluster, migration: Migration, parameters: _Cont
             migration_id=migration.uuid,
             max_retries=parameters.max_retries,
             deadline_seconds=parameters.deadline_seconds,
+            cleanup_delay_seconds=parameters.cleanup_delay_seconds,
         )
     except (ValueError, MigrationConflictError, PreconditionError, RuntimeError) as e:
         raise HTTPException(400, str(e))

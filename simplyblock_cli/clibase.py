@@ -811,12 +811,14 @@ class CLIWrapperBase:
         return True
 
     def volume__migrate_continue(self, sub_command, args):
+        cleanup_delay = getattr(args, 'cleanup_delay_seconds', 0)  # TEMPORARY DEBUG
         if getattr(args, 'batch', False):
             try:
                 group_id = migration_controller.start_batch_migration(
                     group_id=args.migration_id,
                     max_retries=args.max_retries,
                     deadline_seconds=args.deadline_seconds,
+                    cleanup_delay_seconds=cleanup_delay,
                 )
             except (ValueError, MigrationConflictError, PreconditionError, RuntimeError) as e:
                 print(f"Error: {e}")
@@ -828,6 +830,7 @@ class CLIWrapperBase:
                 migration_id=args.migration_id,
                 max_retries=args.max_retries,
                 deadline_seconds=args.deadline_seconds,
+                cleanup_delay_seconds=cleanup_delay,
             )
         except (ValueError, MigrationConflictError, PreconditionError, RuntimeError) as e:
             print(f"Error: {e}")

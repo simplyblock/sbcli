@@ -72,7 +72,8 @@ db = DBController()
 
 def start_migration(migration_id,
                     max_retries=constants.LVOL_MIG_MAX_RETRIES,
-                    deadline_seconds=constants.LVOL_MIG_DEADLINE_SEC):
+                    deadline_seconds=constants.LVOL_MIG_DEADLINE_SEC,
+                    cleanup_delay_seconds=0):
     """
     Promote a PHASE_PRE_CREATED migration record to PHASE_SNAP_COPY and launch
     the task runner.  Always call create_migration first to set up target
@@ -149,6 +150,7 @@ def start_migration(migration_id,
     migration.started_at = int(time.time())
     migration.deadline = int(time.time()) + deadline_seconds if deadline_seconds else 0
     migration.max_retries = max_retries
+    migration.cleanup_delay_seconds = cleanup_delay_seconds  # TEMPORARY DEBUG
     migration.status = LVolMigration.STATUS_NEW
     migration.write_to_db(db.kv_store)
     logger.info(
@@ -1349,7 +1351,8 @@ def create_batch_migration(lvol_id, target_node_id,
 
 def start_batch_migration(group_id,
                           max_retries=constants.LVOL_MIG_MAX_RETRIES,
-                          deadline_seconds=constants.LVOL_MIG_DEADLINE_SEC):
+                          deadline_seconds=constants.LVOL_MIG_DEADLINE_SEC,
+                          cleanup_delay_seconds=0):
     """
     Promote a PHASE_PRECREATE group to PHASE_SNAP_COPY and launch worker tasks
     for each member plus the main orchestrator task.
@@ -1403,6 +1406,7 @@ def start_batch_migration(group_id,
         migration.started_at = now
         migration.deadline = deadline
         migration.max_retries = max_retries
+        migration.cleanup_delay_seconds = cleanup_delay_seconds  # TEMPORARY DEBUG
         migration.status = LVolMigration.STATUS_NEW
         migration.write_to_db(db.kv_store)
 

@@ -134,6 +134,11 @@ class LVolMigration(BaseModel):
     # References an LVolMigrationGroup.uuid.  Empty for standalone migrations.
     migration_group_id: str = ""
 
+    # TEMPORARY DEBUG: seconds to sleep at the start of CLEANUP_TARGET before
+    # any rollback work begins.  Used to hold the cleanup window open long enough
+    # to observe / inject faults.  Remove once debugging is complete.
+    cleanup_delay_seconds: int = 0
+
     # Snaps whose raw data has been transferred to the target in group/worker
     # mode but whose add_clone + convert have NOT yet been performed (the main
     # orchestrator reconstructs the tree after all workers reach snap_copy_done).

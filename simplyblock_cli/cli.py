@@ -810,6 +810,8 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--max-retries', help='Maximum retry attempts before aborting. Default: `10`.', type=int, default=10, dest='max_retries')
         subcommand.add_argument('--deadline', help='Migration deadline in seconds (0 = no deadline). Default: `14400`.', type=int, default=14400, dest='deadline_seconds')
         subcommand.add_argument('--batch', help='ID is a batch migration group ID.', dest='batch', action='store_true')
+        # TEMPORARY DEBUG: remove once debugging is complete.
+        subcommand.add_argument('--cleanup-delay', help='[DEBUG] Seconds to sleep before CLEANUP_TARGET begins. Default: `0`.', type=int, default=0, dest='cleanup_delay_seconds')
 
     def init_volume__migrate_list(self, subparser):
         subcommand = self.add_sub_command(subparser, 'migrate-list', 'List volume migrations.')
