@@ -1,4 +1,3 @@
-# coding=utf-8
 """Unit tests for task cancellation (tasks_controller.cancel_task and
 cancel_pending_node_restart_tasks).
 

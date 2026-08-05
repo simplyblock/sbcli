@@ -23,6 +23,7 @@ import sys
 # command. Listing them would advertise names that do nothing when run.
 _NOT_SERVICES = frozenset({
     "hub_controller_manager",
+    "migration_task_common",
     "replication_final_step",
     "task_runner_base",
 })
