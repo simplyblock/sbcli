@@ -138,6 +138,14 @@ def _kill_spdk_until_dead(snode, max_attempts=3, poll_per_attempt_sec=5,
     OFFLINE so it stops being treated as in_restart).
     """
     snode_api = snode.client(timeout=5, retry=5)
+    # Each attempt is bounded BOTH ways, and needs both. The wall-clock deadline
+    # is what keeps the documented ``max_attempts * poll_per_attempt_sec`` cap
+    # when a single spdk_process_is_up blocks (unreachable node: TCP connect
+    # timeout x retries). The round count is what keeps the cap when sleeping is
+    # free — the integration fixtures patch this module's ``time.sleep`` to a
+    # no-op, which turns a bare deadline loop into a hot spin burning the whole
+    # poll_per_attempt_sec of CPU per attempt.
+    rounds_per_attempt = max(1, int(poll_per_attempt_sec / poll_interval))
     for attempt in range(1, max_attempts + 1):
         try:
             snode_api.spdk_process_kill(snode.rpc_port, snode.cluster_id)
@@ -148,7 +156,9 @@ def _kill_spdk_until_dead(snode, max_attempts=3, poll_per_attempt_sec=5,
             )
 
         deadline = time.time() + poll_per_attempt_sec
-        while time.time() < deadline:
+        for _ in range(rounds_per_attempt):
+            if time.time() >= deadline:
+                break
             try:
                 # spdk_process_is_up returns a (result, error) tuple; unpack it.
                 # Treating the raw tuple as a bool is always truthy, so the

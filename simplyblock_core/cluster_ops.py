@@ -714,6 +714,15 @@ def _wait_for_full_device_connectivity(cl_id, timeout_sec=300, poll_sec=10):
     """
     deadline = time.time() + timeout_sec
     prev_missing = None
+    # A stalled repair is bounded by round count as well as by the wall-clock
+    # deadline. The two express the same budget when the ``time.sleep`` below is
+    # real, but only the round count holds when it is not: the integration
+    # fixtures patch this module's ``time.sleep`` to a no-op, which turns the
+    # wait into thousands of full-mesh repair passes burning CPU for the whole
+    # timeout_sec. Rounds that make progress reset the counter, so a genuinely
+    # long repair keeps the same unbounded-while-shrinking behavior as before.
+    max_stalled_rounds = max(1, int(timeout_sec / poll_sec))
+    stalled_rounds = 0
     while True:
         snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
         online = [n for n in snodes
@@ -734,7 +743,7 @@ def _wait_for_full_device_connectivity(cl_id, timeout_sec=300, poll_sec=10):
             logger.info("Pre-activation connectivity check passed: %d nodes fully meshed "
                         "over %d devices", len(online), len(expected))
             return
-        if time.time() >= deadline:
+        if time.time() >= deadline or stalled_rounds >= max_stalled_rounds:
             sample = ", ".join(f"{n[:8]}->{o[:8]}/dev {d[:8]}" for n, o, d in missing[:8])
             raise ValueError(
                 f"Failed to activate cluster: {len(missing)} cross-node device "
@@ -839,6 +848,9 @@ def _wait_for_full_device_connectivity(cl_id, timeout_sec=300, poll_sec=10):
         # across a full round) still runs the clock out.
         if prev_missing is None or len(missing) < prev_missing:
             deadline = max(deadline, time.time() + timeout_sec / 2)
+            stalled_rounds = 0
+        else:
+            stalled_rounds += 1
         prev_missing = len(missing)
         time.sleep(poll_sec)
 

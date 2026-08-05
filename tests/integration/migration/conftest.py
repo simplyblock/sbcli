@@ -30,14 +30,26 @@ logger = logging.getLogger(__name__)
 _MIGRATION_DIR = os.path.dirname(__file__)
 
 
+#: Per-test budget for the migration tier, overriding the repo-wide default in
+#: pyproject.toml. These tests drive whole migrations against the mock RPC
+#: servers and are minutes-scale where the rest of the suite is seconds-scale.
+#: Measured on the full tier (setup+call+teardown per test): p50 7s, p95 25s,
+#: and one 81s outlier — 180s leaves room for a slower CI runner without being
+#: so loose that a stall hides in it. The four heavier scalability tests carry
+#: their own @pytest.mark.timeout instead.
+MIGRATION_DEFAULT_TIMEOUT = 180
+
+
 def pytest_collection_modifyitems(items):
     """Tag every migration test as ``slow`` so the default integration run can
-    deselect them (see ``-m "not slow"`` in tox.ini). Applied here rather than
-    on each of the ~138 test functions so new migration tests inherit it
-    automatically."""
+    deselect them (see ``-m "not slow"`` in tox.ini), and give the tier its own
+    timeout budget. Applied here rather than on each of the ~138 test functions
+    so new migration tests inherit both automatically."""
     for item in items:
         if str(item.fspath).startswith(_MIGRATION_DIR):
             item.add_marker(pytest.mark.slow)
+            if item.get_closest_marker("timeout") is None:
+                item.add_marker(pytest.mark.timeout(MIGRATION_DEFAULT_TIMEOUT))
 
 
 # ---------------------------------------------------------------------------

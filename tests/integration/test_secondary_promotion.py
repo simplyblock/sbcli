@@ -110,6 +110,20 @@ def _lvol(uuid, node_id, lvs_name="LVS_100"):
 
 class TestConcurrentRestartGuard(unittest.TestCase):
 
+    def setUp(self):
+        # Both tests assert on the restart guard, which is reached in
+        # milliseconds. The failure-cleanup tail that runs afterwards calls
+        # _kill_spdk_until_dead, and that polls the node over HTTP via
+        # snode.client() — not the module-level SNodeClient the tests patch —
+        # so it dials the fixture's unroutable 10.0.0.225 and blocks on TCP
+        # connect (timeout=5, retry=5) for ~110s per test. Nothing under test
+        # here involves killing SPDK.
+        self._kill_patcher = patch(
+            "simplyblock_core.storage_node_ops._kill_spdk_until_dead",
+            return_value=True)
+        self._kill_patcher.start()
+        self.addCleanup(self._kill_patcher.stop)
+
     @patch("simplyblock_core.storage_node_ops._check_peer_disconnected", return_value=False)
     @patch("simplyblock_core.storage_node_ops._set_restart_phase")
     @patch("simplyblock_core.storage_node_ops._handle_rpc_failure_on_peer", return_value="skip")
@@ -178,7 +192,7 @@ class TestSecondaryPromotion(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.health_controller")
     @patch("simplyblock_core.storage_node_ops.storage_events")
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
-    @patch("simplyblock_core.port_block.set_port")
+    @patch("simplyblock_core.utils.port_block.set_port")
     @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._connect_to_remote_jm_devs")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack", return_value=(True, None))
@@ -266,7 +280,7 @@ class TestSecondaryPromotion(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops._set_restart_phase")
     @patch("simplyblock_core.storage_node_ops._handle_rpc_failure_on_peer", return_value="skip")
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
-    @patch("simplyblock_core.port_block.set_port")
+    @patch("simplyblock_core.utils.port_block.set_port")
     @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack", return_value=(True, None))
     @patch("simplyblock_core.storage_node_ops.DBController")
@@ -329,7 +343,7 @@ class TestSecondaryPromotion(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops._set_restart_phase")
     @patch("simplyblock_core.storage_node_ops._handle_rpc_failure_on_peer", return_value="skip")
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
-    @patch("simplyblock_core.port_block.set_port")
+    @patch("simplyblock_core.utils.port_block.set_port")
     @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack", return_value=(True, None))
     @patch("simplyblock_core.storage_node_ops.DBController")
@@ -400,7 +414,7 @@ class TestPrimaryEscalation(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.health_controller")
     @patch("simplyblock_core.storage_node_ops.storage_events")
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
-    @patch("simplyblock_core.port_block.set_port")
+    @patch("simplyblock_core.utils.port_block.set_port")
     @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._connect_to_remote_jm_devs")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack", return_value=(True, None))

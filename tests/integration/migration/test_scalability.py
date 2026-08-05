@@ -251,6 +251,7 @@ class TestScalability:
         assert 30 <= num_groups <= 70, f"Expected ~50 namespace groups, got {num_groups}"
         assert 3 <= avg_per_group <= 8, f"Expected ~5 vols/group, got {avg_per_group:.1f}"
 
+    @pytest.mark.timeout(300)  # 10 sequential migrations over the scale topology (~128s)
     def test_migrate_sample_volumes(self, scale_topology, mock_tgt_server):
         """Migrate 10 random volumes sequentially and verify each completes."""
         ctx, rng = scale_topology
@@ -274,6 +275,7 @@ class TestScalability:
             assert lvol.node_id == tgt.uuid, f"{vol_sym}: node_id not updated"
             assert lvol.hostname == tgt.hostname, f"{vol_sym}: hostname not updated"
 
+    @pytest.mark.timeout(240)  # migrates a whole namespace group at scale (~81s)
     def test_migrate_shared_subsystem_group(self, scale_topology, mock_tgt_server):
         """
         Find a namespace group with multiple volumes and migrate all of them.
@@ -366,6 +368,7 @@ class TestScalability:
         m2 = run_migration_task(mig_id2, max_steps=3000, step_sleep=0.01)
         assert m2.status == LVolMigration.STATUS_DONE
 
+    @pytest.mark.timeout(480)  # 20 sequential migrations; slowest test in the repo (~231s)
     def test_migration_throughput(self, scale_topology):
         """
         Migrate 20 volumes sequentially and measure throughput.
@@ -504,6 +507,7 @@ class TestLargeVolumeMigration:
 
         ctx.teardown()
 
+    @pytest.mark.timeout(360)  # migrates a volume with 250 snapshots (~181s)
     def test_large_volume_migration(self, large_vol_topology, mock_tgt_server):
         """Migrate a volume with 250 snapshots end-to-end."""
         ctx = large_vol_topology

@@ -169,14 +169,44 @@ def pytest_configure(config):
 
     _provision_fdb()
 
+    # Abort rather than skip. A skipped tier is reported as success for all
+    # ~1300 tests, so a run that provisioned nothing is indistinguishable from a
+    # green one (observed: the Docker socket was unreachable, every test
+    # skipped, tox exited 0). Anyone who genuinely wants the tier to no-op
+    # without Docker opts in with SB_ALLOW_FDB_SKIP=1; CI never sets it.
+    if _skip_reason and os.environ.get("SB_ALLOW_FDB_SKIP") != "1":
+        raise pytest.UsageError(
+            f"integration tier requires FoundationDB: {_skip_reason}. "
+            "Set SB_ALLOW_FDB_SKIP=1 to skip the tier instead of failing."
+        )
+
 
 def pytest_unconfigure(config):
     _teardown_fdb()
 
 
+def pytest_report_header(config):
+    """State up front which cluster the tier is running against, or why it isn't.
+
+    Without this the provisioning outcome is invisible: the tier's failure mode
+    is a session-wide skip, which scrolls past as a wall of ``s`` and lets tox
+    exit 0 on a run that executed nothing.
+    """
+    if _skip_reason:
+        return f"FoundationDB: UNAVAILABLE — {_skip_reason}"
+    return f"FoundationDB: {os.environ.get('FDB_CLUSTER_FILE')}"
+
+
 @pytest.fixture(scope="session", autouse=True)
 def fdb_cluster():
-    """Expose the bound cluster file; skip the tier if FDB is unavailable."""
+    """Expose the bound cluster file; fail the tier if FDB is unavailable.
+
+    A skip here would be reported as success for all ~1300 tests — a run that
+    provisioned nothing is indistinguishable from a green one (observed: the
+    Docker socket was unreachable, every test skipped, tox exited 0). Anyone who
+    genuinely wants the tier to no-op without Docker sets ``SB_ALLOW_FDB_SKIP=1``
+    explicitly; CI never does.
+    """
     if _skip_reason:
         pytest.skip(_skip_reason)
     yield os.environ.get("FDB_CLUSTER_FILE")

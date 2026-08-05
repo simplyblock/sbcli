@@ -173,7 +173,7 @@ class TestActivatePortBlockWrapper(unittest.TestCase):
         patches = [
             patch.object(cluster_ops, "db_controller", db),
             patch.object(cluster_ops, "DBController", return_value=db),
-            patch("simplyblock_core.port_block.set_port", _fake_set_port),
+            patch("simplyblock_core.utils.port_block.set_port", _fake_set_port),
             patch.object(cluster_ops.tcp_ports_events, "port_deny", _port_deny),
             patch.object(cluster_ops.tcp_ports_events, "port_allowed", _port_allowed),
             patch.object(cluster_ops.tasks_controller, "add_port_allow_task",
