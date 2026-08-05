@@ -1,4 +1,3 @@
-# coding=utf-8
 """Per-runner tests for the runners migrated onto the shared driver.
 
 Each migrated runner is reduced to a :class:`RunnerSpec`: a void handler that
