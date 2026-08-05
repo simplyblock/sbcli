@@ -39,6 +39,11 @@ DEVICE_MONITOR_INTERVAL_SEC = 5
 STAT_COLLECTOR_INTERVAL_SEC = 60*5  # 5 minutes
 LVOL_STAT_COLLECTOR_INTERVAL_SEC = 30
 LVOL_MONITOR_INTERVAL_SEC = 30
+# Short cadence used by lvol/snapshot monitors while in-deletion objects
+# exist: delete chains advance at most one hop per cycle (clone -> snapshot
+# -> parent snapshot), so the idle 30s interval alone added minutes per
+# chain (run 20260730).
+LVOL_MONITOR_DELETION_INTERVAL_SEC = 2
 DEV_MONITOR_INTERVAL_SEC = 10
 # Collector cadence (#5, 2026-07-21): the idle-cluster baseline measured
 # 4,290 RPCs/min cluster-wide (get_iostat 16k / alceml_get_pages_usage 15k /
