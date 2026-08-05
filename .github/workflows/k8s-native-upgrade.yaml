@@ -260,23 +260,24 @@ jobs:
 
       # ── Common steps (both upgrade types) ──
 
-      - name: Setup KUBECONFIG
+      - name: Setup kubeconfig
         run: |
-          mkdir -p ~/.kube
-          # Try existing kubeconfig first (self-hosted runners may already have cluster access)
-          if kubectl get nodes &>/dev/null; then
-            echo "kubectl already works with existing kubeconfig"
-            kubectl get nodes
-          elif [ -n "${{ secrets.K8S_KUBECONFIG }}" ]; then
-            echo "Writing kubeconfig from K8S_KUBECONFIG secret"
-            echo "${{ secrets.K8S_KUBECONFIG }}" > ~/.kube/config_k8s
-            echo "KUBECONFIG=${HOME}/.kube/config_k8s" >> "$GITHUB_ENV"
-            export KUBECONFIG="${HOME}/.kube/config_k8s"
-            kubectl get nodes
-          else
-            echo "ERROR: No working kubeconfig found and K8S_KUBECONFIG secret is empty"
-            exit 1
-          fi
+          mkdir -p $HOME/.kube
+          KUBECONFIG_FILE="$HOME/.kube/config-${{ github.run_id }}"
+          echo "${KUBECONFIG_DATA}" > "$KUBECONFIG_FILE"
+          chmod 600 "$KUBECONFIG_FILE"
+          echo "KUBECONFIG=$KUBECONFIG_FILE" >> $GITHUB_ENV
+        env:
+          KUBECONFIG_DATA: ${{
+            github.event.inputs.cluster_environment == 'aws-openshift' && secrets.KUBECONFIG_AWS_OPENSHIFT ||
+            github.event.inputs.cluster_environment == 'openshift-local' && secrets.KUBECONFIG_OPENSHIFT_LOCAL ||
+            github.event.inputs.cluster_environment == 'openshift-baremetal' && secrets.KUBECONFIG_OPENSHIFT_BM ||
+            github.event.inputs.cluster_environment == 'gcp' && secrets.KUBECONFIG_GCP ||
+            secrets.KUBECONFIG_LOCAL || secrets.KUBECONFIG_CONTENT
+            }}
+
+      - name: Verify kubectl connectivity
+        run: kubectl get nodes
 
       - name: Remove stale storagenodeset labels from all worker nodes
         if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
@@ -1350,3 +1351,10 @@ jobs:
         env:
           CLUSTER_ID: ${{ env.CLUSTER_ID }}
           MON_SECRET: ${{ secrets.MON_SECRET }}
+
+      - name: Cleanup build folder
+        if: always()
+        run: |
+          rm -rf ./* || true
+          rm -rf ./.??* || true
+          rm -f "$HOME/.kube/config-${{ github.run_id }}"
