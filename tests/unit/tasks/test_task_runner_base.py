@@ -118,6 +118,28 @@ def test_unexpected_exception_is_treated_as_retry(monkeypatch):
     assert task.retry == 1
 
 
+def test_success_message_comes_from_the_handler(monkeypatch):
+    task = _task()
+    _wire(monkeypatch, task)
+
+    def handler(t):
+        t.function_result = "Backup created"
+
+    _runner(handler)._process(task, MagicMock())
+    assert task.status == JobSchedule.STATUS_DONE
+    assert task.function_result == "Backup created"
+
+
+def test_previous_failure_result_does_not_survive_a_later_success(monkeypatch):
+    task = _task(status=JobSchedule.STATUS_SUSPENDED, retry=1)
+    task.function_result = "rpc failed"
+    _wire(monkeypatch, task)
+
+    _runner(MagicMock(return_value=None))._process(task, MagicMock())
+    assert task.status == JobSchedule.STATUS_DONE
+    assert task.function_result == "completed"
+
+
 def test_abort_marks_done_with_reason(monkeypatch):
     task = _task()
     _wire(monkeypatch, task)
