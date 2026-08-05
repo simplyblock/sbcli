@@ -184,29 +184,6 @@ def _wire_base(runner, monkeypatch, task):
 # tree, so a new retry-driven runner shows up as a failing case until a spec is
 # added here.
 
-def _spec_restart(runner, monkeypatch):
-    task = _make_task(JobSchedule.FN_NODE_RESTART)
-    _db, _cluster, node = _wire_base(runner, monkeypatch, task)
-    # Node is offline and stays unreachable -> restart keeps failing, retry
-    # each poll.
-    node.status = StorageNode.STATUS_OFFLINE
-    monkeypatch.setattr(runner, "_restart_pool", _InlineExecutor())
-    monkeypatch.setattr(runner, "_restart_next_attempt", {})
-    monkeypatch.setattr(runner, "_restart_inflight", {})
-    monkeypatch.setattr(runner, "_node_inflight", {})
-    monkeypatch.setattr(runner.tasks_controller, "is_auto_restart_paused",
-                        lambda *a, **k: False)
-    monkeypatch.setattr(runner.tasks_controller, "add_node_to_auto_restart",
-                        MagicMock())
-    monkeypatch.setattr(runner.storage_node_ops, "set_node_status", MagicMock())
-    # Node never reachable -> the reachability check fails and retry advances.
-    monkeypatch.setattr(runner.health_controller, "_check_node_ping",
-                        lambda *a, **k: False)
-    monkeypatch.setattr(runner.health_controller, "_check_node_api",
-                        lambda *a, **k: False)
-    return task
-
-
 def _spec_batch_migration(runner, monkeypatch):
     task = _make_task(JobSchedule.FN_LVOL_BATCH_MIG, group_id="grp-1")
     db, _cluster, _ = _wire_base(runner, monkeypatch, task)
@@ -253,7 +230,6 @@ def _spec_batch_migration(runner, monkeypatch):
 
 # name -> spec for the runners driven through their real main() loop.
 _MAIN_DRIVEN_SPECS = {
-    "tasks_runner_restart.py": _spec_restart,
     "tasks_runner_batch_migration.py": _spec_batch_migration,
 }
 
@@ -278,6 +254,7 @@ _DRIVER_MIGRATED = {
     "tasks_runner_backup.py",
     "tasks_runner_cluster_expand.py",
     "tasks_runner_node_add.py",
+    "tasks_runner_restart.py",
 }
 
 # Runners that increment task.retry but are intentionally UNBOUNDED: the
