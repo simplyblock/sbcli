@@ -1413,8 +1413,12 @@ spec:
         )
 
         # Pre-upgrade: short FIO to write + verify data, then stop
-        self.logger.info("Pre-upgrade Step 2: Pool + StorageClass (R25)")
-        pool_name = self.pool_name
+        self.logger.info("Pre-upgrade Step 2: Create pool (R25)")
+
+        # R25 pool name must match logicalVolume.pool_name in the spdk-csi
+        # helm chart (default: "testing1"). The chart's logicalVolume config
+        # auto-created StorageClass "simplyblock-csi-sc" referencing this pool.
+        pool_name = "testing1"
         # R25 has no operator — create pool directly via sbcli CLI, not Pool CRD
         actual_pool = self.sbcli_utils.add_storage_pool_direct(
             pool_name, sbcli_cmd="sbcli-dev"
@@ -1431,27 +1435,15 @@ spec:
 
         sleep_n_sec(10)
 
-        # R25: The spdk-csi chart's logicalVolume section auto-creates
-        # StorageClass "simplyblock-csi-sc" and VolumeSnapshotClass
-        # "simplyblock-csi-snapshotclass". We do NOT create them here.
-        # Verify they exist from the chart install.
-        sc_name = self.STORAGE_CLASS_NAME  # simplyblock-csi-sc
-        out, _ = self.k8s_utils.k8s._exec_kubectl(
-            f"kubectl get storageclass {sc_name} --no-headers 2>/dev/null || true"
+        # R25: StorageClass "simplyblock-csi-sc" was auto-created by the
+        # spdk-csi chart's logicalVolume config during helm install.
+        # Do NOT create StorageClasses here — use the chart-created one.
+        # Map XFS SC to the same chart-created SC (R25 chart has no XFS variant).
+        self.XFS_STORAGE_CLASS_NAME = self.STORAGE_CLASS_NAME
+        self.logger.info(
+            f"Using chart-created StorageClass '{self.STORAGE_CLASS_NAME}' "
+            f"(from logicalVolume config, pool_name={pool_name})"
         )
-        if sc_name not in out:
-            self.logger.warning(
-                f"StorageClass '{sc_name}' not found — chart may not have created it. "
-                f"Falling back to creating StorageClasses manually."
-            )
-            self._create_storage_classes(self.cluster_id, pool_name)
-        else:
-            self.logger.info(
-                f"Using chart-created StorageClass '{sc_name}' "
-                f"(R25 spdk-csi chart auto-creates SC from logicalVolume config)"
-            )
-            # R25 chart only creates ext4 SC — skip XFS for maintenance upgrade
-            self.XFS_STORAGE_CLASS_NAME = sc_name
 
         pre_fio_runtime = 120  # 2 minutes — just write + verify data
         self.FIO_RUNTIME = pre_fio_runtime

@@ -870,11 +870,11 @@ jobs:
           fi
           helm dependency build . 2>/dev/null || true
 
-          helm install -n $NAMESPACE spdk-csi ./ \
+          helm install -n $NAMESPACE --create-namespace spdk-csi ./ \
             --set csiConfig.simplybk.uuid="${CLUSTER_ID}" \
             --set csiConfig.simplybk.ip="http://simplyblock-webappapi.simplyblock:5000" \
             --set csiSecret.simplybk.secret="${CLUSTER_SECRET}" \
-            --set logicalVolume.pool_name="testpool" \
+            --set logicalVolume.pool_name="testing1" \
             --set image.simplyblock.tag="${BASE_SB_IMAGE}" \
             --set image.csi.tag="${CSI_DRIVER_TAG}" \
             --set logicalVolume.numDataChunks="${NDCS}" \
@@ -882,13 +882,10 @@ jobs:
             --set storageclass.volumeBindingMode=Immediate \
             --set cachingnode.create=false \
             --set logicalVolume.encryption=false \
-            --set logicalVolume.snapshot="True" \
             --set storagenode.ifname="${MGMT_IFC}" \
             --set storagenode.create=true \
-            --set storagenode.numPartitions="${PARTITIONS}" \
+            --set storagenode.numPartitions=0 \
             --set storagenode.coresPercentage=50 \
-            --set storagenode.numDataChunks="${NDCS}" \
-            --set storagenode.numParityChunks="${NPCS}" \
             --set image.storageNode.tag="${STORAGENODE_TAG}"
 
           echo "spdk-csi chart installed"
