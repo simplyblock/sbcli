@@ -6,6 +6,7 @@ import socket
 import threading
 import time
 import uuid
+from typing import Callable, Optional
 
 from simplyblock_core import db_controller, constants, utils
 from simplyblock_core.controllers import tasks_events, device_controller
@@ -92,6 +93,42 @@ def refresh_task_lease(task, owner=None):
     if db.atomic_update(task, _mutate) is None:
         return False
     return refreshed["ok"]
+
+
+def _cancel_atomically(
+        task: JobSchedule,
+        mutate: Callable[[JobSchedule], bool],
+) -> Optional[JobSchedule]:
+    """Apply a cancellation to the task row as it currently stands.
+
+    NOT ``task.write_to_db()``: the copy a canceller holds was read before it
+    decided to cancel — off a bulk ``get_job_tasks`` scan, in the case below —
+    and the runner driving that task writes the same row meanwhile, claiming
+    its lease, moving it to running, advancing retry and recording handler
+    progress in function_params. A full-object write puts all of that back. The
+    damaging one is the owner lease: clearing it hands the task to the next
+    runner host that polls, which executes it a second time. That is the lost
+    update behind the 2026-07-29 double restart, arriving from the other side.
+
+    ``mutate`` receives the fresh row and returns False to decline (a guard
+    that no longer holds). It may be replayed on transaction conflict, so it
+    must do nothing but mutate the object it is given.
+
+    Returns the committed task if this call performed the cancellation, or None
+    if the row is gone or another actor got there first.
+    """
+    now = str(datetime.datetime.now(datetime.timezone.utc))
+    performed = {"ok": False}
+
+    def _mutate(fresh):
+        if mutate(fresh) is False:
+            return False
+        fresh.updated_at = now
+        performed["ok"] = True
+        return True
+
+    committed = db.atomic_update(task, _mutate)
+    return committed if performed["ok"] else None
 
 
 @contextlib.contextmanager
@@ -514,16 +551,25 @@ def cancel_pending_node_restart_tasks(cluster_id, node_id):
     # via the dedup guard in `_validate_new_task_node_restart` until the
     # task runner happens to pick it up — observed as a 5-minute window
     # of failing manual restarts after the node was already back online.
+    def _cancel_if_still_pending(fresh: JobSchedule) -> bool:
+        # Re-checked on the fresh row: a task that reached its own outcome
+        # between the scan and this write has nothing left to cancel, and its
+        # result must not be overwritten with ours.
+        if fresh.canceled or fresh.status == JobSchedule.STATUS_DONE:
+            return False
+        fresh.canceled = True
+        fresh.status = JobSchedule.STATUS_DONE
+        fresh.function_result = "canceled: node back online"
+        return True
+
     canceled = 0
     for task in db.get_job_tasks(cluster_id):
         if (task.function_name == JobSchedule.FN_NODE_RESTART
                 and task.node_id == node_id
                 and task.status != JobSchedule.STATUS_DONE
                 and not task.canceled):
-            task.canceled = True
-            task.status = JobSchedule.STATUS_DONE
-            task.function_result = "canceled: node back online"
-            task.write_to_db(db.kv_store)
+            if _cancel_atomically(task, _cancel_if_still_pending) is None:
+                continue
             canceled += 1
             logger.info(
                 f"Canceled obsolete node_restart task {task.get_id()} (node {node_id} back online)")
@@ -602,9 +648,17 @@ def cancel_task(task_id):
     if task.device_id:
         device_controller.device_set_retries_exhausted(task.device_id, True)
 
-    task.canceled = True
-    task.write_to_db(db.kv_store)
-    tasks_events.task_canceled(task)
+    def _flag_canceled(fresh):
+        if fresh.canceled:
+            return False
+        fresh.canceled = True
+
+    # Only the flag is set. Where the task has got to — status, retry, owner,
+    # progress — stays as the runner left it; the runner reads the flag on its
+    # next pass and finishes the task itself.
+    committed = _cancel_atomically(task, _flag_canceled)
+    if committed is not None:
+        tasks_events.task_canceled(committed)
     return True
 
 
