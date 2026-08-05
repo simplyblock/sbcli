@@ -622,6 +622,20 @@ def spdk_process_kill(query: utils.RPCPortParams):
     return utils.get_response(True)
 
 
+@api.get('/spdk_process_cleanup', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean'
+    })}}},
+})
+def spdk_process_cleanup(query: utils.RPCPortParams):
+    """Authoritative SPDK teardown for failure-cleanup paths. Pod deletion in
+    this deployment mode is already synchronous and verified (see
+    spdk_process_kill's poll-until-gone), so this is an alias kept for parity
+    with the docker agent, where kill (fast, detached remove) and cleanup
+    (slow, verified remove) are distinct."""
+    return spdk_process_kill(query)
+
+
 def _is_pod_up(rpc_port, cluster_id):
     k8s_core_v1 = core_utils.get_k8s_core_client()
     pod_name = f"snode-spdk-pod-{rpc_port}-{cluster_id}"

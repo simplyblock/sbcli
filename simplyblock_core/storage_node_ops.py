@@ -172,6 +172,27 @@ def _kill_spdk_until_dead(snode: StorageNode, max_attempts=3, poll_per_attempt_s
     # poll_per_attempt_sec of CPU per attempt.
     rounds_per_attempt = max(1, int(poll_per_attempt_sec / poll_interval))
     for attempt in range(1, max_attempts + 1):
+        # Prefer the authoritative container-level cleanup: it clears the
+        # restart policy and removes synchronously, so success means the
+        # container is verifiably GONE — not merely "RPC socket down".
+        # spdk_process_is_up probes the RPC Unix socket, which false-
+        # negatives an SPDK that booted but never brought its RPC up; its
+        # zombie container then squats the host's hugepages and starves
+        # every subsequent add/restart attempt (2026-08-05 incident, and
+        # the resurrection race: kill's detached remove vs restart policy).
+        try:
+            ret, _err = snode_api.spdk_process_cleanup(snode.rpc_port, snode.cluster_id)
+            if ret:
+                logger.info(
+                    "SPDK on %s cleaned up (container-level, attempt %d/%d)",
+                    snode.get_id(), attempt, max_attempts,
+                )
+                return True
+        except Exception as e:
+            # Older agent without the endpoint, or transient failure —
+            # fall back to the legacy kill + socket-poll below.
+            logger.debug("spdk_process_cleanup unavailable on %s: %s",
+                         snode.get_id(), e)
         try:
             snode_api.spdk_process_kill(snode.rpc_port, snode.cluster_id)
         except Exception as e:
@@ -2112,6 +2133,97 @@ def _peer_reachable_via_jm_quorum(target_node_id, this_node: StorageNode, peer_p
         if ret.get(remote_key) is True:
             return True
     return not probed
+
+
+def verify_jm_mesh_coverage(cluster_id, repair=True):
+    """Verify the JC journal mesh: every ONLINE node must hold a live remote
+    bdev for every remote JM it references (``jm_ids``) whose OWNER node is
+    itself ONLINE. Returns a list of problem strings (empty = healthy).
+
+    Rationale (2026-08-05 incident): two nodes joined through add-node
+    retries and the peers never attached their ``remote_jm_*`` controllers;
+    the cluster activated and reported healthy while a third of the journal
+    mesh was unreachable. First journal load excluded those JMs, n_safe_jms
+    collapsed and JCERR cascaded cluster-wide. This check is the activation
+    gate for exactly that hole.
+
+    ``repair=True`` re-runs _connect_to_remote_jm_devs once for nodes with
+    missing coverage before reporting. JMs whose owner is not ONLINE are
+    skipped — a re-activation with one or two unhealthy nodes must never be
+    blocked by their (legitimately absent) journals.
+    """
+    db_controller = DBController()
+    nodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
+    jm_owner_by_id = {}
+    for n in nodes:
+        if n.jm_device and n.jm_device.get_id():
+            jm_owner_by_id[n.jm_device.get_id()] = n
+
+    problems = []
+    for node in nodes:
+        if node.status != StorageNode.STATUS_ONLINE or not node.enable_ha_jm:
+            continue
+        expected = {}
+        for entry in (node.remote_jm_devices or []):
+            owner_id = entry.node_id
+            if entry.remote_bdev:
+                expected[owner_id] = entry.remote_bdev
+        missing = []
+        for jm_id in (node.jm_ids or []):
+            owner = jm_owner_by_id.get(jm_id)
+            if owner is None or owner.get_id() == node.get_id():
+                continue
+            if owner.status != StorageNode.STATUS_ONLINE:
+                continue  # recovery tolerance: absent owner, absent journal
+            remote_bdev = expected.get(owner.get_id())
+            if not remote_bdev:
+                missing.append((jm_id, owner.get_id(), "<no record>"))
+        rpc_client = node.rpc_client(timeout=10, retry=2)
+        for owner_id, remote_bdev in expected.items():
+            owner = None
+            for n in nodes:
+                if n.get_id() == owner_id:
+                    owner = n
+                    break
+            if owner is not None and owner.status != StorageNode.STATUS_ONLINE:
+                continue
+            try:
+                present = bool(rpc_client.get_bdevs(remote_bdev))
+            except Exception:
+                present = False
+            if not present:
+                missing.append(("", owner_id, remote_bdev))
+
+        if missing and repair:
+            logger.warning(
+                f"JM mesh: node {node.get_id()} missing {len(missing)} remote "
+                f"JM bdev(s); attempting reconnect")
+            try:
+                fresh = db_controller.get_storage_node_by_id(node.get_id())
+                fresh.remote_jm_devices = _connect_to_remote_jm_devs(fresh)
+                fresh.write_to_db(db_controller.kv_store)
+                still = []
+                rpc_client = fresh.rpc_client(timeout=10, retry=2)
+                for jm_id, owner_id, remote_bdev in missing:
+                    fixed = False
+                    for entry in (fresh.remote_jm_devices or []):
+                        if entry.node_id == owner_id and entry.remote_bdev:
+                            try:
+                                fixed = bool(rpc_client.get_bdevs(entry.remote_bdev))
+                            except Exception:
+                                fixed = False
+                            break
+                    if not fixed:
+                        still.append((jm_id, owner_id, remote_bdev))
+                missing = still
+            except Exception as e:
+                logger.error(f"JM mesh repair failed for {node.get_id()}: {e}")
+
+        for jm_id, owner_id, remote_bdev in missing:
+            problems.append(
+                f"node {node.get_id()}: unreachable remote JM of node "
+                f"{owner_id} (bdev {remote_bdev})")
+    return problems
 
 
 def _connect_to_remote_jm_devs(this_node: StorageNode, jm_ids=None, only_node_id=None):

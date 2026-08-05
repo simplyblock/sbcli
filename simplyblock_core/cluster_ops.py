@@ -1715,6 +1715,27 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     # want headroom for an unplanned failure concurrent with a rollout.)
     utils.set_storage_mcp_max_unavailable(cl_id, cluster.max_fault_tolerance)
 
+    # JM mesh gate (2026-08-05 incident: nodes joined via add-node retries
+    # activated with peers missing their remote_jm controllers — the cluster
+    # reported healthy while a third of the journal mesh was unreachable,
+    # and the first journal load collapsed n_safe_jms into a cluster-wide
+    # JCERR). FRESH activation must not complete over such a hole; a
+    # RE-ACTIVATION is a recovery path that may legitimately run with one
+    # or two nodes unhealthy, so it repairs best-effort and only warns —
+    # the verifier already skips JMs whose owner node is not ONLINE.
+    if cluster.ha_type == "ha":
+        jm_problems = storage_node_ops.verify_jm_mesh_coverage(cl_id, repair=True)
+        if jm_problems:
+            if is_fresh_activation:
+                set_cluster_status(cl_id, ols_status)
+                raise ValueError(
+                    "Failed to activate cluster: JM mesh coverage incomplete "
+                    "(journal quorum would silently run degraded): "
+                    + "; ".join(jm_problems))
+            logger.warning(
+                "JM mesh coverage incomplete on re-activation (continuing — "
+                "recovery path): %s", "; ".join(jm_problems))
+
     _record_activated_nodes(cl_id)
     set_cluster_status(cl_id, Cluster.STATUS_ACTIVE)
     logger.info("Cluster activated successfully")
