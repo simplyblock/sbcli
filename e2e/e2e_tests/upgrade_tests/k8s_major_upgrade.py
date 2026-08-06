@@ -1258,18 +1258,14 @@ class K8sNativeMajorUpgrade(TestClusterBase):
         self.logger.info("FDB resources annotated with keep policy")
 
     def _shutdown_all_nodes(self, storage_node_list: list[dict]):
-        """Step 2 / 6.1: Suspend + shutdown all storage nodes."""
-        self.logger.info(f"Shutting down all {len(storage_node_list)} storage nodes")
-        for node in storage_node_list:
-            node_id = node["id"]
-            self.logger.info(f"  Suspending node {node_id}")
-            try:
-                self.sbcli_utils.suspend_node(node_id)
-            except Exception as e:
-                self.logger.warning(f"  Suspend failed for {node_id}: {e}")
+        """Step 2 / 6.1: Force-shutdown all storage nodes.
 
-        sleep_n_sec(10)
-
+        Suspend is skipped because it fails with "Offline storage nodes
+        found, cannot suspend node without --force" when any node is
+        already offline (e.g. during Step 6.1 after operator install).
+        Using ``shutdown --force`` bypasses the suspended-state check.
+        """
+        self.logger.info(f"Shutting down all {len(storage_node_list)} storage nodes (force)")
         for node in storage_node_list:
             node_id = node["id"]
             self.logger.info(f"  Shutting down node {node_id} (force=True)")
