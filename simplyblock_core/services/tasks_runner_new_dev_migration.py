@@ -36,7 +36,9 @@ def task_runner(task):
         return False
 
     cluster = db.get_cluster_by_id(task.cluster_id)
-    if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
+    # IN_SHRINK: migration family — blocking it stalls the removal's drain.
+    if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED,
+                              Cluster.STATUS_READONLY, Cluster.STATUS_IN_SHRINK]:
         task.function_result = "cluster is not active, retrying"
         task.status = JobSchedule.STATUS_SUSPENDED
         task.retry += 1

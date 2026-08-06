@@ -809,7 +809,9 @@ def task_runner(task):
     )
 
     cluster = db.get_cluster_by_id(group.cluster_id)
-    if cluster.status not in (Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED):
+    # IN_SHRINK: migration family — blocking it stalls the removal's drain.
+    if cluster.status not in (Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED,
+                              Cluster.STATUS_IN_SHRINK):
         if not _is_cleanup_phase:
             task.function_result = f"cluster not active (status={cluster.status})"
             task.status = JobSchedule.STATUS_SUSPENDED

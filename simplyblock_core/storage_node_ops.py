@@ -3583,46 +3583,59 @@ def node_removal_orchestrate(node_id, force_remove=False):
     if snode.status == StorageNode.STATUS_REMOVED:
         return True
 
-    # Phase 1 — shut the node down (graceful). Skipped on re-entry.
-    if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:
-        logger.info(f"[REMOVAL] {node_id}: phase 1 — shutdown")
-        ret = shutdown_storage_node(node_id, force=force_remove)
-        if isinstance(ret, tuple):
-            ret, reason = ret
-            if not ret:
-                logger.error(f"[REMOVAL] {node_id}: shutdown failed: {reason}")
+    # Node removal is a recognised restart-phase owner: phase 3b relocates
+    # replicas onto an ONLINE target and sets a restart phase there, which
+    # get_restart_phase would otherwise judge stale and clear out from under
+    # the live rebuild. Held for ONE attempt only — this returns False and is
+    # retried, and a phase cannot outlive the attempt that set it.
+    # Restore the CAPTURED status, not ACTIVE: the cluster is usually DEGRADED
+    # here, since the node being removed has just been shut down.
+    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+    prev_cluster_status = cluster.status
+    cluster_ops.set_cluster_status(cluster.get_id(), Cluster.STATUS_IN_SHRINK)
+    try:
+        # Phase 1 — shut the node down (graceful). Skipped on re-entry.
+        if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:
+            logger.info(f"[REMOVAL] {node_id}: phase 1 — shutdown")
+            ret = shutdown_storage_node(node_id, force=force_remove)
+            if isinstance(ret, tuple):
+                ret, reason = ret
+                if not ret:
+                    logger.error(f"[REMOVAL] {node_id}: shutdown failed: {reason}")
+                    return False
+            elif not ret:
+                logger.error(f"[REMOVAL] {node_id}: shutdown failed")
                 return False
-        elif not ret:
-            logger.error(f"[REMOVAL] {node_id}: shutdown failed")
+            snode = db_controller.get_storage_node_by_id(node_id)
+
+        # Phase 3a — tear down the (empty) secondary/tertiary replicas of THIS
+        # node's own primary LVS, on the peers that host them (Case A).
+        logger.info(f"[REMOVAL] {node_id}: phase 3a — tear down own replicas")
+        if not _teardown_replicas_of_primary(snode):
             return False
+
+        # Phase 3b — relocate replicas this node hosts for OTHER primaries (Case B).
+        logger.info(f"[REMOVAL] {node_id}: phase 3b — relocate hosted replicas")
+        if not _relocate_replicas_hosted_on(snode):
+            return False
+
+        # Phase 5 — finalize (swarm leave, gpt cleanup) and flip to removed.
+        logger.info(f"[REMOVAL] {node_id}: phase 4 — finalize")
+        _finalize_node_removal(snode)
+        set_node_status(node_id, StorageNode.STATUS_REMOVED, caused_by="remove")
         snode = db_controller.get_storage_node_by_id(node_id)
+        # storage_events.snode_status_change(
+        #     snode, StorageNode.STATUS_REMOVED, StorageNode.STATUS_IN_REMOVAL, caused_by="remove")
 
-    # Phase 3a — tear down the (empty) secondary/tertiary replicas of THIS
-    # node's own primary LVS, on the peers that host them (Case A).
-    logger.info(f"[REMOVAL] {node_id}: phase 3a — tear down own replicas")
-    if not _teardown_replicas_of_primary(snode):
-        return False
+        # Phase 4 — remove + fail devices, then wait for failure-migration to finish.
+        logger.info(f"[REMOVAL] {node_id}: phase 5 — devices remove/fail/migrate")
+        if not _decommission_node_devices(snode):
+            return False
 
-    # Phase 3b — relocate replicas this node hosts for OTHER primaries (Case B).
-    logger.info(f"[REMOVAL] {node_id}: phase 3b — relocate hosted replicas")
-    if not _relocate_replicas_hosted_on(snode):
-        return False
-
-    # Phase 5 — finalize (swarm leave, gpt cleanup) and flip to removed.
-    logger.info(f"[REMOVAL] {node_id}: phase 4 — finalize")
-    _finalize_node_removal(snode)
-    set_node_status(node_id, StorageNode.STATUS_REMOVED, caused_by="remove")
-    snode = db_controller.get_storage_node_by_id(node_id)
-    # storage_events.snode_status_change(
-    #     snode, StorageNode.STATUS_REMOVED, StorageNode.STATUS_IN_REMOVAL, caused_by="remove")
-
-    # Phase 4 — remove + fail devices, then wait for failure-migration to finish.
-    logger.info(f"[REMOVAL] {node_id}: phase 5 — devices remove/fail/migrate")
-    if not _decommission_node_devices(snode):
-        return False
-
-    logger.info(f"[REMOVAL] {node_id}: done")
-    return True
+        logger.info(f"[REMOVAL] {node_id}: done")
+        return True
+    finally:
+        cluster_ops.set_cluster_status(cluster.get_id(), prev_cluster_status)
 
 
 def _teardown_replicas_of_primary(removed_node):
@@ -6484,8 +6497,13 @@ def get_restart_phase(node_id, lvs_name):
             return phase
         try:
             cluster = db_controller.get_cluster_by_id(node.cluster_id)
+            # IN_SHRINK: node removal relocates replicas onto an ONLINE target
+            # and sets a phase there (phase 3b). Without this the phase reads as
+            # stale — the node is ONLINE and the cluster was ACTIVE — and gets
+            # cleared mid-rebuild, which is what the gate exists to prevent.
             if cluster.status in (Cluster.STATUS_IN_ACTIVATION,
-                                  Cluster.STATUS_IN_EXPANSION):
+                                  Cluster.STATUS_IN_EXPANSION,
+                                  Cluster.STATUS_IN_SHRINK):
                 return phase
         except KeyError:
             pass
@@ -6496,8 +6514,8 @@ def get_restart_phase(node_id, lvs_name):
         # after a create that actually succeeded (2026-07-10 20:22 run).
         logger.warning(
             "Stale restart phase %r for %s on %s: node is %s, no restart/"
-            "activation/expansion owns this LVS — clearing it so operations "
-            "proceed instead of queueing into a dead drain queue",
+            "activation/expansion/shrink owns this LVS — clearing it so "
+            "operations proceed instead of queueing into a dead drain queue",
             phase, lvs_name, node_id[:8], node.status)
 
         def _clear(fresh):

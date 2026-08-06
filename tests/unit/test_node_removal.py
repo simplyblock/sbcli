@@ -404,5 +404,57 @@ class TestDecommissionDevices(unittest.TestCase):
         dc.device_remove.assert_not_called()
 
 
+class TestShrinkStatusDoesNotDeadlockRemoval(unittest.TestCase):
+    """``node_removal_orchestrate`` holds ``Cluster.STATUS_IN_SHRINK`` for the
+    duration of an attempt, so that the restart phases its replica relocation
+    sets on an ONLINE target are honoured rather than reclaimed.
+
+    That makes the migration runners' cluster-status gates load-bearing: the
+    removal cannot finish until every data device reaches
+    FAILED_AND_MIGRATED (``_decommission_node_devices``), and only
+    ``tasks_runner_failed_migration`` sets that. If its gate refuses IN_SHRINK,
+    the removal deadlocks against a status it set itself — and nothing in the
+    integration tier would catch it, because it only bites on a real removal.
+    """
+
+    def _run_gate(self, cluster_status):
+        """Drive the runner's cluster-status gate; True == it proceeded."""
+        from simplyblock_core.services import tasks_runner_failed_migration as runner
+        from simplyblock_core.models.job_schedule import JobSchedule
+
+        task = MagicMock(spec=JobSchedule)
+        task.node_id, task.cluster_id, task.retry = "n1", "cl-1", 0
+        task.status = JobSchedule.STATUS_RUNNING
+
+        cluster = MagicMock(spec=Cluster)
+        cluster.status = cluster_status
+        db = MagicMock()
+        db.get_cluster_by_id.return_value = cluster
+        db.get_storage_node_by_id.return_value = _node("n1", n_devices=1, with_jm=False)
+
+        with patch.object(runner, "db", db):
+            try:
+                runner.task_runner(task)
+            except Exception:
+                # Admitted by the gate, then reached real device/DB work this
+                # test deliberately does not mock. The gate's decision is
+                # already recorded on task.status by that point, and it is the
+                # only thing under test here.
+                pass
+        return task.status != JobSchedule.STATUS_SUSPENDED
+
+    def test_failed_migration_runner_admits_in_shrink(self):
+        self.assertTrue(
+            self._run_gate(Cluster.STATUS_IN_SHRINK),
+            "tasks_runner_failed_migration must run while the cluster is "
+            "IN_SHRINK — _decommission_node_devices waits on the device states "
+            "only this runner produces, so refusing here deadlocks removal")
+
+    def test_failed_migration_runner_still_refuses_inactive(self):
+        self.assertFalse(
+            self._run_gate(Cluster.STATUS_SUSPENDED),
+            "the gate must still hold for genuinely non-serving clusters")
+
+
 if __name__ == "__main__":
     unittest.main()
