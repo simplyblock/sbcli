@@ -18,11 +18,18 @@ logger = logging.getLogger(__name__)
 
 def set_port(node, port, block, is_reject=False, timeout=5, retry=2):
     """Block or unblock ``port`` on ``node``.
+    If spdk_version is R26.2-PRE-latest or empty (came from upgrade) then
+     use FirewallClient(iptables). Default is to use SPDK RPC.
 
     Tries SPDK ``nvmf_port_block`` / ``nvmf_port_unblock`` first; on
     method-not-found falls back to ``FirewallClient.firewall_set_port``
     (iptables). Any other error from the RPC propagates as-is.
     """
+    if node.spdk_version == "" or node.spdk_version == "R26.2-PRE-latest":
+        fw = FirewallClient(node, timeout=timeout, retry=retry)
+        action = "block" if block else "allow"
+        return fw.firewall_set_port(port, "tcp", action, node.rpc_port, is_reject=is_reject)
+
     rpc = node.rpc_client(timeout=timeout, retry=retry)
     try:
         if block:
