@@ -272,6 +272,8 @@ _DRIVER_MIGRATED = {
     "tasks_runner_migration.py",
     "tasks_runner_new_dev_migration.py",
     "tasks_runner_failed_migration.py",
+    "tasks_runner_node_removal.py",
+    "tasks_runner_port_allow.py",
 }
 
 # Runners that increment task.retry but are intentionally UNBOUNDED: the
@@ -280,7 +282,6 @@ _DRIVER_MIGRATED = {
 # the reason, surfaced in the skip message.
 INTENTIONALLY_UNBOUNDED = {
     "tasks_runner_lvol_migration.py": "created with max_retry=-1; retry gated on resource recovery",
-    "tasks_runner_node_removal.py": "created with max_retry=-1; multi-hour removal gated on failure-migration completion",
 }
 
 _INCREMENTS_RETRY = re.compile(r"\.retry\s*\+=\s*1")
