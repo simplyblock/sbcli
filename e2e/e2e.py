@@ -47,6 +47,7 @@ TOPOLOGY_MODIFYING_TESTS = {
     "K8sNativeNodeMigrationTest",
     "TestBackupAfterNodeMigration",
     "TestBackupDuringMigration",
+    "TestBackupCrossClusterRestore",
 }
 
 def main():
