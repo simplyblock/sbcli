@@ -447,7 +447,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     if (fabric == "tcp" and not cl.fabric_tcp) or (fabric == "rdma" and not cl.fabric_rdma):
         return False,  f"Fabric not available in cluster: {fabric}"
 
-    if cl.status not in [cl.STATUS_ACTIVE, cl.STATUS_DEGRADED]:
+    if cl.status not in Cluster.MUTABLE_STATUSES:
         return False, f"Cluster is not active, status: {cl.status}"
 
     if lvol_priority_class > 0:
@@ -2326,11 +2326,7 @@ def resize_lvol(id, new_size, lock=True) -> None:
     # Resize grows the allocation, so it is gated like create: only an
     # operational cluster may take it (same allow-list as add_lvol_ha).
     cluster = db_controller.get_cluster_by_id(pool.cluster_id)
-    # IN_SHRINK: client-facing; a removal runs for hours and must not freeze
-    # resize cluster-wide. The per-LVS restart-phase gate covers the window
-    # where the relocation is actually rebuilding a replica.
-    if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED,
-                              Cluster.STATUS_IN_SHRINK]:
+    if cluster.status not in Cluster.MUTABLE_STATUSES:
         raise PreconditionError(
             f"Cannot resize lvol {lvol.uuid}: cluster {cluster.get_id()} "
             f"status is {cluster.status}")
