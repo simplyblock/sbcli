@@ -1530,8 +1530,10 @@ class TestRecreateLvstoreReplicationSuspend(unittest.TestCase):
     def test_jc_disable_replication_raise_aborts(self):
         """A raise from jc_disable_replication aborts the restart (kill SPDK,
         unblock the leader) rather than proceeding against active replication."""
+        from simplyblock_core.rpc_client import RPCException
+
         result, fw_calls, rpc, api, _nodes = self._run(
-            jc_disable_side=Exception("simulated jc RPC timeout"))
+            jc_disable_side=RPCException("simulated jc RPC timeout"))
         self.assertIsInstance(result, Exception)
         self.assertIn("jc_disable_replication", str(result).lower())
         self.assertEqual(rpc.jc_disable_replication.call_count, 1)
