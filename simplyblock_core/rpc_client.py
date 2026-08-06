@@ -9,7 +9,7 @@ import requests
 from jsonschema.exceptions import ValidationError
 from pydantic import SecretStr
 from requests.adapters import HTTPAdapter
-from requests.exceptions import ConnectionError, HTTPError, Timeout, TooManyRedirects
+from requests.exceptions import RequestException
 from urllib3 import Retry
 
 from simplyblock_core import utils, constants
@@ -202,7 +202,7 @@ class RPCClient:
             data = response.json()
             _response_validator.validate(data)
         except (
-                ConnectionError, Timeout, TooManyRedirects, HTTPError,  # requests
+                RequestException,  # requests
                 JSONDecodeError,  # json
                 ValidationError,  # jsonschema
         ) as e:
