@@ -1,0 +1,57 @@
+# coding=utf-8
+from typing import Annotated, Any, Callable, Literal, Optional, Union
+from urllib.parse import urlparse
+from uuid import UUID
+
+from fastapi import Query, Request, Response
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, BeforeValidator, Field
+
+from simplyblock_lib.units import parse_size
+
+
+Unsigned = Annotated[int, Field(ge=0)]
+Size = Annotated[Unsigned, BeforeValidator(parse_size)]
+Percent = Annotated[int, Field(ge=0, le=100)]
+Port = Annotated[int, Field(ge=0, lt=65536)]
+
+
+def _validate_url_path(value: Any) -> str:
+    if not isinstance(value, str):
+        raise ValueError('Path must be a string')
+
+    parsed = urlparse(value)
+    for attribute in ['scheme', 'netloc', 'query', 'fragment']:
+        if getattr(parsed, attribute):
+            raise ValueError(f'{attribute} must not be set')
+
+    return value
+
+UrlPath = Annotated[str, _validate_url_path]
+
+CreationResponseFormat = Literal["empty", "full", "identifier"]
+CreationResponseFormatParameter = Annotated[CreationResponseFormat, Query(alias="response-format")]
+
+
+def creation_response(
+    request: Request,
+    response_format: CreationResponseFormat,
+    entity_id: UUID,
+    route_name: str,
+    route_kwargs: dict[str, Union[UUID, str]],
+    get_full: Callable[[UUID], BaseModel],
+    extra_headers: Optional[dict[str, str]] = None,
+) -> Response:
+    headers = {"Location": str(request.app.url_path_for(route_name, **route_kwargs))}
+    if extra_headers:
+        headers.update(extra_headers)
+
+    if response_format == "empty":
+        return Response(status_code=201, headers=headers)
+    elif response_format == "identifier":
+        return JSONResponse(content=str(entity_id), status_code=201, headers=headers)
+    elif response_format == "full":
+        return JSONResponse(content=jsonable_encoder(get_full(entity_id)), status_code=201, headers=headers)
+    else:
+        raise ValueError(f"Unknown response format: {response_format!r}")
