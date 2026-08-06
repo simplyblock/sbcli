@@ -1272,9 +1272,9 @@ class K8sNativeMajorUpgrade(TestClusterBase):
 
         for node in storage_node_list:
             node_id = node["id"]
-            self.logger.info(f"  Shutting down node {node_id}")
+            self.logger.info(f"  Shutting down node {node_id} (force=True)")
             try:
-                self.sbcli_utils.shutdown_node(node_id)
+                self.sbcli_utils.shutdown_node(node_id, force=True)
             except Exception as e:
                 self.logger.warning(f"  Shutdown failed for {node_id}: {e}")
 
