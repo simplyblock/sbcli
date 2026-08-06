@@ -2366,17 +2366,30 @@ def _classify_existing_endpoint_record(db_controller, cluster_id, node_addr, ssd
       kill its SPDK and delete the record, then re-add.
     - ("conflict", node): record in any other status — refuse; the operator
       must delete or restart that node explicitly.
+
+    More than one record can match at once: a pod restart mid-onboarding
+    (e.g. a transient node NotReady blip restarting the DaemonSet pod before
+    the backend's own online-match safeguard applies) can leave a stale
+    in_creation record behind even after a LATER add attempt for the same
+    host has gone fully online (2026-08-06, gr5kf incident) — that stale
+    record is never revisited by any other code path, so it must win the
+    classification here regardless of which match iteration happens to find
+    first: a cleanup is always needed when one exists, independent of
+    whether another match is already online.
     """
-    for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
-        if node.api_endpoint != node_addr:
-            continue
-        if not any(ssd in node.ssd_pcie for ssd in ssd_pcie):
-            continue
-        if node.status == StorageNode.STATUS_ONLINE:
-            return "already_added", node
+    matches = [
+        node
+        for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id)
+        if node.api_endpoint == node_addr and any(ssd in node.ssd_pcie for ssd in ssd_pcie)
+    ]
+    for node in matches:
         if node.status == StorageNode.STATUS_IN_CREATION:
             return "cleanup", node
-        return "conflict", node
+    for node in matches:
+        if node.status == StorageNode.STATUS_ONLINE:
+            return "already_added", node
+    if matches:
+        return "conflict", matches[0]
     return None, None
 
 
