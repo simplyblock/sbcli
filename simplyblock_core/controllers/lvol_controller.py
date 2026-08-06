@@ -1046,7 +1046,11 @@ def _fail_after_bdev(lvol, rpc_client, msg):
         try:
             all_nodes.append(db_controller.get_storage_node_by_id(sid))
         except KeyError:
-            pass
+            logger.debug(
+                "Skipping missing secondary/tertiary node '%s' during rollback for lvol '%s'",
+                sid,
+                lvol.get_id(),
+            )
 
     if lvol.blobid:
         try:
