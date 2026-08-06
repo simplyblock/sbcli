@@ -1,4 +1,5 @@
 # coding=utf-8
+import contextvars
 import glob
 import json
 import logging
@@ -12,6 +13,7 @@ import subprocess
 import sys
 import uuid
 import time
+
 from datetime import datetime, timezone
 from typing import Union, Any, Optional, Tuple, List, Dict, Iterable
 
@@ -38,6 +40,15 @@ from simplyblock_web import node_utils
 
 from . import pci as pci_utils
 from .helpers import parse_thread_siblings_list
+
+request_id_var: contextvars.ContextVar[str] = contextvars.ContextVar('request_id', default='-')
+
+
+class RequestIdFilter(logging.Filter):
+    def filter(self, record):
+        record.request_id = request_id_var.get()
+        return True
+
 
 CONFIG_KEYS = [
     "app_thread_core",
@@ -718,8 +729,13 @@ def get_logger(name=""):
         # client-port-block window (2026-07-20 FD-0 reboot: block 2s -> 20s).
         # The QueueHandler removes that contention without dropping lines or
         # changing the level; falls back to the direct handler on setup error.
+        # Filter is on the logger, not the handler: it must run synchronously
+        # on the emitting thread to read the caller's contextvars.ContextVar,
+        # before the record crosses into the QueueHandler/listener thread
+        # below (which has no access to the emitting thread's context).
+        logg.addFilter(RequestIdFilter())
         logger_handler = logging.StreamHandler(stream=sys.stderr)
-        logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(thread)d: %(levelname)s: %(message)s'))
+        logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(thread)d: [%(request_id)s] %(levelname)s: %(message)s'))
         try:
             logg.addHandler(make_async_handler(logger_handler))
         except Exception:
