@@ -46,7 +46,7 @@ from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_migration_group import LVolMigrationGroup
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCException
-from simplyblock_core.services.hub_controller_manager import hub_manager
+from simplyblock_core.services.hub_controller_manager import HubControllerManager
 from simplyblock_core.services.tasks_runner_lvol_migration import (
     _make_rpc,
     _snap_tgt_short_name,
@@ -60,6 +60,12 @@ from simplyblock_core.services.tasks_runner_lvol_migration import (
 
 logger = utils.get_logger(__name__)
 db = db_mod.DBController()
+# Constructed explicitly here, once, rather than as a module-level singleton
+# inside hub_controller_manager.py — see that module's docstring. This
+# process's own manager; tasks_runner_lvol_migration.py constructs its own
+# separate instance, and the two coordinate the detach cooldown via the
+# DB-backed HubDetachCooldown record, not shared memory.
+hub_manager = HubControllerManager(db)
 
 
 # ---------------------------------------------------------------------------

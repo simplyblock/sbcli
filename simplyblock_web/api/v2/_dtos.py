@@ -598,7 +598,7 @@ class MigrationDTO(BaseModel):
         )
 
 
-class MigrationGroupDTO(BaseModel):
+class BatchMigrationDTO(BaseModel):
     id: UUID
     cluster_id: str
     source_node_id: str
@@ -612,7 +612,7 @@ class MigrationGroupDTO(BaseModel):
 
     @staticmethod
     def from_model(model: LVolMigrationGroup, connect_strings: Optional[List[NvmeConnectEntry]] = None):
-        return MigrationGroupDTO(
+        return BatchMigrationDTO(
             id=UUID(model.uuid),
             cluster_id=model.cluster_id,
             source_node_id=model.source_node_id,

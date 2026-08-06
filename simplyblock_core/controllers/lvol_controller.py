@@ -1065,6 +1065,21 @@ def _lvol_secondary_index(lvol, node):
 def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
     rpc_client = snode.rpc_client()
 
+    # Refuse to attach a new namespace to a shared subsystem while any
+    # existing member is being migrated. The ANA flip in PHASE_LVOL_MIGRATE
+    # is subsystem-wide, so a concurrently added sibling namespace would be
+    # left inaccessible with no recovery path.
+    if lvol.namespace:
+        from simplyblock_core.controllers import migration_controller
+        active_mig = migration_controller.get_active_migration_for_nqn(
+            lvol.nqn, snode.cluster_id)
+        if active_mig:
+            return False, (
+                f"Cannot attach lvol {lvol.uuid} to subsystem {lvol.nqn}: "
+                f"a member of that subsystem has an active migration "
+                f"{active_mig.uuid}. Retry after the migration completes."
+            )
+
     ret, msg = _create_bdev_stack(lvol, snode, is_primary=is_primary)
     if not ret:
         return _fail_after_bdev(lvol, rpc_client, msg)

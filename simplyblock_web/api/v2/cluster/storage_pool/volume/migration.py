@@ -15,12 +15,12 @@ from ...._dtos import MigrationDTO
 from ....util import CreationResponseFormatParameter, creation_response
 
 api = APIRouter()
+_db = DBController()
 
 
 @api.get('/', name='clusters:storage-pools:volumes:migrations:list')
-def list_migrations(cluster: Cluster) -> List[MigrationDTO]:
-    db = DBController()
-    migrations = db.get_migrations(cluster.get_id())
+def list_migrations(cluster: Cluster, volume: Volume) -> List[MigrationDTO]:
+    migrations = [m for m in _db.get_migrations(cluster.get_id()) if m.lvol_id == volume.get_id()]
     return [MigrationDTO.from_model(m) for m in reversed(migrations)]
 
 
@@ -31,7 +31,13 @@ class _MigrationParams(BaseModel):
 
 
 @api.post('/', name='cluster:storage-pools:volumes:migrations:create', status_code=201, responses={201: {"content": None}})
-def create_migration(request: Request, cluster: Cluster, volume: Volume, parameters: _MigrationParams, response_format: CreationResponseFormatParameter = "full") -> Response:
+def create_migration(
+    request: Request,
+    cluster: Cluster,
+    volume: Volume,
+    parameters: _MigrationParams,
+    response_format: CreationResponseFormatParameter = "full",
+) -> Response:
     try:
         migration_id, connect_strings = migration_controller.create_migration(
             str(volume.get_id()),
@@ -39,29 +45,28 @@ def create_migration(request: Request, cluster: Cluster, volume: Volume, paramet
             ctrl_loss_tmo=parameters.ctrl_loss_tmo,
             host_nqn=parameters.host_nqn,
         )
+        return creation_response(
+            request, response_format,
+            entity_id=UUID(migration_id),
+            route_name='cluster:storage-pools:volumes:migrations:detail',
+            route_kwargs={
+                'cluster_id': UUID(cluster.uuid),
+                'pool_id': UUID(volume.pool_uuid),
+                'volume_id': UUID(volume.uuid),
+                'migration_id': UUID(migration_id),
+            },
+            get_full=lambda id: MigrationDTO.from_model(
+                _db.get_migration_by_id(str(id)), connect_strings=connect_strings),
+        )
     except (ValueError, MigrationConflictError, PreconditionError, RuntimeError) as e:
         raise HTTPException(400, str(e))
-    db = DBController()
-    return creation_response(
-        request, response_format,
-        entity_id=UUID(migration_id),
-        route_name='cluster:storage-pools:volumes:migrations:detail',
-        route_kwargs={
-            'cluster_id': UUID(cluster.uuid),
-            'pool_id': UUID(volume.pool_uuid),
-            'volume_id': UUID(volume.uuid),
-            'migration_id': UUID(migration_id),
-        },
-        get_full=lambda id: MigrationDTO.from_model(
-            db.get_migration_by_id(str(id)), connect_strings=connect_strings),
-    )
 
 
 instance_api = APIRouter(prefix='/{migration_id}')
 
 
 @instance_api.get('/', name='cluster:storage-pools:volumes:migrations:detail')
-def get_migration(cluster: Cluster, migration: Migration) -> MigrationDTO:
+def get_migration(migration: Migration) -> MigrationDTO:
     return MigrationDTO.from_model(migration)
 
 
@@ -71,20 +76,20 @@ class _ContinueParams(BaseModel):
 
 
 @instance_api.post('/continue', name='cluster:storage-pools:volumes:migrations:continue', status_code=200)
-def continue_migration(cluster: Cluster, migration: Migration, parameters: _ContinueParams):
+def continue_migration(migration: Migration, parameters: _ContinueParams):
     try:
-        migration_id = migration_controller.start_migration(
+        result_id = migration_controller.start_migration(
             migration_id=migration.uuid,
             max_retries=parameters.max_retries,
             deadline_seconds=parameters.deadline_seconds,
         )
+        return {"migration_id": result_id}
     except (ValueError, MigrationConflictError, PreconditionError, RuntimeError) as e:
         raise HTTPException(400, str(e))
-    return {"migration_id": migration_id}
 
 
 @instance_api.delete('/', name='cluster:storage-pools:volumes:migrations:cancel', status_code=200)
-def cancel_migration(cluster: Cluster, migration: Migration):
+def cancel_migration(migration: Migration):
     try:
         migration_controller.cancel_migration(migration.uuid)
     except ValueError as e:

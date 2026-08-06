@@ -4,6 +4,7 @@ from uuid import UUID
 from fastapi import Depends, HTTPException
 
 from simplyblock_core.db_controller import DBController
+from simplyblock_web import utils
 from simplyblock_core.models.backup import Backup as BackupModel, BackupPolicy
 from simplyblock_core.models.cluster import Cluster as ClusterModel
 from simplyblock_core.models.job_schedule import JobSchedule
@@ -155,14 +156,37 @@ def _lookup_migration(migration_id: UUID, volume: Volume) -> LVolMigration:
 Migration = Annotated[LVolMigration, Depends(_lookup_migration)]
 
 
-def _lookup_migration_group(group_id: UUID, cluster: Cluster) -> LVolMigrationGroup:
+def _lookup_subsystem(nqn: str, cluster: Cluster) -> str:
+    """Validate that `nqn` roughly looks like a real NQN and return it as-is.
+
+    NQNs are taken as an opaque, already-fully-qualified identifier rather
+    than reconstructed from cluster/lvol identity (e.g. f"{cluster.nqn}:lvol:
+    {lvol.uuid}") — there's no single reliable derivation of "the" NQN for a
+    shared subsystem across the codebase, so accepting it as-is here
+    sidesteps that inconsistency rather than fighting it.
+
+    A full existence check via _db.get_lvols() would be correct but enumerates
+    all lvols on every request; NQN_PATTERN is a cheap substitute until a
+    direct NQN index lookup is available.
+    """
+    if not utils.NQN_PATTERN.match(nqn):
+        raise HTTPException(422, f'Invalid NQN: {nqn!r}')
+    return nqn
+
+
+Subsystem = Annotated[str, Depends(_lookup_subsystem)]
+
+
+def _lookup_batch_migration(migration_id: UUID, cluster: Cluster, subsystem: Subsystem) -> LVolMigrationGroup:
     try:
-        group = _db.get_migration_group_by_id(str(group_id))
+        group = _db.get_migration_group_by_id(str(migration_id))
     except KeyError as e:
         raise HTTPException(404, str(e))
-    if group.cluster_id != cluster.get_id():
-        raise HTTPException(404, f'MigrationGroup {group_id} not found')
+    if group.cluster_id != cluster.get_id() or group.target_nqn != subsystem:
+        raise HTTPException(404, f'Batch migration {migration_id} not found')
     return group
 
 
-MigrationGroup = Annotated[LVolMigrationGroup, Depends(_lookup_migration_group)]
+BatchMigration = Annotated[LVolMigrationGroup, Depends(_lookup_batch_migration)]
+
+
