@@ -1682,6 +1682,17 @@ spec:
         # Step 10: Restart storage nodes one at a time
         self._restart_nodes_sequentially(storage_node_list)
 
+        # Wait for all SPDK pods ready and all nodes online before proceeding
+        self.logger.info("Waiting for all SPDK pods to be ready")
+        self.k8s_utils.wait_spdk_pods_ready(
+            expected_count=len(storage_node_list), timeout=600,
+        )
+        self.logger.info("Waiting for all storage nodes to be online")
+        for node in storage_node_list:
+            self.sbcli_utils.wait_for_storage_node_status(
+                node_id=node["id"], status="online", timeout=600,
+            )
+
         # ── End maintenance window ──
         self.logger.info("=" * 40 + " MAINTENANCE WINDOW END " + "=" * 40)
 
