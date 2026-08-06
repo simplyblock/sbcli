@@ -499,10 +499,25 @@ def _delete_bdev_blocking(bdev_name, primary_rpc, secondary_rpc=None, tertiary_r
         time.sleep(0.2)
 
     for rpc in filter(None, [primary_rpc, secondary_rpc, tertiary_rpc]):
-        try:
-            rpc.delete_lvol(bdev_name, sync=True, special_delete=False)
-        except Exception as e:
-            logger.warning(f"delete bdev {bdev_name} finalize on replica (non-fatal): {e}")
+        last_exc = None
+        for attempt in range(1, 4):
+            try:
+                rpc.delete_lvol(bdev_name, sync=True, special_delete=False)
+                last_exc = None
+                break
+            except Exception as e:
+                last_exc = e
+                logger.error(
+                    f"delete bdev {bdev_name} sync finalize failed on replica "
+                    f"(attempt {attempt}/3): {e}"
+                )
+                if attempt < 3:
+                    time.sleep(1)
+        if last_exc is not None:
+            logger.error(
+                f"delete bdev {bdev_name} sync finalize STILL failing after 3 attempts "
+                f"(non-fatal, blob metadata may not be cleared on this replica): {last_exc}"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -2527,14 +2542,6 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
     src_bdev_short = ctx.get('source_lvol_bdev')
     if lvol is not None and src_bdev_short:
         src_lvol_composite = f"{src_node.lvstore}/{src_bdev_short}"
-        try:
-            src_rpc.bdev_lvol_set_migration_flag(src_lvol_composite)
-            if src_sec_rpc:
-                src_sec_rpc.bdev_lvol_set_migration_flag(src_lvol_composite)
-            if src_ter_rpc:
-                src_ter_rpc.bdev_lvol_set_migration_flag(src_lvol_composite)
-        except Exception as _mf_err:
-            logger.warning(f"bdev_lvol_set_migration_flag failed: {_mf_err}")
         try:
             _delete_bdev_blocking(
                 src_lvol_composite, src_rpc,
