@@ -474,3 +474,46 @@ def test_failed_migration_waits_for_the_last_task_on_the_device(failed_migration
     failed_migration.SPEC.on_finish(task)
 
     failed_migration.device_controller.device_set_failed_and_migrated.assert_not_called()
+
+
+# -- every migrated runner --------------------------------------------------
+
+MIGRATED_RUNNERS = [
+    "fdb_backup", "jc_comp", "replication_final", "sync_lvol_del", "backup",
+    "cluster_expand", "node_add", "restart", "migration", "new_dev_migration",
+    "failed_migration", "node_removal", "port_allow",
+]
+
+
+@pytest.mark.parametrize("name", MIGRATED_RUNNERS)
+def test_runner_module_defines_a_usable_spec(name):
+    """Import-smoke plus spec sanity: the module-level definitions still load
+    under the stubbed-fdb unit env, and what serve() will be handed is
+    actually runnable."""
+    import importlib
+    module = importlib.import_module(f"simplyblock_core.services.tasks_runner_{name}")
+
+    spec = module.SPEC
+    assert spec.function_names, f"{name}: no function names"
+    assert callable(spec.handler)
+    assert callable(spec.is_eligible)
+    assert spec.concurrency >= 1
+    assert spec.interval > 0
+    for optional in (spec.on_finish, spec.on_cycle, spec.serialize,
+                     spec.exclusion_key, spec.backoff):
+        assert optional is None or callable(optional)
+    assert callable(module.main)
+
+
+def test_every_task_function_has_exactly_one_runner():
+    """Two runners claiming the same function name would both drive it, and
+    the lease only guards against a second host, not a second spec."""
+    import importlib
+    owners = {}
+    for name in MIGRATED_RUNNERS:
+        module = importlib.import_module(f"simplyblock_core.services.tasks_runner_{name}")
+        for function_name in module.SPEC.function_names:
+            owners.setdefault(function_name, []).append(name)
+
+    duplicates = {fn: names for fn, names in owners.items() if len(names) > 1}
+    assert not duplicates, f"function names claimed by more than one runner: {duplicates}"
