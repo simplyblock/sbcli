@@ -75,31 +75,34 @@ def add(
         pass
 
     if isinstance(data, _CreateParams):
-        volume_id_or_false, error = lvol_controller.add_lvol_ha(
-            name=data.name,
-            size=data.size,
-            pool_id_or_name=pool.get_id(),
-            use_crypto=data.encrypt,
-            max_size=0,
-            max_rw_iops=data.max_rw_iops,
-            max_rw_mbytes=data.max_rw_mbytes,
-            max_r_mbytes=data.max_r_mbytes,
-            max_w_mbytes=data.max_w_mbytes,
-            host_id_or_name=data.host_id,
-            ha_type=data.ha_type if data.ha_type is not None else 'default',
-            use_comp=False,
-            distr_vuid=0,
-            lvol_priority_class=data.priority_class,
-            namespaced=data.namespaced,
-            pvc_name=data.pvc_name,
-            ndcs=data.ndcs,
-            npcs=data.npcs,
-            allowed_hosts=data.allowed_hosts,
-            fabric=data.fabric,
-            max_namespace_per_subsys=data.max_namespace_per_subsys,
-            do_replicate=data.do_replicate,
-            replication_cluster_id=data.replication_cluster_id,
-        )
+        try:
+            volume_id_or_false, error = lvol_controller.add_lvol_ha(
+                name=data.name,
+                size=data.size,
+                pool_id_or_name=pool.get_id(),
+                use_crypto=data.encrypt,
+                max_size=0,
+                max_rw_iops=data.max_rw_iops,
+                max_rw_mbytes=data.max_rw_mbytes,
+                max_r_mbytes=data.max_r_mbytes,
+                max_w_mbytes=data.max_w_mbytes,
+                host_id_or_name=data.host_id,
+                ha_type=data.ha_type if data.ha_type is not None else 'default',
+                use_comp=False,
+                distr_vuid=0,
+                lvol_priority_class=data.priority_class,
+                namespaced=data.namespaced,
+                pvc_name=data.pvc_name,
+                ndcs=data.ndcs,
+                npcs=data.npcs,
+                allowed_hosts=data.allowed_hosts,
+                fabric=data.fabric,
+                max_namespace_per_subsys=data.max_namespace_per_subsys,
+                do_replicate=data.do_replicate,
+                replication_cluster_id=data.replication_cluster_id,
+            )
+        except KeyError as e:
+            raise HTTPException(404, str(e))
     elif isinstance(data, _CloneParams):
         volume_id_or_false, error = snapshot_controller.clone(
             data.snapshot_id,
@@ -113,7 +116,7 @@ def add(
         raise AssertionError('unreachable')
 
     if volume_id_or_false == False:  # noqa
-        raise ValueError(error)
+        raise HTTPException(422, error)
 
     return util.creation_response(
         request, response_format,

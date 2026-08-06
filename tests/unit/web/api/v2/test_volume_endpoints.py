@@ -78,6 +78,16 @@ class TestCreateVolume:
         )
         lvol_controller.add_lvol_ha.assert_not_called()
 
+    def test_missing_host_node_returns_404(self, client, db, pool, lvol_controller):
+        db.get_lvol_by_name.side_effect = KeyError('LVol not found')
+        lvol_controller.add_lvol_ha.side_effect = KeyError('Can not find storage node: bogus-id')
+
+        response = client.post(
+            f'{BASE}/', json={'name': 'volume-1', 'size': '10G', 'host_id': 'bogus-id'},
+        )
+
+        assert response.status_code == 404
+
     def test_existing_name_returns_409(self, client, db, pool, volume, lvol_controller):
         db.get_lvol_by_name.return_value = volume
 
