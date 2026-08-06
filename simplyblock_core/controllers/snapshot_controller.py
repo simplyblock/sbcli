@@ -467,7 +467,7 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
             return False, msg
 
     cluster = db_controller.get_cluster_by_id(pool.cluster_id)
-    if cluster.status not in [cluster.STATUS_ACTIVE, cluster.STATUS_DEGRADED]:
+    if cluster.status not in cluster.MUTABLE_STATUSES:
         return False, f"Cluster is not active, status: {cluster.status}"
 
     snap_vuid = utils.get_random_snapshot_vuid()
@@ -1089,7 +1089,7 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
         return False, msg
 
     cluster = db_controller.get_cluster_by_id(pool.cluster_id)
-    if cluster.status not in [cluster.STATUS_ACTIVE, cluster.STATUS_DEGRADED]:
+    if cluster.status not in cluster.MUTABLE_STATUSES:
         return False, f"Cluster is not active, status: {cluster.status}"
 
     # Hard per-lvstore object cap (lvols + clones + snapshots).

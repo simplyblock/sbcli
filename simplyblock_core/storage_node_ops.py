@@ -6497,13 +6497,7 @@ def get_restart_phase(node_id, lvs_name):
             return phase
         try:
             cluster = db_controller.get_cluster_by_id(node.cluster_id)
-            # IN_SHRINK: node removal relocates replicas onto an ONLINE target
-            # and sets a phase there (phase 3b). Without this the phase reads as
-            # stale — the node is ONLINE and the cluster was ACTIVE — and gets
-            # cleared mid-rebuild, which is what the gate exists to prevent.
-            if cluster.status in (Cluster.STATUS_IN_ACTIVATION,
-                                  Cluster.STATUS_IN_EXPANSION,
-                                  Cluster.STATUS_IN_SHRINK):
+            if cluster.status in Cluster.TOPOLOGY_OWNED_STATUSES:
                 return phase
         except KeyError:
             pass

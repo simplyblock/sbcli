@@ -22,11 +22,10 @@ def task_runner(task):
         return True
 
     cluster = db.get_cluster_by_id(task.cluster_id)
-    # IN_SHRINK: node removal DEPENDS on this runner — _decommission_node_devices
-    # blocks until every data device reaches FAILED_AND_MIGRATED, which only this
-    # runner sets. Refusing here deadlocks the removal against its own status.
-    if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED,
-                              Cluster.STATUS_READONLY, Cluster.STATUS_IN_SHRINK]:
+    # Node removal DEPENDS on this runner: _decommission_node_devices blocks
+    # until every data device reaches FAILED_AND_MIGRATED, which only this
+    # runner sets — refusing IN_SHRINK deadlocks removal against its own status.
+    if cluster.status not in Cluster.OPERABLE_STATUSES:
         task.function_result = "cluster is not active, retrying"
         task.status = JobSchedule.STATUS_SUSPENDED
         task.retry += 1

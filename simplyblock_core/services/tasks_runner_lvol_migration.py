@@ -2897,9 +2897,7 @@ def task_runner(task):
     # completed migration stays stuck if the source node goes through a brief
     # STATUS_UNREADY / STATUS_IN_ACTIVATION window during recovery.
     cluster = db.get_cluster_by_id(migration.cluster_id)
-    # IN_SHRINK: migration family — blocking it stalls the removal's drain.
-    if cluster.status not in (Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED,
-                              Cluster.STATUS_IN_SHRINK):
+    if cluster.status not in Cluster.MUTABLE_STATUSES:
         if not _is_cleanup_phase:
             return _suspend_task(
                 task, migration, f"cluster not active (status={cluster.status})",
