@@ -83,9 +83,12 @@ the 3-second service-loop gap between phases.
 """
 
 import datetime
+import logging
 import random
 import time
 from typing import Optional
+
+from tenacity import RetryError, Retrying, before_sleep_log, stop_after_attempt, wait_fixed
 
 from simplyblock_core import db_controller as db_mod, utils, constants
 from simplyblock_core.utils import convert_size
@@ -499,24 +502,16 @@ def _delete_bdev_blocking(bdev_name, primary_rpc, secondary_rpc=None, tertiary_r
         time.sleep(0.2)
 
     for rpc in filter(None, [primary_rpc, secondary_rpc, tertiary_rpc]):
-        last_exc = None
-        for attempt in range(1, 4):
-            try:
-                rpc.delete_lvol(bdev_name, sync=True, special_delete=False)
-                last_exc = None
-                break
-            except Exception as e:
-                last_exc = e
-                logger.error(
-                    f"delete bdev {bdev_name} sync finalize failed on replica "
-                    f"(attempt {attempt}/3): {e}"
-                )
-                if attempt < 3:
-                    time.sleep(1)
-        if last_exc is not None:
-            logger.error(
+        try:
+            Retrying(
+                stop=stop_after_attempt(4),
+                wait=wait_fixed(1),
+                before_sleep=before_sleep_log(logger, logging.WARNING),
+            )(rpc.delete_lvol, bdev_name, sync=True, special_delete=False)
+        except RetryError:
+            logger.exception(
                 f"delete bdev {bdev_name} sync finalize STILL failing after 3 attempts "
-                f"(non-fatal, blob metadata may not be cleared on this replica): {last_exc}"
+                f"(non-fatal, blob metadata may not be cleared on this replica)"
             )
 
 
