@@ -1334,6 +1334,9 @@ class K8sNativeMajorUpgrade(TestClusterBase):
         R25 clusters don't have cert-manager since TLS wasn't supported.
         The target operator chart validates cert-manager CRDs when
         tls.enabled=true, so we install it here before helm install.
+
+        If a stale/broken cert-manager release exists, uninstall it first
+        and retry the install up to 3 times.
         """
         self.logger.info("Checking if cert-manager is installed")
         out, _ = self.k8s_utils._exec_kubectl(
@@ -1343,16 +1346,46 @@ class K8sNativeMajorUpgrade(TestClusterBase):
             self.logger.info("cert-manager CRDs already present")
             return
 
+        # Uninstall stale cert-manager if present from a previous failed run
+        self.logger.info("Removing any stale cert-manager release")
+        self.k8s_utils._exec_kubectl(
+            "helm uninstall cert-manager -n cert-manager "
+            "--no-hooks --timeout 60s 2>/dev/null || true"
+        )
+
         self.logger.info("Installing cert-manager (TLS prerequisite)")
         self.k8s_utils._exec_kubectl(
             "helm repo add jetstack https://charts.jetstack.io 2>/dev/null || true"
         )
         self.k8s_utils._exec_kubectl("helm repo update")
-        self.k8s_utils._exec_kubectl(
-            "helm upgrade --install cert-manager jetstack/cert-manager "
-            "--namespace cert-manager --create-namespace "
-            "--version v1.13.0 --set installCRDs=true"
-        )
+
+        last_err = None
+        for attempt in range(1, 4):
+            self.logger.info(f"cert-manager install attempt {attempt}/3")
+            out, err = self.k8s_utils._exec_kubectl(
+                "helm upgrade --install cert-manager jetstack/cert-manager "
+                "--namespace cert-manager --create-namespace "
+                "--version v1.13.0 --set installCRDs=true"
+            )
+            if err and "Error" in err:
+                last_err = err
+                self.logger.warning(
+                    f"cert-manager install attempt {attempt} failed: {err[:200]}"
+                )
+                self.k8s_utils._exec_kubectl(
+                    "helm uninstall cert-manager -n cert-manager "
+                    "--no-hooks --timeout 60s 2>/dev/null || true"
+                )
+                sleep_n_sec(10)
+                continue
+            last_err = None
+            break
+
+        if last_err:
+            raise RuntimeError(
+                f"cert-manager install failed after 3 attempts: {last_err[:500]}"
+            )
+
         self.k8s_utils._exec_kubectl(
             "kubectl wait --for=condition=Ready pods --all "
             "-n cert-manager --timeout=120s"
