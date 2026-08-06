@@ -1036,26 +1036,45 @@ def _fail_after_bdev(lvol, rpc_client, msg):
     with "vbdev_lvol_destroy: ... has N clones". Logs but does not raise on
     rollback failure so the caller still sees the original error."""
     db_controller = DBController()
-    try:
-        primary_node = db_controller.get_storage_node_by_id(lvol.node_id)
-        primary_rpc_client = primary_node.rpc_client(timeout=5)
-        existing_on_primary = primary_rpc_client.get_bdevs(f"{lvol.lvs_name}/{lvol.lvol_bdev}")
-        if not existing_on_primary:
-            for sn_id in lvol.nodes:
-                if sn_id != lvol.node_id:
-                    rpc_client = db_controller.get_storage_node_by_id(sn_id).rpc_client()
-                    existing_on_secondary = rpc_client.get_bdevs(f"{lvol.lvs_name}/{lvol.lvol_bdev}")
-                    if existing_on_secondary:
-                        # register on primary
-                        rpc_client.bdev_lvol_register(
-                            existing_on_secondary[0], lvol.lvs_name, lvol.lvol_uuid, lvol.blobid, lvol.lvol_priority_class)
-                        break
+    host_node = db_controller.get_storage_node_by_id(lvol.node_id)
+    secondary_ids = [host_node.secondary_node_id]
+    if host_node.tertiary_node_id:
+        secondary_ids.append(host_node.tertiary_node_id)
 
-        lvol.status = LVol.STATUS_IN_DELETION
-        lvol.deletion_status = ""
-        lvol.write_to_db(DBController().kv_store)
-    except Exception:
-        logger.exception("rollback of bdev stack failed for %s", lvol.get_id())
+    all_nodes = [host_node]
+    for sid in secondary_ids:
+        try:
+            all_nodes.append(db_controller.get_storage_node_by_id(sid))
+        except KeyError:
+            pass
+
+    if lvol.blobid:
+        try:
+            from simplyblock_core.storage_node_ops import find_leader_with_failover
+            primary_node, non_leaders = find_leader_with_failover(all_nodes, lvol.lvs_name)
+            if primary_node is None:
+                msg = "No leader available, marking it for deletion and let lvol monitor handle deletion"
+            else:
+                existing_on_primary = primary_node.rpc_client().get_bdevs(f"{lvol.lvs_name}/{lvol.lvol_bdev}")
+                if not existing_on_primary:
+                    for sn_id in lvol.nodes:
+                        if sn_id != lvol.node_id:
+                            rpc_client = db_controller.get_storage_node_by_id(sn_id).rpc_client()
+                            existing_on_secondary = rpc_client.get_bdevs(f"{lvol.lvs_name}/{lvol.lvol_bdev}")
+                            if existing_on_secondary:
+                                # register on primary
+                                rpc_client.bdev_lvol_register(
+                                    existing_on_secondary[0], lvol.lvs_name, lvol.lvol_uuid, lvol.blobid, lvol.lvol_priority_class)
+
+            lvol.status = LVol.STATUS_IN_DELETION
+            lvol.deletion_status = ""
+            lvol.write_to_db(DBController().kv_store)
+        except Exception:
+            logger.exception("rollback of bdev stack failed for %s", lvol.get_id())
+    else:
+        for node in all_nodes:
+            _remove_lvol_subsys_from_node(lvol, node.rpc_client())
+        lvol.remove_from_db(db_controller.kv_store)
     return False, msg
 
 
