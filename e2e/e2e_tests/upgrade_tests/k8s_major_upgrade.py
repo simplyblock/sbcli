@@ -1296,6 +1296,10 @@ class K8sNativeMajorUpgrade(TestClusterBase):
             )
             sleep_n_sec(10)
 
+            # Delete resources that survived helm uninstall due to
+            # helm.sh/resource-policy: keep (e.g. simplyblock-snapshot-controller)
+            self._cleanup_kept_spdk_csi_resources()
+
         if self.helm_release_sbcli:
             self.logger.info(
                 f"Migration Step 4: Uninstalling helm release '{self.helm_release_sbcli}'"
@@ -1392,94 +1396,61 @@ class K8sNativeMajorUpgrade(TestClusterBase):
         )
         self.logger.info("cert-manager installed and ready")
 
-    def _readopt_spdk_csi_resources(self):
-        """Re-annotate resources created by the old 'spdk-csi' Helm release.
+    def _cleanup_kept_spdk_csi_resources(self):
+        """Delete resources that survived ``helm uninstall spdk-csi``.
 
-        During R25→R26 upgrades the old Helm release was named 'spdk-csi'.
-        Resources it created (e.g. simplyblock-snapshot-controller in kube-system)
-        carry ``meta.helm.sh/release-name: spdk-csi``.  The new operator chart
-        installs as 'simplyblock-operator' in the 'simplyblock' namespace and
-        cannot adopt these resources unless the annotations match.
+        The old spdk-csi chart sets ``helm.sh/resource-policy: keep`` on
+        certain resources (e.g. simplyblock-snapshot-controller Deployment
+        in kube-system).  ``helm uninstall`` honours that policy and leaves
+        them behind.  These orphaned resources still carry the old Helm
+        ownership annotations (``meta.helm.sh/release-name: spdk-csi``),
+        which prevents the new ``simplyblock-operator`` chart from creating
+        its own version of the same resource.
+
+        The fix is straightforward: delete the orphans so the new chart
+        can recreate them cleanly.
         """
-        self.logger.info("Checking for leftover spdk-csi Helm resources to re-annotate")
+        self.logger.info("Cleaning up resources kept by spdk-csi resource-policy")
 
-        # Namespaced resource types that the old spdk-csi chart may have created
-        resource_types = [
-            "deployment",
-            "service",
-            "serviceaccount",
-            "configmap",
-            "role",
-            "rolebinding",
+        # Known resources that the spdk-csi chart marks with resource-policy: keep
+        # Format: (resource_type, name, namespace_or_None)
+        kept_resources = [
+            ("deployment", "simplyblock-snapshot-controller", "kube-system"),
         ]
 
-        # Namespaces where old resources may reside
-        namespaces = ["kube-system", _NAMESPACE]
-        re_annotated = 0
-
-        for ns in namespaces:
-            for rtype in resource_types:
-                try:
-                    cmd = (
-                        f"kubectl get {rtype} -n {ns} "
-                        f"-o jsonpath='{{range .items[?(@.metadata.annotations.meta\\.helm\\.sh/release-name==\"spdk-csi\")]}}{{.metadata.name}} {{end}}' "
-                        f"2>/dev/null || true"
-                    )
-                    out, _ = self.k8s_utils._exec_kubectl(cmd)
-                    names = (out or "").replace("'", "").split()
-                    for name in names:
-                        name = name.strip()
-                        if not name:
-                            continue
-                        self.logger.info(
-                            f"  Re-annotating {rtype}/{name} in {ns} "
-                            f"from spdk-csi → simplyblock-operator"
-                        )
-                        self.k8s_utils._exec_kubectl(
-                            f"kubectl annotate {rtype} {name} -n {ns} "
-                            f"meta.helm.sh/release-name=simplyblock-operator "
-                            f"meta.helm.sh/release-namespace={_NAMESPACE} "
-                            f"--overwrite"
-                        )
-                        re_annotated += 1
-                except Exception as e:
-                    self.logger.warning(
-                        f"  Failed to process {rtype} in {ns}: {e}"
-                    )
-
-        # Also handle cluster-scoped resources (clusterrole, clusterrolebinding)
-        for rtype in ["clusterrole", "clusterrolebinding"]:
-            try:
-                cmd = (
-                    f"kubectl get {rtype} "
-                    f"-o jsonpath='{{range .items[?(@.metadata.annotations.meta\\.helm\\.sh/release-name==\"spdk-csi\")]}}{{.metadata.name}} {{end}}' "
-                    f"2>/dev/null || true"
+        deleted = 0
+        for rtype, name, ns in kept_resources:
+            ns_flag = f"-n {ns}" if ns else ""
+            # Check if it exists and belongs to spdk-csi
+            check_cmd = (
+                f"kubectl get {rtype} {name} {ns_flag} "
+                f"-o jsonpath='{{.metadata.annotations.meta\\.helm\\.sh/release-name}}' "
+                f"2>/dev/null || true"
+            )
+            out, _ = self.k8s_utils._exec_kubectl(check_cmd)
+            release = (out or "").replace("'", "").strip()
+            if release == "spdk-csi":
+                self.logger.info(
+                    f"  Deleting {rtype}/{name} in {ns or 'cluster-scope'} "
+                    f"(orphaned from spdk-csi with resource-policy: keep)"
                 )
-                out, _ = self.k8s_utils._exec_kubectl(cmd)
-                names = (out or "").replace("'", "").split()
-                for name in names:
-                    name = name.strip()
-                    if not name:
-                        continue
-                    self.logger.info(
-                        f"  Re-annotating {rtype}/{name} (cluster-scoped) "
-                        f"from spdk-csi → simplyblock-operator"
-                    )
-                    self.k8s_utils._exec_kubectl(
-                        f"kubectl annotate {rtype} {name} "
-                        f"meta.helm.sh/release-name=simplyblock-operator "
-                        f"meta.helm.sh/release-namespace={_NAMESPACE} "
-                        f"--overwrite"
-                    )
-                    re_annotated += 1
-            except Exception as e:
-                self.logger.warning(
-                    f"  Failed to process cluster-scoped {rtype}: {e}"
+                self.k8s_utils._exec_kubectl(
+                    f"kubectl delete {rtype} {name} {ns_flag} "
+                    f"--ignore-not-found"
+                )
+                deleted += 1
+            elif release:
+                self.logger.info(
+                    f"  {rtype}/{name} in {ns or 'cluster-scope'} belongs to "
+                    f"release '{release}', not spdk-csi — skipping"
+                )
+            else:
+                self.logger.info(
+                    f"  {rtype}/{name} in {ns or 'cluster-scope'} not found or "
+                    f"has no release annotation — skipping"
                 )
 
-        # Also re-label helm ownership labels if present
-        # Helm uses app.kubernetes.io/managed-by=Helm label
-        self.logger.info(f"Re-annotated {re_annotated} resources from spdk-csi to simplyblock-operator")
+        self.logger.info(f"Deleted {deleted} orphaned spdk-csi resource(s)")
 
     def _install_operator_chart(self):
         """Step 6: Install the operator Helm chart with FDB disabled."""
@@ -1495,10 +1466,6 @@ class K8sNativeMajorUpgrade(TestClusterBase):
             csi_flags += f" --set image.csi.repository={self.csi_repository}"
         if self.csi_tag:
             csi_flags += f" --set image.csi.tag={self.csi_tag}"
-
-        # Re-annotate resources left over from the old 'spdk-csi' Helm release
-        # so they can be adopted by the new 'simplyblock-operator' release.
-        self._readopt_spdk_csi_resources()
 
         helm_cmd = (
             f"helm upgrade --install simplyblock-operator {self.helm_chart_path} "
