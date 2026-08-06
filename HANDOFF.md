@@ -21,25 +21,24 @@ ad4768462  Introduce generic task runner         (B0)
 <A5/A3/A2/A1 commits below>
 ```
 
-## Status: Phase A done, B0 done, 8 of 13 runners migrated
+## Status: the planned scope is complete
 
-Migrated onto the driver: `fdb_backup`, `jc_comp`, `replication_final`,
-`sync_lvol_del`, `backup`, `cluster_expand`, `node_add`, `restart`.
+All thirteen runners in scope are on the driver: `fdb_backup`, `jc_comp`,
+`replication_final`, `sync_lvol_del`, `backup`, `cluster_expand`, `node_add`,
+`restart`, `migration`, `new_dev_migration`, `failed_migration`, `node_removal`,
+`port_allow`.
 
-**Remaining, in order:**
-
-1. migration trio — `migration`, `new_dev_migration`, `failed_migration`
-   (serial; `get_active_node_mig_task` / same-node-sibling gating becomes
-   `is_eligible`). Note `tasks_controller.defer_if_cluster_expanding` writes
-   task state from inside these handlers — it becomes a `TaskDefer` (or an
-   `is_eligible` clause) and the helper goes away.
-2. `port_allow` (large; its `is_eligible` omits the `IN_ACTIVATION` check — the
-   documented opt-out — and keeps the recovery logic)
-3. `node_removal` (serial, already leased, unbounded)
+Nothing outside a runner writes task lifecycle state any more:
+`utils.handle_task_result` and `tasks_controller.defer_task_for_expansion` are
+gone, and the three cancellation paths commit by CAS.
 
 **Deferred to a follow-up PR:** `lvol_migration` and `batch_migration` — under
 active upstream rewrite (~17 commits in the last window, several still labelled
-`TEMP:`). Migrating them now guarantees repeated conflicts for no benefit.
+`TEMP:`). They keep their own loops meanwhile, which is why
+`tasks_cluster_status.py` is not the only file left untouched. Migrating them is
+the same exercise: their pre-run guard chains become `is_eligible`, their poll
+loops `TaskProgress`, and their `_suspend_task(charge_retry=...)` helper maps
+directly onto TaskDefer vs TaskRetry.
 
 ## What the driver grew during the migrations
 
