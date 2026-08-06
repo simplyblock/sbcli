@@ -12,6 +12,12 @@ from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.lvol_model import LVol
+from simplyblock_core.services.task_runner_base import (
+    RunnerSpec,
+    TaskAbort,
+    TaskDefer,
+    serve,
+)
 
 logger = utils.get_logger(__name__)
 
@@ -566,30 +572,13 @@ def _abort_recovering_node(node, reason):
 
 
 def exec_port_allow_task(task):
-    # get new task object because it could be changed from cancel task
-    task = db.get_task_by_id(task.uuid)
-
-    if task.canceled:
-        task.function_result = "canceled"
-        task.status = JobSchedule.STATUS_DONE
-        task.write_to_db(db.kv_store)
-        return
-
     try:
         node = db.get_storage_node_by_id(task.node_id)
     except KeyError:
-        task.function_result = "node not found"
-        task.status = JobSchedule.STATUS_DONE
-        task.write_to_db(db.kv_store)
-        return
+        raise TaskAbort("node not found")
 
     if node.status not in [StorageNode.STATUS_DOWN, StorageNode.STATUS_ONLINE]:
-        msg = f"Node is {node.status}, retry task"
-        logger.info(msg)
-        task.function_result = msg
-        task.status = JobSchedule.STATUS_SUSPENDED
-        task.write_to_db(db.kv_store)
-        return
+        raise TaskDefer(f"Node is {node.status}, retry task")
 
     # check node ping
     ping_check = health_controller._check_node_ping(node.mgmt_ip)
@@ -600,12 +589,7 @@ def exec_port_allow_task(task):
         logger.info(f"Check 2: ping mgmt ip {node.mgmt_ip} ... {ping_check}")
 
     if not ping_check:
-        msg = "Node ping is false, retry task"
-        logger.info(msg)
-        task.function_result = msg
-        task.status = JobSchedule.STATUS_SUSPENDED
-        task.write_to_db(db.kv_store)
-        return
+        raise TaskDefer("Node ping is false, retry task")
 
     # Data-NIC gate: mgmt reachability alone is not recovery — after a
     # partial partition the mgmt plane often returns first while the
@@ -629,24 +613,14 @@ def exec_port_allow_task(task):
             logger.info(f"Check: ping data nic {data_nic.ip4_address} ... {data_ping}")
             data_results.append(data_ping)
     if data_results and not any(r is True for r in data_results):
-        msg = "Node data NIC not confirmed reachable, retry task"
-        logger.info(msg)
-        task.function_result = msg
-        task.status = JobSchedule.STATUS_SUSPENDED
-        task.write_to_db(db.kv_store)
-        return
+        raise TaskDefer("Node data NIC not confirmed reachable, retry task")
 
     logger.info("connect to remote devices")
     # connect to remote devs
     try:
         remote_devices = storage_node_ops._connect_to_remote_devs(node, reattach=False)
         if not remote_devices:
-            msg = "Node unable to connect to remote devs, retry task"
-            logger.info(msg)
-            task.function_result = msg
-            task.status = JobSchedule.STATUS_SUSPENDED
-            task.write_to_db(db.kv_store)
-            return
+            raise TaskDefer("Node unable to connect to remote devs, retry task")
         else:
             # Re-read fresh before writing to avoid overwriting concurrent changes
             node = db.get_storage_node_by_id(task.node_id)
@@ -656,12 +630,7 @@ def exec_port_allow_task(task):
         logger.info("connect to remote JM devices")
         remote_jm_devices = storage_node_ops._connect_to_remote_jm_devs(node)
         if not remote_jm_devices or len(remote_jm_devices) < 2:
-            msg = "Node unable to connect to remote JMs, retry task"
-            logger.info(msg)
-            task.function_result = msg
-            task.status = JobSchedule.STATUS_SUSPENDED
-            task.write_to_db(db.kv_store)
-            return
+            raise TaskDefer("Node unable to connect to remote JMs, retry task")
         else:
             # Re-read fresh before writing to avoid overwriting concurrent changes
             node = db.get_storage_node_by_id(task.node_id)
@@ -669,14 +638,11 @@ def exec_port_allow_task(task):
             node.write_to_db()
 
 
+    except TaskDefer:
+        raise
     except Exception as e:
         logger.error(e)
-        msg = "Error when connect to remote devs, retry task"
-        logger.info(msg)
-        task.function_result = msg
-        task.status = JobSchedule.STATUS_SUSPENDED
-        task.write_to_db(db.kv_store)
-        return
+        raise TaskDefer("Error when connect to remote devs, retry task")
 
     # After a network outage every distrib in the cluster is working from a
     # stale device view: the recovering node's distribs have stale REMOTE
@@ -707,12 +673,7 @@ def exec_port_allow_task(task):
             f"port allow on {node.get_id()}")
         if not device_controller.device_set_online(
                 dev.get_id(), cause=device_controller.CAUSE_NODE_RECOVERY):
-            msg = f"Device {dev.get_id()} re-admit refused, retry task"
-            logger.warning(msg)
-            task.function_result = msg
-            task.status = JobSchedule.STATUS_SUSPENDED
-            task.write_to_db(db.kv_store)
-            return
+            raise TaskDefer(f"Device {dev.get_id()} re-admit refused, retry task")
 
     # Positive confirmation gate: every device-status event must be applied by
     # ALL of its target distribs before we touch hublvols / leadership / the
@@ -722,12 +683,6 @@ def exec_port_allow_task(task):
     # held a stale device view, which is the placement/read-failure class this
     # whole sequence exists to prevent. On any device whose event is not
     # confirmed, suspend and retry — do NOT proceed.
-    def _fail(msg):
-        logger.warning(msg)
-        task.function_result = msg
-        task.status = JobSchedule.STATUS_SUSPENDED
-        task.write_to_db(db.kv_store)
-
     logger.info("Broadcasting local device status of recovering node to all nodes")
     node = db.get_storage_node_by_id(task.node_id)
     for dev in node.nvme_devices:
@@ -736,12 +691,11 @@ def exec_port_allow_task(task):
         try:
             ok = distr_controller.send_dev_status_event(dev, dev.status)
         except Exception as e:
-            _fail(f"Local device status broadcast for {dev.get_id()} failed: {e}, retry task")
-            return
+            raise TaskDefer(f"Local device status broadcast for {dev.get_id()} "
+                            f"failed: {e}, retry task")
         if not ok:
-            _fail(f"Local device status for {dev.get_id()} not applied by all "
-                  f"distribs, retry task")
-            return
+            raise TaskDefer(f"Local device status for {dev.get_id()} "
+                            f"not applied by all distribs, retry task")
 
     logger.info("Sending other nodes' device status events to recovering node")
     for cluster_node in db.get_storage_nodes_by_cluster_id(task.cluster_id):
@@ -753,14 +707,14 @@ def exec_port_allow_task(task):
             try:
                 ok = distr_controller.send_dev_status_event(
                     dev, dev.status, target_node=node)
+            except TaskDefer:
+                raise
             except Exception as e:
-                _fail(f"Device status event for {dev.get_id()} to recovering node "
-                      f"failed: {e}, retry task")
-                return
+                raise TaskDefer(f"Device status event for {dev.get_id()} to "
+                                f"recovering node failed: {e}, retry task")
             if not ok:
-                _fail(f"Device status for {dev.get_id()} not applied by recovering "
-                      f"node's distribs, retry task")
-                return
+                raise TaskDefer(f"Device status for {dev.get_id()} "
+                                f"not applied by recovering node's distribs, retry task")
 
     logger.info("All device-status events confirmed applied by distribs")
 
@@ -774,24 +728,14 @@ def exec_port_allow_task(task):
     node = db.get_storage_node_by_id(task.node_id)
     own_hublvols_ok, own_msg = _reconnect_own_sec_tert_hublvols(node)
     if not own_hublvols_ok:
-        msg = f"Own (outbound) hublvol reconnect failed: {own_msg}, retry task"
-        logger.warning(msg)
-        task.function_result = msg
-        task.status = JobSchedule.STATUS_SUSPENDED
-        task.write_to_db(db.kv_store)
-        return
+        raise TaskDefer(f"Own (outbound) hublvol reconnect failed: {own_msg}, retry task")
 
     # INBOUND: for lvstores where this node is the secondary, re-expose its
     # hub and ensure the tertiary's redirect path to it is connected (no
     # leadership action here — that stays in the failback step below).
     inbound_ok, inbound_msg = _reconnect_inbound_hublvols(node)
     if not inbound_ok:
-        msg = f"Inbound hublvol reconnect failed: {inbound_msg}, retry task"
-        logger.warning(msg)
-        task.function_result = msg
-        task.status = JobSchedule.STATUS_SUSPENDED
-        task.write_to_db(db.kv_store)
-        return
+        raise TaskDefer(f"Inbound hublvol reconnect failed: {inbound_msg}, retry task")
 
     snode = db.get_storage_node_by_id(node.get_id())
     sec_ids = []
@@ -821,17 +765,12 @@ def exec_port_allow_task(task):
                                 snode.jm_vuid)
             except Exception as e:
                 logger.error(e)
-                return
+                raise TaskDefer(f"JC compression check on peer failed: {e}, retry task")
 
     if node.lvstore_status == "ready":
         lvstore_check = health_controller._check_node_lvstore(node.lvstore_stack, node, auto_fix=True)
         if not lvstore_check:
-            msg = "Node LVolStore check fail, retry later"
-            logger.warning(msg)
-            task.function_result = msg
-            task.status = JobSchedule.STATUS_SUSPENDED
-            task.write_to_db(db.kv_store)
-            return
+            raise TaskDefer("Node LVolStore check fail, retry later")
 
         sec_ids = []
         if node.secondary_node_id:
@@ -846,12 +785,7 @@ def exec_port_allow_task(task):
             # primary-local recovery step, not a peer reconnect.
             primary_hublvol_check = health_controller._check_node_hublvol(node)
             if not primary_hublvol_check:
-                msg = "Node hublvol check fail, retry later"
-                logger.warning(msg)
-                task.function_result = msg
-                task.status = JobSchedule.STATUS_SUSPENDED
-                task.write_to_db(db.kv_store)
-                return
+                raise TaskDefer("Node hublvol check fail, retry later")
 
             # Peer hublvol gate: for each ONLINE secondary/tertiary, drive
             # ``connect_to_hublvol`` (which re-attaches the bdev_nvme
@@ -883,15 +817,8 @@ def exec_port_allow_task(task):
                     f"after {_HUBLVOL_MAX_ATTEMPTS} attempts: " +
                     ", ".join(p[:8] for p in failing_peers))
                 _abort_recovering_node(node, reason)
-                task.function_result = (
+                raise TaskAbort(
                     f"Aborted recovering node {node.get_id()[:8]}: {reason}")
-                task.status = JobSchedule.STATUS_DONE
-                task.write_to_db(db.kv_store)
-                return
-
-    if task.status != JobSchedule.STATUS_RUNNING:
-        task.status = JobSchedule.STATUS_RUNNING
-        task.write_to_db(db.kv_store)
 
     try:
         # wait for lvol sync delete
@@ -903,9 +830,11 @@ def exec_port_allow_task(task):
 
         port_number = task.function_params["port_number"]
 
+    except TaskDefer:
+        raise
     except Exception as e:
         logger.error(e)
-        return
+        raise TaskDefer(f"Waiting for lvol sync delete failed: {e}, retry task")
 
     # --- Leadership failback, BEFORE the port is unblocked --------------
     #
@@ -954,12 +883,8 @@ def exec_port_allow_task(task):
                 leadership_read_failed = f"{peer.get_id()[:8]}: {e}"
 
         if current_leader is None and leadership_read_failed:
-            msg = f"Leadership read failed on peer {leadership_read_failed}, retry task"
-            logger.warning(msg)
-            task.function_result = msg
-            task.status = JobSchedule.STATUS_SUSPENDED
-            task.write_to_db(db.kv_store)
-            return
+            raise TaskDefer(
+                f"Leadership read failed on peer {leadership_read_failed}, retry task")
 
         if current_leader is not None:
             failback_ok, failback_msg = _failback_leadership_to_primary(
@@ -974,12 +899,7 @@ def exec_port_allow_task(task):
             failback_ok, failback_msg = True, ""
 
         if not failback_ok:
-            msg = f"Leadership failback incomplete: {failback_msg}, retry task"
-            logger.warning(msg)
-            task.function_result = msg
-            task.status = JobSchedule.STATUS_SUSPENDED
-            task.write_to_db(db.kv_store)
-            return
+            raise TaskDefer(f"Leadership failback incomplete: {failback_msg}, retry task")
 
     # Unblock ALL of the node's LVS subsystem ports (own primary + every
     # follower LVS), not just the single port_number the task was created
@@ -1061,40 +981,26 @@ def exec_port_allow_task(task):
         logger.error(f"Device re-admit after port allow failed: {e}")
 
     task.function_result = f"Port {port_number} allowed on node"
-    task.status = JobSchedule.STATUS_DONE
-    task.write_to_db(db.kv_store)
+
+
+SPEC = RunnerSpec(
+    name="tasks-runner-port-allow",
+    function_names=[JobSchedule.FN_PORT_ALLOW],
+    handler=exec_port_allow_task,
+    # No IN_ACTIVATION gate, deliberately, unlike every other runner:
+    # port_allow is the final step of a node's recovery, and activation NEEDS
+    # those ports open (2026-07-16 full-fleet reboot: a task suspended seconds
+    # before activation started froze for the entire 30-minute activation,
+    # while the activation's hublvol attaches to that node failed against its
+    # still-blocked port). The task's own gates — node status, mgmt/data-NIC
+    # pings, verified-open hublvols — decide whether a retry can proceed; one
+    # that still can't just defers again.
+    interval=5,
+)
 
 
 def main():
-    logger.info("Starting Tasks runner...")
-    while True:
-        clusters = db.get_clusters()
-        if not clusters:
-            logger.error("No clusters found!")
-        else:
-            for cl in clusters:
-                # Deliberately NOT skipped while the cluster is IN_ACTIVATION:
-                # port_allow is the final step of a node's recovery, and
-                # activation NEEDS those ports open (2026-07-16 full-fleet
-                # reboot: a task suspended seconds before activation started
-                # froze at 0/8 retries for the entire 30-minute activation,
-                # while the activation's hublvol attaches to that node failed
-                # against its still-blocked port). The task's own gates (node
-                # status, mgmt/data-NIC pings, verified-open hublvols) decide
-                # whether a retry can proceed; a retry that still can't just
-                # re-suspends.
-                tasks = db.get_job_tasks(cl.get_id(), reverse=False)
-                for task in tasks:
-                    if task.function_name == JobSchedule.FN_PORT_ALLOW:
-                        if task.status != JobSchedule.STATUS_DONE:
-                            # Lease gate: skip a task another live runner host owns.
-                            if not tasks_controller.claim_task(task):
-                                logger.info(f"Port-allow task {task.uuid} owned by another runner host; skipping")
-                                continue
-                            with tasks_controller.task_lease_heartbeat(task):
-                                exec_port_allow_task(task)
-
-        time.sleep(5)
+    serve(SPEC)
 
 
 if __name__ == "__main__":

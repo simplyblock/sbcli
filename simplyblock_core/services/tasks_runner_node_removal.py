@@ -1,12 +1,15 @@
 # coding=utf-8
-import time
-
-
 from simplyblock_core import db_controller, storage_node_ops, utils, constants
-from simplyblock_core.controllers import tasks_controller
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.services.task_runner_base import (
+    RunnerSpec,
+    TaskDefer,
+    TaskProgress,
+    serve,
+)
+
 
 logger = utils.get_logger(__name__)
 
@@ -19,81 +22,35 @@ def process_task(task):
 
     node_removal_orchestrate is idempotent and resumable: it returns True only
     when the node is fully REMOVED, and False to mean "incomplete, retry later"
-    (most commonly: device failure-migration still in progress). On False we
-    suspend the task so the outer loop revisits it on the next tick instead of
-    busy-spinning here for what can be hours.
+    (most commonly: device failure-migration still in progress, which can take
+    hours). Incomplete is progress, not failure — it consumes no retry, and the
+    task stays RUNNING so the next tick picks it straight back up.
     """
-    if task.canceled:
-        task.function_result = "canceled"
-        task.status = JobSchedule.STATUS_DONE
-        task.write_to_db(db.kv_store)
-        return True
-
     cluster = db.get_cluster_by_id(task.cluster_id)
     if cluster.status == Cluster.STATUS_IN_ACTIVATION:
-        task.function_result = "cluster is in_activation, waiting"
-        task.status = JobSchedule.STATUS_SUSPENDED
-        task.write_to_db(db.kv_store)
-        storage_node_ops.set_node_status(task.node_id, StorageNode.STATUS_PENDING_REMOVAL, caused_by="remove")
-        return False
-
-    if task.status != JobSchedule.STATUS_RUNNING:
-        task.status = JobSchedule.STATUS_RUNNING
-        task.write_to_db(db.kv_store)
+        # Checked here rather than through is_eligible: the wait also has to
+        # park the node in PENDING_REMOVAL, and eligibility must stay pure.
+        storage_node_ops.set_node_status(
+            task.node_id, StorageNode.STATUS_PENDING_REMOVAL, caused_by="remove")
+        raise TaskDefer("cluster is in_activation, waiting")
 
     force_remove = bool(task.function_params.get("force_remove", False))
-    try:
-        done = storage_node_ops.node_removal_orchestrate(task.node_id, force_remove=force_remove)
-    except Exception as e:
-        logger.error(f"Node-removal task {task.uuid} raised: {e}")
-        logger.exception(e)
-        task.function_result = f"error: {e}"
-        task.retry += 1
-        task.status = JobSchedule.STATUS_SUSPENDED
-        task.write_to_db(db.kv_store)
-        return False
+    if not storage_node_ops.node_removal_orchestrate(task.node_id, force_remove=force_remove):
+        raise TaskProgress("removal in progress, retrying")
 
-    if done:
-        task.function_result = "Node removed"
-        task.status = JobSchedule.STATUS_DONE
-        task.write_to_db(db.kv_store)
-        return True
-    else:
-        # Incomplete: a phase asked us to retry (typically waiting on migration).
-        task.function_result = "removal in progress, retrying"
-        task.retry += 1
-        task.status = JobSchedule.STATUS_SUSPENDED
-        task.write_to_db(db.kv_store)
-        return False
+    task.function_result = "Node removed"
+
+
+SPEC = RunnerSpec(
+    name="tasks-runner-node-removal",
+    function_names=[JobSchedule.FN_NODE_REMOVAL],
+    handler=process_task,
+    interval=constants.TASK_EXEC_INTERVAL_SEC,
+)
 
 
 def main():
-    logger.info("Starting Tasks runner node removal...")
-
-    while True:
-        time.sleep(constants.TASK_EXEC_INTERVAL_SEC)
-        clusters = db.get_clusters()
-        if not clusters:
-            logger.error("No clusters found!")
-            continue
-        for cl in clusters:
-            tasks = db.get_job_tasks(cl.get_id(), reverse=False)
-            for task in tasks:
-                if task.function_name != JobSchedule.FN_NODE_REMOVAL:
-                    continue
-                if task.status == JobSchedule.STATUS_DONE:
-                    continue
-                # get a fresh object: cancel/other writers may have changed it
-                task = db.get_task_by_id(task.uuid)
-                # Lease gate: skip a task another live runner host owns.
-                if not tasks_controller.claim_task(task):
-                    logger.info(f"Node-removal task {task.uuid} owned by another runner host; skipping")
-                    continue
-                try:
-                    process_task(task)
-                except Exception as e:
-                    logger.error(f"Node-removal task {task.uuid} processing crashed: {e}")
-                    logger.exception(e)
+    serve(SPEC)
 
 
 if __name__ == "__main__":
