@@ -4,6 +4,7 @@ from uuid import UUID
 from fastapi import Depends, HTTPException
 
 from simplyblock_core.db_controller import DBController
+from simplyblock_web import utils
 from simplyblock_core.models.backup import Backup as BackupModel, BackupPolicy
 from simplyblock_core.models.cluster import Cluster as ClusterModel
 from simplyblock_core.models.job_schedule import JobSchedule
@@ -156,17 +157,20 @@ Migration = Annotated[LVolMigration, Depends(_lookup_migration)]
 
 
 def _lookup_subsystem(nqn: str, cluster: Cluster) -> str:
-    """Validate that `nqn` identifies a real shared-namespace subsystem in
-    this cluster and return it as-is.
+    """Validate that `nqn` roughly looks like a real NQN and return it as-is.
 
     NQNs are taken as an opaque, already-fully-qualified identifier rather
     than reconstructed from cluster/lvol identity (e.g. f"{cluster.nqn}:lvol:
     {lvol.uuid}") — there's no single reliable derivation of "the" NQN for a
     shared subsystem across the codebase, so accepting it as-is here
     sidesteps that inconsistency rather than fighting it.
+
+    A full existence check via _db.get_lvols() would be correct but enumerates
+    all lvols on every request; NQN_PATTERN is a cheap substitute until a
+    direct NQN index lookup is available.
     """
-    if not any(lv.nqn == nqn for lv in _db.get_lvols(cluster.get_id())):
-        raise HTTPException(404, f'Subsystem {nqn} not found')
+    if not utils.NQN_PATTERN.match(nqn):
+        raise HTTPException(422, f'Invalid NQN: {nqn!r}')
     return nqn
 
 
