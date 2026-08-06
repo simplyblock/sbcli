@@ -963,6 +963,440 @@ class _MassCreateDeleteMixin:
         self._phase_durations[label] = total_dur
         return node_ip
 
+    # ── Rapid restart cycle (30x stop/restart, no migration wait) ────────
+
+    RAPID_RESTART_ITERATIONS = 30
+    RAPID_RESTART_COOLDOWN = 60   # seconds to wait after node is online
+
+    def _pick_node_with_entries(self):
+        """Pick a storage node that hosts lvols/snapshots (has entries).
+
+        Queries storage nodes and returns the first non-secondary, online
+        node.  With thousands of entities spread across nodes, all nodes
+        should have entries.
+        """
+        nodes = self.sbcli_utils.get_storage_nodes().get("results", [])
+        for n in nodes:
+            if n.get("is_secondary_node"):
+                continue
+            if n.get("status") == "online":
+                return n
+        # fallback: any non-secondary node
+        for n in nodes:
+            if not n.get("is_secondary_node"):
+                return n
+        return nodes[0] if nodes else None
+
+    def _phase_rapid_restart_cycles(self, label: str,
+                                     iterations: int | None = None):
+        """Stop and restart a storage node *iterations* times in a row.
+
+        Does NOT wait for migration/rebalancing to complete — only waits
+        for the node status to return to ``online``, then sleeps
+        ``RAPID_RESTART_COOLDOWN`` seconds before the next iteration.
+
+        Returns a list of dicts, one per iteration:
+            [{iteration, stop_time_iso, online_time_iso,
+              stop_to_online_sec, cooldown_sec}, ...]
+        """
+        if iterations is None:
+            iterations = self.RAPID_RESTART_ITERATIONS
+        cooldown = self.RAPID_RESTART_COOLDOWN
+
+        target = self._pick_node_with_entries()
+        if not target:
+            self.logger.warning(
+                f"[{label}] No storage nodes found — skipping rapid restart"
+            )
+            return []
+
+        node_uuid = target["id"]
+        node_ip = target["mgmt_ip"]
+        rpc_port = target.get("rpc_port", 0)
+
+        self.logger.info(
+            f"[{label}] Starting {iterations} rapid restart cycles on "
+            f"node {node_uuid} ({node_ip}), "
+            f"cooldown={cooldown}s between iterations"
+        )
+
+        results = []
+        for i in range(1, iterations + 1):
+            self.logger.info(
+                f"[{label}] --- Iteration {i}/{iterations} ---"
+            )
+
+            # Stop container / delete pod
+            stop_ts = datetime.now(timezone.utc)
+            t_stop = time.time()
+            if getattr(self, "k8s_test", False):
+                self.k8s_utils.restart_spdk_pod(node_ip)
+            else:
+                self.ssh_obj.stop_spdk_process(
+                    node_ip, rpc_port, self.cluster_id
+                )
+            kill_dur = round(time.time() - t_stop, 1)
+            self.logger.info(
+                f"[{label}][{i}] Kill command took {kill_dur}s"
+            )
+
+            # Wait for node to go offline then back online
+            try:
+                self.sbcli_utils.wait_for_storage_node_status(
+                    node_uuid, ["offline", "unreachable"], timeout=600,
+                )
+            except Exception as exc:
+                self.logger.warning(
+                    f"[{label}][{i}] Timed out waiting for "
+                    f"offline/unreachable: {exc}"
+                )
+
+            self.sbcli_utils.wait_for_storage_node_status(
+                node_uuid, "online", timeout=900,
+            )
+            online_ts = datetime.now(timezone.utc)
+            stop_to_online = round(time.time() - t_stop, 1)
+
+            self.logger.info(
+                f"[{label}][{i}] Node online after {stop_to_online}s "
+                f"— cooling down {cooldown}s"
+            )
+
+            results.append({
+                "iteration": i,
+                "stop_time_iso": stop_ts.isoformat(),
+                "online_time_iso": online_ts.isoformat(),
+                "stop_to_online_sec": stop_to_online,
+                "cooldown_sec": cooldown,
+            })
+
+            # Cooldown — no waiting for migration, just a short pause
+            time.sleep(cooldown)
+
+        total_dur = sum(r["stop_to_online_sec"] for r in results)
+        self._phase_durations[label] = round(total_dur, 1)
+        self.logger.info(
+            f"[{label}] Completed {iterations} restart cycles, "
+            f"cumulative stop-to-online: {total_dur}s"
+        )
+        return results
+
+    # ── Rapid restart test orchestrator ──────────────────────────────────
+
+    def _run_mass_create_rapid_restart_test(self):
+        """Create lvols+snapshots, run 30 rapid restarts, then
+        delete lvols + create clones, run 30 more rapid restarts.
+
+        The final summary prints per-iteration stop-to-online times
+        for both phases (60 entries total).
+        """
+        self._init_mixin_state()
+        self._rapid_restart_results = {
+            "lvol_snapshot": [],
+            "snapshot_clone": [],
+        }
+
+        original_total = self.NUM_SUBSYSTEMS * self.NS_PER_SUBSYSTEM
+        if self.MAX_ENTITY_COUNT > 0:
+            max_lvols = self.MAX_ENTITY_COUNT // (1 + self.SNAPSHOTS_PER_LVOL)
+            if max_lvols < original_total:
+                self.logger.info(
+                    f"[Entity cap] Reducing lvol target from "
+                    f"{original_total} to {max_lvols} "
+                    f"(MAX_ENTITY_COUNT={self.MAX_ENTITY_COUNT}, "
+                    f"SNAPSHOTS_PER_LVOL={self.SNAPSHOTS_PER_LVOL})"
+                )
+                effective_per_sub = max(1, max_lvols // self.NUM_SUBSYSTEMS)
+                effective_num_sub = self.NUM_SUBSYSTEMS
+                if effective_per_sub == 1 and max_lvols < self.NUM_SUBSYSTEMS:
+                    effective_num_sub = max_lvols
+                self.NS_PER_SUBSYSTEM = effective_per_sub
+                self.NUM_SUBSYSTEMS = effective_num_sub
+
+        total = self.NUM_SUBSYSTEMS * self.NS_PER_SUBSYSTEM
+        max_dur = getattr(self, 'MAX_TEST_DURATION', 24 * 3600)
+        self.logger.info(
+            f"=== Starting {self.__class__.__name__}: "
+            f"{total} lvols, {self.SNAPSHOTS_PER_LVOL} snaps/lvol, "
+            f"{self.RAPID_RESTART_ITERATIONS} restart cycles per phase ==="
+        )
+        test_start = time.time()
+
+        # Start periodic kubectl resource collection
+        periodic_stop = self.start_periodic_resource_collection(interval=1800)
+
+        try:
+            # Phase 1: Create lvols
+            t0 = time.time()
+            self._phase_1_create_lvols()
+            self._phase_durations["1_create_lvols"] = round(
+                time.time() - t0, 1
+            )
+            self._metrics["lvols_created"] = len(self._lvol_registry)
+            self.logger.info(
+                f"[Phase 1] {len(self._lvol_registry)} lvols created "
+                f"in {self._phase_durations['1_create_lvols']}s"
+            )
+            if not self._lvol_registry:
+                raise RuntimeError("No lvols created — cannot proceed")
+
+            # Phase 2: FIO on sampled lvols
+            t0 = time.time()
+            self._phase_2_fio_on_lvols()
+            self._phase_durations["2_fio_lvols"] = round(
+                time.time() - t0, 1
+            )
+            self.logger.info(
+                f"[Phase 2] FIO started on "
+                f"{self._metrics['fio_lvol_started']} lvols"
+            )
+
+            # Wait for FIO to finish before snapshots
+            if self._fio_lvol_threads:
+                fio_timeout = self.FIO_RUNTIME + 120
+                for t in self._fio_lvol_threads:
+                    t.join(timeout=fio_timeout)
+
+            if hasattr(self, '_collect_fio_logs_to_nfs'):
+                self._collect_fio_logs_to_nfs(
+                    label="Phase_2", threads=self._fio_lvol_threads,
+                )
+
+            if hasattr(self, '_catchup_newly_bound_pvcs'):
+                self._catchup_newly_bound_pvcs(
+                    label="pre-Phase 3 catch-up"
+                )
+
+            # Phase 3: Create snapshots
+            t0 = time.time()
+            self._phase_3_create_snapshots()
+            self._phase_durations["3_create_snapshots"] = round(
+                time.time() - t0, 1
+            )
+
+            if hasattr(self, '_verify_snapshots_ready'):
+                self._verify_snapshots_ready()
+            if hasattr(self, '_verify_backend_snapshot_count'):
+                self._verify_backend_snapshot_count(
+                    len(self._snapshot_registry)
+                )
+
+            self._metrics["snapshots_created"] = len(self._snapshot_registry)
+            self.logger.info(
+                f"[Phase 3] {len(self._snapshot_registry)} snapshots "
+                f"created in {self._phase_durations['3_create_snapshots']}s"
+            )
+
+            # ── Phase 3r: 30x rapid restart (lvol + snapshot) ────────
+            self.logger.info(
+                "=" * 60
+                + "\n  Phase 3r: RAPID RESTART — lvol + snapshot phase"
+                + "\n" + "=" * 60
+            )
+            self._rapid_restart_results["lvol_snapshot"] = (
+                self._phase_rapid_restart_cycles(
+                    "3r_rapid_restart_lvol_snap",
+                    self.RAPID_RESTART_ITERATIONS,
+                )
+            )
+
+            # Phase 4: Delete lvols (orphan snapshots for cloning)
+            t0 = time.time()
+            self._phase_4_delete_lvols()
+            self._phase_durations["4_delete_lvols"] = round(
+                time.time() - t0, 1
+            )
+            self.logger.info(
+                f"[Phase 4] Lvols deleted "
+                f"in {self._phase_durations['4_delete_lvols']}s"
+            )
+
+            # Phase 5: Create clones from orphaned snapshots
+            t0 = time.time()
+            self._phase_5_create_clones()
+            self._phase_durations["5_create_clones"] = round(
+                time.time() - t0, 1
+            )
+            self._metrics["clones_created"] = len(self._clone_registry)
+            self.logger.info(
+                f"[Phase 5] {len(self._clone_registry)} clones "
+                f"in {self._phase_durations['5_create_clones']}s"
+            )
+
+            # ── Phase 5r: 30x rapid restart (snapshot + clone) ──────
+            self.logger.info(
+                "=" * 60
+                + "\n  Phase 5r: RAPID RESTART — snapshot + clone phase"
+                + "\n" + "=" * 60
+            )
+            self._rapid_restart_results["snapshot_clone"] = (
+                self._phase_rapid_restart_cycles(
+                    "5r_rapid_restart_snap_clone",
+                    self.RAPID_RESTART_ITERATIONS,
+                )
+            )
+
+            # Phase 7: Delete clones
+            t0 = time.time()
+            self._phase_7_delete_clones()
+            self._phase_durations["7_delete_clones"] = round(
+                time.time() - t0, 1
+            )
+
+            # Phase 8: Delete snapshots
+            t0 = time.time()
+            self._phase_8_delete_snapshots()
+            self._phase_durations["8_delete_snapshots"] = round(
+                time.time() - t0, 1
+            )
+
+        finally:
+            periodic_stop.set()
+            try:
+                self.collect_management_details(
+                    suffix="_pre_delete"
+                )
+            except Exception as exc:
+                self.logger.warning(
+                    f"Failed to collect management details: {exc}"
+                )
+            _has_failure = (
+                bool(self._soft_failures)
+                or sys.exc_info()[1] is not None
+            )
+            if _has_failure and getattr(
+                self, 'preserve_resources_on_failure', False
+            ):
+                self.logger.info(
+                    "[cleanup] Skipping cleanup — "
+                    "preserve_resources_on_failure is set"
+                )
+            else:
+                t0 = time.time()
+                self._phase_cleanup()
+                self._phase_durations["cleanup"] = round(
+                    time.time() - t0, 1
+                )
+            self._print_rapid_restart_summary()
+            self._write_rapid_restart_json()
+
+        if self._soft_failures:
+            for f in self._soft_failures:
+                self.logger.error(f"SOFT FAILURE: {f}")
+            raise AssertionError(
+                f"Test had {len(self._soft_failures)} soft failures: "
+                + "; ".join(self._soft_failures)
+            )
+
+    # ── Rapid restart summary ───────────────────────────────────────────
+
+    def _print_rapid_restart_summary(self):
+        total = self.NUM_SUBSYSTEMS * self.NS_PER_SUBSYSTEM
+        self.logger.info("=" * 75)
+        self.logger.info(
+            "  MASS CREATE + RAPID RESTART STRESS TEST — SUMMARY"
+        )
+        self.logger.info("=" * 75)
+        self.logger.info(
+            f"  Config:  {total} lvols, "
+            f"{self.SNAPSHOTS_PER_LVOL} snaps/lvol, "
+            f"cooldown={self.RAPID_RESTART_COOLDOWN}s"
+        )
+        self.logger.info(
+            f"  Lvols created:   {self._metrics['lvols_created']}"
+        )
+        self.logger.info(
+            f"  Snaps created:   {self._metrics['snapshots_created']}"
+        )
+        self.logger.info(
+            f"  Clones created:  {self._metrics['clones_created']}"
+        )
+
+        for phase, dur in self._phase_durations.items():
+            if "rapid_restart" not in phase:
+                self.logger.info(f"  Phase {phase:30s}: {dur}s")
+
+        # Per-iteration restart timing tables
+        for phase_label, display_name in [
+            ("lvol_snapshot", "LVOL + SNAPSHOT"),
+            ("snapshot_clone", "SNAPSHOT + CLONE"),
+        ]:
+            entries = self._rapid_restart_results.get(phase_label, [])
+            self.logger.info("")
+            self.logger.info("-" * 75)
+            self.logger.info(
+                f"  RESTART TIMINGS — {display_name} "
+                f"({len(entries)} iterations)"
+            )
+            self.logger.info("-" * 75)
+            self.logger.info(
+                f"  {'#':>3s}  {'Stop Time (UTC)':>25s}  "
+                f"{'Online Time (UTC)':>25s}  "
+                f"{'Stop→Online (s)':>16s}"
+            )
+            self.logger.info(
+                f"  {'---':>3s}  {'-' * 25:>25s}  "
+                f"{'-' * 25:>25s}  "
+                f"{'-' * 16:>16s}"
+            )
+            for e in entries:
+                self.logger.info(
+                    f"  {e['iteration']:3d}  "
+                    f"{e['stop_time_iso'][:25]:>25s}  "
+                    f"{e['online_time_iso'][:25]:>25s}  "
+                    f"{e['stop_to_online_sec']:16.1f}"
+                )
+            if entries:
+                times = [e["stop_to_online_sec"] for e in entries]
+                self.logger.info(
+                    f"  MIN: {min(times):.1f}s  "
+                    f"MAX: {max(times):.1f}s  "
+                    f"SUM: {sum(times):.1f}s"
+                )
+
+        total_dur = sum(self._phase_durations.values())
+        self.logger.info("")
+        self.logger.info(f"  Total test duration: {total_dur:.1f}s")
+        self.logger.info("=" * 75)
+
+    def _write_rapid_restart_json(self):
+        total_dur = sum(self._phase_durations.values())
+        report = {
+            "test_class": self.__class__.__name__,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "status": "passed",
+            "config": {
+                "num_subsystems": self.NUM_SUBSYSTEMS,
+                "ns_per_subsystem": self.NS_PER_SUBSYSTEM,
+                "snapshots_per_lvol": self.SNAPSHOTS_PER_LVOL,
+                "rapid_restart_iterations":
+                    self.RAPID_RESTART_ITERATIONS,
+                "rapid_restart_cooldown_sec":
+                    self.RAPID_RESTART_COOLDOWN,
+                "max_entity_count": self.MAX_ENTITY_COUNT,
+            },
+            "phases": {
+                name: dur
+                for name, dur in self._phase_durations.items()
+            },
+            "metrics": self._metrics,
+            "rapid_restart_lvol_snapshot":
+                self._rapid_restart_results.get("lvol_snapshot", []),
+            "rapid_restart_snapshot_clone":
+                self._rapid_restart_results.get("snapshot_clone", []),
+            "summary": {
+                "total_duration_sec": round(total_dur, 2),
+            },
+        }
+        out_dir = Path("logs")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / "mass_create_rapid_restart_timing.json"
+        with open(out_path, "w") as f:
+            _json.dump(report, f, indent=2)
+        self.logger.info(
+            f"Rapid restart timing JSON written to {out_path}"
+        )
+
     # ── Summary ────────────────────────────────────────────────────────────
 
     def _print_summary(self):
@@ -4597,3 +5031,88 @@ class MassCreateDeleteRestart_300x10_10Snap_K8s(_MassCreateDeleteK8s):
     NUM_SUBSYSTEMS = 10
     NS_PER_SUBSYSTEM = 300
     SNAPSHOTS_PER_LVOL = 10
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Rapid-restart variants: 6000 entity cap, 3 snaps/lvol (1:3 ratio),
+#  30 container stop/restart cycles after lvol+snapshot creation, then 30
+#  more after clone creation.
+#
+#  Entity cap 6000 with SNAPSHOTS_PER_LVOL=3 → max_lvols = 6000 // 4 = 1500
+#  Peak: 1500 lvols + 4500 snapshots = 6000 entities.
+#
+#  Each restart cycle:
+#    1. Stop container / delete pod (target node with entries)
+#    2. Wait for node → online (no wait for migration/rebalancing)
+#    3. Wait 60s cooldown
+#
+#  Summary output: per-iteration stop→online time for both phases
+#  (30 entries for lvol+snapshot, 30 entries for snapshot+clone = 60 total).
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Docker rapid-restart variants
+
+
+class MassCreateRapidRestart_6k_3Snap_Docker(_MassCreateDeleteDocker):
+    """6000 entity cap, 1:3 ratio (3 snaps/lvol → 1500 lvols + 4500 snaps),
+    30 rapid container stop/restart cycles per phase."""
+    PERSISTENT_RETRY = True
+    MAX_ENTITY_COUNT = 6000
+    NUM_SUBSYSTEMS = 10
+    NS_PER_SUBSYSTEM = 300
+    SNAPSHOTS_PER_LVOL = 3
+    RAPID_RESTART_ITERATIONS = 30
+    RAPID_RESTART_COOLDOWN = 60
+
+    def run(self):
+        actual_pool = self.sbcli_utils.add_storage_pool(
+            pool_name=self.pool_name
+        )
+        if actual_pool and actual_pool != self.pool_name:
+            self.pool_name = actual_pool
+        storage_nodes = self.sbcli_utils.get_storage_nodes()
+        for result in storage_nodes["results"]:
+            self.sn_nodes.append(result["uuid"])
+        self._run_mass_create_rapid_restart_test()
+
+
+# K8s rapid-restart variants
+
+
+class MassCreateRapidRestart_6k_3Snap_K8s(_MassCreateDeleteK8s):
+    """6000 entity cap, 1:3 ratio (3 snaps/lvol → 1500 PVCs + 4500 snaps),
+    30 rapid pod delete/restart cycles per phase."""
+    PERSISTENT_RETRY = True
+    MAX_ENTITY_COUNT = 6000
+    NUM_SUBSYSTEMS = 10
+    NS_PER_SUBSYSTEM = 300
+    SNAPSHOTS_PER_LVOL = 3
+    RAPID_RESTART_ITERATIONS = 30
+    RAPID_RESTART_COOLDOWN = 60
+
+    def run(self):
+        storage_nodes = self.sbcli_utils.get_storage_nodes()
+        for result in storage_nodes["results"]:
+            self.sn_nodes.append(result["uuid"])
+            self.node_vs_pvc[result["uuid"]] = []
+
+        actual_pool = self.sbcli_utils.add_storage_pool(
+            pool_name=self.pool_name
+        )
+        if actual_pool and actual_pool != self.pool_name:
+            self.pool_name = actual_pool
+
+        cluster_id = self.cluster_id or os.environ.get("CLUSTER_ID", "")
+        self.k8s_utils.create_storage_class(
+            name=self.STORAGE_CLASS_NAME,
+            cluster_id=cluster_id,
+            pool_name=self.pool_name,
+            ndcs=self.ndcs,
+            npcs=self.npcs,
+            max_namespace_per_subsys=self.NS_PER_SUBSYSTEM,
+        )
+        self.k8s_utils.create_volume_snapshot_class(
+            name=self.SNAPSHOT_CLASS_NAME,
+        )
+
+        self._run_mass_create_rapid_restart_test()

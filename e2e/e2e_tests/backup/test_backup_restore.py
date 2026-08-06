@@ -2965,9 +2965,13 @@ class TestBackupCrossClusterRestore(BackupTestBase):
 
     Environment variables
     ---------------------
-    CLUSTER2_ID            UUID of the destination cluster
-    CLUSTER2_SECRET        API secret for the destination cluster
-    CLUSTER2_API_BASE_URL  REST API URL for the destination cluster
+    CLUSTER2_ID            UUID of the destination cluster (optional)
+    CLUSTER2_SECRET        API secret for the destination cluster (optional)
+    CLUSTER2_API_BASE_URL  REST API URL for the destination cluster (optional)
+    STORAGE_PRIVATE_IPS    All storage node IPs (required for auto-bootstrap)
+
+    If CLUSTER2_* env vars are NOT set, the test auto-bootstraps a second
+    cluster by splitting the STORAGE_PRIVATE_IPS in half (min 2 per cluster).
 
     Covers
     ------
@@ -2982,6 +2986,9 @@ class TestBackupCrossClusterRestore(BackupTestBase):
     TC-BCK-076b Cluster-2: `backup source-switch local` restores own source
     """
 
+    # Minimum storage nodes per cluster for cross-cluster restore
+    _MIN_NODES_PER_CLUSTER = 2
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.test_name = "backup_cross_cluster_restore"
@@ -2991,21 +2998,303 @@ class TestBackupCrossClusterRestore(BackupTestBase):
         self._meta_file = "/tmp/cross_cluster_backup_meta.json"
         # Resources created on Cluster-2 (separate tracking for teardown)
         self._c2_lvols: list[str] = []
+        # Whether we bootstrapped cluster 2 ourselves (for teardown)
+        self._self_bootstrapped_c2 = False
 
     # ── prerequisite check ────────────────────────────────────────────────────
 
     def _check_prerequisites(self):
-        missing = [
-            v for v, val in [
-                ("CLUSTER2_ID", self._cluster2_id),
-                ("CLUSTER2_SECRET", self._cluster2_secret),
-                ("CLUSTER2_API_BASE_URL", self._cluster2_api_url),
-            ] if not val
-        ]
-        if missing:
+        """Ensure Cluster-2 credentials are available.
+
+        If CLUSTER2_* env vars are not set, attempt to bootstrap a second
+        cluster by splitting the available storage nodes in half.
+        """
+        if self._cluster2_id and self._cluster2_secret and self._cluster2_api_url:
+            return  # env vars already set
+
+        self.logger.info(
+            "TC-BCK-070: CLUSTER2_* env vars not set — "
+            "attempting to bootstrap a second cluster from available nodes")
+        self._bootstrap_second_cluster()
+
+    # ── self-bootstrap second cluster ────────────────────────────────────────
+
+    def _bootstrap_second_cluster(self):
+        """Create a second cluster on the same mgmt node using spare storage nodes.
+
+        Determines which IPs from ``STORAGE_PRIVATE_IPS`` are NOT already in
+        Cluster-1, and uses those for Cluster-2.  If all IPs are already in
+        Cluster-1, falls back to splitting: removes the second half from
+        Cluster-1 and uses them for Cluster-2.
+
+        Requires:
+            - ``STORAGE_PRIVATE_IPS`` env var listing *all* storage node IPs
+            - At least ``_MIN_NODES_PER_CLUSTER * 2`` total IPs
+        """
+        all_ips_raw = os.environ.get("STORAGE_PRIVATE_IPS", "")
+        all_ips = [ip.strip() for ip in all_ips_raw.split() if ip.strip()]
+        if not all_ips:
             raise EnvironmentError(
-                f"TC-BCK-070: cross-cluster restore requires env vars: "
-                f"{', '.join(missing)}")
+                "TC-BCK-070: STORAGE_PRIVATE_IPS env var required to "
+                "auto-bootstrap a second cluster")
+
+        total = len(all_ips)
+        min_total = self._MIN_NODES_PER_CLUSTER * 2
+        if total < min_total:
+            raise EnvironmentError(
+                f"TC-BCK-070: need at least {min_total} storage nodes for "
+                f"cross-cluster restore (have {total}). "
+                f"Set CLUSTER2_ID / CLUSTER2_SECRET / CLUSTER2_API_BASE_URL "
+                f"to use a pre-existing second cluster instead.")
+
+        # Determine which IPs are already in Cluster-1
+        c1_ips = set(self.storage_nodes or [])
+        spare_ips = [ip for ip in all_ips if ip not in c1_ips]
+
+        if len(spare_ips) >= self._MIN_NODES_PER_CLUSTER:
+            # Spare nodes available — use them directly
+            c2_ips = spare_ips
+            self.logger.info(
+                f"TC-BCK-070: using {len(c2_ips)} spare node(s) for Cluster-2: "
+                f"{c2_ips} (Cluster-1 has: {sorted(c1_ips)})")
+        else:
+            # All nodes are in Cluster-1 — split in half
+            split = total // 2
+            c1_keep = all_ips[:split]
+            c2_ips = all_ips[split:]
+            if len(c1_keep) < self._MIN_NODES_PER_CLUSTER:
+                raise EnvironmentError(
+                    f"TC-BCK-070: cannot split {total} nodes into 2 clusters "
+                    f"with min {self._MIN_NODES_PER_CLUSTER} each")
+            self.logger.info(
+                f"TC-BCK-070: splitting {total} storage nodes — "
+                f"Cluster-1 keeps: {c1_keep}, Cluster-2 gets: {c2_ips}")
+            # Remove c2 nodes from Cluster-1 if they are currently members
+            self._remove_nodes_from_cluster1(c2_ips)
+
+        mgmt_ip = self.mgmt_nodes[0]
+        sbcli_cmd = self.base_cmd
+        ifname = os.environ.get("IFNAME", "eth0")
+        data_nic = os.environ.get("BOOTSTRAP_DATA_NIC", "eth1")
+        max_subsys = os.environ.get("BOOTSTRAP_MAX_SUBSYS", "1024")
+        ha_type = os.environ.get("HA_TYPE", "ha")
+        journal_partition = os.environ.get("BOOTSTRAP_JOURNAL_PARTITION", "0")
+        ha_jm_count = os.environ.get("BOOTSTRAP_HA_JM_COUNT", "3")
+        ndcs = os.environ.get("NDCS", str(self.ndcs))
+        npcs = os.environ.get("NPCS", str(self.npcs))
+        extra_cluster_args = os.environ.get("EXTRA_CLUSTER_ARGS", "")
+        extra_sn_args = os.environ.get("EXTRA_SN_ARGS", "")
+        spdk_image = os.environ.get("SPDK_IMAGE", "")
+        branch = os.environ.get("SBCLI_BRANCH", "main")
+
+        # Step 0: ensure SSH connections to Cluster-2 storage nodes
+        for ip in c2_ips:
+            self.logger.info(f"  [C2] Connecting SSH to {ip}")
+            try:
+                self.ssh_obj.connect(
+                    address=ip,
+                    bastion_server_address=self.bastion_server,
+                )
+            except Exception as e:
+                self.logger.warning(f"  [C2] SSH connect to {ip} failed: {e}")
+
+        # Step 1: configure + deploy on each Cluster-2 storage node
+        for ip in c2_ips:
+            self.logger.info(f"  [C2] Configuring + deploying storage node {ip}")
+            install_cmd = (
+                f"pip install --force-reinstall "
+                f"git+https://github.com/simplyblock-io/sbcli.git@{branch}"
+            )
+            self.ssh_obj.exec_command(node=ip, command=install_cmd)
+            sleep_n_sec(5)
+            configure_cmd = (
+                f"{sbcli_cmd} --dev -d sn configure "
+                f"--max-subsys {max_subsys}"
+            )
+            self.ssh_obj.exec_command(node=ip, command=configure_cmd)
+            deploy_cmd = f"{sbcli_cmd} sn deploy --ifname {ifname}"
+            self.ssh_obj.exec_command(node=ip, command=deploy_cmd)
+
+        # Wait for SPDK containers to start
+        self.logger.info("  [C2] Waiting for SPDK containers to start...")
+        sleep_n_sec(30)
+
+        # Step 2: create Cluster-2 on mgmt node
+        self.logger.info("  [C2] Creating second cluster on mgmt node")
+        create_cmd = (
+            f"{sbcli_cmd} --dev -d cluster create"
+            f" --ha-type {ha_type}"
+            f" --data-chunks-per-stripe {ndcs}"
+            f" --parity-chunks-per-stripe {npcs}"
+            f" --ifname {ifname}"
+        )
+        if extra_cluster_args:
+            create_cmd += f" {extra_cluster_args}"
+        self.ssh_obj.exec_command(node=mgmt_ip, command=create_cmd)
+
+        # Extract Cluster-2 ID (the newest cluster that isn't Cluster-1)
+        out, _ = self.ssh_obj.exec_command(
+            node=mgmt_ip,
+            command=f"{sbcli_cmd} cluster list --json 2>/dev/null || "
+                    f"{sbcli_cmd} cluster list"
+        )
+        c2_id = self._extract_second_cluster_id(out)
+        self.logger.info(f"  [C2] Cluster-2 ID: {c2_id}")
+
+        # Step 3: add storage nodes to Cluster-2
+        add_base = (
+            f"{sbcli_cmd} --dev -d storage-node add-node"
+            f" --journal-partition {journal_partition}"
+            f" --ha-jm-count {ha_jm_count}"
+            f" --data-nics {data_nic}"
+        )
+        if spdk_image:
+            add_base += f" --spdk-image {spdk_image}"
+        if extra_sn_args:
+            add_base += f" {extra_sn_args}"
+
+        for ip in c2_ips:
+            self.logger.info(f"  [C2] Adding storage node {ip} to Cluster-2")
+            add_cmd = f"{add_base} {c2_id} {ip}:5000 {ifname}"
+            self.ssh_obj.exec_command(node=mgmt_ip, command=add_cmd)
+            sleep_n_sec(3)
+
+        # Step 4: activate Cluster-2
+        self.logger.info("  [C2] Activating Cluster-2")
+        self.ssh_obj.exec_command(
+            node=mgmt_ip,
+            command=f"{sbcli_cmd} -d cluster activate {c2_id}"
+        )
+
+        # Step 5: create pool on Cluster-2
+        self.logger.info("  [C2] Creating pool on Cluster-2")
+        self.ssh_obj.exec_command(
+            node=mgmt_ip,
+            command=f"{sbcli_cmd} pool add {self.pool_name} {c2_id}"
+        )
+
+        # Step 6: extract Cluster-2 secret
+        out, _ = self.ssh_obj.exec_command(
+            node=mgmt_ip,
+            command=f"{sbcli_cmd} cluster get-secret {c2_id}"
+        )
+        c2_secret = out.strip().split("\n")[0].strip()
+        self.logger.info("  [C2] Cluster-2 secret obtained")
+
+        # Set instance attributes
+        self._cluster2_id = c2_id
+        self._cluster2_secret = c2_secret
+        # Same mgmt node, same API endpoint
+        self._cluster2_api_url = self.api_base_url or f"http://{mgmt_ip}"
+        self._self_bootstrapped_c2 = True
+
+        # Also set env vars so any downstream code can use them
+        os.environ["CLUSTER2_ID"] = c2_id
+        os.environ["CLUSTER2_SECRET"] = c2_secret
+        os.environ["CLUSTER2_API_BASE_URL"] = self._cluster2_api_url
+
+        self.logger.info(
+            f"TC-BCK-070: Cluster-2 bootstrapped — ID={c2_id}, "
+            f"API={self._cluster2_api_url}, nodes={c2_ips}")
+
+    def _remove_nodes_from_cluster1(self, ips_to_remove: list[str]):
+        """Remove storage nodes from Cluster-1 so they can join Cluster-2.
+
+        For each IP, finds the node UUID in Cluster-1, suspends it,
+        shuts it down, removes it, and runs deploy-cleaner on the host.
+        """
+        mgmt_ip = self.mgmt_nodes[0]
+        sn_data = self.sbcli_utils.get_storage_nodes().get("results", [])
+
+        # Build IP→node_id mapping
+        ip_to_ids = {}
+        for node in sn_data:
+            nid = node.get("id") or node.get("uuid") or ""
+            nip = node.get("mgmt_ip") or node.get("ip") or ""
+            if nip and nid:
+                ip_to_ids.setdefault(nip, []).append(nid)
+
+        for ip in ips_to_remove:
+            node_ids = ip_to_ids.get(ip, [])
+            if not node_ids:
+                self.logger.info(f"  [C1] Node {ip} not in Cluster-1, skipping removal")
+                continue
+            for nid in node_ids:
+                self.logger.info(f"  [C1] Removing node {nid} ({ip}) from Cluster-1")
+                try:
+                    self.sbcli_utils.shutdown_node(nid, force=True)
+                    sleep_n_sec(5)
+                except Exception as e:
+                    self.logger.warning(f"  [C1] Shutdown {nid} failed: {e}")
+                try:
+                    self._sbcli(f"storage-node remove {nid}")
+                    sleep_n_sec(3)
+                except Exception as e:
+                    self.logger.warning(f"  [C1] Remove {nid} failed: {e}")
+
+            # Clean up the host
+            self.ssh_obj.exec_command(
+                node=ip,
+                command=f"{self.base_cmd} sn deploy-cleaner 2>/dev/null || true"
+            )
+
+    def _extract_second_cluster_id(self, cluster_list_output: str) -> str:
+        """Extract the Cluster-2 UUID from ``sbcli cluster list`` output.
+
+        The output may be JSON (``cluster list --json``) or a table.
+        Returns the first cluster ID that is NOT ``self.cluster_id``.
+        """
+        import json as _json
+        text = cluster_list_output.strip()
+
+        # Try JSON first
+        try:
+            data = _json.loads(text)
+            if isinstance(data, list):
+                for entry in data:
+                    cid = (entry.get("id") or entry.get("uuid")
+                           or entry.get("cluster_id") or "")
+                    if cid and cid != self.cluster_id:
+                        return cid
+        except (_json.JSONDecodeError, ValueError):
+            pass
+
+        # Fallback: parse table rows for UUID-like strings
+        import re
+        uuid_re = re.compile(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+            re.IGNORECASE,
+        )
+        for line in text.split("\n"):
+            match = uuid_re.search(line)
+            if match:
+                cid = match.group(0)
+                if cid != self.cluster_id:
+                    return cid
+
+        raise RuntimeError(
+            f"Could not find a second cluster ID in output:\n{text[:500]}")
+
+    def _teardown_second_cluster(self):
+        """Destroy the self-bootstrapped second cluster."""
+        if not self._self_bootstrapped_c2 or not self._cluster2_id:
+            return
+        self.logger.info(f"Tearing down self-bootstrapped Cluster-2 ({self._cluster2_id})")
+        mgmt_ip = self.mgmt_nodes[0]
+        try:
+            # Deactivate + delete Cluster-2
+            self.ssh_obj.exec_command(
+                node=mgmt_ip,
+                command=f"{self.base_cmd} cluster deactivate {self._cluster2_id} || true"
+            )
+            sleep_n_sec(5)
+            self.ssh_obj.exec_command(
+                node=mgmt_ip,
+                command=f"{self.base_cmd} cluster delete {self._cluster2_id} || true"
+            )
+            self.logger.info("Cluster-2 deleted")
+        except Exception as e:
+            self.logger.warning(f"Cluster-2 teardown error: {e}")
 
     # ── Cluster-2 sbcli helper ────────────────────────────────────────────────
 
@@ -3204,6 +3493,9 @@ class TestBackupCrossClusterRestore(BackupTestBase):
                         self.mgmt_nodes[0], f"rm -f {self._meta_file}")
                 except Exception:
                     pass
+
+        # Tear down self-bootstrapped Cluster-2 (if we created it)
+        self._teardown_second_cluster()
 
         super().teardown(delete_lvols=delete_lvols, close_ssh=close_ssh,
                          skip_k8s_cleanup=skip_k8s_cleanup)

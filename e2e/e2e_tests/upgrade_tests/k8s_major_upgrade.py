@@ -1392,6 +1392,95 @@ class K8sNativeMajorUpgrade(TestClusterBase):
         )
         self.logger.info("cert-manager installed and ready")
 
+    def _readopt_spdk_csi_resources(self):
+        """Re-annotate resources created by the old 'spdk-csi' Helm release.
+
+        During R25→R26 upgrades the old Helm release was named 'spdk-csi'.
+        Resources it created (e.g. simplyblock-snapshot-controller in kube-system)
+        carry ``meta.helm.sh/release-name: spdk-csi``.  The new operator chart
+        installs as 'simplyblock-operator' in the 'simplyblock' namespace and
+        cannot adopt these resources unless the annotations match.
+        """
+        self.logger.info("Checking for leftover spdk-csi Helm resources to re-annotate")
+
+        # Namespaced resource types that the old spdk-csi chart may have created
+        resource_types = [
+            "deployment",
+            "service",
+            "serviceaccount",
+            "configmap",
+            "role",
+            "rolebinding",
+        ]
+
+        # Namespaces where old resources may reside
+        namespaces = ["kube-system", _NAMESPACE]
+        re_annotated = 0
+
+        for ns in namespaces:
+            for rtype in resource_types:
+                try:
+                    cmd = (
+                        f"kubectl get {rtype} -n {ns} "
+                        f"-o jsonpath='{{range .items[?(@.metadata.annotations.meta\\.helm\\.sh/release-name==\"spdk-csi\")]}}{{.metadata.name}} {{end}}' "
+                        f"2>/dev/null || true"
+                    )
+                    out, _ = self.k8s_utils._exec_kubectl(cmd)
+                    names = (out or "").replace("'", "").split()
+                    for name in names:
+                        name = name.strip()
+                        if not name:
+                            continue
+                        self.logger.info(
+                            f"  Re-annotating {rtype}/{name} in {ns} "
+                            f"from spdk-csi → simplyblock-operator"
+                        )
+                        self.k8s_utils._exec_kubectl(
+                            f"kubectl annotate {rtype} {name} -n {ns} "
+                            f"meta.helm.sh/release-name=simplyblock-operator "
+                            f"meta.helm.sh/release-namespace={_NAMESPACE} "
+                            f"--overwrite"
+                        )
+                        re_annotated += 1
+                except Exception as e:
+                    self.logger.warning(
+                        f"  Failed to process {rtype} in {ns}: {e}"
+                    )
+
+        # Also handle cluster-scoped resources (clusterrole, clusterrolebinding)
+        for rtype in ["clusterrole", "clusterrolebinding"]:
+            try:
+                cmd = (
+                    f"kubectl get {rtype} "
+                    f"-o jsonpath='{{range .items[?(@.metadata.annotations.meta\\.helm\\.sh/release-name==\"spdk-csi\")]}}{{.metadata.name}} {{end}}' "
+                    f"2>/dev/null || true"
+                )
+                out, _ = self.k8s_utils._exec_kubectl(cmd)
+                names = (out or "").replace("'", "").split()
+                for name in names:
+                    name = name.strip()
+                    if not name:
+                        continue
+                    self.logger.info(
+                        f"  Re-annotating {rtype}/{name} (cluster-scoped) "
+                        f"from spdk-csi → simplyblock-operator"
+                    )
+                    self.k8s_utils._exec_kubectl(
+                        f"kubectl annotate {rtype} {name} "
+                        f"meta.helm.sh/release-name=simplyblock-operator "
+                        f"meta.helm.sh/release-namespace={_NAMESPACE} "
+                        f"--overwrite"
+                    )
+                    re_annotated += 1
+            except Exception as e:
+                self.logger.warning(
+                    f"  Failed to process cluster-scoped {rtype}: {e}"
+                )
+
+        # Also re-label helm ownership labels if present
+        # Helm uses app.kubernetes.io/managed-by=Helm label
+        self.logger.info(f"Re-annotated {re_annotated} resources from spdk-csi to simplyblock-operator")
+
     def _install_operator_chart(self):
         """Step 6: Install the operator Helm chart with FDB disabled."""
         self.logger.info("Migration Step 6: Installing operator chart (FDB disabled)")
@@ -1406,6 +1495,10 @@ class K8sNativeMajorUpgrade(TestClusterBase):
             csi_flags += f" --set image.csi.repository={self.csi_repository}"
         if self.csi_tag:
             csi_flags += f" --set image.csi.tag={self.csi_tag}"
+
+        # Re-annotate resources left over from the old 'spdk-csi' Helm release
+        # so they can be adopted by the new 'simplyblock-operator' release.
+        self._readopt_spdk_csi_resources()
 
         helm_cmd = (
             f"helm upgrade --install simplyblock-operator {self.helm_chart_path} "
