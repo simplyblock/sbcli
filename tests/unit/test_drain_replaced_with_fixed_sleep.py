@@ -111,7 +111,10 @@ class FailbackPath_DrainBeforeDrop(unittest.TestCase):
         # unblocks every blocked peer, and raises so the restart task
         # runner re-queues.
         # The condition `if not drained` must lead to abort, not warn-and-proceed.
-        m = re.search(r"if not drained:\s*\n([\s\S]+?)(?=\n\s{0,12}\#\#\#|\nexcept Exception)", self.takeover_block)
+        # Terminator is indentation-agnostic on purpose: this branch's nesting
+        # depth is not part of the contract being pinned, and a fixed indent
+        # bound silently turns "the abort is gone" into "the regex missed".
+        m = re.search(r"if not drained:\s*\n([\s\S]+?)(?=\n[ ]*\#\#\#|\nexcept Exception)", self.takeover_block)
         self.assertIsNotNone(m, "couldn't find `if not drained:` branch in failback takeover")
         not_drained_body = m.group(1)
         self.assertIn(

@@ -25,6 +25,12 @@ class Cluster(BaseModel):
     STATUS_UNREADY = "unready"
     STATUS_IN_ACTIVATION = "in_activation"
     STATUS_IN_EXPANSION = "in_expansion"
+    #: Node removal in flight (the add/remove counterpart of IN_EXPANSION).
+    #: Held only for one attempt of node_removal_orchestrate, and honoured as a
+    #: restart-phase owner: the replica relocation it performs sets a phase on
+    #: an ONLINE target, which get_restart_phase would otherwise judge stale and
+    #: clear out from under a live rebuild.
+    STATUS_IN_SHRINK = "in_shrink"
 
     STATUS_CODE_MAP = {
         STATUS_ACTIVE: 1,
@@ -36,6 +42,7 @@ class Cluster(BaseModel):
         STATUS_UNREADY: 12,
         STATUS_IN_ACTIVATION: 13,
         STATUS_IN_EXPANSION: 14,
+        STATUS_IN_SHRINK: 15,
 
     }
 

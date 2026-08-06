@@ -34,6 +34,7 @@ directly — no FDB, no SPDK, no restart task — and checking:
 import unittest
 from unittest.mock import MagicMock, patch
 
+from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core import storage_node_ops
 
@@ -42,7 +43,17 @@ from simplyblock_core import storage_node_ops
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _fake_node(node_id="node-1", restart_phases=None):
+def _fake_node(node_id="node-1", restart_phases=None,
+               status=StorageNode.STATUS_RESTARTING):
+    """A node carrying a restart phase.
+
+    Defaults to STATUS_RESTARTING because a phase only *means* anything while
+    some flow owns the LVS: get_restart_phase treats a phase held by an
+    unowned node as leaked and clears it (the 2026-07-10 black-hole guard).
+    RESTARTING is the ordinary owner — what a real node restart looks like.
+    Tests covering the other owners set the CLUSTER status instead; see
+    ``_install_db_mock(cluster_status=...)``.
+    """
     node = MagicMock(spec=StorageNode)
     node.get_id.return_value = node_id
     node.uuid = node_id
@@ -53,14 +64,14 @@ def _fake_node(node_id="node-1", restart_phases=None):
     node.rpc_port = 8080
     node.rpc_username = "u"
     node.rpc_password = "p"
-    node.status = StorageNode.STATUS_ONLINE
+    node.status = status
     node.restart_phases = restart_phases or {}
     return node
 
 
 def _with_phase(node, lvs, phase):
     """Return a new node stub with ``restart_phases[lvs] = phase``."""
-    n = _fake_node(node.get_id())
+    n = _fake_node(node.get_id(), status=node.status)
     n.restart_phases = dict(node.restart_phases or {})
     if phase:
         n.restart_phases[lvs] = phase
@@ -69,21 +80,66 @@ def _with_phase(node, lvs, phase):
     return n
 
 
-def _install_db_mock(node):
+def _install_db_mock(node, cluster_status=Cluster.STATUS_ACTIVE):
     """Return a contextmanager that makes DBController.get_storage_node_by_id
-    return ``node`` so storage_node_ops' helpers can resolve it."""
+    return ``node`` so storage_node_ops' helpers can resolve it.
+
+    ``atomic_update`` applies its mutator, as the real DBController does — the
+    phase transitions under test are written that way, and a bare MagicMock
+    silently swallows them.
+    """
     def _get(nid):
         if nid == node.get_id():
             return node
         raise KeyError(nid)
+    cluster = MagicMock(spec=Cluster)
+    cluster.status = cluster_status
     db = MagicMock()
     db.get_storage_node_by_id.side_effect = _get
+    db.get_cluster_by_id.return_value = cluster
+    db.atomic_update.side_effect = lambda obj, fn: (fn(obj), obj)[1]
     return patch.object(storage_node_ops, "DBController", return_value=db)
 
 
 # ---------------------------------------------------------------------------
 # wait_or_delay_for_restart_gate
 # ---------------------------------------------------------------------------
+
+class PhaseOwnership(unittest.TestCase):
+    """Which flows own a phase — i.e. when a non-empty phase is honoured
+    rather than judged leaked and cleared."""
+
+    def test_node_removal_relocation_phase_is_honoured(self):
+        """Regression: node removal must own the phases its relocation sets.
+
+        Phase 3b of node_removal_orchestrate relocates a replica onto a target
+        chosen *because* it is ONLINE, and sets a restart phase there. Before
+        IN_SHRINK existed, get_restart_phase saw an ONLINE node under an ACTIVE
+        cluster, judged the phase leaked, and cleared it mid-rebuild — so
+        concurrent create/delete/resize landed on an LVS whose replica stack was
+        still being built, the exact race the gate exists to prevent.
+        """
+        node = _fake_node(status=StorageNode.STATUS_ONLINE,
+                          restart_phases={"LVS_1": StorageNode.RESTART_PHASE_BLOCKED})
+        with _install_db_mock(node, cluster_status=Cluster.STATUS_IN_SHRINK):
+            self.assertEqual(
+                storage_node_ops.wait_or_delay_for_restart_gate(node.get_id(), "LVS_1"),
+                "delay")
+        self.assertEqual(node.restart_phases, {"LVS_1": StorageNode.RESTART_PHASE_BLOCKED},
+                         "the phase must survive — clearing it is the bug")
+
+    def test_unowned_phase_on_online_node_is_still_cleared(self):
+        """The self-heal must keep working: a phase with no owner at all is a
+        leak (2026-07-10), and leaving it would queue every later registration
+        into a drain queue nothing drains."""
+        node = _fake_node(status=StorageNode.STATUS_ONLINE,
+                          restart_phases={"LVS_1": StorageNode.RESTART_PHASE_BLOCKED})
+        with _install_db_mock(node, cluster_status=Cluster.STATUS_ACTIVE):
+            self.assertEqual(
+                storage_node_ops.wait_or_delay_for_restart_gate(node.get_id(), "LVS_1"),
+                "proceed")
+        self.assertEqual(node.restart_phases, {}, "the leaked phase must be reclaimed")
+
 
 class WaitOrDelayGate(unittest.TestCase):
     """``wait_or_delay_for_restart_gate`` must delay any non-empty phase."""
@@ -197,6 +253,12 @@ class QueueDrainAcrossPhaseTransitions(unittest.TestCase):
         node.write_to_db = MagicMock()
         db = MagicMock()
         db.get_storage_node_by_id.return_value = node
+        # _set_restart_phase commits through atomic_update (a full-object write
+        # would resurrect a phase a concurrent writer just cleared). An
+        # unconfigured MagicMock swallows the mutator, so restart_phases never
+        # changed, old_phase was always "" and NO transition was ever detected —
+        # both drain assertions below were passing vacuously before.
+        db.atomic_update.side_effect = lambda obj, fn: (fn(obj), obj)[1]
         return node, db
 
     def _set_phase(self, node, db, phase):

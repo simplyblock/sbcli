@@ -2326,7 +2326,11 @@ def resize_lvol(id, new_size, lock=True) -> None:
     # Resize grows the allocation, so it is gated like create: only an
     # operational cluster may take it (same allow-list as add_lvol_ha).
     cluster = db_controller.get_cluster_by_id(pool.cluster_id)
-    if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED]:
+    # IN_SHRINK: client-facing; a removal runs for hours and must not freeze
+    # resize cluster-wide. The per-LVS restart-phase gate covers the window
+    # where the relocation is actually rebuilding a replica.
+    if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED,
+                              Cluster.STATUS_IN_SHRINK]:
         raise PreconditionError(
             f"Cannot resize lvol {lvol.uuid}: cluster {cluster.get_id()} "
             f"status is {cluster.status}")
