@@ -1,4 +1,5 @@
 # coding=utf-8
+import datetime
 import json
 import logging
 import os.path
@@ -28,6 +29,34 @@ from simplyblock_core.models.lvstore_lock import LVStoreMutationLock
 from simplyblock_core.utils.helpers import single_or_none
 
 logger = logging.getLogger(__name__)
+
+
+def restart_claim_active(node, claim_owner=""):
+    """Return the owner of a FRESH per-node restart claim on ``node``, or
+    ``None`` when there is no live conflicting claim.
+
+    Fresh = ``restart_claim_ts`` younger than
+    ``constants.RESTART_CLAIM_TTL_SEC``. The caller's own token is never a
+    conflict (returns ``None`` when the claim is held by ``claim_owner``
+    itself — re-acquisition by the same driver). An empty, unparseable or
+    expired claim also returns ``None``: the claim only defends a LIVE
+    driver; a dead one must be takeover-able (the transferable-ownership
+    resume path), mirroring task-lease staleness semantics.
+    """
+    owner = getattr(node, "restart_claim_owner", "") or ""
+    if not owner or owner == claim_owner:
+        return None
+    ts = getattr(node, "restart_claim_ts", "") or ""
+    try:
+        claimed = datetime.datetime.fromisoformat(ts)
+    except (ValueError, TypeError):
+        return None
+    if claimed.tzinfo is None:
+        claimed = claimed.replace(tzinfo=datetime.timezone.utc)
+    age = (datetime.datetime.now(datetime.timezone.utc) - claimed).total_seconds()
+    if age > constants.RESTART_CLAIM_TTL_SEC:
+        return None
+    return owner
 
 
 class Singleton(type):
@@ -1108,7 +1137,8 @@ class DBController(metaclass=Singleton):
 
     # ---- Pre-Restart Guard (Single FDB Transaction) ----
 
-    def _try_set_node_restarting_tx(self, tr, cluster_id, node_id, allow_concurrent_peers=False):
+    def _try_set_node_restarting_tx(self, tr, cluster_id, node_id, allow_concurrent_peers=False,
+                                    claim_owner=""):
         """Pre-restart check as a single FDB transaction.
 
         Opens transaction, queries status of all nodes in the cluster.
@@ -1152,15 +1182,36 @@ class DBController(metaclass=Singleton):
                     continue
                 if n.status in [StorageNode.STATUS_RESTARTING, StorageNode.STATUS_IN_SHUTDOWN]:
                     return False, f"Node {n.get_id()} is {n.status}"
+        # Target-node mutual exclusion: the peer predicate above deliberately
+        # skips the target, so before this check TWO ACTORS (manual CLI
+        # restart and the restart task runner — which calls with force=True
+        # and sails past every pre-tx status guard) could both "acquire" and
+        # drive the same node's restart concurrently, replacing each other's
+        # SPDK container mid-flight (2026-08-06 soak iter-50). A node already
+        # mid-transition whose claim is FRESH belongs to a live driver —
+        # refuse, in BOTH modes (allow_concurrent_peers relaxes peer
+        # exclusion, never same-node exclusion). A stale or absent claim is
+        # takeover-able: that is the transferable-ownership resume path for
+        # a driver that died mid-restart (and the compatibility path for
+        # rows written by pre-claim code).
+        if target is not None and target.status in (
+                StorageNode.STATUS_RESTARTING, StorageNode.STATUS_IN_SHUTDOWN):
+            holder = restart_claim_active(target, claim_owner)
+            if holder:
+                return False, (f"Node {node_id} is {target.status} with a live "
+                               f"restart claim held by {holder}")
         if target:
             target.status = StorageNode.STATUS_RESTARTING
+            target.restart_claim_owner = claim_owner
+            target.restart_claim_ts = str(datetime.datetime.now(datetime.timezone.utc))
             prefix = target.get_db_id()
             data = json.dumps(target.get_clean_dict(unwrap_secrets=True))
             tr[prefix.encode()] = data.encode()
 
         return True, None
 
-    def try_set_node_restarting(self, cluster_id, node_id, allow_concurrent_peers=False):
+    def try_set_node_restarting(self, cluster_id, node_id, allow_concurrent_peers=False,
+                                claim_owner=""):
         """Pre-restart check: single FDB transaction.
 
         Opens FDB transaction, queries status of all nodes.
@@ -1169,6 +1220,10 @@ class DBController(metaclass=Singleton):
         ``allow_concurrent_peers=True`` skips the peer-exclusion predicate
         (suspended-cluster parallel recovery) — the only sanctioned
         relaxation; see _try_set_node_restarting_tx.
+        ``claim_owner`` is the caller's per-node restart-claim token: the tx
+        refuses when the target itself is mid-transition under a FRESH claim
+        held by anyone else, and records this token as the new claim holder
+        on success (cross-actor mutual exclusion — CLI vs task runner).
 
         On successful acquisition the status-change event and peer
         notification are emitted AFTER the commit. The FDB tx itself
@@ -1198,7 +1253,7 @@ class DBController(metaclass=Singleton):
         transactional = fdb.transactional(DBController._try_set_node_restarting_tx)
         try:
             acquired, reason = transactional(self, self.kv_store, cluster_id, node_id,
-                                             allow_concurrent_peers)
+                                             allow_concurrent_peers, claim_owner)
         except fdb.FDBError as e:  # type: ignore[attr-defined]  # injected by fdb.api_version()
             # Residual contention (conflict retries exhausted / tx timeout)
             # is a transient lock-acquisition failure, not a restart failure:
@@ -1232,6 +1287,56 @@ class DBController(metaclass=Singleton):
                     "failed for %s: %s", node_id, e,
                 )
         return acquired, reason
+
+    def refresh_node_restart_claim(self, node_id, claim_owner):
+        """Heartbeat the per-node restart claim: bump ``restart_claim_ts``
+        iff the claim is currently held by ``claim_owner``. A no-op (False)
+        otherwise — before acquisition, after release, or after a takeover
+        by another actor (the takeover is authoritative, mirroring
+        refresh_task_lease)."""
+        if not claim_owner:
+            return False
+        refreshed = {"ok": False}
+        now = str(datetime.datetime.now(datetime.timezone.utc))
+
+        def _mutate(n):
+            if n.restart_claim_owner != claim_owner:
+                return False
+            n.restart_claim_ts = now
+            refreshed["ok"] = True
+            return True
+
+        try:
+            node = self.get_storage_node_by_id(node_id)
+        except KeyError:
+            return False
+        if self.atomic_update(node, _mutate) is None:
+            return False
+        return refreshed["ok"]
+
+    def release_node_restart_claim(self, node_id, claim_owner):
+        """Clear the per-node restart claim iff held by ``claim_owner``.
+        Owner-matched CAS: releasing someone else's claim is impossible, so
+        every restart exit path may call this unconditionally."""
+        if not claim_owner:
+            return False
+        released = {"ok": False}
+
+        def _mutate(n):
+            if n.restart_claim_owner != claim_owner:
+                return False
+            n.restart_claim_owner = ""
+            n.restart_claim_ts = ""
+            released["ok"] = True
+            return True
+
+        try:
+            node = self.get_storage_node_by_id(node_id)
+        except KeyError:
+            return False
+        if self.atomic_update(node, _mutate) is None:
+            return False
+        return released["ok"]
 
     # ---- S3 Backup ----
 

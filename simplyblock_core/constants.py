@@ -146,6 +146,24 @@ RESTART_TASK_EXEC_INTERVAL_MAX_SEC = 3600
 TASK_LEASE_HEARTBEAT_SEC = 30
 TASK_LEASE_TTL_SEC = 180
 
+# Per-node restart claim: cross-ACTOR mutual exclusion for a single node's
+# restart. The task lease above serializes runner HOSTS on one task, but a
+# manual CLI restart and the restart task runner are DIFFERENT actors sharing
+# the same NODE_RESTART task (ensure_node_restart_task dedups to one per
+# node) and — on the mgmt host — potentially the same lease owner id
+# (hostname), so the lease cannot tell them apart. The claim is an
+# (owner-token, timestamp) pair on the StorageNode row, acquired atomically
+# inside try_set_node_restarting's FDB tx, heartbeated by the
+# restart_storage_node wrapper while the restart runs, and released on exit.
+# A claim older than the TTL means its driver died mid-restart and may be
+# taken over (this is what keeps the transferable-ownership resume path
+# alive). force does NOT bypass a fresh claim: mutual exclusion is not an
+# operator-overridable safety check (2026-08-06 soak iter-50: a manual CLI
+# restart and the task runner drove the same node concurrently, their
+# spdk_process_start calls replacing each other's container mid-restart).
+RESTART_CLAIM_HEARTBEAT_SEC = TASK_LEASE_HEARTBEAT_SEC
+RESTART_CLAIM_TTL_SEC = TASK_LEASE_TTL_SEC
+
 # Node-add concurrency: the cross-node mesh section of add_node is serialized
 # per cluster behind a ClusterAddNodeLock. The holder refreshes the lock every
 # CLUSTER_ADD_LOCK_HEARTBEAT_SEC; a lock whose heartbeat is older than

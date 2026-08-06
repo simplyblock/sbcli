@@ -28,6 +28,7 @@ from simplyblock_core.constants import LINUX_DRV_MASS_STORAGE_NVME_TYPE_ID, LINU
 from simplyblock_core.controllers import lvol_controller, storage_events, snapshot_controller, device_events, \
     device_controller, tasks_controller, health_controller, tcp_ports_events, qos_controller
 from simplyblock_core.controllers.host_auth import _reapply_allowed_hosts
+from simplyblock_core import db_controller as db_module
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.job_schedule import JobSchedule
@@ -3904,6 +3905,23 @@ def restart_storage_node(
     # task when it drives this restart and passes it in via
     # current_restart_task_id — creating a second one here would be
     # redundant and would fight the runner's own task for the lease.
+    # Per-node restart claim token: identifies THIS driver (CLI process or
+    # task-runner thread) for the cross-actor mutual exclusion enforced in
+    # try_set_node_restarting's FDB tx. The heartbeat below keeps the claim
+    # fresh while the (potentially minutes-long) restart runs; it lands only
+    # once the impl has actually acquired the claim (owner-matched CAS is a
+    # no-op before that). Released in the finally block on every exit path.
+    _claim_token = _new_restart_claim_token()
+    _claim_hb_stop = threading.Event()
+
+    def _claim_heartbeat():
+        while not _claim_hb_stop.wait(constants.RESTART_CLAIM_HEARTBEAT_SEC):
+            try:
+                db_ctrl.refresh_node_restart_claim(node_id, _claim_token)
+            except Exception as hb_e:
+                logger.debug(f"Restart claim heartbeat failed for {node_id}: {hb_e}")
+    threading.Thread(target=_claim_heartbeat, daemon=True).start()
+
     _hb_stop = threading.Event()
     _owned_task_id = None
     if current_restart_task_id is None and pre_status not in (
@@ -3950,7 +3968,8 @@ def restart_storage_node(
             force=force, node_address=node_address, reattach_volume=reattach_volume,
             clear_data=clear_data, new_ssd_pcie=new_ssd_pcie,
             force_lvol_recreate=force_lvol_recreate, spdk_proxy_image=spdk_proxy_image,
-            current_restart_task_id=current_restart_task_id or _owned_task_id)
+            current_restart_task_id=current_restart_task_id or _owned_task_id,
+            restart_claim_token=_claim_token)
     except Exception:
         # exc_info so the traceback is captured: without it a failing restart
         # only logs this one line, leaving the actual raise point (e.g. a
@@ -3973,15 +3992,23 @@ def restart_storage_node(
                     f"trusting the DB and treating as success."
                 )
                 result = True
-            elif not result and pre_status not in (StorageNode.STATUS_RESTARTING,
+            elif (not result and pre_status not in (StorageNode.STATUS_RESTARTING,
                                                     StorageNode.STATUS_IN_SHUTDOWN,
-                                                    None):
-                # We owned the lock (pre_status was OFFLINE / DOWN / etc.),
-                # the impl failed before reaching the ONLINE flip. Reset to
-                # OFFLINE regardless of current status — a failed restart
-                # can leave RESTARTING, but it can also leave intermediate
-                # states; OFFLINE is the only safe wedge-free landing for
-                # the next retry.
+                                                    None)
+                    and post_node.restart_claim_owner == _claim_token):
+                # We owned the lock — proven by the claim token, not inferred
+                # from pre_status: "pre_status was OFFLINE" also holds when
+                # the impl was REFUSED before acquisition (peer gate, claim
+                # gate, entry checks). Running this cleanup then killed the
+                # SPDK container of whichever OTHER actor was legitimately
+                # mid-restart (2026-08-06 soak iter-50: a refused CLI
+                # attempt's cleanup destroyed the task runner's 14-second-old
+                # container). With the claim check, cleanup runs only when
+                # THIS call's try_set_node_restarting acquisition committed
+                # and the impl failed after it. Reset to OFFLINE regardless
+                # of current status — a failed restart can leave RESTARTING,
+                # but it can also leave intermediate states; OFFLINE is the
+                # only safe wedge-free landing for the next retry.
                 logger.warning(
                     f"Restart of {node_id} failed (post-status={post_node.status}); "
                     f"resetting to OFFLINE to unblock future attempts"
@@ -4050,8 +4077,25 @@ def restart_storage_node(
                         f"Restart cleanup: re-promoting secondary (ANA failover) "
                         f"for {node_id} raised: {ana_exc}"
                     )
+            elif not result:
+                # Failed WITHOUT holding the claim: this call was refused
+                # before acquisition (peer gate, claim held by another live
+                # driver, entry checks). Nothing here is ours to clean —
+                # killing SPDK or flipping OFFLINE would sabotage whichever
+                # actor legitimately owns the node's transition.
+                logger.info(
+                    f"Restart of {node_id} failed without acquiring the "
+                    f"restart claim (holder: "
+                    f"{post_node.restart_claim_owner or 'none'}); skipping "
+                    f"SPDK/status cleanup — not this call's transition")
         except Exception as cleanup_exc:
             logger.error(f"Failed to reset node {node_id} after failed restart: {cleanup_exc}")
+        finally:
+            _claim_hb_stop.set()
+            try:
+                db_ctrl.release_node_restart_claim(node_id, _claim_token)
+            except Exception as rel_exc:
+                logger.debug(f"Restart claim release for {node_id} failed: {rel_exc}")
     return result
 
 
@@ -4107,14 +4151,29 @@ def fd_dead_recovery_allowed(db_controller, snode) -> bool:
         return False
 
 
+def _new_restart_claim_token():
+    """Unique per-driver token for the per-node restart claim. Hostname+pid
+    identify the driving process; the uuid suffix disambiguates threads and
+    pid reuse. Distinct tokens for the CLI and the task-runner service even
+    when both run on the mgmt host — which is exactly the case the
+    hostname-keyed task lease cannot distinguish."""
+    return f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
+
+
 def _restart_storage_node_impl(
         node_id, max_lvol=0, max_snap=0, max_prov=0,
         spdk_image=None, set_spdk_debug=None,
         small_bufsize=0, large_bufsize=0,
         force=False, node_address=None, reattach_volume=False, clear_data=False, new_ssd_pcie=[],
-        force_lvol_recreate=False, spdk_proxy_image=None, current_restart_task_id=None):
+        force_lvol_recreate=False, spdk_proxy_image=None, current_restart_task_id=None,
+        restart_claim_token=""):
     db_controller = DBController()
     logger.info("Restarting storage node")
+    if not restart_claim_token:
+        # Direct callers (tests, legacy paths) that bypass the wrapper still
+        # get a claim; without the wrapper there is no heartbeat, so a hung
+        # direct call becomes takeover-able after RESTART_CLAIM_TTL_SEC.
+        restart_claim_token = _new_restart_claim_token()
     try:
         snode = db_controller.get_storage_node_by_id(node_id)
     except KeyError:
@@ -4177,7 +4236,8 @@ def _restart_storage_node_impl(
     if not allow_concurrent_peers:
         allow_concurrent_peers = fd_dead_recovery_allowed(db_controller, snode)
     acquired, reason = db_controller.try_set_node_restarting(
-        snode.cluster_id, node_id, allow_concurrent_peers=allow_concurrent_peers)
+        snode.cluster_id, node_id, allow_concurrent_peers=allow_concurrent_peers,
+        claim_owner=restart_claim_token)
     if not acquired:
         logger.error(f"Cannot restart {node_id}: {reason}")
         return False
@@ -5355,6 +5415,25 @@ def check_node_shutdown_preconditions(node_id, force=False, current_restart_task
         snode = db_controller.get_storage_node_by_id(node_id)
     except KeyError:
         return False, f"Storage node not found: {node_id}"
+
+    # Per-node restart claim: a FRESH claim on the target itself means a
+    # live driver is mid-transition on this very node RIGHT NOW. Shutting it
+    # down would yank the SPDK container out from under that driver
+    # (2026-08-06 soak iter-50: the restart task runner's cleanup shutdown
+    # destroyed a manual CLI restart's container seconds before it finished).
+    # Deliberately NOT overridable with force and NOT exempted by
+    # current_restart_task_id: both actors share the one NODE_RESTART task,
+    # so the task id cannot discriminate them — the claim token is the only
+    # identity that can. A dead driver's claim expires within
+    # RESTART_CLAIM_TTL_SEC; waiting that out is the sanctioned takeover.
+    if snode.status in (StorageNode.STATUS_RESTARTING, StorageNode.STATUS_IN_SHUTDOWN):
+        _claim_holder = db_module.restart_claim_active(snode)
+        if _claim_holder:
+            reason = (f"Node {node_id} is {snode.status} under a live restart "
+                      f"claim ({_claim_holder}); shutdown refused until the "
+                      f"claim is released or expires")
+            logger.error(reason)
+            return False, reason
 
     # Guard: no concurrent shutdown + restart (design: mutual exclusion)
     for peer in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):

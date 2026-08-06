@@ -487,6 +487,31 @@ def task_runner_node(task):
             _task_finish(task, "canceled")
         return True
 
+    # Cross-actor claim check on a fresh node read: a live driver (e.g. a
+    # manual `sn restart`) mid-transition on this node holds the per-node
+    # restart claim. Proceeding would shutdown+restart over its in-flight
+    # work (2026-08-06 iter-50: this exact path destroyed a CLI restart's
+    # SPDK container at finalization). The shutdown/restart guards below
+    # would refuse anyway — but only after burning a retry; defer like the
+    # peer-exclusion pre-check instead, without consuming the budget. When
+    # the driver finishes (node ONLINE cancels this task) or dies (claim
+    # expires within RESTART_CLAIM_TTL_SEC), the next cycle proceeds.
+    try:
+        node = db.get_storage_node_by_id(task.node_id)
+    except KeyError:
+        _task_finish(task, "node not found")
+        return True
+    if node.status in (StorageNode.STATUS_RESTARTING, StorageNode.STATUS_IN_SHUTDOWN):
+        claim_holder = db_controller.restart_claim_active(node)
+        if claim_holder:
+            msg = (f"Node restart claim held by {claim_holder}; "
+                   f"deferring (no retry consumed)")
+            logger.info(msg)
+            if _task_update(
+                    task, lambda t, m=msg: setattr(t, "function_result", m)) is None:
+                return True
+            return False
+
     # Cleanup shutdown before the restart — but only when there is something
     # to clean: a node that is already OFFLINE had SPDK confirmed gone (that
     # is what put it in OFFLINE), so force-shutting it down again only walks
