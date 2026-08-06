@@ -28,3 +28,4 @@ prometheus_api_client
 paramiko
 pydantic-settings
 botocore
+tenacity
