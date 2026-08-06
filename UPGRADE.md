@@ -300,7 +300,7 @@ Record the following before starting the upgrade:
 
 ### Step 1 — Annotate FDB Resources with `helm.sh/resource-policy: keep`
 
-There are 7 FDB resources that must survive `helm uninstall`:
+There are 8 FDB resources that must survive `helm uninstall`:
 
 | Kind | Name |
 |------|------|
@@ -311,6 +311,12 @@ There are 7 FDB resources that must survive `helm uninstall`:
 | RoleBinding | simplyblock-fdb-manager-rolebinding |
 | ClusterRoleBinding | simplyblock-fdb-manager-clusterrolebinding |
 | FoundationDBCluster | simplyblock-fdb-cluster |
+| ConfigMap | simplyblock-fdb-cluster-config |
+
+> **Why the ConfigMap?** The `simplyblock-fdb-cluster-config` ConfigMap contains the FDB
+> cluster connection file. Admin pods mount it as volume `fdb-cluster-file`. If this
+> ConfigMap is deleted during `helm uninstall sbcli`, admin pods will be stuck in
+> `ContainerCreating` and all `sbcli`/`sbctl` commands will fail.
 
 Annotate each resource:
 
@@ -329,6 +335,8 @@ kubectl annotate clusterrolebinding simplyblock-fdb-manager-clusterrolebinding \
   helm.sh/resource-policy=keep --overwrite
 kubectl annotate foundationdbcluster simplyblock-fdb-cluster -n simplyblock \
   helm.sh/resource-policy=keep --overwrite
+kubectl annotate configmap simplyblock-fdb-cluster-config -n simplyblock \
+  helm.sh/resource-policy=keep --overwrite
 ```
 
 **Verify**:
@@ -341,17 +349,12 @@ kubectl get deployment simplyblock-fdb-controller-manager -n simplyblock \
 
 ### Step 2 — Shut Down All Storage Nodes
 
-Gracefully suspend and shut down each storage node:
+Force-shutdown each storage node. Using `--force` combines suspend and shutdown in one
+command and avoids failures when some nodes are already in a non-online state:
 
 ```bash
-for NODE_ID in $(sbctl sn list | grep "online" | awk '{print $2}'); do
-    sbctl sn suspend "$NODE_ID"
-done
-
-sleep 10
-
 for NODE_ID in $(sbctl sn list | grep -v "offline" | awk '{print $2}'); do
-    sbctl sn shutdown "$NODE_ID"
+    sbctl sn shutdown "$NODE_ID" --force
 done
 ```
 
@@ -368,6 +371,27 @@ sbctl sn list
 helm uninstall spdk-csi --namespace simplyblock --wait
 ```
 
+### Step 3.1 — Delete Orphaned Snapshot Controller
+
+The `spdk-csi` chart deploys a `simplyblock-snapshot-controller` Deployment in
+`kube-system` with `helm.sh/resource-policy: keep`. This means it survives the
+`helm uninstall` above but retains stale ownership annotations pointing to the
+old `spdk-csi` release. When the new `simplyblock-operator` chart tries to
+install its own copy, Helm fails with:
+
+```
+rendered manifests contain a resource that already exists. Unable to continue
+with install: existing resource conflict: namespace: kube-system, name:
+simplyblock-snapshot-controller, existing_kind: apps/v1, Kind=Deployment,
+new_kind: apps/v1, Kind=Deployment
+```
+
+**Fix**: Delete the orphaned deployment after uninstalling `spdk-csi`:
+
+```bash
+kubectl delete deployment simplyblock-snapshot-controller -n kube-system --ignore-not-found
+```
+
 ### Step 4 — Uninstall the `sbcli` Helm Chart
 
 ```bash
@@ -381,6 +405,41 @@ FDB resources survive due to the keep annotation from Step 1.
 ```bash
 kubectl get foundationdbcluster -n simplyblock
 kubectl get pods -n simplyblock -l foundationdb.org/fdb-cluster-name=simplyblock-fdb-cluster
+```
+
+### Step 4.1 — Verify FDB Cluster-Config ConfigMap
+
+Check that the `simplyblock-fdb-cluster-config` ConfigMap survived the helm uninstall.
+Admin pods mount this ConfigMap as volume `fdb-cluster-file` — without it they will be
+stuck in `ContainerCreating`.
+
+```bash
+kubectl get configmap simplyblock-fdb-cluster-config -n simplyblock
+```
+
+If the ConfigMap is missing, recreate it from a running FDB pod:
+
+```bash
+# Extract the cluster file content from any FDB pod
+FDB_POD=$(kubectl get pods -n simplyblock \
+  -l foundationdb.org/fdb-cluster-name=simplyblock-fdb-cluster \
+  -o jsonpath='{.items[0].metadata.name}')
+
+CLUSTER_FILE=$(kubectl exec -n simplyblock "$FDB_POD" -- \
+  cat /var/dynamic-conf/fdb.cluster 2>/dev/null)
+
+# Recreate the ConfigMap
+kubectl create configmap simplyblock-fdb-cluster-config \
+  -n simplyblock \
+  --from-literal=cluster-file="$CLUSTER_FILE"
+```
+
+**Verify**:
+
+```bash
+kubectl get configmap simplyblock-fdb-cluster-config -n simplyblock \
+  -o jsonpath='{.data.cluster-file}'
+# Expected: A non-empty FDB cluster connection string
 ```
 
 ### Step 5 — Create the Upgrade Secret
@@ -407,6 +466,21 @@ kubectl create secret generic simplyblock-simplyblock-cluster-upgrade \
 > `metadata.name` of the StorageCluster CR you will apply in Step 7.
 
 ### Step 6 — Install the Operator Helm Chart (FDB Disabled)
+
+> **Prerequisite — cert-manager (TLS-enabled installs only)**: If the operator chart
+> enables TLS (e.g., `simplyblock-webappapi-tls` Certificate resources), `cert-manager`
+> must be installed before this step. Without it, Certificate CRDs won't exist and the
+> helm install will fail, or the TLS secret will never be created and admin pods will
+> fail to start.
+>
+> ```bash
+> # Check if cert-manager CRDs exist
+> kubectl get crd certificates.cert-manager.io 2>/dev/null
+>
+> # If missing, install cert-manager
+> kubectl apply -f https://github.com/cert-manager/cert-manager/releases/latest/download/cert-manager.yaml
+> kubectl wait --for=condition=Available deployment --all -n cert-manager --timeout=120s
+> ```
 
 Install the new operator chart with FDB creation disabled (FDB is already running):
 
