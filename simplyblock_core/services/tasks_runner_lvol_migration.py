@@ -2257,7 +2257,8 @@ def _delete_intermediate_snaps_on_target(migration, tgt_rpc, tgt_sec_rpc=None, t
             logger.warning(f"Could not remove intermediate snap {snap_uuid} from DB: {e}")
 
 
-def _rename_migrated_bdevs(migration, tgt_node, tgt_rpc, tgt_sec_rpc=None, tgt_ter_rpc=None):
+def _rename_migrated_bdevs(migration, tgt_node, tgt_rpc, tgt_sec_rpc=None, tgt_ter_rpc=None,
+                            warnings=None):
     """
     After migration completes, rename 'm'-suffixed bdevs on the target back to
     their canonical names (without the suffix).  This prevents suffix accumulation
@@ -2278,28 +2279,37 @@ def _rename_migrated_bdevs(migration, tgt_node, tgt_rpc, tgt_sec_rpc=None, tgt_t
     def _do_rename(old_composite, new_short, label):
         """Rename on prim + sec + ter.  Returns 'EXISTS' if the target name is
         already taken on the PRIMARY (SPDK returns JSON-RPC error -32602 'File
-        exists' -> None), True on success.  new_short must be the short name only
+        exists'), True on success.  new_short must be the short name only
         (no lvstore prefix).
 
         Secondary/tertiary conflicts are non-fatal: an overlap node may already
-        carry the bdev at the canonical name, so a None return there must not
+        carry the bdev at the canonical name, so a collision there must not
         mask a successful primary rename.
         """
-        ret = tgt_rpc.bdev_lvol_rename(old_composite, new_short)
+        try:
+            ret = tgt_rpc.bdev_lvol_rename(old_composite, new_short)
+            prim_exists = False
+        except RPCException as exc:
+            if exc.code == -32602:
+                logger.warning(
+                    f"_do_rename prim: {old_composite!r} -> {new_short!r}: "
+                    f"'File exists' (-32602) — will try fallback name"
+                )
+                prim_exists = True
+                ret = None
+            else:
+                raise
         logger.debug(f"_do_rename prim: {old_composite!r} -> {new_short!r}: ret={ret!r}")
-        # SPDK returns None on name collision (-32602 "File exists"); only the
-        # primary result determines whether we should try the fallback name.
-        prim_exists = (not ret) or (ret == _EXISTS)
         for role, rpc in [("sec", tgt_sec_rpc), ("ter", tgt_ter_rpc)]:
             if rpc:
                 try:
-                    r = rpc.bdev_lvol_rename(old_composite, new_short)
-                    logger.debug(f"_do_rename {role}: {old_composite!r} -> {new_short!r}: ret={r!r}")
-                    if (not r) or r == _EXISTS:
-                        logger.warning(
-                            f"_rename_migrated_bdevs: {role} rename {label} "
-                            f"{old_composite!r} -> {new_short!r}: non-fatal "
-                            f"({role} may already have bdev at target name)")
+                    rpc.bdev_lvol_rename(old_composite, new_short)
+                    logger.debug(f"_do_rename {role}: {old_composite!r} -> {new_short!r}: ok")
+                except RPCException as exc:
+                    logger.warning(
+                        f"_rename_migrated_bdevs: {role} rename {label} "
+                        f"{old_composite!r} -> {new_short!r}: non-fatal "
+                        f"(code={exc.code}: {exc.message})")
                 except Exception as exc:
                     logger.warning(
                         f"_rename_migrated_bdevs: {role} rename {label} (non-fatal): {exc}")
@@ -2316,13 +2326,22 @@ def _rename_migrated_bdevs(migration, tgt_node, tgt_rpc, tgt_sec_rpc=None, tgt_t
         ret = _do_rename(old, canonical, label)
         if ret == _EXISTS:
             fallback = canonical + _MIGRATION_BDEV_SUFFIX_DONE
-            logger.info(
-                f"_rename_migrated_bdevs: {canonical} exists - trying fallback {fallback}")
+            msg = (
+                f"bdev rename {current_short!r} -> {canonical!r} failed (File exists); "
+                f"retried as fallback {fallback!r}"
+            )
+            logger.warning(f"_rename_migrated_bdevs: {msg}")
+            if warnings is not None:
+                warnings.append(msg)
             ret2 = _do_rename(old, fallback, label)
             if ret2 == _EXISTS:
-                logger.warning(
-                    f"_rename_migrated_bdevs: both {canonical} and {fallback} "
-                    f"exist - leaving {current_short} as-is")
+                skip_msg = (
+                    f"bdev rename {current_short!r}: both {canonical!r} and {fallback!r} "
+                    f"exist — left as-is"
+                )
+                logger.warning(f"_rename_migrated_bdevs: {skip_msg}")
+                if warnings is not None:
+                    warnings.append(skip_msg)
                 return None
             target = fallback
         else:
@@ -2573,7 +2592,8 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
                 migration, tgt_rpc, tgt_sec_rpc, tgt_ter_rpc,
                 tgt_all_nodes=[n for n in [tgt_node, tgt_sec, tgt_ter] if n],
                 tgt_lvs_name=tgt_node.lvstore)
-        _rename_migrated_bdevs(migration, tgt_node, tgt_rpc, tgt_sec_rpc, tgt_ter_rpc)
+        _rename_migrated_bdevs(migration, tgt_node, tgt_rpc, tgt_sec_rpc, tgt_ter_rpc,
+                               warnings=_warnings)
     except Exception as e:
         logger.warning(f"Target artifact cleanup (rename/intermediate snaps) failed: {e}")
         _warnings.append(f"target rename/intermediate-snap cleanup failed: {e}")
