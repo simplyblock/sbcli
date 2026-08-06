@@ -99,6 +99,7 @@ _FDB_KEEP_RESOURCES = [
     ("rolebinding", "simplyblock-fdb-manager-rolebinding"),
     ("clusterrolebinding", "simplyblock-fdb-manager-clusterrolebinding"),
     ("foundationdbcluster", "simplyblock-fdb-cluster"),
+    ("configmap", "simplyblock-fdb-cluster-config"),
 ]
 
 # Default CR names matching the k8s-native-e2e.yaml workflow
@@ -1301,6 +1302,9 @@ class K8sNativeMajorUpgrade(TestClusterBase):
             self._cleanup_kept_spdk_csi_resources()
 
         if self.helm_release_sbcli:
+            # Capture FDB cluster-config BEFORE uninstall (in case keep fails)
+            fdb_cm_data = self._capture_fdb_cluster_config()
+
             self.logger.info(
                 f"Migration Step 4: Uninstalling helm release '{self.helm_release_sbcli}'"
             )
@@ -1309,6 +1313,89 @@ class K8sNativeMajorUpgrade(TestClusterBase):
                 f"--namespace {_NAMESPACE} --wait 2>/dev/null || true"
             )
             sleep_n_sec(10)
+
+            # Verify FDB cluster-config ConfigMap survived; recreate if missing
+            self._ensure_fdb_cluster_config(fdb_cm_data)
+
+    def _capture_fdb_cluster_config(self) -> str:
+        """Capture the FDB cluster file content before helm uninstall.
+
+        Returns the cluster file data string, or empty string if unavailable.
+        """
+        try:
+            out, _ = self.k8s_utils._exec_kubectl(
+                f"kubectl get configmap simplyblock-fdb-cluster-config "
+                f"-n {_NAMESPACE} -o jsonpath='{{.data.cluster-file}}' "
+                f"2>/dev/null || true"
+            )
+            data = (out or "").replace("'", "").strip()
+            if data:
+                self.logger.info(
+                    f"Captured FDB cluster-config data ({len(data)} chars)")
+            return data
+        except Exception as e:
+            self.logger.warning(f"Failed to capture FDB cluster-config: {e}")
+            return ""
+
+    def _ensure_fdb_cluster_config(self, fdb_cm_data: str):
+        """Ensure the FDB cluster-config ConfigMap exists after helm uninstall.
+
+        The admin-control pods mount this ConfigMap as a volume.  If it was
+        deleted during ``helm uninstall sbcli`` despite resource-policy:keep,
+        recreate it from the previously captured data.  If no captured data is
+        available, attempt to extract it from a running FDB pod.
+        """
+        # Check if ConfigMap still exists
+        out, _ = self.k8s_utils._exec_kubectl(
+            f"kubectl get configmap simplyblock-fdb-cluster-config "
+            f"-n {_NAMESPACE} --no-headers 2>/dev/null || true"
+        )
+        if "simplyblock-fdb-cluster-config" in (out or ""):
+            self.logger.info("FDB cluster-config ConfigMap survived helm uninstall")
+            return
+
+        self.logger.warning(
+            "FDB cluster-config ConfigMap was deleted during helm uninstall — "
+            "recreating it")
+
+        # Try captured data first
+        if not fdb_cm_data:
+            # Fallback: extract from a running FDB pod
+            try:
+                out, _ = self.k8s_utils._exec_kubectl(
+                    f"kubectl get pods -n {_NAMESPACE} "
+                    f"-l foundationdb.org/fdb-cluster-name=simplyblock-fdb-cluster "
+                    f"--no-headers -o custom-columns=NAME:.metadata.name "
+                    f"2>/dev/null | head -1"
+                )
+                fdb_pod = (out or "").strip()
+                if fdb_pod:
+                    out2, _ = self.k8s_utils._exec_kubectl(
+                        f"kubectl exec {fdb_pod} -n {_NAMESPACE} "
+                        f"-c foundationdb -- cat /var/fdb/data/fdb.cluster "
+                        f"2>/dev/null || true"
+                    )
+                    fdb_cm_data = (out2 or "").strip()
+                    if fdb_cm_data:
+                        self.logger.info(
+                            f"Extracted FDB cluster file from pod {fdb_pod}")
+            except Exception as e:
+                self.logger.warning(f"Failed to extract FDB data from pods: {e}")
+
+        if not fdb_cm_data:
+            self.logger.error(
+                "Cannot recreate FDB cluster-config ConfigMap — no data "
+                "available.  Admin pods will fail to start.")
+            return
+
+        # Recreate the ConfigMap
+        # Escape single quotes in the data for the kubectl command
+        escaped = fdb_cm_data.replace("'", "'\\''")
+        self.k8s_utils._exec_kubectl(
+            f"kubectl create configmap simplyblock-fdb-cluster-config "
+            f"-n {_NAMESPACE} --from-literal=cluster-file='{escaped}'"
+        )
+        self.logger.info("Recreated FDB cluster-config ConfigMap")
 
     def _create_upgrade_secret(self):
         """Step 5: Create the upgrade secret so the operator adopts the existing cluster."""
@@ -1495,6 +1582,45 @@ class K8sNativeMajorUpgrade(TestClusterBase):
             f"--timeout=300s --field-selector=status.phase!=Succeeded"
         )
         sleep_n_sec(15)
+
+        # Wait specifically for admin-control pods to be Ready
+        self.logger.info("Waiting for admin-control pods to be Ready")
+        for attempt in range(60):
+            out, _ = self.k8s_utils._exec_kubectl(
+                f"kubectl get pods -n {_NAMESPACE} "
+                f"-l app.kubernetes.io/component=admin-control "
+                f"--no-headers 2>/dev/null || true"
+            )
+            lines = [l for l in (out or "").strip().split("\n") if l.strip()]
+            ready_count = sum(
+                1 for l in lines
+                if "Running" in l and l.split()[1].split("/")[0] == l.split()[1].split("/")[1]
+            )
+            if ready_count > 0:
+                self.logger.info(
+                    f"  {ready_count} admin-control pod(s) Ready")
+                break
+            # Check for ContainerCreating with volume mount failures
+            if any("ContainerCreating" in l for l in lines) and attempt % 10 == 9:
+                self.logger.warning(
+                    f"  Admin pods still ContainerCreating after {(attempt+1)*5}s — "
+                    f"checking events for volume mount issues")
+                for l in lines:
+                    pod_name = l.split()[0] if l.split() else ""
+                    if pod_name and "ContainerCreating" in l:
+                        ev_out, _ = self.k8s_utils._exec_kubectl(
+                            f"kubectl get events -n {_NAMESPACE} "
+                            f"--field-selector involvedObject.name={pod_name} "
+                            f"--sort-by='.lastTimestamp' 2>/dev/null "
+                            f"| tail -5 || true"
+                        )
+                        if ev_out:
+                            self.logger.warning(f"  Events for {pod_name}:\n{ev_out}")
+            sleep_n_sec(5)
+        else:
+            self.logger.error(
+                "Admin-control pods did not become Ready within 300s")
+
         self.k8s_utils.get_admin_pod(refresh=True)
         self.logger.info("Operator chart installed")
 
