@@ -1328,12 +1328,44 @@ class K8sNativeMajorUpgrade(TestClusterBase):
         out, err = self.k8s_utils._exec_kubectl(cmd)
         self.logger.info(f"Upgrade secret created: {out}")
 
+    def _ensure_cert_manager(self):
+        """Install cert-manager if not already present (required for TLS).
+
+        R25 clusters don't have cert-manager since TLS wasn't supported.
+        The target operator chart validates cert-manager CRDs when
+        tls.enabled=true, so we install it here before helm install.
+        """
+        self.logger.info("Checking if cert-manager is installed")
+        out, _ = self.k8s_utils._exec_kubectl(
+            "kubectl get crd certificates.cert-manager.io 2>/dev/null || true"
+        )
+        if "certificates.cert-manager.io" in (out or ""):
+            self.logger.info("cert-manager CRDs already present")
+            return
+
+        self.logger.info("Installing cert-manager (TLS prerequisite)")
+        self.k8s_utils._exec_kubectl(
+            "helm repo add jetstack https://charts.jetstack.io 2>/dev/null || true"
+        )
+        self.k8s_utils._exec_kubectl("helm repo update")
+        self.k8s_utils._exec_kubectl(
+            "helm upgrade --install cert-manager jetstack/cert-manager "
+            "--namespace cert-manager --create-namespace "
+            "--version v1.13.0 --set installCRDs=true"
+        )
+        self.k8s_utils._exec_kubectl(
+            "kubectl wait --for=condition=Ready pods --all "
+            "-n cert-manager --timeout=120s"
+        )
+        self.logger.info("cert-manager installed and ready")
+
     def _install_operator_chart(self):
         """Step 6: Install the operator Helm chart with FDB disabled."""
         self.logger.info("Migration Step 6: Installing operator chart (FDB disabled)")
 
         tls_flags = ""
         if self.tls_enabled:
+            self._ensure_cert_manager()
             tls_flags = "--set tls.enabled=true --set tls.mutual_enabled=true"
 
         csi_flags = ""
