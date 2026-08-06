@@ -124,6 +124,9 @@ class _MassCreateDeleteMixin:
     #   max_lvols = MAX_ENTITY_COUNT // (1 + SNAPSHOTS_PER_LVOL)
     MAX_ENTITY_COUNT = 0
 
+    # ── API hard limit for namespaces per subsystem ──────────────────────
+    MAX_NS_PER_SUBSYSTEM = 50
+
     # ── Persistent retry mode ─────────────────────────────────────────────
     # Subclasses set PERSISTENT_RETRY = True to retry failed items until
     # all expected entities are created or a terminal error is hit.
@@ -564,6 +567,20 @@ class _MassCreateDeleteMixin:
                 # Shadow class attrs on the instance
                 self.NS_PER_SUBSYSTEM = effective_per_sub
                 self.NUM_SUBSYSTEMS = effective_num_sub
+
+        # Enforce API hard limit: max_namespace_per_subsys <= MAX_NS_PER_SUBSYSTEM
+        if self.NS_PER_SUBSYSTEM > self.MAX_NS_PER_SUBSYSTEM:
+            total_lvols = self.NUM_SUBSYSTEMS * self.NS_PER_SUBSYSTEM
+            new_num_sub = math.ceil(total_lvols / self.MAX_NS_PER_SUBSYSTEM)
+            new_per_sub = total_lvols // new_num_sub
+            self.logger.info(
+                f"[NS limit] NS_PER_SUBSYSTEM={self.NS_PER_SUBSYSTEM} exceeds "
+                f"hard limit of {self.MAX_NS_PER_SUBSYSTEM}. Redistributing "
+                f"{total_lvols} lvols: {self.NUM_SUBSYSTEMS}x{self.NS_PER_SUBSYSTEM} "
+                f"→ {new_num_sub}x{new_per_sub}"
+            )
+            self.NS_PER_SUBSYSTEM = new_per_sub
+            self.NUM_SUBSYSTEMS = new_num_sub
 
         total = self.NUM_SUBSYSTEMS * self.NS_PER_SUBSYSTEM
         max_dur = getattr(self, 'MAX_TEST_DURATION', 6 * 3600)
@@ -1112,6 +1129,20 @@ class _MassCreateDeleteMixin:
                     effective_num_sub = max_lvols
                 self.NS_PER_SUBSYSTEM = effective_per_sub
                 self.NUM_SUBSYSTEMS = effective_num_sub
+
+        # Enforce API hard limit: max_namespace_per_subsys <= MAX_NS_PER_SUBSYSTEM
+        if self.NS_PER_SUBSYSTEM > self.MAX_NS_PER_SUBSYSTEM:
+            total_lvols = self.NUM_SUBSYSTEMS * self.NS_PER_SUBSYSTEM
+            new_num_sub = math.ceil(total_lvols / self.MAX_NS_PER_SUBSYSTEM)
+            new_per_sub = total_lvols // new_num_sub
+            self.logger.info(
+                f"[NS limit] NS_PER_SUBSYSTEM={self.NS_PER_SUBSYSTEM} exceeds "
+                f"hard limit of {self.MAX_NS_PER_SUBSYSTEM}. Redistributing "
+                f"{total_lvols} lvols: {self.NUM_SUBSYSTEMS}x{self.NS_PER_SUBSYSTEM} "
+                f"→ {new_num_sub}x{new_per_sub}"
+            )
+            self.NS_PER_SUBSYSTEM = new_per_sub
+            self.NUM_SUBSYSTEMS = new_num_sub
 
         total = self.NUM_SUBSYSTEMS * self.NS_PER_SUBSYSTEM
         max_dur = getattr(self, 'MAX_TEST_DURATION', 24 * 3600)
