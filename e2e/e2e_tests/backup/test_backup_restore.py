@@ -2968,10 +2968,18 @@ class TestBackupCrossClusterRestore(BackupTestBase):
     CLUSTER2_ID            UUID of the destination cluster (optional)
     CLUSTER2_SECRET        API secret for the destination cluster (optional)
     CLUSTER2_API_BASE_URL  REST API URL for the destination cluster (optional)
-    STORAGE_PRIVATE_IPS    All storage node IPs (required for auto-bootstrap)
+    STORAGE_PRIVATE_IPS    Storage node IPs in Cluster-1
+    NEW_NODE_IPS           Spare node IPs for auto-bootstrap of Cluster-2
 
     If CLUSTER2_* env vars are NOT set, the test auto-bootstraps a second
-    cluster by splitting the STORAGE_PRIVATE_IPS in half (min 2 per cluster).
+    cluster.  It first looks for spare nodes (IPs in NEW_NODE_IPS or
+    STORAGE_PRIVATE_IPS that are not already in Cluster-1).  If no spare
+    nodes exist, it splits the total pool in half (min 2 per cluster).
+
+    CI dispatch example (Docker, e2e-bootstrap.yml):
+        STORAGE_PRIVATE_IPS: "IP1 IP2"    # cluster 1
+        NEW_NODE_IPS:        "IP3 IP4"    # spare → cluster 2
+        TEST_CLASS:          "TestBackupCrossClusterRestore"
 
     Covers
     ------
@@ -3031,33 +3039,34 @@ class TestBackupCrossClusterRestore(BackupTestBase):
             - ``STORAGE_PRIVATE_IPS`` env var listing *all* storage node IPs
             - At least ``_MIN_NODES_PER_CLUSTER * 2`` total IPs
         """
-        all_ips_raw = os.environ.get("STORAGE_PRIVATE_IPS", "")
-        all_ips = [ip.strip() for ip in all_ips_raw.split() if ip.strip()]
+        # Collect all known storage node IPs from env vars
+        storage_ips_raw = os.environ.get("STORAGE_PRIVATE_IPS", "")
+        new_node_ips_raw = os.environ.get("NEW_NODE_IPS", "")
+        all_ips = []
+        seen = set()
+        for ip in (storage_ips_raw + " " + new_node_ips_raw).split():
+            ip = ip.strip()
+            if ip and ip not in seen:
+                all_ips.append(ip)
+                seen.add(ip)
+
         if not all_ips:
             raise EnvironmentError(
-                "TC-BCK-070: STORAGE_PRIVATE_IPS env var required to "
-                "auto-bootstrap a second cluster")
-
-        total = len(all_ips)
-        min_total = self._MIN_NODES_PER_CLUSTER * 2
-        if total < min_total:
-            raise EnvironmentError(
-                f"TC-BCK-070: need at least {min_total} storage nodes for "
-                f"cross-cluster restore (have {total}). "
-                f"Set CLUSTER2_ID / CLUSTER2_SECRET / CLUSTER2_API_BASE_URL "
-                f"to use a pre-existing second cluster instead.")
+                "TC-BCK-070: STORAGE_PRIVATE_IPS (and/or NEW_NODE_IPS) env var "
+                "required to auto-bootstrap a second cluster")
 
         # Determine which IPs are already in Cluster-1
         c1_ips = set(self.storage_nodes or [])
         spare_ips = [ip for ip in all_ips if ip not in c1_ips]
 
+        total = len(all_ips)
         if len(spare_ips) >= self._MIN_NODES_PER_CLUSTER:
-            # Spare nodes available — use them directly
+            # Spare nodes available (e.g. from NEW_NODE_IPS) — use them directly
             c2_ips = spare_ips
             self.logger.info(
                 f"TC-BCK-070: using {len(c2_ips)} spare node(s) for Cluster-2: "
                 f"{c2_ips} (Cluster-1 has: {sorted(c1_ips)})")
-        else:
+        elif total >= self._MIN_NODES_PER_CLUSTER * 2:
             # All nodes are in Cluster-1 — split in half
             split = total // 2
             c1_keep = all_ips[:split]
@@ -3071,6 +3080,12 @@ class TestBackupCrossClusterRestore(BackupTestBase):
                 f"Cluster-1 keeps: {c1_keep}, Cluster-2 gets: {c2_ips}")
             # Remove c2 nodes from Cluster-1 if they are currently members
             self._remove_nodes_from_cluster1(c2_ips)
+        else:
+            raise EnvironmentError(
+                f"TC-BCK-070: need at least {self._MIN_NODES_PER_CLUSTER} spare "
+                f"nodes for Cluster-2 (have {len(spare_ips)} spare out of "
+                f"{total} total). Pass spare nodes via NEW_NODE_IPS or "
+                f"STORAGE_PRIVATE_IPS, or set CLUSTER2_* env vars directly.")
 
         mgmt_ip = self.mgmt_nodes[0]
         sbcli_cmd = self.base_cmd
