@@ -21,18 +21,19 @@ Two tiers via tox: `tox run -e unit` (fast, no infra) and `tox run -e integratio
 
 ```bash
 ruff check                          # Lint (or: tox -e lint)
-mypy simplyblock_web simplyblock_cli simplyblock_core  # Type check (or: tox -e types)
+mypy simplyblock_web simplyblock_cli simplyblock_core simplyblock_lib  # Type check (or: tox -e types)
 ```
 
 ## Architecture
 
-Three packages, one entry point:
+Four packages, one entry point:
 
 | Package | Role |
 |---------|------|
 | `simplyblock_cli/` | `sbctl` command-line interface (auto-generated entry point) |
 | `simplyblock_core/` | Business logic, data models, background services, FDB access |
 | `simplyblock_web/` | REST API — FastAPI (v2) + Flask (v1) hybrid on a single uvicorn process |
+| `simplyblock_lib/` | Shared, sbcli-agnostic infrastructure (task lease/runner, monitor skeletons, API scaffolding, units/secrets helpers). Must not import from the other three packages — dependencies flow the other way; persistence and models are injected. |
 
 Data flows: **CLI → Web API → Core controllers → FoundationDB**. Storage nodes are reached via JSON-RPC (`rpc_client.py`).
 

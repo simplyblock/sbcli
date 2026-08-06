@@ -1,5 +1,4 @@
 # coding=utf-8
-import threading
 import time
 from datetime import datetime
 
@@ -9,6 +8,7 @@ from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core import constants, db_controller, storage_node_ops
+from simplyblock_lib.monitors import PerItemSupervisor
 
 
 utils.init_sentry_sdk()
@@ -444,28 +444,22 @@ def loop_for_node(snode):
 
 
 db = db_controller.DBController()
-threads_maps: dict[str, threading.Thread] = {}
+
+
+def _discover_nodes():
+    for cluster in db.get_clusters():
+        for node in db.get_storage_nodes_by_cluster_id(cluster.get_id()):
+            yield node.get_id(), node
 
 
 def _main():
-    logger.info("Starting health check service")
-    while True:
-        try:
-            db.get_clusters()
-        except Exception as e:
-            logger.error(f"Failed to get clusters: {e}")
-            time.sleep(3)
-            continue
-        clusters = db.get_clusters()
-        for cluster in clusters:
-            for node in db.get_storage_nodes_by_cluster_id(cluster.get_id()):
-                node_id = node.get_id()
-                if node_id not in threads_maps or threads_maps[node_id].is_alive() is False:
-                    t = threading.Thread(target=loop_for_node, args=(node,))
-                    t.start()
-                    threads_maps[node_id] = t
-
-        time.sleep(constants.HEALTH_CHECK_INTERVAL_SEC)
+    PerItemSupervisor(
+        _discover_nodes,
+        loop_for_node,
+        interval_sec=constants.HEALTH_CHECK_INTERVAL_SEC,
+        name="health check service",
+        logger=logger,
+    ).run_forever()
 
 
 if __name__ == "__main__":
