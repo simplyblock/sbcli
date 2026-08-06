@@ -9,6 +9,8 @@ from simplyblock_core.models.base_model import BaseModel
 
 class Pool(BaseModel):
 
+    _WATCHED = True
+
     STATUS_ACTIVE = "active"
     STATUS_INACTIVE = "inactive"
 
@@ -41,6 +43,9 @@ class Pool(BaseModel):
     dhchap: bool = False
     dhchap_key: SecretStr = SecretStr("")
     dhchap_ctrlr_key: SecretStr = SecretStr("")
+
+    def watch_scope(self):
+        return (self.cluster_id,)
     allowed_hosts: List[str] = []
 
 
