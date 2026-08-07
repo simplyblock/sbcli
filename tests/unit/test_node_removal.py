@@ -543,7 +543,11 @@ class TestRelocateOneReplicaSpliceExecution(unittest.TestCase):
         self.assertEqual(rec.call_count, 2)  # occupant's rebuild + stranded's own rebuild
         self.assertEqual(removed.lvstore_stack_secondary, "")
 
-    def test_relocate_via_splice_occupant_rebuild_failure_keeps_forward_pointers(self):
+    def test_relocate_via_splice_occupant_rebuild_failure_leaves_old_copy_untouched(self):
+        # Create-before-destroy: a failed rebuild on the stranded node must
+        # NOT tear down or repoint the occupant's still-intact old copy on x
+        # -- that copy is occupant's ONLY surviving replica under FTT1, so a
+        # failed build must change nothing about it (2026-08-07 incident).
         cl = _cluster()
         removed = _node("n1", stack_secondary="stranded")
         stranded = _node("stranded", secondary_id="n1", lvstore="LVS_stranded")
@@ -555,19 +559,69 @@ class TestRelocateOneReplicaSpliceExecution(unittest.TestCase):
                           return_value="x"), \
              patch.object(storage_node_ops, "recreate_lvstore_on_non_leader",
                           return_value=False), \
-             patch.object(storage_node_ops, "_delete_replica_on_peer"):
+             patch.object(storage_node_ops, "_delete_replica_on_peer") as drp:
             ret = storage_node_ops._relocate_one_replica(removed, "stranded", "secondary")
 
         self.assertFalse(ret)
-        # Forward pointer for occupant's move is committed even though the
-        # physical rebuild failed -- matches _relocate_one_replica's own
-        # idempotent-retry pattern: a retry resumes from the committed intent
-        # rather than re-picking (see test_relocate_resume_reuses_committed_target).
-        self.assertEqual(occupant.secondary_node_id, "stranded")
-        # The outer splice claim (stranded -> x) never got committed, since
-        # _relocate_replica_between reported failure first.
+        drp.assert_not_called()  # old copy on x never torn down
+        self.assertEqual(occupant.secondary_node_id, "x")  # unchanged -- still protected
+        self.assertEqual(x.lvstore_stack_secondary, "occupant")  # unchanged
+        # The outer splice claim (stranded -> x) never got committed either.
         self.assertEqual(stranded.secondary_node_id, "n1")
         self.assertEqual(removed.lvstore_stack_secondary, "stranded")
+
+    def test_relocate_via_splice_occupant_rebuild_raises_treated_as_failure(self):
+        # The 2026-08-07 incident's actual failure mode: recreate_lvstore_on_non_leader
+        # RAISED (a hublvol attach error) instead of returning False. Must be
+        # caught and handled identically to a returned False -- old copy on x
+        # stays untouched either way.
+        cl = _cluster()
+        removed = _node("n1", stack_secondary="stranded")
+        stranded = _node("stranded", secondary_id="n1", lvstore="LVS_stranded")
+        occupant = _node("occupant", secondary_id="x", lvstore="LVS_occupant")
+        x = _node("x", stack_secondary="occupant")
+        db = FakeDB(cl, [removed, stranded, occupant, x])
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "_pick_replica_relocation_node",
+                          return_value="x"), \
+             patch.object(storage_node_ops, "recreate_lvstore_on_non_leader",
+                          side_effect=Exception("connect_to_hublvol failed for LVS_18")), \
+             patch.object(storage_node_ops, "_delete_replica_on_peer") as drp:
+            ret = storage_node_ops._relocate_one_replica(removed, "stranded", "secondary")
+
+        self.assertFalse(ret)
+        drp.assert_not_called()
+        self.assertEqual(occupant.secondary_node_id, "x")
+        self.assertEqual(x.lvstore_stack_secondary, "occupant")
+        self.assertEqual(stranded.secondary_node_id, "n1")
+
+    def test_relocate_via_splice_resumes_teardown_after_crash_between_writes(self):
+        # occupant's move was already built + committed by a PRIOR attempt
+        # (forward pointer already points at stranded), but the process
+        # crashed before the old copy on x was torn down -- x's backref is
+        # still stale. A retry must skip re-building (already done) and go
+        # straight to finishing the teardown, without erroring.
+        cl = _cluster()
+        removed = _node("n1", stack_secondary="stranded")
+        stranded = _node("stranded", secondary_id="n1", lvstore="LVS_stranded")
+        occupant = _node("occupant", secondary_id="stranded", lvstore="LVS_occupant")
+        x = _node("x", stack_secondary="occupant")  # stale -- not yet cleared
+        db = FakeDB(cl, [removed, stranded, occupant, x])
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "_pick_replica_relocation_node",
+                          return_value="x"), \
+             patch.object(storage_node_ops, "recreate_lvstore_on_non_leader",
+                          return_value=True) as rec, \
+             patch.object(storage_node_ops, "_delete_replica_on_peer") as drp:
+            ret = storage_node_ops._relocate_one_replica(removed, "stranded", "secondary")
+
+        self.assertTrue(ret)
+        drp.assert_called_once()  # the deferred teardown finally runs
+        self.assertEqual(stranded.secondary_node_id, "x")
+        self.assertEqual(x.lvstore_stack_secondary, "stranded")
+        # rebuild still runs once for stranded's own claim on x -- the
+        # occupant's rebuild was already done, so it must NOT run again.
+        self.assertEqual(rec.call_count, 1)
 
     def test_relocate_via_splice_own_rebuild_failure_after_occupant_moved(self):
         # occupant's move succeeds (evicted + rebuilt on stranded), but
