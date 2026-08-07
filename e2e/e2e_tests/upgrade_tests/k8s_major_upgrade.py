@@ -1588,7 +1588,7 @@ class K8sNativeMajorUpgrade(TestClusterBase):
         for attempt in range(60):
             out, _ = self.k8s_utils._exec_kubectl(
                 f"kubectl get pods -n {_NAMESPACE} "
-                f"-l app.kubernetes.io/component=admin-control "
+                f"-l app=simplyblock-admin-control "
                 f"--no-headers 2>/dev/null || true"
             )
             lines = [l for l in (out or "").strip().split("\n") if l.strip()]
