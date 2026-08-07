@@ -3933,30 +3933,61 @@ def _relocate_replica_between(occupant_primary_id, old_host_id, new_host_id, rol
     ``_find_splice_target_for_relocation``'s docstring for why an
     already-formed pairing, not an idle node, is what's available).
 
-    Idempotent: skips the pointer flip (and the teardown it implies) if a
-    prior attempt already committed it; ``recreate_lvstore_on_non_leader``
-    is retried unconditionally either way, matching ``_relocate_one_replica``'s
-    own idempotency pattern. Returns True if ``occupant_primary_id`` no
-    longer exists — nothing left to relocate.
+    Create-before-destroy: the new replica is built on ``new_host_id``
+    BEFORE the old one on ``old_host_id`` is torn down, so
+    ``occupant_primary`` never has zero surviving copies -- critical on
+    FTT1 (no tertiary): a cluster only tolerates one node down at a time,
+    and that budget belongs to the node actually being removed, not to
+    whatever healthy node this splice happens to touch. (2026-08-07
+    incident: the old destroy-then-build order tore down the occupant's
+    only copy up front; a hublvol attach failure on the rebuild then
+    retried for minutes with that copy already gone.) A raised exception
+    from the rebuild is treated the same as a returned False -- both leave
+    the old copy untouched and safe to retry.
+
+    Idempotent and retry-safe: "already built" is read from the occupant's
+    forward pointer, so a retry after a confirmed build skips straight to
+    the teardown check without re-running the rebuild. The teardown itself
+    is guarded separately by ``old_host``'s own back-reference (not the
+    occupant's forward pointer), so a crash between the two commits still
+    resumes the teardown on the next pass instead of leaking a stale
+    replica on ``old_host`` forever.
+
+    Returns True if ``occupant_primary_id`` no longer exists — nothing left
+    to relocate.
     """
     field = "secondary_node_id" if role == "secondary" else "tertiary_node_id"
+    backref = "lvstore_stack_secondary" if role == "secondary" else "lvstore_stack_tertiary"
     try:
         occupant_primary = db_controller.get_storage_node_by_id(occupant_primary_id)
     except KeyError:
         return True
 
     if getattr(occupant_primary, field) != new_host_id:
-        old_host = db_controller.get_storage_node_by_id(old_host_id)
-        cluster = db_controller.get_cluster_by_id(occupant_primary.cluster_id)
-        if old_host.status == StorageNode.STATUS_ONLINE:
-            _delete_replica_on_peer(old_host, occupant_primary, cluster)
+        new_host = db_controller.get_storage_node_by_id(new_host_id)
+        try:
+            built = recreate_lvstore_on_non_leader(new_host, occupant_primary, occupant_primary)
+        except Exception as e:
+            logger.error(
+                f"[REMOVAL] splice: failed to build {role} replica of "
+                f"{occupant_primary_id} on {new_host_id}, old copy on "
+                f"{old_host_id} left untouched: {e}")
+            return False
+        if not built:
+            return False
         occupant_primary = db_controller.get_storage_node_by_id(occupant_primary_id)
         setattr(occupant_primary, field, new_host_id)
         occupant_primary.write_to_db()
 
-    new_host = db_controller.get_storage_node_by_id(new_host_id)
-    occupant_primary = db_controller.get_storage_node_by_id(occupant_primary_id)
-    return bool(recreate_lvstore_on_non_leader(new_host, occupant_primary, occupant_primary))
+    old_host = db_controller.get_storage_node_by_id(old_host_id)
+    if getattr(old_host, backref) == occupant_primary_id:
+        cluster = db_controller.get_cluster_by_id(occupant_primary.cluster_id)
+        if old_host.status == StorageNode.STATUS_ONLINE:
+            _delete_replica_on_peer(old_host, occupant_primary, cluster)
+        old_host = db_controller.get_storage_node_by_id(old_host_id)
+        setattr(old_host, backref, "")
+        old_host.write_to_db()
+    return True
 
 
 def _clear_replica_backref(removed_node: StorageNode, backref):
