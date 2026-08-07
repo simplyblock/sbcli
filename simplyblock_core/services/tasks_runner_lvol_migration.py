@@ -504,7 +504,7 @@ def _delete_bdev_blocking(bdev_name, primary_rpc, secondary_rpc=None, tertiary_r
     for rpc in filter(None, [primary_rpc, secondary_rpc, tertiary_rpc]):
         try:
             Retrying(
-                stop=stop_after_attempt(4),
+                stop=stop_after_attempt(3),
                 wait=wait_fixed(1),
                 before_sleep=before_sleep_log(logger, logging.WARNING),
             )(rpc.delete_lvol, bdev_name, sync=True, special_delete=False)
