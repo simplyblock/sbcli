@@ -13,7 +13,8 @@ from simplyblock_core.exceptions import MigrationConflictError, PreconditionErro
 from simplyblock_core import storage_node_ops as storage_ops
 from simplyblock_core import mgmt_node_ops as mgmt_ops
 from simplyblock_core.controllers import pool_controller, lvol_controller, snapshot_controller, device_controller, \
-    tasks_controller, qos_controller, migration_controller, backup_controller, fdb_backup_controller
+    tasks_controller, qos_controller, migration_controller, backup_controller, fdb_backup_controller, \
+    manual_delete_controller
 from simplyblock_core.controllers import health_controller
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.cluster import Cluster, HashicorpVaultSettings
@@ -1003,6 +1004,21 @@ class CLIWrapperBase:
 
     def snapshot__set(self, sub_command, args):
         return snapshot_controller.set_value(args.snapshot_id, args.attr_name, args.attr_value)
+
+    def debug__manual_delete(self, sub_command, args):
+        aliases = {"lvol": "lvol", "snapshot": "snapshot", "snap": "snapshot"}
+        entities = []
+        for token in args.entities:
+            kind, _, obj_id = token.partition(':')
+            kind = aliases.get(kind)
+            if not kind or not obj_id:
+                raise ValueError(
+                    f"Invalid entity '{token}', expected 'lvol:<id>' / 'snapshot:<id>' / 'snap:<id>'")
+            entities.append((kind, obj_id))
+
+        results = manual_delete_controller.delete_structure(
+            entities, coalescing=args.coalescing, timeout_s=args.timeout_s)
+        return _format_json(results) if args.json else utils.print_table(results)
 
     def qos__add(self, sub_command, args):
         return qos_controller.add_class(args.name, args.weight, args.cluster_id)

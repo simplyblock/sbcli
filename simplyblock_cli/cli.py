@@ -32,6 +32,8 @@ class CLIWrapper(CLIWrapperBase):
         self.init_backup()
         self.init_qos()
         self.init_db_backup()
+        if self.developer_mode:
+            self.init_debug()
         super().__init__()
 
     def init_storage_node(self):
@@ -1146,6 +1148,31 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--s3-credentials', help='AWS S3 API key and secret, should be supplied like this: [API_KEY]:[API_SECRET]', type=str, dest='backup_credentials')
 
 
+    def init_debug(self):
+        subparser = self.add_command('debug', 'TEMPORARY developer-only debug tools (branch: delete-test). Private, --dev only.')
+        self.init_debug__manual_delete(subparser)
+
+    def init_debug__manual_delete(self, subparser):
+        subcommand = self.add_sub_command(
+            subparser, 'manual-delete',
+            'Fires the same two-phase blocking bdev delete production uses (async-start -> '
+            'poll -> sync-finalize on every replica) plus a clean DB record removal, for an '
+            'ordered list of lvols/snapshots, bypassing all controller locking/precondition '
+            'logic. TEMPORARY: for the delete-order fuzz test on this branch only.')
+        subcommand.add_argument(
+            'entities', nargs='+',
+            help="Ordered list of 'lvol:<id>' / 'snapshot:<id>' (or 'snap:<id>') tokens, "
+                 "e.g. lvol:1111 snapshot:2222 snap:3333. Deletes fire in the order given, "
+                 "back-to-back with no delay between entities.")
+        subcommand.add_argument('--coalescing', help='Pass coalescing=True (special_delete=False on the async phase) '
+                                '— use when the bdev\'s child must inherit its clusters.',
+                                dest='coalescing', action='store_true')
+        subcommand.add_argument('--timeout', help='Seconds to poll the delete-status before giving up (default: 120).',
+                                type=int, default=120, dest='timeout_s')
+        subcommand.add_argument('--json', help='Print machine-readable per-entity results instead of a table.',
+                                dest='json', action='store_true')
+
+
     def run(self):
         args = self.parser.parse_args()
         if args.debug:
@@ -1602,6 +1629,17 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.db_backup__config(sub_command, args)
                 else:
                     self.parser.print_help()
+
+            elif args.command in ['debug']:
+                if not self.developer_mode:
+                    print("This command is private.")
+                    ret = False
+                else:
+                    sub_command = args_dict['debug']
+                    if sub_command in ['manual-delete']:
+                        ret = self.debug__manual_delete(sub_command, args)
+                    else:
+                        self.parser.print_help()
 
             else:
                 self.parser.print_help()
