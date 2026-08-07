@@ -287,14 +287,36 @@ jobs:
           NAMESPACE=simplyblock
           CLUSTER_ENV="${{ github.event.inputs.cluster_environment || 'local' }}"
 
-          # Run the operator's own cleanup script first (thorough helm + CR cleanup)
+          echo "=== Phase 1: Uninstall all Helm releases (R25 + R26) ==="
+          # Uninstall known R25 charts explicitly (they won't be in cleanup scripts)
+          helm uninstall spdk-csi -n $NAMESPACE --no-hooks --timeout 60s 2>/dev/null || true
+          helm uninstall sbcli -n $NAMESPACE --no-hooks --timeout 60s 2>/dev/null || true
+          # Uninstall any remaining releases (R26 operator, etc.)
+          for rel in $(helm list -n $NAMESPACE -q 2>/dev/null); do
+            echo "Uninstalling Helm release: $rel"
+            helm uninstall "$rel" -n $NAMESPACE --no-hooks --timeout 60s 2>/dev/null || true
+          done
+          helm uninstall cert-manager -n cert-manager --no-hooks --timeout 60s 2>/dev/null || true
+
+          echo "=== Phase 2: Delete simplyblock resources in kube-system ==="
+          # The spdk-csi chart installs simplyblock-snapshot-controller in kube-system
+          # with helm.sh/resource-policy: keep, so it survives helm uninstall and
+          # blocks future installs (both R25 spdk-csi and R26 operator).
+          for RTYPE in deployment service sa configmap; do
+            for NAME in $(kubectl -n kube-system get $RTYPE --no-headers -o custom-columns=:metadata.name 2>/dev/null | grep -i simplyblock 2>/dev/null); do
+              echo "Deleting kube-system $RTYPE/$NAME"
+              kubectl -n kube-system delete $RTYPE "$NAME" --ignore-not-found 2>/dev/null || true
+            done
+          done
+
+          echo "=== Phase 3: Run shared cleanup scripts ==="
+          # Run the operator's own cleanup script (thorough helm + CR cleanup)
           if [ -x "$GITHUB_WORKSPACE/simplyblock-operator/helm-charts/scripts/cleanup-simplyblock.sh" ]; then
             bash $GITHUB_WORKSPACE/simplyblock-operator/helm-charts/scripts/cleanup-simplyblock.sh -f $NAMESPACE || true
           fi
-
           # Run the shared cleanup script (handles etcd overload with
           # --request-timeout, bulk deletes, parallel finalizer patching,
-          # kube-system snapshot-controller cleanup, etc.)
+          # kube-system resources, StorageClasses, webhooks, etc.)
           bash $GITHUB_WORKSPACE/e2e/scripts/cleanup_k8s.sh $NAMESPACE
 
           echo "=== Delete Released PVs from simplyblock ==="
