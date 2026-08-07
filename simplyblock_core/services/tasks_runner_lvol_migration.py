@@ -99,7 +99,7 @@ from simplyblock_core.models.lvol_migration import LVolMigration
 from simplyblock_core.models.lvol_migration_group import LVolMigrationGroup
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.snapshot import SnapShot
-from simplyblock_core.rpc_client import RPCException, RPCClient
+from simplyblock_core.rpc_client import RPCErrorCode, RPCException, RPCClient
 from simplyblock_core.services.hub_controller_manager import HubControllerManager
 from simplyblock_core.storage_node_ops import execute_on_leader_with_failover
 
@@ -2290,7 +2290,7 @@ def _rename_migrated_bdevs(migration, tgt_node, tgt_rpc, tgt_sec_rpc=None, tgt_t
             ret = tgt_rpc.bdev_lvol_rename(old_composite, new_short)
             prim_exists = False
         except RPCException as exc:
-            if exc.code == -32602:
+            if exc.code == RPCErrorCode.invalid_params:
                 logger.warning(
                     f"_do_rename prim: {old_composite!r} -> {new_short!r}: "
                     f"'File exists' (-32602) — will try fallback name"
