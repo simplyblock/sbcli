@@ -287,55 +287,43 @@ jobs:
           NAMESPACE=simplyblock
           CLUSTER_ENV="${{ github.event.inputs.cluster_environment || 'local' }}"
 
-          echo "=== Phase 1: Uninstall all Helm releases ==="
-          for rel in $(helm list -n $NAMESPACE -q 2>/dev/null); do
-            echo "Uninstalling Helm release: $rel"
-            helm uninstall "$rel" -n $NAMESPACE --no-hooks --timeout 60s 2>/dev/null || true
-          done
-          helm uninstall cert-manager -n cert-manager --no-hooks --timeout 60s 2>/dev/null || true
-
-          echo "=== Phase 2: Strip finalizers from all simplyblock CRs and CRDs ==="
-          for crd in $(kubectl get crd -o name 2>/dev/null | grep simplyblock); do
-            crd_name="${crd#customresourcedefinition.apiextensions.k8s.io/}"
-            kubectl get "$crd_name" -A --no-headers -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name 2>/dev/null | while read -r ns name; do
-              [ -n "$name" ] && kubectl patch "$crd_name" "$name" -n "$ns" --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null &
-            done
-            kubectl patch crd "$crd_name" --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null &
-          done
-          wait
-
-          echo "=== Phase 3: Force delete CRDs ==="
-          kubectl delete -f $GITHUB_WORKSPACE/simplyblock-operator/helm-charts/charts/simplyblock-operator/crds/ --ignore-not-found --timeout=30s 2>/dev/null || true
-          for crd in $(kubectl get crd -o name 2>/dev/null | grep simplyblock); do
-            crd_name="${crd#customresourcedefinition.apiextensions.k8s.io/}"
-            kubectl delete crd "$crd_name" --ignore-not-found --force --grace-period=0 2>/dev/null || true
-          done
-
-          echo "=== Phase 4: Strip finalizers + force delete ALL resources in namespace ==="
-          if kubectl get namespace $NAMESPACE &>/dev/null; then
-            for kind in pods deployments statefulsets daemonsets replicasets services configmaps secrets serviceaccounts pvc jobs; do
-              kubectl get "$kind" -n $NAMESPACE --no-headers -o custom-columns=NAME:.metadata.name 2>/dev/null | while read -r name; do
-                [ -n "$name" ] && {
-                  kubectl patch "$kind" "$name" -n $NAMESPACE --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null
-                  kubectl delete "$kind" "$name" -n $NAMESPACE --force --grace-period=0 --wait=false 2>/dev/null
-                } &
-              done
-            done
-            wait
+          # Run the operator's own cleanup script first (thorough helm + CR cleanup)
+          if [ -x "$GITHUB_WORKSPACE/simplyblock-operator/helm-charts/scripts/cleanup-simplyblock.sh" ]; then
+            bash $GITHUB_WORKSPACE/simplyblock-operator/helm-charts/scripts/cleanup-simplyblock.sh -f $NAMESPACE || true
           fi
 
-          echo "=== Phase 5: Strip finalizers + force delete all PVs ==="
-          for pv in $(kubectl get pv --no-headers 2>/dev/null | awk '{print $1}'); do
-            kubectl patch pv "$pv" --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
-            kubectl patch pv "$pv" --type=merge -p '{"spec":{"claimRef":null}}' 2>/dev/null || true
-            kubectl delete pv "$pv" --ignore-not-found --force --grace-period=0 2>/dev/null &
-          done
-          wait
+          # Run the shared cleanup script (handles etcd overload with
+          # --request-timeout, bulk deletes, parallel finalizer patching,
+          # kube-system snapshot-controller cleanup, etc.)
+          bash $GITHUB_WORKSPACE/e2e/scripts/cleanup_k8s.sh $NAMESPACE
 
-          echo "=== Phase 6: Force delete + finalize namespaces ==="
+          echo "=== Delete Released PVs from simplyblock ==="
+          for pv in $(kubectl get pv --no-headers 2>/dev/null | grep 'simplyblock/' | awk '{print $1}'); do
+            echo "Deleting PV $pv"
+            kubectl delete pv "$pv" --ignore-not-found 2>/dev/null || true
+          done
+
+          echo "=== Delete CRDs ==="
+          # Clear finalizers on all remaining CR instances so CRD deletion doesn't hang
+          for crd in $(kubectl get crd -o name 2>/dev/null | grep simplyblock); do
+            crd_name="${crd#customresourcedefinition.apiextensions.k8s.io/}"
+            for cr in $(kubectl get "$crd_name" -A --no-headers -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name 2>/dev/null); do
+              IFS=' ' read -r ns name <<< "$cr"
+              kubectl patch "$crd_name" "$name" -n "$ns" --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
+            done
+            kubectl patch crd "$crd_name" --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
+          done
+          kubectl delete -f $GITHUB_WORKSPACE/simplyblock-operator/helm-charts/charts/simplyblock-operator/crds/ --ignore-not-found --timeout=60s 2>/dev/null || true
+          # Force-delete any CRDs that survived the timeout
+          for crd in $(kubectl get crd -o name 2>/dev/null | grep simplyblock); do
+            crd_name="${crd#customresourcedefinition.apiextensions.k8s.io/}"
+            kubectl patch crd "$crd_name" --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
+            kubectl delete crd "$crd_name" --ignore-not-found --timeout=30s 2>/dev/null || true
+          done
+
+          echo "=== Force delete + finalize namespaces ==="
           kubectl delete namespace $NAMESPACE --force --grace-period=0 --wait=false 2>/dev/null || true
           kubectl delete namespace cert-manager --force --grace-period=0 --wait=false 2>/dev/null || true
-          # Immediately strip namespace finalizers via API
           for ns in $NAMESPACE cert-manager; do
             kubectl get namespace $ns -o json 2>/dev/null \
               | jq '.spec.finalizers = []' \
@@ -348,26 +336,7 @@ jobs:
             issuers.cert-manager.io orders.acme.cert-manager.io \
             --ignore-not-found --force --grace-period=0 2>/dev/null || true
 
-          # Delete stale StorageClasses and VolumeSnapshotClasses from simplyblock CSI
-          kubectl get storageclass -o name 2>/dev/null \
-            | grep -v 'local-path\|local-hostpath\|gp2\|gp3\|standard' \
-            | while read -r sc; do
-              PROV=$(kubectl get "$sc" -o jsonpath='{.provisioner}' 2>/dev/null || true)
-              if [[ "$PROV" == *"simplyblock"* ]]; then
-                echo "Deleting stale $sc (provisioner=$PROV)"
-                kubectl delete "$sc" --ignore-not-found 2>/dev/null || true
-              fi
-            done
-          kubectl get volumesnapshotclass -o name 2>/dev/null \
-            | while read -r vsc; do
-              DRV=$(kubectl get "$vsc" -o jsonpath='{.driver}' 2>/dev/null || true)
-              if [[ "$DRV" == *"simplyblock"* ]]; then
-                echo "Deleting stale $vsc (driver=$DRV)"
-                kubectl delete "$vsc" --ignore-not-found 2>/dev/null || true
-              fi
-            done
-
-          echo "=== Phase 7: Disconnect stale NVMe-oF, reset hugepages + restart kubelet (parallel, 90s timeout) ==="
+          echo "=== Disconnect stale NVMe-oF, reset hugepages + restart kubelet ==="
           IFS=',' read -ra NODES <<< "${{ github.event.inputs.worker_nodes }}"
           for NODE in "${NODES[@]}"; do
             (
@@ -383,7 +352,7 @@ jobs:
           done
           wait
 
-          echo "=== Phase 8: Verify namespace gone ==="
+          echo "=== Verify namespace gone ==="
           for i in $(seq 1 4); do
             if ! kubectl get namespace $NAMESPACE &>/dev/null; then
               echo "Namespace $NAMESPACE deleted"
