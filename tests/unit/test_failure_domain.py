@@ -24,6 +24,7 @@ Tests cover:
 All external dependencies (FDB, RPC) are mocked.
 """
 
+import random
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -153,6 +154,98 @@ class TestGetSecondaryNodes(unittest.TestCase):
 
 
 # ===========================================================================
+# 2b. splice_stranded_secondary
+#
+# get_secondary_nodes()'s greedy walk can close a pairing cycle over a strict
+# subset of online nodes and strand the rest with zero candidates, even though
+# a perfect pairing exists (observed 2026-08-03: 12 nodes / 3 domains formed
+# an 11-node cycle, aborting activation for the 12th). splice_stranded_secondary
+# repairs this by inserting the stranded node into an already-formed edge.
+# ===========================================================================
+
+class TestSpliceStrandedSecondary(unittest.TestCase):
+
+    def _mock_db(self, cluster, nodes):
+        mock_db = MagicMock()
+        by_id = {n.get_id(): n for n in nodes}
+        mock_db.get_cluster_by_id.return_value = cluster
+        mock_db.get_storage_nodes_by_cluster_id.return_value = nodes
+        mock_db.get_storage_node_by_id.side_effect = lambda nid: by_id.get(nid)
+        return mock_db
+
+    @staticmethod
+    def _stub_writes(*nodes):
+        for n in nodes:
+            n.write_to_db = MagicMock()
+
+    @patch("simplyblock_core.storage_node_ops.DBController")
+    def test_splices_into_existing_edge(self, MockDBCtrl):
+        import simplyblock_core.storage_node_ops as ops
+        # p -> x is an existing pairing from earlier in the activation pass.
+        p = _node("p", "10.0.0.1", failure_domain=0)
+        x = _node("x", "10.0.0.2", failure_domain=1)
+        p.secondary_node_id = x.get_id()
+        s = _node("s", "10.0.0.3", failure_domain=2)
+        MockDBCtrl.return_value = self._mock_db(_cluster(True), [p, x, s])
+        self._stub_writes(p, x, s)
+
+        assert ops.splice_stranded_secondary(s) is True
+        # p -> s -> x: p now points at s, s sits between p and x.
+        assert p.secondary_node_id == "s"
+        assert s.lvstore_stack_secondary == "p"
+        assert s.secondary_node_id == "x"
+        assert x.lvstore_stack_secondary == "s"
+
+    @patch("simplyblock_core.storage_node_ops.DBController")
+    def test_prefers_edge_domain_disjoint_on_both_ends(self, MockDBCtrl):
+        import simplyblock_core.storage_node_ops as ops
+        s = _node("s", "10.0.0.9", failure_domain=0)
+
+        # Same-domain edge (worse fit: 0/2 mismatch against s's domain).
+        bad_p = _node("bad_p", "10.0.0.1", failure_domain=0)
+        bad_x = _node("bad_x", "10.0.0.2", failure_domain=0)
+        bad_p.secondary_node_id = bad_x.get_id()
+
+        # Domain-disjoint-on-both-ends edge (best fit: 2/2 mismatch).
+        good_p = _node("good_p", "10.0.0.3", failure_domain=1)
+        good_x = _node("good_x", "10.0.0.4", failure_domain=2)
+        good_p.secondary_node_id = good_x.get_id()
+
+        nodes = [s, bad_p, bad_x, good_p, good_x]
+        MockDBCtrl.return_value = self._mock_db(_cluster(True), nodes)
+        self._stub_writes(*nodes)
+
+        assert ops.splice_stranded_secondary(s) is True
+        assert good_p.secondary_node_id == "s"
+        assert s.secondary_node_id == "good_x"
+        assert bad_p.secondary_node_id == "bad_x"  # untouched
+
+    @patch("simplyblock_core.storage_node_ops.DBController")
+    def test_returns_false_when_no_edge_exists_yet(self, MockDBCtrl):
+        import simplyblock_core.storage_node_ops as ops
+        s = _node("s", "10.0.0.9", failure_domain=0)
+        other = _node("other", "10.0.0.1", failure_domain=1)  # no pairing yet
+        MockDBCtrl.return_value = self._mock_db(_cluster(True), [s, other])
+        self._stub_writes(s, other)
+
+        assert ops.splice_stranded_secondary(s) is False
+
+    @patch("simplyblock_core.storage_node_ops.DBController")
+    def test_skips_edge_not_host_disjoint_from_stranded(self, MockDBCtrl):
+        import simplyblock_core.storage_node_ops as ops
+        # x shares mgmt_ip with the stranded node -- splicing there would
+        # violate host-disjointness, so this edge must be skipped entirely.
+        s = _node("s", "10.0.0.5", failure_domain=0)
+        p = _node("p", "10.0.0.1", failure_domain=1)
+        x = _node("x", "10.0.0.5", failure_domain=2)
+        p.secondary_node_id = x.get_id()
+        MockDBCtrl.return_value = self._mock_db(_cluster(True), [s, p, x])
+        self._stub_writes(s, p, x)
+
+        assert ops.splice_stranded_secondary(s) is False
+
+
+# ===========================================================================
 # 3. get_secondary_nodes_2 (tertiary)
 # ===========================================================================
 
@@ -197,6 +290,141 @@ class TestGetSecondaryNodes2(unittest.TestCase):
                 primary, exclude_mgmt_ips=["10.0.0.2"], exclude_failure_domains=[1])
         assert result
         assert any("falling back" in m for m in cm.output)
+
+
+# ===========================================================================
+# 3b. splice_stranded_tertiary
+#
+# get_secondary_nodes_2() has the identical greedy-walk dead-end risk as
+# get_secondary_nodes() (see TestSpliceStrandedSecondary above), reachable on
+# any cluster with max_fault_tolerance >= 2 (e.g. a 2+2 layout). The extra
+# wrinkle: a tertiary must be host-disjoint from both a primary and that
+# primary's OWN secondary, so a valid splice must be re-checked against each
+# side's current secondary_node_id, not just against each other.
+# ===========================================================================
+
+class TestSpliceStrandedTertiary(unittest.TestCase):
+
+    def _mock_db(self, cluster, nodes):
+        mock_db = MagicMock()
+        by_id = {n.get_id(): n for n in nodes}
+        mock_db.get_cluster_by_id.return_value = cluster
+        mock_db.get_storage_nodes_by_cluster_id.return_value = nodes
+        mock_db.get_storage_node_by_id.side_effect = lambda nid: by_id.get(nid)
+        return mock_db
+
+    @staticmethod
+    def _stub_writes(*nodes):
+        for n in nodes:
+            n.write_to_db = MagicMock()
+
+    @patch("simplyblock_core.storage_node_ops.DBController")
+    def test_splices_into_existing_tertiary_edge(self, MockDBCtrl):
+        import simplyblock_core.storage_node_ops as ops
+        # p -> x is an existing tertiary edge. s is stranded, with its own
+        # secondary (s_sec) on a distinct host from everyone else involved.
+        p_sec = _node("p_sec", "10.0.0.10", failure_domain=1)
+        p = _node("p", "10.0.0.1", failure_domain=0)
+        p.secondary_node_id = "p_sec"
+        x = _node("x", "10.0.0.2", failure_domain=1)
+        p.tertiary_node_id = "x"
+
+        s_sec = _node("s_sec", "10.0.0.20", failure_domain=1)
+        s = _node("s", "10.0.0.3", failure_domain=2)
+        s.secondary_node_id = "s_sec"
+
+        nodes = [p, p_sec, x, s, s_sec]
+        MockDBCtrl.return_value = self._mock_db(_cluster(True), nodes)
+        self._stub_writes(*nodes)
+
+        assert ops.splice_stranded_tertiary(s) is True
+        # p -> s -> x: p now points at s, s sits between p and x.
+        assert p.tertiary_node_id == "s"
+        assert s.lvstore_stack_tertiary == "p"
+        assert s.tertiary_node_id == "x"
+        assert x.lvstore_stack_tertiary == "s"
+
+    @patch("simplyblock_core.storage_node_ops.DBController")
+    def test_returns_false_when_no_edge_exists_yet(self, MockDBCtrl):
+        import simplyblock_core.storage_node_ops as ops
+        s = _node("s", "10.0.0.3", failure_domain=0)
+        other = _node("other", "10.0.0.1", failure_domain=1)  # no tertiary edge yet
+        MockDBCtrl.return_value = self._mock_db(_cluster(True), [s, other])
+        self._stub_writes(s, other)
+
+        assert ops.splice_stranded_tertiary(s) is False
+
+    @patch("simplyblock_core.storage_node_ops.DBController")
+    def test_rejects_edge_when_stranded_shares_host_with_primarys_secondary(self, MockDBCtrl):
+        import simplyblock_core.storage_node_ops as ops
+        # s sits on the same host as p's secondary (p_sec) -- s can never
+        # become p's tertiary, so the only existing edge must be rejected.
+        p_sec = _node("p_sec", "10.0.0.9", failure_domain=1)
+        p = _node("p", "10.0.0.1", failure_domain=0)
+        p.secondary_node_id = "p_sec"
+        x = _node("x", "10.0.0.2", failure_domain=1)
+        p.tertiary_node_id = "x"
+
+        s = _node("s", "10.0.0.9", failure_domain=2)  # same mgmt_ip as p_sec
+        s_sec = _node("s_sec", "10.0.0.20", failure_domain=1)
+        s.secondary_node_id = "s_sec"
+
+        nodes = [p, p_sec, x, s, s_sec]
+        MockDBCtrl.return_value = self._mock_db(_cluster(True), nodes)
+        self._stub_writes(*nodes)
+
+        assert ops.splice_stranded_tertiary(s) is False
+
+    @patch("simplyblock_core.storage_node_ops.DBController")
+    def test_rejects_edge_when_x_shares_host_with_stranded_secondary(self, MockDBCtrl):
+        import simplyblock_core.storage_node_ops as ops
+        # x sits on the same host as s's secondary (s_sec) -- x can never
+        # become s's tertiary, so the only existing edge must be rejected.
+        p_sec = _node("p_sec", "10.0.0.9", failure_domain=1)
+        p = _node("p", "10.0.0.1", failure_domain=0)
+        p.secondary_node_id = "p_sec"
+        x = _node("x", "10.0.0.30", failure_domain=1)
+        p.tertiary_node_id = "x"
+
+        s_sec = _node("s_sec", "10.0.0.30", failure_domain=1)  # same mgmt_ip as x
+        s = _node("s", "10.0.0.3", failure_domain=2)
+        s.secondary_node_id = "s_sec"
+
+        nodes = [p, p_sec, x, s, s_sec]
+        MockDBCtrl.return_value = self._mock_db(_cluster(True), nodes)
+        self._stub_writes(*nodes)
+
+        assert ops.splice_stranded_tertiary(s) is False
+
+    @patch("simplyblock_core.storage_node_ops.DBController")
+    def test_prefers_edge_domain_disjoint_on_both_ends(self, MockDBCtrl):
+        import simplyblock_core.storage_node_ops as ops
+        s_sec = _node("s_sec", "10.0.0.90", failure_domain=9)
+        s = _node("s", "10.0.0.9", failure_domain=0)
+        s.secondary_node_id = "s_sec"
+
+        # Same-domain edge (worse fit: 0/2 mismatch against s's domain).
+        bad_p_sec = _node("bad_p_sec", "10.0.0.11", failure_domain=9)
+        bad_p = _node("bad_p", "10.0.0.1", failure_domain=0)
+        bad_p.secondary_node_id = "bad_p_sec"
+        bad_x = _node("bad_x", "10.0.0.2", failure_domain=0)
+        bad_p.tertiary_node_id = "bad_x"
+
+        # Domain-disjoint-on-both-ends edge (best fit: 2/2 mismatch).
+        good_p_sec = _node("good_p_sec", "10.0.0.13", failure_domain=9)
+        good_p = _node("good_p", "10.0.0.3", failure_domain=1)
+        good_p.secondary_node_id = "good_p_sec"
+        good_x = _node("good_x", "10.0.0.4", failure_domain=2)
+        good_p.tertiary_node_id = "good_x"
+
+        nodes = [s, s_sec, bad_p, bad_p_sec, bad_x, good_p, good_p_sec, good_x]
+        MockDBCtrl.return_value = self._mock_db(_cluster(True), nodes)
+        self._stub_writes(*nodes)
+
+        assert ops.splice_stranded_tertiary(s) is True
+        assert good_p.tertiary_node_id == "s"
+        assert s.tertiary_node_id == "good_x"
+        assert bad_p.tertiary_node_id == "bad_x"  # untouched
 
 
 # ===========================================================================
@@ -643,6 +871,125 @@ class TestPlacementPhysicalLabel(unittest.TestCase):
         assert "c3" in result
         assert "c1" not in result  # secondary's label
         assert "c2" not in result  # primary's label
+
+
+# ===========================================================================
+# 9. Domain-grouped ordering eliminates pairing order-sensitivity
+#
+# Two independent things had to be fixed for the pairing loop to stop being
+# order-sensitive:
+#
+#   1. get_secondary_nodes/get_secondary_nodes_2/splice_stranded_secondary/
+#      splice_stranded_tertiary each fetch their own candidate list fresh via
+#      db_controller.get_storage_nodes_by_cluster_id() and scan/score it in
+#      that order -- so their domain-disjointness used to depend on whatever
+#      order the DB happened to return nodes in, regardless of caller. All
+#      four now sort their fetched node list by failure_domain first.
+#   2. Even with (1) fixed, _cluster_activate's own pairing loop still
+#      determines which primary is processed first, and once a domain-size
+#      imbalance forces splice-repair, the repair works off whatever partial
+#      assignment already exists -- so the CALLER's processing order still
+#      changes the outcome. _cluster_activate now also sorts its local
+#      `snodes` by failure_domain before the loop.
+#
+# Verified here by running the full secondary+tertiary pairing sequence with
+# the DB mock returning nodes in an arbitrary (shuffled) order -- proving (1)
+# -- while the caller-side loop mirrors _cluster_activate's own domain sort
+# -- proving (1)+(2) together give a fully order-independent result.
+# ===========================================================================
+
+class TestDomainGroupedCandidateScanOrderIndependence(unittest.TestCase):
+
+    def _mock_db(self, cluster, nodes):
+        mock_db = MagicMock()
+        by_id = {n.get_id(): n for n in nodes}
+        mock_db.get_cluster_by_id.return_value = cluster
+        mock_db.get_storage_nodes_by_cluster_id.return_value = nodes
+        mock_db.get_storage_node_by_id.side_effect = lambda nid: by_id.get(nid)
+        return mock_db
+
+    @staticmethod
+    def _build_nodes(domain_sizes):
+        nodes = []
+        idx = 0
+        for fd, size in enumerate(domain_sizes, start=1):
+            for _ in range(size):
+                idx += 1
+                nodes.append(_node(f"n{idx}", f"10.0.0.{idx}", failure_domain=fd))
+        return nodes
+
+    def _run_pairing(self, db_order_nodes, cluster):
+        """Mirrors _cluster_activate's secondary+tertiary pairing loop
+        (cluster_ops.py), including its own failure_domain sort of the
+        processing order. `db_order_nodes` is deliberately left in an
+        arbitrary order to represent whatever get_storage_nodes_by_cluster_id
+        naturally returns -- proving get_secondary_nodes/_2's own internal
+        sort is what keeps candidate scanning domain-grouped regardless."""
+        import simplyblock_core.storage_node_ops as ops
+        by_id = {n.get_id(): n for n in db_order_nodes}
+        for n in db_order_nodes:
+            n.write_to_db = MagicMock()
+
+        processing_order = sorted(db_order_nodes, key=lambda n: n.failure_domain)
+
+        with patch("simplyblock_core.storage_node_ops.DBController",
+                   return_value=self._mock_db(cluster, db_order_nodes)):
+            for snode in processing_order:
+                secs = ops.get_secondary_nodes(snode)
+                if secs:
+                    snode.secondary_node_id = secs[0]
+                    by_id[secs[0]].lvstore_stack_secondary = snode.get_id()
+                else:
+                    assert ops.splice_stranded_secondary(snode), f"{snode.get_id()} stranded on secondary"
+
+            used_tertiary = []
+            for snode in processing_order:
+                sec = by_id[snode.secondary_node_id]
+                t2 = ops.get_secondary_nodes_2(
+                    snode,
+                    exclude_ids=[snode.secondary_node_id] + used_tertiary,
+                    exclude_mgmt_ips=[sec.mgmt_ip],
+                    exclude_failure_domains=[sec.failure_domain],
+                    exclude_physical_labels=[sec.physical_label],
+                )
+                if t2:
+                    snode.tertiary_node_id = t2[0]
+                    by_id[t2[0]].lvstore_stack_tertiary = snode.get_id()
+                    used_tertiary.append(t2[0])
+                else:
+                    assert ops.splice_stranded_tertiary(snode), f"{snode.get_id()} stranded on tertiary"
+                    used_tertiary.append(snode.tertiary_node_id)
+
+        conflicts = 0
+        for n in db_order_nodes:
+            sec = by_id[n.secondary_node_id]
+            ter = by_id[n.tertiary_node_id]
+            if len({n.failure_domain, sec.failure_domain, ter.failure_domain}) != 3:
+                conflicts += 1
+        return conflicts
+
+    def test_equal_domains_conflict_free_across_many_arbitrary_db_orders(self):
+        cluster = _cluster(True, distr_npcs=2)
+        cluster.distr_ndcs = 2
+        for seed in range(50):
+            nodes = self._build_nodes([4, 4, 4])
+            random.Random(seed).shuffle(nodes)  # arbitrary "DB return" order
+            conflicts = self._run_pairing(nodes, cluster)
+            assert conflicts == 0, f"seed={seed} produced {conflicts} conflicts"
+
+    def test_unequal_domains_conflict_count_is_deterministic(self):
+        # 4/5/4: a full zero-conflict assignment is mathematically impossible
+        # (domains aren't equal size), but the combined sort (candidate scan
+        # + processing order) makes the resulting conflict count the same
+        # regardless of the arbitrary DB return order.
+        cluster = _cluster(True, distr_npcs=2)
+        cluster.distr_ndcs = 2
+        counts = set()
+        for seed in range(20):
+            nodes = self._build_nodes([4, 5, 4])
+            random.Random(seed).shuffle(nodes)
+            counts.add(self._run_pairing(nodes, cluster))
+        assert len(counts) == 1, f"expected one consistent conflict count, got {counts}"
 
 
 if __name__ == "__main__":

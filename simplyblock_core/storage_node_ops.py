@@ -3514,7 +3514,23 @@ def _pick_replica_relocation_node(primary, removed_node, role, db_controller):
     enforced HARD here (not best-effort): if the primary's OTHER non-leader
     role does not already live in a different domain than the primary, the
     replacement must — otherwise a full-domain outage would leave the LVS
-    with zero surviving paths. Returning None makes
+    with zero surviving paths.
+
+    ``get_secondary_nodes``/``get_secondary_nodes_2`` only ever offer
+    UNCLAIMED nodes (each node hosts at most one secondary/tertiary at a
+    time — ``lvstore_stack_secondary``/``_tertiary`` is a single field, not
+    a list). A removal frees exactly one node system-wide (whoever hosted
+    ``removed_node``'s own role); if that one lands in the wrong domain —
+    or nothing is free at all — the direct search has nothing else to
+    offer even though a valid rearrangement exists elsewhere in the
+    cluster (2026-08-07, chained-removal incident: two removals in a row
+    stranded a third node's secondary with zero free cross-domain
+    candidates, while an existing pairing two hops away could have
+    absorbed it). Falls back to splicing ``primary`` into an already-formed
+    pairing (see ``_find_splice_target_for_relocation``) — exactly the fix
+    ``splice_stranded_secondary``/``splice_stranded_tertiary`` already apply
+    to the identical dead end at cluster-activation time. Only returning
+    None here (both searches exhausted) makes
     ``_check_replica_relocation_feasible`` refuse the removal up front.
     """
     exclude_ids = [removed_node.get_id()]
@@ -3535,12 +3551,9 @@ def _pick_replica_relocation_node(primary, removed_node, role, db_controller):
                 pass
         cands = get_secondary_nodes_2(
             primary, exclude_ids=exclude_ids, exclude_mgmt_ips=exclude_mgmt_ips)
-    if not cands:
-        return None
 
     cluster = db_controller.get_cluster_by_id(primary.cluster_id)
-    if (getattr(cluster, "enable_failure_domain", False)
-            and primary.failure_domain >= 0):
+    if cands and getattr(cluster, "enable_failure_domain", False) and primary.failure_domain >= 0:
         other_cross = False
         if other_id and other_id != removed_node.get_id():
             try:
@@ -3560,8 +3573,84 @@ def _pick_replica_relocation_node(primary, removed_node, role, db_controller):
                 if (cand.failure_domain >= 0
                         and cand.failure_domain != primary.failure_domain):
                     return cand_id
-            return None
-    return cands[0]
+        else:
+            return cands[0]
+    elif cands:
+        return cands[0]
+
+    splice = _find_splice_target_for_relocation(
+        primary, role, db_controller, exclude_ids=exclude_ids + [primary.get_id()])
+    return splice[1] if splice else None
+
+
+def _find_splice_target_for_relocation(stranded_primary, role, db_controller, exclude_ids=()):
+    """Find an already-formed pairing ``P -> X`` (``P.<field> == X``)
+    elsewhere in the cluster to splice ``stranded_primary`` into:
+    ``P -> stranded_primary -> X``. Read-only — callers decide whether and
+    how to execute the resulting move (see ``_relocate_one_replica``).
+
+    Generalizes ``splice_stranded_secondary``/``splice_stranded_tertiary``'s
+    edge search (same scoring: prefer both ends domain-disjoint from the
+    stranded node, then relax) with an ``exclude_ids`` list, so the
+    node-removal repair path can rule out the node being removed and any
+    other already-claimed id. Unlike the activation-time splice helpers —
+    which only ever run before any physical LVS exists — this can be asked
+    to splice into a pairing that already has real data on both ends;
+    executing that move (not just picking the edge) is the caller's job.
+
+    Returns ``(p_id, x_id)`` or ``None`` if no valid edge exists.
+    """
+    field = "secondary_node_id" if role == "secondary" else "tertiary_node_id"
+    all_nodes = db_controller.get_storage_nodes_by_cluster_id(stranded_primary.cluster_id)
+    all_nodes = sorted(all_nodes, key=lambda n: n.failure_domain)
+    by_id = {n.get_id(): n for n in all_nodes}
+    exclude = set(exclude_ids) | {stranded_primary.get_id()}
+
+    stranded_sec = None
+    if role == "tertiary" and stranded_primary.secondary_node_id:
+        stranded_sec = by_id.get(stranded_primary.secondary_node_id)
+
+    def _online(*nodes):
+        return all(n.status == StorageNode.STATUS_ONLINE for n in nodes)
+
+    def _valid_tertiary(node, node_sec, candidate):
+        if candidate.get_id() == node.get_id():
+            return False
+        if candidate.mgmt_ip == node.mgmt_ip:
+            return False
+        if node_sec and candidate.mgmt_ip == node_sec.mgmt_ip:
+            return False
+        return True
+
+    def _domain_mismatch_score(*nodes):
+        if stranded_primary.failure_domain < 0:
+            return 0
+        return sum(1 for n in nodes if n.failure_domain != stranded_primary.failure_domain)
+
+    edges = [n for n in all_nodes if getattr(n, field) and n.get_id() not in exclude]
+
+    best, best_score = None, -1
+    for p in edges:
+        x_id = getattr(p, field)
+        if x_id in exclude:
+            continue
+        x = by_id.get(x_id)
+        if not x or not _online(p, x):
+            continue
+        if role == "secondary":
+            if p.mgmt_ip == stranded_primary.mgmt_ip or x.mgmt_ip == stranded_primary.mgmt_ip:
+                continue
+        else:
+            p_sec = by_id.get(p.secondary_node_id) if p.secondary_node_id else None
+            if not _valid_tertiary(p, p_sec, stranded_primary):
+                continue
+            if not _valid_tertiary(stranded_primary, stranded_sec, x):
+                continue
+        score = _domain_mismatch_score(p, x)
+        if score > best_score:
+            best_score, best = score, (p.get_id(), x.get_id())
+
+    return best
 
 
 def node_removal_orchestrate(node_id, force_remove=False):
@@ -3750,6 +3839,21 @@ def _relocate_one_replica(removed_node, primary_id, role):
             logger.error(
                 f"[REMOVAL] no relocation target for {role} replica of {primary_id}")
             return False
+
+        new_node = db_controller.get_storage_node_by_id(new_id)
+        occupant_id = getattr(new_node, backref)
+        if occupant_id and occupant_id not in (primary_id, removed_node.get_id()):
+            # _pick_replica_relocation_node fell back to a splice candidate:
+            # new_id is currently busy hosting occupant_id's replica. Evict
+            # that occupant onto `primary` (the node whose replica we're
+            # relocating) before claiming new_id for primary's own role —
+            # see _find_splice_target_for_relocation's docstring.
+            if not _relocate_replica_between(occupant_id, new_id, primary_id, role, db_controller):
+                logger.error(
+                    f"[REMOVAL] failed to splice {primary_id} into the pairing "
+                    f"occupying {new_id} (occupant {occupant_id})")
+                return False
+
         primary = db_controller.get_storage_node_by_id(primary_id)
         setattr(primary, field, new_id)
         primary.write_to_db()
@@ -3770,6 +3874,73 @@ def _relocate_one_replica(removed_node, primary_id, role):
         return False
 
     _clear_replica_backref(removed_node, backref)
+    return True
+
+
+def _relocate_replica_between(occupant_primary_id, old_host_id, new_host_id, role, db_controller):
+    """Physically move ``occupant_primary_id``'s ``role`` replica off
+    ``old_host_id`` onto ``new_host_id``, updating its forward pointer.
+
+    Used by the splice fallback in ``_relocate_one_replica``: before an
+    already-busy node can be claimed for the primary being relocated, its
+    current occupant must move onto that primary's node instead (see
+    ``_find_splice_target_for_relocation``'s docstring for why an
+    already-formed pairing, not an idle node, is what's available).
+
+    Create-before-destroy: the new replica is built on ``new_host_id``
+    BEFORE the old one on ``old_host_id`` is torn down, so
+    ``occupant_primary`` never has zero surviving copies -- critical on
+    FTT1 (no tertiary): a cluster only tolerates one node down at a time,
+    and that budget belongs to the node actually being removed, not to
+    whatever healthy node this splice happens to touch. (2026-08-07
+    incident: the old destroy-then-build order tore down the occupant's
+    only copy up front; a hublvol attach failure on the rebuild then
+    retried for minutes with that copy already gone.) A raised exception
+    from the rebuild is treated the same as a returned False -- both leave
+    the old copy untouched and safe to retry.
+
+    Idempotent and retry-safe: "already built" is read from the occupant's
+    forward pointer, so a retry after a confirmed build skips straight to
+    the teardown check without re-running the rebuild. The teardown itself
+    is guarded separately by ``old_host``'s own back-reference (not the
+    occupant's forward pointer), so a crash between the two commits still
+    resumes the teardown on the next pass instead of leaking a stale
+    replica on ``old_host`` forever.
+
+    Returns True if ``occupant_primary_id`` no longer exists — nothing left
+    to relocate.
+    """
+    field = "secondary_node_id" if role == "secondary" else "tertiary_node_id"
+    backref = "lvstore_stack_secondary" if role == "secondary" else "lvstore_stack_tertiary"
+    try:
+        occupant_primary = db_controller.get_storage_node_by_id(occupant_primary_id)
+    except KeyError:
+        return True
+
+    if getattr(occupant_primary, field) != new_host_id:
+        new_host = db_controller.get_storage_node_by_id(new_host_id)
+        try:
+            built = recreate_lvstore_on_non_leader(new_host, occupant_primary, occupant_primary)
+        except Exception as e:
+            logger.error(
+                f"[REMOVAL] splice: failed to build {role} replica of "
+                f"{occupant_primary_id} on {new_host_id}, old copy on "
+                f"{old_host_id} left untouched: {e}")
+            return False
+        if not built:
+            return False
+        occupant_primary = db_controller.get_storage_node_by_id(occupant_primary_id)
+        setattr(occupant_primary, field, new_host_id)
+        occupant_primary.write_to_db()
+
+    old_host = db_controller.get_storage_node_by_id(old_host_id)
+    if getattr(old_host, backref) == occupant_primary_id:
+        cluster = db_controller.get_cluster_by_id(occupant_primary.cluster_id)
+        if old_host.status == StorageNode.STATUS_ONLINE:
+            _delete_replica_on_peer(old_host, occupant_primary, cluster)
+        old_host = db_controller.get_storage_node_by_id(old_host_id)
+        setattr(old_host, backref, "")
+        old_host.write_to_db()
     return True
 
 
@@ -5239,10 +5410,58 @@ def _check_ftt_allows_node_removal(node_id, db_controller):
     if jm_replication_active:
         not_online_count += 1
 
-    if npcs == 1:
+    fd_on = cluster.enable_failure_domain and snode.failure_domain >= 0
+    blocked_by_capacity = False
+    capacity_reason = ""
+
+    if fd_on:
+        # Placement spreads a stripe's ndcs+npcs chunks as evenly as possible
+        # across the domains that actually exist. With fewer domains than
+        # chunks, at least one domain holds ceil((ndcs+npcs)/domains) chunks
+        # -- that many nodes can go down within a SINGLE domain for free
+        # (mirrors that domain's worst-case chunk contribution going down
+        # outright, already priced in), but once a domain hits that many
+        # down, it has maxed its contribution to the npcs risk budget and a
+        # DIFFERENT domain can only add a node if the combined risk across
+        # every affected domain (each capped at chunks_per_domain) still
+        # leaves room. This reduces to the familiar "up to npcs whole domains
+        # are free" rule when there are >= ndcs+npcs domains (chunks_per_domain
+        # == 1). See the analogous fdDrainGate in nodedrain_controller.go.
+        domains_available = len({n.failure_domain for n in snodes if n.failure_domain >= 0})
+        domains_needed = ndcs + npcs
+        chunks_per_domain = -(-domains_needed // domains_available) if domains_available > 0 else domains_needed
+
+        domain_down_counts: dict[int, int] = {}
+        for node in not_online_nodes:
+            if node.failure_domain >= 0:
+                domain_down_counts[node.failure_domain] = domain_down_counts.get(node.failure_domain, 0) + 1
+
+        my_domain = snode.failure_domain
+        my_domain_down = domain_down_counts.get(my_domain, 0)
+
+        if my_domain_down < chunks_per_domain:
+            current_risk = sum(min(c, chunks_per_domain) for c in domain_down_counts.values())
+            # jm_replication_active can't be attributed to a specific domain
+            # (the probe only says "some online node's journal is behind"),
+            # so treat it conservatively as always adding a fresh risk unit.
+            if jm_replication_active:
+                current_risk += 1
+            if current_risk + 1 > npcs:
+                blocked_by_capacity = True
+                capacity_reason = (
+                    f"FTT={ft} (npcs={npcs}): cannot remove node in failure domain {my_domain}; "
+                    f"{current_risk}/{npcs} failure-domain risk budget already committed "
+                    f"({domains_available} domain(s) available, {chunks_per_domain} chunk(s)/domain worst case)"
+                    f"{' (including in-progress journal replication)' if jm_replication_active else ''}"
+                )
+        # else: this domain already holds >= chunks_per_domain down nodes --
+        # it has maxed its contribution to the risk budget, so one more node
+        # in the SAME domain adds no additional risk.
+    elif npcs == 1:
         # FTT=1: no room at all if anything is already not online or journal replicating
         if not_online_count > 0:
-            return False, (
+            blocked_by_capacity = True
+            capacity_reason = (
                 f"FTT=1 (npcs=1): cannot remove node, cluster already has "
                 f"{len(not_online_nodes)} not-online node(s)"
                 f"{' and journal replication in progress' if jm_replication_active else ''}"
@@ -5252,53 +5471,59 @@ def _check_ftt_allows_node_removal(node_id, db_controller):
         if ft >= 2:
             # FTT=2: room for one not-online node, block if already have one+
             if not_online_count >= 2:
-                return False, (
+                blocked_by_capacity = True
+                capacity_reason = (
                     f"FTT=2 (npcs=2): cannot remove node, cluster already has "
                     f"{len(not_online_nodes)} not-online node(s)"
                     f"{' and journal replication in progress' if jm_replication_active else ''}"
                 )
         else:
             # npcs=2, ft=1: like FTT=2 for capacity, but additionally
-            # cannot remove both primary and its secondary
+            # cannot remove both primary and its secondary (checked below).
             if not_online_count >= 2:
-                return False, (
+                blocked_by_capacity = True
+                capacity_reason = (
                     f"npcs=2/ft=1: cannot remove node, cluster already has "
                     f"{len(not_online_nodes)} not-online node(s)"
                     f"{' and journal replication in progress' if jm_replication_active else ''}"
                 )
 
-            # Check primary-secondary pair constraint:
-            # If the node being removed is a primary, check its secondary is online.
-            # If the node being removed is a secondary, check its primary is online.
-            for not_online_node in not_online_nodes:
-                # Is any not-online node the secondary of the node we're removing?
-                if snode.secondary_node_id == not_online_node.get_id():
-                    return False, (
-                        f"npcs=2/ft=1: cannot remove node {node_id}, "
-                        f"its secondary {not_online_node.get_id()} is not online "
-                        f"(status: {not_online_node.status})"
-                    )
-                if snode.tertiary_node_id == not_online_node.get_id():
-                    return False, (
-                        f"npcs=2/ft=1: cannot remove node {node_id}, "
-                        f"its secondary {not_online_node.get_id()} is not online "
-                        f"(status: {not_online_node.status})"
-                    )
+    if blocked_by_capacity:
+        return False, capacity_reason
 
-            # Is the node we're removing a secondary of any not-online primary?
-            for not_online_node in not_online_nodes:
-                if not_online_node.secondary_node_id == node_id:
-                    return False, (
-                        f"npcs=2/ft=1: cannot remove node {node_id}, "
-                        f"it is secondary of not-online primary {not_online_node.get_id()} "
-                        f"(status: {not_online_node.status})"
-                    )
-                if not_online_node.tertiary_node_id == node_id:
-                    return False, (
-                        f"npcs=2/ft=1: cannot remove node {node_id}, "
-                        f"it is secondary of not-online primary {not_online_node.get_id()} "
-                        f"(status: {not_online_node.status})"
-                    )
+    if npcs == 2 and ft == 1:
+        # npcs=2, ft=1: beyond the capacity cap above, cannot remove both a
+        # primary and its own secondary/tertiary at once -- a per-relationship
+        # constraint, orthogonal to failure domains.
+        for not_online_node in not_online_nodes:
+            # Is any not-online node the secondary of the node we're removing?
+            if snode.secondary_node_id == not_online_node.get_id():
+                return False, (
+                    f"npcs=2/ft=1: cannot remove node {node_id}, "
+                    f"its secondary {not_online_node.get_id()} is not online "
+                    f"(status: {not_online_node.status})"
+                )
+            if snode.tertiary_node_id == not_online_node.get_id():
+                return False, (
+                    f"npcs=2/ft=1: cannot remove node {node_id}, "
+                    f"its secondary {not_online_node.get_id()} is not online "
+                    f"(status: {not_online_node.status})"
+                )
+
+        # Is the node we're removing a secondary of any not-online primary?
+        for not_online_node in not_online_nodes:
+            if not_online_node.secondary_node_id == node_id:
+                return False, (
+                    f"npcs=2/ft=1: cannot remove node {node_id}, "
+                    f"it is secondary of not-online primary {not_online_node.get_id()} "
+                    f"(status: {not_online_node.status})"
+                )
+            if not_online_node.tertiary_node_id == node_id:
+                return False, (
+                    f"npcs=2/ft=1: cannot remove node {node_id}, "
+                    f"it is secondary of not-online primary {not_online_node.get_id()} "
+                    f"(status: {not_online_node.status})"
+                )
 
     return True, ""
 
@@ -9690,6 +9915,18 @@ def get_secondary_nodes(current_node, exclude_ids=None, removed_node=None):
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(current_node.cluster_id)
     all_nodes = db_controller.get_storage_nodes_by_cluster_id(current_node.cluster_id)
+    # Group by failure domain (stable sort, preserves DB order within each
+    # domain) before scanning candidates. The "first valid candidate after my
+    # own position" logic below skips same-domain nodes as forbidden, so on an
+    # arbitrary/interleaved node order it can still land back on a same-domain
+    # pick once every other domain's nodes are already claimed -- purely an
+    # artifact of iteration order, not availability (verified by simulation:
+    # ~1 in 5 arbitrary orderings produces an avoidable same-domain pick even
+    # when a fully domain-disjoint assignment exists). Grouping first removes
+    # that sensitivity: every node's forward scan cleanly skips past the rest
+    # of its own domain into the next one. A no-op when FD is disabled (all
+    # nodes share the same failure_domain, so the sort is order-preserving).
+    all_nodes = sorted(all_nodes, key=lambda n: n.failure_domain)
     if len(all_nodes) == 2:
         for node in all_nodes:
             if node.get_id() != current_node.get_id() and node.get_id() not in exclude_ids:
@@ -9746,6 +9983,81 @@ def get_secondary_nodes(current_node, exclude_ids=None, removed_node=None):
     return []
 
 
+def splice_stranded_secondary(stranded_node) -> bool:
+    """Fold a node get_secondary_nodes() could not place into the pairing
+    graph already built by the in-progress cluster_activate() pass.
+
+    get_secondary_nodes() walks primaries in order, greedily picking the most
+    domain/host-disjoint unclaimed candidate for each. That greedy walk has no
+    mechanism to guarantee the resulting secondary_node_id/lvstore_stack_secondary
+    edges close a cycle spanning every online node: it can close a cycle over a
+    strict subset and leave the remaining node(s) with zero unclaimed
+    candidates, even though a perfect pairing trivially exists whenever there
+    are 2+ online nodes (observed 2026-08-03: 12 nodes across 3 failure
+    domains formed an 11-node cycle, stranding the 12th and aborting
+    activation).
+
+    Rather than reworking the greedy walk into a global matching solver, this
+    repairs the one failure mode it has: pick any already-formed edge P->X
+    (P.secondary_node_id == X.get_id()) and splice the stranded node in
+    between, P->stranded->X. This always succeeds as long as at least one
+    edge already exists (guaranteed once 2+ pairings have been made this
+    activation pass) and turns the cycle that edge belongs to into one that
+    also covers the stranded node, without disturbing any other node. Prefers
+    an edge where both P and X differ from the stranded node's failure domain
+    (falling back to a host-disjoint-only edge), mirroring get_secondary_nodes'
+    own anti-affinity tiering.
+    """
+    db_controller = DBController()
+    all_nodes = db_controller.get_storage_nodes_by_cluster_id(stranded_node.cluster_id)
+    # Deterministic tie-breaking among equally domain-scored edges -- see
+    # get_secondary_nodes for why this sort matters.
+    all_nodes = sorted(all_nodes, key=lambda n: n.failure_domain)
+    edges = [n for n in all_nodes if n.secondary_node_id and n.get_id() != stranded_node.get_id()]
+
+    def _host_disjoint(p, x):
+        return p.mgmt_ip != stranded_node.mgmt_ip and x.mgmt_ip != stranded_node.mgmt_ip
+
+    def _domain_mismatch_score(p, x):
+        if stranded_node.failure_domain < 0:
+            return 0
+        return sum(1 for n in (p, x) if n.failure_domain != stranded_node.failure_domain)
+
+    best = None
+    best_score = -1
+    for p in edges:
+        x = db_controller.get_storage_node_by_id(p.secondary_node_id)
+        if not x or x.get_id() == stranded_node.get_id() or not _host_disjoint(p, x):
+            continue
+        score = _domain_mismatch_score(p, x)
+        if score > best_score:
+            best_score, best = score, (p, x)
+
+    if best is None:
+        return False
+
+    p, x = best
+    logger.warning(
+        "get_secondary_nodes found no candidate for node %s; splicing it into "
+        "the existing pairing %s -> %s (domain-mismatch score %d/2).",
+        stranded_node.get_id(), p.get_id(), x.get_id(), best_score)
+
+    p = db_controller.get_storage_node_by_id(p.get_id())
+    p.secondary_node_id = stranded_node.get_id()
+    p.write_to_db()
+
+    stranded_node = db_controller.get_storage_node_by_id(stranded_node.get_id())
+    stranded_node.lvstore_stack_secondary = p.get_id()
+    stranded_node.secondary_node_id = x.get_id()
+    stranded_node.write_to_db()
+
+    x = db_controller.get_storage_node_by_id(x.get_id())
+    x.lvstore_stack_secondary = stranded_node.get_id()
+    x.write_to_db()
+
+    return True
+
+
 def get_secondary_nodes_2(current_node, exclude_ids=None, exclude_mgmt_ips=None,
                           exclude_failure_domains=None, exclude_physical_labels=None):
     """Get candidate nodes for second secondary assignment (dual fault tolerance).
@@ -9773,6 +10085,9 @@ def get_secondary_nodes_2(current_node, exclude_ids=None, exclude_mgmt_ips=None,
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(current_node.cluster_id)
     all_nodes = db_controller.get_storage_nodes_by_cluster_id(current_node.cluster_id)
+    # See get_secondary_nodes for why this sort matters: it removes the
+    # pairing algorithm's sensitivity to arbitrary/interleaved node order.
+    all_nodes = sorted(all_nodes, key=lambda n: n.failure_domain)
     if len(all_nodes) == 2:
         for node in all_nodes:
             if node.get_id() != current_node.get_id() and node.get_id() not in exclude_ids:
@@ -9834,6 +10149,89 @@ def get_secondary_nodes_2(current_node, exclude_ids=None, exclude_mgmt_ips=None,
                     "falling back to host-disjoint placement.", current_node.get_id())
             return result
     return []
+
+
+def splice_stranded_tertiary(stranded_node) -> bool:
+    """Tertiary-assignment counterpart to splice_stranded_secondary.
+
+    get_secondary_nodes_2()'s greedy walk has the identical dead-end risk as
+    get_secondary_nodes(): it can close a tertiary-pairing cycle over a
+    subset of online nodes and strand the rest, even though a valid
+    assignment exists — this can surface on any cluster with
+    max_fault_tolerance >= 2 (e.g. a 2+2 layout), the same way
+    splice_stranded_secondary's bug surfaced on the plain secondary pass.
+
+    Splices the stranded node into an already-formed tertiary edge P->X
+    (P.tertiary_node_id == X.get_id()), same idea as the secondary case:
+    P->stranded->X. The extra wrinkle here is that a tertiary must be
+    host-disjoint from BOTH a primary and that primary's OWN secondary (a
+    single host outage must not take out two of the four HA journal members)
+    — so splicing changes what "valid" means on both sides of the edge, and
+    each side is re-checked against the other's current secondary_node_id,
+    not just against each other.
+    """
+    db_controller = DBController()
+    all_nodes = db_controller.get_storage_nodes_by_cluster_id(stranded_node.cluster_id)
+    # Deterministic tie-breaking among equally domain-scored edges -- see
+    # get_secondary_nodes for why this sort matters.
+    all_nodes = sorted(all_nodes, key=lambda n: n.failure_domain)
+    by_id = {n.get_id(): n for n in all_nodes}
+    stranded_sec = by_id.get(stranded_node.secondary_node_id) if stranded_node.secondary_node_id else None
+
+    def _valid_tertiary(primary, primary_sec, candidate):
+        if candidate.get_id() == primary.get_id():
+            return False
+        if candidate.mgmt_ip == primary.mgmt_ip:
+            return False
+        if primary_sec and candidate.mgmt_ip == primary_sec.mgmt_ip:
+            return False
+        return True
+
+    def _domain_mismatch_score(*nodes):
+        if stranded_node.failure_domain < 0:
+            return 0
+        return sum(1 for n in nodes if n.failure_domain != stranded_node.failure_domain)
+
+    edges = [n for n in all_nodes if n.tertiary_node_id and n.get_id() != stranded_node.get_id()]
+
+    best = None
+    best_score = -1
+    for p in edges:
+        x = by_id.get(p.tertiary_node_id)
+        if not x or x.get_id() == stranded_node.get_id():
+            continue
+        p_sec = by_id.get(p.secondary_node_id) if p.secondary_node_id else None
+        if not _valid_tertiary(p, p_sec, stranded_node):
+            continue
+        if not _valid_tertiary(stranded_node, stranded_sec, x):
+            continue
+        score = _domain_mismatch_score(p, x)
+        if score > best_score:
+            best_score, best = score, (p, x)
+
+    if best is None:
+        return False
+
+    p, x = best
+    logger.warning(
+        "get_secondary_nodes_2 found no candidate for node %s; splicing it into "
+        "the existing tertiary pairing %s -> %s (domain-mismatch score %d/2).",
+        stranded_node.get_id(), p.get_id(), x.get_id(), best_score)
+
+    p = db_controller.get_storage_node_by_id(p.get_id())
+    p.tertiary_node_id = stranded_node.get_id()
+    p.write_to_db()
+
+    stranded_node = db_controller.get_storage_node_by_id(stranded_node.get_id())
+    stranded_node.lvstore_stack_tertiary = p.get_id()
+    stranded_node.tertiary_node_id = x.get_id()
+    stranded_node.write_to_db()
+
+    x = db_controller.get_storage_node_by_id(x.get_id())
+    x.lvstore_stack_tertiary = stranded_node.get_id()
+    x.write_to_db()
+
+    return True
 
 
 def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blocks, max_size):
