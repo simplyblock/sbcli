@@ -1,10 +1,20 @@
 # coding=utf-8
-"""Edge-cluster control flows (docs/edge_clusters_spec.md §5).
+"""Edge-cluster control flows (docs/edge_clusters_spec.md §5, v3 product
+adoption).
+
+2-node clusters run ACTIVE/ACTIVE with the spdk-fork's primary/secondary
+lvstore processing: each node owns a store (lvstore over a superblocked
+raid1 mirror of split halves from both nodes), runs a live SECONDARY
+instance of the peer's store (creations registered via bdev_lvol_register*,
+refreshed via bdev_lvol_update_lvstore), and every volume namespace exists
+on both nodes with ANA optimized (leader path) / non-optimized listeners.
+Fail-over promotes the survivor's secondary instance (update + set_leader +
+ANA flip); fail-back fences the store's client port (nvmf_port_block),
+hands leadership home after resync, and unfences.
 
 Everything long-running or retryable is a JobSchedule task processed by
-services/tasks_runner_edge.py; the functions here either complete quickly or
-enqueue. RPC and k8s access go through simplyblock_edge.rpc / .k8s so tests
-can substitute them.
+services/tasks_runner_edge.py. RPC and k8s access go through
+simplyblock_edge.rpc / .k8s so tests can substitute them.
 """
 import datetime
 import logging
@@ -85,7 +95,7 @@ def set_cluster_status(cluster, new_status, caused_by=events_controller.CAUSED_B
         f"Edge cluster status changed from {old} to {new_status}")
 
 
-# -------------------------------------------------------------------- nodes
+# ---------------------------------------------------------------- rpc utils
 
 def _wait_for_rpc(rpc, timeout=edge_constants.EDGE_RPC_WAIT_TIMEOUT_SEC,
                   interval=edge_constants.EDGE_RPC_WAIT_INTERVAL_SEC,
@@ -114,6 +124,11 @@ def _ensure_raid(rpc, spec: stack.RaidSpec):
                              superblock=spec.superblock)
 
 
+def _ensure_split(rpc, plan: stack.LocalStackPlan):
+    if plan.split and not rpc.get_bdevs(name=plan.own_half):
+        rpc.bdev_split(plan.top_bdev, 2)
+
+
 def _ensure_transport(rpc):
     if not rpc.transport_list(trtype="TCP"):
         rpc.transport_create("TCP")
@@ -135,34 +150,61 @@ def _subsystem_has_listener(rpc, nqn, addr, port) -> bool:
                for la in (entry.get('address', entry) for entry in subsystem.get('listen_addresses', [])))
 
 
-def _build_local_stack(rpc, node) -> str:
-    """Idempotently create the node's aio bdevs + local raid; returns top bdev."""
-    plan = stack.plan_local_stack(node)
+def _build_local_stack(rpc, node, split) -> stack.LocalStackPlan:
+    """Idempotently create the node's aio bdevs + local raid (+ split)."""
+    plan = stack.plan_local_stack(node, split=split)
     for aio in plan.aio_bdevs:
         _ensure_aio(rpc, aio)
     if plan.raid is not None:
         _ensure_raid(rpc, plan.raid)
-    return plan.top_bdev
+    _ensure_split(rpc, plan)
+    return plan
 
 
-def _expose_repl_subsystem(rpc, cluster, node, top_bdev):
-    """Every node exposes its local top on the internal replication listener."""
+def _expose_repl_subsystem(rpc, cluster, node, plan: stack.LocalStackPlan):
+    """Export the node's halves for the peer: ns1 = own half (the peer's
+    SECONDARY instance of this node's store reads it), ns2 = peer half (leg
+    of the peer's own store)."""
     nqn = stack.repl_nqn(cluster.nqn, node.uuid)
     _ensure_transport(rpc)
     _ensure_subsystem(rpc, nqn, serial=f"er{stack._short(node.uuid)}")
-    if not _subsystem_has_ns(rpc, nqn, top_bdev):
-        rpc.nvmf_subsystem_add_ns(nqn, top_bdev, nsid=1)
+    if plan.split:
+        if not _subsystem_has_ns(rpc, nqn, plan.own_half):
+            rpc.nvmf_subsystem_add_ns(nqn, plan.own_half, nsid=1)
+        if not _subsystem_has_ns(rpc, nqn, plan.peer_half):
+            rpc.nvmf_subsystem_add_ns(nqn, plan.peer_half, nsid=2)
     if not _subsystem_has_listener(rpc, nqn, node.get_data_ip(), node.repl_port):
         rpc.listeners_create(nqn, "TCP", node.get_data_ip(), node.repl_port)
 
 
-def _attach_remote_leg(primary_rpc, mirror: stack.MirrorPlan):
-    if not primary_rpc.get_bdevs(name=mirror.remote_leg):
-        primary_rpc.bdev_nvme_attach_controller(
-            mirror.remote_controller, mirror.remote_nqn, mirror.remote_addr,
-            mirror.remote_port, "tcp",
+def _attach_peer(rpc, cluster, peer):
+    """Attach the peer's repl subsystem -> er_{peer}n1 / er_{peer}n2."""
+    if not rpc.get_bdevs(name=stack.remote_half_bdev(peer.uuid, 1)):
+        rpc.bdev_nvme_attach_controller(
+            stack.remote_controller_name(peer.uuid),
+            stack.repl_nqn(cluster.nqn, peer.uuid),
+            peer.get_data_ip(), peer.repl_port, "tcp",
             ctrlr_loss_timeout_sec=-1,   # keep retrying: the peer WILL come back
             reconnect_delay_sec=2)
+
+
+def _instantiate_store(rpc, node, store_plan: stack.StorePlan, create_lvstore=False):
+    """Bring up this node's instance of a store: mirror (examine-first, since
+    the superblock is authoritative; explicit create as first-time/fallback)
+    plus the lvstore itself — created fresh (owner, first time), or loaded by
+    the examine with its metadata-persisted role."""
+    rpc.bdev_examine(store_plan.mirror.base_bdevs[0])
+    if not rpc.get_bdevs(name=store_plan.mirror.name):
+        _ensure_raid(rpc, store_plan.mirror)
+        rpc.bdev_examine(store_plan.mirror.name)
+    if create_lvstore:
+        rpc.create_lvstore(store_plan.lvs, store_plan.mirror.name,
+                           edge_constants.EDGE_LVS_CLUSTER_SZ, "unmap")
+    rpc.bdev_lvol_set_lvs_opts(store_plan.lvs, groupid=node.store_index,
+                               subsystem_port=store_plan.client_port,
+                               role=store_plan.role)
+    if store_plan.role == "primary" and create_lvstore:
+        rpc.bdev_lvol_set_leader(store_plan.lvs, leader=True)
 
 
 # ------------------------------------------------------------------- crypto
@@ -174,9 +216,9 @@ def _kms_connection(cluster):
 
 def _ensure_crypto_stack(rpc, cluster, volume):
     """Register the volume's AES_XTS key (fetched from the KMS) and the
-    crypto bdev over the lvol. Idempotent — used at create and at every
-    republish (takeover/failback/restart), since SPDK-side key + bdev are
-    runtime state."""
+    crypto bdev over the lvol. Idempotent, and executed on BOTH nodes — the
+    secondary's lvol bdev exists via registration, so the crypto bdev (and
+    with it the non-optimized path) is fully formed there too."""
     kek = stack.cluster_kek_name(cluster.uuid)
     path = stack.volume_dek_path(cluster.uuid, volume.uuid)
     with _kms_connection(cluster) as kms:
@@ -196,21 +238,25 @@ def _ensure_crypto_stack(rpc, cluster, volume):
 
 
 def _ns_bdev(volume) -> str:
-    """The bdev the client namespace exposes: the crypto bdev when encryption
-    is on, the raw lvol otherwise."""
     return volume.crypto_bdev if volume.crypto else volume.lvol_bdev
 
 
-def _lvstore_host(nodes):
-    """The node currently hosting the lvstore (lvstore_base set). The
-    DESIGNATED primary is is_primary; after a takeover they differ until
-    fail-back completes."""
-    return next((n for n in nodes if n.lvstore_base
-                 and n.status != EdgeNode.STATUS_REMOVED), None)
+# -------------------------------------------------------------------- nodes
+
+def _apply_cpu_layout(rpc, node):
+    """Place the lvs poller per the deploy-time vCPU choice. The reactor and
+    nvmf-poller masks travel as pod env (the SPDK entrypoint applies them at
+    boot); the lvs poller group is an RPC."""
+    layout = stack.plan_cpu_layout(node.spdk_cpus)
+    try:
+        rpc.bdev_lvol_create_poller_group(stack.CpuLayout.hex(layout.lvs_mask))
+    except RPCException as e:
+        if 'exist' not in str(e.message).lower():
+            raise
 
 
 def add_edge_node(cluster_id, hostname, mgmt_ip, partitions, data_ip="",
-                  deploy=True, rpc_wait_timeout=None) -> EdgeNode:
+                  spdk_cpus=None, deploy=True, rpc_wait_timeout=None) -> EdgeNode:
     """Add a node to an edge cluster (spec §5.2). Synchronous — bounded by the
     pod-start wait; API callers run it as a task/background call."""
     cluster = _require_edge_cluster(cluster_id)
@@ -222,10 +268,10 @@ def add_edge_node(cluster_id, hostname, mgmt_ip, partitions, data_ip="",
     if any(n.hostname == hostname for n in nodes):
         raise ValueError(f"Node {hostname} is already part of the cluster")
 
-    primary = next((n for n in nodes if n.is_primary), None)
-    if primary is not None and primary.lvstore_base:
-        # 1->2 expansion under an existing lvstore needs raid1-insert-under or
-        # a migration (spec §10) — reject explicitly rather than half-build.
+    first = nodes[0] if nodes else None
+    if first is not None and first.lvstore_base:
+        # A 1-node cluster with volumes has its lvstore directly on the local
+        # top (unsplit) — going active/active needs a migration (spec §10).
         raise ValueError(
             "Cannot add a node: the cluster already has volumes/an lvstore on a "
             "single-node layout. Add both nodes before creating volumes.")
@@ -237,7 +283,9 @@ def add_edge_node(cluster_id, hostname, mgmt_ip, partitions, data_ip="",
     node.mgmt_ip = mgmt_ip
     node.data_ip = data_ip
     node.partitions = [EdgePartition({"device_path": path}) for path in partitions]
-    node.is_primary = primary is None
+    node.is_primary = first is None
+    node.spdk_cpus = spdk_cpus or edge_constants.EDGE_POD_CPU
+    stack.plan_cpu_layout(node.spdk_cpus)  # validate 1..6 before any side effect
     node.rpc_username = "edge"
     node.rpc_password = SecretStr(core_utils.generate_string(16))
     node.status = EdgeNode.STATUS_IN_CREATION
@@ -245,29 +293,23 @@ def add_edge_node(cluster_id, hostname, mgmt_ip, partitions, data_ip="",
 
     try:
         if deploy:
+            if edge_constants.EDGE_CPU_TOPOLOGY_ENABLED:
+                # Same node-preparation Job the central clusters run.
+                k8s.deploy_cpu_topology_job(cluster, node)
             k8s.deploy_spdk_pod(cluster, node, edge_constants.EDGE_SPDK_IMAGE,
                                 edge_constants.EDGE_PROXY_IMAGE)
         rpc = node_rpc_client(node)
         _wait_for_rpc(rpc, timeout=rpc_wait_timeout or edge_constants.EDGE_RPC_WAIT_TIMEOUT_SEC)
 
-        top_bdev = _build_local_stack(rpc, node)
+        _apply_cpu_layout(rpc, node)
+        two_node = first is not None
+        plan = _build_local_stack(rpc, node, split=two_node)
         for i, part in enumerate(node.partitions):
             part.bdev_name = stack.aio_bdev_name(node.uuid, i)
-        _expose_repl_subsystem(rpc, cluster, node, top_bdev)
+        _expose_repl_subsystem(rpc, cluster, node, plan)
 
-        if primary is not None:
-            # Second node: build the cross-node mirror + lvstore on the primary.
-            mirror = stack.plan_mirror(cluster_id, cluster.nqn, primary, node)
-            primary_rpc = node_rpc_client(primary)
-            _attach_remote_leg(primary_rpc, mirror)
-            _ensure_raid(primary_rpc, mirror.raid)
-            primary_rpc.create_lvstore(stack.lvs_name(cluster_id), mirror.top_bdev,
-                                       edge_constants.EDGE_LVS_CLUSTER_SZ, "unmap")
-
-            def _set_lvstore(fresh):
-                fresh.lvstore_base = mirror.top_bdev
-                return True
-            db.atomic_update(primary, _set_lvstore)
+        if two_node:
+            _form_active_active(cluster, first, node)
     except Exception:
         def _fail(fresh):
             fresh.status = EdgeNode.STATUS_OFFLINE
@@ -294,9 +336,41 @@ def add_edge_node(cluster_id, hostname, mgmt_ip, partitions, data_ip="",
     return node
 
 
+def _form_active_active(cluster, node_a, node_b):
+    """Second-node join: re-split node_a's stack, cross-attach, create both
+    stores (primary on the owner, live secondary instance on the peer)."""
+    rpc_a = node_rpc_client(node_a)
+    rpc_b = node_rpc_client(node_b)
+
+    plan_a = _build_local_stack(rpc_a, node_a, split=True)
+    _expose_repl_subsystem(rpc_a, cluster, node_a, plan_a)
+    _attach_peer(rpc_a, cluster, node_b)
+    _attach_peer(rpc_b, cluster, node_a)
+
+    for owner, peer in ((node_a, node_b), (node_b, node_a)):
+        owner_rpc = node_rpc_client(owner)
+        peer_rpc = node_rpc_client(peer)
+        own_plan = stack.plan_store(owner, owner, peer,
+                                    owner.nvmf_port, owner.store_index)
+        sec_plan = stack.plan_store(peer, owner, peer,
+                                    owner.nvmf_port, owner.store_index)
+        _instantiate_store(owner_rpc, owner, own_plan, create_lvstore=True)
+        _instantiate_store(peer_rpc, peer, sec_plan, create_lvstore=False)
+        peer_rpc.bdev_lvol_update_lvstore(own_plan.lvs)
+
+        def _set_store(fresh, mirror=own_plan.mirror.name, lvs=own_plan.lvs):
+            fresh.lvstore_base = mirror
+            fresh.leader_of = [lvs]
+            return True
+        db.atomic_update(owner, _set_store)
+        owner.lvstore_base = own_plan.mirror.name
+        owner.leader_of = [own_plan.lvs]
+
+
 def shutdown_node(cluster_id, node_id):
     """Admin stop: delete the SPDK pod and pin the node DOWN — the monitor
-    never auto-restarts a DOWN node (spec §5.4)."""
+    never auto-restarts a DOWN node (spec §5.4). Fail-over of its store to
+    the peer is still enqueued by the monitor (availability wins)."""
     cluster = _require_edge_cluster(cluster_id)
     node = db.get_edge_node_by_id(cluster_id, node_id)
 
@@ -331,7 +405,7 @@ def restart_node(cluster_id, node_id) -> str:
 # -------------------------------------------------------------------- tasks
 
 def add_edge_task(function_name, cluster_id, node_id, params=None, max_retry=-1) -> str:
-    """Create a JobSchedule task, deduped per (function, node)."""
+    """Create a JobSchedule task, deduped per (function, node, params)."""
     from simplyblock_core.db_controller import DBController
     db_controller = DBController()
     for task in db_controller.get_job_tasks(cluster_id):
@@ -356,78 +430,130 @@ def add_edge_task(function_name, cluster_id, node_id, params=None, max_retry=-1)
 
 # ------------------------------------------------------------------ volumes
 
-def _ensure_lvstore(cluster, nodes) -> EdgeNode:
-    """Lazy lvstore creation (spec §5.2/§10): on the mirror when both nodes
-    joined before the first volume, else directly on the single node's local
-    top. Returns the node currently HOSTING the lvstore (the designated
-    primary normally; the secondary between takeover and fail-back)."""
-    host = _lvstore_host(nodes)
-    if host is not None:
-        return host
+def _active_nodes(cluster_id):
+    return [n for n in db.get_edge_nodes(cluster_id)
+            if n.status != EdgeNode.STATUS_REMOVED]
 
-    primary = next((n for n in nodes if n.is_primary), None)
-    if primary is None:
-        raise ValueError("Edge cluster has no primary node")
 
-    base = stack.lvstore_base_bdev(cluster.uuid, len(nodes), primary)
-    rpc = node_rpc_client(primary)
-    rpc.create_lvstore(stack.lvs_name(cluster.uuid), base,
+def _leader_node(nodes, lvs) -> EdgeNode:
+    leader = next((n for n in nodes if lvs in n.leader_of), None)
+    if leader is None:
+        raise ValueError(f"No node leads {lvs}")
+    return leader
+
+
+def _volumes_of(cluster_id):
+    return [v for v in db.get_edge_volumes(cluster_id)
+            if v.status != EdgeVolume.STATUS_IN_DELETION]
+
+
+def _ensure_single_node_lvstore(cluster, node) -> None:
+    if node.lvstore_base:
+        return
+    base = stack.single_node_lvs_base(node)
+    rpc = node_rpc_client(node)
+    rpc.create_lvstore(stack.lvs_name(node.uuid), base,
                        edge_constants.EDGE_LVS_CLUSTER_SZ, "unmap")
+    lvs = stack.lvs_name(node.uuid)
 
     def _mutate(fresh):
         fresh.lvstore_base = base
+        fresh.leader_of = [lvs]
         return True
-    db.atomic_update(primary, _mutate)
-    primary.lvstore_base = base
-    return primary
+    db.atomic_update(node, _mutate)
+    node.lvstore_base = base
+    node.leader_of = [lvs]
 
 
-def _publish_volume(rpc, node, cluster, volume, active):
-    """Expose one volume's subsystem on a node. active=True publishes the
-    namespace (the serving path); active=False keeps a namespace-less
-    passive subsystem + listener, so clients hold a pre-established second
-    path that lights up the moment a takeover adds the namespace."""
+def _pick_home(cluster_id, nodes) -> EdgeNode:
+    """Placement: the ONLINE store owner with the fewest homed volumes."""
+    counts = {n.uuid: 0 for n in nodes}
+    for volume in _volumes_of(cluster_id):
+        if volume.home_node_id in counts:
+            counts[volume.home_node_id] += 1
+    candidates = [n for n in nodes if n.status == EdgeNode.STATUS_ONLINE
+                  and n.lvstore_base]
+    if not candidates:
+        raise ValueError("No online store owner available for placement")
+    return min(candidates, key=lambda n: (counts[n.uuid], n.store_index))
+
+
+def _set_path_state(rpc, node, volume, optimized):
+    if _subsystem_has_listener(rpc, volume.nqn, node.get_data_ip(), volume.client_port):
+        rpc.nvmf_subsystem_listener_set_ana_state(
+            volume.nqn, node.get_data_ip(), volume.client_port,
+            is_optimized=optimized)
+
+
+def _publish_volume(rpc, node, cluster, volume, optimized):
+    """Expose one volume on one node: subsystem, namespace (the lvol/crypto
+    bdev exists on BOTH nodes — registration puts it on the secondary), and a
+    listener whose ANA state encodes the path role."""
     _ensure_transport(rpc)
     _ensure_subsystem(rpc, volume.nqn, serial=f"ev{stack._short(volume.uuid)}")
-    if not _subsystem_has_listener(rpc, volume.nqn, node.get_data_ip(), node.nvmf_port):
-        rpc.listeners_create(volume.nqn, "TCP", node.get_data_ip(), node.nvmf_port)
-    if active:
-        if volume.crypto:
-            _ensure_crypto_stack(rpc, cluster, volume)
-        if not _subsystem_has_ns(rpc, volume.nqn, _ns_bdev(volume)):
-            rpc.nvmf_subsystem_add_ns(volume.nqn, _ns_bdev(volume), nsid=volume.ns_id)
+    if volume.crypto:
+        _ensure_crypto_stack(rpc, cluster, volume)
+    if not _subsystem_has_ns(rpc, volume.nqn, _ns_bdev(volume)):
+        rpc.nvmf_subsystem_add_ns(volume.nqn, _ns_bdev(volume), nsid=volume.ns_id)
+    if not _subsystem_has_listener(rpc, volume.nqn, node.get_data_ip(), volume.client_port):
+        rpc.listeners_create(volume.nqn, "TCP", node.get_data_ip(), volume.client_port,
+                             ana_state="optimized" if optimized else "non_optimized")
+    else:
+        _set_path_state(rpc, node, volume, optimized)
+
+
+def _lvol_identity(rpc, lvol_bdev):
+    """(uuid, blobid) of a freshly created lvol — the registration payload."""
+    info = (rpc.get_bdevs(name=lvol_bdev) or [{}])[0]
+    blobid = (info.get('driver_specific') or {}).get('lvol', {}).get('blobid', 0)
+    return info.get('uuid', ''), blobid
 
 
 def create_volume(cluster_id, name, size, crypto=False) -> EdgeVolume:
     cluster = _require_edge_cluster(cluster_id)
     if db.get_edge_volume_by_name(cluster_id, name) is not None:
         raise ValueError(f"Volume with name {name} already exists")
-    nodes = [n for n in db.get_edge_nodes(cluster_id) if n.status != EdgeNode.STATUS_REMOVED]
+    nodes = _active_nodes(cluster_id)
     if not nodes:
         raise ValueError("Edge cluster has no nodes")
-    primary = _ensure_lvstore(cluster, nodes)
-    if primary.status != EdgeNode.STATUS_ONLINE:
-        raise ValueError(f"Primary node is {primary.status}, cannot create volume")
+    if len(nodes) == 1:
+        _ensure_single_node_lvstore(cluster, nodes[0])
+
+    home = _pick_home(cluster_id, nodes)
+    lvs = stack.lvs_name(home.uuid)
+    leader = _leader_node(nodes, lvs)
 
     volume = EdgeVolume()
     volume.uuid = str(uuid_lib.uuid4())
     volume.cluster_id = cluster_id
     volume.volume_name = name
     volume.size = size
-    volume.lvol_bdev = stack.volume_bdev(cluster_id, name)
+    volume.home_node_id = home.uuid
+    volume.lvol_bdev = stack.volume_bdev(home.uuid, name)
     volume.nqn = stack.volume_nqn(cluster.nqn, volume.uuid)
+    volume.client_port = stack.store_client_port(home.nvmf_port, home.store_index)
     volume.crypto = crypto
     volume.crypto_bdev = stack.crypto_bdev(volume.uuid) if crypto else ""
 
-    rpc = node_rpc_client(primary)
-    size_in_mib = size // (1024 * 1024)
-    rpc.create_lvol(name, size_in_mib, stack.lvs_name(cluster_id))
-    _publish_volume(rpc, primary, cluster, volume, active=True)
+    leader_rpc = node_rpc_client(leader)
+    leader_rpc.create_lvol(name, size // (1024 * 1024), lvs)
 
-    # 2-node: pre-establish the passive path on the peer (spec: fail-over).
-    for peer in nodes:
-        if peer.uuid != primary.uuid and peer.status == EdgeNode.STATUS_ONLINE:
-            _publish_volume(node_rpc_client(peer), peer, cluster, volume, active=False)
+    peers = [n for n in nodes if n.uuid != leader.uuid
+             and n.status == EdgeNode.STATUS_ONLINE]
+    if peers:
+        # Product processing: register the creation on the pairing node's
+        # SECONDARY lvstore instance so its lvol bdev (and with it the
+        # non-optimized path) exists there immediately.
+        registered_uuid, blobid = _lvol_identity(leader_rpc, volume.lvol_bdev)
+        for peer in peers:
+            node_rpc_client(peer).bdev_lvol_register(
+                name, lvs, registered_uuid, blobid)
+
+    for node in nodes:
+        if node.status != EdgeNode.STATUS_ONLINE:
+            continue
+        _publish_volume(node_rpc_client(node), node, cluster, volume,
+                        optimized=(node.uuid == leader.uuid))
 
     volume.status = EdgeVolume.STATUS_ONLINE
     volume.write_to_db(db.kv_store())
@@ -442,34 +568,32 @@ def create_volume(cluster_id, name, size, crypto=False) -> EdgeVolume:
 def delete_volume(cluster_id, volume_id):
     cluster = _require_edge_cluster(cluster_id)
     volume = db.get_edge_volume_by_id(cluster_id, volume_id)
-    nodes = [n for n in db.get_edge_nodes(cluster_id) if n.status != EdgeNode.STATUS_REMOVED]
-    host = _lvstore_host(nodes)
-    if host is None:
-        raise ValueError("Edge cluster has no lvstore host")
+    nodes = _active_nodes(cluster_id)
+    leader = _leader_node(nodes, stack.lvs_name(volume.home_node_id))
 
     def _mark(fresh):
         fresh.status = EdgeVolume.STATUS_IN_DELETION
         return True
     db.atomic_update(volume, _mark)
 
-    # Tear the passive subsystem down on peers first, then the active side.
     for node in nodes:
-        if node.uuid != host.uuid and node.status == EdgeNode.STATUS_ONLINE:
-            try:
-                node_rpc_client(node).subsystem_delete(volume.nqn)
-            except RPCException:
-                pass
-    rpc = node_rpc_client(host)
-    rpc.subsystem_delete(volume.nqn)
-    if volume.crypto:
+        if node.status != EdgeNode.STATUS_ONLINE:
+            continue
+        rpc = node_rpc_client(node)
         try:
-            rpc.lvol_crypto_delete(volume.crypto_bdev)
+            rpc.subsystem_delete(volume.nqn)
         except RPCException:
             pass
+        if volume.crypto:
+            try:
+                rpc.lvol_crypto_delete(volume.crypto_bdev)
+            except RPCException:
+                pass
+    node_rpc_client(leader).delete_lvol(volume.lvol_bdev)
+    if volume.crypto:
         with _kms_connection(cluster) as kms:
             kms.delete_data_encryption_keys(
                 stack.volume_dek_path(cluster_id, volume.uuid))
-    rpc.delete_lvol(volume.lvol_bdev)
     volume.remove(db.kv_store())
     events_controller.log_event_cluster(
         cluster_id, events_controller.DOMAIN_STORAGE,
@@ -482,11 +606,9 @@ def resize_volume(cluster_id, volume_id, new_size) -> EdgeVolume:
     volume = db.get_edge_volume_by_id(cluster_id, volume_id)
     if new_size <= volume.size:
         raise ValueError("New size must be larger than the current size")
-    nodes = [n for n in db.get_edge_nodes(cluster_id) if n.status != EdgeNode.STATUS_REMOVED]
-    host = _lvstore_host(nodes)
-    if host is None:
-        raise ValueError("Edge cluster has no lvstore host")
-    node_rpc_client(host).bdev_lvol_resize(volume.lvol_bdev, new_size // (1024 * 1024))
+    nodes = _active_nodes(cluster_id)
+    leader = _leader_node(nodes, stack.lvs_name(volume.home_node_id))
+    node_rpc_client(leader).bdev_lvol_resize(volume.lvol_bdev, new_size // (1024 * 1024))
 
     def _mutate(fresh):
         fresh.size = new_size
@@ -497,23 +619,21 @@ def resize_volume(cluster_id, volume_id, new_size) -> EdgeVolume:
 
 
 def get_connect_info(cluster_id, volume_id) -> list:
-    """One connect entry per node holding a listener for the volume — the
-    lvstore host serves; peers are passive paths that activate on takeover.
-    Clients connect ALL entries (spec: 2-node IO survives a node loss)."""
+    """One entry per node exposing the volume — the leader's path is
+    ANA-optimized, the peer's non-optimized. Clients connect ALL entries;
+    the kernel's ANA handling steers IO."""
     _require_edge_cluster(cluster_id)
     volume = db.get_edge_volume_by_id(cluster_id, volume_id)
-    nodes = [n for n in db.get_edge_nodes(cluster_id)
-             if n.status != EdgeNode.STATUS_REMOVED]
-    host = _lvstore_host(nodes)
-    if host is None:
-        raise ValueError("Edge cluster has no lvstore host")
-    ordered = [host] + [n for n in nodes if n.uuid != host.uuid]
+    nodes = _active_nodes(cluster_id)
+    lvs = stack.lvs_name(volume.home_node_id)
+    leader_uuid = next((n.uuid for n in nodes if lvs in n.leader_of), None)
+    ordered = sorted(nodes, key=lambda n: n.uuid != leader_uuid)
     return [{
         "transport": "tcp",
         "ip": node.get_data_ip(),
-        "port": node.nvmf_port,
+        "port": volume.client_port,
         "nqn": volume.nqn,
-        "active": node.uuid == host.uuid,
+        "active": node.uuid == leader_uuid,
         "reconnect-delay": core_constants.LVOL_NVME_CONNECT_RECONNECT_DELAY,
         "ctrl-loss-tmo": core_constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO,
         "nr-io-queues": 2,
@@ -521,52 +641,6 @@ def get_connect_info(cluster_id, volume_id) -> list:
 
 
 # ------------------------------------------------------------------ devices
-
-def replace_device(cluster_id, node_id, old_path, new_path) -> str:
-    _require_edge_cluster(cluster_id)
-    node = db.get_edge_node_by_id(cluster_id, node_id)
-    part = next((p for p in node.partitions if p.device_path == old_path
-                 and p.status != EdgePartition.STATUS_REMOVED), None)
-    if part is None:
-        raise ValueError(f"Partition {old_path} not found on node {node_id}")
-    active = [p for p in node.partitions if p.status != EdgePartition.STATUS_REMOVED]
-    nodes = [n for n in db.get_edge_nodes(cluster_id) if n.status != EdgeNode.STATUS_REMOVED]
-    if len(active) < 2 and len(nodes) < 2:
-        raise ValueError(
-            "Cannot replace the only partition of a single-node cluster - "
-            "there is no redundancy to rebuild from")
-
-    def _mutate(fresh):
-        for p in fresh.partitions:
-            if p.device_path == old_path:
-                p.status = EdgePartition.STATUS_FAILED
-        return True
-    db.atomic_update(node, _mutate)
-    return add_edge_task(JobSchedule.FN_EDGE_DEVICE_REPLACE, cluster_id, node_id,
-                         params={"old_path": old_path, "new_path": new_path},
-                         max_retry=5)
-
-
-def add_device(cluster_id, node_id, device_path) -> str:
-    _require_edge_cluster(cluster_id)
-    node = db.get_edge_node_by_id(cluster_id, node_id)
-    active = [p for p in node.partitions if p.status != EdgePartition.STATUS_REMOVED]
-    if len(active) < 3:
-        raise ValueError(
-            "Adding a device is only supported under a raid5 local stack "
-            "(3+ partitions)")
-    if any(p.device_path == device_path for p in active):
-        raise ValueError(f"Partition {device_path} is already part of the node")
-
-    def _mutate(fresh):
-        fresh.partitions = fresh.partitions + [
-            EdgePartition({"device_path": device_path,
-                           "status": EdgePartition.STATUS_NEW})]
-        return True
-    db.atomic_update(node, _mutate)
-    return add_edge_task(JobSchedule.FN_EDGE_DEVICE_ADD, cluster_id, node_id,
-                         params={"device_path": device_path}, max_retry=3)
-
 
 def _partition_or_raise(node, device_path):
     part = next((p for p in node.partitions if p.device_path == device_path
@@ -581,7 +655,7 @@ def _require_redundancy(cluster_id, node, device_path):
     local stack is raid (>=2 partitions) or a 2-node mirror covers the node."""
     active = [p for p in node.partitions
               if p.status not in (EdgePartition.STATUS_REMOVED,)]
-    nodes = [n for n in db.get_edge_nodes(cluster_id) if n.status != EdgeNode.STATUS_REMOVED]
+    nodes = _active_nodes(cluster_id)
     if len(active) < 2 and len(nodes) < 2:
         raise ValueError(
             f"Cannot take {device_path} out: single-partition single-node "
@@ -664,25 +738,47 @@ def restart_device(cluster_id, node_id, device_path):
         f"Edge device restarted: {device_path} on {node.hostname}")
 
 
+def replace_device(cluster_id, node_id, old_path, new_path) -> str:
+    _require_edge_cluster(cluster_id)
+    node = db.get_edge_node_by_id(cluster_id, node_id)
+    part = _partition_or_raise(node, old_path)
+    _require_redundancy(cluster_id, node, old_path)
+    del part
+
+    def _mutate(fresh):
+        for p in fresh.partitions:
+            if p.device_path == old_path:
+                p.status = EdgePartition.STATUS_FAILED
+        return True
+    db.atomic_update(node, _mutate)
+    return add_edge_task(JobSchedule.FN_EDGE_DEVICE_REPLACE, cluster_id, node_id,
+                         params={"old_path": old_path, "new_path": new_path},
+                         max_retry=5)
+
+
+def add_device(cluster_id, node_id, device_path) -> str:
+    _require_edge_cluster(cluster_id)
+    node = db.get_edge_node_by_id(cluster_id, node_id)
+    active = [p for p in node.partitions if p.status != EdgePartition.STATUS_REMOVED]
+    if len(active) < 3:
+        raise ValueError(
+            "Adding a device is only supported under a raid5 local stack "
+            "(3+ partitions)")
+    if any(p.device_path == device_path for p in active):
+        raise ValueError(f"Partition {device_path} is already part of the node")
+
+    def _mutate(fresh):
+        fresh.partitions = fresh.partitions + [
+            EdgePartition({"device_path": device_path,
+                           "status": EdgePartition.STATUS_NEW})]
+        return True
+    db.atomic_update(node, _mutate)
+    return add_edge_task(JobSchedule.FN_EDGE_DEVICE_ADD, cluster_id, node_id,
+                         params={"device_path": device_path}, max_retry=3)
+
+
 # ------------------------------------------------------------ task handlers
 # Called by services/tasks_runner_edge.py; return simplyblock_lib TaskResult.
-
-def _volumes_of(cluster_id):
-    return [v for v in db.get_edge_volumes(cluster_id)
-            if v.status != EdgeVolume.STATUS_IN_DELETION]
-
-
-def _republish_volumes(rpc, host, cluster):
-    """(Re)expose every volume ACTIVELY on the lvstore host."""
-    for volume in _volumes_of(host.cluster_id):
-        _publish_volume(rpc, host, cluster, volume, active=True)
-
-
-def _publish_passive_paths(rpc, node, cluster):
-    """(Re)expose every volume's namespace-less passive path on a peer."""
-    for volume in _volumes_of(node.cluster_id):
-        _publish_volume(rpc, node, cluster, volume, active=False)
-
 
 def _wait_raid_synced(rpc, raid_name,
                       timeout=edge_constants.EDGE_RESYNC_TIMEOUT_SEC,
@@ -708,110 +804,104 @@ def _wait_raid_synced(rpc, raid_name,
         sleep(interval)
 
 
-def _reassemble_node(cluster, node, nodes) -> None:
-    """Idempotently rebuild a node's stack after a pod restart (spec §5.6)."""
-    rpc = node_rpc_client(node)
-    top_bdev = _build_local_stack(rpc, node)
-    _expose_repl_subsystem(rpc, cluster, node, top_bdev)
+def _readd_legs_on_peer(cluster, peer, returned):
+    """On the surviving peer, re-add the returned node's halves into BOTH of
+    the peer's raid instances (its own store and its secondary instance of
+    the returned node's store)."""
+    peer_rpc = node_rpc_client(peer)
+    _attach_peer(peer_rpc, cluster, returned)
+    for raid_name, leg in (
+            (stack.mirror_name(peer.uuid), stack.remote_half_bdev(returned.uuid, 2)),
+            (stack.mirror_name(returned.uuid), stack.remote_half_bdev(returned.uuid, 1))):
+        try:
+            peer_rpc.bdev_raid_add_base_bdev(raid_name, leg)
+        except RPCException as e:
+            if 'already' not in str(e.message).lower():
+                raise
 
+
+def _reassemble_node(cluster, node, nodes) -> None:
+    """Idempotently rebuild a node's stack after a pod restart (spec §5.7)."""
+    rpc = node_rpc_client(node)
     peers = [n for n in nodes if n.uuid != node.uuid
              and n.status != EdgeNode.STATUS_REMOVED]
-    host = _lvstore_host(nodes)
+    two_node = bool(peers)
+    _apply_cpu_layout(rpc, node)
+    plan = _build_local_stack(rpc, node, split=two_node)
+    _expose_repl_subsystem(rpc, cluster, node, plan)
 
-    if not peers:
-        # Single node: reload the lvstore and republish the volumes.
+    if not two_node:
         if node.lvstore_base:
             rpc.bdev_examine(node.lvstore_base)
-            _republish_volumes(rpc, node, cluster)
+            for volume in _volumes_of(cluster.uuid):
+                _publish_volume(rpc, node, cluster, volume, optimized=True)
         return
 
     peer = peers[0]
-    if host is not None and host.uuid == node.uuid:
-        # The returning node still hosts the lvstore: reattach the remote
-        # leg, reassemble the mirror, reload, republish actively.
-        mirror = stack.plan_mirror(cluster.uuid, cluster.nqn, node, peer)
-        _attach_remote_leg(rpc, mirror)
-        _ensure_raid(rpc, mirror.raid)
-        rpc.bdev_examine(mirror.top_bdev)
-        _republish_volumes(rpc, node, cluster)
-    elif host is not None:
-        # A peer hosts the lvstore (normal secondary restart, or a failed-over
-        # primary coming back): re-add this node's leg into the HOST's mirror
-        # (SPDK rebuild) and restore the passive client paths here. Fail-back,
-        # if due, happens in handle_node_restart_task after the resync.
-        mirror = stack.plan_mirror(cluster.uuid, cluster.nqn, host, node)
-        host_rpc = node_rpc_client(host)
-        _attach_remote_leg(host_rpc, mirror)
-        try:
-            host_rpc.bdev_raid_add_base_bdev(mirror.raid.name, mirror.remote_leg)
-        except RPCException as e:
-            # Already a member (the nvme controller auto-reconnected and the
-            # raid never dropped the leg) is fine; anything else is not.
-            if 'already' not in str(e.message).lower():
-                raise
-        _publish_passive_paths(rpc, node, cluster)
-    # else: no lvstore anywhere yet — the local stack is all there is.
+    _attach_peer(rpc, cluster, peer)
+    _readd_legs_on_peer(cluster, peer, node)
 
+    # Re-instantiate BOTH stores on the returned node: its own (leadership is
+    # resolved afterwards — fail-back if the peer took over) and its
+    # secondary instance of the peer's store.
+    own_plan = stack.plan_store(node, node, peer, node.nvmf_port, node.store_index)
+    sec_plan = stack.plan_store(node, peer, node, peer.nvmf_port, peer.store_index)
+    _instantiate_store(rpc, node, own_plan, create_lvstore=False)
+    _instantiate_store(rpc, node, sec_plan, create_lvstore=False)
+    rpc.bdev_lvol_update_lvstore(sec_plan.lvs)
 
-def _fail_back(cluster, primary, secondary):
-    """Move the lvstore back from the secondary to the designated primary
-    (spec: fail-back on node restart). Preconditions: the primary's stack is
-    rebuilt and its leg re-added to the secondary-hosted mirror.
-
-    Sequence: wait for resync -> withdraw the namespaces on the secondary
-    (clients flip to path-down on that leg; the passive primary path is about
-    to activate) -> release the mirror on the secondary (superblock stays on
-    the legs) -> assemble mirror + lvstore on the primary -> republish
-    actively there, passively on the secondary -> flip lvstore_base records.
-    """
-    mirror_bdev = stack.mirror_name(cluster.uuid)
-    secondary_rpc = node_rpc_client(secondary)
-    _wait_raid_synced(secondary_rpc, mirror_bdev)
-
+    # Republish paths on the returned node — everything non-optimized until
+    # leadership says otherwise (fail-back flips its own store's paths).
     for volume in _volumes_of(cluster.uuid):
-        try:
-            secondary_rpc.nvmf_subsystem_remove_ns(volume.nqn, volume.ns_id)
-        except RPCException:
-            pass
-        if volume.crypto:
-            try:
-                secondary_rpc.lvol_crypto_delete(volume.crypto_bdev)
-            except RPCException:
-                pass
+        _publish_volume(rpc, node, cluster, volume, optimized=False)
+
+
+def _fail_back(cluster, returned, peer):
+    """Hand the returned node's store home (spec §5.7 step 4): wait for
+    resync, fence the store's client port on the peer (nvmf_port_block),
+    release leadership there, update + take leadership on the returned node
+    (its instance was reloaded by examine during reassembly), flip ANA,
+    unfence."""
+    lvs = stack.lvs_name(returned.uuid)
+    mirror_bdev = stack.mirror_name(returned.uuid)
+    port = stack.store_client_port(returned.nvmf_port, returned.store_index)
+    peer_rpc = node_rpc_client(peer)
+    returned_rpc = node_rpc_client(returned)
+
+    _wait_raid_synced(peer_rpc, mirror_bdev)
+
+    peer_rpc.nvmf_port_block(port)
     try:
-        secondary_rpc.bdev_raid_delete(mirror_bdev)
-    except RPCException:
-        pass
+        peer_rpc.bdev_lvol_set_leader(lvs, leader=False, bs_nonleadership=True)
+        if not returned_rpc.bdev_lvol_update_lvstore(lvs):
+            raise RuntimeError(f"bdev_lvol_update_lvstore({lvs}) refused")
+        returned_rpc.bdev_lvol_set_leader(lvs, leader=True)
+        for volume in _volumes_of(cluster.uuid):
+            if volume.home_node_id != returned.uuid:
+                continue
+            _set_path_state(returned_rpc, returned, volume, optimized=True)
+            _set_path_state(peer_rpc, peer, volume, optimized=False)
+    finally:
+        peer_rpc.nvmf_port_unblock(port)
 
-    primary_rpc = node_rpc_client(primary)
-    mirror = stack.plan_mirror(cluster.uuid, cluster.nqn, primary, secondary)
-    _attach_remote_leg(primary_rpc, mirror)
-    primary_rpc.bdev_examine(stack.plan_local_stack(primary).top_bdev)
-    if not primary_rpc.get_bdevs(name=mirror_bdev):
-        # Fork gate (spec §10): superblock examine should reassemble; fall
-        # back to explicit re-creation over the synced legs.
-        _ensure_raid(primary_rpc, mirror.raid)
-        primary_rpc.bdev_examine(mirror_bdev)
-    _republish_volumes(primary_rpc, primary, cluster)
-    _publish_passive_paths(secondary_rpc, secondary, cluster)
-
-    def _set_primary(fresh):
-        fresh.lvstore_base = mirror_bdev
+    def _take(fresh):
+        if lvs not in fresh.leader_of:
+            fresh.leader_of = fresh.leader_of + [lvs]
         return True
-    db.atomic_update(primary, _set_primary)
-    primary.lvstore_base = mirror_bdev
+    db.atomic_update(returned, _take)
+    returned.leader_of = list(set(returned.leader_of + [lvs]))
 
-    def _clear_secondary(fresh):
-        fresh.lvstore_base = ""
+    def _release(fresh):
+        fresh.leader_of = [name for name in fresh.leader_of if name != lvs]
         return True
-    db.atomic_update(secondary, _clear_secondary)
-    secondary.lvstore_base = ""
+    db.atomic_update(peer, _release)
+    peer.leader_of = [name for name in peer.leader_of if name != lvs]
 
     events_controller.log_event_cluster(
         cluster.uuid, events_controller.DOMAIN_STORAGE,
-        events_controller.EVENT_STATUS_CHANGE, primary,
+        events_controller.EVENT_STATUS_CHANGE, returned,
         events_controller.CAUSED_BY_MONITOR,
-        f"Edge lvstore failed back to primary {primary.hostname}")
+        f"Edge store {lvs} failed back to {returned.hostname}")
 
 
 def handle_node_restart_task(task) -> TaskResult:
@@ -836,12 +926,23 @@ def handle_node_restart_task(task) -> TaskResult:
     nodes = db.get_edge_nodes(task.cluster_id)
     try:
         _reassemble_node(cluster, node, nodes)
-        # Fail-back: the designated primary returns while the secondary hosts
-        # the lvstore (a takeover happened). Its mirror leg was just re-added
-        # above; once resynced, move the lvstore home.
-        host = _lvstore_host(nodes)
-        if node.is_primary and host is not None and host.uuid != node.uuid:
-            _fail_back(cluster, node, host)
+        own_lvs = stack.lvs_name(node.uuid)
+        peer_leader = next((n for n in nodes if n.uuid != node.uuid
+                            and own_lvs in n.leader_of), None)
+        if node.lvstore_base and peer_leader is not None:
+            # Fail-back: the peer took the store over while this node was
+            # away — hand it home after resync (port fence + handover).
+            _fail_back(cluster, node, peer_leader)
+        elif node.lvstore_base and len(nodes) > 1:
+            # No takeover happened (restart won the race against fail-over):
+            # the records still say this node leads its own store, but its
+            # SPDK-side leadership and ANA states died with the pod — resume.
+            rpc = node_rpc_client(node)
+            rpc.bdev_lvol_update_lvstore(own_lvs)
+            rpc.bdev_lvol_set_leader(own_lvs, leader=True)
+            for volume in _volumes_of(cluster.uuid):
+                if volume.home_node_id == node.uuid:
+                    _set_path_state(rpc, node, volume, optimized=True)
     except Exception as e:
         logger.error(f"Edge node reassembly failed for {node.get_id()}: {e}")
 
@@ -866,58 +967,56 @@ def handle_node_restart_task(task) -> TaskResult:
 
 
 def handle_failover_task(task) -> TaskResult:
-    """Move the lvstore to the surviving secondary (task.node_id) after the
-    designated primary stopped serving (spec: fail-over). The mirror's
-    on-disk superblock lets the secondary assemble it degraded from its own
-    leg; the passive client paths then activate by adding the namespaces."""
+    """Promote the survivor's SECONDARY lvstore instance of the dead node's
+    store (spec §5.6): bdev_lvol_update_lvstore (refresh in-memory metadata
+    from its mirror copy) -> set_leader -> ANA flip. task.node_id is the
+    survivor; params.lvs the store to take over."""
     cluster = db.get_cluster(task.cluster_id)
     try:
-        secondary = db.get_edge_node_by_id(task.cluster_id, task.node_id)
+        survivor = db.get_edge_node_by_id(task.cluster_id, task.node_id)
     except KeyError:
         return TaskResult.done("node not found")
-    nodes = [n for n in db.get_edge_nodes(task.cluster_id)
-             if n.status != EdgeNode.STATUS_REMOVED]
-    host = _lvstore_host(nodes)
-    if host is not None and host.uuid == secondary.uuid:
-        return TaskResult.done("secondary already hosts the lvstore")
-    primary = next((n for n in nodes if n.is_primary), None)
-    if primary is not None and primary.status == EdgeNode.STATUS_ONLINE:
-        return TaskResult.done("primary recovered before takeover — nothing to do")
-    if secondary.status != EdgeNode.STATUS_ONLINE:
-        return TaskResult.retry(f"secondary is {secondary.status}, cannot take over")
+    lvs = task.function_params.get("lvs", "")
+    nodes = _active_nodes(task.cluster_id)
+    owner = next((n for n in nodes if stack.lvs_name(n.uuid) == lvs), None)
+    if owner is None:
+        return TaskResult.done(f"store {lvs} has no owner")
+    if lvs in survivor.leader_of:
+        return TaskResult.done("survivor already leads the store")
+    if owner.status == EdgeNode.STATUS_ONLINE:
+        return TaskResult.done("owner recovered before takeover — nothing to do")
+    if survivor.status != EdgeNode.STATUS_ONLINE:
+        return TaskResult.retry(f"survivor is {survivor.status}, cannot take over")
 
-    mirror_bdev = stack.mirror_name(cluster.uuid)
     try:
-        rpc = node_rpc_client(secondary)
-        top_bdev = _build_local_stack(rpc, secondary)
-        rpc.bdev_examine(top_bdev)
-        if not rpc.get_bdevs(name=mirror_bdev):
-            # Fork gate (spec §10): examine of a superblocked leg should
-            # assemble the mirror degraded; fall back to explicit single-leg
-            # creation if the fork requires it.
-            rpc.bdev_raid_create(mirror_bdev, [top_bdev], raid_level="1",
-                                 superblock=True)
-            rpc.bdev_examine(mirror_bdev)
-        _republish_volumes(rpc, secondary, cluster)
+        rpc = node_rpc_client(survivor)
+        if not rpc.bdev_lvol_update_lvstore(lvs):
+            raise RuntimeError(f"bdev_lvol_update_lvstore({lvs}) refused")
+        rpc.bdev_lvol_set_leader(lvs, leader=True)
+        for volume in _volumes_of(task.cluster_id):
+            if volume.home_node_id != owner.uuid:
+                continue
+            _publish_volume(rpc, survivor, cluster, volume, optimized=True)
     except Exception as e:
         return TaskResult.retry(f"takeover failed: {e}")
 
-    def _set_host(fresh):
-        fresh.lvstore_base = mirror_bdev
+    def _take(fresh):
+        if lvs not in fresh.leader_of:
+            fresh.leader_of = fresh.leader_of + [lvs]
         return True
-    db.atomic_update(secondary, _set_host)
-    if primary is not None:
-        def _clear_old(fresh):
-            fresh.lvstore_base = ""
-            return True
-        db.atomic_update(primary, _clear_old)
+    db.atomic_update(survivor, _take)
+
+    def _release(fresh):
+        fresh.leader_of = [name for name in fresh.leader_of if name != lvs]
+        return True
+    db.atomic_update(owner, _release)
 
     events_controller.log_event_cluster(
         task.cluster_id, events_controller.DOMAIN_STORAGE,
-        events_controller.EVENT_STATUS_CHANGE, secondary,
+        events_controller.EVENT_STATUS_CHANGE, survivor,
         events_controller.CAUSED_BY_MONITOR,
-        f"Edge lvstore failed over to {secondary.hostname}")
-    return TaskResult.done(f"lvstore now hosted on {secondary.hostname}")
+        f"Edge store {lvs} failed over to {survivor.hostname}")
+    return TaskResult.done(f"store {lvs} now led by {survivor.hostname}")
 
 
 def handle_device_replace_task(task) -> TaskResult:
@@ -983,7 +1082,7 @@ def handle_device_add_task(task) -> TaskResult:
     try:
         if not rpc.get_bdevs(name=bdev):
             rpc.bdev_aio_create(bdev, device_path)
-        # Fork-capability gate (spec §10.1): upstream raid5f cannot grow; the
+        # Fork-capability gate (spec §10): upstream raid5f cannot grow; the
         # fork's error is surfaced verbatim if unsupported.
         rpc.bdev_raid_add_base_bdev(plan.raid.name, bdev)
     except Exception as e:

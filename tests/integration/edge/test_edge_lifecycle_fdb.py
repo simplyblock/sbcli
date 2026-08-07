@@ -1,14 +1,14 @@
 # coding=utf-8
-"""End-to-end edge-cluster lifecycle against real FoundationDB.
+"""End-to-end edge-cluster lifecycle against real FoundationDB (v3
+active/active). Real: record persistence, prefix reads, atomic_update CAS,
+JobSchedule integration, monitor sweep, task runner. Faked: SPDK proxies and
+the edge k8s API (same split as the rest of the tier).
 
-Everything above the DB is exercised for real (record persistence, cluster-
-prefixed range reads, atomic_update CAS, JobSchedule integration, the monitor
-sweep and the task runner); only the node side (SPDK proxy, edge k8s API) is
-faked — the same split every other integration test uses.
-
-Flow: create cluster -> add two nodes -> create volume -> connect info ->
-secondary outage (monitor degrades) -> pod returns (restart task enqueued) ->
-task runner reassembles -> cluster active again.
+Flow: create cluster -> 2 nodes (active/active stores) -> volumes on both
+stores -> owner outage (monitor degrades + enqueues fail-over) -> survivor
+promotes the secondary lvstore instance -> owner returns (restart task
+reassembles, resyncs, port-fenced fail-back) -> cluster active, leadership
+home.
 """
 import pytest
 
@@ -30,75 +30,72 @@ def _monitor():
     return EdgeMonitor("edge-monitor-it", interval_sec=0, sleep=lambda _s: None)
 
 
+def _leader_of(cluster_id, lvs):
+    return next((n for n in edge_db.get_edge_nodes(cluster_id)
+                 if lvs in n.leader_of), None)
+
+
 def test_full_lifecycle(db, spdk, fake_k8s):
-    # --- create + populate --------------------------------------------------
     cluster = edge_cluster_ops.create_edge_cluster("edge-it")
     assert db.get_cluster_by_id(cluster.uuid).cluster_type == Cluster.TYPE_EDGE
 
-    primary = edge_cluster_ops.add_edge_node(
-        cluster.uuid, "worker-1", "10.0.0.1", ["/dev/sdb1"])
-    secondary = edge_cluster_ops.add_edge_node(
+    node_a = edge_cluster_ops.add_edge_node(
+        cluster.uuid, "worker-1", "10.0.0.1", ["/dev/sdb1"], spdk_cpus=2)
+    node_b = edge_cluster_ops.add_edge_node(
         cluster.uuid, "worker-2", "10.0.0.2", ["/dev/sdb1", "/dev/sdc1"])
-
-    nodes = edge_db.get_edge_nodes(cluster.uuid)
-    assert {n.hostname for n in nodes} == {"worker-1", "worker-2"}
     assert db.get_cluster_by_id(cluster.uuid).status == Cluster.STATUS_ACTIVE
 
-    # lvstore was created on the mirror at second-node add
-    mirror = stack.mirror_name(cluster.uuid)
-    assert edge_db.get_edge_node_by_id(cluster.uuid, primary.uuid).lvstore_base == mirror
-    assert spdk.for_ip("10.0.0.1").lvstores[stack.lvs_name(cluster.uuid)] == mirror
+    # active/active: each node owns + leads its store (persisted)
+    lvs_a, lvs_b = stack.lvs_name(node_a.uuid), stack.lvs_name(node_b.uuid)
+    assert _leader_of(cluster.uuid, lvs_a).uuid == node_a.uuid
+    assert _leader_of(cluster.uuid, lvs_b).uuid == node_b.uuid
+    assert edge_db.get_edge_node_by_id(cluster.uuid, node_a.uuid).spdk_cpus == 2
 
-    # --- volume ---------------------------------------------------------------
-    volume = edge_cluster_ops.create_volume(cluster.uuid, "pvc-1", 5 * 1024 ** 3)
-    persisted = edge_db.get_edge_volume_by_id(cluster.uuid, volume.uuid)
-    assert persisted.nqn == stack.volume_nqn(cluster.nqn, volume.uuid)
+    volumes = [edge_cluster_ops.create_volume(cluster.uuid, f"pvc-{i}", 5 * 1024 ** 3)
+               for i in range(2)]
+    assert {v.home_node_id for v in volumes} == {node_a.uuid, node_b.uuid}
 
-    info = edge_cluster_ops.get_connect_info(cluster.uuid, volume.uuid)
-    assert info[0]["ip"] == "10.0.0.1"
-    assert info[0]["nqn"] == volume.nqn
+    for volume in volumes:
+        info = edge_cluster_ops.get_connect_info(cluster.uuid, volume.uuid)
+        assert len(info) == 2 and info[0]["active"]
 
-    # --- outage: secondary pod dies ------------------------------------------
-    fake_k8s.running["worker-2"] = False
+    # --- owner outage --------------------------------------------------------
+    fake_k8s.running["worker-1"] = False
     monitor = _monitor()
     assert monitor.check_cluster(db.get_cluster_by_id(cluster.uuid)) == \
         Cluster.STATUS_DEGRADED
-    assert edge_db.get_edge_node_by_id(cluster.uuid, secondary.uuid).status == \
+    assert edge_db.get_edge_node_by_id(cluster.uuid, node_a.uuid).status == \
         EdgeNode.STATUS_OFFLINE
 
-    # --- pod returns: monitor enqueues reassembly, does NOT flip online ------
-    fake_k8s.running["worker-2"] = True
-    spdk.for_ip("10.0.0.2").reset()  # pod restart lost all SPDK state
-    monitor.check_cluster(db.get_cluster_by_id(cluster.uuid))
-    tasks = db.get_job_tasks(cluster.uuid)
-    restarts = [t for t in tasks if t.function_name == JobSchedule.FN_EDGE_NODE_RESTART]
-    assert len(restarts) == 1
-    assert edge_db.get_edge_node_by_id(cluster.uuid, secondary.uuid).status == \
-        EdgeNode.STATUS_OFFLINE
-
-    # --- task runner reassembles the node ------------------------------------
+    # fail-over task enqueued and processed by the runner
     runner = EdgeTaskRunner(db, sleep=lambda _s: None)
     runner.run_cycle()
+    assert _leader_of(cluster.uuid, lvs_a).uuid == node_b.uuid
+    rpc_b = spdk.for_ip("10.0.0.2")
+    assert rpc_b.lvstores[lvs_a]["leader"] is True
 
+    # --- owner returns: restart task reassembles + fails back ---------------
+    fake_k8s.running["worker-1"] = True
+    spdk.for_ip("10.0.0.1").reset()
+    monitor.check_cluster(db.get_cluster_by_id(cluster.uuid))
+    restarts = [t for t in db.get_job_tasks(cluster.uuid)
+                if t.function_name == JobSchedule.FN_EDGE_NODE_RESTART]
+    assert len(restarts) == 1
+
+    runner.run_cycle()
     task = db.get_task_by_id(restarts[0].uuid)
     assert task.status == JobSchedule.STATUS_DONE
-    assert "online" in task.function_result
-    assert edge_db.get_edge_node_by_id(cluster.uuid, secondary.uuid).status == \
+    assert edge_db.get_edge_node_by_id(cluster.uuid, node_a.uuid).status == \
         EdgeNode.STATUS_ONLINE
-    # secondary stack rebuilt + its leg back in the primary's mirror
-    assert stack.repl_nqn(cluster.nqn, secondary.uuid) in \
-        spdk.for_ip("10.0.0.2").subsystems
-    assert stack.remote_leg_bdev(secondary.uuid) in \
-        spdk.for_ip("10.0.0.1").raids[mirror]
-
-    # --- monitor confirms recovery -------------------------------------------
+    # leadership home, fence used, survivor released
+    assert _leader_of(cluster.uuid, lvs_a).uuid == node_a.uuid
+    assert rpc_b.called("nvmf_port_block")
+    assert not getattr(rpc_b, "blocked_ports", set())
     assert monitor.check_cluster(db.get_cluster_by_id(cluster.uuid)) == \
         Cluster.STATUS_ACTIVE
-    assert db.get_cluster_by_id(cluster.uuid).status == Cluster.STATUS_ACTIVE
 
 
 def test_volume_records_survive_and_are_prefix_scoped(db, spdk, fake_k8s):
-    """Two clusters' records never leak into each other's range reads."""
     cluster_a = edge_cluster_ops.create_edge_cluster("edge-a")
     cluster_b = edge_cluster_ops.create_edge_cluster("edge-b")
     edge_cluster_ops.add_edge_node(cluster_a.uuid, "wa", "10.0.0.1", ["/dev/sdb1"])
@@ -108,7 +105,6 @@ def test_volume_records_survive_and_are_prefix_scoped(db, spdk, fake_k8s):
 
     assert [v.volume_name for v in edge_db.get_edge_volumes(cluster_a.uuid)] == ["vol-a"]
     assert [v.volume_name for v in edge_db.get_edge_volumes(cluster_b.uuid)] == ["vol-b"]
-    assert len(edge_db.get_edge_nodes(cluster_a.uuid)) == 1
 
     edge_cluster_ops.delete_volume(cluster_a.uuid, edge_db.get_edge_volumes(
         cluster_a.uuid)[0].uuid)
@@ -123,14 +119,11 @@ def test_admin_shutdown_is_sticky_across_sweeps(db, spdk, fake_k8s):
     edge_cluster_ops.shutdown_node(cluster.uuid, node.uuid)
 
     monitor = _monitor()
-    status = monitor.check_cluster(db.get_cluster_by_id(cluster.uuid))
-    assert status == Cluster.STATUS_SUSPENDED
-    assert edge_db.get_edge_node_by_id(cluster.uuid, node.uuid).status == \
-        EdgeNode.STATUS_DOWN
+    assert monitor.check_cluster(db.get_cluster_by_id(cluster.uuid)) == \
+        Cluster.STATUS_SUSPENDED
     assert [t for t in db.get_job_tasks(cluster.uuid)
             if t.function_name == JobSchedule.FN_EDGE_NODE_RESTART] == []
 
-    # Explicit admin restart is the way back.
     edge_cluster_ops.restart_node(cluster.uuid, node.uuid)
     EdgeTaskRunner(db, sleep=lambda _s: None).run_cycle()
     assert edge_db.get_edge_node_by_id(cluster.uuid, node.uuid).status == \

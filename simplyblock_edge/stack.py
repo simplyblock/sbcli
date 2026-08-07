@@ -1,19 +1,35 @@
 # coding=utf-8
 """Pure bdev-stack planner for edge clusters (docs/edge_clusters_spec.md §4).
 
-Every name is deterministically derived from the persisted records, so stack
-assembly is idempotent and a node's stack can be reconstructed after any
-restart from the EdgeNode/EdgeVolume rows alone. No RPC or DB access here —
-the ops layer executes plans.
+v3 (product adoption): 2-node clusters are ACTIVE/ACTIVE with the spdk-fork's
+primary/secondary lvstore processing. Each node hosts its own lvstore; the
+pairing node runs a live SECONDARY instance of it (lvol/snapshot/clone
+creations are registered there; `bdev_lvol_update_lvstore` refreshes it;
+leadership gates writes). Every lvol namespace exists on BOTH nodes with
+ANA optimized (leader) / non-optimized (secondary) listeners.
 
-Local stack rule (per node):
-    1 partition  -> the aio bdev itself
-    2 partitions -> raid1  over the aio bdevs
-    3+           -> raid5f over the aio bdevs
+Per-node layout (2-node cluster; node i, peer j):
 
-Cross-node mirror (2-node clusters): every node exposes its local top via an
-internal replication subsystem; the primary attaches the peer's and builds a
-raid1 of [local_top, remote leg]. Single-node clusters skip the mirror.
+    partitions -> aio bdevs -> local raid (1: bare aio, 2: raid1, 3+: raid5f)
+    local_top  -> bdev_split(2) -> {local_top}p0  (own half)
+                                   {local_top}p1  (peer half)
+    repl subsystem (edge-repl:{i}) exposes ns1 = p0, ns2 = p1
+    er_{j} controller on i -> er_{j}n1 (= j.p0), er_{j}n2 (= j.p1)
+
+    mirror of store i   on node i (PRIMARY):   raid1[i.p0, er_{j}n2]
+    mirror of store i   on node j (SECONDARY): raid1[j.p1, er_{i}n1]
+    lvstore elvs_{i} on mirror em_{i}; role primary on i, secondary on j;
+    leader = node i (normally).
+
+Single-node clusters keep the flat layout: lvstore directly on the local top,
+no split, no mirror.
+
+Client ports are PER STORE (nvmf_port + store index) so fail-back can fence
+one store's IO with a single nvmf_port_block without touching the other
+store's traffic.
+
+Everything here is pure naming/planning — no RPC or DB access. All names
+derive deterministically from the records, so stack assembly is idempotent.
 """
 from dataclasses import dataclass, field
 from typing import List, Optional
@@ -35,6 +51,16 @@ def local_raid_name(node_uuid: str) -> str:
     return f"el_{_short(node_uuid)}"
 
 
+def own_half(local_top: str) -> str:
+    """First split half: leg of the node's OWN store mirror (primary side)."""
+    return f"{local_top}p0"
+
+
+def peer_half(local_top: str) -> str:
+    """Second split half: leg of the PEER's store mirror."""
+    return f"{local_top}p1"
+
+
 def repl_nqn(cluster_nqn: str, node_uuid: str) -> str:
     return f"{cluster_nqn}:edge-repl:{node_uuid}"
 
@@ -43,25 +69,32 @@ def remote_controller_name(peer_node_uuid: str) -> str:
     return f"er_{_short(peer_node_uuid)}"
 
 
-def remote_leg_bdev(peer_node_uuid: str) -> str:
-    # bdev_nvme_attach_controller names the namespace bdev "<name>n<nsid>".
-    return f"{remote_controller_name(peer_node_uuid)}n1"
+def remote_half_bdev(peer_node_uuid: str, half: int) -> str:
+    """Namespace bdev of the peer's exported half: ns1 = p0, ns2 = p1."""
+    return f"{remote_controller_name(peer_node_uuid)}n{half}"
 
 
-def mirror_name(cluster_id: str) -> str:
-    return f"em_{_short(cluster_id)}"
+def mirror_name(store_node_uuid: str) -> str:
+    """The mirror backing the store OWNED by store_node_uuid (instantiated on
+    both nodes under the same name — the raid superblock ties them)."""
+    return f"em_{_short(store_node_uuid)}"
 
 
-def lvs_name(cluster_id: str) -> str:
-    return f"elvs_{_short(cluster_id)}"
+def lvs_name(store_node_uuid: str) -> str:
+    return f"elvs_{_short(store_node_uuid)}"
+
+
+def store_client_port(base_port: int, store_index: int) -> int:
+    """Per-store client port: fail-back fences exactly one store's IO."""
+    return base_port + store_index
 
 
 def volume_nqn(cluster_nqn: str, volume_uuid: str) -> str:
     return f"{cluster_nqn}:edge-lvol:{volume_uuid}"
 
 
-def volume_bdev(cluster_id: str, volume_name: str) -> str:
-    return f"{lvs_name(cluster_id)}/{volume_name}"
+def volume_bdev(store_node_uuid: str, volume_name: str) -> str:
+    return f"{lvs_name(store_node_uuid)}/{volume_name}"
 
 
 def crypto_bdev(volume_uuid: str) -> str:
@@ -82,6 +115,42 @@ def cluster_kek_name(cluster_id: str) -> str:
     return f"edge-{cluster_id}"
 
 
+# ---------------------------------------------------------------- cpu layout
+
+@dataclass
+class CpuLayout:
+    """SPDK thread placement for 1-6 vCPUs (deploy-time choice):
+
+        1 vCPU : app + lvs poller + nvmf poller all on core 0
+        2 vCPU : app + lvs poller on core 0; nvmf poller on core 1
+        3 vCPU : app on 0, lvs poller on 1, nvmf poller on 2
+        4-6    : cores 3+ become ADDITIONAL nvmf poller cores
+    """
+    vcpus: int
+    app_mask: int
+    lvs_mask: int
+    nvmf_mask: int
+
+    @property
+    def reactor_mask(self) -> int:
+        return (1 << self.vcpus) - 1
+
+    @staticmethod
+    def hex(mask: int) -> str:
+        return f"0x{mask:X}"
+
+
+def plan_cpu_layout(vcpus: int) -> CpuLayout:
+    if not 1 <= vcpus <= 6:
+        raise ValueError(f"spdk_cpus must be between 1 and 6, got {vcpus}")
+    if vcpus == 1:
+        return CpuLayout(vcpus, app_mask=0x1, lvs_mask=0x1, nvmf_mask=0x1)
+    if vcpus == 2:
+        return CpuLayout(vcpus, app_mask=0x1, lvs_mask=0x1, nvmf_mask=0x2)
+    nvmf_mask = ((1 << vcpus) - 1) & ~0x3  # cores 2..n-1
+    return CpuLayout(vcpus, app_mask=0x1, lvs_mask=0x2, nvmf_mask=nvmf_mask)
+
+
 # --------------------------------------------------------------------- plans
 
 @dataclass
@@ -97,32 +166,42 @@ class RaidSpec:
     raid_level: str                  # "1" or "5f"
     base_bdevs: List[str] = field(default_factory=list)
     strip_size_kb: int = 0           # raid5f only
-    # The cross-node mirror carries an on-disk superblock so either node can
-    # reassemble it (degraded) via bdev_examine during takeover/failback.
+    # Store mirrors carry an on-disk superblock so either node can reassemble
+    # them via bdev_examine (secondary instance / takeover / fail-back).
     superblock: bool = False
 
 
 @dataclass
 class LocalStackPlan:
-    """Per-node local stack: aio bdevs, optional local raid, resulting top."""
+    """Per-node local stack: aio bdevs, optional local raid, resulting top,
+    and (2-node clusters) the two split halves."""
     aio_bdevs: List[AioSpec]
     raid: Optional[RaidSpec]
     top_bdev: str
+    split: bool = False              # 2-node: split the top into two halves
+
+    @property
+    def own_half(self) -> str:
+        return own_half(self.top_bdev) if self.split else self.top_bdev
+
+    @property
+    def peer_half(self) -> str:
+        if not self.split:
+            raise ValueError("single-node stacks have no peer half")
+        return peer_half(self.top_bdev)
 
 
 @dataclass
-class MirrorPlan:
-    """Primary-side cross-node mirror."""
-    remote_controller: str           # bdev_nvme_attach_controller name
-    remote_nqn: str
-    remote_addr: str
-    remote_port: int
-    remote_leg: str                  # resulting namespace bdev
-    raid: RaidSpec                   # raid1 [local_top, remote_leg]
-    top_bdev: str
+class StorePlan:
+    """One store (lvstore + mirror) as seen from ONE node."""
+    store_node_uuid: str             # the designated owner of this store
+    lvs: str
+    mirror: RaidSpec                 # this node's instance of the mirror
+    role: str                        # "primary" | "secondary" on THIS node
+    client_port: int
 
 
-def plan_local_stack(node) -> LocalStackPlan:
+def plan_local_stack(node, split: bool = False) -> LocalStackPlan:
     """node: EdgeNode-shaped (uuid, partitions with device_path).
 
     aio bdev names are keyed by the partition's ORIGINAL index in
@@ -140,7 +219,7 @@ def plan_local_stack(node) -> LocalStackPlan:
 
     if len(aio_bdevs) == 1:
         return LocalStackPlan(aio_bdevs=aio_bdevs, raid=None,
-                              top_bdev=aio_bdevs[0].bdev_name)
+                              top_bdev=aio_bdevs[0].bdev_name, split=split)
 
     if len(aio_bdevs) == 2:
         raid = RaidSpec(name=local_raid_name(node.uuid), raid_level="1",
@@ -149,29 +228,35 @@ def plan_local_stack(node) -> LocalStackPlan:
         raid = RaidSpec(name=local_raid_name(node.uuid), raid_level="5f",
                         base_bdevs=[a.bdev_name for a in aio_bdevs],
                         strip_size_kb=edge_constants.EDGE_RAID5_STRIP_SIZE_KB)
-    return LocalStackPlan(aio_bdevs=aio_bdevs, raid=raid, top_bdev=raid.name)
+    return LocalStackPlan(aio_bdevs=aio_bdevs, raid=raid, top_bdev=raid.name,
+                          split=split)
 
 
-def plan_mirror(cluster_id: str, cluster_nqn: str, primary, secondary) -> MirrorPlan:
-    """Primary-side plan mirroring the primary's local top with the secondary's
-    replication subsystem. primary/secondary: EdgeNode-shaped."""
-    local_top = plan_local_stack(primary).top_bdev
-    leg = remote_leg_bdev(secondary.uuid)
-    return MirrorPlan(
-        remote_controller=remote_controller_name(secondary.uuid),
-        remote_nqn=repl_nqn(cluster_nqn, secondary.uuid),
-        remote_addr=secondary.get_data_ip(),
-        remote_port=secondary.repl_port,
-        remote_leg=leg,
-        raid=RaidSpec(name=mirror_name(cluster_id), raid_level="1",
-                      base_bdevs=[local_top, leg], superblock=True),
-        top_bdev=mirror_name(cluster_id),
+def plan_store(this_node, store_node, peer_node, base_port: int,
+               store_index: int) -> StorePlan:
+    """This node's instance of the store owned by store_node.
+
+    Leg selection (see module docstring): the owner contributes its OWN half
+    and the peer's PEER half; the secondary contributes its PEER half and the
+    owner's OWN half — the same two physical halves, viewed from each side.
+    """
+    this_plan = plan_local_stack(this_node, split=True)
+    if this_node.uuid == store_node.uuid:
+        legs = [this_plan.own_half, remote_half_bdev(peer_node.uuid, 2)]
+        role = "primary"
+    else:
+        legs = [this_plan.peer_half, remote_half_bdev(store_node.uuid, 1)]
+        role = "secondary"
+    return StorePlan(
+        store_node_uuid=store_node.uuid,
+        lvs=lvs_name(store_node.uuid),
+        mirror=RaidSpec(name=mirror_name(store_node.uuid), raid_level="1",
+                        base_bdevs=legs, superblock=True),
+        role=role,
+        client_port=store_client_port(base_port, store_index),
     )
 
 
-def lvstore_base_bdev(cluster_id: str, node_count: int, primary) -> str:
-    """Where the lvstore sits: on the mirror for 2-node clusters, directly on
-    the primary's local top for single-node clusters (spec §4.3)."""
-    if node_count >= 2:
-        return mirror_name(cluster_id)
-    return plan_local_stack(primary).top_bdev
+def single_node_lvs_base(node) -> str:
+    """Single-node clusters: the lvstore sits directly on the local top."""
+    return plan_local_stack(node, split=False).top_bdev

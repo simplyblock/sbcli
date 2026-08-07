@@ -39,6 +39,10 @@ EDGE_POD_CPU = int(os.getenv("SIMPLYBLOCK_EDGE_POD_CPU", "1"))
 EDGE_POD_HUGEPAGES_MIB = int(os.getenv("SIMPLYBLOCK_EDGE_POD_HUGEPAGES_MIB", "1024"))
 EDGE_SPDK_IMAGE = os.getenv("SIMPLYBLOCK_EDGE_SPDK_IMAGE", "simplyblock/spdk:edge-latest")
 EDGE_PROXY_IMAGE = os.getenv("SIMPLYBLOCK_EDGE_PROXY_IMAGE", "simplyblock/spdk-proxy:latest")
+# The same node-preparation CPU-topology Job central clusters run (kubelet
+# static cpu-manager policy + reserved system cpus).
+EDGE_CPU_TOPOLOGY_ENABLED = os.getenv("SIMPLYBLOCK_EDGE_CPU_TOPOLOGY", "true").lower() == "true"
+EDGE_RESERVED_SYSTEM_CPUS = os.getenv("SIMPLYBLOCK_EDGE_RESERVED_SYSTEM_CPUS", "0")
 
 # Node add: how long to wait for the SPDK proxy to answer after pod deploy.
 EDGE_RPC_WAIT_TIMEOUT_SEC = 120

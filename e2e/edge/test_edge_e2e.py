@@ -132,7 +132,8 @@ def test_03b_reboot_two_node_both_nodes(state, apis, spec):
         workload.start_fio_pod(state, server, pod, connect, runtime=1500)
         time.sleep(30)  # let IO settle before the fault
 
-        rebooting_host = api.node_by_hostname(reboot_target)["hosts_lvstore"]
+        rebooted = api.node_by_hostname(reboot_target)
+        owned_stores = [lvs for lvs in rebooted["leader_of"]]
 
         helpers.reboot_instance(state, reboot_target)
         # 2-node: degraded only — NEVER suspended.
@@ -140,24 +141,27 @@ def test_03b_reboot_two_node_both_nodes(state, apis, spec):
                          lambda: api.cluster_status() == "degraded", timeout=600)
         assert api.cluster_status() != "suspended"
 
-        if rebooting_host:
-            # The lvstore host went down: fail-over must move it to the peer.
+        if owned_stores:
+            # Its store(s) must fail over to the survivor (secondary lvstore
+            # promotion: update + set_leader + ANA flip).
             survivor = [n for n in entry["nodes"] if n != reboot_target][0]
             helpers.wait_for(
-                f"{spec.name} lvstore failed over to {survivor}",
-                lambda: api.node_by_hostname(survivor)["hosts_lvstore"], timeout=900)
+                f"{spec.name} stores {owned_stores} failed over to {survivor}",
+                lambda: all(lvs in api.node_by_hostname(survivor)["leader_of"]
+                            for lvs in owned_stores), timeout=900)
 
         helpers.observe_node_transitions(
             api, reboot_target, ["unreachable", "offline", "online"], timeout=1500)
         # rebuild done, cluster back to active before the second round
         helpers.wait_cluster_status(api, "active", timeout=900)
 
-        if rebooting_host:
-            # Fail-back: the designated primary hosts the lvstore again.
+        if owned_stores:
+            # Fail-back: the returning node leads its own store(s) again
+            # (port-fenced handover after resync).
             helpers.wait_for(
-                f"{spec.name} lvstore failed back to {reboot_target}",
-                lambda: api.node_by_hostname(reboot_target)["hosts_lvstore"],
-                timeout=1800)
+                f"{spec.name} stores failed back to {reboot_target}",
+                lambda: all(lvs in api.node_by_hostname(reboot_target)["leader_of"]
+                            for lvs in owned_stores), timeout=1800)
 
         result = workload.wait_fio_result(state, server, pod, timeout=2400)
         workload.delete_fio_pod(state, server, pod)

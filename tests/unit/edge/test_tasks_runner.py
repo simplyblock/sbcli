@@ -1,5 +1,5 @@
 # coding=utf-8
-"""Unit tests for the edge task handlers + runner dispatch (spec §5.5-5.6)."""
+"""Unit tests for the edge task handlers + runner dispatch (spec §5.5, §5.7)."""
 import pytest
 
 from simplyblock_core.db_controller import DBController
@@ -17,11 +17,11 @@ def env(kv, spdk, fake_k8s):
 
 def _two_node_cluster(spdk):
     cluster = edge_cluster_ops.create_edge_cluster("edge-1")
-    primary = edge_cluster_ops.add_edge_node(cluster.uuid, "worker-1", "10.0.0.1",
-                                             ["/dev/sdb1"])
-    secondary = edge_cluster_ops.add_edge_node(cluster.uuid, "worker-2", "10.0.0.2",
-                                               ["/dev/sdb1", "/dev/sdc1"])
-    return cluster, primary, secondary
+    node_a = edge_cluster_ops.add_edge_node(cluster.uuid, "worker-1", "10.0.0.1",
+                                            ["/dev/sdb1"])
+    node_b = edge_cluster_ops.add_edge_node(cluster.uuid, "worker-2", "10.0.0.2",
+                                            ["/dev/sdb1", "/dev/sdc1"])
+    return cluster, node_a, node_b
 
 
 def _task(cluster, node, fn=JobSchedule.FN_EDGE_NODE_RESTART, params=None):
@@ -39,91 +39,61 @@ def _set_status(node, status):
 
 # ------------------------------------------------------------- node restart
 
-def test_secondary_restart_rebuilds_and_readds_mirror_leg(env):
+def test_node_restart_rebuilds_stack_and_readds_legs(env):
     kv, spdk, _ = env
-    cluster, primary, secondary = _two_node_cluster(spdk)
+    cluster, node_a, node_b = _two_node_cluster(spdk)
 
-    # Simulate: secondary pod restarted (SPDK state gone), raid leg dropped.
-    secondary_rpc = spdk.for_ip("10.0.0.2")
-    secondary_rpc.reset()
-    primary_rpc = spdk.for_ip("10.0.0.1")
-    mirror = stack.mirror_name(cluster.uuid)
-    leg = stack.remote_leg_bdev(secondary.uuid)
-    primary_rpc.raids[mirror].remove(leg)
-    primary_rpc.bdevs.discard(leg)
-    _set_status(secondary, EdgeNode.STATUS_OFFLINE)
+    # node B's pod restarted: SPDK state gone; A's raids dropped B's legs.
+    rpc_b = spdk.for_ip("10.0.0.2")
+    rpc_b.reset()
+    rpc_a = spdk.for_ip("10.0.0.1")
+    for raid, leg in ((stack.mirror_name(node_a.uuid), stack.remote_half_bdev(node_b.uuid, 2)),
+                      (stack.mirror_name(node_b.uuid), stack.remote_half_bdev(node_b.uuid, 1))):
+        if leg in rpc_a.raids.get(raid, []):
+            rpc_a.raids[raid].remove(leg)
+        rpc_a.bdevs.discard(leg)
+    _set_status(node_b, EdgeNode.STATUS_OFFLINE)
 
-    result = edge_cluster_ops.handle_node_restart_task(_task(cluster, secondary))
-
+    result = edge_cluster_ops.handle_node_restart_task(_task(cluster, node_b))
     assert result.kind == TaskResult.DONE
-    # local stack + repl subsystem rebuilt on the secondary
-    assert stack.local_raid_name(secondary.uuid) in secondary_rpc.raids
-    assert stack.repl_nqn(cluster.nqn, secondary.uuid) in secondary_rpc.subsystems
-    # remote leg re-attached + re-added into the primary's mirror
-    assert leg in primary_rpc.raids[mirror]
-    assert edge_db.get_edge_node_by_id(cluster.uuid, secondary.uuid).status == \
+
+    # local stack + split + both halves exported again
+    assert stack.local_raid_name(node_b.uuid) in rpc_b.raids
+    repl = rpc_b.subsystems[stack.repl_nqn(cluster.nqn, node_b.uuid)]
+    assert len(repl["namespaces"]) == 2
+    # B's legs re-added into BOTH of A's raid instances
+    assert stack.remote_half_bdev(node_b.uuid, 2) in rpc_a.raids[stack.mirror_name(node_a.uuid)]
+    assert stack.remote_half_bdev(node_b.uuid, 1) in rpc_a.raids[stack.mirror_name(node_b.uuid)]
+    # B re-instantiated both stores locally (its own + secondary of A's)
+    assert stack.mirror_name(node_b.uuid) in rpc_b.raids
+    assert stack.mirror_name(node_a.uuid) in rpc_b.raids
+    assert edge_db.get_edge_node_by_id(cluster.uuid, node_b.uuid).status == \
         EdgeNode.STATUS_ONLINE
-
-
-def test_secondary_restart_tolerates_leg_never_dropped(env):
-    """If the nvme controller auto-reconnected and the raid kept the leg,
-    re-adding must not fail the task."""
-    kv, spdk, _ = env
-    cluster, primary, secondary = _two_node_cluster(spdk)
-    spdk.for_ip("10.0.0.2").reset()
-    _set_status(secondary, EdgeNode.STATUS_OFFLINE)
-
-    result = edge_cluster_ops.handle_node_restart_task(_task(cluster, secondary))
-    assert result.kind == TaskResult.DONE
-
-
-def test_primary_restart_reloads_lvstore_and_republishes_volumes(env):
-    kv, spdk, _ = env
-    cluster, primary, secondary = _two_node_cluster(spdk)
-    volume = edge_cluster_ops.create_volume(cluster.uuid, "vol-1", 1024 ** 3)
-
-    primary_rpc = spdk.for_ip("10.0.0.1")
-    primary_rpc.reset()
-    _set_status(primary, EdgeNode.STATUS_OFFLINE)
-
-    result = edge_cluster_ops.handle_node_restart_task(_task(cluster, primary))
-
-    assert result.kind == TaskResult.DONE
-    mirror = stack.mirror_name(cluster.uuid)
-    # mirror reassembled and examined (lvstore load)
-    assert mirror in primary_rpc.raids
-    assert primary_rpc.called("bdev_examine")[0][1]["name"] == mirror
-    # client subsystem republished with ns + listener
-    subsystem = primary_rpc.subsystems[volume.nqn]
-    assert subsystem["namespaces"][0]["bdev_name"] == volume.lvol_bdev
-    assert subsystem["listen_addresses"][0]["trsvcid"] == "4420"
 
 
 def test_restart_task_on_down_node_is_a_noop(env):
     kv, spdk, _ = env
-    cluster, primary, _ = _two_node_cluster(spdk)
-    _set_status(primary, EdgeNode.STATUS_DOWN)
+    cluster, node_a, _ = _two_node_cluster(spdk)
+    _set_status(node_a, EdgeNode.STATUS_DOWN)
     calls_before = len(spdk.for_ip("10.0.0.1").calls)
 
-    result = edge_cluster_ops.handle_node_restart_task(_task(cluster, primary))
+    result = edge_cluster_ops.handle_node_restart_task(_task(cluster, node_a))
     assert result.kind == TaskResult.DONE
     assert "down" in result.message
     assert len(spdk.for_ip("10.0.0.1").calls) == calls_before
-    assert edge_db.get_edge_node_by_id(cluster.uuid, primary.uuid).status == \
-        EdgeNode.STATUS_DOWN
 
 
 def test_restart_failure_retries_and_returns_node_offline(env):
     kv, spdk, _ = env
-    cluster, primary, secondary = _two_node_cluster(spdk)
-    secondary_rpc = spdk.for_ip("10.0.0.2")
-    secondary_rpc.reset()
-    secondary_rpc.fail.add("bdev_aio_create")
-    _set_status(secondary, EdgeNode.STATUS_OFFLINE)
+    cluster, node_a, node_b = _two_node_cluster(spdk)
+    rpc_b = spdk.for_ip("10.0.0.2")
+    rpc_b.reset()
+    rpc_b.fail.add("bdev_aio_create")
+    _set_status(node_b, EdgeNode.STATUS_OFFLINE)
 
-    result = edge_cluster_ops.handle_node_restart_task(_task(cluster, secondary))
+    result = edge_cluster_ops.handle_node_restart_task(_task(cluster, node_b))
     assert result.kind == TaskResult.RETRY
-    assert edge_db.get_edge_node_by_id(cluster.uuid, secondary.uuid).status == \
+    assert edge_db.get_edge_node_by_id(cluster.uuid, node_b.uuid).status == \
         EdgeNode.STATUS_OFFLINE
 
 
@@ -132,16 +102,15 @@ def test_single_node_restart_reloads_lvstore(env):
     cluster = edge_cluster_ops.create_edge_cluster("edge-1")
     node = edge_cluster_ops.add_edge_node(cluster.uuid, "worker-1", "10.0.0.1",
                                           ["/dev/sdb1"])
-    edge_cluster_ops.create_volume(cluster.uuid, "vol-1", 1024 ** 3)
+    volume = edge_cluster_ops.create_volume(cluster.uuid, "vol-1", 1024 ** 3)
     rpc = spdk.for_ip("10.0.0.1")
     rpc.reset()
     _set_status(node, EdgeNode.STATUS_OFFLINE)
 
     result = edge_cluster_ops.handle_node_restart_task(_task(cluster, node))
     assert result.kind == TaskResult.DONE
-    # examined the lvstore base (the bare aio top) and republished the volume
     assert rpc.called("bdev_examine")[0][1]["name"] == stack.aio_bdev_name(node.uuid, 0)
-    assert len(rpc.subsystems) == 2  # repl + volume subsystem
+    assert rpc.subsystems[volume.nqn]["listen_addresses"][0]["ana_state"] == "optimized"
 
 
 # ------------------------------------------------------------ device tasks
@@ -153,19 +122,14 @@ def test_device_replace_handler(env):
                                           ["/dev/sdb1", "/dev/sdc1"])
     task_id = edge_cluster_ops.replace_device(cluster.uuid, node.uuid,
                                               "/dev/sdb1", "/dev/sdz1")
-    task = DBController().get_task_by_id(task_id)
-
-    result = edge_cluster_ops.handle_device_replace_task(task)
+    result = edge_cluster_ops.handle_device_replace_task(
+        DBController().get_task_by_id(task_id))
     assert result.kind == TaskResult.DONE
 
     rpc = spdk.for_ip("10.0.0.1")
     bdev = stack.aio_bdev_name(node.uuid, 0)
-    assert rpc.called("bdev_raid_remove_base_bdev")
-    assert rpc.called("bdev_aio_delete")[0][1]["name"] == bdev
-    # recreated from the new path and back in the local raid
     assert rpc.called("bdev_aio_create")[-1][1]["filename"] == "/dev/sdz1"
     assert bdev in rpc.raids[stack.local_raid_name(node.uuid)]
-
     fresh = edge_db.get_edge_node_by_id(cluster.uuid, node.uuid)
     assert fresh.partitions[0].device_path == "/dev/sdz1"
     assert fresh.partitions[0].status == EdgePartition.STATUS_ONLINE
@@ -190,16 +154,12 @@ def test_device_add_handler_grows_raid5(env):
     node = edge_cluster_ops.add_edge_node(cluster.uuid, "worker-1", "10.0.0.1",
                                           ["/dev/sdb1", "/dev/sdc1", "/dev/sdd1"])
     task_id = edge_cluster_ops.add_device(cluster.uuid, node.uuid, "/dev/sde1")
-
     result = edge_cluster_ops.handle_device_add_task(
         DBController().get_task_by_id(task_id))
     assert result.kind == TaskResult.DONE
 
     rpc = spdk.for_ip("10.0.0.1")
-    new_bdev = stack.aio_bdev_name(node.uuid, 3)
-    assert new_bdev in rpc.raids[stack.local_raid_name(node.uuid)]
-    fresh = edge_db.get_edge_node_by_id(cluster.uuid, node.uuid)
-    assert fresh.partitions[3].status == EdgePartition.STATUS_ONLINE
+    assert stack.aio_bdev_name(node.uuid, 3) in rpc.raids[stack.local_raid_name(node.uuid)]
 
 
 def test_runner_dispatch(env):

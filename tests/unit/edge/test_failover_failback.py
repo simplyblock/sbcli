@@ -1,8 +1,7 @@
 # coding=utf-8
-"""Unit tests for lvstore fail-over/fail-back and crypto volumes (the spec
-corrections of 2026-08-07: dynamic volumes over the lvstore, secondary
-takeover, fail-back on primary restart, optional crypto bdevs with KMS keys).
-"""
+"""Unit tests for the product-native fail-over/fail-back (spec §5.6-5.7):
+secondary lvstore promotion via update+set_leader with ANA flips, port-fenced
+fail-back, and crypto volumes across both nodes."""
 import pytest
 
 from simplyblock_core.db_controller import DBController
@@ -18,17 +17,17 @@ def env(kv, spdk, fake_k8s):
     return kv, spdk, fake_k8s
 
 
-def _two_node_cluster(spdk, volume=True, crypto=False):
+def _two_node_cluster(spdk, crypto=False):
     cluster = edge_cluster_ops.create_edge_cluster("edge-fo")
-    primary = edge_cluster_ops.add_edge_node(cluster.uuid, "worker-1", "10.0.0.1",
-                                             ["/dev/sdb1"])
-    secondary = edge_cluster_ops.add_edge_node(cluster.uuid, "worker-2", "10.0.0.2",
-                                               ["/dev/sdb1"])
-    volumes = []
-    if volume:
-        volumes.append(edge_cluster_ops.create_volume(
-            cluster.uuid, "vol-1", 1024 ** 3, crypto=crypto))
-    return cluster, primary, secondary, volumes
+    node_a = edge_cluster_ops.add_edge_node(cluster.uuid, "worker-1", "10.0.0.1",
+                                            ["/dev/sdb1"])
+    node_b = edge_cluster_ops.add_edge_node(cluster.uuid, "worker-2", "10.0.0.2",
+                                            ["/dev/sdb1"])
+    volumes = [edge_cluster_ops.create_volume(cluster.uuid, "vol-1", 1024 ** 3,
+                                              crypto=crypto),
+               edge_cluster_ops.create_volume(cluster.uuid, "vol-2", 1024 ** 3,
+                                              crypto=crypto)]
+    return cluster, node_a, node_b, volumes
 
 
 def _set_status(node, status):
@@ -48,62 +47,46 @@ def _failover_tasks(cluster_id):
             if t.function_name == JobSchedule.FN_EDGE_FAILOVER]
 
 
-def _host(cluster_id):
-    nodes = edge_db.get_edge_nodes(cluster_id)
-    return next((n for n in nodes if n.lvstore_base), None)
+def _leader_of(cluster_id, lvs):
+    return next((n for n in edge_db.get_edge_nodes(cluster_id)
+                 if lvs in n.leader_of), None)
 
 
-# --------------------------------------------------------- passive paths
-
-def test_volume_create_publishes_passive_path_on_peer(env):
-    _, spdk, _ = env
-    cluster, primary, secondary, (volume,) = _two_node_cluster(spdk)
-    passive = spdk.for_ip("10.0.0.2").subsystems[volume.nqn]
-    assert passive["namespaces"] == []          # no ns until takeover
-    assert passive["listen_addresses"][0]["traddr"] == "10.0.0.2"
-    active = spdk.for_ip("10.0.0.1").subsystems[volume.nqn]
-    assert active["namespaces"][0]["bdev_name"] == volume.lvol_bdev
-
-
-def test_connect_info_returns_both_paths_active_first(env):
-    _, spdk, _ = env
-    cluster, primary, secondary, (volume,) = _two_node_cluster(spdk)
-    info = edge_cluster_ops.get_connect_info(cluster.uuid, volume.uuid)
-    assert [e["ip"] for e in info] == ["10.0.0.1", "10.0.0.2"]
-    assert [e["active"] for e in info] == [True, False]
-    assert all(e["nqn"] == volume.nqn for e in info)
+def _ana(rpc, volume, ip):
+    subsystem = rpc.subsystems[volume.nqn]
+    return next(la["ana_state"] for la in subsystem["listen_addresses"]
+                if la["traddr"] == ip)
 
 
 # --------------------------------------------------------------- failover
 
-def test_monitor_enqueues_failover_when_host_dies(env):
+def test_monitor_enqueues_per_store_failover(env):
     _, spdk, fake_k8s = env
-    cluster, primary, secondary, _ = _two_node_cluster(spdk)
+    cluster, node_a, node_b, _ = _two_node_cluster(spdk)
     fake_k8s.running["worker-1"] = False
 
     monitor = _monitor()
     monitor.check_cluster(edge_db.get_cluster(cluster.uuid))
-    monitor.check_cluster(edge_db.get_cluster(cluster.uuid))  # dedupe check
+    monitor.check_cluster(edge_db.get_cluster(cluster.uuid))  # dedupe
 
     tasks = _failover_tasks(cluster.uuid)
     assert len(tasks) == 1
-    assert tasks[0].node_id == secondary.uuid
+    assert tasks[0].node_id == node_b.uuid
+    assert tasks[0].function_params == {"lvs": stack.lvs_name(node_a.uuid)}
 
 
 def test_monitor_no_failover_without_survivor(env):
-    """Both nodes out -> nobody can take over -> no failover task (the
-    cluster suspends instead). Single-node clusters are excluded by the
-    2-node guard."""
     _, spdk, fake_k8s = env
-    cluster, primary, secondary, _ = _two_node_cluster(spdk)
+    cluster, *_ = _two_node_cluster(spdk)
     fake_k8s.unreachable = True
     _monitor().check_cluster(edge_db.get_cluster(cluster.uuid))
     assert _failover_tasks(cluster.uuid) == []
 
 
-def test_failover_moves_lvstore_to_secondary(env):
+def test_failover_promotes_secondary_instance(env):
     _, spdk, fake_k8s = env
-    cluster, primary, secondary, (volume,) = _two_node_cluster(spdk)
+    cluster, node_a, node_b, volumes = _two_node_cluster(spdk)
+    lvs_a = stack.lvs_name(node_a.uuid)
     fake_k8s.running["worker-1"] = False
     _monitor().check_cluster(edge_db.get_cluster(cluster.uuid))
     task = _failover_tasks(cluster.uuid)[0]
@@ -111,124 +94,141 @@ def test_failover_moves_lvstore_to_secondary(env):
     result = edge_cluster_ops.handle_failover_task(task)
     assert result.kind == TaskResult.DONE
 
-    mirror = stack.mirror_name(cluster.uuid)
-    secondary_rpc = spdk.for_ip("10.0.0.2")
-    # degraded mirror assembled on the secondary, volume served there
-    assert mirror in secondary_rpc.raids
-    served = secondary_rpc.subsystems[volume.nqn]
-    assert served["namespaces"][0]["bdev_name"] == volume.lvol_bdev
-    # records flipped
-    host = _host(cluster.uuid)
-    assert host.uuid == secondary.uuid
-    assert edge_db.get_edge_node_by_id(cluster.uuid, primary.uuid).lvstore_base == ""
-    # connect info now leads with the secondary
-    info = edge_cluster_ops.get_connect_info(cluster.uuid, volume.uuid)
-    assert info[0]["ip"] == "10.0.0.2" and info[0]["active"]
-
+    rpc_b = spdk.for_ip("10.0.0.2")
+    # promotion = update (refresh in-memory metadata) THEN leadership
+    assert any(c[1]["lvs"] == lvs_a for c in rpc_b.called("bdev_lvol_update_lvstore"))
+    assert rpc_b.lvstores[lvs_a]["leader"] is True
+    # the survivor's paths for store-A volumes flipped to optimized
+    for volume in volumes:
+        if volume.home_node_id == node_a.uuid:
+            assert _ana(rpc_b, volume, "10.0.0.2") == "optimized"
+    # records: survivor leads BOTH stores now
+    assert sorted(_leader_of(cluster.uuid, lvs_a).leader_of) == \
+        sorted([lvs_a, stack.lvs_name(node_b.uuid)])
     # idempotent
     assert edge_cluster_ops.handle_failover_task(task).kind == TaskResult.DONE
 
 
-def test_failover_retries_until_secondary_online(env):
-    _, spdk, fake_k8s = env
-    cluster, primary, secondary, _ = _two_node_cluster(spdk)
-    _set_status(primary, EdgeNode.STATUS_OFFLINE)
-    _set_status(secondary, EdgeNode.STATUS_OFFLINE)
-    task_id = edge_cluster_ops.add_edge_task(JobSchedule.FN_EDGE_FAILOVER,
-                                             cluster.uuid, secondary.uuid)
+def test_failover_retries_until_survivor_online(env):
+    _, spdk, _ = env
+    cluster, node_a, node_b, _ = _two_node_cluster(spdk)
+    _set_status(node_a, EdgeNode.STATUS_OFFLINE)
+    _set_status(node_b, EdgeNode.STATUS_OFFLINE)
+    task_id = edge_cluster_ops.add_edge_task(
+        JobSchedule.FN_EDGE_FAILOVER, cluster.uuid, node_b.uuid,
+        params={"lvs": stack.lvs_name(node_a.uuid)})
     task = DBController().get_task_by_id(task_id)
     assert edge_cluster_ops.handle_failover_task(task).kind == TaskResult.RETRY
 
 
-def test_failover_aborts_when_primary_recovered(env):
-    _, spdk, fake_k8s = env
-    cluster, primary, secondary, _ = _two_node_cluster(spdk)
-    task_id = edge_cluster_ops.add_edge_task(JobSchedule.FN_EDGE_FAILOVER,
-                                             cluster.uuid, secondary.uuid)
-    task = DBController().get_task_by_id(task_id)
-    result = edge_cluster_ops.handle_failover_task(task)
+def test_failover_aborts_when_owner_recovered(env):
+    _, spdk, _ = env
+    cluster, node_a, node_b, _ = _two_node_cluster(spdk)
+    task_id = edge_cluster_ops.add_edge_task(
+        JobSchedule.FN_EDGE_FAILOVER, cluster.uuid, node_b.uuid,
+        params={"lvs": stack.lvs_name(node_a.uuid)})
+    result = edge_cluster_ops.handle_failover_task(
+        DBController().get_task_by_id(task_id))
     assert result.kind == TaskResult.DONE
     assert "recovered" in result.message
-    assert _host(cluster.uuid).uuid == primary.uuid  # untouched
+    assert _leader_of(cluster.uuid, stack.lvs_name(node_a.uuid)).uuid == node_a.uuid
 
 
 # --------------------------------------------------------------- fail-back
 
-def test_failback_on_primary_restart(env):
-    _, spdk, fake_k8s = env
-    cluster, primary, secondary, (volume,) = _two_node_cluster(spdk)
-
-    # takeover first
-    fake_k8s.running["worker-1"] = False
+def _take_over(spdk, fake_k8s, cluster, dead, survivor):
+    fake_k8s.running[dead.hostname] = False
     _monitor().check_cluster(edge_db.get_cluster(cluster.uuid))
-    edge_cluster_ops.handle_failover_task(_failover_tasks(cluster.uuid)[0])
-    assert _host(cluster.uuid).uuid == secondary.uuid
+    task = _failover_tasks(cluster.uuid)[0]
+    assert edge_cluster_ops.handle_failover_task(task).kind == TaskResult.DONE
 
-    # primary pod returns empty; its restart task runs
+
+def test_failback_on_owner_restart(env):
+    _, spdk, fake_k8s = env
+    cluster, node_a, node_b, volumes = _two_node_cluster(spdk)
+    lvs_a = stack.lvs_name(node_a.uuid)
+    port_a = stack.store_client_port(node_a.nvmf_port, 0)
+    _take_over(spdk, fake_k8s, cluster, node_a, node_b)
+
+    # node A's pod returns empty; the restart task reassembles + fails back.
     spdk.for_ip("10.0.0.1").reset()
     fake_k8s.running["worker-1"] = True
-    _set_status(primary, EdgeNode.STATUS_OFFLINE)
+    _set_status(node_a, EdgeNode.STATUS_OFFLINE)
     task_id = edge_cluster_ops.add_edge_task(
-        JobSchedule.FN_EDGE_NODE_RESTART, cluster.uuid, primary.uuid)
+        JobSchedule.FN_EDGE_NODE_RESTART, cluster.uuid, node_a.uuid)
     result = edge_cluster_ops.handle_node_restart_task(
         DBController().get_task_by_id(task_id))
     assert result.kind == TaskResult.DONE
 
-    mirror = stack.mirror_name(cluster.uuid)
-    primary_rpc = spdk.for_ip("10.0.0.1")
-    secondary_rpc = spdk.for_ip("10.0.0.2")
-    # lvstore is home again: mirror on the primary, active ns there
-    assert mirror in primary_rpc.raids
-    assert primary_rpc.subsystems[volume.nqn]["namespaces"][0]["bdev_name"] == \
-        volume.lvol_bdev
-    # secondary released the mirror and holds only the passive path
-    assert mirror not in secondary_rpc.raids
-    assert secondary_rpc.subsystems[volume.nqn]["namespaces"] == []
-    # records flipped back
-    assert _host(cluster.uuid).uuid == primary.uuid
-    assert edge_db.get_edge_node_by_id(cluster.uuid, secondary.uuid).lvstore_base == ""
-    assert edge_db.get_edge_node_by_id(cluster.uuid, primary.uuid).status == \
+    rpc_a, rpc_b = spdk.for_ip("10.0.0.1"), spdk.for_ip("10.0.0.2")
+    # the fence: port block + unblock around the handover on the survivor
+    assert rpc_b.called("nvmf_port_block")[0][1]["port"] == port_a
+    assert rpc_b.called("nvmf_port_unblock")[0][1]["port"] == port_a
+    assert not getattr(rpc_b, "blocked_ports", set())
+    # leadership handed home: released on B (bs_nonleadership), taken on A
+    release = [c for c in rpc_b.called("bdev_lvol_set_leader") if c[1]["lvs"] == lvs_a]
+    assert release[-1][1] == {"lvs": lvs_a, "leader": False, "bs_nonleadership": True}
+    assert any(c[1]["lvs"] == lvs_a for c in rpc_a.called("bdev_lvol_update_lvstore"))
+    assert rpc_a.lvstores[lvs_a]["leader"] is True
+    # ANA flipped back for store-A volumes
+    for volume in volumes:
+        if volume.home_node_id == node_a.uuid:
+            assert _ana(rpc_a, volume, "10.0.0.1") == "optimized"
+            assert _ana(rpc_b, volume, "10.0.0.2") == "non_optimized"
+    # records
+    assert _leader_of(cluster.uuid, lvs_a).uuid == node_a.uuid
+    fresh_b = edge_db.get_edge_node_by_id(cluster.uuid, node_b.uuid)
+    assert fresh_b.leader_of == [stack.lvs_name(node_b.uuid)]
+    assert edge_db.get_edge_node_by_id(cluster.uuid, node_a.uuid).status == \
         EdgeNode.STATUS_ONLINE
+
+
+def test_restart_without_takeover_resumes_own_leadership(env):
+    """Restart wins the race against fail-over: the returning node must
+    re-take SPDK-side leadership of its own store (it never lost it in the
+    records) and flip its paths back to optimized."""
+    _, spdk, fake_k8s = env
+    cluster, node_a, node_b, volumes = _two_node_cluster(spdk)
+    lvs_a = stack.lvs_name(node_a.uuid)
+
+    spdk.for_ip("10.0.0.1").reset()
+    _set_status(node_a, EdgeNode.STATUS_OFFLINE)
+    task_id = edge_cluster_ops.add_edge_task(
+        JobSchedule.FN_EDGE_NODE_RESTART, cluster.uuid, node_a.uuid)
+    result = edge_cluster_ops.handle_node_restart_task(
+        DBController().get_task_by_id(task_id))
+    assert result.kind == TaskResult.DONE
+
+    rpc_a = spdk.for_ip("10.0.0.1")
+    assert rpc_a.lvstores[lvs_a]["leader"] is True
+    for volume in volumes:
+        if volume.home_node_id == node_a.uuid:
+            assert _ana(rpc_a, volume, "10.0.0.1") == "optimized"
+    # no port fence needed in this path
+    assert not spdk.for_ip("10.0.0.2").called("nvmf_port_block")
 
 
 # ------------------------------------------------------------------ crypto
 
-def test_crypto_volume_create(env):
+def test_crypto_volume_exists_on_both_nodes(env):
     kv, spdk, _ = env
-    cluster, primary, secondary, (volume,) = _two_node_cluster(spdk, crypto=True)
-    rpc = spdk.for_ip("10.0.0.1")
-    assert volume.crypto and volume.crypto_bdev == stack.crypto_bdev(volume.uuid)
-    # key registered + crypto bdev over the lvol; ns exposes the CRYPTO bdev
-    assert stack.crypto_key_name(volume.uuid) in rpc.crypto_keys
-    create = rpc.called("lvol_crypto_create")[0][1]
-    assert create["base_name"] == volume.lvol_bdev
-    assert rpc.subsystems[volume.nqn]["namespaces"][0]["bdev_name"] == \
-        volume.crypto_bdev
-    # DEKs persisted through the KMS (LocalKMS -> the shared kv store)
-    dek_key = f"keys/{stack.volume_dek_path(cluster.uuid, volume.uuid)}".encode()
-    assert kv.get(dek_key)
+    cluster, node_a, node_b, volumes = _two_node_cluster(spdk, crypto=True)
+    for volume in volumes:
+        for ip in ("10.0.0.1", "10.0.0.2"):
+            rpc = spdk.for_ip(ip)
+            # key registered + crypto bdev over the (created or registered) lvol
+            assert stack.crypto_key_name(volume.uuid) in rpc.crypto_keys
+            assert volume.crypto_bdev in rpc.bdevs
+            assert rpc.subsystems[volume.nqn]["namespaces"][0]["bdev_name"] == \
+                volume.crypto_bdev
+        dek_key = f"keys/{stack.volume_dek_path(cluster.uuid, volume.uuid)}".encode()
+        assert kv.get(dek_key)
 
 
 def test_crypto_volume_delete_removes_keys(env):
     kv, spdk, _ = env
-    cluster, primary, secondary, (volume,) = _two_node_cluster(spdk, crypto=True)
+    cluster, node_a, node_b, volumes = _two_node_cluster(spdk, crypto=True)
+    volume = volumes[0]
     edge_cluster_ops.delete_volume(cluster.uuid, volume.uuid)
-    rpc = spdk.for_ip("10.0.0.1")
-    assert volume.crypto_bdev not in rpc.bdevs
     dek_key = f"keys/{stack.volume_dek_path(cluster.uuid, volume.uuid)}".encode()
     assert kv.get(dek_key) is None
-
-
-def test_failover_republishes_crypto_on_secondary(env):
-    kv, spdk, fake_k8s = env
-    cluster, primary, secondary, (volume,) = _two_node_cluster(spdk, crypto=True)
-    fake_k8s.running["worker-1"] = False
-    _monitor().check_cluster(edge_db.get_cluster(cluster.uuid))
-    result = edge_cluster_ops.handle_failover_task(_failover_tasks(cluster.uuid)[0])
-    assert result.kind == TaskResult.DONE
-
-    secondary_rpc = spdk.for_ip("10.0.0.2")
-    # the key came back from the KMS and the crypto bdev was rebuilt there
-    assert stack.crypto_key_name(volume.uuid) in secondary_rpc.crypto_keys
-    assert secondary_rpc.subsystems[volume.nqn]["namespaces"][0]["bdev_name"] == \
-        volume.crypto_bdev

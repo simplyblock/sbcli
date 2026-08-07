@@ -75,10 +75,10 @@ class EdgeApi:
     def node(self, node_id) -> dict:
         return self.request("GET", f"/edge-nodes/{node_id}").json()
 
-    def add_node(self, hostname, mgmt_ip, partitions, data_ip=None):
+    def add_node(self, hostname, mgmt_ip, partitions, data_ip=None, spdk_cpus=1):
         return self.request("POST", "/edge-nodes/", json={
-            "hostname": hostname, "mgmt_ip": mgmt_ip,
-            "data_ip": data_ip, "partitions": partitions})
+            "hostname": hostname, "mgmt_ip": mgmt_ip, "data_ip": data_ip,
+            "partitions": partitions, "spdk_cpus": spdk_cpus})
 
     def create_volume(self, name, size) -> dict:
         return self.request("POST", "/edge-volumes/",

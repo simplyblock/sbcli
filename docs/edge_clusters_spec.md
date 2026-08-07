@@ -20,13 +20,13 @@ API/security). The CP talks to an edge site over exactly two channels:
    from rendered yaml), and
 2. **SPDK JSON-RPC** (via the spdk proxy container in the edge SPDK pod).
 
-No snode agent, no swarm, no ultra distr/JM/hublvol machinery. Runs in 2 vCPU per node.
+No snode agent, no swarm, no ultra distr/JM machinery. SPDK runs on a deploy-time
+choice of 1-6 vCPUs per node (§4.5).
 The edge data plane must keep serving autonomously while the uplink to the CP is down —
 no CP-held lock, lease, or task gates edge IO.
 
-Out of scope (explicitly): pools, snapshots/clones, QoS, backups, ANA-based multipath
-(a simpler active/passive dual-path scheme is used — §4.4), cross-site replication,
-1→2 node expansion (§10).
+Out of scope (explicitly): pools, snapshots/clones (registration hooks prepared), QoS,
+backups, cross-site replication, 1→2 node expansion (§10).
 
 ## 2. Tenancy and placement
 
@@ -63,7 +63,9 @@ read is a bounded FDB range read — no new full-table scans (analysis §1.3).
 | `nvmf_port` | client-facing nvmf-tcp listener (default 4420) |
 | `repl_port` | internal node-to-node replication listener (default 4430) |
 | `partitions: List[EdgePartition]` | the node's contributed partitions/devices |
-| `is_primary` | primary hosts the lvstore + client subsystems (first node added) |
+| `is_primary` | first node added; store index 0 (per-store client ports) |
+| `spdk_cpus` | deploy-time SPDK vCPU choice, 1..6 (§4.5) |
+| `lvstore_base` / `leader_of` | this node's own store backing bdev; the lvs names it currently LEADS |
 | `status` | from BaseNodeObject: `online`, `offline`, `unreachable`, `down`, `in_creation`, `in_restart`, `removed` |
 | `online_since` | for status history |
 
@@ -97,64 +99,72 @@ block_size=4096)`.
 | 2 | `raid1` `el_{node_short}` over the two aio bdevs |
 | 3+ | `raid5f` `el_{node_short}` over all aio bdevs (strip 64 KiB) |
 
-### 4.2 Cross-node mirror (2-node clusters only)
+### 4.2 Active/active stores (2-node clusters — product processing)
 
-- **Every** node exposes its local top via an internal replication subsystem
-  `"{cluster.nqn}:edge-repl:{node_uuid}"`, listener `data_ip:repl_port`, ns 1.
-  (The primary exposes one too — it is unused until a takeover/failback needs it,
-  and keeping the two nodes symmetric makes reassembly trivial.)
-- The **primary** attaches the secondary's replication subsystem:
-  `bdev_nvme_attach_controller(name="er_{peer_short}", …)` → bdev `er_{peer_short}n1`,
-  and builds `raid1` `em_{cluster_short}` = `[local_top, er_{peer_short}n1]`.
-- Single-node clusters skip the mirror entirely (per the sketch): the lvstore sits
-  directly on the local top.
+Each node OWNS a store and runs a live SECONDARY instance of the peer's store
+(the spdk-fork primary/secondary lvstore machinery — same as hyperscale):
 
-### 4.3 Lvstore and volumes (dynamic volume management)
+```
+partitions -> aio bdevs -> local raid -> local_top -> bdev_split(2)
+    {local_top}p0 (own half)   {local_top}p1 (peer half)
+repl subsystem edge-repl:{node}: ns1 = p0, ns2 = p1 (listener data_ip:4430)
+er_{peer} controller: er_{peer}n1 (= peer.p0), er_{peer}n2 (= peer.p1)
 
-- lvstore `elvs_{cluster_short}` **between the nvmf target and the first raid**: it sits
-  on the mirror (2-node) or the local top (1-node), `cluster_sz` 4 MiB,
-  `clear_method=unmap`. Hosted by exactly one node at a time — the *designated primary*
-  normally, the secondary between fail-over and fail-back (`EdgeNode.lvstore_base` marks
-  the current host).
-- Volume = plain SPDK lvol (thin): bdev `elvs_{cluster_short}/{volume_name}` — created,
-  resized and deleted dynamically at runtime.
-- The **mirror raid carries an on-disk superblock** so either node can reassemble it
-  (degraded) via `bdev_examine` during fail-over/fail-back.
+store of node i:  mirror em_{i} = raid1, superblock, instantiated on BOTH nodes
+    on node i (PRIMARY):   [i.p0, er_{j}n2]
+    on node j (SECONDARY): [j.p1, er_{i}n1]      (the same two physical copies)
+lvstore elvs_{i} on em_{i}; role via bdev_lvol_set_lvs_opts; leader = node i.
+```
 
-### 4.4 Client paths (active/passive)
+Single-node clusters keep the flat layout (lvstore directly on the local top,
+no split/mirror; created lazily at first volume).
 
-One client subsystem per volume: nqn `"{cluster.nqn}:edge-lvol:{volume_uuid}"`. On
-2-node clusters the subsystem + listener exist on **both** nodes from volume-create:
+### 4.3 Dynamic volumes, registration, and the two ANA paths
 
-- the lvstore host publishes the namespace (the **active** path),
-- the peer holds a namespace-less **passive** subsystem — clients pre-connect it, and it
-  lights up the moment a takeover adds the namespace (namespace-attach AEN; no ANA
-  machinery needed).
+- Volume create places on the least-loaded ONLINE store (balanced across both
+  nodes) and runs on the store's LEADER; the creation is **registered on the
+  pairing node's secondary instance** (`bdev_lvol_register`, snapshot/clone
+  variants when those land) so the lvol bdev exists on both nodes.
+- One client subsystem per volume with a namespace and listener on **both**
+  nodes: ANA **optimized** on the leader's path, **non-optimized** on the
+  peer's. Clients connect both entries from connect-info; kernel ANA steers.
+- Client ports are per store (`nvmf_port + store_index`, 4420/4421) so a
+  fail-back can fence exactly one store's IO with `nvmf_port_block`.
 
-Connect info returns one entry per path, active first; clients connect all of them
-(`nvme connect` per entry, same reconnect-tuning defaults as hyperscale).
+### 4.4 Optional encryption (crypto bdevs)
 
-### 4.5 Optional encryption (crypto bdevs)
+`create_volume(crypto=true)` inserts a crypto bdev `ecr_{vol_short}` between
+the lvol and the fabric **on both nodes** (the registered lvol makes that
+possible). AES_XTS key pairs live in the cluster's KMS via the existing
+abstraction (external Vault or LocalKMS), path
+`cluster/{cluster_id}/edge-volume/{volume_uuid}` — identical key handling to
+hyperscale lvols. SPDK-side key registration and the crypto bdev are runtime
+state, re-established from the KMS at every republish; volume delete removes
+the DEKs. WAN caveat: crypto-volume *recovery publication* needs the KMS
+reachable; in-flight IO never does.
 
-`create_volume(crypto=True)` inserts a crypto bdev `ecr_{vol_short}` between the lvol
-and the fabric (the namespace exposes the crypto bdev). AES_XTS key pairs live in the
-cluster's KMS via the existing abstraction (`simplyblock_core.kms`: external Vault or
-LocalKMS), path `cluster/{cluster_id}/edge-volume/{volume_uuid}`, KEK
-`edge-{cluster_id}` — the same key handling as hyperscale lvols. SPDK-side key
-registration (`accel_crypto_key_create`) and the crypto bdev are runtime state,
-re-established from the KMS at every republish (restart/fail-over/fail-back). Volume
-delete removes the DEKs. Note the WAN caveat: creating/republishing an encrypted volume
-needs the KMS reachable — an uplink outage delays crypto-volume *recovery publication*
-but never in-flight IO.
+### 4.5 SPDK pod and CPU layout (deploy-time choice: 1-6 vCPUs)
 
-### 4.4 SPDK pod (2 vCPU)
+`spdk_cpus` is chosen per node at add time (API `spdk_cpus`, 1..6):
 
-Rendered by the CP from `simplyblock_edge/templates/edge_spdk_pod.yaml.j2` and created
-through the edge cluster's k8s API: `hostNetwork`, `nodeSelector` on `hostname`,
-privileged (raw partition access via `/dev` hostPath), spdk container + spdk-proxy
-container, 2 CPU / small hugepage allocation. Pod name `edge-spdk-{node_short}`. No init
-Job, no vfio binding, no kubelet reconfiguration — partitions are consumed via AIO, so
-the kernel keeps owning the devices.
+| vCPUs | placement |
+|---|---|
+| 1 | app + lvs poller + nvmf poller on core 0 |
+| 2 | app + lvs poller on core 0; nvmf poller on core 1 |
+| 3 | app / lvs poller / nvmf poller on cores 0/1/2 |
+| 4-6 | cores 3+ add MORE nvmf poller cores |
+
+The masks (`stack.plan_cpu_layout`) travel as pod env (`SPDK_REACTOR_MASK`,
+`SPDK_APP_MASK`, `EDGE_LVS_MASK`, `EDGE_NVMF_MASK`); the lvs poller group is
+placed via `bdev_lvol_create_poller_group`. The **same CPU-topology
+node-preparation Job the central clusters use**
+(`storage_cpu_topology.yaml.j2`: kubelet static cpu-manager policy + reserved
+system cpus) runs on every edge node before the SPDK pod deploys (toggle
+`SIMPLYBLOCK_EDGE_CPU_TOPOLOGY`, reserved set
+`SIMPLYBLOCK_EDGE_RESERVED_SYSTEM_CPUS`). Pod: hostNetwork, nodeSelector on
+hostname, privileged (raw partitions via /dev, consumed as AIO — no vfio, no
+snode agent).
+
 
 ## 5. Control flows (all through `simplyblock_edge/edge_cluster_ops.py`)
 
@@ -196,39 +206,42 @@ first node reaches ONLINE), `mode = kubernetes`.
   (**fork-capability gate**: upstream raid5f has no rebuild/grow; the call is made and a
   clear error is surfaced if the fork rejects it — see Open Questions).
 
-### 5.6 Fail-over (lvstore takeover by the secondary)
+### 5.6 Fail-over (secondary lvstore promotion)
 
-When the monitor sees the lvstore host not serving (offline/unreachable/down) while the
-peer is ONLINE on a 2-node cluster, it enqueues FN_EDGE_FAILOVER (deduped) targeting the
-survivor. The task, on the secondary:
-1. Ensure the local stack + `bdev_examine` its local top → the superblocked mirror
-   assembles **degraded** from the surviving leg → the lvstore loads.
-   (Fork gate: if examine-assembly is unavailable, fall back to explicit single-leg
-   `bdev_raid_create` — §10.)
-2. Republish every volume actively: crypto keys re-fetched from the KMS, namespaces
-   added to the pre-existing passive subsystems → the clients' second path activates.
-3. Flip `lvstore_base`: secondary becomes the host; connect info reorders.
+When the monitor sees a store's leader not serving (offline/unreachable/down)
+while the peer is ONLINE, it enqueues FN_EDGE_FAILOVER for THAT store
+(deduped, params.lvs). The survivor's secondary instance is LIVE, so the task
+is exactly the product flow:
 
-If the primary recovers before the takeover ran, the task no-ops.
+1. `bdev_lvol_update_lvstore(lvs)` — refresh the in-memory metadata of the
+   secondary instance from its mirror copy (reload-then-grant).
+2. `bdev_lvol_set_leader(lvs, leader=True)`.
+3. Flip the survivor's listeners for the store's volumes to ANA
+   **optimized** — the clients' pre-connected second path takes the IO.
+
+No cold examine, no reconnect. If the owner recovered first, the task no-ops.
 
 ### 5.7 Node returns after outage (rebuild + fail-back)
 
-The monitor detects "probe says reachable, record says offline/unreachable" and
-enqueues FN_EDGE_NODE_RESTART (deduped). The task, on the returned node:
-1. Recreate aio bdevs + local stack + repl subsystem (idempotent — names are derived).
-2. If a **peer hosts the lvstore** (normal secondary restart, or a failed-over primary
-   coming home): on the host, re-attach the returning node's repl leg and
-   `bdev_raid_add_base_bdev` it into the mirror → SPDK raid1 rebuild, no CP data path.
-   Restore the passive client paths on the returning node.
-3. If the returning node **still hosts the lvstore** (no takeover happened): reattach
-   the remote leg, reassemble the mirror, reload the lvstore, republish actively.
-4. **Fail-back**: if the returning node is the *designated primary* and the secondary
-   currently hosts the lvstore — wait for the mirror resync to complete, then: withdraw
-   the namespaces on the secondary, release the mirror there (superblock stays on the
-   legs), assemble mirror + lvstore on the primary, republish actively on the primary
-   and passively on the secondary, flip `lvstore_base` home. The namespace withdrawal →
-   republish window is the (bounded) path-switch blip clients ride out on their queued
-   reconnects.
+FN_EDGE_NODE_RESTART (monitor-enqueued, deduped) on the returning node:
+
+1. Rebuild aio bdevs + local raid + split + repl subsystem (idempotent).
+2. On the surviving peer: re-add the returning node's halves into BOTH of its
+   raid instances (its own store's mirror and its secondary instance of the
+   returning node's store) → SPDK raid1 rebuilds.
+3. On the returning node: re-instantiate both stores (examine of the
+   superblocked halves; explicit create fallback), `update_lvstore` its
+   secondary instance, republish all paths non-optimized.
+4. **Fail-back** (peer leads the returning node's own store): wait for the
+   mirror resync, then the product sequence — `nvmf_port_block` on the
+   store's client port at the peer (fence), `set_leader(leader=False,
+   bs_nonleadership=True)` there, `update_lvstore` + `set_leader(True)` on
+   the returning node (examine already reloaded its instance), ANA flip
+   (optimized home / non-optimized peer), `nvmf_port_unblock`. The fence
+   bounds the handover to the block window (sub-second in hyperscale
+   measurements).
+   If no takeover happened (restart won the race), the returning node simply
+   resumes leadership of its own store (update + set_leader + ANA).
 5. Node → `online`; cluster status re-derived.
 
 ## 6. Status model

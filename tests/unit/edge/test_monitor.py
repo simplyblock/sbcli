@@ -99,13 +99,15 @@ def test_returned_node_gets_restart_task_not_instant_online(env):
     monitor.check_cluster(cluster)
     assert _fresh(cluster, n2).status == EdgeNode.STATUS_OFFLINE
 
-    tasks = DBController().get_job_tasks(cluster.uuid)
-    assert len(tasks) == 1
-    assert tasks[0].function_name == JobSchedule.FN_EDGE_NODE_RESTART
-    assert tasks[0].node_id == n2.uuid
+    restarts = [t for t in DBController().get_job_tasks(cluster.uuid)
+                if t.function_name == JobSchedule.FN_EDGE_NODE_RESTART]
+    assert len(restarts) == 1
+    assert restarts[0].node_id == n2.uuid
 
 
-def test_down_node_is_never_touched_or_restarted(env):
+def test_down_node_is_never_auto_restarted(env):
+    """DOWN pins the node (no auto-restart), but its STORE still fails over
+    to the survivor — availability wins over the admin stop."""
     _, spdk, fake_k8s = env
     cluster, n1, n2 = _cluster_with_nodes(spdk)
     edge_cluster_ops.shutdown_node(cluster.uuid, n2.uuid)
@@ -113,7 +115,8 @@ def test_down_node_is_never_touched_or_restarted(env):
     status = _monitor().check_cluster(cluster)
     assert _fresh(cluster, n2).status == EdgeNode.STATUS_DOWN
     assert status == Cluster.STATUS_DEGRADED
-    assert DBController().get_job_tasks(cluster.uuid) == []
+    tasks = DBController().get_job_tasks(cluster.uuid)
+    assert [t.function_name for t in tasks] == [JobSchedule.FN_EDGE_FAILOVER]
 
 
 def test_tick_isolates_broken_cluster(env):

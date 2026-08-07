@@ -66,8 +66,10 @@ class EdgeNodeDTO(BaseModel):
     mgmt_ip: str
     data_ip: str
     status: str
-    is_primary: bool          # designated primary
-    hosts_lvstore: bool       # current lvstore host (differs during fail-over)
+    is_primary: bool          # first node added (store index 0)
+    # lvs names this node currently LEADS (active/active: normally its own
+    # store; after a fail-over the survivor also leads the peer's store).
+    leader_of: List[str]
     nvmf_port: int
     partitions: List[EdgePartitionDTO]
 
@@ -76,7 +78,7 @@ class EdgeNodeDTO(BaseModel):
         return EdgeNodeDTO(
             uuid=UUID(node.uuid), hostname=node.hostname, mgmt_ip=node.mgmt_ip,
             data_ip=node.get_data_ip(), status=node.status,
-            is_primary=node.is_primary, hosts_lvstore=bool(node.lvstore_base),
+            is_primary=node.is_primary, leader_of=list(node.leader_of),
             nvmf_port=node.nvmf_port,
             partitions=[EdgePartitionDTO.from_model(p) for p in node.partitions
                         if p.status != 'removed'])
@@ -100,6 +102,10 @@ class _AddNodeParams(BaseModel):
     mgmt_ip: str = Field(min_length=1)
     data_ip: Optional[str] = None
     partitions: List[str] = Field(min_length=1)
+    # SPDK vCPUs on this node (1-6); thread placement derives from it
+    # (1: everything together; 2: app+lvs / nvmf; 3: one core each;
+    # 4-6: extra cores become additional nvmf pollers).
+    spdk_cpus: int = Field(default=1, ge=1, le=6)
 
 
 class _AddDeviceParams(BaseModel):
@@ -190,7 +196,8 @@ def add_node(cluster: EdgeCluster, parameters: _AddNodeParams) -> Response:
         try:
             edge_cluster_ops.add_edge_node(
                 cluster.get_id(), parameters.hostname, parameters.mgmt_ip,
-                parameters.partitions, data_ip=parameters.data_ip or "")
+                parameters.partitions, data_ip=parameters.data_ip or "",
+                spdk_cpus=parameters.spdk_cpus)
         except Exception:
             logger.exception('Edge node add failed')
 

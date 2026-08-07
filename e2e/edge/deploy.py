@@ -123,7 +123,8 @@ def deploy_edge_cluster(state, spec, admin_session):
     for node_name in entry["nodes"]:
         node_info = helpers.instance(state, node_name)
         api.add_node(hostname=node_name, mgmt_ip=node_info["private_ip"],
-                     partitions=entry["device_paths"])
+                     partitions=entry["device_paths"],
+                     spdk_cpus=int(os.getenv("EDGE_E2E_SPDK_CPUS", "1")))
         helpers.wait_node_status(api, node_name, "online", timeout=900)
     helpers.wait_cluster_status(api, "active", timeout=300)
 

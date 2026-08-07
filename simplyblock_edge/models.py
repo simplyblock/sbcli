@@ -48,16 +48,27 @@ class EdgeNode(BaseNodeObject):
     rpc_password: SecretStr = SecretStr("")
     nvmf_port: int = edge_constants.EDGE_NVMF_PORT
     repl_port: int = edge_constants.EDGE_REPL_PORT
+    # Deploy-time choice, 1..6: SPDK reactor cores on this node. Thread
+    # placement (app / lvs poller / nvmf pollers) derives from it — see
+    # stack.plan_cpu_layout.
+    spdk_cpus: int = edge_constants.EDGE_POD_CPU
     partitions: List[EdgePartition] = []
-    # The primary hosts the lvstore and the client subsystems; the first node
-    # added to the cluster becomes primary.
+    # The first node added; store index 0 (its store's client port is
+    # nvmf_port + 0, the second node's store is nvmf_port + 1).
     is_primary: bool = False
-    # Primary only: the bdev the lvstore was created on (empty = no lvstore
-    # yet). Created lazily — at first volume create, or at second-node add so
-    # it can sit on the cross-node mirror (spec §5.2/§10). Also encodes the
+    # The bdev this node's OWN lvstore was created on (empty = not created
+    # yet). 2-node: the store mirror; 1-node: the local top. Encodes the
     # topology for idempotent reassembly after restarts.
     lvstore_base: str = ""
+    # lvs names this node currently LEADS (fork leadership). Normally its own
+    # store only; after a fail-over the survivor also leads the peer's store
+    # until fail-back returns it.
+    leader_of: List[str] = []
     online_since: str = ""
+
+    @property
+    def store_index(self) -> int:
+        return 0 if self.is_primary else 1
 
     def get_id(self):
         return "%s/%s" % (self.cluster_id, self.uuid)
@@ -81,6 +92,11 @@ class EdgeVolume(BaseModel):
     lvol_bdev: str = ""         # "{lvs}/{name}"
     nqn: str = ""
     ns_id: int = 1
+    # The node whose lvstore homes this volume (placement is balanced across
+    # the two stores on 2-node clusters). Leadership — and therefore which
+    # path is ANA-optimized — normally follows the home node.
+    home_node_id: str = ""
+    client_port: int = 0        # the home store's per-store client port
     status: str = STATUS_ONLINE
     # Optional encryption: a crypto bdev between the lvol and the fabric.
     # AES_XTS keys live in the cluster's KMS (external Vault or LocalKMS) —

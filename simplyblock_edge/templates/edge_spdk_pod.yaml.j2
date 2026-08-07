@@ -19,6 +19,14 @@ spec:
       env:
         - name: RPC_PORT
           value: "{{ rpc_port }}"
+        - name: SPDK_REACTOR_MASK
+          value: "{{ reactor_mask }}"
+        - name: SPDK_APP_MASK
+          value: "{{ app_mask }}"
+        - name: EDGE_LVS_MASK
+          value: "{{ lvs_mask }}"
+        - name: EDGE_NVMF_MASK
+          value: "{{ nvmf_mask }}"
       resources:
         requests:
           cpu: "{{ cpu }}"

@@ -96,6 +96,8 @@ def pod_running(cluster, node, timeout=edge_constants.EDGE_K8S_PROBE_TIMEOUT_SEC
 
 
 def render_spdk_pod(cluster, node, spdk_image, proxy_image) -> dict:
+    from simplyblock_edge.stack import CpuLayout, plan_cpu_layout
+    layout = plan_cpu_layout(node.spdk_cpus)
     env = jinja2.Environment(loader=jinja2.PackageLoader('simplyblock_edge', 'templates'),
                              autoescape=False)
     manifest = env.get_template('edge_spdk_pod.yaml.j2').render(
@@ -107,10 +109,57 @@ def render_spdk_pod(cluster, node, spdk_image, proxy_image) -> dict:
         rpc_port=node.rpc_port,
         rpc_username=node.rpc_username,
         rpc_password=node.rpc_password.get_secret_value(),
-        cpu=edge_constants.EDGE_POD_CPU,
+        cpu=node.spdk_cpus,
+        reactor_mask=CpuLayout.hex(layout.reactor_mask),
+        app_mask=CpuLayout.hex(layout.app_mask),
+        lvs_mask=CpuLayout.hex(layout.lvs_mask),
+        nvmf_mask=CpuLayout.hex(layout.nvmf_mask),
         hugepages_mib=edge_constants.EDGE_POD_HUGEPAGES_MIB,
     )
     return yaml.safe_load(manifest)
+
+
+def deploy_cpu_topology_job(cluster, node,
+                            reserved_system_cpus=None,
+                            timeout=600, interval=5):
+    """Run the SAME node-preparation CPU-topology Job the central clusters
+    use (simplyblock_web/templates/storage_cpu_topology.yaml.j2) against the
+    edge node, through the edge cluster's k8s API: create, wait for
+    completion, delete."""
+    import time as _time
+    env = jinja2.Environment(loader=jinja2.PackageLoader('simplyblock_web', 'templates'),
+                             autoescape=False)
+    job_name = f"edge-cpu-topology-{_short(node.uuid)}"
+    body = yaml.safe_load(env.get_template('storage_cpu_topology.yaml.j2').render(
+        CORE_JOBNAME=job_name,
+        HOSTNAME=node.hostname,
+        NAMESPACE=cluster.k8s_namespace,
+        RESERVED_SYSTEM_CPUS=(reserved_system_cpus
+                              or edge_constants.EDGE_RESERVED_SYSTEM_CPUS),
+    ))
+    batch = k8s_client.BatchV1Api(api_client(cluster))
+    try:
+        batch.create_namespaced_job(cluster.k8s_namespace, body)
+    except k8s_client.ApiException as e:
+        if e.status != 409:
+            raise EdgeK8sError(f"create cpu-topology job: {e.status}") from e
+    deadline = _time.monotonic() + timeout
+    try:
+        while True:
+            job = batch.read_namespaced_job(job_name, cluster.k8s_namespace)
+            if job.status.succeeded:
+                return
+            if job.status.failed:
+                raise EdgeK8sError(f"cpu-topology job failed on {node.hostname}")
+            if _time.monotonic() >= deadline:
+                raise EdgeK8sError(f"cpu-topology job timed out on {node.hostname}")
+            _time.sleep(interval)
+    finally:
+        try:
+            batch.delete_namespaced_job(job_name, cluster.k8s_namespace,
+                                        propagation_policy='Foreground')
+        except k8s_client.ApiException:
+            pass
 
 
 def deploy_spdk_pod(cluster, node, spdk_image, proxy_image):

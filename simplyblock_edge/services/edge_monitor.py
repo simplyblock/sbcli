@@ -72,23 +72,29 @@ class EdgeMonitor(PollingService):
         return new_status
 
     def _maybe_failover(self, cluster, nodes):
-        """2-node clusters: when the lvstore host stops serving while the
-        peer is ONLINE, enqueue the fail-over (deduped task). Fail-back is
-        driven by the returning node's restart task."""
+        """2-node clusters: for every store whose leader stopped serving
+        while the peer is ONLINE, enqueue the fail-over of THAT store
+        (deduped task; the survivor's live secondary instance gets promoted
+        via update + set_leader). Fail-back is driven by the returning
+        node's restart task."""
+        from simplyblock_edge import stack
         from simplyblock_edge.models import EdgeNode
         active = [n for n in nodes if n.status != EdgeNode.STATUS_REMOVED]
         if len(active) < 2:
             return
-        host = next((n for n in active if n.lvstore_base), None)
-        if host is None:
-            return  # no lvstore yet
         not_serving = (EdgeNode.STATUS_OFFLINE, EdgeNode.STATUS_UNREACHABLE,
                        EdgeNode.STATUS_DOWN)
-        survivor = next((n for n in active if n.uuid != host.uuid
-                         and n.status == EdgeNode.STATUS_ONLINE), None)
-        if host.status in not_serving and survivor is not None:
+        for owner in active:
+            if not owner.lvstore_base or owner.status not in not_serving:
+                continue
+            lvs = stack.lvs_name(owner.uuid)
+            survivor = next((n for n in active if n.uuid != owner.uuid
+                             and n.status == EdgeNode.STATUS_ONLINE), None)
+            if survivor is None or lvs in survivor.leader_of:
+                continue
             edge_cluster_ops.add_edge_task(
                 JobSchedule.FN_EDGE_FAILOVER, cluster.get_id(), survivor.uuid,
+                params={"lvs": lvs},
                 max_retry=edge_constants.EDGE_NODE_RESTART_MAX_RETRY)
 
     def check_devices(self, node):

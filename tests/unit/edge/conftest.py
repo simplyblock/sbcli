@@ -78,6 +78,7 @@ def spdk(monkeypatch):
 @pytest.fixture()
 def fake_k8s(monkeypatch):
     fake = FakeEdgeK8s()
-    for attr in ("deploy_spdk_pod", "delete_spdk_pod", "node_ready", "pod_running"):
+    for attr in ("deploy_spdk_pod", "delete_spdk_pod", "node_ready", "pod_running",
+                 "deploy_cpu_topology_job"):
         monkeypatch.setattr(edge_k8s, attr, getattr(fake, attr))
     return fake

@@ -60,11 +60,19 @@ class FakeSpdk:
         self._rec("get_version")
         return "25.05-edge"
 
+    def _bdev_info(self, name):
+        info = {"name": name}
+        lvols = getattr(self, "lvols", {})
+        if name in lvols:
+            info["uuid"] = lvols[name]["uuid"]
+            info["driver_specific"] = {"lvol": {"blobid": lvols[name]["blobid"]}}
+        return info
+
     def get_bdevs(self, name=None, all_bdevs=False):
         self._rec("get_bdevs", name=name)
         if name is not None:
-            return [{"name": name}] if name in self.bdevs else None
-        return [{"name": b} for b in self.bdevs]
+            return [self._bdev_info(name)] if name in self.bdevs else None
+        return [self._bdev_info(b) for b in self.bdevs]
 
     # -- aio
     def bdev_aio_create(self, name, filename, block_size=4096):
@@ -163,23 +171,94 @@ class FakeSpdk:
         return True
 
     def listeners_create(self, nqn, trtype, traddr, trsvcid, ana_state=None):
-        self._rec("listeners_create", nqn=nqn, traddr=traddr, trsvcid=trsvcid)
+        self._rec("listeners_create", nqn=nqn, traddr=traddr, trsvcid=trsvcid,
+                  ana_state=ana_state)
         self.subsystems[nqn]["listen_addresses"].append(
-            {"trtype": trtype, "traddr": traddr, "trsvcid": str(trsvcid)})
+            {"trtype": trtype, "traddr": traddr, "trsvcid": str(trsvcid),
+             "ana_state": ana_state or "optimized"})
         return True
 
-    # -- lvstore / lvols
+    # -- split
+    def bdev_split(self, base_bdev, split_count):
+        self._rec("bdev_split", base_bdev=base_bdev, split_count=split_count)
+        halves = [f"{base_bdev}p{i}" for i in range(split_count)]
+        self.bdevs.update(halves)
+        return halves
+
+    # -- lvstore / lvols (fork primary/secondary processing)
     def create_lvstore(self, name, bdev_name, cluster_sz, clear_method,
                        num_md_pages_per_cluster_ratio=1):
         self._rec("create_lvstore", name=name, bdev_name=bdev_name)
-        self.lvstores[name] = bdev_name
+        self.lvstores[name] = {"base": bdev_name, "role": "primary",
+                               "leader": False}
+        return True
+
+    def bdev_lvol_set_lvs_opts(self, lvs, *, groupid, subsystem_port=9090,
+                               hublvol_port=0, role="primary"):
+        self._rec("bdev_lvol_set_lvs_opts", lvs=lvs, groupid=groupid,
+                  subsystem_port=subsystem_port, role=role)
+        self.lvstores.setdefault(lvs, {"base": "", "leader": False})["role"] = role
+        return True
+
+    def bdev_lvol_set_leader(self, lvs, *, leader=False, bs_nonleadership=False):
+        self._rec("bdev_lvol_set_leader", lvs=lvs, leader=leader,
+                  bs_nonleadership=bs_nonleadership)
+        self.lvstores.setdefault(lvs, {"base": "", "role": ""})["leader"] = leader
+        return True
+
+    def bdev_lvol_create_poller_group(self, cpu_mask):
+        self._rec("bdev_lvol_create_poller_group", cpu_mask=cpu_mask)
+        return True
+
+    def bdev_lvol_update_lvstore(self, lvs):
+        self._rec("bdev_lvol_update_lvstore", lvs=lvs)
+        return True
+
+    def bdev_lvol_register(self, name, lvs_name, registered_uuid, blobid,
+                           priority_class=0):
+        self._rec("bdev_lvol_register", name=name, lvs_name=lvs_name,
+                  registered_uuid=registered_uuid, blobid=blobid)
+        bdev = f"{lvs_name}/{name}"
+        self.bdevs.add(bdev)
+        self.lvols = getattr(self, "lvols", {})
+        self.lvols[bdev] = {"uuid": registered_uuid, "blobid": blobid}
         return True
 
     def create_lvol(self, name, size_in_mib, lvs_name, lvol_priority_class=0,
                     ndcs=0, npcs=0, uuid=None):
         self._rec("create_lvol", name=name, size_in_mib=size_in_mib, lvs_name=lvs_name)
-        self.bdevs.add(f"{lvs_name}/{name}")
-        return f"{lvs_name}/{name}"
+        bdev = f"{lvs_name}/{name}"
+        self.bdevs.add(bdev)
+        self.lvols = getattr(self, "lvols", {})
+        self.lvols[bdev] = {"uuid": f"uuid-{name}", "blobid": len(self.lvols) + 100}
+        return bdev
+
+    # -- port fence
+    def nvmf_port_block(self, port, is_reject=False):
+        self._rec("nvmf_port_block", port=port)
+        self.blocked_ports = getattr(self, "blocked_ports", set())
+        self.blocked_ports.add(port)
+        return True
+
+    def nvmf_port_unblock(self, port):
+        self._rec("nvmf_port_unblock", port=port)
+        self.blocked_ports = getattr(self, "blocked_ports", set())
+        self.blocked_ports.discard(port)
+        return True
+
+    def nvmf_subsystem_listener_set_ana_state(self, nqn, ip, port, trtype="TCP",
+                                              is_optimized=True, ana=None):
+        state = ana or ("optimized" if is_optimized else "non_optimized")
+        self._rec("nvmf_subsystem_listener_set_ana_state", nqn=nqn, ip=ip,
+                  port=port, ana_state=state)
+        subsystem = self.subsystems.get(nqn)
+        if subsystem is None:
+            raise RPCException("subsystem not found")
+        for la in subsystem["listen_addresses"]:
+            if la["traddr"] == ip and la["trsvcid"] == str(port):
+                la["ana_state"] = state
+                return True
+        raise RPCException("listener not found")
 
     def delete_lvol(self, name, sync=False, special_delete=False):
         self._rec("delete_lvol", name=name)
@@ -260,6 +339,12 @@ class FakeEdgeK8s:
         self._check()
         self.deployed.append(node.hostname)
         self.running[node.hostname] = True
+
+    def deploy_cpu_topology_job(self, cluster, node, reserved_system_cpus=None,
+                                timeout=600, interval=5):
+        self._check()
+        self.topology_jobs = getattr(self, "topology_jobs", [])
+        self.topology_jobs.append(node.hostname)
 
     def delete_spdk_pod(self, cluster, node):
         self._check()
