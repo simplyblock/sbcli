@@ -775,6 +775,26 @@ jobs:
             exit 1
           fi
 
+          echo "=== Waiting for FDB to be ready ==="
+          for i in $(seq 1 30); do
+            FDB_STATUS=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
+              sbcli-dev cluster list 2>&1) || true
+            if echo "$FDB_STATUS" | grep -qiE 'Connection.*invalid|Error.*reading.*FDB|not found'; then
+              echo "FDB not ready yet ($i/30): $(echo "$FDB_STATUS" | head -1)"
+              sleep 10
+            else
+              echo "FDB appears ready"
+              break
+            fi
+            if [ "$i" -eq 30 ]; then
+              echo "ERROR: FDB not ready after 5 minutes"
+              echo "$FDB_STATUS"
+              kubectl -n $NAMESPACE get pods
+              kubectl -n $NAMESPACE logs "$ADMIN_POD" --tail=50 2>/dev/null || true
+              exit 1
+            fi
+          done
+
           echo "=== Creating R25 cluster ==="
           CREATE_OUTPUT=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
             sbcli-dev -d --dev cluster create \
@@ -812,6 +832,14 @@ jobs:
             CLUSTER_SECRET=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
               sbcli-dev cluster list --json 2>/dev/null \
               | jq -r '.[0].secret // empty') || true
+          fi
+
+          # Validate the secret — should be a short alphanumeric token, not an error dump
+          if [ -z "$CLUSTER_SECRET" ] || [ "${#CLUSTER_SECRET}" -gt 100 ]; then
+            echo "ERROR: CLUSTER_SECRET is empty or invalid (length=${#CLUSTER_SECRET})"
+            echo "This usually means FDB is not reachable from the admin pod."
+            kubectl -n $NAMESPACE exec "$ADMIN_POD" -- sbcli-dev cluster list 2>&1 || true
+            exit 1
           fi
           echo "::add-mask::${CLUSTER_SECRET}"
           set -x
@@ -985,6 +1013,10 @@ jobs:
                   sbcli-dev cluster list --json 2>/dev/null \
                   | jq -r '.[0].secret // empty') || true
               fi
+              if [ -z "$CLUSTER_SECRET" ] || [ "${#CLUSTER_SECRET}" -gt 100 ]; then
+                echo "ERROR: CLUSTER_SECRET is empty or invalid (length=${#CLUSTER_SECRET})"
+                exit 1
+              fi
               echo "::add-mask::${CLUSTER_SECRET}"
               set -x
               echo "CLUSTER_ID=${CLUSTER_ID}" >> $GITHUB_ENV
@@ -1106,6 +1138,7 @@ jobs:
                 CLUSTER_ID=$(echo "$JSON_OUT" | jq -r '.[0].id // .[0].uuid // empty')
               fi
               # Get cluster secret using dedicated command
+              set +x
               CLUSTER_SECRET=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
                 sbctl cluster get-secret "$CLUSTER_ID" 2>/dev/null | tr -d '[:space:]') || true
               if [ -z "$CLUSTER_SECRET" ]; then
@@ -1113,7 +1146,12 @@ jobs:
                   sbctl cluster list --json 2>/dev/null \
                   | jq -r '.[0].secret // empty') || true
               fi
+              if [ -z "$CLUSTER_SECRET" ] || [ "${#CLUSTER_SECRET}" -gt 100 ]; then
+                echo "ERROR: CLUSTER_SECRET is empty or invalid (length=${#CLUSTER_SECRET})"
+                exit 1
+              fi
               echo "::add-mask::${CLUSTER_SECRET}"
+              set -x
               echo "CLUSTER_ID=${CLUSTER_ID}" >> $GITHUB_ENV
               echo "CLUSTER_SECRET=${CLUSTER_SECRET}" >> $GITHUB_ENV
               exit 0
