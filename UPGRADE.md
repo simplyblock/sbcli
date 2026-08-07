@@ -339,6 +339,36 @@ kubectl annotate configmap simplyblock-fdb-cluster-config -n simplyblock \
   helm.sh/resource-policy=keep --overwrite
 ```
 
+#### Step 1.1 — Protect FDB CRDs from Helm Deletion (CRITICAL)
+
+> **STATUS: NEEDS DEV CONFIRMATION** — If the `sbcli` Helm chart includes FDB CRDs
+> (e.g., `foundationdbclusters.apps.foundationdb.org`), then `helm uninstall sbcli`
+> will delete the CRDs. When a CRD is deleted, Kubernetes cascade-deletes ALL custom
+> resources of that type — meaning the `FoundationDBCluster` CR gets deleted by
+> Kubernetes regardless of any `helm.sh/resource-policy=keep` annotation. This causes
+> the FDB controller to remove all FDB pods, destroying the database.
+>
+> **Observed failure (2026-08-07)**: After `helm uninstall sbcli`, all FDB resources
+> (FoundationDBCluster CR, controller-manager, FDB pods) were gone despite having
+> keep annotations. Every `sbctl` command returned `transaction timed out (1031)`.
+>
+> **Potential fix**: Annotate the FDB CRDs with keep policy, OR remove the CRDs from
+> the chart before uninstalling. Confirm with dev which approach is correct.
+
+```bash
+# Option A: Annotate FDB CRDs with keep policy
+for CRD in foundationdbclusters.apps.foundationdb.org \
+           foundationdbbackups.apps.foundationdb.org \
+           foundationdbrestores.apps.foundationdb.org; do
+    kubectl annotate crd "$CRD" helm.sh/resource-policy=keep --overwrite
+done
+```
+
+```bash
+# Option B: Remove CRDs from the chart so helm uninstall won't touch them
+# (requires modifying the chart before running helm uninstall)
+```
+
 **Verify**:
 
 ```bash
@@ -398,14 +428,31 @@ kubectl delete deployment simplyblock-snapshot-controller -n kube-system --ignor
 helm uninstall sbcli --namespace simplyblock --wait
 ```
 
-FDB resources survive due to the keep annotation from Step 1.
+FDB resources survive due to the keep annotations from Steps 1 and 1.1.
 
-**Verify FDB still running**:
+**Verify FDB still running** (CRITICAL — if any of these fail, STOP and investigate):
 
 ```bash
-kubectl get foundationdbcluster -n simplyblock
+# 1. FoundationDBCluster CR must still exist
+kubectl get foundationdbcluster simplyblock-fdb-cluster -n simplyblock
+# Expected: Shows the cluster resource
+
+# 2. FDB controller-manager deployment must still exist
+kubectl get deployment simplyblock-fdb-controller-manager -n simplyblock
+# Expected: Shows the deployment
+
+# 3. FDB pods must still be running
 kubectl get pods -n simplyblock -l foundationdb.org/fdb-cluster-name=simplyblock-fdb-cluster
+# Expected: Multiple FDB pods in Running state
+
+# 4. FDB CRDs must still exist
+kubectl get crd foundationdbclusters.apps.foundationdb.org
+# Expected: Shows the CRD
 ```
+
+> **If the FoundationDBCluster CR or FDB CRDs are missing**, the database is destroyed
+> and cannot be recovered from this state. Check whether Step 1.1 (CRD protection)
+> was applied correctly.
 
 ### Step 4.1 — Verify FDB Cluster-Config ConfigMap
 
