@@ -298,7 +298,7 @@ Record the following before starting the upgrade:
 > **WARNING**: Storage nodes are shut down during this phase. Volumes are
 > unavailable to workloads. Plan for downtime and notify teams.
 
-### Step 1 — Annotate FDB Resources with `helm.sh/resource-policy: keep`
+### Step 1 — Ensure FDB Resources Have `helm.sh/resource-policy: keep` in Chart
 
 There are 8 FDB resources that must survive `helm uninstall`:
 
@@ -318,7 +318,51 @@ There are 8 FDB resources that must survive `helm uninstall`:
 > ConfigMap is deleted during `helm uninstall sbcli`, admin pods will be stuck in
 > `ContainerCreating` and all `sbcli`/`sbctl` commands will fail.
 
-Annotate each resource:
+> **IMPORTANT: `kubectl annotate` on live resources is NOT effective for `helm uninstall`.**
+> Helm reads annotations from its stored release manifest (in `sh.helm.release.v1.*`
+> secrets), not from the live object in etcd. Annotating a live resource with
+> `kubectl annotate` only patches etcd — Helm's copy is unchanged and it will still
+> delete the resource on uninstall.
+>
+> **The correct approach** is to add `helm.sh/resource-policy: keep` directly in the
+> Helm chart templates so it is baked into the stored manifest. This requires a chart
+> change + `helm upgrade` before uninstall.
+
+#### Option A — Chart template fix (correct way, requires chart change)
+
+Add to each FDB template in the chart:
+
+```yaml
+metadata:
+  annotations:
+    "helm.sh/resource-policy": keep
+```
+
+Then run `helm upgrade` to persist the annotation into Helm's release secret before
+running `helm uninstall`.
+
+#### Option B — Patch the Helm release secret directly (workaround without chart change)
+
+If the chart cannot be modified (e.g., upgrading from an older R25 chart), you can
+patch the stored Helm release manifest directly:
+
+```bash
+# 1. Get the latest Helm release secret
+SECRET_NAME=$(kubectl get secrets -n simplyblock -l owner=helm,name=sbcli \
+  --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1].metadata.name}')
+
+# 2. Decode, decompress, patch, recompress, re-encode the release data
+kubectl get secret "$SECRET_NAME" -n simplyblock -o jsonpath='{.data.release}' \
+  | base64 -d | base64 -d | gzip -d > /tmp/helm-release.json
+
+# 3. Inject keep annotation into FDB resource manifests in the release
+# (This is complex — use the chart fix if possible)
+```
+
+#### Option C — `kubectl annotate` live resources (limited effectiveness)
+
+> **WARNING**: This only works if Helm happens to check live objects, which standard
+> Helm does NOT do. Listed here for reference but **Option A is strongly recommended**.
 
 ```bash
 kubectl annotate deployment simplyblock-fdb-controller-manager -n simplyblock \
@@ -339,42 +383,17 @@ kubectl annotate configmap simplyblock-fdb-cluster-config -n simplyblock \
   helm.sh/resource-policy=keep --overwrite
 ```
 
-#### Step 1.1 — Protect FDB CRDs from Helm Deletion (CRITICAL)
-
-> **STATUS: NEEDS DEV CONFIRMATION** — If the `sbcli` Helm chart includes FDB CRDs
-> (e.g., `foundationdbclusters.apps.foundationdb.org`), then `helm uninstall sbcli`
-> will delete the CRDs. When a CRD is deleted, Kubernetes cascade-deletes ALL custom
-> resources of that type — meaning the `FoundationDBCluster` CR gets deleted by
-> Kubernetes regardless of any `helm.sh/resource-policy=keep` annotation. This causes
-> the FDB controller to remove all FDB pods, destroying the database.
->
-> **Observed failure (2026-08-07)**: After `helm uninstall sbcli`, all FDB resources
-> (FoundationDBCluster CR, controller-manager, FDB pods) were gone despite having
-> keep annotations. Every `sbctl` command returned `transaction timed out (1031)`.
->
-> **Potential fix**: Annotate the FDB CRDs with keep policy, OR remove the CRDs from
-> the chart before uninstalling. Confirm with dev which approach is correct.
+**Verify** (check Helm's stored manifest, not just live object):
 
 ```bash
-# Option A: Annotate FDB CRDs with keep policy
-for CRD in foundationdbclusters.apps.foundationdb.org \
-           foundationdbbackups.apps.foundationdb.org \
-           foundationdbrestores.apps.foundationdb.org; do
-    kubectl annotate crd "$CRD" helm.sh/resource-policy=keep --overwrite
-done
-```
-
-```bash
-# Option B: Remove CRDs from the chart so helm uninstall won't touch them
-# (requires modifying the chart before running helm uninstall)
-```
-
-**Verify**:
-
-```bash
+# Check live object (may not reflect what Helm sees)
 kubectl get deployment simplyblock-fdb-controller-manager -n simplyblock \
   -o jsonpath='{.metadata.annotations.helm\.sh/resource-policy}'
 # Expected: keep
+
+# Check Helm's stored manifest (this is what actually matters)
+helm get manifest sbcli -n simplyblock 2>/dev/null | grep -A5 "simplyblock-fdb-controller-manager" | grep resource-policy
+# Expected: "helm.sh/resource-policy": keep
 ```
 
 ### Step 2 — Shut Down All Storage Nodes
@@ -428,7 +447,9 @@ kubectl delete deployment simplyblock-snapshot-controller -n kube-system --ignor
 helm uninstall sbcli --namespace simplyblock --wait
 ```
 
-FDB resources survive due to the keep annotations from Steps 1 and 1.1.
+FDB resources survive because the chart templates include `helm.sh/resource-policy: keep`
+annotations (see Step 1). If the chart does NOT have these annotations, FDB will be
+deleted by `helm uninstall` and the database will be destroyed.
 
 **Verify FDB still running** (CRITICAL — if any of these fail, STOP and investigate):
 
@@ -450,9 +471,10 @@ kubectl get crd foundationdbclusters.apps.foundationdb.org
 # Expected: Shows the CRD
 ```
 
-> **If the FoundationDBCluster CR or FDB CRDs are missing**, the database is destroyed
-> and cannot be recovered from this state. Check whether Step 1.1 (CRD protection)
-> was applied correctly.
+> **If FDB resources are missing**: The chart likely does not have `helm.sh/resource-policy: keep`
+> in its templates. This must be fixed in the chart (see Step 1, Option A). Note that
+> `kubectl annotate` on live objects does NOT protect against `helm uninstall` — Helm reads
+> from its stored release manifest, not from etcd.
 
 ### Step 4.1 — Verify FDB Cluster-Config ConfigMap
 

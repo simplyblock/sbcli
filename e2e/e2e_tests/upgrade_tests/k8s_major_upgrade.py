@@ -5,7 +5,7 @@ Supports two upgrade paths:
 
 **R25 → R26 (maintenance window)**:
   Full Helm-to-Operator migration following the production upgrade guide:
-  1. Annotate FDB resources with ``helm.sh/resource-policy: keep``
+  1. Patch Helm release secret to add ``helm.sh/resource-policy: keep`` to FDB resources
   2. Shut down all storage nodes (suspend + shutdown)
   3. Uninstall old Helm chart(s)
   4. Create upgrade secret with existing cluster UUID/secret
@@ -28,6 +28,7 @@ No SSH to worker nodes required (Talos-compatible).
 
 from __future__ import annotations
 
+import json
 import os
 import random
 import string
@@ -1243,12 +1244,23 @@ class K8sNativeMajorUpgrade(TestClusterBase):
     # ══════════════════════════════════════════════════════════════════════════
 
     def _annotate_fdb_keep(self):
-        """Step 1: Add helm.sh/resource-policy: keep to FDB resources."""
-        self.logger.info("Migration Step 1: Annotating FDB resources with keep policy")
+        """Step 1: Add helm.sh/resource-policy: keep to FDB resources.
 
-        # First try upgrading the existing release to add the annotation via helm
-        # (as described in the guide). Fall back to direct annotation if the
-        # sbcli release doesn't exist (operator-deployed clusters).
+        IMPORTANT: ``kubectl annotate`` on live resources does NOT protect
+        against ``helm uninstall``. Helm reads annotations from its stored
+        release manifest (in sh.helm.release.v1.* secrets), not from the
+        live object in etcd. We must patch the Helm release secret so that
+        the stored manifest contains the keep annotation.
+
+        We also annotate live objects as a belt-and-suspenders measure, but
+        the Helm secret patch is the one that actually matters.
+        """
+        self.logger.info("Migration Step 1: Patching Helm release secret to add keep policy to FDB resources")
+
+        # Patch the Helm release secret for the sbcli chart
+        self._patch_helm_release_keep_annotations(self.helm_release_sbcli)
+
+        # Also annotate live resources (belt-and-suspenders, not sufficient alone)
         for kind, name in _FDB_KEEP_RESOURCES:
             ns_flag = f"-n {_NAMESPACE}" if kind not in ("clusterrole", "clusterrolebinding") else ""
             cmd = (
@@ -1256,7 +1268,114 @@ class K8sNativeMajorUpgrade(TestClusterBase):
                 f"helm.sh/resource-policy=keep --overwrite 2>/dev/null || true"
             )
             self.k8s_utils._exec_kubectl(cmd)
-        self.logger.info("FDB resources annotated with keep policy")
+        self.logger.info("FDB resources annotated with keep policy (live + Helm secret)")
+
+    def _patch_helm_release_keep_annotations(self, release_name: str):
+        """Patch the Helm release secret to inject resource-policy: keep.
+
+        Helm stores release data in secrets named sh.helm.release.v1.<name>.v<N>.
+        The data is: base64 → base64 → gzip → JSON. We decode, inject the keep
+        annotation into matching FDB resource manifests, and re-encode.
+        """
+        if not release_name:
+            self.logger.warning("No Helm release name provided, skipping secret patch")
+            return
+
+        fdb_resource_names = {name for _, name in _FDB_KEEP_RESOURCES}
+
+        # Find the latest Helm release secret
+        cmd = (
+            f"kubectl get secrets -n {_NAMESPACE} "
+            f"-l owner=helm,name={release_name} "
+            f"--sort-by=.metadata.creationTimestamp "
+            f"-o jsonpath='{{.items[-1].metadata.name}}' 2>/dev/null || true"
+        )
+        out, _ = self.k8s_utils._exec_kubectl(cmd)
+        secret_name = out.strip().strip("'")
+        if not secret_name:
+            self.logger.warning(f"No Helm release secret found for '{release_name}', skipping patch")
+            return
+
+        self.logger.info(f"Patching Helm release secret: {secret_name}")
+
+        # Read the release data from the secret
+        cmd = (
+            f"kubectl get secret {secret_name} -n {_NAMESPACE} "
+            f"-o jsonpath='{{.data.release}}' 2>/dev/null || true"
+        )
+        out, _ = self.k8s_utils._exec_kubectl(cmd)
+        raw = out.strip().strip("'")
+        if not raw:
+            self.logger.warning("Could not read Helm release secret data, skipping patch")
+            return
+
+        try:
+            import base64
+            import gzip
+
+            # Helm release encoding: base64 → base64 → gzip → JSON
+            decoded = gzip.decompress(base64.b64decode(base64.b64decode(raw)))
+            release = json.loads(decoded)
+
+            manifest = release.get("manifest", "")
+            if not manifest:
+                self.logger.warning("No manifest in Helm release, skipping patch")
+                return
+
+            # Split manifest into individual YAML documents
+            docs = manifest.split("\n---\n")
+            patched = False
+
+            new_docs = []
+            for doc in docs:
+                # Check if this document is an FDB resource by looking for its name
+                matched_name = None
+                for fname in fdb_resource_names:
+                    if f"name: {fname}" in doc:
+                        matched_name = fname
+                        break
+
+                if matched_name and "helm.sh/resource-policy" not in doc:
+                    # Inject the keep annotation
+                    if "  annotations:" in doc:
+                        doc = doc.replace(
+                            "  annotations:\n",
+                            '  annotations:\n    "helm.sh/resource-policy": keep\n',
+                            1,
+                        )
+                    else:
+                        doc = doc.replace(
+                            "metadata:\n",
+                            'metadata:\n  annotations:\n    "helm.sh/resource-policy": keep\n',
+                            1,
+                        )
+                    patched = True
+                    self.logger.info(f"  Injected keep annotation for: {matched_name}")
+
+                new_docs.append(doc)
+
+            if not patched:
+                self.logger.info("No FDB resources needed patching (already have keep annotation or not found in manifest)")
+                return
+
+            release["manifest"] = "\n---\n".join(new_docs)
+
+            # Re-encode: JSON → gzip → base64 → base64
+            compressed = gzip.compress(json.dumps(release).encode())
+            encoded = base64.b64encode(base64.b64encode(compressed)).decode()
+
+            # Patch the secret
+            patch_json = json.dumps({"data": {"release": encoded}})
+            cmd = (
+                f"kubectl patch secret {secret_name} -n {_NAMESPACE} "
+                f"--type=merge -p '{patch_json}'"
+            )
+            self.k8s_utils._exec_kubectl(cmd)
+            self.logger.info("Helm release secret patched successfully")
+
+        except Exception as e:
+            self.logger.warning(f"Failed to patch Helm release secret: {e}")
+            self.logger.warning("FDB resources may be deleted by helm uninstall")
 
     def _shutdown_all_nodes(self, storage_node_list: list[dict]):
         """Step 2 / 6.1: Force-shutdown all storage nodes.
