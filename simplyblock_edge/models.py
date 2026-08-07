@@ -19,7 +19,14 @@ class EdgePartition(BaseModel):
     STATUS_ONLINE = 'online'
     STATUS_FAILED = 'failed'
     STATUS_NEW = 'new'          # added, awaiting raid grow
-    STATUS_REMOVED = 'removed'
+    STATUS_REMOVED = 'removed'  # permanently gone (replaced); slot is retired
+    # Gracefully removed by the operator (device-remove); comes back via
+    # device-restart.
+    STATUS_OFFLINE = 'offline'
+    # The monitor detected the backing device is gone/faulted (e.g. EBS
+    # force-detach) while the record says it should be serving. IO continues
+    # on raid redundancy; device-restart brings it back after reattach.
+    STATUS_UNAVAILABLE = 'unavailable'
 
     device_path: str = ""       # e.g. /dev/nvme0n1p4
     size: int = 0
@@ -75,6 +82,12 @@ class EdgeVolume(BaseModel):
     nqn: str = ""
     ns_id: int = 1
     status: str = STATUS_ONLINE
+    # Optional encryption: a crypto bdev between the lvol and the fabric.
+    # AES_XTS keys live in the cluster's KMS (external Vault or LocalKMS) —
+    # same key handling as hyperscale lvols; the key name/path derive from
+    # the volume uuid (stack.crypto_key_name / stack.volume_dek_path).
+    crypto: bool = False
+    crypto_bdev: str = ""
 
     def get_id(self):
         return "%s/%s" % (self.cluster_id, self.uuid)

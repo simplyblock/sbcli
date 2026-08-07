@@ -64,10 +64,78 @@ class EdgeMonitor(PollingService):
         for node in nodes:
             statuses.append(self.check_node(cluster, node))
 
+        self._maybe_failover(cluster, nodes)
+
         new_status = derive_cluster_status(statuses)
         if cluster.status != new_status:
             edge_cluster_ops.set_cluster_status(cluster, new_status)
         return new_status
+
+    def _maybe_failover(self, cluster, nodes):
+        """2-node clusters: when the lvstore host stops serving while the
+        peer is ONLINE, enqueue the fail-over (deduped task). Fail-back is
+        driven by the returning node's restart task."""
+        from simplyblock_edge.models import EdgeNode
+        active = [n for n in nodes if n.status != EdgeNode.STATUS_REMOVED]
+        if len(active) < 2:
+            return
+        host = next((n for n in active if n.lvstore_base), None)
+        if host is None:
+            return  # no lvstore yet
+        not_serving = (EdgeNode.STATUS_OFFLINE, EdgeNode.STATUS_UNREACHABLE,
+                       EdgeNode.STATUS_DOWN)
+        survivor = next((n for n in active if n.uuid != host.uuid
+                         and n.status == EdgeNode.STATUS_ONLINE), None)
+        if host.status in not_serving and survivor is not None:
+            edge_cluster_ops.add_edge_task(
+                JobSchedule.FN_EDGE_FAILOVER, cluster.get_id(), survivor.uuid,
+                max_retry=edge_constants.EDGE_NODE_RESTART_MAX_RETRY)
+
+    def check_devices(self, node):
+        """Detect backing-device loss (e.g. EBS force-detach): a partition
+        whose record says ONLINE but whose aio bdev is gone — or was ejected
+        from its raid after IO errors — goes UNAVAILABLE. IO continues on the
+        remaining raid redundancy; recovery is explicit (device restart after
+        the operator reattaches the disk). Runs only for ONLINE nodes."""
+        from simplyblock_edge import stack
+        from simplyblock_edge.models import EdgePartition
+
+        rpc = node_rpc_client(node, timeout=edge_constants.EDGE_RPC_PROBE_TIMEOUT_SEC,
+                              retry=0)
+        try:
+            raids = rpc.bdev_raid_get_bdevs() or []
+        except Exception:
+            return  # transient RPC issue; the node probe owns that verdict
+        raid_members = set()
+        for raid in raids:
+            for member in (raid.get('base_bdevs_list') or []):
+                raid_members.add(member.get('name') if isinstance(member, dict) else member)
+
+        plan = stack.plan_local_stack(node)
+        lost = []
+        for index, part in enumerate(node.partitions):
+            if part.status != EdgePartition.STATUS_ONLINE:
+                continue
+            bdev = stack.aio_bdev_name(node.uuid, index)
+            try:
+                present = bool(rpc.get_bdevs(name=bdev))
+            except Exception:
+                return
+            in_raid = plan.raid is None or bdev in raid_members
+            if not present or not in_raid:
+                lost.append(part.device_path)
+
+        if not lost:
+            return
+
+        def _mutate(fresh):
+            for p in fresh.partitions:
+                if p.device_path in lost and p.status == EdgePartition.STATUS_ONLINE:
+                    p.status = EdgePartition.STATUS_UNAVAILABLE
+            return True
+        db.atomic_update(node, _mutate)
+        logger.warning(f"Edge node {node.get_id()} ({node.hostname}): "
+                       f"devices unavailable: {lost}")
 
     def check_node(self, cluster, node) -> str:
         probe = probe_node(cluster, node)
@@ -90,6 +158,13 @@ class EdgeMonitor(PollingService):
             edge_cluster_ops.add_edge_task(
                 JobSchedule.FN_EDGE_NODE_RESTART, cluster.get_id(), node.uuid,
                 max_retry=edge_constants.EDGE_NODE_RESTART_MAX_RETRY)
+
+        from simplyblock_edge.models import EdgeNode
+        if node.status == EdgeNode.STATUS_ONLINE and probe.rpc_alive:
+            try:
+                self.check_devices(node)
+            except Exception as e:
+                logger.error(f"Device check failed for {node.get_id()}: {e}")
 
         return node.status
 

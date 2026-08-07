@@ -21,6 +21,10 @@ EDGE_MONITOR_FAILURE_THRESHOLD = 60
 EDGE_K8S_PROBE_TIMEOUT_SEC = 5
 EDGE_RPC_PROBE_TIMEOUT_SEC = 3
 
+# Fail-back: how long to wait for the returning primary's mirror leg to
+# resync before moving the lvstore home.
+EDGE_RESYNC_TIMEOUT_SEC = int(os.getenv("SIMPLYBLOCK_EDGE_RESYNC_TIMEOUT", "7200"))
+
 # Task runner.
 EDGE_TASK_INTERVAL_SEC = 5
 EDGE_TASK_BACKOFF_BASE_SEC = 3
@@ -29,8 +33,10 @@ EDGE_NODE_RESTART_MAX_RETRY = 11
 
 # SPDK pod.
 EDGE_POD_PREFIX = "edge-spdk-"
-EDGE_POD_CPU = 2
-EDGE_POD_HUGEPAGES_MIB = 1024
+# vCPUs for the SPDK pod. E2e/edge sites run 4-vCPU instances with a single
+# vCPU dedicated to SPDK; larger boxes can raise this.
+EDGE_POD_CPU = int(os.getenv("SIMPLYBLOCK_EDGE_POD_CPU", "1"))
+EDGE_POD_HUGEPAGES_MIB = int(os.getenv("SIMPLYBLOCK_EDGE_POD_HUGEPAGES_MIB", "1024"))
 EDGE_SPDK_IMAGE = os.getenv("SIMPLYBLOCK_EDGE_SPDK_IMAGE", "simplyblock/spdk:edge-latest")
 EDGE_PROXY_IMAGE = os.getenv("SIMPLYBLOCK_EDGE_PROXY_IMAGE", "simplyblock/spdk-proxy:latest")
 

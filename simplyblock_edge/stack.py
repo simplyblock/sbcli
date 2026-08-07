@@ -64,6 +64,24 @@ def volume_bdev(cluster_id: str, volume_name: str) -> str:
     return f"{lvs_name(cluster_id)}/{volume_name}"
 
 
+def crypto_bdev(volume_uuid: str) -> str:
+    return f"ecr_{_short(volume_uuid)}"
+
+
+def crypto_key_name(volume_uuid: str) -> str:
+    return f"ekey_{_short(volume_uuid)}"
+
+
+def volume_dek_path(cluster_id: str, volume_uuid: str) -> str:
+    """KMS path for a volume's data encryption keys (AES_XTS key pair) —
+    same layout as the hyperscale lvol DEKs."""
+    return f"cluster/{cluster_id}/edge-volume/{volume_uuid}"
+
+
+def cluster_kek_name(cluster_id: str) -> str:
+    return f"edge-{cluster_id}"
+
+
 # --------------------------------------------------------------------- plans
 
 @dataclass
@@ -79,6 +97,9 @@ class RaidSpec:
     raid_level: str                  # "1" or "5f"
     base_bdevs: List[str] = field(default_factory=list)
     strip_size_kb: int = 0           # raid5f only
+    # The cross-node mirror carries an on-disk superblock so either node can
+    # reassemble it (degraded) via bdev_examine during takeover/failback.
+    superblock: bool = False
 
 
 @dataclass
@@ -143,7 +164,7 @@ def plan_mirror(cluster_id: str, cluster_nqn: str, primary, secondary) -> Mirror
         remote_port=secondary.repl_port,
         remote_leg=leg,
         raid=RaidSpec(name=mirror_name(cluster_id), raid_level="1",
-                      base_bdevs=[local_top, leg]),
+                      base_bdevs=[local_top, leg], superblock=True),
         top_bdev=mirror_name(cluster_id),
     )
 

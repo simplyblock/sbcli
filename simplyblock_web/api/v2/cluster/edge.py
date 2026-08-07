@@ -66,7 +66,8 @@ class EdgeNodeDTO(BaseModel):
     mgmt_ip: str
     data_ip: str
     status: str
-    is_primary: bool
+    is_primary: bool          # designated primary
+    hosts_lvstore: bool       # current lvstore host (differs during fail-over)
     nvmf_port: int
     partitions: List[EdgePartitionDTO]
 
@@ -75,7 +76,8 @@ class EdgeNodeDTO(BaseModel):
         return EdgeNodeDTO(
             uuid=UUID(node.uuid), hostname=node.hostname, mgmt_ip=node.mgmt_ip,
             data_ip=node.get_data_ip(), status=node.status,
-            is_primary=node.is_primary, nvmf_port=node.nvmf_port,
+            is_primary=node.is_primary, hosts_lvstore=bool(node.lvstore_base),
+            nvmf_port=node.nvmf_port,
             partitions=[EdgePartitionDTO.from_model(p) for p in node.partitions
                         if p.status != 'removed'])
 
@@ -112,10 +114,48 @@ class _ReplaceDeviceParams(BaseModel):
 class _CreateVolumeParams(BaseModel):
     name: str = Field(min_length=1)
     size: Size
+    crypto: bool = False
 
 
 class _ResizeVolumeParams(BaseModel):
     size: Size
+
+
+# ------------------------------------------------------------ cluster create
+
+create_api = APIRouter()
+
+
+class _CreateEdgeClusterParams(BaseModel):
+    name: str = Field(min_length=1)
+    k8s_api_url: str = ""
+    k8s_token: str = ""
+    k8s_ca_cert: str = ""
+    k8s_namespace: str = "simplyblock"
+
+
+class EdgeClusterCreatedDTO(BaseModel):
+    uuid: UUID
+    name: str
+    status: str
+    nqn: str
+    # Create-time secret egress: the caller needs it to authenticate as the
+    # new cluster (same pattern as hyperscale cluster bootstrap).
+    secret: str
+
+
+@create_api.post('/edge', name='clusters:edge:create', status_code=201)
+def create_edge_cluster(parameters: _CreateEdgeClusterParams) -> EdgeClusterCreatedDTO:
+    try:
+        cluster = edge_cluster_ops.create_edge_cluster(
+            parameters.name, k8s_api_url=parameters.k8s_api_url,
+            k8s_token=parameters.k8s_token, k8s_ca_cert=parameters.k8s_ca_cert,
+            k8s_namespace=parameters.k8s_namespace)
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+    return EdgeClusterCreatedDTO(
+        uuid=UUID(cluster.uuid), name=cluster.cluster_name, status=cluster.status,
+        nqn=cluster.nqn, secret=cluster.secret.get_secret_value())
 
 
 # --------------------------------------------------------------- edge-nodes
@@ -197,6 +237,30 @@ def replace_device(cluster: EdgeCluster, node: EdgeNodeDep,
     return {"task_id": task_id}
 
 
+@node_api.post('/{node_id}/devices/remove', name='clusters:edge-nodes:devices:remove',
+               status_code=204, responses={204: {"content": None}})
+def remove_device(cluster: EdgeCluster, node: EdgeNodeDep,
+                  parameters: _AddDeviceParams) -> Response:
+    try:
+        edge_cluster_ops.remove_device(cluster.get_id(), node.uuid,
+                                       parameters.device_path)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return Response(status_code=204)
+
+
+@node_api.post('/{node_id}/devices/restart', name='clusters:edge-nodes:devices:restart',
+               status_code=204, responses={204: {"content": None}})
+def restart_device(cluster: EdgeCluster, node: EdgeNodeDep,
+                   parameters: _AddDeviceParams) -> Response:
+    try:
+        edge_cluster_ops.restart_device(cluster.get_id(), node.uuid,
+                                        parameters.device_path)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return Response(status_code=204)
+
+
 # ------------------------------------------------------------- edge-volumes
 
 volume_api = APIRouter()
@@ -212,7 +276,8 @@ def list_volumes(cluster: EdgeCluster) -> List[EdgeVolumeDTO]:
 def create_volume(cluster: EdgeCluster, parameters: _CreateVolumeParams) -> EdgeVolumeDTO:
     try:
         volume = edge_cluster_ops.create_volume(cluster.get_id(), parameters.name,
-                                                parameters.size)
+                                                parameters.size,
+                                                crypto=parameters.crypto)
     except ValueError as e:
         raise HTTPException(400, str(e))
     return EdgeVolumeDTO.from_model(volume)

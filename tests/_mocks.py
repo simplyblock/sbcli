@@ -101,6 +101,19 @@ class FakeSpdk:
                 return True
         raise RPCException("base bdev not found")
 
+    def bdev_raid_get_bdevs(self):
+        self._rec("bdev_raid_get_bdevs")
+        return [{"name": name, "base_bdevs_list": [{"name": m} for m in members]}
+                for name, members in self.raids.items()]
+
+    def detach_backing_device(self, bdev):
+        """Test helper: simulate the backing disk vanishing (EBS force-detach)
+        — the bdev disappears and every raid ejects it."""
+        self.bdevs.discard(bdev)
+        for members in self.raids.values():
+            if bdev in members:
+                members.remove(bdev)
+
     # -- remote leg
     def bdev_nvme_attach_controller(self, name, nqn, traddr, trsvcid, trtype,
                                     multipath=False, **kwargs):
@@ -175,6 +188,43 @@ class FakeSpdk:
 
     def bdev_lvol_resize(self, name, size_in_mib):
         self._rec("bdev_lvol_resize", name=name, size_in_mib=size_in_mib)
+        return True
+
+    def nvmf_subsystem_remove_ns(self, nqn, nsid):
+        self._rec("nvmf_subsystem_remove_ns", nqn=nqn, nsid=nsid)
+        subsystem = self.subsystems.get(nqn)
+        if subsystem is None:
+            raise RPCException("subsystem not found")
+        subsystem["namespaces"] = [ns for ns in subsystem["namespaces"]
+                                   if ns.get("nsid") != nsid]
+        return True
+
+    def bdev_raid_delete(self, name):
+        self._rec("bdev_raid_delete", name=name)
+        if name not in self.raids:
+            raise RPCException("raid not found")
+        self.raids.pop(name)
+        self.bdevs.discard(name)
+        return True
+
+    # -- crypto
+    def lvol_crypto_key_create(self, name, key, key2):
+        self._rec("lvol_crypto_key_create", name=name)
+        self.crypto_keys = getattr(self, "crypto_keys", set())
+        if name in self.crypto_keys:
+            raise RPCException("key already exists")
+        self.crypto_keys.add(name)
+        return True
+
+    def lvol_crypto_create(self, name, base_name, key_name):
+        self._rec("lvol_crypto_create", name=name, base_name=base_name,
+                  key_name=key_name)
+        self.bdevs.add(name)
+        return name
+
+    def lvol_crypto_delete(self, name):
+        self._rec("lvol_crypto_delete", name=name)
+        self.bdevs.discard(name)
         return True
 
 

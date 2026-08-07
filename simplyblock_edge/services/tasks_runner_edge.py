@@ -22,12 +22,14 @@ class EdgeTaskRunner(TaskRunner):
         JobSchedule.FN_EDGE_NODE_RESTART,
         JobSchedule.FN_EDGE_DEVICE_REPLACE,
         JobSchedule.FN_EDGE_DEVICE_ADD,
+        JobSchedule.FN_EDGE_FAILOVER,
     )
 
     HANDLERS = {
         JobSchedule.FN_EDGE_NODE_RESTART: edge_cluster_ops.handle_node_restart_task,
         JobSchedule.FN_EDGE_DEVICE_REPLACE: edge_cluster_ops.handle_device_replace_task,
         JobSchedule.FN_EDGE_DEVICE_ADD: edge_cluster_ops.handle_device_add_task,
+        JobSchedule.FN_EDGE_FAILOVER: edge_cluster_ops.handle_failover_task,
     }
 
     def execute(self, task):

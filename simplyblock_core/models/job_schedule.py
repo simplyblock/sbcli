@@ -45,6 +45,10 @@ class JobSchedule(BaseModel):
     FN_EDGE_NODE_RESTART = "edge_node_restart"
     FN_EDGE_DEVICE_REPLACE = "edge_device_replace"
     FN_EDGE_DEVICE_ADD = "edge_device_add"
+    # 2-node clusters: move the lvstore to the surviving secondary when the
+    # designated primary stops serving (fail-back happens inside the
+    # primary's FN_EDGE_NODE_RESTART once its mirror leg has resynced).
+    FN_EDGE_FAILOVER = "edge_failover"
 
     canceled: bool = False
     cluster_id: str = ""
