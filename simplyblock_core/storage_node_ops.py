@@ -3844,7 +3844,23 @@ def _pick_replica_relocation_node(primary, removed_node: StorageNode, role, db_c
     enforced HARD here (not best-effort): if the primary's OTHER non-leader
     role does not already live in a different domain than the primary, the
     replacement must — otherwise a full-domain outage would leave the LVS
-    with zero surviving paths. Returning None makes
+    with zero surviving paths.
+
+    ``get_secondary_nodes``/``get_secondary_nodes_2`` only ever offer
+    UNCLAIMED nodes (each node hosts at most one secondary/tertiary at a
+    time — ``lvstore_stack_secondary``/``_tertiary`` is a single field, not
+    a list). A removal frees exactly one node system-wide (whoever hosted
+    ``removed_node``'s own role); if that one lands in the wrong domain —
+    or nothing is free at all — the direct search has nothing else to
+    offer even though a valid rearrangement exists elsewhere in the
+    cluster (2026-08-07, chained-removal incident: two removals in a row
+    stranded a third node's secondary with zero free cross-domain
+    candidates, while an existing pairing two hops away could have
+    absorbed it). Falls back to splicing ``primary`` into an already-formed
+    pairing (see ``_find_splice_target_for_relocation``) — exactly the fix
+    ``splice_stranded_secondary``/``splice_stranded_tertiary`` already apply
+    to the identical dead end at cluster-activation time. Only returning
+    None here (both searches exhausted) makes
     ``_check_replica_relocation_feasible`` refuse the removal up front.
     """
     exclude_ids = [removed_node.get_id()]
@@ -3865,12 +3881,9 @@ def _pick_replica_relocation_node(primary, removed_node: StorageNode, role, db_c
                 pass
         cands = get_secondary_nodes_2(
             primary, exclude_ids=exclude_ids, exclude_mgmt_ips=exclude_mgmt_ips)
-    if not cands:
-        return None
 
     cluster = db_controller.get_cluster_by_id(primary.cluster_id)
-    if (getattr(cluster, "enable_failure_domain", False)
-            and primary.failure_domain >= 0):
+    if cands and getattr(cluster, "enable_failure_domain", False) and primary.failure_domain >= 0:
         other_cross = False
         if other_id and other_id != removed_node.get_id():
             try:
@@ -3890,8 +3903,84 @@ def _pick_replica_relocation_node(primary, removed_node: StorageNode, role, db_c
                 if (cand.failure_domain >= 0
                         and cand.failure_domain != primary.failure_domain):
                     return cand_id
-            return None
-    return cands[0]
+        else:
+            return cands[0]
+    elif cands:
+        return cands[0]
+
+    splice = _find_splice_target_for_relocation(
+        primary, role, db_controller, exclude_ids=exclude_ids + [primary.get_id()])
+    return splice[1] if splice else None
+
+
+def _find_splice_target_for_relocation(stranded_primary, role, db_controller, exclude_ids=()):
+    """Find an already-formed pairing ``P -> X`` (``P.<field> == X``)
+    elsewhere in the cluster to splice ``stranded_primary`` into:
+    ``P -> stranded_primary -> X``. Read-only — callers decide whether and
+    how to execute the resulting move (see ``_relocate_one_replica``).
+
+    Generalizes ``splice_stranded_secondary``/``splice_stranded_tertiary``'s
+    edge search (same scoring: prefer both ends domain-disjoint from the
+    stranded node, then relax) with an ``exclude_ids`` list, so the
+    node-removal repair path can rule out the node being removed and any
+    other already-claimed id. Unlike the activation-time splice helpers —
+    which only ever run before any physical LVS exists — this can be asked
+    to splice into a pairing that already has real data on both ends;
+    executing that move (not just picking the edge) is the caller's job.
+
+    Returns ``(p_id, x_id)`` or ``None`` if no valid edge exists.
+    """
+    field = "secondary_node_id" if role == "secondary" else "tertiary_node_id"
+    all_nodes = db_controller.get_storage_nodes_by_cluster_id(stranded_primary.cluster_id)
+    all_nodes = sorted(all_nodes, key=lambda n: n.failure_domain)
+    by_id = {n.get_id(): n for n in all_nodes}
+    exclude = set(exclude_ids) | {stranded_primary.get_id()}
+
+    stranded_sec = None
+    if role == "tertiary" and stranded_primary.secondary_node_id:
+        stranded_sec = by_id.get(stranded_primary.secondary_node_id)
+
+    def _online(*nodes):
+        return all(n.status == StorageNode.STATUS_ONLINE for n in nodes)
+
+    def _valid_tertiary(node, node_sec, candidate):
+        if candidate.get_id() == node.get_id():
+            return False
+        if candidate.mgmt_ip == node.mgmt_ip:
+            return False
+        if node_sec and candidate.mgmt_ip == node_sec.mgmt_ip:
+            return False
+        return True
+
+    def _domain_mismatch_score(*nodes):
+        if stranded_primary.failure_domain < 0:
+            return 0
+        return sum(1 for n in nodes if n.failure_domain != stranded_primary.failure_domain)
+
+    edges = [n for n in all_nodes if getattr(n, field) and n.get_id() not in exclude]
+
+    best, best_score = None, -1
+    for p in edges:
+        x_id = getattr(p, field)
+        if x_id in exclude:
+            continue
+        x = by_id.get(x_id)
+        if not x or not _online(p, x):
+            continue
+        if role == "secondary":
+            if p.mgmt_ip == stranded_primary.mgmt_ip or x.mgmt_ip == stranded_primary.mgmt_ip:
+                continue
+        else:
+            p_sec = by_id.get(p.secondary_node_id) if p.secondary_node_id else None
+            if not _valid_tertiary(p, p_sec, stranded_primary):
+                continue
+            if not _valid_tertiary(stranded_primary, stranded_sec, x):
+                continue
+        score = _domain_mismatch_score(p, x)
+        if score > best_score:
+            best_score, best = score, (p.get_id(), x.get_id())
+
+    return best
 
 
 def node_removal_orchestrate(node_id, force_remove=False):
@@ -4080,6 +4169,21 @@ def _relocate_one_replica(removed_node: StorageNode, primary_id, role):
             logger.error(
                 f"[REMOVAL] no relocation target for {role} replica of {primary_id}")
             return False
+
+        new_node = db_controller.get_storage_node_by_id(new_id)
+        occupant_id = getattr(new_node, backref)
+        if occupant_id and occupant_id not in (primary_id, removed_node.get_id()):
+            # _pick_replica_relocation_node fell back to a splice candidate:
+            # new_id is currently busy hosting occupant_id's replica. Evict
+            # that occupant onto `primary` (the node whose replica we're
+            # relocating) before claiming new_id for primary's own role —
+            # see _find_splice_target_for_relocation's docstring.
+            if not _relocate_replica_between(occupant_id, new_id, primary_id, role, db_controller):
+                logger.error(
+                    f"[REMOVAL] failed to splice {primary_id} into the pairing "
+                    f"occupying {new_id} (occupant {occupant_id})")
+                return False
+
         primary = db_controller.get_storage_node_by_id(primary_id)
         setattr(primary, field, new_id)
         primary.write_to_db()
@@ -4101,6 +4205,42 @@ def _relocate_one_replica(removed_node: StorageNode, primary_id, role):
 
     _clear_replica_backref(removed_node, backref)
     return True
+
+
+def _relocate_replica_between(occupant_primary_id, old_host_id, new_host_id, role, db_controller):
+    """Physically move ``occupant_primary_id``'s ``role`` replica off
+    ``old_host_id`` onto ``new_host_id``, updating its forward pointer.
+
+    Used by the splice fallback in ``_relocate_one_replica``: before an
+    already-busy node can be claimed for the primary being relocated, its
+    current occupant must move onto that primary's node instead (see
+    ``_find_splice_target_for_relocation``'s docstring for why an
+    already-formed pairing, not an idle node, is what's available).
+
+    Idempotent: skips the pointer flip (and the teardown it implies) if a
+    prior attempt already committed it; ``recreate_lvstore_on_non_leader``
+    is retried unconditionally either way, matching ``_relocate_one_replica``'s
+    own idempotency pattern. Returns True if ``occupant_primary_id`` no
+    longer exists — nothing left to relocate.
+    """
+    field = "secondary_node_id" if role == "secondary" else "tertiary_node_id"
+    try:
+        occupant_primary = db_controller.get_storage_node_by_id(occupant_primary_id)
+    except KeyError:
+        return True
+
+    if getattr(occupant_primary, field) != new_host_id:
+        old_host = db_controller.get_storage_node_by_id(old_host_id)
+        cluster = db_controller.get_cluster_by_id(occupant_primary.cluster_id)
+        if old_host.status == StorageNode.STATUS_ONLINE:
+            _delete_replica_on_peer(old_host, occupant_primary, cluster)
+        occupant_primary = db_controller.get_storage_node_by_id(occupant_primary_id)
+        setattr(occupant_primary, field, new_host_id)
+        occupant_primary.write_to_db()
+
+    new_host = db_controller.get_storage_node_by_id(new_host_id)
+    occupant_primary = db_controller.get_storage_node_by_id(occupant_primary_id)
+    return bool(recreate_lvstore_on_non_leader(new_host, occupant_primary, occupant_primary))
 
 
 def _clear_replica_backref(removed_node: StorageNode, backref):

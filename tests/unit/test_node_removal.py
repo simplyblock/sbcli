@@ -30,7 +30,8 @@ from simplyblock_core.rpc_client import RPCConnectionError
 # Fixtures
 # ---------------------------------------------------------------------------
 
-def _cluster(ha_type="ha", npcs=1, ndcs=2, ft=1, mode="docker"):
+def _cluster(ha_type="ha", npcs=1, ndcs=2, ft=1, mode="docker",
+             enable_failure_domain=False):
     cl = Cluster()
     cl.uuid = "cluster-1"
     cl.ha_type = ha_type
@@ -40,12 +41,14 @@ def _cluster(ha_type="ha", npcs=1, ndcs=2, ft=1, mode="docker"):
     cl.mode = mode
     cl.status = Cluster.STATUS_ACTIVE
     cl.nqn = "nqn.2023-01.io.simplyblock:cluster-1"
+    cl.enable_failure_domain = enable_failure_domain
     return cl
 
 
 def _node(node_id, status=StorageNode.STATUS_ONLINE, lvstore="",
           secondary_id="", tertiary_id="",
-          stack_secondary="", stack_tertiary="", n_devices=0, with_jm=False):
+          stack_secondary="", stack_tertiary="", n_devices=0, with_jm=False,
+          failure_domain=-1, mgmt_ip=None):
     n = MagicMock(spec=StorageNode)
     n.uuid = node_id
     n.get_id = MagicMock(return_value=node_id)
@@ -59,7 +62,8 @@ def _node(node_id, status=StorageNode.STATUS_ONLINE, lvstore="",
     n.tertiary_node_id = tertiary_id
     n.lvstore_stack_secondary = stack_secondary
     n.lvstore_stack_tertiary = stack_tertiary
-    n.mgmt_ip = f"10.0.0.{abs(hash(node_id)) % 250 + 1}"
+    n.failure_domain = failure_domain
+    n.mgmt_ip = mgmt_ip or f"10.0.0.{abs(hash(node_id)) % 250 + 1}"
     n.write_to_db = MagicMock()
     n.rpc_client = MagicMock(return_value=MagicMock())
     n.hublvol_nqn_for_lvstore = MagicMock(return_value=f"nqn:hub:{lvstore}")
@@ -261,6 +265,160 @@ class TestRelocationFeasibility(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# _find_splice_target_for_relocation — the removal-repair fallback used when
+# get_secondary_nodes/_2 offer no free (unclaimed) cross-domain candidate.
+#
+# Regression coverage for the 2026-08-07 chained-removal incident: two
+# removals in a row can strand a third node's secondary with zero free
+# cross-domain candidates, even though an existing pairing two hops away
+# could absorb it. Mirrors splice_stranded_secondary/_tertiary's edge search
+# (used for the identical dead end at activation time), generalized with an
+# exclude list for the removal path.
+# ---------------------------------------------------------------------------
+
+class TestFindSpliceTargetForRelocation(unittest.TestCase):
+
+    def test_splices_into_existing_secondary_edge(self):
+        cl = _cluster(enable_failure_domain=True)
+        p = _node("p", secondary_id="x", failure_domain=0, mgmt_ip="10.0.0.1")
+        x = _node("x", failure_domain=1, mgmt_ip="10.0.0.2")
+        stranded = _node("s", failure_domain=2, mgmt_ip="10.0.0.3")
+        db = FakeDB(cl, [p, x, stranded])
+        got = storage_node_ops._find_splice_target_for_relocation(stranded, "secondary", db)
+        self.assertEqual(got, ("p", "x"))
+
+    def test_prefers_edge_domain_disjoint_on_both_ends(self):
+        cl = _cluster(enable_failure_domain=True)
+        stranded = _node("s", failure_domain=0, mgmt_ip="10.0.0.9")
+        bad_p = _node("bad_p", secondary_id="bad_x", failure_domain=0, mgmt_ip="10.0.0.1")
+        bad_x = _node("bad_x", failure_domain=0, mgmt_ip="10.0.0.2")
+        good_p = _node("good_p", secondary_id="good_x", failure_domain=1, mgmt_ip="10.0.0.3")
+        good_x = _node("good_x", failure_domain=2, mgmt_ip="10.0.0.4")
+        db = FakeDB(cl, [stranded, bad_p, bad_x, good_p, good_x])
+        got = storage_node_ops._find_splice_target_for_relocation(stranded, "secondary", db)
+        self.assertEqual(got, ("good_p", "good_x"))
+
+    def test_excludes_ids_passed_by_caller(self):
+        cl = _cluster(enable_failure_domain=True)
+        p = _node("p", secondary_id="x", failure_domain=0, mgmt_ip="10.0.0.1")
+        x = _node("x", failure_domain=1, mgmt_ip="10.0.0.2")
+        stranded = _node("s", failure_domain=2, mgmt_ip="10.0.0.3")
+        db = FakeDB(cl, [p, x, stranded])
+        got = storage_node_ops._find_splice_target_for_relocation(
+            stranded, "secondary", db, exclude_ids=["x"])
+        self.assertIsNone(got)
+
+    def test_no_edge_exists_returns_none(self):
+        cl = _cluster(enable_failure_domain=True)
+        stranded = _node("s", failure_domain=0, mgmt_ip="10.0.0.1")
+        other = _node("other", failure_domain=1, mgmt_ip="10.0.0.2")
+        db = FakeDB(cl, [stranded, other])
+        got = storage_node_ops._find_splice_target_for_relocation(stranded, "secondary", db)
+        self.assertIsNone(got)
+
+    def test_skips_edge_with_offline_endpoint(self):
+        cl = _cluster(enable_failure_domain=True)
+        p = _node("p", secondary_id="x", failure_domain=0, mgmt_ip="10.0.0.1")
+        x = _node("x", failure_domain=1, mgmt_ip="10.0.0.2",
+                  status=StorageNode.STATUS_OFFLINE)
+        stranded = _node("s", failure_domain=2, mgmt_ip="10.0.0.3")
+        db = FakeDB(cl, [p, x, stranded])
+        got = storage_node_ops._find_splice_target_for_relocation(stranded, "secondary", db)
+        self.assertIsNone(got)
+
+    def test_skips_edge_not_host_disjoint_from_stranded(self):
+        stranded = _node("s", failure_domain=0, mgmt_ip="10.0.0.5")
+        p = _node("p", secondary_id="x", failure_domain=1, mgmt_ip="10.0.0.1")
+        x = _node("x", failure_domain=2, mgmt_ip="10.0.0.5")  # shares stranded's host
+        cl = _cluster(enable_failure_domain=True)
+        db = FakeDB(cl, [stranded, p, x])
+        got = storage_node_ops._find_splice_target_for_relocation(stranded, "secondary", db)
+        self.assertIsNone(got)
+
+    def test_tertiary_edge_respects_secondary_host_disjointness(self):
+        cl = _cluster(enable_failure_domain=True)
+        stranded = _node("s", failure_domain=0, secondary_id="s_sec", mgmt_ip="10.0.0.9")
+        s_sec = _node("s_sec", failure_domain=1, mgmt_ip="10.0.0.50")
+        p = _node("p", tertiary_id="x", failure_domain=0, mgmt_ip="10.0.0.60")
+        x = _node("x", failure_domain=1, mgmt_ip="10.0.0.61")
+        db = FakeDB(cl, [stranded, s_sec, p, x])
+        got = storage_node_ops._find_splice_target_for_relocation(stranded, "tertiary", db)
+        self.assertEqual(got, ("p", "x"))
+
+
+# ---------------------------------------------------------------------------
+# _pick_replica_relocation_node — falls back to the splice finder above when
+# the direct free-candidate search comes up empty (no candidates at all, or
+# none that satisfy the hard cross-domain requirement).
+# ---------------------------------------------------------------------------
+
+class TestPickReplicaRelocationSpliceFallback(unittest.TestCase):
+
+    def test_falls_back_to_splice_when_no_free_candidate_at_all(self):
+        cl = _cluster(enable_failure_domain=True)
+        primary = _node("p1", secondary_id="n1", failure_domain=2, mgmt_ip="10.0.0.9")
+        removed = _node("n1", failure_domain=1, mgmt_ip="10.0.0.99")
+        edge_p = _node("edge_p", secondary_id="edge_x", failure_domain=0, mgmt_ip="10.0.0.1")
+        edge_x = _node("edge_x", failure_domain=1, mgmt_ip="10.0.0.2")
+        db = FakeDB(cl, [primary, removed, edge_p, edge_x])
+        with patch.object(storage_node_ops, "get_secondary_nodes", return_value=[]):
+            got = storage_node_ops._pick_replica_relocation_node(
+                primary, removed, "secondary", db)
+        self.assertEqual(got, "edge_x")
+
+    def test_falls_back_to_splice_when_only_candidate_is_same_domain(self):
+        cl = _cluster(enable_failure_domain=True)
+        primary = _node("p1", secondary_id="n1", failure_domain=2, mgmt_ip="10.0.0.9")
+        removed = _node("n1", failure_domain=1, mgmt_ip="10.0.0.99")
+        same_domain_cand = _node("same_domain_cand", failure_domain=2, mgmt_ip="10.0.0.8")
+        edge_p = _node("edge_p", secondary_id="edge_x", failure_domain=0, mgmt_ip="10.0.0.1")
+        edge_x = _node("edge_x", failure_domain=1, mgmt_ip="10.0.0.2")
+        db = FakeDB(cl, [primary, removed, same_domain_cand, edge_p, edge_x])
+        with patch.object(storage_node_ops, "get_secondary_nodes",
+                          return_value=["same_domain_cand"]):
+            got = storage_node_ops._pick_replica_relocation_node(
+                primary, removed, "secondary", db)
+        self.assertEqual(got, "edge_x")
+
+    def test_returns_none_when_no_free_and_no_splice_candidate(self):
+        cl = _cluster(enable_failure_domain=True)
+        primary = _node("p1", secondary_id="n1", failure_domain=0, mgmt_ip="10.0.0.9")
+        removed = _node("n1", failure_domain=1, mgmt_ip="10.0.0.99")
+        db = FakeDB(cl, [primary, removed])
+        with patch.object(storage_node_ops, "get_secondary_nodes", return_value=[]):
+            got = storage_node_ops._pick_replica_relocation_node(
+                primary, removed, "secondary", db)
+        self.assertIsNone(got)
+
+    def test_does_not_use_splice_when_free_cross_domain_candidate_exists(self):
+        cl = _cluster(enable_failure_domain=True)
+        primary = _node("p1", secondary_id="n1", failure_domain=0, mgmt_ip="10.0.0.9")
+        removed = _node("n1", failure_domain=1, mgmt_ip="10.0.0.99")
+        free1 = _node("free1", failure_domain=1, mgmt_ip="10.0.0.1")
+        db = FakeDB(cl, [primary, removed, free1])
+        with patch.object(storage_node_ops, "get_secondary_nodes", return_value=["free1"]), \
+             patch.object(storage_node_ops, "_find_splice_target_for_relocation") as finder:
+            got = storage_node_ops._pick_replica_relocation_node(
+                primary, removed, "secondary", db)
+        self.assertEqual(got, "free1")
+        finder.assert_not_called()
+
+    def test_fd_disabled_never_needs_splice_when_candidate_exists(self):
+        # Non-FD clusters take the unconditional cands[0] path -- splice is
+        # only relevant once cands is genuinely empty.
+        cl = _cluster(enable_failure_domain=False)
+        primary = _node("p1", secondary_id="n1", mgmt_ip="10.0.0.9")
+        removed = _node("n1", mgmt_ip="10.0.0.99")
+        db = FakeDB(cl, [primary, removed])
+        with patch.object(storage_node_ops, "get_secondary_nodes", return_value=["free1"]), \
+             patch.object(storage_node_ops, "_find_splice_target_for_relocation") as finder:
+            got = storage_node_ops._pick_replica_relocation_node(
+                primary, removed, "secondary", db)
+        self.assertEqual(got, "free1")
+        finder.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # Case A — teardown of own primary's replicas
 # ---------------------------------------------------------------------------
 
@@ -409,6 +567,136 @@ class TestRelocateOneReplica(unittest.TestCase):
             ret = storage_node_ops._relocate_one_replica(removed, "gone", "secondary")
         self.assertTrue(ret)
         self.assertEqual(removed.lvstore_stack_secondary, "")
+
+
+# ---------------------------------------------------------------------------
+# Case B, splice fallback — _pick_replica_relocation_node returned a BUSY
+# node (a splice candidate, per _find_splice_target_for_relocation) instead
+# of a free one. _relocate_one_replica must evict that node's current
+# occupant onto the stranded primary before claiming the slot for itself.
+# ---------------------------------------------------------------------------
+
+class TestRelocateOneReplicaSpliceExecution(unittest.TestCase):
+
+    def test_relocate_via_splice_evicts_occupant_first(self):
+        cl = _cluster()
+        removed = _node("n1", stack_secondary="stranded")
+        stranded = _node("stranded", secondary_id="n1", lvstore="LVS_stranded")
+        occupant = _node("occupant", secondary_id="x", lvstore="LVS_occupant")
+        x = _node("x", stack_secondary="occupant")  # x is busy, not free
+        db = FakeDB(cl, [removed, stranded, occupant, x])
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "_pick_replica_relocation_node",
+                          return_value="x"), \
+             patch.object(storage_node_ops, "recreate_lvstore_on_non_leader",
+                          return_value=True) as rec, \
+             patch.object(storage_node_ops, "_delete_replica_on_peer") as drp:
+            ret = storage_node_ops._relocate_one_replica(removed, "stranded", "secondary")
+
+        self.assertTrue(ret)
+        drp.assert_called_once()  # occupant's old replica torn down off x
+        self.assertEqual(occupant.secondary_node_id, "stranded")  # occupant re-homed onto stranded
+        self.assertEqual(stranded.secondary_node_id, "x")  # stranded takes over x's freed slot
+        self.assertEqual(x.lvstore_stack_secondary, "stranded")
+        self.assertEqual(rec.call_count, 2)  # occupant's rebuild + stranded's own rebuild
+        self.assertEqual(removed.lvstore_stack_secondary, "")
+
+    def test_relocate_via_splice_occupant_rebuild_failure_keeps_forward_pointers(self):
+        cl = _cluster()
+        removed = _node("n1", stack_secondary="stranded")
+        stranded = _node("stranded", secondary_id="n1", lvstore="LVS_stranded")
+        occupant = _node("occupant", secondary_id="x", lvstore="LVS_occupant")
+        x = _node("x", stack_secondary="occupant")
+        db = FakeDB(cl, [removed, stranded, occupant, x])
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "_pick_replica_relocation_node",
+                          return_value="x"), \
+             patch.object(storage_node_ops, "recreate_lvstore_on_non_leader",
+                          return_value=False), \
+             patch.object(storage_node_ops, "_delete_replica_on_peer"):
+            ret = storage_node_ops._relocate_one_replica(removed, "stranded", "secondary")
+
+        self.assertFalse(ret)
+        # Forward pointer for occupant's move is committed even though the
+        # physical rebuild failed -- matches _relocate_one_replica's own
+        # idempotent-retry pattern: a retry resumes from the committed intent
+        # rather than re-picking (see test_relocate_resume_reuses_committed_target).
+        self.assertEqual(occupant.secondary_node_id, "stranded")
+        # The outer splice claim (stranded -> x) never got committed, since
+        # _relocate_replica_between reported failure first.
+        self.assertEqual(stranded.secondary_node_id, "n1")
+        self.assertEqual(removed.lvstore_stack_secondary, "stranded")
+
+    def test_relocate_via_splice_own_rebuild_failure_after_occupant_moved(self):
+        # occupant's move succeeds (evicted + rebuilt on stranded), but
+        # stranded's own rebuild on the freed slot x fails.
+        cl = _cluster()
+        removed = _node("n1", stack_secondary="stranded")
+        stranded = _node("stranded", secondary_id="n1", lvstore="LVS_stranded")
+        occupant = _node("occupant", secondary_id="x", lvstore="LVS_occupant")
+        x = _node("x", stack_secondary="occupant")
+        db = FakeDB(cl, [removed, stranded, occupant, x])
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "_pick_replica_relocation_node",
+                          return_value="x"), \
+             patch.object(storage_node_ops, "recreate_lvstore_on_non_leader",
+                          side_effect=[True, False]), \
+             patch.object(storage_node_ops, "_delete_replica_on_peer") as drp:
+            ret = storage_node_ops._relocate_one_replica(removed, "stranded", "secondary")
+
+        self.assertFalse(ret)
+        drp.assert_called_once()
+        self.assertEqual(occupant.secondary_node_id, "stranded")
+        # Forward pointers for stranded's own claim ARE committed (pre-build,
+        # same idempotent pattern) even though the rebuild on x failed.
+        self.assertEqual(stranded.secondary_node_id, "x")
+        self.assertEqual(x.lvstore_stack_secondary, "stranded")
+        self.assertEqual(removed.lvstore_stack_secondary, "stranded")
+
+    def test_relocate_via_splice_tertiary_role(self):
+        cl = _cluster()
+        removed = _node("n1", stack_tertiary="stranded")
+        stranded = _node("stranded", tertiary_id="n1", lvstore="LVS_stranded")
+        occupant = _node("occupant", tertiary_id="x", lvstore="LVS_occupant")
+        x = _node("x", stack_tertiary="occupant")
+        db = FakeDB(cl, [removed, stranded, occupant, x])
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "_pick_replica_relocation_node",
+                          return_value="x"), \
+             patch.object(storage_node_ops, "recreate_lvstore_on_non_leader",
+                          return_value=True), \
+             patch.object(storage_node_ops, "_delete_replica_on_peer") as drp:
+            ret = storage_node_ops._relocate_one_replica(removed, "stranded", "tertiary")
+
+        self.assertTrue(ret)
+        drp.assert_called_once()
+        self.assertEqual(occupant.tertiary_node_id, "stranded")
+        self.assertEqual(stranded.tertiary_node_id, "x")
+        self.assertEqual(x.lvstore_stack_tertiary, "stranded")
+        self.assertEqual(removed.lvstore_stack_tertiary, "")
+
+    def test_relocate_free_target_never_triggers_splice_eviction(self):
+        # Regression guard: when the picked target is genuinely free (no
+        # backref set), _relocate_one_replica must behave exactly as before
+        # -- no eviction, no extra recreate_lvstore_on_non_leader call.
+        cl = _cluster()
+        removed = _node("n1", stack_secondary="p1")
+        primary = _node("p1", secondary_id="n1", lvstore="LVS_p1")
+        free_node = _node("n3")  # stack_secondary="" -- genuinely free
+        db = FakeDB(cl, [removed, primary, free_node])
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "_pick_replica_relocation_node",
+                          return_value="n3"), \
+             patch.object(storage_node_ops, "recreate_lvstore_on_non_leader",
+                          return_value=True) as rec, \
+             patch.object(storage_node_ops, "_delete_replica_on_peer") as drp:
+            ret = storage_node_ops._relocate_one_replica(removed, "p1", "secondary")
+
+        self.assertTrue(ret)
+        drp.assert_not_called()
+        rec.assert_called_once()
+        self.assertEqual(primary.secondary_node_id, "n3")
+        self.assertEqual(free_node.lvstore_stack_secondary, "p1")
 
 
 # ---------------------------------------------------------------------------
