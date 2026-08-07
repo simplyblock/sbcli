@@ -26,14 +26,15 @@ mypy simplyblock_web simplyblock_cli simplyblock_core simplyblock_lib  # Type ch
 
 ## Architecture
 
-Four packages, one entry point:
+Five packages, one entry point:
 
 | Package | Role |
 |---------|------|
 | `simplyblock_cli/` | `sbctl` command-line interface (auto-generated entry point) |
 | `simplyblock_core/` | Business logic, data models, background services, FDB access |
 | `simplyblock_web/` | REST API — FastAPI (v2) + Flask (v1) hybrid on a single uvicorn process |
-| `simplyblock_lib/` | Shared, sbcli-agnostic infrastructure (task lease/runner, monitor skeletons, API scaffolding, units/secrets helpers). Must not import from the other three packages — dependencies flow the other way; persistence and models are injected. |
+| `simplyblock_lib/` | Shared, sbcli-agnostic infrastructure (task lease/runner, monitor skeletons, API scaffolding, units/secrets helpers). Must not import from the other packages — dependencies flow the other way; persistence and models are injected. |
+| `simplyblock_edge/` | Edge clusters: spdk-only 1-2 node sites managed by the same centralized CP over the edge k8s API + SPDK RPC only (`docs/edge_clusters_spec.md`). Imports core and lib; nothing in core/web imports it except the v2 router mount and the JobSchedule `FN_EDGE_*` constants. |
 
 Data flows: **CLI → Web API → Core controllers → FoundationDB**. Storage nodes are reached via JSON-RPC (`rpc_client.py`).
 

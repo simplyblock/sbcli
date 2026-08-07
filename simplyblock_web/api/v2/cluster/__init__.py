@@ -12,6 +12,7 @@ from simplyblock_core import cluster_ops
 
 from .._dependencies import Cluster
 from .backup import api as backup_api
+from .edge import node_api as edge_node_api, volume_api as edge_volume_api
 from .storage_pool import api as pool_api
 from .storage_node import api as storage_node_api
 from .subsystem import api as subsystem_api
@@ -254,4 +255,6 @@ instance_api.include_router(task_api, prefix='/tasks')
 instance_api.include_router(pool_api, prefix='/storage-pools')
 instance_api.include_router(backup_api, prefix='/backups')
 instance_api.include_router(subsystem_api, prefix='/subsystems')
+instance_api.include_router(edge_node_api, prefix='/edge-nodes')
+instance_api.include_router(edge_volume_api, prefix='/edge-volumes')
 api.include_router(instance_api)

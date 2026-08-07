@@ -39,6 +39,12 @@ class JobSchedule(BaseModel):
     # migration commit and fail-back (fresh or recovered source).
     FN_REPLICATION_FINAL = "replication_final"
     FN_FDB_BACKUP = "fdb_backup"
+    # Edge clusters (simplyblock_edge/, docs/edge_clusters_spec.md §7):
+    # stack reassembly + raid re-add after a node returns, and raid member
+    # replace/grow. Processed by services/tasks_runner_edge.py.
+    FN_EDGE_NODE_RESTART = "edge_node_restart"
+    FN_EDGE_DEVICE_REPLACE = "edge_device_replace"
+    FN_EDGE_DEVICE_ADD = "edge_device_add"
 
     canceled: bool = False
     cluster_id: str = ""

@@ -1,0 +1,108 @@
+# coding=utf-8
+"""Edge cluster monitor (docs/edge_clusters_spec.md §6-7).
+
+One PollingService sweep over every edge cluster: probe each node through the
+edge site's kubernetes API + SPDK RPC, CAS node statuses, enqueue reassembly
+tasks for returned nodes, and derive/CAS the cluster status. Runs on the CP.
+"""
+from simplyblock_core import utils as core_utils
+from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.models.job_schedule import JobSchedule
+from simplyblock_lib.monitors import PollingService
+from simplyblock_edge import constants as edge_constants, db, k8s
+from simplyblock_edge import edge_cluster_ops
+from simplyblock_edge.rpc import node_rpc_client
+from simplyblock_edge.status import NodeProbe, derive_cluster_status, derive_node_status
+
+logger = core_utils.get_logger(__name__)
+
+
+def probe_node(cluster, node) -> NodeProbe:
+    """Bounded probe (spec §7): k8s ≤5s per call, RPC ≤3s. An unreachable
+    kube-apiserver yields k8s_reachable=False — mapped to UNREACHABLE, never
+    to anything destructive."""
+    try:
+        ready = k8s.node_ready(cluster, node)
+    except k8s.EdgeK8sError:
+        return NodeProbe(k8s_reachable=False)
+    try:
+        running = k8s.pod_running(cluster, node)
+    except k8s.EdgeK8sError:
+        return NodeProbe(k8s_reachable=False, node_ready=ready)
+
+    rpc_alive = False
+    if running:
+        try:
+            rpc = node_rpc_client(node, timeout=edge_constants.EDGE_RPC_PROBE_TIMEOUT_SEC,
+                                  retry=0)
+            rpc_alive = bool(rpc.get_version())
+        except Exception:
+            rpc_alive = False
+    return NodeProbe(k8s_reachable=True, node_ready=ready,
+                     pod_running=running, rpc_alive=rpc_alive)
+
+
+class EdgeMonitor(PollingService):
+
+    def tick(self):
+        any_not_active = False
+        for cluster in db.get_edge_clusters():
+            # Per-cluster isolation: one unreachable site must not stall the
+            # sweep over the others.
+            try:
+                if self.check_cluster(cluster) != Cluster.STATUS_ACTIVE:
+                    any_not_active = True
+            except Exception as e:
+                logger.error(f"Edge monitor failed for cluster {cluster.get_id()}: {e}")
+                logger.exception(e)
+                any_not_active = True
+        return any_not_active
+
+    def check_cluster(self, cluster) -> str:
+        nodes = db.get_edge_nodes(cluster.get_id())
+        statuses = []
+        for node in nodes:
+            statuses.append(self.check_node(cluster, node))
+
+        new_status = derive_cluster_status(statuses)
+        if cluster.status != new_status:
+            edge_cluster_ops.set_cluster_status(cluster, new_status)
+        return new_status
+
+    def check_node(self, cluster, node) -> str:
+        probe = probe_node(cluster, node)
+        new_status, needs_restart = derive_node_status(node.status, probe)
+
+        if new_status is not None and new_status != node.status:
+            logger.info(f"Edge node {node.get_id()} ({node.hostname}): "
+                        f"{node.status} -> {new_status}")
+
+            def _mutate(fresh):
+                current, _ = derive_node_status(fresh.status, probe)
+                if current != new_status:
+                    return False  # somebody moved it meanwhile — re-derive next sweep
+                fresh.status = new_status
+                return True
+            db.atomic_update(node, _mutate)
+            node.status = new_status
+
+        if needs_restart:
+            edge_cluster_ops.add_edge_task(
+                JobSchedule.FN_EDGE_NODE_RESTART, cluster.get_id(), node.uuid,
+                max_retry=edge_constants.EDGE_NODE_RESTART_MAX_RETRY)
+
+        return node.status
+
+
+def main():
+    EdgeMonitor(
+        "Edge monitor",
+        interval_sec=edge_constants.EDGE_MONITOR_INTERVAL_SEC,
+        fast_interval_sec=edge_constants.EDGE_MONITOR_FAST_INTERVAL_SEC,
+        failure_threshold=edge_constants.EDGE_MONITOR_FAILURE_THRESHOLD,
+        logger=logger,
+    ).run_forever()
+
+
+if __name__ == "__main__":
+    main()
