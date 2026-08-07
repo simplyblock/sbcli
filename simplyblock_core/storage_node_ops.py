@@ -2893,6 +2893,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         snode.active_tcp = active_tcp
         snode.active_rdma = active_rdma
         snode.spdk_proxy_image = spdk_proxy_image
+        snode.spdk_version = spdk_proxy_image.split(":")[1]
 
         if 'cpu_count' in node_info:
             snode.cpu = node_info['cpu_count']
@@ -4438,6 +4439,8 @@ def _restart_storage_node_impl(
 
     if spdk_proxy_image:
         snode.spdk_proxy_image = spdk_proxy_image
+        snode.spdk_version = spdk_proxy_image.split(":")[1]
+
     if not snode.spdk_proxy_image:
         snode.spdk_proxy_image = cluster.container_image_prefix + constants.SIMPLY_BLOCK_DOCKER_IMAGE
 
