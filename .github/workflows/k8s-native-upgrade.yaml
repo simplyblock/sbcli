@@ -39,9 +39,9 @@ on:
         required: false
         default: ''
 
-      # ── Operator repo branches (base,target — e.g. "main,main" or "release-25,main") ──
-      operator_repo_branches:
-        description: 'Operator repo branches: base_branch,target_branch (e.g. main,main)'
+      # ── Helm repo branches (base,target — e.g. "main,main" or "release-25,main") ──
+      helm_repo_branches:
+        description: 'Helm chart repo branches: base_branch,target_branch (R25: base has CSI chart, R26+: base has operator chart)'
         required: true
         default: 'main,main'
 
@@ -74,9 +74,9 @@ on:
         required: false
         default: 'br-ex:enp2s0f0'
       cluster_params:
-        description: 'Cluster config: ndcs=2,npcs=2,bs=4096,chunk_bs=4096,partitions=1,jm_count=4,max_lvol=30'
+        description: 'Cluster config: ndcs=1,npcs=1,bs=4096,chunk_bs=4096,partitions=0,jm_count=3,max_lvol=30'
         required: false
-        default: 'ndcs=2,npcs=2,bs=4096,chunk_bs=4096,partitions=1,jm_count=4,max_lvol=30'
+        default: 'ndcs=1,npcs=1,bs=4096,chunk_bs=4096,partitions=0,jm_count=3,max_lvol=30'
       cluster_environment:
         description: 'Target cluster environment'
         required: true
@@ -159,8 +159,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Parse operator_repo_branches (format: "base_branch,target_branch")
-          IFS=',' read -r BASE_HELM TARGET_HELM <<< "${{ github.event.inputs.operator_repo_branches || 'main,main' }}"
+          # Parse helm_repo_branches (format: "base_branch,target_branch")
+          IFS=',' read -r BASE_HELM TARGET_HELM <<< "${{ github.event.inputs.helm_repo_branches || 'main,main' }}"
           TARGET_HELM="${TARGET_HELM:-$BASE_HELM}"
           echo "BASE_HELM_BRANCH=${BASE_HELM}" >> "$GITHUB_ENV"
           echo "TARGET_HELM_BRANCH=${TARGET_HELM}" >> "$GITHUB_ENV"
@@ -239,7 +239,7 @@ jobs:
       # ── Parse cluster params ──
       - name: Parse cluster parameters
         run: |
-          PARAMS="${{ github.event.inputs.cluster_params || 'ndcs=2,npcs=2,bs=4096,chunk_bs=4096,partitions=1,jm_count=4' }}"
+          PARAMS="${{ github.event.inputs.cluster_params || 'ndcs=1,npcs=1,bs=4096,chunk_bs=4096,partitions=0,jm_count=3,max_lvol=30' }}"
           for kv in $(echo "$PARAMS" | tr ',' '\n'); do
             key=$(echo "$kv" | cut -d= -f1 | tr '[:lower:]' '[:upper:]')
             val=$(echo "$kv" | cut -d= -f2)
@@ -260,6 +260,145 @@ jobs:
 
       # ── Common steps (both upgrade types) ──
 
+      - name: Setup kubeconfig
+        run: |
+          mkdir -p $HOME/.kube
+          KUBECONFIG_FILE="$HOME/.kube/config-${{ github.run_id }}"
+          echo "${KUBECONFIG_DATA}" > "$KUBECONFIG_FILE"
+          chmod 600 "$KUBECONFIG_FILE"
+          echo "KUBECONFIG=$KUBECONFIG_FILE" >> $GITHUB_ENV
+        env:
+          KUBECONFIG_DATA: ${{
+            github.event.inputs.cluster_environment == 'aws-openshift' && secrets.KUBECONFIG_AWS_OPENSHIFT ||
+            github.event.inputs.cluster_environment == 'openshift-local' && secrets.KUBECONFIG_OPENSHIFT_LOCAL ||
+            github.event.inputs.cluster_environment == 'openshift-baremetal' && secrets.KUBECONFIG_OPENSHIFT_BM ||
+            github.event.inputs.cluster_environment == 'gcp' && secrets.KUBECONFIG_GCP ||
+            secrets.KUBECONFIG_LOCAL || secrets.KUBECONFIG_CONTENT
+            }}
+
+      - name: Verify kubectl connectivity
+        run: kubectl get nodes
+
+      - name: Force cleanup old deployment
+        if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
+        timeout-minutes: 15
+        run: |
+          set +e
+          NAMESPACE=simplyblock
+          CLUSTER_ENV="${{ github.event.inputs.cluster_environment || 'local' }}"
+
+          echo "=== Phase 1: Uninstall all Helm releases (R25 + R26) ==="
+          # Uninstall known R25 charts explicitly (they won't be in cleanup scripts)
+          helm uninstall spdk-csi -n $NAMESPACE --no-hooks --timeout 60s 2>/dev/null || true
+          helm uninstall sbcli -n $NAMESPACE --no-hooks --timeout 60s 2>/dev/null || true
+          # Uninstall any remaining releases (R26 operator, etc.)
+          for rel in $(helm list -n $NAMESPACE -q 2>/dev/null); do
+            echo "Uninstalling Helm release: $rel"
+            helm uninstall "$rel" -n $NAMESPACE --no-hooks --timeout 60s 2>/dev/null || true
+          done
+          helm uninstall cert-manager -n cert-manager --no-hooks --timeout 60s 2>/dev/null || true
+
+          echo "=== Phase 2: Delete simplyblock resources in kube-system ==="
+          # The spdk-csi chart installs simplyblock-snapshot-controller in kube-system
+          # with helm.sh/resource-policy: keep, so it survives helm uninstall and
+          # blocks future installs (both R25 spdk-csi and R26 operator).
+          for RTYPE in deployment service sa configmap; do
+            for NAME in $(kubectl -n kube-system get $RTYPE --no-headers -o custom-columns=:metadata.name 2>/dev/null | grep -i simplyblock 2>/dev/null); do
+              echo "Deleting kube-system $RTYPE/$NAME"
+              kubectl -n kube-system delete $RTYPE "$NAME" --ignore-not-found 2>/dev/null || true
+            done
+          done
+
+          echo "=== Phase 3: Run shared cleanup scripts ==="
+          # Run the operator's own cleanup script (thorough helm + CR cleanup)
+          if [ -x "$GITHUB_WORKSPACE/simplyblock-operator/helm-charts/scripts/cleanup-simplyblock.sh" ]; then
+            bash $GITHUB_WORKSPACE/simplyblock-operator/helm-charts/scripts/cleanup-simplyblock.sh -f $NAMESPACE || true
+          fi
+          # Run the shared cleanup script (handles etcd overload with
+          # --request-timeout, bulk deletes, parallel finalizer patching,
+          # kube-system resources, StorageClasses, webhooks, etc.)
+          bash $GITHUB_WORKSPACE/e2e/scripts/cleanup_k8s.sh $NAMESPACE
+
+          echo "=== Delete Released PVs from simplyblock ==="
+          for pv in $(kubectl get pv --no-headers 2>/dev/null | grep 'simplyblock/' | awk '{print $1}'); do
+            echo "Deleting PV $pv"
+            kubectl delete pv "$pv" --ignore-not-found 2>/dev/null || true
+          done
+
+          echo "=== Delete CRDs ==="
+          # Clear finalizers on all remaining CR instances so CRD deletion doesn't hang
+          for crd in $(kubectl get crd -o name 2>/dev/null | grep simplyblock); do
+            crd_name="${crd#customresourcedefinition.apiextensions.k8s.io/}"
+            for cr in $(kubectl get "$crd_name" -A --no-headers -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name 2>/dev/null); do
+              IFS=' ' read -r ns name <<< "$cr"
+              kubectl patch "$crd_name" "$name" -n "$ns" --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
+            done
+            kubectl patch crd "$crd_name" --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
+          done
+          kubectl delete -f $GITHUB_WORKSPACE/simplyblock-operator/helm-charts/charts/simplyblock-operator/crds/ --ignore-not-found --timeout=60s 2>/dev/null || true
+          # Force-delete any CRDs that survived the timeout
+          for crd in $(kubectl get crd -o name 2>/dev/null | grep simplyblock); do
+            crd_name="${crd#customresourcedefinition.apiextensions.k8s.io/}"
+            kubectl patch crd "$crd_name" --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
+            kubectl delete crd "$crd_name" --ignore-not-found --timeout=30s 2>/dev/null || true
+          done
+
+          echo "=== Force delete + finalize namespaces ==="
+          kubectl delete namespace $NAMESPACE --force --grace-period=0 --wait=false 2>/dev/null || true
+          kubectl delete namespace cert-manager --force --grace-period=0 --wait=false 2>/dev/null || true
+          for ns in $NAMESPACE cert-manager; do
+            kubectl get namespace $ns -o json 2>/dev/null \
+              | jq '.spec.finalizers = []' \
+              | kubectl replace --raw "/api/v1/namespaces/$ns/finalize" -f - 2>/dev/null || true
+          done
+
+          # Delete cert-manager CRDs
+          kubectl delete crd certificaterequests.cert-manager.io certificates.cert-manager.io \
+            challenges.acme.cert-manager.io clusterissuers.cert-manager.io \
+            issuers.cert-manager.io orders.acme.cert-manager.io \
+            --ignore-not-found --force --grace-period=0 2>/dev/null || true
+
+          echo "=== Disconnect stale NVMe-oF, reset hugepages + restart kubelet ==="
+          IFS=',' read -ra NODES <<< "${{ github.event.inputs.worker_nodes }}"
+          for NODE in "${NODES[@]}"; do
+            (
+              if [[ "$CLUSTER_ENV" == *"openshift"* ]]; then
+                timeout 90 oc debug node/"$NODE" -- chroot /host bash -c \
+                  "nvme disconnect-all 2>/dev/null; echo 0 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages && systemctl restart kubelet" 2>/dev/null || true
+              else
+                timeout 90 kubectl debug node/"$NODE" -q --image=busybox:latest -- chroot /host sh -c \
+                  "nvme disconnect-all 2>/dev/null; echo 0 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages && systemctl restart kubelet" 2>/dev/null || true
+              fi
+              echo "Done: $NODE"
+            ) &
+          done
+          wait
+
+          echo "=== Verify namespace gone ==="
+          for i in $(seq 1 4); do
+            if ! kubectl get namespace $NAMESPACE &>/dev/null; then
+              echo "Namespace $NAMESPACE deleted"
+              break
+            fi
+            echo "Namespace still terminating ($i/4), force-finalizing..."
+            kubectl get namespace $NAMESPACE -o json 2>/dev/null \
+              | jq '.spec.finalizers = []' \
+              | kubectl replace --raw "/api/v1/namespaces/$NAMESPACE/finalize" -f - 2>/dev/null || true
+            sleep 5
+          done
+          echo "=== Cleanup complete ==="
+
+      - name: Remove stale storagenodeset labels from all worker nodes
+        if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
+        run: |
+          echo "Removing stale io.simplyblock.storagenodeset label from all worker nodes..."
+          IFS=',' read -ra NODES <<< "${{ github.event.inputs.worker_nodes }}"
+          for NODE in "${NODES[@]}"; do
+            echo "Removing storagenodeset label from $NODE"
+            kubectl label node "$NODE" io.simplyblock.storagenodeset- 2>/dev/null || true
+          done
+          echo "Stale label cleanup complete."
+
       - name: Cleanup stale CSI hostpath data on worker nodes
         if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
         run: |
@@ -278,7 +417,7 @@ jobs:
           echo "CSI hostpath data cleanup complete."
 
       - name: Install cert-manager (TLS prerequisite)
-        if: ${{ github.event.inputs.use_existing_cluster != 'true' && github.event.inputs.tls_enabled == 'true' }}
+        if: ${{ github.event.inputs.use_existing_cluster != 'true' && github.event.inputs.tls_enabled == 'true' && github.event.inputs.upgrade_type != 'r25-to-r2x' }}
         run: |
           helm repo add jetstack https://charts.jetstack.io
           helm repo update
@@ -295,6 +434,7 @@ jobs:
       - name: Install Helm Chart for simplyblock-operator (BASE version)
         if: ${{ github.event.inputs.use_existing_cluster != 'true' && github.event.inputs.upgrade_type != 'r25-to-r2x' }}
         run: |
+          set -euxo pipefail
           cd $GITHUB_WORKSPACE/simplyblock-operator/helm-charts/charts/simplyblock-operator/
 
           TLS_FLAGS=""
@@ -396,6 +536,11 @@ jobs:
             RESERVED_CPU_YAML='  reservedSystemCPU: "0,1,10,11,16,17,26,27"'
           fi
 
+          PCIE_MODEL_YAML=""
+          if [ "$CLUSTER_ENV" != "openshift-baremetal" ] && [ "$CLUSTER_ENV" != "openshift-local" ]; then
+            PCIE_MODEL_YAML='  pcieModel: "SAMSUNG MZQLB1T9HAJR-00007"'
+          fi
+
           # Build vault settings (conditional on TLS)
           VAULT_SETTINGS=""
           if [ "${{ github.event.inputs.tls_enabled }}" = "true" ]; then
@@ -444,7 +589,7 @@ jobs:
             clusterImage: "${SB_REPO}:${SB_TAG}"
             spdkImage: "${SPDK_IMAGE}"
             spdkProxyImage: "${SB_REPO}:${SB_TAG}"
-            pcieModel: "SAMSUNG MZQLB1T9HAJR-00007"
+          ${PCIE_MODEL_YAML}
             driveSizeRange: "${DRIVE_SIZE_RANGE}"
             mgmtIfname: ${MGMT_IFC}
             dataIfname:
@@ -561,10 +706,12 @@ jobs:
           set -euxo pipefail
           echo "=== Installing R25 sbcli control plane chart ==="
           cd $GITHUB_WORKSPACE/sbcli-r25/simplyblock_core/scripts/charts/
+          helm dependency build .
           helm upgrade --install sbcli \
             --namespace simplyblock \
             --create-namespace \
             --timeout 10m \
+            --set ingress-nginx.controller.admissionWebhooks.enabled=false \
             ./
           echo "sbcli control plane chart installed"
 
@@ -605,7 +752,7 @@ jobs:
           ADMIN_POD=""
           for i in $(seq 1 30); do
             ADMIN_POD=$(kubectl -n $NAMESPACE get pods --no-headers 2>/dev/null \
-              | grep -i "webappapi\|admin\|sbcli" \
+              | grep -i "admin-control\|webappapi" \
               | grep "Running" | head -1 | awk '{print $1}') || true
             if [ -n "$ADMIN_POD" ]; then
               echo "Found admin pod: $ADMIN_POD"
@@ -628,6 +775,26 @@ jobs:
             exit 1
           fi
 
+          echo "=== Waiting for FDB to be ready ==="
+          for i in $(seq 1 30); do
+            FDB_STATUS=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
+              sbcli-dev cluster list 2>&1) || true
+            if echo "$FDB_STATUS" | grep -qiE 'Connection.*invalid|Error.*reading.*FDB|not found'; then
+              echo "FDB not ready yet ($i/30): $(echo "$FDB_STATUS" | head -1)"
+              sleep 10
+            else
+              echo "FDB appears ready"
+              break
+            fi
+            if [ "$i" -eq 30 ]; then
+              echo "ERROR: FDB not ready after 5 minutes"
+              echo "$FDB_STATUS"
+              kubectl -n $NAMESPACE get pods
+              kubectl -n $NAMESPACE logs "$ADMIN_POD" --tail=50 2>/dev/null || true
+              exit 1
+            fi
+          done
+
           echo "=== Creating R25 cluster ==="
           CREATE_OUTPUT=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
             sbcli-dev -d --dev cluster create \
@@ -648,11 +815,6 @@ jobs:
               sbcli-dev cluster list 2>&1) || true
             echo "Cluster list output: $LIST_OUTPUT"
             CLUSTER_ID=$(echo "$LIST_OUTPUT" | awk 'NR==4{print $2}')
-            CLUSTER_SECRET=$(echo "$LIST_OUTPUT" | awk 'NR==4{print $NF}')
-          else
-            CLUSTER_SECRET=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
-              sbcli-dev cluster list --json 2>/dev/null \
-              | jq -r '.[0].secret // empty') || true
           fi
 
           if [ -z "$CLUSTER_ID" ] || [ "$CLUSTER_ID" = "+" ]; then
@@ -661,10 +823,42 @@ jobs:
             exit 1
           fi
 
+          # Get cluster secret using dedicated command (disable tracing to avoid leaking secret)
+          set +x
+          CLUSTER_SECRET=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
+            sbcli-dev cluster get-secret "$CLUSTER_ID" 2>/dev/null | tr -d '[:space:]') || true
+          if [ -z "$CLUSTER_SECRET" ]; then
+            echo "WARNING: Failed to get cluster secret via get-secret, trying JSON fallback"
+            CLUSTER_SECRET=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
+              sbcli-dev cluster list --json 2>/dev/null \
+              | jq -r '.[0].secret // empty') || true
+          fi
+
+          # Validate the secret — should be a short alphanumeric token, not an error dump
+          if [ -z "$CLUSTER_SECRET" ] || [ "${#CLUSTER_SECRET}" -gt 100 ]; then
+            echo "ERROR: CLUSTER_SECRET is empty or invalid (length=${#CLUSTER_SECRET})"
+            echo "This usually means FDB is not reachable from the admin pod."
+            kubectl -n $NAMESPACE exec "$ADMIN_POD" -- sbcli-dev cluster list 2>&1 || true
+            exit 1
+          fi
+          echo "::add-mask::${CLUSTER_SECRET}"
+          set -x
+
           echo "R25 cluster created: CLUSTER_ID=$CLUSTER_ID"
           echo "CLUSTER_ID=${CLUSTER_ID}" >> $GITHUB_ENV
           echo "CLUSTER_SECRET=${CLUSTER_SECRET}" >> $GITHUB_ENV
           echo "R25_ADMIN_POD=${ADMIN_POD}" >> $GITHUB_ENV
+
+      - name: Label worker nodes for R25 storage plane
+        if: ${{ github.event.inputs.use_existing_cluster != 'true' && github.event.inputs.upgrade_type == 'r25-to-r2x' }}
+        run: |
+          set -euxo pipefail
+          echo "=== Labeling worker nodes for R25 storage plane ==="
+          IFS=',' read -ra NODES <<< "${{ github.event.inputs.worker_nodes }}"
+          for NODE in "${NODES[@]}"; do
+            kubectl label node "$NODE" io.simplyblock.node-type=simplyblock-storage-plane --overwrite
+            echo "Labeled $NODE with io.simplyblock.node-type=simplyblock-storage-plane"
+          done
 
       - name: Install spdk-csi chart for R25 storage nodes
         if: ${{ github.event.inputs.use_existing_cluster != 'true' && github.event.inputs.upgrade_type == 'r25-to-r2x' }}
@@ -673,9 +867,21 @@ jobs:
           NAMESPACE=simplyblock
 
           echo "=== Installing R25 spdk-csi chart ==="
-          cd $GITHUB_WORKSPACE/simplyblock-operator/csi-driver/charts/spdk-csi/latest/spdk-csi/
+          # v0.2.4 has charts/ at root; main moved it to csi-driver/charts/
+          if [ -d "$GITHUB_WORKSPACE/simplyblock-operator/csi-driver/charts/spdk-csi/latest/spdk-csi" ]; then
+            cd $GITHUB_WORKSPACE/simplyblock-operator/csi-driver/charts/spdk-csi/latest/spdk-csi/
+          elif [ -d "$GITHUB_WORKSPACE/simplyblock-operator/charts/spdk-csi/latest/spdk-csi" ]; then
+            cd $GITHUB_WORKSPACE/simplyblock-operator/charts/spdk-csi/latest/spdk-csi/
+          else
+            echo "ERROR: Cannot find spdk-csi chart directory"
+            ls -la $GITHUB_WORKSPACE/simplyblock-operator/
+            ls -la $GITHUB_WORKSPACE/simplyblock-operator/charts/ 2>/dev/null || true
+            ls -la $GITHUB_WORKSPACE/simplyblock-operator/csi-driver/ 2>/dev/null || true
+            exit 1
+          fi
+          helm dependency build . 2>/dev/null || true
 
-          helm install -n $NAMESPACE spdk-csi ./ \
+          helm install -n $NAMESPACE --create-namespace spdk-csi ./ \
             --set csiConfig.simplybk.uuid="${CLUSTER_ID}" \
             --set csiConfig.simplybk.ip="http://simplyblock-webappapi.simplyblock:5000" \
             --set csiSecret.simplybk.secret="${CLUSTER_SECRET}" \
@@ -687,10 +893,10 @@ jobs:
             --set storageclass.volumeBindingMode=Immediate \
             --set cachingnode.create=false \
             --set logicalVolume.encryption=false \
-            --set logicalVolume.snapshot="True" \
             --set storagenode.ifname="${MGMT_IFC}" \
             --set storagenode.create=true \
-            --set storagenode.numPartitions="${PARTITIONS}" \
+            --set storagenode.numPartitions=1 \
+            --set storagenode.coresPercentage=50 \
             --set image.storageNode.tag="${STORAGENODE_TAG}"
 
           echo "spdk-csi chart installed"
@@ -739,7 +945,7 @@ jobs:
           # Re-resolve admin pod (it may have restarted)
           for i in $(seq 1 30); do
             NEW_POD=$(kubectl -n $NAMESPACE get pods --no-headers 2>/dev/null \
-              | grep -i "webappapi\|admin\|sbcli" \
+              | grep -i "admin-control\|webappapi" \
               | grep "Running" | head -1 | awk '{print $1}') || true
             if [ -n "$NEW_POD" ]; then
               ADMIN_POD="$NEW_POD"
@@ -747,6 +953,41 @@ jobs:
             fi
             sleep 10
           done
+
+          echo "=== Waiting for storage nodes to register ==="
+          CLUSTER_ID="${CLUSTER_ID:-}"
+          if [ -z "$CLUSTER_ID" ]; then
+            CLUSTER_ID=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
+              sbcli-dev cluster list --json 2>/dev/null \
+              | jq -r '.[0].id // .[0].uuid // empty') || true
+          fi
+          for i in $(seq 1 60); do
+            SN_COUNT=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
+              sbcli-dev sn list --json 2>/dev/null | jq 'length' 2>/dev/null || echo "0")
+            echo "Storage nodes registered: $SN_COUNT/$EXPECTED_SNODES ($i/60)"
+            if [ "$SN_COUNT" -ge "$EXPECTED_SNODES" ]; then
+              echo "All storage nodes registered"
+              break
+            fi
+            sleep 10
+          done
+
+          echo "=== Waiting for all storage nodes to be online ==="
+          for i in $(seq 1 60); do
+            ONLINE_COUNT=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
+              sbcli-dev sn list --json 2>/dev/null \
+              | jq '[.[] | select(.status == "online")] | length' 2>/dev/null || echo "0")
+            echo "Storage nodes online: $ONLINE_COUNT/$EXPECTED_SNODES ($i/60)"
+            if [ "$ONLINE_COUNT" -ge "$EXPECTED_SNODES" ]; then
+              echo "All storage nodes are online"
+              break
+            fi
+            sleep 10
+          done
+
+          echo "=== Activating R25 cluster (no auto-activate in R25) ==="
+          kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
+            sbcli-dev cluster activate "$CLUSTER_ID" 2>&1 || true
 
           echo "=== Polling cluster status (admin pod: $ADMIN_POD) ==="
           for i in $(seq 1 $MAX_POLL); do
@@ -756,15 +997,28 @@ jobs:
 
             if echo "$OUTPUT" | grep -qi "active"; then
               echo "R25 cluster is active!"
-              # Re-capture cluster ID/secret in case they changed
+              # Re-capture cluster ID
               CLUSTER_ID=$(echo "$OUTPUT" | awk 'NR==4{print $2}')
-              CLUSTER_SECRET=$(echo "$OUTPUT" | awk 'NR==4{print $NF}')
               if [ -z "$CLUSTER_ID" ] || [ "$CLUSTER_ID" = "+" ]; then
                 JSON_OUT=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
                   sbcli-dev cluster list --json 2>&1) || true
                 CLUSTER_ID=$(echo "$JSON_OUT" | jq -r '.[0].id // .[0].uuid // empty')
-                CLUSTER_SECRET=$(echo "$JSON_OUT" | jq -r '.[0].secret // empty')
               fi
+              # Get cluster secret using dedicated command (disable tracing to avoid leaking secret)
+              set +x
+              CLUSTER_SECRET=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
+                sbcli-dev cluster get-secret "$CLUSTER_ID" 2>/dev/null | tr -d '[:space:]') || true
+              if [ -z "$CLUSTER_SECRET" ]; then
+                CLUSTER_SECRET=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
+                  sbcli-dev cluster list --json 2>/dev/null \
+                  | jq -r '.[0].secret // empty') || true
+              fi
+              if [ -z "$CLUSTER_SECRET" ] || [ "${#CLUSTER_SECRET}" -gt 100 ]; then
+                echo "ERROR: CLUSTER_SECRET is empty or invalid (length=${#CLUSTER_SECRET})"
+                exit 1
+              fi
+              echo "::add-mask::${CLUSTER_SECRET}"
+              set -x
               echo "CLUSTER_ID=${CLUSTER_ID}" >> $GITHUB_ENV
               echo "CLUSTER_SECRET=${CLUSTER_SECRET}" >> $GITHUB_ENV
               exit 0
@@ -777,6 +1031,7 @@ jobs:
           exit 1
         env:
           R25_ADMIN_POD: ${{ env.R25_ADMIN_POD }}
+          CLUSTER_ID: ${{ env.CLUSTER_ID }}
 
       # ── Wait for cluster readiness (operator-based bootstrap only) ──
 
@@ -877,13 +1132,26 @@ jobs:
             if echo "$OUTPUT" | grep -qi "active"; then
               echo "Cluster is active!"
               CLUSTER_ID=$(echo "$OUTPUT" | awk 'NR==4{print $2}')
-              CLUSTER_SECRET=$(echo "$OUTPUT" | awk 'NR==4{print $NF}')
               if [ -z "$CLUSTER_ID" ] || [ "$CLUSTER_ID" = "+" ]; then
                 JSON_OUT=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
                   sbctl cluster list --json 2>&1) || true
                 CLUSTER_ID=$(echo "$JSON_OUT" | jq -r '.[0].id // .[0].uuid // empty')
-                CLUSTER_SECRET=$(echo "$JSON_OUT" | jq -r '.[0].secret // empty')
               fi
+              # Get cluster secret using dedicated command
+              set +x
+              CLUSTER_SECRET=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
+                sbctl cluster get-secret "$CLUSTER_ID" 2>/dev/null | tr -d '[:space:]') || true
+              if [ -z "$CLUSTER_SECRET" ]; then
+                CLUSTER_SECRET=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
+                  sbctl cluster list --json 2>/dev/null \
+                  | jq -r '.[0].secret // empty') || true
+              fi
+              if [ -z "$CLUSTER_SECRET" ] || [ "${#CLUSTER_SECRET}" -gt 100 ]; then
+                echo "ERROR: CLUSTER_SECRET is empty or invalid (length=${#CLUSTER_SECRET})"
+                exit 1
+              fi
+              echo "::add-mask::${CLUSTER_SECRET}"
+              set -x
               echo "CLUSTER_ID=${CLUSTER_ID}" >> $GITHUB_ENV
               echo "CLUSTER_SECRET=${CLUSTER_SECRET}" >> $GITHUB_ENV
               exit 0
@@ -1305,3 +1573,10 @@ jobs:
         env:
           CLUSTER_ID: ${{ env.CLUSTER_ID }}
           MON_SECRET: ${{ secrets.MON_SECRET }}
+
+      - name: Cleanup build folder
+        if: always()
+        run: |
+          rm -rf ./* || true
+          rm -rf ./.??* || true
+          rm -f "$HOME/.kube/config-${{ github.run_id }}"

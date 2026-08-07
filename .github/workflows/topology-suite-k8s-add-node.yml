@@ -1,5 +1,5 @@
 name: K8s Topology Suite - Add Node (Per-Test Bootstrap)
-run-name: "K8s Topology Add-Node | ${{ inputs.cluster_environment || 'local' }} | ${{ inputs.TEST_CLASSES }} | ${{ inputs.cluster_params }}"
+run-name: "K8s Topology Add-Node | ${{ inputs.cluster_environment || 'openshift-baremetal' }} | ${{ inputs.TEST_CLASSES }} | ${{ inputs.cluster_params }}"
 
 on:
   workflow_dispatch:
@@ -36,11 +36,13 @@ on:
         required: false
         default: 'main'
       csi_repository:
-        description: 'CSI driver image repository (leave empty for chart default)'
+        description: 'CSI driver image repository'
         required: false
+        default: 'simplyblock/spdkcsi'
       csi_tag:
-        description: 'CSI driver image tag (leave empty for chart default)'
+        description: 'CSI driver image tag'
         required: false
+        default: 'latest'
       spdk_image:
         description: 'SPDK container image'
         required: true
@@ -53,7 +55,7 @@ on:
         description: 'Comma-separated initial K8s worker node names'
         required: true
       new_worker_nodes:
-        description: 'Comma-separated new K8s worker node names to add during test (at least 2, multiples of 2)'
+        description: 'Comma-separated new K8s worker node names to add during test (at least 1)'
         required: true
 
       # =========================
@@ -62,7 +64,7 @@ on:
       ifc_names:
         description: 'Network interfaces (mgmt_ifc:data_nics)'
         required: false
-        default: 'ens18:enp1s0'
+        default: 'br-ex:enp2s0f0'
       max_lvol:
         description: 'Max logical volume count per storage node'
         required: false
@@ -74,7 +76,7 @@ on:
       cluster_environment:
         description: 'Target cluster environment'
         required: true
-        default: 'local'
+        default: 'openshift-baremetal'
         type: choice
         options:
           - local
@@ -132,9 +134,22 @@ on:
         description: 'NFS mountpoint on client nodes'
         required: false
         default: '/mnt/nfs_share/'
+      cluster_security:
+        description: "Cluster setup mode. 'backup' deploys MinIO and enables backup on StorageCluster. Auto-enabled for backup test names."
+        required: false
+        type: choice
+        default: "none"
+        options:
+          - none
+          - backup
+      preserve_resources_on_failure:
+        description: 'Preserve PVCs, FIO pods, snapshots on test failure for debugging'
+        required: false
+        default: true
+        type: boolean
 
 concurrency:
-  group: k8s-topology-add-node-${{ inputs.cluster_environment || 'local' }}
+  group: k8s-topology-add-node-${{ inputs.cluster_environment || 'openshift-baremetal' }}
   cancel-in-progress: false
 
 # ============================================================================
@@ -191,23 +206,25 @@ jobs:
       simplyblock_repository: ${{ inputs.simplyblock_repository || 'public.ecr.aws/simply-block/simplyblock' }}
       operator_repository: ${{ inputs.operator_repository || 'simplyblock/simplyblock-operator' }}
       operator_tag: ${{ inputs.operator_tag || 'main' }}
-      csi_repository: ${{ inputs.csi_repository || '' }}
-      csi_tag: ${{ inputs.csi_tag || '' }}
+      csi_repository: ${{ inputs.csi_repository || 'simplyblock/spdkcsi' }}
+      csi_tag: ${{ inputs.csi_tag || 'latest' }}
       spdk_image: ${{ inputs.spdk_image }}
       worker_nodes: ${{ inputs.worker_nodes }}
       new_worker_nodes: ${{ inputs.new_worker_nodes }}
-      ifc_names: ${{ inputs.ifc_names || 'ens18:enp1s0' }}
+      ifc_names: ${{ inputs.ifc_names || 'br-ex:enp2s0f0' }}
       max_lvol: ${{ inputs.max_lvol || '30' }}
       ssh_user: ${{ inputs.ssh_user || 'root' }}
       key_path: ${{ inputs.key_path }}
       send_slack_notification: false
       cluster_params: ${{ inputs.cluster_params || 'ndcs=2,npcs=2,bs=4096,chunk_bs=4096,partitions=1,jm_count=4' }}
-      cluster_environment: ${{ inputs.cluster_environment || 'local' }}
+      cluster_environment: ${{ inputs.cluster_environment || 'openshift-baremetal' }}
       skip_nfs: ${{ inputs.skip_nfs || 'false' }}
       use_existing_cluster: ${{ inputs.use_existing_cluster || 'false' }}
       tls_enabled: ${{ inputs.tls_enabled }}
       client_ips: ${{ inputs.client_ips || '' }}
       nfs_mountpoint: ${{ inputs.nfs_mountpoint || '/mnt/nfs_share/' }}
+      cluster_security: ${{ inputs.cluster_security || 'none' }}
+      preserve_resources_on_failure: ${{ inputs.preserve_resources_on_failure }}
     secrets: inherit
 
   # ─────────────────────────────────────────────────────────────────────────
@@ -290,7 +307,7 @@ jobs:
           GITHUB_REF_NAME: ${{ github.ref_name }}
           TEST_COUNT: ${{ needs.setup-matrix.outputs.test_count }}
           TEST_CLASSES: ${{ inputs.TEST_CLASSES }}
-          CLUSTER_ENV: ${{ inputs.cluster_environment || 'local' }}
+          CLUSTER_ENV: ${{ inputs.cluster_environment || 'openshift-baremetal' }}
         run: |
           python3 - <<'PYEOF'
           import json, os, re, sys, urllib.request
@@ -321,17 +338,21 @@ jobs:
                   if not os.path.isfile(md_path):
                       continue
                   content = open(md_path).read()
-                  # Extract test name from "## ... Summary — <TestName>"
+                  # Extract test name — try "Summary — <Name>" first,
+                  # fall back to "Test class: `<Name>`" (e2e-bootstrap format)
                   name_m = re.search(r'Summary\s*[-—]\s*(\S+)', content)
+                  if not name_m:
+                      name_m = re.search(r'\*\*Test class:\*\*\s*`([^`]+)`', content)
                   tname = name_m.group(1) if name_m else d
-                  # Extract result
-                  res_m = re.search(r'\*\*Result:\*\*\s*(\S+)', content)
-                  result = res_m.group(1) if res_m else "?"
-                  r_icon = ":white_check_mark:" if "pass" in result.lower() or "success" in result.lower() else ":x:"
-                  # Extract counts
-                  total_m  = re.search(r'\*\*Total:\*\*\s*(\d+)', content)
-                  passed_m = re.search(r'\*\*Passed:\*\*\s*(\d+)', content)
-                  failed_m = re.search(r'\*\*Failed:\*\*\s*(\d+)', content)
+                  # Extract result — handle both "SUCCESS"/"FAILED" and emoji prefixed "✅ SUCCESS"
+                  res_m = re.search(r'\*\*Result:\*\*\s*(.+?)(?:\s*[&<\n]|$)', content)
+                  result = res_m.group(1).strip() if res_m else "?"
+                  r_icon = ":white_check_mark:" if "success" in result.lower() else ":x:"
+                  # Extract counts — handle both inline "**Total:** N" and
+                  # table format "| ✅ Passed | N |" from e2e-bootstrap
+                  total_m  = re.search(r'\*\*Total[:\*]*\*?\*?\s*\|?\s*\*?\*?(\d+)', content)
+                  passed_m = re.search(r'(?:\*\*Passed:\*\*|[✅] Passed)\s*\|?\s*(\d+)', content)
+                  failed_m = re.search(r'(?:\*\*Failed:\*\*|[❌] Failed)\s*\|?\s*(\d+)', content)
                   total  = total_m.group(1) if total_m else "?"
                   passed = passed_m.group(1) if passed_m else "?"
                   failed = failed_m.group(1) if failed_m else "?"

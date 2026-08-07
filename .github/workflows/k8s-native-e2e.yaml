@@ -343,6 +343,11 @@ jobs:
           set +e
           NAMESPACE=simplyblock
 
+          # Run the operator's own cleanup script first (thorough helm + CR cleanup)
+          if [ -x "$GITHUB_WORKSPACE/simplyblock-operator/helm-charts/scripts/cleanup-simplyblock.sh" ]; then
+            bash $GITHUB_WORKSPACE/simplyblock-operator/helm-charts/scripts/cleanup-simplyblock.sh -f $NAMESPACE || true
+          fi
+
           # Run the shared cleanup script (handles etcd overload with
           # --request-timeout, bulk deletes, and parallel finalizer patching)
           bash $GITHUB_WORKSPACE/e2e/scripts/cleanup_k8s.sh $NAMESPACE
@@ -375,15 +380,15 @@ jobs:
           CLUSTER_ENV="${{ github.event.inputs.cluster_environment || 'local' }}"
           IFS=',' read -ra NODES <<< "${{ github.event.inputs.worker_nodes }}"
           for NODE in "${NODES[@]}"; do
-            echo "Resetting hugepages to 0 on $NODE..."
+            echo "Disconnecting stale NVMe-oF and resetting hugepages on $NODE..."
             if [[ "$CLUSTER_ENV" == *"openshift"* ]]; then
               oc debug node/"$NODE" -- chroot /host bash -c \
-                "echo 0 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages" 2>/dev/null || true
+                "nvme disconnect-all 2>/dev/null; echo 0 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages" 2>/dev/null || true
               echo "Restarting kubelet on $NODE..."
               oc debug node/"$NODE" -- chroot /host systemctl restart kubelet 2>/dev/null || true
             else
               kubectl debug node/"$NODE" -q --image=busybox:latest -- chroot /host sh -c \
-                "echo 0 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages" 2>/dev/null || true
+                "nvme disconnect-all 2>/dev/null; echo 0 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages" 2>/dev/null || true
               echo "Restarting kubelet on $NODE..."
               kubectl debug node/"$NODE" -q --image=busybox:latest -- chroot /host sh -c \
                 "systemctl restart kubelet" 2>/dev/null || true
@@ -425,6 +430,19 @@ jobs:
           echo "Waiting for vault namespace to be deleted..."
           kubectl wait --for=delete namespace/vault --timeout=120s 2>/dev/null || true
           echo "=== KMS cleanup complete ==="
+
+      # ── Remove stale labels from previous runs ──────────────────────────────
+
+      - name: Remove stale storagenodeset labels from all worker nodes
+        if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
+        run: |
+          echo "Removing stale io.simplyblock.storagenodeset label from all worker nodes..."
+          IFS=',' read -ra NODES <<< "${{ github.event.inputs.worker_nodes }}"
+          for NODE in "${NODES[@]}"; do
+            echo "Removing storagenodeset label from $NODE"
+            kubectl label node "$NODE" io.simplyblock.storagenodeset- 2>/dev/null || true
+          done
+          echo "Stale label cleanup complete."
 
       # ── Label nodes (after cluster is active) ───────────────────────────────
 
@@ -558,6 +576,37 @@ jobs:
 
           echo "=== MinIO and backup credentials setup complete ==="
 
+      - name: Start MinIO trace logging
+        if: >-
+          ${{
+            github.event.inputs.use_existing_cluster != 'true' &&
+            (github.event.inputs.cluster_security == 'backup' ||
+             github.event.inputs.testname == 'backup' ||
+             github.event.inputs.testname == 'backup-stress')
+          }}
+        run: |
+          set -euxo pipefail
+
+          # 1. Install mc (MinIO Client)
+          curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o /usr/local/bin/mc
+          chmod +x /usr/local/bin/mc
+
+          # 2. Port-forward MinIO service to localhost
+          kubectl -n minio port-forward svc/minio 9000:9000 &
+          echo "MC_PORT_FWD_PID=$!" >> "$GITHUB_ENV"
+          sleep 3
+
+          # 3. Configure mc alias
+          mc alias set myminio http://localhost:9000 minioadmin minioadmin123
+
+          # 4. Start admin trace in background
+          MINIO_TRACE_LOG="/tmp/minio-trace-${GITHUB_RUN_ID}.log"
+          echo "MINIO_TRACE_LOG=${MINIO_TRACE_LOG}" >> "$GITHUB_ENV"
+          nohup mc admin trace -v --all myminio > "${MINIO_TRACE_LOG}" 2>&1 &
+          echo "MC_TRACE_PID=$!" >> "$GITHUB_ENV"
+
+          echo "=== MinIO trace logging started (PID=$!, log=${MINIO_TRACE_LOG}) ==="
+
       - name: Wait before helm install
         if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
         run: sleep 30
@@ -580,6 +629,7 @@ jobs:
       - name: Install Helm Chart for simplyblock-operator
         if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
         run: |
+          set -euxo pipefail
           cd $GITHUB_WORKSPACE/simplyblock-operator/helm-charts/charts/simplyblock-operator/
 
           TLS_FLAGS=""
@@ -792,6 +842,12 @@ jobs:
             RESERVED_CPU_YAML='  reservedSystemCPU: "0,1,10,11,16,17,26,27"'
           fi
 
+          PCIE_MODEL_YAML=""
+          CLUSTER_ENV="${{ github.event.inputs.cluster_environment }}"
+          if [ "$CLUSTER_ENV" != "openshift-baremetal" ] && [ "$CLUSTER_ENV" != "openshift-local" ]; then
+            PCIE_MODEL_YAML='  pcieModel: "SAMSUNG MZQLB1T9HAJR-00007"'
+          fi
+
           # Build workerNodes YAML list from comma-separated input
           WORKER_YAML=""
           IFS=',' read -ra NODES <<< "${{ github.event.inputs.worker_nodes }}"
@@ -875,7 +931,7 @@ jobs:
             clusterImage: "${SB_REPO}:${SB_TAG}"
             spdkImage: "${SPDK_IMAGE}"
             spdkProxyImage: "${SB_REPO}:${SB_TAG}"
-            pcieModel: "SAMSUNG MZQLB1T9HAJR-00007"
+          ${PCIE_MODEL_YAML}
             driveSizeRange: "${DRIVE_SIZE_RANGE}"
             mgmtIfname: ${MGMT_IFC}
             dataIfname:
@@ -939,7 +995,7 @@ jobs:
             clusterImage: "${SB_REPO}:${SB_TAG}"
             spdkImage: "${SPDK_IMAGE}"
             spdkProxyImage: "${SB_REPO}:${SB_TAG}"
-            pcieModel: "SAMSUNG MZQLB1T9HAJR-00007"
+          ${PCIE_MODEL_YAML}
             driveSizeRange: "${DRIVE_SIZE_RANGE}"
             mgmtIfname: ${MGMT_IFC}
             dataIfname:
@@ -1922,6 +1978,36 @@ jobs:
           path: |
             e2e/output.log
           if-no-files-found: warn
+
+      - name: Stop MinIO trace logging and save
+        if: always()
+        run: |
+          set +e
+          if [ -n "${MC_TRACE_PID:-}" ]; then
+            echo "Stopping MinIO trace (PID=${MC_TRACE_PID})..."
+            kill "${MC_TRACE_PID}" 2>/dev/null || true
+            wait "${MC_TRACE_PID}" 2>/dev/null || true
+          fi
+          if [ -n "${MC_PORT_FWD_PID:-}" ]; then
+            kill "${MC_PORT_FWD_PID}" 2>/dev/null || true
+          fi
+          if [ -f "${MINIO_TRACE_LOG:-}" ]; then
+            LINES=$(wc -l < "${MINIO_TRACE_LOG}")
+            SIZE=$(du -h "${MINIO_TRACE_LOG}" | cut -f1)
+            echo "=== MinIO trace log: ${LINES} lines, ${SIZE} ==="
+            # Copy to e2e/ so it gets picked up by artifact upload
+            cp "${MINIO_TRACE_LOG}" e2e/minio-trace.log 2>/dev/null || true
+          else
+            echo "No MinIO trace log found (backup tests may not have run)"
+          fi
+
+      - name: Upload MinIO trace log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minio-trace-${{ github.run_id }}
+          path: e2e/minio-trace.log
+          if-no-files-found: ignore
 
       - name: Cleanup MinIO namespace (if deployed)
         if: always()

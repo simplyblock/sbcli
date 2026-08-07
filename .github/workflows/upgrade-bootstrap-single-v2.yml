@@ -73,7 +73,7 @@ on:
         default: true
       TEST_CLASS:
         type: string
-        default: "major_upgrade_single"
+        default: "TestMajorUpgradeSingleNode"
       RUN_LABEL:
         type: string
         default: ""
@@ -126,7 +126,7 @@ on:
         description: "Upgrade test class name; defaults to single-node variant (no FIO during upgrade)"
         required: false
         type: string
-        default: "major_upgrade_single"
+        default: "TestMajorUpgradeSingleNode"
 
       RUN_LABEL:
         description: "Optional label appended to artifact names to avoid collisions"
@@ -179,11 +179,11 @@ jobs:
       BOOTSTRAP_HA_TYPE:           ${{ inputs.BOOTSTRAP_HA_TYPE || 'single' }}
       BOOTSTRAP_DATA_NIC:          ${{ inputs.BOOTSTRAP_DATA_NIC || 'eth1' }}
 
-      TEST_CLASS: ${{ inputs.TEST_CLASS || 'major_upgrade_single' }}
+      TEST_CLASS: ${{ inputs.TEST_CLASS || 'TestMajorUpgradeSingleNode' }}
 
       # Target images (overridden by CUSTOM_IMAGES target_spdk/target_docker)
       TARGET_SPDK_IMAGE:   'simplyblock/spdk:main-latest'
-      TARGET_DOCKER_IMAGE: 'public.ecr.aws/simply-block/simplyblock:main-latest'
+      TARGET_DOCKER_IMAGE: 'public.ecr.aws/simply-block/simplyblock:main'
 
       # Secrets
       SSH_PASSWORD:      ${{ secrets.SSH_PASSWORD }}

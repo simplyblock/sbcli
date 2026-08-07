@@ -1543,8 +1543,28 @@ class K8sUtils:
     def create_volume_snapshot(self, name: str, pvc_name: str,
                                snapshot_class: str = "simplyblock-csi-snapshotclass",
                                namespace: str = None):
-        """Create a VolumeSnapshot from a PVC."""
+        """Create a VolumeSnapshot from a PVC.
+
+        If a stale VolumeSnapshot with the same name already exists (e.g.
+        from a previous test run that did not clean up), it is deleted
+        first to avoid ``persistentVolumeClaimName is immutable`` errors
+        from ``kubectl apply``.
+        """
         ns = namespace or self.namespace
+        # Remove any stale VolumeSnapshot with the same name to avoid
+        # immutable-field collisions from a prior test.
+        existing = self.get_resource_json("volumesnapshot", name, namespace=ns)
+        if existing:
+            existing_pvc = (existing.get("spec", {})
+                           .get("source", {})
+                           .get("persistentVolumeClaimName", ""))
+            if existing_pvc != pvc_name:
+                self.logger.warning(
+                    f"[K8sUtils] Stale VolumeSnapshot '{name}' found "
+                    f"(source PVC '{existing_pvc}' != '{pvc_name}'), "
+                    f"deleting before re-creating"
+                )
+                self.delete_volume_snapshot(name, namespace=ns, wait=True)
         yaml_content = (
             f"apiVersion: snapshot.storage.k8s.io/v1\n"
             f"kind: VolumeSnapshot\n"
@@ -1584,11 +1604,23 @@ class K8sUtils:
             f"[K8sUtils] VolumeSnapshot '{name}' not ready within {timeout}s"
         )
 
-    def delete_volume_snapshot(self, name: str, namespace: str = None):
-        """Delete a VolumeSnapshot."""
+    def delete_volume_snapshot(self, name: str, namespace: str = None,
+                               wait: bool = False):
+        """Delete a VolumeSnapshot.
+
+        When *wait* is True the call blocks until the VolumeSnapshot is fully
+        removed, preventing stale-object collisions in subsequent tests.
+        """
         ns = namespace or self.namespace
-        self.logger.info(f"[K8sUtils] Deleting VolumeSnapshot '{name}'")
-        self.delete_resource("volumesnapshot", name, namespace=ns)
+        self.logger.info(f"[K8sUtils] Deleting VolumeSnapshot '{name}'"
+                         f"{' (waiting)' if wait else ''}")
+        if wait:
+            self._exec_kubectl(
+                f"kubectl delete volumesnapshot {name} -n {ns} "
+                f"--ignore-not-found --wait=true --timeout=120s"
+            )
+        else:
+            self.delete_resource("volumesnapshot", name, namespace=ns)
 
     def has_client_nodes(self) -> bool:
         """Return True if any K8s node has the 'client' role label."""
@@ -1900,9 +1932,9 @@ class K8sUtils:
             # Delete clone PVCs (prefixed clone-)
             f"kubectl get pvc -n {ns} --no-headers -o custom-columns=NAME:.metadata.name "
             f"2>/dev/null | grep '^clone-' | xargs -r kubectl delete pvc -n {ns} --ignore-not-found",
-            # Delete VolumeSnapshots (prefixed snap-)
+            # Delete VolumeSnapshots (prefixed snap- or snapshot-)
             f"kubectl get volumesnapshot -n {ns} --no-headers -o custom-columns=NAME:.metadata.name "
-            f"2>/dev/null | grep '^snap-' | xargs -r kubectl delete volumesnapshot -n {ns} --ignore-not-found",
+            f"2>/dev/null | grep -E '^(snap-|snapshot-)' | xargs -r kubectl delete volumesnapshot -n {ns} --ignore-not-found --wait=true",
             # Delete test PVCs (various prefixes)
             f"kubectl get pvc -n {ns} --no-headers -o custom-columns=NAME:.metadata.name "
             f"2>/dev/null | grep -E '^(pvc-|mig-pvc-|add-pvc-)' | xargs -r kubectl delete pvc -n {ns} --ignore-not-found",
@@ -2156,6 +2188,11 @@ class K8sUtils:
         new CR and handles provisioning automatically — no separate
         ``StorageCluster`` expand patch is needed.
 
+        Device configuration (``driveSizeRange``, ``pcieModel``) is
+        read from the parent StorageNodeSet and included in the
+        ``overrides`` block so the init container can find the correct
+        SSD devices on the new worker.
+
         Parameters
         ----------
         new_workers : list[str]
@@ -2167,8 +2204,31 @@ class K8sUtils:
             Override namespace (default ``self.namespace``).
         """
         ns = namespace or self.namespace
+
+        # Read device config from parent StorageNodeSet
+        sns_json = self.get_resource_json(
+            "storagenodeset.storage.simplyblock.io",
+            storage_node_set_ref,
+            namespace=ns,
+        )
+        sns_spec = sns_json.get("spec", {})
+        drive_size_range = sns_spec.get("driveSizeRange", "")
+        pcie_model = sns_spec.get("pcieModel", "")
+        if drive_size_range or pcie_model:
+            self.logger.info(
+                f"[K8sUtils] Read device config from StorageNodeSet "
+                f"'{storage_node_set_ref}': driveSizeRange={drive_size_range!r}, "
+                f"pcieModel={pcie_model!r}"
+            )
+
         for worker in new_workers:
             cr_name = f"{storage_node_set_ref}-expand-{worker}"
+            overrides = "    expand: true\n"
+            if drive_size_range:
+                overrides += f'    driveSizeRange: "{drive_size_range}"\n'
+            if pcie_model:
+                overrides += f'    pcieModel: "{pcie_model}"\n'
+
             yaml_content = (
                 "apiVersion: storage.simplyblock.io/v1alpha1\n"
                 "kind: StorageNode\n"
@@ -2180,7 +2240,7 @@ class K8sUtils:
                 f"  workerNode: {worker}\n"
                 "  socketIndex: 0\n"
                 "  overrides:\n"
-                "    expand: true\n"
+                f"{overrides}"
             )
             self.logger.info(
                 f"[K8sUtils] Creating StorageNode CR '{cr_name}' "
@@ -2872,11 +2932,104 @@ class K8sUtils:
                 checksums[parts[1]] = parts[0]
         return checksums
 
-    def delete_pod(self, pod_name: str, namespace: str = None):
-        """Delete a pod."""
+    def delete_pod(self, pod_name: str, namespace: str = None,
+                   wait: bool = False):
+        """Delete a pod.
+
+        When *wait* is True the call blocks until the pod is fully removed,
+        preventing name-collision races when a new pod with the same name is
+        created shortly after deletion.
+        """
         ns = namespace or self.namespace
-        self.logger.info(f"[K8sUtils] Deleting pod '{pod_name}'")
-        self.delete_resource("pod", pod_name, namespace=ns)
+        self.logger.info(f"[K8sUtils] Deleting pod '{pod_name}'"
+                         f"{' (waiting)' if wait else ''}")
+        if wait:
+            self._exec_kubectl(
+                f"kubectl delete pod {pod_name} -n {ns} "
+                f"--ignore-not-found --wait=true --timeout=60s"
+            )
+        else:
+            self.delete_resource("pod", pod_name, namespace=ns)
+
+    def wait_for_per_node_config(self, worker_node: str,
+                                  configmap_name: str = "simplyblock-node-per-node-config",
+                                  namespace: str = None,
+                                  timeout: int = 120):
+        """Wait until the per-node-config ConfigMap has an entry for *worker_node*.
+
+        The operator updates this ConfigMap when it reconciles a StorageNode CR.
+        The DaemonSet pod's ``node-env-writer`` init container reads the entry
+        to set ``MAX_LVOL``, ``MAX_SIZE``, etc.  If the pod starts before the
+        entry exists it gets ``MAX_LVOL=0`` and crashes.
+
+        Args:
+            worker_node: The K8s node name (e.g. ``worker-4.ocp.simplyblock.ai``).
+            configmap_name: Name of the per-node-config ConfigMap.
+            namespace: K8s namespace (defaults to ``self.namespace``).
+            timeout: Max seconds to wait.
+        """
+        import time
+        ns = namespace or self.namespace
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            cm = self.get_resource_json("configmap", configmap_name, namespace=ns)
+            data = cm.get("data", {})
+            if worker_node in data:
+                self.logger.info(
+                    f"[K8sUtils] per-node-config has entry for '{worker_node}': "
+                    f"{data[worker_node][:120]}..."
+                )
+                return
+            self.logger.info(
+                f"[K8sUtils] Waiting for per-node-config entry for "
+                f"'{worker_node}' (keys: {list(data.keys())})..."
+            )
+            time.sleep(10)
+        self.logger.warning(
+            f"[K8sUtils] per-node-config entry for '{worker_node}' not found "
+            f"after {timeout}s — proceeding anyway (pod may still fail)"
+        )
+
+    def delete_storage_node_pods_on_worker(self, worker_node: str,
+                                           namespace: str = None):
+        """Delete storage-node DaemonSet pods running on a specific worker.
+
+        Call this after the per-node-config ConfigMap has been updated for the
+        worker (use ``wait_for_per_node_config`` first) so the DaemonSet
+        recreates the pod with the correct configuration.
+        """
+        ns = namespace or self.namespace
+        cmd = (
+            f"kubectl get pods -n {ns} "
+            f"--field-selector spec.nodeName={worker_node} "
+            f"--no-headers -o custom-columns=NAME:.metadata.name"
+        )
+        out, _ = self._exec_kubectl(cmd, supress_logs=True)
+        deleted = 0
+        for line in (out or "").strip().splitlines():
+            pod_name = line.strip()
+            if not pod_name:
+                continue
+            if "simplyblock-storage-node-ds" in pod_name:
+                self.logger.info(
+                    f"[K8sUtils] Deleting stale storage-node pod "
+                    f"'{pod_name}' on worker '{worker_node}'"
+                )
+                self._exec_kubectl(
+                    f"kubectl delete pod {pod_name} -n {ns} "
+                    f"--force --grace-period=0 --ignore-not-found"
+                )
+                deleted += 1
+        if deleted:
+            self.logger.info(
+                f"[K8sUtils] Deleted {deleted} stale storage-node pod(s) "
+                f"on worker '{worker_node}'"
+            )
+        else:
+            self.logger.info(
+                f"[K8sUtils] No stale storage-node pods found on "
+                f"worker '{worker_node}'"
+            )
 
     def verify_pvc_mount(self, pvc_name: str, namespace: str = None,
                          timeout: int = 120) -> tuple:
@@ -3315,6 +3468,55 @@ class K8sSbcliUtils:
             f"[pool] Pool not visible in sbcli after 300s. "
             f"Pool CRD(s): {existing_crds}. "
             f"Operator may not have reconciled the pool."
+        )
+
+    def add_storage_pool_direct(self, pool_name, cluster_id=None, sbcli_cmd=None):
+        """Create a pool directly via ``sbcli pool add`` (kubectl exec).
+
+        Unlike ``add_storage_pool()``, this does NOT create a Pool CRD —
+        it calls the CLI directly in the admin pod.  Use this for R25
+        clusters that have no operator to reconcile Pool CRDs.
+
+        sbcli_cmd: override the CLI binary name (e.g. "sbcli-dev" for R25).
+                   Defaults to self.sbcli_cmd.
+
+        Returns the pool name on success.
+        """
+        cli = sbcli_cmd or self.sbcli_cmd
+
+        def _list_pools():
+            items = self._run_json(f"{cli} pool list --json")
+            return {item["Name"]: item["UUID"] for item in items}
+
+        # 1. Check if sbcli already sees a pool
+        existing = _list_pools()
+        if existing:
+            actual = next(iter(existing))
+            self.logger.info(f"[pool] Using existing pool '{actual}'")
+            return actual
+
+        # 2. Create via CLI
+        cid = cluster_id or self.cluster_id
+        cmd = f"{cli} pool add {pool_name} {cid}"
+        self.logger.info(f"[pool] Creating pool directly via CLI: {cmd}")
+        out = self._run(cmd)
+        self.logger.info(f"[pool] pool add output: {out}")
+
+        # 3. Wait for pool to appear in pool list
+        for attempt in range(30):  # up to 150s
+            pools = _list_pools()
+            if pools:
+                actual = next(iter(pools))
+                self.logger.info(
+                    f"[pool] Pool '{actual}' visible after CLI create "
+                    f"(attempt {attempt})"
+                )
+                return actual
+            sleep_n_sec(5)
+
+        raise TimeoutError(
+            f"[pool] Pool '{pool_name}' not visible in sbcli after 150s "
+            f"following direct CLI creation."
         )
 
     def pool_crd_exists(self, pool_name):

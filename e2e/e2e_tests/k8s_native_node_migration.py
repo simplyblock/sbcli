@@ -391,6 +391,20 @@ class K8sNativeNodeMigrationTest(TestClusterBase):
 
         migration_timestamp = int(datetime.now().timestamp())
 
+        # Ensure the storage-node pod on the migration target is healthy
+        # BEFORE creating the StorageNodeOps CR.  If worker-5 was labelled
+        # during cluster setup the DaemonSet will have scheduled a pod, but
+        # the operator may not have populated the per-node-config ConfigMap
+        # entry yet — causing the init container to crash with MAX_LVOL=0.
+        # Fix the pod now so the operator finds a healthy pod when it starts
+        # the migration and can resolve DNS immediately.
+        self.k8s_utils.wait_for_per_node_config(
+            self.migrate_to_worker, timeout=120
+        )
+        self.k8s_utils.delete_storage_node_pods_on_worker(
+            self.migrate_to_worker
+        )
+
         ops_name, storage_node_cr = self.k8s_utils.patch_storage_node_migrate(
             node_uuid=migrate_node_uuid,
             target_worker=self.migrate_to_worker,

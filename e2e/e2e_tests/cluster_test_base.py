@@ -897,7 +897,7 @@ class TestClusterBase:
                     files = k8s.find_files_in_pvc(pod_name)
                 return k8s.generate_checksums_in_pvc(pod_name, files)
             finally:
-                k8s.delete_pod(pod_name)
+                k8s.delete_pod(pod_name, wait=True)
                 if pod_name in self._k8s_utility_pods:
                     self._k8s_utility_pods.remove(pod_name)
         else:
@@ -973,10 +973,23 @@ class TestClusterBase:
         self._k8s_configmaps.clear()
         for snap_name in list(self._k8s_volume_snapshots):
             try:
-                k8s.delete_volume_snapshot(snap_name)
+                k8s.delete_volume_snapshot(snap_name, wait=True)
             except Exception as e:
                 self.logger.warning(f"[k8s-teardown] VolumeSnapshot error {snap_name}: {e}")
         self._k8s_volume_snapshots.clear()
+        # Catch-all: delete any remaining test VolumeSnapshots that may not
+        # have been tracked (e.g. snapshot-1, snapshot-2 naming pattern).
+        try:
+            ns = k8s.namespace
+            k8s._exec_kubectl(
+                f"kubectl get volumesnapshot -n {ns} --no-headers "
+                f"-o custom-columns=NAME:.metadata.name 2>/dev/null "
+                f"| grep -E '^(snap-|snapshot-)' "
+                f"| xargs -r kubectl delete volumesnapshot -n {ns} "
+                f"--ignore-not-found --wait=true --timeout=120s"
+            )
+        except Exception as e:
+            self.logger.warning(f"[k8s-teardown] catch-all snapshot cleanup error: {e}")
         for pvc_name in list(self._k8s_pvcs):
             try:
                 k8s.delete_pvc(pvc_name)

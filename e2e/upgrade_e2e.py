@@ -20,6 +20,9 @@ def main():
     parser.add_argument('--run_k8s', type=bool, help="Run K8s tests", default=False)
     parser.add_argument('--send_debug_notification', type=bool, help="Send notification for debug", default=False)
     parser.add_argument('--testname', type=str, help="The name of the test to run", default=None)
+    parser.add_argument('--preserve_resources_on_failure', type=bool,
+                        help="Skip K8s resource cleanup when test fails (preserve PVCs/pods for debugging)",
+                        default=True)
 
     args = parser.parse_args()
 
@@ -45,7 +48,8 @@ def main():
                         target_spdk_image=args.target_spdk_image,
                         target_docker_image=args.target_docker_image,
                         fio_debug=args.fio_debug,
-                        k8s_run=args.run_k8s)
+                        k8s_run=args.run_k8s,
+                        preserve_resources_on_failure=args.preserve_resources_on_failure)
         try:
             test_obj.setup()
             if i == 0:
@@ -56,13 +60,16 @@ def main():
         except Exception as exp:
             logger.error(traceback.format_exc())
             errors[f"{test.__name__}"] = [exp]
+            stop_after_teardown = True
+        else:
+            stop_after_teardown = False
         try:
             if not args.run_k8s:
                 test_obj.stop_docker_logs_collect()
             else:
                 test_obj.stop_k8s_log_collect()
             test_obj.fetch_all_nodes_distrib_log()
-            if i == (len(test_class_run) - 1) or check_for_dumps():
+            if i == (len(test_class_run) - 1) or stop_after_teardown or check_for_dumps():
                 test_obj.collect_management_details()
             if not args.run_k8s:
                 all_nodes = test_obj._get_all_nodes()
@@ -75,6 +82,10 @@ def main():
             logger.error(f"Error During Teardown for test: {test.__name__}")
             logger.error(traceback.format_exc())
         finally:
+            if stop_after_teardown:
+                logger.info("Previous test failed. "
+                            "Cannot execute more upgrade tests as cluster state is unknown. Exiting")
+                break
             if check_for_dumps():
                 logger.info("Found a core dump during test execution. "
                             "Cannot execute more tests as cluster is not stable. Exiting")
