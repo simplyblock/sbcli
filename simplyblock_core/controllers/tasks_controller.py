@@ -6,6 +6,7 @@ import socket
 import threading
 import time
 import uuid
+from typing import Callable, Optional
 
 from simplyblock_core import db_controller, constants, utils
 from simplyblock_core.controllers import tasks_events, device_controller
@@ -92,6 +93,62 @@ def refresh_task_lease(task, owner=None):
     if db.atomic_update(task, _mutate) is None:
         return False
     return refreshed["ok"]
+
+
+def _cancel_atomically(
+        task: JobSchedule,
+        mutate: Callable[[JobSchedule], bool],
+) -> Optional[JobSchedule]:
+    """Apply a cancellation to the task row as it currently stands.
+
+    NOT ``task.write_to_db()``: the copy a canceller holds was read before it
+    decided to cancel — off a bulk ``get_job_tasks`` scan, in the case below —
+    and the runner driving that task writes the same row meanwhile, claiming
+    its lease, moving it to running, advancing retry and recording handler
+    progress in function_params. A full-object write puts all of that back. The
+    damaging one is the owner lease: clearing it hands the task to the next
+    runner host that polls, which executes it a second time. That is the lost
+    update behind the 2026-07-29 double restart, arriving from the other side.
+
+    ``mutate`` receives the fresh row and returns False to decline (a guard
+    that no longer holds). It may be replayed on transaction conflict, so it
+    must do nothing but mutate the object it is given.
+
+    Returns the committed task if this call performed the cancellation, or None
+    if the row is gone or another actor got there first.
+    """
+    now = str(datetime.datetime.now(datetime.timezone.utc))
+    performed = {"ok": False}
+
+    def _mutate(fresh):
+        if mutate(fresh) is False:
+            return False
+        fresh.updated_at = now
+        performed["ok"] = True
+        return True
+
+    committed = db.atomic_update(task, _mutate)
+    return committed if performed["ok"] else None
+
+
+def _flag_canceled(fresh: JobSchedule) -> bool:
+    """Set only the canceled flag. Where the task has got to — status, retry,
+    owner, progress — stays as the runner left it; the runner reads the flag on
+    its next pass and finishes the task itself."""
+    if fresh.canceled:
+        return False
+    fresh.canceled = True
+    return True
+
+
+def _flag_canceled_if_pending(fresh: JobSchedule) -> bool:
+    """As _flag_canceled, but declines a task that has already finished. An
+    opportunistic bulk cancellation has nothing left to cancel there, and
+    flagging it would misreport a completed task as canceled. (An operator's
+    explicit cancel_task is deliberately not this strict.)"""
+    if fresh.status == JobSchedule.STATUS_DONE:
+        return False
+    return _flag_canceled(fresh)
 
 
 @contextlib.contextmanager
@@ -514,19 +571,51 @@ def cancel_pending_node_restart_tasks(cluster_id, node_id):
     # via the dedup guard in `_validate_new_task_node_restart` until the
     # task runner happens to pick it up — observed as a 5-minute window
     # of failing manual restarts after the node was already back online.
+    def _cancel_if_still_pending(fresh: JobSchedule) -> bool:
+        # Re-checked on the fresh row: a task that reached its own outcome
+        # between the scan and this write has nothing left to cancel, and its
+        # result must not be overwritten with ours.
+        if fresh.canceled or fresh.status == JobSchedule.STATUS_DONE:
+            return False
+        fresh.canceled = True
+        fresh.status = JobSchedule.STATUS_DONE
+        fresh.function_result = "canceled: node back online"
+        return True
+
     canceled = 0
     for task in db.get_job_tasks(cluster_id):
         if (task.function_name == JobSchedule.FN_NODE_RESTART
                 and task.node_id == node_id
                 and task.status != JobSchedule.STATUS_DONE
                 and not task.canceled):
-            task.canceled = True
-            task.status = JobSchedule.STATUS_DONE
-            task.function_result = "canceled: node back online"
-            task.write_to_db(db.kv_store)
+            if _cancel_atomically(task, _cancel_if_still_pending) is None:
+                continue
             canceled += 1
             logger.info(
                 f"Canceled obsolete node_restart task {task.get_id()} (node {node_id} back online)")
+    return canceled
+
+
+def cancel_node_tasks(cluster_id, node_id, function_names):
+    """Flag the node's unfinished tasks of the given kinds canceled.
+
+    Used when a node is going away and the work queued against it is moot
+    (shutdown cancelling its migration tasks). Like every canceller this reads
+    in bulk and writes one row at a time, so each write goes through the CAS in
+    _cancel_atomically rather than putting the scan's copy back.
+
+    Returns how many tasks this call canceled.
+    """
+    canceled = 0
+    for task in db.get_job_tasks(cluster_id):
+        if task.node_id != node_id or task.function_name not in function_names:
+            continue
+        if task.status == JobSchedule.STATUS_DONE or task.canceled:
+            continue
+        if _cancel_atomically(task, _flag_canceled_if_pending) is None:
+            continue
+        canceled += 1
+        logger.info(f"Canceled task {task.get_id()} ({task.function_name}) on node {node_id}")
     return canceled
 
 
@@ -602,9 +691,9 @@ def cancel_task(task_id):
     if task.device_id:
         device_controller.device_set_retries_exhausted(task.device_id, True)
 
-    task.canceled = True
-    task.write_to_db(db.kv_store)
-    tasks_events.task_canceled(task)
+    committed = _cancel_atomically(task, _flag_canceled)
+    if committed is not None:
+        tasks_events.task_canceled(committed)
     return True
 
 
@@ -763,27 +852,6 @@ def get_active_cluster_expand_task(cluster_id):
                 and task.status != JobSchedule.STATUS_DONE:
             return task.uuid
     return False
-
-
-def defer_task_for_expansion(task):
-    """Suspend ``task`` if a cluster expansion is in progress. Returns True
-    when deferred.
-
-    Migration-family runners call this right after their cluster-status
-    gate. The status gate alone is not enough: a node outage mid-expansion
-    suspends the cluster-expand task and restores the cluster status to
-    ACTIVE between its retries — without this gate the outage's recovery
-    migrations would start running in that window and then block the
-    expansion resume, inverting the required order (expansion completes
-    FIRST, then outage device migration, then expansion migration).
-    Deliberately does not consume a retry: this is a deferral, not a
-    failure."""
-    if not get_active_cluster_expand_task(task.cluster_id):
-        return False
-    task.function_result = "cluster expansion in progress, deferring"
-    task.status = JobSchedule.STATUS_SUSPENDED
-    task.write_to_db(db.kv_store)
-    return True
 
 
 def get_active_node_tasks(cluster_id, node_id):
@@ -965,90 +1033,6 @@ def add_lvol_sync_op_task(cluster_id, node_id, lvol_id, op, secondary_index=0):
                                       "secondary_index": secondary_index},
                      max_retry=-1)
 
-
-def run_lvol_sync_op_task(task):
-    """Execute one FN_LVOL_SYNC_OP task (called by the sync runner's loop;
-    lives here so it is importable without triggering the runner's
-    module-level loop). Idempotent; never raises."""
-    from simplyblock_core import storage_node_ops
-    from simplyblock_core.models.lvol_model import LVol
-
-    def _finish(result):
-        task.function_result = result
-        task.status = JobSchedule.STATUS_DONE
-        task.write_to_db(db.kv_store)
-
-    def _defer(result):
-        task.function_result = result
-        task.status = JobSchedule.STATUS_SUSPENDED
-        task.write_to_db(db.kv_store)
-
-    try:
-        if task.canceled:
-            _finish("canceled")
-            return
-
-        lvol_id = task.function_params.get("lvol_id")
-        op = task.function_params.get("op")
-        try:
-            lvol = db.get_lvol_by_id(lvol_id)
-        except KeyError:
-            _finish("lvol no longer exists")
-            return
-        if lvol.status == LVol.STATUS_IN_DELETION:
-            _finish("lvol is being deleted")
-            return
-        if lvol.status != LVol.STATUS_ONLINE:
-            _defer(f"lvol status is {lvol.status}, retrying")
-            return
-
-        try:
-            node = db.get_storage_node_by_id(task.node_id)
-        except KeyError:
-            _finish("node no longer exists")
-            return
-        if node.get_id() not in lvol.nodes:
-            _finish("node no longer hosts this lvol (topology moved)")
-            return
-        if node.status != StorageNode.STATUS_ONLINE:
-            _defer(f"node is {node.status}, retrying")
-            return
-        if storage_node_ops.get_restart_phase(task.node_id, lvol.lvs_name):
-            # The owning flow (restart/activation/expansion) re-registers
-            # lvols itself; re-check once it has released the LVS.
-            _defer("LVS owned by a restart/activation/expansion, retrying")
-            return
-
-        if task.status != JobSchedule.STATUS_RUNNING:
-            task.status = JobSchedule.STATUS_RUNNING
-            task.write_to_db(db.kv_store)
-
-        if op == "register":
-            ok, err = storage_node_ops.repair_lvol_registration_on_non_leader(
-                lvol, node, task.function_params.get("secondary_index", 0))
-            if ok:
-                _finish(f"registered lvol {lvol_id} on {task.node_id}")
-            else:
-                _defer(f"registration failed: {err}")
-        elif op == "resize":
-            # Converge to the CURRENT DB size — resize_lvol persists the new
-            # size after the fan-out, so this always applies the latest
-            # target even if the lvol was resized again meanwhile.
-            size_in_mib = utils.convert_size(lvol.size, 'MiB')
-            ret = node.rpc_client(timeout=10, retry=2).bdev_lvol_resize(
-                f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib)
-            if ret:
-                _finish(f"resized lvol {lvol_id} on {task.node_id} to {size_in_mib} MiB")
-            else:
-                _defer("resize RPC failed, retrying")
-        else:
-            _finish(f"unknown op {op!r}")
-    except Exception as e:
-        logger.error(f"lvol sync-op task {task.uuid} failed: {e}")
-        try:
-            _defer(f"error: {e}")
-        except Exception as defer_e:
-            logger.debug(f"lvol sync-op task {task.uuid}: _defer fallback also failed: {defer_e}")
 
 def get_lvol_sync_del_task(cluster_id, node_id, lvol_bdev_name=None):
     tasks = db.get_job_tasks(cluster_id)

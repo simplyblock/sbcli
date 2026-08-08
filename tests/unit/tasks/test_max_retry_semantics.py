@@ -10,9 +10,10 @@ runner's ``while True`` service loop lives behind an ``if __name__ ==
 The invariant under test is the basic task-scheduler semantic: a task whose
 ``retry`` has reached its ceiling must *terminate* (``STATUS_DONE``) instead of
 looping forever, and it must not perform its side-effecting work on that final
-poll. Below the ceiling the task still advances. See
-:mod:`test_retry_ceiling` for the backup runner's version of the same guard and
-the static cross-runner check.
+poll. Below the ceiling the task still advances. See :mod:`test_retry_ceiling`
+for the cross-runner discovery check, and
+:mod:`tests.unit.tasks.test_task_runner_base` for the ceiling as enforced by the
+shared driver, which the migrated runners delegate it to.
 """
 from unittest.mock import MagicMock
 
@@ -23,6 +24,7 @@ from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.storage_node import StorageNode
 
 import simplyblock_core.services.tasks_runner_node_add as node_add_runner
+from simplyblock_core.services.task_runner_base import TaskDefer, TaskRetry
 import simplyblock_core.services.tasks_runner_restart as restart_runner
 
 
@@ -49,115 +51,148 @@ def _task(function_name, retry, max_retry, **params):
 
 # --------------------------------------------------------------------------
 # tasks_runner_node_add.process_task
+#
+# The ceiling itself now lives in the shared driver (see
+# tests/unit/tasks/test_task_runner_base.py); what this runner still decides is
+# whether a failed add counts against it at all.
 # --------------------------------------------------------------------------
 
-def test_node_add_max_retry_finishes_without_adding(monkeypatch):
-    """retry >= max_retry must finish the task and never call add_node."""
-    sops = MagicMock()
-    monkeypatch.setattr(node_add_runner, "storage_node_ops", sops)
-    monkeypatch.setattr(node_add_runner, "db", MagicMock())
-
-    task = _task(JobSchedule.FN_NODE_ADD, retry=3, max_retry=3, node_id="node-1")
-    res = node_add_runner.process_task(task, MagicMock())
-
-    assert res is True
-    assert task.status == JobSchedule.STATUS_DONE
-    assert "max retry" in task.function_result
-    sops.add_node.assert_not_called()
-
-
-def test_node_add_below_ceiling_dispatches(monkeypatch):
-    """Below the ceiling the task still runs its step (add_node)."""
+def test_node_add_success_completes(monkeypatch):
     sops = MagicMock()
     sops.add_node.return_value = True
     monkeypatch.setattr(node_add_runner, "storage_node_ops", sops)
-    # get_cluster_by_id().status is a Mock != STATUS_IN_ACTIVATION, so the
-    # in-activation gate is not taken and the task proceeds to add_node.
-    monkeypatch.setattr(node_add_runner, "db", MagicMock())
 
     task = _task(JobSchedule.FN_NODE_ADD, retry=0, max_retry=3, node_id="node-1")
-    res = node_add_runner.process_task(task, MagicMock())
-
-    assert res is True
+    assert node_add_runner.process_task(task) is None
     sops.add_node.assert_called_once_with(node_id="node-1")
-    assert task.status == JobSchedule.STATUS_DONE
 
 
-def test_node_add_failure_below_ceiling_suspends_and_counts_retry(monkeypatch):
-    """A failed add below the ceiling suspends and advances retry (so the
-    ceiling can eventually bind), rather than finishing the task."""
+def test_node_add_failure_counts_a_retry(monkeypatch):
+    """A failed add against a responsive node advances retry, so the driver's
+    ceiling can eventually bind."""
     sops = MagicMock()
     sops.add_node.return_value = False
     monkeypatch.setattr(node_add_runner, "storage_node_ops", sops)
-    monkeypatch.setattr(node_add_runner, "db", MagicMock())
+    monkeypatch.setattr(node_add_runner, "_wait_node_reachable", lambda task: False)
 
     task = _task(JobSchedule.FN_NODE_ADD, retry=1, max_retry=3, node_id="node-1")
-    res = node_add_runner.process_task(task, MagicMock())
+    with pytest.raises(TaskRetry):
+        node_add_runner.process_task(task)
 
-    assert res is True  # processed; the loop keeps polling
-    assert task.status == JobSchedule.STATUS_SUSPENDED
-    assert task.retry == 2
+
+def test_node_add_failure_during_a_reboot_does_not_count(monkeypatch):
+    """The CPU-topology reboot is expected, not a failure: waiting it out must
+    not burn one of the task's retries."""
+    sops = MagicMock()
+    sops.add_node.return_value = False
+    monkeypatch.setattr(node_add_runner, "storage_node_ops", sops)
+    monkeypatch.setattr(node_add_runner, "_wait_node_reachable", lambda task: True)
+
+    task = _task(JobSchedule.FN_NODE_ADD, retry=1, max_retry=3, node_id="node-1")
+    with pytest.raises(TaskDefer):
+        node_add_runner.process_task(task)
+
+
+def test_node_add_exception_is_handled_like_a_failed_add(monkeypatch):
+    sops = MagicMock()
+    sops.add_node.side_effect = RuntimeError("boom")
+    monkeypatch.setattr(node_add_runner, "storage_node_ops", sops)
+    monkeypatch.setattr(node_add_runner, "_wait_node_reachable", lambda task: False)
+
+    task = _task(JobSchedule.FN_NODE_ADD, retry=0, max_retry=3, node_id="node-1")
+    with pytest.raises(TaskRetry, match="boom"):
+        node_add_runner.process_task(task)
 
 
 # --------------------------------------------------------------------------
-# tasks_runner_restart.task_runner_node
+# tasks_runner_restart give-up side effects
+#
+# The ceiling itself is the driver's (test_task_runner_base); what the runner
+# still owns is what to do about the target when the ceiling terminates a task
+# — a path its handler never sees, so it hangs off the driver's on_finish.
 # --------------------------------------------------------------------------
 
-def test_restart_node_max_retry_finishes_and_marks_offline(monkeypatch):
-    """retry >= max_retry finishes the task, flips the node OFFLINE via the
-    restart_cleanup path, and re-queues a fresh auto-restart."""
-    node = MagicMock()
-    node.status = StorageNode.STATUS_ONLINE
+def _restart_task(function_name, retry, max_retry, canceled=False):
+    task = _task(function_name, retry, max_retry, node_id="node-1")
+    task.canceled = canceled
+    return task
+
+
+def test_restart_node_give_up_marks_offline_and_requeues(monkeypatch):
+    """Exhausting the retries parks the node OFFLINE and queues a fresh
+    auto-restart, so it is not stranded until an operator intervenes."""
     fake_db = MagicMock()
-    fake_db.get_storage_node_by_id.return_value = node
-    # Mirror DBController.atomic_update's contract: apply the mutator to the
-    # (fresh) object and return it. The restart runner's task writes go
-    # through this instead of write_to_db (stale-copy lost-update fix).
-    fake_db.atomic_update.side_effect = lambda obj, fn: (fn(obj), obj)[1]
     monkeypatch.setattr(restart_runner, "db", fake_db)
-
     sops = MagicMock()
     tasks_ctrl = MagicMock()
     monkeypatch.setattr(restart_runner, "storage_node_ops", sops)
     monkeypatch.setattr(restart_runner, "tasks_controller", tasks_ctrl)
 
-    task = _task(JobSchedule.FN_NODE_RESTART, retry=5, max_retry=5, node_id="node-1")
-    res = restart_runner.task_runner_node(task)
+    restart_runner.SPEC.on_finish(
+        _restart_task(JobSchedule.FN_NODE_RESTART, retry=5, max_retry=5))
 
-    assert res is True
-    assert task.status == JobSchedule.STATUS_DONE
-    assert "max retry" in task.function_result
     sops.set_node_status.assert_called_once()
     assert sops.set_node_status.call_args.args[1] == StorageNode.STATUS_OFFLINE
     tasks_ctrl.add_node_to_auto_restart.assert_called_once()
 
 
-# --------------------------------------------------------------------------
-# tasks_runner_restart.task_runner_device
-# --------------------------------------------------------------------------
+def test_restart_node_success_leaves_the_node_alone(monkeypatch):
+    """A task that finished below the ceiling succeeded — the node is online
+    and must not be flipped OFFLINE by the cleanup path."""
+    monkeypatch.setattr(restart_runner, "db", MagicMock())
+    sops = MagicMock()
+    tasks_ctrl = MagicMock()
+    monkeypatch.setattr(restart_runner, "storage_node_ops", sops)
+    monkeypatch.setattr(restart_runner, "tasks_controller", tasks_ctrl)
 
-def test_restart_device_max_retry_finishes_and_exhausts(monkeypatch):
-    """retry >= TASK_EXEC_RETRY_COUNT finishes the task and marks the device
-    unavailable / retries-exhausted instead of restarting it again."""
+    restart_runner.SPEC.on_finish(
+        _restart_task(JobSchedule.FN_NODE_RESTART, retry=2, max_retry=5))
+
+    sops.set_node_status.assert_not_called()
+    tasks_ctrl.add_node_to_auto_restart.assert_not_called()
+
+
+def test_restart_node_unbounded_never_gives_up(monkeypatch):
+    monkeypatch.setattr(restart_runner, "db", MagicMock())
+    sops = MagicMock()
+    monkeypatch.setattr(restart_runner, "storage_node_ops", sops)
+    monkeypatch.setattr(restart_runner, "tasks_controller", MagicMock())
+
+    restart_runner.SPEC.on_finish(
+        _restart_task(JobSchedule.FN_NODE_RESTART, retry=100, max_retry=-1))
+
+    sops.set_node_status.assert_not_called()
+
+
+def test_restart_device_give_up_marks_unavailable_and_exhausted(monkeypatch):
     device = MagicMock()
     device.get_id.return_value = "dev-1"
     monkeypatch.setattr(restart_runner, "_get_device", lambda task: device)
     monkeypatch.setattr(restart_runner, "db", MagicMock())
-
     dc = MagicMock()
     monkeypatch.setattr(restart_runner, "device_controller", dc)
 
-    task = _task(
+    restart_runner.SPEC.on_finish(_restart_task(
         JobSchedule.FN_DEV_RESTART,
         retry=constants.TASK_EXEC_RETRY_COUNT,
-        max_retry=constants.TASK_EXEC_RETRY_COUNT,
-        node_id="node-1",
-    )
-    res = restart_runner.task_runner_device(task)
+        max_retry=constants.TASK_EXEC_RETRY_COUNT))
 
-    assert res is True
-    assert task.status == JobSchedule.STATUS_DONE
-    assert "max retry" in task.function_result
     dc.device_set_unavailable.assert_called_once_with("dev-1")
     dc.device_set_retries_exhausted.assert_called_once_with("dev-1", True)
     dc.restart_device.assert_not_called()
+
+
+def test_restart_device_cancel_exhausts_retries(monkeypatch):
+    """A canceled device task must not be picked up and retried forever."""
+    device = MagicMock()
+    device.get_id.return_value = "dev-1"
+    monkeypatch.setattr(restart_runner, "_get_device", lambda task: device)
+    monkeypatch.setattr(restart_runner, "db", MagicMock())
+    dc = MagicMock()
+    monkeypatch.setattr(restart_runner, "device_controller", dc)
+
+    restart_runner.SPEC.on_finish(_restart_task(
+        JobSchedule.FN_DEV_RESTART, retry=0, max_retry=5, canceled=True))
+
+    dc.device_set_retries_exhausted.assert_called_once_with("dev-1", True)
+    dc.device_set_unavailable.assert_not_called()

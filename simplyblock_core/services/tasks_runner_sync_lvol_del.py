@@ -1,18 +1,36 @@
 # coding=utf-8
-import sys
-import time
+"""Task runner for the deferred per-node lvol operations.
+
+Two task families share this runner, both of them work that could not be done
+inline on the owning node at the time it was requested:
+
+- ``FN_LVOL_SYNC_OP`` — re-apply a create-registration or a resize on a
+  non-leader node (incident 2026-07-10: an in-memory deferral queue was never
+  drained, so a volume's tertiary subsystem was never created).
+- ``FN_LVOL_SYNC_DEL`` — delete a replica bdev on a secondary node, holding the
+  primary's del-sync lock until the task ends.
+"""
 from typing import Optional
 
-from simplyblock_core import db_controller, utils
-from simplyblock_core.controllers import snapshot_controller, tasks_controller
+from simplyblock_core import db_controller, storage_node_ops, utils
+from simplyblock_core.controllers import snapshot_controller
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.services.task_runner_base import (
+    RunnerSpec,
+    TaskAbort,
+    TaskDefer,
+    TaskRetry,
+    serve,
+)
 
 logger = utils.get_logger(__name__)
 
 # get DB controller
 db = db_controller.DBController()
+
 
 def get_primary_node(task) -> Optional[StorageNode]:
     if "primary_node" in task.function_params:
@@ -24,153 +42,114 @@ def get_primary_node(task) -> Optional[StorageNode]:
     return None
 
 
-# A persistent FDB read failure — or an unexpectedly empty cluster list — on this
-# long-lived process means the FDB client is wedged: fdb.open() caches the
-# Database and the network thread is per-process, so re-reading the same handle
-# never recovers; only a fresh process does. Incident
-# mass_create_delete_docker-20260629: this runner sat idle ~8h logging
-# "No clusters found!" after a startup FDBError(1031), so 2,664 lvols never
-# drained from in_deletion. Exit after this many consecutive failures so the
-# orchestrator restarts us with a clean FDB connection (~3 min at the 3s tick).
-_DB_FAILURE_RESTART_THRESHOLD = 60
+def _run_sync_op(task):
+    lvol_id = task.function_params.get("lvol_id")
+    op = task.function_params.get("op")
+
+    try:
+        lvol = db.get_lvol_by_id(lvol_id)
+    except KeyError:
+        raise TaskAbort("lvol no longer exists")
+
+    if lvol.status == LVol.STATUS_IN_DELETION:
+        raise TaskAbort("lvol is being deleted")
+    if lvol.status != LVol.STATUS_ONLINE:
+        raise TaskDefer(f"lvol status is {lvol.status}, retrying")
+
+    try:
+        node = db.get_storage_node_by_id(task.node_id)
+    except KeyError:
+        raise TaskAbort("node no longer exists")
+
+    if node.get_id() not in lvol.nodes:
+        raise TaskAbort("node no longer hosts this lvol (topology moved)")
+    if node.status != StorageNode.STATUS_ONLINE:
+        raise TaskDefer(f"node is {node.status}, retrying")
+    if storage_node_ops.get_restart_phase(task.node_id, lvol.lvs_name):
+        # The owning flow (restart/activation/expansion) re-registers
+        # lvols itself; re-check once it has released the LVS.
+        raise TaskDefer("LVS owned by a restart/activation/expansion, retrying")
+
+    if op == "register":
+        ok, err = storage_node_ops.repair_lvol_registration_on_non_leader(
+            lvol, node, task.function_params.get("secondary_index", 0))
+        if not ok:
+            raise TaskDefer(f"registration failed: {err}")
+        task.function_result = f"registered lvol {lvol_id} on {task.node_id}"
+    elif op == "resize":
+        # Converge to the CURRENT DB size — resize_lvol persists the new
+        # size after the fan-out, so this always applies the latest
+        # target even if the lvol was resized again meanwhile.
+        size_in_mib = utils.convert_size(lvol.size, 'MiB')
+        if not node.rpc_client(timeout=10, retry=2).bdev_lvol_resize(
+                f"{lvol.lvs_name}/{lvol.lvol_bdev}", size_in_mib):
+            raise TaskDefer("resize RPC failed, retrying")
+        task.function_result = f"resized lvol {lvol_id} on {task.node_id} to {size_in_mib} MiB"
+    else:
+        raise TaskAbort(f"unknown op {op!r}")
+
+
+def _run_sync_del(task):
+    try:
+        node = db.get_storage_node_by_id(task.node_id)
+    except KeyError:
+        raise TaskAbort("node not found")
+
+    if node.status not in [StorageNode.STATUS_DOWN, StorageNode.STATUS_ONLINE]:
+        raise TaskDefer(f"Node is {node.status}, retry task")
+
+    lvol_bdev_name = task.function_params["lvol_bdev_name"]
+    logger.info(f"Sync delete bdev: {lvol_bdev_name} from node: {node.get_id()}")
+    try:
+        # Per-node lvstore lock: the sync delete mutates the replica blob tree
+        # and must not interleave with a create/register of another object on
+        # this node.
+        with snapshot_controller.lvstore_op_lock(
+                node.cluster_id,
+                lvol_bdev_name.split("/")[0],
+                node_id=node.get_id()):
+            ret, err = node.rpc_client().delete_lvol(lvol_bdev_name, sync=True)
+    except Exception as e:
+        raise TaskRetry(f"Sync delete of {lvol_bdev_name} on {node.get_id()} failed: {e}; will retry")
+
+    if not ret:
+        if "code" not in err or err["code"] != -19:
+            raise TaskRetry(f"Failed to sync delete bdev: {lvol_bdev_name} from node: {node.get_id()}")
+        logger.error(f"Sync delete completed with error: {err}")
+
+    task.function_result = f"bdev {lvol_bdev_name} deleted"
+
+
+def process_task(task):
+    if task.function_name == JobSchedule.FN_LVOL_SYNC_OP:
+        _run_sync_op(task)
+    else:
+        _run_sync_del(task)
+
+
+def release_del_sync_lock(task):
+    """Free the primary's del-sync lock once the delete task is over, however
+    it ended — the lock is keyed on there being no active task left."""
+    if task.function_name != JobSchedule.FN_LVOL_SYNC_DEL:
+        return
+
+    primary_node = get_primary_node(task)
+    if primary_node:
+        primary_node.lvol_del_sync_lock_reset()
+
+
+SPEC = RunnerSpec(
+    name="tasks-runner-sync-lvol-del",
+    function_names=[JobSchedule.FN_LVOL_SYNC_OP, JobSchedule.FN_LVOL_SYNC_DEL],
+    handler=process_task,
+    on_finish=release_del_sync_lock,
+    is_eligible=lambda task, cluster: cluster.status != Cluster.STATUS_IN_ACTIVATION,
+    interval=3,
+)
 
 
 def main():
-    logger.info("Starting Tasks runner...")
-
-    _consecutive_db_failures = 0
-    while True:
-        try:
-            clusters = db.get_clusters()
-        except Exception as e:
-            _consecutive_db_failures += 1
-            logger.error(f"Failed to get clusters ({_consecutive_db_failures}): {e}")
-            if _consecutive_db_failures >= _DB_FAILURE_RESTART_THRESHOLD:
-                logger.error("FDB unreadable for too long; exiting for a clean restart")
-                sys.exit(1)
-            time.sleep(3)
-            continue
-
-        if not clusters:
-            _consecutive_db_failures += 1
-            logger.error(f"No clusters found! ({_consecutive_db_failures})")
-            if _consecutive_db_failures >= _DB_FAILURE_RESTART_THRESHOLD:
-                logger.error("No clusters readable for too long (FDB client likely wedged); "
-                             "exiting for a clean restart")
-                sys.exit(1)
-        else:
-            for cl in clusters:
-                if cl.status == Cluster.STATUS_IN_ACTIVATION:
-                    continue
-
-                # An unhandled FDBError here (e.g. 1031 transaction timeout,
-                # 2026-07-16 run) killed the whole runner — count it toward
-                # the same wedge-detection threshold as get_clusters instead.
-                try:
-                    tasks = db.get_job_tasks(cl.get_id(), reverse=False)
-                except Exception as e:
-                    _consecutive_db_failures += 1
-                    logger.error(f"Failed to read tasks for cluster {cl.get_id()} "
-                                 f"({_consecutive_db_failures}): {e}")
-                    if _consecutive_db_failures >= _DB_FAILURE_RESTART_THRESHOLD:
-                        logger.error("FDB unreadable for too long; exiting for a clean restart")
-                        sys.exit(1)
-                    continue
-                _consecutive_db_failures = 0
-                for task in tasks:
-                    if task.function_name == JobSchedule.FN_LVOL_SYNC_OP:
-                        if task.status != JobSchedule.STATUS_DONE:
-                            # Re-read (it may have been canceled concurrently).
-                            task = db.get_task_by_id(task.uuid)
-                            if task.status == JobSchedule.STATUS_DONE:
-                                continue
-                            try:
-                                tasks_controller.run_lvol_sync_op_task(task)
-                            except Exception as e:
-                                logger.error(f"lvol sync-op task {task.uuid} crashed: {e}")
-                        continue
-
-                    if task.function_name == JobSchedule.FN_LVOL_SYNC_DEL:
-                        if task.status != JobSchedule.STATUS_DONE:
-
-                            # get new task object because it could be changed from cancel task
-                            task = db.get_task_by_id(task.uuid)
-
-                            if task.canceled:
-                                task.function_result = "canceled"
-                                task.status = JobSchedule.STATUS_DONE
-                                task.write_to_db(db.kv_store)
-                                primary_node = get_primary_node(task)
-                                if primary_node:
-                                    primary_node.lvol_del_sync_lock_reset()
-                                continue
-
-                            node = db.get_storage_node_by_id(task.node_id)
-
-                            if not node:
-                                task.function_result = "node not found"
-                                task.status = JobSchedule.STATUS_DONE
-                                task.write_to_db(db.kv_store)
-                                primary_node = db.get_storage_node_by_id(task.function_params["primary_node"])
-                                primary_node.lvol_del_sync_lock_reset()
-                                continue
-
-                            if node.status not in [StorageNode.STATUS_DOWN, StorageNode.STATUS_ONLINE]:
-                                msg = f"Node is {node.status}, retry task"
-                                logger.info(msg)
-                                task.function_result = msg
-                                task.status = JobSchedule.STATUS_SUSPENDED
-                                task.write_to_db(db.kv_store)
-                                continue
-
-                            if task.status != JobSchedule.STATUS_RUNNING:
-                                task.status = JobSchedule.STATUS_RUNNING
-                                task.write_to_db(db.kv_store)
-
-                            lvol_bdev_name = task.function_params["lvol_bdev_name"]
-
-                            logger.info(f"Sync delete bdev: {lvol_bdev_name} from node: {node.get_id()}")
-                            try:
-                                # Per-node lvstore lock: the sync delete mutates
-                                # the replica blob tree and must not interleave
-                                # with a create/register of another object on
-                                # this node. The try also keeps a dead node from
-                                # killing the runner: on 2026-07-16 an unhandled
-                                # RPCException ('connection error') here took the
-                                # whole service down and no deferred sync delete
-                                # ever ran again.
-                                with snapshot_controller.lvstore_op_lock(
-                                        node.cluster_id,
-                                        lvol_bdev_name.split("/")[0],
-                                        node_id=node.get_id()):
-                                    ret, err = node.rpc_client().delete_lvol(lvol_bdev_name, sync=True)
-                            except Exception as e:
-                                msg = (f"Sync delete of {lvol_bdev_name} on {node.get_id()} "
-                                       f"failed: {e}; will retry")
-                                logger.error(msg)
-                                task.function_result = msg
-                                task.status = JobSchedule.STATUS_SUSPENDED
-                                task.write_to_db(db.kv_store)
-                                continue
-                            if not ret:
-                                if "code" in err and err["code"] == -19:
-                                    logger.error(f"Sync delete completed with error: {err}")
-                                else:
-                                    msg =  f"Failed to sync delete bdev: {lvol_bdev_name} from node: {node.get_id()}"
-                                    logger.error(msg)
-                                    task.function_result = msg
-                                    task.status = JobSchedule.STATUS_SUSPENDED
-                                    task.write_to_db(db.kv_store)
-                                    continue
-
-                            task.function_result = f"bdev {lvol_bdev_name} deleted"
-                            task.status = JobSchedule.STATUS_DONE
-                            task.write_to_db(db.kv_store)
-                            primary_node = get_primary_node(task)
-                            if primary_node:
-                                primary_node.lvol_del_sync_lock_reset()
-
-        time.sleep(3)
+    serve(SPEC)
 
 
 if __name__ == "__main__":
