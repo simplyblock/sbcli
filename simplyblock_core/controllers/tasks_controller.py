@@ -467,8 +467,11 @@ def add_node_to_auto_restart(node):
             "for node %s until all nodes are offline",
             node.cluster_id, node.get_id())
         return False
+    # IN_SHRINK: a PEER failing mid-removal must still get an auto-restart —
+    # the removal itself requires every other node online to make progress.
     if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED,
-                              Cluster.STATUS_READONLY, Cluster.STATUS_UNREADY, Cluster.STATUS_SUSPENDED]:
+                              Cluster.STATUS_READONLY, Cluster.STATUS_UNREADY,
+                              Cluster.STATUS_SUSPENDED, Cluster.STATUS_IN_SHRINK]:
         logger.warning(f"Cluster is not active, skip node auto restart, status: {cluster.status}")
         return False
     # Past-fault-tolerance guard: don't auto-restart nodes one-by-one when
@@ -722,6 +725,21 @@ def get_active_node_removal_task(cluster_id, node_id):
     return False
 
 
+def get_active_node_removal_task_for_cluster(cluster_id):
+    """Return the UUID of any active node-removal task in the cluster, or False.
+
+    Cluster-scoped counterpart to ``get_active_node_removal_task``: the
+    ``IN_SHRINK`` watchdog needs "is a removal in flight anywhere" rather than
+    "for this node", because the node whose removal set the status may already
+    be REMOVED (or gone) by the time the status is found held."""
+    for task in db.get_job_tasks(cluster_id):
+        if task.function_name == JobSchedule.FN_NODE_REMOVAL \
+                and task.canceled is False \
+                and task.status != JobSchedule.STATUS_DONE:
+            return task.uuid
+    return False
+
+
 def add_cluster_expand_task(cluster_id, new_node_id):
     """Queue a single-node cluster-expansion task. The runner drives the
     planner/orchestrator/executor to integrate ``new_node_id`` into the
@@ -872,13 +890,18 @@ def get_active_lvol_mig_task_on_node(cluster_id, node_id):
 
 
 def add_lvol_mig_task(migration):
-    """Create the JobSchedule task that drives a live volume migration."""
+    """Create the JobSchedule task that drives a live volume migration.
+
+    max_retry=-1 disables the backup runner's retry-count kill switch.
+    The migration runner has its own internal ceiling via migration.retry_count;
+    the backup runner's time-based timeout is the only external backstop.
+    """
     return _add_task(
         JobSchedule.FN_LVOL_MIG,
         migration.cluster_id,
         migration.source_node_id,
         "",
-        max_retry=migration.max_retries,
+        max_retry=-1,
         function_params={
             "migration_id": migration.uuid,
             "lvol_id": migration.lvol_id,
@@ -888,12 +911,19 @@ def add_lvol_mig_task(migration):
 
 
 def add_batch_mig_task(group):
-    """Create the JobSchedule task that drives a batch (shared-namespace) migration."""
+    """Create the JobSchedule task that drives a batch (shared-namespace) migration.
+
+    max_retry=-1 disables the backup runner's retry-count kill switch.
+    The batch orchestrator uses its own internal ceiling via task.retry vs
+    constants.LVOL_MIG_MAX_RETRIES; the backup runner's time-based timeout
+    is the only external backstop.
+    """
     return _add_task(
         JobSchedule.FN_LVOL_BATCH_MIG,
         group.cluster_id,
         group.source_node_id,
         "",
+        max_retry=-1,
         function_params={
             "group_id": group.uuid,
             "target_node_id": group.target_node_id,

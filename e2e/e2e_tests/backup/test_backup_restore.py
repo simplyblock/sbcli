@@ -850,7 +850,7 @@ class BackupTestBase(TestClusterBase):
                         # Detect product-side failures marked as "done"
                         # (e.g. "S3 transfer failed on data plane (attempt 3)")
                         if "failed" in result.lower():
-                            raise AssertionError(
+                            assert False, (
                                 f"Restore task for {lvol_name} completed with "
                                 f"failure: {result}"
                             )
@@ -861,20 +861,22 @@ class BackupTestBase(TestClusterBase):
                         sleep_n_sec(60)
                         return
                     if status == "failed":
-                        raise AssertionError(
+                        assert False, (
                             f"Restore task for {lvol_name} failed: {result}"
                         )
                     self.logger.info(
                         f"[restore] Restore task status: {status} "
                         f"({int(deadline - time.time())}s remaining)"
                     )
+            except AssertionError:
+                raise
             except Exception as e:
                 self.logger.warning(f"[restore] Could not check restore task status: {e}")
             sleep_n_sec(_POLL)
 
-        self.logger.warning(
-            f"[restore] Restore task for {lvol_name} did not reach 'done' "
-            f"within {timeout}s — proceeding with connect/mount anyway."
+        assert False, (
+            f"Restore task for {lvol_name} did not reach 'done' "
+            f"within {timeout}s — failing test."
         )
 
     def _validate_backup_fields(self, backup: dict, lvol_name: str = None,
@@ -1242,6 +1244,16 @@ class BackupTestBase(TestClusterBase):
                 f"FIO {fio_name} did not finish within {runtime + 120}s"
             )
         self.common_utils.validate_fio_test(self.fio_node, log_file=log_file)
+
+        # Flush filesystem metadata (inode sizes, block maps, journal) to
+        # disk so that subsequent SPDK-level snapshots capture a fully
+        # consistent on-disk state.  --direct=1 only bypasses the page
+        # cache for data I/O; ext4/xfs metadata still goes through the
+        # buffer cache and journal, which may not be committed yet.
+        target = mount or name_or_mount
+        self.ssh_obj.exec_command(
+            self.fio_node, f"sync -f {target} 2>/dev/null; sync")
+        self.logger.debug(f"Post-FIO sync completed for {target}")
 
     # ── table parser ──────────────────────────────────────────────────────────
 
@@ -4251,9 +4263,14 @@ class TestBackupPolicyVersionsOne(BackupTestBase):
         # TC-BCK-157: verify only 1 backup retained
         # Phase 1: wait until we see at least one 'merging' or 'merged' entry
         #          (confirms the retention pruner has started working).
+        #          In K8s mode the StorageBackup CRD phase never becomes
+        #          "merging"/"merged" — merges happen via internal tasks and
+        #          the CRD is deleted once done.  So we also detect pruning
+        #          activity by watching the backup count decrease.
         # Phase 2: wait until no 'merging'/'merged' entries remain for this
         #          lvol, then assert ≤ 1 active backup.
         _MERGING_STATUSES = {"merging", "merged"}
+        initial_count = None
         self.logger.info("TC-BCK-157: Phase 1 — waiting for merging to start …")
         phase1_deadline = time.time() + 300  # up to 5 min for pruner to kick in
         saw_merging = False
@@ -4263,14 +4280,18 @@ class TestBackupPolicyVersionsOne(BackupTestBase):
                 b for b in backups
                 if any(lvol_name in str(v) or lvol_id in str(v) for v in b.values())
             ]
+            if initial_count is None:
+                initial_count = len(lvol_all)
             merging_entries = [
                 b for b in lvol_all
                 if str(b.get("Status") or b.get("status") or "").lower() in _MERGING_STATUSES
             ]
-            if merging_entries:
+            # Detect merging by status field (Docker) or count decrease (K8s)
+            if merging_entries or len(lvol_all) < initial_count:
                 self.logger.info(
-                    f"TC-BCK-157: Detected {len(merging_entries)} merging/merged "
-                    f"entry(ies) — pruning has started")
+                    f"TC-BCK-157: Detected pruning activity — "
+                    f"{len(merging_entries)} merging/merged, "
+                    f"count {len(lvol_all)}/{initial_count}")
                 saw_merging = True
                 break
             self.logger.info(f"TC-BCK-157: No merging yet, {len(lvol_all)} backups total")

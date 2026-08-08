@@ -20,7 +20,7 @@ from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.hublvol import HubLVol
 
-
+from tests._mocks import assert_hublvol_wired
 
 
 # ---------------------------------------------------------------------------
@@ -216,15 +216,17 @@ class TestConnectToHublvolRole(unittest.TestCase):
             return_value=attach_rpc,
         )
 
-    def test_secondary_role_default(self):
+    def test_role_is_required_not_defaulted(self):
+        """``role`` is keyword-only and mandatory — there is no default.
+
+        It used to default to "secondary", so a caller that forgot to pass it
+        on a tertiary silently wired that node up as the secondary. Pin the
+        requirement so the default cannot come back."""
         primary = self._make_primary()
         sec = self._make_secondary()
-        rpc, rpcclient_patch = self._install_rpc_mocks(sec)
-        with rpcclient_patch:
+        _rpc, rpcclient_patch = self._install_rpc_mocks(sec)
+        with rpcclient_patch, self.assertRaises(TypeError):
             sec.connect_to_hublvol(primary)
-        rpc.bdev_lvol_set_lvs_opts.assert_called_once()
-        call_kwargs = rpc.bdev_lvol_set_lvs_opts.call_args
-        self.assertEqual(call_kwargs[1]["role"], "secondary")
 
     def test_tertiary_role_explicit(self):
         primary = self._make_primary()
@@ -279,7 +281,7 @@ class TestRecreateLvstoreRoles(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.health_controller")
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
     @patch("simplyblock_core.storage_node_ops.storage_events")
-    @patch("simplyblock_core.port_block.set_port")
+    @patch("simplyblock_core.utils.port_block.set_port")
     @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._connect_to_remote_jm_devs")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
@@ -347,7 +349,7 @@ class TestRecreateLvstoreRoles(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.health_controller")
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
     @patch("simplyblock_core.storage_node_ops.storage_events")
-    @patch("simplyblock_core.port_block.set_port")
+    @patch("simplyblock_core.utils.port_block.set_port")
     @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._connect_to_remote_jm_devs")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
@@ -410,12 +412,10 @@ class TestRecreateLvstoreRoles(unittest.TestCase):
         # post-port-unblock via ``add_hublvol_failover_path``.
         # Non-takeover recreate ⇒ lvs_node is snode itself; the peer-loop
         # connect call routes LVS metadata via lvs_node=snode.
-        nodes["node-2"].connect_to_hublvol.assert_called_once_with(
-            snode, failover_node=None, role="secondary", rpc_timeout=0.2,
-            lvs_node=snode)
-        nodes["node-3"].connect_to_hublvol.assert_called_once_with(
-            snode, failover_node=None, role="tertiary", rpc_timeout=0.2,
-            lvs_node=snode)
+        assert_hublvol_wired(nodes["node-2"].connect_to_hublvol, snode,
+                             role="secondary", lvs_node=snode)
+        assert_hublvol_wired(nodes["node-3"].connect_to_hublvol, snode,
+                             role="tertiary", lvs_node=snode)
         nodes["node-3"].add_hublvol_failover_path.assert_called_once_with(
             snode, nodes["node-2"])
 
@@ -426,7 +426,7 @@ class TestRecreateLvstoreRoles(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.health_controller")
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
     @patch("simplyblock_core.storage_node_ops.storage_events")
-    @patch("simplyblock_core.port_block.set_port")
+    @patch("simplyblock_core.utils.port_block.set_port")
     @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._connect_to_remote_jm_devs")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
@@ -483,9 +483,8 @@ class TestRecreateLvstoreRoles(unittest.TestCase):
 
         # Only sec1 should be called, with role="secondary".
         # FTT=1 ⇒ no tertiary in topology ⇒ no deferred failover-path attach.
-        nodes["node-2"].connect_to_hublvol.assert_called_once_with(
-            snode, failover_node=None, role="secondary", rpc_timeout=0.2,
-            lvs_node=snode)
+        assert_hublvol_wired(nodes["node-2"].connect_to_hublvol, snode,
+                             role="secondary", lvs_node=snode)
         nodes["node-3"].connect_to_hublvol.assert_not_called()
 
 
@@ -520,7 +519,7 @@ class TestRecreateLvstoreOnSecRoles(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops._set_restart_phase")
     @patch("simplyblock_core.storage_node_ops._handle_rpc_failure_on_peer", return_value="skip")
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
-    @patch("simplyblock_core.port_block.set_port")
+    @patch("simplyblock_core.utils.port_block.set_port")
     @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._connect_to_remote_jm_devs")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
@@ -567,15 +566,14 @@ class TestRecreateLvstoreOnSecRoles(unittest.TestCase):
         recreate_lvstore_on_non_leader(sec1, leader_node=primary, primary_node=primary)
 
         # sec-1 is lvstore_stack_secondary → role="secondary"
-        sec1.connect_to_hublvol.assert_called_once()
-        call_kwargs = sec1.connect_to_hublvol.call_args
-        self.assertEqual(call_kwargs[1].get("role"), "secondary")
+        assert_hublvol_wired(sec1.connect_to_hublvol, primary,
+                             role="secondary", lvs_node=primary)
 
     @patch("simplyblock_core.storage_node_ops._check_peer_disconnected", return_value=False)
     @patch("simplyblock_core.storage_node_ops._set_restart_phase")
     @patch("simplyblock_core.storage_node_ops._handle_rpc_failure_on_peer", return_value="skip")
     @patch("simplyblock_core.storage_node_ops.tcp_ports_events")
-    @patch("simplyblock_core.port_block.set_port")
+    @patch("simplyblock_core.utils.port_block.set_port")
     @patch("simplyblock_core.models.storage_node.RPCClient")
     @patch("simplyblock_core.storage_node_ops._connect_to_remote_jm_devs")
     @patch("simplyblock_core.storage_node_ops._create_bdev_stack")
@@ -622,9 +620,8 @@ class TestRecreateLvstoreOnSecRoles(unittest.TestCase):
         recreate_lvstore_on_non_leader(sec2, leader_node=primary, primary_node=primary)
 
         # sec-2 is lvstore_stack_tertiary → role="tertiary"
-        sec2.connect_to_hublvol.assert_called_once()
-        call_kwargs = sec2.connect_to_hublvol.call_args
-        self.assertEqual(call_kwargs[1].get("role"), "tertiary")
+        assert_hublvol_wired(sec2.connect_to_hublvol, primary,
+                             role="tertiary", lvs_node=primary)
 
 
 # ---------------------------------------------------------------------------

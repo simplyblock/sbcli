@@ -39,6 +39,11 @@ DEVICE_MONITOR_INTERVAL_SEC = 5
 STAT_COLLECTOR_INTERVAL_SEC = 60*5  # 5 minutes
 LVOL_STAT_COLLECTOR_INTERVAL_SEC = 30
 LVOL_MONITOR_INTERVAL_SEC = 30
+# Short cadence used by lvol/snapshot monitors while in-deletion objects
+# exist: delete chains advance at most one hop per cycle (clone -> snapshot
+# -> parent snapshot), so the idle 30s interval alone added minutes per
+# chain (run 20260730).
+LVOL_MONITOR_DELETION_INTERVAL_SEC = 2
 DEV_MONITOR_INTERVAL_SEC = 10
 # Collector cadence (#5, 2026-07-21): the idle-cluster baseline measured
 # 4,290 RPCs/min cluster-wide (get_iostat 16k / alceml_get_pages_usage 15k /
@@ -140,6 +145,24 @@ RESTART_TASK_EXEC_INTERVAL_MAX_SEC = 3600
 # regardless of this value (owner id is the hostname).
 TASK_LEASE_HEARTBEAT_SEC = 30
 TASK_LEASE_TTL_SEC = 180
+
+# Per-node restart claim: cross-ACTOR mutual exclusion for a single node's
+# restart. The task lease above serializes runner HOSTS on one task, but a
+# manual CLI restart and the restart task runner are DIFFERENT actors sharing
+# the same NODE_RESTART task (ensure_node_restart_task dedups to one per
+# node) and — on the mgmt host — potentially the same lease owner id
+# (hostname), so the lease cannot tell them apart. The claim is an
+# (owner-token, timestamp) pair on the StorageNode row, acquired atomically
+# inside try_set_node_restarting's FDB tx, heartbeated by the
+# restart_storage_node wrapper while the restart runs, and released on exit.
+# A claim older than the TTL means its driver died mid-restart and may be
+# taken over (this is what keeps the transferable-ownership resume path
+# alive). force does NOT bypass a fresh claim: mutual exclusion is not an
+# operator-overridable safety check (2026-08-06 soak iter-50: a manual CLI
+# restart and the task runner drove the same node concurrently, their
+# spdk_process_start calls replacing each other's container mid-restart).
+RESTART_CLAIM_HEARTBEAT_SEC = TASK_LEASE_HEARTBEAT_SEC
+RESTART_CLAIM_TTL_SEC = TASK_LEASE_TTL_SEC
 
 # Node-add concurrency: the cross-node mesh section of add_node is serialized
 # per cluster behind a ClusterAddNodeLock. The holder refreshes the lock every
@@ -267,13 +290,27 @@ INSTANCE_STORAGE_DATA = {
 
 MAX_SNAP_COUNT = 100
 
-# Per-SPDK-instance object cap: each vCPU in the instance's core mask serves
-# at most this many objects (lvols + clones + snapshots), counted against
-# their primary node. 8 cores (the minimum) -> 16k objects, 32 cores -> 64k.
-# Guards the data plane against object-count overload (run 20260712-231123:
+# Hard per-lvstore object cap: an lvstore serves at most this many objects
+# (lvols + clones + snapshots), counted against the lvstore's owning node.
+# Enforced on every create path (lvol create, snapshot create, clone). A node
+# that temporarily serves a second LVS (takeover / acting leader) gets an
+# independent budget per LVS — the limit protects each lvstore's blobstore
+# and journal, not the host. Replaces the earlier per-core cap
+# (cores x 2000); object-count overload precedent: run 20260712-231123,
 # ~68k objects on one 12-core instance drove swap thrash and a JC-quartet
-# abort).
-MAX_OBJECTS_PER_CORE = 2000
+# abort.
+MAX_OBJECTS_PER_LVSTORE = 6000
+
+# Hard cap on namespaces (lvols) sharing one nvmf subsystem. The DEFAULT for
+# namespaced creates stays LVO_MAX_NAMESPACES_PER_SUBSYS; this is the ceiling
+# a caller-supplied max_namespace_per_subsys may not exceed, and it also
+# bounds joins into legacy subsystems recorded with a larger max.
+MAX_NAMESPACES_PER_SUBSYSTEM = 50
+
+# Hard cap on lvol subsystems per node (primary subsystems; namespaced
+# volumes share one). Applied as a ceiling over the node's configured
+# max_lvol: effective limit = min(max_lvol, this).
+MAX_SUBSYSTEMS_PER_NODE = 75
 
 SPDK_PROXY_MULTI_THREADING_ENABLED=True
 SPDK_PROXY_TIMEOUT=60*5
@@ -395,12 +432,6 @@ FAST_FAIL_TO=0
 RECONNECT_DELAY_CLUSTER=1
 LVOL_CLUSTER_RATIO=1
 
-# Per-branch feature gate for the SPDK compression-thread JM layout (see
-# calculate_core_allocations and device_controller.bdev_jm_create). OFF on
-# main: when False the CPU allocation and JM-create RPC are byte-for-byte
-# unchanged from the pre-compression-thread behaviour.
-JM_COMPRESSION_THREAD_ENABLED = False
-
 # Fixed size (in bytes) each distrib bdev reports up to the raid0/lvstore
 # layer, independent of cluster raw capacity or number_of_distribs. 250 TiB.
 #
@@ -500,7 +531,7 @@ MIG_PARALLEL_JOBS = 64
 MIG_JOB_SIZE = 64
 
 # Live volume migration constants
-LVOL_MIG_MAX_RETRIES = 5          # max retry attempts before aborting
+LVOL_MIG_MAX_RETRIES = 5          # max retries before entering cleanup_target
 LVOL_MIG_DEADLINE_SEC = 3600  # 1-hour deadline (0 = no deadline)
 LVOL_MIG_MAX_INTERMEDIATE_SNAPS = 3        # max recursive "shrink" snapshot rounds
 LVOL_MIG_INTERMEDIATE_SNAP_THRESHOLD_BYTES = 500 * 1024 * 1024  # 500 MiB — skip if delta is smaller

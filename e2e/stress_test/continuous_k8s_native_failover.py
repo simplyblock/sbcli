@@ -515,24 +515,13 @@ class K8sNativeFailoverTest(TestClusterBase):
 
     def _get_all_k8s_node_names(self) -> list[str]:
         """Return a list of ALL K8s node hostnames."""
-        out, _ = self.k8s_utils._exec_kubectl(
-            "kubectl get nodes --no-headers -o custom-columns=':metadata.name'",
-            supress_logs=True,
-        )
-        return [n.strip() for n in out.strip().splitlines() if n.strip()]
+        return self.k8s_utils.get_all_k8s_node_names()
 
     def _detect_openshift(self) -> bool:
         """Return True if the cluster is OpenShift (``oc`` available)."""
         if hasattr(self, '_is_openshift'):
             return self._is_openshift
-        try:
-            out, _ = self.k8s_utils._exec_kubectl(
-                "oc version --client 2>/dev/null && echo OC_OK || echo OC_NO",
-                supress_logs=True,
-            )
-            self._is_openshift = "OC_OK" in out
-        except Exception:
-            self._is_openshift = False
+        self._is_openshift = self.k8s_utils.detect_openshift()
         self.logger.info(f"[dmesg] Platform detection: openshift={self._is_openshift}")
         return self._is_openshift
 
@@ -6204,10 +6193,13 @@ class K8sNativeScaleBreakTest(K8sNativeFailoverTest):
             traceback.print_exc()
         finally:
             self._log_scale_break_summary(break_reason, capacity_reached)
-            # Always clean up FIO jobs, configmaps, and PVCs — even on
-            # failure — so the pipeline cleanup script doesn't have to
-            # force-delete hundreds of leftover resources.
-            self._cleanup_all_k8s_resources()
+            if test_failed and self.preserve_resources_on_failure:
+                self.logger.info(
+                    "[scale_break] Preserving K8s resources (FIO pods, PVCs, "
+                    "snapshots) for debugging (--preserve_resources_on_failure)"
+                )
+            else:
+                self._cleanup_all_k8s_resources()
 
         if test_failed:
             raise RuntimeError(

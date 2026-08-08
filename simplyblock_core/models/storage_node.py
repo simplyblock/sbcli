@@ -112,6 +112,14 @@ class StorageNode(BaseNodeObject):
     pollers_mask: str = ""
     primary_ip: str = ""
     raid: str = ""
+    # Per-node restart claim: owner token + ISO timestamp of the actor
+    # currently driving this node's restart. Written atomically by
+    # try_set_node_restarting, heartbeated by the restart_storage_node
+    # wrapper, released on exit. A claim older than
+    # constants.RESTART_CLAIM_TTL_SEC is stale (driver died) and may be
+    # taken over. Only meaningful while status is RESTARTING/IN_SHUTDOWN.
+    restart_claim_owner: str = ""
+    restart_claim_ts: str = ""
     remote_devices: List[RemoteDevice] = []
     remote_jm_devices: List[RemoteJMDevice] = []
     rpc_password: SecretStr = SecretStr("")
@@ -155,6 +163,8 @@ class StorageNode(BaseNodeObject):
     lvol_poller_mask: str = ""
     spdk_proxy_image: str = ""
     transfer_hublvol: HubLVol = None  # type: ignore[assignment]
+    # spdk image tag
+    spdk_version: str = "main"
 
     def get_lvol_subsys_port(self, lvs_name=None):
         """Get the client-facing NVMeoF port for a specific lvstore.

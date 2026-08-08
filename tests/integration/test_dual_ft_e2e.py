@@ -28,7 +28,7 @@ import pytest
 
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.iface import IFace
-from simplyblock_core.models.nvme_device import NVMeDevice
+from simplyblock_core.models.nvme_device import NVMeDevice, RemoteDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.stats import ClusterStatObject
 
@@ -693,8 +693,21 @@ def cluster_env(ensure_cluster, mock_rpc_servers):
             dev.size = 100000000000
             devs.append(dev)
         n.nvme_devices = devs
-        n.write_to_db(db.kv_store)
         nodes.append(n)
+
+    # Cross-node device mesh. ``cluster_activate`` gates on
+    # ``_wait_for_full_device_connectivity``, which requires every online primary
+    # to hold a connected remote-device record for every OTHER primary's devices.
+    # A real deployment builds these during node-add; this harness patches
+    # ``_connect_to_remote_devs`` out, so the mesh has to be seeded here or the
+    # gate can never be satisfied and every activation test fails.
+    for n in nodes[:_NUM_PRIMARIES]:
+        n.remote_devices = [
+            _make_remote_device(peer, dev)
+            for peer in nodes[:_NUM_PRIMARIES] if peer.uuid != n.uuid
+            for dev in peer.nvme_devices
+        ]
+        n.write_to_db(db.kv_store)
 
     # Secondary nodes
     for i in range(_NUM_SECONDARIES):
@@ -739,6 +752,20 @@ def cluster_env(ensure_cluster, mock_rpc_servers):
         cluster.remove(db.kv_store)
     except Exception:
         pass
+
+
+def _make_remote_device(owner, dev) -> RemoteDevice:
+    """A connected remote-device record on a peer for ``owner``'s ``dev``.
+
+    The uuid must match the owning device's — the connectivity gate keys the
+    mesh on device id, not on the record's own identity."""
+    rd = RemoteDevice()
+    rd.uuid = dev.get_id()
+    rd.remote_bdev = f"remote_{dev.alceml_bdev}"
+    rd.alceml_name = dev.alceml_bdev
+    rd.node_id = owner.get_id()
+    rd.size = dev.size
+    return rd
 
 
 def _make_nic(ip: str) -> IFace:

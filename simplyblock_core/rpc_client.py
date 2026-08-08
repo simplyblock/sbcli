@@ -9,7 +9,7 @@ import requests
 from jsonschema.exceptions import ValidationError
 from pydantic import SecretStr
 from requests.adapters import HTTPAdapter
-from requests.exceptions import ConnectionError, HTTPError, Timeout, TooManyRedirects
+from requests.exceptions import RequestException
 from urllib3 import Retry
 
 from simplyblock_core import utils, constants
@@ -202,7 +202,7 @@ class RPCClient:
             data = response.json()
             _response_validator.validate(data)
         except (
-                ConnectionError, Timeout, TooManyRedirects, HTTPError,  # requests
+                RequestException,  # requests
                 JSONDecodeError,  # json
                 ValidationError,  # jsonschema
         ) as e:
@@ -1159,10 +1159,9 @@ class RPCClient:
             params["shared_placement"] = True
         if jm_cpu_mask:
             params["bdb_lcpu_mask"] = int(jm_cpu_mask, 16)
-        # Compression thread: enabled per-branch (constants.JM_COMPRESSION_THREAD_ENABLED).
-        # compression_cpu_mask is a hex mask string co-located with jc-singleton on
-        # nodes <32 vCPU, or a dedicated core on >=32 vCPU; the data plane wants it as
-        # an int, matching bdb_lcpu_mask above.
+        # Compression thread: currently always off (no caller passes True).
+        # compression_cpu_mask is a hex mask string; the data plane wants it
+        # as an int, matching bdb_lcpu_mask above.
         if compression_thread:
             params["compression_thread"] = True
             if compression_cpu_mask:
@@ -1397,6 +1396,17 @@ class RPCClient:
             "bs_nonleadership": bs_nonleadership,
         })
 
+    def bdev_lvol_update_lvstore(self, lvs):
+        """Reload the lvstore's blob metadata from disk (spdk_lvs_update_live).
+
+        Pure md refresh — does NOT change leadership. Must be called on a
+        non-leader LVS (the SPDK side asserts leader == false). Used before a
+        control-plane leadership grant so the grant never serves stale blob
+        metadata (the 2026-07-06 LVS_13 hazard of a bare set_leader)."""
+        return self._request("bdev_lvol_update_lvstore", {
+            "uuid" if utils.UUID_PATTERN.match(lvs) else "lvs_name": lvs,
+        })
+
     def bdev_lvol_set_lvs_signal(self, lvs):
         """Send a fabric-level signal to an LVS to drop leadership.
 
@@ -1575,7 +1585,7 @@ class RPCClient:
         params = {
             "jm_vuid": jm_vuid,
         }
-        return self._request("jc_disable_replication", params)
+        return self._request3("jc_disable_replication", **params)
 
     def bdev_distrib_check_inflight_io(self, jm_vuid):
         params = {
@@ -1618,10 +1628,10 @@ class RPCClient:
         return self._request2("jc_compression", params)
 
     def nvmf_port_block(self, port, is_reject=False):
-        return self._request3("nvmf_port_block",
-            port=port,
-            reject=is_reject,
-        )
+        params = {"port": port}
+        if is_reject:
+            params["reject"] = is_reject
+        return self._request3("nvmf_port_block", **params)
 
     def nvmf_port_unblock(self, port):
         return self._request3("nvmf_port_unblock", port=port)

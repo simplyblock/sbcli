@@ -22,22 +22,19 @@ on:
         description: "sbcli branch / version tag to upgrade to (e.g. main)"
       STORAGE_PRIVATE_IPS:
         type: string
-        default: "192.168.10.205 192.168.10.206 192.168.10.207 192.168.10.208"
+        default: "192.168.10.201 192.168.10.202 192.168.10.203 192.168.10.204"
       API_INVOKE_URL:
         type: string
-        default: "http://192.168.10.211/"
+        default: "http://192.168.10.210/"
       BASTION_IP:
         type: string
-        default: "192.168.10.211"
+        default: "192.168.10.210"
       MNODES:
         type: string
-        default: "192.168.10.211"
-      NR_HUGEPAGES:
-        type: string
-        default: "2048"
+        default: "192.168.10.210"
       GRAFANA_ENDPOINT:
         type: string
-        default: "http://192.168.10.211/grafana"
+        default: "http://192.168.10.210/grafana"
       SSH_USER:
         type: string
         default: "root"
@@ -55,7 +52,7 @@ on:
         default: "300"
       BOOTSTRAP_DATA_CHUNKS:
         type: string
-        default: "2"
+        default: "1"
       BOOTSTRAP_PARITY_CHUNKS:
         type: string
         default: "2"
@@ -64,7 +61,7 @@ on:
         default: "1"
       BOOTSTRAP_HA_JM_COUNT:
         type: string
-        default: "3"
+        default: "4"
       BOOTSTRAP_HA_TYPE:
         type: string
         default: "single"
@@ -73,7 +70,7 @@ on:
         default: "eth1"
       BOOTSTRAP_ENABLE_NODE_AFFINITY:
         type: boolean
-        default: false
+        default: true
       TEST_CLASS:
         type: string
         default: "major_upgrade_single"
@@ -123,7 +120,7 @@ on:
         description: "Bootstrap: enable node affinity (--enable-node-affinity)"
         type: boolean
         required: false
-        default: false
+        default: true
 
       TEST_CLASS:
         description: "Upgrade test class name; defaults to single-node variant (no FIO during upgrade)"
@@ -154,14 +151,14 @@ jobs:
       CUSTOM_IMAGES:       ${{ inputs.CUSTOM_IMAGES || 'base_spdk="" target_spdk="" base_docker="" target_docker=""' }}
 
       # Cluster/lab env
-      STORAGE_PRIVATE_IPS:     ${{ inputs.STORAGE_PRIVATE_IPS || '192.168.10.205 192.168.10.206 192.168.10.207 192.168.10.208' }}
-      API_INVOKE_URL:   ${{ inputs.API_INVOKE_URL || 'http://192.168.10.211/' }}
-      API_BASE_URL:     ${{ inputs.API_INVOKE_URL || 'http://192.168.10.211/' }}
-      BASTION_IP:       ${{ inputs.BASTION_IP || '192.168.10.211' }}
-      BASTION_SERVER:   ${{ inputs.BASTION_IP || '192.168.10.211' }}
-      MNODES:           ${{ inputs.MNODES || '192.168.10.211' }}
-      NR_HUGEPAGES:     ${{ inputs.NR_HUGEPAGES || '2048' }}
-      GRAFANA_ENDPOINT: ${{ inputs.GRAFANA_ENDPOINT || 'http://192.168.10.211/grafana' }}
+      STORAGE_PRIVATE_IPS:     ${{ inputs.STORAGE_PRIVATE_IPS || '192.168.10.201 192.168.10.202 192.168.10.203 192.168.10.204' }}
+      API_INVOKE_URL:   ${{ inputs.API_INVOKE_URL || 'http://192.168.10.210/' }}
+      API_BASE_URL:     ${{ inputs.API_INVOKE_URL || 'http://192.168.10.210/' }}
+      BASTION_IP:       ${{ inputs.BASTION_IP || '192.168.10.210' }}
+      BASTION_SERVER:   ${{ inputs.BASTION_IP || '192.168.10.210' }}
+      MNODES:           ${{ inputs.MNODES || '192.168.10.210' }}
+      NR_HUGEPAGES:     '2048'
+      GRAFANA_ENDPOINT: ${{ inputs.GRAFANA_ENDPOINT || 'http://192.168.10.210/grafana' }}
       SBCLI_CMD:        sbctl
 
       # SSH/client env
@@ -175,14 +172,18 @@ jobs:
 
       # Bootstrap params
       BOOTSTRAP_MAX_SUBSYS:          ${{ inputs.BOOTSTRAP_MAX_SUBSYS || '300' }}
-      BOOTSTRAP_DATA_CHUNKS:       ${{ inputs.BOOTSTRAP_DATA_CHUNKS || '2' }}
+      BOOTSTRAP_DATA_CHUNKS:       ${{ inputs.BOOTSTRAP_DATA_CHUNKS || '1' }}
       BOOTSTRAP_PARITY_CHUNKS:     ${{ inputs.BOOTSTRAP_PARITY_CHUNKS || '2' }}
       BOOTSTRAP_JOURNAL_PARTITION: ${{ inputs.BOOTSTRAP_JOURNAL_PARTITION || '1' }}
-      BOOTSTRAP_HA_JM_COUNT:       ${{ inputs.BOOTSTRAP_HA_JM_COUNT || '3' }}
+      BOOTSTRAP_HA_JM_COUNT:       ${{ inputs.BOOTSTRAP_HA_JM_COUNT || '4' }}
       BOOTSTRAP_HA_TYPE:           ${{ inputs.BOOTSTRAP_HA_TYPE || 'single' }}
       BOOTSTRAP_DATA_NIC:          ${{ inputs.BOOTSTRAP_DATA_NIC || 'eth1' }}
 
       TEST_CLASS: ${{ inputs.TEST_CLASS || 'major_upgrade_single' }}
+
+      # Target images (overridden by CUSTOM_IMAGES target_spdk/target_docker)
+      TARGET_SPDK_IMAGE:   'simplyblock/spdk:main-latest'
+      TARGET_DOCKER_IMAGE: 'public.ecr.aws/simply-block/simplyblock:main-latest'
 
       # Secrets
       SSH_PASSWORD:      ${{ secrets.SSH_PASSWORD }}

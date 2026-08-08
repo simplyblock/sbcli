@@ -14,8 +14,8 @@ the volume served 2/3 paths until a dual outage within FTT killed all IO.
 
 Fixes under test:
 * ``get_restart_phase`` self-heals: a non-empty phase with no owning flow
-  (node not RESTARTING, cluster not IN_ACTIVATION/IN_EXPANSION) is stale —
-  cleared atomically and reported as "not in restart".
+  (node not RESTARTING, cluster not IN_ACTIVATION/IN_EXPANSION/IN_SHRINK) is
+  stale — cleared atomically and reported as "not in restart".
 * ``_set_restart_phase`` writes via atomic_update (no full-object write).
 """
 
@@ -62,9 +62,13 @@ class TestGetRestartPhaseStaleness(unittest.TestCase):
             StorageNode.RESTART_PHASE_POST_UNBLOCK)
         self.db.atomic_update.assert_not_called()
 
-    def test_phase_valid_during_activation_and_expansion(self):
+    def test_phase_valid_during_activation_expansion_and_shrink(self):
+        # IN_SHRINK is the node-removal owner: phase 3b relocates a replica
+        # onto an ONLINE target and sets a phase there, so without it the
+        # combination below (ONLINE node, non-ACTIVE cluster) reads as leaked.
         for cl_status in (Cluster.STATUS_IN_ACTIVATION,
-                          Cluster.STATUS_IN_EXPANSION):
+                          Cluster.STATUS_IN_EXPANSION,
+                          Cluster.STATUS_IN_SHRINK):
             self.db.reset_mock()
             self._setup(StorageNode.STATUS_ONLINE, cl_status)
             self.assertEqual(

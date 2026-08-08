@@ -647,11 +647,15 @@ class TestAddHostToLvolDhchapPool(unittest.TestCase):
 def _make_connect_ctx(lvol_allowed_hosts, pool_dhchap_key="", pool_dhchap_ctrlr_key=""):
     """Build the mocked DBController context used by every connect_lvol test.
 
-    connect_lvol unconditionally pulls the pool's DHCHAP keys onto the matched
-    host_entry (see PR #1074, which reverted the "stop injecting" change), so the
-    pool mock must return concrete (possibly empty) key strings rather than the
-    default MagicMock attributes. Callers that want a secret injected pass
-    pool_dhchap_key / pool_dhchap_ctrlr_key.
+    connect_lvol pulls the pool's DHCHAP keys onto the matched host_entry (see
+    PR #1074, which reverted the "stop injecting" change), so the pool mock must
+    return concrete (possibly empty) key strings rather than the default
+    MagicMock attributes. Callers that want a secret injected pass
+    pool_dhchap_key / pool_dhchap_ctrlr_key; that also turns on the pool's
+    ``dhchap`` flag, which is what gates the pool-key branch in
+    ``HostConnectAuth.from_entry``. Callers that pass no keys get a pool with
+    DHCHAP off, so per-entry material (e.g. psk) is used instead — matching
+    add_pool, which sets the flag and the keys together.
 
     Returns (patchers, lvol) — patchers must be started/stopped by the test.
     """
@@ -691,6 +695,7 @@ def _make_connect_ctx(lvol_allowed_hosts, pool_dhchap_key="", pool_dhchap_ctrlr_
 
     pool = Pool()
     pool.uuid = "pool-1"
+    pool.dhchap = bool(pool_dhchap_key or pool_dhchap_ctrlr_key)
     pool.dhchap_key = SecretStr(pool_dhchap_key)
     pool.dhchap_ctrlr_key = SecretStr(pool_dhchap_ctrlr_key)
 
@@ -712,9 +717,9 @@ class TestConnectLvolDhchap(unittest.TestCase):
         """connect_lvol must add --dhchap-secret and --dhchap-ctrl-secret,
         sourced from the pool's DHCHAP keys, for an allowed host entry.
 
-        Per PR #1074, connect_lvol unconditionally injects the pool keys onto
-        the matched host_entry, so the secrets come from the pool — not from
-        any key material stored on the lvol's allowed_hosts entry."""
+        Per PR #1074 the secrets come from the POOL, not from any key material
+        stored on the lvol's allowed_hosts entry — for a pool with DHCHAP
+        enabled (the pool keys are gated on pool.dhchap)."""
         from simplyblock_core.controllers.lvol_controller import connect_lvol
 
         pool_key = "DHHC-1:01:aGVsbG8=:"

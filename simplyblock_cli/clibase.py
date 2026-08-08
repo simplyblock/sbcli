@@ -582,7 +582,7 @@ class CLIWrapperBase:
         return cluster_ops.get_ssh_pass(cluster_id)
 
     def cluster__set(self, sub_command, args):
-        cluster_ops.set(args.cluster_id, args.attr_name, args.attr_value)
+        cluster_ops.set_(args.cluster_id, args.attr_name, args.attr_value)
         return True
 
     def cluster__set_shared_placement(self, sub_command, args):

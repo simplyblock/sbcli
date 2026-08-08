@@ -85,9 +85,9 @@ def db(monkeypatch):
         management_node_module,
     ):
         monkeypatch.setattr(module, 'db', mock)
+    monkeypatch.setattr(migration_module, '_db', mock)
     # These modules instantiate DBController() at call time
     monkeypatch.setattr(dtos_module, 'DBController', lambda: mock)
-    monkeypatch.setattr(migration_module, 'DBController', lambda: mock)
 
     mock.get_cluster_capacity.return_value = []
     mock.get_node_capacity.return_value = []

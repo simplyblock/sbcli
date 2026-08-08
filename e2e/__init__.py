@@ -108,13 +108,22 @@ from stress_test.mass_create_delete_stress import (
     MassCreateDeletePersistent_30x100_Docker,
     MassCreateDeletePersistent_300x10_Docker,
     MassCreateDeletePersistent_300x10_6Snap_Docker,
+    MassCreateDeletePersistent_300x10_10Snap_Docker,
     MassCreateDeletePersistent_500x1_Docker,
     MassCreateDeletePersistent_3000x1_Docker,
     MassCreateDeletePersistent_1x500_K8s,
     MassCreateDeletePersistent_30x100_K8s,
     MassCreateDeletePersistent_300x10_K8s,
+    MassCreateDeletePersistent_300x10_6Snap_K8s,
+    MassCreateDeletePersistent_300x10_10Snap_K8s,
     MassCreateDeletePersistent_500x1_K8s,
     MassCreateDeletePersistent_3000x1_K8s,
+    MassCreateDeleteRestart_300x10_Docker,
+    MassCreateDeleteRestart_300x10_6Snap_Docker,
+    MassCreateDeleteRestart_300x10_10Snap_Docker,
+    MassCreateDeleteRestart_300x10_K8s,
+    MassCreateDeleteRestart_300x10_6Snap_K8s,
+    MassCreateDeleteRestart_300x10_10Snap_K8s,
 )
 from stress_test.device_failure_migration import (
     DeviceFailureMigrationNoLoadDocker,
@@ -229,8 +238,9 @@ from e2e_tests.backup.test_backup_restore import (
     TestBackupNegative,
     TestBackupCryptoLvol,
     TestBackupCustomGeometry,
-    TestBackupRetentionMergeAfterDelete,
-    TestBackupDeleteAndRestore,
+    # DISABLED: lvol-level backup delete not supported (SFAM-2792)
+    # TestBackupRetentionMergeAfterDelete,
+    # TestBackupDeleteAndRestore,
     TestBackupCrossClusterRestore,  # NOT in get_backup_tests(); run explicitly only
     # Extra coverage tests (TC-BCK-100..148)
     TestBackupConcurrentIO,
@@ -242,7 +252,8 @@ from e2e_tests.backup.test_backup_restore import (
     TestBackupSnapshotClone,
     TestBackupFilesystemXFS,
     TestBackupLargeLvol,
-    TestBackupDeleteInProgress,
+    # DISABLED: lvol-level backup delete not supported (SFAM-2792)
+    # TestBackupDeleteInProgress,
     TestBackupPolicyMultipleLvols,
     # Extended backup tests (TC-BCK-150..190)
     TestBackupSecurityLvol,
@@ -278,11 +289,13 @@ from stress_test.continuous_backup_stress import (
     BackupStressMarathon,
     BackupStressLargeScale,
     BackupStressFilesystemSecurityMix,
-    BackupStressRetentionMergeCycles,
+    # DISABLED: backup delete not supported (SFAM-2792)
+    # BackupStressRetentionMergeCycles,
 )
 
 
 from load_tests.lvol_outage_load import TestLvolOutageLoadTest
+from e2e_tests.test_api_parity_audit import TestAPIParityAudit
 
 
 ALL_TESTS = [
@@ -343,14 +356,16 @@ ALL_TESTS = [
     RandomRDMAFailoverTest,
     RandomRDMAMultiFailoverTest,
     # Backup E2E tests
-    TestBackupRetentionMergeAfterDelete,
+    # DISABLED: lvol-level backup delete not supported (SFAM-2792)
+    # TestBackupRetentionMergeAfterDelete,
     TestBackupBasicPositive,
     TestBackupRestoreDataIntegrity,
     TestBackupPolicy,
     TestBackupNegative,
     TestBackupCryptoLvol,
     TestBackupCustomGeometry,
-    TestBackupDeleteAndRestore,
+    # DISABLED: lvol-level backup delete not supported (SFAM-2792)
+    # TestBackupDeleteAndRestore,
     TestBackupInterruptedBackup,
     TestBackupInterruptedRestore,
     # Backup extra E2E tests (TC-BCK-100..148)
@@ -363,7 +378,8 @@ ALL_TESTS = [
     TestBackupSnapshotClone,
     TestBackupFilesystemXFS,
     TestBackupLargeLvol,
-    TestBackupDeleteInProgress,
+    # DISABLED: lvol-level backup delete not supported (SFAM-2792)
+    # TestBackupDeleteInProgress,
     TestBackupPolicyMultipleLvols,
     # Extended backup E2E tests (TC-BCK-150..190)
     TestBackupSecurityLvol,
@@ -421,13 +437,22 @@ ALL_TESTS = [
     MassCreateDeletePersistent_30x100_Docker,
     MassCreateDeletePersistent_300x10_Docker,
     MassCreateDeletePersistent_300x10_6Snap_Docker,
+    MassCreateDeletePersistent_300x10_10Snap_Docker,
     MassCreateDeletePersistent_500x1_Docker,
     MassCreateDeletePersistent_3000x1_Docker,
     MassCreateDeletePersistent_1x500_K8s,
     MassCreateDeletePersistent_30x100_K8s,
     MassCreateDeletePersistent_300x10_K8s,
+    MassCreateDeletePersistent_300x10_6Snap_K8s,
+    MassCreateDeletePersistent_300x10_10Snap_K8s,
     MassCreateDeletePersistent_500x1_K8s,
     MassCreateDeletePersistent_3000x1_K8s,
+    MassCreateDeleteRestart_300x10_Docker,
+    MassCreateDeleteRestart_300x10_6Snap_Docker,
+    MassCreateDeleteRestart_300x10_10Snap_Docker,
+    MassCreateDeleteRestart_300x10_K8s,
+    MassCreateDeleteRestart_300x10_6Snap_K8s,
+    MassCreateDeleteRestart_300x10_10Snap_K8s,
     DeviceFailureMigrationNoLoadDocker,
     DeviceFailureMigrationUnderLoadDocker,
     DeviceFailureMigrationPCIeNoLoadDocker,
@@ -499,6 +524,8 @@ ALL_TESTS = [
     TestPoolHostManagement,
     TestLvolPlacement,
     TestNodeShutdownRestart,
+    # API parity audit
+    TestAPIParityAudit,
 ]
 
 def get_all_tests(custom=True, ha_test=False):
@@ -691,13 +718,22 @@ def get_stress_tests():
         MassCreateDeletePersistent_30x100_Docker,
         MassCreateDeletePersistent_300x10_Docker,
         MassCreateDeletePersistent_300x10_6Snap_Docker,
+        MassCreateDeletePersistent_300x10_10Snap_Docker,
         MassCreateDeletePersistent_500x1_Docker,
         MassCreateDeletePersistent_3000x1_Docker,
         MassCreateDeletePersistent_1x500_K8s,
         MassCreateDeletePersistent_30x100_K8s,
         MassCreateDeletePersistent_300x10_K8s,
+        MassCreateDeletePersistent_300x10_6Snap_K8s,
+        MassCreateDeletePersistent_300x10_10Snap_K8s,
         MassCreateDeletePersistent_500x1_K8s,
         MassCreateDeletePersistent_3000x1_K8s,
+        MassCreateDeleteRestart_300x10_Docker,
+        MassCreateDeleteRestart_300x10_6Snap_Docker,
+        MassCreateDeleteRestart_300x10_10Snap_Docker,
+        MassCreateDeleteRestart_300x10_K8s,
+        MassCreateDeleteRestart_300x10_6Snap_K8s,
+        MassCreateDeleteRestart_300x10_10Snap_K8s,
         DeviceFailureMigrationNoLoadDocker,
         DeviceFailureMigrationUnderLoadDocker,
         DeviceFailureMigrationPCIeNoLoadDocker,
@@ -741,13 +777,22 @@ def get_monitoring_tests():
         MassCreateDeletePersistent_30x100_Docker,
         MassCreateDeletePersistent_300x10_Docker,
         MassCreateDeletePersistent_300x10_6Snap_Docker,
+        MassCreateDeletePersistent_300x10_10Snap_Docker,
         MassCreateDeletePersistent_500x1_Docker,
         MassCreateDeletePersistent_3000x1_Docker,
         MassCreateDeletePersistent_1x500_K8s,
         MassCreateDeletePersistent_30x100_K8s,
         MassCreateDeletePersistent_300x10_K8s,
+        MassCreateDeletePersistent_300x10_6Snap_K8s,
+        MassCreateDeletePersistent_300x10_10Snap_K8s,
         MassCreateDeletePersistent_500x1_K8s,
         MassCreateDeletePersistent_3000x1_K8s,
+        MassCreateDeleteRestart_300x10_Docker,
+        MassCreateDeleteRestart_300x10_6Snap_Docker,
+        MassCreateDeleteRestart_300x10_10Snap_Docker,
+        MassCreateDeleteRestart_300x10_K8s,
+        MassCreateDeleteRestart_300x10_6Snap_K8s,
+        MassCreateDeleteRestart_300x10_10Snap_K8s,
         DeviceFailureMigrationNoLoadDocker,
         DeviceFailureMigrationUnderLoadDocker,
         DeviceFailureMigrationPCIeNoLoadDocker,
@@ -768,8 +813,8 @@ def get_monitoring_tests():
 
 def get_backup_tests():
     return [
-        # Regression: retention merge after delete must run first (clean S3 bucket)
-        TestBackupRetentionMergeAfterDelete,
+        # DISABLED: lvol-level backup delete not supported (SFAM-2792)
+        # TestBackupRetentionMergeAfterDelete,
         # E2E backup tests
         TestBackupBasicPositive,
         TestBackupRestoreDataIntegrity,
@@ -777,7 +822,8 @@ def get_backup_tests():
         TestBackupNegative,
         TestBackupCryptoLvol,
         # TestBackupCustomGeometry, # Will re-enable when we have a way to reliably test it in CI (currently requires manual setup of custom geometry pool)
-        TestBackupDeleteAndRestore,
+        # DISABLED: lvol-level backup delete not supported (SFAM-2792)
+        # TestBackupDeleteAndRestore,
         # Extra coverage tests (TC-BCK-100..148)
         TestBackupMultipleRestores,
         TestBackupDeltaChainPointInTime,
@@ -787,7 +833,8 @@ def get_backup_tests():
         TestBackupSnapshotClone,
         TestBackupFilesystemXFS,
         TestBackupLargeLvol,
-        TestBackupDeleteInProgress,
+        # DISABLED: lvol-level backup delete not supported (SFAM-2792)
+        # TestBackupDeleteInProgress,
         TestBackupPolicyMultipleLvols,
         # Extended backup tests (TC-BCK-150..190)
         TestBackupSecurityLvol,
@@ -822,7 +869,8 @@ def get_backup_stress_tests():
         BackupStressMarathon,
         BackupStressLargeScale,
         BackupStressFilesystemSecurityMix,
-        BackupStressRetentionMergeCycles,
+        # DISABLED: backup delete not supported (SFAM-2792)
+        # BackupStressRetentionMergeCycles,
     ]
 
 
@@ -844,8 +892,4 @@ def get_load_tests():
 
 def get_parity_tests():
     """API parity audit — CLI vs v1 vs v2 three-way comparison."""
-    try:
-        from e2e_tests.test_api_parity_audit import TestAPIParityAudit
-        return [TestAPIParityAudit]
-    except ImportError:
-        return []
+    return [TestAPIParityAudit]

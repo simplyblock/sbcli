@@ -211,7 +211,7 @@ jobs:
       max_lvol: ${{ inputs.max_lvol || '30' }}
       ssh_user: ${{ inputs.ssh_user || 'root' }}
       key_path: ${{ inputs.key_path }}
-      send_slack_notification: ${{ inputs.send_slack_notification }}
+      send_slack_notification: false
       cluster_params: ${{ inputs.cluster_params || 'ndcs=2,npcs=2,bs=4096,chunk_bs=4096,partitions=1,jm_count=4' }}
       cluster_environment: ${{ inputs.cluster_environment || 'local' }}
       skip_nfs: ${{ inputs.skip_nfs || 'false' }}
@@ -244,6 +244,37 @@ jobs:
             echo ""
             echo "**Tests:** ${{ needs.setup-matrix.outputs.test_count }} | **Overall:** ${{ needs.run-tests.result }}"
             echo ""
+
+            # Extract and display consolidated log directories
+            echo "## Log Directories"
+            echo ""
+            log_found=0
+            for dir in summaries/test-summary-*/; do
+              [[ -d "$dir" ]] || continue
+              [[ -f "${dir}test-summary.md" ]] || continue
+              content="$(cat "${dir}test-summary.md")"
+              tname="$(echo "$content" | grep -oP 'Summary\s*[—-]\s*\K\S+' | head -1)"
+              [[ -z "$tname" ]] && tname="$(basename "$dir")"
+              test_log="$(echo "$content" | grep -oP '\*\*Test logs:\*\*\s*`\K[^`]+' | head -1)"
+              run_dir="$(echo "$content" | grep -oP '\*\*(RUN_BASE_DIR|Run dir):\*\*\s*`\K[^`]+' | head -1)"
+              if [[ -n "$test_log" || -n "$run_dir" ]]; then
+                log_found=$((log_found + 1))
+                echo "**${tname}**"
+                [[ -n "$test_log" ]] && echo "- Test logs: \`${test_log}\`"
+                if [[ -n "$run_dir" ]]; then
+                  run_dir="${run_dir%/}"
+                  echo "- E2E run dir: \`${run_dir}/\`"
+                  echo "- Graylog: \`${run_dir}/graylog_collected/\`"
+                fi
+                echo ""
+              fi
+            done
+            if [[ "$log_found" -eq 0 ]]; then
+              echo "> No log directories detected."
+              echo ""
+            fi
+
+            # Append individual test summaries
             found=0
             for dir in summaries/test-summary-*/; do
               [[ -d "$dir" ]] || continue
@@ -259,3 +290,97 @@ jobs:
               echo "> No individual test summaries were found."
             fi
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Send Combined Slack Notification
+        if: always() && (inputs.send_slack_notification || true) == true
+        shell: bash
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          OVERALL_STATUS: ${{ needs.run-tests.result }}
+          SLACK_RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          TEST_COUNT: ${{ needs.setup-matrix.outputs.test_count }}
+          TEST_CLASSES: ${{ inputs.TEST_CLASSES }}
+          CLUSTER_ENV: ${{ inputs.cluster_environment || 'local' }}
+        run: |
+          python3 - <<'PYEOF'
+          import json, os, re, sys, urllib.request
+
+          webhook = os.environ.get("SLACK_WEBHOOK_URL", "")
+          if not webhook:
+              print("No SLACK_WEBHOOK_URL set, skipping.")
+              sys.exit(0)
+
+          overall  = os.environ.get("OVERALL_STATUS", "unknown")
+          run_url  = os.environ.get("SLACK_RUN_URL", "")
+          branch   = os.environ.get("GITHUB_REF_NAME", "?")
+          count    = os.environ.get("TEST_COUNT", "?")
+          classes  = os.environ.get("TEST_CLASSES", "")
+          env_name = os.environ.get("CLUSTER_ENV", "?")
+
+          ok     = overall == "success"
+          icon   = ":white_check_mark:" if ok else ":x:"
+          status = "SUCCESS" if ok else "FAILURE"
+          mention = "" if ok else " <!channel>"
+
+          # Parse per-test results from downloaded summary artifacts
+          test_lines = []
+          summary_dir = "summaries"
+          if os.path.isdir(summary_dir):
+              for d in sorted(os.listdir(summary_dir)):
+                  md_path = os.path.join(summary_dir, d, "test-summary.md")
+                  if not os.path.isfile(md_path):
+                      continue
+                  content = open(md_path).read()
+                  name_m = re.search(r'Summary\s*[-—]\s*(\S+)', content)
+                  tname = name_m.group(1) if name_m else d
+                  res_m = re.search(r'\*\*Result:\*\*\s*(\S+)', content)
+                  result = res_m.group(1) if res_m else "?"
+                  r_icon = ":white_check_mark:" if "pass" in result.lower() or "success" in result.lower() else ":x:"
+                  total_m  = re.search(r'\*\*Total:\*\*\s*(\d+)', content)
+                  passed_m = re.search(r'\*\*Passed:\*\*\s*(\d+)', content)
+                  failed_m = re.search(r'\*\*Failed:\*\*\s*(\d+)', content)
+                  total  = total_m.group(1) if total_m else "?"
+                  passed = passed_m.group(1) if passed_m else "?"
+                  failed = failed_m.group(1) if failed_m else "?"
+                  # Extract test logs path (from e2e framework)
+                  test_log_m = re.search(r'\*\*Test logs:\*\*\s*`([^`]+)`', content)
+                  test_log_path = test_log_m.group(1) if test_log_m else None
+                  # Extract RUN_BASE_DIR / Run dir path (workflow run directory)
+                  log_m = re.search(r'\*\*(?:RUN_BASE_DIR|Run dir):\*\*\s*`([^`]+)`', content)
+                  run_dir_path = log_m.group(1).rstrip('/') if log_m else None
+                  line = f"  {r_icon} `{tname}` — {passed}/{total} passed, {failed} failed"
+                  if test_log_path:
+                      line += f"\n        :open_file_folder: `{test_log_path}`"
+                  if run_dir_path:
+                      line += f"\n        :file_folder: `{run_dir_path}/`"
+                      line += f"\n        :scroll: `{run_dir_path}/graylog_collected/`"
+                  test_lines.append(line)
+
+          lines = [
+              f"{icon} *SimplyBlock K8s Migration Topology Suite*{mention}",
+              f"*Status:* {status}  |  *Environment:* `{env_name}`",
+              f"*Branch:* `{branch}`  |  *Tests:* {count}",
+              "",
+          ]
+          if test_lines:
+              lines.append("*Per-test results:*")
+              lines.extend(test_lines)
+          else:
+              lines.append("_(no per-test summaries found)_")
+          lines += [
+              "",
+              f":link: *Run:* <{run_url}|View on GitHub>",
+          ]
+          payload = {"text": "\n".join(lines)}
+          req = urllib.request.Request(
+              webhook,
+              data=json.dumps(payload).encode(),
+              headers={"Content-Type": "application/json"},
+          )
+          try:
+              urllib.request.urlopen(req, timeout=15)
+              print("Combined Slack notification sent.")
+          except Exception as exc:
+              print(f"WARN: Slack notification failed: {exc}", file=sys.stderr)
+          PYEOF
