@@ -256,6 +256,17 @@ def parse_protocols(input_str: str):
         "rdma": "rdma" in parts,
     }
 
+def _validated_device_mode(device_mode) -> str:
+    """Normalize/validate the cluster device mode ("nvme" | "lblk").
+    Deploy-time only, like enable_failure_domain."""
+    mode = (device_mode or constants.DEVICE_MODE_NVME).lower()
+    if mode not in (constants.DEVICE_MODE_NVME, constants.DEVICE_MODE_LBLK):
+        raise ValueError(
+            f"invalid device_mode {device_mode!r}; must be "
+            f"'{constants.DEVICE_MODE_NVME}' or '{constants.DEVICE_MODE_LBLK}'")
+    return mode
+
+
 def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, ifname, mgmt_ip, log_del_interval, metrics_retention_period,
                    contact_point, grafana_endpoint, distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, mode,
@@ -265,6 +276,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001, container_image_prefix=None,
                    hashicorp_vault_settings : t.Optional[HashicorpVaultSettings] = None,
                    enable_failure_domain=False,
+                   device_mode=constants.DEVICE_MODE_NVME,
                    enable_hang_device=False,
 ) -> str:
 
@@ -399,6 +411,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.inflight_io_threshold = inflight_io_threshold
     cluster.strict_node_anti_affinity = strict_node_anti_affinity
     cluster.enable_failure_domain = enable_failure_domain
+    cluster.device_mode = _validated_device_mode(device_mode)
     cluster.contact_point = contact_point
     cluster.disable_monitoring = disable_monitoring
     cluster.mode = mode
@@ -504,6 +517,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
                 nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001,
                 hashicorp_vault_settings : t.Optional[HashicorpVaultSettings] = None,
                 enable_failure_domain=False,
+                device_mode=constants.DEVICE_MODE_NVME,
 ) -> str:
     """Thin wrapper around _add_cluster_impl() that serializes create calls
     for the same name behind a ClusterCreateLock.
@@ -529,6 +543,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
         client_data_nic=client_data_nic, max_fault_tolerance=max_fault_tolerance, backup_config=backup_config,
         nvmf_base_port=nvmf_base_port, rpc_base_port=rpc_base_port, snode_api_port=snode_api_port,
         hashicorp_vault_settings=hashicorp_vault_settings, enable_failure_domain=enable_failure_domain,
+        device_mode=device_mode,
     )
     if not name:
         return _add_cluster_impl(**kwargs)
@@ -552,6 +567,7 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
                 nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001,
                 hashicorp_vault_settings : t.Optional[HashicorpVaultSettings] = None,
                 enable_failure_domain=False,
+                device_mode=constants.DEVICE_MODE_NVME,
 ) -> str:
 
     clusters = db_controller.get_clusters()
@@ -590,6 +606,7 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
     cluster.secret = SecretStr(utils.generate_string(20))
     cluster.strict_node_anti_affinity = strict_node_anti_affinity
     cluster.enable_failure_domain = enable_failure_domain
+    cluster.device_mode = _validated_device_mode(device_mode)
 
     if clusters:
         cfg = db_controller.get_deploy_config()
@@ -1547,6 +1564,27 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     # risk until it goes ACTIVE. (Use max_fault_tolerance - 1 instead if you
     # want headroom for an unplanned failure concurrent with a rollout.)
     utils.set_storage_mcp_max_unavailable(cl_id, cluster.max_fault_tolerance)
+
+    # JM mesh gate (2026-08-05 incident: nodes joined via add-node retries
+    # activated with peers missing their remote_jm controllers — the cluster
+    # reported healthy while a third of the journal mesh was unreachable,
+    # and the first journal load collapsed n_safe_jms into a cluster-wide
+    # JCERR). FRESH activation must not complete over such a hole; a
+    # RE-ACTIVATION is a recovery path that may legitimately run with one
+    # or two nodes unhealthy, so it repairs best-effort and only warns —
+    # the verifier already skips JMs whose owner node is not ONLINE.
+    if cluster.ha_type == "ha":
+        jm_problems = storage_node_ops.verify_jm_mesh_coverage(cl_id, repair=True)
+        if jm_problems:
+            if is_fresh_activation:
+                set_cluster_status(cl_id, ols_status)
+                raise ValueError(
+                    "Failed to activate cluster: JM mesh coverage incomplete "
+                    "(journal quorum would silently run degraded): "
+                    + "; ".join(jm_problems))
+            logger.warning(
+                "JM mesh coverage incomplete on re-activation (continuing — "
+                "recovery path): %s", "; ".join(jm_problems))
 
     set_cluster_status(cl_id, Cluster.STATUS_ACTIVE)
     logger.info("Cluster activated successfully")

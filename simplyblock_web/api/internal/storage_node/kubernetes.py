@@ -138,6 +138,36 @@ def get_info():
     })
 
 
+@api.get('/blockdevices', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'array',
+        'items': {'type': 'object', 'additionalProperties': True},
+    })}}},
+})
+def get_blockdevices():
+    """Whole-disk inventory for the lblk cluster mode (eligibility fields,
+    serial/WWN identity, by-id path, NUMA)."""
+    return utils.get_response(node_utils.get_block_devices_info())
+
+
+class _WipeBlockDeviceParams(BaseModel):
+    device_name: str
+
+
+@api.post('/wipe_block_device', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean'
+    })}}},
+})
+def wipe_block_device(body: _WipeBlockDeviceParams):
+    """--force-format for lblk add-node: wipe partition/FS signatures from a
+    whole disk. Refuses busy devices (mounts/holders/root disk)."""
+    ok, reason = node_utils.wipe_block_device_signatures(body.device_name)
+    if not ok:
+        return utils.get_response(None, reason)
+    return utils.get_response(True)
+
+
 @api.post('/join_swarm', responses={
     200: {'content': {'application/json': {'schema': utils.response_schema({
         'type': 'boolean'
@@ -595,6 +625,20 @@ def spdk_process_kill(query: utils.RPCPortParams):
         return utils.get_response(False, f"Pod {pod_name} did not terminate in time")
 
     return utils.get_response(True)
+
+
+@api.get('/spdk_process_cleanup', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean'
+    })}}},
+})
+def spdk_process_cleanup(query: utils.RPCPortParams):
+    """Authoritative SPDK teardown for failure-cleanup paths. Pod deletion in
+    this deployment mode is already synchronous and verified (see
+    spdk_process_kill's poll-until-gone), so this is an alias kept for parity
+    with the docker agent, where kill (fast, detached remove) and cleanup
+    (slow, verified remove) are distinct."""
+    return spdk_process_kill(query)
 
 
 def _is_pod_up(rpc_port, cluster_id):

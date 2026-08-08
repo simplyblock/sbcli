@@ -85,6 +85,7 @@ class ClusterParams(BaseModel):
     backup_config: Optional[BackupConfigParams] = None
     hashicorp_vault_settings: Optional[HashicorpVaultSettings] = None
     enable_failure_domain: bool = False
+    device_mode: Literal["nvme", "lblk"] = "nvme"
 
 
 @api.get('/', name='clusters:list')
