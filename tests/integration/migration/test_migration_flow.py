@@ -14,8 +14,6 @@ Background services (node monitor, distrib event collector, etc.) are never
 started; the test process only imports the task runner module directly.
 """
 
-import random
-import threading
 import time
 import pytest
 
@@ -24,7 +22,9 @@ from simplyblock_core.controllers import migration_controller
 from simplyblock_core.models.lvol_migration import LVolMigration
 from simplyblock_core.models.storage_node import StorageNode
 
-from tests.integration.migration.conftest import run_migration_task, set_node_status, start_migration
+from tests.integration.migration.conftest import (
+    run_migration_task, set_node_status, start_migration,
+)
 from tests.integration.migration.topology_loader import TestContext
 
 # Lazily initialised so the module can be imported without FDB installed.
@@ -756,34 +756,107 @@ class TestFourNodeFourSnapshotMigration:
             assert node_fresh.status == StorageNode.STATUS_ONLINE, (
                 f"Passive node {node_sym} status changed to {node_fresh.status}")
 
-    def test_random_node_offline_then_online_during_migration(
+    # -- Node-outage resilience --------------------------------------------
+    #
+    # These tests replace a single test that picked one of n1/n2/n3/n4 with
+    # random.choice() and took it offline from a wall-clock thread. Because the
+    # migration is always n1 -> n2, that one draw selected between three
+    # materially different scenarios with different correct outcomes, and only
+    # one of them ran per CI run — the n1 draw failed ~25% of runs and accounted
+    # for 14 of 16 observed `integration-slow` failures.
+    #
+    # Each scenario now gets its own test, and the outage is injected from the
+    # runner loop via run_migration_task(on_step=...) instead of from a thread,
+    # so "how long was the node down" is an exact tick count rather than a race.
+
+    _MAX_RETRIES = 5
+
+    def _outage(self, offline_uuid, down_at, up_at=None):
+        """Build an on_step callback taking a node offline for [down_at, up_at) ticks.
+
+        ``up_at=None`` leaves it down for the rest of the run.  Note the run ends
+        as soon as the migration is terminal, so a tick-scheduled restore may
+        never fire — always restore explicitly afterwards (``_restore``) before
+        asserting on node status.
+        """
+        def _on_step(step):
+            if step == down_at:
+                set_node_status(offline_uuid, StorageNode.STATUS_OFFLINE)
+            elif up_at is not None and step == up_at:
+                set_node_status(offline_uuid, StorageNode.STATUS_ONLINE)
+        return _on_step
+
+    def _restore(self, node_uuid):
+        """Put a node back online regardless of how far the run got."""
+        set_node_status(node_uuid, StorageNode.STATUS_ONLINE)
+
+    def _assert_back_online(self, node_uuid, sym):
+        node_fresh = db.get_storage_node_by_id(node_uuid)
+        assert node_fresh.status == StorageNode.STATUS_ONLINE, (
+            f"Node {sym} is still {node_fresh.status!r} after migration")
+
+    def test_source_offline_longer_than_retry_budget_resumes_and_completes(
             self, topology_four_node, mock_src_server, mock_tgt_server):
         """
-        Resilience test: a randomly chosen storage node goes offline for ~2 s
-        (representing a 40-second real-world outage; mock async ops complete in
-        ~0.2 s each so time is scaled ×20) during the migration, then comes
-        back online.  The migration must still reach STATUS_DONE.
+        The source node goes offline mid-migration for longer than the retry
+        budget, then comes back.  The migration must resume from its current
+        phase and complete.
 
-        The four possible outcomes depending on which node is chosen:
+        KNOWN FAILING — this asserts documented behaviour the runner does not
+        currently implement, and is the reproduction to hand over with the
+        source-outage policy question.
 
-        - n1 (src offline): runner detects STATUS != ONLINE at the start of
-          every task_runner() call and suspends the task.  Once n1 is restored
-          the task resumes from the current phase and completes.
+        What happens instead: the source-offline check in task_runner takes the
+        _budget_suspend path, which does `migration.retry_count += 1` on EVERY
+        tick that observes the outage and never resets it.  With the node down
+        for 10 ticks and a budget of 5, the budget is spent while the node is
+        still down; the migration is redirected to PHASE_CLEANUP_TARGET, rolls
+        back, and ends STATUS_FAILED with
+        `error_message="source node not online (status=offline)"`.
 
-        - n2 (tgt offline): DIFFERENT policy — a target observed offline during
-          SNAP_COPY/LVOL_MIGRATE deliberately fails the migration into
-          cleanup_target (a restarted target may have lost migration state, so
-          the runner rolls back rather than resuming; see the pre-tick status
-          gate in tasks_runner_lvol_migration).  Whether the outage is observed
-          at all depends on tick timing, so BOTH outcomes are legitimate:
-          STATUS_DONE (window missed) or STATUS_FAILED with a completed clean
-          rollback (volume still served from the source).
+        So the retry budget is not 5 retried operations — it is a wall-clock
+        tolerance of `max_retries x poll_interval`, which makes it depend on how
+        fast the caller ticks (0.1 s here; ~15 s for the real 3 s service loop).
+        Note that _suspend_task already takes `charge_retry`, and the two checks
+        immediately below this one — "cluster not active" and "expansion in
+        progress" — both pass charge_retry=False and let the migration deadline
+        bound them instead.  Source-node-offline is the only environmental wait
+        that charges the budget.
 
-        - n3 / n4 (passive nodes): the migration runner never contacts them, so
-          the outage has no effect on migration progress; STATUS_DONE is reached
-          at normal speed.
+        Resolve by either fixing that asymmetry or, if charging is deliberate,
+        rewriting this test to expect rollback (see the n2 test below, which
+        asserts exactly that shape).
+        """
+        ctx = topology_four_node
+        lvol = ctx.lvol("l1")
+        tgt_node = ctx.node("n2")
+        src_uuid = ctx.node_uuid("n1")
 
-        In all cases the offline node must be STATUS_ONLINE when the test ends.
+        _seed_all(mock_src_server, ctx, "n1")
+
+        mig_id, err = start_migration(lvol.uuid, tgt_node.uuid,
+                                      max_retries=self._MAX_RETRIES)
+        assert err is None, f"start_migration failed: {err}"
+
+        # Down for 10 ticks — deliberately longer than the 5-retry budget.
+        run_migration_task(mig_id, max_steps=3000, step_sleep=0.02,
+                           on_step=self._outage(src_uuid, down_at=2, up_at=12))
+        # The run stops the moment the migration goes terminal, which under
+        # current behaviour is before tick 12 — restore so this fails on the
+        # assertion below rather than on leftover node state.
+        self._restore(src_uuid)
+
+        _assert_migration_done(mig_id)
+        assert db.get_lvol_by_id(lvol.uuid).node_id == tgt_node.uuid
+        self._assert_back_online(src_uuid, "n1")
+
+    def test_target_offline_during_snap_copy_rolls_back(
+            self, topology_four_node, mock_src_server, mock_tgt_server):
+        """
+        A target observed offline during SNAP_COPY/LVOL_MIGRATE deliberately
+        fails the migration into cleanup_target rather than suspending: a
+        restarted target may have lost its migration state, so the runner rolls
+        back.  The volume must still be served from the source afterwards.
         """
         ctx = topology_four_node
         lvol = ctx.lvol("l1")
@@ -791,51 +864,70 @@ class TestFourNodeFourSnapshotMigration:
 
         _seed_all(mock_src_server, ctx, "n1")
 
-        # Pick one of the four cluster nodes at random.
-        offline_sym = random.choice(["n1", "n2", "n3", "n4"])
-        offline_uuid = ctx.node_uuid(offline_sym)
-
-        mig_id, err = start_migration(lvol.uuid, tgt_node.uuid)
+        mig_id, err = start_migration(lvol.uuid, tgt_node.uuid,
+                                      max_retries=self._MAX_RETRIES)
         assert err is None, f"start_migration failed: {err}"
 
-        # Background thread: wait 0.3 s (let migration get started), take the
-        # node offline for 2 s (representing the 40-second outage), then restore it.
-        offline_cycle_done = threading.Event()
+        # Take the target down while still in SNAP_COPY. The gate acts on the
+        # first tick that observes it, so no tick-count guessing is needed.
+        assert db.get_migration_by_id(mig_id).phase == LVolMigration.PHASE_SNAP_COPY
+        set_node_status(tgt_node.uuid, StorageNode.STATUS_OFFLINE)
 
-        def _offline_cycle():
-            time.sleep(0.3)
-            set_node_status(offline_uuid, StorageNode.STATUS_OFFLINE)
-            time.sleep(2.0)
-            set_node_status(offline_uuid, StorageNode.STATUS_ONLINE)
-            offline_cycle_done.set()
-
-        t = threading.Thread(target=_offline_cycle, daemon=True, name="offline-injector")
-        t.start()
-
-        # Drive the task runner; max_steps=3000 × 0.02 s = 60 s wall budget,
-        # which is more than enough even if the runner stalls for 2 s.
         run_migration_task(mig_id, max_steps=3000, step_sleep=0.02)
-
-        t.join(timeout=10.0)
-        assert offline_cycle_done.is_set(), "Offline-cycle thread did not finish"
+        self._restore(tgt_node.uuid)
 
         m = db.get_migration_by_id(mig_id)
-        updated_lvol = db.get_lvol_by_id(lvol.uuid)
-        if (offline_sym == "n2"
-                and m.status == LVolMigration.STATUS_FAILED
-                and "target node offline" in (m.error_message or "")):
-            # Target outage was observed by a runner tick: the deliberate
-            # policy is fail + clean rollback, not suspend/resume. Verify the
-            # rollback actually completed and the volume stayed on the source.
-            assert m.phase == LVolMigration.PHASE_CLEANUP_TARGET, (
-                f"Expected completed cleanup_target rollback, got phase={m.phase}")
-            assert updated_lvol.node_id == ctx.node_uuid("n1"), (
-                "Rolled-back volume must still be served from the source node")
-        else:
-            _assert_migration_done(mig_id)
-            assert updated_lvol.node_id == tgt_node.uuid
+        assert m.status == LVolMigration.STATUS_FAILED, (
+            f"Expected FAILED after target outage, got {m.status}")
+        assert m.phase == LVolMigration.PHASE_CLEANUP_TARGET, (
+            f"Expected completed cleanup_target rollback, got phase={m.phase}")
+        assert "target node offline" in (m.error_message or ""), (
+            f"Expected a target-offline rollback, got {m.error_message!r}")
+        assert db.get_lvol_by_id(lvol.uuid).node_id == ctx.node_uuid("n1"), (
+            "Rolled-back volume must still be served from the source node")
+        self._assert_back_online(tgt_node.uuid, "n2")
 
-        # Whichever node was taken offline must be back online now.
-        node_fresh = db.get_storage_node_by_id(offline_uuid)
-        assert node_fresh.status == StorageNode.STATUS_ONLINE, (
-            f"Node {offline_sym} is still {node_fresh.status!r} after migration")
+    # The old test also accepted STATUS_DONE for a target outage, on the grounds
+    # that the outage window could be "missed between ticks". That case gets no
+    # test of its own because there is no deterministic version of it:
+    # task_runner recurses straight through a phase advance (`return
+    # task_runner(task)` at the end of the phase dispatcher), so
+    # LVOL_MIGRATE -> CLEANUP_SOURCE -> COMPLETED all happen inside a single
+    # tick and PHASE_CLEANUP_SOURCE is never observable at a tick boundary. A
+    # target outage is therefore either observed during SNAP_COPY/LVOL_MIGRATE —
+    # the rollback asserted above — or not observed at all, in which case it has
+    # no effect and there is nothing to assert beyond what the plain migration
+    # tests in this class already cover. The `_is_cleanup_phase` exemption for
+    # CLEANUP_SOURCE only becomes reachable after an unclean restart, which is
+    # what the run_migration_with_crashes tests exercise.
+
+    def test_unrelated_node_offline_does_not_affect_migration(
+            self, topology_four_node, mock_src_server, mock_tgt_server):
+        """
+        A node that is neither source nor target goes offline for longer than
+        any retry budget.  The runner only ever loads the migration's own source
+        and target (and this topology is ha_type="single", so no peer resolution
+        reaches n3 either), so the outage must not affect progress at all.
+
+        n3 and n4 are interchangeable here — same role, same config bar an
+        rpc_port no mock server listens on — so one of them covers the scenario.
+        """
+        ctx = topology_four_node
+        lvol = ctx.lvol("l1")
+        tgt_node = ctx.node("n2")
+        unrelated_uuid = ctx.node_uuid("n3")
+
+        _seed_all(mock_src_server, ctx, "n1")
+
+        mig_id, err = start_migration(lvol.uuid, tgt_node.uuid,
+                                      max_retries=self._MAX_RETRIES)
+        assert err is None, f"start_migration failed: {err}"
+
+        # Down from tick 2 for the rest of the run — the migration completes
+        # with n3 still offline, which is exactly the point.
+        run_migration_task(mig_id, max_steps=3000, step_sleep=0.02,
+                           on_step=self._outage(unrelated_uuid, down_at=2))
+        self._restore(unrelated_uuid)
+
+        _assert_migration_done(mig_id)
+        assert db.get_lvol_by_id(lvol.uuid).node_id == tgt_node.uuid
