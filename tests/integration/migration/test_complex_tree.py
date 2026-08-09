@@ -40,7 +40,8 @@ from simplyblock_core.models.lvol_migration import LVolMigration
 from simplyblock_core.models.storage_node import StorageNode
 
 from tests.integration.migration.conftest import (
-    run_migration_task, run_migration_with_crashes, set_node_status, start_migration,
+    advance_until, run_migration_task, run_migration_with_crashes, set_node_status,
+    start_migration,
 )
 from tests.integration.migration.topology_loader import TestContext
 
@@ -169,6 +170,43 @@ def _migrate_one(lvol_uuid, tgt_uuid, max_steps=1500, step_sleep=0.02,
         for srv in failure_servers:
             srv.set_failure_rate(0.0)
     return mig_id
+
+
+def _assert_active(mig_id):
+    """Assert the migration is in flight, without driving the runner.
+
+    Tests that check "operation X is/isn't blocked by an active migration" used
+    to pump a fixed 3-5 task_runner ticks first.  That is a race, and for a short
+    snapshot chain it is unwinnable: a phase handler waits for its own transfer
+    internally, and the phase dispatcher recurses on advance
+    (``return task_runner(task)``), so one tick can carry a small migration all
+    the way to COMPLETED — there is no tick boundary at which it is observably
+    mid-flight.  start_migration already leaves the migration active in
+    PHASE_SNAP_COPY, which is the precondition these tests actually need.
+    """
+    m = db.get_migration_by_id(mig_id)
+    assert m.is_active(), (
+        f"Migration is not active (status={m.status}, phase={m.phase})")
+    return m
+
+
+def _advance_into_migration(mig_id, max_steps=1000):
+    """Advance to a deterministic mid-flight point: the first snapshot copied.
+
+    Replaces ``for _ in range(3): task_runner(...)``.  How far a migration gets
+    per tick depends on the mock server's randomised async-completion delays, so
+    a fixed tick count sometimes ran the whole migration to completion and the
+    "migration is still active" precondition then failed.
+
+    Only usable for volumes with a snapshot chain long enough that copying the
+    first one cannot finish the migration; use ``_assert_active`` otherwise.
+    """
+    m = advance_until(mig_id, lambda mig: len(mig.snaps_migrated) > 0,
+                      max_steps=max_steps)
+    assert m.is_active(), (
+        f"Migration reached a terminal state before the test could act "
+        f"(status={m.status}, phase={m.phase})")
+    return m
 
 
 # ---------------------------------------------------------------------------
@@ -378,15 +416,7 @@ class TestConcurrentIndependentOperations:
         assert err is None
 
         # While migration is in progress, create a new snapshot on l_ind
-        from simplyblock_core.services.tasks_runner_lvol_migration import task_runner
-        from tests.integration.migration.conftest import _find_migration_task
-
-        task = _find_migration_task(db, mig_id)
-        # Run a few steps
-        for _ in range(5):
-            task = db.get_task_by_id(task.uuid)
-            task_runner(task)
-            time.sleep(0.02)
+        _advance_into_migration(mig_id)
 
         # Add a new snapshot to the independent volume via topology context
         new_snap = ctx.add_snapshot("s_ind2", "l_ind", snap_ref_sym="s_ind",
@@ -411,15 +441,7 @@ class TestConcurrentIndependentOperations:
         mig_id, err = start_migration(
             ctx.lvol_uuid("l3"), tgt.uuid)
         assert err is None
-
-        from simplyblock_core.services.tasks_runner_lvol_migration import task_runner
-        from tests.integration.migration.conftest import _find_migration_task
-
-        task = _find_migration_task(db, mig_id)
-        for _ in range(3):
-            task = db.get_task_by_id(task.uuid)
-            task_runner(task)
-            time.sleep(0.02)
+        _assert_active(mig_id)
 
         # Create a new lvol via the topology context
         new_lvol = ctx.add_lvol("l_temp", "src", size="512M", pool_sym="pool1",
@@ -458,14 +480,7 @@ class TestMigrationProtection:
         assert err is None
 
         # Run a few steps so migration is active
-        from simplyblock_core.services.tasks_runner_lvol_migration import task_runner
-        from tests.integration.migration.conftest import _find_migration_task
-
-        task = _find_migration_task(db, mig_id)
-        for _ in range(5):
-            task = db.get_task_by_id(task.uuid)
-            task_runner(task)
-            time.sleep(0.02)
+        _advance_into_migration(mig_id)
 
         # Verify migration is active
         m = db.get_migration_by_id(mig_id)
@@ -495,14 +510,7 @@ class TestMigrationProtection:
             ctx.lvol_uuid("l2"), tgt.uuid)
         assert err is None
 
-        from simplyblock_core.services.tasks_runner_lvol_migration import task_runner
-        from tests.integration.migration.conftest import _find_migration_task
-
-        task = _find_migration_task(db, mig_id)
-        for _ in range(5):
-            task = db.get_task_by_id(task.uuid)
-            task_runner(task)
-            time.sleep(0.02)
+        _advance_into_migration(mig_id)
 
         m = db.get_migration_by_id(mig_id)
         assert m.is_active()
@@ -523,18 +531,7 @@ class TestMigrationProtection:
         mig_id, err = start_migration(
             ctx.lvol_uuid("l3"), tgt.uuid)
         assert err is None
-
-        from simplyblock_core.services.tasks_runner_lvol_migration import task_runner
-        from tests.integration.migration.conftest import _find_migration_task
-
-        task = _find_migration_task(db, mig_id)
-        for _ in range(3):
-            task = db.get_task_by_id(task.uuid)
-            task_runner(task)
-            time.sleep(0.02)
-
-        m = db.get_migration_by_id(mig_id)
-        assert m.is_active()
+        _assert_active(mig_id)
 
         # Try to resize l3 — must be blocked
         new_size = 4 * 1024 * 1024 * 1024  # 4G
@@ -557,14 +554,7 @@ class TestMigrationProtection:
             ctx.lvol_uuid("l2"), tgt.uuid)
         assert err is None
 
-        from simplyblock_core.services.tasks_runner_lvol_migration import task_runner
-        from tests.integration.migration.conftest import _find_migration_task
-
-        task = _find_migration_task(db, mig_id)
-        for _ in range(3):
-            task = db.get_task_by_id(task.uuid)
-            task_runner(task)
-            time.sleep(0.02)
+        _advance_into_migration(mig_id)
 
         # l_ind has no active migration — delete should not be blocked
         # by migration protection (may fail for other RPC reasons)
@@ -585,14 +575,7 @@ class TestMigrationProtection:
             ctx.lvol_uuid("l1"), tgt.uuid)
         assert err is None
 
-        from simplyblock_core.services.tasks_runner_lvol_migration import task_runner
-        from tests.integration.migration.conftest import _find_migration_task
-
-        task = _find_migration_task(db, mig_id)
-        for _ in range(3):
-            task = db.get_task_by_id(task.uuid)
-            task_runner(task)
-            time.sleep(0.02)
+        _advance_into_migration(mig_id)
 
         # s_ind belongs to l_ind, not l1 — deletion must not be blocked
         # by migration protection
