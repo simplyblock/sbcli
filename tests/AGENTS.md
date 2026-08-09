@@ -94,6 +94,49 @@ adding one, check you are not looking at a stall instead:
 Both integration envs run with `--durations=10`, so the slowest tests are printed on
 every run and drift is visible before it trips a timeout.
 
+### Randomness and seeds
+
+`pytest-randomly` picks a **fresh seed on every run** and prints it in the report
+header (`Using --randomly-seed=1234567`), so runs explore different stochastic paths
+and any run can be replayed exactly:
+
+```bash
+PYTEST_ADDOPTS="--randomly-seed=1234567" tox run -e unit    # replay a specific run
+PYTEST_ADDOPTS="--randomly-seed=last" tox run -e unit       # replay the previous local run
+```
+
+`last` reads pytest's cache directory, which CI does not persist — **re-running a CI
+job picks a new seed and will not reproduce the failure.** Copy the seed out of the
+failed run's header instead.
+
+The global RNG is reseeded before each test to `seed + crc32(nodeid)`, so a test's
+draws don't depend on what ran before it or on xdist sharding. Ordinary tests should
+just use the `random` module; there is no fixture to request and nothing to wire up.
+
+**`random.seed()` is banned in `tests/`** (ruff TID251) — it overrides the session
+seed and breaks replay for every test that follows.
+
+**Threads must be handed their own RNG.** A shared stream consumed from several
+threads has a nondeterministic draw *order*, so seeding alone won't replay. Draw the
+child seed in the spawning thread, at a fixed point:
+
+```python
+worker_rng = random.Random(random.getrandbits(64))   # in start(), not in the worker
+t = threading.Thread(target=self._worker, args=(i, worker_rng))
+```
+
+`StressRunner.start` in `integration/ftt2/test_restart_concurrent_ops.py` is the
+canonical example, and `MockRpcServer` (`integration/migration/mock_rpc_server.py`)
+gives each node its own stream, reseeded per test in `reset_state()`, so the src/tgt
+servers can't perturb each other's failure patterns.
+
+A seed replays the *values* each thread draws, not the *interleaving* between them.
+Concurrency tests must therefore assert invariants, not exact outcomes.
+
+Don't patch stdlib `random` attributes (`patch("...utils.random.random", ...)`) —
+that mutates the module process-wide, for every thread. Rebind the name in the module
+under test instead (see `unit/test_soak_outage_gap.py`).
+
 ### Slow tests (the `slow` marker)
 
 The migration suite (`tests/integration/migration/`, ~138 tests, ~20min) is tagged

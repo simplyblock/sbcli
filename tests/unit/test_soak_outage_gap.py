@@ -18,15 +18,17 @@ contracted to exercise. If the cap math drifts, the soak silently stops
 covering the dual-outage path it was built for.
 """
 
+import functools
 import importlib.util
 import os
 import random
 import sys
 import unittest
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 
+@functools.cache
 def _load_soak_module():
     """Load the soak script as a module without invoking its main().
 
@@ -34,6 +36,10 @@ def _load_soak_module():
     `python scripts/aws_dual_node_outage_soak_mixed_churn.py`. It does
     not run anything at import time (only argparse + class defs), so a
     plain importlib load gives us the SoakRunner class.
+
+    Cached so every ``_runner_stub()`` shares one module object: tests that
+    build a second stub mid-test would otherwise get a freshly exec'd module,
+    which a patch installed in setUp does not cover.
     """
     repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     path = os.path.join(repo_root, "scripts",
@@ -114,14 +120,16 @@ class TestPickOutageGap(unittest.TestCase):
 
     def setUp(self):
         self.mod, self.runner = _runner_stub()
-        # Determinism: lock random.randint for repeatable assertions on
-        # bounds. random.uniform is not used by _pick_outage_gap.
-        self._orig_randint = random.randint
         self.calls = []
-        random.randint = lambda a, b: (self.calls.append((a, b)) or a)
-
-    def tearDown(self):
-        random.randint = self._orig_randint
+        # Record the bounds _pick_outage_gap asks for, and return the low one so
+        # the assertions below are about the bounds, not the draw. Rebinding the
+        # name inside the soak module rather than assigning to random.randint:
+        # the latter mutates the stdlib module for the whole process.
+        stub = MagicMock(wraps=random)
+        stub.randint = lambda a, b: (self.calls.append((a, b)) or a)
+        patcher = patch.object(self.mod, "random", stub)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def _last_bounds(self):
         self.assertTrue(self.calls, "random.randint was not called")

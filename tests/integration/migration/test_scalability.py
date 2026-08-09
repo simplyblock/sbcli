@@ -57,7 +57,7 @@ MAX_SNAPS = 10
 AVG_VOLS_PER_SUBSYS = 5
 
 
-def _generate_scalability_spec(rng: random.Random) -> dict:
+def _generate_scalability_spec() -> dict:
     """
     Build a topology spec dict with NUM_VOLUMES volumes, random snapshot
     chains, and shared namespace groups.
@@ -72,8 +72,8 @@ def _generate_scalability_spec(rng: random.Random) -> dict:
     for vi in range(NUM_VOLUMES):
         vol_id = f"v{vi}"
         vol_name = f"vol_{vi}"
-        grp = rng.choice(groups)
-        num_snaps = rng.randint(MIN_SNAPS, MAX_SNAPS)
+        grp = random.choice(groups)
+        num_snaps = random.randint(MIN_SNAPS, MAX_SNAPS)
 
         volumes.append({
             "id": vol_id,
@@ -209,8 +209,7 @@ class TestScalability:
         mock_tgt_server.reset_state()
         mock_tgt_server.set_failure_rate(0.0)
 
-        rng = random.Random(42)  # deterministic for reproducibility
-        spec = _generate_scalability_spec(rng)
+        spec = _generate_scalability_spec()
 
         # Patch RPC ports to match session-scoped mock servers
         import os
@@ -229,13 +228,13 @@ class TestScalability:
         ctx = load_topology(spec)
         _seed_all(mock_src_server, ctx, "src")
 
-        yield ctx, rng
+        yield ctx
 
         ctx.teardown()
 
     def test_topology_creation(self, scale_topology):
         """Verify the topology was created with expected counts."""
-        ctx, rng = scale_topology
+        ctx = scale_topology
 
         assert len(ctx._lvols) == NUM_VOLUMES
         assert len(ctx._snaps) > NUM_VOLUMES  # at least 1 snap per vol
@@ -254,11 +253,11 @@ class TestScalability:
     @pytest.mark.timeout(300)  # 10 sequential migrations over the scale topology (~128s)
     def test_migrate_sample_volumes(self, scale_topology, mock_tgt_server):
         """Migrate 10 random volumes sequentially and verify each completes."""
-        ctx, rng = scale_topology
+        ctx = scale_topology
         tgt = ctx.node("tgt")
 
         # Pick 10 random volumes to migrate
-        vol_syms = [f"v{i}" for i in rng.sample(range(NUM_VOLUMES), 10)]
+        vol_syms = [f"v{i}" for i in random.sample(range(NUM_VOLUMES), 10)]
 
         for vol_sym in vol_syms:
             lvol_uuid = ctx.lvol_uuid(vol_sym)
@@ -281,7 +280,7 @@ class TestScalability:
         Find a namespace group with multiple volumes and migrate all of them.
         The target should reuse the subsystem for subsequent volumes.
         """
-        ctx, rng = scale_topology
+        ctx = scale_topology
         tgt = ctx.node("tgt")
 
         # Find a group with at least 3 volumes
@@ -323,7 +322,7 @@ class TestScalability:
         Migrate two volumes from the same snapshot chain.
         The second migration should detect pre-existing snapshots.
         """
-        ctx, rng = scale_topology
+        ctx = scale_topology
         tgt = ctx.node("tgt")
 
         # Find a volume with multiple snapshots (>= 3)
@@ -374,7 +373,7 @@ class TestScalability:
         Migrate 20 volumes sequentially and measure throughput.
         This is not a pass/fail test — it prints timing stats for CI monitoring.
         """
-        ctx, rng = scale_topology
+        ctx = scale_topology
         tgt = ctx.node("tgt")
 
         vol_syms = [f"v{i}" for i in range(20)]
