@@ -6,6 +6,7 @@ build-backend = 'setuptools.build_meta'
 extend-exclude = ['simplyblock_cli/cli.py']
 
 [tool.ruff.lint]
+extend-select = ["TID251"]
 ignore = [
     "B006",
     "B008",
@@ -93,6 +94,14 @@ ignore = [
     "UP045",
 ]
 
+[tool.ruff.lint.per-file-ignores]
+# TID251 is flake8-tidy-imports.banned-api, configured below. Test code only —
+# production code may seed the global RNG.
+"!tests/**" = ["TID251"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"random.seed".msg = "Seeding the global RNG breaks seed replay for every later test — pytest-randomly seeds it per test. See tests/AGENTS.md § Randomness and seeds."
+
 [tool.mypy]
 check_untyped_defs = true
 follow_untyped_imports = true
@@ -102,6 +111,10 @@ enable_error_code = ["deprecated"]
 pythonpath = "."
 testpaths = ['simplyblock_core/test', 'tests']
 norecursedirs = ['tests/perf']
+# Order randomization stays off for now: tests/conftest.py documents inter-test
+# coupling (TTL caches, the DBController singleton, the port-block gate) that
+# shuffling would surface all at once. Enabling it is its own change.
+addopts = "-p randomly --randomly-dont-reorganize"
 markers = [
     "slow: long-running integration tests (e.g. live migration); excluded from the default integration run, opt in with -m slow",
 ]

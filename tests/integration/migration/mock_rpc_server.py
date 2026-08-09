@@ -36,13 +36,13 @@ logger = logging.getLogger(__name__)
 # Async-delay helper
 # ---------------------------------------------------------------------------
 
-def _async_delay() -> float:
+def _async_delay(rng: random.Random) -> float:
     """
     Return a completion delay (seconds) from an exponential distribution with
     mean 0.2 s (λ = 5), clipped to [0.1, 100].  Values pile up near 0.2 s but
     occasionally reach tens of seconds, matching real-world transfer variance.
     """
-    raw = random.expovariate(5.0)
+    raw = rng.expovariate(5.0)
     return max(0.1, min(100.0, raw))
 
 
@@ -82,6 +82,11 @@ class NodeState:
         self._map_id_counter = 1
         self._nsid_counter: Dict[str, int] = {}  # nqn → next nsid
         self.lock = threading.Lock()
+
+        # Per node rather than one shared stream: otherwise adding a single RPC
+        # to the source would shift every later failure draw on the target, so
+        # an unrelated edit would silently change which calls fail.
+        self.rng = random.Random()
 
     # ---- helpers ----
 
@@ -153,8 +158,9 @@ class _RpcHandler(BaseHTTPRequestHandler):
 
         # --- failure injection ---
         if server.failure_rate > 0:
-            if random.random() < server.failure_rate:
-                failure_type = random.choice(['timeout', 'error'])
+            rng = server.node_state.rng
+            if rng.random() < server.failure_rate:
+                failure_type = rng.choice(['timeout', 'error'])
                 if failure_type == 'timeout':
                     # Sleep beyond typical client timeout to simulate a hang
                     time.sleep(server.timeout_seconds + 1)
@@ -163,7 +169,7 @@ class _RpcHandler(BaseHTTPRequestHandler):
                 else:
                     # Pick a random error code from method-specific list or generic
                     codes = _METHOD_ERROR_CODES.get(method, [-1, -22, -2])
-                    code = random.choice(codes)
+                    code = rng.choice(codes)
                     self._send_error(code, f"Simulated failure for {method}", req_id)
                     return
 
@@ -332,7 +338,7 @@ def _bdev_lvol_delete(s: NodeState, p: dict):
         if composite not in bdevs:
             # Not found – return ok (idempotent start)
             return True
-        s.delete_ops[composite] = time.time() + _async_delay()
+        s.delete_ops[composite] = time.time() + _async_delay(s.rng)
         logger.debug("mock delete_lvol async start %s", composite)
         return True
     else:
@@ -567,7 +573,7 @@ def _bdev_lvol_transfer(s: NodeState, p: dict):
     if composite not in s.lvols and composite not in s.snapshots:
         raise _RpcError(-2, f"source bdev {composite} not found")
     s.transfer_ops[composite] = {
-        'complete_at': time.time() + _async_delay(),
+        'complete_at': time.time() + _async_delay(s.rng),
         'state': 'In progress',
     }
     logger.debug("mock bdev_lvol_transfer started for %s", composite)
@@ -598,7 +604,7 @@ def _bdev_lvol_transfer_final_step(s: NodeState, p: dict):
     if composite not in s.lvols:
         raise _RpcError(-2, f"source lvol {composite} not found")
     s.transfer_ops[composite] = {
-        'complete_at': time.time() + _async_delay(),
+        'complete_at': time.time() + _async_delay(s.rng),
         'state': 'In progress',
     }
     logger.debug("mock bdev_lvol_transfer_final_step started for %s", composite)
@@ -909,8 +915,15 @@ class MockRpcServer:
             self._server.timeout_seconds = timeout_seconds
 
     def reset_state(self):
-        """Wipe all in-memory state (useful between subtests)."""
+        """Wipe all in-memory state (useful between subtests).
+
+        Also reseeds the node's RNG — servers are session-scoped, so without
+        this the stream would carry over between tests. The draw happens here,
+        on the main thread while the server is idle, rather than in the handler
+        thread, so it lands at a fixed point in the test's stream.
+        """
         with self.state.lock:
+            self.state.rng.seed(random.getrandbits(64))
             self.state.lvols.clear()
             self.state.snapshots.clear()
             self.state.subsystems.clear()
