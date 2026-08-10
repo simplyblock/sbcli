@@ -964,6 +964,38 @@ def _update_cluster_status_impl(cluster_id):
 # blocked. Recovery is port-unblock, not a destructive restart.
 
 
+#: Node ids whose ANA failover has already been applied for the CURRENT
+#: offline episode. Without this, the OFFLINE branch of check_node re-ran
+#: trigger_ana_failover_for_node on EVERY monitor cycle for as long as the
+#: node stayed offline: incident 2026-08-09 iteration 28 produced 2789
+#: nvmf_subsystem_listener_set_ana_state RPCs in 16 minutes (170/min, one
+#: per subsystem per cycle) against a single peer. Each of those is a real
+#: spdk_nvmf_subsystem_pause of a live subsystem (see _set_lvol_ana_on_node),
+#: so the churn lands on client-facing volumes exactly while the cluster is
+#: least able to absorb it. The promotion is idempotent in effect, so it only
+#: needs to run once per offline transition; the entry is dropped as soon as
+#: the node is observed in any non-OFFLINE state, so a later offline episode
+#: re-arms it.
+_ana_failover_applied: set = set()
+
+
+def _ana_failover_once(node) -> bool:
+    """Run ANA failover for ``node`` at most once per offline episode.
+
+    Returns True when the failover was actually invoked this call."""
+    node_id = node.get_id()
+    if node_id in _ana_failover_applied:
+        return False
+    storage_node_ops.trigger_ana_failover_for_node(node)
+    _ana_failover_applied.add(node_id)
+    return True
+
+
+def _ana_failover_rearm(node_id) -> None:
+    """Forget the one-shot marker so the next offline episode re-triggers."""
+    _ana_failover_applied.discard(node_id)
+
+
 def set_node_offline(node):
     node = db.get_storage_node_by_id(node.get_id())
     # Do not flip to OFFLINE while the node is mid-restart / mid-shutdown:
@@ -1014,7 +1046,7 @@ def set_node_offline(node):
 
         try:
             logger.info(f"Triggering ANA failover for node {node.get_id()}")
-            storage_node_ops.trigger_ana_failover_for_node(node)
+            _ana_failover_once(node)
         except Exception as ana_e:
             logger.error("ANA failover for node %s failed: %s", node.get_id(), ana_e)
 
@@ -1481,11 +1513,22 @@ def check_node(snode):
     # intentionally shut down via sbctl.  Auto-restart is only added by
     # set_node_offline() when the monitor itself detects a failure.
     if snode.status == StorageNode.STATUS_OFFLINE:
+        # One-shot per offline episode. This branch exists because another
+        # service may have set the node offline without triggering the
+        # failover, so it must stay — but re-issuing it on every cycle turns
+        # a one-time promotion into a sustained pause storm on the peer
+        # (incident 2026-08-09: 2789 set_ana_state calls over 16 minutes).
         try:
-            storage_node_ops.trigger_ana_failover_for_node(snode)
+            if _ana_failover_once(snode):
+                logger.info("ANA failover applied for offline node %s "
+                            "(not previously triggered)", snode.get_id())
         except Exception as e:
             logger.error("ANA failover for offline node %s failed: %s", snode.get_id(), e)
         return True
+
+    # Any non-OFFLINE observation ends the episode: re-arm so a future
+    # offline transition triggers the promotion again.
+    _ana_failover_rearm(snode.get_id())
 
     # 1- check node ping
     ping_check = health_controller._check_node_ping(snode.mgmt_ip)

@@ -103,13 +103,31 @@ GRAYLOG_CHECK_INTERVAL_SEC = 60
 FDB_CLEANUP_INTERVAL_SEC = 60 * 60
 
 # Continuous per-lvol NVMf subsystem verification + auto-repair in the lvol
-# monitor. Off by default: it exists only to compensate for a lost deferred
-# non-leader registration (lossy in-memory drain queue), and at scale it costs
-# 2 RPCs per lvol per 30s cycle while its repair path has re-added namespaces
-# of in-deletion lvols mid-delete (incidents 2026-07-14 / 2026-07-16). Set
-# LVOL_MONITOR_SUBSYS_CHECK=1 to re-enable on clusters that need the sweep.
+# monitor. ON by default since 2026-08-10.
+#
+# It was previously off for two reasons, both now addressed:
+#  - cost (2 RPCs per lvol per 30s cycle): the sweep is now rate-limited to
+#    LVOL_MONITOR_SUBSYS_CHECK_INTERVAL_SEC instead of running every cycle;
+#  - its repair re-added namespaces of in-deletion lvols mid-delete
+#    (2026-07-14 / 2026-07-16): both check_node and add_lvol_thread now
+#    re-read the record and refuse to register anything not ONLINE/OFFLINE.
+#
+# Leaving it off costs far more than it saves: this sweep is the ONLY thing
+# that detects a replica whose subsystem exists but carries no namespace, and
+# such a replica is invisible everywhere else — the client connects fine and
+# simply has one path fewer than it believes. In the 2026-08-09 run that state
+# persisted for 36 hours across many volumes (78726d0e 608 degraded reports,
+# 64467bfa 437, 638be965 308) and cost one volume all of its I/O when an
+# outage took the two paths it had left. Set LVOL_MONITOR_SUBSYS_CHECK=0 to
+# disable.
 LVOL_MONITOR_SUBSYS_CHECK = str(
-    os.getenv("LVOL_MONITOR_SUBSYS_CHECK", "")).lower() in ("1", "true", "yes")
+    os.getenv("LVOL_MONITOR_SUBSYS_CHECK", "1")).lower() in ("1", "true", "yes")
+
+# How often the per-lvol subsystem verification sweep above actually runs.
+# The monitor's own cycle stays at LVOL_MONITOR_INTERVAL_SEC (deletions must
+# drain promptly); only the verification sweep is throttled to this period.
+LVOL_MONITOR_SUBSYS_CHECK_INTERVAL_SEC = int(
+    os.getenv("LVOL_MONITOR_SUBSYS_CHECK_INTERVAL_SEC", "300"))
 
 TASK_EXEC_INTERVAL_SEC = 10
 TASK_EXEC_RETRY_COUNT = 8

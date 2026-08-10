@@ -9473,7 +9473,28 @@ def add_lvol_thread(lvol, snode: StorageNode, lvol_ana_state="optimized"):
                     lvol.ns_id, lvol.nqn)
     else:
         logger.info("Add BDev to subsystem " + f"{lvol.vuid:016X}")
-        rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid, nsid=lvol.ns_id)
+        if not rpc_client.nvmf_subsystem_add_ns(
+                lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid, nsid=lvol.ns_id):
+            msg = (f"Failed to add namespace nsid={lvol.ns_id} ({lvol.top_bdev}) "
+                   f"to {lvol.nqn} on {snode.get_id()}")
+            logger.error(msg)
+            return False, msg
+
+    # Post-condition before publishing a listener: the subsystem MUST have the
+    # namespace. A listener in front of an empty subsystem accepts connections
+    # and establishes qpairs, but its namespace never joins the client's
+    # multipath head — the path is silently absent, no controller reset ever
+    # fires, and `nvme connect` refuses to repair it ("already connected").
+    # Incident 2026-08-09: 19 such subsystems on one node, one of which cost a
+    # volume all of its I/O. Both ways of arriving here are covered — an add_ns
+    # that failed (above) and an idempotency check that wrongly reported the
+    # namespace present (the skip branch above; observed for 4 of those 19).
+    if not _rpc_subsystem_has_ns(rpc_client, lvol.nqn, nsid=lvol.ns_id, bdev_name=lvol.top_bdev):
+        msg = (f"Subsystem {lvol.nqn} on {snode.get_id()} has no namespace "
+               f"nsid={lvol.ns_id} ({lvol.top_bdev}) after registration; "
+               f"refusing to add a listener for an empty subsystem")
+        logger.error(msg)
+        return False, msg
 
     # Use per-lvstore port for this lvol's lvstore
     listener_port = snode.get_lvol_subsys_port(lvol.lvs_name)
@@ -9566,7 +9587,7 @@ def repair_lvol_registration_on_non_leader(lvol, sec_node: StorageNode, secondar
 
     rpc_client = sec_node.rpc_client(timeout=10, retry=2)
     if rpc_client.subsystem_get(lvol.nqn) is None:
-        min_cntlid = 1000 * (secondary_index + 1)
+        min_cntlid = lvol_controller.lvol_min_cntlid(secondary_index + 1)
         allow_any = not bool(lvol.allowed_hosts)
         logger.warning(
             "Repairing missing subsystem %s on non-leader %s (lvol %s)",

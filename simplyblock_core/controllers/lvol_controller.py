@@ -1052,14 +1052,60 @@ def _fail_after_bdev(lvol, rpc_client, msg):
     return False, msg
 
 
+#: Width of the controller-id window reserved for each path of a shared
+#: subsystem. Every path must hand out cntlids from a DISJOINT window: the
+#: host rejects a controller that presents an already-seen cntlid for the
+#: same subsystem ("Duplicate cntlid N with nvmeX, subsys ..., rejecting")
+#: and that path is then silently missing for the lifetime of the
+#: connection — `nvme connect` reports success, the target establishes
+#: qpairs, but the namespace never joins the multipath head. Incident
+#: 2026-08-09: volumes 78726d0e / 3f171cfb / a2d300d3 ran permanently at
+#: 2 of 3 paths this way.
+LVOL_CNTLID_WINDOW = 1000
+
+
+def lvol_min_cntlid(path_index: int) -> int:
+    """``min_cntlid`` for the subsystem path at ``path_index`` in ``lvol.nodes``.
+
+    0 (primary) -> 1, 1 (secondary) -> 1000, 2 (tertiary) -> 2000, ...
+
+    Single source of truth on purpose. Each call site used to carry its own
+    formula — ``1000 * (secondary_index + 1)`` on the create path versus
+    ``1 + 1000 * ha_inode_self`` on the restart path — so the same node could
+    be given a different window depending on which flow (re)created its
+    subsystem.
+    """
+    return 1 if path_index <= 0 else LVOL_CNTLID_WINDOW * path_index
+
+
+def _lvol_path_index(lvol, node) -> int:
+    """Position of ``node`` among the lvol's paths (0 = primary/leader).
+
+    A node that is not in ``lvol.nodes`` gets the next window ABOVE every
+    assigned one rather than index 0. The previous fallback collapsed every
+    unknown node onto the primary's window, which is precisely the cntlid
+    collision described on LVOL_CNTLID_WINDOW.
+    """
+    node_id = node.get_id()
+    nodes = getattr(lvol, "nodes", None) or []
+    if node_id in nodes:
+        return nodes.index(node_id)
+    # `nodes` may not be populated yet (early create, legacy record). The
+    # leader is still identifiable, and it legitimately owns window 0.
+    if node_id == getattr(lvol, "node_id", None):
+        return 0
+    fallback = max(len(nodes), 1)
+    logger.error(
+        "Node %s is not among lvol %s paths %s — assigning cntlid window "
+        "%s to avoid colliding with an assigned path",
+        node_id, lvol.get_id(), nodes, lvol_min_cntlid(fallback))
+    return fallback
+
+
 def _lvol_secondary_index(lvol, node):
     """Position of ``node`` among the lvol's non-leaders (0 = secondary,
-    1 = tertiary) — determines the subsystem cntlid range (1000/2000).
-    Falls back to 0 when the node is not in ``lvol.nodes`` yet."""
-    try:
-        return max(lvol.nodes.index(node.get_id()) - 1, 0)
-    except (ValueError, AttributeError):
-        return 0
+    1 = tertiary) — determines the subsystem cntlid range (1000/2000)."""
+    return max(_lvol_path_index(lvol, node) - 1, 0)
 
 
 def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
@@ -1095,12 +1141,7 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
         return _fail_after_bdev(lvol, rpc_client, str(e))
 
     if resolve_subsys:
-        if is_primary:
-            min_cntlid = 1
-        else:
-            # Each secondary needs a unique cntlid range to avoid conflicts
-            # sec1: 1000, sec2: 2000, etc.
-            min_cntlid = 1000 * (secondary_index + 1)
+        min_cntlid = lvol_min_cntlid(0 if is_primary else secondary_index + 1)
         allow_any = not bool(lvol.allowed_hosts)
         logger.info("creating subsystem %s (allow_any_host=%s)", lvol.nqn, allow_any)
         ret = rpc_client.subsystem_create(lvol.nqn, lvol.ha_type, lvol.uuid, min_cntlid,
@@ -1272,9 +1313,19 @@ def is_node_leader(snode, lvs_name):
         return is_leader
     return False
 
-def recreate_lvol_on_node(lvol, snode, ha_inode_self=0, ana_state=None):
+def recreate_lvol_on_node(lvol, snode, ha_inode_self=None, ana_state=None):
+    """Recreate ``lvol``'s subsystem/namespace/listener on ``snode``.
+
+    ``ha_inode_self`` is the node's path index (0 = primary). It defaults to
+    None — derived from ``lvol.nodes`` — rather than 0: a caller that omitted
+    it used to silently place a secondary/tertiary path in the primary's
+    cntlid window, and the host then rejected that path as a duplicate.
+    """
     db_controller = DBController()
     rpc_client = snode.rpc_client()
+
+    if ha_inode_self is None:
+        ha_inode_self = _lvol_path_index(lvol, snode)
 
     if "crypto" in lvol.lvol_type:
         cluster = db_controller.get_cluster_by_id(snode.cluster_id)
@@ -1284,7 +1335,11 @@ def recreate_lvol_on_node(lvol, snode, ha_inode_self=0, ana_state=None):
             logger.error(msg)
             return False, msg
 
-    min_cntlid = 1 + 1000 * ha_inode_self
+    # Same window as the create path — see lvol_min_cntlid(). This used to be
+    # `1 + 1000 * ha_inode_self`, and ha_inode_self defaults to 0, so a
+    # non-primary path recreated through this function landed in the
+    # primary's window and the host rejected it as a duplicate cntlid.
+    min_cntlid = lvol_min_cntlid(ha_inode_self)
     allow_any = not bool(lvol.allowed_hosts)
     logger.info("creating subsystem %s (allow_any_host=%s)", lvol.nqn, allow_any)
     rpc_client.subsystem_create(lvol.nqn, lvol.ha_type, lvol.uuid, min_cntlid,
@@ -1340,9 +1395,23 @@ def recreate_lvol_on_node(lvol, snode, ha_inode_self=0, ana_state=None):
         lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid,
         nsid=lvol.ns_id if lvol.ns_id else None)
     if not ret:
-        logger.error(
-            "Failed to (re)add namespace for %s to %s with nsid=%s",
-            lvol.get_id(), lvol.nqn, lvol.ns_id or "auto")
+        # FATAL, deliberately. This used to log and fall through to the
+        # listener creation below, publishing a subsystem that accepts
+        # connections but has no namespace behind it. That state is invisible
+        # to every layer: `nvme connect` succeeds, the target establishes
+        # qpairs, the client prints "new ctrl" — but the namespace never joins
+        # the multipath head, so the path silently does not exist. The kernel
+        # never resets the controller (nothing is wrong with it), and the CSI
+        # repair loop cannot fix it because `nvme connect` returns "already
+        # connected". Incident 2026-08-09: worker-3 carried 19 such subsystems
+        # (71 listeners vs 52 namespaces); volume 638be965 ran at 2 of 3 paths
+        # for 11 minutes and lost all I/O when the outage took the other two.
+        # Failing here leaves no listener, which IS detectable and repairable.
+        msg = (f"Failed to (re)add namespace for {lvol.get_id()} to {lvol.nqn} "
+               f"with nsid={lvol.ns_id or 'auto'}; refusing to publish a "
+               f"listener for a subsystem with no namespace")
+        logger.error(msg)
+        return False, msg
 
     # add listeners - use per-lvstore port
     recreate_lvs_port = snode.get_lvol_subsys_port(lvol.lvs_name)

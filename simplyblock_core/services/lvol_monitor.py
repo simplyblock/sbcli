@@ -298,7 +298,25 @@ def process_lvol_delete_try_again(lvol):
                      lambda x: setattr(x, "deletion_status", ""))
 
 
-def check_node(cluster, snode, all_lvols):
+#: Wall-clock of the last per-lvol subsystem verification sweep.
+_last_subsys_sweep = 0.0
+
+
+def _subsys_sweep_due() -> bool:
+    """True at most once per LVOL_MONITOR_SUBSYS_CHECK_INTERVAL_SEC.
+
+    Evaluated once per monitor cycle (not per lvol) and stamps the clock as a
+    side effect, so a cycle either sweeps every node or none of them.
+    """
+    global _last_subsys_sweep
+    now = time.time()
+    if now - _last_subsys_sweep < constants.LVOL_MONITOR_SUBSYS_CHECK_INTERVAL_SEC:
+        return False
+    _last_subsys_sweep = now
+    return True
+
+
+def check_node(cluster, snode, all_lvols, subsys_check=False):
     # Number of in-deletion lvols acted on this pass — the main loop uses it
     # to shorten the inter-cycle sleep while a mass delete is draining.
     deletions_processed = 0
@@ -516,11 +534,10 @@ def check_node(cluster, snode, all_lvols):
 
             continue
 
-        # Continuous per-lvol subsystem verification + repair is opt-in
-        # (LVOL_MONITOR_SUBSYS_CHECK env): it compensates for a lost deferred
-        # non-leader registration, costs 2 RPCs per lvol per cycle at scale,
-        # and its repair path has raced mass deletes (2026-07-14 incident).
-        if not constants.LVOL_MONITOR_SUBSYS_CHECK:
+        # Continuous per-lvol subsystem verification + repair. On by default;
+        # the caller decides once per cycle whether the (2 RPCs per lvol)
+        # sweep is due — see _subsys_sweep_due().
+        if not subsys_check:
             continue
 
         # `all_lvols` is a cycle-start snapshot and a full pass takes minutes
@@ -561,6 +578,19 @@ def check_node(cluster, snode, all_lvols):
                             lvol.nqn, rpc_client=sec_node.rpc_client(), ns_uuid=lvol.uuid)
                         if not ret:
                             passed = False
+                            # Explicit, greppable degraded-path signal. Without
+                            # it a replica whose subsystem is missing (or,
+                            # worse, present but with no namespace) is visible
+                            # nowhere above the client: the host connects
+                            # successfully and simply has one path fewer than
+                            # it believes. Incident 2026-08-09 ran 36 hours in
+                            # that state before an outage exposed it.
+                            logger.error(
+                                "DEGRADED PATHS: lvol %s (%s) replica on node "
+                                "%s is not serving — subsystem missing or has "
+                                "no namespace; volume is running below its "
+                                "configured redundancy",
+                                lvol.get_id(), lvol.lvs_name, sec_id)
                             # Self-heal: a missing registration on an online
                             # non-leader never fixes itself (the create-time
                             # deferral queue is lossy) — re-register now. The
@@ -608,9 +638,12 @@ def main():
             # acts on. The full-LVol scan re-read every 72-field record
             # per 30s cycle.
             all_lvols = db.get_mini_lvols()
+            # Decided once per cycle so a sweep covers every node consistently.
+            subsys_check = constants.LVOL_MONITOR_SUBSYS_CHECK and _subsys_sweep_due()
             for snode in db.get_storage_nodes_by_cluster_id(cluster.get_id()):
                 try:
-                    deletions_in_flight += check_node(cluster, snode, all_lvols) or 0
+                    deletions_in_flight += check_node(
+                        cluster, snode, all_lvols, subsys_check=subsys_check) or 0
                 except Exception as e:
                     logger.error(e)
 
