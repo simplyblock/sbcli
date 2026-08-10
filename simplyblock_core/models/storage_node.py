@@ -197,7 +197,7 @@ class StorageNode(BaseNodeObject):
             host = f"{self._k8s_node_label()}.simplyblock-storage-node-api.{self.cr_namespace}.svc.cluster.local:{port}"
         return SNodeClient(host, **kwargs)
 
-    def rpc_client(self, **kwargs):
+    def rpc_client(self, **kwargs) -> RPCClient:
         """Return rpc client to this node
         """
         host = self.mgmt_ip

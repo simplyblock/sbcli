@@ -120,7 +120,7 @@ def _rpc_lvstore_exists(rpc_client, lvs_name):
         return False
 
 
-def _kill_spdk_until_dead(snode, max_attempts=3, poll_per_attempt_sec=5,
+def _kill_spdk_until_dead(snode: StorageNode, max_attempts=3, poll_per_attempt_sec=5,
                            poll_interval=0.25):
     """Kill SPDK on `snode` and return only after it is verifiably gone.
 
@@ -191,7 +191,7 @@ def _kill_spdk_until_dead(snode, max_attempts=3, poll_per_attempt_sec=5,
 
 
 
-def _set_lvol_ana_on_node(lvol, node, ana_state):
+def _set_lvol_ana_on_node(lvol: LVol, node: StorageNode, ana_state):
     """Set ANA state for a single lvol's listeners on a given node."""
     rpc_client = node.rpc_client(timeout=10, retry=2)
     listener_port = node.get_lvol_subsys_port(lvol.lvs_name)
@@ -206,7 +206,7 @@ def _set_lvol_ana_on_node(lvol, node, ana_state):
                 logger.info("ANA: %s on %s (%s) → %s", lvol.nqn, node.get_id(), iface.ip4_address, ana_state)
 
 
-def _failover_primary_ana(primary_node):
+def _failover_primary_ana(primary_node: StorageNode):
     """Primary failed: promote first_sec→optimized.
 
     The second_sec stays at non_optimized (its permanent state).
@@ -232,7 +232,7 @@ def _failover_primary_ana(primary_node):
             _set_lvol_ana_on_node(lvol, first_sec, "optimized")
 
 
-def _failback_primary_ana(primary_node):
+def _failback_primary_ana(primary_node: StorageNode):
     """Primary restarting: demote first_sec→non_optimized.
 
     The second_sec is already non_optimized and never changes.
@@ -255,7 +255,7 @@ def _failback_primary_ana(primary_node):
             _set_lvol_ana_on_node(lvol, first_sec, "non_optimized")
 
 
-def trigger_ana_failover_for_node(offline_node):
+def trigger_ana_failover_for_node(offline_node: StorageNode):
     """Trigger ANA failover when a node goes offline.
 
     Only action needed: if the offline node is a primary, promote its
@@ -272,7 +272,7 @@ def trigger_ana_failover_for_node(offline_node):
             logger.error("ANA failover for primary role of %s failed: %s", node_id, e)
 
 
-def trigger_ana_failback_for_node(restarting_node):
+def trigger_ana_failback_for_node(restarting_node: StorageNode):
     """Trigger ANA failback when a primary comes back online.
 
     Demote first_sec from optimized back to non_optimized.
@@ -568,7 +568,7 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, attach_time
             expected_ips, is_multipath)
 
 
-def _connect_device_attach(name, device, node, rpc_client, attach_rpc_client,
+def _connect_device_attach(name, device, node: StorageNode, rpc_client, attach_rpc_client,
                            expected_ips, is_multipath):
     """Controller inspect + attach path of connect_device.
 
@@ -839,7 +839,7 @@ def _search_for_partitions(rpc_client, nvme_device):
     return partitioned_devices
 
 
-def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
+def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode: StorageNode, after_restart):
     # RAID 0+1 journal layout (see simplyblock_core/jm_raid.py):
     #   1 device   -> no raid (bare device)
     #   2 devices  -> raid1 over two single-device legs  (a 2-way mirror)
@@ -953,7 +953,7 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
     })
 
 
-def _create_jm_stack_on_device(rpc_client, nvme, snode, after_restart):
+def _create_jm_stack_on_device(rpc_client, nvme, snode: StorageNode, after_restart):
     alceml_id = nvme.get_id()
     alceml_name = device_controller.get_alceml_name(alceml_id)
     db_controller = DBController()
@@ -1044,7 +1044,7 @@ def _create_jm_stack_on_device(rpc_client, nvme, snode, after_restart):
     })
 
 
-def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
+def _create_storage_device_stack(rpc_client, nvme, snode: StorageNode, after_restart):
     db_controller = DBController()
     nvme_bdev = nvme.nvme_bdev
     if snode.enable_test_device:
@@ -1117,7 +1117,7 @@ def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
     return nvme
 
 
-def _create_device_partitions(rpc_client, nvme, snode, num_partitions_per_dev, jm_percent, partition_size, nbd_index):
+def _create_device_partitions(rpc_client, nvme, snode: StorageNode, num_partitions_per_dev, jm_percent, partition_size, nbd_index):
     nbd_device = rpc_client.nbd_start_disk(nvme.nvme_bdev, f"/dev/nbd{nbd_index}")
     time.sleep(3)
     if not nbd_device:
@@ -1155,7 +1155,7 @@ def _create_device_partitions(rpc_client, nvme, snode, num_partitions_per_dev, j
     return True
 
 
-def _prepare_cluster_devices_partitions(snode, devices):
+def _prepare_cluster_devices_partitions(snode: StorageNode, devices):
     db_controller = DBController()
     new_devices = []
     devices_to_partition = []
@@ -1245,7 +1245,7 @@ def _prepare_cluster_devices_partitions(snode, devices):
     return True
 
 
-def _prepare_cluster_devices_jm_on_dev(snode, devices):
+def _prepare_cluster_devices_jm_on_dev(snode: StorageNode, devices):
     db_controller = DBController()
     if not devices:
         return True
@@ -1284,7 +1284,7 @@ def _prepare_cluster_devices_jm_on_dev(snode, devices):
     return True
 
 
-def _prepare_cluster_devices_on_restart(snode, clear_data=False):
+def _prepare_cluster_devices_on_restart(snode: StorageNode, clear_data=False):
     db_controller = DBController()
 
     new_devices = []
@@ -1965,7 +1965,7 @@ def reconnect_dropped_remote_devs(this_node: StorageNode):
     return changed, all_ok
 
 
-def _peer_reachable_via_jm_quorum(target_node_id, this_node, peer_probe_timeout=1):
+def _peer_reachable_via_jm_quorum(target_node_id, this_node: StorageNode, peer_probe_timeout=1):
     """Check whether ``target_node`` is reachable on the data plane by asking
     other online peers about their JM quorum state.
 
@@ -2000,7 +2000,7 @@ def _peer_reachable_via_jm_quorum(target_node_id, this_node, peer_probe_timeout=
     return not probed
 
 
-def _connect_to_remote_jm_devs(this_node, jm_ids=None, only_node_id=None):
+def _connect_to_remote_jm_devs(this_node: StorageNode, jm_ids=None, only_node_id=None):
     """Connect ``this_node`` to remote JM devices and return the refreshed
     remote-JM records.
 
@@ -3506,7 +3506,7 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
     return task_id
 
 
-def _check_replica_relocation_feasible(removed_node, db_controller):
+def _check_replica_relocation_feasible(removed_node: StorageNode, db_controller):
     """Pre-flight Case-B check: a secondary/tertiary replica hosted on
     ``removed_node`` for some OTHER primary must have a valid relocation target.
     Returns (feasible: bool, reason: str)."""
@@ -3528,7 +3528,7 @@ def _check_replica_relocation_feasible(removed_node, db_controller):
     return True, ""
 
 
-def _pick_replica_relocation_node(primary, removed_node, role, db_controller):
+def _pick_replica_relocation_node(primary, removed_node: StorageNode, role, db_controller):
     """Choose a node to re-host ``primary``'s ``role`` (secondary|tertiary)
     replica, currently on ``removed_node``. Returns a node id or None.
     Reuses the existing anti-affinity-aware placement helpers.
@@ -3662,7 +3662,7 @@ def node_removal_orchestrate(node_id, force_remove=False):
         cluster_ops.set_cluster_status(cluster.get_id(), prev_cluster_status)
 
 
-def _teardown_replicas_of_primary(removed_node):
+def _teardown_replicas_of_primary(removed_node: StorageNode):
     """Case A: the primary LVS lives on ``removed_node`` (now shut down).
     Delete its secondary/tertiary replicas from the peers that host them and
     clear the cross-reference bookkeeping. The node has no LVols (enforced at
@@ -3727,7 +3727,7 @@ def _delete_replica_on_peer(peer, primary, cluster):
         logger.warning(f"replica bdev-stack teardown for {lvstore} on {peer.get_id()} failed: {e}")
 
 
-def _relocate_replicas_hosted_on(removed_node):
+def _relocate_replicas_hosted_on(removed_node: StorageNode):
     """Case B: ``removed_node`` holds a secondary and/or tertiary replica for
     other primaries. Re-host each on a fresh, anti-affinity-valid node so the
     owning primary keeps its fault tolerance after this node leaves."""
@@ -3746,7 +3746,7 @@ def _relocate_replicas_hosted_on(removed_node):
     return True
 
 
-def _relocate_one_replica(removed_node, primary_id, role):
+def _relocate_one_replica(removed_node: StorageNode, primary_id, role):
     """Re-host ``primary_id``'s ``role`` replica off ``removed_node``.
 
     Idempotent: the back-reference on ``removed_node`` is cleared only AFTER the
@@ -3796,7 +3796,7 @@ def _relocate_one_replica(removed_node, primary_id, role):
     return True
 
 
-def _clear_replica_backref(removed_node, backref):
+def _clear_replica_backref(removed_node: StorageNode, backref):
     db_controller = DBController()
     removed_node = db_controller.get_storage_node_by_id(removed_node.get_id())
     if getattr(removed_node, backref):
@@ -3804,7 +3804,7 @@ def _clear_replica_backref(removed_node, backref):
         removed_node.write_to_db()
 
 
-def _decommission_node_devices(removed_node):
+def _decommission_node_devices(removed_node: StorageNode):
     """Remove, fail and migrate every data device on ``removed_node``.
 
     Drives each device ONLINE/UNAVAILABLE -> REMOVED -> FAILED (which queues the
@@ -3866,7 +3866,7 @@ def _decommission_node_devices(removed_node):
     return True
 
 
-def _finalize_node_removal(removed_node):
+def _finalize_node_removal(removed_node: StorageNode):
     """Best-effort host cleanup before the node is flipped to REMOVED: leave the
     docker swarm and wipe GPT partitions. Mirrors the tail of the legacy
     offline-removal path."""
@@ -4157,7 +4157,7 @@ def restart_storage_node(
     return result
 
 
-def fd_dead_recovery_allowed(db_controller, snode) -> bool:
+def fd_dead_recovery_allowed(db_controller, snode: StorageNode) -> bool:
     """Same-failure-domain parallel restart carve-out, reinstated with a hard gate.
 
     Concurrent node restarts outside a drained SUSPENDED cluster are sanctioned
@@ -5028,7 +5028,7 @@ def _restart_storage_node_impl(
         return True
 
 
-def _format_lvstore_ports(node):
+def _format_lvstore_ports(node: StorageNode):
     """Format per-lvstore ports for display."""
     if not node.lvstore_ports:
         return "-"
@@ -5334,7 +5334,7 @@ def _check_ftt_allows_node_removal(node_id, db_controller):
     return True, ""
 
 
-def _allow_shutdown_with_migration_tasks(snode, db_controller):
+def _allow_shutdown_with_migration_tasks(snode: StorageNode, db_controller):
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     return (
         cluster.ha_type == "ha"
@@ -5354,7 +5354,7 @@ _PEER_RECONNECT_ELIGIBLE_STATUSES = (
 )
 
 
-def _target_is_reconnect_eligible(target_node):
+def _target_is_reconnect_eligible(target_node: StorageNode):
     """True iff a remote ctrlr attach toward ``target_node`` should proceed.
 
     Any service that calls bdev_nvme_attach_controller toward a peer must
@@ -5368,7 +5368,7 @@ def _target_is_reconnect_eligible(target_node):
     return target_node.status in _PEER_RECONNECT_ELIGIBLE_STATUSES
 
 
-def _detach_remote_controllers_from_peers(snode, db_controller):
+def _detach_remote_controllers_from_peers(snode: StorageNode, db_controller):
     """Loop 2 of graceful shutdown.
 
     For every peer in {online, down, in_restart}, detach the remote
@@ -6426,7 +6426,7 @@ def set_node_status(node_id, status, caused_by="monitor"):
     return True
 
 
-def _set_restart_phase(snode, lvs_name, phase, db_controller):
+def _set_restart_phase(snode: StorageNode, lvs_name, phase, db_controller):
     """Persist the restart phase for a given LVS to FDB.
 
     Other services check this to gate sync deletes and create/clone/
@@ -6660,7 +6660,7 @@ def drain_restart_queue(node_id, lvs_name):
             logger.error("Queued operation failed (%s): %s", description, e)
 
 
-def _is_node_rpc_responsive(node, lvs_name, timeout=5, retry=2):
+def _is_node_rpc_responsive(node: StorageNode, lvs_name, timeout=5, retry=2):
     """Check if a node's RPC interface is responsive.
 
     Returns True if RPC succeeds, False if it fails/times out.
@@ -6675,7 +6675,7 @@ def _is_node_rpc_responsive(node, lvs_name, timeout=5, retry=2):
         return False
 
 
-def _is_fabric_connected(node, lvs_peer_ids=None):
+def _is_fabric_connected(node: StorageNode, lvs_peer_ids=None):
     """Check if a node's fabric is connected (JM quorum says NOT disconnected)."""
     return not _check_peer_disconnected(node, lvs_peer_ids=lvs_peer_ids)
 
@@ -7237,7 +7237,7 @@ def execute_on_leader_with_failover(all_nodes, lvs_name, operation_fn,
         return False, new_leader, f"Operation failed on new leader: {e}"
 
 
-def _check_peer_disconnected(peer_node, lvs_peer_ids=None):
+def _check_peer_disconnected(peer_node: StorageNode, lvs_peer_ids=None):
     """Check if a peer node should be treated as disconnected for the purpose
     of routing (takeover vs. non-leader path) and peer-port-block decisions.
 
@@ -7310,7 +7310,7 @@ def _check_peer_disconnected(peer_node, lvs_peer_ids=None):
     return False
 
 
-def _check_hublvol_connected(snode, peer_node):
+def _check_hublvol_connected(snode: StorageNode, peer_node):
     """Method 2: Check if the hublvol to peer_node is still connected from snode.
 
     Per design: used as fallback when RPCs fail/timeout after the quorum check
@@ -7337,7 +7337,7 @@ def _check_hublvol_connected(snode, peer_node):
         return False
 
 
-def _handle_rpc_failure_on_peer(snode, peer_node, lvs_jm_vuid, lvs_name=None):
+def _handle_rpc_failure_on_peer(snode: StorageNode, peer_node, lvs_jm_vuid, lvs_name=None):
     """Handle RPC failure to a peer during restart, per design decision tree.
 
     Called when RPCs to a previously-connected peer fail/timeout.
@@ -7398,7 +7398,7 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
             snode, leader_node, primary_node, activation_mode=False, force=force)
 
 
-def _recreate_lvstore_on_non_leader_impl(snode, leader_node, primary_node, activation_mode=False, force=False):
+def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primary_node, activation_mode=False, force=False):
     """Recreate a non-leader LVS on snode.
 
     Per design: runs for secondary when primary is online, or for tertiary always.
@@ -8265,7 +8265,7 @@ def _restore_peer_lvstore_status_ready(node_id, db_controller):
             fresh, lambda n: setattr(n, "lvstore_status", "ready"))
 
 
-def recreate_all_lvstores(snode, force=False):
+def recreate_all_lvstores(snode: StorageNode, force=False):
     """Recreate all LVS stacks on a restarting node: primary, secondary, tertiary.
 
     This is the dispatch logic extracted from restart_storage_node() so it can
@@ -8285,7 +8285,7 @@ def recreate_all_lvstores(snode, force=False):
     return _recreate_all_lvstores_serial(snode, force=force)
 
 
-def _recreate_all_lvstores_serial(snode, force=False):
+def _recreate_all_lvstores_serial(snode: StorageNode, force=False):
     db_controller = DBController()
 
     # --- Step 1: Primary LVS ---
@@ -8403,7 +8403,7 @@ def _recreate_all_lvstores_serial(snode, force=False):
     return non_leader_ok
 
 
-def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False):
+def recreate_lvstore(snode: StorageNode, force=False, lvs_primary=None, activation_mode=False):
     """Per-LVS-locked wrapper: serialize recreate of this LVS only against a
     concurrent recreate of the SAME LVS. The LVS is ``lvs_primary.lvstore``
     (secondary taking leadership) or ``snode.lvstore`` (own primary).
@@ -8417,7 +8417,7 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
             snode, force=force, lvs_primary=lvs_primary, activation_mode=False)
 
 
-def _recreate_lvstore_impl(snode, force=False, lvs_primary=None, activation_mode=False):
+def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, activation_mode=False):
     """Recreate LVStore as leader.
 
     Per design: runs for snode's own primary LVS, and also when snode
@@ -9436,7 +9436,7 @@ def _recreate_lvstore_impl(snode, force=False, lvs_primary=None, activation_mode
         _release_block_gate()
 
 
-def add_lvol_thread(lvol, snode, lvol_ana_state="optimized"):
+def add_lvol_thread(lvol, snode: StorageNode, lvol_ana_state="optimized"):
     db_controller = DBController()
 
     # Refuse to (re)register an lvol that is being torn down: the delete
@@ -9529,7 +9529,7 @@ def add_lvol_thread(lvol, snode, lvol_ana_state="optimized"):
     return True, None
 
 
-def repair_lvol_registration_on_non_leader(lvol, sec_node, secondary_index):
+def repair_lvol_registration_on_non_leader(lvol, sec_node: StorageNode, secondary_index):
     """(Re)apply an lvol's fabric registration on an ONLINE non-leader
     (secondary/tertiary): create the missing nvmf subsystem if absent
     (cntlid range mirrors the restart flow: sec1 1000, sec2/tert 2000,
@@ -9581,7 +9581,7 @@ def repair_lvol_registration_on_non_leader(lvol, sec_node, secondary_index):
     return add_lvol_thread(lvol, sec_node, lvol_ana_state="non_optimized")
 
 
-def get_sorted_ha_jms(current_node):
+def get_sorted_ha_jms(current_node: StorageNode):
     """Select the remote HA journal members for ``current_node``.
 
     The full HA journal set is ``ha_jm_count`` members: the node's own local JM
@@ -9699,7 +9699,7 @@ def get_sorted_ha_jms(current_node):
     return selected[:target]
 
 
-def get_node_jm_names(current_node, remote_node=None):
+def get_node_jm_names(current_node: StorageNode, remote_node=None):
     jm_list = []
     if current_node.jm_device:
         if remote_node:
@@ -9728,7 +9728,7 @@ def get_node_jm_names(current_node, remote_node=None):
     return jm_list[:current_node.ha_jm_count]
 
 
-def get_secondary_nodes(current_node, exclude_ids=None, removed_node=None):
+def get_secondary_nodes(current_node: StorageNode, exclude_ids=None, removed_node=None):
     if exclude_ids is None:
         exclude_ids = []
     db_controller = DBController()
@@ -9790,7 +9790,7 @@ def get_secondary_nodes(current_node, exclude_ids=None, removed_node=None):
     return []
 
 
-def get_secondary_nodes_2(current_node, exclude_ids=None, exclude_mgmt_ips=None,
+def get_secondary_nodes_2(current_node: StorageNode, exclude_ids=None, exclude_mgmt_ips=None,
                           exclude_failure_domains=None, exclude_physical_labels=None):
     """Get candidate nodes for second secondary assignment (dual fault tolerance).
     Unlike get_secondary_nodes, this checks lvstore_stack_tertiary instead of
@@ -9880,7 +9880,7 @@ def get_secondary_nodes_2(current_node, exclude_ids=None, exclude_mgmt_ips=None,
     return []
 
 
-def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blocks, max_size):
+def create_lvstore(snode: StorageNode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blocks, max_size):
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     lvstore_stack: List[dict] = []
@@ -10117,12 +10117,12 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
 _DISTR_RECREATE_RETRY_DELAY_SEC = 5
 
 
-def _create_bdev_stack(snode, lvstore_stack=None, primary_node=None):
+def _create_bdev_stack(snode: StorageNode, lvstore_stack=None, primary_node=None):
     # Per-distrib creation outcome, keyed by bdev name. Threads write their own
     # key (distinct keys -> GIL-safe), the main loop reads after join.
     distr_results: dict = {}
 
-    def _create_distr(snode, name, params):
+    def _create_distr(snode: StorageNode, name, params):
         # If a peer node goes offline at the exact moment a distrib is
         # (re)created, the cluster map can be briefly stale -- it still flags
         # that peer's devices as online -- and bdev_distrib_create (or the
@@ -10280,7 +10280,7 @@ def _remove_bdev_stack(bdev_stack, rpc_client, remove_distr_only=False):
         # time.sleep(1)
 
 
-def recreate_lvstore_on_sec(snode):
+def recreate_lvstore_on_sec(snode: StorageNode):
     """Build (or rebuild) the non-leader LVS stack on ``snode`` for every
     primary that currently points at it as secondary or tertiary.
 
@@ -10344,7 +10344,7 @@ def recreate_lvstore_on_sec(snode):
     return overall_ok
 
 
-def teardown_non_leader_lvstore(donor_node, primary_node, slot=None):
+def teardown_non_leader_lvstore(donor_node: StorageNode, primary_node: StorageNode, slot=None):
     """Tear down a non-leader (secondary or tertiary) LVStore stack on
     ``donor_node`` for the LVS owned by ``primary_node``, in-place.
 
@@ -10479,7 +10479,7 @@ def teardown_non_leader_lvstore(donor_node, primary_node, slot=None):
     return True
 
 
-def reattach_sibling_failover(sibling_node, primary_node,
+def reattach_sibling_failover(sibling_node: StorageNode, primary_node: StorageNode,
                               old_failover_node, new_failover_node):
     """Surgically reconfigure a sibling secondary's NVMe-oF multipath group
     so its failover path points at the new sec_1 holder instead of the old
