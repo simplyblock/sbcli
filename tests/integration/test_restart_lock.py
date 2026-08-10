@@ -341,6 +341,8 @@ class TestRestartWrapperCleanupSafety(unittest.TestCase):
         self.assertFalse(result)
         mock_set_status.assert_not_called()
 
+    @patch("simplyblock_core.storage_node_ops._new_restart_claim_token",
+           return_value="claim-tok-1")
     @patch("simplyblock_core.storage_node_ops.distr_controller")
     @patch("simplyblock_core.storage_node_ops.storage_events")
     @patch("simplyblock_core.storage_node_ops.set_node_status")
@@ -348,7 +350,7 @@ class TestRestartWrapperCleanupSafety(unittest.TestCase):
     @patch("simplyblock_core.storage_node_ops.DBController")
     def test_cleanup_runs_when_pre_offline_and_post_restarting(
             self, mock_db_cls, mock_impl, mock_set_status,
-            mock_events, mock_distr):
+            mock_events, mock_distr, _mock_token):
         """WE acquired RESTARTING (pre=OFFLINE) and a later step failed
         (impl returned False). Cleanup must reset the node to OFFLINE so
         future attempts can proceed.
@@ -357,11 +359,19 @@ class TestRestartWrapperCleanupSafety(unittest.TestCase):
         ``set_node_status`` (deliberately, to avoid second-order effects
         from the helper). The contract this test pins is therefore: on
         the failure path, ``post_node.write_to_db`` is invoked and the
-        post_node's status is set to OFFLINE before the write."""
+        post_node's status is set to OFFLINE before the write.
+
+        Cleanup is gated on the node's ``restart_claim_owner`` matching THIS
+        call's claim token, not on pre_status alone: pre_status is OFFLINE both
+        when we acquired the claim and when we were refused before acquisition,
+        and running cleanup in the refused case killed another actor's SPDK
+        container. So the node has to carry our token for the owned-lock path
+        to be the one under test."""
         from simplyblock_core.storage_node_ops import restart_storage_node
 
         pre_node = self._node(StorageNode.STATUS_OFFLINE)
         post_node = self._node(StorageNode.STATUS_RESTARTING)
+        post_node.restart_claim_owner = "claim-tok-1"
         post_node.write_to_db = MagicMock()
 
         mock_db_cls.return_value.get_storage_node_by_id.side_effect = [

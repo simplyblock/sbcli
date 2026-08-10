@@ -33,6 +33,7 @@ import shutil
 import tempfile
 import time
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -169,14 +170,76 @@ def pytest_configure(config):
 
     _provision_fdb()
 
+    # Abort rather than skip. A skipped tier is reported as success for all
+    # ~1300 tests, so a run that provisioned nothing is indistinguishable from a
+    # green one (observed: the Docker socket was unreachable, every test
+    # skipped, tox exited 0). Anyone who genuinely wants the tier to no-op
+    # without Docker opts in with SB_ALLOW_FDB_SKIP=1; CI never sets it.
+    if _skip_reason and os.environ.get("SB_ALLOW_FDB_SKIP") != "1":
+        raise pytest.UsageError(
+            f"integration tier requires FoundationDB: {_skip_reason}. "
+            "Set SB_ALLOW_FDB_SKIP=1 to skip the tier instead of failing."
+        )
+
 
 def pytest_unconfigure(config):
     _teardown_fdb()
 
 
+def pytest_report_header(config):
+    """State up front which cluster the tier is running against, or why it isn't.
+
+    Without this the provisioning outcome is invisible: the tier's failure mode
+    is a session-wide skip, which scrolls past as a wall of ``s`` and lets tox
+    exit 0 on a run that executed nothing.
+    """
+    if _skip_reason:
+        return f"FoundationDB: UNAVAILABLE — {_skip_reason}"
+    return f"FoundationDB: {os.environ.get('FDB_CLUSTER_FILE')}"
+
+
+@pytest.fixture(autouse=True)
+def _no_kubernetes():
+    """Seal the Kubernetes boundary for the whole tier.
+
+    Every k8s call in the codebase funnels through
+    ``utils.load_kube_config_with_fallback``, which tries in-cluster config and
+    then falls back to the developer's ``~/.kube/config``. Unpatched, control
+    paths that touch k8s (cluster activation calls
+    ``set_storage_mcp_max_unavailable``; the event controllers call
+    ``patch_cr_node_status``) issue REAL, untimed HTTPS requests to whatever
+    cluster that file names.
+
+    That made the tier's runtime a function of the developer's kubeconfig:
+    ``test_dual_ft_e2e`` ran in 9.8s the day the configured API server refused
+    fast, and 272s — six timeouts — once it started accepting connections
+    without answering. CI has no kubeconfig, so raising here is not a new
+    behaviour, it is the environment these tests were written against, pinned
+    so it holds everywhere. Callers already handle an unavailable config; that
+    is the branch they take on any non-k8s deployment.
+    """
+    from kubernetes.config.config_exception import ConfigException
+
+    from simplyblock_core import utils
+
+    def _refuse():
+        raise ConfigException(
+            "Kubernetes access is disabled in tests (tests/integration/conftest.py)")
+
+    with patch.object(utils, "load_kube_config_with_fallback", _refuse):
+        yield
+
+
 @pytest.fixture(scope="session", autouse=True)
 def fdb_cluster():
-    """Expose the bound cluster file; skip the tier if FDB is unavailable."""
+    """Expose the bound cluster file; fail the tier if FDB is unavailable.
+
+    A skip here would be reported as success for all ~1300 tests — a run that
+    provisioned nothing is indistinguishable from a green one (observed: the
+    Docker socket was unreachable, every test skipped, tox exited 0). Anyone who
+    genuinely wants the tier to no-op without Docker sets ``SB_ALLOW_FDB_SKIP=1``
+    explicitly; CI never does.
+    """
     if _skip_reason:
         pytest.skip(_skip_reason)
     yield os.environ.get("FDB_CLUSTER_FILE")

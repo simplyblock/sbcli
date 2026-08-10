@@ -184,6 +184,20 @@ class TestNamespacedAttachRace(unittest.TestCase):
         # resolver must downgrade this lvol to its own standalone subsystem.
         db.get_mini_lvols.return_value = []
         db.kv_store = MagicMock()
+
+        # The downgrade is performed BY claim_lvol_ns_slot: it re-picks the
+        # slot and rewrites every pick-dependent field on the lvol in one
+        # transaction (nqn -> the standalone nqn, namespace -> cleared),
+        # returning False for "owns a standalone subsystem". Mocked out, none
+        # of that happens and the lvol keeps pointing at the subsystem SPDK
+        # just rejected.
+        def _claim(lvol_arg, host_node, namespaced, standalone_nqn,
+                   standalone_namespace="", standalone_allowed_hosts=None,
+                   exclude_nqns=None):
+            lvol_arg.nqn = standalone_nqn
+            lvol_arg.namespace = standalone_namespace
+            return False
+        db.claim_lvol_ns_slot.side_effect = _claim
         mock_db_cls.return_value = db
 
         bdev, err = lvol_controller.add_lvol_on_node(lvol, node)

@@ -87,7 +87,7 @@ def task_runner(task):
         return False
 
     cluster = db.get_cluster_by_id(task.cluster_id)
-    if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
+    if cluster.status not in Cluster.OPERABLE_STATUSES:
         task.function_result = "cluster is not active, retrying"
         task.status = JobSchedule.STATUS_SUSPENDED
         task.retry += 1

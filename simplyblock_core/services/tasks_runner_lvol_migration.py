@@ -83,9 +83,12 @@ the 3-second service-loop gap between phases.
 """
 
 import datetime
+import logging
 import random
 import time
 from typing import Optional
+
+from tenacity import RetryError, Retrying, before_sleep_log, stop_after_attempt, wait_fixed
 
 from simplyblock_core import db_controller as db_mod, utils, constants
 from simplyblock_core.utils import convert_size
@@ -99,7 +102,7 @@ from simplyblock_core.models.lvol_migration import LVolMigration
 from simplyblock_core.models.lvol_migration_group import LVolMigrationGroup
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.snapshot import SnapShot
-from simplyblock_core.rpc_client import RPCException, RPCClient
+from simplyblock_core.rpc_client import RPCErrorCode, RPCException, RPCClient
 from simplyblock_core.services.hub_controller_manager import HubControllerManager
 from simplyblock_core.storage_node_ops import execute_on_leader_with_failover
 
@@ -500,9 +503,16 @@ def _delete_bdev_blocking(bdev_name, primary_rpc, secondary_rpc=None, tertiary_r
 
     for rpc in filter(None, [primary_rpc, secondary_rpc, tertiary_rpc]):
         try:
-            rpc.delete_lvol(bdev_name, sync=True, special_delete=False)
-        except Exception as e:
-            logger.warning(f"delete bdev {bdev_name} finalize on replica (non-fatal): {e}")
+            Retrying(
+                stop=stop_after_attempt(3),
+                wait=wait_fixed(1),
+                before_sleep=before_sleep_log(logger, logging.WARNING),
+            )(rpc.delete_lvol, bdev_name, sync=True, special_delete=False)
+        except RetryError:
+            logger.exception(
+                f"delete bdev {bdev_name} sync finalize STILL failing after 3 attempts "
+                f"(non-fatal, blob metadata may not be cleared on this replica)"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -2242,7 +2252,8 @@ def _delete_intermediate_snaps_on_target(migration, tgt_rpc, tgt_sec_rpc=None, t
             logger.warning(f"Could not remove intermediate snap {snap_uuid} from DB: {e}")
 
 
-def _rename_migrated_bdevs(migration, tgt_node, tgt_rpc, tgt_sec_rpc=None, tgt_ter_rpc=None):
+def _rename_migrated_bdevs(migration, tgt_node, tgt_rpc, tgt_sec_rpc=None, tgt_ter_rpc=None,
+                            warnings=None):
     """
     After migration completes, rename 'm'-suffixed bdevs on the target back to
     their canonical names (without the suffix).  This prevents suffix accumulation
@@ -2263,28 +2274,37 @@ def _rename_migrated_bdevs(migration, tgt_node, tgt_rpc, tgt_sec_rpc=None, tgt_t
     def _do_rename(old_composite, new_short, label):
         """Rename on prim + sec + ter.  Returns 'EXISTS' if the target name is
         already taken on the PRIMARY (SPDK returns JSON-RPC error -32602 'File
-        exists' -> None), True on success.  new_short must be the short name only
+        exists'), True on success.  new_short must be the short name only
         (no lvstore prefix).
 
         Secondary/tertiary conflicts are non-fatal: an overlap node may already
-        carry the bdev at the canonical name, so a None return there must not
+        carry the bdev at the canonical name, so a collision there must not
         mask a successful primary rename.
         """
-        ret = tgt_rpc.bdev_lvol_rename(old_composite, new_short)
+        try:
+            ret = tgt_rpc.bdev_lvol_rename(old_composite, new_short)
+            prim_exists = False
+        except RPCException as exc:
+            if exc.code == RPCErrorCode.invalid_params:
+                logger.warning(
+                    f"_do_rename prim: {old_composite!r} -> {new_short!r}: "
+                    f"'File exists' (-32602) — will try fallback name"
+                )
+                prim_exists = True
+                ret = None
+            else:
+                raise
         logger.debug(f"_do_rename prim: {old_composite!r} -> {new_short!r}: ret={ret!r}")
-        # SPDK returns None on name collision (-32602 "File exists"); only the
-        # primary result determines whether we should try the fallback name.
-        prim_exists = (not ret) or (ret == _EXISTS)
         for role, rpc in [("sec", tgt_sec_rpc), ("ter", tgt_ter_rpc)]:
             if rpc:
                 try:
-                    r = rpc.bdev_lvol_rename(old_composite, new_short)
-                    logger.debug(f"_do_rename {role}: {old_composite!r} -> {new_short!r}: ret={r!r}")
-                    if (not r) or r == _EXISTS:
-                        logger.warning(
-                            f"_rename_migrated_bdevs: {role} rename {label} "
-                            f"{old_composite!r} -> {new_short!r}: non-fatal "
-                            f"({role} may already have bdev at target name)")
+                    rpc.bdev_lvol_rename(old_composite, new_short)
+                    logger.debug(f"_do_rename {role}: {old_composite!r} -> {new_short!r}: ok")
+                except RPCException as exc:
+                    logger.warning(
+                        f"_rename_migrated_bdevs: {role} rename {label} "
+                        f"{old_composite!r} -> {new_short!r}: non-fatal "
+                        f"(code={exc.code}: {exc.message})")
                 except Exception as exc:
                     logger.warning(
                         f"_rename_migrated_bdevs: {role} rename {label} (non-fatal): {exc}")
@@ -2301,13 +2321,22 @@ def _rename_migrated_bdevs(migration, tgt_node, tgt_rpc, tgt_sec_rpc=None, tgt_t
         ret = _do_rename(old, canonical, label)
         if ret == _EXISTS:
             fallback = canonical + _MIGRATION_BDEV_SUFFIX_DONE
-            logger.info(
-                f"_rename_migrated_bdevs: {canonical} exists - trying fallback {fallback}")
+            msg = (
+                f"bdev rename {current_short!r} -> {canonical!r} failed (File exists); "
+                f"retried as fallback {fallback!r}"
+            )
+            logger.warning(f"_rename_migrated_bdevs: {msg}")
+            if warnings is not None:
+                warnings.append(msg)
             ret2 = _do_rename(old, fallback, label)
             if ret2 == _EXISTS:
-                logger.warning(
-                    f"_rename_migrated_bdevs: both {canonical} and {fallback} "
-                    f"exist - leaving {current_short} as-is")
+                skip_msg = (
+                    f"bdev rename {current_short!r}: both {canonical!r} and {fallback!r} "
+                    f"exist — left as-is"
+                )
+                logger.warning(f"_rename_migrated_bdevs: {skip_msg}")
+                if warnings is not None:
+                    warnings.append(skip_msg)
                 return None
             target = fallback
         else:
@@ -2528,14 +2557,6 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
     if lvol is not None and src_bdev_short:
         src_lvol_composite = f"{src_node.lvstore}/{src_bdev_short}"
         try:
-            src_rpc.bdev_lvol_set_migration_flag(src_lvol_composite)
-            if src_sec_rpc:
-                src_sec_rpc.bdev_lvol_set_migration_flag(src_lvol_composite)
-            if src_ter_rpc:
-                src_ter_rpc.bdev_lvol_set_migration_flag(src_lvol_composite)
-        except Exception as _mf_err:
-            logger.warning(f"bdev_lvol_set_migration_flag failed: {_mf_err}")
-        try:
             _delete_bdev_blocking(
                 src_lvol_composite, src_rpc,
                 secondary_rpc=src_sec_rpc, tertiary_rpc=src_ter_rpc,
@@ -2566,7 +2587,8 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
                 migration, tgt_rpc, tgt_sec_rpc, tgt_ter_rpc,
                 tgt_all_nodes=[n for n in [tgt_node, tgt_sec, tgt_ter] if n],
                 tgt_lvs_name=tgt_node.lvstore)
-        _rename_migrated_bdevs(migration, tgt_node, tgt_rpc, tgt_sec_rpc, tgt_ter_rpc)
+        _rename_migrated_bdevs(migration, tgt_node, tgt_rpc, tgt_sec_rpc, tgt_ter_rpc,
+                               warnings=_warnings)
     except Exception as e:
         logger.warning(f"Target artifact cleanup (rename/intermediate snaps) failed: {e}")
         _warnings.append(f"target rename/intermediate-snap cleanup failed: {e}")
@@ -2897,7 +2919,7 @@ def task_runner(task):
     # completed migration stays stuck if the source node goes through a brief
     # STATUS_UNREADY / STATUS_IN_ACTIVATION window during recovery.
     cluster = db.get_cluster_by_id(migration.cluster_id)
-    if cluster.status not in (Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED):
+    if cluster.status not in Cluster.MUTABLE_STATUSES:
         if not _is_cleanup_phase:
             return _suspend_task(
                 task, migration, f"cluster not active (status={cluster.status})",

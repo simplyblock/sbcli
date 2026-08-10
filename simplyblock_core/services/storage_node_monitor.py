@@ -633,6 +633,31 @@ def _watchdog_stuck_activation(cluster):
 
 # Node statuses that mean a node is NOT yet drained for suspend recovery:
 # either still up/serving or mid-transition. The drain is complete only once
+def _watchdog_stuck_shrink(cluster):
+    """Release a cluster wedged in IN_SHRINK with no removal task driving it.
+
+    ``node_removal_orchestrate`` holds IN_SHRINK for one attempt and restores
+    the previous status in a ``finally``. If the process driving it dies, that
+    restore never runs: the status sticks, every later tick early-returns, the
+    topology gates keep refusing, and ``get_restart_phase`` stops reclaiming
+    genuinely leaked phases — none of which clears on its own.
+
+    The removal task is the liveness signal. It is created with max_retry=-1 and
+    only reaches DONE when the removal completes, so "IN_SHRINK held but no open
+    FN_NODE_REMOVAL task" means the flow is gone, not slow. No time budget is
+    needed (contrast ``_watchdog_stuck_activation``, whose driver is a thread
+    with no task row of its own).
+    """
+    if tasks_controller.get_active_node_removal_task_for_cluster(cluster.get_id()):
+        return
+    next_status = get_next_cluster_status(cluster.get_id())
+    logger.error(
+        "Cluster %s is IN_SHRINK but no node-removal task is open: the removal "
+        "driver is gone. Reverting to %s so topology gates and stale-phase "
+        "reclamation resume.", cluster.get_id(), next_status)
+    cluster_ops.set_cluster_status(cluster.get_id(), next_status)
+
+
 # every (non operator-stopped) node has left all of these for OFFLINE/REMOVED.
 _DRAIN_PENDING_STATUSES = (
     StorageNode.STATUS_ONLINE,
@@ -883,7 +908,15 @@ def _update_cluster_status_impl(cluster_id):
         _watchdog_stuck_activation(cluster)
         return
 
-    if current_cluster_status in [Cluster.STATUS_UNREADY, Cluster.STATUS_IN_EXPANSION]:
+    # IN_SHRINK, like IN_EXPANSION, is owned by a topology flow that restores
+    # the previous status itself; driving transitions under it would clobber
+    # that ownership. _watchdog_stuck_shrink below covers a flow that dies
+    # holding it.
+    if current_cluster_status in [Cluster.STATUS_UNREADY,
+                                  Cluster.STATUS_IN_EXPANSION,
+                                  Cluster.STATUS_IN_SHRINK]:
+        if current_cluster_status == Cluster.STATUS_IN_SHRINK:
+            _watchdog_stuck_shrink(cluster)
         return
 
     if current_cluster_status == Cluster.STATUS_DEGRADED and next_current_status == Cluster.STATUS_ACTIVE:

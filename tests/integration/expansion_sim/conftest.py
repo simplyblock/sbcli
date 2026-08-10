@@ -19,8 +19,17 @@ import os
 import sys
 import pytest
 
-_FDB_CLUSTER_FILE = os.environ.get(
-    "FDB_CLUSTER_FILE", "/etc/foundationdb/fdb.cluster")
+def _fdb_cluster_file():
+    """Resolve the cluster file LAZILY, never at import time.
+
+    tests/integration/conftest.py binds FDB_CLUSTER_FILE to the
+    testcontainer's file in pytest_configure. This conftest is imported before
+    that when a path inside this directory is named on the command line (pytest
+    loads the conftests for an argument's directories during startup), so a
+    module-level snapshot captured the /etc default and skipped the whole suite
+    — but only for targeted runs, which is exactly when you want it to run.
+    """
+    return os.environ.get("FDB_CLUSTER_FILE", "/etc/foundationdb/fdb.cluster")
 
 
 def _ensure_real_fdb():
@@ -89,8 +98,8 @@ def fast_sleep(monkeypatch):
 
 
 def _require_fdb():
-    if not os.path.isfile(_FDB_CLUSTER_FILE):
-        pytest.skip(f"FDB cluster file not found at {_FDB_CLUSTER_FILE}; "
+    if not os.path.isfile(_fdb_cluster_file()):
+        pytest.skip(f"FDB cluster file not found at {_fdb_cluster_file()}; "
                     f"set FDB_CLUSTER_FILE or run on the EC2 sim host.")
     try:
         fdb = _ensure_real_fdb()
@@ -107,7 +116,7 @@ def fdb_db():
     """Session-level real-FDB connection. Reused across tests."""
     fdb = _require_fdb()
     fdb.api_version(730)
-    db = fdb.open(_FDB_CLUSTER_FILE)
+    db = fdb.open(_fdb_cluster_file())
     db.options.set_transaction_timeout(10000)
     return db
 

@@ -411,8 +411,11 @@ def add_node_to_auto_restart(node):
             "for node %s until all nodes are offline",
             node.cluster_id, node.get_id())
         return False
+    # IN_SHRINK: a PEER failing mid-removal must still get an auto-restart —
+    # the removal itself requires every other node online to make progress.
     if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED,
-                              Cluster.STATUS_READONLY, Cluster.STATUS_UNREADY, Cluster.STATUS_SUSPENDED]:
+                              Cluster.STATUS_READONLY, Cluster.STATUS_UNREADY,
+                              Cluster.STATUS_SUSPENDED, Cluster.STATUS_IN_SHRINK]:
         logger.warning(f"Cluster is not active, skip node auto restart, status: {cluster.status}")
         return False
     # Past-fault-tolerance guard: don't auto-restart nodes one-by-one when
@@ -663,6 +666,21 @@ def get_active_node_removal_task(cluster_id, node_id):
         if task.function_name == JobSchedule.FN_NODE_REMOVAL and task.node_id == node_id:
             if task.status != JobSchedule.STATUS_DONE and task.canceled is False:
                 return task.uuid
+    return False
+
+
+def get_active_node_removal_task_for_cluster(cluster_id):
+    """Return the UUID of any active node-removal task in the cluster, or False.
+
+    Cluster-scoped counterpart to ``get_active_node_removal_task``: the
+    ``IN_SHRINK`` watchdog needs "is a removal in flight anywhere" rather than
+    "for this node", because the node whose removal set the status may already
+    be REMOVED (or gone) by the time the status is found held."""
+    for task in db.get_job_tasks(cluster_id):
+        if task.function_name == JobSchedule.FN_NODE_REMOVAL \
+                and task.canceled is False \
+                and task.status != JobSchedule.STATUS_DONE:
+            return task.uuid
     return False
 
 
