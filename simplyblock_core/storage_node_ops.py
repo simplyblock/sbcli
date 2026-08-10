@@ -3701,7 +3701,7 @@ def _delete_replica_on_peer(peer, primary, cluster):
         return
     try:
         nqn = peer.hublvol_nqn_for_lvstore(cluster.nqn, lvstore)
-        if rpc_client.subsystem_list(nqn):
+        if rpc_client.subsystem_get(nqn):
             rpc_client.subsystem_delete(nqn)
     except Exception as e:
         logger.warning(f"hublvol subsystem teardown for {lvstore} on {peer.get_id()} failed: {e}")
