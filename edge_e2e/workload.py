@@ -3,7 +3,7 @@
 volume and runs the standard job (2 jobs, iodepth 2, 10 GiB each, 30/70
 read/write mix, max_latency 20s so a stall is an explicit fio failure)."""
 
-from e2e.edge import helpers
+from edge_e2e import helpers
 
 FIO_IMAGE = "ubuntu:22.04"
 

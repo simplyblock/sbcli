@@ -13,8 +13,8 @@ STATE_FILE for deploy.py / the test suite; --destroy tears everything down
 by tag.
 
 Usage:
-    python e2e/edge/provision.py --region eu-west-1 --key-name mykey
-    python e2e/edge/provision.py --region eu-west-1 --destroy
+    python edge_e2e/provision.py --region eu-west-1 --key-name mykey
+    python edge_e2e/provision.py --region eu-west-1 --destroy
 
 Requires: boto3, an SSH key pair already registered in the region.
 """
@@ -27,7 +27,7 @@ import time
 
 import boto3
 
-from e2e.edge.topology import CENTRAL, EDGE_CLUSTERS
+from edge_e2e.topology import CENTRAL, EDGE_CLUSTERS
 
 TAG_KEY = "simplyblock-edge-e2e"
 STATE_FILE = pathlib.Path(__file__).parent / "state.json"
@@ -205,7 +205,7 @@ def provision(region, key_name):
     STATE_FILE.write_text(json.dumps(state, indent=2))
     print(f"State written to {STATE_FILE}")
     print("Give cloud-init ~3-5 minutes to finish the k3s installs, "
-          "then run: python e2e/edge/deploy.py")
+          "then run: python edge_e2e/deploy.py")
 
 
 def destroy(region):

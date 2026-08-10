@@ -16,11 +16,11 @@ Edge instances are 4-vCPU `c5a.xlarge` with **1 vCPU for SPDK**
 pip install boto3 requests pytest
 export AWS_PROFILE=...            # credentials with EC2 rights
 
-python e2e/edge/provision.py --region eu-west-1 --key-name <ec2-keypair>
+python edge_e2e/provision.py --region eu-west-1 --key-name <ec2-keypair>
 #  -> creates VPC + instances + EBS volumes, installs k3s via cloud-init,
-#     writes e2e/edge/state.json. Wait ~5 min for cloud-init.
+#     writes edge_e2e/state.json. Wait ~5 min for cloud-init.
 
-python e2e/edge/deploy.py         # == TEST 1: deploy simplyblock everywhere
+python edge_e2e/deploy.py         # == TEST 1: deploy simplyblock everywhere
 #  -> bootstraps the central CP (override with EDGE_E2E_BOOTSTRAP_CMD; the
 #     default clones simplyblock-deploy and runs bootstrap-cluster.sh — after
 #     a manual bootstrap, set central.api_url/cluster_id/cluster_secret in
@@ -29,9 +29,9 @@ python e2e/edge/deploy.py         # == TEST 1: deploy simplyblock everywhere
 #     token + CA minting, POST /api/v2/clusters/edge, node adds (ONLINE
 #     gates), the standard 30G test volume.
 
-pytest e2e/edge/test_edge_e2e.py -v -x     # tests 2-6, ordered
+pytest edge_e2e/test_edge_e2e.py -v -x     # tests 2-6, ordered
 
-python e2e/edge/provision.py --region eu-west-1 --destroy
+python edge_e2e/provision.py --region eu-west-1 --destroy
 ```
 
 ## Test map
@@ -62,3 +62,32 @@ python e2e/edge/provision.py --region eu-west-1 --destroy
   defaults. `state.json` is the single source of truth between stages.
 - Everything is tagged `simplyblock-edge-e2e`; `--destroy` sweeps by tag, so
   teardown works even with a lost state file.
+
+## One-shot orchestration (`run_all.py`)
+
+`run_all.py` is the entry point for a full campaign or an unattended soak. It
+chains provision → deploy (test 1) → tests 2-6, writes a self-contained run
+directory (`edge_e2e/runs/run-<ts>/`: per-stage logs, junit xml, pre/post
+cluster-status snapshots, and on failure a `cluster-logs/` capture of nodes,
+pods, events and k3s journals from every cluster), and exits non-zero if any
+stage failed.
+
+```bash
+python edge_e2e/run_all.py --region eu-west-1 --key-name mykey   # full campaign + teardown
+python edge_e2e/run_all.py --skip-provision --only 04,05a        # re-run a subset
+python edge_e2e/run_all.py --soak-cycles 12 --keep               # overnight fault soak
+python edge_e2e/run_all.py --teardown-only                       # clean up by tag
+```
+
+`--soak-cycles N` repeats the fault stages N times against the same
+environment (stopping early on the first failing cycle) — that is the soak
+mode for the reboot / device-failure / connection-fault scenarios.
+
+## Tier isolation
+
+The suite lives at the repo top level (`edge_e2e/`, not under `e2e/`) because
+`e2e/__init__.py` imports the legacy `e2e_tests` framework at package-import
+time, which makes anything beneath it uncollectable outside that environment.
+`norecursedirs` keeps it out of the unit/integration tiers, `conftest.py`
+tags every case `edge_e2e` and raises the per-test timeout from the repo-wide
+30s budget to 3h.

@@ -2,7 +2,7 @@
 """Edge-clusters e2e suite (tests 2-6). Requires a provisioned + deployed
 environment (provision.py, deploy.py — deploy success IS test 1).
 
-Run ordered:  pytest e2e/edge/test_edge_e2e.py -v -x
+Run ordered:  pytest edge_e2e/test_edge_e2e.py -v -x
 
 Test map (from the test plan):
   2. parallel fio on central + every edge cluster
@@ -21,8 +21,8 @@ import time
 
 import pytest
 
-from e2e.edge import helpers, workload
-from e2e.edge.topology import EDGE_CLUSTERS, has_device_redundancy
+from edge_e2e import helpers, workload
+from edge_e2e.topology import EDGE_CLUSTERS, has_device_redundancy
 
 pytestmark = pytest.mark.edge_e2e
 

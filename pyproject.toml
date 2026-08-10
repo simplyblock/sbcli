@@ -101,9 +101,10 @@ enable_error_code = ["deprecated"]
 [tool.pytest.ini_options]
 pythonpath = "."
 testpaths = ['simplyblock_core/test', 'tests']
-norecursedirs = ['tests/perf']
+norecursedirs = ['tests/perf', 'edge_e2e']
 markers = [
     "slow: long-running integration tests (e.g. live migration); excluded from the default integration run, opt in with -m slow",
+    "edge_e2e: edge-cluster e2e campaign (needs a provisioned AWS environment); never collected by the unit/integration tiers",
 ]
 # Per-test time BUDGET, not a safety net. The previous 900s ceiling was larger
 # than every stall it was meant to catch — a 300s hot-spin in cluster activation

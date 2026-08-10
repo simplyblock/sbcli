@@ -16,18 +16,21 @@ Steps:
    - add each node (device paths from the topology matrix) and wait ONLINE,
    - create the standard test volume.
 
-Run:  python e2e/edge/deploy.py [--skip-central]
+Run:  python edge_e2e/deploy.py [--skip-central]
 """
 import argparse
 import base64
+import json
 import os
 import sys
 
-from e2e.edge import helpers
-from e2e.edge.topology import CENTRAL, EDGE_CLUSTERS
+from edge_e2e import helpers
+from edge_e2e.topology import CENTRAL, EDGE_CLUSTERS
 
 VOLUME_NAME = "edge-e2e-vol"
 VOLUME_SIZE = 30 * 1024 ** 3
+CENTRAL_POOL = "edge-e2e-pool"
+CENTRAL_VOLUME = "edge-e2e-central-vol"
 
 DEFAULT_BOOTSTRAP_CMD = (
     "git clone https://github.com/simplyblock/simplyblock-deploy.git || true; "
@@ -62,6 +65,56 @@ def bootstrap_central(state):
         "cluster_secret": secret,
     })
     helpers.save_state(state)
+
+
+def prepare_central_workload(state):
+    """Create the pool + lvol the central (hyperscale) cluster's fio pod runs
+    against, and stash its connect info in the state file. Without this,
+    test 2's central leg silently skips."""
+    server = f"{CENTRAL.name}-mgmt"
+    cluster_id = state["central"]["cluster_id"]
+
+    pools = helpers.ssh(state, server, "sbctl storage-pool list --json", check=False)
+    if CENTRAL_POOL not in pools:
+        helpers.ssh(state, server,
+                    f"sbctl storage-pool add {CENTRAL_POOL} {cluster_id}")
+
+    volumes = helpers.ssh(state, server, "sbctl volume list --json", check=False)
+    if CENTRAL_VOLUME not in volumes:
+        helpers.ssh(state, server,
+                    f"sbctl volume add {CENTRAL_VOLUME} {VOLUME_SIZE // 1024 ** 3}G "
+                    f"{CENTRAL_POOL}")
+
+    raw = helpers.ssh(state, server,
+                      f"sbctl volume connect {CENTRAL_VOLUME} --json", check=False)
+    entries = _parse_connect(raw)
+    if not entries:
+        raise RuntimeError(f"could not parse central connect info from: {raw[:400]}")
+    state["central"]["fio_connect"] = entries
+    helpers.save_state(state)
+    print(f"central: workload volume {CENTRAL_VOLUME} ready ({len(entries)} path(s))")
+
+
+def _parse_connect(raw) -> list:
+    """Normalize `sbctl volume connect --json` output into the entry shape the
+    fio pod builder consumes (ip/port/nqn), tolerating both the hyphenated
+    v1 keys and the underscored variants."""
+    try:
+        payload = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return []
+    if isinstance(payload, dict):
+        payload = payload.get("results") or payload.get("data") or [payload]
+    entries = []
+    for item in payload if isinstance(payload, list) else []:
+        if not isinstance(item, dict):
+            continue
+        ip = item.get("ip") or item.get("traddr")
+        port = item.get("port") or item.get("trsvcid")
+        nqn = item.get("nqn") or item.get("subnqn")
+        if ip and port and nqn:
+            entries.append({"ip": ip, "port": port, "nqn": nqn})
+    return entries
 
 
 def prepare_partitions(state, spec):
@@ -145,6 +198,7 @@ def main():
         bootstrap_central(state)
     if not state["central"].get("api_url"):
         sys.exit("state.central.api_url missing — bootstrap central first")
+    prepare_central_workload(state)
 
     import requests
     admin_session = requests.Session()
