@@ -414,6 +414,31 @@ sbctl sn list
 # Expected: All nodes show "offline" status
 ```
 
+### Step 2.1 — Disable Auto-Restart on All Nodes
+
+**Critical:** Before uninstalling charts or installing the R26 operator, disable
+auto-restart on every storage node. Without this, the R26 operator's tasks-runner
+will detect offline nodes and create `node_restart` tasks immediately after
+starting. These stale tasks block the explicit `sn restart` in Step 10 (there is
+no `--force` flag for restart).
+
+```bash
+for NODE_ID in $(sbctl sn list --json | jq -r '.[].id'); do
+    sbctl --dev sn set "$NODE_ID" auto_restart_disabled true
+done
+```
+
+If stale restart tasks already exist (e.g. from a previous failed run), cancel
+them before proceeding:
+
+```bash
+# List tasks
+sbctl cluster list-tasks "$CLUSTER_ID" --limit 0
+
+# Cancel any running node_restart tasks
+sbctl cluster cancel-task "$CLUSTER_ID" "$TASK_ID"
+```
+
 ### Step 3 — Uninstall the `spdk-csi` Helm Chart
 
 ```bash

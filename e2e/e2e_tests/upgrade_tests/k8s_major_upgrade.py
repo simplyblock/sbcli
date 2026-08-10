@@ -1969,6 +1969,88 @@ spec:
             )
             self.logger.info(f"Storage node {node_id} CR refs patched")
 
+    def _disable_auto_restart_all_nodes(self, storage_node_list: list[dict]):
+        """Set auto_restart_disabled=true on all nodes.
+
+        Called before installing the R26 operator so its tasks-runner
+        won't create node_restart tasks for offline nodes.
+        """
+        self.logger.info(
+            "Disabling auto-restart on all storage nodes "
+            "(prevent operator restart tasks)"
+        )
+        sbcli = "sbcli-dev" if self.upgrade_type == "r25-to-r2x" else "sbctl"
+        for node in storage_node_list:
+            node_id = node["id"]
+            try:
+                self.k8s_utils.exec_sbcli(
+                    f"{sbcli} --dev sn set {node_id} auto_restart_disabled true"
+                )
+            except Exception as e:
+                self.logger.warning(
+                    f"Failed to disable auto-restart for {node_id}: {e}"
+                )
+
+    def _cancel_stale_restart_tasks(self):
+        """Cancel any running/new node_restart tasks before our explicit restart.
+
+        The R26 operator's tasks-runner may have created restart tasks for
+        offline nodes between Step 6 (operator install) and Step 6.1
+        (second shutdown).  These stale tasks block ``sn restart``.
+        """
+        self.logger.info("Checking for stale node_restart tasks to cancel")
+        sbcli = "sbctl"
+        try:
+            stdout, _ = self.k8s_utils.exec_sbcli(
+                f"{sbcli} cluster list-tasks {self.cluster_id} --json --limit 0"
+            )
+            if not stdout or not stdout.strip():
+                self.logger.info("No tasks found")
+                return
+
+            tasks = json.loads(stdout)
+            stale = [
+                t for t in tasks
+                if t.get("function") == "node_restart"
+                and t.get("status") in ("running", "new")
+            ]
+            if not stale:
+                self.logger.info("No stale node_restart tasks found")
+                return
+
+            self.logger.info(f"Found {len(stale)} stale node_restart tasks — cancelling")
+            for t in stale:
+                task_id = t.get("id") or t.get("task_id") or t.get("uuid")
+                target = t.get("target_id", "")
+                self.logger.info(f"  Cancelling task {task_id} ({target})")
+                try:
+                    self.k8s_utils.exec_sbcli(
+                        f"{sbcli} cluster cancel-task {self.cluster_id} {task_id}"
+                    )
+                except Exception as e:
+                    self.logger.warning(f"  cancel-task failed for {task_id}: {e}")
+
+            # Verify all cancelled
+            sleep_n_sec(5)
+            stdout2, _ = self.k8s_utils.exec_sbcli(
+                f"{sbcli} cluster list-tasks {self.cluster_id} --json --limit 0"
+            )
+            if stdout2 and stdout2.strip():
+                tasks2 = json.loads(stdout2)
+                remaining = [
+                    t for t in tasks2
+                    if t.get("function") == "node_restart"
+                    and t.get("status") in ("running", "new")
+                ]
+                if remaining:
+                    self.logger.warning(
+                        f"{len(remaining)} node_restart tasks still running after cancel"
+                    )
+                else:
+                    self.logger.info("All stale node_restart tasks cancelled successfully")
+        except Exception as e:
+            self.logger.warning(f"Failed to list/cancel stale tasks: {e}")
+
     def _restart_nodes_sequentially(self, storage_node_list: list[dict]):
         """Step 10: Restart each storage node one at a time with new SPDK image."""
         self.logger.info(
@@ -2114,6 +2196,11 @@ spec:
         self.logger.info("Migration Step 2: Shutting down all storage nodes")
         self._shutdown_all_nodes(storage_node_list)
 
+        # Step 2.1: Disable auto-restart — commented out, dev fixed the
+        # operator's tasks-runner to not create restart tasks for offline nodes.
+        # Uncomment if the product fix regresses.
+        # self._disable_auto_restart_all_nodes(storage_node_list)
+
         # Steps 3-4: Uninstall old Helm charts
         self.logger.info("Migration Steps 3-4: Uninstalling old Helm releases")
         self._uninstall_helm_releases()
@@ -2140,6 +2227,11 @@ spec:
 
         # Step 9: Patch backend CR references
         self._patch_backend_cr_references(storage_node_list)
+
+        # Step 9.1: Cancel stale restart tasks — commented out, dev fixed
+        # the operator to not create restart tasks during upgrade.
+        # Uncomment if stale tasks reappear.
+        # self._cancel_stale_restart_tasks()
 
         # Step 10: Restart storage nodes one at a time
         self._restart_nodes_sequentially(storage_node_list)
