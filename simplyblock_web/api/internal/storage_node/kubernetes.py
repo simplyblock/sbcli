@@ -6,7 +6,6 @@ import time
 import traceback
 from typing import List, Optional, Union
 
-import cpuinfo
 from flask_openapi3 import APIBlueprint
 from kubernetes.client import ApiException, V1DeleteOptions
 from jinja2 import Environment, PackageLoader
@@ -19,7 +18,7 @@ from simplyblock_web import utils, node_utils, node_utils_k8s
 from simplyblock_web.node_utils_k8s import namespace_id_file
 
 from . import docker as snode_ops
-from ._cloud_info import get_cloud_info
+from ._node_info import get_static_node_info
 
 
 logger = logging.getLogger(__name__)
@@ -112,14 +111,15 @@ def get_nodes_config():
     })}}},
 })
 def get_info():
+    node_info = get_static_node_info()
     return utils.get_response({
         "cluster_id": get_cluster_id(),
 
-        "hostname": HOSTNAME,
-        "system_id": SYSTEM_ID,
+        "hostname": node_info["hostname"],
+        "system_id": node_info["system_id"],
 
-        "cpu_count": CPU_INFO['count'],
-        "cpu_hz": CPU_INFO['hz_advertised'][0] if 'hz_advertised' in CPU_INFO else 1,
+        "cpu_count": node_info["cpu_info"]['count'],
+        "cpu_hz": node_info["cpu_info"]['hz_advertised'][0] if 'hz_advertised' in node_info["cpu_info"] else 1,
 
         "memory": node_utils.get_memory(),
         "hugepages": node_utils.get_huge_memory(),
@@ -133,7 +133,7 @@ def get_info():
 
         "network_interface": core_utils.get_nics_data(),
 
-        "cloud_instance": CLOUD_INFO,
+        "cloud_instance": node_info["cloud_info"],
         "nodes_config": get_nodes_config(),
     })
 
@@ -196,16 +196,6 @@ def make_gpt_partitions_for_nbd(body: _GPTPartitionsParams):
 
 
 api.post('/delete_dev_gpt_partitions')(snode_ops.delete_gpt_partitions_for_dev)
-
-
-CPU_INFO = cpuinfo.get_cpu_info()
-HOSTNAME, _, _ = shell_utils.run_command("hostname -s")
-SYSTEM_ID = ""
-CLOUD_INFO = get_cloud_info() or {}
-if CLOUD_INFO:
-    SYSTEM_ID = CLOUD_INFO["id"]
-else:
-    SYSTEM_ID, _, _ = shell_utils.run_command("dmidecode -s system-uuid")
 
 
 class SPDKParams(BaseModel):
