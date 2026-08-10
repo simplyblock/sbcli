@@ -3713,17 +3713,17 @@ def _delete_replica_on_peer(peer, primary, cluster):
         nqn = peer.hublvol_nqn_for_lvstore(cluster.nqn, lvstore)
         if rpc_client.subsystem_get(nqn):
             rpc_client.subsystem_delete(nqn)
-    except Exception as e:
+    except RPCException as e:
         logger.warning(f"hublvol subsystem teardown for {lvstore} on {peer.get_id()} failed: {e}")
     try:
         rpc_client.bdev_lvol_delete_hublvol(lvstore)
-    except Exception as e:
+    except RPCException as e:
         logger.warning(f"hublvol bdev teardown for {lvstore} on {peer.get_id()} failed: {e}")
     try:
         # deepcopy: _remove_bdev_stack stamps bdev['status']; don't mutate the
         # primary's stored stack definition.
         _remove_bdev_stack(copy.deepcopy(primary.lvstore_stack), rpc_client)
-    except Exception as e:
+    except RPCException as e:
         logger.warning(f"replica bdev-stack teardown for {lvstore} on {peer.get_id()} failed: {e}")
 
 
