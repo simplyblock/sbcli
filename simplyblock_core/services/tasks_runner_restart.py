@@ -457,7 +457,13 @@ def task_runner_node(task):
         if data_nic.ip4_address:
             data_ping_check = health_controller._check_ping_from_node(data_nic.ip4_address, ifname=data_nic.if_name, node=node)
             logger.info(f"Check: ping data nic {data_nic.ip4_address} ... {data_ping_check}")
-            node_data_nic_ping_check |= data_ping_check
+            # data_ping_check is tri-state (True/False/None): None means the
+            # SnodeAPI call itself errored/timed out (inconclusive), not that
+            # the ping failed. `|=` against None raises TypeError and crashes
+            # task processing every retry, wedging the task in a non-DONE
+            # state forever. Only an explicit True should flip this to True.
+            if data_ping_check is True:
+                node_data_nic_ping_check = True
     if not ping_check or not node_api_check or not node_data_nic_ping_check:
         # node is unreachable, retry
         logger.info(f"Node is not reachable: {task.node_id}, retry")
