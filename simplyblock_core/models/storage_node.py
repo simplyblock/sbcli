@@ -79,8 +79,10 @@ class StorageNode(BaseNodeObject):
     lvols: int = 0
     lvstore: str = ""
     lvstore_stack: List[dict] = []
-    lvstore_stack_secondary: List[dict] = []
-    lvstore_stack_tertiary: List[dict] = []
+    # Despite the names, these hold the UUID of the primary whose LVS this node
+    # serves as a peer for — not a bdev stack.
+    lvstore_stack_secondary: str = ""
+    lvstore_stack_tertiary: str = ""
     lvol_subsys_port: int = 9090
     lvstore_ports: dict = {}  # {lvs_name: {"lvol_subsys_port": N, "hublvol_port": M}}
     max_lvol: int = 0

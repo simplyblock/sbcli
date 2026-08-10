@@ -59,8 +59,8 @@ def _make_node(node_id, status=StorageNode.STATUS_ONLINE,
                     "write_protection": False}}
         for i, name in enumerate(distrib_names)
     ]
-    n.lvstore_stack_secondary = []
-    n.lvstore_stack_tertiary = []
+    n.lvstore_stack_secondary = ""
+    n.lvstore_stack_tertiary = ""
 
     rpc = MagicMock()
     rpc.distr_shared_placement = MagicMock(return_value=True)

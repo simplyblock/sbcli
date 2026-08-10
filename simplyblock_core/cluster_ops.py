@@ -1843,16 +1843,8 @@ def set_shared_placement(cl_id, enable=True, force=False) -> bool:
 
     # Step 3: persist the flag in every stored distrib stack entry on
     # every node, so restarts re-create with the new mode without needing
-    # to consult the cluster row.
-    #
-    # NB: only `lvstore_stack` is a List[dict] of bdev stack entries.
-    # Despite the model's type annotation, `lvstore_stack_secondary` and
-    # `_tertiary` hold a single UUID string — the id of the upstream
-    # primary whose LVS this node serves as a peer for. The peer's bdev
-    # params come from that primary's lvstore_stack at recreate time
-    # (see storage_node_ops._create_bdev_stack callers in step-2 /
-    # step-3 of full_node_recreate_lvstore), so updating the primary's
-    # stack here covers the peers automatically.
+    # to consult the cluster row. Peers recreate their bdevs from the
+    # primary's lvstore_stack, so updating primaries covers them too.
     for node in nodes:
         # Atomic compare-and-set: mutate only lvstore_stack on the freshly-read
         # node so the long per-node loop above can't clobber a concurrent
