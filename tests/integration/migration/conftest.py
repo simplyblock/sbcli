@@ -411,7 +411,7 @@ _TERMINAL_STATUSES = (LVolMigration.STATUS_DONE,
 
 
 def _drive(migration_id: str, max_steps: int, step_sleep: float,
-           on_step=None, stop_when=None) -> LVolMigration:
+           stop_when=None) -> LVolMigration:
     """Shared driver behind ``run_migration_task`` and ``advance_until``.
 
     Imports the task runner lazily to avoid pulling heavy service modules into
@@ -443,9 +443,6 @@ def _drive(migration_id: str, max_steps: int, step_sleep: float,
         if task is None:
             break  # task marked done and dropped from active list
 
-        if on_step is not None:
-            on_step(step)
-
         terminal = task_runner(task)
 
         migration = db.get_migration_by_id(migration_id)
@@ -462,19 +459,12 @@ def _drive(migration_id: str, max_steps: int, step_sleep: float,
 
 
 def run_migration_task(migration_id: str, max_steps: int = 200,
-                       step_sleep: float = 0.05, on_step=None) -> LVolMigration:
+                       step_sleep: float = 0.05) -> LVolMigration:
     """
     Drive the migration task-runner synchronously until the migration reaches a
     terminal state or ``max_steps`` iterations are exhausted.
-
-    ``on_step(step)`` runs immediately before each ``task_runner`` call, with the
-    0-based step index.  Tests use it to inject an event — a node going offline,
-    say — at an exact tick.  Injecting from this loop rather than from a
-    wall-clock thread is what makes such a test deterministic: the test owns
-    every tick, so "how long was the node down" is a tick count, not a race
-    between a ``time.sleep`` and however fast the runner happens to be.
     """
-    return _drive(migration_id, max_steps, step_sleep, on_step=on_step)
+    return _drive(migration_id, max_steps, step_sleep)
 
 
 def advance_until(migration_id: str, predicate, max_steps: int = 200,
