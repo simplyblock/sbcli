@@ -284,6 +284,63 @@ class TestTeardownOwnReplicas(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# _delete_replica_on_peer — the peer-side hublvol+bdev teardown _teardown_
+# replicas_of_primary and _relocate_replica_between both call.
+#
+# Regression coverage for a real bug found live (2026-08-10): the hublvol
+# subsystem check called rpc_client.subsystem_list(nqn), but subsystem_list()
+# takes no arguments at all (it lists everything, unfiltered) -- every call
+# raised TypeError, silently swallowed by the surrounding best-effort
+# try/except, so the hublvol subsystem was never actually torn down on any
+# peer during node removal. subsystem_get(nqn) is the existing, correct,
+# server-side-filtered method for this.
+# ---------------------------------------------------------------------------
+
+class TestDeleteReplicaOnPeer(unittest.TestCase):
+
+    def test_deletes_subsystem_when_present(self):
+        cl = _cluster()
+        primary = _node("p1", lvstore="LVS_1")
+        peer = _node("peer1", lvstore="LVS_1")  # hublvol_nqn_for_lvstore's mocked return value bakes in this lvstore
+        rpc = peer.rpc_client()
+        rpc.subsystem_get.return_value = {"nqn": "nqn:hub:LVS_1"}
+        storage_node_ops._delete_replica_on_peer(peer, primary, cl)
+        rpc.subsystem_get.assert_called_once_with("nqn:hub:LVS_1")
+        rpc.subsystem_delete.assert_called_once_with("nqn:hub:LVS_1")
+
+    def test_skips_delete_when_subsystem_absent(self):
+        cl = _cluster()
+        primary = _node("p1", lvstore="LVS_1")
+        peer = _node("peer1", lvstore="LVS_1")  # hublvol_nqn_for_lvstore's mocked return value bakes in this lvstore
+        rpc = peer.rpc_client()
+        rpc.subsystem_get.return_value = None
+        storage_node_ops._delete_replica_on_peer(peer, primary, cl)
+        rpc.subsystem_get.assert_called_once_with("nqn:hub:LVS_1")
+        rpc.subsystem_delete.assert_not_called()
+
+    def test_subsystem_get_failure_is_caught_not_raised(self):
+        # Best-effort: an RPC failure here must not propagate and block removal.
+        cl = _cluster()
+        primary = _node("p1", lvstore="LVS_1")
+        peer = _node("peer1", lvstore="LVS_1")  # hublvol_nqn_for_lvstore's mocked return value bakes in this lvstore
+        rpc = peer.rpc_client()
+        rpc.subsystem_get.side_effect = Exception("connection error")
+        storage_node_ops._delete_replica_on_peer(peer, primary, cl)  # must not raise
+        rpc.subsystem_delete.assert_not_called()
+        # Teardown of the other artifacts still proceeds despite this failure.
+        rpc.bdev_lvol_delete_hublvol.assert_called_once_with("LVS_1")
+
+    def test_no_op_when_primary_has_no_lvstore(self):
+        cl = _cluster()
+        primary = _node("p1", lvstore="")
+        peer = _node("peer1", lvstore="LVS_1")  # hublvol_nqn_for_lvstore's mocked return value bakes in this lvstore
+        rpc = peer.rpc_client()
+        storage_node_ops._delete_replica_on_peer(peer, primary, cl)
+        rpc.subsystem_get.assert_not_called()
+        rpc.bdev_lvol_delete_hublvol.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # Case B — relocate a hosted replica
 # ---------------------------------------------------------------------------
 
