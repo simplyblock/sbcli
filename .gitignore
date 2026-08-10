@@ -18,3 +18,8 @@ AGENTS.local.md
 
 # Local-only agent configs, not shared via git
 .claude/agents/
+
+# Edge e2e campaign: run state carries cluster secrets and k8s SA tokens;
+# run artifacts are large. Never commit either.
+edge_e2e/state.json
+edge_e2e/runs/
