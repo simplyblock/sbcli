@@ -32,6 +32,7 @@ before the cutover runner flips ANA.
 """
 import json
 import os
+import socket
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -91,7 +92,7 @@ SSH_RETRIES = 4
 SSH_RETRY_BACKOFF = 5
 
 
-def run(ip, key_path, cmd, check=True, quiet=False):
+def run(ip, key_path, cmd, check=True, quiet=False, timeout=900):
     if not quiet:
         print(f"  [{ip}] $ {cmd}")
 
@@ -104,7 +105,7 @@ def run(ip, key_path, cmd, check=True, quiet=False):
     for attempt in range(1, SSH_RETRIES + 1):
         try:
             ssh = _ssh(ip, key_path)
-            _in, out, err = ssh.exec_command(cmd, timeout=900)
+            _in, out, err = ssh.exec_command(cmd, timeout=timeout)
             break
         except (paramiko.SSHException, OSError, EOFError) as exc:
             if ssh is not None:
@@ -120,9 +121,24 @@ def run(ip, key_path, cmd, check=True, quiet=False):
                   f"({attempt + 1}/{SSH_RETRIES})")
             time.sleep(delay)
 
-    o = out.read().decode()
-    e = err.read().decode()
-    rc = out.channel.recv_exit_status()
+    try:
+        o = out.read().decode()
+        e = err.read().decode()
+        rc = out.channel.recv_exit_status()
+    except (socket.timeout, TimeoutError, OSError, paramiko.SSHException) as exc:
+        # The command was dispatched, so we cannot safely replay it. For
+        # best-effort work (check=False) a hang must not kill the run: an
+        # `umount`/`nvme disconnect` can block indefinitely once the cutover has
+        # moved the device, which is exactly how a PASSING case 1 still took the
+        # driver down before case 2 could start.
+        try:
+            ssh.close()
+        except Exception:
+            pass
+        if check:
+            raise RuntimeError(f"SSH read failed on {ip} for: {cmd} ({exc})") from exc
+        print(f"  [{ip}] read timed out on best-effort command, continuing: {cmd}")
+        return ""
     ssh.close()
     if rc != 0 and check:
         print(o[-2000:])
@@ -365,20 +381,34 @@ def cleanup_client(client_ip, key_path, mounts):
     # subsequent run then dies on `mkdir -p` of that same path.
     for m in mounts:
         run(client_ip, key_path,
-            f"sudo umount {m['mount']} 2>/dev/null "
-            f"|| sudo umount -f {m['mount']} 2>/dev/null "
-            f"|| sudo umount -l {m['mount']} 2>/dev/null || true", check=False)
+            f"sudo timeout 15 umount {m['mount']} 2>/dev/null "
+            f"|| sudo timeout 15 umount -f {m['mount']} 2>/dev/null "
+            f"|| sudo timeout 15 umount -l {m['mount']} 2>/dev/null || true",
+            check=False, timeout=90)
     for m in mounts:
         if m.get("nqn"):
-            run(client_ip, key_path, f"sudo nvme disconnect -n {m['nqn']} 2>/dev/null || true", check=False)
+            run(client_ip, key_path,
+                f"sudo timeout 30 nvme disconnect -n {m['nqn']} 2>/dev/null || true",
+                check=False, timeout=90)
 
 
 def prepare_mount_points(client_ip, key_path):
-    """Clear stale mountpoints left by an aborted run before mounting again."""
+    """Clear stale fio + mountpoints left by an aborted run before mounting again.
+
+    fio is started with nohup, so it survives the driver being killed and keeps
+    the old mounts busy (and keeps writing). Kill it first, or the unmount below
+    fails and we are back to stale EIO mountpoints.
+    """
+    run(client_ip, key_path, "sudo pkill -x fio || true", check=False, timeout=60)
+    time.sleep(3)
+    # `timeout 15` per unmount: once the cutover has moved the device, umount can
+    # block forever in the kernel, and relying on the SSH read timeout alone
+    # stalls the driver for the full read window on EVERY stale mount.
     run(client_ip, key_path,
         "for m in /mnt/repl*; do "
-        "sudo umount -f \"$m\" 2>/dev/null || sudo umount -l \"$m\" 2>/dev/null || true; "
-        "sudo rmdir \"$m\" 2>/dev/null || true; done", check=False)
+        "sudo timeout 15 umount -f \"$m\" 2>/dev/null "
+        "|| sudo timeout 15 umount -l \"$m\" 2>/dev/null || true; "
+        "sudo rmdir \"$m\" 2>/dev/null || true; done", check=False, timeout=180)
 
 
 # --------------------------------------------------------------------------- #

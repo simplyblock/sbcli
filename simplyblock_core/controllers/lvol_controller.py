@@ -3047,25 +3047,53 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
 
 
 def _last_replicated_target_snapshot(db_controller, lvol_id, cluster_id):
-    """Return the target-cluster copy of the most recent replicated snapshot of
-    *lvol_id*, or None."""
+    """Return the target-cluster copy of the most recent FULLY replicated
+    snapshot of *lvol_id*, or None.
+
+    A fail-over point must be a snapshot whose data actually reached the target:
+
+      * the replication task must be STATUS_DONE. A target snapshot record is
+        created before/while the data is transferred, so
+        ``target_replicated_snap_uuid`` being set proves only that the copy was
+        allocated -- not that it holds any data. Selecting such a snapshot yields
+        a clone that reads as zeros.
+      * the target copy must not be in deletion. Retention deletes replicated
+        snapshots, and cloning from one that is going away leaves the failed-over
+        volume with an orphaned parent (again: reads as zeros).
+
+    Candidates are walked newest-first so an incomplete or disappearing newest
+    snapshot falls back to the last good one rather than failing the fail-over.
+    """
     snaps = []
     for task in db_controller.get_job_tasks(cluster_id):
-        if task.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION:
-            try:
-                snap = db_controller.get_snapshot_by_id(task.function_params["snapshot_id"])
-            except KeyError:
-                continue
-            if snap.lvol.get_id() != lvol_id or not snap.target_replicated_snap_uuid:
-                continue
-            snaps.append(snap)
-    if not snaps:
-        return None
-    snaps.sort(key=lambda x: x.created_at)
-    try:
-        return db_controller.get_snapshot_by_id(snaps[-1].target_replicated_snap_uuid)
-    except KeyError:
-        return None
+        if task.function_name != JobSchedule.FN_SNAPSHOT_REPLICATION:
+            continue
+        if task.status != JobSchedule.STATUS_DONE:
+            continue
+        try:
+            snap = db_controller.get_snapshot_by_id(task.function_params["snapshot_id"])
+        except KeyError:
+            continue
+        if snap.lvol.get_id() != lvol_id or not snap.target_replicated_snap_uuid:
+            continue
+        snaps.append(snap)
+
+    snaps.sort(key=lambda x: x.created_at, reverse=True)
+    for snap in snaps:
+        try:
+            target_snap = db_controller.get_snapshot_by_id(snap.target_replicated_snap_uuid)
+        except KeyError:
+            logger.warning(
+                f"Fail-over candidate {snap.get_id()}: target copy "
+                f"{snap.target_replicated_snap_uuid} is gone; trying an older snapshot")
+            continue
+        if target_snap.status == SnapShot.STATUS_IN_DELETION:
+            logger.warning(
+                f"Fail-over candidate {snap.get_id()}: target copy "
+                f"{target_snap.get_id()} is in deletion; trying an older snapshot")
+            continue
+        return target_snap
+    return None
 
 
 def replicate_lvol_on_target_cluster(lvol_id):

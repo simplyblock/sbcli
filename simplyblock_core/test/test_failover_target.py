@@ -91,6 +91,10 @@ class _FakeDB:
     def get_job_tasks(self, cluster_id, reverse=True):
         t = JobSchedule()
         t.function_name = JobSchedule.FN_SNAPSHOT_REPLICATION
+        # STATUS_DONE is required: these cases assume a snapshot whose data
+        # actually reached the target, and a fail-over point is only valid once
+        # its replication task has completed (JobSchedule.status defaults to "").
+        t.status = JobSchedule.STATUS_DONE
         t.function_params = {"snapshot_id": "s1"}
         return [t]
 
