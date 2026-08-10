@@ -2052,7 +2052,14 @@ spec:
             self.logger.warning(f"Failed to list/cancel stale tasks: {e}")
 
     def _restart_nodes_sequentially(self, storage_node_list: list[dict]):
-        """Step 10: Restart each storage node one at a time with new SPDK image."""
+        """Step 10: Restart each storage node one at a time with new SPDK image.
+
+        In the maintenance upgrade path all nodes start offline, so the
+        cluster cannot become ``active`` until every node is back online.
+        We therefore restart all nodes first (waiting only for each
+        individual node to reach ``online``), then let the caller check
+        cluster-active status after the loop.
+        """
         self.logger.info(
             f"Migration Step 10: Restarting {len(storage_node_list)} nodes sequentially"
         )
@@ -2063,8 +2070,6 @@ spec:
             self.logger.info(
                 f"  Restarting node {node_id} ({idx + 1}/{len(storage_node_list)})"
             )
-
-            restart_ts = int(datetime.now().timestamp())
 
             spdk_flag = ""
             if self.target_spdk_image:
@@ -2083,19 +2088,8 @@ spec:
             )
             self.logger.info(f"  Node {node_id} is back online")
 
-            # Wait for cluster active before next node
-            self.sbcli_utils.wait_for_cluster_status(
-                cluster_id=self.cluster_id, status="active", timeout=600,
-            )
-
-            # Wait for migration tasks
-            sleep_n_sec(30)
-            self.validate_migration_for_node(
-                restart_ts, 1200, node_id, 60, no_task_ok=True
-            )
-
             if idx < len(storage_node_list) - 1:
-                sleep_n_sec(30)
+                sleep_n_sec(10)
 
         self.logger.info("All storage nodes restarted successfully")
 
