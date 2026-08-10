@@ -23,6 +23,7 @@ from simplyblock_core import storage_node_ops
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
 from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.rpc_client import RPCConnectionError
 
 
 # ---------------------------------------------------------------------------
@@ -324,7 +325,7 @@ class TestDeleteReplicaOnPeer(unittest.TestCase):
         primary = _node("p1", lvstore="LVS_1")
         peer = _node("peer1", lvstore="LVS_1")  # hublvol_nqn_for_lvstore's mocked return value bakes in this lvstore
         rpc = peer.rpc_client()
-        rpc.subsystem_get.side_effect = Exception("connection error")
+        rpc.subsystem_get.side_effect = RPCConnectionError("connection error")
         storage_node_ops._delete_replica_on_peer(peer, primary, cl)  # must not raise
         rpc.subsystem_delete.assert_not_called()
         # Teardown of the other artifacts still proceeds despite this failure.
