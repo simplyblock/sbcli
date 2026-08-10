@@ -2534,6 +2534,16 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         else:
             minimum_sys_memory = node_config.get("sys_memory")
         max_lvol = node_config.get("max_lvol")
+        # Clamp rather than fail: a config file generated before the cap was
+        # enforced (or hand-edited) can carry a larger value, and refusing the
+        # add would strand hosts that are otherwise fine. The node record then
+        # states the limit that actually applies at placement time.
+        if max_lvol and int(max_lvol) > constants.MAX_SUBSYSTEMS_PER_NODE:
+            logger.warning(
+                f"max_lvol {max_lvol} from the node config exceeds the maximum of "
+                f"{constants.MAX_SUBSYSTEMS_PER_NODE} subsystems per storage node; "
+                f"using {constants.MAX_SUBSYSTEMS_PER_NODE}")
+            max_lvol = constants.MAX_SUBSYSTEMS_PER_NODE
         ssd_pcie = node_config.get("ssd_pcis")
 
         if ssd_pcie:
@@ -3906,6 +3916,14 @@ def restart_storage_node(
     the only way post-call status can be RESTARTING is that THIS call's
     `try_set_node_restarting` acquired the lock and a subsequent step
     failed — that's the case the cleanup is for."""
+    # Refuse an over-cap max_lvol before touching node status: a restart is
+    # the one path that can raise an existing node's limit, and the impl
+    # applies it (snode.max_lvol = max_lvol) without any ceiling of its own.
+    if max_lvol and max_lvol > constants.MAX_SUBSYSTEMS_PER_NODE:
+        logger.error(f"max_lvol {max_lvol} exceeds the maximum of "
+                     f"{constants.MAX_SUBSYSTEMS_PER_NODE} subsystems per storage node")
+        return False
+
     db_ctrl = DBController()
     pre_status = None
     _snode_pre = None
@@ -6019,6 +6037,16 @@ def upgrade_automated_deployment_config():
 def generate_automated_deployment_config(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_allowed, pci_blocked,
                                          cores_percentage=0, force=False, device_model="", size_range="", nvme_names=None, k8s=False,
                                          calculate_hp_only=False, number_of_devices=0):
+    # Reject an over-cap max_lvol here rather than only in the CLI: this is the
+    # single entry point shared by `sn configure` and the k8s node-configure
+    # job, and the value it writes into NODES_CONFIG_FILE becomes the node's
+    # max_lvol at add time. Above the cap it also sizes huge pages for
+    # subsystems the node can never serve (placement caps at
+    # MAX_SUBSYSTEMS_PER_NODE).
+    if int(max_lvol or 0) > constants.MAX_SUBSYSTEMS_PER_NODE:
+        logger.error(f"max_lvol {max_lvol} exceeds the maximum of "
+                     f"{constants.MAX_SUBSYSTEMS_PER_NODE} subsystems per storage node")
+        return False
     if calculate_hp_only:
         minimum_hp_memory = utils.calculate_hp_only(max_lvol, number_of_devices, sockets_to_use, nodes_per_socket, cores_percentage)
         hp_number = math.ceil(minimum_hp_memory / 2)

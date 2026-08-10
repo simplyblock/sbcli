@@ -33,7 +33,11 @@ commands:
           yaml config to be used when adding the storage node.
         arguments:
           - name: "--max-subsys"
-            help: "The max number of subsystems per storage node."
+            help: "The max number of subsystems per storage node. Must not exceed 75."
+            description: >
+              The maximum number of nvmf subsystems this storage node may serve. 75 is a hard
+              product limit and larger values are rejected: they only inflated the huge-page
+              reservation, since volume placement always capped the node at 75 regardless.
             dest: max_lvol
             type: int
             required: true
@@ -346,7 +350,11 @@ commands:
             completer: _completer_get_sn_list
             type: str
           - name: "--max-subsys"
-            help: "The max number of subsystems per storage node. Default: `0`."
+            help: "The max number of subsystems per storage node. Must not exceed 75. Default: `0`."
+            description: >
+              The maximum number of nvmf subsystems this storage node may serve. 75 is a hard
+              product limit and larger values are rejected. `0` keeps the value the node was
+              added with.
             dest: max_lvol
             type: int
             default: 0

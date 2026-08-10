@@ -310,6 +310,14 @@ MAX_NAMESPACES_PER_SUBSYSTEM = 50
 # Hard cap on lvol subsystems per node (primary subsystems; namespaced
 # volumes share one). Applied as a ceiling over the node's configured
 # max_lvol: effective limit = min(max_lvol, this).
+#
+# It is also the admission ceiling for the user-supplied max_lvol itself
+# (`sn configure --max-subsys`, `sn restart --max-subsys`, the k8s
+# node-configure entrypoint and persist_node_config). A larger value was
+# accepted before and then silently clamped at placement time, so the node
+# reserved huge pages for subsystems it could never serve and operators
+# believed a limit that did not hold. Ingress now rejects anything above
+# this; internal readers of an already-stored config clamp with a warning.
 MAX_SUBSYSTEMS_PER_NODE = 75
 
 SPDK_PROXY_MULTI_THREADING_ENABLED=True

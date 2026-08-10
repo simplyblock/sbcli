@@ -704,7 +704,7 @@ def bind_device_to_spdk(body: utils.DeviceParams):
 
 
 class PersistNodeConfigParams(BaseModel):
-    max_lvol: Optional[int] = Field(None, ge=0)
+    max_lvol: Optional[int] = Field(None, ge=0, le=constants.MAX_SUBSYSTEMS_PER_NODE)
     huge_page_memory: Optional[int] = Field(None, ge=0)
     numa_node: Optional[int] = Field(None, ge=0)
     ssd_list: Optional[List[str]] = Field(None)

@@ -74,7 +74,7 @@ on:
       BOOTSTRAP_MAX_SUBSYS:
         description: "bootstrap: --max-subsys"
         required: true
-        default: "300"
+        default: "75"
       BOOTSTRAP_DATA_CHUNKS:
         description: "bootstrap: --data-chunks-per-stripe (also ndcs)"
         required: true
