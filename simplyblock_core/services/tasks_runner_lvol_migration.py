@@ -1321,7 +1321,7 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                     snap = db.get_snapshot_by_id(snap_uuid)
                 except KeyError:
                     return False, True, f"Snapshot {snap_uuid} not found in DB"
-                if snap.lvol.ha_type == "ha":
+                if snap.lvol.ha_type != "single":
                     tgt_sec, sec_err = _get_target_secondary_node(tgt_node, src_node.get_id())
                     if sec_err:
                         migration.error_message = sec_err
@@ -1331,16 +1331,13 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                         return False, True, None
                     if tgt_sec:
                         sec_rpc = _make_rpc(tgt_sec)
-                elif snap.lvol.ha_type == "ha3":
-                    tgt_sec, sec_err = _get_target_secondary_node(tgt_node, src_node.get_id())
-                    if sec_err:
-                        migration.error_message = sec_err
-                        migration.write_to_db(db.kv_store)
-                        # transient replica state: suspend (via error_message),
-                        # don't charge the retry budget toward cleanup_target
-                        return False, True, None
-                    if tgt_sec:
-                        sec_rpc = _make_rpc(tgt_sec)
+
+                    # Tertiary eligibility is a property of the target node's own
+                    # LVS topology (tgt_node.tertiary_node_id), not of this lvol's
+                    # ha_type -- match every other subsystem's detection
+                    # (snapshot_controller.delete, lvol_controller, health_controller,
+                    # snapshot_monitor, storage_node_monitor, cluster_expansion,
+                    # replication_final_step all check tertiary_node_id directly).
                     tgt_ter, ter_err = _get_target_tertiary_node(tgt_node, src_node.get_id())
                     if ter_err:
                         migration.error_message = ter_err
@@ -1558,7 +1555,7 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         sec_rpc = None
         tgt_ter = None
         ter_rpc = None
-        if snap.lvol.ha_type in ("ha", "ha3"):
+        if snap.lvol.ha_type != "single":
             tgt_sec, sec_err = _get_target_secondary_node(tgt_node, src_node.get_id())
             if sec_err:
                 migration.error_message = sec_err
@@ -1568,7 +1565,11 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                 return False, True, None
             if tgt_sec:
                 sec_rpc = _make_rpc(tgt_sec)
-        if snap.lvol.ha_type == "ha3":
+
+            # Tertiary eligibility is a property of the target node's own LVS
+            # topology (tgt_node.tertiary_node_id), not of this lvol's ha_type
+            # -- match every other subsystem's detection (see the identical
+            # comment at the snap-copy call site above).
             tgt_ter, ter_err = _get_target_tertiary_node(tgt_node, src_node.get_id())
             if ter_err:
                 migration.error_message = ter_err
@@ -1865,15 +1866,23 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         }
 
     else:
-        # --- Gate: check target secondary state before creating on target primary ---
-        if lvol.ha_type == "ha":
-            _, sec_err = _get_target_secondary_node(tgt_node, src_node.get_id())
-            if sec_err:
-                migration.error_message = sec_err
-                migration.write_to_db(db.kv_store)
-                # transient replica state: suspend (via error_message),
-                # don't charge the retry budget toward cleanup_target
-                return False, True, None
+        # --- Gate: check target secondary/tertiary state before creating on
+        # target primary. tgt_sec/tgt_ter were already resolved unconditionally
+        # above (node topology, not lvol.ha_type) -- match that here instead of
+        # re-deriving readiness from ha_type. ---
+        _, sec_err = _get_target_secondary_node(tgt_node, src_node.get_id())
+        if sec_err:
+            migration.error_message = sec_err
+            migration.write_to_db(db.kv_store)
+            # transient replica state: suspend (via error_message),
+            # don't charge the retry budget toward cleanup_target
+            return False, True, None
+        _, ter_err = _get_target_tertiary_node(tgt_node, src_node.get_id())
+        if ter_err:
+            migration.error_message = ter_err
+            migration.write_to_db(db.kv_store)
+            # transient replica state: suspend, don't charge retries
+            return False, True, None
 
         # --- Start the final migration ---
 

@@ -996,7 +996,7 @@ def create_migration(lvol_id, target_node_id,
     # ── 1d. Register migration bdev on TGT-sec and TGT-ter ───────────────────
     # All HA peers need bdev_lvol_register so they can mirror writes during migration.
     _pre_sec_node = None
-    if lvol.ha_type in ("ha", "ha3") and tgt_node.secondary_node_id:
+    if lvol.ha_type != "single" and tgt_node.secondary_node_id:
         try:
             _pre_sec_node = db.get_storage_node_by_id(tgt_node.secondary_node_id)
             _sec_rpc_reg  = _pre_sec_node.rpc_client()
@@ -1066,7 +1066,7 @@ def create_migration(lvol_id, target_node_id,
         src_node_ids.add(src_node.tertiary_node_id)
 
     tgt_sec_node = None
-    if lvol.ha_type in ("ha", "ha3") and tgt_node.secondary_node_id:
+    if lvol.ha_type != "single" and tgt_node.secondary_node_id:
         tgt_sec_node = (_pre_sec_node if _pre_sec_node is not None else None)
         if tgt_sec_node is None:
             try:
