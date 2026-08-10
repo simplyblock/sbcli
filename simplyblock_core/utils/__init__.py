@@ -677,7 +677,21 @@ def make_async_handler(target_handler):
     log_queue: "_queue.Queue" = _queue.Queue(-1)  # unbounded; enqueue never blocks a worker
     listener = _lh.QueueListener(log_queue, target_handler, respect_handler_level=False)
     listener.start()
-    atexit.register(listener.stop)
+
+    def _stop_if_running() -> None:
+        # TODO(drop-py3.9): delete this wrapper and register listener.stop
+        # directly once Python 3.9 support is dropped. On 3.9,
+        # QueueListener.stop() is not idempotent (`self._thread.join();
+        # self._thread = None` with no guard), so a second call raises
+        # AttributeError. Callers that need the listener drained
+        # deterministically (e.g. tests) may already have called `stop()`
+        # themselves before interpreter exit; only stop here if that hasn't
+        # happened yet. Fixed upstream in https://github.com/python/cpython/issues/114706
+        # (backported to 3.10+), where stop() guards on `if self._thread`.
+        if listener._thread is not None:
+            listener.stop()
+
+    atexit.register(_stop_if_running)
     qh = _lh.QueueHandler(log_queue)
     qh._listener = listener  # type: ignore[attr-defined]  # strong ref, not GC'd
     return qh
