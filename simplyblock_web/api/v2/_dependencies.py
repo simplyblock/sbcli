@@ -1,4 +1,4 @@
-from typing import Annotated
+from typing import Annotated, Union
 from uuid import UUID
 
 from fastapi import Depends, HTTPException
@@ -143,19 +143,6 @@ def _lookup_backup_policy(policy_id: UUID, cluster: Cluster) -> BackupPolicy:
 Policy = Annotated[BackupPolicy, Depends(_lookup_backup_policy)]
 
 
-def _lookup_migration(migration_id: UUID, volume: Volume) -> LVolMigration:
-    try:
-        migration = _db.get_migration_by_id(str(migration_id))
-    except KeyError as e:
-        raise HTTPException(404, str(e))
-    if migration.lvol_id != volume.get_id():
-        raise HTTPException(404, f'Migration {migration_id} not found')
-    return migration
-
-
-Migration = Annotated[LVolMigration, Depends(_lookup_migration)]
-
-
 def _lookup_subsystem(nqn: str, cluster: Cluster) -> str:
     """Validate that `nqn` roughly looks like a real NQN and return it as-is.
 
@@ -177,16 +164,38 @@ def _lookup_subsystem(nqn: str, cluster: Cluster) -> str:
 Subsystem = Annotated[str, Depends(_lookup_subsystem)]
 
 
-def _lookup_batch_migration(migration_id: UUID, cluster: Cluster, subsystem: Subsystem) -> LVolMigrationGroup:
+def _lookup_subsystem_migration(
+    migration_id: UUID, cluster: Cluster, subsystem: Subsystem,
+) -> Union[LVolMigration, LVolMigrationGroup]:
+    """Resolve *migration_id* under subsystem `nqn`, as either a single-lvol
+    migration or a batch (shared-namespace) migration group — whichever it
+    actually is. Group lookup is tried first since a group id and a plain
+    migration id are both UUIDs drawn from disjoint spaces, so at most one
+    lookup can ever succeed.
+    """
     try:
         group = _db.get_migration_group_by_id(str(migration_id))
+    except KeyError:
+        pass
+    else:
+        if group.cluster_id == cluster.get_id() and group.target_nqn == subsystem:
+            return group
+
+    try:
+        migration = _db.get_migration_by_id(str(migration_id))
     except KeyError as e:
         raise HTTPException(404, str(e))
-    if group.cluster_id != cluster.get_id() or group.target_nqn != subsystem:
-        raise HTTPException(404, f'Batch migration {migration_id} not found')
-    return group
+    try:
+        lvol = _db.get_lvol_by_id(migration.lvol_id)
+    except KeyError:
+        lvol = None
+    if migration.cluster_id != cluster.get_id() or lvol is None or lvol.nqn != subsystem:
+        raise HTTPException(404, f'Migration {migration_id} not found')
+    return migration
 
 
-BatchMigration = Annotated[LVolMigrationGroup, Depends(_lookup_batch_migration)]
+SubsystemMigration = Annotated[
+    Union[LVolMigration, LVolMigrationGroup], Depends(_lookup_subsystem_migration)
+]
 
 
