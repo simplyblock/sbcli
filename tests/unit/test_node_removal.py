@@ -17,13 +17,13 @@ pure control-flow + bookkeeping tests.
 """
 
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import DEFAULT, MagicMock, patch
 
 from simplyblock_core import storage_node_ops
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
 from simplyblock_core.models.cluster import Cluster
-from simplyblock_core.rpc_client import RPCConnectionError
+from simplyblock_core.rpc_client import RPCConnectionError, RPCException
 
 
 # ---------------------------------------------------------------------------
@@ -802,6 +802,187 @@ class TestDecommissionDevices(unittest.TestCase):
             ret = storage_node_ops._decommission_node_devices(removed)
         self.assertTrue(ret)
         dc.device_remove.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# node_removal_orchestrate — phase-5 resume gap
+#
+# Phase 4 flips node status to REMOVED *before* phase 5 (device/JM
+# decommission) runs. "status == REMOVED" therefore means phases 1/3a/3b/4
+# committed, NOT that removal is fully done -- a resumed attempt must still
+# (re)run phase 5 rather than short-circuiting to "done" (2026-08-10
+# incident: an RPC error mid phase 5 left a peer's lvstore un-rebuilt while
+# the task still reported "Node removed").
+# ---------------------------------------------------------------------------
+
+class TestNodeRemovalOrchestrateResumesPhase5(unittest.TestCase):
+
+    def _patch_all(self):
+        return patch.multiple(
+            storage_node_ops,
+            DBController=DEFAULT,
+            cluster_ops=DEFAULT,
+            shutdown_storage_node=DEFAULT,
+            _teardown_replicas_of_primary=DEFAULT,
+            _relocate_replicas_hosted_on=DEFAULT,
+            _finalize_node_removal=DEFAULT,
+            set_node_status=DEFAULT,
+            _decommission_node_devices=DEFAULT,
+        )
+
+    def test_already_removed_skips_phases_1_to_4_but_reruns_phase5(self):
+        cl = _cluster()
+        node = _node("n1", status=StorageNode.STATUS_REMOVED)
+        db = FakeDB(cl, [node])
+        with self._patch_all() as mocks:
+            mocks["DBController"].return_value = db
+            mocks["_decommission_node_devices"].return_value = True
+            ret = storage_node_ops.node_removal_orchestrate("n1")
+
+        self.assertTrue(ret)
+        mocks["shutdown_storage_node"].assert_not_called()
+        mocks["_teardown_replicas_of_primary"].assert_not_called()
+        mocks["_relocate_replicas_hosted_on"].assert_not_called()
+        mocks["_finalize_node_removal"].assert_not_called()
+        mocks["set_node_status"].assert_not_called()
+        mocks["_decommission_node_devices"].assert_called_once_with(node)
+
+    def test_already_removed_reports_incomplete_if_phase5_fails_again(self):
+        # The regression this guards: a prior attempt raised mid phase 5
+        # after the status flip had already committed. The retry must
+        # actually retry phase 5, not silently report done because status
+        # already reads REMOVED.
+        cl = _cluster()
+        node = _node("n1", status=StorageNode.STATUS_REMOVED)
+        db = FakeDB(cl, [node])
+        with self._patch_all() as mocks:
+            mocks["DBController"].return_value = db
+            mocks["_decommission_node_devices"].return_value = False
+            ret = storage_node_ops.node_removal_orchestrate("n1")
+
+        self.assertFalse(ret)
+        mocks["_decommission_node_devices"].assert_called_once_with(node)
+
+    def test_fresh_removal_still_runs_all_phases_then_phase5(self):
+        # Regression guard the other way: a from-scratch removal (status
+        # still ONLINE) must not skip phases 1/3a/3b/4.
+        cl = _cluster()
+        node = _node("n1", status=StorageNode.STATUS_ONLINE)
+        db = FakeDB(cl, [node])
+        with self._patch_all() as mocks:
+            mocks["DBController"].return_value = db
+            mocks["shutdown_storage_node"].return_value = True
+            mocks["_teardown_replicas_of_primary"].return_value = True
+            mocks["_relocate_replicas_hosted_on"].return_value = True
+            mocks["_decommission_node_devices"].return_value = True
+            ret = storage_node_ops.node_removal_orchestrate("n1")
+
+        self.assertTrue(ret)
+        mocks["shutdown_storage_node"].assert_called_once()
+        mocks["_teardown_replicas_of_primary"].assert_called_once()
+        mocks["_relocate_replicas_hosted_on"].assert_called_once()
+        mocks["_finalize_node_removal"].assert_called_once()
+        mocks["set_node_status"].assert_called_once_with(
+            "n1", StorageNode.STATUS_REMOVED, caused_by="remove")
+        mocks["_decommission_node_devices"].assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# _connect_to_remote_jm_devs — bounded retry + degrade-not-crash on a
+# transient RPC/DNS failure during the fallback bdev-existence poll
+#
+# The primary connect_device() failure already degrades gracefully (logs
+# "Failed to connect to ...", sets connect_failed=True). The get_bdevs()
+# poll called right after it, against the same rpc_client, hits the
+# identical transport and gets a bounded retry (3 attempts, 1s apart) to
+# ride out a DNS blip; only once that's exhausted does it degrade to "this
+# JM not connected" instead of raising -- 2026-08-10 incident: this exact
+# call raised RPCException uncaught and killed a node-removal task mid
+# phase 5.
+# ---------------------------------------------------------------------------
+
+class TestConnectToRemoteJmDevsDegradesOnRpcException(unittest.TestCase):
+
+    def _owner_setup(self, this_node_id="this-node"):
+        jm_dev = JMDevice()
+        jm_dev.uuid = "jm-owner"
+        jm_dev.jm_bdev = "jm_owner_bdev"
+        jm_dev.status = NVMeDevice.STATUS_ONLINE
+
+        owner_node = MagicMock(spec=StorageNode)
+        owner_node.get_id = MagicMock(return_value="owner-node")
+        owner_node.status = StorageNode.STATUS_ONLINE
+        owner_node.jm_device = jm_dev
+
+        this_node = MagicMock(spec=StorageNode)
+        this_node.get_id = MagicMock(return_value=this_node_id)
+        this_node.jm_ids = []
+        this_node.lvstore_stack_secondary = ""
+        this_node.lvstore_stack_tertiary = ""
+        this_node.remote_jm_devices = []
+        rpc_client = MagicMock()
+        this_node.rpc_client = MagicMock(return_value=rpc_client)
+
+        db = MagicMock()
+        db.get_jm_device_by_id.return_value = jm_dev
+        db.get_storage_nodes.return_value = [owner_node]
+
+        return this_node, rpc_client, db
+
+    def test_get_bdevs_rpc_exception_exhausts_retries_and_does_not_raise(self):
+        # Persistent failure (all 3 bounded-retry attempts fail): must
+        # still degrade, not raise -- this is the exact call chain that
+        # took down a live node-removal task before the retry was added.
+        this_node, rpc_client, db = self._owner_setup()
+        rpc_client.get_bdevs.side_effect = RPCException("connection error")
+
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "connect_device",
+                          side_effect=RPCException("connection error")):
+            result = storage_node_ops._connect_to_remote_jm_devs(
+                this_node, jm_ids=["jm-owner"])
+
+        self.assertEqual(result, [])
+        # 3 bounded-retry attempts, one get_bdevs call each (remote_bdev
+        # is empty so the first branch short-circuits without calling).
+        self.assertEqual(rpc_client.get_bdevs.call_count, 3)
+
+    def test_transient_failure_recovers_on_retry(self):
+        # A blip that clears within the retry budget must be caught, not
+        # just tolerated -- the whole point of adding the bounded retry
+        # instead of degrading on the very first failure.
+        this_node, rpc_client, db = self._owner_setup()
+        rpc_client.get_bdevs.side_effect = [
+            RPCException("connection error"),
+            RPCException("connection error"),
+            {"name": "remote_jm_owner_bdevn1"},
+        ]
+
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "connect_device",
+                          side_effect=RPCException("connection error")), \
+             patch.object(storage_node_ops.time, "sleep"):
+            result = storage_node_ops._connect_to_remote_jm_devs(
+                this_node, jm_ids=["jm-owner"])
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].remote_bdev, "remote_jm_owner_bdevn1")
+        self.assertEqual(rpc_client.get_bdevs.call_count, 3)
+
+    def test_transient_failure_does_not_block_a_clean_connect(self):
+        # Once the blip has cleared, the same code path must still succeed
+        # normally -- the new guard must not swallow a real success too.
+        this_node, rpc_client, db = self._owner_setup()
+        rpc_client.get_bdevs.return_value = {"name": "remote_jm_owner_bdevn1"}
+
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "connect_device",
+                          return_value="remote_jm_owner_bdevn1"):
+            result = storage_node_ops._connect_to_remote_jm_devs(
+                this_node, jm_ids=["jm-owner"])
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].remote_bdev, "remote_jm_owner_bdevn1")
 
 
 class TestShrinkStatusDoesNotDeadlockRemoval(unittest.TestCase):

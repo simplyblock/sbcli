@@ -2,6 +2,7 @@
 import copy
 import datetime
 import json
+import logging
 import math
 import platform
 import socket
@@ -19,6 +20,7 @@ import uuid
 import docker
 from docker.types import LogConfig
 from pydantic import SecretStr
+from tenacity import RetryError, Retrying, before_sleep_log, retry_if_exception_type, stop_after_attempt, wait_fixed
 
 from simplyblock_core import constants, scripts, distr_controller, cluster_ops
 from simplyblock_core import utils
@@ -2192,17 +2194,42 @@ def _connect_to_remote_jm_devs(this_node: StorageNode, jm_ids=None, only_node_id
         # 5s for one that can never appear. During whole-cluster recovery the
         # 10x0.5s wait ran per dead peer JM (~30 of them), adding minutes to
         # every restart attempt (2026-07-13).
-        for _ in range(1 if connect_failed else 10):
-            if remote_device.remote_bdev and rpc_client.get_bdevs(remote_device.remote_bdev):
-                break
-            if rpc_client.get_bdevs(expected_bdev):
-                remote_device.remote_bdev = expected_bdev
-                break
-            time.sleep(0.5)
-        if not remote_device.remote_bdev and org_dev.get_id() in existing_remote_jm_devices:
-            existing_remote_device = existing_remote_jm_devices[org_dev.get_id()]
-            if existing_remote_device.remote_bdev and rpc_client.get_bdevs(existing_remote_device.remote_bdev):
-                remote_device.remote_bdev = existing_remote_device.remote_bdev
+        def _poll_for_remote_jm_bdev():
+            for _ in range(1 if connect_failed else 10):
+                if remote_device.remote_bdev and rpc_client.get_bdevs(remote_device.remote_bdev):
+                    return
+                if rpc_client.get_bdevs(expected_bdev):
+                    remote_device.remote_bdev = expected_bdev
+                    return
+                time.sleep(0.5)
+            if not remote_device.remote_bdev and org_dev.get_id() in existing_remote_jm_devices:
+                existing_remote_device = existing_remote_jm_devices[org_dev.get_id()]
+                if existing_remote_device.remote_bdev and rpc_client.get_bdevs(existing_remote_device.remote_bdev):
+                    remote_device.remote_bdev = existing_remote_device.remote_bdev
+
+        try:
+            # Bounded retry: a transient RPC/DNS blip against this_node's
+            # own proxy (the same one connect_device just hit above) is
+            # given a few seconds to clear before giving up. Same
+            # degrade-not-crash rationale as the connect_device catch
+            # above -- only RPCException (the transport-level failure) is
+            # retried; anything else propagates immediately.
+            Retrying(
+                stop=stop_after_attempt(3),
+                wait=wait_fixed(1),
+                retry=retry_if_exception_type(RPCException),
+                before_sleep=before_sleep_log(logger, logging.WARNING),
+            )(_poll_for_remote_jm_bdev)
+        except RetryError as e:
+            # Still failing after 3 attempts -- degrade to "this JM not
+            # connected" instead of aborting the whole node-removal /
+            # restart operation (2026-08-10 incident: this exact call
+            # raised uncaught and killed a node-removal task mid phase 5,
+            # leaving a peer's lvstore un-rebuilt while the task still
+            # reported "done").
+            logger.warning(
+                f'get_bdevs kept failing while polling for {expected_bdev} '
+                f'on {this_node.get_id()} after 3 attempts: {e}')
         if not remote_device.remote_bdev:
             logger.error(f"Failed to connect to remote JM device {org_dev.alceml_name}")
             continue
@@ -4000,8 +4027,18 @@ def node_removal_orchestrate(node_id, force_remove=False):
         logger.error(f"node_removal_orchestrate: node {node_id} not found")
         return False
 
-    if snode.status == StorageNode.STATUS_REMOVED:
-        return True
+    # Phase 4 (below) flips status to REMOVED *before* phase 5 (device/JM
+    # decommission) runs -- so "status == REMOVED" means phases 1/3a/3b/4
+    # committed, NOT that removal is fully done. A bare `return True` here
+    # would let a transient failure inside phase 5 (e.g. an RPC error
+    # against a peer) get permanently masked: the retry re-enters, hits this
+    # guard, and reports "done" forever without phase 5 ever completing
+    # (2026-08-10 incident: a mid-phase-5 RPC error left a peer's lvstore
+    # un-rebuilt while the task reported "Node removed"). Only phases
+    # 1/3a/3b/4 are skipped below when already_removed; phase 5 always
+    # runs and is itself idempotent (skips devices/JM already migrated), so
+    # resuming it here is a no-op once it has genuinely finished.
+    already_removed = snode.status == StorageNode.STATUS_REMOVED
 
     # Node removal is a recognised restart-phase owner: phase 3b relocates
     # replicas onto an ONLINE target and sets a restart phase there, which
@@ -4014,40 +4051,43 @@ def node_removal_orchestrate(node_id, force_remove=False):
     prev_cluster_status = cluster.status
     cluster_ops.set_cluster_status(cluster.get_id(), Cluster.STATUS_IN_SHRINK)
     try:
-        # Phase 1 — shut the node down (graceful). Skipped on re-entry.
-        if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:
-            logger.info(f"[REMOVAL] {node_id}: phase 1 — shutdown")
-            ret = shutdown_storage_node(node_id, force=force_remove)
-            if isinstance(ret, tuple):
-                ret, reason = ret
-                if not ret:
-                    logger.error(f"[REMOVAL] {node_id}: shutdown failed: {reason}")
+        if not already_removed:
+            # Phase 1 — shut the node down (graceful). Skipped on re-entry.
+            if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:
+                logger.info(f"[REMOVAL] {node_id}: phase 1 — shutdown")
+                ret = shutdown_storage_node(node_id, force=force_remove)
+                if isinstance(ret, tuple):
+                    ret, reason = ret
+                    if not ret:
+                        logger.error(f"[REMOVAL] {node_id}: shutdown failed: {reason}")
+                        return False
+                elif not ret:
+                    logger.error(f"[REMOVAL] {node_id}: shutdown failed")
                     return False
-            elif not ret:
-                logger.error(f"[REMOVAL] {node_id}: shutdown failed")
+                snode = db_controller.get_storage_node_by_id(node_id)
+
+            # Phase 3a — tear down the (empty) secondary/tertiary replicas of THIS
+            # node's own primary LVS, on the peers that host them (Case A).
+            logger.info(f"[REMOVAL] {node_id}: phase 3a — tear down own replicas")
+            if not _teardown_replicas_of_primary(snode):
                 return False
+
+            # Phase 3b — relocate replicas this node hosts for OTHER primaries (Case B).
+            logger.info(f"[REMOVAL] {node_id}: phase 3b — relocate hosted replicas")
+            if not _relocate_replicas_hosted_on(snode):
+                return False
+
+            # Phase 4 — finalize (swarm leave, gpt cleanup) and flip to removed.
+            logger.info(f"[REMOVAL] {node_id}: phase 4 — finalize")
+            _finalize_node_removal(snode)
+            set_node_status(node_id, StorageNode.STATUS_REMOVED, caused_by="remove")
             snode = db_controller.get_storage_node_by_id(node_id)
+            # storage_events.snode_status_change(
+            #     snode, StorageNode.STATUS_REMOVED, StorageNode.STATUS_IN_REMOVAL, caused_by="remove")
 
-        # Phase 3a — tear down the (empty) secondary/tertiary replicas of THIS
-        # node's own primary LVS, on the peers that host them (Case A).
-        logger.info(f"[REMOVAL] {node_id}: phase 3a — tear down own replicas")
-        if not _teardown_replicas_of_primary(snode):
-            return False
-
-        # Phase 3b — relocate replicas this node hosts for OTHER primaries (Case B).
-        logger.info(f"[REMOVAL] {node_id}: phase 3b — relocate hosted replicas")
-        if not _relocate_replicas_hosted_on(snode):
-            return False
-
-        # Phase 5 — finalize (swarm leave, gpt cleanup) and flip to removed.
-        logger.info(f"[REMOVAL] {node_id}: phase 4 — finalize")
-        _finalize_node_removal(snode)
-        set_node_status(node_id, StorageNode.STATUS_REMOVED, caused_by="remove")
-        snode = db_controller.get_storage_node_by_id(node_id)
-        # storage_events.snode_status_change(
-        #     snode, StorageNode.STATUS_REMOVED, StorageNode.STATUS_IN_REMOVAL, caused_by="remove")
-
-        # Phase 4 — remove + fail devices, then wait for failure-migration to finish.
+        # Phase 5 — remove + fail devices, then wait for failure-migration to
+        # finish. Always attempted, even on resume after status already
+        # flipped to REMOVED -- see the already_removed comment above.
         logger.info(f"[REMOVAL] {node_id}: phase 5 — devices remove/fail/migrate")
         if not _decommission_node_devices(snode):
             return False
