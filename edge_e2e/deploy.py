@@ -22,7 +22,11 @@ import argparse
 import base64
 import json
 import os
+import pathlib
 import sys
+
+# Allow running as a script (`python edge_e2e/x.py`) as well as `-m`:
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from edge_e2e import helpers
 from edge_e2e.topology import CENTRAL, EDGE_CLUSTERS

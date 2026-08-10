@@ -27,6 +27,9 @@ import time
 
 import boto3
 
+# Allow running as a script (`python edge_e2e/x.py`) as well as `-m`:
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+
 from edge_e2e.topology import CENTRAL, EDGE_CLUSTERS
 
 TAG_KEY = "simplyblock-edge-e2e"
@@ -35,19 +38,34 @@ STATE_FILE = pathlib.Path(__file__).parent / "state.json"
 UBUNTU_AMI_PARAM = ("/aws/service/canonical/ubuntu/server/22.04/stable/"
                     "current/amd64/hvm/ebs-gp2/ami-id")
 
-K3S_SERVER_USERDATA = """#!/bin/bash
-set -e
-apt-get update -y && apt-get install -y curl nvme-cli fio sgdisk gdisk jq
-curl -sfL https://get.k3s.io | K3S_TOKEN={token} sh -s - server \\
-  --write-kubeconfig-mode 644 --disable traefik --node-name {node_name}
+# NB: sgdisk ships INSIDE the `gdisk` package. Naming it separately makes apt
+# fail, and with `set -e` that aborted cloud-init before k3s installed — on
+# every instance of the first real run (2026-08-10). apt/k3s fetches are
+# retried because a freshly booted instance often races DNS/network.
+_PREAMBLE = """#!/bin/bash
+set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+for i in $(seq 1 12); do apt-get update -y && break || sleep 10; done
+for i in $(seq 1 12); do
+  apt-get install -y curl nvme-cli fio gdisk jq && break || sleep 10
+done
 """
 
-K3S_AGENT_USERDATA = """#!/bin/bash
-set -e
-apt-get update -y && apt-get install -y curl nvme-cli fio sgdisk gdisk jq
+K3S_SERVER_USERDATA = _PREAMBLE + """
+for i in $(seq 1 10); do
+  curl -sfL https://get.k3s.io | K3S_TOKEN={token} sh -s - server \\
+    --write-kubeconfig-mode 644 --disable traefik --node-name {node_name} \\
+  && break || sleep 15
+done
+"""
+
+K3S_AGENT_USERDATA = _PREAMBLE + """
 until curl -sk https://{server_ip}:6443 >/dev/null 2>&1; do sleep 5; done
-curl -sfL https://get.k3s.io | K3S_URL=https://{server_ip}:6443 \\
-  K3S_TOKEN={token} sh -s - agent --node-name {node_name}
+for i in $(seq 1 10); do
+  curl -sfL https://get.k3s.io | K3S_URL=https://{server_ip}:6443 \\
+    K3S_TOKEN={token} sh -s - agent --node-name {node_name} \\
+  && break || sleep 15
+done
 """
 
 

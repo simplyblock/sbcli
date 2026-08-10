@@ -78,6 +78,19 @@ EDGE_CLUSTERS: List[EdgeClusterSpec] = [
     EdgeClusterSpec("edge-2n-4d", nodes=2, drives=[DriveSpec(DATA_DRIVE_GB)] * 4),
 ]
 
+# EDGE_E2E_CLUSTERS selects a subset by name (comma-separated) — used to burn
+# down bootstrap/device-path assumptions on a cheap 2-cluster run before
+# paying for the full fleet. Unset = the whole matrix.
+_selection = os.getenv("EDGE_E2E_CLUSTERS", "").strip()
+if _selection:
+    _wanted = [name.strip() for name in _selection.split(",") if name.strip()]
+    _by_name = {spec.name: spec for spec in EDGE_CLUSTERS}
+    unknown = [name for name in _wanted if name not in _by_name]
+    if unknown:
+        raise ValueError(f"EDGE_E2E_CLUSTERS names unknown clusters: {unknown}")
+    EDGE_CLUSTERS = [_by_name[name] for name in _wanted]
+
+
 # Clusters with redundancy on the DEVICE level (device remove / EBS-detach
 # tests must keep IO unaffected there): >1 partition on the node, i.e.
 # everything except the single-drive-single-partition variants.
