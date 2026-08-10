@@ -34,7 +34,7 @@ on:
       SBCLI_BRANCH:
         description: "sbcli repo branch to clone for tests"
         required: true
-        default: "R25.10-Hotfix"
+        default: "main"
 
       CUSTOM_IMAGES:
         description: "Image overrides: set spdk and/or docker values, leave as \"\" to skip."

@@ -21,7 +21,7 @@ on:
         default: "http://192.168.10.210/grafana"
       SBCLI_BRANCH:
         type: string
-        default: "R25.10-Hotfix"
+        default: "main"
       CUSTOM_IMAGES:
         type: string
         default: 'spdk="simplyblock/spdk:main-latest" docker="simplyblock/simplyblock:main"'
@@ -119,7 +119,7 @@ on:
       SBCLI_BRANCH:
         description: "sbcli repo branch to clone for tests"
         required: true
-        default: "R25.10-Hotfix"
+        default: "main"
 
       CUSTOM_IMAGES:
         description: "Image overrides: set spdk and/or docker values, leave as \"\" to skip."
@@ -259,7 +259,7 @@ jobs:
       EXTRA_SN_ARGS: ${{ inputs.EXTRA_SN_ARGS || '' }}
       GRAFANA_ENDPOINT: ${{ inputs.GRAFANA_ENDPOINT || 'http://192.168.10.210/grafana' }}
       SBCLI_CMD: "sbctl"
-      SBCLI_BRANCH: ${{ inputs.SBCLI_BRANCH || 'R25.10-Hotfix' }}
+      SBCLI_BRANCH: ${{ inputs.SBCLI_BRANCH || 'main' }}
 
       # SSH/client env
       SSH_USER: ${{ inputs.SSH_USER || 'root' }}
