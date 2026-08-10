@@ -456,6 +456,22 @@ def add_node_to_auto_restart(node):
         return False
 
     cluster = db.get_cluster_by_id(node.cluster_id)
+    # A k8s-managed node that hasn't been CR-linked yet (cr_namespace unset)
+    # is mid-adoption: its DB record exists but the operator hasn't finished
+    # wiring it up. Queuing an auto-restart here builds the data-nic health
+    # check's k8s-service hostname from an empty cr_namespace (".."), which
+    # fails DNS resolution every time and leaves the node in a
+    # permanently-unreachable retry loop that also blocks any manual
+    # `sn restart`/`sn shutdown` on the node (2026-08-10 helm-to-operator
+    # upgrade test). Docker deployments are unaffected: cr_namespace is
+    # legitimately always empty there, so gate on cluster.mode as well.
+    if cluster.mode == "kubernetes" and not node.cr_namespace:
+        logger.info(
+            "Node %s is k8s-managed but not yet CR-linked (cr_namespace unset); "
+            "skipping auto-restart until adoption completes",
+            node.get_id(),
+        )
+        return False
     # Suspended cluster: hold every auto-restart until the suspend-recovery
     # auto-shutdown has drained the whole cluster offline. Restarting nodes
     # one-by-one before the drain completes is exactly what wedged the cluster
