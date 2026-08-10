@@ -164,7 +164,7 @@ class StorageNode(BaseNodeObject):
     spdk_proxy_image: str = ""
     transfer_hublvol: HubLVol = None  # type: ignore[assignment]
     # spdk image tag
-    spdk_version: str = "main"
+    spdk_version: str = ""
 
     def get_lvol_subsys_port(self, lvs_name=None):
         """Get the client-facing NVMeoF port for a specific lvstore.
