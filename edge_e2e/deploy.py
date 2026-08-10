@@ -36,9 +36,45 @@ VOLUME_SIZE = 30 * 1024 ** 3
 CENTRAL_POOL = "edge-e2e-pool"
 CENTRAL_VOLUME = "edge-e2e-central-vol"
 
-DEFAULT_BOOTSTRAP_CMD = (
-    "git clone https://github.com/simplyblock/simplyblock-deploy.git || true; "
-    "cd simplyblock-deploy && sudo ./bootstrap-cluster.sh --mode kubernetes")
+# The bootstrap scripts live in the PUBLIC simplyBlockDeploy repo, under
+# bare-metal/ — same source the k8s e2e workflows use
+# (.github/workflows/e2e-bootstrap-k8s.yml clones it and runs
+# bare-metal/bootstrap-k3s.sh; k8s-e2e.yaml runs bootstrap-cluster.sh with
+# the cluster geometry flags). k3s itself is already installed here by
+# provision.py's cloud-init, so only the cluster bootstrap runs.
+DEPLOY_REPO = "https://github.com/simplyblock-io/simplyBlockDeploy.git"
+
+# bootstrap-cluster.sh takes its topology from ENVIRONMENT VARIABLES (MNODES,
+# STORAGE_PRIVATE_IPS, KEY, ...) — the CLI flags only carry cluster geometry,
+# and the flag names have moved on from the ones in the older k8s-e2e
+# workflow (--max-lvol -> --max-subsys, --distr-ndcs ->
+# --data-chunks-per-stripe). Verified against the script's own --help on a
+# live node, 2026-08-10.
+BOOTSTRAP_FLAGS = ("--sbcli-cmd sbctl --k8s-snode --ha-type ha "
+                   "--max-subsys 10 --max-snap 10 --number-of-devices 1")
+
+
+def default_bootstrap_cmd(state) -> str:
+    """Clone the deploy repo and run the cluster bootstrap with this fleet's
+    mgmt/storage private IPs and SSH key."""
+    mgmt_ip = helpers.instance(state, f"{CENTRAL.name}-mgmt")["private_ip"]
+    storage_ips = " ".join(
+        helpers.instance(state, worker)["private_ip"]
+        for worker in state["central"]["workers"])
+    return (
+        f"rm -rf simplyBlockDeploy && git clone -q {DEPLOY_REPO} simplyBlockDeploy && "
+        "cd simplyBlockDeploy/bare-metal && chmod +x ./bootstrap-cluster.sh && "
+        f"MNODES='{mgmt_ip}' STORAGE_PRIVATE_IPS='{storage_ips}' "
+        f"KEY=$HOME/.ssh/id_rsa BASTION_IP='' "
+        f"./bootstrap-cluster.sh {BOOTSTRAP_FLAGS}")
+
+
+# sbctl is not on the image; the admin host needs it plus the FDB client
+# (docs/k8s_mgmt.md step 2).
+INSTALL_SBCTL = (
+    "which sbctl >/dev/null 2>&1 || { "
+    "sudo apt-get update -y && sudo apt-get install -y python3-pip && "
+    "sudo pip3 install -q sbctl; }")
 
 
 def wait_k3s_ready(state, server_name, expected_nodes):
@@ -54,7 +90,11 @@ def bootstrap_central(state):
     """Install the CP + hyperscale storage cluster on the central cluster."""
     server = f"{CENTRAL.name}-mgmt"
     wait_k3s_ready(state, server, expected_nodes=1 + CENTRAL.workers)
-    command = os.getenv("EDGE_E2E_BOOTSTRAP_CMD", DEFAULT_BOOTSTRAP_CMD)
+
+    print(f"Installing sbctl on {server}...")
+    helpers.ssh(state, server, INSTALL_SBCTL, timeout=1800)
+
+    command = os.getenv("EDGE_E2E_BOOTSTRAP_CMD") or default_bootstrap_cmd(state)
     print(f"Bootstrapping central CP on {server}...")
     print(helpers.ssh(state, server, command, timeout=3600))
 

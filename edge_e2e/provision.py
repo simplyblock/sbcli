@@ -104,6 +104,12 @@ def _ensure_network(ec2, run_id):
          "IpRanges": [{"CidrIp": "0.0.0.0/0"}]},
         {"IpProtocol": "tcp", "FromPort": 6443, "ToPort": 6443,
          "IpRanges": [{"CidrIp": "0.0.0.0/0"}]},
+        # The management API (and the edge campaign's API client) reach the
+        # control plane over the ingress on 80/443.
+        {"IpProtocol": "tcp", "FromPort": 80, "ToPort": 80,
+         "IpRanges": [{"CidrIp": "0.0.0.0/0"}]},
+        {"IpProtocol": "tcp", "FromPort": 443, "ToPort": 443,
+         "IpRanges": [{"CidrIp": "0.0.0.0/0"}]},
     ])
     return {"vpc": vpc["VpcId"], "subnet": subnet["SubnetId"], "sg": sg["GroupId"],
             "igw": igw["InternetGatewayId"]}
