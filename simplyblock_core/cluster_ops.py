@@ -19,6 +19,7 @@ from docker.errors import DockerException
 from pydantic import SecretStr
 
 from simplyblock_core import utils, scripts, constants, mgmt_node_ops, storage_node_ops
+from simplyblock_core import topology_labels
 from simplyblock_core.utils import port_block
 from simplyblock_core.controllers import backup_controller, cluster_events, device_controller, qos_controller, tasks_controller, tcp_ports_events
 from simplyblock_core.db_controller import DBController
@@ -2272,8 +2273,66 @@ def get_cluster(cl_id) -> dict:
     return db_controller.get_cluster_by_id(cl_id).get_clean_dict()
 
 
+def backfill_topology_labels(cluster_id) -> dict:
+    """Name the topology ids of a cluster that predates labels.
+
+    Every failure_domain / physical_label id in service gets a derived name
+    (FD<id> / HOST<id>) so `sn list` and the API have something to show and the
+    operator has a handle to rename later. Derived, not guessed: a rack the
+    operator calls RACK7 is theirs to rename, not ours to invent.
+
+    Idempotent — an id that already has a label is left alone, so repeated
+    `cluster update` runs (and a rename done in between) are safe. Returns the
+    labels it added, per kind.
+    """
+    cluster = db_controller.get_cluster_by_id(cluster_id)
+    nodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
+    added: dict = {}
+
+    for kind, ids in (
+        (topology_labels.FAILURE_DOMAIN,
+         {n.failure_domain for n in nodes if n.failure_domain >= 0}),
+        (topology_labels.PHYSICAL,
+         {n.physical_label for n in nodes if n.physical_label > 0}),
+    ):
+        field = topology_labels.REGISTRY_FIELD[kind]
+        registry = getattr(cluster, field) or {}
+        for id_ in sorted(ids):
+            if topology_labels.label_for_id(registry, id_) is not None:
+                continue
+            label = topology_labels.backfill_label(kind, id_)
+            if registry.get(label) not in (None, id_):
+                # The derived name is taken by a DIFFERENT id (an operator
+                # named a rack "FD3" by hand). Leave the id unnamed rather
+                # than steal the name or invent a suffix.
+                logger.warning(
+                    f"Cannot backfill {kind} id {id_}: label {label} already "
+                    f"maps to id {registry[label]}. Name it manually.")
+                continue
+            # Through the transactional claim, not a direct write: an add-node
+            # allocating a new label concurrently must not lose its entry.
+            # desired_id, because the id already exists — we are naming it, not
+            # allocating a new one.
+            claimed = db_controller.claim_topology_label(
+                cluster_id, kind, label, desired_id=id_)
+            if claimed != id_:
+                # Only reachable if the id acquired a different name between the
+                # check above and the transaction; that name wins.
+                logger.warning(
+                    f"Backfill of {kind} id {id_} as {label} resolved to id "
+                    f"{claimed} instead; leaving it alone")
+                continue
+            logger.info(f"Labelled {kind} id {id_} as {label}")
+            added.setdefault(kind, {})[label] = id_
+            registry = getattr(db_controller.get_cluster_by_id(cluster_id), field) or {}
+
+    return added
+
+
 def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, mgmt_image=None, **kwargs) -> None:
     cluster = db_controller.get_cluster_by_id(cluster_id)  # ensure exists
+
+    backfill_topology_labels(cluster_id)
 
     logger.info("Updating mgmt cluster")
     if cluster.mode == "docker":

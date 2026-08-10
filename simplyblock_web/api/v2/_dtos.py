@@ -6,6 +6,7 @@ from uuid import UUID
 from fastapi import Request
 from pydantic import BaseModel, SecretStr, field_serializer
 
+from simplyblock_core import topology_labels
 from simplyblock_core.controllers import migration_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.utils import hexa_to_cpu_list
@@ -323,10 +324,15 @@ class StorageNodeDTO(BaseModel):
     device_count: int
     online_device_count: int
     failure_domain: int
+    # The operator-facing name for failure_domain. Additive: the integer stays,
+    # so consumers written against it are unaffected. None when the cluster has
+    # no label registered for the id (not backfilled, or created by id).
+    failure_domain_label: Optional[str]
     capacity: CapacityStatDTO
 
     @staticmethod
-    def from_model(model: StorageNode, stat_obj: Optional[StatsObject] = None):
+    def from_model(model: StorageNode, stat_obj: Optional[StatsObject] = None,
+                   failure_domain_labels: Optional[dict] = None):
         return StorageNodeDTO(
             id=UUID(model.get_id()),
             cluster_id=UUID(model.cluster_id),
@@ -353,6 +359,8 @@ class StorageNodeDTO(BaseModel):
             device_count=len(model.nvme_devices),
             online_device_count=len([device for device in model.nvme_devices if device.status == "online" ]),
             failure_domain=model.failure_domain,
+            failure_domain_label=topology_labels.label_for_id(
+                failure_domain_labels, model.failure_domain),
             capacity=CapacityStatDTO.from_model(
                 stat_obj if stat_obj else StatsObject()
             ),

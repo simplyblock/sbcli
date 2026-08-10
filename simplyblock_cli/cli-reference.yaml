@@ -245,9 +245,16 @@ commands:
             dest: ha_jm_count
             type: int
           - name: "--failure-domain"
-            help: "The failure-domain id (a non-negative integer identifying the rack/cabinet/DC) this node belongs to. Required when the cluster was created with --enable-failure-domain; must be omitted otherwise."
+            help: "The failure-domain label (e.g. RACK1, AZ2) identifying the rack/cabinet/DC this node belongs to. Required when the cluster was created with --enable-failure-domain; must be omitted otherwise."
+            description: >
+              A name for the rack, cabinet or availability zone this node sits in — a letter
+              followed by up to 31 letters, digits, '_' or '-'; case-insensitive, so rack1 and
+              RACK1 are the same domain. The first node added with a given label allocates its
+              internal id; later nodes naming the same label join that domain. A host's domain
+              is immutable: re-adding it under a different label is refused. For backward
+              compatibility an all-digits value is still taken as the internal id itself.
             dest: failure_domain
-            type: int
+            type: str
           - name: "--namespace"
             help: "The Kubernetes namespace to deploy on."
             dest: namespace

@@ -184,6 +184,18 @@ class Cluster(BaseModel):
     # Deploy-time only — set at cluster create/add, never toggled at runtime;
     # an existing cluster must be redeployed to gain the feature.
     enable_failure_domain: bool = False
+    # Operator-facing names for the two integer topology ids. The integer stays
+    # the internal identity everywhere (placement, the distrib cluster map, the
+    # expansion planner); these only decide what the operator types and sees.
+    #   failure_domain_labels: {"RACK1": 0, "AZ2": 1}   -> StorageNode.failure_domain
+    #   physical_labels:       {"HOST1": 1}             -> StorageNode.physical_label
+    # Label -> id is the stored direction; ids are unique per kind, so the
+    # reverse map is derived by scan (tens of entries, not thousands). Both are
+    # written only through DBController.claim_topology_label, which allocates
+    # ids transactionally. Empty on clusters that predate labels — `cluster
+    # update` backfills them (FD<id> / HOST<id>).
+    failure_domain_labels: dict = {}
+    physical_labels: dict = {}
     snapshot_replication_target_cluster: str = ""
     snapshot_replication_target_pool: str = ""
     snapshot_replication_timeout: int = 60*10

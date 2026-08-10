@@ -558,6 +558,67 @@ class DBController(metaclass=Singleton):
         transactional = fdb.transactional(DBController._release_backup_chain_locks_tx)
         transactional(self, self.kv_store, ordered_snapshot_ids)
 
+    # ---- Topology label -> id allocation (Single FDB Transaction) ----
+
+    def _claim_topology_label_tx(self, tr, cluster_id, kind, label, extra_used,
+                                 desired_id=None):
+        from simplyblock_core import topology_labels
+
+        field = topology_labels.REGISTRY_FIELD[kind]
+        key = Cluster().get_db_id(cluster_id).encode()
+        # Plain (non-snapshot) read: the read conflict on the cluster key is the
+        # serialization point. Two concurrent adds naming the same NEW label
+        # cannot both allocate — the loser retries and finds the winner's entry.
+        raw = tr.get(key).wait()
+        if not raw.present():
+            raise KeyError(f'Cluster {cluster_id} not found')
+        cluster = Cluster().from_dict(json.loads(raw))
+
+        registry = dict(getattr(cluster, field) or {})
+        if label in registry:
+            return registry[label]
+
+        if desired_id is not None:
+            # Naming an id that already exists (the `cluster update` backfill),
+            # rather than allocating a new one. Never let two labels own one id:
+            # if it is already named, that name wins and this is a no-op.
+            already = topology_labels.label_for_id(registry, int(desired_id))
+            if already is not None:
+                return registry[already]
+            new_id = int(desired_id)
+        else:
+            new_id = topology_labels.next_free_id(
+                list(registry.values()) + [v for v in extra_used if v is not None])
+        registry[label] = new_id
+        setattr(cluster, field, registry)
+        cluster.write_to_db(tr)
+        return new_id
+
+    def claim_topology_label(self, cluster_id, kind, label, extra_used=(),
+                             desired_id=None):
+        """Resolve ``label`` to its integer id, allocating one if it is new.
+
+        ``kind`` is topology_labels.FAILURE_DOMAIN or .PHYSICAL. ``extra_used``
+        carries ids that exist on node records but not (yet) in the registry —
+        ids chosen by a legacy integer call, or a cluster not backfilled yet —
+        so a freshly allocated id can never collide with one already in service.
+        ``desired_id`` names an id that already exists instead of allocating
+        (the `cluster update` backfill); an id that is already named keeps its
+        name and the call is a no-op.
+
+        Idempotent for a known label: same label, same id, no write.
+        """
+        kv = self.kv_store
+        extra_used = tuple(extra_used)
+        if kv is not None and hasattr(kv, 'create_transaction'):
+            transactional = fdb.transactional(DBController._claim_topology_label_tx)
+            return transactional(self, kv, cluster_id, kind, label, extra_used,
+                                 desired_id)
+        # Transactionless store (unit-tier fdb stub / fake stores in tests):
+        # same logic, not atomic.
+        return self._claim_topology_label_tx(
+            _NoTxnStore(kv), cluster_id, kind, label, extra_used, desired_id)
+
     # ---- Cluster node-add mesh lock (Single FDB Transaction) ----
 
     def get_cluster_add_lock(self, cluster_id: str) -> Optional[ClusterAddNodeLock]:

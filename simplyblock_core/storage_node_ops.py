@@ -21,6 +21,7 @@ from docker.types import LogConfig
 from pydantic import SecretStr
 
 from simplyblock_core import constants, scripts, distr_controller, cluster_ops
+from simplyblock_core import topology_labels
 from simplyblock_core import utils
 from simplyblock_core import jm_raid
 from simplyblock_core.utils import port_block
@@ -2429,19 +2430,37 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
 
         ha_jm_count = resolve_ha_jm_count(cluster, ha_jm_count)
 
+        # The operator names the domain (RACK1, AZ2); the control plane keys off
+        # the integer. An all-digits value still means that literal id, so
+        # scripts and the k8s operator written against the integer API keep
+        # working. A new label is allocated an id transactionally, seeded with
+        # the ids already on node records so it cannot collide with one in
+        # service.
+        try:
+            fd_id_arg, fd_label = topology_labels.parse_failure_domain_arg(failure_domain)
+        except topology_labels.InvalidLabelError as e:
+            logger.error(str(e))
+            return False
+
         # Failure-domain id is mandatory exactly when the cluster has the
         # feature enabled (deploy-time only — clusters cannot be upgraded into
         # it, so the flag is fixed for the cluster's lifetime). 32-bit int,
         # >= 0 to activate; -1/None means unset.
         if cluster.enable_failure_domain:
-            if failure_domain is None or failure_domain < 0:
+            if fd_label is not None:
+                fd_id_arg = db_controller.claim_topology_label(
+                    cluster_id, topology_labels.FAILURE_DOMAIN, fd_label,
+                    extra_used=[n.failure_domain for n in
+                                db_controller.get_storage_nodes_by_cluster_id(cluster_id)])
+                logger.info(f"Failure domain {fd_label} resolved to id {fd_id_arg}")
+            if fd_id_arg is None or fd_id_arg < 0:
                 logger.error("This cluster was created with --enable-failure-domain; "
-                             "--failure-domain <id> (a non-negative integer) is required "
+                             "--failure-domain <label> (e.g. RACK1) is required "
                              "when adding a node.")
                 return False
-            failure_domain_id = failure_domain
+            failure_domain_id = fd_id_arg
         else:
-            if failure_domain is not None and failure_domain >= 0:
+            if fd_label is not None or (fd_id_arg is not None and fd_id_arg >= 0):
                 logger.error("--failure-domain was given but this cluster does not have the "
                              "failure-domain feature enabled. Redeploy the cluster with "
                              "--enable-failure-domain to use failure domains.")
@@ -5032,6 +5051,17 @@ def list_storage_nodes(cluster_id=None):
     all_lvols = db_controller.get_mini_lvols()
     # Only surface the failure-domain column when the feature is actually in use.
     show_failure_domain = any(node.failure_domain >= 0 for node in nodes)
+    fd_registry = {}
+    if show_failure_domain:
+        # One read per listing, not per node: every node in a listing filtered by
+        # cluster shares the registry, and a cluster-wide listing is dominated by
+        # the node scan above anyway.
+        for _cid in {node.cluster_id for node in nodes if node.failure_domain >= 0}:
+            try:
+                fd_registry.update(
+                    db_controller.get_cluster_by_id(_cid).failure_domain_labels or {})
+            except KeyError:
+                pass
     for node in nodes:
         logger.debug(node)
         logger.debug("*" * 20)
@@ -5067,7 +5097,10 @@ def list_storage_nodes(cluster_id=None):
 
         }
         if show_failure_domain:
-            row["Failure Domain"] = node.failure_domain if node.failure_domain >= 0 else "-"
+            # Show the operator's label; fall back to the raw id for a cluster
+            # that has not been backfilled or a domain created by id.
+            row["Failure Domain"] = topology_labels.render(
+                fd_registry, node.failure_domain) or "-"
         data.append(row)
 
     return data

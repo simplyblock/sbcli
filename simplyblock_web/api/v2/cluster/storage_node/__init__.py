@@ -27,7 +27,8 @@ def list(cluster: Cluster) -> List[StorageNodeDTO]:
         ret = db.get_node_capacity(storage_node, 1)
         if ret:
             node_stat_obj = ret[0]
-        data.append(StorageNodeDTO.from_model(storage_node, node_stat_obj))
+        data.append(StorageNodeDTO.from_model(
+            storage_node, node_stat_obj, cluster.failure_domain_labels))
     return data
 
 
@@ -109,7 +110,8 @@ def get(cluster: Cluster, storage_node: StorageNode):
     ret = db.get_node_capacity(storage_node, 1)
     if ret:
         node_stat_obj = ret[0]
-    return StorageNodeDTO.from_model(storage_node, node_stat_obj)
+    return StorageNodeDTO.from_model(
+        storage_node, node_stat_obj, cluster.failure_domain_labels)
 
 
 @instance_api.delete('/', name='clusters:storage-nodes:delete')
