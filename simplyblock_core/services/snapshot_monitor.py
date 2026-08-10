@@ -72,9 +72,14 @@ def process_snap_delete_finish(snap, completed_node):
             for nl in non_leaders)
         if any_sec_down:
             primary_node.lvol_del_sync_lock()
-        ret, _ = primary_node.rpc_client().delete_lvol(snap.snap_bdev, sync=True, special_delete=special_delete)
-        if not ret:
-            logger.error(f"Failed to delete snap from node: {snode.get_id()}")
+        # No sync delete on the leader — its async delete already removed the
+        # blob and unregistered the bdev, and this path only runs after that
+        # async delete reported done. A second delete here re-walks the
+        # snapshot/clone metadata the async pass already cleaned (run
+        # 20260807: 4361 "Clone entry not found" on the leader, 0 on the
+        # non-leaders). See the identical change in lvol_monitor and the
+        # protocol statement in _rollback_snapshot_bdev ("unconditionally,
+        # never on the leader").
 
     lvol_bdev_name = snap.snap_bdev
     for non_leader in non_leaders:

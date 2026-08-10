@@ -1561,6 +1561,91 @@ def _remove_lvol_subsys_from_node(lvol, rpc_client):
     return True
 
 
+# --- inline async->sync delete -------------------------------------------
+#
+# The leader's async delete returns as soon as the request is registered; the
+# cluster unmap and the snapshot/clone metadata walk finish in the background.
+# The sync legs on the non-leaders must not start before it has completed, or
+# they race the leader's walk ("operation sneaked in between async and sync
+# delete"). Polling that completion here — instead of leaving the whole sync
+# stage to lvol_monitor's next cycle — is what keeps a delete at sub-second
+# latency: in run 20260807 the data-plane delete took 202s on average (max
+# 675s) purely because the API returned after the async leg and the serial
+# monitor loop drained the sync legs at 72 objects/min against a submit rate
+# of 153/min, building a ~2200-object backlog. Whenever that backlog was
+# empty the very same monitor finished a delete 0.1-0.2s after the async leg,
+# so the cost was queueing, not per-object work.
+#
+# Cadence is front-loaded: the create-rollback path (_rollback_snapshot_bdev),
+# which has always run this protocol inline, was measured in that run
+# completing the poll ~39ms after the async delete (SNAP_1635: async 33.354,
+# poll 33.393, sync legs 33.596/33.633 — 0.28s end to end). A flat 0.5s
+# interval would hold the leader's lvstore lock an order of magnitude longer
+# than the work needs, and that lock hold time is the throughput ceiling for
+# deletes on a busy lvstore.
+ASYNC_DELETE_POLL_INTERVALS = (0.02, 0.05, 0.1, 0.25)
+ASYNC_DELETE_POLL_INTERVAL_MAX = 0.5
+# Bounded, and deliberately much shorter than the 15s _rollback_snapshot_bdev
+# allows: this runs on every delete, under the leader's lvstore lock, so the
+# bound is a cap on how long one slow object may block the lvstore. On expiry
+# nothing fails — the lvol stays in_deletion and lvol_monitor completes it
+# exactly as it did before this fast path existed.
+ASYNC_DELETE_POLL_TIMEOUT = 2.0
+# completed / not found — same set _rollback_snapshot_bdev accepts
+ASYNC_DELETE_DONE_STATUSES = (0, 2, -2, -19)
+
+
+def _wait_async_delete(rpc_client, bdev_name) -> bool:
+    """Poll the leader until its async delete of *bdev_name* has completed.
+
+    Returns True if it completed within ``ASYNC_DELETE_POLL_TIMEOUT``. False
+    means "not finished yet, or leadership moved" — the caller must then leave
+    the object in_deletion for lvol_monitor rather than starting the sync
+    legs, because a sync delete issued while the leader's metadata walk is
+    still running is the interleaving this protocol exists to prevent.
+    """
+    deadline = time.time() + ASYNC_DELETE_POLL_TIMEOUT
+    attempt = 0
+    while True:
+        try:
+            st = rpc_client.bdev_lvol_get_lvol_delete_status(bdev_name)
+        except Exception as e:
+            logger.warning(f"delete-status poll for {bdev_name} failed: {e}")
+            return False
+        # Strict: the RPC layer returns None (not a status) when the call
+        # itself failed, and `False == 0` in Python — so a bare membership
+        # test against the "done" set would read a failed poll as "completed"
+        # and release the sync legs while the leader may still be walking
+        # metadata. Anything that is not a real int is a failed poll.
+        if isinstance(st, bool) or not isinstance(st, int):
+            logger.warning(
+                f"delete-status poll for {bdev_name} returned {st!r}; "
+                f"leaving the sync legs to lvol_monitor")
+            return False
+        if st in ASYNC_DELETE_DONE_STATUSES:
+            return True
+        # -35 (leadership changed) and 4 (no async request registered) are not
+        # retried here: both mean this node is no longer the right target, and
+        # the monitor's poll owns re-resolving that (it resets deletion_status
+        # and re-issues on the then-current leader).
+        if st not in (1,):
+            logger.info(
+                f"async delete of {bdev_name} returned status {st}; leaving "
+                f"the sync legs to lvol_monitor")
+            return False
+        if time.time() >= deadline:
+            logger.info(
+                f"async delete of {bdev_name} still running after "
+                f"{ASYNC_DELETE_POLL_TIMEOUT}s; leaving the sync legs to "
+                f"lvol_monitor")
+            return False
+        if attempt < len(ASYNC_DELETE_POLL_INTERVALS):
+            time.sleep(ASYNC_DELETE_POLL_INTERVALS[attempt])
+        else:
+            time.sleep(ASYNC_DELETE_POLL_INTERVAL_MAX)
+        attempt += 1
+
+
 def _delete_lvol_from_all_nodes(lvol, snode, force_delete, lock=True) -> None:
     """Remove the lvol from every node that hosts it (single, or ha
     leader + non-leaders), each single-node delete wrapped in the INNER
@@ -1644,10 +1729,19 @@ def _delete_lvol_from_all_nodes(lvol, snode, force_delete, lock=True) -> None:
 
         # Step 1: Execute async delete on leader (with failover). Each leader
         # attempt is one single-node op, so it takes the inner lvstore lock.
+        # The completion poll runs INSIDE that lock, so the leader's delete
+        # window stays exclusive until the async pass has finished and no
+        # other object's create/delete interleaves with it (same rationale as
+        # snapshot_controller._rollback_snapshot_bdev).
+        async_completed = {"done": False}
+
         def _delete_on_leader(leader):
             with snapshot_controller.lvstore_op_lock(
                     snode.cluster_id, lvol.lvs_name, node_id=leader.get_id(), enabled=_inner):
                 ret = delete_lvol_from_node(lvol.get_id(), leader.get_id(), force=force_delete)
+                if ret:
+                    async_completed["done"] = _wait_async_delete(
+                        leader.rpc_client(), f"{lvol.lvs_name}/{lvol.lvol_bdev}")
             return ret if ret else None
 
         success, actual_leader, result = execute_on_leader_with_failover(
@@ -1659,7 +1753,11 @@ def _delete_lvol_from_all_nodes(lvol, snode, force_delete, lock=True) -> None:
             else:
                 logger.warning(msg)
 
-        # Step 2: Sync delete on non-leaders (leader op already completed)
+        # Step 2: Sync delete on non-leaders (leader op already completed).
+        # Nodes whose sync leg completes here are recorded on the lvol so
+        # lvol_monitor does not issue a second one when it finalises the
+        # record.
+        sync_done: List[str] = []
         non_leaders = [n for n in all_nodes if actual_leader and n.get_id() != actual_leader.get_id()]
         for nl in non_leaders:
             action = check_non_leader_for_operation(
@@ -1675,20 +1773,52 @@ def _delete_lvol_from_all_nodes(lvol, snode, force_delete, lock=True) -> None:
                     f"{lvol.lvs_name}/{lvol.lvol_bdev}", lvol.node_id)
             elif action == "proceed":
                 ok = False
+                synced = False
                 try:
                     with snapshot_controller.lvstore_op_lock(
                             snode.cluster_id, lvol.lvs_name, node_id=nl.get_id(), enabled=_inner):
                         ok = _remove_lvol_subsys_from_node(lvol, nl.rpc_client())
+                        if ok and async_completed["done"]:
+                            # The sync leg this non-leader owes. The leader's
+                            # async delete removes the blob but cannot clear
+                            # the peers' lvol REGISTRATIONS. Doing it here,
+                            # rather than leaving the whole sync stage to
+                            # lvol_monitor, is what keeps a delete at ~0.3s
+                            # instead of minutes behind a drain backlog.
+                            # -19 ("no such device") means this peer is
+                            # already clean and counts as done.
+                            ret, err = nl.rpc_client().delete_lvol(
+                                f"{lvol.lvs_name}/{lvol.lvol_bdev}", sync=True)
+                            synced = bool(ret) or bool(
+                                err and err.get("code") == -19)
                 except Exception as e:
                     # Includes a per-node lock acquisition timeout: the node
                     # can die while this op WAITS for the lock. Never abort
                     # the loop — the remaining non-leaders must still be
                     # processed; this node's delete is deferred durably.
                     logger.warning(f"Failed sync delete on {nl.get_id()}: {e}")
-                if not ok:
+                if not ok or (async_completed["done"] and not synced):
+                    # Either the subsystem/ns removal did not confirm, or the
+                    # sync delete was attempted and failed. Defer durably.
                     tasks_controller.add_lvol_sync_del_task(
                         snode.cluster_id, nl.get_id(),
                         f"{lvol.lvs_name}/{lvol.lvol_bdev}", lvol.node_id)
+                elif synced:
+                    sync_done.append(nl.get_id())
+                # else: the leader's async delete had not completed within the
+                # poll bound, so no sync leg was issued here. Deliberately NO
+                # durable task either — a sync delete must never be issued
+                # while the leader's metadata walk is still running. The lvol
+                # stays in_deletion and lvol_monitor owns the sync legs, which
+                # is exactly the behaviour before this fast path existed.
+
+        if sync_done:
+            # Atomic: a plain read-modify-write here races lvol_monitor's own
+            # updates to the same record and silently clobbers them.
+            db_controller.atomic_update(
+                db_controller.get_lvol_by_id(lvol.get_id()),
+                lambda x: x.sync_deleted_nodes.extend(
+                    n for n in sync_done if n not in x.sync_deleted_nodes))
 
 
 def delete_lvol(lvol: LVol, *, force_delete: bool = False, lock: bool = True) -> None:
@@ -1953,11 +2083,7 @@ def list_lvols(cluster_id, pool_id_or_name, all=False):
         lvols = db_controller.get_lvols(cluster_id)
     elif pool_id_or_name:
         try:
-            pool = (
-                    db_controller.get_pool_by_id(pool_id_or_name)
-                    if utils.UUID_PATTERN.match(pool_id_or_name) is not None
-                    else db_controller.get_pool_by_name(pool_id_or_name)
-            )
+            pool = db_controller.get_pool_by_id_or_name(pool_id_or_name)
             for lv in db_controller.get_lvols_by_pool_id(pool.get_id()):
                 lvols.append(lv)
         except KeyError:

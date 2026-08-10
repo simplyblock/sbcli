@@ -52,6 +52,12 @@ class LVol(BaseModel):
     ns_id: int = 1
     max_namespace_per_subsys: int = 1
     subsys_port: int = 9090
+    # Node ids whose sync delete already completed inline in the API delete
+    # call (lvol_controller._delete_lvol_from_all_nodes). lvol_monitor skips
+    # these when it finalises the record, so a node never receives a second
+    # sync delete — a repeat walks the replica blob tree again and errors on
+    # every entry the first pass cleaned.
+    sync_deleted_nodes: List[str] = []
     pool_uuid: str = ""
     pool_name: str = ""
     pvc_name: str = ""

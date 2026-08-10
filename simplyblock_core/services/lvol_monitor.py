@@ -141,6 +141,16 @@ def post_lvol_delete_rebalance(cluster, lvol):
 def process_lvol_delete_finish(cluster, lvol):
     logger.info(f"LVol deleted successfully, id: {lvol.get_id()}")
 
+    # Re-read the record: `lvol` comes from the cycle-start snapshot in
+    # check_node, and the API delete call may have completed its inline sync
+    # legs (and recorded them in sync_deleted_nodes) after that snapshot was
+    # taken. Using the stale copy would re-issue a sync delete on a node that
+    # already had one.
+    try:
+        lvol = db.get_lvol_by_id(lvol.get_id())
+    except KeyError:
+        return  # already finalised by another pass
+
     # check leadership
     snode = db.get_storage_node_by_id(lvol.node_id)
     sec_nodes = []
@@ -199,7 +209,29 @@ def process_lvol_delete_finish(cluster, lvol):
                 non_leader_nodes.append(db.get_storage_node_by_id(node_id))
             except KeyError:
                 pass
-    # 3-1 async delete lvol bdev from primary
+    # The leader gets NO sync delete. Its async delete already removed the
+    # blob AND unregistered the bdev; this function only runs once that async
+    # delete reported done (poll ret 0/2). Re-deleting on the leader walks the
+    # snapshot/clone metadata a second time and errors on every entry the
+    # async pass already cleaned:
+    #
+    #   run 20260807, LVS_1 (~7.5k objects): 4361 "Clone entry not found"
+    #   (blob_get_snapshot_and_clone_entries) plus 888 lvol_delete_async_cb
+    #   *ERROR* on the leader (vm201) — and exactly 0 on either non-leader,
+    #   because they get their one and only delete here. Same signature as
+    #   run 20260716 (1382x). The _remove_bdev_stack "already deleted,
+    #   skipping" guard did not fire once in that run, so it cannot be relied
+    #   on to suppress the second pass.
+    #
+    # Verified safe: of the 162 objects that took the create-rollback path in
+    # run 20260807 (async on the leader, sync on the non-leaders only, never
+    # on the leader), 0 were still present in the leader's end-of-run bdev
+    # dump — the async delete alone leaves nothing behind.
+    #
+    # This matches the delete protocol as stated in
+    # snapshot_controller._rollback_snapshot_bdev: an async delete must always
+    # be followed by sync deletes on EVERY non-leader HA member of the LVS —
+    # "unconditionally, never on the leader".
     primary_node = db.get_storage_node_by_id(leader_node.get_id())
     if primary_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
         # Check if any non-leader node needs sync lock
@@ -207,14 +239,19 @@ def process_lvol_delete_finish(cluster, lvol):
             if nln.status in [StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN, StorageNode.STATUS_UNREACHABLE]:
                 primary_node.lvol_del_sync_lock()
                 break
-        with snapshot_controller.lvstore_op_lock(
-                cluster.get_id(), lvol.lvs_name, node_id=primary_node.get_id()):
-            ret = lvol_controller.delete_lvol_from_node(lvol.get_id(), primary_node.get_id(), sync=True)
-        if not ret:
-            logger.error(f"Failed to delete lvol from primary_node node: {primary_node.get_id()}")
 
     lvol_bdev_name=f"{lvol.lvs_name}/{lvol.lvol_bdev}"
     for sec_node in non_leader_nodes:
+        if sec_node.get_id() in lvol.sync_deleted_nodes:
+            # The API delete call already completed this node's sync leg
+            # inline (lvol_controller._delete_lvol_from_all_nodes). Issuing a
+            # second one walks the replica blob tree again and errors on every
+            # entry the first pass cleaned — the same defect the leader used
+            # to suffer above.
+            logger.debug(
+                f"Sync delete of {lvol_bdev_name} on {sec_node.get_id()[:8]} "
+                f"already done inline; skipping")
+            continue
         if sec_node.status in [StorageNode.STATUS_ONLINE]:
             logger.info(f"Sync delete bdev: {lvol_bdev_name} from node: {sec_node.get_id()}")
             # Same per-node serialization as the primary: the sync delete
