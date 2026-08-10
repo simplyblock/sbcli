@@ -35,7 +35,7 @@ import simplyblock_web.api.v2.cluster.storage_node.device as device_module
 import simplyblock_web.api.v2.cluster.storage_pool as storage_pool_module
 import simplyblock_web.api.v2.cluster.storage_pool.snapshot as snapshot_module
 import simplyblock_web.api.v2.cluster.storage_pool.volume as volume_module
-import simplyblock_web.api.v2.cluster.storage_pool.volume.migration as migration_module
+import simplyblock_web.api.v2.cluster.subsystem.migration as migration_module
 import simplyblock_web.api.v2.cluster.task as task_module
 import simplyblock_web.api.v2.management_node as management_node_module
 
@@ -93,6 +93,7 @@ def db(monkeypatch):
     mock.get_node_capacity.return_value = []
     mock.get_device_stats.return_value = []
     mock.get_policy_for_lvol.return_value = None
+    mock.get_migration_groups.return_value = []
     return mock
 
 
@@ -200,6 +201,7 @@ def volume(db, pool):
     volume = factories.make_volume()
     db.get_lvols_by_pool_id.return_value = [volume]
     db.get_lvol_by_id.return_value = volume
+    db.get_lvols.return_value = [volume]
     return volume
 
 
