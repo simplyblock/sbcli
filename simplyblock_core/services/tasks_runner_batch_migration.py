@@ -45,7 +45,7 @@ from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_migration_group import LVolMigrationGroup
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.rpc_client import RPCException
+from simplyblock_core.rpc_client import RPCErrorCode, RPCRemoteError, RPCException
 from simplyblock_core.services.hub_controller_manager import HubControllerManager
 from simplyblock_core.services.tasks_runner_lvol_migration import (
     _make_rpc,
@@ -545,13 +545,11 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
             lvol_names, lvol_ids, snapshot_names, 2, hub_bdev, "migrate")
         logger.info(f"Group {group.uuid[:8]}: bdev_lvol_batch_transfer_final_step returned {ret!r}")
         batch_ok = True
-    except RPCException as e:
+    except RPCRemoteError as e:
         logger.error(f"Group {group.uuid[:8]}: bdev_lvol_batch_transfer_final_step RPC error code={e.code}: {e}")
         batch_err = str(e)
-        # -32601 = Method not found: SPDK binary is missing this RPC handler.
-        # Retrying will never help; surface as fatal so the group fails immediately.
-        if e.code == -32601:
-            return False, batch_err
+        if e.code == RPCErrorCode.method_not_found:
+            return False, batch_err  # Retrying will never help; surface as fatal so the group fails immediately.
     except Exception as e:
         logger.error(f"Group {group.uuid[:8]}: bdev_lvol_batch_transfer_final_step failed: {e}")
         batch_err = str(e)

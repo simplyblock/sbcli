@@ -10,7 +10,7 @@ import logging
 
 import jc
 
-from simplyblock_core.rpc_client import RPCErrorCode, RPCException
+from simplyblock_core.rpc_client import RPCErrorCode, RPCRemoteError
 from simplyblock_core.fw_api_client import FirewallClient
 
 logger = logging.getLogger(__name__)
@@ -35,7 +35,7 @@ def set_port(node, port, block, is_reject=False, timeout=5, retry=2):
         if block:
             return rpc.nvmf_port_block(port, is_reject=is_reject)
         return rpc.nvmf_port_unblock(port)
-    except RPCException as exc:
+    except RPCRemoteError as exc:
         if exc.code != RPCErrorCode.method_not_found:
             raise
         logger.info(
@@ -61,7 +61,7 @@ def get_blocked_ports_set(node, timeout=5, retry=5):
     rpc = node.rpc_client(timeout=timeout, retry=retry)
     try:
         blocked = rpc.nvmf_get_blocked_ports()
-    except RPCException as exc:
+    except RPCRemoteError as exc:
         if exc.code != RPCErrorCode.method_not_found:
             raise
         return None
@@ -79,7 +79,7 @@ def is_port_blocked(node, port_id, timeout=5, retry=5):
     """
     try:
         return port_id in node.rpc_client(timeout=timeout, retry=retry).nvmf_get_blocked_ports()
-    except RPCException as exc:
+    except RPCRemoteError as exc:
         if exc.code != RPCErrorCode.method_not_found:
             raise
         return  _is_port_blocked_iptables(node, port_id, timeout, retry)

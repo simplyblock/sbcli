@@ -603,7 +603,7 @@ class StorageNode(BaseNodeObject):
                 self.create_hublvol()
                 return True
             except RPCException as e:
-                logger.error("Error establishing hublvol: %s", e.message)
+                logger.error("Error establishing hublvol: %s", e)
                 return False
 
     def connect_to_hublvol(self, primary_node, failover_node=None, *, role,

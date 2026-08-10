@@ -9,7 +9,7 @@ import requests
 from jsonschema.exceptions import ValidationError
 from pydantic import SecretStr
 from requests.adapters import HTTPAdapter
-from requests.exceptions import RequestException
+from requests.exceptions import ConnectionError, HTTPError, ReadTimeout
 from urllib3 import Retry
 
 from simplyblock_core import utils, constants
@@ -86,10 +86,29 @@ class RPCErrorCode(IntEnum):
 
 
 class RPCException(Exception):
-    def __init__(self, message: str, code: Optional[int] = None, data: Any = None):
-        super().__init__(message, code, data)
+    """Base class for all client-raised operational errors."""
+
+
+class RPCConnectionError(RPCException):
+    """Network/connection-level failure (couldn't reach the server)."""
+
+
+class RPCHTTPError(RPCException):
+    """Non-2xx HTTP status (raise_for_status failure)."""
+    def __init__(self, message, status_code, response_text=None):
+        super().__init__(message)
+        self.status_code = status_code
+        self.response_text = response_text
+
+
+class RPCProtocolError(RPCException):
+    """Response wasn't valid/well-formed JSON-RPC."""
+
+
+class RPCRemoteError(RPCException):
+    def __init__(self, message: str, code: int, data: Any = None):
+        super().__init__(message)
         self.code = code
-        self.message = message
         self.data = data
 
 
@@ -189,27 +208,33 @@ class RPCClient:
 
     def _request3(self, method: str, **kwargs):
         logger.debug("Requesting method: %s, params: %s", method, kwargs)
+        wire_payload = unwrap_secrets_for_send({
+            'id': 1,
+            'method': method,
+            'params': kwargs,
+        })
         try:
-            wire_payload = unwrap_secrets_for_send({
-                'id': 1,
-                'method': method,
-                'params': kwargs,
-            })
             response = self.session.post(
                 self.url, data=json.dumps(wire_payload), timeout=self.timeout,
                 headers={"X-RPC-Timeout": str(self.timeout)})
             response.raise_for_status()
             data = response.json()
             _response_validator.validate(data)
-        except (
-                RequestException,  # requests
-                JSONDecodeError,  # json
-                ValidationError,  # jsonschema
-        ) as e:
-            raise RPCException('Request failed') from e
+        except ConnectionError as e:
+            raise RPCConnectionError("Could not reach remote") from e
+        except ReadTimeout as e:
+            raise RPCConnectionError("Did not get a response from remote within timeout") from e
+        except HTTPError as e:
+            raise RPCHTTPError(
+                f"HTTP {response.status_code} from remote",
+                status_code=response.status_code,
+                response_text=response.text,
+            ) from e
+        except (JSONDecodeError, ValidationError) as e:
+            raise RPCProtocolError("Invalid result payload") from e
 
         if (error := data.get('error')) is not None:
-            raise RPCException(**error)
+            raise RPCRemoteError(**error)
 
         return data['result']
 
@@ -223,7 +248,7 @@ class RPCClient:
     def subsystem_get(self, nqn: str) -> Optional[dict]:
         try:
             return single_or_none(self._request3("nvmf_get_subsystems", nqn=nqn))
-        except RPCException as e:
+        except RPCRemoteError as e:
             if e.code == -errno.ENODEV:
                 return None
             raise
@@ -254,7 +279,7 @@ class RPCClient:
         """
         try:
             return self._request3("keyring_file_add_key", name=name, path=path)
-        except RPCException as e:
+        except RPCRemoteError as e:
             if allow_existing and e.code == -17:
                 logger.debug("Key %s already in SPDK keyring, reusing", name)
                 return None
@@ -1848,7 +1873,7 @@ class RPCClient:
                 name=name,
                 bucket_name=bucket_name,
             )
-        except RPCException as e:
+        except RPCRemoteError as e:
             if allow_existing and e.code == -17:
                 logger.debug("Bucket %s already registered with %s", name, bucket_name)
                 return None
