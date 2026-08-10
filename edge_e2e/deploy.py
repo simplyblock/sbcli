@@ -23,6 +23,7 @@ import base64
 import json
 import os
 import pathlib
+import subprocess
 import sys
 
 # Allow running as a script (`python edge_e2e/x.py`) as well as `-m`:
@@ -54,6 +55,36 @@ BOOTSTRAP_FLAGS = ("--sbcli-cmd sbctl --k8s-snode --ha-type ha "
                    "--max-subsys 10 --max-snap 10 --number-of-devices 1")
 
 
+# bootstrap-cluster.sh targets simplyBlockDeploy's terraform topology: it
+# SSHes to storage nodes as ROOT, through a BASTION (ProxyCommand), using a
+# key path HARDCODED on line 4 (`KEY="$HOME/.ssh/simplyblock-us-east-2.pem"`
+# — an assignment, not `${KEY:-...}`, so the env var is ignored). A flat
+# public-subnet fleet has to be adapted to those three assumptions.
+BOOTSTRAP_KEY_PATH = "~/.ssh/simplyblock-us-east-2.pem"
+
+ENABLE_ROOT_SSH = (
+    "sudo mkdir -p /root/.ssh && "
+    "sudo cp /home/ubuntu/.ssh/authorized_keys /root/.ssh/authorized_keys && "
+    "sudo chmod 600 /root/.ssh/authorized_keys && "
+    "sudo sed -i 's/^#\\?PermitRootLogin.*/PermitRootLogin prohibit-password/' "
+    "/etc/ssh/sshd_config && sudo systemctl reload ssh")
+
+
+def prepare_bootstrap_ssh(state, key_path):
+    """Give the bootstrap script the SSH shape it expects: root login on every
+    central node, and the private key at its hardcoded filename on the mgmt
+    node (which doubles as its own bastion)."""
+    server = f"{CENTRAL.name}-mgmt"
+    for node in [server] + list(state["central"]["workers"]):
+        helpers.ssh(state, node, ENABLE_ROOT_SSH, timeout=300)
+    subprocess.run(
+        ["scp", "-i", key_path, *helpers.SSH_OPTS, key_path,
+         f"{helpers.SSH_USER}@{helpers.instance(state, server)['public_ip']}:"
+         f"{BOOTSTRAP_KEY_PATH.replace('~', '/home/ubuntu')}"],
+        check=True, capture_output=True, timeout=300)
+    helpers.ssh(state, server, f"chmod 600 {BOOTSTRAP_KEY_PATH}", timeout=120)
+
+
 def default_bootstrap_cmd(state) -> str:
     """Clone the deploy repo and run the cluster bootstrap with this fleet's
     mgmt/storage private IPs and SSH key."""
@@ -65,7 +96,7 @@ def default_bootstrap_cmd(state) -> str:
         f"rm -rf simplyBlockDeploy && git clone -q {DEPLOY_REPO} simplyBlockDeploy && "
         "cd simplyBlockDeploy/bare-metal && chmod +x ./bootstrap-cluster.sh && "
         f"MNODES='{mgmt_ip}' STORAGE_PRIVATE_IPS='{storage_ips}' "
-        f"KEY=$HOME/.ssh/id_rsa BASTION_IP='' "
+        f"BASTION_IP='{mgmt_ip}' "
         f"./bootstrap-cluster.sh {BOOTSTRAP_FLAGS}")
 
 
@@ -93,6 +124,10 @@ def bootstrap_central(state):
 
     print(f"Installing sbctl on {server}...")
     helpers.ssh(state, server, INSTALL_SBCTL, timeout=1800)
+
+    key_path = state.get("key_path") or f"~/.ssh/{state['key_name']}.pem"
+    print("Preparing bootstrap SSH (root login + hardcoded key path)...")
+    prepare_bootstrap_ssh(state, pathlib.Path(key_path).expanduser().as_posix())
 
     command = os.getenv("EDGE_E2E_BOOTSTRAP_CMD") or default_bootstrap_cmd(state)
     print(f"Bootstrapping central CP on {server}...")
