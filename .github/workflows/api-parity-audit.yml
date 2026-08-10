@@ -33,8 +33,8 @@ on:
         required: false
         default: false
         type: boolean
-  schedule:
-    - cron: '0 6 * * 1'  # Weekly on Monday 6am UTC
+  # schedule:
+  #   - cron: '0 6 * * 1'  # Weekly on Monday 6am UTC — disabled to avoid interfering with other runs
 
 concurrency:
   group: ${{ github.workflow }}

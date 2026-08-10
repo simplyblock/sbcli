@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import re
 import string
 from datetime import datetime
 
@@ -1248,17 +1249,35 @@ class K8sNativeMajorUpgrade(TestClusterBase):
 
         IMPORTANT: ``kubectl annotate`` on live resources does NOT protect
         against ``helm uninstall``. Helm reads annotations from its stored
-        release manifest (in sh.helm.release.v1.* secrets), not from the
-        live object in etcd. We must patch the Helm release secret so that
-        the stored manifest contains the keep annotation.
+        release manifest, not from the live object in etcd.
 
-        We also annotate live objects as a belt-and-suspenders measure, but
-        the Helm secret patch is the one that actually matters.
+        Primary approach (Option A): Edit the chart template files on disk
+        to add ``helm.sh/resource-policy: keep`` annotations, then run
+        ``helm upgrade --reuse-values`` to persist the annotations into
+        Helm's stored release manifest.
+
+        Fallback (Option B): If the chart path is not available, patch the
+        Helm release secret directly (decode base64→gzip→JSON, inject
+        annotations, re-encode).
         """
-        self.logger.info("Migration Step 1: Patching Helm release secret to add keep policy to FDB resources")
+        self.logger.info("Migration Step 1: Adding keep policy to FDB resources")
 
-        # Patch the Helm release secret for the sbcli chart
-        self._patch_helm_release_keep_annotations(self.helm_release_sbcli)
+        success = False
+
+        # Option A: Edit chart files on disk + helm upgrade --reuse-values
+        r25_chart_path = os.environ.get("R25_CHART_PATH", "")
+        if r25_chart_path and os.path.isdir(r25_chart_path):
+            success = self._inject_keep_annotations_via_helm_upgrade(r25_chart_path)
+        else:
+            self.logger.info(
+                f"R25_CHART_PATH not set or not found ('{r25_chart_path}'), "
+                f"trying Helm release secret patch"
+            )
+
+        # Option B: Patch Helm release secret directly (fallback)
+        if not success:
+            self.logger.info("Falling back to Helm release secret patching")
+            self._patch_helm_release_keep_annotations(self.helm_release_sbcli)
 
         # Also annotate live resources (belt-and-suspenders, not sufficient alone)
         for kind, name in _FDB_KEEP_RESOURCES:
@@ -1268,7 +1287,80 @@ class K8sNativeMajorUpgrade(TestClusterBase):
                 f"helm.sh/resource-policy=keep --overwrite 2>/dev/null || true"
             )
             self.k8s_utils._exec_kubectl(cmd)
-        self.logger.info("FDB resources annotated with keep policy (live + Helm secret)")
+        self.logger.info("FDB keep annotation step complete")
+
+    def _inject_keep_annotations_via_helm_upgrade(self, chart_path: str) -> bool:
+        """Edit FDB template files on disk and run helm upgrade --reuse-values.
+
+        This is the correct way to add keep annotations: modify the chart
+        templates so Helm stores the annotation in its release manifest,
+        then ``helm uninstall`` will see it and skip deletion.
+
+        Returns True if successful, False otherwise.
+        """
+        fdb_template = os.path.join(chart_path, "templates", "foundationdb.yaml")
+        if not os.path.isfile(fdb_template):
+            self.logger.warning(f"FDB template not found at {fdb_template}")
+            return False
+
+        self.logger.info(f"Editing FDB template: {fdb_template}")
+
+        try:
+            with open(fdb_template, "r") as f:
+                content = f.read()
+
+            if "helm.sh/resource-policy" in content:
+                self.logger.info("FDB template already has resource-policy annotations")
+            else:
+                # Inject "helm.sh/resource-policy: keep" annotation after each
+                # "metadata:" block. The template has multiple YAML documents
+                # separated by "---". Each resource has a "metadata:" line
+                # followed by "  name: ...". We add an annotations block.
+                import re
+                # Match "metadata:\n  name: <fdb-resource-name>" and inject annotation
+                fdb_names = {name for _, name in _FDB_KEEP_RESOURCES}
+                for name in fdb_names:
+                    # Pattern: metadata:\n  name: <name> (with optional labels after)
+                    pattern = rf'(metadata:\n)(  name: {re.escape(name)}\n)'
+                    replacement = (
+                        r'\1  annotations:\n'
+                        r'    "helm.sh/resource-policy": keep\n'
+                        r'\2'
+                    )
+                    content, count = re.subn(pattern, replacement, content)
+                    if count > 0:
+                        self.logger.info(f"  Injected keep annotation for: {name}")
+
+                with open(fdb_template, "w") as f:
+                    f.write(content)
+
+            # Run helm upgrade --reuse-values to persist annotations
+            self.logger.info(
+                f"Running helm upgrade --reuse-values for '{self.helm_release_sbcli}'"
+            )
+            cmd = (
+                f"helm upgrade {self.helm_release_sbcli} {chart_path} "
+                f"--namespace {_NAMESPACE} --reuse-values --timeout 5m"
+            )
+            out, _ = self.k8s_utils._exec_kubectl(cmd)
+            self.logger.info(f"Helm upgrade result: {out[:500] if out else '(empty)'}")
+
+            # Verify the annotation is in the stored manifest
+            verify_cmd = (
+                f"helm get manifest {self.helm_release_sbcli} -n {_NAMESPACE} "
+                f"2>/dev/null | grep -c 'resource-policy' || echo '0'"
+            )
+            verify_out, _ = self.k8s_utils._exec_kubectl(verify_cmd)
+            annotation_count = int(verify_out.strip() or "0")
+            self.logger.info(
+                f"Verified: {annotation_count} resource-policy annotations "
+                f"in stored manifest"
+            )
+            return annotation_count > 0
+
+        except Exception as e:
+            self.logger.warning(f"Failed to inject keep annotations via helm upgrade: {e}")
+            return False
 
     def _patch_helm_release_keep_annotations(self, release_name: str):
         """Patch the Helm release secret to inject resource-policy: keep.
