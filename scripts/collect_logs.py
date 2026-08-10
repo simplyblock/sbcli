@@ -42,6 +42,8 @@ Examples
 
 import argparse
 import json
+import os
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -104,6 +106,12 @@ CONTROL_PLANE_SERVICES_DOCKER = [
     "TasksRunnerLVolSyncDelete",
     "TasksRunnerBackup",
     "TasksRunnerBackupMerge",
+    # Async cross-cluster replication: these run on the CP but were missing from
+    # this list, so a replication incident collected no replication logs at all.
+    "SnapshotReplication",
+    "TasksRunnerReplicationFinal",
+    "TasksRunnerBatchMigration",
+    "TasksNodeRemovalRunner",
     "HAProxy",
 ]
 
@@ -132,11 +140,32 @@ CONTROL_PLANE_SERVICES_KUBERNETES = [
     "tasks-runner-backup",
     "tasks-runner-backup-merge",
     "tasks-runner-snapshot-replication",
+    "tasks-runner-replication-final",
+    "tasks-runner-batch-migration",
 ]
 
 # ---------------------------------------------------------------------------
 # sbctl helpers
 # ---------------------------------------------------------------------------
+
+
+def _sbctl_bin():
+    """Absolute path to the sbctl binary.
+
+    The script is normally run under sudo, whose secure_path does not include
+    /usr/local/bin, so a bare "sbctl" raises FileNotFoundError and the collector
+    exits before gathering anything.
+    """
+    found = shutil.which("sbctl")
+    if found:
+        return found
+    for candidate in ("/usr/local/bin/sbctl", "/usr/bin/sbctl"):
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return "sbctl"
+
+
+SBCTL_BIN = _sbctl_bin()
 
 
 def _run(cmd, timeout=30):
@@ -156,7 +185,7 @@ def sbctl_json(*args):
     Run ``sbctl <args> --json`` and return the parsed JSON (list or dict).
     Returns None and prints an error on failure.
     """
-    cmd = ["sbctl"] + list(args) + ["--json"]
+    cmd = [SBCTL_BIN] + list(args) + ["--json"]
     r = _run(cmd)
     if r is None or r.returncode != 0:
         if r:
@@ -178,7 +207,7 @@ def sbctl_raw(*args):
     Run ``sbctl <args>`` (no --json) and return stripped stdout text.
     Returns None on failure.
     """
-    r = _run(["sbctl"] + list(args))
+    r = _run([SBCTL_BIN] + list(args))
     if r is None or r.returncode != 0:
         if r:
             print(

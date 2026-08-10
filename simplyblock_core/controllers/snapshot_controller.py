@@ -707,9 +707,7 @@ def list_snapshots(cluster_id=None, node_id=None, lvol_id=None,pool_id_or_name=N
             return False
     elif pool_id_or_name:
         try:
-            pool = (db_controller.get_pool_by_id(pool_id_or_name)
-                    if utils.UUID_PATTERN.match(pool_id_or_name) is not None
-                    else db_controller.get_pool_by_name(pool_id_or_name))
+            pool = db_controller.get_pool_by_id_or_name(pool_id_or_name)
             snaps = db_controller.get_snapshots_by_pool_id(pool.get_id())
         except KeyError:
             logger.error("Can not find pool with provided pool_id_or_name: %s", pool_id_or_name)

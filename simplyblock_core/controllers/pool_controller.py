@@ -334,12 +334,7 @@ def set_pool(uuid, pool_max=0, lvol_max=0, max_rw_iops=0,
 def delete_pool(uuid):
     db_controller = DBController()
     try:
-        pool = (
-                db_controller.get_pool_by_id(uuid)
-                if utils.UUID_PATTERN.match(uuid) is not None
-                else db_controller.get_pool_by_name(uuid)
-        )
-        pool = db_controller.get_pool_by_id(uuid)
+        pool = db_controller.get_pool_by_id_or_name(uuid)
     except KeyError as e:
         logger.error(e)
         return False

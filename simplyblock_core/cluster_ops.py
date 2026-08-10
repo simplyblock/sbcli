@@ -2575,23 +2575,30 @@ def set_(cl_id, attr, value) -> bool:
 
 def add_replication(source_cl_id, target_cl_id, timeout=0, target_pool=None) -> bool:
     db_controller = DBController()
-    cluster = db_controller.get_cluster_by_id(source_cl_id)
-    if not cluster:
+    # The get_*_by_id() helpers raise KeyError rather than returning None, so
+    # translate here; a bare KeyError traceback used to reach the operator.
+    try:
+        db_controller.get_cluster_by_id(source_cl_id)
+    except KeyError:
         raise ValueError(f"Cluster not found: {source_cl_id}")
 
-    target_cluster = db_controller.get_cluster_by_id(target_cl_id)
-    if not target_cluster:
+    try:
+        db_controller.get_cluster_by_id(target_cl_id)
+    except KeyError:
         raise ValueError(f"Target cluster not found: {target_cl_id}")
 
     logger.info("Updating Cluster replication target")
     new_pool = None
     if target_pool:
-        pool = db_controller.get_pool_by_id(target_pool)
-        if not pool:
+        # --target-pool is documented as "ID or name".
+        try:
+            pool = db_controller.get_pool_by_id_or_name(target_pool)
+        except KeyError:
             raise ValueError(f"Pool not found: {target_pool}")
         if pool.status != Pool.STATUS_ACTIVE:
             raise ValueError(f"Pool not active: {target_pool}")
-        new_pool = target_pool
+        # Store the UUID: the name is mutable, the reference must not be.
+        new_pool = pool.get_id()
     new_timeout = timeout if (timeout and timeout > 0) else None
 
     # Atomic: mutate only the replication fields on the freshly-read cluster so

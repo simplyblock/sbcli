@@ -23,6 +23,7 @@ class _RPC:
         self.node_id = node_id
         self.events = events
         self._final_step_ret = final_step_ret
+        self.final_step_gateways = []
 
     # hub attach fast-path: pretend the remote bdev already exists
     def get_bdevs(self, name=None):
@@ -36,7 +37,10 @@ class _RPC:
 
     def bdev_lvol_transfer_final_step(self, lvol_name, lvol_id, snapshot_name,
                                       batch, gateway, operation):
+        # `gateway` is recorded separately: it was omitted from the event tuple,
+        # which is how the controller-name-instead-of-bdev bug went unnoticed.
         self.events.append(("final_step", operation, lvol_name, snapshot_name, batch))
+        self.final_step_gateways.append(gateway)
         return ["ok"] if self._final_step_ret else None
 
     def bdev_lvol_add_clone(self, lvol_name, parent):
@@ -141,6 +145,31 @@ def test_run_cutover_happy_path(monkeypatch):
     # add_clone only on the online peer T2.
     clones = [e for e in events if e[0] == "add_clone"]
     assert clones == [("add_clone", "T2", "lvs_tgt/LVOL_1", "lvs_tgt/SNAP1")]
+
+
+def test_run_cutover_gateway_is_the_attached_bdev_not_the_controller(monkeypatch):
+    """The final-step gateway must be the namespace bdev, not the controller name.
+
+    Regression: run_cutover passed ensure_hub_attached()'s FIRST return value
+    (the controller name handed to bdev_nvme_attach_controller, e.g.
+    "LVS_13/transferhub") instead of the SECOND (the attached bdev,
+    "LVS_13/transferhubn1"). Only the latter exists as a bdev, so SPDK answered
+    every call with ENODEV (-19): 80/80 failures in the lab, and every volume
+    stayed in cutover_pending while snapshot replication kept working.
+    """
+    events: list = []
+    tgt = _Node("T1", events, "t1", "lvs_tgt")
+    src = _Node("S1", events, "s1", "lvs_src")
+    _install_nodes(monkeypatch, {"T1": tgt, "S1": src})
+
+    ok, err = rfs.run_cutover(
+        src, tgt, _Lvol(), "lvs_tgt/LVOL_1", 42, "lvs_tgt/SNAP1", operation="replicate")
+
+    assert ok is True and err is None
+    hub = tgt.transfer_hublvol
+    assert src.rpc_client().final_step_gateways == [hub.get_remote_bdev_name()]
+    # And specifically NOT the controller name.
+    assert hub.bdev_name not in src.rpc_client().final_step_gateways
 
 
 def test_run_cutover_final_step_failure_no_ana(monkeypatch):

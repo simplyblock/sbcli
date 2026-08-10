@@ -35,8 +35,11 @@ SUBNET_ID = "subnet-0593459d6b931ee4c"
 STORAGE_SG_ID = "sg-02e89a1372e9f39e9"
 
 # Branch whose code (and matching Docker image) should be deployed. The async
-# replication work lives on new-failure-domain.
-BRANCH = "new-failure-domain"
+# replication work has since merged to main (snapshot_replication,
+# tasks_runner_replication_final, replication_final_step, cluster
+# add-replication), so main is what we test; the default
+# SIMPLY_BLOCK_DOCKER_IMAGE (simplyblock/simplyblock:main) matches it.
+BRANCH = "main"
 
 SN_TYPE = "i3en.2xlarge"
 MGMT_TYPE = "m6i.2xlarge"
@@ -45,7 +48,9 @@ CLIENT_COUNT = 1                            # client(s) used by the test process
 
 USER = "ec2-user"
 IFACE = "eth0"
-MAX_LVOL = "100"
+# Hard-capped by constants.MAX_SUBSYSTEMS_PER_NODE (75); `sn configure` rejects
+# anything above it at ingress, so do not raise this without raising that.
+MAX_LVOL = "75"
 
 # --- Two-cluster topology on a single control plane ---
 # The FIRST cluster (bootstrap=True) is created with `cluster create`; every
@@ -56,7 +61,10 @@ CLUSTERS = [
         "nodes": 2,
         "ndcs": 1,                # data-chunks-per-stripe
         "npcs": 1,                # parity-chunks-per-stripe (FT=1)
-        "ha_jm_count": 2,         # <= node count
+        # None => let the CP resolve the required count (3 for FT=1). An explicit
+        # 2 is now rejected by resolve_ha_jm_count(); a 2-node cluster simply
+        # ends up with the 2 host-disjoint journals it can place.
+        "ha_jm_count": None,
         "bootstrap": True,        # `cluster create`
         "pool": "pool_src",
     },
@@ -156,6 +164,21 @@ def list_cluster_uuids(mgmt_ip):
     return set(re.findall(r"[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}", raw))
 
 
+def get_pool_uuid(mgmt_ip, pool_name):
+    """Resolve a pool name to its UUID.
+
+    `cluster add-replication --target-pool` documents "ID or name" but
+    cluster_ops.add_replication only does get_pool_by_id(), so a name fails with
+    a raw KeyError. Always hand it the UUID.
+    """
+    raw = ssh_exec(mgmt_ip, [f"{SBCTL} pool list"], get_output=True)[0]
+    for line in raw.splitlines():
+        cols = [c.strip() for c in line.split("|")]
+        if len(cols) > 2 and cols[2] == pool_name:
+            return cols[1]
+    raise RuntimeError(f"Could not resolve UUID for pool {pool_name!r}")
+
+
 def fetch_cluster_topology(mgmt_ip, cluster_uuid):
     """Reuse the topology dumper from setup_perf_test1 (kept identical)."""
     from setup_perf_test1 import fetch_cluster_topology as _f
@@ -183,12 +206,14 @@ def create_or_add_cluster(mgmt_ip, cfg):
 
 
 def add_nodes_to_cluster(mgmt_ip, cluster_uuid, priv_ips, ha_jm_count):
+    jm_flag = f" --ha-jm-count {ha_jm_count}" if ha_jm_count else ""
+
     def add_one(priv_ip):
         for attempt in range(5):
             try:
                 ssh_exec(mgmt_ip, [
                     f"{SBCTL} -d sn add-node {cluster_uuid} {priv_ip}:5000 {IFACE}"
-                    f" --ha-jm-count {ha_jm_count}"
+                    f"{jm_flag}"
                 ], check=True)
                 return
             except RuntimeError:
@@ -307,10 +332,12 @@ def main():
     src_uuid = cluster_uuids[REPLICATION["source"]]
     tgt_uuid = cluster_uuids[REPLICATION["target"]]
     tgt_pool = next(c["pool"] for c in CLUSTERS if c["name"] == REPLICATION["target"])
-    print(f"Configuring replication {REPLICATION['source']} -> {REPLICATION['target']}...")
+    tgt_pool_uuid = get_pool_uuid(mgmt_ip, tgt_pool)
+    print(f"Configuring replication {REPLICATION['source']} -> {REPLICATION['target']}"
+          f" (target pool {tgt_pool} = {tgt_pool_uuid})...")
     ssh_exec(mgmt_ip, [
         f"{SBCTL} -d cluster add-replication {src_uuid} {tgt_uuid}"
-        f" --target-pool {tgt_pool} --timeout {REPLICATION['timeout']}"
+        f" --target-pool {tgt_pool_uuid} --timeout {REPLICATION['timeout']}"
     ], check=True)
 
     # --- Phase 6: prep clients ---

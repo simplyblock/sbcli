@@ -8,7 +8,7 @@ import time
 import fdb
 from typing import Any, List, Optional
 
-from simplyblock_core import constants
+from simplyblock_core import constants, utils
 from simplyblock_core.models.cluster import Cluster, ClusterAddNodeLock, ClusterCreateLock, PortReservation, DeployConfig
 from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.job_schedule import JobSchedule
@@ -205,6 +205,19 @@ class DBController(metaclass=Singleton):
         if pool is None:
             raise KeyError(f'Pool {name} not found')
         return pool
+
+    def get_pool_by_id_or_name(self, id_or_name: str) -> Pool:
+        """Look a pool up by UUID, falling back to its name.
+
+        Every CLI/API surface that documents "pool ID or name" needs this; it
+        used to be copied per call site, and the copies drifted (some resolved
+        by ID only, so a valid name raised KeyError).
+        """
+        return (
+            self.get_pool_by_id(id_or_name)
+            if utils.UUID_PATTERN.match(id_or_name) is not None
+            else self.get_pool_by_name(id_or_name)
+        )
 
     def get_lvols(self, cluster_id: Optional[str] = None) -> List[LVol]:
         lvols = self.get_all_lvols()
