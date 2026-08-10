@@ -312,8 +312,8 @@ class TestSharedSnapshotChain:
         # s1 and s2 must still be on target. s1/s2 are owned by l1, not c1, so
         # c1's migration recorded its target-side copy as an ``instances``
         # entry rather than mutating the canonical (still source-side)
-        # snap_bdev — look up that instance's bdev, which carries the
-        # migration suffix (e.g. SNAP_xxxm).
+        # snap_bdev — look up that instance's bdev, whose name the rename step
+        # of c1's CLEANUP_SOURCE kept in sync with the target.
         for snap_sym in ["s1", "s2"]:
             snap = db.get_snapshot_by_id(ctx.snap_uuid(snap_sym))
             instance = next(
@@ -532,10 +532,11 @@ class TestHASecondaryRegistration:
         run_migration_task(mig_id, max_steps=500, step_sleep=0.02)
         _assert_migration_done(mig_id)
 
-        # The secondary mock should have a snapshot registered. Target bdevs
-        # carry the migration suffix (e.g. SNAP_xxxm).
+        # The secondary mock should have a snapshot registered. Target bdevs are
+        # created with the migration suffix (SNAP_xxxm) and renamed back to the
+        # canonical name — on the secondary too — during CLEANUP_SOURCE.
         short = snap.snap_bdev.split('/', 1)[1] if '/' in snap.snap_bdev else snap.snap_bdev
-        sec_composite = f"{ctx.node('tgt-sec').lvstore}/{short}{constants.LVOL_MIG_BDEV_SUFFIX}"
+        sec_composite = f"{ctx.node('tgt-sec').lvstore}/{short}"
         with mock_sec_server.state.lock:
             assert sec_composite in mock_sec_server.state.snapshots, \
                 f"Snapshot not registered on secondary: {sec_composite}"
@@ -676,8 +677,9 @@ class TestFourNodeFourSnapshotMigration:
             snap = ctx.snap(snap_sym)
             short = snap.snap_bdev.split('/', 1)[1] if '/' in snap.snap_bdev \
                 else snap.snap_bdev
-            # Target bdevs carry the migration suffix (e.g. SNAP_xxxm).
-            composite = f"{tgt_lvstore}/{short}{constants.LVOL_MIG_BDEV_SUFFIX}"
+            # Target bdevs are created as SNAP_xxxm and renamed back to the
+            # canonical name during CLEANUP_SOURCE.
+            composite = f"{tgt_lvstore}/{short}"
             assert composite in tgt_snaps, (
                 f"Snapshot {snap.snap_name} ({composite}) missing from target")
 
@@ -755,3 +757,38 @@ class TestFourNodeFourSnapshotMigration:
             node_fresh = db.get_storage_node_by_id(node_uuid)
             assert node_fresh.status == StorageNode.STATUS_ONLINE, (
                 f"Passive node {node_sym} status changed to {node_fresh.status}")
+
+    def test_four_snap_target_bdevs_renamed_to_canonical_names(
+            self, topology_four_node, mock_src_server, mock_tgt_server):
+        """
+        Every bdev is created on the target under the migration suffix and
+        renamed back to its canonical name in CLEANUP_SOURCE, on the node and in
+        the DB.  Left unrenamed, the suffix would be baked into the records and
+        each further migration of the volume would have to reason about it.
+        """
+        ctx = topology_four_node
+        lvol = ctx.lvol("l1")
+        tgt_node = ctx.node("n2")
+
+        _seed_all(mock_src_server, ctx, "n1")
+
+        mig_id, err = start_migration(lvol.uuid, tgt_node.uuid)
+        assert err is None
+        run_migration_task(mig_id, max_steps=1000, step_sleep=0.02)
+        _assert_migration_done(mig_id)
+
+        suffix = constants.LVOL_MIG_BDEV_SUFFIX
+        with mock_tgt_server.state.lock:
+            leftover = sorted(n for n in mock_tgt_server.state.all_bdevs()
+                              if n.endswith(suffix))
+        assert not leftover, f"Bdevs left in the migration namespace: {leftover}"
+
+        migrated_lvol = db.get_lvol_by_id(lvol.uuid)
+        assert not migrated_lvol.lvol_bdev.endswith(suffix), (
+            f"lvol_bdev still suffixed: {migrated_lvol.lvol_bdev}")
+        assert migrated_lvol.top_bdev == f"{tgt_node.lvstore}/{migrated_lvol.lvol_bdev}"
+
+        for snap_sym in ("s1", "s2", "s3", "s4"):
+            snap = db.get_snapshot_by_id(ctx.snap_uuid(snap_sym))
+            assert not snap.snap_bdev.endswith(suffix), (
+                f"{snap_sym} snap_bdev still suffixed: {snap.snap_bdev}")

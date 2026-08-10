@@ -223,6 +223,10 @@ _METHOD_ERROR_CODES: Dict[str, list] = {
     "bdev_lvol_delete":              [-1, -2, -22],    # generic, ENOENT, EINVAL
     "bdev_lvol_get_lvol_delete_status": [-1, -2],
     "bdev_lvol_set_migration_flag":  [-1, -2],
+    # Deliberately no -32602: "File exists" is a state condition the handler
+    # raises from actual state, and injecting it at random would send the runner
+    # down the fallback-name path for no reason.
+    "bdev_lvol_rename":              [-1, -19],       # generic, ENODEV
     "bdev_lvol_transfer":            [-1, -22, -2],
     "bdev_lvol_transfer_stat":       [-1, -2],
     "bdev_lvol_add_clone":           [-1, -22, -2],
@@ -362,6 +366,65 @@ def _bdev_lvol_get_lvol_delete_status(s: NodeState, p: dict):
     if time.time() >= complete_at:
         return 0  # done (finalize step will actually remove it)
     return 1  # in progress
+
+
+def _bdev_lvol_rename(s: NodeState, p: dict):
+    """Rename an lvol/snapshot bdev, as SPDK's ``bdev_lvol_rename`` does.
+
+    ``old_name`` is the composite path (or a bare short name); ``new_name`` is a
+    bare short name, and the bdev ends up at ``<lvstore>/<new_name>``.
+
+    Two error codes matter to the caller and are *not* interchangeable:
+
+    - target name already taken → EEXIST inside SPDK, surfaced by its RPC layer
+      as ``invalid_params`` (-32602) with message "File exists".  The migration
+      runner's ``_do_rename`` keys its fallback-name logic on exactly this code,
+      so returning any other code silently disables that path.
+    - source bdev missing → ENODEV (-19), which the runner treats as fatal for
+      the primary and non-fatal for secondary/tertiary.
+
+    Renaming a bdev to the name it already has is a success no-op in SPDK, not
+    an EEXIST.
+    """
+    old_name = _req(p, 'old_name')
+    new_name = _req(p, 'new_name')
+
+    bdevs = s.all_bdevs()
+    old_composite = old_name if old_name in bdevs else s.composite(old_name)
+    if old_composite not in bdevs:
+        raise _RpcError(-19, f"lvol {old_name} does not exist")
+
+    new_short = s.short_name(new_name)
+    new_composite = s.composite(new_short)
+    if new_composite == old_composite:
+        return True
+    if new_composite in bdevs:
+        raise _RpcError(-32602, "File exists")
+
+    store = s.lvols if old_composite in s.lvols else s.snapshots
+    entry = store.pop(old_composite)
+    entry['name'] = new_short
+    entry['composite'] = new_composite
+    store[new_composite] = entry
+
+    # Everything that referenced the bdev by its old path follows it: real SPDK
+    # holds pointers, so a rename is invisible to clones and to attached
+    # namespaces rather than orphaning them.
+    for other in s.all_bdevs().values():
+        lvol_info = other.get('driver_specific', {}).get('lvol', {})
+        if lvol_info.get('base_snapshot') == old_composite:
+            lvol_info['base_snapshot'] = new_composite
+    for subsys in s.subsystems.values():
+        for ns in subsys.get('namespaces', []):
+            if ns.get('bdev_name') == old_composite:
+                ns['bdev_name'] = new_composite
+    if old_composite in s.delete_ops:
+        s.delete_ops[new_composite] = s.delete_ops.pop(old_composite)
+    if old_composite in s.transfer_ops:
+        s.transfer_ops[new_composite] = s.transfer_ops.pop(old_composite)
+
+    logger.debug("mock bdev_lvol_rename %s → %s", old_composite, new_composite)
+    return True
 
 
 def _bdev_lvol_set_migration_flag(s: NodeState, p: dict):
@@ -816,6 +879,7 @@ _DISPATCH = {
     'bdev_lvol_create':                      _bdev_lvol_create,
     'bdev_lvol_delete':                      _bdev_lvol_delete,
     'bdev_lvol_get_lvol_delete_status':      _bdev_lvol_get_lvol_delete_status,
+    'bdev_lvol_rename':                      _bdev_lvol_rename,
     'bdev_lvol_set_migration_flag':          _bdev_lvol_set_migration_flag,
     'bdev_lvol_snapshot':                    _bdev_lvol_snapshot,
     'bdev_lvol_clone':                       _bdev_lvol_clone,
