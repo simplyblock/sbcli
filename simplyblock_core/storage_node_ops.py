@@ -38,7 +38,7 @@ from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.prom_client import PromClient
-from simplyblock_core.rpc_client import RPCClient, RPCException  # noqa: F401  (RPCClient kept as a patch target for tests)
+from simplyblock_core.rpc_client import RPCClient, RPCErrorCode, RPCRemoteError, RPCException  # noqa: F401  (RPCClient kept as a patch target for tests)
 from simplyblock_core.snode_client import SNodeClient, SNodeClientException
 from simplyblock_web import node_utils
 from simplyblock_core.utils import addNvmeDevices
@@ -8927,8 +8927,8 @@ def _recreate_lvstore_impl(snode, force=False, lvs_primary=None, activation_mode
                     # c. suspend journal replication while the port is blocked
                     try:
                         repl_disabled = current_leader.rpc_client().jc_disable_replication(lvs_jm_vuid)
-                    except RPCException as e:
-                        if e.code == -32601:  # method not found
+                    except RPCRemoteError as e:
+                        if e.code == RPCErrorCode.method_not_found:
                             try:
                                 logger.warning("Failed to disable replication on leader, trying other method")
                                 ret = current_leader.rpc_client().jc_get_jm_status(lvs_jm_vuid)
@@ -8943,6 +8943,9 @@ def _recreate_lvstore_impl(snode, force=False, lvs_primary=None, activation_mode
                         else:
                             _abort_restart_and_unblock(
                                 f"jc_disable_replication on leader {current_leader.get_id()} failed: {e}")
+                    except RPCException as e:
+                        _abort_restart_and_unblock(
+                            f"jc_disable_replication on leader {current_leader.get_id()} failed: {e}")
 
                     if repl_disabled:
                         replication_suspended = True
@@ -9224,8 +9227,8 @@ def _recreate_lvstore_impl(snode, force=False, lvs_primary=None, activation_mode
                             _abort_restart_and_unblock(
                                 f"recreate_hublvol returned False on {snode.get_id()}")
                     except RPCException as e:
-                        logger.error("Error creating hublvol: %s", e.message)
-                        _abort_restart_and_unblock(f"recreate_hublvol raised: {e.message}")
+                        logger.error("Error creating hublvol: %s", e)
+                        _abort_restart_and_unblock(f"recreate_hublvol raised: {e}")
                     try:
                         # defer_db_write: the full-object node write (~150ms FDB
                         # round-trip caught in-window by the [NODE-WRITE]
@@ -9233,7 +9236,7 @@ def _recreate_lvstore_impl(snode, force=False, lvs_primary=None, activation_mode
                         snode.create_transfer_hublvol(defer_db_write=True)
                         _deferred_node_persist["needed"] = True
                     except RPCException as e:
-                        logger.error("Error creating transfer hublvol: %s", e.message)
+                        logger.error("Error creating transfer hublvol: %s", e)
 
             ### 8b- connect peers to hublvol WITHIN port-blocked window
             # The old leader must be set to secondary role (via set_lvs_opts + connect_hublvol)
@@ -10057,13 +10060,13 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
     try:
         snode.create_hublvol(cluster_nqn=cluster.nqn)
     except RPCException as e:
-        logger.error("Error establishing hublvol: %s", e.message)
+        logger.error("Error establishing hublvol: %s", e)
         # return False
 
     try:
         snode.create_transfer_hublvol()
     except RPCException as e:
-        logger.error("Error creating transfer hublvol: %s", e.message)
+        logger.error("Error creating transfer hublvol: %s", e)
 
     if secondary_ids:
         # Create secondary hublvol on sec_1 so tertiary can multipath.

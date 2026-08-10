@@ -3,7 +3,7 @@ import time
 
 
 from simplyblock_core import db_controller, utils, storage_node_ops, distr_controller
-from simplyblock_core.rpc_client import RPCException
+from simplyblock_core.rpc_client import RPCErrorCode, RPCException, RPCRemoteError
 from simplyblock_core.utils import port_block
 from simplyblock_core.controllers import (
     tcp_ports_events, health_controller, tasks_controller, storage_events, device_controller,
@@ -363,8 +363,8 @@ def _failback_leadership_to_primary(node, current_leader, other_peers):
                 if current_leader.rpc_client().jc_disable_replication(lvs_jm_vuid):
                     repl_suspended = True
                     break
-            except RPCException as e:
-                if e.code == -32601: # method not found
+            except RPCRemoteError as e:
+                if e.code == RPCErrorCode.method_not_found:
                     try:
                         logger.warning("Failed to disable replication on leader, trying other method")
                         ret = current_leader.rpc_client().jc_get_jm_status(lvs_jm_vuid)
@@ -389,6 +389,12 @@ def _failback_leadership_to_primary(node, current_leader, other_peers):
                         "leader %s (attempt %d/%d); re-quiescing",
                     current_leader.get_id()[:8], _attempt + 1,
                     _REPL_SUSPEND_MAX_ATTEMPTS)
+            except RPCException:
+                logger.warning(
+                    "jc_disable_replication reports active replication on acting "
+                    "leader %s (attempt %d/%d); re-quiescing",
+                current_leader.get_id()[:8], _attempt + 1,
+                _REPL_SUSPEND_MAX_ATTEMPTS)
         except Exception as e:
             return False, f"jc_disable_replication on acting leader failed: {e}"
 
