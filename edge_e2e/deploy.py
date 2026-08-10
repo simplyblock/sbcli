@@ -3,12 +3,12 @@
 
 Steps:
 1. Wait for every k3s cluster to be Ready (cloud-init installed them).
-2. Bootstrap the central control plane + the 3-node hyperscale storage
-   cluster on the central workers. The CP bootstrap itself comes from the
-   simplyblock-deploy repo (docs/k8s_mgmt.md); override the exact command
-   with EDGE_E2E_BOOTSTRAP_CMD if your flow differs. After this step the
-   state file must contain central.api_url / central.cluster_id /
-   central.cluster_secret — set them manually if you bootstrap by hand.
+2. Install the simplyblock stack on the CENTRAL cluster with the operator's
+   Helm chart (control plane + operator + cert-manager + CSI), wait for the
+   ControlPlane CR to report Ready, then declare the 3-node hyperscale
+   storage cluster as StorageCluster/StorageNode CRs. Override the install
+   with EDGE_E2E_BOOTSTRAP_CMD if your flow differs; after this step the
+   state file carries central.api_url / cluster_id / cluster_secret.
 3. For every edge cluster:
    - split the raw volume with sgdisk on the *-2p variants,
    - mint a ServiceAccount token + CA on the edge cluster for the CP,
@@ -23,7 +23,6 @@ import base64
 import json
 import os
 import pathlib
-import subprocess
 import sys
 
 # Allow running as a script (`python edge_e2e/x.py`) as well as `-m`:
@@ -37,75 +36,72 @@ VOLUME_SIZE = 30 * 1024 ** 3
 CENTRAL_POOL = "edge-e2e-pool"
 CENTRAL_VOLUME = "edge-e2e-central-vol"
 
-# The bootstrap scripts live in the PUBLIC simplyBlockDeploy repo, under
-# bare-metal/ — same source the k8s e2e workflows use
-# (.github/workflows/e2e-bootstrap-k8s.yml clones it and runs
-# bare-metal/bootstrap-k3s.sh; k8s-e2e.yaml runs bootstrap-cluster.sh with
-# the cluster geometry flags). k3s itself is already installed here by
-# provision.py's cloud-init, so only the cluster bootstrap runs.
-DEPLOY_REPO = "https://github.com/simplyblock-io/simplyBlockDeploy.git"
+# --- Central control-plane install (k8s-native) ------------------------------
+#
+# simplyblock is installed on kubernetes as a whole via the operator's Helm
+# chart (control plane + operator + cert-manager + CSI), per
+# https://docs.simplyblock.io/latest/deployments/kubernetes/ . The operator
+# sits ON TOP of the control plane: its CRDs (ControlPlane, StorageCluster,
+# StorageNode, Pool, ...) are thin mirrors of the sbcli API, which stays the
+# source of truth. So the campaign installs the stack with helm, declares the
+# central storage cluster + nodes as CRs, and then drives EDGE clusters
+# through the v2 API (the operator has no edge CRs yet — that is follow-up
+# work that will consume these same APIs).
+#
+# NB: the bare-metal bootstrap-cluster.sh path is deliberately NOT used: it
+# assumes a terraform/bastion topology with root SSH and a docker daemon on
+# the management host, none of which belong in a kubernetes-only deployment.
+HELM_REPO_NAME = "simplyblock"
+HELM_REPO_URL = os.getenv(
+    "EDGE_E2E_HELM_REPO", "https://simplyblock.github.io/helm-charts/charts")
+HELM_RELEASE = "simplyblock-operator"
+HELM_CHART = f"{HELM_REPO_NAME}/simplyblock-operator"
+K8S_NAMESPACE = os.getenv("EDGE_E2E_NAMESPACE", "simplyblock")
+CENTRAL_CLUSTER_CR = "edge-e2e-central"
 
-# bootstrap-cluster.sh takes its topology from ENVIRONMENT VARIABLES (MNODES,
-# STORAGE_PRIVATE_IPS, KEY, ...) — the CLI flags only carry cluster geometry,
-# and the flag names have moved on from the ones in the older k8s-e2e
-# workflow (--max-lvol -> --max-subsys, --distr-ndcs ->
-# --data-chunks-per-stripe). Verified against the script's own --help on a
-# live node, 2026-08-10.
-BOOTSTRAP_FLAGS = ("--sbcli-cmd sbctl --k8s-snode --ha-type ha "
-                   "--max-subsys 10 --max-snap 10 --number-of-devices 1")
+INSTALL_HELM = (
+    "command -v helm >/dev/null 2>&1 || "
+    "curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 "
+    "| sudo bash")
 
-
-# bootstrap-cluster.sh targets simplyBlockDeploy's terraform topology: it
-# SSHes to storage nodes as ROOT, through a BASTION (ProxyCommand), using a
-# key path HARDCODED on line 4 (`KEY="$HOME/.ssh/simplyblock-us-east-2.pem"`
-# — an assignment, not `${KEY:-...}`, so the env var is ignored). A flat
-# public-subnet fleet has to be adapted to those three assumptions.
-BOOTSTRAP_KEY_PATH = "~/.ssh/simplyblock-us-east-2.pem"
-
-ENABLE_ROOT_SSH = (
-    "sudo mkdir -p /root/.ssh && "
-    "sudo cp /home/ubuntu/.ssh/authorized_keys /root/.ssh/authorized_keys && "
-    "sudo chmod 600 /root/.ssh/authorized_keys && "
-    "sudo sed -i 's/^#\\?PermitRootLogin.*/PermitRootLogin prohibit-password/' "
-    "/etc/ssh/sshd_config && sudo systemctl reload ssh")
-
-
-def prepare_bootstrap_ssh(state, key_path):
-    """Give the bootstrap script the SSH shape it expects: root login on every
-    central node, and the private key at its hardcoded filename on the mgmt
-    node (which doubles as its own bastion)."""
-    server = f"{CENTRAL.name}-mgmt"
-    for node in [server] + list(state["central"]["workers"]):
-        helpers.ssh(state, node, ENABLE_ROOT_SSH, timeout=300)
-    subprocess.run(
-        ["scp", "-i", key_path, *helpers.SSH_OPTS, key_path,
-         f"{helpers.SSH_USER}@{helpers.instance(state, server)['public_ip']}:"
-         f"{BOOTSTRAP_KEY_PATH.replace('~', '/home/ubuntu')}"],
-        check=True, capture_output=True, timeout=300)
-    helpers.ssh(state, server, f"chmod 600 {BOOTSTRAP_KEY_PATH}", timeout=120)
-
-
-def default_bootstrap_cmd(state) -> str:
-    """Clone the deploy repo and run the cluster bootstrap with this fleet's
-    mgmt/storage private IPs and SSH key."""
-    mgmt_ip = helpers.instance(state, f"{CENTRAL.name}-mgmt")["private_ip"]
-    storage_ips = " ".join(
-        helpers.instance(state, worker)["private_ip"]
-        for worker in state["central"]["workers"])
-    return (
-        f"rm -rf simplyBlockDeploy && git clone -q {DEPLOY_REPO} simplyBlockDeploy && "
-        "cd simplyBlockDeploy/bare-metal && chmod +x ./bootstrap-cluster.sh && "
-        f"MNODES='{mgmt_ip}' STORAGE_PRIVATE_IPS='{storage_ips}' "
-        f"BASTION_IP='{mgmt_ip}' "
-        f"./bootstrap-cluster.sh {BOOTSTRAP_FLAGS}")
-
-
-# sbctl is not on the image; the admin host needs it plus the FDB client
-# (docs/k8s_mgmt.md step 2).
 INSTALL_SBCTL = (
     "which sbctl >/dev/null 2>&1 || { "
     "sudo apt-get update -y && sudo apt-get install -y python3-pip && "
     "sudo pip3 install -q sbctl; }")
+
+
+def helm_install_cmd() -> str:
+    return (
+        f"sudo helm repo add {HELM_REPO_NAME} {HELM_REPO_URL} && "
+        "sudo helm repo update && "
+        f"sudo helm upgrade --install {HELM_RELEASE} {HELM_CHART} "
+        f"--namespace {K8S_NAMESPACE} --create-namespace --wait --timeout 20m")
+
+
+def storage_cluster_manifest(worker_names) -> str:
+    """Central hyperscale cluster declared as CRs: one StorageCluster plus a
+    StorageNode per worker. Geometry mirrors the sbcli cluster params."""
+    nodes = "\n".join(
+        f"""---
+apiVersion: storage.simplyblock.io/v1alpha1
+kind: StorageNode
+metadata:
+  name: {name}
+  namespace: {K8S_NAMESPACE}
+spec:
+  storageClusterRef: {CENTRAL_CLUSTER_CR}
+  workerNode: {name}"""
+        for name in worker_names)
+    return f"""apiVersion: storage.simplyblock.io/v1alpha1
+kind: StorageCluster
+metadata:
+  name: {CENTRAL_CLUSTER_CR}
+  namespace: {K8S_NAMESPACE}
+spec:
+  haType: ha
+  blockSize: 512
+{nodes}
+"""
 
 
 def wait_k3s_ready(state, server_name, expected_nodes):
@@ -118,32 +114,51 @@ def wait_k3s_ready(state, server_name, expected_nodes):
 
 
 def bootstrap_central(state):
-    """Install the CP + hyperscale storage cluster on the central cluster."""
+    """Install the simplyblock stack on the central k3s cluster via the
+    operator Helm chart, then declare the hyperscale storage cluster as CRs
+    and record the API endpoint + credentials for the campaign."""
     server = f"{CENTRAL.name}-mgmt"
     wait_k3s_ready(state, server, expected_nodes=1 + CENTRAL.workers)
 
-    print(f"Installing sbctl on {server}...")
+    print(f"Installing helm + sbctl on {server}...")
+    helpers.ssh(state, server, INSTALL_HELM, timeout=900)
     helpers.ssh(state, server, INSTALL_SBCTL, timeout=1800)
 
-    key_path = state.get("key_path") or f"~/.ssh/{state['key_name']}.pem"
-    print("Preparing bootstrap SSH (root login + hardcoded key path)...")
-    prepare_bootstrap_ssh(state, pathlib.Path(key_path).expanduser().as_posix())
+    command = os.getenv("EDGE_E2E_BOOTSTRAP_CMD") or helm_install_cmd()
+    print(f"Installing simplyblock via helm on {server}...")
+    print(helpers.ssh(state, server, command, timeout=3600)[-2000:])
 
-    command = os.getenv("EDGE_E2E_BOOTSTRAP_CMD") or default_bootstrap_cmd(state)
-    print(f"Bootstrapping central CP on {server}...")
-    print(helpers.ssh(state, server, command, timeout=3600))
+    print("Waiting for the ControlPlane to report Ready...")
+    helpers.ssh(
+        state, server,
+        f"sudo kubectl -n {K8S_NAMESPACE} wait controlplane --all "
+        "--for=jsonpath='{.status.phase}'=Ready --timeout=600s", timeout=900)
 
-    # The bootstrap prints/stores cluster id + secret; pick them up via sbctl.
-    cluster_id = helpers.ssh(
-        state, server, "sbctl cluster list --json | jq -r '.[0].uuid'").strip()
+    print("Declaring the central StorageCluster + StorageNodes...")
+    manifest = storage_cluster_manifest(state["central"]["workers"])
+    helpers.ssh(state, server,
+                f"cat <<'EOF' | sudo kubectl apply -f -\n{manifest}\nEOF",
+                timeout=300)
+
+    cluster_id = helpers.wait_for(
+        "central StorageCluster to report its backend UUID",
+        lambda: helpers.ssh(
+            state, server,
+            f"sudo kubectl -n {K8S_NAMESPACE} get storagecluster "
+            f"{CENTRAL_CLUSTER_CR} -o jsonpath='{{.status.uuid}}'",
+            check=False, timeout=60).strip() or False,
+        timeout=2400, interval=20)
+
     secret = helpers.ssh(
         state, server, f"sbctl cluster get-secret {cluster_id}").strip()
     state["central"].update({
         "api_url": f"http://{helpers.instance(state, server)['public_ip']}",
         "cluster_id": cluster_id,
         "cluster_secret": secret,
+        "namespace": K8S_NAMESPACE,
     })
     helpers.save_state(state)
+    print(f"central: control plane up, cluster {cluster_id}")
 
 
 def prepare_central_workload(state):
