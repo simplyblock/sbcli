@@ -78,7 +78,7 @@ def get_requirements():
 COMMAND_NAME = get_env_var("SIMPLY_BLOCK_COMMAND_NAME", SIMPLYBLOCK_DEFAULT_CLI_CMD)
 VERSION = get_env_var("SIMPLY_BLOCK_VERSION", "1")
 
-data_files = gen_data_files("simplyblock_core","simplyblock_web")
+data_files = gen_data_files("simplyblock_core","simplyblock_web","simplyblock_edge")
 data_files.append(('', ["requirements.txt"]))
 # data_files.append(('/etc/simplyblock', ["requirements.txt"]))
 

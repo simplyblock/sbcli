@@ -4,15 +4,14 @@ import logging
 import os
 import ssl
 import sys
-import time
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.wsgi import WSGIMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
-from starlette.middleware.base import BaseHTTPMiddleware
 import uvicorn
 from uvicorn.config import Config
 
+from simplyblock_lib.api.middleware import ACCESS_LOG_FORMAT, AccessLogMiddleware
 from simplyblock_web.api import v1, v2
 from simplyblock_web.settings import Settings as WebSettings
 from simplyblock_core import constants, utils as core_utils
@@ -33,45 +32,12 @@ for _ext_logger_name in (
 
 access_logger = logging.getLogger('simplyblock_web.access')
 _access_handler = logging.StreamHandler(stream=sys.stdout)
-_access_handler.setFormatter(logging.Formatter(
-    '%(asctime)s %(levelname)s %(client_ip)s'
-    ' "%(message)s" %(status_code)s %(request_size)s %(response_size)s %(duration_ms).2fms'
-))
+_access_handler.setFormatter(logging.Formatter(ACCESS_LOG_FORMAT))
 access_logger.addHandler(_access_handler)
 access_logger.propagate = False
 
 
 core_utils.init_sentry_sdk()
-
-
-class AccessLogMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        client_ip = request.client.host if request.client else '-'
-        request_size = request.headers.get('content-length', '-')
-
-        # Query strings can carry credentials (?secret=…, ?token=…) and have
-        # no type info to mask by, so log the path only.
-        path = request.url.path
-
-        start = time.monotonic()
-        response = await call_next(request)
-        duration_ms = (time.monotonic() - start) * 1000
-
-        response_size = response.headers.get('content-length', '-')
-
-        access_logger.info(
-            '%s %s',
-            request.method,
-            path,
-            extra={
-                'client_ip': client_ip,
-                'request_size': request_size,
-                'status_code': response.status_code,
-                'response_size': response_size,
-                'duration_ms': duration_ms,
-            },
-        )
-        return response
 
 
 app: FastAPI = FastAPI()
@@ -97,7 +63,7 @@ async def runtime_error_handler(request: Request, exc: RuntimeError):
 
 _web_settings = WebSettings()
 
-app.add_middleware(AccessLogMiddleware)
+app.add_middleware(AccessLogMiddleware, logger=access_logger)
 
 if 2 in _web_settings.api_versions:
     app.include_router(v2.api, prefix='/api/v2')

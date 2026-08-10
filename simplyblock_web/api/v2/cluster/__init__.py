@@ -12,6 +12,8 @@ from simplyblock_core import cluster_ops
 
 from .._dependencies import Cluster
 from .backup import api as backup_api
+from .edge import (create_api as edge_create_api, node_api as edge_node_api,
+                   volume_api as edge_volume_api)
 from .storage_pool import api as pool_api
 from .storage_node import api as storage_node_api
 from .subsystem import api as subsystem_api
@@ -123,6 +125,9 @@ def add(request: Request, parameters: ClusterParams, response_format: util.Creat
         get_full=lambda _: ClusterDTO.from_model(cluster),
     )
 
+
+# Literal /edge must register before the /{cluster_id} tree so it wins routing.
+api.include_router(edge_create_api)
 
 instance_api = APIRouter(prefix='/{cluster_id}')
 
@@ -254,4 +259,6 @@ instance_api.include_router(task_api, prefix='/tasks')
 instance_api.include_router(pool_api, prefix='/storage-pools')
 instance_api.include_router(backup_api, prefix='/backups')
 instance_api.include_router(subsystem_api, prefix='/subsystems')
+instance_api.include_router(edge_node_api, prefix='/edge-nodes')
+instance_api.include_router(edge_volume_api, prefix='/edge-volumes')
 api.include_router(instance_api)

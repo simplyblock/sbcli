@@ -1,9 +1,7 @@
 # coding=utf-8
-import contextlib
 import datetime
 import logging
 import socket
-import threading
 import time
 import uuid
 
@@ -12,6 +10,7 @@ from simplyblock_core.controllers import tasks_events, device_controller
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_lib.tasks.lease import TaskLease
 
 logger = logging.getLogger()
 db = db_controller.DBController()
@@ -20,20 +19,22 @@ db = db_controller.DBController()
 # and restarts on the same host re-claims its own in-flight tasks immediately.
 _RUNNER_HOST = socket.gethostname()
 
+# The lease mechanics live in simplyblock_lib.tasks.lease; the wrappers below
+# keep this module's long-standing entry points (every runner imports them).
+_lease = TaskLease(
+    db,
+    ttl_sec=constants.TASK_LEASE_TTL_SEC,
+    heartbeat_sec=constants.TASK_LEASE_HEARTBEAT_SEC,
+    owner=_RUNNER_HOST,
+    done_status=JobSchedule.STATUS_DONE,
+    logger=logger,
+)
+
 
 def _task_lease_is_stale(task):
     """True if the task's lease (its last write) is older than the TTL, i.e.
     the owning runner host is presumed dead and another host may take over."""
-    if not task.updated_at:
-        return True
-    try:
-        last = datetime.datetime.fromisoformat(task.updated_at)
-    except (ValueError, TypeError):
-        return True
-    if last.tzinfo is None:
-        last = last.replace(tzinfo=datetime.timezone.utc)
-    age = (datetime.datetime.now(datetime.timezone.utc) - last).total_seconds()
-    return age > constants.TASK_LEASE_TTL_SEC
+    return _lease.is_stale(task)
 
 
 def claim_task(task, owner=None):
@@ -41,63 +42,23 @@ def claim_task(task, owner=None):
 
     Returns True if this host now holds the lease and may run the task, or
     False if another still-alive host owns it (caller must skip it this cycle).
-
-    The lease is keyed by hostname and refreshed (via updated_at) on every
-    claim and on every task write. A second runner replica on a *different*
-    host is locked out until the lease goes stale (constants.TASK_LEASE_TTL_SEC),
-    which is what prevents two replicas from both executing the same
-    side-effecting task during a rolling deploy or a transient dual-manager
-    window. A runner on the *same* host always wins immediately, so the common
-    single-replica deployment is unaffected (this gate returns True).
-
-    Done/canceled tasks are never claimed.
+    A runner on the *same* host always wins immediately, so the common
+    single-replica deployment is unaffected. Done tasks are never claimed.
+    See simplyblock_lib.tasks.lease.TaskLease.claim for the full contract.
     """
-    owner = owner or _RUNNER_HOST
-    decision = {"won": False}
-    now = str(datetime.datetime.now(datetime.timezone.utc))
-
-    def _mutate(t):
-        if t.status == JobSchedule.STATUS_DONE:
-            return False  # not claimable; decision stays False
-        if t.owner and t.owner != owner and not _task_lease_is_stale(t):
-            return False  # owned by another live host
-        t.owner = owner
-        t.updated_at = now  # refresh the lease (atomic_update bypasses write_to_db)
-        decision["won"] = True
-        return True
-
-    if db.atomic_update(task, _mutate) is None:
-        return False
-    return decision["won"]
+    return _lease.claim(task, owner)
 
 
 def refresh_task_lease(task, owner=None):
-    """Heartbeat: refresh this host's lease on a task it already owns, so a
-    live owner is never preempted while blocking on long RPCs. Returns False
-    (without touching the task) if the task is done or owned by another host —
-    the caller lost the lease and should treat the takeover as authoritative."""
-    owner = owner or _RUNNER_HOST
-    now = str(datetime.datetime.now(datetime.timezone.utc))
-    refreshed = {"ok": False}
-
-    def _mutate(t):
-        if t.status == JobSchedule.STATUS_DONE:
-            return False
-        if t.owner != owner:
-            return False
-        t.updated_at = now
-        refreshed["ok"] = True
-        return True
-
-    if db.atomic_update(task, _mutate) is None:
-        return False
-    return refreshed["ok"]
+    """Heartbeat: refresh this host's lease on a task it already owns. Returns
+    False if the task is done or owned by another host — the takeover is
+    authoritative. See simplyblock_lib.tasks.lease.TaskLease.refresh."""
+    return _lease.refresh(task, owner)
 
 
-@contextlib.contextmanager
 def task_lease_heartbeat(task, owner=None):
-    """Refresh this host's lease on `task` every TASK_LEASE_HEARTBEAT_SEC for
-    the duration of the with-block.
+    """Context manager refreshing this host's lease on `task` every
+    TASK_LEASE_HEARTBEAT_SEC for the duration of the with-block.
 
     Every runner that executes long-blocking work under a claimed lease MUST
     wrap that work in this: since TASK_LEASE_TTL_SEC (180s) is far shorter
@@ -106,26 +67,9 @@ def task_lease_heartbeat(task, owner=None):
     new pod during a rolling update) would claim the task and double-drive
     it — for node-add that means killing the in-flight add's SPDK and
     deleting its half-created node record.
-
-    The heartbeat stops on its own if the lease is lost to another host
-    (refresh_task_lease returns False) — the takeover is authoritative.
+    See simplyblock_lib.tasks.lease.TaskLease.heartbeat.
     """
-    stop = threading.Event()
-
-    def _beat():
-        while not stop.wait(constants.TASK_LEASE_HEARTBEAT_SEC):
-            try:
-                if not refresh_task_lease(task, owner):
-                    return
-            except Exception as e:
-                logger.debug(f"Lease heartbeat failed for task {task.uuid}: {e}")
-
-    thread = threading.Thread(target=_beat, daemon=True)
-    thread.start()
-    try:
-        yield
-    finally:
-        stop.set()
+    return _lease.heartbeat(task, owner)
 
 
 def ensure_node_restart_task(node):

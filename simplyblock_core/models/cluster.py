@@ -17,6 +17,9 @@ class HashicorpVaultSettings(BaseModel):
 
 class Cluster(BaseModel):
 
+    TYPE_HYPERSCALE = "hyperscale"
+    TYPE_EDGE = "edge"
+
     STATUS_ACTIVE = "active"
     STATUS_READONLY = 'read_only'
     STATUS_INACTIVE = "inactive"
@@ -76,6 +79,18 @@ class Cluster(BaseModel):
         """True while a lifecycle flow (activation/expansion/shrink) owns the
         cluster layout."""
         return self.status in self.TOPOLOGY_OWNED_STATUSES
+
+    # "hyperscale" (the ultra/distr data plane, default for all pre-existing
+    # records) or "edge" (spdk-only 1-2 node clusters managed by this same
+    # centralized control plane; see docs/edge_clusters_spec.md and
+    # simplyblock_edge/). Gates which ops/monitors/API surfaces apply.
+    cluster_type: str = TYPE_HYPERSCALE
+    # Edge clusters only: how the CP reaches the edge site's kubernetes API.
+    # Empty k8s_api_url means "the CP's own cluster" (in-cluster config).
+    k8s_api_url: str = ""
+    k8s_token: SecretStr = SecretStr("")
+    k8s_ca_cert: str = ""
+    k8s_namespace: str = "simplyblock"
 
     auth_hosts_only: bool = False
     blk_size: int = 0

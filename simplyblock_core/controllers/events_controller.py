@@ -4,6 +4,7 @@ import uuid
 from simplyblock_core.models.events import EventObj
 from simplyblock_core.db_controller import DBController
 from simplyblock_core import utils
+from simplyblock_lib import events as lib_events
 
 
 logger = utils.get_logger(__name__)
@@ -103,11 +104,4 @@ def log_event_based_on_level(cluster_id, event, db_object, message, caused_by, e
         "caused_by": caused_by
     })
 
-    if event_level == EventObj.LEVEL_CRITICAL:
-        logger.critical(json_str)
-    elif event_level == EventObj.LEVEL_WARN:
-        logger.warning(json_str)
-    elif event_level == EventObj.LEVEL_ERROR:
-        logger.error(json_str)
-    else:
-        logger.info(json_str)
+    lib_events.log_at_level(logger, event_level, json_str)
