@@ -23,6 +23,10 @@ import uuid as uuid_lib
 
 from pydantic import SecretStr
 
+from tenacity import (RetryError, Retrying, before_sleep_log,
+                      retry_if_exception_type, retry_if_result,
+                      stop_after_delay, wait_fixed)
+
 from simplyblock_core import constants as core_constants, utils as core_utils
 from simplyblock_core.controllers import events_controller
 from simplyblock_core.models.cluster import Cluster
@@ -98,18 +102,19 @@ def set_cluster_status(cluster, new_status, caused_by=events_controller.CAUSED_B
 # ---------------------------------------------------------------- rpc utils
 
 def _wait_for_rpc(rpc, timeout=edge_constants.EDGE_RPC_WAIT_TIMEOUT_SEC,
-                  interval=edge_constants.EDGE_RPC_WAIT_INTERVAL_SEC,
-                  sleep=time.sleep):
-    deadline = time.monotonic() + timeout
-    while True:
-        try:
-            if rpc.get_version():
-                return
-        except Exception:
-            pass
-        if time.monotonic() >= deadline:
-            raise TimeoutError("SPDK RPC did not come up in time")
-        sleep(interval)
+                  interval=edge_constants.EDGE_RPC_WAIT_INTERVAL_SEC):
+    """Block until the node's SPDK proxy answers (pod start)."""
+    try:
+        Retrying(
+            stop=stop_after_delay(timeout),
+            wait=wait_fixed(interval),
+            retry=retry_if_result(lambda answered: not answered)
+                  | retry_if_exception_type(Exception),
+            before_sleep=before_sleep_log(logger, logging.DEBUG),
+        )(lambda: bool(rpc.get_version()))
+    except RetryError as e:
+        raise TimeoutError(
+            f"SPDK RPC did not come up within {timeout}s") from e
 
 
 def _ensure_aio(rpc, spec: stack.AioSpec):
@@ -780,28 +785,38 @@ def add_device(cluster_id, node_id, device_path) -> str:
 # ------------------------------------------------------------ task handlers
 # Called by services/tasks_runner_edge.py; return simplyblock_lib TaskResult.
 
-def _wait_raid_synced(rpc, raid_name,
-                      timeout=edge_constants.EDGE_RESYNC_TIMEOUT_SEC,
-                      interval=5, sleep=time.sleep, monotonic=time.monotonic):
-    """Block until the mirror has both legs and no rebuild in flight.
+def _raid_is_synced(rpc, raid_name) -> bool:
+    """True when the mirror has both legs and no rebuild in flight.
 
     Fork gate (spec §10): the exact rebuild-progress fields of
     bdev_raid_get_bdevs are fork-specific; this treats "2 base bdevs present
     and no process/rebuilding marker" as synced.
     """
-    deadline = monotonic() + timeout
-    while True:
-        entry = next((r for r in (rpc.bdev_raid_get_bdevs() or [])
-                      if r.get('name') == raid_name), None)
-        if entry is not None:
-            members = entry.get('base_bdevs_list') or []
-            rebuilding = bool(entry.get('process')) or any(
-                isinstance(m, dict) and m.get('is_rebuilding') for m in members)
-            if len(members) >= 2 and not rebuilding:
-                return
-        if monotonic() >= deadline:
-            raise TimeoutError(f"raid {raid_name} did not resync in {timeout}s")
-        sleep(interval)
+    entry = next((r for r in (rpc.bdev_raid_get_bdevs() or [])
+                  if r.get('name') == raid_name), None)
+    if entry is None:
+        return False
+    members = entry.get('base_bdevs_list') or []
+    rebuilding = bool(entry.get('process')) or any(
+        isinstance(m, dict) and m.get('is_rebuilding') for m in members)
+    return len(members) >= 2 and not rebuilding
+
+
+def _wait_raid_synced(rpc, raid_name,
+                      timeout=edge_constants.EDGE_RESYNC_TIMEOUT_SEC,
+                      interval=edge_constants.EDGE_RESYNC_POLL_SEC):
+    """Block until the mirror finished rebuilding (fail-back gate)."""
+    try:
+        Retrying(
+            stop=stop_after_delay(timeout),
+            wait=wait_fixed(interval),
+            retry=retry_if_result(lambda synced: not synced)
+                  | retry_if_exception_type(Exception),
+            before_sleep=before_sleep_log(logger, logging.DEBUG),
+        )(_raid_is_synced, rpc, raid_name)
+    except RetryError as e:
+        raise TimeoutError(
+            f"raid {raid_name} did not resync within {timeout}s") from e
 
 
 def _readd_legs_on_peer(cluster, peer, returned):

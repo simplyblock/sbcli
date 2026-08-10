@@ -24,6 +24,7 @@ EDGE_RPC_PROBE_TIMEOUT_SEC = 3
 # Fail-back: how long to wait for the returning primary's mirror leg to
 # resync before moving the lvstore home.
 EDGE_RESYNC_TIMEOUT_SEC = int(os.getenv("SIMPLYBLOCK_EDGE_RESYNC_TIMEOUT", "7200"))
+EDGE_RESYNC_POLL_SEC = 5
 
 # Task runner.
 EDGE_TASK_INTERVAL_SEC = 5
