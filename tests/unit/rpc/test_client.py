@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from pydantic import SecretStr
 
-from simplyblock_core.rpc_client import RPCClient, RPCException
+from simplyblock_core.rpc_client import RPCClient, RPCException, RPCRemoteError
 
 
 def _make_client(**kwargs):
@@ -76,14 +76,14 @@ class TestSubsystem(unittest.TestCase):
     def test_subsystem_get_no_such_device_returns_none(self, mock_req):
         # SPDK returns ENODEV (-19) "No such device" when the subsystem is gone;
         # treat it as absent rather than propagating the error.
-        mock_req.side_effect = RPCException("No such device", code=-errno.ENODEV)
+        mock_req.side_effect = RPCRemoteError("No such device", code=-errno.ENODEV)
         client = _make_client()
         self.assertIsNone(client.subsystem_get("nqn.gone"))
 
     @patch.object(RPCClient, "_request3")
     def test_subsystem_get_other_rpc_error_propagates(self, mock_req):
         # Generic RPC failures must still surface.
-        mock_req.side_effect = RPCException("Something broke", code=-errno.EINVAL)
+        mock_req.side_effect = RPCRemoteError("Something broke", code=-errno.EINVAL)
         client = _make_client()
         with self.assertRaises(RPCException):
             client.subsystem_get("nqn.b")
