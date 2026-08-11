@@ -55,7 +55,7 @@ from simplyblock_core.services.tasks_runner_lvol_migration import (
     _get_source_tertiary_node,
     _lvol_tgt_bdev_name,
     _build_paths,
-    _ensure_target_nvmf_state,
+    _ensure_and_prune_target_paths,
 )
 
 logger = utils.get_logger(__name__)
@@ -330,6 +330,29 @@ def _flip_ana_to_optimized(group, member_migrations, src_node, src_rpc, tgt_node
     nqn = group.target_nqn
     src_paths, tgt_paths, overlap_ids = _build_paths(src_node, tgt_node, src_rpc, tgt_rpc)
     src_port_by_id = {p['node_id']: p['port'] for p in src_paths}
+
+    # Detect and repair a target-side node restart that wiped the migration's
+    # NVMe-oF subsystem/listener/namespace, right before this ANA-flip
+    # sequence -- that state is only ever consumed here, at cutover, so there
+    # is no need to poll for it during PHASE_SNAP_COPY/PHASE_INTERMEDIATE.
+    # All workers share the same NQN/subsystem, so the first member is a
+    # representative stand-in. bdev_lvol_batch_final_step has already run and
+    # cannot be undone, so unlike solo migration this is always best-effort:
+    # secondary/tertiary get pruned from tgt_paths on failure (same as solo),
+    # and even a primary failure is only logged -- there is no "abort" option
+    # left at this point, matching this function's existing tolerance for any
+    # ANA-flip step failing (see docstring above).
+    if member_migrations:
+        try:
+            first_lvol = db.get_lvol_by_id(member_migrations[0].lvol_id)
+            tgt_paths, _ensure_err = _ensure_and_prune_target_paths(
+                member_migrations[0], first_lvol, tgt_node, tgt_paths)
+            if _ensure_err:
+                logger.error(
+                    f"Group {group.uuid[:8]}: target primary NVMe-oF state check "
+                    f"failed (non-fatal, batch_final_step already committed): {_ensure_err}")
+        except Exception as e:
+            logger.warning(f"Group {group.uuid[:8]}: target NVMe-oF state check error (non-fatal): {e}")
 
     def _flip(rpc, ip, port, trtype, state, label):
         try:
@@ -877,22 +900,6 @@ def task_runner(task):
             task.status = JobSchedule.STATUS_SUSPENDED
             task.write_to_db(db.kv_store)
             return False
-
-    # --- Target NVMe-oF state reconciliation (GAP D) ---
-    # Mirror the solo runner's per-tick subsystem/listener/namespace repair.
-    # Use the first member migration (all workers share the same NQN and subsystem).
-    if phase in (LVolMigrationGroup.PHASE_SNAP_COPY, LVolMigrationGroup.PHASE_INTERMEDIATE):
-        if member_migrations:
-            first_mig = member_migrations[0]
-            try:
-                first_lvol = db.get_lvol_by_id(first_mig.lvol_id)
-                nvmf_err = _ensure_target_nvmf_state(
-                    first_mig, first_lvol, src_node, tgt_node, src_rpc, tgt_rpc)
-                if nvmf_err:
-                    logger.warning(f"Group {group_id[:8]}: target NVMe-oF state check failed: {nvmf_err}")
-                    return _batch_budget_suspend(task, group, group_id, nvmf_err)
-            except Exception as e:
-                logger.warning(f"Group {group_id[:8]}: _ensure_target_nvmf_state error (non-fatal): {e}")
 
     try:
         # ── PHASE_SNAP_COPY: wait for all workers, then reconstruct tree ─────────
