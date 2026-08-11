@@ -77,6 +77,19 @@ CLUSTERS = [
         "bootstrap": False,       # `cluster add`
         "pool": "pool_tgt",
     },
+    # Pristine, never-written cluster used only by the fail-back-to-a-fresh-site
+    # case (test_async_replication case4): failing back there must replicate the
+    # FULL dataset, not a delta. Drop this entry (and save 2 instances) if you
+    # only run cases 1-3/5/6.
+    {
+        "name": "fresh",
+        "nodes": 2,
+        "ndcs": 1,
+        "npcs": 1,
+        "ha_jm_count": None,
+        "bootstrap": False,
+        "pool": "pool_fresh",
+    },
 ]
 
 # Snapshot replication direction (source cluster -> target cluster).

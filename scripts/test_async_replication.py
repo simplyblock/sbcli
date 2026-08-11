@@ -52,6 +52,9 @@ CUTOVER_WAIT_TIMEOUT = 600
 # 3x the snapshot interval tolerates one missed cycle without being slack.
 MAX_LAG_SECONDS = REPL_INTERVAL_MIN * 60 * 3
 STABLE_POLLS = 2                      # consecutive good polls before cutting over
+NODE_STATE_TIMEOUT = 900              # node offline/online transition budget
+BASELINE_MB = 128                     # size of the md5-verified marker file
+OUTAGE_REPL_CYCLES = 4                # replication cycles to observe during an outage
 
 # --- fio workload (per the test spec) ---
 FIO_NUMJOBS = 4                       # 4 parallel jobs
@@ -424,6 +427,147 @@ def kill_spdk(node_ip, key_path):
 # --------------------------------------------------------------------------- #
 # Test cases
 # --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+# Node control + fail-back helpers (cases 3-6)
+# --------------------------------------------------------------------------- #
+def node_of_lvol(mgmt_ip, key_path, lvol_uuid):
+    """Return {node_id, replication_node_id, cluster_id, secondary_node_id}."""
+    return mgmt_py(mgmt_ip, key_path, f"""
+import json
+from simplyblock_core.db_controller import DBController
+db = DBController()
+lv = db.get_lvol_by_id({lvol_uuid!r})
+n = db.get_storage_node_by_id(lv.node_id)
+print(json.dumps({{"node_id": lv.node_id,
+                   "replication_node_id": lv.replication_node_id,
+                   "cluster_id": n.cluster_id,
+                   "secondary_node_id": n.secondary_node_id}}))
+""")
+
+
+def node_status(mgmt_ip, key_path, node_id):
+    return mgmt_py(mgmt_ip, key_path, f"""
+import json
+from simplyblock_core.db_controller import DBController
+db = DBController()
+n = db.get_storage_node_by_id({node_id!r})
+print(json.dumps({{"status": n.status, "health": n.health_check}}))
+""")["status"]
+
+
+def wait_node_status(mgmt_ip, key_path, node_id, wanted, timeout=NODE_STATE_TIMEOUT):
+    start = time.time()
+    seen = ""
+    while time.time() - start < timeout:
+        seen = node_status(mgmt_ip, key_path, node_id)
+        if seen == wanted:
+            print(f"  node {node_id[:8]} -> {wanted}")
+            return True
+        time.sleep(10)
+    raise RuntimeError(
+        f"Node {node_id} did not reach {wanted!r} within {timeout}s (last={seen!r})")
+
+
+def sn_shutdown(mgmt_ip, key_path, node_id):
+    """Take a node offline the supported way.
+
+    Deliberately NOT `docker kill` on the SPDK container: the control plane
+    auto-restarts that within minutes (case 2 saw the "suspended" source cluster
+    heal itself mid-test), which silently invalidates an outage scenario.
+    """
+    print(f"Shutting down node {node_id[:8]} ...")
+    run(mgmt_ip, key_path, f"{SBCTL} -d sn suspend {node_id}", check=False)
+    run(mgmt_ip, key_path, f"{SBCTL} -d sn shutdown {node_id}", check=False)
+    wait_node_status(mgmt_ip, key_path, node_id, "offline")
+
+
+def sn_bring_back(mgmt_ip, key_path, node_id):
+    print(f"Restarting node {node_id[:8]} ...")
+    run(mgmt_ip, key_path, f"{SBCTL} -d sn restart {node_id}", check=False, timeout=1800)
+    wait_node_status(mgmt_ip, key_path, node_id, "online")
+    run(mgmt_ip, key_path, f"{SBCTL} -d sn resume {node_id}", check=False)
+
+
+def set_cluster_replication(mgmt_ip, key_path, from_cluster, to_cluster, to_pool_uuid):
+    """Point `from_cluster`'s replication at `to_cluster`/`to_pool_uuid`.
+
+    Required before a fail-back commit: replication_commit takes the destination
+    NODE from lvol.replication_node_id (which replication_failback sets) but the
+    destination POOL from source_cluster.snapshot_replication_target_pool -- the
+    cluster-level config of whichever cluster currently hosts the volume. A
+    cluster holds only one target, so fail-back to a different destination means
+    repointing this first.
+    """
+    print(f"Pointing cluster {from_cluster[:8]} replication -> {to_cluster[:8]} "
+          f"(pool {to_pool_uuid[:8]})")
+    run(mgmt_ip, key_path,
+        f"{SBCTL} -d cluster add-replication {from_cluster} {to_cluster}"
+        f" --target-pool {to_pool_uuid} --timeout 3600", check=True)
+
+
+def pool_uuid_of(mgmt_ip, key_path, pool_name):
+    raw = run(mgmt_ip, key_path, f"{SBCTL} pool list", quiet=True)
+    for line in raw.splitlines():
+        cols = [c.strip() for c in line.split("|")]
+        if len(cols) > 2 and cols[2] == pool_name:
+            return cols[1]
+    raise RuntimeError(f"Pool not found: {pool_name}")
+
+
+def write_baseline(client_ip, key_path, mounts, tag="baseline"):
+    """Write a known file per mount and return {lvol: md5}."""
+    sums = {}
+    for m in mounts:
+        path = f"{m['mount']}/{tag}.bin"
+        run(client_ip, key_path,
+            f"sudo dd if=/dev/urandom of={path} bs=1M count={BASELINE_MB} oflag=direct")
+        run(client_ip, key_path, "sync")
+        sums[m["lvol"]] = run(client_ip, key_path,
+                              f"sudo md5sum {path}").split()[0]
+    return sums
+
+
+def verify_baseline(client_ip, key_path, mounts, expected, tag="baseline"):
+    """Return (all_ok, details) comparing tag.bin on each mount to *expected*."""
+    ok = True
+    details = []
+    for m in mounts:
+        md5 = run(client_ip, key_path,
+                  f"sudo md5sum {m['mount']}/{tag}.bin 2>/dev/null | awk '{{print $1}}'",
+                  check=False).strip()
+        want = expected.get(m["lvol"], "")
+        match = bool(md5) and md5 == want
+        ok = ok and match
+        details.append({"lvol": m["lvol"], "mount": m["mount"],
+                        "md5": md5, "expected": want, "match": match})
+        print(f"  {m['mount']}: md5_match={match} ({md5 or '<none>'} vs {want})")
+    return ok, details
+
+
+def failback(mgmt_ip, key_path, lvol_uuid, source_cluster_id=None):
+    """Configure fail-back for a failed-over volume (delta or fresh)."""
+    flag = f" --source-cluster-id {source_cluster_id}" if source_cluster_id else ""
+    kind = "fresh (full)" if source_cluster_id else "recovered source (delta)"
+    print(f"  fail-back {lvol_uuid[:8]} -> {kind}")
+    run(mgmt_ip, key_path, f"{SBCTL} -d volume replication-failback {lvol_uuid}{flag}")
+
+
+def failed_over_targets(mgmt_ip, key_path, src_lvols):
+    """Map source lvol id -> target lvol id for failed_over relationships."""
+    return mgmt_py(mgmt_ip, key_path, f"""
+import json
+from simplyblock_core.db_controller import DBController
+db = DBController()
+wanted = {list(src_lvols)!r}
+out = {{}}
+for r in db.get_lvol_replication_objects():
+    if r.source_lvol and r.source_lvol.get_id() in wanted and r.target_lvol:
+        if r.state in ("failed_over", "cutover_done"):
+            out[r.source_lvol.get_id()] = r.target_lvol.get_id()
+print(json.dumps(out))
+""")
+
+
 def _src_target(meta):
     src_uuid = meta["replication"]["source_cluster"]
     tgt_uuid = meta["replication"]["target_cluster"]
@@ -656,14 +800,328 @@ def test_case_2(meta):
     print("CASE 2 PASSED: data readable and intact on target after fail-over.")
 
 
+def _setup_failed_over_volumes(meta, tag):
+    """Shared prologue for the fail-back cases: get 5 volumes failed over to tgt.
+
+    Returns (lvols_on_target, baseline_md5_by_target_lvol, mounts).
+    Leaves the client connected+mounted on the TARGET copies.
+    """
+    key_path = meta["key_path"]
+    mgmt_ip = meta["mgmt"]["public_ip"]
+    client_ip = meta["clients"][0]["public_ip"]
+    src_uuid, src, tgt_uuid, tgt = _src_target(meta)
+
+    prepare_mount_points(client_ip, key_path)
+    delete_test_volumes(mgmt_ip, key_path, [src["pool"], tgt["pool"]])
+
+    print(f"[{tag}] creating + replicating 5 volumes (failover mode)...")
+    lvols = create_volumes(mgmt_ip, key_path, src["pool"], tgt_uuid, mode="failover")
+    mounts = connect_and_mount(client_ip, key_path, mgmt_ip, lvols, fmt=True)
+    baseline = write_baseline(client_ip, key_path, mounts)
+    wait_replication_caught_up(mgmt_ip, key_path, lvols)
+
+    print(f"[{tag}] taking the source cluster down (both nodes)...")
+    for ip in src["storage_public_ips"][:2]:
+        kill_spdk(ip, key_path)
+    time.sleep(15)
+    stop_fio(client_ip, key_path)
+    cleanup_client(client_ip, key_path, mounts)
+
+    print(f"[{tag}] failing over...")
+    tgt_lvols = []
+    for lv in lvols:
+        fo = do_failover(mgmt_ip, key_path, lv)
+        if not isinstance(fo, dict) or not fo.get("connection_strings"):
+            raise RuntimeError(f"FAIL: fail-over returned no connection strings for {lv}")
+        tgt_lvols.append(fo["lvol_id"])
+
+    # Re-key the baseline by TARGET lvol id and mount the failed-over copies.
+    tgt_baseline = {t: baseline[s] for s, t in zip(lvols, tgt_lvols)}
+    tgt_mounts = connect_and_mount(client_ip, key_path, mgmt_ip, tgt_lvols,
+                                   fmt=False, mount_base=MOUNT_BASE + "_fo")
+    return tgt_lvols, tgt_baseline, tgt_mounts
+
+
+def test_case_3(meta):
+    """Online fail-back (delta) to the RECOVERED primary, fio never stops."""
+    print("\n========== CASE 3: online fail-back to recovered primary ==========")
+    key_path = meta["key_path"]
+    mgmt_ip = meta["mgmt"]["public_ip"]
+    client_ip = meta["clients"][0]["public_ip"]
+    src_uuid, src, tgt_uuid, tgt = _src_target(meta)
+
+    tgt_lvols, baseline, mounts = _setup_failed_over_volumes(meta, "case3")
+
+    # Keep serving IO from the new site while the primary comes back.
+    jobfile = write_fio_jobfile(client_ip, key_path, mounts)
+    start_fio(client_ip, key_path, jobfile)
+
+    print("Restoring service on the primary site...")
+    for node_id in [n["uuid"] for n in src["topology"]["nodes"]]:
+        st = node_status(mgmt_ip, key_path, node_id)
+        if st != "online":
+            sn_bring_back(mgmt_ip, key_path, node_id)
+    print("  primary site online again.")
+
+    # Fail-back needs the CURRENT host cluster (tgt) pointed back at src.
+    set_cluster_replication(mgmt_ip, key_path, tgt_uuid, src_uuid,
+                            pool_uuid_of(mgmt_ip, key_path, src["pool"]))
+
+    for lv in tgt_lvols:
+        failback(mgmt_ip, key_path, lv)          # delta: no --source-cluster-id
+    wait_replication_caught_up(mgmt_ip, key_path, tgt_lvols)
+
+    print("Committing the fail-back cutover while fio runs...")
+    for lv in tgt_lvols:
+        run(mgmt_ip, key_path, f"{SBCTL} -d volume replication-commit {lv}")
+
+    start = time.time()
+    done = 0
+    while time.time() - start < CUTOVER_WAIT_TIMEOUT:
+        if not fio_alive(client_ip, key_path):
+            raise RuntimeError("FAIL: fio stopped during online fail-back (interrupted)")
+        states = replication_states(mgmt_ip, key_path, tgt_lvols)
+        done = sum(1 for s in states.values() if s in ("cutover_done", "failed_over"))
+        print(f"  fail-back cutovers done: {done}/{len(tgt_lvols)}  fio_alive=True")
+        if done == len(tgt_lvols):
+            break
+        time.sleep(15)
+
+    time.sleep(20)
+    alive = fio_alive(client_ip, key_path)
+    errors = fio_error_count(client_ip, key_path)
+    print(f"  fio_alive={alive} error_indicators={errors} failbacks_done={done}/{len(tgt_lvols)}")
+    stop_fio(client_ip, key_path)
+
+    back = failed_over_targets(mgmt_ip, key_path, tgt_lvols)
+    cleanup_client(client_ip, key_path, mounts)
+    src_mounts = connect_and_mount(
+        client_ip, key_path, mgmt_ip, [back[lv] for lv in tgt_lvols if lv in back],
+        fmt=False, mount_base=MOUNT_BASE + "_fb")
+    remap = {back[lv]: baseline[lv] for lv in tgt_lvols if lv in back}
+    ok, _ = verify_baseline(client_ip, key_path, src_mounts, remap)
+    cleanup_client(client_ip, key_path, src_mounts)
+
+    if not alive:
+        raise RuntimeError("FAIL: fio did not survive the online fail-back")
+    if errors:
+        raise RuntimeError(f"FAIL: fio reported {errors} error/latency violations during fail-back")
+    if done != len(tgt_lvols):
+        raise RuntimeError(f"FAIL: only {done}/{len(tgt_lvols)} fail-back cutovers completed")
+    if not ok:
+        raise RuntimeError("FAIL: data not intact after fail-back to the recovered primary")
+    print("CASE 3 PASSED: online delta fail-back, no fio interruption, data intact.")
+
+
+def test_case_4(meta):
+    """Fail-back to a FRESH, empty cluster (full replication, not delta)."""
+    print("\n========== CASE 4: fail-back to a fresh empty cluster ==========")
+    key_path = meta["key_path"]
+    mgmt_ip = meta["mgmt"]["public_ip"]
+    client_ip = meta["clients"][0]["public_ip"]
+    src_uuid, src, tgt_uuid, tgt = _src_target(meta)
+
+    fresh = meta["clusters"].get("fresh")
+    if not fresh:
+        raise RuntimeError(
+            "CASE 4 needs a third, empty cluster. Redeploy with the 'fresh' "
+            "cluster enabled in setup_repl_test_2clusters.py (CLUSTERS).")
+    fresh_uuid = fresh["cluster_uuid"]
+
+    tgt_lvols, baseline, mounts = _setup_failed_over_volumes(meta, "case4")
+
+    # "Primary removed": drop the original source volumes so nothing can be
+    # reused as a delta base — the fresh cluster must receive the FULL dataset.
+    print("Removing the original primary's volumes (fresh fail-back must be full)...")
+    delete_test_volumes(mgmt_ip, key_path, [src["pool"]])
+
+    set_cluster_replication(mgmt_ip, key_path, tgt_uuid, fresh_uuid,
+                            pool_uuid_of(mgmt_ip, key_path, fresh["pool"]))
+
+    for lv in tgt_lvols:
+        failback(mgmt_ip, key_path, lv, source_cluster_id=fresh_uuid)
+    wait_replication_caught_up(mgmt_ip, key_path, tgt_lvols)
+
+    print("Committing the cutover onto the fresh cluster...")
+    for lv in tgt_lvols:
+        run(mgmt_ip, key_path, f"{SBCTL} -d volume replication-commit {lv}")
+
+    start = time.time()
+    done = 0
+    while time.time() - start < CUTOVER_WAIT_TIMEOUT:
+        states = replication_states(mgmt_ip, key_path, tgt_lvols)
+        done = sum(1 for s in states.values() if s in ("cutover_done", "failed_over"))
+        print(f"  cutovers onto fresh cluster: {done}/{len(tgt_lvols)}")
+        if done == len(tgt_lvols):
+            break
+        time.sleep(15)
+
+    back = failed_over_targets(mgmt_ip, key_path, tgt_lvols)
+    cleanup_client(client_ip, key_path, mounts)
+    fresh_mounts = connect_and_mount(
+        client_ip, key_path, mgmt_ip, [back[lv] for lv in tgt_lvols if lv in back],
+        fmt=False, mount_base=MOUNT_BASE + "_fresh")
+    remap = {back[lv]: baseline[lv] for lv in tgt_lvols if lv in back}
+    ok, _ = verify_baseline(client_ip, key_path, fresh_mounts, remap)
+    cleanup_client(client_ip, key_path, fresh_mounts)
+
+    if done != len(tgt_lvols):
+        raise RuntimeError(f"FAIL: only {done}/{len(tgt_lvols)} cutovers onto the fresh cluster")
+    if not ok:
+        raise RuntimeError("FAIL: data not intact after full fail-back to a fresh cluster")
+    print("CASE 4 PASSED: full fail-back to a fresh cluster, data intact.")
+
+
+def _replication_progress(mgmt_ip, key_path, lvols):
+    infos = get_replication_infos(mgmt_ip, key_path, lvols)
+    return sum((i.get("replicated_count") or 0) for i in infos.values())
+
+
+def test_case_5(meta):
+    """Error case: a TARGET node goes offline mid-replication, then returns."""
+    print("\n========== CASE 5: target node offline during replication ==========")
+    key_path = meta["key_path"]
+    mgmt_ip = meta["mgmt"]["public_ip"]
+    client_ip = meta["clients"][0]["public_ip"]
+    src_uuid, src, tgt_uuid, tgt = _src_target(meta)
+
+    prepare_mount_points(client_ip, key_path)
+    delete_test_volumes(mgmt_ip, key_path, [src["pool"], tgt["pool"]])
+    lvols = create_volumes(mgmt_ip, key_path, src["pool"], tgt_uuid, mode="failover")
+    mounts = connect_and_mount(client_ip, key_path, mgmt_ip, lvols, fmt=True)
+    jobfile = write_fio_jobfile(client_ip, key_path, mounts)
+    start_fio(client_ip, key_path, jobfile)
+    wait_replication_caught_up(mgmt_ip, key_path, lvols)
+
+    victim = node_of_lvol(mgmt_ip, key_path, lvols[0])["replication_node_id"]
+    print(f"Taking the REPLICATION TARGET node {victim[:8]} offline...")
+    before = _replication_progress(mgmt_ip, key_path, lvols)
+    sn_shutdown(mgmt_ip, key_path, victim)
+
+    print(f"Observing {OUTAGE_REPL_CYCLES} replication cycles with the target down...")
+    time.sleep(OUTAGE_REPL_CYCLES * REPL_INTERVAL_MIN * 60)
+    during = _replication_progress(mgmt_ip, key_path, lvols)
+    fio_ok = fio_alive(client_ip, key_path)
+    print(f"  replicated_count: before={before} during_outage={during}  fio_alive={fio_ok}")
+    if not fio_ok:
+        raise RuntimeError("FAIL: client IO stopped because a REPLICATION TARGET node went down")
+
+    print("Bringing the target node back...")
+    sn_bring_back(mgmt_ip, key_path, victim)
+    wait_replication_caught_up(mgmt_ip, key_path, lvols)
+    after = _replication_progress(mgmt_ip, key_path, lvols)
+    print(f"  replicated_count after recovery={after}")
+
+    stop_fio(client_ip, key_path)
+    errors = fio_error_count(client_ip, key_path)
+    cleanup_client(client_ip, key_path, mounts)
+    if after <= during:
+        raise RuntimeError(
+            f"FAIL: replication did not resume after the target node returned "
+            f"(during={during}, after={after})")
+    if errors:
+        raise RuntimeError(f"FAIL: fio reported {errors} errors during the target-node outage")
+    print("CASE 5 PASSED: target-node outage survived, replication resumed.")
+
+
+def test_case_6(meta):
+    """Error case: the SOURCE PRIMARY goes offline; the secondary keeps serving."""
+    print("\n========== CASE 6: source primary offline (secondary survives) ==========")
+    key_path = meta["key_path"]
+    mgmt_ip = meta["mgmt"]["public_ip"]
+    client_ip = meta["clients"][0]["public_ip"]
+    src_uuid, src, tgt_uuid, tgt = _src_target(meta)
+
+    prepare_mount_points(client_ip, key_path)
+    delete_test_volumes(mgmt_ip, key_path, [src["pool"], tgt["pool"]])
+    lvols = create_volumes(mgmt_ip, key_path, src["pool"], tgt_uuid, mode="failover")
+    mounts = connect_and_mount(client_ip, key_path, mgmt_ip, lvols, fmt=True)
+    jobfile = write_fio_jobfile(client_ip, key_path, mounts)
+    start_fio(client_ip, key_path, jobfile)
+    wait_replication_caught_up(mgmt_ip, key_path, lvols)
+
+    info = node_of_lvol(mgmt_ip, key_path, lvols[0])
+    primary, secondary = info["node_id"], info["secondary_node_id"]
+    if not secondary:
+        raise RuntimeError("CASE 6 needs an HA pair: no secondary node for the volume")
+    print(f"Taking the SOURCE PRIMARY {primary[:8]} offline "
+          f"(secondary {secondary[:8]} must carry on)...")
+    before = _replication_progress(mgmt_ip, key_path, lvols)
+    sn_shutdown(mgmt_ip, key_path, primary)
+
+    print(f"Observing {OUTAGE_REPL_CYCLES} replication cycles on the secondary...")
+    time.sleep(OUTAGE_REPL_CYCLES * REPL_INTERVAL_MIN * 60)
+    during = _replication_progress(mgmt_ip, key_path, lvols)
+    sec_status = node_status(mgmt_ip, key_path, secondary)
+    fio_ok = fio_alive(client_ip, key_path)
+    print(f"  replicated_count: before={before} during_outage={during}  "
+          f"secondary={sec_status}  fio_alive={fio_ok}")
+    if sec_status != "online":
+        raise RuntimeError(f"FAIL: secondary went {sec_status} when the primary was shut down")
+    if during <= before:
+        raise RuntimeError(
+            f"FAIL: replication stalled while the source primary was down "
+            f"(before={before}, during={during}) — the secondary should keep it going")
+
+    print("Bringing the primary back...")
+    sn_bring_back(mgmt_ip, key_path, primary)
+    wait_replication_caught_up(mgmt_ip, key_path, lvols)
+    after = _replication_progress(mgmt_ip, key_path, lvols)
+    print(f"  replicated_count after recovery={after}")
+
+    stop_fio(client_ip, key_path)
+    errors = fio_error_count(client_ip, key_path)
+    cleanup_client(client_ip, key_path, mounts)
+    if after <= during:
+        raise RuntimeError(f"FAIL: replication did not resume after the primary returned "
+                           f"(during={during}, after={after})")
+    if errors:
+        raise RuntimeError(f"FAIL: fio reported {errors} errors during the primary outage")
+    print("CASE 6 PASSED: source-primary outage survived, replication continued and resumed.")
+
+
+CASES = {
+    "case1": test_case_1,   # online migration cutover, no IO interruption
+    "case2": test_case_2,   # DR fail-over on source-cluster loss
+    "case3": test_case_3,   # online delta fail-back to the recovered primary
+    "case4": test_case_4,   # full fail-back to a fresh empty cluster
+    "case5": test_case_5,   # error: replication target node offline
+    "case6": test_case_6,   # error: source primary offline, secondary survives
+}
+GROUPS = {
+    "both": ["case1", "case2"],
+    "failback": ["case3", "case4"],
+    "errors": ["case5", "case6"],
+    "all": ["case1", "case2", "case3", "case4", "case5", "case6"],
+}
+
+
 def main():
-    cases = sys.argv[1] if len(sys.argv) > 1 else "both"
+    arg = sys.argv[1] if len(sys.argv) > 1 else "both"
+    selected = GROUPS.get(arg, [arg])
+    unknown = [c for c in selected if c not in CASES]
+    if unknown:
+        print(f"Unknown case(s): {unknown}\n"
+              f"  cases: {', '.join(CASES)}\n"
+              f"  groups: {', '.join(GROUPS)}")
+        sys.exit(2)
+
     meta = load_meta()
-    if cases in ("case1", "both"):
-        test_case_1(meta)
-    if cases in ("case2", "both"):
-        test_case_2(meta)
-    print("\n=== DONE ===")
+    results = []
+    for name in selected:
+        try:
+            CASES[name](meta)
+            results.append((name, "PASS", ""))
+        except Exception as exc:            # keep going: one case must not hide the rest
+            results.append((name, "FAIL", str(exc)[:200]))
+            print(f"\n!! {name} FAILED: {exc}")
+
+    print("\n=== SUMMARY ===")
+    for name, verdict, detail in results:
+        print(f"  {name:<7} {verdict}{('  ' + detail) if detail else ''}")
+    print("=== DONE ===")
+    if any(v == "FAIL" for _, v, _ in results):
+        sys.exit(1)
 
 
 if __name__ == "__main__":

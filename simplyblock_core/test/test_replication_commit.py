@@ -64,6 +64,11 @@ class _FakeDB:
     def get_lvol_by_id(self, lid):
         return _src_lvol()
 
+    def get_snapshot_by_id(self, sid):
+        # The cutover re-reads the chosen snapshot while holding its mutation
+        # lock, to catch retention deleting it in the selection window.
+        return _snap()
+
     def get_storage_node_by_id(self, nid):
         return self._nodes[nid]
 

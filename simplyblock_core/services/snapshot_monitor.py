@@ -215,6 +215,29 @@ def process_snap_delete(snap, snode, all_mini_lvols=None, leader_cache=None):
         all_mini_lvols = db.get_mini_lvols()
     for lvol in all_mini_lvols:
         if lvol.cloned_from_snap and lvol.cloned_from_snap == snap.get_id():
+            if lvol.status != SnapShot.STATUS_IN_DELETION:
+                # A LIVE clone must block the snapshot's hard-delete. Only
+                # in-deletion clones were treated as blockers here, so a healthy
+                # clone did not stop the delete at all: a cross-cluster
+                # fail-over volume (cloned from the last replicated target
+                # snapshot) had its parent removed ~40 min after it was created
+                # and every read then returned zeros — no filesystem, md5
+                # mismatch, while every status field still said success
+                # (lab runs 2026-08-10 / 2026-08-11).
+                #
+                # snapshot_controller._delete_locked already treats a live clone
+                # as blocking (it soft-deletes and keeps the blob); this path is
+                # the deferred finalisation of that same delete and has to honour
+                # the same rule, or it undoes it.
+                try:
+                    fresh = db.get_lvol_by_id(lvol.get_id())
+                except KeyError:
+                    continue  # clone is gone — no longer a blocker
+                if fresh.status != SnapShot.STATUS_IN_DELETION:
+                    logger.warning(
+                        "Not deleting snapshot %s: live clone %s still depends on it",
+                        snap.get_id(), fresh.get_id())
+                    return False
             if lvol.status == SnapShot.STATUS_IN_DELETION:
                 # `all_mini_lvols` is a cycle-start snapshot: the clone may
                 # have finished (and been removed) earlier in THIS cycle.

@@ -3165,6 +3165,54 @@ def _last_replicated_target_snapshot(db_controller, lvol_id, cluster_id):
     return None
 
 
+def _clone_from_last_replicated(db_controller, lvol_id, lvol, target_node, pool_uuid,
+                                cluster_id, attempts=3):
+    """Pick the last fully replicated target snapshot and clone from it ATOMICALLY.
+
+    Selecting and then cloning as two unsynchronised steps loses the data: the
+    replication retention pass (_prune_internal_snapshots) deletes every
+    replicated internal snapshot older than the newest, and
+    snapshot_controller._delete_locked only spares a snapshot that ALREADY has a
+    clone. In the window between "pick T_n" and "create the clone on T_n" there
+    is no clone yet, so retention hard-deletes T_n and the fail-over volume ends
+    up on a parent that no longer exists -- it reads as all zeros, with no
+    filesystem, while every status field still says success.
+
+    snapshot_controller.delete() takes object_mutation_lock(snapshot) precisely
+    so a "concurrent clone-create of this same snapshot ... holds the same lock
+    for its whole sequence"; the normal clone path honours that, this one did
+    not. Hold the lock across the clone, re-validate under it, and fall back to
+    an older snapshot if the chosen one disappeared before we got the lock.
+
+    Returns (new_lvol, snapshot_used, error).
+    """
+    for _ in range(attempts):
+        snapshot = _last_replicated_target_snapshot(db_controller, lvol_id, cluster_id)
+        if not snapshot:
+            return None, None, "No replicated snapshot on target yet"
+
+        with snapshot_controller.object_mutation_lock(snapshot.cluster_id, snapshot.uuid):
+            # Re-read INSIDE the lock: retention may have removed or started
+            # removing it between the selection above and acquiring the lock.
+            try:
+                snap = db_controller.get_snapshot_by_id(snapshot.get_id())
+            except KeyError:
+                logger.warning(
+                    f"Replicated snapshot {snapshot.get_id()} vanished before the clone "
+                    f"could take its lock; re-selecting")
+                continue
+            if snap.status == SnapShot.STATUS_IN_DELETION or getattr(snap, "deleted", False):
+                logger.warning(
+                    f"Replicated snapshot {snap.get_id()} entered deletion before the clone "
+                    f"could take its lock; re-selecting")
+                continue
+            new_lvol, error = _create_target_lvol_clone(
+                db_controller, lvol, target_node, pool_uuid, snap)
+            return new_lvol, snap, error
+
+    return None, None, "No stable replicated snapshot to clone from"
+
+
 def replicate_lvol_on_target_cluster(lvol_id):
     db_controller = DBController()
     try:
@@ -3195,15 +3243,11 @@ def replicate_lvol_on_target_cluster(lvol_id):
             logger.info(f"LVol with same nqn already exists on target cluster: {lv.get_id()}")
             return lv.get_id()
 
-    snapshot = _last_replicated_target_snapshot(db_controller, lvol_id, source_node.cluster_id)
-    if not snapshot:
-        logger.error(f"Snapshot for replication not found for lvol: {lvol_id}")
-        return False
-
-    new_lvol, error = _create_target_lvol_clone(
-        db_controller, lvol, target_node,
-        source_cluster.snapshot_replication_target_pool, snapshot)
+    new_lvol, _snapshot, error = _clone_from_last_replicated(
+        db_controller, lvol_id, lvol, target_node,
+        source_cluster.snapshot_replication_target_pool, source_node.cluster_id)
     if error:
+        logger.error(f"Fail-over clone failed for lvol {lvol_id}: {error}")
         return False, error
 
     new_lvol.status = LVol.STATUS_ONLINE
@@ -3296,15 +3340,11 @@ def replication_commit(lvol_id):
     if snap_err:
         logger.warning(f"Final pre-cutover snapshot failed (continuing): {snap_err}")
 
-    snapshot = _last_replicated_target_snapshot(db_controller, lvol_id, source_node.cluster_id)
-    if not snapshot:
-        logger.error(f"No replicated snapshot found on target for lvol: {lvol_id}")
-        return False, "No replicated snapshot on target yet"
-
-    new_lvol, error = _create_target_lvol_clone(
-        db_controller, lvol, target_node,
-        source_cluster.snapshot_replication_target_pool, snapshot)
+    new_lvol, snapshot, error = _clone_from_last_replicated(
+        db_controller, lvol_id, lvol, target_node,
+        source_cluster.snapshot_replication_target_pool, source_node.cluster_id)
     if error:
+        logger.error(f"Cutover clone failed for lvol {lvol_id}: {error}")
         return False, error
 
     new_lvol.status = LVol.STATUS_ONLINE
