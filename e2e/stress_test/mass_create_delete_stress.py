@@ -1145,13 +1145,11 @@ class _MassCreateDeleteMixin:
             self.NUM_SUBSYSTEMS = new_num_sub
 
         total = self.NUM_SUBSYSTEMS * self.NS_PER_SUBSYSTEM
-        max_dur = getattr(self, 'MAX_TEST_DURATION', 24 * 3600)
         self.logger.info(
             f"=== Starting {self.__class__.__name__}: "
             f"{total} lvols, {self.SNAPSHOTS_PER_LVOL} snaps/lvol, "
             f"{self.RAPID_RESTART_ITERATIONS} restart cycles per phase ==="
         )
-        test_start = time.time()
 
         # Start periodic kubectl resource collection
         periodic_stop = self.start_periodic_resource_collection(interval=1800)

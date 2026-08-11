@@ -31,7 +31,6 @@ from __future__ import annotations
 import json
 import os
 import random
-import re
 import string
 from datetime import datetime
 
@@ -1833,23 +1832,23 @@ class K8sNativeMajorUpgrade(TestClusterBase):
                 f"-l app=simplyblock-admin-control "
                 f"--no-headers 2>/dev/null || true"
             )
-            lines = [l for l in (out or "").strip().split("\n") if l.strip()]
+            lines = [ln for ln in (out or "").strip().split("\n") if ln.strip()]
             ready_count = sum(
-                1 for l in lines
-                if "Running" in l and l.split()[1].split("/")[0] == l.split()[1].split("/")[1]
+                1 for ln in lines
+                if "Running" in ln and ln.split()[1].split("/")[0] == ln.split()[1].split("/")[1]
             )
             if ready_count > 0:
                 self.logger.info(
                     f"  {ready_count} admin-control pod(s) Ready")
                 break
             # Check for ContainerCreating with volume mount failures
-            if any("ContainerCreating" in l for l in lines) and attempt % 10 == 9:
+            if any("ContainerCreating" in ln for ln in lines) and attempt % 10 == 9:
                 self.logger.warning(
                     f"  Admin pods still ContainerCreating after {(attempt+1)*5}s — "
                     f"checking events for volume mount issues")
-                for l in lines:
-                    pod_name = l.split()[0] if l.split() else ""
-                    if pod_name and "ContainerCreating" in l:
+                for ln in lines:
+                    pod_name = ln.split()[0] if ln.split() else ""
+                    if pod_name and "ContainerCreating" in ln:
                         ev_out, _ = self.k8s_utils._exec_kubectl(
                             f"kubectl get events -n {_NAMESPACE} "
                             f"--field-selector involvedObject.name={pod_name} "
@@ -2180,12 +2179,10 @@ spec:
             "(non-fatal if it fails)"
         )
         fio_timeout = 300  # 5 minutes max wait
-        pre_upgrade_fio_ok = True
         try:
             self._validate_all_fio(fio_timeout)
             self.logger.info("Pre-upgrade FIO completed and validated")
         except Exception as fio_err:
-            pre_upgrade_fio_ok = False
             self.logger.warning(
                 f"Pre-upgrade FIO did not complete successfully: {fio_err}. "
                 "Continuing with upgrade — this is non-fatal."
@@ -2498,8 +2495,6 @@ spec:
                 f"  Worker {worker_idx}/{len(unique_ips)} ({host_ip}): "
                 f"restarting {len(nids)} nodes: {nids}"
             )
-
-            restart_ts = int(datetime.now().timestamp())
 
             # Restart all nodes on this worker
             for node_id in nids:
