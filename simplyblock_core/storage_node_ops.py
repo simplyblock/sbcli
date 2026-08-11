@@ -10563,6 +10563,15 @@ def reattach_sibling_failover(sibling_node: StorageNode, primary_node: StorageNo
             f"path for primary {primary_node.get_id()} on sibling "
             f"{sibling_node.get_id()}")
 
+    # This is the one hublvol attach that does not flow through
+    # HublvolReconnectCoordinator, so assert the policy here too rather
+    # than waiting for the next reconcile to converge it.
+    from simplyblock_core.utils.hublvol_reconnect import (
+        ensure_hublvol_active_active,
+    )
+    ensure_hublvol_active_active(
+        rpc_client, bdev_name, sibling_node.get_id(), "sec_2")
+
     # Remove old failover path(s). Best-effort: the dead path is also
     # naturally inert once the donor's stack is torn down.
     for iface in old_failover_node.data_nics:

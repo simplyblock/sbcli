@@ -1580,12 +1580,33 @@ class RPCClient:
             params["ana_state"] = ana_state
         return self._request2("nvmf_subsystem_add_listener", params)
 
-    def bdev_nvme_set_multipath_policy(self, name, policy):  # policy: active_active or active_passive
+    def bdev_nvme_set_multipath_policy(self, name, policy, selector=None,
+                                       rr_min_io=None, request_timeout=None):
+        """Set the multipath policy on an NVMe bdev.
+
+        ``policy``: ``active_active`` or ``active_passive``.
+
+        ``selector`` (``active_active`` only): ``round_robin`` or
+        ``queue_depth``. Omitting it lets SPDK default to ``round_robin``
+        with ``rr_min_io`` coerced to 1 (bdev_nvme.c:5626), i.e. the path
+        alternates on every IO.
+
+        Note that ``active_active`` load-balances only WITHIN an ANA state:
+        ``_bdev_nvme_find_io_path`` (bdev_nvme.c:1150) returns the first
+        available ``optimized`` path and reaches ``non_optimized`` only when
+        no optimized path exists. Setting it therefore never overrides an
+        ANA-expressed primary/failover preference.
+        """
         params = {
             "name": name,
             "policy": policy,
         }
-        return self._request("bdev_nvme_set_multipath_policy", params)
+        if selector:
+            params["selector"] = selector
+        if rr_min_io is not None:
+            params["rr_min_io"] = rr_min_io
+        return self._request("bdev_nvme_set_multipath_policy", params,
+                             request_timeout=request_timeout)
 
     def jc_get_jm_status(self, jm_vuid):
         """
