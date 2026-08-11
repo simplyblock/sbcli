@@ -76,8 +76,13 @@ def main():
                 test_obj.ssh_obj.collect_final_docker_logs_simple(all_nodes, test_obj.docker_logs_path)
             test_obj.export_graylog_logs()
             test_obj.extract_delay_qpair_logs()
-            test_obj.teardown()
-            # pass
+            _skip_k8s = stop_after_teardown and test_obj.preserve_resources_on_failure
+            if _skip_k8s:
+                logger.info(
+                    f"[cleanup] Test {test.__name__} failed — preserving K8s "
+                    "resources for debugging (--preserve_resources_on_failure)"
+                )
+            test_obj.teardown(skip_k8s_cleanup=_skip_k8s)
         except Exception as _:
             logger.error(f"Error During Teardown for test: {test.__name__}")
             logger.error(traceback.format_exc())

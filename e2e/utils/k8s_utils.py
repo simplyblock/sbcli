@@ -140,10 +140,22 @@ class K8sUtils:
         )
         stdout, stderr = self._exec_kubectl(kubectl_cmd, supress_logs=supress_logs)
 
-        # If the admin pod was recreated (e.g. during outage), retry with fresh pod
-        if "NotFound" in (stderr or ""):
+        # If the admin pod was recreated (e.g. during upgrade), retry with
+        # a freshly-resolved pod.  kubectl may report different error strings
+        # depending on the phase of termination:
+        #   - "NotFound"                                (pod fully deleted)
+        #   - "unable to upgrade connection: pod does not exist"
+        #   - "pod … not found"
+        _err = stderr or ""
+        _pod_gone = (
+            "NotFound" in _err
+            or "pod does not exist" in _err
+            or "pod not found" in _err.lower()
+        )
+        if _pod_gone:
             self.logger.warning(
-                f"[K8sUtils] Admin pod '{admin_pod}' not found, re-resolving..."
+                f"[K8sUtils] Admin pod '{admin_pod}' gone ({_err.strip()[:80]}), "
+                "re-resolving..."
             )
             admin_pod = self.get_admin_pod(refresh=True)
             kubectl_cmd = (
@@ -2748,6 +2760,77 @@ class K8sUtils:
         self.logger.info(f"[K8sUtils] Deleting BackupRestore '{name}'")
         self.delete_resource("backuprestore", name, namespace=ns)
 
+    # ── BackupImport CRD operations ──────────────────────────────────────────
+
+    def create_backup_import(self, name: str,
+                              source_cluster_name: str,
+                              source_backup_id: str,
+                              target_cluster_name: str,
+                              namespace: str = None):
+        """Create a BackupImport CRD to import a backup from another cluster.
+
+        The operator will create a corresponding StorageBackup on the target
+        cluster and handle source-switching automatically.
+        """
+        ns = namespace or self.namespace
+        yaml_content = (
+            f"apiVersion: storage.simplyblock.io/v1alpha1\n"
+            f"kind: BackupImport\n"
+            f"metadata:\n"
+            f"  name: {name}\n"
+            f"  namespace: {ns}\n"
+            f"spec:\n"
+            f"  sourceClusterName: {source_cluster_name}\n"
+            f"  sourceBackupID: {source_backup_id}\n"
+            f"  targetClusterName: {target_cluster_name}\n"
+        )
+        self.logger.info(
+            f"[K8sUtils] Creating BackupImport '{name}' "
+            f"(source={source_cluster_name}/{source_backup_id} "
+            f"-> target={target_cluster_name})"
+        )
+        self.apply_yaml(yaml_content, namespace=ns)
+
+    def wait_backup_import_done(self, name: str, timeout: int = 300,
+                                 namespace: str = None) -> dict:
+        """Poll until BackupImport phase is ``Done``.  Returns resource JSON.
+
+        The status will contain ``storageBackupRef`` — the name of the
+        StorageBackup CRD created on the target cluster.
+        """
+        ns = namespace or self.namespace
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            res = self.get_resource_json("backupimport", name, namespace=ns)
+            phase = (res.get("status", {}).get("phase") or "").lower()
+            if phase == "done":
+                self.logger.info(f"[K8sUtils] BackupImport '{name}' is Done")
+                return res
+            if phase == "failed":
+                raise AssertionError(
+                    f"BackupImport '{name}' failed: {res.get('status')}")
+            self.logger.info(
+                f"[K8sUtils] Waiting for BackupImport '{name}' "
+                f"(phase={res.get('status', {}).get('phase', 'unknown')})"
+            )
+            time.sleep(10)
+        raise TimeoutError(
+            f"BackupImport '{name}' not Done within {timeout}s"
+        )
+
+    def get_backup_import_storage_backup_ref(self, name: str,
+                                              namespace: str = None) -> str:
+        """Return the storageBackupRef from a BackupImport's status."""
+        ns = namespace or self.namespace
+        res = self.get_resource_json("backupimport", name, namespace=ns)
+        return res.get("status", {}).get("storageBackupRef", "")
+
+    def delete_backup_import(self, name: str, namespace: str = None):
+        """Delete a BackupImport CRD."""
+        ns = namespace or self.namespace
+        self.logger.info(f"[K8sUtils] Deleting BackupImport '{name}'")
+        self.delete_resource("backupimport", name, namespace=ns)
+
     # ── BackupPolicy CRD operations ──────────────────────────────────────────
 
     def create_backup_policy(self, name: str,
@@ -3301,11 +3384,20 @@ class K8sSbcliUtils:
         actual_status = None
         status_list = status if isinstance(status, list) else [status]
         while timeout > 0:
-            node_details = self.get_storage_node_details(node_id)
-            actual_status = node_details[0]["status"]
-            if actual_status in status_list:
-                return node_details[0]
-            self.logger.info(f"Expected Status: {status_list} / Actual Status: {actual_status}")
+            try:
+                node_details = self.get_storage_node_details(node_id)
+                actual_status = node_details[0]["status"]
+                if actual_status in status_list:
+                    return node_details[0]
+                self.logger.info(
+                    f"Expected Status: {status_list} / Actual Status: {actual_status}"
+                )
+            except (json.JSONDecodeError, IndexError, KeyError) as exc:
+                # Transient failure — admin-control pod may be recycling.
+                self.logger.warning(
+                    f"[wait_for_storage_node_status] Transient error for "
+                    f"{node_id}: {exc!r}, retrying..."
+                )
             sleep_n_sec(1)
             timeout -= 1
         raise TimeoutError(

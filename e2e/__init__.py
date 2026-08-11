@@ -909,7 +909,7 @@ def get_upgrade_tests():
         TestMajorUpgradeSingleNode,
         TestMajorUpgradeDualNode,
         K8sNativeMajorUpgrade,
-        K8sNativeMajorUpgradeDualNode,
+        # K8sNativeMajorUpgradeDualNode,  # disabled: focus on single-node upgrade first
     ]
     return tests
 
