@@ -12,7 +12,7 @@ setup, upgrade steps, and validation procedures are correct.
 |-------|-------------|-----------|
 | Phase 1 | Deploy R25.x cluster using legacy Helm charts | No (fresh setup) |
 | Phase 2 | Pre-upgrade data setup — pool, PVCs, FIO, snapshots, clones, MD5 | No |
-| Phase 3 | Maintenance window — 10-step migration from Helm to Operator | **Yes** |
+| Phase 3 | Maintenance window — 11-step migration from Helm to Operator | **Yes** |
 | Phase 4 | Post-upgrade validation — verify old data, new provisioning, outages | No |
 
 ---
@@ -414,16 +414,17 @@ sbctl sn list
 # Expected: All nodes show "offline" status
 ```
 
-### Step 2.1 — Disable Auto-Restart on All Nodes
+### Step 2.1 — Disable Auto-Restart on All Nodes (Safety Net)
 
-**Critical:** Before uninstalling charts or installing the R26 operator, disable
-auto-restart on every storage node. Without this, the R26 operator's tasks-runner
-will detect offline nodes and create `node_restart` tasks immediately after
-starting. These stale tasks block the explicit `sn restart` in Step 10 (there is
-no `--force` flag for restart).
+> **Status**: The R26 operator now skips creating `node_restart` tasks for nodes
+> that were already offline before the operator started. This makes Step 2.1
+> optional in most cases. However, if upgrading to an older R26 build or if the
+> fix regresses, this step prevents the operator's tasks-runner from creating
+> stale `node_restart` tasks that block the explicit `sn restart` in Step 10
+> (there is no `--force` flag for restart).
 
 ```bash
-for NODE_ID in $(sbctl sn list --json | jq -r '.[].id'); do
+for NODE_ID in $(sbctl sn list --json | jq -r '.[].UUID'); do
     sbctl --dev sn set "$NODE_ID" auto_restart_disabled true
 done
 ```
@@ -435,8 +436,11 @@ them before proceeding:
 # List tasks
 sbctl cluster list-tasks "$CLUSTER_ID" --limit 0
 
-# Cancel any running node_restart tasks
-sbctl cluster cancel-task "$CLUSTER_ID" "$TASK_ID"
+# Cancel any running/new node_restart tasks
+for TASK_ID in $(sbctl cluster list-tasks "$CLUSTER_ID" --json --limit 0 \
+  | jq -r '.[] | select(.function=="node_restart" and (.status=="running" or .status=="new")) | .id'); do
+    sbctl cluster cancel-task "$CLUSTER_ID" "$TASK_ID"
+done
 ```
 
 ### Step 3 — Uninstall the `spdk-csi` Helm Chart
@@ -770,29 +774,101 @@ for NODE_ID in $(sbctl sn list | grep -E "offline|in_creation" | awk '{print $2}
 done
 ```
 
+### Step 9.1 — Cancel Stale Restart Tasks (If Needed)
+
+> **Status**: With the R26 operator fix (see Step 2.1), stale tasks should not
+> appear. This step is a safety net for older operator builds or regressions.
+
+If any `node_restart` tasks were created by the operator's tasks-runner between
+Step 6 (operator install) and Step 10, they will block `sn restart`. Check and
+cancel them:
+
+```bash
+# Check for stale node_restart tasks
+sbctl cluster list-tasks "$CLUSTER_ID" --limit 0
+
+# Cancel any that are running or new
+for TASK_ID in $(sbctl cluster list-tasks "$CLUSTER_ID" --json --limit 0 \
+  | jq -r '.[] | select(.function=="node_restart" and (.status=="running" or .status=="new")) | .id'); do
+    echo "Cancelling stale task: $TASK_ID"
+    sbctl cluster cancel-task "$CLUSTER_ID" "$TASK_ID"
+done
+```
+
 ### Step 10 — Restart Storage Nodes One at a Time
 
-Restart each storage node with the target SPDK image. Wait for the cluster to return
-to `active` before restarting the next node:
+Restart each storage node with the new SPDK image and proxy image.
+
+> **IMPORTANT — Maintenance upgrade**: In a maintenance upgrade all nodes start
+> offline. The cluster **cannot** become `active` until every node is back online.
+> Do **not** wait for cluster `active` between individual node restarts — only
+> wait for each node to reach `online`, then proceed to the next. Check cluster
+> `active` only after **all** nodes have been restarted.
 
 ```bash
 export SPDK_IMAGE=<TARGET_SPDK_IMAGE>
+export SPDK_PROXY_IMAGE=<TARGET_DOCKER_IMAGE>
 
-# For each node (one at a time):
-NODE_ID=<node-uuid>
-sbctl -d --dev sn restart $NODE_ID --spdk-image $SPDK_IMAGE
+for NODE_ID in $(sbctl sn list --json | jq -r '.[].UUID'); do
+    echo "Restarting node: $NODE_ID"
+    sbctl -d --dev sn restart "$NODE_ID" \
+        --spdk-image "$SPDK_IMAGE" \
+        --spdk-proxy-image "$SPDK_PROXY_IMAGE"
 
-# Wait for node online
-sbctl sn list  # node should show "online"
+    # Wait for this node to come online (up to 10 minutes)
+    while ! sbctl sn list --json | jq -e ".[] | select(.UUID==\"$NODE_ID\" and .Status==\"online\")" > /dev/null 2>&1; do
+        sleep 5
+    done
+    echo "  Node $NODE_ID is online"
 
-# Wait for cluster active
-sbctl cluster list  # cluster should show "active"
-
-# Then proceed to next node
+    sleep 10  # brief pause before next node
+done
 ```
 
-**Repeat for every storage node.** Do not restart the next node until the current
-node is online and the cluster is active.
+> **Note — Admin-control pod recycling**: During Step 10, the R26 operator may
+> recycle the `simplyblock-admin-control` pods as nodes come back online
+> (deployment rollout). If `kubectl exec` commands fail with `error: unable to
+> upgrade connection: pod does not exist`, wait a few seconds and retry with the
+> new pod name:
+>
+> ```bash
+> ADMIN_POD=$(kubectl get pods -n simplyblock -l app=simplyblock-admin-control \
+>   -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+> ```
+
+### Step 10.1 — Wait for Cluster Active and Health Checks
+
+After all nodes are restarted, wait for the cluster to become `active` and for
+all node health checks to settle to `True`. The `health_check` field may
+remain `None` or `False` for 30-60 seconds after a node comes online while the
+monitoring loop catches up.
+
+```bash
+# Wait for cluster active
+while [ "$(sbctl cluster list --json | jq -r '.[0].Status')" != "ACTIVE" ]; do
+    echo "Waiting for cluster to become active..."
+    sleep 10
+done
+echo "Cluster is active"
+
+# Wait for all nodes to report health_check=True (up to 2 minutes)
+TIMEOUT=120
+while [ $TIMEOUT -gt 0 ]; do
+    UNHEALTHY=$(sbctl sn list --json | jq '[.[] | select(.Health != "True")] | length')
+    if [ "$UNHEALTHY" -eq 0 ]; then
+        echo "All nodes are healthy"
+        break
+    fi
+    echo "  $UNHEALTHY node(s) still settling health_check, retrying in 10s..."
+    sleep 10
+    TIMEOUT=$((TIMEOUT - 10))
+done
+
+if [ $TIMEOUT -le 0 ]; then
+    echo "WARNING: Some nodes still have health_check != True after 120s"
+    sbctl sn list
+fi
+```
 
 ### Step 11 — Restart Workload Pods
 
@@ -960,6 +1036,73 @@ After Step 3, rollback requires:
 
 > Full rollback procedures are not covered here. The recommendation is to snapshot/backup
 > the FDB PVC before starting the maintenance window.
+
+---
+
+## Operational Notes (Lessons Learned from E2E Runs)
+
+These notes capture real-world issues found during automated and manual upgrade
+testing that operators should be aware of.
+
+### 1. Do NOT wait for cluster active between node restarts (maintenance path)
+
+In a maintenance upgrade, all storage nodes start offline. The cluster enters
+`suspended` state because it has no quorum. **The cluster cannot become `active`
+until all (or most) nodes are back online.** If you wait for cluster `active`
+after restarting each individual node, you will hang indefinitely after the
+first node.
+
+**Correct approach**: Restart each node one at a time, wait only for that node
+to reach `online` status, then immediately start the next. Only check for
+cluster `active` after **all** nodes have been restarted (Step 10.1).
+
+This does NOT apply to rolling upgrades, where only one node is down at a time
+and the cluster stays active throughout.
+
+### 2. Health check settling delay after restart
+
+After a node restarts, its `health_check` field in the database transitions
+through `None` → `False` → `True` as the monitoring loop catches up. This can
+take 20-60 seconds. **Do not assert `health_check == True` immediately** after
+a node comes online — poll with a timeout (120 seconds recommended).
+
+### 3. Admin-control pod recycling during node restarts
+
+When storage nodes come back online, the R26 operator may trigger a rollout of
+the `simplyblock-admin-control` deployment. If your automation uses `kubectl exec`
+to run `sbctl` commands via a cached admin pod name, the cached name may become
+stale. Symptoms:
+
+- `error: unable to upgrade connection: pod does not exist`
+- `json.JSONDecodeError: Expecting value: line 1 column 1` (empty stdout)
+
+**Mitigation**: Re-discover the admin pod name if kubectl exec fails, and retry
+the command. The E2E framework handles this automatically.
+
+### 4. Stale `node_restart` tasks blocking `sn restart`
+
+After the R26 operator installs (Step 6), its tasks-runner may detect offline
+nodes and create `node_restart` tasks. When you later run `sn restart` in
+Step 10, it may fail with a conflict because the stale task is still
+running/pending.
+
+**Mitigation**: The R26 operator now skips creating restart tasks for nodes that
+were already offline. For older builds, use Step 2.1 (disable auto-restart) and
+Step 9.1 (cancel stale tasks) before Step 10.
+
+### 5. StorageNodeSet CR must adopt existing nodes
+
+The R26 operator's StorageNodeSet reconciler must detect pre-existing storage
+nodes from R25 and adopt them (same ports: 8080-8085). If the operator creates
+new nodes instead (ports 4420+), the old data is inaccessible. This was a known
+operator bug — ensure the operator version includes the StorageNode CR adoption
+fix.
+
+### 6. Preserve resources on failure for debugging
+
+When an upgrade test fails, avoid cleaning up PVCs, pools, and lvols in the
+teardown. Use `--preserve_resources_on_failure true` in the test runner to keep
+all K8s resources intact for post-mortem analysis.
 
 ---
 
