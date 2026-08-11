@@ -3154,7 +3154,7 @@ class TestBackupCrossClusterRestore(BackupTestBase):
                 lvol_name, lvol_id, mount=mount, format_disk=format_disk)
         mount = mount or f"{self.mount_path}/{lvol_name}"
         # Get NVMe connect strings via CLI
-        out, err = self._sbcli(f"volume connect {lvol_name}")
+        out, err = self._sbcli(f"volume connect {lvol_id}")
         connect_lines = [
             ln.strip() for ln in (out or "").split("\n")
             if ln.strip() and "nvme connect" in ln
