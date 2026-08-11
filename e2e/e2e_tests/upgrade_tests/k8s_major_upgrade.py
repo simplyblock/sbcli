@@ -715,15 +715,46 @@ class K8sNativeMajorUpgrade(TestClusterBase):
         self._save_fio_pod_logs(post_clone_job, post_clone)
         self.k8s_utils.validate_fio_job(post_clone_job, timeout=600)
 
-    def _assert_all_nodes_healthy(self):
-        storage_node_list = self.sbcli_utils.get_storage_nodes()["results"]
-        for node in storage_node_list:
-            assert node["status"] == "online", (
-                f"Node {node['id']} not online (status={node['status']})"
+    def _assert_all_nodes_healthy(self, timeout=120, interval=10):
+        """Assert all storage nodes are online with health_check=True.
+
+        After a maintenance upgrade the health_check field may remain
+        None or False for a short period while the monitoring loop
+        catches up.  Retry up to *timeout* seconds before failing.
+        """
+        from time import time as _now
+
+        deadline = _now() + timeout
+        while True:
+            storage_node_list = self.sbcli_utils.get_storage_nodes()["results"]
+            unhealthy = []
+            for node in storage_node_list:
+                if node["status"] != "online":
+                    unhealthy.append(
+                        f"Node {node['id']} not online (status={node['status']})"
+                    )
+                elif not node.get("health_check", False):
+                    unhealthy.append(
+                        f"Node {node['id']} health_check={node.get('health_check')}"
+                    )
+
+            if not unhealthy:
+                self.logger.info("All storage nodes online and healthy")
+                return
+
+            if _now() >= deadline:
+                for msg in unhealthy:
+                    self.logger.error(msg)
+                raise AssertionError(
+                    f"{len(unhealthy)} node(s) unhealthy after {timeout}s: "
+                    + "; ".join(unhealthy)
+                )
+
+            self.logger.info(
+                f"Waiting for {len(unhealthy)} node(s) to become healthy, "
+                f"retrying in {interval}s …"
             )
-            assert node.get("health_check", True), (
-                f"Node {node['id']} health check failed"
-            )
+            sleep_n_sec(interval)
 
     # ── Phase 2.7: Capture pre-upgrade state ──────────────────────────────────
 
