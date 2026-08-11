@@ -633,6 +633,31 @@ def _watchdog_stuck_activation(cluster):
 
 # Node statuses that mean a node is NOT yet drained for suspend recovery:
 # either still up/serving or mid-transition. The drain is complete only once
+def _watchdog_stuck_shrink(cluster):
+    """Release a cluster wedged in IN_SHRINK with no removal task driving it.
+
+    ``node_removal_orchestrate`` holds IN_SHRINK for one attempt and restores
+    the previous status in a ``finally``. If the process driving it dies, that
+    restore never runs: the status sticks, every later tick early-returns, the
+    topology gates keep refusing, and ``get_restart_phase`` stops reclaiming
+    genuinely leaked phases — none of which clears on its own.
+
+    The removal task is the liveness signal. It is created with max_retry=-1 and
+    only reaches DONE when the removal completes, so "IN_SHRINK held but no open
+    FN_NODE_REMOVAL task" means the flow is gone, not slow. No time budget is
+    needed (contrast ``_watchdog_stuck_activation``, whose driver is a thread
+    with no task row of its own).
+    """
+    if tasks_controller.get_active_node_removal_task_for_cluster(cluster.get_id()):
+        return
+    next_status = get_next_cluster_status(cluster.get_id())
+    logger.error(
+        "Cluster %s is IN_SHRINK but no node-removal task is open: the removal "
+        "driver is gone. Reverting to %s so topology gates and stale-phase "
+        "reclamation resume.", cluster.get_id(), next_status)
+    cluster_ops.set_cluster_status(cluster.get_id(), next_status)
+
+
 # every (non operator-stopped) node has left all of these for OFFLINE/REMOVED.
 _DRAIN_PENDING_STATUSES = (
     StorageNode.STATUS_ONLINE,
@@ -883,7 +908,15 @@ def _update_cluster_status_impl(cluster_id):
         _watchdog_stuck_activation(cluster)
         return
 
-    if current_cluster_status in [Cluster.STATUS_UNREADY, Cluster.STATUS_IN_EXPANSION]:
+    # IN_SHRINK, like IN_EXPANSION, is owned by a topology flow that restores
+    # the previous status itself; driving transitions under it would clobber
+    # that ownership. _watchdog_stuck_shrink below covers a flow that dies
+    # holding it.
+    if current_cluster_status in [Cluster.STATUS_UNREADY,
+                                  Cluster.STATUS_IN_EXPANSION,
+                                  Cluster.STATUS_IN_SHRINK]:
+        if current_cluster_status == Cluster.STATUS_IN_SHRINK:
+            _watchdog_stuck_shrink(cluster)
         return
 
     if current_cluster_status == Cluster.STATUS_DEGRADED and next_current_status == Cluster.STATUS_ACTIVE:
@@ -929,6 +962,38 @@ def _update_cluster_status_impl(cluster_id):
 # DOWN is NOT routed through auto-restart: SPDK is still alive and
 # cluster-internal traffic works -- only the client-facing port is
 # blocked. Recovery is port-unblock, not a destructive restart.
+
+
+#: Node ids whose ANA failover has already been applied for the CURRENT
+#: offline episode. Without this, the OFFLINE branch of check_node re-ran
+#: trigger_ana_failover_for_node on EVERY monitor cycle for as long as the
+#: node stayed offline: incident 2026-08-09 iteration 28 produced 2789
+#: nvmf_subsystem_listener_set_ana_state RPCs in 16 minutes (170/min, one
+#: per subsystem per cycle) against a single peer. Each of those is a real
+#: spdk_nvmf_subsystem_pause of a live subsystem (see _set_lvol_ana_on_node),
+#: so the churn lands on client-facing volumes exactly while the cluster is
+#: least able to absorb it. The promotion is idempotent in effect, so it only
+#: needs to run once per offline transition; the entry is dropped as soon as
+#: the node is observed in any non-OFFLINE state, so a later offline episode
+#: re-arms it.
+_ana_failover_applied: set = set()
+
+
+def _ana_failover_once(node) -> bool:
+    """Run ANA failover for ``node`` at most once per offline episode.
+
+    Returns True when the failover was actually invoked this call."""
+    node_id = node.get_id()
+    if node_id in _ana_failover_applied:
+        return False
+    storage_node_ops.trigger_ana_failover_for_node(node)
+    _ana_failover_applied.add(node_id)
+    return True
+
+
+def _ana_failover_rearm(node_id) -> None:
+    """Forget the one-shot marker so the next offline episode re-triggers."""
+    _ana_failover_applied.discard(node_id)
 
 
 def set_node_offline(node):
@@ -981,7 +1046,7 @@ def set_node_offline(node):
 
         try:
             logger.info(f"Triggering ANA failover for node {node.get_id()}")
-            storage_node_ops.trigger_ana_failover_for_node(node)
+            _ana_failover_once(node)
         except Exception as ana_e:
             logger.error("ANA failover for node %s failed: %s", node.get_id(), ana_e)
 
@@ -1448,11 +1513,22 @@ def check_node(snode):
     # intentionally shut down via sbctl.  Auto-restart is only added by
     # set_node_offline() when the monitor itself detects a failure.
     if snode.status == StorageNode.STATUS_OFFLINE:
+        # One-shot per offline episode. This branch exists because another
+        # service may have set the node offline without triggering the
+        # failover, so it must stay — but re-issuing it on every cycle turns
+        # a one-time promotion into a sustained pause storm on the peer
+        # (incident 2026-08-09: 2789 set_ana_state calls over 16 minutes).
         try:
-            storage_node_ops.trigger_ana_failover_for_node(snode)
+            if _ana_failover_once(snode):
+                logger.info("ANA failover applied for offline node %s "
+                            "(not previously triggered)", snode.get_id())
         except Exception as e:
             logger.error("ANA failover for offline node %s failed: %s", snode.get_id(), e)
         return True
+
+    # Any non-OFFLINE observation ends the episode: re-arm so a future
+    # offline transition triggers the promotion again.
+    _ana_failover_rearm(snode.get_id())
 
     # 1- check node ping
     ping_check = health_controller._check_node_ping(snode.mgmt_ip)

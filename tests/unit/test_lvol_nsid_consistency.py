@@ -64,6 +64,10 @@ class _Base(unittest.TestCase):
             patch.object(
                 lvol_controller, "_fail_after_bdev",
                 side_effect=lambda lvol, rpc, msg: (False, msg)),
+            patch(
+                "simplyblock_core.controllers.migration_controller"
+                ".get_active_migration_for_nqn",
+                return_value=None),
         ]
         for p in self._patches:
             started = p.start()

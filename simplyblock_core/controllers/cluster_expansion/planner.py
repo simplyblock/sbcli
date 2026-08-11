@@ -41,7 +41,7 @@ Two entry points:
   caller needs to express the host topology explicitly.
 """
 
-from typing import Dict, List, NamedTuple, Optional, Tuple
+from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 
 # Role names match the wire protocol used by bdev_lvol_set_lvs_opts.
@@ -342,6 +342,165 @@ def compute_role_diff(
     current_topology = [[n] for n in existing_node_ids]
     new_topology = current_topology + [[new_node_id]]
     return compute_role_diff_topology(current_topology, new_topology, ftt)
+
+
+# ---------------------------------------------------------------------------
+# Failure-domain policy helpers (pure).
+#
+# Invariant model: with failure domains enabled, secondary/tertiary *role*
+# placement only affects availability (client paths / promotion), never
+# durability — data-chunk anti-affinity and the HA-JM per-domain caps are
+# enforced independently by the data plane and the JM picker. The role
+# invariant we hold is therefore:
+#
+#   every LVS keeps AT LEAST ONE cross-domain non-leader role
+#   (its secondary or its tertiary lives in a different failure domain
+#   than its primary)
+#
+# so that a full-domain outage never leaves an LVS with zero surviving
+# paths while its data is still readable in the surviving domain. With two
+# domains and three roles the pigeonhole forces one co-located pair per
+# LVS; the interleaved rotation below keeps that pair deterministic and
+# confines "secondary same-domain as primary" to at most the odd host when
+# the domain populations differ by one.
+#
+# Topology admission (the ``max |n_a - n_b| <= 1`` rule and the >=2 hosts
+# per domain floor) is validated by :func:`fd_balance_violation`; callers
+# (add/remove/activate) decide which bound applies to their operation.
+# ---------------------------------------------------------------------------
+
+
+def fd_interleaved_host_order(
+    host_fd_pairs: Sequence[Tuple[str, int]],
+) -> List[str]:
+    """Order hosts round-robin across failure domains.
+
+    ``host_fd_pairs`` is a list of ``(host_key, failure_domain)`` in a
+    deterministic base order (the caller fixes tie-breaking, e.g. by
+    create-time or id). Domains are cycled in ascending id order; within a
+    domain, hosts keep their base order.
+
+    With equal per-domain populations the result alternates perfectly, so
+    the ``(i+1) mod H`` rotation places every secondary in a different
+    domain than its primary. With a one-host imbalance the larger domain
+    contributes the final host, producing exactly one same-domain
+    adjacency (at the cyclic wrap) — the single degraded LVS the +/-1
+    policy accepts, whose tertiary the rotation still lands cross-domain.
+    """
+    by_fd: Dict[int, List[str]] = {}
+    for host, fd in host_fd_pairs:
+        by_fd.setdefault(fd, []).append(host)
+    fds = sorted(by_fd)
+    order: List[str] = []
+    for round_idx in range(max((len(v) for v in by_fd.values()), default=0)):
+        for fd in fds:
+            if round_idx < len(by_fd[fd]):
+                order.append(by_fd[fd][round_idx])
+    return order
+
+
+def rotation_layout(
+    topology: List[List[str]],
+    ftt: int,
+) -> Dict[str, Tuple[str, str]]:
+    """Public wrapper around the host-rotation formula: the desired
+    ``primary -> (secondary, tertiary)`` layout for ``topology`` (tertiary
+    is ``""`` for FTT1). Validates the topology first (uniform slots per
+    host, unique non-empty ids) and raises ``ValueError`` on malformed
+    input. Used by cluster activation to assign roles deterministically
+    instead of greedily."""
+    if ftt not in (1, 2):
+        raise ValueError(f"ftt must be 1 or 2, got {ftt}")
+    _validate_topology(topology, "topology")
+    if len(topology) < ftt + 1:
+        raise ValueError(
+            f"topology has {len(topology)} hosts; need at least {ftt + 1} "
+            f"for FTT{ftt} (roles must land on distinct hosts)")
+    return {
+        primary_id: (sec_id, tert_id)
+        for primary_id, sec_id, tert_id in _host_rotation_layout(
+            topology, ftt)
+    }
+
+
+def compute_fd_layout_violations(
+    topology: List[List[str]],
+    ftt: int,
+    fd_by_node: Dict[str, int],
+    *,
+    layout: Optional[Dict[str, Tuple[str, str]]] = None,
+) -> List[str]:
+    """Check the >=1-cross-domain-role invariant over a (desired) layout.
+
+    Evaluates the rotation layout implied by ``topology`` (or an explicit
+    ``layout`` of ``primary -> (sec, tert)`` when given, e.g. the *actual*
+    layout read from DB pointers) against ``fd_by_node``. Nodes with an
+    unset domain (< 0 / missing) are skipped — the feature is off for
+    them. A role whose holder has an unset domain does NOT count as
+    cross-domain (unknown is not disjoint).
+
+    Returns a list of human-readable violation strings; empty means the
+    layout satisfies the invariant.
+    """
+    if layout is None:
+        layout = {
+            primary_id: (sec_id, tert_id)
+            for primary_id, sec_id, tert_id in _host_rotation_layout(
+                topology, ftt)
+        }
+    violations: List[str] = []
+    for primary_id, (sec_id, tert_id) in layout.items():
+        fd_p = fd_by_node.get(primary_id, -1)
+        if fd_p < 0:
+            continue
+        fd_s = fd_by_node.get(sec_id, -1) if sec_id else -1
+        fd_t = fd_by_node.get(tert_id, -1) if tert_id else -1
+        sec_cross = fd_s >= 0 and fd_s != fd_p
+        tert_cross = ftt >= 2 and fd_t >= 0 and fd_t != fd_p
+        if not sec_cross and not tert_cross:
+            violations.append(
+                f"LVS@{primary_id} (fd={fd_p}) keeps no cross-domain role: "
+                f"secondary={sec_id or '-'} (fd={fd_s}), "
+                f"tertiary={tert_id or '-'} (fd={fd_t})")
+    return violations
+
+
+def fd_balance_violation(
+    fd_host_counts: Dict[int, int],
+    *,
+    max_delta: int = 1,
+    min_hosts_per_fd: Optional[int] = None,
+) -> Optional[str]:
+    """Validate per-domain host counts against the balance policy.
+
+    ``fd_host_counts`` maps failure-domain id (>= 0) to the number of
+    distinct hosts it would contain AFTER the operation under admission.
+    Returns a human-readable reason on violation, ``None`` when the
+    counts are acceptable. Empty counts (feature unused) are acceptable.
+
+    ``max_delta`` is the allowed population spread (the +/-1 rule).
+    ``min_hosts_per_fd``, when given, is the per-domain floor (2 for any
+    operation on an activated HA cluster: below two hosts per domain the
+    2-2 HA-journal split and cross-domain role hosting both collapse).
+    """
+    counts = {fd: c for fd, c in fd_host_counts.items() if fd >= 0}
+    if not counts:
+        return None
+    lo, hi = min(counts.values()), max(counts.values())
+    if hi - lo > max_delta:
+        return (
+            f"failure domains would be unbalanced by {hi - lo} hosts "
+            f"(allowed: {max_delta}); populations: "
+            f"{ {fd: counts[fd] for fd in sorted(counts)} }. Restore "
+            f"balance before the next topology change.")
+    if min_hosts_per_fd is not None:
+        for fd in sorted(counts):
+            if counts[fd] < min_hosts_per_fd:
+                return (
+                    f"failure domain {fd} would drop to {counts[fd]} "
+                    f"host(s); at least {min_hosts_per_fd} are required "
+                    f"per domain.")
+    return None
 
 
 # ---------------------------------------------------------------------------

@@ -39,14 +39,14 @@ PHASE_CLEANUP_TARGET (orchestrator: wait + target teardown)
 import time
 from typing import Optional
 
-from simplyblock_core import db_controller as db_mod, utils
-from simplyblock_core.controllers import migration_controller, tasks_events
+from simplyblock_core import constants, db_controller as db_mod, utils
+from simplyblock_core.controllers import migration_controller, migration_events, tasks_controller, tasks_events
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_migration_group import LVolMigrationGroup
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.rpc_client import RPCException
-from simplyblock_core.services.hub_controller_manager import hub_manager
+from simplyblock_core.rpc_client import RPCErrorCode, RPCRemoteError, RPCException
+from simplyblock_core.services.hub_controller_manager import HubControllerManager
 from simplyblock_core.services.tasks_runner_lvol_migration import (
     _make_rpc,
     _snap_tgt_short_name,
@@ -55,10 +55,17 @@ from simplyblock_core.services.tasks_runner_lvol_migration import (
     _get_source_tertiary_node,
     _lvol_tgt_bdev_name,
     _build_paths,
+    _ensure_target_nvmf_state,
 )
 
 logger = utils.get_logger(__name__)
 db = db_mod.DBController()
+# Constructed explicitly here, once, rather than as a module-level singleton
+# inside hub_controller_manager.py — see that module's docstring. This
+# process's own manager; tasks_runner_lvol_migration.py constructs its own
+# separate instance, and the two coordinate the detach cooldown via the
+# DB-backed HubDetachCooldown record, not shared memory.
+hub_manager = HubControllerManager(db)
 
 
 # ---------------------------------------------------------------------------
@@ -538,13 +545,11 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
             lvol_names, lvol_ids, snapshot_names, 2, hub_bdev, "migrate")
         logger.info(f"Group {group.uuid[:8]}: bdev_lvol_batch_transfer_final_step returned {ret!r}")
         batch_ok = True
-    except RPCException as e:
+    except RPCRemoteError as e:
         logger.error(f"Group {group.uuid[:8]}: bdev_lvol_batch_transfer_final_step RPC error code={e.code}: {e}")
         batch_err = str(e)
-        # -32601 = Method not found: SPDK binary is missing this RPC handler.
-        # Retrying will never help; surface as fatal so the group fails immediately.
-        if e.code == -32601:
-            return False, batch_err
+        if e.code == RPCErrorCode.method_not_found:
+            return False, batch_err  # Retrying will never help; surface as fatal so the group fails immediately.
     except Exception as e:
         logger.error(f"Group {group.uuid[:8]}: bdev_lvol_batch_transfer_final_step failed: {e}")
         batch_err = str(e)
@@ -711,6 +716,39 @@ def _delete_target_subsystem(group, src_node, src_rpc, tgt_node, tgt_rpc):
 
 
 # ---------------------------------------------------------------------------
+# Retry-budget helper
+# ---------------------------------------------------------------------------
+
+def _batch_budget_suspend(task, group, group_id, error_msg):
+    """Charge retry budget and suspend; redirect to cleanup_target when exhausted.
+
+    Uses constants.LVOL_MIG_MAX_RETRIES as the internal ceiling, independent of
+    task.max_retry (which is set to -1 to disable the backup runner's kill switch).
+    """
+    task.retry += 1
+    task.function_result = error_msg
+    if task.retry >= constants.LVOL_MIG_MAX_RETRIES:
+        ceiling_msg = (
+            f"Group {group_id[:8]}: max retry ({constants.LVOL_MIG_MAX_RETRIES}) "
+            f"reached; entering cleanup_target: {error_msg}"
+        )
+        logger.error(ceiling_msg)
+        group.phase = LVolMigrationGroup.PHASE_CLEANUP_TARGET
+        group.error_message = ceiling_msg
+        task.function_result = ceiling_msg
+        group.write_to_db(db.kv_store)
+        for rec in group.members:
+            try:
+                mig = db.get_migration_by_id(rec['migration_id'])
+                migration_events.migration_phase_changed(mig)
+            except Exception:
+                pass
+    task.status = JobSchedule.STATUS_SUSPENDED
+    task.write_to_db(db.kv_store)
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Main task runner
 # ---------------------------------------------------------------------------
 
@@ -762,12 +800,26 @@ def task_runner(task):
         task.write_to_db(db.kv_store)
         return False
 
+    phase = group.phase
+    _is_cleanup_phase = phase in (
+        LVolMigrationGroup.PHASE_CLEANUP_TARGET,
+        LVolMigrationGroup.PHASE_CLEANUP_SOURCE,
+    )
+
     cluster = db.get_cluster_by_id(group.cluster_id)
-    if cluster.status not in (Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED):
-        task.function_result = f"cluster not active (status={cluster.status})"
-        task.status = JobSchedule.STATUS_SUSPENDED
-        task.write_to_db(db.kv_store)
-        return False
+    if cluster.status not in Cluster.MUTABLE_STATUSES:
+        if not _is_cleanup_phase:
+            task.function_result = f"cluster not active (status={cluster.status})"
+            task.status = JobSchedule.STATUS_SUSPENDED
+            task.write_to_db(db.kv_store)
+            return False
+
+    if tasks_controller.get_active_cluster_expand_task(task.cluster_id):
+        if not _is_cleanup_phase:
+            task.function_result = "cluster expansion in progress, deferring"
+            task.status = JobSchedule.STATUS_SUSPENDED
+            task.write_to_db(db.kv_store)
+            return False
 
     if task.status in (JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED):
         task.status = JobSchedule.STATUS_RUNNING
@@ -785,8 +837,6 @@ def task_runner(task):
             task.status = JobSchedule.STATUS_SUSPENDED
             task.write_to_db(db.kv_store)
             return False
-
-    phase = group.phase
 
     # If source or target went offline during data-transfer phases, enter
     # CLEANUP_TARGET immediately — same fast-path as the single-lvol runner.
@@ -811,29 +861,46 @@ def task_runner(task):
             logger.warning(
                 f"Group {group_id[:8]}: source node unavailable "
                 f"(status={fresh_src.status}) during {phase}; suspending")
-            task.retry += 1
-            if task.max_retry >= 0 and task.retry >= task.max_retry:
-                task.function_result = (
-                    f"max retry reached ({task.retry}/{task.max_retry}): "
-                    f"source node unavailable (status={fresh_src.status})")
-                task.status = JobSchedule.STATUS_DONE
-                task.write_to_db(db.kv_store)
-                return True
-            task.function_result = f"source node unavailable (status={fresh_src.status})"
+            return _batch_budget_suspend(
+                task, group, group_id,
+                f"source node unavailable (status={fresh_src.status})")
+
+    # --- Deadline check (GAP F2) ---
+    if not _is_cleanup_phase and member_migrations:
+        first_mig = member_migrations[0]
+        if first_mig.has_deadline_passed():
+            logger.warning(f"Group {group_id[:8]}: migration deadline exceeded; entering cleanup_target")
+            group.phase = LVolMigrationGroup.PHASE_CLEANUP_TARGET
+            group.error_message = "migration deadline exceeded"
+            group.write_to_db(db.kv_store)
+            task.function_result = "migration deadline exceeded"
             task.status = JobSchedule.STATUS_SUSPENDED
             task.write_to_db(db.kv_store)
             return False
+
+    # --- Target NVMe-oF state reconciliation (GAP D) ---
+    # Mirror the solo runner's per-tick subsystem/listener/namespace repair.
+    # Use the first member migration (all workers share the same NQN and subsystem).
+    if phase in (LVolMigrationGroup.PHASE_SNAP_COPY, LVolMigrationGroup.PHASE_INTERMEDIATE):
+        if member_migrations:
+            first_mig = member_migrations[0]
+            try:
+                first_lvol = db.get_lvol_by_id(first_mig.lvol_id)
+                nvmf_err = _ensure_target_nvmf_state(
+                    first_mig, first_lvol, src_node, tgt_node, src_rpc, tgt_rpc)
+                if nvmf_err:
+                    logger.warning(f"Group {group_id[:8]}: target NVMe-oF state check failed: {nvmf_err}")
+                    return _batch_budget_suspend(task, group, group_id, nvmf_err)
+            except Exception as e:
+                logger.warning(f"Group {group_id[:8]}: _ensure_target_nvmf_state error (non-fatal): {e}")
 
     try:
         # ── PHASE_SNAP_COPY: wait for all workers, then reconstruct tree ─────────
         if phase == LVolMigrationGroup.PHASE_SNAP_COPY:
             done, err = _handle_snap_copy_barrier(group, member_migrations, tgt_node, tgt_rpc)
             if err:
-                task.function_result = err
-                task.status = JobSchedule.STATUS_SUSPENDED
-                task.write_to_db(db.kv_store)
                 logger.error(f"Group {group_id[:8]}: snap_copy barrier error: {err}")
-                return False
+                return _batch_budget_suspend(task, group, group_id, err)
             if not done:
                 task.write_to_db(db.kv_store)
                 return False
@@ -850,11 +917,8 @@ def task_runner(task):
                 group, member_migrations, src_node, tgt_node, src_rpc, tgt_rpc)
 
             if err:
-                task.function_result = err
-                task.status = JobSchedule.STATUS_SUSPENDED
-                task.write_to_db(db.kv_store)
                 logger.error(f"Group {group_id[:8]}: intermediate barrier error: {err}")
-                return False
+                return _batch_budget_suspend(task, group, group_id, err)
 
             if batch_ok is None:
                 # Still waiting for workers.
@@ -883,10 +947,11 @@ def task_runner(task):
             group.phase = LVolMigrationGroup.PHASE_CLEANUP_TARGET
             group.error_message = f"target node offline during {phase}: {exc}"
             group.write_to_db(db.kv_store)
-        task.function_result = str(exc)
-        task.status = JobSchedule.STATUS_SUSPENDED
-        task.write_to_db(db.kv_store)
-        return False
+            task.function_result = str(exc)
+            task.status = JobSchedule.STATUS_SUSPENDED
+            task.write_to_db(db.kv_store)
+            return False
+        return _batch_budget_suspend(task, group, group_id, f"RPC error in phase {phase}: {exc}")
 
     # ── PHASE_CLEANUP_SOURCE: wait for workers, then delete source subsystem ───
     if phase == LVolMigrationGroup.PHASE_CLEANUP_SOURCE:

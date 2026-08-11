@@ -251,6 +251,10 @@ def _base_db(task):
     db.get_task_by_id.return_value = task
     db.get_cluster_by_id.return_value = cluster
     db.get_storage_nodes_by_cluster_id.return_value = [node]
+    # Mirror DBController.atomic_update's contract: apply the mutator to the
+    # (fresh) object and return it. The restart runner's task writes go
+    # through this instead of write_to_db (stale-copy lost-update fix).
+    db.atomic_update.side_effect = lambda obj, fn: (fn(obj), obj)[1]
     return db, cluster, node
 
 
@@ -372,6 +376,11 @@ def _spec_batch_migration(runner, monkeypatch):
     # The main loop calls get_active_batch_migration_tasks, not get_job_tasks.
     db.get_active_batch_migration_tasks.return_value = [task]
 
+    # Worker migrations appear terminal so CLEANUP_TARGET can complete.
+    worker_mig = MagicMock()
+    worker_mig.is_active.return_value = False
+    db.get_migration_by_id.return_value = worker_mig
+
     # Source is offline (retry path); target is online (not the fast-fail path).
     src_node = MagicMock()
     src_node.status = StorageNode.STATUS_OFFLINE
@@ -388,6 +397,12 @@ def _spec_batch_migration(runner, monkeypatch):
     db.get_storage_node_by_id.side_effect = _get_node
     # _make_rpc is imported into the runner module; stub it so no real connections.
     monkeypatch.setattr(runner, "_make_rpc", MagicMock())
+    # Stub collaborators that hit real infrastructure (DB, events, network).
+    monkeypatch.setattr(runner.tasks_controller, "get_active_cluster_expand_task",
+                        lambda *a, **k: False)
+    monkeypatch.setattr(runner, "_delete_target_subsystem", MagicMock())
+    monkeypatch.setattr(runner, "migration_events", MagicMock())
+    monkeypatch.setattr(runner, "tasks_events", MagicMock())
     return task
 
 

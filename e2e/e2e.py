@@ -97,8 +97,8 @@ def main():
                         help="Journal partition count for bootstrap.",
                         default=int(os.environ.get("BOOTSTRAP_JOURNAL_PARTITION", "0")))
     parser.add_argument('--max_subsys', type=int,
-                        help="Max subsystems per storage node.",
-                        default=int(os.environ.get("BOOTSTRAP_MAX_SUBSYS", "1024")))
+                        help="Max subsystems per storage node (max 75).",
+                        default=int(os.environ.get("BOOTSTRAP_MAX_SUBSYS", "75")))
     parser.add_argument('--data_nic', type=str,
                         help="Data NIC interface name.",
                         default=os.environ.get("BOOTSTRAP_DATA_NIC", "eth1"))

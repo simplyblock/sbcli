@@ -83,9 +83,12 @@ the 3-second service-loop gap between phases.
 """
 
 import datetime
+import logging
 import random
 import time
 from typing import Optional
+
+from tenacity import RetryError, Retrying, before_sleep_log, stop_after_attempt, wait_fixed
 
 from simplyblock_core import db_controller as db_mod, utils, constants
 from simplyblock_core.utils import convert_size
@@ -99,19 +102,18 @@ from simplyblock_core.models.lvol_migration import LVolMigration
 from simplyblock_core.models.lvol_migration_group import LVolMigrationGroup
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.snapshot import SnapShot
-from simplyblock_core.rpc_client import RPCException, RPCClient
-from simplyblock_core.services.hub_controller_manager import hub_manager
+from simplyblock_core.rpc_client import RPCErrorCode, RPCRemoteError, RPCException, RPCClient
+from simplyblock_core.services.hub_controller_manager import HubControllerManager
 from simplyblock_core.storage_node_ops import execute_on_leader_with_failover
 
 logger = utils.get_logger(__name__)
 db = db_mod.DBController()
-
-# Sentinel used as the ``error`` return value when a phase handler wants to
-# suspend the task WITHOUT incrementing the retry counter.  This is distinct
-# from a real operation failure: it signals a *transient external condition*
-# (e.g. secondary node in unexpected state) that the runner should wait for,
-# not charge against the retry budget.
-_WAIT = object()
+# Constructed explicitly here, once, rather than as a module-level singleton
+# inside hub_controller_manager.py — see that module's docstring. This
+# process's own manager; tasks_runner_batch_migration.py constructs its own
+# separate instance, and the two coordinate the detach cooldown via the
+# DB-backed HubDetachCooldown record, not shared memory.
+hub_manager = HubControllerManager(db)
 
 # Busy-poll settings for intermediate ("shrink") snapshot transfers.
 # Intermediate snapshots represent a small dirty delta so they should complete
@@ -501,9 +503,16 @@ def _delete_bdev_blocking(bdev_name, primary_rpc, secondary_rpc=None, tertiary_r
 
     for rpc in filter(None, [primary_rpc, secondary_rpc, tertiary_rpc]):
         try:
-            rpc.delete_lvol(bdev_name, sync=True, special_delete=False)
-        except Exception as e:
-            logger.warning(f"delete bdev {bdev_name} finalize on replica (non-fatal): {e}")
+            Retrying(
+                stop=stop_after_attempt(3),
+                wait=wait_fixed(1),
+                before_sleep=before_sleep_log(logger, logging.WARNING),
+            )(rpc.delete_lvol, bdev_name, sync=True, special_delete=False)
+        except RetryError:
+            logger.exception(
+                f"delete bdev {bdev_name} sync finalize STILL failing after 3 attempts "
+                f"(non-fatal, blob metadata may not be cleared on this replica)"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -730,9 +739,8 @@ def _ensure_target_nvmf_state(migration, lvol, src_node, tgt_node, src_rpc, tgt_
     subsystem created by this migration — if that subsystem is entirely gone,
     something outside migration's control needs to fix it, so this only waits.
 
-    Returns None if everything is fine (or was successfully repaired), or the
-    _WAIT sentinel if the caller should suspend without charging the
-    migration's retry budget.
+    Returns None if everything is fine (or was successfully repaired), or an
+    error string describing the transient failure.
     """
     nqn = lvol.nqn
     try:
@@ -740,7 +748,7 @@ def _ensure_target_nvmf_state(migration, lvol, src_node, tgt_node, src_rpc, tgt_
     except Exception as e:
         logger.warning(f"_ensure_target_nvmf_state: could not build target paths: {e}")
         migration.error_message = f"target topology unavailable: {e}"
-        return _WAIT
+        return migration.error_message
 
     owned_node_ids = set(migration.target_subsystem_node_ids or [])
     short_bdev = _lvol_tgt_bdev_name(lvol.lvol_bdev)
@@ -760,7 +768,7 @@ def _ensure_target_nvmf_state(migration, lvol, src_node, tgt_node, src_rpc, tgt_
                 f"_ensure_target_nvmf_state: subsystem_get failed on "
                 f"{label} {node_id[:8]}: {e}")
             migration.error_message = f"could not query subsystem on {label} target node: {e}"
-            return _WAIT
+            return migration.error_message
 
         if not sub:
             if not owns_subsystem:
@@ -769,7 +777,7 @@ def _ensure_target_nvmf_state(migration, lvol, src_node, tgt_node, src_rpc, tgt_
                        f"node recovery")
                 logger.warning(f"_ensure_target_nvmf_state: {msg}")
                 migration.error_message = msg
-                return _WAIT
+                return migration.error_message
 
             logger.warning(
                 f"_ensure_target_nvmf_state: subsystem {nqn} missing on "
@@ -779,7 +787,7 @@ def _ensure_target_nvmf_state(migration, lvol, src_node, tgt_node, src_rpc, tgt_
                 lo, hi = _CNTLID_RANGES.get(label, (3, 500))
                 rpc.subsystem_create(
                     nqn, lvol.ha_type, lvol.uuid, min_cntlid=random.randint(lo, hi),
-                    max_namespaces=constants.LVO_MAX_NAMESPACES_PER_SUBSYS)
+                    max_namespaces=lvol.max_namespace_per_subsys)
                 if lvol.allowed_hosts:
                     _reapply_allowed_hosts(lvol, path['node'], rpc)
                 for _ip in path['ips']:
@@ -800,7 +808,7 @@ def _ensure_target_nvmf_state(migration, lvol, src_node, tgt_node, src_rpc, tgt_
                     f"_ensure_target_nvmf_state: recreate failed on {label} "
                     f"{node_id[:8]}: {e}")
                 migration.error_message = f"failed to recreate target subsystem on {label} node: {e}"
-                return _WAIT
+                return migration.error_message
             continue
 
         # Subsystem present — verify our listener survived.
@@ -811,7 +819,7 @@ def _ensure_target_nvmf_state(migration, lvol, src_node, tgt_node, src_rpc, tgt_
                 f"_ensure_target_nvmf_state: listeners_list failed on "
                 f"{label} {node_id[:8]}: {e}")
             migration.error_message = f"could not query listeners on {label} target node: {e}"
-            return _WAIT
+            return migration.error_message
 
         listener_addrs = {
             (ls.get('address', {}).get('traddr'), str(ls.get('address', {}).get('trsvcid')))
@@ -831,7 +839,7 @@ def _ensure_target_nvmf_state(migration, lvol, src_node, tgt_node, src_rpc, tgt_
                         f"_ensure_target_nvmf_state: listener recreate failed on "
                         f"{label} {node_id[:8]}: {e}")
                     migration.error_message = f"failed to recreate target listener on {label} node: {e}"
-                    return _WAIT
+                    return migration.error_message
 
         # Namespace check — only on nodes whose namespace lifecycle we own;
         # overlap nodes legitimately still point at the SRC bdev pre-cutover
@@ -854,7 +862,7 @@ def _ensure_target_nvmf_state(migration, lvol, src_node, tgt_node, src_rpc, tgt_
                         f"_ensure_target_nvmf_state: namespace re-add errored on "
                         f"{label} {node_id[:8]}: {e}")
                     migration.error_message = f"failed to re-add namespace on {label} node: {e}"
-                    return _WAIT
+                    return migration.error_message
 
     return None
 
@@ -1318,7 +1326,9 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                     if sec_err:
                         migration.error_message = sec_err
                         migration.write_to_db(db.kv_store)
-                        return False, True, _WAIT
+                        # transient replica state: suspend (via error_message),
+                        # don't charge the retry budget toward cleanup_target
+                        return False, True, None
                     if tgt_sec:
                         sec_rpc = _make_rpc(tgt_sec)
                 elif snap.lvol.ha_type == "ha3":
@@ -1326,14 +1336,17 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                     if sec_err:
                         migration.error_message = sec_err
                         migration.write_to_db(db.kv_store)
-                        return False, True, _WAIT
+                        # transient replica state: suspend (via error_message),
+                        # don't charge the retry budget toward cleanup_target
+                        return False, True, None
                     if tgt_sec:
                         sec_rpc = _make_rpc(tgt_sec)
                     tgt_ter, ter_err = _get_target_tertiary_node(tgt_node, src_node.get_id())
                     if ter_err:
                         migration.error_message = ter_err
                         migration.write_to_db(db.kv_store)
-                        return False, True, _WAIT
+                        # transient replica state: suspend, don't charge retries
+                        return False, True, None
                     if tgt_ter:
                         ter_rpc = _make_rpc(tgt_ter)
                 break  # one check is enough
@@ -1477,11 +1490,6 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                 tgt_ter=tgt_ter, ter_rpc=ter_rpc)
             if not ok:
                 migration.transfer_context = {}
-                if err is _WAIT:
-                    migration.error_message = (
-                        f"Secondary node not ready during post-process of {snap_uuid}")
-                    migration.write_to_db(db.kv_store)
-                    return False, True, _WAIT
                 migration.write_to_db(db.kv_store)
                 return False, True, err
 
@@ -1555,7 +1563,9 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             if sec_err:
                 migration.error_message = sec_err
                 migration.write_to_db(db.kv_store)
-                return False, True, _WAIT
+                # transient replica state: suspend (via error_message),
+                # don't charge the retry budget toward cleanup_target
+                return False, True, None
             if tgt_sec:
                 sec_rpc = _make_rpc(tgt_sec)
         if snap.lvol.ha_type == "ha3":
@@ -1563,7 +1573,8 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             if ter_err:
                 migration.error_message = ter_err
                 migration.write_to_db(db.kv_store)
-                return False, True, _WAIT
+                # transient replica state: suspend, don't charge retries
+                return False, True, None
             if tgt_ter:
                 ter_rpc = _make_rpc(tgt_ter)
 
@@ -1649,11 +1660,6 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             tgt_sec=tgt_sec, sec_rpc=sec_rpc,
             tgt_ter=tgt_ter, ter_rpc=ter_rpc)
         if not ok:
-            if err is _WAIT:
-                migration.error_message = (
-                    f"Secondary node not ready after intermediate snap {snap_uuid}")
-                migration.write_to_db(db.kv_store)
-                return False, True, _WAIT
             return False, True, err
 
         migration.next_snap_index = len(plan)
@@ -1865,7 +1871,9 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             if sec_err:
                 migration.error_message = sec_err
                 migration.write_to_db(db.kv_store)
-                return False, True, _WAIT
+                # transient replica state: suspend (via error_message),
+                # don't charge the retry budget toward cleanup_target
+                return False, True, None
 
         # --- Start the final migration ---
 
@@ -2244,7 +2252,8 @@ def _delete_intermediate_snaps_on_target(migration, tgt_rpc, tgt_sec_rpc=None, t
             logger.warning(f"Could not remove intermediate snap {snap_uuid} from DB: {e}")
 
 
-def _rename_migrated_bdevs(migration, tgt_node, tgt_rpc, tgt_sec_rpc=None, tgt_ter_rpc=None):
+def _rename_migrated_bdevs(migration, tgt_node, tgt_rpc, tgt_sec_rpc=None, tgt_ter_rpc=None,
+                            warnings=None):
     """
     After migration completes, rename 'm'-suffixed bdevs on the target back to
     their canonical names (without the suffix).  This prevents suffix accumulation
@@ -2265,28 +2274,37 @@ def _rename_migrated_bdevs(migration, tgt_node, tgt_rpc, tgt_sec_rpc=None, tgt_t
     def _do_rename(old_composite, new_short, label):
         """Rename on prim + sec + ter.  Returns 'EXISTS' if the target name is
         already taken on the PRIMARY (SPDK returns JSON-RPC error -32602 'File
-        exists' -> None), True on success.  new_short must be the short name only
+        exists'), True on success.  new_short must be the short name only
         (no lvstore prefix).
 
         Secondary/tertiary conflicts are non-fatal: an overlap node may already
-        carry the bdev at the canonical name, so a None return there must not
+        carry the bdev at the canonical name, so a collision there must not
         mask a successful primary rename.
         """
-        ret = tgt_rpc.bdev_lvol_rename(old_composite, new_short)
+        try:
+            ret = tgt_rpc.bdev_lvol_rename(old_composite, new_short)
+            prim_exists = False
+        except RPCRemoteError as exc:
+            if exc.code == RPCErrorCode.invalid_params:
+                logger.warning(
+                    f"_do_rename prim: {old_composite!r} -> {new_short!r}: "
+                    f"'File exists' (-32602) — will try fallback name"
+                )
+                prim_exists = True
+                ret = None
+            else:
+                raise
         logger.debug(f"_do_rename prim: {old_composite!r} -> {new_short!r}: ret={ret!r}")
-        # SPDK returns None on name collision (-32602 "File exists"); only the
-        # primary result determines whether we should try the fallback name.
-        prim_exists = (not ret) or (ret == _EXISTS)
         for role, rpc in [("sec", tgt_sec_rpc), ("ter", tgt_ter_rpc)]:
             if rpc:
                 try:
-                    r = rpc.bdev_lvol_rename(old_composite, new_short)
-                    logger.debug(f"_do_rename {role}: {old_composite!r} -> {new_short!r}: ret={r!r}")
-                    if (not r) or r == _EXISTS:
-                        logger.warning(
-                            f"_rename_migrated_bdevs: {role} rename {label} "
-                            f"{old_composite!r} -> {new_short!r}: non-fatal "
-                            f"({role} may already have bdev at target name)")
+                    rpc.bdev_lvol_rename(old_composite, new_short)
+                    logger.debug(f"_do_rename {role}: {old_composite!r} -> {new_short!r}: ok")
+                except RPCRemoteError as exc:
+                    logger.warning(
+                        f"_rename_migrated_bdevs: {role} rename {label} "
+                        f"{old_composite!r} -> {new_short!r}: non-fatal "
+                        f"(code={exc.code}: {exc})")
                 except Exception as exc:
                     logger.warning(
                         f"_rename_migrated_bdevs: {role} rename {label} (non-fatal): {exc}")
@@ -2303,13 +2321,22 @@ def _rename_migrated_bdevs(migration, tgt_node, tgt_rpc, tgt_sec_rpc=None, tgt_t
         ret = _do_rename(old, canonical, label)
         if ret == _EXISTS:
             fallback = canonical + _MIGRATION_BDEV_SUFFIX_DONE
-            logger.info(
-                f"_rename_migrated_bdevs: {canonical} exists - trying fallback {fallback}")
+            msg = (
+                f"bdev rename {current_short!r} -> {canonical!r} failed (File exists); "
+                f"retried as fallback {fallback!r}"
+            )
+            logger.warning(f"_rename_migrated_bdevs: {msg}")
+            if warnings is not None:
+                warnings.append(msg)
             ret2 = _do_rename(old, fallback, label)
             if ret2 == _EXISTS:
-                logger.warning(
-                    f"_rename_migrated_bdevs: both {canonical} and {fallback} "
-                    f"exist - leaving {current_short} as-is")
+                skip_msg = (
+                    f"bdev rename {current_short!r}: both {canonical!r} and {fallback!r} "
+                    f"exist — left as-is"
+                )
+                logger.warning(f"_rename_migrated_bdevs: {skip_msg}")
+                if warnings is not None:
+                    warnings.append(skip_msg)
                 return None
             target = fallback
         else:
@@ -2530,14 +2557,6 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
     if lvol is not None and src_bdev_short:
         src_lvol_composite = f"{src_node.lvstore}/{src_bdev_short}"
         try:
-            src_rpc.bdev_lvol_set_migration_flag(src_lvol_composite)
-            if src_sec_rpc:
-                src_sec_rpc.bdev_lvol_set_migration_flag(src_lvol_composite)
-            if src_ter_rpc:
-                src_ter_rpc.bdev_lvol_set_migration_flag(src_lvol_composite)
-        except Exception as _mf_err:
-            logger.warning(f"bdev_lvol_set_migration_flag failed: {_mf_err}")
-        try:
             _delete_bdev_blocking(
                 src_lvol_composite, src_rpc,
                 secondary_rpc=src_sec_rpc, tertiary_rpc=src_ter_rpc,
@@ -2568,7 +2587,8 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
                 migration, tgt_rpc, tgt_sec_rpc, tgt_ter_rpc,
                 tgt_all_nodes=[n for n in [tgt_node, tgt_sec, tgt_ter] if n],
                 tgt_lvs_name=tgt_node.lvstore)
-        _rename_migrated_bdevs(migration, tgt_node, tgt_rpc, tgt_sec_rpc, tgt_ter_rpc)
+        _rename_migrated_bdevs(migration, tgt_node, tgt_rpc, tgt_sec_rpc, tgt_ter_rpc,
+                               warnings=_warnings)
     except Exception as e:
         logger.warning(f"Target artifact cleanup (rename/intermediate snaps) failed: {e}")
         _warnings.append(f"target rename/intermediate-snap cleanup failed: {e}")
@@ -2774,17 +2794,20 @@ def _budget_suspend(task, migration, migration_id, error_msg):
     """Charge retry budget and suspend; redirect to cleanup_target when exhausted."""
     migration.retry_count += 1
     migration.error_message = error_msg
-    task.retry += 1
     task.function_result = error_msg
     if migration.retry_count >= migration.max_retries:
         logger.error(
             f"Migration {migration_id} exceeded max retries "
             f"({migration.max_retries}); entering cleanup_target"
         )
+        task.retry += 1
+        task.status = JobSchedule.STATUS_SUSPENDED
         migration.phase = LVolMigration.PHASE_CLEANUP_TARGET
         migration.current_job_id = ""
-        migration.write_to_db(db.kv_store)
+        # Write task first so the runner can always re-enter and attempt cleanup,
+        # even if the migration write below fails.
         task.write_to_db(db.kv_store)
+        migration.write_to_db(db.kv_store)
         migration_events.migration_phase_changed(migration)
         return False
     return _suspend_task(task, migration, error_msg)
@@ -2896,17 +2919,19 @@ def task_runner(task):
     # completed migration stays stuck if the source node goes through a brief
     # STATUS_UNREADY / STATUS_IN_ACTIVATION window during recovery.
     cluster = db.get_cluster_by_id(migration.cluster_id)
-    if cluster.status not in (Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED):
+    if cluster.status not in Cluster.MUTABLE_STATUSES:
         if not _is_cleanup_phase:
             return _suspend_task(
-                task, migration, f"cluster not active (status={cluster.status})")
+                task, migration, f"cluster not active (status={cluster.status})",
+                charge_retry=False)
 
     # Expansion-first ordering: defer while a cluster expansion is open —
     # even between the expand task's retries, when the cluster status is
     # momentarily ACTIVE (see tasks_controller.defer_task_for_expansion).
     if tasks_controller.get_active_cluster_expand_task(task.cluster_id):
         return _suspend_task(
-            task, migration, "cluster expansion in progress, deferring")
+            task, migration, "cluster expansion in progress, deferring",
+            charge_retry=False)
 
     # --- Transition NEW/SUSPENDED → RUNNING ---
     if task.status in (JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED):
@@ -2939,9 +2964,10 @@ def task_runner(task):
         except KeyError:
             return _budget_suspend(task, migration, migration.get_id(), f"LVol {migration.lvol_id} not found")
 
-        nvmf_wait = _ensure_target_nvmf_state(migration, lvol, src_node, tgt_node, src_rpc, tgt_rpc)
-        if nvmf_wait is _WAIT:
-            return _suspend_task(task, migration, migration.error_message or "waiting for target node to recover")
+        nvmf_err = _ensure_target_nvmf_state(migration, lvol, src_node, tgt_node, src_rpc, tgt_rpc)
+        if nvmf_err:
+            return _budget_suspend(task, migration, migration.get_id(),
+                                   migration.error_message or nvmf_err)
 
     try:
         if migration.migration_group_id:
@@ -3005,16 +3031,10 @@ def task_runner(task):
         error = str(exc)
 
     # --- Handle error / suspend ---
-    if error is _WAIT:
-        # Transient external condition (e.g. secondary node not ready).
-        # Suspend without charging against the retry budget.
-        return _suspend_task(task, migration, migration.error_message or "waiting")
-
     if error:
-        # Real operation failure – increment retry counter.
+        # Operation failure – increment retry counter.
         migration.retry_count += 1
         migration.error_message = error
-        task.retry += 1
         task.function_result = error
 
         if migration.retry_count >= migration.max_retries:
@@ -3030,6 +3050,7 @@ def task_runner(task):
                 f"Migration {migration_id} exceeded max retries "
                 f"({migration.max_retries}); entering cleanup_target"
             )
+            task.retry += 1
             migration.phase = LVolMigration.PHASE_CLEANUP_TARGET
             migration.current_job_id = ""
             migration.write_to_db(db.kv_store)
@@ -3173,11 +3194,11 @@ def _handle_group_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         if _g_sec_err:
             migration.error_message = _g_sec_err
             migration.write_to_db(db.kv_store)
-            return False, True, _WAIT
+            return False, True, _g_sec_err
         if _g_ter_err:
             migration.error_message = _g_ter_err
             migration.write_to_db(db.kv_store)
-            return False, True, _WAIT
+            return False, True, _g_ter_err
         _g_sec_rpc = _make_rpc(_g_tgt_sec) if _g_tgt_sec else None
         _g_ter_rpc = _make_rpc(_g_tgt_ter) if _g_tgt_ter else None
 
@@ -3307,11 +3328,11 @@ def _handle_group_intermediate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         if _g_sec_err:
             migration.error_message = _g_sec_err
             migration.write_to_db(db.kv_store)
-            return False, True, _WAIT
+            return False, True, _g_sec_err
         if _g_ter_err:
             migration.error_message = _g_ter_err
             migration.write_to_db(db.kv_store)
-            return False, True, _WAIT
+            return False, True, _g_ter_err
         _g_sec_rpc = _make_rpc(_g_tgt_sec) if _g_tgt_sec else None
         _g_ter_rpc = _make_rpc(_g_tgt_ter) if _g_tgt_ter else None
 
@@ -3411,9 +3432,9 @@ def _group_worker_phase_dispatch(task, migration, phase, src_node, tgt_node, src
             # Still transferring owned snaps.
             done, suspend, error = _handle_group_snap_copy(
                 migration, src_node, tgt_node, src_rpc, tgt_rpc)
-            if error and error is not _WAIT:
+            if error:
                 return _suspend_task(task, migration, error)
-            if error is _WAIT or suspend:
+            if suspend:
                 return _suspend_task(task, migration, migration.error_message or "waiting")
             if done:
                 # Signal snap_copy_done to group.
@@ -3454,9 +3475,9 @@ def _group_worker_phase_dispatch(task, migration, phase, src_node, tgt_node, src
         if migration_id not in group.intermediates_done:
             done, suspend, error = _handle_group_intermediate(
                 migration, src_node, tgt_node, src_rpc, tgt_rpc)
-            if error and error is not _WAIT:
+            if error:
                 return _suspend_task(task, migration, error)
-            if error is _WAIT or suspend:
+            if suspend:
                 return _suspend_task(task, migration, migration.error_message or "waiting")
             if done:
                 group = db.get_migration_group_by_id(group_id)
@@ -3503,9 +3524,9 @@ def _group_worker_phase_dispatch(task, migration, phase, src_node, tgt_node, src
         except RPCException as exc:
             return _suspend_task(task, migration, str(exc))
 
-        if error and error is not _WAIT:
+        if error:
             return _suspend_task(task, migration, error)
-        if error is _WAIT or suspend:
+        if suspend:
             return _suspend_task(task, migration, migration.error_message or "waiting")
         if done:
             # Signal cleanup_source_done to group.
@@ -3536,9 +3557,9 @@ def _group_worker_phase_dispatch(task, migration, phase, src_node, tgt_node, src
         except RPCException as exc:
             return _suspend_task(task, migration, str(exc))
 
-        if error and error is not _WAIT:
+        if error:
             return _suspend_task(task, migration, error)
-        if error is _WAIT or suspend:
+        if suspend:
             return _suspend_task(task, migration, migration.error_message or "waiting")
         if done:
             migration.status = (LVolMigration.STATUS_CANCELLED if migration.canceled
@@ -3567,10 +3588,11 @@ def _make_rpc(node):
     return node.rpc_client(timeout=5, retry=2)
 
 
-def _suspend_task(task, migration, reason):
+def _suspend_task(task, migration, reason, charge_retry=True):
     task.status = JobSchedule.STATUS_SUSPENDED
     task.function_result = reason
-    task.retry += 1
+    if charge_retry:
+        task.retry += 1
     task.write_to_db(db.kv_store)
     migration.status = LVolMigration.STATUS_SUSPENDED
     migration.error_message = reason
@@ -3603,6 +3625,42 @@ def _fail_task(task, migration_or_msg, reason=None):
 
 
 # ---------------------------------------------------------------------------
+_STATUS_NEW_TIMEOUT_SECONDS = 300  # 5 minutes
+
+
+def _cancel_stale_new_migrations(cluster_id):
+    """Auto-cancel migrations stuck in STATUS_NEW for longer than the timeout.
+
+    A migration in STATUS_NEW is waiting for the operator to call
+    migrate-continue (start_migration).  If it hasn't been continued within
+    5 minutes, cancel it so resources on the target node are released and the
+    operator gets a clear signal to retry from scratch.
+    """
+    now = datetime.datetime.now()
+    for migration in db.get_migrations(cluster_id):
+        if migration.status != LVolMigration.STATUS_NEW:
+            continue
+        if not migration.create_dt:
+            continue
+        try:
+            created = datetime.datetime.fromisoformat(migration.create_dt)
+        except ValueError:
+            continue
+        age_seconds = (now - created).total_seconds()
+        if age_seconds > _STATUS_NEW_TIMEOUT_SECONDS:
+            logger.warning(
+                f"Migration {migration.uuid} (lvol={migration.lvol_id}) has been "
+                f"in STATUS_NEW for {age_seconds:.0f}s (>{_STATUS_NEW_TIMEOUT_SECONDS}s); "
+                "auto-cancelling"
+            )
+            try:
+                migration_controller.cancel_migration(migration.uuid)
+            except Exception as e:
+                logger.error(
+                    f"Failed to auto-cancel stale migration {migration.uuid}: {e}"
+                )
+
+
 # Runner main loop
 # ---------------------------------------------------------------------------
 
@@ -3621,6 +3679,7 @@ if __name__ == "__main__":
             logger.error("No clusters found!")
         else:
             for cl in clusters:
+                _cancel_stale_new_migrations(cl.get_id())
                 for task in db.get_active_migration_tasks(cl.get_id()):
                     # Lease gate: skip a task another live runner host owns, so
                     # two replicas can't both drive the same migration's

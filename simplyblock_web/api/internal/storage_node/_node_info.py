@@ -1,6 +1,61 @@
-from typing import Callable, List, Optional
+# encoding: utf-8
+"""Static, process-lifetime-constant identity info for a storage node.
 
+Gathering this is not free: ``cpuinfo.get_cpu_info()`` parses ``/proc/cpuinfo``,
+``hostname``/``dmidecode`` shell out, and cloud-metadata detection
+(:func:`get_cloud_info`) makes network requests to well-known metadata
+IPs/hostnames that block for their client timeout whenever the node isn't
+actually on that cloud.
+
+None of it changes for the life of the process, so it is gathered lazily on
+first use and memoized with ``lru_cache`` rather than at import time.
+``docker.py`` and ``kubernetes.py`` are imported transitively by almost
+anything that touches ``simplyblock_web`` (test collection, the CLI,
+OpenAPI-schema generation, ...), so computing this at module scope paid the
+network-probe cost there regardless of whether a ``/info`` request was ever
+served -- that's what made test collection slow.
+"""
+import functools
+import os
+from typing import Any, Callable, Dict, List, Optional, TypedDict
+
+import cpuinfo
 import requests
+
+from simplyblock_core import shell_utils
+
+
+class StaticNodeInfo(TypedDict):
+    cpu_info: Dict[str, Any]
+    hostname: str
+    system_id: str
+    cloud_info: Dict[str, Any]
+
+
+@functools.lru_cache(maxsize=1)
+def get_static_node_info() -> StaticNodeInfo:
+    """Gather and cache this node's static identity info.
+
+    Computed on first call, not at import time. Set ``WITHOUT_CLOUD_INFO`` to
+    skip the cloud-metadata probe entirely (useful in deployments where it's
+    known not to apply, avoiding up to a few seconds of network timeout on
+    the first call after boot).
+    """
+    hostname, _, _ = shell_utils.run_command("hostname -s")
+    system_id, _, _ = shell_utils.run_command("dmidecode -s system-uuid")
+
+    cloud_info: Dict[str, Any] = {}
+    if not os.environ.get("WITHOUT_CLOUD_INFO"):
+        cloud_info = get_cloud_info() or {}
+        if cloud_info:
+            system_id = cloud_info["id"]
+
+    return StaticNodeInfo(
+        cpu_info=cpuinfo.get_cpu_info(),
+        hostname=hostname,
+        system_id=system_id,
+        cloud_info=cloud_info,
+    )
 
 
 def get_cloud_info() -> Optional[dict]:

@@ -47,13 +47,22 @@ REPL_INTERVAL_MIN = 1
 CASE2_ITERATIONS = 10                 # one-minute replication cycles before kill
 REPL_WAIT_TIMEOUT = 1200
 CUTOVER_WAIT_TIMEOUT = 600
+# Readiness gate: newest point-in-time on the target must be no older than this.
+# 3x the snapshot interval tolerates one missed cycle without being slack.
+MAX_LAG_SECONDS = REPL_INTERVAL_MIN * 60 * 3
+STABLE_POLLS = 2                      # consecutive good polls before cutting over
 
 # --- fio workload (per the test spec) ---
 FIO_NUMJOBS = 4                       # 4 parallel jobs
 FIO_RW = "rw"
 FIO_BS = "64k"
 FIO_IODEPTH = 4
-FIO_SIZE = "100G"
+# PER-CLONE, not per volume: fio allocates `size` for EACH of the numjobs
+# clones, so the volume must hold FIO_NUMJOBS * FIO_SIZE. VOL_SIZE=100G lands as
+# ~93 GiB usable, so 4 x 100G asked for ~400G and every run died of ENOSPC
+# ("err=28 ... No space left on device") within minutes -- which had nothing to
+# do with the cutover under test.
+FIO_SIZE = "8G"
 FIO_MAX_LATENCY = "20s"               # IOs slower than this are errors -> proves stall
 FIO_LOG = "/tmp/fio_repl.log"
 FIO_JOBFILE = "/tmp/fio_repl.fio"
@@ -78,11 +87,39 @@ def _ssh(ip, key_path):
     return ssh
 
 
+SSH_RETRIES = 4
+SSH_RETRY_BACKOFF = 5
+
+
 def run(ip, key_path, cmd, check=True, quiet=False):
-    ssh = _ssh(ip, key_path)
     if not quiet:
         print(f"  [{ip}] $ {cmd}")
-    _in, out, err = ssh.exec_command(cmd, timeout=900)
+
+    # Retry only the connect/open-session phase. A reset there means the command
+    # never ran, so replaying it is safe; once we hold a channel the command has
+    # been dispatched and re-running it could repeat a non-idempotent step
+    # (nvme connect, mkfs, volume delete). Long polling loops open a fresh
+    # connection per call and can trip sshd's rate limiting -> WinError 10054.
+    ssh = out = err = None
+    for attempt in range(1, SSH_RETRIES + 1):
+        try:
+            ssh = _ssh(ip, key_path)
+            _in, out, err = ssh.exec_command(cmd, timeout=900)
+            break
+        except (paramiko.SSHException, OSError, EOFError) as exc:
+            if ssh is not None:
+                try:
+                    ssh.close()
+                except Exception:
+                    pass
+            if attempt == SSH_RETRIES:
+                raise RuntimeError(
+                    f"SSH transport failure on {ip} after {SSH_RETRIES} attempts: {exc}") from exc
+            delay = SSH_RETRY_BACKOFF * attempt
+            print(f"  [{ip}] SSH transport failure ({exc}); reconnecting in {delay}s "
+                  f"({attempt + 1}/{SSH_RETRIES})")
+            time.sleep(delay)
+
     o = out.read().decode()
     e = err.read().decode()
     rc = out.channel.recv_exit_status()
@@ -132,13 +169,24 @@ print(json.dumps({{"err": str(err) if err else "",
 """)
 
 
+FIELDS = ("lag_seconds", "outstanding_count", "outstanding_bytes", "replicated_count")
+
+
 def get_replication_info(mgmt_ip, key_path, lvol_uuid):
+    return get_replication_infos(mgmt_ip, key_path, [lvol_uuid])[lvol_uuid]
+
+
+def get_replication_infos(mgmt_ip, key_path, lvol_uuids):
+    """Replication info for all volumes in ONE round trip (see replication_states)."""
     return mgmt_py(mgmt_ip, key_path, f"""
 import json
 from simplyblock_core.controllers import lvol_controller
-info = lvol_controller.get_replication_info({lvol_uuid!r}) or {{}}
-print(json.dumps({{k: info.get(k) for k in
-    ("lag_seconds", "outstanding_count", "outstanding_bytes", "replicated_count")}}))
+fields = {list(FIELDS)!r}
+out = {{}}
+for u in {list(lvol_uuids)!r}:
+    info = lvol_controller.get_replication_info(u) or {{}}
+    out[u] = {{k: info.get(k) for k in fields}}
+print(json.dumps(out))
 """)
 
 
@@ -152,31 +200,65 @@ print(json.dumps(res if isinstance(res, dict) else {{"result": res}}))
 
 
 def replication_state(mgmt_ip, key_path, lvol_uuid):
+    return {"state": replication_states(mgmt_ip, key_path, [lvol_uuid])[lvol_uuid]}
+
+
+def replication_states(mgmt_ip, key_path, lvol_uuids):
+    """States for all volumes in ONE round trip.
+
+    Polling per volume opened len(lvols) SSH sessions every 15s; that churn is
+    what tripped the connection resets during the cutover wait.
+    """
     return mgmt_py(mgmt_ip, key_path, f"""
 import json
 from simplyblock_core.db_controller import DBController
 db = DBController()
-state = ""
+wanted = {list(lvol_uuids)!r}
+states = {{u: "" for u in wanted}}
 for r in db.get_lvol_replication_objects():
-    if r.source_lvol and r.source_lvol.get_id() == {lvol_uuid!r}:
-        state = r.state
-print(json.dumps({{"state": state}}))
+    if r.source_lvol and r.source_lvol.get_id() in states:
+        states[r.source_lvol.get_id()] = r.state
+print(json.dumps(states))
 """)
 
 
 def wait_replication_caught_up(mgmt_ip, key_path, lvol_uuids, timeout=REPL_WAIT_TIMEOUT):
-    print("Waiting for replication to catch up on all volumes...")
+    """Wait until every volume is replicating steadily with a bounded lag.
+
+    NOT outstanding_count == 0. `outstanding_count` counts internal snapshots
+    whose replication task has not finished, and --interval-min creates a fresh
+    snapshot per volume every minute, so with continuous fio there is nearly
+    always one in flight: the old `outstanding == 0` gate could only pass by
+    luck and in practice just burned the timeout and aborted the run.
+
+    The meaningful readiness signal is `lag_seconds` — the age of the newest
+    point-in-time that exists on the target. Bounded lag means the target is
+    keeping up; the residual delta is `replication-commit`'s job, which is
+    documented to "minimize delta then fail the client over".
+    """
+    max_lag = MAX_LAG_SECONDS
+    print(f"Waiting for replication to reach a steady state (lag <= {max_lag}s) on all volumes...")
     start = time.time()
+    stable = 0
     while time.time() - start < timeout:
-        infos = {lv: get_replication_info(mgmt_ip, key_path, lv) for lv in lvol_uuids}
-        outstanding = sum((i.get("outstanding_count") or 0) for i in infos.values())
+        infos = get_replication_infos(mgmt_ip, key_path, lvol_uuids)
+        lags = [i.get("lag_seconds") for i in infos.values()]
         replicated = min((i.get("replicated_count") or 0) for i in infos.values())
-        print(f"  total_outstanding={outstanding} min_replicated={replicated}")
-        if outstanding == 0 and replicated > 0:
-            print("Replication caught up.")
-            return True
+        outstanding = sum((i.get("outstanding_count") or 0) for i in infos.values())
+        worst = max((lag for lag in lags if lag is not None), default=None)
+        missing = sum(1 for lag in lags if lag is None)
+        print(f"  worst_lag={worst}s never_replicated={missing} "
+              f"min_replicated={replicated} outstanding={outstanding}")
+        if missing == 0 and replicated > 0 and worst is not None and worst <= max_lag:
+            stable += 1
+            if stable >= STABLE_POLLS:        # hold, so we don't cut over on one lucky sample
+                print(f"Replication steady (worst lag {worst}s).")
+                return True
+        else:
+            stable = 0
         time.sleep(15)
-    raise RuntimeError("Timed out waiting for replication to catch up")
+    raise RuntimeError(
+        f"Timed out waiting for replication to reach a steady state (lag <= {max_lag}s)")
 
 
 # --------------------------------------------------------------------------- #
@@ -191,6 +273,7 @@ def _newest_spdk_devs(client_ip, key_path, count):
 
 def connect_and_mount(client_ip, key_path, mgmt_ip, lvols, fmt=True, mount_base=MOUNT_BASE):
     """Connect each lvol on the client and mount it. Returns [{lvol,nqn,dev,mount}]."""
+    prepare_mount_points(client_ip, key_path)
     mounts = []
     for idx, lv in enumerate(lvols):
         conn = get_connect_cmds(mgmt_ip, key_path, lv)
@@ -229,7 +312,12 @@ def write_fio_jobfile(client_ip, key_path, mounts):
         "",
     ]
     for i, m in enumerate(mounts):
-        sections += [f"[vol{i}]", f"filename={m['mount']}/fio.dat", ""]
+        # `directory`, NOT a shared `filename`: with numjobs>1 every clone opens
+        # the same path and they overwrite each other's verify patterns
+        # ("multiple writers may overwrite blocks that belong to other jobs"),
+        # so md5 verify failures were guaranteed regardless of replication.
+        # With `directory` each clone gets its own <jobname>.<jobnum>.0 file.
+        sections += [f"[vol{i}]", f"directory={m['mount']}", ""]
     content = "\n".join(sections)
     # Write the job file on the client.
     run(client_ip, key_path, f"cat > {FIO_JOBFILE} <<'EOF'\n{content}\nEOF")
@@ -271,10 +359,26 @@ def stop_fio(client_ip, key_path):
 
 
 def cleanup_client(client_ip, key_path, mounts):
+    # Unmount before disconnecting, with a lazy fallback: a plain (or forced)
+    # unmount fails once the transport is dead, and disconnecting underneath a
+    # live mount leaves a stale mountpoint that later stat()s with EIO -- a
+    # subsequent run then dies on `mkdir -p` of that same path.
     for m in mounts:
-        run(client_ip, key_path, f"sudo umount {m['mount']} 2>/dev/null || true", check=False)
+        run(client_ip, key_path,
+            f"sudo umount {m['mount']} 2>/dev/null "
+            f"|| sudo umount -f {m['mount']} 2>/dev/null "
+            f"|| sudo umount -l {m['mount']} 2>/dev/null || true", check=False)
+    for m in mounts:
         if m.get("nqn"):
             run(client_ip, key_path, f"sudo nvme disconnect -n {m['nqn']} 2>/dev/null || true", check=False)
+
+
+def prepare_mount_points(client_ip, key_path):
+    """Clear stale mountpoints left by an aborted run before mounting again."""
+    run(client_ip, key_path,
+        "for m in /mnt/repl*; do "
+        "sudo umount -f \"$m\" 2>/dev/null || sudo umount -l \"$m\" 2>/dev/null || true; "
+        "sudo rmdir \"$m\" 2>/dev/null || true; done", check=False)
 
 
 # --------------------------------------------------------------------------- #
@@ -298,6 +402,48 @@ def _src_target(meta):
     return src_uuid, src, tgt_uuid, tgt
 
 
+def delete_test_volumes(mgmt_ip, key_path, pools):
+    """Remove leftover replvol*/REP_* volumes from a previous case or run.
+
+    Case 1 leaves its volumes behind AND a completed cutover creates a same-named
+    copy on the target pool, so `get_lvol_by_name('replvol0')` then matches more
+    than one record and dies with "Multiple values present". Case 2's docstring
+    always claimed it cleaned up first; this is that step.
+    """
+    victims = []
+    for pool in pools:
+        raw = run(mgmt_ip, key_path, f"{SBCTL} volume list --pool {pool} 2>/dev/null",
+                  check=False, quiet=True)
+        for line in raw.splitlines():
+            cols = [c.strip() for c in line.split("|")]
+            if len(cols) > 3 and (cols[2].startswith("replvol") or cols[2].startswith("REP_")):
+                if (cols[1], cols[2]) not in victims:
+                    victims.append((cols[1], cols[2]))
+    if not victims:
+        return
+    print(f"Cleaning up {len(victims)} leftover volume(s) before this case...")
+    for uuid, name in victims:
+        print(f"  deleting {name} ({uuid})")
+        run(mgmt_ip, key_path, f"{SBCTL} volume replication-stop {uuid}", check=False, quiet=True)
+        run(mgmt_ip, key_path, f"{SBCTL} volume delete {uuid} --force", check=False, quiet=True)
+
+    # Deletion is asynchronous; wait for the records to drain so the name is free.
+    for _ in range(30):
+        time.sleep(10)
+        left = 0
+        for pool in pools:
+            raw = run(mgmt_ip, key_path, f"{SBCTL} volume list --pool {pool} 2>/dev/null",
+                      check=False, quiet=True)
+            for line in raw.splitlines():
+                cols = [c.strip() for c in line.split("|")]
+                if len(cols) > 3 and (cols[2].startswith("replvol") or cols[2].startswith("REP_")):
+                    left += 1
+        if left == 0:
+            print("  cleanup drained.")
+            return
+    raise RuntimeError("Timed out waiting for leftover volumes to delete")
+
+
 def create_volumes(mgmt_ip, key_path, pool, tgt_uuid, mode, count=NUM_VOLUMES):
     lvols = []
     for i in range(count):
@@ -318,6 +464,10 @@ def test_case_1(meta):
     mgmt_ip = meta["mgmt"]["public_ip"]
     client_ip = meta["clients"][0]["public_ip"]
     src_uuid, src, tgt_uuid, tgt = _src_target(meta)
+
+    # 0. clear anything an aborted run left behind, so names are free
+    prepare_mount_points(client_ip, key_path)
+    delete_test_volumes(mgmt_ip, key_path, [src["pool"], tgt["pool"]])
 
     # 1. create + replicate (migration mode, 1-min auto snapshots)
     lvols = create_volumes(mgmt_ip, key_path, src["pool"], tgt_uuid, mode="migration")
@@ -357,11 +507,13 @@ print(json.dumps({{"target_lvol": tgt}}))
     # 5. wait for cutovers to complete, monitoring fio the whole time
     print("Waiting for cutover completion + monitoring fio...")
     start = time.time()
+    states = {}
+    done = 0
     while time.time() - start < CUTOVER_WAIT_TIMEOUT:
         if not fio_alive(client_ip, key_path):
             raise RuntimeError("FAIL: fio stopped during online migration (interrupted)")
-        states = [replication_state(mgmt_ip, key_path, lv)["state"] for lv in lvols]
-        done = sum(1 for s in states if s in ("cutover_done", "failed_over"))
+        states = replication_states(mgmt_ip, key_path, lvols)
+        done = sum(1 for s in states.values() if s in ("cutover_done", "failed_over"))
         print(f"  cutovers done: {done}/{len(lvols)}  fio_alive=True")
         if done == len(lvols):
             break
@@ -371,13 +523,20 @@ print(json.dumps({{"target_lvol": tgt}}))
     time.sleep(20)
     alive = fio_alive(client_ip, key_path)
     errors = fio_error_count(client_ip, key_path)
-    print(f"  fio_alive={alive} error_indicators={errors}")
+    print(f"  fio_alive={alive} error_indicators={errors} cutovers_done={done}/{len(lvols)}")
     stop_fio(client_ip, key_path)
     cleanup_client(client_ip, key_path, mounts)
     if not alive:
         raise RuntimeError("FAIL: fio did not survive the online migration")
     if errors:
         raise RuntimeError(f"FAIL: fio reported {errors} error/latency violations during cutover")
+    # The migration itself must actually have happened. Without this the case
+    # "passed" on a cutover that never completed (0/5 for the whole timeout) --
+    # surviving fio proves nothing if no volume ever moved.
+    if done != len(lvols):
+        raise RuntimeError(
+            f"FAIL: only {done}/{len(lvols)} cutovers completed within "
+            f"{CUTOVER_WAIT_TIMEOUT}s; states={states}")
     print("CASE 1 PASSED: online migration completed with no fio interruption.")
 
 
@@ -390,6 +549,10 @@ def test_case_2(meta):
     # to the other cluster). We use the configured replication source as the
     # cluster hosting the volumes and the one we suspend.
     src_uuid, src, tgt_uuid, tgt = _src_target(meta)
+
+    # clean up whatever case 1 (or an aborted run) left behind
+    prepare_mount_points(client_ip, key_path)
+    delete_test_volumes(mgmt_ip, key_path, [src["pool"], tgt["pool"]])
 
     # create + replicate (failover mode, 1-min auto snapshots)
     lvols = create_volumes(mgmt_ip, key_path, src["pool"], tgt_uuid, mode="failover")

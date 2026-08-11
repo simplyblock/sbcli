@@ -99,7 +99,7 @@ class CLIWrapper(CLIWrapperBase):
 
     def init_storage_node__configure(self, subparser):
         subcommand = self.add_sub_command(subparser, 'configure', 'Prepare a configuration file to be used when adding the storage node.')
-        subcommand.add_argument('--max-subsys', help='The max number of subsystems per storage node.', type=int, dest='max_lvol', required=True)
+        subcommand.add_argument('--max-subsys', help='The max number of subsystems per storage node. Must not exceed 75.', type=int, dest='max_lvol', required=True)
         subcommand.add_argument('--max-size', help='The maximum amount of Huge Pages to be set on the node.', type=str, dest='max_prov', required=False)
         subcommand.add_argument('--nodes-per-socket', help='The number of each node to be added per each socket. Default: `1`.', type=int, default=1, dest='nodes_per_socket')
         subcommand.add_argument('--sockets-to-use', help='The system socket to use when adding the storage nodes. Default: `0`.', type=str, default='0', dest='sockets_to_use')
@@ -183,7 +183,7 @@ class CLIWrapper(CLIWrapperBase):
     def init_storage_node__restart(self, subparser):
         subcommand = self.add_sub_command(subparser, 'restart', 'Restarts a storage node.')
         subcommand.add_argument('node_id', help='Storage node id', type=str).completer = self._completer_get_sn_list
-        subcommand.add_argument('--max-subsys', help='The max number of subsystems per storage node. Default: `0`.', type=int, default=0, dest='max_lvol')
+        subcommand.add_argument('--max-subsys', help='The max number of subsystems per storage node. Must not exceed 75. Default: `0`.', type=int, default=0, dest='max_lvol')
         if self.developer_mode:
             subcommand.add_argument('--max-snap', help='The max snapshot per storage node. Default: `5000`.', type=int, default=5000, dest='max_snap')
         if self.developer_mode:

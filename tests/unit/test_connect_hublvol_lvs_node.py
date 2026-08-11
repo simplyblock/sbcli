@@ -197,7 +197,14 @@ class TestBackwardCompat(unittest.TestCase):
 
 
 class TestSourceCallSites(unittest.TestCase):
-    """Pin the call sites in recreate_lvstore_on_non_leader use lvs_node."""
+    """Pin that the recreate call sites pass lvs_node.
+
+    These read source text, so they target the ``_impl`` functions: both
+    ``recreate_lvstore`` and ``recreate_lvstore_on_non_leader`` are now thin
+    lock/retry wrappers around ``_recreate_lvstore_impl`` /
+    ``_recreate_lvstore_on_non_leader_impl``, and the call sites being pinned
+    live in the latter.
+    """
 
     @classmethod
     def setUpClass(cls):
@@ -216,7 +223,7 @@ class TestSourceCallSites(unittest.TestCase):
         # The subsequent connect_to_hublvol on that target must pass
         # lvs_node=primary_node so LVS metadata comes from the configured
         # primary, not the peer.
-        start = self.src.index("def recreate_lvstore_on_non_leader(")
+        start = self.src.index("def _recreate_lvstore_on_non_leader_impl(")
         end = self.src.index("\ndef ", start + 1)
         body = self.src[start:end]
         # Tertiary branch maps sync_target onto attach_target.
@@ -231,7 +238,7 @@ class TestSourceCallSites(unittest.TestCase):
         )
 
     def test_recreate_on_non_leader_passes_lvs_node_for_secondary_branch(self):
-        start = self.src.index("def recreate_lvstore_on_non_leader(")
+        start = self.src.index("def _recreate_lvstore_on_non_leader_impl(")
         end = self.src.index("\ndef ", start + 1)
         body = self.src[start:end]
         # Secondary branch sets attach_target = leader_node, then the
@@ -260,7 +267,7 @@ class TestSourceCallSites(unittest.TestCase):
         # client write, producing a dual-leader writer conflict.
         # (incident 2026-05-21 05:38:14 k8s_native_resilient_failover-
         # 20260520-231822, LVS_270 takeover by worker-4.)
-        start = self.src.index("def recreate_lvstore(")
+        start = self.src.index("def _recreate_lvstore_impl(")
         end = self.src.index("\ndef ", start + 1)
         body = self.src[start:end]
         # The peer-loop connect call uses sec_node.connect_to_hublvol(snode, ...)
@@ -279,7 +286,7 @@ class TestSourceCallSites(unittest.TestCase):
         recreate_lvstore must pass lvs_node= explicitly. Guards against
         a regression that adds a new call site in the takeover path
         without re-applying the metadata-routing arg."""
-        start = self.src.index("def recreate_lvstore(")
+        start = self.src.index("def _recreate_lvstore_impl(")
         end = self.src.index("\ndef ", start + 1)
         body = self.src[start:end]
         cursor = 0
@@ -394,13 +401,19 @@ class TestRecreateLvstoreTakeoverBehavioral(unittest.TestCase):
         captured = []
 
         def make_capture(self_node):
-            def fake(primary_node, failover_node=None, role=None,
-                     timeout=None, rpc_timeout=None, lvs_node=None):
+            # Mirror StorageNode.connect_to_hublvol's signature, including the
+            # pre-block attach pass (attach_only) and the hublvol advisory lock
+            # — a stub that rejects them turns into an "Abort restart" instead
+            # of recording the call under test.
+            def fake(primary_node, failover_node=None, *, role,
+                     timeout=None, rpc_timeout=None, lvs_node=None,
+                     coordinator_lock=None, attach_only=False):
                 captured.append({
                     "self_id": self_node.get_id(),
                     "primary_id": primary_node.get_id(),
                     "lvs_node_id": lvs_node.get_id() if lvs_node else None,
                     "role": role,
+                    "attach_only": attach_only,
                 })
                 return True
             return fake
@@ -450,7 +463,7 @@ class TestRecreateLvstoreTakeoverBehavioral(unittest.TestCase):
              patch("simplyblock_core.storage_node_ops.health_controller"), \
              patch("simplyblock_core.storage_node_ops.tcp_ports_events"), \
              patch("simplyblock_core.storage_node_ops.storage_events"), \
-             patch("simplyblock_core.port_block.set_port",
+             patch("simplyblock_core.utils.port_block.set_port",
                    return_value=MagicMock()), \
              patch("simplyblock_core.rpc_client.RPCClient", return_value=rpc), \
              patch("simplyblock_core.storage_node_ops._connect_to_remote_jm_devs",
@@ -471,11 +484,17 @@ class TestRecreateLvstoreTakeoverBehavioral(unittest.TestCase):
             ok = storage_node_ops.recreate_lvstore(snode, lvs_primary=lvs_owner)
             self.assertTrue(ok)
 
-        # Exactly one connect_to_hublvol on the tertiary peer.
+        # The tertiary peer is connected twice: an attach_only=True pre-attach
+        # hoisted out of the client-port-block window, then the real in-window
+        # connect. Both must route via lvs_node; assert on the real one.
+        in_window = [c for c in captured if not c["attach_only"]]
         self.assertEqual(
-            len(captured), 1,
-            f"Expected one connect_to_hublvol call on tertiary, got {captured}")
-        c = captured[0]
+            len(in_window), 1,
+            f"Expected one in-window connect_to_hublvol on tertiary, got {captured}")
+        self.assertTrue(
+            all(c["lvs_node_id"] == "worker-3" for c in captured),
+            f"every connect must route LVS metadata via worker-3, got {captured}")
+        c = in_window[0]
         self.assertEqual(c["self_id"], "worker-1",
                          "connect_to_hublvol should run on the tertiary peer")
         self.assertEqual(c["primary_id"], "worker-4",

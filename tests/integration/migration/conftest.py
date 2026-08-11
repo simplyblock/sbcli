@@ -30,14 +30,26 @@ logger = logging.getLogger(__name__)
 _MIGRATION_DIR = os.path.dirname(__file__)
 
 
+#: Per-test budget for the migration tier, overriding the repo-wide default in
+#: pyproject.toml. These tests drive whole migrations against the mock RPC
+#: servers and are minutes-scale where the rest of the suite is seconds-scale.
+#: Measured on the full tier (setup+call+teardown per test): p50 7s, p95 25s,
+#: and one 81s outlier — 180s leaves room for a slower CI runner without being
+#: so loose that a stall hides in it. The four heavier scalability tests carry
+#: their own @pytest.mark.timeout instead.
+MIGRATION_DEFAULT_TIMEOUT = 180
+
+
 def pytest_collection_modifyitems(items):
     """Tag every migration test as ``slow`` so the default integration run can
-    deselect them (see ``-m "not slow"`` in tox.ini). Applied here rather than
-    on each of the ~138 test functions so new migration tests inherit it
-    automatically."""
+    deselect them (see ``-m "not slow"`` in tox.ini), and give the tier its own
+    timeout budget. Applied here rather than on each of the ~138 test functions
+    so new migration tests inherit both automatically."""
     for item in items:
         if str(item.fspath).startswith(_MIGRATION_DIR):
             item.add_marker(pytest.mark.slow)
+            if item.get_closest_marker("timeout") is None:
+                item.add_marker(pytest.mark.timeout(MIGRATION_DEFAULT_TIMEOUT))
 
 
 # ---------------------------------------------------------------------------
@@ -393,11 +405,14 @@ def start_migration(lvol_id, target_node_id, max_retries=None, deadline_seconds=
 # Task-runner helper
 # ---------------------------------------------------------------------------
 
-def run_migration_task(migration_id: str, max_steps: int = 200,
-                       step_sleep: float = 0.05) -> LVolMigration:
-    """
-    Drive the migration task-runner synchronously until the migration reaches a
-    terminal state or ``max_steps`` iterations are exhausted.
+_TERMINAL_STATUSES = (LVolMigration.STATUS_DONE,
+                      LVolMigration.STATUS_FAILED,
+                      LVolMigration.STATUS_CANCELLED)
+
+
+def _drive(migration_id: str, max_steps: int, step_sleep: float,
+           stop_when=None) -> LVolMigration:
+    """Shared driver behind ``run_migration_task`` and ``advance_until``.
 
     Imports the task runner lazily to avoid pulling heavy service modules into
     the collection phase.
@@ -408,12 +423,17 @@ def run_migration_task(migration_id: str, max_steps: int = 200,
     db = DBController()
     task = _find_migration_task(db, migration_id)
     if task is None:
-        raise RuntimeError(f"No task found for migration {migration_id}")
+        # Already terminal: the task was marked done and dropped from the active
+        # list. That is a valid state to be called in, not an error.
+        return db.get_migration_by_id(migration_id)
 
     task_id = task.uuid
     cluster_id = task.cluster_id
 
     for step in range(max_steps):
+        if stop_when is not None and stop_when(db.get_migration_by_id(migration_id)):
+            break
+
         # Re-fetch fresh task state directly (targeted scan for this cluster only)
         task = next(
             (t for t in db.get_active_migration_tasks(cluster_id)
@@ -426,9 +446,7 @@ def run_migration_task(migration_id: str, max_steps: int = 200,
         terminal = task_runner(task)
 
         migration = db.get_migration_by_id(migration_id)
-        if migration.status in (LVolMigration.STATUS_DONE,
-                                 LVolMigration.STATUS_FAILED,
-                                 LVolMigration.STATUS_CANCELLED):
+        if migration.status in _TERMINAL_STATUSES:
             logger.info("Migration %s → %s after %d steps",
                         migration_id, migration.status, step + 1)
             return migration
@@ -438,6 +456,34 @@ def run_migration_task(migration_id: str, max_steps: int = 200,
         time.sleep(step_sleep)
 
     return db.get_migration_by_id(migration_id)
+
+
+def run_migration_task(migration_id: str, max_steps: int = 200,
+                       step_sleep: float = 0.05) -> LVolMigration:
+    """
+    Drive the migration task-runner synchronously until the migration reaches a
+    terminal state or ``max_steps`` iterations are exhausted.
+    """
+    return _drive(migration_id, max_steps, step_sleep)
+
+
+def advance_until(migration_id: str, predicate, max_steps: int = 200,
+                  step_sleep: float = 0.02) -> LVolMigration:
+    """
+    Drive the task-runner until ``predicate(migration)`` holds, the migration
+    reaches a terminal state, or ``max_steps`` is exhausted.  Returns the
+    migration as last read.
+
+    The predicate is checked *before* each tick, so a migration that already
+    satisfies it is returned without the runner being called at all.
+
+    Use this instead of pumping a fixed number of ticks.  How far a migration
+    gets per tick depends on the mock server's randomised async-completion
+    delays (``mock_rpc_server._async_delay``), so "run 3 steps, the migration
+    must still be in flight" is a race — it fails whenever the draws come in
+    fast enough to finish the whole migration.
+    """
+    return _drive(migration_id, max_steps, step_sleep, stop_when=predicate)
 
 
 def run_migration_with_crashes(migration_id: str, crash_points: list,
@@ -544,6 +590,7 @@ __all__ = [
     "custom_topology",
     # helpers
     "run_migration_task",
+    "advance_until",
     "run_migration_with_crashes",
     "set_node_status",
     "set_cluster_status",

@@ -51,7 +51,7 @@ If commands or options are added, updated, or removed, the YAML file, the genera
 startup code of `sbctl`.
 
 ```bash
-./simplyblock_cli/scripts/generate.sh
+tox run -e generate
 ```
 
 Executing this command updates `simplyblock_cli/cli.py` according to the reference file.

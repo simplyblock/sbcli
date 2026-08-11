@@ -141,6 +141,16 @@ def post_lvol_delete_rebalance(cluster, lvol):
 def process_lvol_delete_finish(cluster, lvol):
     logger.info(f"LVol deleted successfully, id: {lvol.get_id()}")
 
+    # Re-read the record: `lvol` comes from the cycle-start snapshot in
+    # check_node, and the API delete call may have completed its inline sync
+    # legs (and recorded them in sync_deleted_nodes) after that snapshot was
+    # taken. Using the stale copy would re-issue a sync delete on a node that
+    # already had one.
+    try:
+        lvol = db.get_lvol_by_id(lvol.get_id())
+    except KeyError:
+        return  # already finalised by another pass
+
     # check leadership
     snode = db.get_storage_node_by_id(lvol.node_id)
     sec_nodes = []
@@ -199,7 +209,29 @@ def process_lvol_delete_finish(cluster, lvol):
                 non_leader_nodes.append(db.get_storage_node_by_id(node_id))
             except KeyError:
                 pass
-    # 3-1 async delete lvol bdev from primary
+    # The leader gets NO sync delete. Its async delete already removed the
+    # blob AND unregistered the bdev; this function only runs once that async
+    # delete reported done (poll ret 0/2). Re-deleting on the leader walks the
+    # snapshot/clone metadata a second time and errors on every entry the
+    # async pass already cleaned:
+    #
+    #   run 20260807, LVS_1 (~7.5k objects): 4361 "Clone entry not found"
+    #   (blob_get_snapshot_and_clone_entries) plus 888 lvol_delete_async_cb
+    #   *ERROR* on the leader (vm201) — and exactly 0 on either non-leader,
+    #   because they get their one and only delete here. Same signature as
+    #   run 20260716 (1382x). The _remove_bdev_stack "already deleted,
+    #   skipping" guard did not fire once in that run, so it cannot be relied
+    #   on to suppress the second pass.
+    #
+    # Verified safe: of the 162 objects that took the create-rollback path in
+    # run 20260807 (async on the leader, sync on the non-leaders only, never
+    # on the leader), 0 were still present in the leader's end-of-run bdev
+    # dump — the async delete alone leaves nothing behind.
+    #
+    # This matches the delete protocol as stated in
+    # snapshot_controller._rollback_snapshot_bdev: an async delete must always
+    # be followed by sync deletes on EVERY non-leader HA member of the LVS —
+    # "unconditionally, never on the leader".
     primary_node = db.get_storage_node_by_id(leader_node.get_id())
     if primary_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
         # Check if any non-leader node needs sync lock
@@ -207,14 +239,19 @@ def process_lvol_delete_finish(cluster, lvol):
             if nln.status in [StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN, StorageNode.STATUS_UNREACHABLE]:
                 primary_node.lvol_del_sync_lock()
                 break
-        with snapshot_controller.lvstore_op_lock(
-                cluster.get_id(), lvol.lvs_name, node_id=primary_node.get_id()):
-            ret = lvol_controller.delete_lvol_from_node(lvol.get_id(), primary_node.get_id(), sync=True)
-        if not ret:
-            logger.error(f"Failed to delete lvol from primary_node node: {primary_node.get_id()}")
 
     lvol_bdev_name=f"{lvol.lvs_name}/{lvol.lvol_bdev}"
     for sec_node in non_leader_nodes:
+        if sec_node.get_id() in lvol.sync_deleted_nodes:
+            # The API delete call already completed this node's sync leg
+            # inline (lvol_controller._delete_lvol_from_all_nodes). Issuing a
+            # second one walks the replica blob tree again and errors on every
+            # entry the first pass cleaned — the same defect the leader used
+            # to suffer above.
+            logger.debug(
+                f"Sync delete of {lvol_bdev_name} on {sec_node.get_id()[:8]} "
+                f"already done inline; skipping")
+            continue
         if sec_node.status in [StorageNode.STATUS_ONLINE]:
             logger.info(f"Sync delete bdev: {lvol_bdev_name} from node: {sec_node.get_id()}")
             # Same per-node serialization as the primary: the sync delete
@@ -261,7 +298,34 @@ def process_lvol_delete_try_again(lvol):
                      lambda x: setattr(x, "deletion_status", ""))
 
 
-def check_node(cluster, snode, all_lvols):
+#: Wall-clock of the last per-lvol subsystem verification sweep.
+_last_subsys_sweep = 0.0
+
+
+def _subsys_sweep_due() -> bool:
+    """True at most once per LVOL_MONITOR_SUBSYS_CHECK_INTERVAL_SEC.
+
+    Evaluated once per monitor cycle (not per lvol) and stamps the clock as a
+    side effect, so a cycle either sweeps every node or none of them.
+    """
+    global _last_subsys_sweep
+    now = time.time()
+    if now - _last_subsys_sweep < constants.LVOL_MONITOR_SUBSYS_CHECK_INTERVAL_SEC:
+        return False
+    _last_subsys_sweep = now
+    return True
+
+
+def check_node(cluster, snode, all_lvols, subsys_check=False):
+    # Number of in-deletion lvols acted on this pass — the main loop uses it
+    # to shorten the inter-cycle sleep while a mass delete is draining.
+    deletions_processed = 0
+    # Per-pass leadership cache: the probe below costs 1-3 get_lvstores RPCs
+    # and used to run once PER LVOL — at mass-delete scale that alone adds
+    # tens of seconds per cycle. Leadership moves mid-pass are already
+    # handled by the poll's own error codes (-35/4), which reset
+    # deletion_status and re-resolve on the next cycle.
+    leader_cache: dict = {}
 
     for lvol in all_lvols:
         if lvol.node_id != snode.get_id():
@@ -316,33 +380,38 @@ def check_node(cluster, snode, all_lvols):
             if lvol.status != LVol.STATUS_IN_DELETION:
                 continue
 
-            # check leadership
-            leader_node = None
-            snode = db.get_storage_node_by_id(snode.get_id())
-            if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
-                ret = snode.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
-                if not ret:
-                    raise Exception("Failed to get LVol info")
-                lvs_info = ret[0]
-                if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
-                    leader_node = snode
+            deletions_processed += 1
 
-            if not leader_node:
-                for sec_id in lvol.nodes[1:]:
-                    try:
-                        _sec = db.get_storage_node_by_id(sec_id)
-                    except KeyError:
-                        continue
-                    if _sec.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
-                        ret = _sec.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
-                        if ret:
-                            lvs_info = ret[0]
-                            if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
-                                leader_node = _sec
-                                break
+            # check leadership (cached per pass, see leader_cache above)
+            cache_key = (snode.get_id(), tuple(lvol.nodes[1:]))
+            leader_node = leader_cache.get(cache_key)
+            if leader_node is None:
+                snode = db.get_storage_node_by_id(snode.get_id())
+                if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
+                    ret = snode.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
+                    if not ret:
+                        raise Exception("Failed to get LVol info")
+                    lvs_info = ret[0]
+                    if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
+                        leader_node = snode
 
-            if not leader_node:
-                raise Exception("Failed to get leader node")
+                if not leader_node:
+                    for sec_id in lvol.nodes[1:]:
+                        try:
+                            _sec = db.get_storage_node_by_id(sec_id)
+                        except KeyError:
+                            continue
+                        if _sec.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
+                            ret = _sec.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
+                            if ret:
+                                lvs_info = ret[0]
+                                if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
+                                    leader_node = _sec
+                                    break
+
+                if not leader_node:
+                    raise Exception("Failed to get leader node")
+                leader_cache[cache_key] = leader_node
 
             # Leader stickiness: while the node that owns the in-flight
             # async delete (deletion_status) is still reachable, keep
@@ -369,7 +438,13 @@ def check_node(cluster, snode, all_lvols):
                 with snapshot_controller.lvstore_op_lock(
                         cluster.get_id(), lvol.lvs_name, node_id=leader_node.get_id()):
                     lvol_controller.delete_lvol_from_node(lvol.get_id(), leader_node.get_id())
-                time.sleep(3)
+                # NOTE no inline sleep here: the loop is SERIAL over every
+                # in-deletion lvol, so a per-object pause multiplies into
+                # minutes of added latency for every object in a mass-delete
+                # wave (run 20260730: cycle times of 4-5 min, single deletes
+                # taking 5+ min end-to-end). The status poll below handles a
+                # still-running async delete (ret == 1) by simply retrying on
+                # the next cycle.
 
             try:
                 ret = leader_node.rpc_client().bdev_lvol_get_lvol_delete_status(
@@ -459,11 +534,10 @@ def check_node(cluster, snode, all_lvols):
 
             continue
 
-        # Continuous per-lvol subsystem verification + repair is opt-in
-        # (LVOL_MONITOR_SUBSYS_CHECK env): it compensates for a lost deferred
-        # non-leader registration, costs 2 RPCs per lvol per cycle at scale,
-        # and its repair path has raced mass deletes (2026-07-14 incident).
-        if not constants.LVOL_MONITOR_SUBSYS_CHECK:
+        # Continuous per-lvol subsystem verification + repair. On by default;
+        # the caller decides once per cycle whether the (2 RPCs per lvol)
+        # sweep is due — see _subsys_sweep_due().
+        if not subsys_check:
             continue
 
         # `all_lvols` is a cycle-start snapshot and a full pass takes minutes
@@ -504,6 +578,19 @@ def check_node(cluster, snode, all_lvols):
                             lvol.nqn, rpc_client=sec_node.rpc_client(), ns_uuid=lvol.uuid)
                         if not ret:
                             passed = False
+                            # Explicit, greppable degraded-path signal. Without
+                            # it a replica whose subsystem is missing (or,
+                            # worse, present but with no namespace) is visible
+                            # nowhere above the client: the host connects
+                            # successfully and simply has one path fewer than
+                            # it believes. Incident 2026-08-09 ran 36 hours in
+                            # that state before an outage exposed it.
+                            logger.error(
+                                "DEGRADED PATHS: lvol %s (%s) replica on node "
+                                "%s is not serving — subsystem missing or has "
+                                "no namespace; volume is running below its "
+                                "configured redundancy",
+                                lvol.get_id(), lvol.lvs_name, sec_id)
                             # Self-heal: a missing registration on an online
                             # non-leader never fixes itself (the create-time
                             # deferral queue is lossy) — re-register now. The
@@ -524,6 +611,7 @@ def check_node(cluster, snode, all_lvols):
         if passed:
             set_lvol_status(lvol, LVol.STATUS_ONLINE)
 
+    return deletions_processed
 
 
 # get DB controller
@@ -539,6 +627,7 @@ def main():
             logger.error(f"Failed to get clusters: {e}")
             time.sleep(3)
             continue
+        deletions_in_flight = 0
         for cluster in db.get_clusters():
 
             if cluster.status in [Cluster.STATUS_INACTIVE, Cluster.STATUS_UNREADY, Cluster.STATUS_IN_ACTIVATION]:
@@ -549,13 +638,25 @@ def main():
             # acts on. The full-LVol scan re-read every 72-field record
             # per 30s cycle.
             all_lvols = db.get_mini_lvols()
+            # Decided once per cycle so a sweep covers every node consistently.
+            subsys_check = constants.LVOL_MONITOR_SUBSYS_CHECK and _subsys_sweep_due()
             for snode in db.get_storage_nodes_by_cluster_id(cluster.get_id()):
                 try:
-                    check_node(cluster, snode, all_lvols)
+                    deletions_in_flight += check_node(
+                        cluster, snode, all_lvols, subsys_check=subsys_check) or 0
                 except Exception as e:
                     logger.error(e)
 
-        time.sleep(constants.LVOL_MONITOR_INTERVAL_SEC)
+        # Adaptive cadence: while deletes are draining, every full-interval
+        # sleep adds up to 30s of latency PER CHAIN HOP (a clone must fully
+        # finish before its snapshot becomes deletable, and that before the
+        # parent snapshot) — run 20260730: a 7-object delete chain took ~50
+        # minutes almost entirely in monitor waits. Re-scan quickly while
+        # in-deletion objects exist; idle clusters keep the low-load 30s.
+        if deletions_in_flight > 0:
+            time.sleep(constants.LVOL_MONITOR_DELETION_INTERVAL_SEC)
+        else:
+            time.sleep(constants.LVOL_MONITOR_INTERVAL_SEC)
 
 
 if __name__ == "__main__":

@@ -34,7 +34,12 @@ drains first, then the expansion (new-device) migration runs
 (tasks_runner_new_dev_migration's recovery-before-expansion gate).
 """
 
+from collections import Counter
+
 from simplyblock_core import utils
+from simplyblock_core.controllers.cluster_expansion.planner import (
+    fd_balance_violation,
+)
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
@@ -42,6 +47,10 @@ from simplyblock_core.models.storage_node import StorageNode
 
 
 logger = utils.get_logger(__name__)
+
+#: Per-domain host floor on activated HA clusters: below two hosts per
+#: domain the 2-2 HA-journal split and cross-domain role hosting collapse.
+FD_MIN_HOSTS_PER_DOMAIN = 2
 
 
 #: Cluster-wide task families that must be fully drained before an
@@ -88,6 +97,119 @@ EXPANSION_DEFERRING_TASK_FNS = frozenset({
 
 def _task_is_open(task) -> bool:
     return task.status != JobSchedule.STATUS_DONE and not task.canceled
+
+
+# ---------------------------------------------------------------------------
+# Failure-domain admission (the +/-1 balance rule).
+#
+# The balance unit is the physical HOST (mgmt_ip): multi-slot hosts
+# (nodes_per_socket > 1) contribute one host regardless of slot count, and
+# adding/removing one slot of an existing host never changes the balance.
+# Dedicated secondary nodes (is_secondary_node) are excluded — they hold no
+# primary LVS and act as overflow role hosts by design.
+# ---------------------------------------------------------------------------
+
+
+def failure_domain_host_map(cluster, db_controller, exclude_node_ids=frozenset()):
+    """Map ``mgmt_ip -> failure_domain`` over the cluster's non-removed,
+    non-dedicated-secondary storage nodes. Hosts whose nodes carry an unset
+    domain (< 0) are skipped."""
+    host_fd = {}
+    for node in db_controller.get_storage_nodes_by_cluster_id(cluster.get_id()):
+        if node.get_id() in exclude_node_ids:
+            continue
+        if node.status == StorageNode.STATUS_REMOVED or node.is_secondary_node:
+            continue
+        if node.failure_domain < 0 or not node.mgmt_ip:
+            continue
+        host_fd[node.mgmt_ip] = node.failure_domain
+    return host_fd
+
+
+def _fd_counts(host_fd):
+    return Counter(host_fd.values())
+
+
+def check_fd_admission_for_add(cluster, db_controller,
+                               new_failure_domain, new_mgmt_ip=None):
+    """Admission for adding a node: the resulting per-domain host split must
+    stay within the +/-1 balance rule.
+
+    Adding another slot to an already-known host is always balance-neutral,
+    but its domain tag must match the host's existing one — a host cannot
+    span domains, and re-tagging is FD migration, which is not supported.
+
+    Returns ``(ok: bool, reason: str)``.
+    """
+    if not getattr(cluster, "enable_failure_domain", False):
+        return True, ""
+    if new_failure_domain is None or new_failure_domain < 0:
+        return False, ("failure-domain id is required on this cluster; "
+                       "pass --failure-domain <id>")
+    host_fd = failure_domain_host_map(cluster, db_controller)
+    if new_mgmt_ip and new_mgmt_ip in host_fd:
+        if host_fd[new_mgmt_ip] != new_failure_domain:
+            return False, (
+                f"host {new_mgmt_ip} already belongs to failure domain "
+                f"{host_fd[new_mgmt_ip]}; changing a node's failure domain "
+                f"is not supported (remove the node first, restore balance, "
+                f"then re-add it in the target domain)")
+        return True, ""
+    counts = _fd_counts(host_fd)
+    counts[new_failure_domain] = counts.get(new_failure_domain, 0) + 1
+    reason = fd_balance_violation(counts, max_delta=1)
+    if reason:
+        return False, f"cannot add node to failure domain {new_failure_domain}: {reason}"
+    return True, ""
+
+
+def check_fd_admission_for_remove(cluster, db_controller, snode):
+    """Admission for removing ``snode``: the resulting per-domain host split
+    must stay within the +/-1 rule and no domain may drop below
+    ``FD_MIN_HOSTS_PER_DOMAIN`` hosts.
+
+    Only enforced once the cluster has an HA layout to protect (any node
+    holds an lvstore) — while the cluster is still being assembled
+    pre-activation, nodes may be removed freely.
+
+    Returns ``(ok: bool, reason: str)``.
+    """
+    if not getattr(cluster, "enable_failure_domain", False):
+        return True, ""
+    if snode.failure_domain < 0:
+        return True, ""
+    nodes = db_controller.get_storage_nodes_by_cluster_id(cluster.get_id())
+    if not any(n.lvstore for n in nodes
+               if n.status != StorageNode.STATUS_REMOVED):
+        return True, ""
+    # Removing one slot of a multi-slot host keeps the host present.
+    for n in nodes:
+        if (n.get_id() != snode.get_id()
+                and n.status != StorageNode.STATUS_REMOVED
+                and not n.is_secondary_node
+                and n.mgmt_ip == snode.mgmt_ip):
+            return True, ""
+    host_fd = failure_domain_host_map(cluster, db_controller)
+    host_fd.pop(snode.mgmt_ip, None)
+    reason = fd_balance_violation(
+        _fd_counts(host_fd), max_delta=1,
+        min_hosts_per_fd=FD_MIN_HOSTS_PER_DOMAIN)
+    if reason:
+        return False, f"cannot remove node {snode.get_id()}: {reason}"
+    return True, ""
+
+
+def check_fd_balance_current(cluster, db_controller):
+    """Verify the cluster's CURRENT per-domain host split satisfies the +/-1
+    rule — the pre-rebalance re-check inside the expansion runner (the
+    newcomer is in the DB by then). Returns ``(ok: bool, reason: str)``."""
+    if not getattr(cluster, "enable_failure_domain", False):
+        return True, ""
+    counts = _fd_counts(failure_domain_host_map(cluster, db_controller))
+    reason = fd_balance_violation(counts, max_delta=1)
+    if reason:
+        return False, reason
+    return True, ""
 
 
 def impacted_donor_node_ids(moves) -> set:

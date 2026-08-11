@@ -92,6 +92,13 @@ class _FakeDB:
     def get_storage_nodes_by_cluster_id(self, cluster_id):
         return list(self.nodes.values())
 
+    def get_job_tasks(self, cluster_id, **kwargs):
+        # get_next_cluster_status fetches the task table once and passes it to
+        # is_new_migrated_node per node. These tests build no tasks, and the
+        # only question asked of the list is whether a node has a live
+        # migration — "none" is the answer they mean.
+        return []
+
     def atomic_update(self, obj, fn):
         fn(obj)
         return obj
@@ -425,11 +432,15 @@ class TestStrandedDeviceReconciler(unittest.TestCase):
             "a recovered device must get a fresh grace window if re-stranded")
 
     def test_sweep_wired_into_update_cluster_status(self):
+        # update_cluster_status is now a coalescing wrapper (dedupes concurrent
+        # ticks per cluster) around _update_cluster_status_impl, which does the
+        # work — including this sweep — and which the wrapper loops until no
+        # tick is pending.
         import inspect
-        src = inspect.getsource(self.mon.update_cluster_status)
+        src = inspect.getsource(self.mon._update_cluster_status_impl)
         self.assertIn(
             "_readmit_stranded_devices", src,
-            "update_cluster_status must run the reconciler sweep each tick")
+            "the cluster-status tick must run the reconciler sweep")
 
 
 if __name__ == "__main__":

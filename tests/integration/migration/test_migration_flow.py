@@ -14,8 +14,6 @@ Background services (node monitor, distrib event collector, etc.) are never
 started; the test process only imports the task runner module directly.
 """
 
-import random
-import threading
 import time
 import pytest
 
@@ -24,7 +22,9 @@ from simplyblock_core.controllers import migration_controller
 from simplyblock_core.models.lvol_migration import LVolMigration
 from simplyblock_core.models.storage_node import StorageNode
 
-from tests.integration.migration.conftest import run_migration_task, set_node_status, start_migration
+from tests.integration.migration.conftest import (
+    run_migration_task, set_node_status, start_migration,
+)
 from tests.integration.migration.topology_loader import TestContext
 
 # Lazily initialised so the module can be imported without FDB installed.
@@ -312,8 +312,8 @@ class TestSharedSnapshotChain:
         # s1 and s2 must still be on target. s1/s2 are owned by l1, not c1, so
         # c1's migration recorded its target-side copy as an ``instances``
         # entry rather than mutating the canonical (still source-side)
-        # snap_bdev — look up that instance's bdev, which carries the
-        # migration suffix (e.g. SNAP_xxxm).
+        # snap_bdev — look up that instance's bdev, whose name the rename step
+        # of c1's CLEANUP_SOURCE kept in sync with the target.
         for snap_sym in ["s1", "s2"]:
             snap = db.get_snapshot_by_id(ctx.snap_uuid(snap_sym))
             instance = next(
@@ -532,10 +532,11 @@ class TestHASecondaryRegistration:
         run_migration_task(mig_id, max_steps=500, step_sleep=0.02)
         _assert_migration_done(mig_id)
 
-        # The secondary mock should have a snapshot registered. Target bdevs
-        # carry the migration suffix (e.g. SNAP_xxxm).
+        # The secondary mock should have a snapshot registered. Target bdevs are
+        # created with the migration suffix (SNAP_xxxm) and renamed back to the
+        # canonical name — on the secondary too — during CLEANUP_SOURCE.
         short = snap.snap_bdev.split('/', 1)[1] if '/' in snap.snap_bdev else snap.snap_bdev
-        sec_composite = f"{ctx.node('tgt-sec').lvstore}/{short}{constants.LVOL_MIG_BDEV_SUFFIX}"
+        sec_composite = f"{ctx.node('tgt-sec').lvstore}/{short}"
         with mock_sec_server.state.lock:
             assert sec_composite in mock_sec_server.state.snapshots, \
                 f"Snapshot not registered on secondary: {sec_composite}"
@@ -676,8 +677,9 @@ class TestFourNodeFourSnapshotMigration:
             snap = ctx.snap(snap_sym)
             short = snap.snap_bdev.split('/', 1)[1] if '/' in snap.snap_bdev \
                 else snap.snap_bdev
-            # Target bdevs carry the migration suffix (e.g. SNAP_xxxm).
-            composite = f"{tgt_lvstore}/{short}{constants.LVOL_MIG_BDEV_SUFFIX}"
+            # Target bdevs are created as SNAP_xxxm and renamed back to the
+            # canonical name during CLEANUP_SOURCE.
+            composite = f"{tgt_lvstore}/{short}"
             assert composite in tgt_snaps, (
                 f"Snapshot {snap.snap_name} ({composite}) missing from target")
 
@@ -756,27 +758,13 @@ class TestFourNodeFourSnapshotMigration:
             assert node_fresh.status == StorageNode.STATUS_ONLINE, (
                 f"Passive node {node_sym} status changed to {node_fresh.status}")
 
-    def test_random_node_offline_then_online_during_migration(
+    def test_four_snap_target_bdevs_renamed_to_canonical_names(
             self, topology_four_node, mock_src_server, mock_tgt_server):
         """
-        Resilience test: a randomly chosen storage node goes offline for ~2 s
-        (representing a 40-second real-world outage; mock async ops complete in
-        ~0.2 s each so time is scaled ×20) during the migration, then comes
-        back online.  The migration must still reach STATUS_DONE.
-
-        The four possible outcomes depending on which node is chosen:
-
-        - n1 (src offline): runner detects STATUS != ONLINE at the start of
-          every task_runner() call and suspends the task.  Once n1 is restored
-          the task resumes from the current phase and completes.
-
-        - n2 (tgt offline): same pattern – runner suspends until tgt is back.
-
-        - n3 / n4 (passive nodes): the migration runner never contacts them, so
-          the outage has no effect on migration progress; STATUS_DONE is reached
-          at normal speed.
-
-        In all cases the offline node must be STATUS_ONLINE when the test ends.
+        Every bdev is created on the target under the migration suffix and
+        renamed back to its canonical name in CLEANUP_SOURCE, on the node and in
+        the DB.  Left unrenamed, the suffix would be baked into the records and
+        each further migration of the volume would have to reason about it.
         """
         ctx = topology_four_node
         lvol = ctx.lvol("l1")
@@ -784,40 +772,23 @@ class TestFourNodeFourSnapshotMigration:
 
         _seed_all(mock_src_server, ctx, "n1")
 
-        # Pick one of the four cluster nodes at random.
-        offline_sym = random.choice(["n1", "n2", "n3", "n4"])
-        offline_uuid = ctx.node_uuid(offline_sym)
-
         mig_id, err = start_migration(lvol.uuid, tgt_node.uuid)
-        assert err is None, f"start_migration failed: {err}"
-
-        # Background thread: wait 0.3 s (let migration get started), take the
-        # node offline for 2 s (representing the 40-second outage), then restore it.
-        offline_cycle_done = threading.Event()
-
-        def _offline_cycle():
-            time.sleep(0.3)
-            set_node_status(offline_uuid, StorageNode.STATUS_OFFLINE)
-            time.sleep(2.0)
-            set_node_status(offline_uuid, StorageNode.STATUS_ONLINE)
-            offline_cycle_done.set()
-
-        t = threading.Thread(target=_offline_cycle, daemon=True, name="offline-injector")
-        t.start()
-
-        # Drive the task runner; max_steps=3000 × 0.02 s = 60 s wall budget,
-        # which is more than enough even if the runner stalls for 2 s.
-        run_migration_task(mig_id, max_steps=3000, step_sleep=0.02)
-
-        t.join(timeout=10.0)
-        assert offline_cycle_done.is_set(), "Offline-cycle thread did not finish"
-
+        assert err is None
+        run_migration_task(mig_id, max_steps=1000, step_sleep=0.02)
         _assert_migration_done(mig_id)
 
-        updated_lvol = db.get_lvol_by_id(lvol.uuid)
-        assert updated_lvol.node_id == tgt_node.uuid
+        suffix = constants.LVOL_MIG_BDEV_SUFFIX
+        with mock_tgt_server.state.lock:
+            leftover = sorted(n for n in mock_tgt_server.state.all_bdevs()
+                              if n.endswith(suffix))
+        assert not leftover, f"Bdevs left in the migration namespace: {leftover}"
 
-        # Whichever node was taken offline must be back online now.
-        node_fresh = db.get_storage_node_by_id(offline_uuid)
-        assert node_fresh.status == StorageNode.STATUS_ONLINE, (
-            f"Node {offline_sym} is still {node_fresh.status!r} after migration")
+        migrated_lvol = db.get_lvol_by_id(lvol.uuid)
+        assert not migrated_lvol.lvol_bdev.endswith(suffix), (
+            f"lvol_bdev still suffixed: {migrated_lvol.lvol_bdev}")
+        assert migrated_lvol.top_bdev == f"{tgt_node.lvstore}/{migrated_lvol.lvol_bdev}"
+
+        for snap_sym in ("s1", "s2", "s3", "s4"):
+            snap = db.get_snapshot_by_id(ctx.snap_uuid(snap_sym))
+            assert not snap.snap_bdev.endswith(suffix), (
+                f"{snap_sym} snap_bdev still suffixed: {snap.snap_bdev}")

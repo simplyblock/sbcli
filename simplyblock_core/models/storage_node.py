@@ -79,8 +79,10 @@ class StorageNode(BaseNodeObject):
     lvols: int = 0
     lvstore: str = ""
     lvstore_stack: List[dict] = []
-    lvstore_stack_secondary: List[dict] = []
-    lvstore_stack_tertiary: List[dict] = []
+    # Despite the names, these hold the UUID of the primary whose LVS this node
+    # serves as a peer for — not a bdev stack.
+    lvstore_stack_secondary: str = ""
+    lvstore_stack_tertiary: str = ""
     lvol_subsys_port: int = 9090
     lvstore_ports: dict = {}  # {lvs_name: {"lvol_subsys_port": N, "hublvol_port": M}}
     max_lvol: int = 0
@@ -112,6 +114,14 @@ class StorageNode(BaseNodeObject):
     pollers_mask: str = ""
     primary_ip: str = ""
     raid: str = ""
+    # Per-node restart claim: owner token + ISO timestamp of the actor
+    # currently driving this node's restart. Written atomically by
+    # try_set_node_restarting, heartbeated by the restart_storage_node
+    # wrapper, released on exit. A claim older than
+    # constants.RESTART_CLAIM_TTL_SEC is stale (driver died) and may be
+    # taken over. Only meaningful while status is RESTARTING/IN_SHUTDOWN.
+    restart_claim_owner: str = ""
+    restart_claim_ts: str = ""
     remote_devices: List[RemoteDevice] = []
     remote_jm_devices: List[RemoteJMDevice] = []
     rpc_password: SecretStr = SecretStr("")
@@ -155,6 +165,8 @@ class StorageNode(BaseNodeObject):
     lvol_poller_mask: str = ""
     spdk_proxy_image: str = ""
     transfer_hublvol: HubLVol = None  # type: ignore[assignment]
+    # spdk image tag
+    spdk_version: str = ""
 
     def get_lvol_subsys_port(self, lvs_name=None):
         """Get the client-facing NVMeoF port for a specific lvstore.
@@ -185,7 +197,7 @@ class StorageNode(BaseNodeObject):
             host = f"{self._k8s_node_label()}.simplyblock-storage-node-api.{self.cr_namespace}.svc.cluster.local:{port}"
         return SNodeClient(host, **kwargs)
 
-    def rpc_client(self, **kwargs):
+    def rpc_client(self, **kwargs) -> RPCClient:
         """Return rpc client to this node
         """
         host = self.mgmt_ip
@@ -593,7 +605,7 @@ class StorageNode(BaseNodeObject):
                 self.create_hublvol()
                 return True
             except RPCException as e:
-                logger.error("Error establishing hublvol: %s", e.message)
+                logger.error("Error establishing hublvol: %s", e)
                 return False
 
     def connect_to_hublvol(self, primary_node, failover_node=None, *, role,

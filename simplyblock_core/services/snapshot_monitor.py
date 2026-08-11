@@ -72,9 +72,14 @@ def process_snap_delete_finish(snap, completed_node):
             for nl in non_leaders)
         if any_sec_down:
             primary_node.lvol_del_sync_lock()
-        ret, _ = primary_node.rpc_client().delete_lvol(snap.snap_bdev, sync=True, special_delete=special_delete)
-        if not ret:
-            logger.error(f"Failed to delete snap from node: {snode.get_id()}")
+        # No sync delete on the leader — its async delete already removed the
+        # blob and unregistered the bdev, and this path only runs after that
+        # async delete reported done. A second delete here re-walks the
+        # snapshot/clone metadata the async pass already cleaned (run
+        # 20260807: 4361 "Clone entry not found" on the leader, 0 on the
+        # non-leaders). See the identical change in lvol_monitor and the
+        # protocol statement in _rollback_snapshot_bdev ("unconditionally,
+        # never on the leader").
 
     lvol_bdev_name = snap.snap_bdev
     for non_leader in non_leaders:
@@ -161,49 +166,69 @@ def _poll_delete_status(node, bdev_name):
         return None
 
 
-def process_snap_delete(snap, snode, all_mini_lvols=None):
-    # check leadership
+def process_snap_delete(snap, snode, all_mini_lvols=None, leader_cache=None):
+    # check leadership — cached per monitor cycle when the caller provides
+    # ``leader_cache``: the probe costs 1-3 get_lvstores RPCs and previously
+    # ran once PER SNAPSHOT, adding tens of seconds to a mass-delete cycle.
+    # Leadership moves mid-cycle are handled by the poll's error codes
+    # (-35/4 reset deletion_status and re-resolve next cycle).
     leader_node = None
-    if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED,
-                        StorageNode.STATUS_DOWN]:
-        try:
-            ret = snode.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
-        except Exception:
-            ret = None
-        if ret:
-            lvs_info = ret[0]
-            if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
-                leader_node = snode
-
-    if not leader_node:
-        for peer_id in [snode.secondary_node_id, snode.tertiary_node_id]:
-            if not peer_id:
-                continue
+    if leader_cache is not None and snode.get_id() in leader_cache:
+        leader_node = leader_cache[snode.get_id()]
+    if leader_node is None:
+        if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED,
+                            StorageNode.STATUS_DOWN]:
             try:
-                sec_node = db.get_storage_node_by_id(peer_id)
-            except KeyError:
-                continue
-            if sec_node.status not in [StorageNode.STATUS_ONLINE,
-                                       StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
-                continue
-            try:
-                ret = sec_node.rpc_client().bdev_lvol_get_lvstores(sec_node.lvstore)
+                ret = snode.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
             except Exception:
-                continue
-            if not ret:
-                continue
-            lvs_info = ret[0]
-            if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
-                leader_node = sec_node
-                break
+                ret = None
+            if ret:
+                lvs_info = ret[0]
+                if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
+                    leader_node = snode
+
+        if not leader_node:
+            for peer_id in [snode.secondary_node_id, snode.tertiary_node_id]:
+                if not peer_id:
+                    continue
+                try:
+                    sec_node = db.get_storage_node_by_id(peer_id)
+                except KeyError:
+                    continue
+                if sec_node.status not in [StorageNode.STATUS_ONLINE,
+                                           StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
+                    continue
+                try:
+                    ret = sec_node.rpc_client().bdev_lvol_get_lvstores(sec_node.lvstore)
+                except Exception:
+                    continue
+                if not ret:
+                    continue
+                lvs_info = ret[0]
+                if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
+                    leader_node = sec_node
+                    break
+        if leader_node is not None and leader_cache is not None:
+            leader_cache[snode.get_id()] = leader_node
 
     if all_mini_lvols is None:
         all_mini_lvols = db.get_mini_lvols()
     for lvol in all_mini_lvols:
         if lvol.cloned_from_snap and lvol.cloned_from_snap == snap.get_id():
             if lvol.status == SnapShot.STATUS_IN_DELETION:
-                logger.error("Cannot delete snapshot while it's clone is in deletion")
-                return False
+                # `all_mini_lvols` is a cycle-start snapshot: the clone may
+                # have finished (and been removed) earlier in THIS cycle.
+                # Trusting the stale record here defers the snapshot a full
+                # extra cycle per chain hop (run 20260730: 7-object delete
+                # chains stretched to ~50 min). Re-read the single record
+                # before blocking.
+                try:
+                    fresh = db.get_lvol_by_id(lvol.get_id())
+                except KeyError:
+                    continue  # clone fully deleted — not a blocker
+                if fresh.status == SnapShot.STATUS_IN_DELETION:
+                    logger.error("Cannot delete snapshot while it's clone is in deletion")
+                    return False
 
     if not leader_node:
         # Phase-2 needs NO leader: sync deletes run per-node and the
@@ -239,8 +264,11 @@ def process_snap_delete(snap, snode, all_mini_lvols=None):
         snap = db.get_snapshot_by_id(snap.get_id())
         snap.deletion_status = leader_node.get_id()
         snap.write_to_db()
-
-        time.sleep(1)
+        # NOTE no inline sleep: this loop is serial over every in-deletion
+        # snapshot — a 1s pause per phase-1 alone burned ~17 min/hour in run
+        # 20260730 and stretched the cycle (and therefore every object's
+        # async->sync latency) to 4-5 minutes. The status poll below simply
+        # sees "in progress" (1) and retries next cycle.
 
     elif snap.deletion_status != leader_node.get_id():
         # Leadership moved AFTER phase-1 was issued elsewhere. Never blindly
@@ -272,7 +300,7 @@ def process_snap_delete(snap, snode, all_mini_lvols=None):
             snap = db.get_snapshot_by_id(snap.get_id())
             snap.deletion_status = leader_node.get_id()
             snap.write_to_db()
-            time.sleep(1)
+            # no inline sleep — see the phase-1 note above
         else:
             # Transient poll error on the recorded node — retry next cycle
             # rather than risking a duplicate phase-1.
@@ -416,6 +444,7 @@ def main():
             logger.error(f"Failed to get clusters: {e}")
             time.sleep(3)
             continue
+        deletions_in_flight = 0
         for cluster in db.get_clusters():
 
             if cluster.status in [Cluster.STATUS_INACTIVE, Cluster.STATUS_UNREADY, Cluster.STATUS_IN_ACTIVATION]:
@@ -435,9 +464,11 @@ def main():
                            if m.status == SnapShot.STATUS_IN_DELETION]
             if not in_deletion:
                 continue
+            deletions_in_flight += len(in_deletion)
             snodes = {n.get_id(): n
                       for n in db.get_storage_nodes_by_cluster_id(cluster.get_id())}
             all_mini_lvols = db.get_mini_lvols()
+            leader_cache: dict = {}
             for mini in in_deletion:
                 try:
                     snap = db.get_snapshot_by_id(mini.get_id())
@@ -453,11 +484,18 @@ def main():
                 if snode is None:
                     continue
                 try:
-                    process_snap_delete(snap, snode, all_mini_lvols)
+                    process_snap_delete(snap, snode, all_mini_lvols, leader_cache)
                 except Exception as e:
                     logger.error(e)
 
-        time.sleep(constants.LVOL_MONITOR_INTERVAL_SEC)
+        # Adaptive cadence: chained deletes (clone -> snapshot -> parent)
+        # advance one hop per cycle, so the idle 30s interval alone adds
+        # minutes per chain (run 20260730). Re-scan quickly while snapshots
+        # are draining; keep the low-load 30s when idle.
+        if deletions_in_flight > 0:
+            time.sleep(constants.LVOL_MONITOR_DELETION_INTERVAL_SEC)
+        else:
+            time.sleep(constants.LVOL_MONITOR_INTERVAL_SEC)
 
 
 if __name__ == "__main__":

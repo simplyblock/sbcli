@@ -317,6 +317,21 @@ def get_active_migration_for_lvol(lvol_id, cluster_id=None):
     return None
 
 
+def get_active_migration_for_nqn(nqn, cluster_id=None):
+    """Return the first active LVolMigration for any lvol sharing *nqn*, or None.
+
+    Used to block new namespace additions to a shared subsystem while one of
+    its existing members is being migrated (the ANA flip in PHASE_LVOL_MIGRATE
+    is subsystem-wide and would strand the newly attached lvol).
+    """
+    for lv in db.get_lvols(cluster_id):
+        if lv.nqn == nqn:
+            m = get_active_migration_for_lvol(lv.uuid, cluster_id)
+            if m:
+                return m
+    return None
+
+
 def get_active_migration_on_node(cluster_id, node_id):
     """
     Return any active migration whose source node is *node_id*, or None.
@@ -1159,7 +1174,7 @@ def create_migration(lvol_id, target_node_id,
                     _min_cntlid = _min_cntlid + 10000
                 _rpc.subsystem_create(
                     nqn, lvol.ha_type, lvol.uuid, min_cntlid=_min_cntlid,
-                    max_namespaces=constants.LVO_MAX_NAMESPACES_PER_SUBSYS)
+                    max_namespaces=lvol.max_namespace_per_subsys)
                 _subsystem_created_node_ids.append(_node_id)
 
             if lvol.allowed_hosts:
@@ -1326,7 +1341,7 @@ def create_batch_migration(lvol_id, target_node_id,
     group.target_nqn = lvol.nqn
     group.members = member_records
     group.snap_owners = snap_owners
-    group.phase = LVolMigrationGroup.PHASE_PRECREATE
+    group.phase = LVolMigrationGroup.PHASE_PRE_CREATED
     group.status = LVolMigrationGroup.STATUS_RUNNING
     group.create_dt = str(datetime.now())
     group.write_to_db(db_inst.kv_store)
@@ -1351,7 +1366,7 @@ def start_batch_migration(group_id,
                           max_retries=constants.LVOL_MIG_MAX_RETRIES,
                           deadline_seconds=constants.LVOL_MIG_DEADLINE_SEC):
     """
-    Promote a PHASE_PRECREATE group to PHASE_SNAP_COPY and launch worker tasks
+    Promote a PHASE_PRE_CREATED group to PHASE_SNAP_COPY and launch worker tasks
     for each member plus the main orchestrator task.
 
     Returns group_uuid on success; raises ValueError on failure.
@@ -1361,9 +1376,9 @@ def start_batch_migration(group_id,
     except KeyError:
         raise ValueError(f"LVolMigrationGroup {group_id} not found")
 
-    if group.phase != LVolMigrationGroup.PHASE_PRECREATE:
+    if group.phase != LVolMigrationGroup.PHASE_PRE_CREATED:
         raise ValueError(
-            f"Group {group_id} is not in PHASE_PRECREATE (phase={group.phase})"
+            f"Group {group_id} is not in PHASE_PRE_CREATED (phase={group.phase})"
         )
 
     now = int(time.time())
@@ -1431,7 +1446,7 @@ def cancel_batch_migration(group_id):
     """
     Cancel an active batch migration group.
 
-    For PHASE_PRECREATE groups (no tasks launched yet), cleans up all worker
+    For PHASE_PRE_CREATED groups (no tasks launched yet), cleans up all worker
     migration records inline.  For all other phases, sets canceled=True on each
     worker migration so the task runners pick it up.
 
@@ -1449,7 +1464,7 @@ def cancel_batch_migration(group_id):
     ):
         raise ValueError(f"Group {group_id} is not active (status={group.status})")
 
-    if group.phase == LVolMigrationGroup.PHASE_PRECREATE:
+    if group.phase == LVolMigrationGroup.PHASE_PRE_CREATED:
         for rec in group.members:
             try:
                 cancel_migration(rec["migration_id"])

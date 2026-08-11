@@ -159,13 +159,21 @@ def run_cutover(src_node, tgt_node, lvol, tgt_lvol_composite, tgt_map_id,
     src_rpc = src_node.rpc_client()
     src_lvol_composite = f"{src_node.lvstore}/{lvol.lvol_bdev}"
 
-    hub_bdev, _remote, err = ensure_hub_attached(src_rpc, tgt_node)
+    # The gateway must be the attached NAMESPACE bdev ("<lvstore>/transferhubn1"),
+    # not the controller name ("<lvstore>/transferhub") that
+    # bdev_nvme_attach_controller was given -- only the former exists as a bdev.
+    # Passing the controller name made every cross-cluster cutover fail with
+    # ENODEV (-19) and left the volume stuck in cutover_pending forever, while
+    # snapshot replication (which passes the n1 bdev) kept working. This matches
+    # tasks_runner_lvol_migration, which uses the second element for the same RPC.
+    _ctrl_name, hub_bdev, err = ensure_hub_attached(src_rpc, tgt_node)
     if err:
         return False, err
 
     logger.info(
         f"[IO-FREEZE] bdev_lvol_transfer_final_step starting: lvol={lvol.uuid} "
-        f"src={src_lvol_composite} tgt_snap={tgt_snap_composite} op={operation}")
+        f"src={src_lvol_composite} tgt_snap={tgt_snap_composite} "
+        f"gateway={hub_bdev} op={operation}")
     ret = src_rpc.bdev_lvol_transfer_final_step(
         src_lvol_composite, tgt_map_id, tgt_snap_composite,
         _FINAL_STEP_BATCH, hub_bdev, operation)

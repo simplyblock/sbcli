@@ -328,10 +328,10 @@ class TestCreateS3Bdev(unittest.TestCase):
     @patch("simplyblock_core.controllers.backup_controller.boto3.client")
     @patch("simplyblock_core.models.storage_node.RPCClient")
     def test_bucket_name_fails(self, MockRPC, mock_boto3_client):
-        from simplyblock_core.rpc_client import RPCException
+        from simplyblock_core.rpc_client import RPCRemoteError
         mock_rpc = MockRPC.return_value
         mock_rpc.bdev_s3_create.return_value = True
-        mock_rpc.bdev_s3_add_bucket_name.side_effect = RPCException("error", code=-1)
+        mock_rpc.bdev_s3_add_bucket_name.side_effect = RPCRemoteError("error", code=-1)
         mock_s3 = mock_boto3_client.return_value
         mock_s3.head_bucket.return_value = {}
 
@@ -344,11 +344,11 @@ class TestCreateS3Bdev(unittest.TestCase):
     @patch("simplyblock_core.controllers.backup_controller.boto3.client")
     @patch("simplyblock_core.models.storage_node.RPCClient")
     def test_attach_fails(self, MockRPC, mock_boto3_client):
-        from simplyblock_core.rpc_client import RPCException
+        from simplyblock_core.rpc_client import RPCRemoteError
         mock_rpc = MockRPC.return_value
         mock_rpc.bdev_s3_create.return_value = True
         mock_rpc.bdev_s3_add_bucket_name.return_value = (True, None)
-        mock_rpc.bdev_lvol_s3_bdev.side_effect = RPCException("attach failed")
+        mock_rpc.bdev_lvol_s3_bdev.side_effect = RPCRemoteError("attach failed", code=-1)
         mock_s3 = mock_boto3_client.return_value
         mock_s3.head_bucket.return_value = {}
 

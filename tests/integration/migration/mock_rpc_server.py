@@ -36,13 +36,13 @@ logger = logging.getLogger(__name__)
 # Async-delay helper
 # ---------------------------------------------------------------------------
 
-def _async_delay() -> float:
+def _async_delay(rng: random.Random) -> float:
     """
     Return a completion delay (seconds) from an exponential distribution with
     mean 0.2 s (λ = 5), clipped to [0.1, 100].  Values pile up near 0.2 s but
     occasionally reach tens of seconds, matching real-world transfer variance.
     """
-    raw = random.expovariate(5.0)
+    raw = rng.expovariate(5.0)
     return max(0.1, min(100.0, raw))
 
 
@@ -55,6 +55,7 @@ class NodeState:
 
     def __init__(self, lvstore: str):
         self.lvstore = lvstore
+        self.lvstore_uuid = str(_uuid_mod.uuid4())
 
         # composite_name (e.g. "lvs/myvol") → bdev dict
         self.lvols: Dict[str, dict] = {}
@@ -81,6 +82,11 @@ class NodeState:
         self._map_id_counter = 1
         self._nsid_counter: Dict[str, int] = {}  # nqn → next nsid
         self.lock = threading.Lock()
+
+        # Per node rather than one shared stream: otherwise adding a single RPC
+        # to the source would shift every later failure draw on the target, so
+        # an unrelated edit would silently change which calls fail.
+        self.rng = random.Random()
 
     # ---- helpers ----
 
@@ -152,8 +158,9 @@ class _RpcHandler(BaseHTTPRequestHandler):
 
         # --- failure injection ---
         if server.failure_rate > 0:
-            if random.random() < server.failure_rate:
-                failure_type = random.choice(['timeout', 'error'])
+            rng = server.node_state.rng
+            if rng.random() < server.failure_rate:
+                failure_type = rng.choice(['timeout', 'error'])
                 if failure_type == 'timeout':
                     # Sleep beyond typical client timeout to simulate a hang
                     time.sleep(server.timeout_seconds + 1)
@@ -162,7 +169,7 @@ class _RpcHandler(BaseHTTPRequestHandler):
                 else:
                     # Pick a random error code from method-specific list or generic
                     codes = _METHOD_ERROR_CODES.get(method, [-1, -22, -2])
-                    code = random.choice(codes)
+                    code = rng.choice(codes)
                     self._send_error(code, f"Simulated failure for {method}", req_id)
                     return
 
@@ -211,10 +218,15 @@ class _RpcError(Exception):
 # ---------------------------------------------------------------------------
 
 _METHOD_ERROR_CODES: Dict[str, list] = {
+    "bdev_lvol_get_lvstores":        [-1, -19],        # generic, ENODEV
     "bdev_lvol_create":              [-1, -22, -17],   # generic, EINVAL, EEXIST
     "bdev_lvol_delete":              [-1, -2, -22],    # generic, ENOENT, EINVAL
     "bdev_lvol_get_lvol_delete_status": [-1, -2],
     "bdev_lvol_set_migration_flag":  [-1, -2],
+    # Deliberately no -32602: "File exists" is a state condition the handler
+    # raises from actual state, and injecting it at random would send the runner
+    # down the fallback-name path for no reason.
+    "bdev_lvol_rename":              [-1, -19],       # generic, ENODEV
     "bdev_lvol_transfer":            [-1, -22, -2],
     "bdev_lvol_transfer_stat":       [-1, -2],
     "bdev_lvol_add_clone":           [-1, -22, -2],
@@ -253,6 +265,33 @@ def _req(params: dict, key: str, required=True) -> Any:
             raise _RpcError(-22, f"Missing required param: {key}")
         return None
     return params[key]
+
+
+# ---- lvstore ----
+
+def _bdev_lvol_get_lvstores(s: NodeState, p: dict):
+    """Fork-extended lvstore dump. Migration gates every target-side lvol
+    create on ``lvs_primary`` + ``"lvs leadership"`` via
+    _ensure_lvstore_primary_leader (commit 5c4c2ff2, LVS_16 corruption
+    guard) — this handler went missing when that guard landed, which failed
+    every migration test at start_migration with "Lvstore ... not found".
+    The mock node is by construction the sole primary/leader of its
+    lvstore, so report exactly that; an unknown lvs_name returns an empty
+    list, which the guard maps to the not-found error."""
+    name = _req(p, 'lvs_name', required=False)
+    if name and name != s.lvstore:
+        return []
+    return [{
+        "uuid": s.lvstore_uuid,
+        "name": s.lvstore,
+        "base_bdev": f"{s.lvstore}_base",
+        "total_data_clusters": 1 << 20,
+        "free_clusters": 1 << 20,
+        "block_size": 4096,
+        "cluster_size": 2097152,
+        "lvs_primary": True,
+        "lvs leadership": True,
+    }]
 
 
 # ---- lvol lifecycle ----
@@ -303,7 +342,7 @@ def _bdev_lvol_delete(s: NodeState, p: dict):
         if composite not in bdevs:
             # Not found – return ok (idempotent start)
             return True
-        s.delete_ops[composite] = time.time() + _async_delay()
+        s.delete_ops[composite] = time.time() + _async_delay(s.rng)
         logger.debug("mock delete_lvol async start %s", composite)
         return True
     else:
@@ -327,6 +366,65 @@ def _bdev_lvol_get_lvol_delete_status(s: NodeState, p: dict):
     if time.time() >= complete_at:
         return 0  # done (finalize step will actually remove it)
     return 1  # in progress
+
+
+def _bdev_lvol_rename(s: NodeState, p: dict):
+    """Rename an lvol/snapshot bdev, as SPDK's ``bdev_lvol_rename`` does.
+
+    ``old_name`` is the composite path (or a bare short name); ``new_name`` is a
+    bare short name, and the bdev ends up at ``<lvstore>/<new_name>``.
+
+    Two error codes matter to the caller and are *not* interchangeable:
+
+    - target name already taken → EEXIST inside SPDK, surfaced by its RPC layer
+      as ``invalid_params`` (-32602) with message "File exists".  The migration
+      runner's ``_do_rename`` keys its fallback-name logic on exactly this code,
+      so returning any other code silently disables that path.
+    - source bdev missing → ENODEV (-19), which the runner treats as fatal for
+      the primary and non-fatal for secondary/tertiary.
+
+    Renaming a bdev to the name it already has is a success no-op in SPDK, not
+    an EEXIST.
+    """
+    old_name = _req(p, 'old_name')
+    new_name = _req(p, 'new_name')
+
+    bdevs = s.all_bdevs()
+    old_composite = old_name if old_name in bdevs else s.composite(old_name)
+    if old_composite not in bdevs:
+        raise _RpcError(-19, f"lvol {old_name} does not exist")
+
+    new_short = s.short_name(new_name)
+    new_composite = s.composite(new_short)
+    if new_composite == old_composite:
+        return True
+    if new_composite in bdevs:
+        raise _RpcError(-32602, "File exists")
+
+    store = s.lvols if old_composite in s.lvols else s.snapshots
+    entry = store.pop(old_composite)
+    entry['name'] = new_short
+    entry['composite'] = new_composite
+    store[new_composite] = entry
+
+    # Everything that referenced the bdev by its old path follows it: real SPDK
+    # holds pointers, so a rename is invisible to clones and to attached
+    # namespaces rather than orphaning them.
+    for other in s.all_bdevs().values():
+        lvol_info = other.get('driver_specific', {}).get('lvol', {})
+        if lvol_info.get('base_snapshot') == old_composite:
+            lvol_info['base_snapshot'] = new_composite
+    for subsys in s.subsystems.values():
+        for ns in subsys.get('namespaces', []):
+            if ns.get('bdev_name') == old_composite:
+                ns['bdev_name'] = new_composite
+    if old_composite in s.delete_ops:
+        s.delete_ops[new_composite] = s.delete_ops.pop(old_composite)
+    if old_composite in s.transfer_ops:
+        s.transfer_ops[new_composite] = s.transfer_ops.pop(old_composite)
+
+    logger.debug("mock bdev_lvol_rename %s → %s", old_composite, new_composite)
+    return True
 
 
 def _bdev_lvol_set_migration_flag(s: NodeState, p: dict):
@@ -538,7 +636,7 @@ def _bdev_lvol_transfer(s: NodeState, p: dict):
     if composite not in s.lvols and composite not in s.snapshots:
         raise _RpcError(-2, f"source bdev {composite} not found")
     s.transfer_ops[composite] = {
-        'complete_at': time.time() + _async_delay(),
+        'complete_at': time.time() + _async_delay(s.rng),
         'state': 'In progress',
     }
     logger.debug("mock bdev_lvol_transfer started for %s", composite)
@@ -569,7 +667,7 @@ def _bdev_lvol_transfer_final_step(s: NodeState, p: dict):
     if composite not in s.lvols:
         raise _RpcError(-2, f"source lvol {composite} not found")
     s.transfer_ops[composite] = {
-        'complete_at': time.time() + _async_delay(),
+        'complete_at': time.time() + _async_delay(s.rng),
         'state': 'In progress',
     }
     logger.debug("mock bdev_lvol_transfer_final_step started for %s", composite)
@@ -777,9 +875,11 @@ def _spdk_get_version(s: NodeState, p: dict):
 
 _DISPATCH = {
     'spdk_get_version':                      _spdk_get_version,
+    'bdev_lvol_get_lvstores':                _bdev_lvol_get_lvstores,
     'bdev_lvol_create':                      _bdev_lvol_create,
     'bdev_lvol_delete':                      _bdev_lvol_delete,
     'bdev_lvol_get_lvol_delete_status':      _bdev_lvol_get_lvol_delete_status,
+    'bdev_lvol_rename':                      _bdev_lvol_rename,
     'bdev_lvol_set_migration_flag':          _bdev_lvol_set_migration_flag,
     'bdev_lvol_snapshot':                    _bdev_lvol_snapshot,
     'bdev_lvol_clone':                       _bdev_lvol_clone,
@@ -879,8 +979,15 @@ class MockRpcServer:
             self._server.timeout_seconds = timeout_seconds
 
     def reset_state(self):
-        """Wipe all in-memory state (useful between subtests)."""
+        """Wipe all in-memory state (useful between subtests).
+
+        Also reseeds the node's RNG — servers are session-scoped, so without
+        this the stream would carry over between tests. The draw happens here,
+        on the main thread while the server is idle, rather than in the handler
+        thread, so it lands at a fixed point in the test's stream.
+        """
         with self.state.lock:
+            self.state.rng.seed(random.getrandbits(64))
             self.state.lvols.clear()
             self.state.snapshots.clear()
             self.state.subsystems.clear()

@@ -104,6 +104,10 @@ class CLIWrapperBase:
     def storage_node__configure(self, sub_command, args):
         if not args.max_lvol:
             self.parser.error(f"Mandatory argument '--max-subsys' not provided for {sub_command}")
+        if args.max_lvol > constants.MAX_SUBSYSTEMS_PER_NODE:
+            self.parser.error(
+                f"--max-subsys {args.max_lvol} exceeds the maximum of "
+                f"{constants.MAX_SUBSYSTEMS_PER_NODE} subsystems per storage node")
         max_size = getattr(args, "max_prov") or 0
         number_of_devices = getattr(args, "number_of_devices") or 0
         sockets_to_use = [0]
@@ -275,6 +279,10 @@ class CLIWrapperBase:
         reattach_volume = args.reattach_volume
 
         max_lvol = args.max_lvol
+        if max_lvol > constants.MAX_SUBSYSTEMS_PER_NODE:
+            self.parser.error(
+                f"--max-subsys {max_lvol} exceeds the maximum of "
+                f"{constants.MAX_SUBSYSTEMS_PER_NODE} subsystems per storage node")
         max_snap = args.max_snap
         max_prov = utils.parse_size(args.max_prov)
 
@@ -582,7 +590,7 @@ class CLIWrapperBase:
         return cluster_ops.get_ssh_pass(cluster_id)
 
     def cluster__set(self, sub_command, args):
-        cluster_ops.set(args.cluster_id, args.attr_name, args.attr_value)
+        cluster_ops.set_(args.cluster_id, args.attr_name, args.attr_value)
         return True
 
     def cluster__set_shared_placement(self, sub_command, args):

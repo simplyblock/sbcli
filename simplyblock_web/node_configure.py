@@ -182,6 +182,10 @@ def validate_arguments(args: argparse.Namespace) -> None:
             max_lvol = int(args.max_lvol)
             if max_lvol <= 0:
                 raise ValueError("max-lvol must be a positive integer")
+            if max_lvol > constants.MAX_SUBSYSTEMS_PER_NODE:
+                raise ValueError(
+                    f"max-lvol must not exceed {constants.MAX_SUBSYSTEMS_PER_NODE}, "
+                    f"the maximum number of subsystems per storage node")
         except ValueError as e:
             raise argparse.ArgumentError(
                 None,

@@ -23,6 +23,7 @@ from simplyblock_core import storage_node_ops
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
 from simplyblock_core.models.cluster import Cluster
+from simplyblock_core.rpc_client import RPCConnectionError
 
 
 # ---------------------------------------------------------------------------
@@ -284,6 +285,63 @@ class TestTeardownOwnReplicas(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# _delete_replica_on_peer — the peer-side hublvol+bdev teardown _teardown_
+# replicas_of_primary and _relocate_replica_between both call.
+#
+# Regression coverage for a real bug found live (2026-08-10): the hublvol
+# subsystem check called rpc_client.subsystem_list(nqn), but subsystem_list()
+# takes no arguments at all (it lists everything, unfiltered) -- every call
+# raised TypeError, silently swallowed by the surrounding best-effort
+# try/except, so the hublvol subsystem was never actually torn down on any
+# peer during node removal. subsystem_get(nqn) is the existing, correct,
+# server-side-filtered method for this.
+# ---------------------------------------------------------------------------
+
+class TestDeleteReplicaOnPeer(unittest.TestCase):
+
+    def test_deletes_subsystem_when_present(self):
+        cl = _cluster()
+        primary = _node("p1", lvstore="LVS_1")
+        peer = _node("peer1", lvstore="LVS_1")  # hublvol_nqn_for_lvstore's mocked return value bakes in this lvstore
+        rpc = peer.rpc_client()
+        rpc.subsystem_get.return_value = {"nqn": "nqn:hub:LVS_1"}
+        storage_node_ops._delete_replica_on_peer(peer, primary, cl)
+        rpc.subsystem_get.assert_called_once_with("nqn:hub:LVS_1")
+        rpc.subsystem_delete.assert_called_once_with("nqn:hub:LVS_1")
+
+    def test_skips_delete_when_subsystem_absent(self):
+        cl = _cluster()
+        primary = _node("p1", lvstore="LVS_1")
+        peer = _node("peer1", lvstore="LVS_1")  # hublvol_nqn_for_lvstore's mocked return value bakes in this lvstore
+        rpc = peer.rpc_client()
+        rpc.subsystem_get.return_value = None
+        storage_node_ops._delete_replica_on_peer(peer, primary, cl)
+        rpc.subsystem_get.assert_called_once_with("nqn:hub:LVS_1")
+        rpc.subsystem_delete.assert_not_called()
+
+    def test_subsystem_get_failure_is_caught_not_raised(self):
+        # Best-effort: an RPC failure here must not propagate and block removal.
+        cl = _cluster()
+        primary = _node("p1", lvstore="LVS_1")
+        peer = _node("peer1", lvstore="LVS_1")  # hublvol_nqn_for_lvstore's mocked return value bakes in this lvstore
+        rpc = peer.rpc_client()
+        rpc.subsystem_get.side_effect = RPCConnectionError("connection error")
+        storage_node_ops._delete_replica_on_peer(peer, primary, cl)  # must not raise
+        rpc.subsystem_delete.assert_not_called()
+        # Teardown of the other artifacts still proceeds despite this failure.
+        rpc.bdev_lvol_delete_hublvol.assert_called_once_with("LVS_1")
+
+    def test_no_op_when_primary_has_no_lvstore(self):
+        cl = _cluster()
+        primary = _node("p1", lvstore="")
+        peer = _node("peer1", lvstore="LVS_1")  # hublvol_nqn_for_lvstore's mocked return value bakes in this lvstore
+        rpc = peer.rpc_client()
+        storage_node_ops._delete_replica_on_peer(peer, primary, cl)
+        rpc.subsystem_get.assert_not_called()
+        rpc.bdev_lvol_delete_hublvol.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # Case B — relocate a hosted replica
 # ---------------------------------------------------------------------------
 
@@ -402,6 +460,58 @@ class TestDecommissionDevices(unittest.TestCase):
             ret = storage_node_ops._decommission_node_devices(removed)
         self.assertTrue(ret)
         dc.device_remove.assert_not_called()
+
+
+class TestShrinkStatusDoesNotDeadlockRemoval(unittest.TestCase):
+    """``node_removal_orchestrate`` holds ``Cluster.STATUS_IN_SHRINK`` for the
+    duration of an attempt, so that the restart phases its replica relocation
+    sets on an ONLINE target are honoured rather than reclaimed.
+
+    That makes the migration runners' cluster-status gates load-bearing: the
+    removal cannot finish until every data device reaches
+    FAILED_AND_MIGRATED (``_decommission_node_devices``), and only
+    ``tasks_runner_failed_migration`` sets that. If its gate refuses IN_SHRINK,
+    the removal deadlocks against a status it set itself — and nothing in the
+    integration tier would catch it, because it only bites on a real removal.
+    """
+
+    def _run_gate(self, cluster_status):
+        """Drive the runner's cluster-status gate; True == it proceeded."""
+        from simplyblock_core.services import tasks_runner_failed_migration as runner
+        from simplyblock_core.models.job_schedule import JobSchedule
+
+        task = MagicMock(spec=JobSchedule)
+        task.node_id, task.cluster_id, task.retry = "n1", "cl-1", 0
+        task.status = JobSchedule.STATUS_RUNNING
+
+        cluster = MagicMock(spec=Cluster)
+        cluster.status = cluster_status
+        db = MagicMock()
+        db.get_cluster_by_id.return_value = cluster
+        db.get_storage_node_by_id.return_value = _node("n1", n_devices=1, with_jm=False)
+
+        with patch.object(runner, "db", db):
+            try:
+                runner.task_runner(task)
+            except Exception:
+                # Admitted by the gate, then reached real device/DB work this
+                # test deliberately does not mock. The gate's decision is
+                # already recorded on task.status by that point, and it is the
+                # only thing under test here.
+                pass
+        return task.status != JobSchedule.STATUS_SUSPENDED
+
+    def test_failed_migration_runner_admits_in_shrink(self):
+        self.assertTrue(
+            self._run_gate(Cluster.STATUS_IN_SHRINK),
+            "tasks_runner_failed_migration must run while the cluster is "
+            "IN_SHRINK — _decommission_node_devices waits on the device states "
+            "only this runner produces, so refusing here deadlocks removal")
+
+    def test_failed_migration_runner_still_refuses_inactive(self):
+        self.assertFalse(
+            self._run_gate(Cluster.STATUS_SUSPENDED),
+            "the gate must still hold for genuinely non-serving clusters")
 
 
 if __name__ == "__main__":

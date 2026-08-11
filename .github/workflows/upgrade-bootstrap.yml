@@ -48,7 +48,7 @@ on:
         default: "/mnt/nfs_share"
       BOOTSTRAP_MAX_SUBSYS:
         type: string
-        default: "300"
+        default: "75"
       BOOTSTRAP_DATA_CHUNKS:
         type: string
         default: "1"
@@ -142,7 +142,7 @@ on:
       BOOTSTRAP_MAX_SUBSYS:
         description: "bootstrap: --max-subsys"
         required: true
-        default: "300"
+        default: "75"
       BOOTSTRAP_DATA_CHUNKS:
         description: "bootstrap: --data-chunks-per-stripe (also ndcs)"
         required: true
@@ -241,7 +241,7 @@ jobs:
       NFS_MOUNTPOINT: ${{ inputs.NFS_MOUNTPOINT || '/mnt/nfs_share' }}
 
       # Bootstrap params
-      BOOTSTRAP_MAX_SUBSYS:          ${{ inputs.BOOTSTRAP_MAX_SUBSYS || '300' }}
+      BOOTSTRAP_MAX_SUBSYS:          ${{ inputs.BOOTSTRAP_MAX_SUBSYS || '75' }}
       BOOTSTRAP_DATA_CHUNKS:       ${{ inputs.BOOTSTRAP_DATA_CHUNKS || '1' }}
       BOOTSTRAP_PARITY_CHUNKS:     ${{ inputs.BOOTSTRAP_PARITY_CHUNKS || '2' }}
       BOOTSTRAP_JOURNAL_PARTITION: ${{ inputs.BOOTSTRAP_JOURNAL_PARTITION || '1' }}

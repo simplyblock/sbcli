@@ -25,6 +25,12 @@ class Cluster(BaseModel):
     STATUS_UNREADY = "unready"
     STATUS_IN_ACTIVATION = "in_activation"
     STATUS_IN_EXPANSION = "in_expansion"
+    #: Node removal in flight (the add/remove counterpart of IN_EXPANSION).
+    #: Held only for one attempt of node_removal_orchestrate, and honoured as a
+    #: restart-phase owner: the replica relocation it performs sets a phase on
+    #: an ONLINE target, which get_restart_phase would otherwise judge stale and
+    #: clear out from under a live rebuild.
+    STATUS_IN_SHRINK = "in_shrink"
 
     STATUS_CODE_MAP = {
         STATUS_ACTIVE: 1,
@@ -36,8 +42,40 @@ class Cluster(BaseModel):
         STATUS_UNREADY: 12,
         STATUS_IN_ACTIVATION: 13,
         STATUS_IN_EXPANSION: 14,
+        STATUS_IN_SHRINK: 15,
 
     }
+
+    #: Client-visible MUTATIONS may proceed (lvol/snapshot create, resize).
+    #: READONLY is excluded by definition — that is what read-only means.
+    MUTABLE_STATUSES = frozenset({
+        STATUS_ACTIVE, STATUS_DEGRADED, STATUS_IN_SHRINK})
+
+    #: Background/maintenance work may proceed (health checks, monitors,
+    #: device and lvol migration). Superset of MUTABLE_STATUSES: READONLY
+    #: blocks client writes, not upkeep — and upkeep is often what gets a
+    #: read-only cluster back to ACTIVE.
+    OPERABLE_STATUSES = frozenset(MUTABLE_STATUSES | {STATUS_READONLY})
+
+    #: A lifecycle flow owns the layout and restores the status itself; other
+    #: flows must stand off rather than drive transitions or reclaim state.
+    #: This is the set that decides whether a restart phase has an owner (see
+    #: storage_node_ops.get_restart_phase).
+    TOPOLOGY_OWNED_STATUSES = frozenset({
+        STATUS_IN_ACTIVATION, STATUS_IN_EXPANSION, STATUS_IN_SHRINK})
+
+    def allows_mutation(self) -> bool:
+        """True if client-visible mutations may proceed on this cluster."""
+        return self.status in self.MUTABLE_STATUSES
+
+    def allows_operation(self) -> bool:
+        """True if background/maintenance work may proceed on this cluster."""
+        return self.status in self.OPERABLE_STATUSES
+
+    def is_topology_owned(self) -> bool:
+        """True while a lifecycle flow (activation/expansion/shrink) owns the
+        cluster layout."""
+        return self.status in self.TOPOLOGY_OWNED_STATUSES
 
     auth_hosts_only: bool = False
     blk_size: int = 0
