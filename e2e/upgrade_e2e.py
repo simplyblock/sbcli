@@ -82,7 +82,10 @@ def main():
                     f"[cleanup] Test {test.__name__} failed — preserving K8s "
                     "resources for debugging (--preserve_resources_on_failure)"
                 )
-            test_obj.teardown(skip_k8s_cleanup=_skip_k8s)
+            test_obj.teardown(
+                delete_lvols=not _skip_k8s,
+                skip_k8s_cleanup=_skip_k8s,
+            )
         except Exception as _:
             logger.error(f"Error During Teardown for test: {test.__name__}")
             logger.error(traceback.format_exc())
