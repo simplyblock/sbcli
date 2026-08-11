@@ -4054,6 +4054,17 @@ def _decommission_node_devices(removed_node: StorageNode):
         device_controller.remove_jm_device(removed_node.jm_device.get_id(), force=True)
         # look for other nodes who use this JM and replace it
         for node in db_controller.get_storage_nodes_by_cluster_id(removed_node.cluster_id):
+            # get_storage_nodes_by_cluster_id returns every node regardless of
+            # status, including ones already REMOVED. An already-removed node
+            # can still carry the just-removed node's JM id in its own stale
+            # jm_ids (never cleared on ITS removal) -- without this guard we'd
+            # try to "fix" that dead node's JM connections using its own
+            # rpc_client, which points at a pod that no longer exists and can
+            # never resolve/connect (2026-08-11 incident: a prior removal's
+            # leftover jm_ids on 7b8hf sent a later removal's phase 5 chasing
+            # a permanently-dead hostname).
+            if node.status == StorageNode.STATUS_REMOVED:
+                continue
             if node.jm_ids and removed_node.jm_device.get_id() in node.jm_ids:
                 node.jm_ids.remove(removed_node.jm_device.get_id())
                 jm_ids = get_sorted_ha_jms(node)
