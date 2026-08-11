@@ -174,6 +174,20 @@ def _root_device_name(ec2, ami) -> str:
         "RootDeviceName", "/dev/sda1")
 
 
+def _describe_instance(ec2, instance_id, attempts=12, delay=5):
+    """RunInstances returns before DescribeInstances can see the id
+    (EC2 eventual consistency: "The instance ID ... does not exist").
+    Retry rather than fail the whole provision."""
+    for attempt in range(attempts):
+        try:
+            return ec2.describe_instances(
+                InstanceIds=[instance_id])["Reservations"][0]["Instances"][0]
+        except Exception:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(delay)
+
+
 def _run_instance(ec2, *, ami, itype, key_name, subnet, sg, name, run_id,
                   user_data, drives=(), root_device_name="/dev/sda1"):
     result = ec2.run_instances(
@@ -229,8 +243,7 @@ def provision(region, key_name):
         user_data=K3S_SERVER_USERDATA.format(token=central_token, node_name=server_name),
         root_device_name=root_device)
     instance_ids.append(server_id)
-    server_ip = ec2.describe_instances(InstanceIds=[server_id])[
-        "Reservations"][0]["Instances"][0]["PrivateIpAddress"]
+    server_ip = _describe_instance(ec2, server_id)["PrivateIpAddress"]
 
     worker_names = []
     for w in range(CENTRAL.workers):
@@ -257,8 +270,7 @@ def provision(region, key_name):
         instance_ids.append(server_id)
         node_names = [server_name]
         if spec.nodes == 2:
-            server_ip = ec2.describe_instances(InstanceIds=[server_id])[
-                "Reservations"][0]["Instances"][0]["PrivateIpAddress"]
+            server_ip = _describe_instance(ec2, server_id)["PrivateIpAddress"]
             agent_name = f"{spec.name}-n2"
             node_names.append(agent_name)
             instance_ids.append(_run_instance(

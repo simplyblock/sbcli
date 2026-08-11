@@ -265,14 +265,34 @@ def add_edge_node(cluster_id, hostname, mgmt_ip, partitions, data_ip="",
     """Add a node to an edge cluster (spec §5.2). Synchronous — bounded by the
     pod-start wait; API callers run it as a task/background call."""
     cluster = _require_edge_cluster(cluster_id)
-    nodes = [n for n in db.get_edge_nodes(cluster_id) if n.status != EdgeNode.STATUS_REMOVED]
-    if len(nodes) >= edge_constants.MAX_EDGE_NODES:
-        raise ValueError(f"Edge clusters support at most {edge_constants.MAX_EDGE_NODES} nodes")
     if not partitions:
         raise ValueError("An edge node needs at least one free partition")
-    if any(n.hostname == hostname for n in nodes):
+
+    all_nodes = [n for n in db.get_edge_nodes(cluster_id)
+                 if n.status != EdgeNode.STATUS_REMOVED]
+
+    # RETRY SEMANTICS. A node add that fails part-way leaves its record behind
+    # (offline, so the operator can see why). Counting those toward the node
+    # limit made a failed deploy UNRETRYABLE: the second attempt hit "Edge
+    # clusters support at most 2 nodes" on a 1-node cluster and could never
+    # succeed without manual DB surgery (observed on the first live run,
+    # 2026-08-11). Treat a never-online record for the same hostname as the
+    # SAME node and retry into it, and don't count failed-in-creation records
+    # against the limit.
+    retryable = [n for n in all_nodes
+                 if n.hostname == hostname and not n.online_since]
+    established = [n for n in all_nodes if n not in retryable]
+
+    if len(established) >= edge_constants.MAX_EDGE_NODES:
+        raise ValueError(f"Edge clusters support at most {edge_constants.MAX_EDGE_NODES} nodes")
+    if any(n.hostname == hostname for n in established):
         raise ValueError(f"Node {hostname} is already part of the cluster")
 
+    # Drop stale attempts for this hostname so the retry starts clean.
+    for stale in retryable:
+        stale.remove(db.kv_store())
+
+    nodes = established
     first = nodes[0] if nodes else None
     if first is not None and first.lvstore_base:
         # A 1-node cluster with volumes has its lvstore directly on the local
@@ -315,9 +335,13 @@ def add_edge_node(cluster_id, hostname, mgmt_ip, partitions, data_ip="",
 
         if two_node:
             _form_active_active(cluster, first, node)
-    except Exception:
+    except Exception as e:
+        reason = f"{type(e).__name__}: {e}"
+        logger.exception("Edge node add failed for %s: %s", hostname, reason)
+
         def _fail(fresh):
             fresh.status = EdgeNode.STATUS_OFFLINE
+            fresh.status_reason = reason[:500]
             return True
         db.atomic_update(node, _fail)
         raise
@@ -325,6 +349,7 @@ def add_edge_node(cluster_id, hostname, mgmt_ip, partitions, data_ip="",
     def _online(fresh):
         fresh.partitions = node.partitions
         fresh.status = EdgeNode.STATUS_ONLINE
+        fresh.status_reason = ""
         fresh.online_since = str(datetime.datetime.now(datetime.timezone.utc))
         return True
     db.atomic_update(node, _online)

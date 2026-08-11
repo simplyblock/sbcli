@@ -65,6 +65,12 @@ class EdgeNode(BaseNodeObject):
     # until fail-back returns it.
     leader_of: List[str] = []
     online_since: str = ""
+    # Why the node is in its current (failure) state. Set whenever a flow
+    # gives up on a node: without it the ONLY signal a caller gets is a
+    # status flip to offline, so an API client can do nothing but poll until
+    # its own timeout and report "timed out" — which is what happened on the
+    # first live edge run (2026-08-11), hiding the real error entirely.
+    status_reason: str = ""
 
     @property
     def store_index(self) -> int:

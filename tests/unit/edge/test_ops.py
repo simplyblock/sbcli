@@ -288,3 +288,49 @@ def test_add_device_under_raid5_enqueues(env):
     assert fresh.partitions[3].status == EdgePartition.STATUS_NEW
     task = DBController().get_job_tasks(cluster.uuid)[0]
     assert task.function_name == JobSchedule.FN_EDGE_DEVICE_ADD
+
+
+# ------------------------------------------------- retry after failed add
+
+def test_failed_node_add_is_retryable(env):
+    """A node add that fails leaves an offline record behind. That record
+    must NOT make the retry impossible — the first live run hit "at most 2
+    nodes" on a 1-node cluster after two failed attempts and could never
+    recover without manual DB surgery."""
+    kv, spdk, fake_k8s = env
+    cluster = _create_cluster()
+    spdk.for_ip("10.0.0.1").fail.add("bdev_aio_create")
+    for _ in range(3):
+        with pytest.raises(Exception):
+            _add_node(cluster, "worker-1", "10.0.0.1", ["/dev/sdb1"])
+        # exactly one (failed) record, never an accumulating pile
+        assert len(edge_db.get_edge_nodes(cluster.uuid)) == 1
+
+    # and the retry succeeds once the underlying fault clears
+    spdk.for_ip("10.0.0.1").fail.clear()
+    node = _add_node(cluster, "worker-1", "10.0.0.1", ["/dev/sdb1"])
+    assert node.status == EdgeNode.STATUS_ONLINE
+    assert edge_db.get_edge_node_by_id(cluster.uuid, node.uuid).status_reason == ""
+
+
+def test_failed_node_add_records_the_reason(env):
+    """The reason must land on the record: without it a client can only poll
+    until its own timeout and report 'timed out (last error: None)'."""
+    kv, spdk, fake_k8s = env
+    cluster = _create_cluster()
+    spdk.for_ip("10.0.0.1").fail.add("bdev_aio_create")
+    with pytest.raises(Exception):
+        _add_node(cluster, "worker-1", "10.0.0.1", ["/dev/sdb1"])
+
+    node = edge_db.get_edge_nodes(cluster.uuid)[0]
+    assert node.status == EdgeNode.STATUS_OFFLINE
+    assert "bdev_aio_create" in node.status_reason
+
+
+def test_established_nodes_still_capped_at_two(env):
+    kv, spdk, fake_k8s = env
+    cluster = _create_cluster()
+    _add_node(cluster, "worker-1", "10.0.0.1", ["/dev/sdb1"])
+    _add_node(cluster, "worker-2", "10.0.0.2", ["/dev/sdb1"])
+    with pytest.raises(ValueError, match="at most 2"):
+        _add_node(cluster, "worker-3", "10.0.0.3", ["/dev/sdb1"])

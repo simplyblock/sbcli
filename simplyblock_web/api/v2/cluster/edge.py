@@ -66,6 +66,9 @@ class EdgeNodeDTO(BaseModel):
     mgmt_ip: str
     data_ip: str
     status: str
+    # Why the node is in this state (set when a flow gives up on it) — the
+    # only way a client learns the reason without CP log access.
+    status_reason: str = ""
     is_primary: bool          # first node added (store index 0)
     # lvs names this node currently LEADS (active/active: normally its own
     # store; after a fail-over the survivor also leads the peer's store).
@@ -78,6 +81,7 @@ class EdgeNodeDTO(BaseModel):
         return EdgeNodeDTO(
             uuid=UUID(node.uuid), hostname=node.hostname, mgmt_ip=node.mgmt_ip,
             data_ip=node.get_data_ip(), status=node.status,
+            status_reason=node.status_reason,
             is_primary=node.is_primary, leader_of=list(node.leader_of),
             nvmf_port=node.nvmf_port,
             partitions=[EdgePartitionDTO.from_model(p) for p in node.partitions

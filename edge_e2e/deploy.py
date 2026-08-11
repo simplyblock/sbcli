@@ -76,8 +76,10 @@ def sb_image() -> str:
         return override
     branch = (os.getenv("EDGE_E2E_BRANCH")
               or _git("rev-parse", "--abbrev-ref", "HEAD")).replace("/", "-")
-    sha8 = _git("rev-parse", "HEAD")[:8]
-    return f"{SB_REGISTRY}:{branch}-{sha8}"
+    # Default to the plain branch tag: docker-image.yml republishes it on
+    # every push, whereas the branch-<sha8> variant only exists for commits
+    # that were actually pushed. Pin a sha with EDGE_E2E_IMAGE.
+    return f"{SB_REGISTRY}:{branch}"
 
 
 SB_BRANCH = os.getenv("EDGE_E2E_BRANCH") or _git("rev-parse", "--abbrev-ref", "HEAD")
@@ -120,7 +122,8 @@ def helm_install_cmd() -> str:
         f"{helm} repo update && "
         f"{helm} upgrade --install {HELM_RELEASE} {HELM_CHART} "
         f"--namespace {K8S_NAMESPACE} --create-namespace "
-        f"--set image.repository={repository} --set image.tag={tag} "
+        f"--set image.simplyblock.repository={repository} "
+        f"--set image.simplyblock.tag={tag} "
         f"--wait --timeout 20m")
 
 

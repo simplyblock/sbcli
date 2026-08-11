@@ -207,9 +207,19 @@ def wait_for(description, predicate, timeout=600, interval=10):
 
 
 def wait_node_status(api, hostname, status, timeout=600):
-    return wait_for(f"node {hostname} -> {status}",
-                    lambda: api.node_by_hostname(hostname)["status"] == status,
-                    timeout=timeout)
+    """Wait for a node status, but abort early when the control plane has
+    already recorded a failure reason — otherwise a failed add just burns the
+    whole timeout and reports "timed out (last error: None)"."""
+    def _check():
+        node = api.node_by_hostname(hostname)
+        if node["status"] == status:
+            return True
+        reason = node.get("status_reason")
+        if reason:
+            raise RuntimeError(f"node {hostname} failed: {reason}")
+        return False
+
+    return wait_for(f"node {hostname} -> {status}", _check, timeout=timeout)
 
 
 def wait_cluster_status(api, status, timeout=600):
