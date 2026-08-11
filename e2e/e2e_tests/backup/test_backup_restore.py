@@ -3702,7 +3702,8 @@ class TestBackupCrossClusterRestore(BackupTestBase):
             f"TC-BCK-074b: Cluster-2 — backup source-switch to "
             f"Cluster-1 ({self.cluster_id})")
         out_sw, err_sw = self._sbcli_c2(
-            f"backup source-switch {self.cluster_id}")
+            f"backup source-switch {self.cluster_id}"
+            f" --cluster-id {self._cluster2_id}")
         assert not (err_sw and "error" in err_sw.lower()), \
             f"TC-BCK-074b: source-switch to Cluster-1 failed: {err_sw}"
         self.logger.info(
@@ -3788,7 +3789,8 @@ class TestBackupCrossClusterRestore(BackupTestBase):
                 "TC-BCK-076b: Cluster-2 — backup source-switch "
                 "back to local")
             out_back, err_back = self._sbcli_c2(
-                "backup source-switch local")
+                f"backup source-switch local"
+                f" --cluster-id {self._cluster2_id}")
             if err_back and "error" in err_back.lower():
                 self.logger.warning(
                     f"TC-BCK-076b: source-switch-back warning: "
@@ -3857,7 +3859,9 @@ class TestBackupCrossClusterRestore(BackupTestBase):
         # (CLI mode only — K8s-native mode uses CRDs, no manual source-switch)
         if not self.k8s_test:
             try:
-                self._sbcli_c2("backup source-switch local")
+                self._sbcli_c2(
+                    f"backup source-switch local"
+                    f" --cluster-id {self._cluster2_id}")
             except Exception as e:
                 self.logger.warning(
                     f"source-switch-back in teardown warning: {e}")
