@@ -3205,17 +3205,16 @@ class TestBackupCrossClusterRestore(BackupTestBase):
             self.ssh_obj.exec_command(node=ip, command=deploy_cmd)
 
         # Wait for SPDK containers to start
-        self.logger.info("  [C2] Waiting for SPDK containers to start...")
+        self.logger.info("  [C2] art...")
         sleep_n_sec(30)
 
         # Step 2: create Cluster-2 on mgmt node
         self.logger.info("  [C2] Creating second cluster on mgmt node")
         create_cmd = (
-            f"{sbcli_cmd} --dev -d cluster create"
+            f"{sbcli_cmd} --dev -d cluster add"
             f" --ha-type {ha_type}"
             f" --data-chunks-per-stripe {ndcs}"
             f" --parity-chunks-per-stripe {npcs}"
-            f" --ifname {ifname}"
         )
         if extra_cluster_args:
             create_cmd += f" {extra_cluster_args}"
