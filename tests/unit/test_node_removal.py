@@ -803,6 +803,32 @@ class TestDecommissionDevices(unittest.TestCase):
         self.assertTrue(ret)
         dc.device_remove.assert_not_called()
 
+    def test_skips_already_removed_peer_with_stale_jm_ids(self):
+        # 2026-08-11 incident: an earlier-removed node can still carry the
+        # currently-removed node's JM id in its own stale jm_ids (never
+        # cleared on ITS OWN removal) -- get_storage_nodes_by_cluster_id
+        # returns every node regardless of status, including removed ones.
+        # Must be skipped outright, not "fixed" via its own (permanently
+        # dead) rpc_client.
+        cl = _cluster()
+        removed = _node("n1", n_devices=0, with_jm=True)
+        removed.jm_ids = []
+        stale_peer = _node("stale-peer", status=StorageNode.STATUS_REMOVED)
+        stale_peer.jm_ids = [removed.jm_device.get_id()]
+        db = FakeDB(cl, [removed, stale_peer])
+        dc = MagicMock()
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "device_controller", dc), \
+             patch.object(storage_node_ops, "_connect_to_remote_jm_devs") as connect_mock:
+            ret = storage_node_ops._decommission_node_devices(removed)
+
+        self.assertTrue(ret)
+        dc.remove_jm_device.assert_called_once()
+        connect_mock.assert_not_called()
+        # The stale peer's own bookkeeping is left alone -- it's dead, not "fixed".
+        self.assertEqual(stale_peer.jm_ids, [removed.jm_device.get_id()])
+        stale_peer.write_to_db.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # node_removal_orchestrate — phase-5 resume gap
