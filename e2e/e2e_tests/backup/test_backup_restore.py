@@ -3010,7 +3010,7 @@ class TestBackupCrossClusterRestore(BackupTestBase):
         # Whether we bootstrapped cluster 2 ourselves (for teardown)
         self._self_bootstrapped_c2 = False
         # K8s-mode: second K8sUtils instance for Cluster-2 (initialised in _check_prerequisites)
-        self._k8s_c2: "K8sUtils | None" = None
+        self._k8s_c2 = None
 
     # ── prerequisite check ────────────────────────────────────────────────────
 
@@ -3292,7 +3292,6 @@ class TestBackupCrossClusterRestore(BackupTestBase):
         For each IP, finds the node UUID in Cluster-1, suspends it,
         shuts it down, removes it, and runs deploy-cleaner on the host.
         """
-        mgmt_ip = self.mgmt_nodes[0]
         sn_data = self.sbcli_utils.get_storage_nodes().get("results", [])
 
         # Build IP→node_id mapping
