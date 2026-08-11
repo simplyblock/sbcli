@@ -6,7 +6,7 @@ import shutil
 import subprocess
 import time
 import traceback
-from __init__ import get_all_tests, get_security_tests, get_backup_tests, get_backup_stress_tests, get_parity_tests, ALL_TESTS
+from __init__ import get_all_tests, get_security_tests, get_backup_tests, get_backup_topology_tests, get_backup_stress_tests, get_parity_tests, ALL_TESTS
 from logger_config import setup_logger
 from exceptions.custom_exception import (
     TestNotFoundException,
@@ -36,15 +36,18 @@ COMPLETION_COMMENT = "E2E run"
 # starts with a fresh cluster and clean spare nodes.
 TOPOLOGY_MODIFYING_TESTS = {
     "TestAddNodesDuringFioRun",
+    "TestAddNodesDualNodePerHost",
     "TestSequentialNodeAdd",
     "TestAddNodeSnapshotCloneOnNewNode",
     "TestBackupAfterNodeAdd",
     "TestBackupWithFioOnNewNode",
     "TestAddK8sNodesDuringFioRun",
+    "TestAddK8sNodesDualNodePerHost",
     "K8sNativeAddNodeTest",
     "K8sNativeNodeMigrationTest",
     "TestBackupAfterNodeMigration",
     "TestBackupDuringMigration",
+    "TestBackupCrossClusterRestore",
 }
 
 def main():
@@ -137,6 +140,8 @@ def main():
         test_class_run = get_security_tests()
     elif args.testname and args.testname.strip().lower() == "backup":
         test_class_run = get_backup_tests()
+    elif args.testname and args.testname.strip().lower() == "backup-topology":
+        test_class_run = get_backup_topology_tests()
     elif args.testname and args.testname.strip().lower() == "backup-stress":
         test_class_run = get_backup_stress_tests()
     elif args.testname and args.testname.strip().lower() == "parity":
@@ -146,6 +151,11 @@ def main():
             if cls.__name__ == "TestAddNodesDuringFioRun":
                 if len(new_nodes) == 0:
                     logger.warning("Skipping TestAddNodesDuringFioRun: requires --new-nodes with at least 1 IP.")
+                    skipped_cases += 1
+                    continue
+            if cls.__name__ == "TestAddNodesDualNodePerHost":
+                if len(new_nodes) == 0:
+                    logger.warning("Skipping TestAddNodesDualNodePerHost: requires --new-nodes with at least 1 IP.")
                     skipped_cases += 1
                     continue
             if cls.__name__ == "TestRestartNodeOnAnotherHost":
@@ -158,6 +168,13 @@ def main():
                     continue
                 if len(new_nodes) == 0:
                     logger.warning("Skipping TestAddK8sNodesDuringFioRun: requires --new-nodes with at least 1 IP.")
+                    skipped_cases += 1
+                    continue
+            if cls.__name__ == "TestAddK8sNodesDualNodePerHost":
+                if not args.run_k8s:
+                    continue
+                if len(new_nodes) == 0:
+                    logger.warning("Skipping TestAddK8sNodesDualNodePerHost: requires --new-nodes with at least 1 IP.")
                     skipped_cases += 1
                     continue
             if cls.__name__ == "K8sNativeAddNodeTest":
@@ -204,12 +221,19 @@ def main():
                 if needle in cls.__name__.lower().replace("_", "") and cls not in seen:
                     if cls.__name__ == "TestAddNodesDuringFioRun" and len(new_nodes) == 0:
                         raise ValueError("TestAddNodesDuringFioRun requires --new-nodes with at least 1 IP.")
+                    if cls.__name__ == "TestAddNodesDualNodePerHost" and len(new_nodes) == 0:
+                        raise ValueError("TestAddNodesDualNodePerHost requires --new-nodes with at least 1 IP.")
                     if cls.__name__ == "TestRestartNodeOnAnotherHost" and len(new_nodes) == 0:
                         raise ValueError("TestRestartNodeOnAnotherHost requires --new-nodes with atleast 1 new IP.")
                     if cls.__name__ == "TestAddK8sNodesDuringFioRun" and len(new_nodes) == 0:
                         if not args.run_k8s:
                             continue
                         raise ValueError("TestAddK8sNodesDuringFioRun requires --new-nodes with at least 1 IP.")
+                    if cls.__name__ == "TestAddK8sNodesDualNodePerHost":
+                        if not args.run_k8s:
+                            continue
+                        if len(new_nodes) == 0:
+                            raise ValueError("TestAddK8sNodesDualNodePerHost requires --new-nodes with at least 1 IP.")
                     if cls.__name__ == "K8sNativeAddNodeTest":
                         if not args.run_k8s:
                             continue

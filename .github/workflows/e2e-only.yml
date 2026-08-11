@@ -30,7 +30,7 @@ on:
       SBCLI_BRANCH:
         description: "sbcli repo branch to clone for tests"
         required: true
-        default: "R25.10-Hotfix"
+        default: "main"
 
       CLUSTER_ID:
         description: "Cluster ID to run tests on"

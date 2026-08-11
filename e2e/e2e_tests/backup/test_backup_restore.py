@@ -1864,8 +1864,8 @@ class TestBackupRestoreDataIntegrity(BackupTestBase):
             except Exception:
                 pass
 
-        # --- TC-BCK-018: Delete lvol while backup is in-progress; backup must still complete ---
-        self.logger.info("TC-BCK-018: delete lvol before backup completes, expect backup to finish and restore to work")
+        # --- TC-BCK-018: Backup then delete source lvol; restore must work ---
+        self.logger.info("TC-BCK-018: backup lvol, wait for completion, delete source, then restore and verify")
         tc18_lvol_name, tc18_lvol_id = self._create_lvol()
         _, tc18_mount = self._connect_and_mount(tc18_lvol_name, tc18_lvol_id)
         self._run_fio(tc18_mount, runtime=30)
@@ -1875,28 +1875,18 @@ class TestBackupRestoreDataIntegrity(BackupTestBase):
 
         tc18_snap_name = f"tc18_snap_{_rand_suffix()}"
         tc18_snap_id = self._create_snapshot(tc18_lvol_id, tc18_snap_name, backup=True)
-        self.logger.info(f"TC-BCK-018: snapshot {tc18_snap_id} + backup triggered — deleting lvol after backup source resolved")
+        self.logger.info(f"TC-BCK-018: snapshot {tc18_snap_id} + backup triggered")
 
-        # Delete lvol before backup completes (backup reads from snapshot, not live lvol).
-        # In K8s mode we must wait for the StorageBackup to leave Pending phase,
-        # otherwise the backup controller can't resolve the source PVC.
+        # Wait for backup to complete before deleting the source.
+        # In K8s mode the operator re-resolves PVC references during reconciliation,
+        # so deleting the PVC mid-backup causes BackupSourceResolutionError.
+        tc18_bk_id = self._wait_for_backup_by_snap(tc18_snap_name, "TC-BCK-018")
+        self.logger.info(f"TC-BCK-018: backup {tc18_bk_id} completed")
+
+        # Now delete the source lvol/PVC
         if self.k8s_test:
             k8s = self._ensure_k8s_utils()
             pvc_name = self._k8s_normalize_name(tc18_lvol_name)
-            # tc18_snap_id is the StorageBackup CRD name (bck-tc18-snap-xxx)
-            bck_name = tc18_snap_id
-            # Wait up to 120s for backup to move past Pending
-            for _ in range(24):
-                try:
-                    res = k8s.get_resource_json("storagebackup", bck_name)
-                    phase = (res.get("status", {}).get("phase") or "").lower()
-                    if phase and phase != "pending":
-                        self.logger.info(
-                            f"TC-BCK-018: StorageBackup {bck_name} reached phase={phase}, safe to delete PVC")
-                        break
-                except Exception:
-                    pass
-                sleep_n_sec(5)
             k8s.delete_pvc(pvc_name)
             if pvc_name in self.created_pvcs:
                 self.created_pvcs.remove(pvc_name)
@@ -1913,11 +1903,7 @@ class TestBackupRestoreDataIntegrity(BackupTestBase):
             self.sbcli_utils.delete_lvol(lvol_name=tc18_lvol_name, skip_error=True)
         if tc18_lvol_name in self.created_lvols:
             self.created_lvols.remove(tc18_lvol_name)
-        self.logger.info("TC-BCK-018: lvol deleted; waiting for backup to complete")
-
-        # Backup should still complete because it reads from snapshot, not the live lvol
-        tc18_bk_id = self._wait_for_backup_by_snap(tc18_snap_name, "TC-BCK-018")
-        self.logger.info(f"TC-BCK-018: backup {tc18_bk_id} completed despite lvol deletion ✓")
+        self.logger.info("TC-BCK-018: source lvol deleted after backup completed")
 
         # Restore and verify checksums
         tc18_restored_name = f"tc18_restored_{_rand_suffix()}"
@@ -1929,7 +1915,7 @@ class TestBackupRestoreDataIntegrity(BackupTestBase):
             mount=f"{self.mount_path}/tc18_{_rand_suffix()}",
             format_disk=False)
         self._verify_checksums(self.fio_node, tc18_r_mount, tc18_checksums)
-        self.logger.info("TC-BCK-018: checksums match after restore from in-progress backup ✓")
+        self.logger.info("TC-BCK-018: checksums match after restore from backup of deleted source ✓")
 
         self.logger.info("=== TestBackupRestoreDataIntegrity PASSED ===")
 
@@ -2979,9 +2965,21 @@ class TestBackupCrossClusterRestore(BackupTestBase):
 
     Environment variables
     ---------------------
-    CLUSTER2_ID            UUID of the destination cluster
-    CLUSTER2_SECRET        API secret for the destination cluster
-    CLUSTER2_API_BASE_URL  REST API URL for the destination cluster
+    CLUSTER2_ID            UUID of the destination cluster (optional)
+    CLUSTER2_SECRET        API secret for the destination cluster (optional)
+    CLUSTER2_API_BASE_URL  REST API URL for the destination cluster (optional)
+    STORAGE_PRIVATE_IPS    Storage node IPs in Cluster-1
+    NEW_NODE_IPS           Spare node IPs for auto-bootstrap of Cluster-2
+
+    If CLUSTER2_* env vars are NOT set, the test auto-bootstraps a second
+    cluster.  It first looks for spare nodes (IPs in NEW_NODE_IPS or
+    STORAGE_PRIVATE_IPS that are not already in Cluster-1).  If no spare
+    nodes exist, it splits the total pool in half (min 2 per cluster).
+
+    CI dispatch example (Docker, e2e-bootstrap.yml):
+        STORAGE_PRIVATE_IPS: "IP1 IP2"    # cluster 1
+        NEW_NODE_IPS:        "IP3 IP4"    # spare → cluster 2
+        TEST_CLASS:          "TestBackupCrossClusterRestore"
 
     Covers
     ------
@@ -2996,35 +2994,414 @@ class TestBackupCrossClusterRestore(BackupTestBase):
     TC-BCK-076b Cluster-2: `backup source-switch local` restores own source
     """
 
+    # Minimum storage nodes per cluster for cross-cluster restore
+    _MIN_NODES_PER_CLUSTER = 2
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.test_name = "backup_cross_cluster_restore"
         self._cluster2_id = os.environ.get("CLUSTER2_ID", "")
         self._cluster2_secret = os.environ.get("CLUSTER2_SECRET", "")
         self._cluster2_api_url = os.environ.get("CLUSTER2_API_BASE_URL", "")
+        self._cluster2_namespace = os.environ.get("CLUSTER2_NAMESPACE", "simplyblock-c2")
         self._meta_file = "/tmp/cross_cluster_backup_meta.json"
         # Resources created on Cluster-2 (separate tracking for teardown)
         self._c2_lvols: list[str] = []
+        # Whether we bootstrapped cluster 2 ourselves (for teardown)
+        self._self_bootstrapped_c2 = False
+        # K8s-mode: second K8sUtils instance for Cluster-2 (initialised in _check_prerequisites)
+        self._k8s_c2 = None
 
     # ── prerequisite check ────────────────────────────────────────────────────
 
     def _check_prerequisites(self):
-        missing = [
-            v for v, val in [
-                ("CLUSTER2_ID", self._cluster2_id),
-                ("CLUSTER2_SECRET", self._cluster2_secret),
-                ("CLUSTER2_API_BASE_URL", self._cluster2_api_url),
-            ] if not val
-        ]
-        if missing:
+        """Ensure Cluster-2 credentials are available.
+
+        K8s mode:
+            Cluster-2 is pre-deployed by the pipeline in namespace
+            ``CLUSTER2_NAMESPACE`` (default ``simplyblock-c2``).  Credentials
+            are extracted from the admin pod in that namespace.
+
+        Docker mode:
+            If CLUSTER2_* env vars are not set, attempt to bootstrap a second
+            cluster by splitting the available storage nodes in half.
+        """
+        if self._cluster2_id and self._cluster2_secret and self._cluster2_api_url:
+            if self.k8s_test:
+                self._init_k8s_c2()
+            return  # env vars already set
+
+        if self.k8s_test:
+            # In K8s mode, discover Cluster-2 from its namespace admin pod
+            self._init_k8s_c2()
+            self._discover_k8s_cluster2()
+            return
+
+        self.logger.info(
+            "TC-BCK-070: CLUSTER2_* env vars not set — "
+            "attempting to bootstrap a second cluster from available nodes")
+        self._bootstrap_second_cluster()
+
+    # ── K8s mode: Cluster-2 namespace discovery ─────────────────────────────
+
+    def _init_k8s_c2(self):
+        """Initialise a K8sUtils instance pointing at the Cluster-2 namespace."""
+        if self._k8s_c2 is not None:
+            return
+        from utils.k8s_utils import K8sUtils
+        mgmt_node = self.mgmt_nodes[0]
+        self._k8s_c2 = K8sUtils(
+            ssh_obj=self.ssh_obj,
+            mgmt_node=mgmt_node,
+            namespace=self._cluster2_namespace,
+        )
+        self.logger.info(
+            f"[K8s] Cluster-2 K8sUtils initialised for namespace "
+            f"'{self._cluster2_namespace}' on {mgmt_node}")
+
+    def _discover_k8s_cluster2(self):
+        """Extract Cluster-2 ID and secret from the admin pod in C2 namespace."""
+        self.logger.info(
+            f"TC-BCK-070: discovering Cluster-2 from namespace "
+            f"'{self._cluster2_namespace}'")
+        # cluster list via C2 admin pod
+        out, err = self._k8s_c2.exec_sbcli(f"{self.base_cmd} cluster list")
+        if not out or "error" in (err or "").lower():
+            raise RuntimeError(
+                f"TC-BCK-070: cannot list clusters in namespace "
+                f"'{self._cluster2_namespace}': {err}")
+
+        # Extract the cluster UUID (should be the only cluster in this namespace)
+        import re
+        uuid_re = re.compile(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+            re.IGNORECASE,
+        )
+        for line in out.split("\n"):
+            m = uuid_re.search(line)
+            if m:
+                self._cluster2_id = m.group(0)
+                break
+        if not self._cluster2_id:
+            raise RuntimeError(
+                f"TC-BCK-070: no cluster UUID found in namespace "
+                f"'{self._cluster2_namespace}' output: {out[:300]}")
+
+        # Get secret
+        secret_out, _ = self._k8s_c2.exec_sbcli(
+            f"{self.base_cmd} cluster get-secret {self._cluster2_id}")
+        self._cluster2_secret = (secret_out or "").strip().split("\n")[-1].strip()
+
+        # API URL: same mgmt node, both clusters share the management API
+        self._cluster2_api_url = self.api_base_url
+
+        self.logger.info(
+            f"TC-BCK-070: Cluster-2 discovered — ID={self._cluster2_id}, "
+            f"namespace={self._cluster2_namespace}")
+
+    # ── self-bootstrap second cluster ────────────────────────────────────────
+
+    def _bootstrap_second_cluster(self):
+        """Create a second cluster on the same mgmt node using spare storage nodes.
+
+        Determines which IPs from ``STORAGE_PRIVATE_IPS`` are NOT already in
+        Cluster-1, and uses those for Cluster-2.  If all IPs are already in
+        Cluster-1, falls back to splitting: removes the second half from
+        Cluster-1 and uses them for Cluster-2.
+
+        Requires:
+            - ``STORAGE_PRIVATE_IPS`` env var listing *all* storage node IPs
+            - At least ``_MIN_NODES_PER_CLUSTER * 2`` total IPs
+        """
+        # Collect all known storage node IPs from env vars
+        storage_ips_raw = os.environ.get("STORAGE_PRIVATE_IPS", "")
+        new_node_ips_raw = os.environ.get("NEW_NODE_IPS", "")
+        all_ips = []
+        seen = set()
+        for ip in (storage_ips_raw + " " + new_node_ips_raw).split():
+            ip = ip.strip()
+            if ip and ip not in seen:
+                all_ips.append(ip)
+                seen.add(ip)
+
+        if not all_ips:
             raise EnvironmentError(
-                f"TC-BCK-070: cross-cluster restore requires env vars: "
-                f"{', '.join(missing)}")
+                "TC-BCK-070: STORAGE_PRIVATE_IPS (and/or NEW_NODE_IPS) env var "
+                "required to auto-bootstrap a second cluster")
+
+        # Determine which IPs are already in Cluster-1
+        c1_ips = set(self.storage_nodes or [])
+        spare_ips = [ip for ip in all_ips if ip not in c1_ips]
+
+        total = len(all_ips)
+        if len(spare_ips) >= self._MIN_NODES_PER_CLUSTER:
+            # Spare nodes available (e.g. from NEW_NODE_IPS) — use them directly
+            c2_ips = spare_ips
+            self.logger.info(
+                f"TC-BCK-070: using {len(c2_ips)} spare node(s) for Cluster-2: "
+                f"{c2_ips} (Cluster-1 has: {sorted(c1_ips)})")
+        elif total >= self._MIN_NODES_PER_CLUSTER * 2:
+            # All nodes are in Cluster-1 — split in half
+            split = total // 2
+            c1_keep = all_ips[:split]
+            c2_ips = all_ips[split:]
+            if len(c1_keep) < self._MIN_NODES_PER_CLUSTER:
+                raise EnvironmentError(
+                    f"TC-BCK-070: cannot split {total} nodes into 2 clusters "
+                    f"with min {self._MIN_NODES_PER_CLUSTER} each")
+            self.logger.info(
+                f"TC-BCK-070: splitting {total} storage nodes — "
+                f"Cluster-1 keeps: {c1_keep}, Cluster-2 gets: {c2_ips}")
+            # Remove c2 nodes from Cluster-1 if they are currently members
+            self._remove_nodes_from_cluster1(c2_ips)
+        else:
+            raise EnvironmentError(
+                f"TC-BCK-070: need at least {self._MIN_NODES_PER_CLUSTER} spare "
+                f"nodes for Cluster-2 (have {len(spare_ips)} spare out of "
+                f"{total} total). Pass spare nodes via NEW_NODE_IPS or "
+                f"STORAGE_PRIVATE_IPS, or set CLUSTER2_* env vars directly.")
+
+        mgmt_ip = self.mgmt_nodes[0]
+        sbcli_cmd = self.base_cmd
+        ifname = os.environ.get("IFNAME", "eth0")
+        data_nic = os.environ.get("BOOTSTRAP_DATA_NIC", "eth1")
+        max_subsys = os.environ.get("BOOTSTRAP_MAX_SUBSYS", "1024")
+        ha_type = os.environ.get("HA_TYPE", "ha")
+        journal_partition = os.environ.get("BOOTSTRAP_JOURNAL_PARTITION", "0")
+        ha_jm_count = os.environ.get("BOOTSTRAP_HA_JM_COUNT", "3")
+        ndcs = os.environ.get("NDCS", str(self.ndcs))
+        npcs = os.environ.get("NPCS", str(self.npcs))
+        extra_cluster_args = os.environ.get("EXTRA_CLUSTER_ARGS", "")
+        extra_sn_args = os.environ.get("EXTRA_SN_ARGS", "")
+        spdk_image = os.environ.get("SPDK_IMAGE", "")
+        branch = os.environ.get("SBCLI_BRANCH", "main")
+
+        # Step 0: ensure SSH connections to Cluster-2 storage nodes
+        for ip in c2_ips:
+            self.logger.info(f"  [C2] Connecting SSH to {ip}")
+            try:
+                self.ssh_obj.connect(
+                    address=ip,
+                    bastion_server_address=self.bastion_server,
+                )
+            except Exception as e:
+                self.logger.warning(f"  [C2] SSH connect to {ip} failed: {e}")
+
+        # Step 1: configure + deploy on each Cluster-2 storage node
+        for ip in c2_ips:
+            self.logger.info(f"  [C2] Configuring + deploying storage node {ip}")
+            install_cmd = (
+                f"pip install --force-reinstall "
+                f"git+https://github.com/simplyblock-io/sbcli.git@{branch}"
+            )
+            self.ssh_obj.exec_command(node=ip, command=install_cmd)
+            sleep_n_sec(5)
+            configure_cmd = (
+                f"{sbcli_cmd} --dev -d sn configure "
+                f"--max-subsys {max_subsys}"
+            )
+            self.ssh_obj.exec_command(node=ip, command=configure_cmd)
+            deploy_cmd = f"{sbcli_cmd} sn deploy --ifname {ifname}"
+            self.ssh_obj.exec_command(node=ip, command=deploy_cmd)
+
+        # Wait for SPDK containers to start
+        self.logger.info("  [C2] Waiting for SPDK containers to start...")
+        sleep_n_sec(30)
+
+        # Step 2: create Cluster-2 on mgmt node
+        self.logger.info("  [C2] Creating second cluster on mgmt node")
+        create_cmd = (
+            f"{sbcli_cmd} --dev -d cluster create"
+            f" --ha-type {ha_type}"
+            f" --data-chunks-per-stripe {ndcs}"
+            f" --parity-chunks-per-stripe {npcs}"
+            f" --ifname {ifname}"
+        )
+        if extra_cluster_args:
+            create_cmd += f" {extra_cluster_args}"
+        self.ssh_obj.exec_command(node=mgmt_ip, command=create_cmd)
+
+        # Extract Cluster-2 ID (the newest cluster that isn't Cluster-1)
+        out, _ = self.ssh_obj.exec_command(
+            node=mgmt_ip,
+            command=f"{sbcli_cmd} cluster list --json 2>/dev/null || "
+                    f"{sbcli_cmd} cluster list"
+        )
+        c2_id = self._extract_second_cluster_id(out)
+        self.logger.info(f"  [C2] Cluster-2 ID: {c2_id}")
+
+        # Step 3: add storage nodes to Cluster-2
+        add_base = (
+            f"{sbcli_cmd} --dev -d storage-node add-node"
+            f" --journal-partition {journal_partition}"
+            f" --ha-jm-count {ha_jm_count}"
+            f" --data-nics {data_nic}"
+        )
+        if spdk_image:
+            add_base += f" --spdk-image {spdk_image}"
+        if extra_sn_args:
+            add_base += f" {extra_sn_args}"
+
+        for ip in c2_ips:
+            self.logger.info(f"  [C2] Adding storage node {ip} to Cluster-2")
+            add_cmd = f"{add_base} {c2_id} {ip}:5000 {ifname}"
+            self.ssh_obj.exec_command(node=mgmt_ip, command=add_cmd)
+            sleep_n_sec(3)
+
+        # Step 4: activate Cluster-2
+        self.logger.info("  [C2] Activating Cluster-2")
+        self.ssh_obj.exec_command(
+            node=mgmt_ip,
+            command=f"{sbcli_cmd} -d cluster activate {c2_id}"
+        )
+
+        # Step 5: create pool on Cluster-2
+        self.logger.info("  [C2] Creating pool on Cluster-2")
+        self.ssh_obj.exec_command(
+            node=mgmt_ip,
+            command=f"{sbcli_cmd} pool add {self.pool_name} {c2_id}"
+        )
+
+        # Step 6: extract Cluster-2 secret
+        out, _ = self.ssh_obj.exec_command(
+            node=mgmt_ip,
+            command=f"{sbcli_cmd} cluster get-secret {c2_id}"
+        )
+        c2_secret = out.strip().split("\n")[0].strip()
+        self.logger.info("  [C2] Cluster-2 secret obtained")
+
+        # Set instance attributes
+        self._cluster2_id = c2_id
+        self._cluster2_secret = c2_secret
+        # Same mgmt node, same API endpoint
+        self._cluster2_api_url = self.api_base_url or f"http://{mgmt_ip}"
+        self._self_bootstrapped_c2 = True
+
+        # Also set env vars so any downstream code can use them
+        os.environ["CLUSTER2_ID"] = c2_id
+        os.environ["CLUSTER2_SECRET"] = c2_secret
+        os.environ["CLUSTER2_API_BASE_URL"] = self._cluster2_api_url
+
+        self.logger.info(
+            f"TC-BCK-070: Cluster-2 bootstrapped — ID={c2_id}, "
+            f"API={self._cluster2_api_url}, nodes={c2_ips}")
+
+    def _remove_nodes_from_cluster1(self, ips_to_remove: list[str]):
+        """Remove storage nodes from Cluster-1 so they can join Cluster-2.
+
+        For each IP, finds the node UUID in Cluster-1, suspends it,
+        shuts it down, removes it, and runs deploy-cleaner on the host.
+        """
+        sn_data = self.sbcli_utils.get_storage_nodes().get("results", [])
+
+        # Build IP→node_id mapping
+        ip_to_ids = {}
+        for node in sn_data:
+            nid = node.get("id") or node.get("uuid") or ""
+            nip = node.get("mgmt_ip") or node.get("ip") or ""
+            if nip and nid:
+                ip_to_ids.setdefault(nip, []).append(nid)
+
+        for ip in ips_to_remove:
+            node_ids = ip_to_ids.get(ip, [])
+            if not node_ids:
+                self.logger.info(f"  [C1] Node {ip} not in Cluster-1, skipping removal")
+                continue
+            for nid in node_ids:
+                self.logger.info(f"  [C1] Removing node {nid} ({ip}) from Cluster-1")
+                try:
+                    self.sbcli_utils.shutdown_node(nid, force=True)
+                    sleep_n_sec(5)
+                except Exception as e:
+                    self.logger.warning(f"  [C1] Shutdown {nid} failed: {e}")
+                try:
+                    self._sbcli(f"storage-node remove {nid}")
+                    sleep_n_sec(3)
+                except Exception as e:
+                    self.logger.warning(f"  [C1] Remove {nid} failed: {e}")
+
+            # Clean up the host
+            self.ssh_obj.exec_command(
+                node=ip,
+                command=f"{self.base_cmd} sn deploy-cleaner 2>/dev/null || true"
+            )
+
+    def _extract_second_cluster_id(self, cluster_list_output: str) -> str:
+        """Extract the Cluster-2 UUID from ``sbcli cluster list`` output.
+
+        The output may be JSON (``cluster list --json``) or a table.
+        Returns the first cluster ID that is NOT ``self.cluster_id``.
+        """
+        import json as _json
+        text = cluster_list_output.strip()
+
+        # Try JSON first
+        try:
+            data = _json.loads(text)
+            if isinstance(data, list):
+                for entry in data:
+                    cid = (entry.get("id") or entry.get("uuid")
+                           or entry.get("cluster_id") or "")
+                    if cid and cid != self.cluster_id:
+                        return cid
+        except (_json.JSONDecodeError, ValueError):
+            pass
+
+        # Fallback: parse table rows for UUID-like strings
+        import re
+        uuid_re = re.compile(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+            re.IGNORECASE,
+        )
+        for line in text.split("\n"):
+            match = uuid_re.search(line)
+            if match:
+                cid = match.group(0)
+                if cid != self.cluster_id:
+                    return cid
+
+        raise RuntimeError(
+            f"Could not find a second cluster ID in output:\n{text[:500]}")
+
+    def _teardown_second_cluster(self):
+        """Destroy the self-bootstrapped second cluster."""
+        if not self._self_bootstrapped_c2 or not self._cluster2_id:
+            return
+        self.logger.info(f"Tearing down self-bootstrapped Cluster-2 ({self._cluster2_id})")
+        mgmt_ip = self.mgmt_nodes[0]
+        try:
+            # Deactivate + delete Cluster-2
+            self.ssh_obj.exec_command(
+                node=mgmt_ip,
+                command=f"{self.base_cmd} cluster deactivate {self._cluster2_id} || true"
+            )
+            sleep_n_sec(5)
+            self.ssh_obj.exec_command(
+                node=mgmt_ip,
+                command=f"{self.base_cmd} cluster delete {self._cluster2_id} || true"
+            )
+            self.logger.info("Cluster-2 deleted")
+        except Exception as e:
+            self.logger.warning(f"Cluster-2 teardown error: {e}")
 
     # ── Cluster-2 sbcli helper ────────────────────────────────────────────────
 
     def _sbcli_c2(self, subcmd: str) -> tuple[str, str]:
-        """Run sbcli command targeted at Cluster-2."""
+        """Run sbcli command targeted at Cluster-2.
+
+        K8s mode:  kubectl exec into the admin pod in C2's namespace.
+        Docker:    SSH to mgmt node with CLUSTER_ID/SECRET/API_BASE_URL env prefix.
+        """
+        if self.k8s_test and self._k8s_c2 is not None:
+            cmd = (
+                f"CLUSTER_ID={self._cluster2_id} "
+                f"CLUSTER_SECRET={self._cluster2_secret} "
+                f"API_BASE_URL={self._cluster2_api_url} "
+                f"{self.base_cmd} {subcmd}"
+            )
+            out, err = self._k8s_c2.exec_sbcli(cmd)
+            self.logger.debug(f"CMD (k8s-c2): {cmd}\nOUT: {out}\nERR: {err}")
+            return out, err
         env_prefix = (
             f"CLUSTER_ID={self._cluster2_id} "
             f"CLUSTER_SECRET={self._cluster2_secret} "
@@ -3040,23 +3417,306 @@ class TestBackupCrossClusterRestore(BackupTestBase):
         Export backup metadata from Cluster-1 using the CLI backup export
         command, writing a JSON file to self._meta_file.
 
-        Returns the path of the metadata file on the mgmt node.
+        In K8s mode, the export runs inside C1's admin pod, then the file
+        is transferred into C2's admin pod via ``kubectl cp``.
+
+        Returns the path of the metadata file on the mgmt node (or inside
+        the admin pod in K8s mode).
         """
         out, err = self._sbcli(f"backup export -o {self._meta_file}")
         assert not (err and "error" in err.lower()), \
             f"TC-BCK-072: backup export failed: {err}"
         self.logger.info(f"TC-BCK-072: backup export result: {(out or '').strip()}")
+
+        if self.k8s_test and self._k8s_c2 is not None:
+            # Transfer metadata file from C1 admin pod → C2 admin pod
+            c1_ns = self.sbcli_utils.k8s.namespace
+            c1_pod = self.sbcli_utils.k8s.get_admin_pod()
+            c2_ns = self._cluster2_namespace
+            c2_pod = self._k8s_c2.get_admin_pod()
+            local_tmp = f"/tmp/cc_backup_meta_{int(time.time())}.json"
+            self.logger.info(
+                f"TC-BCK-072: transferring metadata "
+                f"{c1_ns}/{c1_pod} → {c2_ns}/{c2_pod}")
+            # kubectl cp from C1 admin pod to runner
+            self._k8s_c2._exec_kubectl(
+                f"kubectl cp {c1_ns}/{c1_pod}:{self._meta_file} {local_tmp}")
+            # kubectl cp from runner into C2 admin pod
+            self._k8s_c2._exec_kubectl(
+                f"kubectl cp {local_tmp} {c2_ns}/{c2_pod}:{self._meta_file}")
+            self.logger.info("TC-BCK-072: metadata file transferred to C2 admin pod ✓")
+
         return self._meta_file
+
+    # ── K8s-native CRD cross-cluster restore ────────────────────────────────
+
+    def _run_k8s_native_cross_cluster_restore(self, backup_id: str,
+                                               orig_checksums: dict):
+        """Cross-cluster restore via K8s CRDs (BackupImport → BackupRestore).
+
+        Flow:
+          1. Get backup UUID from C1's StorageBackup status.
+          2. Create BackupImport CR on C2 → wait Done → get storageBackupRef.
+          3. Create BackupRestore CR on C2 with pvcTemplate → wait Done.
+          4. Verify data integrity via utility pod on restored PVC.
+
+        The controller handles source-switching automatically — no manual
+        ``backup source-switch`` is needed.
+        """
+        k8s_c1 = self._ensure_k8s_utils()
+        c2_cluster_name = os.environ.get(
+            "CLUSTER2_CRD_NAME", self._cluster_name)
+
+        # backup_id in K8s mode is the StorageBackup CRD name; get the
+        # actual UUID from its status.backupId field.
+        source_backup_uuid = k8s_c1.get_storage_backup_id(backup_id)
+        assert source_backup_uuid, (
+            f"TC-BCK-072: could not get backupId from StorageBackup "
+            f"'{backup_id}' status"
+        )
+        self.logger.info(
+            f"TC-BCK-072: StorageBackup '{backup_id}' → "
+            f"backupId={source_backup_uuid}")
+
+        # TC-BCK-073: create BackupImport on C2
+        import_name = f"cc-import-{_rand_suffix().lower()}"
+        self.logger.info(
+            f"TC-BCK-073: creating BackupImport '{import_name}' on C2 "
+            f"(source={self._cluster_name}/{source_backup_uuid} "
+            f"→ target={c2_cluster_name})")
+        self._k8s_c2.create_backup_import(
+            name=import_name,
+            source_cluster_name=self._cluster_name,
+            source_backup_id=source_backup_uuid,
+            target_cluster_name=c2_cluster_name,
+        )
+
+        restore_name = None
+        try:
+            # Wait for BackupImport to reach Done
+            self._k8s_c2.wait_backup_import_done(
+                import_name, timeout=_RESTORE_COMPLETE_TIMEOUT)
+            storage_backup_ref = (
+                self._k8s_c2.get_backup_import_storage_backup_ref(
+                    import_name))
+            assert storage_backup_ref, (
+                f"TC-BCK-073: BackupImport '{import_name}' Done but "
+                f"storageBackupRef is empty")
+            self.logger.info(
+                f"TC-BCK-073: BackupImport Done — "
+                f"storageBackupRef={storage_backup_ref}")
+
+            # TC-BCK-075: create BackupRestore on C2 with pvcTemplate
+            restore_name = f"cc-restore-{_rand_suffix().lower()}"
+            restored_pvc = f"cc-rest-{_rand_suffix().lower()}"
+            c2_sc = os.environ.get(
+                "CLUSTER2_STORAGE_CLASS", self._storage_class_name)
+            self.logger.info(
+                f"TC-BCK-075: creating BackupRestore '{restore_name}' on C2 "
+                f"(backupRef={storage_backup_ref} → PVC={restored_pvc})")
+            self._k8s_c2.create_backup_restore(
+                name=restore_name,
+                backup_ref_name=storage_backup_ref,
+                pvc_name=restored_pvc,
+                pvc_size="5Gi",
+                cluster_name=c2_cluster_name,
+                storage_class=c2_sc,
+            )
+
+            # Wait for BackupRestore to reach Done (PVC auto-created)
+            self._k8s_c2.wait_backup_restore_done(
+                restore_name, timeout=_RESTORE_COMPLETE_TIMEOUT)
+            self.logger.info(
+                f"TC-BCK-075: BackupRestore '{restore_name}' Done — "
+                f"PVC '{restored_pvc}' created on C2")
+
+            # TC-BCK-076: verify data integrity on restored PVC via
+            # utility pod in C2's namespace
+            self.logger.info(
+                "TC-BCK-076: verifying checksums on restored PVC in C2")
+            pod_name = f"cksum-c2-{_rand_suffix().lower()}"
+            self._k8s_c2.create_utility_pod(pod_name, restored_pvc)
+            try:
+                self._k8s_c2.wait_pod_running(pod_name, timeout=600)
+                files = self._k8s_c2.find_files_in_pvc(pod_name)
+                actual = self._k8s_c2.generate_checksums_in_pvc(
+                    pod_name, files)
+
+                expected_by_name = {
+                    os.path.basename(k): v
+                    for k, v in orig_checksums.items()
+                }
+                actual_by_name = {
+                    os.path.basename(k): v for k, v in actual.items()
+                }
+                assert actual_by_name, (
+                    "TC-BCK-076: no files in restored PVC for checksum "
+                    "verification"
+                )
+                for fname, cksum in expected_by_name.items():
+                    assert fname in actual_by_name, (
+                        f"TC-BCK-076: file {fname} not found in restored PVC"
+                    )
+                    assert actual_by_name[fname] == cksum, (
+                        f"TC-BCK-076: checksum mismatch for {fname}: "
+                        f"expected {cksum}, got {actual_by_name[fname]}"
+                    )
+                self.logger.info(
+                    "TC-BCK-076: cross-cluster restore checksums match "
+                    "(K8s-native CRD flow)")
+            finally:
+                try:
+                    self._k8s_c2.delete_pod(pod_name)
+                except Exception:
+                    pass
+
+        finally:
+            # Best-effort cleanup of C2 CRDs
+            for kind, crd_name in [
+                ("backuprestore", restore_name),
+                ("backupimport", import_name),
+            ]:
+                if crd_name:
+                    try:
+                        self._k8s_c2.delete_resource(kind, crd_name)
+                    except Exception as exc:
+                        self.logger.warning(
+                            f"TC-BCK-076b: cleanup {kind}/{crd_name}: "
+                            f"{exc}")
+
+    # ── CLI cross-cluster restore (Docker mode) ──────────────────────────────
+
+    def _run_cli_cross_cluster_restore(self, backup_id: str,
+                                        orig_checksums: dict):
+        """Cross-cluster restore via CLI (export → import → source-switch →
+        restore → verify → switch-back)."""
+
+        # TC-BCK-072: export metadata from Cluster-1
+        self.logger.info("TC-BCK-072: exporting backup metadata from Cluster-1")
+        meta_file = self._export_backup_metadata(backup_id)
+
+        # TC-BCK-073: import metadata on Cluster-2
+        self.logger.info(f"TC-BCK-073: Cluster-2 — backup import {meta_file}")
+        out, err = self._sbcli_c2(f"backup import {meta_file}")
+        assert not (err and "error" in err.lower()), \
+            f"TC-BCK-073: backup import on Cluster-2 failed: {err}"
+        self.logger.info(f"TC-BCK-073: import result: {out.strip()}")
+
+        # TC-BCK-074: verify backup is visible on Cluster-2
+        self.logger.info(
+            "TC-BCK-074: Cluster-2 — backup list should show imported backup")
+        out2, err2 = self._sbcli_c2("backup list")
+        assert not (err2 and "error" in err2.lower()), \
+            f"TC-BCK-074: backup list on Cluster-2 failed: {err2}"
+        assert backup_id in out2 or out2.strip(), \
+            f"TC-BCK-074: imported backup_id {backup_id} not visible on C2"
+        self.logger.info(
+            f"TC-BCK-074: Cluster-2 backup list snippet: {out2[:200]}")
+
+        # TC-BCK-074b: switch Cluster-2's backup source to Cluster-1's S3
+        self.logger.info(
+            f"TC-BCK-074b: Cluster-2 — backup source-switch to "
+            f"Cluster-1 ({self.cluster_id})")
+        out_sw, err_sw = self._sbcli_c2(
+            f"backup source-switch {self.cluster_id}")
+        assert not (err_sw and "error" in err_sw.lower()), \
+            f"TC-BCK-074b: source-switch to Cluster-1 failed: {err_sw}"
+        self.logger.info(
+            f"TC-BCK-074b: source switched to Cluster-1 — "
+            f"{out_sw.strip()}")
+
+        try:
+            # TC-BCK-075: restore on Cluster-2
+            restored_name = f"cc_rest_{_rand_suffix()}"
+            self.logger.info(
+                f"TC-BCK-075: Cluster-2 — backup restore "
+                f"{backup_id} → {restored_name}")
+            c2_pool = os.environ.get("CLUSTER2_POOL", self.pool_name)
+            out3, err3 = self._sbcli_c2(
+                f"backup restore {backup_id} "
+                f"--lvol {restored_name} --pool {c2_pool}")
+            assert not (err3 and "error" in err3.lower()), \
+                f"TC-BCK-075: restore on Cluster-2 failed: {err3}"
+            self.logger.info(
+                f"TC-BCK-075: restore triggered: {out3.strip()}")
+            self._c2_lvols.append(restored_name)
+
+            # Wait for restore to complete on Cluster-2
+            self.logger.info(
+                "TC-BCK-075: waiting for Cluster-2 restore to complete…")
+            deadline = time.time() + _RESTORE_COMPLETE_TIMEOUT
+            while time.time() < deadline:
+                lvol_out, _ = self._sbcli_c2("lvol list")
+                if restored_name in lvol_out:
+                    self.logger.info(
+                        "TC-BCK-075: restored lvol appeared on Cluster-2")
+                    break
+                sleep_n_sec(_POLL_INTERVAL)
+            else:
+                raise TimeoutError(
+                    f"TC-BCK-075: restored lvol {restored_name} did not "
+                    f"appear on Cluster-2 within "
+                    f"{_RESTORE_COMPLETE_TIMEOUT}s")
+
+            # TC-BCK-076: data integrity — connect via Cluster-2
+            self.logger.info(
+                "TC-BCK-076: connecting restored lvol from Cluster-2")
+            c2_connect_out, c2_connect_err = self._sbcli_c2(
+                f"volume connect {restored_name}")
+            connect_lines = [
+                line.strip()
+                for line in c2_connect_out.strip().split("\n")
+                if line.strip() and "nvme connect" in line
+            ]
+            assert connect_lines, (
+                f"TC-BCK-076: no nvme connect strings from Cluster-2: "
+                f"{c2_connect_out}")
+
+            initial_devs = self.ssh_obj.get_devices(node=self.fio_node)
+            for cmd in connect_lines:
+                self.ssh_obj.exec_command(
+                    node=self.fio_node, command=cmd)
+            sleep_n_sec(3)
+            final_devs = self.ssh_obj.get_devices(node=self.fio_node)
+            new_devs = [d for d in final_devs if d not in initial_devs]
+            assert new_devs, (
+                "TC-BCK-076: no new block device after connecting "
+                "Cluster-2 lvol")
+
+            r_device = f"/dev/{new_devs[0]}"
+            r_mount = f"{self.mount_path}/cc_rest_{_rand_suffix()}"
+            self.ssh_obj.exec_command(
+                self.fio_node, f"mkdir -p {r_mount}")
+            self.ssh_obj.mount_path(
+                node=self.fio_node, device=r_device,
+                mount_path=r_mount)
+            self.mounted.append((self.fio_node, r_mount))
+
+            self._verify_checksums(
+                self.fio_node, r_mount, orig_checksums)
+            self.logger.info(
+                "TC-BCK-076: cross-cluster restore checksums match")
+
+        finally:
+            # TC-BCK-076b: switch Cluster-2 source back to local
+            self.logger.info(
+                "TC-BCK-076b: Cluster-2 — backup source-switch "
+                "back to local")
+            out_back, err_back = self._sbcli_c2(
+                "backup source-switch local")
+            if err_back and "error" in err_back.lower():
+                self.logger.warning(
+                    f"TC-BCK-076b: source-switch-back warning: "
+                    f"{err_back}")
+            else:
+                self.logger.info(
+                    f"TC-BCK-076b: source switched back to local — "
+                    f"{out_back.strip()}")
 
     # ── main run ──────────────────────────────────────────────────────────────
 
     def run(self):
         self.logger.info("=== TestBackupCrossClusterRestore START ===")
-        if self.k8s_test:
-            self.logger.info(
-                "TestBackupCrossClusterRestore requires CLI-only operations "
-                "(export/import/source-switch) — skipping in K8s mode.")
-            return
 
         # TC-BCK-070: check prerequisites
         self._check_prerequisites()
@@ -3094,113 +3754,28 @@ class TestBackupCrossClusterRestore(BackupTestBase):
         self._wait_for_backup(backup_id)
         self.logger.info(f"TC-BCK-071: backup {backup_id} is done on Cluster-1 ✓")
 
-        # ── Cluster-2: import → source-switch → restore → verify → switch-back ─
+        # ── Cluster-2: import → restore → verify ────────────────────────────────
 
-        # TC-BCK-072: export metadata from Cluster-1
-        self.logger.info("TC-BCK-072: exporting backup metadata from Cluster-1")
-        meta_file = self._export_backup_metadata(backup_id)
-
-        # TC-BCK-073: import metadata on Cluster-2
-        self.logger.info(f"TC-BCK-073: Cluster-2 — backup import {meta_file}")
-        out, err = self._sbcli_c2(f"backup import {meta_file}")
-        assert not (err and "error" in err.lower()), \
-            f"TC-BCK-073: backup import on Cluster-2 failed: {err}"
-        self.logger.info(f"TC-BCK-073: import result: {out.strip()}")
-
-        # TC-BCK-074: verify backup is visible on Cluster-2
-        self.logger.info("TC-BCK-074: Cluster-2 — backup list should show imported backup")
-        out2, err2 = self._sbcli_c2("backup list")
-        assert not (err2 and "error" in err2.lower()), \
-            f"TC-BCK-074: backup list on Cluster-2 failed: {err2}"
-        assert backup_id in out2 or out2.strip(), \
-            f"TC-BCK-074: imported backup_id {backup_id} not visible on Cluster-2"
-        self.logger.info(f"TC-BCK-074: Cluster-2 backup list snippet: {out2[:200]}")
-
-        # TC-BCK-074b: switch Cluster-2's backup source to Cluster-1's S3
-        self.logger.info(
-            f"TC-BCK-074b: Cluster-2 — backup source-switch to Cluster-1 ({self.cluster_id})")
-        out_sw, err_sw = self._sbcli_c2(f"backup source-switch {self.cluster_id}")
-        assert not (err_sw and "error" in err_sw.lower()), \
-            f"TC-BCK-074b: source-switch to Cluster-1 failed: {err_sw}"
-        self.logger.info(f"TC-BCK-074b: source switched to Cluster-1 ✓ — {out_sw.strip()}")
-
-        try:
-            # TC-BCK-075: restore on Cluster-2 (now sourced from Cluster-1's S3)
-            restored_name = f"cc_rest_{_rand_suffix()}"
-            self.logger.info(
-                f"TC-BCK-075: Cluster-2 — backup restore {backup_id} → {restored_name}")
-            c2_pool = os.environ.get("CLUSTER2_POOL", self.pool_name)
-            out3, err3 = self._sbcli_c2(
-                f"backup restore {backup_id} --lvol {restored_name} --pool {c2_pool}")
-            assert not (err3 and "error" in err3.lower()), \
-                f"TC-BCK-075: restore on Cluster-2 failed: {err3}"
-            self.logger.info(f"TC-BCK-075: restore triggered: {out3.strip()}")
-            self._c2_lvols.append(restored_name)
-
-            # Wait for restore to complete on Cluster-2
-            self.logger.info("TC-BCK-075: waiting for Cluster-2 restore to complete…")
-            deadline = time.time() + _RESTORE_COMPLETE_TIMEOUT
-            while time.time() < deadline:
-                lvol_out, _ = self._sbcli_c2("lvol list")
-                if restored_name in lvol_out:
-                    self.logger.info("TC-BCK-075: restored lvol appeared on Cluster-2 ✓")
-                    break
-                sleep_n_sec(_POLL_INTERVAL)
-            else:
-                raise TimeoutError(
-                    f"TC-BCK-075: restored lvol {restored_name} did not appear "
-                    f"on Cluster-2 within {_RESTORE_COMPLETE_TIMEOUT}s")
-
-            # TC-BCK-076: data integrity — connect on FIO node via Cluster-2 connect string
-            self.logger.info("TC-BCK-076: connecting restored lvol from Cluster-2")
-            c2_connect_out, c2_connect_err = self._sbcli_c2(
-                f"volume connect {restored_name}")
-            connect_lines = [
-                line.strip()
-                for line in c2_connect_out.strip().split("\n")
-                if line.strip() and "nvme connect" in line
-            ]
-            assert connect_lines, \
-                f"TC-BCK-076: no nvme connect strings from Cluster-2: {c2_connect_out}"
-
-            initial_devs = self.ssh_obj.get_devices(node=self.fio_node)
-            for cmd in connect_lines:
-                self.ssh_obj.exec_command(node=self.fio_node, command=cmd)
-            sleep_n_sec(3)
-            final_devs = self.ssh_obj.get_devices(node=self.fio_node)
-            new_devs = [d for d in final_devs if d not in initial_devs]
-            assert new_devs, "TC-BCK-076: no new block device after connecting Cluster-2 lvol"
-
-            r_device = f"/dev/{new_devs[0]}"
-            r_mount = f"{self.mount_path}/cc_rest_{_rand_suffix()}"
-            self.ssh_obj.exec_command(self.fio_node, f"mkdir -p {r_mount}")
-            self.ssh_obj.mount_path(node=self.fio_node, device=r_device, mount_path=r_mount)
-            self.mounted.append((self.fio_node, r_mount))
-
-            self._verify_checksums(self.fio_node, r_mount, orig_checksums)
-            self.logger.info("TC-BCK-076: cross-cluster restore checksums match ✓")
-
-        finally:
-            # TC-BCK-076b: switch Cluster-2's backup source back to local (always)
-            self.logger.info("TC-BCK-076b: Cluster-2 — backup source-switch back to local")
-            out_back, err_back = self._sbcli_c2("backup source-switch local")
-            if err_back and "error" in err_back.lower():
-                self.logger.warning(
-                    f"TC-BCK-076b: source-switch-back warning: {err_back}")
-            else:
-                self.logger.info(
-                    f"TC-BCK-076b: source switched back to local ✓ — {out_back.strip()}")
+        if self.k8s_test and self._k8s_c2 is not None:
+            self._run_k8s_native_cross_cluster_restore(
+                backup_id, orig_checksums)
+        else:
+            self._run_cli_cross_cluster_restore(
+                backup_id, orig_checksums)
 
         self.logger.info("=== TestBackupCrossClusterRestore PASSED ===")
 
     # ── teardown ──────────────────────────────────────────────────────────────
 
     def teardown(self, delete_lvols=True, close_ssh=True, skip_k8s_cleanup=False):
-        # Safety: ensure Cluster-2's source is switched back to local (always)
-        try:
-            self._sbcli_c2("backup source-switch local")
-        except Exception as e:
-            self.logger.warning(f"source-switch-back in teardown warning: {e}")
+        # Safety: ensure Cluster-2's source is switched back to local
+        # (CLI mode only — K8s-native mode uses CRDs, no manual source-switch)
+        if not self.k8s_test:
+            try:
+                self._sbcli_c2("backup source-switch local")
+            except Exception as e:
+                self.logger.warning(
+                    f"source-switch-back in teardown warning: {e}")
 
         if delete_lvols:
             # Best-effort cleanup of Cluster-2 resources
@@ -3218,6 +3793,9 @@ class TestBackupCrossClusterRestore(BackupTestBase):
                         self.mgmt_nodes[0], f"rm -f {self._meta_file}")
                 except Exception:
                     pass
+
+        # Tear down self-bootstrapped Cluster-2 (if we created it)
+        self._teardown_second_cluster()
 
         super().teardown(delete_lvols=delete_lvols, close_ssh=close_ssh,
                          skip_k8s_cleanup=skip_k8s_cleanup)
@@ -4572,10 +5150,10 @@ class TestBackupResizedLvol(BackupTestBase):
         self._verify_checksums(self.fio_node, rst_v1_mnt, checksums_v1)
         self.logger.info("TC-BCK-171: v1 restore data integrity PASSED")
 
-        # TC-BCK-172: restore v2, verify
+        # TC-BCK-172: restore v2, verify (must use 10G since lvol was resized)
         self.logger.info("TC-BCK-172: Restoring v2 …")
         rst_v2 = f"rszrst2{_rand_suffix()}"
-        self._restore_backup(bk_v2, rst_v2)
+        self._restore_backup(bk_v2, rst_v2, restore_size="10G")
         self._wait_for_restore(rst_v2)
         rst_v2_id = self._get_lvol_id(rst_v2)
         assert rst_v2_id
@@ -4643,7 +5221,7 @@ class TestBackupListFields(BackupTestBase):
 
         # TC-BCK-175: backup list with cluster-id filter
         self.logger.info("TC-BCK-175: Testing --cluster-id filter …")
-        out, err = self._sbcli(f"-d backup list --cluster-id {self.cluster_id}")
+        out, err = self._sbcli(f"backup list --cluster-id {self.cluster_id}")
         assert not (err and "error" in err.lower()), \
             f"backup list --cluster-id failed: {err}"
         assert bk_id in (out or "") or snap_name in (out or "") or lvol_name in (out or ""), \

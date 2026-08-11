@@ -81,6 +81,14 @@ on:
       nfs_mountpoint:
         type: string
         default: '/mnt/nfs_share/'
+      cluster_security:
+        type: string
+        default: 'none'
+        description: "Cluster setup mode. 'backup' deploys MinIO and enables backup on StorageCluster."
+      preserve_resources_on_failure:
+        type: boolean
+        default: true
+        description: 'Preserve PVCs, FIO pods, snapshots on test failure for debugging'
   workflow_dispatch:
     inputs:
       testname:
@@ -200,6 +208,10 @@ on:
         description: 'NFS mountpoint on client nodes'
         required: false
         default: '/mnt/nfs_share/'
+      # cluster_security is available via workflow_call only (25 input limit).
+      # For workflow_dispatch, backup is auto-enabled when testname contains "Backup".
+      # preserve_resources_on_failure is also workflow_call only (25 input limit);
+      # defaults to true when not provided.
 
 jobs:
   e2e-node-migration:
@@ -392,6 +404,11 @@ jobs:
           NAMESPACE=simplyblock
           KUBECTL_TIMEOUT="--request-timeout=120s"
 
+          # Run the operator's own cleanup script first (thorough helm + CR cleanup)
+          if [ -x "$GITHUB_WORKSPACE/simplyblock-operator/helm-charts/scripts/cleanup-simplyblock.sh" ]; then
+            bash $GITHUB_WORKSPACE/simplyblock-operator/helm-charts/scripts/cleanup-simplyblock.sh -f $NAMESPACE || true
+          fi
+
           # Run the shared cleanup script (handles etcd overload with
           # --request-timeout, bulk deletes, and parallel finalizer patching)
           bash $GITHUB_WORKSPACE/e2e/scripts/cleanup_k8s.sh $NAMESPACE
@@ -432,12 +449,18 @@ jobs:
             echo "Resetting hugepages to 0 on $NODE..."
             if [[ "$CLUSTER_ENV" == *"openshift"* ]]; then
               oc debug node/"$NODE" -- chroot /host bash -c \
-                "echo 0 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages" 2>/dev/null || true
+                "nvme disconnect-all 2>/dev/null; echo 0 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages" 2>/dev/null || true
+              echo "Cleaning stale simplyblock config on $NODE..."
+              oc debug node/"$NODE" -- chroot /host bash -c \
+                "rm -rf /etc/simplyblock" 2>/dev/null || true
               echo "Restarting kubelet on $NODE..."
               oc debug node/"$NODE" -- chroot /host systemctl restart kubelet 2>/dev/null || true
             else
               kubectl debug node/"$NODE" -q --image=busybox:latest -- chroot /host sh -c \
-                "echo 0 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages" 2>/dev/null || true
+                "nvme disconnect-all 2>/dev/null; echo 0 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages" 2>/dev/null || true
+              echo "Cleaning stale simplyblock config on $NODE..."
+              kubectl debug node/"$NODE" -q --image=busybox:latest -- chroot /host sh -c \
+                "rm -rf /etc/simplyblock" 2>/dev/null || true
               echo "Restarting kubelet on $NODE..."
               kubectl debug node/"$NODE" -q --image=busybox:latest -- chroot /host sh -c \
                 "systemctl restart kubelet" 2>/dev/null || true
@@ -479,6 +502,25 @@ jobs:
           echo "Waiting for vault namespace to be deleted..."
           kubectl wait --for=delete namespace/vault --timeout=120s 2>/dev/null || true
           echo "=== KMS cleanup complete ==="
+
+      # ── Remove stale labels from previous runs ──────────────────────────────
+
+      - name: Remove stale storagenodeset labels from all worker nodes
+        if: ${{ inputs.use_existing_cluster != 'true' }}
+        run: |
+          echo "Removing stale io.simplyblock.storagenodeset label from all worker nodes..."
+          # Remove from initial workers
+          IFS=',' read -ra NODES <<< "${{ inputs.worker_nodes }}"
+          # Include the migration target
+          MIGRATE_NODE="${{ inputs.migrate_to_worker }}"
+          if [ -n "$MIGRATE_NODE" ]; then
+            NODES+=("$MIGRATE_NODE")
+          fi
+          for NODE in "${NODES[@]}"; do
+            echo "Removing storagenodeset label from $NODE"
+            kubectl label node "$NODE" io.simplyblock.storagenodeset- 2>/dev/null || true
+          done
+          echo "Stale label cleanup complete."
 
       # ── Label nodes ─────────────────────────────────────────────────────────
 
@@ -546,6 +588,116 @@ jobs:
             pod-security.kubernetes.io/warn=privileged \
             --overwrite
 
+      # ── Deploy MinIO for backup tests (conditional) ────────────────────────
+
+      - name: Deploy MinIO for backup tests
+        if: >-
+          ${{
+            inputs.use_existing_cluster != 'true' &&
+            (inputs.cluster_security == 'backup' ||
+             inputs.testname == 'backup-topology' ||
+             contains(inputs.testname, 'Backup'))
+          }}
+        run: |
+          set -euxo pipefail
+          NAMESPACE=simplyblock
+
+          echo "=== Setting up MinIO for backup tests ==="
+
+          # 1. Create minio namespace + deployment + service
+          kubectl create ns minio --dry-run=client -o yaml | kubectl apply -f -
+
+          cat <<'MINIO_EOF' | kubectl apply -f -
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: minio
+            namespace: minio
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: minio
+            template:
+              metadata:
+                labels:
+                  app: minio
+              spec:
+                containers:
+                - name: minio
+                  image: minio/minio
+                  command: ["/bin/sh", "-c", "minio server /data --console-address :9001"]
+                  env:
+                  - name: MINIO_ROOT_USER
+                    value: minioadmin
+                  - name: MINIO_ROOT_PASSWORD
+                    value: minioadmin123
+                  ports:
+                  - containerPort: 9000
+                  - containerPort: 9001
+          MINIO_EOF
+
+          kubectl -n minio expose deploy/minio --port 9000 \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          # 2. Wait for MinIO pod to be ready (up to 5 min)
+          echo "Waiting for MinIO pod to be ready..."
+          for i in $(seq 1 30); do
+            READY=$(kubectl -n minio get pods --no-headers 2>/dev/null | grep -c "Running" || true)
+            if [ "$READY" -ge 1 ]; then
+              echo "MinIO pod is running"
+              break
+            fi
+            echo "MinIO not ready yet ($i/30)..."
+            sleep 10
+          done
+
+          # 3. Create backup-credentials K8s Secret in cluster namespace
+          cat <<CREDEOF | kubectl apply -f -
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: backup-credentials
+            namespace: ${NAMESPACE}
+          type: Opaque
+          stringData:
+            access_key_id: minioadmin
+            secret_access_key: minioadmin123
+          CREDEOF
+
+          echo "=== MinIO and backup credentials setup complete ==="
+
+      - name: Start MinIO trace logging
+        if: >-
+          ${{
+            inputs.use_existing_cluster != 'true' &&
+            (inputs.cluster_security == 'backup' ||
+             inputs.testname == 'backup-topology' ||
+             contains(inputs.testname, 'Backup'))
+          }}
+        run: |
+          set -euxo pipefail
+
+          # 1. Install mc (MinIO Client)
+          curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o /usr/local/bin/mc
+          chmod +x /usr/local/bin/mc
+
+          # 2. Port-forward MinIO service to localhost
+          kubectl -n minio port-forward svc/minio 9000:9000 &
+          echo "MC_PORT_FWD_PID=$!" >> "$GITHUB_ENV"
+          sleep 3
+
+          # 3. Configure mc alias
+          mc alias set myminio http://localhost:9000 minioadmin minioadmin123
+
+          # 4. Start admin trace in background
+          MINIO_TRACE_LOG="/tmp/minio-trace-${GITHUB_RUN_ID}.log"
+          echo "MINIO_TRACE_LOG=${MINIO_TRACE_LOG}" >> "$GITHUB_ENV"
+          nohup mc admin trace -v --all myminio > "${MINIO_TRACE_LOG}" 2>&1 &
+          echo "MC_TRACE_PID=$!" >> "$GITHUB_ENV"
+
+          echo "=== MinIO trace logging started (PID=$!, log=${MINIO_TRACE_LOG}) ==="
+
       - name: Wait before helm install
         if: ${{ inputs.use_existing_cluster != 'true' }}
         run: sleep 30
@@ -553,7 +705,7 @@ jobs:
       # ── Deploy CSI stack ────────────────────────────────────────────────────
 
       - name: Install cert-manager (TLS prerequisite)
-        if: ${{ inputs.use_existing_cluster != 'true' && inputs.tls_enabled == 'true' }}
+        if: ${{ inputs.use_existing_cluster != 'true' && inputs.tls_enabled }}
         run: |
           helm repo add jetstack https://charts.jetstack.io
           helm repo update
@@ -568,6 +720,7 @@ jobs:
       - name: Install Helm Chart for simplyblock-operator
         if: ${{ inputs.use_existing_cluster != 'true' }}
         run: |
+          set -euxo pipefail
           cd $GITHUB_WORKSPACE/simplyblock-operator/helm-charts/charts/simplyblock-operator/
 
           TLS_FLAGS=""
@@ -695,7 +848,7 @@ jobs:
           done
 
       - name: Setup KMS (vault) for encryption
-        if: ${{ inputs.use_existing_cluster != 'true' && inputs.tls_enabled == 'true' }}
+        if: ${{ inputs.use_existing_cluster != 'true' && inputs.tls_enabled }}
         run: |
           # Ensure vault namespace from previous run is fully terminated before installing.
           echo "Checking if vault namespace is still terminating..."
@@ -778,12 +931,33 @@ jobs:
             RESERVED_CPU_YAML='  reservedSystemCPU: "0,1,10,11,16,17,26,27"'
           fi
 
+          PCIE_MODEL_YAML=""
+          CLUSTER_ENV="${{ inputs.cluster_environment }}"
+          if [ "$CLUSTER_ENV" != "openshift-baremetal" ] && [ "$CLUSTER_ENV" != "openshift-local" ]; then
+            PCIE_MODEL_YAML='  pcieModel: "SAMSUNG MZQLB1T9HAJR-00007"'
+          fi
+
           # Build workerNodes YAML list from all worker nodes
           WORKER_YAML=""
           IFS=',' read -ra NODES <<< "${{ inputs.worker_nodes }}"
           for NODE in "${NODES[@]}"; do
             WORKER_YAML="${WORKER_YAML}    - ${NODE}"$'\n'
           done
+
+          # Conditionally build backup spec block
+          BACKUP_SPEC=""
+          CLUSTER_SEC="${{ inputs.cluster_security || 'none' }}"
+          TESTNAME_INPUT="${{ inputs.testname || '' }}"
+          if [ "$CLUSTER_SEC" = "backup" ] || [ "$TESTNAME_INPUT" = "backup-topology" ] || echo "$TESTNAME_INPUT" | grep -qi "Backup"; then
+            BACKUP_SPEC="  backup:
+              credentialsSecretRef:
+                name: backup-credentials
+              localEndpoint: http://minio.minio.svc.cluster.local:9000
+              localTesting: true
+              secondaryTarget: 0
+              snapshotBackups: true
+              withCompression: false"
+          fi
 
           # Build vault settings and encryption pool blocks (conditional on TLS)
           VAULT_SETTINGS=""
@@ -824,6 +998,7 @@ jobs:
             criticalThreshold:
               capacity: 96
               provisionedCapacity: 98
+          ${BACKUP_SPEC}
           ${VAULT_SETTINGS}
           ---
           apiVersion: storage.simplyblock.io/v1alpha1
@@ -845,7 +1020,7 @@ jobs:
             clusterImage: "${SB_REPO}:${SB_TAG}"
             spdkImage: "${SPDK_IMAGE}"
             spdkProxyImage: "${SB_REPO}:${SB_TAG}"
-            pcieModel: "SAMSUNG MZQLB1T9HAJR-00007"
+          ${PCIE_MODEL_YAML}
             driveSizeRange: "${DRIVE_SIZE_RANGE}"
             mgmtIfname: ${MGMT_IFC}
             dataIfname:
@@ -1213,10 +1388,15 @@ jobs:
             REATTACH_VOL_ARG="--reattach_volume True"
           fi
 
+          PRESERVE_ARG="--preserve_resources_on_failure True"
+          if [ "${{ inputs.preserve_resources_on_failure }}" = "false" ]; then
+            PRESERVE_ARG=""
+          fi
+
           python3 -u e2e.py \
             --testname "${{ inputs.testname || 'K8sNativeNodeMigrationTest' }}" \
             --migrate_to_worker "${{ inputs.migrate_to_worker }}" \
-            ${NEW_SSD_PCIE_ARG} ${REATTACH_VOL_ARG} \
+            ${NEW_SSD_PCIE_ARG} ${REATTACH_VOL_ARG} ${PRESERVE_ARG} \
             --ndcs $NDCS --npcs $NPCS --bs $BS --chunk_bs $CHUNK_BS \
             --run_k8s True \
             --namespace simplyblock \
@@ -1416,7 +1596,7 @@ jobs:
           retention-days: 7
 
       - name: Send Slack Notification
-        if: always() && (inputs.send_slack_notification || 'true') == 'true'
+        if: always() && inputs.send_slack_notification != false
         shell: bash
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
@@ -1769,6 +1949,35 @@ jobs:
         env:
           CLUSTER_ID: ${{ env.CLUSTER_ID }}
           MON_SECRET: ${{ secrets.MON_SECRET }}
+      - name: Stop MinIO trace logging and save
+        if: always()
+        run: |
+          set +e
+          if [ -n "${MC_TRACE_PID:-}" ]; then
+            echo "Stopping MinIO trace (PID=${MC_TRACE_PID})..."
+            kill "${MC_TRACE_PID}" 2>/dev/null || true
+            wait "${MC_TRACE_PID}" 2>/dev/null || true
+          fi
+          if [ -n "${MC_PORT_FWD_PID:-}" ]; then
+            kill "${MC_PORT_FWD_PID}" 2>/dev/null || true
+          fi
+          if [ -f "${MINIO_TRACE_LOG:-}" ]; then
+            LINES=$(wc -l < "${MINIO_TRACE_LOG}")
+            SIZE=$(du -h "${MINIO_TRACE_LOG}" | cut -f1)
+            echo "=== MinIO trace log: ${LINES} lines, ${SIZE} ==="
+            cp "${MINIO_TRACE_LOG}" e2e/minio-trace.log 2>/dev/null || true
+          else
+            echo "No MinIO trace log found (backup tests may not have run)"
+          fi
+
+      - name: Upload MinIO trace log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minio-trace-${{ github.run_id }}
+          path: e2e/minio-trace.log
+          if-no-files-found: ignore
+
       - name: Cleanup build folder
         if: always()
         run: |

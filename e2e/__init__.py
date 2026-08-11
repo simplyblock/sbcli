@@ -36,7 +36,9 @@ from e2e_tests.test_multi_node_outage import (
 
 from e2e_tests.add_node_fio_run import (
     TestAddNodesDuringFioRun,
-    TestAddK8sNodesDuringFioRun
+    TestAddK8sNodesDuringFioRun,
+    TestAddNodesDualNodePerHost,
+    TestAddK8sNodesDualNodePerHost,
 )
 from e2e_tests.k8s_native_add_node import K8sNativeAddNodeTest
 from e2e_tests.k8s_native_node_migration import K8sNativeNodeMigrationTest
@@ -124,6 +126,8 @@ from stress_test.mass_create_delete_stress import (
     MassCreateDeleteRestart_300x10_K8s,
     MassCreateDeleteRestart_300x10_6Snap_K8s,
     MassCreateDeleteRestart_300x10_10Snap_K8s,
+    MassCreateRapidRestart_6k_3Snap_Docker,
+    MassCreateRapidRestart_6k_3Snap_K8s,
 )
 from stress_test.device_failure_migration import (
     DeviceFailureMigrationNoLoadDocker,
@@ -173,8 +177,15 @@ from e2e_tests.security.test_lvol_security import (
     TestLvolSecurityMultiClientConcurrent,
 )
 
-from e2e_tests.upgrade_tests.major_upgrade import TestMajorUpgrade, TestMajorUpgradeSingleNode
-from e2e_tests.upgrade_tests.k8s_major_upgrade import K8sNativeMajorUpgrade
+from e2e_tests.upgrade_tests.major_upgrade import (
+    TestMajorUpgrade,
+    TestMajorUpgradeSingleNode,
+    TestMajorUpgradeDualNode,
+)
+from e2e_tests.upgrade_tests.k8s_major_upgrade import (
+    K8sNativeMajorUpgrade,
+    K8sNativeMajorUpgradeDualNode,
+)
 
 # ── Phase 1 functional E2E tests ─────────────────────────────────────
 from e2e_tests.test_lvol_basic import TestLvolBasicCRUD
@@ -306,6 +317,7 @@ ALL_TESTS = [
     TestSingleNodeOutage,
     TestSingleNodeFailure,
     TestAddNodesDuringFioRun,
+    TestAddNodesDualNodePerHost,
     TestRestartNodeOnAnotherHost,
     TestRebootNodeHost,
     TestMgmtNodeReboot,
@@ -323,11 +335,13 @@ ALL_TESTS = [
     TestHASingleNodeOutage,
     TestSingleNodeResizeLvolCone,
     TestAddK8sNodesDuringFioRun,
+    TestAddK8sNodesDualNodePerHost,
     K8sNativeAddNodeTest,
     K8sNativeNodeMigrationTest,
     TestSequentialNodeAdd,
     TestAddNodeSnapshotCloneOnNewNode,
     K8sNativeMajorUpgrade,
+    K8sNativeMajorUpgradeDualNode,
     # Security E2E tests
     TestLvolSecurityCombinations,
     TestLvolDynamicHostManagement,
@@ -453,6 +467,8 @@ ALL_TESTS = [
     MassCreateDeleteRestart_300x10_K8s,
     MassCreateDeleteRestart_300x10_6Snap_K8s,
     MassCreateDeleteRestart_300x10_10Snap_K8s,
+    MassCreateRapidRestart_6k_3Snap_Docker,
+    MassCreateRapidRestart_6k_3Snap_K8s,
     DeviceFailureMigrationNoLoadDocker,
     DeviceFailureMigrationUnderLoadDocker,
     DeviceFailureMigrationPCIeNoLoadDocker,
@@ -734,6 +750,8 @@ def get_stress_tests():
         MassCreateDeleteRestart_300x10_K8s,
         MassCreateDeleteRestart_300x10_6Snap_K8s,
         MassCreateDeleteRestart_300x10_10Snap_K8s,
+        MassCreateRapidRestart_6k_3Snap_Docker,
+        MassCreateRapidRestart_6k_3Snap_K8s,
         DeviceFailureMigrationNoLoadDocker,
         DeviceFailureMigrationUnderLoadDocker,
         DeviceFailureMigrationPCIeNoLoadDocker,
@@ -793,6 +811,8 @@ def get_monitoring_tests():
         MassCreateDeleteRestart_300x10_K8s,
         MassCreateDeleteRestart_300x10_6Snap_K8s,
         MassCreateDeleteRestart_300x10_10Snap_K8s,
+        MassCreateRapidRestart_6k_3Snap_Docker,
+        MassCreateRapidRestart_6k_3Snap_K8s,
         DeviceFailureMigrationNoLoadDocker,
         DeviceFailureMigrationUnderLoadDocker,
         DeviceFailureMigrationPCIeNoLoadDocker,
@@ -850,7 +870,16 @@ def get_backup_tests():
         TestBackupInterruptedBackup,
         TestBackupInterruptedRestore,
         TestBackupConcurrentIO,
-        # Backup node-add / node-migration edge cases
+    ]
+
+
+def get_backup_topology_tests():
+    """Backup tests that modify cluster topology (add-node / migration).
+
+    These require extra infrastructure (NEW_NODE_IPS, migrate_to_worker)
+    and must run in dedicated topology pipelines, not the regular backup suite.
+    """
+    return [
         TestBackupAfterNodeAdd,
         TestBackupWithFioOnNewNode,
         TestBackupAfterNodeMigration,
@@ -878,7 +907,9 @@ def get_upgrade_tests():
     tests = [
         TestMajorUpgrade,
         TestMajorUpgradeSingleNode,
+        TestMajorUpgradeDualNode,
         K8sNativeMajorUpgrade,
+        # K8sNativeMajorUpgradeDualNode,  # disabled: focus on single-node upgrade first
     ]
     return tests
 
