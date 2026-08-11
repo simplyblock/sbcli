@@ -31,6 +31,7 @@ MANAGEMENT_NODE_ID = '88888888-8888-8888-8888-888888888888'
 BACKUP_ID = '99999999-9999-9999-9999-999999999999'
 POLICY_ID = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
 MIGRATION_ID = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'
+VOLUME_NQN = 'nqn.2023-02.io.simplyblock:volume-1'
 
 
 def _apply(model, attrs):
@@ -69,7 +70,7 @@ def make_volume(**attrs) -> LVol:
     volume.pool_name = 'pool-1'
     volume.node_id = STORAGE_NODE_ID
     volume.nodes = [STORAGE_NODE_ID]
-    volume.nqn = 'nqn.2023-02.io.simplyblock:volume-1'
+    volume.nqn = VOLUME_NQN
     volume.hostname = 'snode-1'
     volume.ha_type = 'single'
     volume.size = 10 * 1024 ** 3

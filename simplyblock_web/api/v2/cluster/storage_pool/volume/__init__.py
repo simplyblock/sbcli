@@ -12,7 +12,6 @@ from simplyblock_core.models.lvol_model import LVol
 from ...._dependencies import Cluster, StoragePool, Volume
 from ...._dtos import BackupDTO, VolumeDTO, SnapshotDTO, TaskDTO
 from .... import util
-from .migration import api as migration_api
 
 
 api = APIRouter()
@@ -396,5 +395,4 @@ def delete_backups(cluster: Cluster, pool: StoragePool, volume: Volume) -> Respo
     return Response(status_code=204)
 
 
-instance_api.include_router(migration_api, prefix="/migrations")
 api.include_router(instance_api)

@@ -1341,7 +1341,7 @@ def create_batch_migration(lvol_id, target_node_id,
     group.target_nqn = lvol.nqn
     group.members = member_records
     group.snap_owners = snap_owners
-    group.phase = LVolMigrationGroup.PHASE_PRECREATE
+    group.phase = LVolMigrationGroup.PHASE_PRE_CREATED
     group.status = LVolMigrationGroup.STATUS_RUNNING
     group.create_dt = str(datetime.now())
     group.write_to_db(db_inst.kv_store)
@@ -1366,7 +1366,7 @@ def start_batch_migration(group_id,
                           max_retries=constants.LVOL_MIG_MAX_RETRIES,
                           deadline_seconds=constants.LVOL_MIG_DEADLINE_SEC):
     """
-    Promote a PHASE_PRECREATE group to PHASE_SNAP_COPY and launch worker tasks
+    Promote a PHASE_PRE_CREATED group to PHASE_SNAP_COPY and launch worker tasks
     for each member plus the main orchestrator task.
 
     Returns group_uuid on success; raises ValueError on failure.
@@ -1376,9 +1376,9 @@ def start_batch_migration(group_id,
     except KeyError:
         raise ValueError(f"LVolMigrationGroup {group_id} not found")
 
-    if group.phase != LVolMigrationGroup.PHASE_PRECREATE:
+    if group.phase != LVolMigrationGroup.PHASE_PRE_CREATED:
         raise ValueError(
-            f"Group {group_id} is not in PHASE_PRECREATE (phase={group.phase})"
+            f"Group {group_id} is not in PHASE_PRE_CREATED (phase={group.phase})"
         )
 
     now = int(time.time())
@@ -1446,7 +1446,7 @@ def cancel_batch_migration(group_id):
     """
     Cancel an active batch migration group.
 
-    For PHASE_PRECREATE groups (no tasks launched yet), cleans up all worker
+    For PHASE_PRE_CREATED groups (no tasks launched yet), cleans up all worker
     migration records inline.  For all other phases, sets canceled=True on each
     worker migration so the task runners pick it up.
 
@@ -1464,7 +1464,7 @@ def cancel_batch_migration(group_id):
     ):
         raise ValueError(f"Group {group_id} is not active (status={group.status})")
 
-    if group.phase == LVolMigrationGroup.PHASE_PRECREATE:
+    if group.phase == LVolMigrationGroup.PHASE_PRE_CREATED:
         for rec in group.members:
             try:
                 cancel_migration(rec["migration_id"])
