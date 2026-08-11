@@ -3422,7 +3422,8 @@ class TestBackupCrossClusterRestore(BackupTestBase):
         Returns the path of the metadata file on the mgmt node (or inside
         the admin pod in K8s mode).
         """
-        out, err = self._sbcli(f"backup export -o {self._meta_file}")
+        out, err = self._sbcli(
+            f"backup export --cluster {self.cluster_id} -o {self._meta_file}")
         assert not (err and "error" in err.lower()), \
             f"TC-BCK-072: backup export failed: {err}"
         self.logger.info(f"TC-BCK-072: backup export result: {(out or '').strip()}")
@@ -3596,7 +3597,8 @@ class TestBackupCrossClusterRestore(BackupTestBase):
 
         # TC-BCK-073: import metadata on Cluster-2
         self.logger.info(f"TC-BCK-073: Cluster-2 — backup import {meta_file}")
-        out, err = self._sbcli_c2(f"backup import {meta_file}")
+        out, err = self._sbcli_c2(
+            f"backup import {meta_file} --cluster-id {self._cluster2_id}")
         assert not (err and "error" in err.lower()), \
             f"TC-BCK-073: backup import on Cluster-2 failed: {err}"
         self.logger.info(f"TC-BCK-073: import result: {out.strip()}")
@@ -3604,7 +3606,8 @@ class TestBackupCrossClusterRestore(BackupTestBase):
         # TC-BCK-074: verify backup is visible on Cluster-2
         self.logger.info(
             "TC-BCK-074: Cluster-2 — backup list should show imported backup")
-        out2, err2 = self._sbcli_c2("backup list")
+        out2, err2 = self._sbcli_c2(
+            f"backup list --cluster {self._cluster2_id}")
         assert not (err2 and "error" in err2.lower()), \
             f"TC-BCK-074: backup list on Cluster-2 failed: {err2}"
         assert backup_id in out2 or out2.strip(), \
