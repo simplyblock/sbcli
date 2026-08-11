@@ -3003,27 +3003,101 @@ class TestBackupCrossClusterRestore(BackupTestBase):
         self._cluster2_id = os.environ.get("CLUSTER2_ID", "")
         self._cluster2_secret = os.environ.get("CLUSTER2_SECRET", "")
         self._cluster2_api_url = os.environ.get("CLUSTER2_API_BASE_URL", "")
+        self._cluster2_namespace = os.environ.get("CLUSTER2_NAMESPACE", "simplyblock-c2")
         self._meta_file = "/tmp/cross_cluster_backup_meta.json"
         # Resources created on Cluster-2 (separate tracking for teardown)
         self._c2_lvols: list[str] = []
         # Whether we bootstrapped cluster 2 ourselves (for teardown)
         self._self_bootstrapped_c2 = False
+        # K8s-mode: second K8sUtils instance for Cluster-2 (initialised in _check_prerequisites)
+        self._k8s_c2: "K8sUtils | None" = None
 
     # ── prerequisite check ────────────────────────────────────────────────────
 
     def _check_prerequisites(self):
         """Ensure Cluster-2 credentials are available.
 
-        If CLUSTER2_* env vars are not set, attempt to bootstrap a second
-        cluster by splitting the available storage nodes in half.
+        K8s mode:
+            Cluster-2 is pre-deployed by the pipeline in namespace
+            ``CLUSTER2_NAMESPACE`` (default ``simplyblock-c2``).  Credentials
+            are extracted from the admin pod in that namespace.
+
+        Docker mode:
+            If CLUSTER2_* env vars are not set, attempt to bootstrap a second
+            cluster by splitting the available storage nodes in half.
         """
         if self._cluster2_id and self._cluster2_secret and self._cluster2_api_url:
+            if self.k8s_test:
+                self._init_k8s_c2()
             return  # env vars already set
+
+        if self.k8s_test:
+            # In K8s mode, discover Cluster-2 from its namespace admin pod
+            self._init_k8s_c2()
+            self._discover_k8s_cluster2()
+            return
 
         self.logger.info(
             "TC-BCK-070: CLUSTER2_* env vars not set — "
             "attempting to bootstrap a second cluster from available nodes")
         self._bootstrap_second_cluster()
+
+    # ── K8s mode: Cluster-2 namespace discovery ─────────────────────────────
+
+    def _init_k8s_c2(self):
+        """Initialise a K8sUtils instance pointing at the Cluster-2 namespace."""
+        if self._k8s_c2 is not None:
+            return
+        from utils.k8s_utils import K8sUtils
+        mgmt_node = self.mgmt_nodes[0]
+        self._k8s_c2 = K8sUtils(
+            ssh_obj=self.ssh_obj,
+            mgmt_node=mgmt_node,
+            namespace=self._cluster2_namespace,
+        )
+        self.logger.info(
+            f"[K8s] Cluster-2 K8sUtils initialised for namespace "
+            f"'{self._cluster2_namespace}' on {mgmt_node}")
+
+    def _discover_k8s_cluster2(self):
+        """Extract Cluster-2 ID and secret from the admin pod in C2 namespace."""
+        self.logger.info(
+            f"TC-BCK-070: discovering Cluster-2 from namespace "
+            f"'{self._cluster2_namespace}'")
+        # cluster list via C2 admin pod
+        out, err = self._k8s_c2.exec_sbcli(f"{self.base_cmd} cluster list")
+        if not out or "error" in (err or "").lower():
+            raise RuntimeError(
+                f"TC-BCK-070: cannot list clusters in namespace "
+                f"'{self._cluster2_namespace}': {err}")
+
+        # Extract the cluster UUID (should be the only cluster in this namespace)
+        import re
+        uuid_re = re.compile(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+            re.IGNORECASE,
+        )
+        for line in out.split("\n"):
+            m = uuid_re.search(line)
+            if m:
+                self._cluster2_id = m.group(0)
+                break
+        if not self._cluster2_id:
+            raise RuntimeError(
+                f"TC-BCK-070: no cluster UUID found in namespace "
+                f"'{self._cluster2_namespace}' output: {out[:300]}")
+
+        # Get secret
+        secret_out, _ = self._k8s_c2.exec_sbcli(
+            f"{self.base_cmd} cluster get-secret {self._cluster2_id}")
+        self._cluster2_secret = (secret_out or "").strip().split("\n")[-1].strip()
+
+        # API URL: same mgmt node, both clusters share the management API
+        self._cluster2_api_url = self.api_base_url
+
+        self.logger.info(
+            f"TC-BCK-070: Cluster-2 discovered — ID={self._cluster2_id}, "
+            f"namespace={self._cluster2_namespace}")
 
     # ── self-bootstrap second cluster ────────────────────────────────────────
 
@@ -3314,7 +3388,21 @@ class TestBackupCrossClusterRestore(BackupTestBase):
     # ── Cluster-2 sbcli helper ────────────────────────────────────────────────
 
     def _sbcli_c2(self, subcmd: str) -> tuple[str, str]:
-        """Run sbcli command targeted at Cluster-2."""
+        """Run sbcli command targeted at Cluster-2.
+
+        K8s mode:  kubectl exec into the admin pod in C2's namespace.
+        Docker:    SSH to mgmt node with CLUSTER_ID/SECRET/API_BASE_URL env prefix.
+        """
+        if self.k8s_test and self._k8s_c2 is not None:
+            cmd = (
+                f"CLUSTER_ID={self._cluster2_id} "
+                f"CLUSTER_SECRET={self._cluster2_secret} "
+                f"API_BASE_URL={self._cluster2_api_url} "
+                f"{self.base_cmd} {subcmd}"
+            )
+            out, err = self._k8s_c2.exec_sbcli(cmd)
+            self.logger.debug(f"CMD (k8s-c2): {cmd}\nOUT: {out}\nERR: {err}")
+            return out, err
         env_prefix = (
             f"CLUSTER_ID={self._cluster2_id} "
             f"CLUSTER_SECRET={self._cluster2_secret} "
@@ -3330,23 +3418,41 @@ class TestBackupCrossClusterRestore(BackupTestBase):
         Export backup metadata from Cluster-1 using the CLI backup export
         command, writing a JSON file to self._meta_file.
 
-        Returns the path of the metadata file on the mgmt node.
+        In K8s mode, the export runs inside C1's admin pod, then the file
+        is transferred into C2's admin pod via ``kubectl cp``.
+
+        Returns the path of the metadata file on the mgmt node (or inside
+        the admin pod in K8s mode).
         """
         out, err = self._sbcli(f"backup export -o {self._meta_file}")
         assert not (err and "error" in err.lower()), \
             f"TC-BCK-072: backup export failed: {err}"
         self.logger.info(f"TC-BCK-072: backup export result: {(out or '').strip()}")
+
+        if self.k8s_test and self._k8s_c2 is not None:
+            # Transfer metadata file from C1 admin pod → C2 admin pod
+            c1_ns = self.sbcli_utils.k8s.namespace
+            c1_pod = self.sbcli_utils.k8s.get_admin_pod()
+            c2_ns = self._cluster2_namespace
+            c2_pod = self._k8s_c2.get_admin_pod()
+            local_tmp = f"/tmp/cc_backup_meta_{int(time.time())}.json"
+            self.logger.info(
+                f"TC-BCK-072: transferring metadata "
+                f"{c1_ns}/{c1_pod} → {c2_ns}/{c2_pod}")
+            # kubectl cp from C1 admin pod to runner
+            self._k8s_c2._exec_kubectl(
+                f"kubectl cp {c1_ns}/{c1_pod}:{self._meta_file} {local_tmp}")
+            # kubectl cp from runner into C2 admin pod
+            self._k8s_c2._exec_kubectl(
+                f"kubectl cp {local_tmp} {c2_ns}/{c2_pod}:{self._meta_file}")
+            self.logger.info("TC-BCK-072: metadata file transferred to C2 admin pod ✓")
+
         return self._meta_file
 
     # ── main run ──────────────────────────────────────────────────────────────
 
     def run(self):
         self.logger.info("=== TestBackupCrossClusterRestore START ===")
-        if self.k8s_test:
-            self.logger.info(
-                "TestBackupCrossClusterRestore requires CLI-only operations "
-                "(export/import/source-switch) — skipping in K8s mode.")
-            return
 
         # TC-BCK-070: check prerequisites
         self._check_prerequisites()
