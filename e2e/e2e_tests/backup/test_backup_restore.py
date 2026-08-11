@@ -3005,6 +3005,10 @@ class TestBackupCrossClusterRestore(BackupTestBase):
         self._cluster2_api_url = os.environ.get("CLUSTER2_API_BASE_URL", "")
         self._cluster2_namespace = os.environ.get("CLUSTER2_NAMESPACE", "simplyblock-c2")
         self._meta_file = "/tmp/cross_cluster_backup_meta.json"
+        # Distinct pool names per cluster to avoid ambiguity
+        self.pool_name = "bck_pool_c1"
+        self._cluster2_pool_name = os.environ.get(
+            "CLUSTER2_POOL", "bck_pool_c2")
         # Resources created on Cluster-2 (separate tracking for teardown)
         self._c2_lvols: list[str] = []
         # Whether we bootstrapped cluster 2 ourselves (for teardown)
@@ -3336,7 +3340,7 @@ class TestBackupCrossClusterRestore(BackupTestBase):
         self.logger.info("  [C2] Creating pool on Cluster-2")
         self.ssh_obj.exec_command(
             node=mgmt_ip,
-            command=f"{sbcli_cmd} pool add {self.pool_name} {c2_id}"
+            command=f"{sbcli_cmd} pool add {self._cluster2_pool_name} {c2_id}"
         )
 
         # Step 6: extract Cluster-2 secret
@@ -3711,10 +3715,10 @@ class TestBackupCrossClusterRestore(BackupTestBase):
             self.logger.info(
                 f"TC-BCK-075: Cluster-2 — backup restore "
                 f"{backup_id} → {restored_name}")
-            c2_pool = os.environ.get("CLUSTER2_POOL", self.pool_name)
             out3, err3 = self._sbcli_c2(
                 f"backup restore {backup_id} "
-                f"--lvol {restored_name} --pool {c2_pool} "
+                f"--lvol {restored_name} "
+                f"--pool {self._cluster2_pool_name} "
                 f"--cluster-id {self._cluster2_id}")
             assert not (err3 and "error" in err3.lower()), \
                 f"TC-BCK-075: restore on Cluster-2 failed: {err3}"
