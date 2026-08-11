@@ -762,6 +762,21 @@ class StorageNode(BaseNodeObject):
                          lvs_node.lvstore, self.get_id())
             return False
 
+        # Assert the hublvol multipath policy on the way out. The coordinator
+        # already does this, but it is skipped entirely when the remote bdev
+        # already exists (the guard at the top of this method), which leaves a
+        # window where a re-attached hublvol runs at SPDK's ACTIVE_PASSIVE
+        # default and one NIC of the leader carries all hub IO. Observed on a
+        # non-outaged peer during soak 2026-08-11 (LVS_14 at active_passive
+        # until a later reconcile re-asserted it). wait=False: this is the last
+        # step of the in-freeze / port-block path, so it must not poll.
+        from simplyblock_core.utils.hublvol_reconnect import (
+            ensure_hublvol_active_active,
+        )
+        ensure_hublvol_active_active(
+            rpc_client, lvs_node.hublvol.bdev_name, self.get_id(), role,
+            wait=False, request_timeout=rpc_timeout)
+
         return True
 
     def add_hublvol_failover_path(self, primary_node, failover_node):

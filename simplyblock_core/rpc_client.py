@@ -20,6 +20,42 @@ from simplyblock_core.utils.secrets import unwrap_secrets_for_send
 logger = utils.get_logger()
 
 
+def namespace_matches(ns, dev_name=None, nsid=None, uuid=None):
+    """True iff a namespace dict from ``nvmf_get_subsystems`` is the namespace
+    identified by ``(dev_name, nsid, uuid)``.
+
+    Identity matches on EITHER the namespace UUID or the bdev name, because
+    SPDK reports ``bdev_name`` as whichever name the bdev was registered
+    under. For an lvol that is its **raw UUID**, not the ``<lvs>/<lvol>``
+    alias carried in ``lvol.top_bdev`` — so comparing bdev_name alone reports
+    "no namespace" for a namespace that is plainly present.
+
+    That false negative is not cosmetic. Soak 2026-08-11, first outage pair:
+    on both recovered nodes every lvol subsystem ended up with its namespace
+    attached and **zero listeners**, because ``add_lvol_thread``'s
+    post-condition ("refusing to add a listener for an empty subsystem", the
+    guard added for the 2026-08-09 listener-without-namespace incident) read
+    the namespace as absent and skipped listener creation. 4 of 6 volumes
+    silently lost a path, the control plane still reported every lvol ``ha``,
+    and fio never errored because the primary path still served IO. The
+    lvol-monitor repair loop detected it correctly and then re-refused it on
+    every cycle for the same reason, so the state was permanent.
+
+    A contradicting UUID still disqualifies a bdev_name match: the same bdev
+    name carrying a different volume UUID is a real conflict, not a match.
+    """
+    if nsid is not None and ns.get("nsid") != nsid:
+        return False
+    ns_uuid = str(ns.get("uuid") or "").lower()
+    want_uuid = str(uuid or "").lower()
+    if want_uuid and ns_uuid:
+        # Both sides know the UUID: it is authoritative in both directions.
+        return ns_uuid == want_uuid
+    if dev_name is not None:
+        return ns.get("bdev_name") == dev_name
+    return True
+
+
 _response_schema = {
     "$schema": "http://json-schema.org/draft-07/schema#",
     "title": "JSON-RPC 2.0 Response",
@@ -490,14 +526,8 @@ class RPCClient:
         if err and idempotent:
             try:
                 for ns in (self.subsystem_get(nqn) or {}).get("namespaces", []):
-                    if ns.get("bdev_name") != dev_name:
-                        continue
-                    if nsid is not None and ns.get("nsid") != nsid:
-                        continue
-                    if uuid is not None and ns.get("uuid") and ns.get("uuid") != uuid:
-                        # Same bdev at a different nsid is fine to no-op,
-                        # but a mismatched uuid on the same bdev is a real
-                        # conflict — keep the original error.
+                    if not namespace_matches(ns, dev_name=dev_name, nsid=nsid,
+                                             uuid=uuid):
                         continue
                     existing_nsid = ns.get("nsid")
                     logger.info(

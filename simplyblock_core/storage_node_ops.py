@@ -38,7 +38,7 @@ from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.prom_client import PromClient
-from simplyblock_core.rpc_client import RPCClient, RPCErrorCode, RPCRemoteError, RPCException  # noqa: F401  (RPCClient kept as a patch target for tests)
+from simplyblock_core.rpc_client import RPCClient, RPCErrorCode, RPCRemoteError, RPCException, namespace_matches  # noqa: F401  (RPCClient kept as a patch target for tests)
 from simplyblock_core.snode_client import SNodeClient, SNodeClientException
 from simplyblock_web import node_utils
 from simplyblock_core.utils import addNvmeDevices
@@ -69,21 +69,44 @@ class LVSRestartRequiredError(Exception):
         super().__init__(msg)
 
 
-def _rpc_subsystem_has_ns(rpc_client, nqn, nsid=None, bdev_name=None):
-    """True iff the subsystem has a namespace matching nsid and/or bdev_name."""
+def _rpc_subsystem_has_ns(rpc_client, nqn, nsid=None, bdev_name=None, uuid=None):
+    """True iff the subsystem has the namespace identified by nsid/bdev_name/uuid.
+
+    Matching is delegated to :func:`rpc_client.namespace_matches`, which
+    accepts the namespace UUID as well as the bdev name — SPDK reports an
+    lvol's namespace under its raw UUID rather than the ``<lvs>/<lvol>``
+    alias, and a bdev_name-only comparison therefore misses it. Always pass
+    ``uuid`` when the caller knows it.
+    """
     try:
         subsystem = rpc_client.subsystem_get(nqn)
         if subsystem is None:
             return False
-        for ns in subsystem.get('namespaces', []) or []:
-            if nsid is not None and ns.get('nsid') != nsid:
-                continue
-            if bdev_name is not None and ns.get('bdev_name') != bdev_name:
-                continue
-            return True
-        return False
+        return any(
+            namespace_matches(ns, dev_name=bdev_name, nsid=nsid, uuid=uuid)
+            for ns in subsystem.get('namespaces', []) or []
+        )
     except Exception:
         return False
+
+
+def _rpc_wait_subsystem_has_ns(rpc_client, nqn, nsid=None, bdev_name=None,
+                               uuid=None, tries=10, delay=0.2):
+    """:func:`_rpc_subsystem_has_ns` with a bounded poll.
+
+    ``nvmf_subsystem_add_ns`` can report success a moment before the namespace
+    is observable on the subsystem, so a single read is not enough to conclude
+    "empty subsystem" and permanently skip listener creation. Polling briefly
+    keeps the post-condition strict without turning a propagation delay into
+    a volume that has silently lost a path.
+    """
+    for attempt in range(max(1, tries)):
+        if _rpc_subsystem_has_ns(rpc_client, nqn, nsid=nsid,
+                                 bdev_name=bdev_name, uuid=uuid):
+            return True
+        if attempt + 1 < tries:
+            time.sleep(delay)
+    return False
 
 
 def _rpc_subsystem_has_listener(rpc_client, nqn, trtype, traddr, trsvcid):
@@ -9468,7 +9491,8 @@ def add_lvol_thread(lvol, snode: StorageNode, lvol_ana_state="optimized"):
             return False, msg
 
     # Add NS to subsystem (idempotent: skip if already bound with matching NSID).
-    if _rpc_subsystem_has_ns(rpc_client, lvol.nqn, nsid=lvol.ns_id, bdev_name=lvol.top_bdev):
+    if _rpc_subsystem_has_ns(rpc_client, lvol.nqn, nsid=lvol.ns_id,
+                             bdev_name=lvol.top_bdev, uuid=lvol.uuid):
         logger.info("Namespace nsid=%s already on subsystem %s, skipping add_ns",
                     lvol.ns_id, lvol.nqn)
     else:
@@ -9489,10 +9513,20 @@ def add_lvol_thread(lvol, snode: StorageNode, lvol_ana_state="optimized"):
     # volume all of its I/O. Both ways of arriving here are covered — an add_ns
     # that failed (above) and an idempotency check that wrongly reported the
     # namespace present (the skip branch above; observed for 4 of those 19).
-    if not _rpc_subsystem_has_ns(rpc_client, lvol.nqn, nsid=lvol.ns_id, bdev_name=lvol.top_bdev):
+    #
+    # The check must identify the namespace by UUID as well as bdev name, and
+    # must tolerate a short propagation delay. Getting either wrong inverts the
+    # incident it guards against: soak 2026-08-11 saw this post-condition read
+    # a present namespace as absent (SPDK reports it under the lvol's raw UUID,
+    # not the <lvs>/<lvol> alias) and skip listener creation on both recovered
+    # nodes, leaving namespace-without-listener on 4 of 6 volumes — a silent
+    # path loss the control plane never flagged, re-refused by the lvol-monitor
+    # repair loop on every cycle.
+    if not _rpc_wait_subsystem_has_ns(rpc_client, lvol.nqn, nsid=lvol.ns_id,
+                                      bdev_name=lvol.top_bdev, uuid=lvol.uuid):
         msg = (f"Subsystem {lvol.nqn} on {snode.get_id()} has no namespace "
-               f"nsid={lvol.ns_id} ({lvol.top_bdev}) after registration; "
-               f"refusing to add a listener for an empty subsystem")
+               f"nsid={lvol.ns_id} ({lvol.top_bdev}, uuid={lvol.uuid}) after "
+               f"registration; refusing to add a listener for an empty subsystem")
         logger.error(msg)
         return False, msg
 
