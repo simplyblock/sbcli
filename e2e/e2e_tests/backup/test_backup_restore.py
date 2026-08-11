@@ -3099,6 +3099,84 @@ class TestBackupCrossClusterRestore(BackupTestBase):
             f"TC-BCK-070: Cluster-2 discovered — ID={self._cluster2_id}, "
             f"namespace={self._cluster2_namespace}")
 
+    # ── CLI overrides (Docker mode) ─────────────────────────────────────────
+    # In multi-cluster Docker setups the REST API helpers in sbcli_utils
+    # hit issues that won't be fixed until v2.  Override the base-class
+    # methods to use sbctl CLI commands instead.
+
+    def _ensure_pool_and_sc(self, pool_name=None, retries=3):
+        if self.k8s_test:
+            return super()._ensure_pool_and_sc(
+                pool_name=pool_name, retries=retries)
+        target = pool_name or self.pool_name
+        self.logger.info(f"[CLI] Creating pool '{target}' via sbctl")
+        out, err = self._sbcli(
+            f"pool add {target} {self.cluster_id}")
+        # Tolerate "already exists" — reuse the pool
+        if err and "error" in err.lower():
+            if "already exists" not in (err or "").lower():
+                raise RuntimeError(f"pool add failed: {err}")
+            self.logger.info(f"[CLI] Pool '{target}' already exists, reusing")
+        else:
+            self.logger.info(
+                f"[CLI] Pool '{target}' created: {(out or '').strip()}")
+        return self.pool_name
+
+    def _create_lvol(self, name=None, size=None,
+                     crypto=False, ndcs=None, npcs=None):
+        if self.k8s_test:
+            return super()._create_lvol(
+                name=name, size=size, crypto=crypto,
+                ndcs=ndcs, npcs=npcs)
+        name = name or f"bck_{_rand_suffix()}"
+        size = size or self.lvol_size
+        cmd = f"lvol add {name} {size} {self.pool_name}"
+        if crypto:
+            cmd += " --crypto"
+        out, err = self._sbcli(cmd)
+        assert not (err and "error" in err.lower()), \
+            f"lvol add failed: {err}"
+        # sbctl lvol add prints the lvol UUID
+        lvol_id = (out or "").strip().split()[-1] if out and out.strip() else name
+        self.created_lvols.append(name)
+        self.logger.info(
+            f"[CLI] Created lvol '{name}' (id={lvol_id})")
+        return name, lvol_id
+
+    def _connect_and_mount(self, lvol_name, lvol_id,
+                           mount=None, format_disk=True):
+        if self.k8s_test:
+            return super()._connect_and_mount(
+                lvol_name, lvol_id, mount=mount, format_disk=format_disk)
+        mount = mount or f"{self.mount_path}/{lvol_name}"
+        # Get NVMe connect strings via CLI
+        out, err = self._sbcli(f"volume connect {lvol_name}")
+        connect_lines = [
+            ln.strip() for ln in (out or "").split("\n")
+            if ln.strip() and "nvme connect" in ln
+        ]
+        assert connect_lines, (
+            f"No nvme connect strings for {lvol_name}: {out}")
+
+        initial = self.ssh_obj.get_devices(node=self.fio_node)
+        for cmd in connect_lines:
+            self.ssh_obj.exec_command(node=self.fio_node, command=cmd)
+        sleep_n_sec(3)
+        final = self.ssh_obj.get_devices(node=self.fio_node)
+        new_devs = [d for d in final if d not in initial]
+        assert new_devs, (
+            f"No new block device after connecting {lvol_name}")
+        device = f"/dev/{new_devs[0]}"
+        if format_disk:
+            self.ssh_obj.format_disk(
+                node=self.fio_node, device=device, fs_type="ext4")
+        self.ssh_obj.exec_command(self.fio_node, f"mkdir -p {mount}")
+        self.ssh_obj.mount_path(
+            node=self.fio_node, device=device, mount_path=mount)
+        self.mounted.append((self.fio_node, mount))
+        self.connected.append(lvol_id)
+        return device, mount
+
     # ── self-bootstrap second cluster ────────────────────────────────────────
 
     def _bootstrap_second_cluster(self):
