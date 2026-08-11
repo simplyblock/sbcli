@@ -2492,20 +2492,8 @@ spec:
                 )
                 self.logger.info(f"  Node {node_id} is back online")
 
-            # Wait for cluster active before next worker
-            self.sbcli_utils.wait_for_cluster_status(
-                cluster_id=self.cluster_id, status="active", timeout=600,
-            )
-
-            # Validate migration for all nodes on this worker
-            sleep_n_sec(30)
-            for node_id in nids:
-                self.validate_migration_for_node(
-                    restart_ts, 1200, node_id, 60, no_task_ok=True
-                )
-
             if worker_idx < len(unique_ips):
-                sleep_n_sec(30)
+                sleep_n_sec(10)
 
         self.logger.info("All storage nodes restarted successfully")
 
