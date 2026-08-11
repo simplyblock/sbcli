@@ -3326,22 +3326,54 @@ class TestBackupCrossClusterRestore(BackupTestBase):
         for ip in c2_ips:
             self.logger.info(f"  [C2] Adding storage node {ip} to Cluster-2")
             add_cmd = f"{add_base} {c2_id} {ip}:5000 {ifname}"
-            self.ssh_obj.exec_command(node=mgmt_ip, command=add_cmd)
+            out, err = self.ssh_obj.exec_command(node=mgmt_ip, command=add_cmd)
+            if err and "error" in err.lower():
+                raise RuntimeError(
+                    f"TC-BCK-070: failed to add node {ip} to Cluster-2: {err}")
+            if out and "Error" in out:
+                raise RuntimeError(
+                    f"TC-BCK-070: failed to add node {ip} to Cluster-2: {out}")
             sleep_n_sec(3)
+
+        # Verify nodes were added
+        sn_out, _ = self.ssh_obj.exec_command(
+            node=mgmt_ip, command=f"{sbcli_cmd} sn list")
+        self.logger.info(f"  [C2] Storage node list after add:\n{sn_out}")
 
         # Step 4: activate Cluster-2
         self.logger.info("  [C2] Activating Cluster-2")
-        self.ssh_obj.exec_command(
+        out, err = self.ssh_obj.exec_command(
             node=mgmt_ip,
             command=f"{sbcli_cmd} -d cluster activate {c2_id}"
         )
+        if err and "error" in err.lower():
+            raise RuntimeError(
+                f"TC-BCK-070: failed to activate Cluster-2: {err}")
+        if out and "Error" in out:
+            raise RuntimeError(
+                f"TC-BCK-070: failed to activate Cluster-2: {out}")
+
+        # Verify cluster is ACTIVE
+        cl_out, _ = self.ssh_obj.exec_command(
+            node=mgmt_ip, command=f"{sbcli_cmd} cluster list")
+        if "ACTIVE" not in cl_out or c2_id not in cl_out:
+            raise RuntimeError(
+                f"TC-BCK-070: Cluster-2 {c2_id} not ACTIVE after "
+                f"activate:\n{cl_out}")
+        self.logger.info(f"  [C2] Cluster list after activate:\n{cl_out}")
 
         # Step 5: create pool on Cluster-2
         self.logger.info("  [C2] Creating pool on Cluster-2")
-        self.ssh_obj.exec_command(
+        out, err = self.ssh_obj.exec_command(
             node=mgmt_ip,
             command=f"{sbcli_cmd} pool add {self._cluster2_pool_name} {c2_id}"
         )
+        if err and "error" in err.lower():
+            raise RuntimeError(
+                f"TC-BCK-070: failed to create pool on Cluster-2: {err}")
+        if out and "Error" in out:
+            raise RuntimeError(
+                f"TC-BCK-070: failed to create pool on Cluster-2: {out}")
 
         # Step 6: extract Cluster-2 secret
         out, _ = self.ssh_obj.exec_command(
@@ -3349,6 +3381,9 @@ class TestBackupCrossClusterRestore(BackupTestBase):
             command=f"{sbcli_cmd} cluster get-secret {c2_id}"
         )
         c2_secret = out.strip().split("\n")[0].strip()
+        if not c2_secret:
+            raise RuntimeError(
+                "TC-BCK-070: failed to extract Cluster-2 secret")
         self.logger.info("  [C2] Cluster-2 secret obtained")
 
         # Set instance attributes
