@@ -884,7 +884,7 @@ jobs:
           fi
           NEW_NODES_ARGS=()
           if [[ -n "${NEW_NODE_IPS:-}" ]]; then
-            NEW_NODES_ARGS=(--new_nodes ${NEW_NODE_IPS})
+            NEW_NODES_ARGS=(--new_nodes "${NEW_NODE_IPS}")
           fi
           # Build extra cluster args for inter-test reset
           # These are passed directly to 'sbcli cluster create' so use
