@@ -3633,7 +3633,8 @@ class TestBackupCrossClusterRestore(BackupTestBase):
             c2_pool = os.environ.get("CLUSTER2_POOL", self.pool_name)
             out3, err3 = self._sbcli_c2(
                 f"backup restore {backup_id} "
-                f"--lvol {restored_name} --pool {c2_pool}")
+                f"--lvol {restored_name} --pool {c2_pool} "
+                f"--cluster-id {self._cluster2_id}")
             assert not (err3 and "error" in err3.lower()), \
                 f"TC-BCK-075: restore on Cluster-2 failed: {err3}"
             self.logger.info(
