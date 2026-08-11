@@ -135,6 +135,10 @@ def _ensure_network(ec2, run_id, availability_zone):
          "IpRanges": [{"CidrIp": "0.0.0.0/0"}]},
         {"IpProtocol": "tcp", "FromPort": 443, "ToPort": 443,
          "IpRanges": [{"CidrIp": "0.0.0.0/0"}]},
+        # k8s NodePort range — the management API is exposed there (it is a
+        # ClusterIP service with no ingress, so port 80 is not listening).
+        {"IpProtocol": "tcp", "FromPort": 30000, "ToPort": 32767,
+         "IpRanges": [{"CidrIp": "0.0.0.0/0"}]},
     ])
     return {"vpc": vpc["VpcId"], "subnet": subnet["SubnetId"], "sg": sg["GroupId"],
             "igw": igw["InternetGatewayId"], "availability_zone": availability_zone}

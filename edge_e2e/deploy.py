@@ -51,6 +51,37 @@ CENTRAL_VOLUME = "edge-e2e-central-vol"
 # NB: the bare-metal bootstrap-cluster.sh path is deliberately NOT used: it
 # assumes a terraform/bastion topology with root SSH and a docker daemon on
 # the management host, none of which belong in a kubernetes-only deployment.
+# --- Which BUILD of simplyblock to deploy ------------------------------------
+#
+# Every push to any branch is built and published by .github/workflows/
+# docker-image.yml as simplyblock/simplyblock:<branch> and
+# public.ecr.aws/simply-block/simplyblock:<branch>-<sha8> (the soak scripts in
+# scripts/ pin exactly that, e.g. SB_TAG = "md-journal-05ed69d6"). The chart
+# otherwise installs the RELEASED image, which does not contain the edge API —
+# POST /clusters/edge would 404. Pin the branch build instead.
+SB_REGISTRY = os.getenv("EDGE_E2E_REGISTRY", "public.ecr.aws/simply-block/simplyblock")
+
+
+def _git(*args) -> str:
+    import subprocess
+    return subprocess.run(["git", *args], cwd=pathlib.Path(__file__).parent.parent,
+                          capture_output=True, text=True).stdout.strip()
+
+
+def sb_image() -> str:
+    """<registry>:<branch>-<sha8> for the checked-out commit, or an explicit
+    EDGE_E2E_SB_IMAGE override."""
+    override = os.getenv("EDGE_E2E_SB_IMAGE")
+    if override:
+        return override
+    branch = (os.getenv("EDGE_E2E_BRANCH")
+              or _git("rev-parse", "--abbrev-ref", "HEAD")).replace("/", "-")
+    sha8 = _git("rev-parse", "HEAD")[:8]
+    return f"{SB_REGISTRY}:{branch}-{sha8}"
+
+
+SB_BRANCH = os.getenv("EDGE_E2E_BRANCH") or _git("rev-parse", "--abbrev-ref", "HEAD")
+
 HELM_REPO_NAME = "simplyblock"
 HELM_REPO_URL = os.getenv(
     "EDGE_E2E_HELM_REPO", "https://simplyblock.github.io/helm-charts/charts")
@@ -58,16 +89,21 @@ HELM_RELEASE = "simplyblock-operator"
 HELM_CHART = f"{HELM_REPO_NAME}/simplyblock-operator"
 K8S_NAMESPACE = os.getenv("EDGE_E2E_NAMESPACE", "simplyblock")
 CENTRAL_CLUSTER_CR = "edge-e2e-central"
+# The CRD validator requires maxLogicalVolumeCount, workerNodes and
+# mgmtIfname whenever `action` is not set. ens5 is the nitro primary NIC.
+CENTRAL_MGMT_IFNAME = os.getenv("EDGE_E2E_MGMT_IFNAME", "ens5")
+CENTRAL_MAX_LVOLS = int(os.getenv("EDGE_E2E_MAX_LVOLS", "10"))
 
 INSTALL_HELM = (
     "command -v helm >/dev/null 2>&1 || "
     "curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 "
     "| sudo bash")
 
+# Install the CLI from the SAME branch as the image (scripts/setup_lblk_*.py
+# use `pip install git+https://github.com/simplyblock-io/sbcli@<branch>`).
 INSTALL_SBCTL = (
-    "which sbctl >/dev/null 2>&1 || { "
-    "sudo apt-get update -y && sudo apt-get install -y python3-pip && "
-    "sudo pip3 install -q sbctl; }")
+    "sudo apt-get update -y && sudo apt-get install -y python3-pip git && "
+    f"sudo pip3 install -q --upgrade 'git+https://github.com/simplyblock/sbcli@{SB_BRANCH}'")
 
 
 # k3s writes its admin kubeconfig here; helm run under sudo has no
@@ -77,27 +113,28 @@ KUBECONFIG = "/etc/rancher/k3s/k3s.yaml"
 
 def helm_install_cmd() -> str:
     helm = f"sudo KUBECONFIG={KUBECONFIG} helm"
+    image = sb_image()
+    repository, tag = image.rsplit(":", 1)
     return (
         f"{helm} repo add {HELM_REPO_NAME} {HELM_REPO_URL} && "
         f"{helm} repo update && "
         f"{helm} upgrade --install {HELM_RELEASE} {HELM_CHART} "
-        f"--namespace {K8S_NAMESPACE} --create-namespace --wait --timeout 20m")
+        f"--namespace {K8S_NAMESPACE} --create-namespace "
+        f"--set image.repository={repository} --set image.tag={tag} "
+        f"--wait --timeout 20m")
 
 
 def storage_cluster_manifest(worker_names) -> str:
-    """Central hyperscale cluster declared as CRs: one StorageCluster plus a
-    StorageNode per worker. Geometry mirrors the sbcli cluster params."""
-    nodes = "\n".join(
-        f"""---
-apiVersion: storage.simplyblock.io/v1alpha1
-kind: StorageNode
-metadata:
-  name: {name}
-  namespace: {K8S_NAMESPACE}
-spec:
-  storageClusterRef: {CENTRAL_CLUSTER_CR}
-  workerNode: {name}"""
-        for name in worker_names)
+    """Central hyperscale cluster as CRs, matching the schema of the CHART
+    THAT IS INSTALLED (26.2.8), read from the live CRD via `kubectl explain`
+    — not from the operator's main-branch Go types, which describe a newer
+    API (a StorageNodeSet layer that this chart does not ship, and a
+    StorageNode keyed by storageNodeSetRef).
+
+    Here a single StorageNode CR carries `clusterName` plus the `workerNodes`
+    list.
+    """
+    workers = "".join(f"\n    - {name}" for name in worker_names)
     return f"""apiVersion: storage.simplyblock.io/v1alpha1
 kind: StorageCluster
 metadata:
@@ -106,7 +143,17 @@ metadata:
 spec:
   haType: ha
   blockSize: 512
-{nodes}
+---
+apiVersion: storage.simplyblock.io/v1alpha1
+kind: StorageNode
+metadata:
+  name: {CENTRAL_CLUSTER_CR}-nodes
+  namespace: {K8S_NAMESPACE}
+spec:
+  clusterName: {CENTRAL_CLUSTER_CR}
+  maxLogicalVolumeCount: {CENTRAL_MAX_LVOLS}
+  mgmtIfname: {CENTRAL_MGMT_IFNAME}
+  workerNodes:{workers}
 """
 
 
@@ -134,11 +181,18 @@ def bootstrap_central(state):
     print(f"Installing simplyblock via helm on {server}...")
     print(helpers.ssh(state, server, command, timeout=3600)[-2000:])
 
+    # Poll from here with SHORT ssh calls rather than holding one session open
+    # for a 10-minute `kubectl wait`: a dropped session failed the whole deploy
+    # even though the control plane was still converging.
     print("Waiting for the ControlPlane to report Ready...")
-    helpers.ssh(
-        state, server,
-        f"sudo kubectl -n {K8S_NAMESPACE} wait controlplane --all "
-        "--for=jsonpath='{.status.phase}'=Ready --timeout=600s", timeout=900)
+    helpers.wait_for(
+        "ControlPlane phase=Ready",
+        lambda: "Ready" in helpers.ssh(
+            state, server,
+            f"sudo kubectl -n {K8S_NAMESPACE} get controlplane "
+            "-o jsonpath='{.items[*].status.phase}'",
+            check=False, timeout=90),
+        timeout=1800, interval=20)
 
     print("Declaring the central StorageCluster + StorageNodes...")
     manifest = storage_cluster_manifest(state["central"]["workers"])
@@ -155,10 +209,34 @@ def bootstrap_central(state):
             check=False, timeout=60).strip() or False,
         timeout=2400, interval=20)
 
+    # The operator publishes the cluster credentials as a k8s Secret
+    # (simplyblock-cluster-<cr name>, keys: uuid + secret). Read them from
+    # there rather than via `sbctl cluster get-secret`: sbctl on the admin
+    # host has no FDB client configured ("kv_store is required for reading
+    # from DB"), and the Secret is the k8s-native source anyway.
     secret = helpers.ssh(
-        state, server, f"sbctl cluster get-secret {cluster_id}").strip()
+        state, server,
+        f"sudo kubectl -n {K8S_NAMESPACE} get secret "
+        f"simplyblock-cluster-{CENTRAL_CLUSTER_CR} "
+        "-o jsonpath='{.data.secret}' | base64 -d").strip()
+    # The management API is a ClusterIP service (simplyblock-webappapi:5000)
+    # with no ingress — nothing listens on port 80 of the node. Expose it as a
+    # NodePort so the campaign (which drives the v2 API from outside the
+    # cluster) can reach it.
+    helpers.ssh(state, server,
+                f"sudo kubectl -n {K8S_NAMESPACE} patch svc simplyblock-webappapi "
+                "-p '{\"spec\":{\"type\":\"NodePort\"}}'", check=False, timeout=120)
+    node_port = helpers.wait_for(
+        "webappapi NodePort",
+        lambda: helpers.ssh(
+            state, server,
+            f"sudo kubectl -n {K8S_NAMESPACE} get svc simplyblock-webappapi "
+            "-o jsonpath='{.spec.ports[0].nodePort}'",
+            check=False, timeout=60).strip() or False,
+        timeout=300, interval=10)
+
     state["central"].update({
-        "api_url": f"http://{helpers.instance(state, server)['public_ip']}",
+        "api_url": f"http://{helpers.instance(state, server)['public_ip']}:{node_port}",
         "cluster_id": cluster_id,
         "cluster_secret": secret,
         "namespace": K8S_NAMESPACE,
@@ -298,7 +376,17 @@ def main():
         bootstrap_central(state)
     if not state["central"].get("api_url"):
         sys.exit("state.central.api_url missing — bootstrap central first")
-    prepare_central_workload(state)
+    # The central fio leg is a NICE-TO-HAVE for test 2; the campaign's purpose
+    # is the EDGE clusters. sbctl on the admin host has no FDB client in a k8s
+    # deployment, so pool/volume creation via sbctl fails there — and in k8s
+    # the native path is a Pool CR + a PVC through the CSI driver (there is no
+    # Volume CRD). Until that is wired, don't let it block the edge run: test 2
+    # already skips the central leg when fio_connect is absent.
+    try:
+        prepare_central_workload(state)
+    except Exception as e:
+        print(f"WARNING: central workload not prepared ({e}); "
+              "test 2 will run on the edge clusters only")
 
     import requests
     admin_session = requests.Session()

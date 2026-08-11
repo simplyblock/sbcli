@@ -11,8 +11,12 @@ import requests
 
 STATE_FILE = pathlib.Path(__file__).parent / "state.json"
 SSH_USER = "ubuntu"
+# ServerAlive* keeps long-running remote commands (helm install, kubectl
+# wait) from dying with "Connection reset by peer" (rc=255) when the session
+# sits idle — observed on the 600s ControlPlane wait, run-1786470xxx.
 SSH_OPTS = ["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
-            "-o", "LogLevel=ERROR", "-o", "ConnectTimeout=10"]
+            "-o", "LogLevel=ERROR", "-o", "ConnectTimeout=10",
+            "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=20"]
 
 
 def load_state() -> dict:
