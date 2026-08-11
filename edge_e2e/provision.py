@@ -20,6 +20,7 @@ Requires: boto3, an SSH key pair already registered in the region.
 """
 import argparse
 import json
+import os
 import pathlib
 import secrets
 import sys
@@ -33,6 +34,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 from edge_e2e.topology import CENTRAL, EDGE_CLUSTERS
 
 TAG_KEY = "simplyblock-edge-e2e"
+# Root volume size (GiB). Must hold the whole control-plane image set.
+ROOT_DISK_GB = int(os.getenv("EDGE_E2E_ROOT_DISK_GB", "80"))
 STATE_FILE = pathlib.Path(__file__).parent / "state.json"
 
 UBUNTU_AMI_PARAM = ("/aws/service/canonical/ubuntu/server/22.04/stable/"
@@ -78,7 +81,28 @@ def _latest_ubuntu_ami(ssm):
     return ssm.get_parameter(Name=UBUNTU_AMI_PARAM)["Parameter"]["Value"]
 
 
-def _ensure_network(ec2, run_id):
+def _pick_availability_zone(ec2, instance_types) -> str:
+    """An AZ that offers EVERY instance type this run needs.
+
+    Creating the subnet without an AZ lets AWS pick, and it picked us-east-1e
+    — which does not offer m5.xlarge, so RunInstances failed with
+    "Unsupported ... in your requested Availability Zone".
+    """
+    zones = None
+    for instance_type in sorted(set(instance_types)):
+        offerings = ec2.describe_instance_type_offerings(
+            LocationType="availability-zone",
+            Filters=[{"Name": "instance-type", "Values": [instance_type]}],
+        )["InstanceTypeOfferings"]
+        supported = {o["Location"] for o in offerings}
+        zones = supported if zones is None else (zones & supported)
+    if not zones:
+        raise RuntimeError(
+            f"no availability zone offers all of {sorted(set(instance_types))}")
+    return sorted(zones)[0]
+
+
+def _ensure_network(ec2, run_id, availability_zone):
     vpc = ec2.create_vpc(CidrBlock="10.90.0.0/16",
                          TagSpecifications=_tags("vpc", run_id, "edge-e2e-vpc"))["Vpc"]
     ec2.modify_vpc_attribute(VpcId=vpc["VpcId"], EnableDnsSupport={"Value": True})
@@ -87,6 +111,7 @@ def _ensure_network(ec2, run_id):
         TagSpecifications=_tags("internet-gateway", run_id, "edge-e2e-igw"))["InternetGateway"]
     ec2.attach_internet_gateway(InternetGatewayId=igw["InternetGatewayId"], VpcId=vpc["VpcId"])
     subnet = ec2.create_subnet(VpcId=vpc["VpcId"], CidrBlock="10.90.1.0/24",
+                               AvailabilityZone=availability_zone,
                                TagSpecifications=_tags("subnet", run_id, "edge-e2e-subnet"))["Subnet"]
     ec2.modify_subnet_attribute(SubnetId=subnet["SubnetId"],
                                 MapPublicIpOnLaunch={"Value": True})
@@ -112,7 +137,7 @@ def _ensure_network(ec2, run_id):
          "IpRanges": [{"CidrIp": "0.0.0.0/0"}]},
     ])
     return {"vpc": vpc["VpcId"], "subnet": subnet["SubnetId"], "sg": sg["GroupId"],
-            "igw": igw["InternetGatewayId"]}
+            "igw": igw["InternetGatewayId"], "availability_zone": availability_zone}
 
 
 def _tags(resource_type, run_id, name):
@@ -120,8 +145,16 @@ def _tags(resource_type, run_id, name):
              "Tags": [{"Key": TAG_KEY, "Value": run_id}, {"Key": "Name", "Value": name}]}]
 
 
-def _block_devices(drives):
-    mappings = []
+def _block_devices(drives, root_device_name):
+    # The AMI's default root volume is 8 GiB, which the control-plane install
+    # exhausts on image pulls alone (FDB, CSI, minio, admin-control, SPDK):
+    # run-1786464991 hit 87% used with ~1 GiB free and the kubelet evicted
+    # FDB and admin-control pods. Size the root volume explicitly.
+    mappings = [{
+        "DeviceName": root_device_name,
+        "Ebs": {"VolumeSize": ROOT_DISK_GB, "VolumeType": "gp3",
+                "DeleteOnTermination": True},
+    }]
     for index, drive in enumerate(drives):
         mappings.append({
             # /dev/sdf.. maps to /dev/nvme{index+1}n1 on nitro
@@ -132,13 +165,18 @@ def _block_devices(drives):
     return mappings
 
 
+def _root_device_name(ec2, ami) -> str:
+    return ec2.describe_images(ImageIds=[ami])["Images"][0].get(
+        "RootDeviceName", "/dev/sda1")
+
+
 def _run_instance(ec2, *, ami, itype, key_name, subnet, sg, name, run_id,
-                  user_data, drives=()):
+                  user_data, drives=(), root_device_name="/dev/sda1"):
     result = ec2.run_instances(
         ImageId=ami, InstanceType=itype, KeyName=key_name, MinCount=1, MaxCount=1,
         NetworkInterfaces=[{"DeviceIndex": 0, "SubnetId": subnet, "Groups": [sg],
                             "AssociatePublicIpAddress": True}],
-        BlockDeviceMappings=_block_devices(drives),
+        BlockDeviceMappings=_block_devices(drives, root_device_name),
         UserData=user_data,
         TagSpecifications=_tags("instance", run_id, name),
     )
@@ -166,8 +204,13 @@ def _wait_running(ec2, instance_ids):
 def provision(region, key_name):
     ec2, ssm = _clients(region)
     ami = _latest_ubuntu_ami(ssm)
+    root_device = _root_device_name(ec2, ami)
     run_id = f"run-{int(time.time())}"
-    net = _ensure_network(ec2, run_id)
+    needed_types = [CENTRAL.mgmt_instance_type, CENTRAL.instance_type,
+                    *(spec.instance_type for spec in EDGE_CLUSTERS)]
+    zone = _pick_availability_zone(ec2, needed_types)
+    print(f"Using availability zone {zone} for {sorted(set(needed_types))}")
+    net = _ensure_network(ec2, run_id, zone)
 
     state = {"region": region, "run_id": run_id, "key_name": key_name,
              "network": net, "central": {}, "edge": {}}
@@ -179,7 +222,8 @@ def provision(region, key_name):
     server_id = _run_instance(
         ec2, ami=ami, itype=CENTRAL.mgmt_instance_type, key_name=key_name,
         subnet=net["subnet"], sg=net["sg"], name=server_name, run_id=run_id,
-        user_data=K3S_SERVER_USERDATA.format(token=central_token, node_name=server_name))
+        user_data=K3S_SERVER_USERDATA.format(token=central_token, node_name=server_name),
+        root_device_name=root_device)
     instance_ids.append(server_id)
     server_ip = ec2.describe_instances(InstanceIds=[server_id])[
         "Reservations"][0]["Instances"][0]["PrivateIpAddress"]
@@ -193,7 +237,7 @@ def provision(region, key_name):
             subnet=net["subnet"], sg=net["sg"], name=name, run_id=run_id,
             user_data=K3S_AGENT_USERDATA.format(server_ip=server_ip,
                                                 token=central_token, node_name=name),
-            drives=CENTRAL.storage_drives))
+            drives=CENTRAL.storage_drives, root_device_name=root_device))
     state["central"] = {"token": central_token, "server": server_name,
                         "workers": worker_names}
 
@@ -205,7 +249,7 @@ def provision(region, key_name):
             ec2, ami=ami, itype=spec.instance_type, key_name=key_name,
             subnet=net["subnet"], sg=net["sg"], name=server_name, run_id=run_id,
             user_data=K3S_SERVER_USERDATA.format(token=token, node_name=server_name),
-            drives=spec.drives)
+            drives=spec.drives, root_device_name=root_device)
         instance_ids.append(server_id)
         node_names = [server_name]
         if spec.nodes == 2:
@@ -218,7 +262,7 @@ def provision(region, key_name):
                 subnet=net["subnet"], sg=net["sg"], name=agent_name, run_id=run_id,
                 user_data=K3S_AGENT_USERDATA.format(server_ip=server_ip, token=token,
                                                     node_name=agent_name),
-                drives=spec.drives))
+                drives=spec.drives, root_device_name=root_device))
         state["edge"][spec.name] = {"token": token, "nodes": node_names,
                                     "device_paths": spec.device_paths,
                                     "node_count": spec.nodes}

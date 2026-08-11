@@ -70,11 +70,17 @@ INSTALL_SBCTL = (
     "sudo pip3 install -q sbctl; }")
 
 
+# k3s writes its admin kubeconfig here; helm run under sudo has no
+# ~/.kube/config and would otherwise fall back to localhost:8080.
+KUBECONFIG = "/etc/rancher/k3s/k3s.yaml"
+
+
 def helm_install_cmd() -> str:
+    helm = f"sudo KUBECONFIG={KUBECONFIG} helm"
     return (
-        f"sudo helm repo add {HELM_REPO_NAME} {HELM_REPO_URL} && "
-        "sudo helm repo update && "
-        f"sudo helm upgrade --install {HELM_RELEASE} {HELM_CHART} "
+        f"{helm} repo add {HELM_REPO_NAME} {HELM_REPO_URL} && "
+        f"{helm} repo update && "
+        f"{helm} upgrade --install {HELM_RELEASE} {HELM_CHART} "
         f"--namespace {K8S_NAMESPACE} --create-namespace --wait --timeout 20m")
 
 
