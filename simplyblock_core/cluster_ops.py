@@ -1054,6 +1054,9 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     if cluster.ha_type == "ha":
         for snode in snodes:
+            # Do not assign secondary to removed node
+            if snode.status == StorageNode.STATUS_REMOVED:
+                continue
             if snode.is_secondary_node:  # pass
                 continue
             if snode.secondary_node_id:
