@@ -3448,6 +3448,271 @@ class TestBackupCrossClusterRestore(BackupTestBase):
 
         return self._meta_file
 
+    # ── K8s-native CRD cross-cluster restore ────────────────────────────────
+
+    def _run_k8s_native_cross_cluster_restore(self, backup_id: str,
+                                               orig_checksums: dict):
+        """Cross-cluster restore via K8s CRDs (BackupImport → BackupRestore).
+
+        Flow:
+          1. Get backup UUID from C1's StorageBackup status.
+          2. Create BackupImport CR on C2 → wait Done → get storageBackupRef.
+          3. Create BackupRestore CR on C2 with pvcTemplate → wait Done.
+          4. Verify data integrity via utility pod on restored PVC.
+
+        The controller handles source-switching automatically — no manual
+        ``backup source-switch`` is needed.
+        """
+        k8s_c1 = self._ensure_k8s_utils()
+        c2_cluster_name = os.environ.get(
+            "CLUSTER2_CRD_NAME", self._cluster_name)
+
+        # backup_id in K8s mode is the StorageBackup CRD name; get the
+        # actual UUID from its status.backupId field.
+        source_backup_uuid = k8s_c1.get_storage_backup_id(backup_id)
+        assert source_backup_uuid, (
+            f"TC-BCK-072: could not get backupId from StorageBackup "
+            f"'{backup_id}' status"
+        )
+        self.logger.info(
+            f"TC-BCK-072: StorageBackup '{backup_id}' → "
+            f"backupId={source_backup_uuid}")
+
+        # TC-BCK-073: create BackupImport on C2
+        import_name = f"cc-import-{_rand_suffix().lower()}"
+        self.logger.info(
+            f"TC-BCK-073: creating BackupImport '{import_name}' on C2 "
+            f"(source={self._cluster_name}/{source_backup_uuid} "
+            f"→ target={c2_cluster_name})")
+        self._k8s_c2.create_backup_import(
+            name=import_name,
+            source_cluster_name=self._cluster_name,
+            source_backup_id=source_backup_uuid,
+            target_cluster_name=c2_cluster_name,
+        )
+
+        restore_name = None
+        try:
+            # Wait for BackupImport to reach Done
+            self._k8s_c2.wait_backup_import_done(
+                import_name, timeout=_RESTORE_COMPLETE_TIMEOUT)
+            storage_backup_ref = (
+                self._k8s_c2.get_backup_import_storage_backup_ref(
+                    import_name))
+            assert storage_backup_ref, (
+                f"TC-BCK-073: BackupImport '{import_name}' Done but "
+                f"storageBackupRef is empty")
+            self.logger.info(
+                f"TC-BCK-073: BackupImport Done — "
+                f"storageBackupRef={storage_backup_ref}")
+
+            # TC-BCK-075: create BackupRestore on C2 with pvcTemplate
+            restore_name = f"cc-restore-{_rand_suffix().lower()}"
+            restored_pvc = f"cc-rest-{_rand_suffix().lower()}"
+            c2_sc = os.environ.get(
+                "CLUSTER2_STORAGE_CLASS", self._storage_class_name)
+            self.logger.info(
+                f"TC-BCK-075: creating BackupRestore '{restore_name}' on C2 "
+                f"(backupRef={storage_backup_ref} → PVC={restored_pvc})")
+            self._k8s_c2.create_backup_restore(
+                name=restore_name,
+                backup_ref_name=storage_backup_ref,
+                pvc_name=restored_pvc,
+                pvc_size="5Gi",
+                cluster_name=c2_cluster_name,
+                storage_class=c2_sc,
+            )
+
+            # Wait for BackupRestore to reach Done (PVC auto-created)
+            self._k8s_c2.wait_backup_restore_done(
+                restore_name, timeout=_RESTORE_COMPLETE_TIMEOUT)
+            self.logger.info(
+                f"TC-BCK-075: BackupRestore '{restore_name}' Done — "
+                f"PVC '{restored_pvc}' created on C2")
+
+            # TC-BCK-076: verify data integrity on restored PVC via
+            # utility pod in C2's namespace
+            self.logger.info(
+                "TC-BCK-076: verifying checksums on restored PVC in C2")
+            pod_name = f"cksum-c2-{_rand_suffix().lower()}"
+            self._k8s_c2.create_utility_pod(pod_name, restored_pvc)
+            try:
+                self._k8s_c2.wait_pod_running(pod_name, timeout=600)
+                files = self._k8s_c2.find_files_in_pvc(pod_name)
+                actual = self._k8s_c2.generate_checksums_in_pvc(
+                    pod_name, files)
+
+                expected_by_name = {
+                    os.path.basename(k): v
+                    for k, v in orig_checksums.items()
+                }
+                actual_by_name = {
+                    os.path.basename(k): v for k, v in actual.items()
+                }
+                assert actual_by_name, (
+                    "TC-BCK-076: no files in restored PVC for checksum "
+                    "verification"
+                )
+                for fname, cksum in expected_by_name.items():
+                    assert fname in actual_by_name, (
+                        f"TC-BCK-076: file {fname} not found in restored PVC"
+                    )
+                    assert actual_by_name[fname] == cksum, (
+                        f"TC-BCK-076: checksum mismatch for {fname}: "
+                        f"expected {cksum}, got {actual_by_name[fname]}"
+                    )
+                self.logger.info(
+                    "TC-BCK-076: cross-cluster restore checksums match "
+                    "(K8s-native CRD flow)")
+            finally:
+                try:
+                    self._k8s_c2.delete_pod(pod_name)
+                except Exception:
+                    pass
+
+        finally:
+            # Best-effort cleanup of C2 CRDs
+            for kind, crd_name in [
+                ("backuprestore", restore_name),
+                ("backupimport", import_name),
+            ]:
+                if crd_name:
+                    try:
+                        self._k8s_c2.delete_resource(kind, crd_name)
+                    except Exception as exc:
+                        self.logger.warning(
+                            f"TC-BCK-076b: cleanup {kind}/{crd_name}: "
+                            f"{exc}")
+
+    # ── CLI cross-cluster restore (Docker mode) ──────────────────────────────
+
+    def _run_cli_cross_cluster_restore(self, backup_id: str,
+                                        orig_checksums: dict):
+        """Cross-cluster restore via CLI (export → import → source-switch →
+        restore → verify → switch-back)."""
+
+        # TC-BCK-072: export metadata from Cluster-1
+        self.logger.info("TC-BCK-072: exporting backup metadata from Cluster-1")
+        meta_file = self._export_backup_metadata(backup_id)
+
+        # TC-BCK-073: import metadata on Cluster-2
+        self.logger.info(f"TC-BCK-073: Cluster-2 — backup import {meta_file}")
+        out, err = self._sbcli_c2(f"backup import {meta_file}")
+        assert not (err and "error" in err.lower()), \
+            f"TC-BCK-073: backup import on Cluster-2 failed: {err}"
+        self.logger.info(f"TC-BCK-073: import result: {out.strip()}")
+
+        # TC-BCK-074: verify backup is visible on Cluster-2
+        self.logger.info(
+            "TC-BCK-074: Cluster-2 — backup list should show imported backup")
+        out2, err2 = self._sbcli_c2("backup list")
+        assert not (err2 and "error" in err2.lower()), \
+            f"TC-BCK-074: backup list on Cluster-2 failed: {err2}"
+        assert backup_id in out2 or out2.strip(), \
+            f"TC-BCK-074: imported backup_id {backup_id} not visible on C2"
+        self.logger.info(
+            f"TC-BCK-074: Cluster-2 backup list snippet: {out2[:200]}")
+
+        # TC-BCK-074b: switch Cluster-2's backup source to Cluster-1's S3
+        self.logger.info(
+            f"TC-BCK-074b: Cluster-2 — backup source-switch to "
+            f"Cluster-1 ({self.cluster_id})")
+        out_sw, err_sw = self._sbcli_c2(
+            f"backup source-switch {self.cluster_id}")
+        assert not (err_sw and "error" in err_sw.lower()), \
+            f"TC-BCK-074b: source-switch to Cluster-1 failed: {err_sw}"
+        self.logger.info(
+            f"TC-BCK-074b: source switched to Cluster-1 — "
+            f"{out_sw.strip()}")
+
+        try:
+            # TC-BCK-075: restore on Cluster-2
+            restored_name = f"cc_rest_{_rand_suffix()}"
+            self.logger.info(
+                f"TC-BCK-075: Cluster-2 — backup restore "
+                f"{backup_id} → {restored_name}")
+            c2_pool = os.environ.get("CLUSTER2_POOL", self.pool_name)
+            out3, err3 = self._sbcli_c2(
+                f"backup restore {backup_id} "
+                f"--lvol {restored_name} --pool {c2_pool}")
+            assert not (err3 and "error" in err3.lower()), \
+                f"TC-BCK-075: restore on Cluster-2 failed: {err3}"
+            self.logger.info(
+                f"TC-BCK-075: restore triggered: {out3.strip()}")
+            self._c2_lvols.append(restored_name)
+
+            # Wait for restore to complete on Cluster-2
+            self.logger.info(
+                "TC-BCK-075: waiting for Cluster-2 restore to complete…")
+            deadline = time.time() + _RESTORE_COMPLETE_TIMEOUT
+            while time.time() < deadline:
+                lvol_out, _ = self._sbcli_c2("lvol list")
+                if restored_name in lvol_out:
+                    self.logger.info(
+                        "TC-BCK-075: restored lvol appeared on Cluster-2")
+                    break
+                sleep_n_sec(_POLL_INTERVAL)
+            else:
+                raise TimeoutError(
+                    f"TC-BCK-075: restored lvol {restored_name} did not "
+                    f"appear on Cluster-2 within "
+                    f"{_RESTORE_COMPLETE_TIMEOUT}s")
+
+            # TC-BCK-076: data integrity — connect via Cluster-2
+            self.logger.info(
+                "TC-BCK-076: connecting restored lvol from Cluster-2")
+            c2_connect_out, c2_connect_err = self._sbcli_c2(
+                f"volume connect {restored_name}")
+            connect_lines = [
+                line.strip()
+                for line in c2_connect_out.strip().split("\n")
+                if line.strip() and "nvme connect" in line
+            ]
+            assert connect_lines, (
+                f"TC-BCK-076: no nvme connect strings from Cluster-2: "
+                f"{c2_connect_out}")
+
+            initial_devs = self.ssh_obj.get_devices(node=self.fio_node)
+            for cmd in connect_lines:
+                self.ssh_obj.exec_command(
+                    node=self.fio_node, command=cmd)
+            sleep_n_sec(3)
+            final_devs = self.ssh_obj.get_devices(node=self.fio_node)
+            new_devs = [d for d in final_devs if d not in initial_devs]
+            assert new_devs, (
+                "TC-BCK-076: no new block device after connecting "
+                "Cluster-2 lvol")
+
+            r_device = f"/dev/{new_devs[0]}"
+            r_mount = f"{self.mount_path}/cc_rest_{_rand_suffix()}"
+            self.ssh_obj.exec_command(
+                self.fio_node, f"mkdir -p {r_mount}")
+            self.ssh_obj.mount_path(
+                node=self.fio_node, device=r_device,
+                mount_path=r_mount)
+            self.mounted.append((self.fio_node, r_mount))
+
+            self._verify_checksums(
+                self.fio_node, r_mount, orig_checksums)
+            self.logger.info(
+                "TC-BCK-076: cross-cluster restore checksums match")
+
+        finally:
+            # TC-BCK-076b: switch Cluster-2 source back to local
+            self.logger.info(
+                "TC-BCK-076b: Cluster-2 — backup source-switch "
+                "back to local")
+            out_back, err_back = self._sbcli_c2(
+                "backup source-switch local")
+            if err_back and "error" in err_back.lower():
+                self.logger.warning(
+                    f"TC-BCK-076b: source-switch-back warning: "
+                    f"{err_back}")
+            else:
+                self.logger.info(
+                    f"TC-BCK-076b: source switched back to local — "
+                    f"{out_back.strip()}")
+
     # ── main run ──────────────────────────────────────────────────────────────
 
     def run(self):
@@ -3489,113 +3754,28 @@ class TestBackupCrossClusterRestore(BackupTestBase):
         self._wait_for_backup(backup_id)
         self.logger.info(f"TC-BCK-071: backup {backup_id} is done on Cluster-1 ✓")
 
-        # ── Cluster-2: import → source-switch → restore → verify → switch-back ─
+        # ── Cluster-2: import → restore → verify ────────────────────────────────
 
-        # TC-BCK-072: export metadata from Cluster-1
-        self.logger.info("TC-BCK-072: exporting backup metadata from Cluster-1")
-        meta_file = self._export_backup_metadata(backup_id)
-
-        # TC-BCK-073: import metadata on Cluster-2
-        self.logger.info(f"TC-BCK-073: Cluster-2 — backup import {meta_file}")
-        out, err = self._sbcli_c2(f"backup import {meta_file}")
-        assert not (err and "error" in err.lower()), \
-            f"TC-BCK-073: backup import on Cluster-2 failed: {err}"
-        self.logger.info(f"TC-BCK-073: import result: {out.strip()}")
-
-        # TC-BCK-074: verify backup is visible on Cluster-2
-        self.logger.info("TC-BCK-074: Cluster-2 — backup list should show imported backup")
-        out2, err2 = self._sbcli_c2("backup list")
-        assert not (err2 and "error" in err2.lower()), \
-            f"TC-BCK-074: backup list on Cluster-2 failed: {err2}"
-        assert backup_id in out2 or out2.strip(), \
-            f"TC-BCK-074: imported backup_id {backup_id} not visible on Cluster-2"
-        self.logger.info(f"TC-BCK-074: Cluster-2 backup list snippet: {out2[:200]}")
-
-        # TC-BCK-074b: switch Cluster-2's backup source to Cluster-1's S3
-        self.logger.info(
-            f"TC-BCK-074b: Cluster-2 — backup source-switch to Cluster-1 ({self.cluster_id})")
-        out_sw, err_sw = self._sbcli_c2(f"backup source-switch {self.cluster_id}")
-        assert not (err_sw and "error" in err_sw.lower()), \
-            f"TC-BCK-074b: source-switch to Cluster-1 failed: {err_sw}"
-        self.logger.info(f"TC-BCK-074b: source switched to Cluster-1 ✓ — {out_sw.strip()}")
-
-        try:
-            # TC-BCK-075: restore on Cluster-2 (now sourced from Cluster-1's S3)
-            restored_name = f"cc_rest_{_rand_suffix()}"
-            self.logger.info(
-                f"TC-BCK-075: Cluster-2 — backup restore {backup_id} → {restored_name}")
-            c2_pool = os.environ.get("CLUSTER2_POOL", self.pool_name)
-            out3, err3 = self._sbcli_c2(
-                f"backup restore {backup_id} --lvol {restored_name} --pool {c2_pool}")
-            assert not (err3 and "error" in err3.lower()), \
-                f"TC-BCK-075: restore on Cluster-2 failed: {err3}"
-            self.logger.info(f"TC-BCK-075: restore triggered: {out3.strip()}")
-            self._c2_lvols.append(restored_name)
-
-            # Wait for restore to complete on Cluster-2
-            self.logger.info("TC-BCK-075: waiting for Cluster-2 restore to complete…")
-            deadline = time.time() + _RESTORE_COMPLETE_TIMEOUT
-            while time.time() < deadline:
-                lvol_out, _ = self._sbcli_c2("lvol list")
-                if restored_name in lvol_out:
-                    self.logger.info("TC-BCK-075: restored lvol appeared on Cluster-2 ✓")
-                    break
-                sleep_n_sec(_POLL_INTERVAL)
-            else:
-                raise TimeoutError(
-                    f"TC-BCK-075: restored lvol {restored_name} did not appear "
-                    f"on Cluster-2 within {_RESTORE_COMPLETE_TIMEOUT}s")
-
-            # TC-BCK-076: data integrity — connect on FIO node via Cluster-2 connect string
-            self.logger.info("TC-BCK-076: connecting restored lvol from Cluster-2")
-            c2_connect_out, c2_connect_err = self._sbcli_c2(
-                f"volume connect {restored_name}")
-            connect_lines = [
-                line.strip()
-                for line in c2_connect_out.strip().split("\n")
-                if line.strip() and "nvme connect" in line
-            ]
-            assert connect_lines, \
-                f"TC-BCK-076: no nvme connect strings from Cluster-2: {c2_connect_out}"
-
-            initial_devs = self.ssh_obj.get_devices(node=self.fio_node)
-            for cmd in connect_lines:
-                self.ssh_obj.exec_command(node=self.fio_node, command=cmd)
-            sleep_n_sec(3)
-            final_devs = self.ssh_obj.get_devices(node=self.fio_node)
-            new_devs = [d for d in final_devs if d not in initial_devs]
-            assert new_devs, "TC-BCK-076: no new block device after connecting Cluster-2 lvol"
-
-            r_device = f"/dev/{new_devs[0]}"
-            r_mount = f"{self.mount_path}/cc_rest_{_rand_suffix()}"
-            self.ssh_obj.exec_command(self.fio_node, f"mkdir -p {r_mount}")
-            self.ssh_obj.mount_path(node=self.fio_node, device=r_device, mount_path=r_mount)
-            self.mounted.append((self.fio_node, r_mount))
-
-            self._verify_checksums(self.fio_node, r_mount, orig_checksums)
-            self.logger.info("TC-BCK-076: cross-cluster restore checksums match ✓")
-
-        finally:
-            # TC-BCK-076b: switch Cluster-2's backup source back to local (always)
-            self.logger.info("TC-BCK-076b: Cluster-2 — backup source-switch back to local")
-            out_back, err_back = self._sbcli_c2("backup source-switch local")
-            if err_back and "error" in err_back.lower():
-                self.logger.warning(
-                    f"TC-BCK-076b: source-switch-back warning: {err_back}")
-            else:
-                self.logger.info(
-                    f"TC-BCK-076b: source switched back to local ✓ — {out_back.strip()}")
+        if self.k8s_test and self._k8s_c2 is not None:
+            self._run_k8s_native_cross_cluster_restore(
+                backup_id, orig_checksums)
+        else:
+            self._run_cli_cross_cluster_restore(
+                backup_id, orig_checksums)
 
         self.logger.info("=== TestBackupCrossClusterRestore PASSED ===")
 
     # ── teardown ──────────────────────────────────────────────────────────────
 
     def teardown(self, delete_lvols=True, close_ssh=True, skip_k8s_cleanup=False):
-        # Safety: ensure Cluster-2's source is switched back to local (always)
-        try:
-            self._sbcli_c2("backup source-switch local")
-        except Exception as e:
-            self.logger.warning(f"source-switch-back in teardown warning: {e}")
+        # Safety: ensure Cluster-2's source is switched back to local
+        # (CLI mode only — K8s-native mode uses CRDs, no manual source-switch)
+        if not self.k8s_test:
+            try:
+                self._sbcli_c2("backup source-switch local")
+            except Exception as e:
+                self.logger.warning(
+                    f"source-switch-back in teardown warning: {e}")
 
         if delete_lvols:
             # Best-effort cleanup of Cluster-2 resources
