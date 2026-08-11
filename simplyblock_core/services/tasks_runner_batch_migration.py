@@ -558,6 +558,48 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
                 f"failure (non-fatal): {detach_exc}")
         return None, str(e)
 
+    # Pre-freeze: take SRC secondary/tertiary out of the read path before the
+    # synchronous final-step transfer below. bdev_lvol_batch_transfer_final_step
+    # freezes the SRC primary internally for the duration of the transfer, but
+    # a client sitting on a SRC replica path is not covered by that freeze —
+    # without this, a write accepted by a SRC replica during the transfer (or
+    # in the gap before cutover flips SRC paths inaccessible) never reaches
+    # the copy that already ran, and is silently lost. Mirrors the single-lvol
+    # path's identical pre-freeze (tasks_runner_lvol_migration.py).
+    nqn = group.target_nqn
+    src_paths, _, _ = _build_paths(src_node, tgt_node, src_rpc, tgt_rpc)
+    src_replica_paths = src_paths[1:]  # secondary/tertiary only; primary is frozen internally by the RPC below
+
+    def _flip(rpc, ip, port, trtype, state, label):
+        try:
+            rpc.nvmf_subsystem_listener_set_ana_state(nqn, ip, port, trtype=trtype, ana=state)
+            logger.info(f"Group {group.uuid[:8]}: ANA {label} {ip}:{port} → {state}")
+            return True
+        except Exception as e:
+            logger.warning(f"Group {group.uuid[:8]}: ANA {label} {ip}:{port} (non-fatal): {e}")
+            return False
+
+    def _flip_all(rpc, ips, port, trtype, state, label):
+        for _ip in ips:
+            _flip(rpc, _ip, port, trtype, state, label)
+
+    def _revert_src_replicas(reason):
+        # Final step didn't complete — put SRC secondary/tertiary back into
+        # the read path (their pre-freeze state) so clients keep multipath
+        # access to the still-live source instead of being stuck on primary only.
+        if not src_replica_paths:
+            return
+        logger.warning(f"Group {group.uuid[:8]}: {reason}; reverting SRC secondary/tertiary to non_optimized")
+        for p in src_replica_paths:
+            _flip_all(p['rpc'], p['ips'], p['port'], p['trtype'],
+                      "non_optimized", f"SRC-{p['node_id'][:8]}(revert)")
+
+    if src_replica_paths:
+        logger.info(f"Group {group.uuid[:8]}: setting SRC secondary/tertiary inaccessible pre-final-step")
+        for p in src_replica_paths:
+            _flip_all(p['rpc'], p['ips'], p['port'], p['trtype'],
+                      "inaccessible", f"SRC-{p['node_id'][:8]}(pre-freeze)")
+
     logger.info(
         f"Group {group.uuid[:8]}: batch_final_step "
         f"lvols={len(lvol_names)} hub={hub_bdev}")
@@ -572,10 +614,16 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
         logger.error(f"Group {group.uuid[:8]}: bdev_lvol_batch_transfer_final_step RPC error code={e.code}: {e}")
         batch_err = str(e)
         if e.code == RPCErrorCode.method_not_found:
+            _revert_src_replicas("batch_final_step failed (method_not_found)")
             return False, batch_err  # Retrying will never help; surface as fatal so the group fails immediately.
     except Exception as e:
         logger.error(f"Group {group.uuid[:8]}: bdev_lvol_batch_transfer_final_step failed: {e}")
         batch_err = str(e)
+
+    if not batch_ok:
+        _revert_src_replicas("batch_final_step failed")
+    # else: left as-is — the Done handler's ANA sequence (_flip_ana_to_optimized)
+    # already drives every SRC path (including primary) to inaccessible on success.
 
     if batch_ok:
         # bdev_lvol_batch_final_step handles add_clone on the primary internally.
