@@ -78,7 +78,6 @@ class ClusterParams(BaseModel):
     cr_namespace: str = ""
     cr_plural: str = ""
     client_data_nic: str = ""
-    max_fault_tolerance: int = 1
     nvmf_base_port: int = 4420
     rpc_base_port: int = 8080
     snode_api_port: int = 50001
