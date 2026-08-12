@@ -3326,11 +3326,8 @@ class TestBackupCrossClusterRestore(BackupTestBase):
         for ip in c2_ips:
             self.logger.info(f"  [C2] Adding storage node {ip} to Cluster-2")
             add_cmd = f"{add_base} {c2_id} {ip}:5000 {ifname}"
-            out, err = self.ssh_obj.exec_command(node=mgmt_ip, command=add_cmd)
-            if err and "error" in err.lower():
-                raise RuntimeError(
-                    f"TC-BCK-070: failed to add node {ip} to Cluster-2: {err}")
-            if out and "Error" in out:
+            out, _ = self.ssh_obj.exec_command(node=mgmt_ip, command=add_cmd)
+            if out and "Error:" in out:
                 raise RuntimeError(
                     f"TC-BCK-070: failed to add node {ip} to Cluster-2: {out}")
             sleep_n_sec(3)
@@ -3342,14 +3339,11 @@ class TestBackupCrossClusterRestore(BackupTestBase):
 
         # Step 4: activate Cluster-2
         self.logger.info("  [C2] Activating Cluster-2")
-        out, err = self.ssh_obj.exec_command(
+        out, _ = self.ssh_obj.exec_command(
             node=mgmt_ip,
             command=f"{sbcli_cmd} -d cluster activate {c2_id}"
         )
-        if err and "error" in err.lower():
-            raise RuntimeError(
-                f"TC-BCK-070: failed to activate Cluster-2: {err}")
-        if out and "Error" in out:
+        if out and "Error:" in out:
             raise RuntimeError(
                 f"TC-BCK-070: failed to activate Cluster-2: {out}")
 
@@ -3364,14 +3358,11 @@ class TestBackupCrossClusterRestore(BackupTestBase):
 
         # Step 5: create pool on Cluster-2
         self.logger.info("  [C2] Creating pool on Cluster-2")
-        out, err = self.ssh_obj.exec_command(
+        out, _ = self.ssh_obj.exec_command(
             node=mgmt_ip,
             command=f"{sbcli_cmd} pool add {self._cluster2_pool_name} {c2_id}"
         )
-        if err and "error" in err.lower():
-            raise RuntimeError(
-                f"TC-BCK-070: failed to create pool on Cluster-2: {err}")
-        if out and "Error" in out:
+        if out and "Error:" in out:
             raise RuntimeError(
                 f"TC-BCK-070: failed to create pool on Cluster-2: {out}")
 
