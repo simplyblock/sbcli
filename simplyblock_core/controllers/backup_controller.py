@@ -436,39 +436,8 @@ def restore_backup(backup_id: str, lvol_name: str, pool_id_or_name: str, cluster
     if size <= 0:
         return None, "Backup has no size information"
 
-    # Determine target node: use explicit target, or fall back to backup node.
-    # In cross-cluster restore, backup.node_id belongs to the source cluster,
-    # so we must pick an online node from the target cluster instead.
-    if target_node_id:
-        restore_node_id = target_node_id
-    else:
-        # Check if backup's original node belongs to the target cluster
-        backup_node_in_target = False
-        try:
-            orig_node = db_controller.get_storage_node_by_id(backup.node_id)
-            if orig_node.cluster_id == cluster_id:
-                backup_node_in_target = True
-        except KeyError:
-            pass
-
-        if backup_node_in_target:
-            restore_node_id = backup.node_id
-        else:
-            # Cross-cluster: pick an online node from the target cluster
-            target_nodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
-            online_nodes = [
-                n for n in target_nodes
-                if n.status == StorageNode.STATUS_ONLINE and n.lvstore
-            ]
-            if not online_nodes:
-                return None, (
-                    f"No online storage node with lvstore found in "
-                    f"cluster {cluster_id} for cross-cluster restore")
-            restore_node_id = online_nodes[0].get_id()
-            logger.info(
-                f"Cross-cluster restore: backup node {backup.node_id} "
-                f"belongs to a different cluster, using target cluster "
-                f"node {restore_node_id}")
+    # Determine target node: use explicit target, or fall back to backup node
+    restore_node_id = target_node_id or backup.node_id
 
     # Validate target node is online and has an S3 bdev
     try:
