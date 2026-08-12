@@ -1237,7 +1237,7 @@ class K8sNativeMajorUpgrade(TestClusterBase):
 
             sleep_n_sec(30)
             self.validate_migration_for_node(
-                restart_ts, 1200, node_id, 60, no_task_ok=True
+                restart_ts, 1200, None, 60, no_task_ok=True
             )
             if idx < len(storage_node_list) - 1:
                 sleep_n_sec(30)
@@ -2613,7 +2613,7 @@ spec:
             sleep_n_sec(30)
             for node_id in nids:
                 self.validate_migration_for_node(
-                    restart_ts, 1200, node_id, 60, no_task_ok=True
+                    restart_ts, 1200, None, 60, no_task_ok=True
                 )
 
             if worker_idx < len(unique_ips):

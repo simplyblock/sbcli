@@ -998,7 +998,7 @@ print("done")
             self.validate_migration_for_node(
                 timestamp=migration_ts,
                 timeout=1800,
-                node_id=node_id,
+                node_id=None,
                 check_interval=30,
                 no_task_ok=(not self.fio_during_upgrade),
             )
@@ -1602,7 +1602,7 @@ class TestMajorUpgradeDualNode(TestMajorUpgrade):
                 self.validate_migration_for_node(
                     timestamp=migration_ts,
                     timeout=1800,
-                    node_id=nid,
+                    node_id=None,
                     check_interval=30,
                     no_task_ok=(not self.fio_during_upgrade),
                 )
