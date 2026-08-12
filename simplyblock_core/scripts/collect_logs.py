@@ -774,6 +774,9 @@ def collect_k8s_pod_logs(api, namespace: str, pod: str, out_dir: Path,
     Files are named <pod>_<container>.log
     """
     since_dt = datetime.fromisoformat(from_iso.replace("Z", "+00:00"))
+    # since_seconds is relative to now; we also filter the lower bound in
+    # post-processing to stay precise despite the relative approximation.
+    since_seconds = max(1, int((datetime.now(timezone.utc) - since_dt).total_seconds()))
     containers = _get_containers(api, namespace, pod)
     for container in containers:
         log_file = out_dir / f"{pod}_{container}.log"
@@ -788,10 +791,13 @@ def collect_k8s_pod_logs(api, namespace: str, pod: str, out_dir: Path,
                     pod, namespace,
                     container=container,
                     timestamps=True,
-                    since_time=since_dt,
+                    since_seconds=since_seconds,
                 ) or ""
                 for line in logs.splitlines():
-                    if line[:26] > to_iso[:26]:
+                    ts = line[:26]
+                    if ts < from_iso[:26]:
+                        continue
+                    if ts > to_iso[:26]:
                         break
                     fh.write(line + "\n")
             except ApiException as exc:
