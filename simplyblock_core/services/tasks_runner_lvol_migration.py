@@ -3437,7 +3437,11 @@ def _group_worker_budget_suspend(task, migration, group_id, error_msg):
                     f"Group {group_id[:8]}: failing whole group — worker "
                     f"{migration.uuid[:8]} exhausted its retry budget")
         except KeyError:
-            pass
+            # Group may already be removed/cleaned up by another workflow.
+            # We keep worker cleanup flow idempotent by not re-raising.
+            logger.warning(
+                f"Group {group_id[:8]} not found while propagating worker "
+                f"{migration.uuid[:8]} retry-budget exhaustion; continuing.")
         return False
     return _suspend_task(task, migration, error_msg)
 
