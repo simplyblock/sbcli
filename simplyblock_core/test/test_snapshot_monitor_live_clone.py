@@ -71,7 +71,7 @@ class _Node:
 
 @pytest.fixture
 def db(monkeypatch):
-    store = {"lvols": {}}
+    store: dict[str, dict[str, _Lvol]] = {"lvols": {}}
 
     class _DB:
         def get_lvol_by_id(self, lid):

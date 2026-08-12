@@ -9,18 +9,17 @@ being-deleted target copy could become the fail-over point.
 """
 from simplyblock_core.controllers.lvol_controller import _last_replicated_target_snapshot
 from simplyblock_core.models.job_schedule import JobSchedule
+from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.snapshot import SnapShot
 
 LVOL_ID = "LV1"
 CLUSTER_ID = "CL_src"
 
 
-class _Lvol:
-    def __init__(self, uuid=LVOL_ID):
-        self.uuid = uuid
-
-    def get_id(self):
-        return self.uuid
+def _lvol(uuid=LVOL_ID):
+    lvol = LVol()
+    lvol.uuid = uuid
+    return lvol
 
 
 def _snap(uuid, created_at, target_uuid):
@@ -28,7 +27,7 @@ def _snap(uuid, created_at, target_uuid):
     s.uuid = uuid
     s.created_at = created_at
     s.target_replicated_snap_uuid = target_uuid
-    s.lvol = _Lvol()
+    s.lvol = _lvol()
     return s
 
 
@@ -117,7 +116,7 @@ def test_none_when_all_target_copies_gone():
 def test_ignores_other_lvols_and_other_task_types():
     mine = _snap("S_mine", 100, "T_mine")
     theirs = _snap("S_theirs", 300, "T_theirs")
-    theirs.lvol = _Lvol("OTHER_LVOL")
+    theirs.lvol = _lvol("OTHER_LVOL")
     unrelated = _task("S_mine")
     unrelated.function_name = "some_other_function"
     got = _pick([_task("S_mine"), _task("S_theirs"), unrelated],

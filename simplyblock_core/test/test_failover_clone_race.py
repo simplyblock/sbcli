@@ -13,6 +13,8 @@ the parent and the clone is built on nothing. snapshot_controller.delete()
 documents the invariant it relies on: a concurrent clone-create "holds the same
 lock for its whole sequence". The fail-over clone path did not.
 """
+from typing import Any
+
 import pytest
 
 from simplyblock_core.controllers import lvol_controller
@@ -41,8 +43,9 @@ def _snap(uuid, created_at, status=SnapShot.STATUS_ONLINE):
 
 
 class _FakeDB:
-    def __init__(self, snaps):
-        self._snaps = {s.get_id(): s for s in snaps}
+    def __init__(self, order):
+        self._order = list(order)
+        self._snaps = {sid: _snap(sid, i) for i, sid in enumerate(order)}
 
     def get_snapshot_by_id(self, sid):
         if sid not in self._snaps:
@@ -56,7 +59,8 @@ class _FakeDB:
 
 @pytest.fixture
 def harness(monkeypatch):
-    state = {"locks": [], "cloned_from": [], "selected": [], "prune_on_lock": None}
+    state: dict[str, Any] = {
+        "locks": [], "cloned_from": [], "selected": [], "prune_on_lock": None}
 
     class _Lock:
         def __init__(self, cluster_id, uuid, enabled=True):
@@ -101,14 +105,8 @@ def harness(monkeypatch):
     return state
 
 
-def _db(order):
-    db = _FakeDB([_snap(sid, i) for i, sid in enumerate(order)])
-    db._order = list(order)
-    return db
-
-
 def test_clone_takes_the_snapshot_lock(harness):
-    db = _db(["S_old", "S_new"])
+    db = _FakeDB(["S_old", "S_new"])
     new_lvol, snap, err = lvol_controller._clone_from_last_replicated(
         db, LVOL_ID, _Lvol(), object(), "pool", CLUSTER)
     assert err is None and new_lvol is not None
@@ -119,7 +117,7 @@ def test_clone_takes_the_snapshot_lock(harness):
 
 def test_falls_back_when_retention_deletes_the_chosen_snapshot(harness):
     """Retention removes the picked snapshot before the lock is acquired."""
-    db = _db(["S_old", "S_new"])
+    db = _FakeDB(["S_old", "S_new"])
     harness["prune_on_lock"] = lambda: db.drop("S_new")
 
     new_lvol, snap, err = lvol_controller._clone_from_last_replicated(
@@ -134,7 +132,7 @@ def test_falls_back_when_retention_deletes_the_chosen_snapshot(harness):
 
 
 def test_skips_snapshot_that_entered_deletion(harness):
-    db = _db(["S_old", "S_new"])
+    db = _FakeDB(["S_old", "S_new"])
 
     def _mark():
         db._snaps["S_new"].status = SnapShot.STATUS_IN_DELETION
@@ -148,7 +146,7 @@ def test_skips_snapshot_that_entered_deletion(harness):
 
 def test_gives_up_rather_than_cloning_nothing(harness):
     """No usable snapshot at all -> refuse, never return a parentless clone."""
-    db = _db([])
+    db = _FakeDB([])
     new_lvol, snap, err = lvol_controller._clone_from_last_replicated(
         db, LVOL_ID, _Lvol(), object(), "pool", CLUSTER)
     assert new_lvol is None and snap is None
