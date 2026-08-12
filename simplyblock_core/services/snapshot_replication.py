@@ -104,13 +104,40 @@ def process_snap_replicate_start(task, snapshot):
     offset = 0
     if "offset" in task.function_params and task.function_params["offset"]:
         offset = task.function_params["offset"]
+
+    # The receiving volume's map_id MUST ride along as lvol_id. The fork stores
+    # it as redirect_map_id and tags every remote write with it in the top 16
+    # bits of the LBA (dst_offset = map_id << 48 | offset, lib/lvol/lvol.c) so
+    # the target distrib routes the data into the receiving volume's map; the
+    # end-of-transfer signal is likewise only recognised as a control message
+    # when tagged. Omitting it (default 0) sends untagged writes: the target
+    # blob allocates clusters but no readable data ever lands in the map, so
+    # every snapshot replicated this way — and any volume failed over onto it —
+    # reads as zeros. The migration runner has always passed lvol_id=tgt_map_id
+    # to this same RPC, which is why planned cutover worked while DR fail-over
+    # produced empty volumes.
+    ret = remote_lv_node.rpc_client().get_bdevs(remote_lv.top_bdev)
+    try:
+        remote_map_id = ret[0]["driver_specific"]["lvol"]["map_id"]
+    except (TypeError, KeyError, IndexError):
+        remote_map_id = None
+    if not remote_map_id:
+        logger.error(f"map_id of receiving lvol {remote_lv.top_bdev} not found on "
+                     f"{remote_lv.node_id}; not starting a transfer that cannot land")
+        task.function_result = "receiving lvol map_id unavailable, retrying"
+        task.status = JobSchedule.STATUS_SUSPENDED
+        task.retry += 1
+        task.write_to_db()
+        return
+
     # 3 start replication
     snode.rpc_client().bdev_lvol_transfer(
         name=snapshot.snap_bdev,
         offset=offset,
         batch_size=16,
         bdev_name=f"{remote_lv.top_bdev}n1",
-        operation="replicate"
+        operation="replicate",
+        lvol_id=remote_map_id
     )
     task.status = JobSchedule.STATUS_RUNNING
     task.function_params["start_time"] = int(time.time())
