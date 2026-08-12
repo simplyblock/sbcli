@@ -38,6 +38,7 @@ import simplyblock_web.api.v2.cluster.storage_pool.volume as volume_module
 import simplyblock_web.api.v2.cluster.subsystem.migration as migration_module
 import simplyblock_web.api.v2.cluster.task as task_module
 import simplyblock_web.api.v2.management_node as management_node_module
+import simplyblock_web.api.v2.metrics as metrics_module
 
 from tests.unit.web.api.v2 import _factories as factories
 
@@ -83,6 +84,7 @@ def db(monkeypatch):
         volume_module,
         task_module,
         management_node_module,
+        metrics_module,
     ):
         monkeypatch.setattr(module, 'db', mock)
     monkeypatch.setattr(migration_module, '_db', mock)
