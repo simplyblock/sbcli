@@ -38,6 +38,16 @@ logger = utils.get_logger(__name__)
 
 db_controller = DBController()
 
+SUPPORTED_ERASURE_CODING_SCHEMES = {
+    (1, 0),
+    (1, 1),
+    (2, 1),
+    (4, 1),
+    (1, 2),
+    (2, 2),
+    (4, 2),
+}
+
 def _create_update_user(cluster_id, grafana_url, grafana_secret: SecretStr, user_secret: SecretStr, update_secret=False):
     session = requests.session()
     session.auth = ("admin", grafana_secret.get_secret_value())
@@ -256,6 +266,7 @@ def parse_protocols(input_str: str):
         "rdma": "rdma" in parts,
     }
 
+
 def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, ifname, mgmt_ip, log_del_interval, metrics_retention_period,
                    contact_point, grafana_endpoint, distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, mode,
@@ -267,9 +278,8 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    enable_failure_domain=False,
                    enable_hang_device=False,
 ) -> str:
-
-    if distr_ndcs == 0 and distr_npcs == 0:
-        raise ValueError("both distr_ndcs and distr_npcs cannot be 0")
+    if (distr_ndcs, distr_npcs) not in SUPPORTED_ERASURE_CODING_SCHEMES:
+        raise ValueError("Unsupported erasure coding scheme")
 
     if max_fault_tolerance > 1:
         if ha_type != "ha":
@@ -560,8 +570,8 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
             if existing.cluster_name and existing.cluster_name == name:
                 raise ValueError(f"A cluster with the name '{name}' already exists")
 
-    if distr_ndcs == 0 and distr_npcs == 0:
-        raise ValueError("both distr_ndcs and distr_npcs cannot be 0")
+    if (distr_ndcs, distr_npcs) not in SUPPORTED_ERASURE_CODING_SCHEMES:
+        raise ValueError("Unsupported erasure coding scheme")
 
     if max_fault_tolerance > 1:
         if ha_type != "ha":
