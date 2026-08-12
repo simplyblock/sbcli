@@ -3773,12 +3773,24 @@ class TestBackupCrossClusterRestore(BackupTestBase):
             # Wait for restore to complete on Cluster-2
             self.logger.info(
                 "TC-BCK-075: waiting for Cluster-2 restore to complete…")
+            restored_id = None
             deadline = time.time() + _RESTORE_COMPLETE_TIMEOUT
             while time.time() < deadline:
                 lvol_out, _ = self._sbcli_c2("lvol list")
                 if restored_name in lvol_out:
+                    # Extract lvol ID from the table row containing the name
+                    import re as _re
+                    for line in lvol_out.split("\n"):
+                        if restored_name in line:
+                            id_match = _re.search(
+                                r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+                                r"[0-9a-f]{4}-[0-9a-f]{12})", line)
+                            if id_match:
+                                restored_id = id_match.group(1)
+                            break
                     self.logger.info(
-                        "TC-BCK-075: restored lvol appeared on Cluster-2")
+                        f"TC-BCK-075: restored lvol appeared on Cluster-2"
+                        f" (id={restored_id})")
                     break
                 sleep_n_sec(_POLL_INTERVAL)
             else:
@@ -3787,11 +3799,15 @@ class TestBackupCrossClusterRestore(BackupTestBase):
                     f"appear on Cluster-2 within "
                     f"{_RESTORE_COMPLETE_TIMEOUT}s")
 
+            assert restored_id, (
+                f"TC-BCK-075: could not extract lvol ID for "
+                f"{restored_name} from lvol list output")
+
             # TC-BCK-076: data integrity — connect via Cluster-2
             self.logger.info(
                 "TC-BCK-076: connecting restored lvol from Cluster-2")
             c2_connect_out, c2_connect_err = self._sbcli_c2(
-                f"volume connect {restored_name}")
+                f"volume connect {restored_id}")
             connect_lines = [
                 line.strip()
                 for line in c2_connect_out.strip().split("\n")
