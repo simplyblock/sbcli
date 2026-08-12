@@ -400,6 +400,12 @@ def _spec_batch_migration(runner, monkeypatch):
     # Stub collaborators that hit real infrastructure (DB, events, network).
     monkeypatch.setattr(runner.tasks_controller, "get_active_cluster_expand_task",
                         lambda *a, **k: False)
+    # main() lease-gates each task via claim_task before running it (so two
+    # runner replicas can't both drive the same group); without this the real
+    # claim_task hits the module's own uninitialized DBController, "loses" the
+    # claim every time, and main() skips task_runner forever.
+    monkeypatch.setattr(runner.tasks_controller, "claim_task",
+                        lambda *a, **k: True)
     monkeypatch.setattr(runner, "_delete_target_subsystem", MagicMock())
     monkeypatch.setattr(runner, "migration_events", MagicMock())
     monkeypatch.setattr(runner, "tasks_events", MagicMock())
