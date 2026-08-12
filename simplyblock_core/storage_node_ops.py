@@ -4145,16 +4145,16 @@ def _delete_replica_on_peer(peer, primary, cluster):
     lvstore = primary.lvstore
     if not lvstore:
         return
-    try:
-        nqn = peer.hublvol_nqn_for_lvstore(cluster.nqn, lvstore)
-        if rpc_client.subsystem_get(nqn):
-            rpc_client.subsystem_delete(nqn)
-    except RPCException as e:
-        logger.warning(f"hublvol subsystem teardown for {lvstore} on {peer.get_id()} failed: {e}")
-    try:
-        rpc_client.bdev_lvol_delete_hublvol(lvstore)
-    except RPCException as e:
-        logger.warning(f"hublvol bdev teardown for {lvstore} on {peer.get_id()} failed: {e}")
+    # try:
+    #     nqn = peer.hublvol_nqn_for_lvstore(cluster.nqn, lvstore)
+    #     if rpc_client.subsystem_get(nqn):
+    #         rpc_client.subsystem_delete(nqn)
+    # except RPCException as e:
+    #     logger.warning(f"hublvol subsystem teardown for {lvstore} on {peer.get_id()} failed: {e}")
+    # try:
+    #     rpc_client.bdev_lvol_delete_hublvol(lvstore)
+    # except RPCException as e:
+    #     logger.warning(f"hublvol bdev teardown for {lvstore} on {peer.get_id()} failed: {e}")
     try:
         # deepcopy: _remove_bdev_stack stamps bdev['status']; don't mutate the
         # primary's stored stack definition.
@@ -6353,6 +6353,28 @@ def shutdown_storage_node(node_id, force=False, keep_auto_restart=False,
             logger.warning(
                 "Loop 2: peer-side detach pass raised %s (continuing to kill)",
                 e)
+
+        if snode.hublvol:
+            # Disconnect hublvol from secondary
+            if snode.secondary_node_id:
+                sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
+                if sec_node.status == StorageNode.STATUS_ONLINE:
+                    logger.info("Disconnecting hublvol from %s", sec_node.get_id())
+                    try:
+                        sec_node.rpc_client().bdev_nvme_detach_controller(snode.hublvol.bdev_name)
+                    except Exception as e:
+                        logger.warning("Disconnecting hublvol failed: %s", e)
+
+            # Disconnect hublvol from tertiary
+            if snode.tertiary_node_id:
+                ter_node = db_controller.get_storage_node_by_id(snode.tertiary_node_id)
+                if ter_node.status == StorageNode.STATUS_ONLINE:
+                    logger.info("Disconnecting hublvol from %s", ter_node.get_id())
+                    try:
+                        ter_node.rpc_client().bdev_nvme_detach_controller(snode.hublvol.bdev_name)
+                    except Exception as e:
+                        logger.warning("Disconnecting hublvol failed: %s", e)
+
 
     # Step 5: hard-kill SPDK. Same code path as the existing --force
     # shutdown — peers see the TCP drop and host multipath retries on
