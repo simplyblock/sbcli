@@ -3799,28 +3799,42 @@ class TestBackupCrossClusterRestore(BackupTestBase):
 
             # Phase 1: wait for restore task to reach 'done'
             task_deadline = time.time() + _RESTORE_COMPLETE_TIMEOUT
+            restore_task_done = False
             while time.time() < task_deadline:
                 try:
                     task_out, _ = self._sbcli_c2(
                         f"cluster list-tasks {self._cluster2_id}"
                         f" --limit 0")
                     for line in (task_out or "").splitlines():
-                        if "s3_backup_restore" in line and "done" in line:
+                        if "s3_backup_restore" not in line:
+                            continue
+                        if "done" in line:
                             self.logger.info(
                                 "TC-BCK-075: restore task reached 'done'")
+                            restore_task_done = True
                             break
-                    else:
-                        sleep_n_sec(_POLL_INTERVAL)
-                        continue
-                    break  # task done
+                        # Detect fatal task failure: max retries exhausted
+                        retry_match = _re.search(
+                            r"(\d+)/(\d+)", line)
+                        if retry_match:
+                            cur, mx = int(retry_match.group(1)), int(retry_match.group(2))
+                            if cur >= mx:
+                                raise AssertionError(
+                                    f"TC-BCK-075: restore task exhausted "
+                                    f"retries ({cur}/{mx}): {line.strip()}")
+                    if restore_task_done:
+                        break
+                    sleep_n_sec(_POLL_INTERVAL)
+                except AssertionError:
+                    raise
                 except Exception as e:
                     self.logger.warning(
                         f"TC-BCK-075: could not check task status: {e}")
                     sleep_n_sec(_POLL_INTERVAL)
             else:
-                self.logger.warning(
+                raise AssertionError(
                     "TC-BCK-075: restore task did not reach 'done' "
-                    f"within {_RESTORE_COMPLETE_TIMEOUT}s — proceeding")
+                    f"within {_RESTORE_COMPLETE_TIMEOUT}s")
 
             # Stabilisation wait after restore task completes
             self.logger.info(
@@ -3837,6 +3851,10 @@ class TestBackupCrossClusterRestore(BackupTestBase):
                         r"[0-9a-f]{4}-[0-9a-f]{12})", line)
                     if id_match:
                         restored_id = id_match.group(1)
+                    if "restore_failed" in line.lower():
+                        raise AssertionError(
+                            f"TC-BCK-075: lvol {restored_name} has "
+                            f"restore_failed status: {line.strip()}")
                     if "online" not in line.lower():
                         self.logger.warning(
                             f"TC-BCK-075: lvol {restored_name} not "
