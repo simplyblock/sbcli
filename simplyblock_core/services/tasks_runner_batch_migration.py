@@ -55,7 +55,7 @@ from simplyblock_core.services.tasks_runner_lvol_migration import (
     _get_source_tertiary_node,
     _lvol_tgt_bdev_name,
     _build_paths,
-    _ensure_target_nvmf_state,
+    _ensure_and_prune_target_paths,
 )
 
 logger = utils.get_logger(__name__)
@@ -191,10 +191,30 @@ def _reconstruct_snap_tree(group, member_migrations, tgt_node, tgt_rpc) -> Optio
                 if not ter_rpc.bdev_lvol_convert(tgt_composite):
                     return f"bdev_lvol_convert on tertiary failed for {snap_uuid}"
 
+            # Early partial DB update: route health-check/delete to the target
+            # node right away rather than waiting for apply_migration_to_db()
+            # at this worker's CLEANUP_SOURCE -- which, on the batch path, is
+            # still several phases (INTERMEDIATE, final-step transfer, ANA
+            # flip) and potentially a long wall-clock gap away. Mirrors the
+            # single-lvol path's _post_process_snap.
+            try:
+                snap_rec = db.get_snapshot_by_id(snap_uuid)
+                if snap_rec.lvol.uuid == m.lvol_id:
+                    snap_rec.lvol.node_id = tgt_node.get_id()
+                    snap_rec.write_to_db(db.kv_store)
+            except KeyError:
+                logger.warning(f"Snapshot {snap_uuid} not found in DB for early node update")
+
             committed.add(snap_uuid)
             # Update migration record so snaps_migrated reflects committed state.
             if snap_uuid not in m.snaps_migrated:
                 m.snaps_migrated.append(snap_uuid)
+            # Track this snap's target bdev so cleanup_migration_target() knows
+            # to delete it on rollback -- mirrors _post_process_snap; without
+            # this the batch path never recorded it, so cleanup silently left
+            # every migrated snapshot bdev orphaned on the target.
+            if snap_uuid not in m.snaps_preexisting_on_target and tgt_composite not in m.target_snap_bdevs:
+                m.target_snap_bdevs.append(tgt_composite)
 
         m.write_to_db(db.kv_store)
 
@@ -330,6 +350,29 @@ def _flip_ana_to_optimized(group, member_migrations, src_node, src_rpc, tgt_node
     nqn = group.target_nqn
     src_paths, tgt_paths, overlap_ids = _build_paths(src_node, tgt_node, src_rpc, tgt_rpc)
     src_port_by_id = {p['node_id']: p['port'] for p in src_paths}
+
+    # Detect and repair a target-side node restart that wiped the migration's
+    # NVMe-oF subsystem/listener/namespace, right before this ANA-flip
+    # sequence -- that state is only ever consumed here, at cutover, so there
+    # is no need to poll for it during PHASE_SNAP_COPY/PHASE_INTERMEDIATE.
+    # All workers share the same NQN/subsystem, so the first member is a
+    # representative stand-in. bdev_lvol_batch_final_step has already run and
+    # cannot be undone, so unlike solo migration this is always best-effort:
+    # secondary/tertiary get pruned from tgt_paths on failure (same as solo),
+    # and even a primary failure is only logged -- there is no "abort" option
+    # left at this point, matching this function's existing tolerance for any
+    # ANA-flip step failing (see docstring above).
+    if member_migrations:
+        try:
+            first_lvol = db.get_lvol_by_id(member_migrations[0].lvol_id)
+            tgt_paths, _ensure_err = _ensure_and_prune_target_paths(
+                member_migrations[0], first_lvol, tgt_node, tgt_paths)
+            if _ensure_err:
+                logger.error(
+                    f"Group {group.uuid[:8]}: target primary NVMe-oF state check "
+                    f"failed (non-fatal, batch_final_step already committed): {_ensure_err}")
+        except Exception as e:
+            logger.warning(f"Group {group.uuid[:8]}: target NVMe-oF state check error (non-fatal): {e}")
 
     def _flip(rpc, ip, port, trtype, state, label):
         try:
@@ -535,6 +578,48 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
                 f"failure (non-fatal): {detach_exc}")
         return None, str(e)
 
+    # Pre-freeze: take SRC secondary/tertiary out of the read path before the
+    # synchronous final-step transfer below. bdev_lvol_batch_transfer_final_step
+    # freezes the SRC primary internally for the duration of the transfer, but
+    # a client sitting on a SRC replica path is not covered by that freeze —
+    # without this, a write accepted by a SRC replica during the transfer (or
+    # in the gap before cutover flips SRC paths inaccessible) never reaches
+    # the copy that already ran, and is silently lost. Mirrors the single-lvol
+    # path's identical pre-freeze (tasks_runner_lvol_migration.py).
+    nqn = group.target_nqn
+    src_paths, _, _ = _build_paths(src_node, tgt_node, src_rpc, tgt_rpc)
+    src_replica_paths = src_paths[1:]  # secondary/tertiary only; primary is frozen internally by the RPC below
+
+    def _flip(rpc, ip, port, trtype, state, label):
+        try:
+            rpc.nvmf_subsystem_listener_set_ana_state(nqn, ip, port, trtype=trtype, ana=state)
+            logger.info(f"Group {group.uuid[:8]}: ANA {label} {ip}:{port} → {state}")
+            return True
+        except Exception as e:
+            logger.warning(f"Group {group.uuid[:8]}: ANA {label} {ip}:{port} (non-fatal): {e}")
+            return False
+
+    def _flip_all(rpc, ips, port, trtype, state, label):
+        for _ip in ips:
+            _flip(rpc, _ip, port, trtype, state, label)
+
+    def _revert_src_replicas(reason):
+        # Final step didn't complete — put SRC secondary/tertiary back into
+        # the read path (their pre-freeze state) so clients keep multipath
+        # access to the still-live source instead of being stuck on primary only.
+        if not src_replica_paths:
+            return
+        logger.warning(f"Group {group.uuid[:8]}: {reason}; reverting SRC secondary/tertiary to non_optimized")
+        for p in src_replica_paths:
+            _flip_all(p['rpc'], p['ips'], p['port'], p['trtype'],
+                      "non_optimized", f"SRC-{p['node_id'][:8]}(revert)")
+
+    if src_replica_paths:
+        logger.info(f"Group {group.uuid[:8]}: setting SRC secondary/tertiary inaccessible pre-final-step")
+        for p in src_replica_paths:
+            _flip_all(p['rpc'], p['ips'], p['port'], p['trtype'],
+                      "inaccessible", f"SRC-{p['node_id'][:8]}(pre-freeze)")
+
     logger.info(
         f"Group {group.uuid[:8]}: batch_final_step "
         f"lvols={len(lvol_names)} hub={hub_bdev}")
@@ -549,10 +634,16 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
         logger.error(f"Group {group.uuid[:8]}: bdev_lvol_batch_transfer_final_step RPC error code={e.code}: {e}")
         batch_err = str(e)
         if e.code == RPCErrorCode.method_not_found:
+            _revert_src_replicas("batch_final_step failed (method_not_found)")
             return False, batch_err  # Retrying will never help; surface as fatal so the group fails immediately.
     except Exception as e:
         logger.error(f"Group {group.uuid[:8]}: bdev_lvol_batch_transfer_final_step failed: {e}")
         batch_err = str(e)
+
+    if not batch_ok:
+        _revert_src_replicas("batch_final_step failed")
+    # else: left as-is — the Done handler's ANA sequence (_flip_ana_to_optimized)
+    # already drives every SRC path (including primary) to inaccessible on success.
 
     if batch_ok:
         # bdev_lvol_batch_final_step handles add_clone on the primary internally.
@@ -787,18 +878,14 @@ def task_runner(task):
     try:
         src_node = db.get_storage_node_by_id(group.source_node_id)
     except KeyError:
-        task.function_result = f"source node {group.source_node_id} not found"
-        task.status = JobSchedule.STATUS_SUSPENDED
-        task.write_to_db(db.kv_store)
-        return False
+        return _batch_budget_suspend(
+            task, group, group_id, f"source node {group.source_node_id} not found")
 
     try:
         tgt_node = db.get_storage_node_by_id(group.target_node_id)
     except KeyError:
-        task.function_result = f"target node {group.target_node_id} not found"
-        task.status = JobSchedule.STATUS_SUSPENDED
-        task.write_to_db(db.kv_store)
-        return False
+        return _batch_budget_suspend(
+            task, group, group_id, f"target node {group.target_node_id} not found")
 
     phase = group.phase
     _is_cleanup_phase = phase in (
@@ -877,22 +964,6 @@ def task_runner(task):
             task.status = JobSchedule.STATUS_SUSPENDED
             task.write_to_db(db.kv_store)
             return False
-
-    # --- Target NVMe-oF state reconciliation (GAP D) ---
-    # Mirror the solo runner's per-tick subsystem/listener/namespace repair.
-    # Use the first member migration (all workers share the same NQN and subsystem).
-    if phase in (LVolMigrationGroup.PHASE_SNAP_COPY, LVolMigrationGroup.PHASE_INTERMEDIATE):
-        if member_migrations:
-            first_mig = member_migrations[0]
-            try:
-                first_lvol = db.get_lvol_by_id(first_mig.lvol_id)
-                nvmf_err = _ensure_target_nvmf_state(
-                    first_mig, first_lvol, src_node, tgt_node, src_rpc, tgt_rpc)
-                if nvmf_err:
-                    logger.warning(f"Group {group_id[:8]}: target NVMe-oF state check failed: {nvmf_err}")
-                    return _batch_budget_suspend(task, group, group_id, nvmf_err)
-            except Exception as e:
-                logger.warning(f"Group {group_id[:8]}: _ensure_target_nvmf_state error (non-fatal): {e}")
 
     try:
         # ── PHASE_SNAP_COPY: wait for all workers, then reconstruct tree ─────────
@@ -1021,7 +1092,14 @@ def main():
         else:
             for cl in clusters:
                 for task in db.get_active_batch_migration_tasks(cl.get_id()):
-                    task_runner(task)
+                    # Lease gate: skip a task another live runner host owns, so
+                    # two replicas can't both drive the same batch migration's
+                    # multi-phase data-plane state-machine concurrently.
+                    if not tasks_controller.claim_task(task):
+                        logger.info(f"Batch-migration task {task.uuid} owned by another runner host; skipping")
+                        continue
+                    with tasks_controller.task_lease_heartbeat(task):
+                        task_runner(task)
 
         time.sleep(3)
 

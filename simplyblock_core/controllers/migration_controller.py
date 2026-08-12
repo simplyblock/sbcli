@@ -149,7 +149,12 @@ def start_migration(migration_id,
     migration.started_at = int(time.time())
     migration.deadline = int(time.time()) + deadline_seconds if deadline_seconds else 0
     migration.max_retries = max_retries
-    migration.status = LVolMigration.STATUS_NEW
+    # RUNNING, not NEW: _cancel_stale_new_migrations treats STATUS_NEW as
+    # "operator never called migrate-continue" and auto-cancels it after 5
+    # minutes. Once continued, the migration is actively in progress even if
+    # the task runner's own NEW→RUNNING flip is delayed behind a node/cluster
+    # gate (e.g. cluster rebalancing) — it must not look abandoned.
+    migration.status = LVolMigration.STATUS_RUNNING
     migration.write_to_db(db.kv_store)
     logger.info(
         f"Promoting pre-created migration {migration.uuid} → PHASE_SNAP_COPY "
@@ -996,7 +1001,7 @@ def create_migration(lvol_id, target_node_id,
     # ── 1d. Register migration bdev on TGT-sec and TGT-ter ───────────────────
     # All HA peers need bdev_lvol_register so they can mirror writes during migration.
     _pre_sec_node = None
-    if lvol.ha_type in ("ha", "ha3") and tgt_node.secondary_node_id:
+    if lvol.ha_type != "single" and tgt_node.secondary_node_id:
         try:
             _pre_sec_node = db.get_storage_node_by_id(tgt_node.secondary_node_id)
             _sec_rpc_reg  = _pre_sec_node.rpc_client()
@@ -1066,7 +1071,7 @@ def create_migration(lvol_id, target_node_id,
         src_node_ids.add(src_node.tertiary_node_id)
 
     tgt_sec_node = None
-    if lvol.ha_type in ("ha", "ha3") and tgt_node.secondary_node_id:
+    if lvol.ha_type != "single" and tgt_node.secondary_node_id:
         tgt_sec_node = (_pre_sec_node if _pre_sec_node is not None else None)
         if tgt_sec_node is None:
             try:
@@ -1288,7 +1293,12 @@ def create_batch_migration(lvol_id, target_node_id,
             f"Use create_migration instead."
         )
 
-    # Check for an existing active group for this NQN on this target.
+    # Check for an existing active group for this NQN on this target. If it's
+    # still PHASE_PRE_CREATED, treat this as an idempotent retry (e.g. a
+    # client-side timeout on a call that actually succeeded) and reuse it
+    # below instead of hard-failing every retry -- mirrors create_migration's
+    # existing_migration handling.
+    existing_group = None
     existing_groups = db_inst.get_migration_groups(tgt_node.cluster_id)
     for g in existing_groups:
         if g.target_node_id == target_node_id and g.status not in (
@@ -1298,10 +1308,12 @@ def create_batch_migration(lvol_id, target_node_id,
         ):
             # Check NQN overlap via target_nqn
             if g.target_nqn == lvol.nqn:
-                raise ValueError(
-                    f"An active batch migration group ({g.uuid}) already exists "
-                    f"for NQN {lvol.nqn} targeting {target_node_id}."
-                )
+                if g.phase != LVolMigrationGroup.PHASE_PRE_CREATED:
+                    raise PreconditionError(
+                        f"Batch migration group {g.uuid} for NQN {lvol.nqn} is already "
+                        f"past pre-create (phase={g.phase}). Use /continue or cancel it."
+                    )
+                existing_group = g
 
     source_node_id = lvol.node_id
 
@@ -1331,6 +1343,13 @@ def create_batch_migration(lvol_id, target_node_id,
         for snap_uuid, lvol_uuid in snap_owner_lvol.items()
         if lvol_uuid in lvol_uuid_to_migration_id
     }
+
+    if existing_group is not None:
+        logger.info(
+            f"create_batch_migration: idempotent re-call for NQN={lvol.nqn} "
+            f"target={target_node_id} reusing group_id={existing_group.uuid} "
+            f"connect_strings={len(master_connect_strings)}")
+        return existing_group.uuid, master_connect_strings
 
     # Stamp migration_group_id on each worker record.
     group = LVolMigrationGroup()
@@ -1381,6 +1400,19 @@ def start_batch_migration(group_id,
             f"Group {group_id} is not in PHASE_PRE_CREATED (phase={group.phase})"
         )
 
+    # Same preconditions as start_migration's single-lvol path — these are
+    # only checked at create_batch_migration (precreate) time today, so a
+    # cluster rebalance / conflicting node migration starting in the gap
+    # before migrate-continue --batch would otherwise go unnoticed here.
+    cluster = db.get_cluster_by_id(group.cluster_id)
+    if cluster.status != Cluster.STATUS_ACTIVE:
+        raise PreconditionError(f"Cluster {cluster.get_id()} is not active (status={cluster.status})")
+    if not _can_add_lvol_migration(cluster.get_id()):
+        raise PreconditionError(f"Cluster {cluster.get_id()} is rebalancing; wait for it to finish before migrating")
+    for node_id in (group.source_node_id, group.target_node_id):
+        if tasks_controller.get_active_node_mig_task(group.cluster_id, node_id):
+            raise PreconditionError(f"Node {node_id} has a data migration in progress; wait for it to finish")
+
     now = int(time.time())
     deadline = now + deadline_seconds if deadline_seconds else 0
 
@@ -1397,6 +1429,9 @@ def start_batch_migration(group_id,
             lvol = db.get_lvol_by_id(lvol_id)
         except KeyError:
             raise ValueError(f"LVol {lvol_id} not found for worker {migration_id}")
+
+        if lvol.status != LVol.STATUS_ONLINE:
+            raise ValueError(f"Volume {lvol_id} is not online (status={lvol.status})")
 
         snap_plan = get_snapshot_chain(lvol_id, migration.source_node_id)
         snaps_on_target = [s for s in snap_plan if _is_snap_on_node(s, migration.target_node_id)]
@@ -1418,7 +1453,11 @@ def start_batch_migration(group_id,
         migration.started_at = now
         migration.deadline = deadline
         migration.max_retries = max_retries
-        migration.status = LVolMigration.STATUS_NEW
+        # RUNNING, not NEW — see the matching comment in start_migration:
+        # _cancel_stale_new_migrations doesn't know about batch workers and
+        # would cancel just this one member (stranding the group) if it sat
+        # in STATUS_NEW for 5+ minutes behind a delayed task-runner pickup.
+        migration.status = LVolMigration.STATUS_RUNNING
         migration.write_to_db(db.kv_store)
 
         task_uuid = tasks_controller.add_lvol_mig_task(migration)
@@ -1485,6 +1524,22 @@ def cancel_batch_migration(group_id):
         except Exception as e:
             logger.warning(f"cancel_batch_migration: could not mark worker "
                            f"{rec['migration_id']} cancelled: {e}")
+
+    # A cancelled worker abandons its current phase for its own CLEANUP_TARGET
+    # instead of signalling snap_copy_done/intermediates_done -- so the
+    # orchestrator's barrier for that phase would otherwise wait forever and
+    # the group would stay STATUS_RUNNING permanently, even after every worker
+    # reaches a terminal state on its own. Advance the group directly, same as
+    # _group_worker_budget_suspend does on retry exhaustion.
+    if group.phase not in (
+        LVolMigrationGroup.PHASE_CLEANUP_TARGET,
+        LVolMigrationGroup.PHASE_CLEANUP_SOURCE,
+        LVolMigrationGroup.PHASE_COMPLETED,
+    ):
+        group.phase = LVolMigrationGroup.PHASE_CLEANUP_TARGET
+        group.error_message = "cancelled by operator"
+        group.write_to_db(db.kv_store)
+
     logger.info(f"cancel_batch_migration: marked all workers cancelled: {group_id}")
 
 
