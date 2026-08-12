@@ -144,7 +144,7 @@
                         "uid": "PBFA97CFB590B2093"
                     },
                     "editorMode": "code",
-                    "expr": "snode_size_total{cluster=~\"$cluster\",snode=~\"$node\"}",
+                    "expr": "simplyblock_snode_size_total_bytes{cluster=~\"$cluster\",snode=~\"$node\"}",
                     "legendFormat": "__auto",
                     "range": true,
                     "refId": "A"
@@ -237,7 +237,7 @@
                         "uid": "PBFA97CFB590B2093"
                     },
                     "editorMode": "code",
-                    "expr": "snode_size_free{cluster=~\"$cluster\",snode=~\"$node\"}",
+                    "expr": "simplyblock_snode_size_free_bytes{cluster=~\"$cluster\",snode=~\"$node\"}",
                     "legendFormat": "__auto",
                     "range": true,
                     "refId": "A"
@@ -330,7 +330,7 @@
                         "uid": "PBFA97CFB590B2093"
                     },
                     "editorMode": "code",
-                    "expr": "snode_size_used{cluster=~\"$cluster\",snode=~\"$node\"}",
+                    "expr": "simplyblock_snode_size_used_bytes{cluster=~\"$cluster\",snode=~\"$node\"}",
                     "legendFormat": "__auto",
                     "range": true,
                     "refId": "A"
@@ -423,7 +423,7 @@
                         "uid": "PBFA97CFB590B2093"
                     },
                     "editorMode": "code",
-                    "expr": "snode_size_prov{cluster=~\"$cluster\",snode=~\"$node\"}",
+                    "expr": "simplyblock_snode_size_provisioned_bytes{cluster=~\"$cluster\",snode=~\"$node\"}",
                     "legendFormat": "__auto",
                     "range": true,
                     "refId": "A"
@@ -516,7 +516,7 @@
                         "uid": "PBFA97CFB590B2093"
                     },
                     "editorMode": "code",
-                    "expr": "snode_size_prov_util{cluster=~\"$cluster\",snode=~\"$node\"}",
+                    "expr": "100 * simplyblock_snode_size_provisioned_bytes{cluster=~\"$cluster\",snode=~\"$node\"} / simplyblock_snode_size_total_bytes{cluster=~\"$cluster\",snode=~\"$node\"}",
                     "legendFormat": "__auto",
                     "range": true,
                     "refId": "A"
@@ -609,7 +609,7 @@
                         "uid": "PBFA97CFB590B2093"
                     },
                     "editorMode": "code",
-                    "expr": "snode_size_util{cluster=~\"$cluster\",snode=~\"$node\"}",
+                    "expr": "100 * simplyblock_snode_size_used_bytes{cluster=~\"$cluster\",snode=~\"$node\"} / simplyblock_snode_size_total_bytes{cluster=~\"$cluster\",snode=~\"$node\"}",
                     "legendFormat": "__auto",
                     "range": true,
                     "refId": "A"
@@ -715,7 +715,7 @@
                         "uid": "PBFA97CFB590B2093"
                     },
                     "editorMode": "code",
-                    "expr": "snode_write_bytes{cluster=~\"$cluster\",snode=~\"$node\"}",
+                    "expr": "simplyblock_snode_write_bytes_total{cluster=~\"$cluster\",snode=~\"$node\"}",
                     "legendFormat": "__auto",
                     "range": true,
                     "refId": "A"
@@ -808,7 +808,7 @@
                         "uid": "PBFA97CFB590B2093"
                     },
                     "editorMode": "code",
-                    "expr": "snode_write_bytes_ps{cluster=~\"$cluster\",snode=~\"$node\"}",
+                    "expr": "rate(simplyblock_snode_write_bytes_total{cluster=~\"$cluster\",snode=~\"$node\"}[$__rate_interval])",
                     "legendFormat": "__auto",
                     "range": true,
                     "refId": "A"
@@ -900,7 +900,7 @@
                         "uid": "PBFA97CFB590B2093"
                     },
                     "editorMode": "code",
-                    "expr": "snode_write_latency_ticks{cluster=~\"$cluster\",snode=~\"$node\"}",
+                    "expr": "simplyblock_snode_write_latency_ticks_total{cluster=~\"$cluster\",snode=~\"$node\"}",
                     "legendFormat": "__auto",
                     "range": true,
                     "refId": "A"
@@ -992,7 +992,7 @@
                         "uid": "PBFA97CFB590B2093"
                     },
                     "editorMode": "code",
-                    "expr": "snode_write_io{cluster=~\"$cluster\",snode=~\"$node\"}",
+                    "expr": "simplyblock_snode_write_operations_total{cluster=~\"$cluster\",snode=~\"$node\"}",
                     "legendFormat": "__auto",
                     "range": true,
                     "refId": "A"
@@ -1084,7 +1084,7 @@
                         "uid": "PBFA97CFB590B2093"
                     },
                     "editorMode": "code",
-                    "expr": "snode_write_io_ps{cluster=~\"$cluster\",snode=~\"$node\"}",
+                    "expr": "rate(simplyblock_snode_write_operations_total{cluster=~\"$cluster\",snode=~\"$node\"}[$__rate_interval])",
                     "legendFormat": "__auto",
                     "range": true,
                     "refId": "A"
@@ -1147,7 +1147,7 @@
                             }
                         ]
                     },
-                    "unit": "µs"
+                    "unit": "\u00b5s"
                 },
                 "overrides": []
             },
@@ -1177,7 +1177,7 @@
                         "uid": "PBFA97CFB590B2093"
                     },
                     "editorMode": "code",
-                    "expr": "snode_write_latency_ps{cluster=~\"$cluster\",snode=~\"$node\"} / 1000",
+                    "expr": "rate(simplyblock_snode_write_latency_ticks_total{cluster=~\"$cluster\",snode=~\"$node\"}[$__rate_interval]) / 1000",
                     "legendFormat": "__auto",
                     "range": true,
                     "refId": "A"
@@ -1283,7 +1283,7 @@
                         "uid": "PBFA97CFB590B2093"
                     },
                     "editorMode": "code",
-                    "expr": "snode_read_bytes{cluster=~\"$cluster\",snode=~\"$node\"}",
+                    "expr": "simplyblock_snode_read_bytes_total{cluster=~\"$cluster\",snode=~\"$node\"}",
                     "legendFormat": "__auto",
                     "range": true,
                     "refId": "A"
@@ -1376,7 +1376,7 @@
                         "uid": "PBFA97CFB590B2093"
                     },
                     "editorMode": "code",
-                    "expr": "snode_read_bytes_ps{cluster=~\"$cluster\",snode=~\"$node\"}",
+                    "expr": "rate(simplyblock_snode_read_bytes_total{cluster=~\"$cluster\",snode=~\"$node\"}[$__rate_interval])",
                     "legendFormat": "__auto",
                     "range": true,
                     "refId": "A"
@@ -1439,7 +1439,7 @@
                             }
                         ]
                     },
-                    "unit": "µs"
+                    "unit": "\u00b5s"
                 },
                 "overrides": []
             },
@@ -1469,7 +1469,7 @@
                         "uid": "PBFA97CFB590B2093"
                     },
                     "editorMode": "code",
-                    "expr": "snode_read_latency_ps{cluster=~\"$cluster\",snode=~\"$node\"}",
+                    "expr": "rate(simplyblock_snode_read_latency_ticks_total{cluster=~\"$cluster\",snode=~\"$node\"}[$__rate_interval])",
                     "legendFormat": "__auto",
                     "range": true,
                     "refId": "A"
@@ -1561,7 +1561,7 @@
                         "uid": "PBFA97CFB590B2093"
                     },
                     "editorMode": "code",
-                    "expr": "snode_read_io{cluster=~\"$cluster\",snode=~\"$node\"}",
+                    "expr": "simplyblock_snode_read_operations_total{cluster=~\"$cluster\",snode=~\"$node\"}",
                     "legendFormat": "__auto",
                     "range": true,
                     "refId": "A"
@@ -1653,7 +1653,7 @@
                         "uid": "PBFA97CFB590B2093"
                     },
                     "editorMode": "code",
-                    "expr": "snode_read_io_ps{cluster=~\"$cluster\",snode=~\"$node\"}",
+                    "expr": "rate(simplyblock_snode_read_operations_total{cluster=~\"$cluster\",snode=~\"$node\"}[$__rate_interval])",
                     "legendFormat": "__auto",
                     "range": true,
                     "refId": "A"
@@ -1745,7 +1745,7 @@
                         "uid": "PBFA97CFB590B2093"
                     },
                     "editorMode": "code",
-                    "expr": "snode_read_latency_ticks{cluster=~\"$cluster\",snode=~\"$node\"}",
+                    "expr": "simplyblock_snode_read_latency_ticks_total{cluster=~\"$cluster\",snode=~\"$node\"}",
                     "legendFormat": "__auto",
                     "range": true,
                     "refId": "A"
@@ -1850,7 +1850,7 @@
                         "uid": "PBFA97CFB590B2093"
                     },
                     "editorMode": "code",
-                    "expr": "snode_unmap_latency_ticks{cluster=~\"$cluster\",snode=~\"$node\"}",
+                    "expr": "simplyblock_snode_unmap_latency_ticks_total{cluster=~\"$cluster\",snode=~\"$node\"}",
                     "legendFormat": "__auto",
                     "range": true,
                     "refId": "A"
@@ -1943,7 +1943,7 @@
                         "uid": "PBFA97CFB590B2093"
                     },
                     "editorMode": "code",
-                    "expr": "snode_unmap_bytes_ps{cluster=~\"$cluster\",snode=~\"$node\"}",
+                    "expr": "rate(simplyblock_snode_unmap_bytes_total{cluster=~\"$cluster\",snode=~\"$node\"}[$__rate_interval])",
                     "legendFormat": "__auto",
                     "range": true,
                     "refId": "A"
@@ -2007,7 +2007,7 @@
                             }
                         ]
                     },
-                    "unit": "µs"
+                    "unit": "\u00b5s"
                 },
                 "overrides": []
             },
@@ -2037,7 +2037,7 @@
                         "uid": "PBFA97CFB590B2093"
                     },
                     "editorMode": "code",
-                    "expr": "snode_unmap_latency_ps{cluster=~\"$cluster\",snode=~\"$node\"}",
+                    "expr": "rate(simplyblock_snode_unmap_latency_ticks_total{cluster=~\"$cluster\",snode=~\"$node\"}[$__rate_interval])",
                     "legendFormat": "__auto",
                     "range": true,
                     "refId": "A"
@@ -2154,7 +2154,7 @@
                         "uid": "PBFA97CFB590B2093"
                     },
                     "editorMode": "code",
-                    "expr": "snode_unmap_io_ps{cluster=~\"$cluster\",snode=~\"$node\"}",
+                    "expr": "rate(simplyblock_snode_unmap_operations_total{cluster=~\"$cluster\",snode=~\"$node\"}[$__rate_interval])",
                     "legendFormat": "__auto",
                     "range": true,
                     "refId": "A"
@@ -2246,7 +2246,7 @@
                         "uid": "PBFA97CFB590B2093"
                     },
                     "editorMode": "code",
-                    "expr": "snode_unmap_io{cluster=~\"$cluster\",snode=~\"$node\"}",
+                    "expr": "simplyblock_snode_unmap_operations_total{cluster=~\"$cluster\",snode=~\"$node\"}",
                     "legendFormat": "__auto",
                     "range": true,
                     "refId": "A"
@@ -2339,7 +2339,7 @@
                         "uid": "PBFA97CFB590B2093"
                     },
                     "editorMode": "code",
-                    "expr": "snode_unmap_bytes{cluster=~\"$cluster\",snode=~\"$node\"}",
+                    "expr": "simplyblock_snode_unmap_bytes_total{cluster=~\"$cluster\",snode=~\"$node\"}",
                     "legendFormat": "__auto",
                     "range": true,
                     "refId": "A"
@@ -2444,7 +2444,7 @@
                         "uid": "PBFA97CFB590B2093"
                     },
                     "editorMode": "code",
-                    "expr": "snode_health_check{cluster=~\"$cluster\",snode=~\"$node\"}",
+                    "expr": "simplyblock_snode_health_check{cluster=~\"$cluster\",snode=~\"$node\"}",
                     "legendFormat": "__auto",
                     "range": true,
                     "refId": "A"
@@ -2549,7 +2549,7 @@
                         "uid": "PBFA97CFB590B2093"
                     },
                     "editorMode": "code",
-                    "expr": "snode_cpu_busy_percentage{cluster=~\"$cluster\",snode=~\"$node\"}",
+                    "expr": "100 * rate(simplyblock_snode_thread_busy_ticks_total{cluster=~\"$cluster\",snode=~\"$node\"}[$__rate_interval]) / on(cluster,cluster_name,snode,hostname,core_id) group_left(thread_name) (rate(simplyblock_snode_reactor_busy_ticks_total{cluster=~\"$cluster\",snode=~\"$node\"}[$__rate_interval]) + rate(simplyblock_snode_reactor_idle_ticks_total{cluster=~\"$cluster\",snode=~\"$node\"}[$__rate_interval]))",
                     "legendFormat": "__auto",
                     "range": true,
                     "refId": "A"
@@ -2641,7 +2641,7 @@
                         "uid": "PBFA97CFB590B2093"
                     },
                     "editorMode": "code",
-                    "expr": "snode_cpu_core_utilization{cluster=~\"$cluster\",snode=~\"$node\"}",
+                    "expr": "100 * (rate(simplyblock_snode_reactor_busy_ticks_total{cluster=~\"$cluster\",snode=~\"$node\"}[$__rate_interval]) + rate(simplyblock_snode_reactor_irq_ticks_total{cluster=~\"$cluster\",snode=~\"$node\"}[$__rate_interval]) + rate(simplyblock_snode_reactor_sys_ticks_total{cluster=~\"$cluster\",snode=~\"$node\"}[$__rate_interval])) / ((rate(simplyblock_snode_reactor_busy_ticks_total{cluster=~\"$cluster\",snode=~\"$node\"}[$__rate_interval]) + rate(simplyblock_snode_reactor_irq_ticks_total{cluster=~\"$cluster\",snode=~\"$node\"}[$__rate_interval]) + rate(simplyblock_snode_reactor_sys_ticks_total{cluster=~\"$cluster\",snode=~\"$node\"}[$__rate_interval])) + rate(simplyblock_snode_reactor_idle_ticks_total{cluster=~\"$cluster\",snode=~\"$node\"}[$__rate_interval]))",
                     "legendFormat": "__auto",
                     "range": true,
                     "refId": "A"
@@ -2676,7 +2676,7 @@
                 "name": "cluster",
                 "options": [],
                 "query": {
-                    "query": "query_result((cluster_read_io{cluster=~\".*\"}  and on() (absent(_{_=\"admin\"}) and absent(_{_=\"${__user.login}\"}))) or on() (cluster_read_io{cluster=\"${__user.login}\"}  unless on() (absent(_{_!=\"admin\"}) and absent(_{_=\"${user.login}\"}))))",
+                    "query": "query_result((simplyblock_cluster_read_operations_total{cluster=~\".*\"}  and on() (absent(_{_=\"admin\"}) and absent(_{_=\"${__user.login}\"}))) or on() (simplyblock_cluster_read_operations_total{cluster=\"${__user.login}\"}  unless on() (absent(_{_!=\"admin\"}) and absent(_{_=\"${user.login}\"}))))",
                     "refId": "PrometheusVariableQueryEditor-VariableQuery"
                 },
                 "refresh": 1,
@@ -2708,7 +2708,7 @@
                 "name": "node",
                 "options": [],
                 "query": {
-                    "query": "query_result(device_size_total{cluster=~\"$cluster\"})",
+                    "query": "query_result(simplyblock_device_size_total_bytes{cluster=~\"$cluster\"})",
                     "refId": "PrometheusVariableQueryEditor-VariableQuery"
                 },
                 "refresh": 1,
