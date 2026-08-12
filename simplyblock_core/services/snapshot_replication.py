@@ -6,6 +6,7 @@ from typing import Optional
 from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.controllers import lvol_controller, snapshot_events, snapshot_controller
 from simplyblock_core.models.job_schedule import JobSchedule
+from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
@@ -120,6 +121,22 @@ def process_snap_replicate_start(task, snapshot):
         snapshot.write_to_db()
 
 
+def _has_dependent_clone(snapshot_uuid):
+    """True when any live volume is cloned from *snapshot_uuid*.
+
+    A failed-over volume is a clone of the last replicated target snapshot, so
+    that snapshot must outlive it. Uses the mini index (same source the snapshot
+    delete path consults) and ignores volumes that are themselves going away.
+    """
+    for lvol in db.get_mini_lvols():
+        if lvol.cloned_from_snap != snapshot_uuid:
+            continue
+        if lvol.status == LVol.STATUS_IN_DELETION:
+            continue
+        return True
+    return False
+
+
 def _prune_internal_snapshots(source_lvol):
     """Retention for replication-driven internal snapshots.
 
@@ -153,6 +170,17 @@ def _prune_internal_snapshots(source_lvol):
             db.get_snapshot_by_id(target_uuid)
         except KeyError:
             target_uuid = ""  # already gone — fall through to source cleanup
+        if target_uuid and _has_dependent_clone(target_uuid):
+            # Never prune a target snapshot a volume is cloned from. The delete
+            # reaches SPDK as bdev_lvol_delete(sync=False) and frees the blocks
+            # there and then, so no downstream DB-level guard can save the clone:
+            # a failed-over volume built on this snapshot would silently start
+            # reading zeros. Keep both copies; the pair is released once the
+            # dependent volume is gone.
+            logger.info("Keeping replicated internal snapshot %s on source and "
+                        "%s on target: a volume is cloned from the target copy",
+                        snap.get_id(), target_uuid)
+            continue
         if target_uuid:
             logger.info("Pruning replicated internal snapshot on target: %s", target_uuid)
             if not snapshot_controller.delete(target_uuid):
