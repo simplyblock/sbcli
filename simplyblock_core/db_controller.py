@@ -1357,8 +1357,9 @@ class DBController(metaclass=Singleton):
         prefix = cluster_id if cluster_id else " "
         return Backup().read_from_db(self.kv_store, id=prefix)
 
-    def get_backup_by_id(self, backup_id: str) -> Backup:
-        backup = single_or_none(b for b in self.get_backups() if b.uuid == backup_id)
+    def get_backup_by_id(self, backup_id: str, cluster_id: Optional[str] = None) -> Backup:
+        backup = single_or_none(
+            b for b in self.get_backups(cluster_id) if b.uuid == backup_id)
         if backup is None:
             raise KeyError(f'Backup {backup_id} not found')
         return backup
@@ -1369,7 +1370,7 @@ class DBController(metaclass=Singleton):
     def get_backups_by_snapshot_id(self, snapshot_id: str) -> List[Backup]:
         return [b for b in self.get_backups() if b.snapshot_id == snapshot_id]
 
-    def get_backup_chain(self, backup_id: str) -> List[Backup]:
+    def get_backup_chain(self, backup_id: str, cluster_id: Optional[str] = None) -> List[Backup]:
         """Return the full backup chain ending at backup_id, oldest first."""
         chain = []
         current_id = backup_id
@@ -1377,7 +1378,7 @@ class DBController(metaclass=Singleton):
         while current_id and current_id not in visited:
             visited.add(current_id)
             try:
-                backup = self.get_backup_by_id(current_id)
+                backup = self.get_backup_by_id(current_id, cluster_id)
             except KeyError:
                 break
             chain.append(backup)

@@ -411,7 +411,7 @@ def restore_backup(backup_id: str, lvol_name: str, pool_id_or_name: str, cluster
     from simplyblock_core.models.lvol_model import LVol
 
     try:
-        backup = db_controller.get_backup_by_id(backup_id)
+        backup = db_controller.get_backup_by_id(backup_id, cluster_id)
         cluster = db_controller.get_cluster_by_id(cluster_id)
     except KeyError as e:
         return None, str(e)
@@ -428,7 +428,7 @@ def restore_backup(backup_id: str, lvol_name: str, pool_id_or_name: str, cluster
             f"{backup_src}' first.")
 
     # Build the backup chain
-    chain = db_controller.get_backup_chain(backup_id)
+    chain = db_controller.get_backup_chain(backup_id, cluster_id)
     if not chain:
         return None, f"Could not build backup chain for {backup_id}"
 
@@ -655,9 +655,8 @@ def import_backups(s3_metadata_list, cluster_id=None):
 
         # Skip only if already registered for the target cluster
         try:
-            existing = db_controller.get_backup_by_id(backup_id)
-            if existing.cluster_id == target_cluster:
-                continue  # already imported for this cluster
+            db_controller.get_backup_by_id(backup_id, target_cluster)
+            continue  # already imported for this cluster
         except KeyError:
             pass
 
