@@ -42,7 +42,15 @@ EDGE_SPDK_IMAGE = os.getenv("SIMPLYBLOCK_EDGE_SPDK_IMAGE", "simplyblock/spdk:edg
 EDGE_PROXY_IMAGE = os.getenv("SIMPLYBLOCK_EDGE_PROXY_IMAGE", "simplyblock/spdk-proxy:latest")
 # The same node-preparation CPU-topology Job central clusters run (kubelet
 # static cpu-manager policy + reserved system cpus).
-EDGE_CPU_TOPOLOGY_ENABLED = os.getenv("SIMPLYBLOCK_EDGE_CPU_TOPOLOGY", "true").lower() == "true"
+# Default OFF (2026-08-13): the central cpu-topology job mutates kubelet
+# config and restarts the kubelet — on a 1-node k3s edge cluster that
+# restarts the embedded API server mid-node-add (the very channel the CP is
+# using), and the kubeadm-style script crash-loops on k3s anyway. Exclusive
+# reactor cores on edge come from the cluster's own kubelet policy
+# (cpu-manager-policy=static via k3s config), set when the edge cluster is
+# provisioned; a plain high/RT priority is no substitute (RT throttling
+# stalls pollers 50ms/s by default, and CFS nice still time-shares the core).
+EDGE_CPU_TOPOLOGY_ENABLED = os.getenv("SIMPLYBLOCK_EDGE_CPU_TOPOLOGY", "false").lower() == "true"
 EDGE_RESERVED_SYSTEM_CPUS = os.getenv("SIMPLYBLOCK_EDGE_RESERVED_SYSTEM_CPUS", "0")
 
 # Node add: how long to wait for the SPDK proxy to answer after pod deploy.
