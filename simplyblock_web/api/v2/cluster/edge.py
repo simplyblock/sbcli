@@ -182,19 +182,15 @@ def list_nodes(cluster: EdgeCluster) -> List[EdgeNodeDTO]:
 
 @node_api.post('/', name='clusters:edge-nodes:add', status_code=202)
 def add_node(cluster: EdgeCluster, parameters: _AddNodeParams) -> Response:
-    # Validate the cheap preconditions synchronously so the caller gets a 400
-    # instead of a silent background failure; the pod deploy + stack build
-    # then runs detached (bounded by the RPC wait timeout).
-    nodes = [n for n in edge_db.get_edge_nodes(cluster.get_id())
-             if n.status != EdgeNode.STATUS_REMOVED]
-    if len(nodes) >= 2:
-        raise HTTPException(400, 'Edge clusters support at most 2 nodes')
-    if any(n.hostname == parameters.hostname for n in nodes):
-        raise HTTPException(400, f'Node {parameters.hostname} is already part of the cluster')
-    primary = next((n for n in nodes if n.is_primary), None)
-    if primary is not None and primary.lvstore_base:
-        raise HTTPException(400, 'Cannot add a node: cluster already has volumes '
-                                 'on a single-node layout')
+    # Validate the admission preconditions synchronously so the caller gets a
+    # 400 instead of a silent background failure; the pod deploy + stack build
+    # then runs detached (bounded by the RPC wait timeout). MUST be the same
+    # check ops applies — a private copy here once used stricter semantics and
+    # made failed adds unretryable through the API.
+    try:
+        edge_cluster_ops.check_node_admission(cluster.get_id(), parameters.hostname)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
     def _run():
         try:

@@ -334,3 +334,37 @@ def test_established_nodes_still_capped_at_two(env):
     _add_node(cluster, "worker-2", "10.0.0.2", ["/dev/sdb1"])
     with pytest.raises(ValueError, match="at most 2"):
         _add_node(cluster, "worker-3", "10.0.0.3", ["/dev/sdb1"])
+
+
+def test_api_layer_admission_matches_ops(env):
+    """The API endpoint must use the SAME admission check as ops: its private
+    copy once 400ed 'already part of the cluster' on a retry that ops would
+    have reclaimed (live run 2026-08-13)."""
+    kv, spdk, fake_k8s = env
+    cluster = _create_cluster()
+    spdk.for_ip("10.0.0.1").fail.add("bdev_aio_create")
+    with pytest.raises(Exception):
+        _add_node(cluster, "worker-1", "10.0.0.1", ["/dev/sdb1"])
+
+    # the retry must be admissible through the shared check
+    established, retryable = edge_cluster_ops.check_node_admission(
+        cluster.uuid, "worker-1")
+    assert established == []
+    assert len(retryable) == 1
+
+
+def test_second_node_retry_admissible_after_partial_formation(env):
+    """A failed second-node add may leave the first node's lvstore_base
+    stamped by the aborted active/active formation; the single-node-layout
+    guard must not block the retry."""
+    kv, spdk, fake_k8s = env
+    cluster = _create_cluster()
+    _add_node(cluster, "worker-1", "10.0.0.1", ["/dev/sdb1"])
+    spdk.for_ip("10.0.0.2").fail.add("bdev_aio_create")
+    with pytest.raises(Exception):
+        _add_node(cluster, "worker-2", "10.0.0.2", ["/dev/sdb1"])
+
+    edge_cluster_ops.check_node_admission(cluster.uuid, "worker-2")
+    spdk.for_ip("10.0.0.2").fail.clear()
+    node = _add_node(cluster, "worker-2", "10.0.0.2", ["/dev/sdb1"])
+    assert node.status == EdgeNode.STATUS_ONLINE

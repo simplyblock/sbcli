@@ -260,25 +260,25 @@ def _apply_cpu_layout(rpc, node):
             raise
 
 
-def add_edge_node(cluster_id, hostname, mgmt_ip, partitions, data_ip="",
-                  spdk_cpus=None, deploy=True, rpc_wait_timeout=None) -> EdgeNode:
-    """Add a node to an edge cluster (spec §5.2). Synchronous — bounded by the
-    pod-start wait; API callers run it as a task/background call."""
-    cluster = _require_edge_cluster(cluster_id)
-    if not partitions:
-        raise ValueError("An edge node needs at least one free partition")
+def check_node_admission(cluster_id, hostname):
+    """Admission preconditions for adding `hostname`, shared by the API
+    endpoint (fast 400) and add_edge_node (authoritative) — the two MUST
+    agree. When the endpoint kept its own copy with the old semantics, the
+    retry path was unreachable: a failed add left an offline record and the
+    API 400ed "already part of the cluster" before ops could reclaim it
+    (live run 2026-08-13).
 
+    RETRY SEMANTICS. A node add that fails part-way leaves its record behind
+    (offline, with status_reason). Counting those toward the node limit made
+    a failed deploy UNRETRYABLE (observed 2026-08-11: "at most 2 nodes" on a
+    1-node cluster). A record for the same hostname that never came online is
+    the SAME node retrying: it doesn't count against the limit, doesn't
+    trigger the duplicate check, and is reclaimed by the new attempt.
+
+    Returns (established, retryable); raises ValueError when inadmissible.
+    """
     all_nodes = [n for n in db.get_edge_nodes(cluster_id)
                  if n.status != EdgeNode.STATUS_REMOVED]
-
-    # RETRY SEMANTICS. A node add that fails part-way leaves its record behind
-    # (offline, so the operator can see why). Counting those toward the node
-    # limit made a failed deploy UNRETRYABLE: the second attempt hit "Edge
-    # clusters support at most 2 nodes" on a 1-node cluster and could never
-    # succeed without manual DB surgery (observed on the first live run,
-    # 2026-08-11). Treat a never-online record for the same hostname as the
-    # SAME node and retry into it, and don't count failed-in-creation records
-    # against the limit.
     retryable = [n for n in all_nodes
                  if n.hostname == hostname and not n.online_since]
     established = [n for n in all_nodes if n not in retryable]
@@ -287,6 +287,28 @@ def add_edge_node(cluster_id, hostname, mgmt_ip, partitions, data_ip="",
         raise ValueError(f"Edge clusters support at most {edge_constants.MAX_EDGE_NODES} nodes")
     if any(n.hostname == hostname for n in established):
         raise ValueError(f"Node {hostname} is already part of the cluster")
+    first = established[0] if established else None
+    if first is not None and first.lvstore_base and not retryable:
+        # A 1-node cluster with volumes has its lvstore directly on the local
+        # top (unsplit) — going active/active needs a migration (spec §10).
+        # Guarded to FRESH adds: a retry of a failed second-node add must
+        # pass even though the aborted active/active formation may already
+        # have stamped the first node's lvstore_base (the mirror base).
+        raise ValueError(
+            "Cannot add a node: the cluster already has volumes/an lvstore on a "
+            "single-node layout. Add both nodes before creating volumes.")
+    return established, retryable
+
+
+def add_edge_node(cluster_id, hostname, mgmt_ip, partitions, data_ip="",
+                  spdk_cpus=None, deploy=True, rpc_wait_timeout=None) -> EdgeNode:
+    """Add a node to an edge cluster (spec §5.2). Synchronous — bounded by the
+    pod-start wait; API callers run it as a task/background call."""
+    cluster = _require_edge_cluster(cluster_id)
+    if not partitions:
+        raise ValueError("An edge node needs at least one free partition")
+
+    established, retryable = check_node_admission(cluster_id, hostname)
 
     # Drop stale attempts for this hostname so the retry starts clean.
     for stale in retryable:
@@ -294,12 +316,6 @@ def add_edge_node(cluster_id, hostname, mgmt_ip, partitions, data_ip="",
 
     nodes = established
     first = nodes[0] if nodes else None
-    if first is not None and first.lvstore_base:
-        # A 1-node cluster with volumes has its lvstore directly on the local
-        # top (unsplit) — going active/active needs a migration (spec §10).
-        raise ValueError(
-            "Cannot add a node: the cluster already has volumes/an lvstore on a "
-            "single-node layout. Add both nodes before creating volumes.")
 
     node = EdgeNode()
     node.uuid = str(uuid_lib.uuid4())
