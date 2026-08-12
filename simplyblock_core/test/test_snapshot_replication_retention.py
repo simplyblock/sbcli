@@ -19,10 +19,21 @@ def _mk_snap(uuid, created_at, snap_type, lvol_uuid, node_id,
     return s
 
 
+class _Clone:
+    def __init__(self, uuid, cloned_from, status=LVol.STATUS_ONLINE):
+        self.uuid = uuid
+        self.cloned_from_snap = cloned_from
+        self.status = status
+
+    def get_id(self):
+        return self.uuid
+
+
 class _FakeDB:
-    def __init__(self, source_snaps, existing_uuids):
+    def __init__(self, source_snaps, existing_uuids, clones=()):
         self._source_snaps = source_snaps
         self._existing = set(existing_uuids)
+        self._clones = list(clones)
 
     def get_snapshots_by_node_id(self, node_id):
         return [s for s in self._source_snaps if s.lvol.node_id == node_id]
@@ -31,6 +42,9 @@ class _FakeDB:
         if uuid in self._existing:
             return object()
         raise KeyError(uuid)
+
+    def get_mini_lvols(self):
+        return self._clones
 
 
 class _FakeSnapCtl:
@@ -44,8 +58,8 @@ class _FakeSnapCtl:
         return True
 
 
-def _patch(monkeypatch, source_snaps, existing_uuids):
-    db = _FakeDB(source_snaps, existing_uuids)
+def _patch(monkeypatch, source_snaps, existing_uuids, clones=()):
+    db = _FakeDB(source_snaps, existing_uuids, clones)
     snapctl = _FakeSnapCtl(db)
     monkeypatch.setattr(sr, "db", db)
     monkeypatch.setattr(sr, "snapshot_controller", snapctl)
@@ -133,6 +147,55 @@ def test_other_lvol_snapshots_untouched(monkeypatch):
         _mk_snap("other_new", 250, SnapShot.TYPE_INTERNAL, "LV2", "N1", target="TO_new"),
     ]
     snapctl = _patch(monkeypatch, snaps, {"T_old", "T_new", "TO_old", "TO_new"})
+
+    sr._prune_internal_snapshots(source_lvol)
+
+    assert snapctl.deleted == ["T_old", "int_old"]
+
+
+def test_never_prunes_snapshot_a_failed_over_volume_is_cloned_from(monkeypatch):
+    """Root cause of the all-zeros DR fail-over (labs 2026-08-10/11).
+
+    Fail-over clones the volume from the last replicated TARGET snapshot; the
+    prune, keyed only on the SOURCE snapshot age, then deleted that target copy.
+    The delete reaches SPDK as bdev_lvol_delete(sync=False) and frees the blocks
+    immediately, so no DB-level guard downstream can save the clone. Retention
+    must skip a target snapshot with a live dependent clone.
+    """
+    source_lvol = LVol()
+    source_lvol.uuid = "LV1"
+    source_lvol.node_id = "N1"
+
+    snaps = [
+        _mk_snap("int_old", 100, SnapShot.TYPE_INTERNAL, "LV1", "N1", target="T_old"),
+        _mk_snap("int_new", 200, SnapShot.TYPE_INTERNAL, "LV1", "N1", target="T_new"),
+    ]
+    # A failed-over volume lives on the OLD target snapshot.
+    snapctl = _patch(monkeypatch, snaps, {"T_old", "T_new"},
+                     clones=[_Clone("FO_VOL", "T_old")])
+
+    sr._prune_internal_snapshots(source_lvol)
+
+    assert "T_old" not in snapctl.deleted, (
+        "pruned the target snapshot a failed-over volume is cloned from — "
+        "its blocks are freed by SPDK immediately (sync=False), the volume "
+        "reads zeros from then on")
+    # The source-side copy must survive too (it pairs with the kept target).
+    assert "int_old" not in snapctl.deleted
+
+
+def test_in_deletion_clone_does_not_pin_the_snapshot(monkeypatch):
+    """A clone that is itself going away must not block retention forever."""
+    source_lvol = LVol()
+    source_lvol.uuid = "LV1"
+    source_lvol.node_id = "N1"
+
+    snaps = [
+        _mk_snap("int_old", 100, SnapShot.TYPE_INTERNAL, "LV1", "N1", target="T_old"),
+        _mk_snap("int_new", 200, SnapShot.TYPE_INTERNAL, "LV1", "N1", target="T_new"),
+    ]
+    snapctl = _patch(monkeypatch, snaps, {"T_old", "T_new"},
+                     clones=[_Clone("DYING", "T_old", status=LVol.STATUS_IN_DELETION)])
 
     sr._prune_internal_snapshots(source_lvol)
 
