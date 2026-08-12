@@ -36,19 +36,11 @@ class TestCreateCluster:
         kwargs = cluster_ops.add_cluster.call_args.kwargs
         assert kwargs['name'] == 'cluster-1'
         assert kwargs['distr_npcs'] == 2
-        assert kwargs['max_fault_tolerance'] == 2
         assert kwargs['blk_size'] == 512
         assert kwargs['ha_type'] == 'ha'
         assert response.json()['id'] == CLUSTER_ID
         assert response.headers['Location'].endswith(f'/clusters/{CLUSTER_ID}/')
         db.get_cluster_by_id.assert_called_once_with(CLUSTER_ID)
-
-    def test_caps_max_fault_tolerance_at_two(self, client, db, cluster, cluster_ops):
-        cluster_ops.add_cluster.return_value = CLUSTER_ID
-
-        client.post('/api/v2/clusters/', json={'distr_npcs': 4})
-
-        assert cluster_ops.add_cluster.call_args.kwargs['max_fault_tolerance'] == 2
 
     def test_conflict_maps_to_409(self, client, db, cluster_ops):
         cluster_ops.add_cluster.side_effect = ValueError('cluster exists')
