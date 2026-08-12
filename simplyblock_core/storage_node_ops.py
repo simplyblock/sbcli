@@ -4123,6 +4123,7 @@ def _teardown_replicas_of_primary(removed_node: StorageNode):
 
         if peer.status == StorageNode.STATUS_ONLINE:
             _delete_replica_on_peer(peer, removed_node, cluster)
+            _prune_stale_lvstore_ports(peer_id, removed_node.lvstore, db_controller)
 
         # Clear the peer's back-reference if it still points at us.
         peer = db_controller.get_storage_node_by_id(peer_id)
@@ -4161,6 +4162,25 @@ def _delete_replica_on_peer(peer, primary, cluster):
         _remove_bdev_stack(copy.deepcopy(primary.lvstore_stack), rpc_client)
     except RPCException as e:
         logger.warning(f"replica bdev-stack teardown for {lvstore} on {peer.get_id()} failed: {e}")
+
+
+def _prune_stale_lvstore_ports(node_id, lvstore, db_controller):
+    """Drop ``lvstore``'s port reservation from ``node_id``'s
+    ``lvstore_ports`` after its replica has been torn down there for good.
+
+    Unlike ``teardown_non_leader_lvstore``'s donor-reconnect path (which
+    deliberately keeps the entry so a returning node reuses its old ports),
+    callers of this helper -- node removal, splice eviction -- know the
+    replica isn't coming back to this node. A stale entry there only
+    misrepresents `sn list`'s "LVS Ports" column (2026-08-12: found live via
+    bdev_lvol_get_lvstores disagreeing with the DB after a node removal).
+    Re-fetches fresh to avoid clobbering unrelated concurrent edits."""
+    if not lvstore:
+        return
+    node = db_controller.get_storage_node_by_id(node_id)
+    if node.lvstore_ports and lvstore in node.lvstore_ports:
+        del node.lvstore_ports[lvstore]
+        node.write_to_db()
 
 
 def _relocate_replicas_hosted_on(removed_node: StorageNode):
@@ -4247,15 +4267,34 @@ def _relocate_one_replica(removed_node: StorageNode, primary_id, role):
     return True
 
 
-def _relocate_replica_between(occupant_primary_id, old_host_id, new_host_id, role, db_controller):
+def _relocate_replica_between(occupant_primary_id, old_host_id, new_host_id, role, db_controller, _seen=None):
     """Physically move ``occupant_primary_id``'s ``role`` replica off
-    ``old_host_id`` onto ``new_host_id``, updating its forward pointer.
+    ``old_host_id`` onto ``new_host_id``, updating its forward pointer AND
+    ``new_host_id``'s back-reference.
 
     Used by the splice fallback in ``_relocate_one_replica``: before an
     already-busy node can be claimed for the primary being relocated, its
     current occupant must move onto that primary's node instead (see
     ``_find_splice_target_for_relocation``'s docstring for why an
     already-formed pairing, not an idle node, is what's available).
+
+    ``new_host_id`` itself may ALREADY be hosting a different primary's
+    replica via this same single-value ``lvstore_stack_secondary`` /
+    ``lvstore_stack_tertiary`` slot: every node in a full ring hosts exactly
+    one other node's replica before any removal starts, and that
+    relationship has nothing to do with whichever edge the splice search
+    happened to pick. (2026-08-12 incident: a splice claimed a node whose
+    slot already held an unrelated pre-existing occupant. The physical
+    build succeeded -- SPDK doesn't mind hosting a second lvstore -- but the
+    slot could not record it, silently untracking that replica for any
+    future failover, and leaving `sn list`'s "LVS Ports" column short by
+    one entry.) When the slot is occupied, the existing occupant is
+    relocated first -- recursively, via this same function -- onto a fresh
+    target, before ``occupant_primary``'s replica claims the freed slot.
+    This is a rotation, not a retry loop: ``_seen`` accumulates visited
+    ``new_host_id``s across the recursion purely as a cycle backstop against
+    a topology bug; the rotation itself is always finite, since each hop
+    heads toward the one slot the original removal freed.
 
     Create-before-destroy: the new replica is built on ``new_host_id``
     BEFORE the old one on ``old_host_id`` is torn down, so
@@ -4282,6 +4321,7 @@ def _relocate_replica_between(occupant_primary_id, old_host_id, new_host_id, rol
     """
     field = "secondary_node_id" if role == "secondary" else "tertiary_node_id"
     backref = "lvstore_stack_secondary" if role == "secondary" else "lvstore_stack_tertiary"
+    seen = _seen if _seen is not None else set()
     try:
         occupant_primary = db_controller.get_storage_node_by_id(occupant_primary_id)
     except KeyError:
@@ -4289,6 +4329,41 @@ def _relocate_replica_between(occupant_primary_id, old_host_id, new_host_id, rol
 
     if getattr(occupant_primary, field) != new_host_id:
         new_host = db_controller.get_storage_node_by_id(new_host_id)
+
+        existing_occupant_id = getattr(new_host, backref)
+        if existing_occupant_id and existing_occupant_id != occupant_primary_id:
+            if new_host_id in seen:
+                logger.error(
+                    f"[REMOVAL] splice: cycle detected while vacating "
+                    f"{new_host_id}'s existing {role} occupant "
+                    f"{existing_occupant_id} to make room for "
+                    f"{occupant_primary_id}; refusing")
+                return False
+            seen.add(new_host_id)
+            try:
+                existing_occupant = db_controller.get_storage_node_by_id(existing_occupant_id)
+            except KeyError:
+                existing_occupant = None
+            vacate_target = (
+                _pick_replica_relocation_node(existing_occupant, new_host, role, db_controller)
+                if existing_occupant else None)
+            if not vacate_target or vacate_target == occupant_primary_id:
+                logger.error(
+                    f"[REMOVAL] splice: no relocation target to vacate "
+                    f"{new_host_id}'s existing {role} occupant "
+                    f"{existing_occupant_id}; cannot free the slot for "
+                    f"{occupant_primary_id}")
+                return False
+            if not _relocate_replica_between(
+                    existing_occupant_id, new_host_id, vacate_target, role,
+                    db_controller, _seen=seen):
+                logger.error(
+                    f"[REMOVAL] splice: failed to vacate {new_host_id}'s "
+                    f"existing {role} occupant {existing_occupant_id} onto "
+                    f"{vacate_target}")
+                return False
+            new_host = db_controller.get_storage_node_by_id(new_host_id)
+
         try:
             built = recreate_lvstore_on_non_leader(new_host, occupant_primary, occupant_primary)
         except Exception as e:
@@ -4303,11 +4378,27 @@ def _relocate_replica_between(occupant_primary_id, old_host_id, new_host_id, rol
         setattr(occupant_primary, field, new_host_id)
         occupant_primary.write_to_db()
 
+        # Record the new host's side of the relationship too. Re-fetch: the
+        # build above (recreate_lvstore_on_non_leader) persists its own
+        # lvstore_ports snapshot for new_host, derived only from its
+        # (now-vacated) lvstore_stack_secondary/_tertiary -- it has no way to
+        # know about occupant_primary, so this entry has to be added here.
+        new_host = db_controller.get_storage_node_by_id(new_host_id)
+        setattr(new_host, backref, occupant_primary_id)
+        if not new_host.lvstore_ports:
+            new_host.lvstore_ports = {}
+        new_host.lvstore_ports[occupant_primary.lvstore] = {
+            "lvol_subsys_port": occupant_primary.lvol_subsys_port,
+            "hublvol_port": occupant_primary.hublvol.nvmf_port if occupant_primary.hublvol else 0,
+        }
+        new_host.write_to_db()
+
     old_host = db_controller.get_storage_node_by_id(old_host_id)
     if getattr(old_host, backref) == occupant_primary_id:
         cluster = db_controller.get_cluster_by_id(occupant_primary.cluster_id)
         if old_host.status == StorageNode.STATUS_ONLINE:
             _delete_replica_on_peer(old_host, occupant_primary, cluster)
+            _prune_stale_lvstore_ports(old_host_id, occupant_primary.lvstore, db_controller)
         old_host = db_controller.get_storage_node_by_id(old_host_id)
         setattr(old_host, backref, "")
         old_host.write_to_db()

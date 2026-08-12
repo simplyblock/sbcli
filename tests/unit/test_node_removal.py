@@ -707,6 +707,97 @@ class TestRelocateOneReplicaSpliceExecution(unittest.TestCase):
         self.assertEqual(x.lvstore_stack_secondary, "stranded")
         self.assertEqual(removed.lvstore_stack_secondary, "stranded")
 
+    def test_relocate_via_splice_vacates_strandeds_preexisting_occupant_first(self):
+        # 2026-08-12 live incident: `stranded` already hosts an unrelated
+        # occupant `z` via its own back-reference BEFORE this removal starts
+        # -- every node in a full ring already hosts someone. Splicing
+        # `occupant` onto `stranded` without first moving `z` elsewhere
+        # would silently drop z's back-reference (a single-value field
+        # can't hold both z and occupant): live symptom was `sn list`
+        # showing two different primaries both claiming the same secondary
+        # node, and a physically-live replica invisible to lvstore_ports.
+        # `z` must be relocated first -- onto a genuinely free node -- before
+        # `occupant` claims the freed slot.
+        cl = _cluster()
+        removed = _node("n1", stack_secondary="stranded")
+        stranded = _node("stranded", secondary_id="n1", lvstore="LVS_stranded",
+                          stack_secondary="z")  # already hosting z
+        occupant = _node("occupant", secondary_id="x", lvstore="LVS_occupant")
+        x = _node("x", stack_secondary="occupant")
+        z = _node("z", secondary_id="stranded", lvstore="LVS_z")
+        free_node = _node("free", lvstore="LVS_free")  # genuinely unclaimed
+        db = FakeDB(cl, [removed, stranded, occupant, x, z, free_node])
+
+        def pick_side_effect(primary, exclude_node, role, db_controller):
+            if primary.get_id() == "stranded":
+                self.assertEqual(exclude_node.get_id(), "n1")
+                return "x"
+            if primary.get_id() == "z":
+                self.assertEqual(exclude_node.get_id(), "stranded")
+                return "free"
+            raise AssertionError(f"unexpected pick for {primary.get_id()}")
+
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "_pick_replica_relocation_node",
+                          side_effect=pick_side_effect), \
+             patch.object(storage_node_ops, "recreate_lvstore_on_non_leader",
+                          return_value=True) as rec, \
+             patch.object(storage_node_ops, "_delete_replica_on_peer") as drp:
+            ret = storage_node_ops._relocate_one_replica(removed, "stranded", "secondary")
+
+        self.assertTrue(ret)
+        # z relocated off stranded onto the genuinely free node.
+        self.assertEqual(z.secondary_node_id, "free")
+        self.assertEqual(free_node.lvstore_stack_secondary, "z")
+        # stranded's slot no longer holds the stale "z" -- it now correctly
+        # reflects occupant, the relationship this splice actually created.
+        self.assertEqual(stranded.lvstore_stack_secondary, "occupant")
+        # occupant evicted off x onto the now-vacated stranded.
+        self.assertEqual(occupant.secondary_node_id, "stranded")
+        # stranded's own claim on x (the originally-picked splice target).
+        self.assertEqual(stranded.secondary_node_id, "x")
+        self.assertEqual(x.lvstore_stack_secondary, "stranded")
+        self.assertEqual(removed.lvstore_stack_secondary, "")
+        self.assertEqual(rec.call_count, 3)  # z's + occupant's + stranded's own rebuild
+        self.assertEqual(drp.call_count, 2)  # old z copy off stranded, old occupant copy off x
+
+    def test_relocate_via_splice_refuses_when_preexisting_occupant_has_no_target(self):
+        # Same setup, but z has nowhere to go. Must fail closed -- refuse the
+        # whole splice rather than overload stranded's single-value slot.
+        cl = _cluster()
+        removed = _node("n1", stack_secondary="stranded")
+        stranded = _node("stranded", secondary_id="n1", lvstore="LVS_stranded",
+                          stack_secondary="z")
+        occupant = _node("occupant", secondary_id="x", lvstore="LVS_occupant")
+        x = _node("x", stack_secondary="occupant")
+        z = _node("z", secondary_id="stranded", lvstore="LVS_z")
+        db = FakeDB(cl, [removed, stranded, occupant, x, z])
+
+        def pick_side_effect(primary, exclude_node, role, db_controller):
+            if primary.get_id() == "stranded":
+                return "x"
+            if primary.get_id() == "z":
+                return None  # nothing free anywhere for z
+            raise AssertionError(f"unexpected pick for {primary.get_id()}")
+
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "_pick_replica_relocation_node",
+                          side_effect=pick_side_effect), \
+             patch.object(storage_node_ops, "recreate_lvstore_on_non_leader",
+                          return_value=True) as rec, \
+             patch.object(storage_node_ops, "_delete_replica_on_peer") as drp:
+            ret = storage_node_ops._relocate_one_replica(removed, "stranded", "secondary")
+
+        self.assertFalse(ret)
+        drp.assert_not_called()
+        rec.assert_not_called()
+        # Nothing committed -- z, occupant, x, stranded, removed all untouched.
+        self.assertEqual(z.secondary_node_id, "stranded")
+        self.assertEqual(stranded.lvstore_stack_secondary, "z")
+        self.assertEqual(occupant.secondary_node_id, "x")
+        self.assertEqual(stranded.secondary_node_id, "n1")
+        self.assertEqual(removed.lvstore_stack_secondary, "stranded")
+
     def test_relocate_via_splice_tertiary_role(self):
         cl = _cluster()
         removed = _node("n1", stack_tertiary="stranded")
@@ -728,6 +819,52 @@ class TestRelocateOneReplicaSpliceExecution(unittest.TestCase):
         self.assertEqual(stranded.tertiary_node_id, "x")
         self.assertEqual(x.lvstore_stack_tertiary, "stranded")
         self.assertEqual(removed.lvstore_stack_tertiary, "")
+
+    def test_relocate_via_splice_tertiary_vacates_strandeds_preexisting_occupant_first(self):
+        # FTT2 (dual fault tolerance) variant of
+        # test_relocate_via_splice_vacates_strandeds_preexisting_occupant_first:
+        # secondary and tertiary live in separate fields on every node, so a
+        # node hosting one primary's secondary AND a different primary's
+        # tertiary at once is fine -- that was never the collision. The
+        # collision is within a single field, and the cascade fix is
+        # parameterized by role throughout, so this exercises the same path
+        # for lvstore_stack_tertiary specifically.
+        cl = _cluster()
+        removed = _node("n1", stack_tertiary="stranded")
+        stranded = _node("stranded", tertiary_id="n1", lvstore="LVS_stranded",
+                          stack_tertiary="z")  # already hosting z's tertiary
+        occupant = _node("occupant", tertiary_id="x", lvstore="LVS_occupant")
+        x = _node("x", stack_tertiary="occupant")
+        z = _node("z", tertiary_id="stranded", lvstore="LVS_z")
+        free_node = _node("free", lvstore="LVS_free")
+        db = FakeDB(cl, [removed, stranded, occupant, x, z, free_node])
+
+        def pick_side_effect(primary, exclude_node, role, db_controller):
+            self.assertEqual(role, "tertiary")
+            if primary.get_id() == "stranded":
+                return "x"
+            if primary.get_id() == "z":
+                return "free"
+            raise AssertionError(f"unexpected pick for {primary.get_id()}")
+
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "_pick_replica_relocation_node",
+                          side_effect=pick_side_effect), \
+             patch.object(storage_node_ops, "recreate_lvstore_on_non_leader",
+                          return_value=True) as rec, \
+             patch.object(storage_node_ops, "_delete_replica_on_peer") as drp:
+            ret = storage_node_ops._relocate_one_replica(removed, "stranded", "tertiary")
+
+        self.assertTrue(ret)
+        self.assertEqual(z.tertiary_node_id, "free")
+        self.assertEqual(free_node.lvstore_stack_tertiary, "z")
+        self.assertEqual(stranded.lvstore_stack_tertiary, "occupant")
+        self.assertEqual(occupant.tertiary_node_id, "stranded")
+        self.assertEqual(stranded.tertiary_node_id, "x")
+        self.assertEqual(x.lvstore_stack_tertiary, "stranded")
+        self.assertEqual(removed.lvstore_stack_tertiary, "")
+        self.assertEqual(rec.call_count, 3)
+        self.assertEqual(drp.call_count, 2)
 
     def test_relocate_free_target_never_triggers_splice_eviction(self):
         # Regression guard: when the picked target is genuinely free (no
