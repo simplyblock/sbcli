@@ -3754,6 +3754,26 @@ class TestBackupCrossClusterRestore(BackupTestBase):
             f"{out_sw.strip()}")
 
         try:
+            import re as _re
+
+            # Pick a C2 storage node for restore (backup.node_id is from C1)
+            sn_out, _ = self._sbcli_c2(
+                f"sn list --cluster-id {self._cluster2_id}")
+            c2_node_id = None
+            for line in (sn_out or "").splitlines():
+                if "online" not in line.lower():
+                    continue
+                m = _re.search(
+                    r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+                    r"[0-9a-f]{4}-[0-9a-f]{12})", line)
+                if m:
+                    c2_node_id = m.group(0)
+                    break
+            assert c2_node_id, (
+                f"TC-BCK-075: no online C2 storage node found in:\n{sn_out}")
+            self.logger.info(
+                f"TC-BCK-075: using C2 storage node {c2_node_id}")
+
             # TC-BCK-075: restore on Cluster-2
             restored_name = f"cc_rest_{_rand_suffix()}"
             self.logger.info(
@@ -3763,6 +3783,7 @@ class TestBackupCrossClusterRestore(BackupTestBase):
                 f"backup restore {backup_id} "
                 f"--lvol {restored_name} "
                 f"--pool {self._cluster2_pool_name} "
+                f"--node {c2_node_id} "
                 f"--cluster-id {self._cluster2_id}")
             assert not (err3 and "error" in err3.lower()), \
                 f"TC-BCK-075: restore on Cluster-2 failed: {err3}"
@@ -3777,7 +3798,6 @@ class TestBackupCrossClusterRestore(BackupTestBase):
                 "complete…")
 
             # Phase 1: wait for restore task to reach 'done'
-            import re as _re
             task_deadline = time.time() + _RESTORE_COMPLETE_TIMEOUT
             while time.time() < task_deadline:
                 try:
