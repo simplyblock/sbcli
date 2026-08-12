@@ -25,7 +25,7 @@ import sys
 import time
 
 HERE = pathlib.Path(__file__).parent
-REPO = HERE.parent.parent
+REPO = HERE.parent
 RUNS = HERE / "runs"
 
 # Test-id prefixes in execution order; --only selects a subset.

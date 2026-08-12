@@ -113,18 +113,42 @@ INSTALL_SBCTL = (
 KUBECONFIG = "/etc/rancher/k3s/k3s.yaml"
 
 
-def helm_install_cmd() -> str:
+def _helm(*sets, wait=True) -> str:
     helm = f"sudo KUBECONFIG={KUBECONFIG} helm"
-    image = sb_image()
-    repository, tag = image.rsplit(":", 1)
+    set_flags = " ".join(f"--set {kv}" for kv in sets)
+    # --reset-values: helm upgrade REUSES the previous release's values when
+    # none are supplied, so a phase-1 "install the chart default image" after
+    # a run that --set the branch image silently keeps the branch image (and
+    # with it the 401 bootstrap loop). Start every upgrade from chart
+    # defaults; each phase states its full intent via --set.
     return (
         f"{helm} repo add {HELM_REPO_NAME} {HELM_REPO_URL} && "
         f"{helm} repo update && "
         f"{helm} upgrade --install {HELM_RELEASE} {HELM_CHART} "
-        f"--namespace {K8S_NAMESPACE} --create-namespace "
-        f"--set image.simplyblock.repository={repository} "
-        f"--set image.simplyblock.tag={tag} "
-        f"--wait --timeout 20m")
+        f"--namespace {K8S_NAMESPACE} --create-namespace --reset-values "
+        f"{set_flags} "
+        f"{'--wait --timeout 20m' if wait else ''}")
+
+
+def helm_install_cmd() -> str:
+    """PHASE 1: install with the chart's DEFAULT (released) image.
+
+    The first backend cluster can only be bootstrapped by the released
+    build: the installed operator (chart 26.2.8) creates it via the
+    unauthenticated POST /cluster/create_first, which main removed in
+    eb095b60c ("Remove first cluster exception") — against a main-based
+    image every create attempt 401s forever ("Authentication Token is
+    missing!", observed 2026-08-12). Once the cluster + credentials
+    Secret exist, helm_upgrade_image_cmd() switches to the branch build.
+    """
+    return _helm()
+
+
+def helm_upgrade_image_cmd() -> str:
+    """PHASE 2: upgrade the running release to the branch image under test."""
+    repository, tag = sb_image().rsplit(":", 1)
+    return _helm(f"image.simplyblock.repository={repository}",
+                 f"image.simplyblock.tag={tag}")
 
 
 def storage_cluster_manifest(worker_names) -> str:
@@ -238,6 +262,25 @@ def bootstrap_central(state):
             check=False, timeout=60).strip() or False,
         timeout=300, interval=10)
 
+    # PHASE 2: the backend cluster exists — switch the control plane to the
+    # branch build under test. Then VERIFY the running image string: helm
+    # silently ignores unknown --set keys, and one wrong key already shipped
+    # a full run against the released image (2026-08-11).
+    print(f"Upgrading the control plane to {sb_image()}...")
+    print(helpers.ssh(state, server, helm_upgrade_image_cmd(),
+                      timeout=3600)[-1500:])
+    expected = sb_image()
+    helpers.wait_for(
+        f"webappapi rollout to {expected}",
+        lambda: expected in helpers.ssh(
+            state, server,
+            f"sudo kubectl -n {K8S_NAMESPACE} get deploy simplyblock-webappapi "
+            "-o jsonpath='{.spec.template.spec.containers[*].image}' && "
+            f"sudo kubectl -n {K8S_NAMESPACE} rollout status "
+            "deploy/simplyblock-webappapi --timeout=30s",
+            check=False, timeout=90),
+        timeout=1200, interval=15)
+
     state["central"].update({
         "api_url": f"http://{helpers.instance(state, server)['public_ip']}:{node_port}",
         "cluster_id": cluster_id,
@@ -245,7 +288,7 @@ def bootstrap_central(state):
         "namespace": K8S_NAMESPACE,
     })
     helpers.save_state(state)
-    print(f"central: control plane up, cluster {cluster_id}")
+    print(f"central: control plane up, cluster {cluster_id}, image {expected}")
 
 
 def prepare_central_workload(state):
@@ -342,16 +385,23 @@ def deploy_edge_cluster(state, spec, admin_session):
     credentials = mint_edge_credentials(state, spec)
 
     base = state["central"]["api_url"]
-    response = admin_session.post(f"{base}/api/v2/clusters/edge", json={
-        "name": spec.name,
-        "k8s_api_url": credentials["api_url"],
-        "k8s_token": credentials["token"],
-        "k8s_ca_cert": credentials["ca_cert"],
-    }, timeout=60)
-    response.raise_for_status()
-    created = response.json()
-    entry.update({"cluster_id": created["uuid"], "secret": created["secret"]})
-    helpers.save_state(state)
+    if entry.get("cluster_id") and entry.get("secret"):
+        # Re-run on the same fleet: the edge cluster is already registered
+        # (its name is unique in the CP, so re-POSTing would fail) and node
+        # adds are retryable — continue from the recorded credentials.
+        created = {"uuid": entry["cluster_id"], "secret": entry["secret"]}
+        print(f"{spec.name}: reusing registered cluster {created['uuid']}")
+    else:
+        response = admin_session.post(f"{base}/api/v2/clusters/edge", json={
+            "name": spec.name,
+            "k8s_api_url": credentials["api_url"],
+            "k8s_token": credentials["token"],
+            "k8s_ca_cert": credentials["ca_cert"],
+        }, timeout=60)
+        response.raise_for_status()
+        created = response.json()
+        entry.update({"cluster_id": created["uuid"], "secret": created["secret"]})
+        helpers.save_state(state)
 
     api = helpers.EdgeApi(base, created["uuid"], created["secret"])
     for node_name in entry["nodes"]:

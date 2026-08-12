@@ -119,6 +119,44 @@ def render_spdk_pod(cluster, node, spdk_image, proxy_image) -> dict:
     return yaml.safe_load(manifest)
 
 
+def _job_events(cluster, job_name) -> str:
+    """Last warning events involving the job, appended to failure messages so
+    the status_reason on the node record explains WHY (e.g. a forbidden pod),
+    not just that a wait expired."""
+    try:
+        events = core_api(cluster).list_namespaced_event(
+            cluster.k8s_namespace,
+            field_selector=f"involvedObject.name={job_name}")
+        warnings = [e.message for e in events.items if e.type == 'Warning']
+        return f" ({'; '.join(warnings[-2:])})" if warnings else ""
+    except Exception:
+        return ""
+
+
+def _ensure_service_account(cluster, name):
+    """Create a bare ServiceAccount in the edge namespace if missing.
+
+    The shared cpu-topology job template pins serviceAccountName to the SA
+    the HELM CHART creates on central clusters — nothing creates it on a
+    bare edge cluster, so pod creation is forbidden and the job can never
+    start (first live run 2026-08-13: 'error looking up service account
+    simplyblock/simplyblock-storage-node-sa'). The job runs a host-prep
+    script and makes no k8s API calls, so an empty SA (no RBAC) is enough.
+    """
+    core = core_api(cluster)
+    try:
+        core.read_namespaced_service_account(name, cluster.k8s_namespace)
+    except k8s_client.ApiException as e:
+        if e.status != 404:
+            raise EdgeK8sError(f"read service account {name}: {e.status}") from e
+        try:
+            core.create_namespaced_service_account(
+                cluster.k8s_namespace, {'metadata': {'name': name}})
+        except k8s_client.ApiException as e2:
+            if e2.status != 409:
+                raise EdgeK8sError(f"create service account {name}: {e2.status}") from e2
+
+
 def deploy_cpu_topology_job(cluster, node,
                             reserved_system_cpus=None,
                             timeout=600, interval=5):
@@ -127,6 +165,7 @@ def deploy_cpu_topology_job(cluster, node,
     edge node, through the edge cluster's k8s API: create, wait for
     completion, delete."""
     import time as _time
+    _ensure_service_account(cluster, 'simplyblock-storage-node-sa')
     env = jinja2.Environment(loader=jinja2.PackageLoader('simplyblock_web', 'templates'),
                              autoescape=False)
     job_name = f"edge-cpu-topology-{_short(node.uuid)}"
@@ -150,9 +189,11 @@ def deploy_cpu_topology_job(cluster, node,
             if job.status.succeeded:
                 return
             if job.status.failed:
-                raise EdgeK8sError(f"cpu-topology job failed on {node.hostname}")
+                raise EdgeK8sError(f"cpu-topology job failed on {node.hostname}"
+                                   f"{_job_events(cluster, job_name)}")
             if _time.monotonic() >= deadline:
-                raise EdgeK8sError(f"cpu-topology job timed out on {node.hostname}")
+                raise EdgeK8sError(f"cpu-topology job timed out on {node.hostname}"
+                                   f"{_job_events(cluster, job_name)}")
             _time.sleep(interval)
     finally:
         try:
