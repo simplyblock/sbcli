@@ -1918,7 +1918,7 @@ spec:
     provisionedCapacity: 98
 ---
 apiVersion: storage.simplyblock.io/v1alpha1
-kind: Pool
+kind: StoragePool
 metadata:
   name: {self.pool_cr_name}
   namespace: {_NAMESPACE}
@@ -1938,7 +1938,7 @@ spec:
   mgmtIfname: {mgmt_ifc}
   dataIfname:
     - {data_nics}
-  maxLogicalVolumeCount: {max_lvol}
+  maxSubsystemCount: {max_lvol}
   enableCpuTopology: true
   workerNodes:
 {worker_yaml}"""
@@ -2139,7 +2139,7 @@ spec:
         # helm chart (default: "testing1"). The chart's logicalVolume config
         # auto-created StorageClass "simplyblock-csi-sc" referencing this pool.
         pool_name = "testing1"
-        # R25 has no operator — create pool directly via sbcli CLI, not Pool CRD
+        # R25 has no operator — create pool directly via sbcli CLI, not StoragePool CRD
         actual_pool = self.sbcli_utils.add_storage_pool_direct(
             pool_name, sbcli_cmd="sbcli-dev"
         )
@@ -2447,7 +2447,7 @@ spec:
     provisionedCapacity: 98
 ---
 apiVersion: storage.simplyblock.io/v1alpha1
-kind: Pool
+kind: StoragePool
 metadata:
   name: {self.pool_cr_name}
   namespace: {_NAMESPACE}
@@ -2467,7 +2467,7 @@ spec:
   mgmtIfname: {mgmt_ifc}
   dataIfname:
     - {data_nics}
-  maxLogicalVolumeCount: {max_lvol}
+  maxSubsystemCount: {max_lvol}
   enableCpuTopology: true
   nodesPerSocket: {self.nodes_per_socket}
   workerNodes:

@@ -3457,7 +3457,7 @@ class K8sSbcliUtils:
         Returns the actual pool name to use (may differ from *pool_name* if an
         existing pool with a different name was found).
 
-        The operator creates pools from Pool CRDs. The pool name in the
+        The operator creates pools from StoragePool CRDs. The pool name in the
         backend (visible via ``sbcli pool list``) is set by the operator and
         may differ from the CRD metadata.name.  This method waits for the
         operator to reconcile the pool so that the real pool name can be
@@ -3471,10 +3471,10 @@ class K8sSbcliUtils:
             self.logger.info(f"[pool] Using existing pool '{actual}'")
             return actual
 
-        # 2. Check if Pool CRDs exist (operator may still be reconciling)
+        # 2. Check if StoragePool CRDs exist (operator may still be reconciling)
         ns = self.k8s.namespace
         out, _ = self.k8s._exec_kubectl(
-            f"kubectl get pools -n {ns} --no-headers "
+            f"kubectl get storagepools -n {ns} --no-headers "
             f"-o custom-columns=NAME:.metadata.name 2>/dev/null || true"
         )
         existing_crds = [r.strip() for r in out.strip().splitlines() if r.strip()]
@@ -3491,7 +3491,7 @@ class K8sSbcliUtils:
             )
 
             # Look up the StorageCluster CRD name from K8s to ensure
-            # the Pool CRD references the correct CRD resource name.
+            # the StoragePool CRD references the correct CRD resource name.
             sc_out, _ = self.k8s._exec_kubectl(
                 f"kubectl get storageclusters -n {ns} --no-headers "
                 f"-o custom-columns=NAME:.metadata.name 2>/dev/null || true"
@@ -3513,7 +3513,7 @@ class K8sSbcliUtils:
 
             yaml_content = (
                 f"apiVersion: storage.simplyblock.io/v1alpha1\n"
-                f"kind: Pool\n"
+                f"kind: StoragePool\n"
                 f"metadata:\n"
                 f"  name: {k8s_resource_name}\n"
                 f"  namespace: {ns}\n"
@@ -3530,11 +3530,11 @@ class K8sSbcliUtils:
             existing_crds = [k8s_resource_name]
         else:
             self.logger.info(
-                f"[pool] Found existing Pool CRD(s): {existing_crds} — "
+                f"[pool] Found existing StoragePool CRD(s): {existing_crds} — "
                 f"waiting for operator to reconcile"
             )
 
-        # 4. Wait for operator to reconcile the Pool CRD into an actual pool
+        # 4. Wait for operator to reconcile the StoragePool CRD into an actual pool
         #    visible via sbcli pool list.  Use 300s timeout to handle slow
         #    reconciliation after pool deletion/recreation cycles.
         for attempt in range(60):  # up to 300s
@@ -3549,7 +3549,7 @@ class K8sSbcliUtils:
             if attempt % 5 == 4:
                 self.logger.info(
                     f"[pool] Still waiting for operator to reconcile "
-                    f"Pool CRD(s) {existing_crds} (attempt {attempt})"
+                    f"StoragePool CRD(s) {existing_crds} (attempt {attempt})"
                 )
             sleep_n_sec(5)
 
@@ -3558,16 +3558,16 @@ class K8sSbcliUtils:
         #    pools that don't exist on the backend, leading to PVC bind failures.
         raise TimeoutError(
             f"[pool] Pool not visible in sbcli after 300s. "
-            f"Pool CRD(s): {existing_crds}. "
+            f"StoragePool CRD(s): {existing_crds}. "
             f"Operator may not have reconciled the pool."
         )
 
     def add_storage_pool_direct(self, pool_name, cluster_id=None, sbcli_cmd=None):
         """Create a pool directly via ``sbcli pool add`` (kubectl exec).
 
-        Unlike ``add_storage_pool()``, this does NOT create a Pool CRD —
+        Unlike ``add_storage_pool()``, this does NOT create a StoragePool CRD —
         it calls the CLI directly in the admin pod.  Use this for R25
-        clusters that have no operator to reconcile Pool CRDs.
+        clusters that have no operator to reconcile StoragePool CRDs.
 
         sbcli_cmd: override the CLI binary name (e.g. "sbcli-dev" for R25).
                    Defaults to self.sbcli_cmd.
@@ -3612,22 +3612,22 @@ class K8sSbcliUtils:
         )
 
     def pool_crd_exists(self, pool_name):
-        """Check if a Pool CRD exists in K8s (with or without simplyblock- prefix).
+        """Check if a StoragePool CRD exists in K8s (with or without simplyblock- prefix).
 
-        Returns True if the Pool CRD is found, False otherwise.
+        Returns True if the StoragePool CRD is found, False otherwise.
         """
         ns = self.k8s.namespace
         # Try with simplyblock- prefix first (add_storage_pool creates these)
         k8s_name = f"simplyblock-{pool_name.lower().replace('_', '-')}"
         out, _ = self.k8s._exec_kubectl(
-            f"kubectl get pools {k8s_name} -n {ns} "
+            f"kubectl get storagepools {k8s_name} -n {ns} "
             f"-o jsonpath='{{.metadata.name}}' 2>/dev/null || true"
         )
         if out.strip():
             return True
         # Try with exact pool_name (ensure_pool_exists creates these)
         out, _ = self.k8s._exec_kubectl(
-            f"kubectl get pools {pool_name} -n {ns} "
+            f"kubectl get storagepools {pool_name} -n {ns} "
             f"-o jsonpath='{{.metadata.name}}' 2>/dev/null || true"
         )
         return bool(out.strip())
@@ -3657,7 +3657,7 @@ class K8sSbcliUtils:
         )
 
         # Look up the StorageCluster CRD name from K8s to ensure
-        # the Pool CRD references the correct CRD resource name.
+        # the StoragePool CRD references the correct CRD resource name.
         ns = self.k8s.namespace
         sc_out, _ = self.k8s._exec_kubectl(
             f"kubectl get storageclusters -n {ns} --no-headers "
@@ -3684,7 +3684,7 @@ class K8sSbcliUtils:
 
         yaml_content = (
             f"apiVersion: storage.simplyblock.io/v1alpha1\n"
-            f"kind: Pool\n"
+            f"kind: StoragePool\n"
             f"metadata:\n"
             f"  name: {pool_name}\n"
             f"  namespace: {ns}\n"
@@ -3709,7 +3709,7 @@ class K8sSbcliUtils:
             sleep_n_sec(5)
         raise RuntimeError(
             f"[pool] Pool '{pool_name}' not confirmed after kubectl apply "
-            f"— operator did not reconcile the Pool CRD within 180s"
+            f"— operator did not reconcile the StoragePool CRD within 180s"
         )
 
     def add_host_to_pool(self, pool_id, host_nqn):
@@ -3733,7 +3733,7 @@ class K8sSbcliUtils:
         self.logger.info(f"[pool] Deleting pool CRD '{pool_name}'")
         ns = self.k8s.namespace
         self.k8s._exec_kubectl(
-            f"kubectl delete pools {pool_name} -n {ns} "
+            f"kubectl delete storagepools {pool_name} -n {ns} "
             f"--timeout=60s 2>/dev/null || true"
         )
         # Wait for pool to disappear from sbcli
@@ -3748,14 +3748,14 @@ class K8sSbcliUtils:
         """Delete all storage pool CRD resources."""
         ns = self.k8s.namespace
         out, _ = self.k8s._exec_kubectl(
-            f"kubectl get pools -n {ns} --no-headers "
+            f"kubectl get storagepools -n {ns} --no-headers "
             f"-o custom-columns=NAME:.metadata.name 2>/dev/null || true"
         )
         resources = [r.strip() for r in out.strip().splitlines() if r.strip()]
         for res in resources:
             self.logger.info(f"[pool] Deleting pool CRD '{res}'")
             self.k8s._exec_kubectl(
-                f"kubectl delete pools {res} -n {ns} "
+                f"kubectl delete storagepools {res} -n {ns} "
                 f"--timeout=60s 2>/dev/null || true"
             )
 
