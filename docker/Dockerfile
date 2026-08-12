@@ -3,10 +3,7 @@ FROM simplyblock/simplyblock:base_image
 
 USER root
 
-RUN dnf install -y iproute procps-ng libcap openssh systemd && \
-    curl -LO "https://dl.k8s.io/release/$(curl -Ls https://dl.k8s.io/release/stable.txt)/bin/linux/$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')/kubectl" && \
-    chmod +x kubectl && \
-    mv ./kubectl /usr/local/bin/kubectl
+RUN dnf install -y iproute procps-ng libcap openssh systemd
 
 WORKDIR /app
 
