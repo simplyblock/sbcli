@@ -2171,22 +2171,15 @@ spec:
         self.logger.info("Pre-upgrade Step 3: Creating PVCs and running short FIO")
         self._create_pvcs_with_fio(len(storage_node_list), runtime=pre_fio_runtime)
 
-        # Wait for pre-upgrade FIO to complete (max 5 mins).
-        # FIO failure is non-fatal — the goal is to test the upgrade itself,
-        # not the old version's IO path.
+        # Wait for pre-upgrade FIO to complete on ALL PVCs.
+        # This is mandatory — every lvol must have data written before we
+        # create snapshots/clones and proceed with the upgrade.
         self.logger.info(
-            "Pre-upgrade: Waiting up to 5 mins for FIO to complete "
-            "(non-fatal if it fails)"
+            "Pre-upgrade: Waiting for FIO to complete on all PVCs"
         )
-        fio_timeout = 300  # 5 minutes max wait
-        try:
-            self._validate_all_fio(fio_timeout)
-            self.logger.info("Pre-upgrade FIO completed and validated")
-        except Exception as fio_err:
-            self.logger.warning(
-                f"Pre-upgrade FIO did not complete successfully: {fio_err}. "
-                "Continuing with upgrade — this is non-fatal."
-            )
+        fio_timeout = 600  # 10 minutes — enough for 6 PVCs on a busy cluster
+        self._validate_all_fio(fio_timeout)
+        self.logger.info("Pre-upgrade FIO completed and validated on all PVCs")
 
         # Clean up FIO jobs/pods (preserve PVCs for snapshots + checksums)
         self.logger.info("Pre-upgrade: Cleaning up FIO jobs")
