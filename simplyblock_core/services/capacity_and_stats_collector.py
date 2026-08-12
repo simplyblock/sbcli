@@ -1,12 +1,21 @@
 # coding=utf-8
 import statistics
 import time
+from typing import List, Optional
 
 from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.controllers import device_events
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.models.stats import DeviceStatObject, NodeStatObject, ClusterStatObject
+from simplyblock_core.models.stats import (
+    ClusterStatObject,
+    CpuStats,
+    DeviceStatObject,
+    NodeStatObject,
+    ReactorStats,
+    ThreadStats,
+)
+from simplyblock_core.rpc_client import RPCException
 
 logger = utils.get_logger(__name__)
 
@@ -211,7 +220,46 @@ def add_device_stats(cl, device, capacity_dict, stats_dict):
     return stat_obj
 
 
-def add_node_stats(cluster, node, records, all_lvols):
+def get_cpu_stats(rpc_client) -> CpuStats:
+    """Collect raw SPDK reactor and lightweight-thread tick counters.
+
+    The counters are stored unprocessed rather than as a utilization
+    percentage. SPDK reports busy/idle/irq/sys cumulatively since reactor
+    start, so a ratio computed at collection time is an average over the whole
+    process lifetime, not current load — the longer a node is up, the less it
+    responds to present load. Deriving the rate at query time also makes the
+    result independent of this collector's interval.
+    """
+    reactor_data = rpc_client.framework_get_reactors() or {}
+    thread_data = rpc_client.thread_get_stats() or {}
+    thread_stats = {t['id']: t for t in thread_data.get('threads', [])}
+
+    reactors: List[ReactorStats] = []
+    for reactor in reactor_data['reactors']:
+        threads: List[ThreadStats] = []
+        for thread in reactor['lw_threads']:
+            entry: ThreadStats = {'id': thread['id'], 'name': thread['name']}
+            # Per-thread counters come from the second RPC and are matched by
+            # id. A thread that appeared between the two calls has no entry
+            # there; omit its counters rather than recording them as zero.
+            stats = thread_stats.get(thread['id'])
+            if stats is not None:
+                entry['busy'] = stats['busy']
+                entry['idle'] = stats['idle']
+            threads.append(entry)
+
+        reactors.append({
+            'lcore': reactor['lcore'],
+            'busy': reactor['busy'],
+            'idle': reactor['idle'],
+            'irq': reactor['irq'],
+            'sys': reactor['sys'],
+            'threads': threads,
+        })
+    return {'reactors': reactors}
+
+
+def add_node_stats(cluster, node, records, all_lvols, cpu_dict: Optional[CpuStats] = None):
     size_used = 0
     size_total = 0
     data = {}
@@ -238,7 +286,8 @@ def add_node_stats(cluster, node, records, all_lvols):
         "date": int(time.time()),
         "size_util": size_util,
         "size_prov": size_prov,
-        "size_prov_util": size_prov_util
+        "size_prov_util": size_prov_util,
+        "cpu_dict": cpu_dict or {}
     })
     stat_obj = NodeStatObject(data=data)
     stat_obj.write_to_db(db.kv_store)
@@ -338,7 +387,18 @@ def main():
                             devices_records.append(record)
                             cluster_device_records.append((device, record))
 
-                node_record = add_node_stats(cl, node, devices_records, all_lvols)
+                try:
+                    cpu_dict = get_cpu_stats(rpc_client)
+                except (RPCException, KeyError) as e:
+                    # KeyError means the SPDK reply lacked a field we read
+                    # unconditionally — record no CPU data rather than
+                    # substituting zeros for counters we did not observe.
+                    logger.error("Failed to collect CPU stats for node %s: %s", node.get_id(), e)
+                    # Empty, not {'reactors': []} — we do not know the node has
+                    # zero reactors.
+                    cpu_dict = {}
+
+                node_record = add_node_stats(cl, node, devices_records, all_lvols, cpu_dict)
                 node_records.append(node_record)
 
             add_cluster_stats(cl, node_records)
