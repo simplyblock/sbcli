@@ -650,7 +650,7 @@ spec:
     provisionedCapacity: 98
 ---
 apiVersion: storage.simplyblock.io/v1alpha1
-kind: Pool
+kind: StoragePool
 metadata:
   name: <EXISTING_POOL_NAME>       # Must match the pool name from R25 (e.g., testing1)
   namespace: simplyblock
@@ -670,7 +670,7 @@ spec:
   mgmtIfname: ens18
   dataIfname:
     - enp1s0
-  maxLogicalVolumeCount: 30
+  maxSubsystemCount: 30
   enableCpuTopology: true
   workerNodes:
     - <worker-node-1>
@@ -687,7 +687,7 @@ Verify adoption (status should reflect existing UUIDs, not `in_creation`):
 ```bash
 kubectl get storagecluster -n simplyblock -o yaml
 kubectl get storagenode -n simplyblock -o yaml
-kubectl get pool -n simplyblock -o yaml
+kubectl get storagepool -n simplyblock -o yaml
 ```
 
 ### Step 8 — Run R25 to R26 Data Migration Script

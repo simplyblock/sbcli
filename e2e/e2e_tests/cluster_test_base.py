@@ -277,7 +277,7 @@ class TestClusterBase:
         if not self.k8s_test:
             self.sbcli_utils.delete_all_storage_pools()
         else:
-            # In K8s mode, avoid deleting pools during setup — the Pool CRD
+            # In K8s mode, avoid deleting pools during setup — the StoragePool CRD
             # reconciliation is async and deleting+recreating pools between
             # tests causes long waits or failures.  Tests create pools via
             # _add_pool_dual() which reuses existing pools.
@@ -411,13 +411,13 @@ class TestClusterBase:
         return self.pool_name
 
     def _verify_pool_exists_dual(self, pool_name=None):
-        """Assert that a pool exists. In K8s mode checks the Pool CRD;
+        """Assert that a pool exists. In K8s mode checks the StoragePool CRD;
         in Docker mode checks sbcli pool list."""
         pool_name = pool_name or self.pool_name
         if self.k8s_test:
             exists = self.sbcli_utils.pool_crd_exists(pool_name)
             assert exists, (
-                f"Pool CRD for '{pool_name}' not found in K8s"
+                f"StoragePool CRD for '{pool_name}' not found in K8s"
             )
         else:
             pools = self.sbcli_utils.list_storage_pools()
@@ -425,7 +425,7 @@ class TestClusterBase:
                 f"Pool {pool_name} not present in list of pools: {pools}"
 
     def _delete_pool_dual(self, pool_name=None):
-        """Delete a storage pool. In K8s mode, deletes the Pool CRD.
+        """Delete a storage pool. In K8s mode, deletes the StoragePool CRD.
 
         Skipped entirely when pool_name doesn't match any existing pool
         (avoids errors from trying to delete a pool that was already
@@ -439,7 +439,7 @@ class TestClusterBase:
                 k8s_name = f"simplyblock-{pool_name.lower().replace('_', '-')}"
                 ns = self._ensure_k8s_utils().namespace
                 self._ensure_k8s_utils()._exec_kubectl(
-                    f"kubectl delete pools {k8s_name} -n {ns} "
+                    f"kubectl delete storagepools {k8s_name} -n {ns} "
                     f"--timeout=60s 2>/dev/null || true"
                 )
                 return
