@@ -1,6 +1,7 @@
 # coding=utf-8
 import json
 import uuid
+from typing import List, TypedDict
 
 from simplyblock_core.models.base_model import BaseModel
 
@@ -86,8 +87,33 @@ class DeviceStatObject(StatsObject):
     pass
 
 
+# `total=False` throughout: these records are read back from FoundationDB and
+# may have been written by an older collector, so every key is genuinely
+# optional at read time. Key names and value types are still checked — only
+# presence is not. Readers get `Optional[...]` from `.get()` and have to say
+# what absence means rather than defaulting it away.
+class ThreadStats(TypedDict, total=False):
+    id: int
+    name: str
+    busy: int
+    idle: int
+
+
+class ReactorStats(TypedDict, total=False):
+    lcore: int
+    busy: int
+    idle: int
+    irq: int
+    sys: int
+    threads: List[ThreadStats]
+
+
+class CpuStats(TypedDict, total=False):
+    reactors: List[ReactorStats]
+
+
 class NodeStatObject(StatsObject):
-    pass
+    cpu_dict: CpuStats = {}
 
 
 class ClusterStatObject(StatsObject):
