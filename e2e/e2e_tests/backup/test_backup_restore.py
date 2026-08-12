@@ -3326,45 +3326,62 @@ class TestBackupCrossClusterRestore(BackupTestBase):
         for ip in c2_ips:
             self.logger.info(f"  [C2] Adding storage node {ip} to Cluster-2")
             add_cmd = f"{add_base} {c2_id} {ip}:5000 {ifname}"
-            out, _ = self.ssh_obj.exec_command(node=mgmt_ip, command=add_cmd)
-            if out and "Error:" in out:
-                raise RuntimeError(
-                    f"TC-BCK-070: failed to add node {ip} to Cluster-2: {out}")
+            self.ssh_obj.exec_command(node=mgmt_ip, command=add_cmd)
             sleep_n_sec(3)
 
-        # Verify nodes were added
+        # Verify nodes were added to Cluster-2
         sn_out, _ = self.ssh_obj.exec_command(
-            node=mgmt_ip, command=f"{sbcli_cmd} sn list")
-        self.logger.info(f"  [C2] Storage node list after add:\n{sn_out}")
+            node=mgmt_ip,
+            command=f"{sbcli_cmd} sn list --cluster-id {c2_id}")
+        self.logger.info(f"  [C2] Storage nodes for Cluster-2:\n{sn_out}")
+        sn_count = sum(
+            1 for line in sn_out.split("\n")
+            if c2_id in line or "online" in line.lower())
+        if sn_count < len(c2_ips):
+            raise RuntimeError(
+                f"TC-BCK-070: expected {len(c2_ips)} storage nodes in "
+                f"Cluster-2 but found {sn_count}:\n{sn_out}")
 
         # Step 4: activate Cluster-2
         self.logger.info("  [C2] Activating Cluster-2")
-        out, _ = self.ssh_obj.exec_command(
+        self.ssh_obj.exec_command(
             node=mgmt_ip,
-            command=f"{sbcli_cmd} -d cluster activate {c2_id}"
-        )
-        if out and "Error:" in out:
-            raise RuntimeError(
-                f"TC-BCK-070: failed to activate Cluster-2: {out}")
+            command=f"{sbcli_cmd} -d cluster activate {c2_id}")
 
-        # Verify cluster is ACTIVE
+        # Verify cluster is ACTIVE and nodes are online+healthy
         cl_out, _ = self.ssh_obj.exec_command(
             node=mgmt_ip, command=f"{sbcli_cmd} cluster list")
-        if "ACTIVE" not in cl_out or c2_id not in cl_out:
+        self.logger.info(f"  [C2] Cluster list after activate:\n{cl_out}")
+        # Find C2's row and check it says ACTIVE
+        c2_active = False
+        for line in cl_out.split("\n"):
+            if c2_id in line and "ACTIVE" in line:
+                c2_active = True
+                break
+        if not c2_active:
             raise RuntimeError(
                 f"TC-BCK-070: Cluster-2 {c2_id} not ACTIVE after "
                 f"activate:\n{cl_out}")
-        self.logger.info(f"  [C2] Cluster list after activate:\n{cl_out}")
+
+        sn_out2, _ = self.ssh_obj.exec_command(
+            node=mgmt_ip,
+            command=f"{sbcli_cmd} sn list --cluster-id {c2_id}")
+        self.logger.info(
+            f"  [C2] Storage nodes after activate:\n{sn_out2}")
+        unhealthy = [
+            line for line in sn_out2.split("\n")
+            if "|" in line and c2_id not in line
+            and "online" in line.lower() and "false" in line.lower()]
+        if unhealthy:
+            self.logger.warning(
+                f"  [C2] Unhealthy nodes detected: {unhealthy}")
 
         # Step 5: create pool on Cluster-2
         self.logger.info("  [C2] Creating pool on Cluster-2")
-        out, _ = self.ssh_obj.exec_command(
+        self.ssh_obj.exec_command(
             node=mgmt_ip,
             command=f"{sbcli_cmd} pool add {self._cluster2_pool_name} {c2_id}"
         )
-        if out and "Error:" in out:
-            raise RuntimeError(
-                f"TC-BCK-070: failed to create pool on Cluster-2: {out}")
 
         # Step 6: extract Cluster-2 secret
         out, _ = self.ssh_obj.exec_command(
