@@ -3011,6 +3011,7 @@ class TestBackupCrossClusterRestore(BackupTestBase):
             "CLUSTER2_POOL", "bck_pool_c2")
         # Resources created on Cluster-2 (separate tracking for teardown)
         self._c2_lvols: list[str] = []
+        self._c2_node_ips: list[str] = []
         # Whether we bootstrapped cluster 2 ourselves (for teardown)
         self._self_bootstrapped_c2 = False
         # K8s-mode: second K8sUtils instance for Cluster-2 (initialised in _check_prerequisites)
@@ -3409,6 +3410,26 @@ class TestBackupCrossClusterRestore(BackupTestBase):
         self.logger.info(
             f"TC-BCK-070: Cluster-2 bootstrapped — ID={c2_id}, "
             f"API={self._cluster2_api_url}, nodes={c2_ips}")
+
+        # Start log collection on C2 nodes so we capture SPDK/mgmt logs
+        self._c2_node_ips = list(c2_ips)
+        if hasattr(self, 'docker_logs_path') and self.docker_logs_path:
+            for ip in c2_ips:
+                try:
+                    node_log_dir = os.path.join(self.docker_logs_path, ip)
+                    self.ssh_obj.make_directory(node=ip, dir_name=node_log_dir)
+                    containers = self.ssh_obj.get_running_containers(node_ip=ip)
+                    self.ssh_obj.check_tmux_installed(node_ip=ip)
+                    self.ssh_obj.exec_command(
+                        node=ip, command="sudo tmux kill-server")
+                    self.ssh_obj.start_docker_logging(
+                        node_ip=ip, containers=containers,
+                        log_dir=node_log_dir, test_name=self.test_name)
+                    self.logger.info(
+                        f"  [C2] Started log collection on {ip}")
+                except Exception as e:
+                    self.logger.warning(
+                        f"  [C2] Failed to start log collection on {ip}: {e}")
 
     def _remove_nodes_from_cluster1(self, ips_to_remove: list[str]):
         """Remove storage nodes from Cluster-1 so they can join Cluster-2.
@@ -4006,6 +4027,18 @@ class TestBackupCrossClusterRestore(BackupTestBase):
                         self.mgmt_nodes[0], f"rm -f {self._meta_file}")
                 except Exception:
                     pass
+
+        # Collect final logs from C2 nodes before teardown
+        c2_ips = getattr(self, '_c2_node_ips', [])
+        if c2_ips and hasattr(self, 'docker_logs_path') and self.docker_logs_path:
+            try:
+                self.ssh_obj.collect_final_docker_logs_simple(
+                    c2_ips, self.docker_logs_path)
+                self.logger.info(
+                    f"Collected final logs from C2 nodes: {c2_ips}")
+            except Exception as e:
+                self.logger.warning(
+                    f"Failed to collect final C2 logs: {e}")
 
         # Tear down self-bootstrapped Cluster-2 (if we created it)
         self._teardown_second_cluster()
