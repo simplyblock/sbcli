@@ -191,10 +191,30 @@ def _reconstruct_snap_tree(group, member_migrations, tgt_node, tgt_rpc) -> Optio
                 if not ter_rpc.bdev_lvol_convert(tgt_composite):
                     return f"bdev_lvol_convert on tertiary failed for {snap_uuid}"
 
+            # Early partial DB update: route health-check/delete to the target
+            # node right away rather than waiting for apply_migration_to_db()
+            # at this worker's CLEANUP_SOURCE -- which, on the batch path, is
+            # still several phases (INTERMEDIATE, final-step transfer, ANA
+            # flip) and potentially a long wall-clock gap away. Mirrors the
+            # single-lvol path's _post_process_snap.
+            try:
+                snap_rec = db.get_snapshot_by_id(snap_uuid)
+                if snap_rec.lvol.uuid == m.lvol_id:
+                    snap_rec.lvol.node_id = tgt_node.get_id()
+                    snap_rec.write_to_db(db.kv_store)
+            except KeyError:
+                logger.warning(f"Snapshot {snap_uuid} not found in DB for early node update")
+
             committed.add(snap_uuid)
             # Update migration record so snaps_migrated reflects committed state.
             if snap_uuid not in m.snaps_migrated:
                 m.snaps_migrated.append(snap_uuid)
+            # Track this snap's target bdev so cleanup_migration_target() knows
+            # to delete it on rollback -- mirrors _post_process_snap; without
+            # this the batch path never recorded it, so cleanup silently left
+            # every migrated snapshot bdev orphaned on the target.
+            if snap_uuid not in m.snaps_preexisting_on_target and tgt_composite not in m.target_snap_bdevs:
+                m.target_snap_bdevs.append(tgt_composite)
 
         m.write_to_db(db.kv_store)
 
@@ -858,18 +878,14 @@ def task_runner(task):
     try:
         src_node = db.get_storage_node_by_id(group.source_node_id)
     except KeyError:
-        task.function_result = f"source node {group.source_node_id} not found"
-        task.status = JobSchedule.STATUS_SUSPENDED
-        task.write_to_db(db.kv_store)
-        return False
+        return _batch_budget_suspend(
+            task, group, group_id, f"source node {group.source_node_id} not found")
 
     try:
         tgt_node = db.get_storage_node_by_id(group.target_node_id)
     except KeyError:
-        task.function_result = f"target node {group.target_node_id} not found"
-        task.status = JobSchedule.STATUS_SUSPENDED
-        task.write_to_db(db.kv_store)
-        return False
+        return _batch_budget_suspend(
+            task, group, group_id, f"target node {group.target_node_id} not found")
 
     phase = group.phase
     _is_cleanup_phase = phase in (
@@ -1076,7 +1092,14 @@ def main():
         else:
             for cl in clusters:
                 for task in db.get_active_batch_migration_tasks(cl.get_id()):
-                    task_runner(task)
+                    # Lease gate: skip a task another live runner host owns, so
+                    # two replicas can't both drive the same batch migration's
+                    # multi-phase data-plane state-machine concurrently.
+                    if not tasks_controller.claim_task(task):
+                        logger.info(f"Batch-migration task {task.uuid} owned by another runner host; skipping")
+                        continue
+                    with tasks_controller.task_lease_heartbeat(task):
+                        task_runner(task)
 
         time.sleep(3)
 

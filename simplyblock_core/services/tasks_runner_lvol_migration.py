@@ -3393,6 +3393,55 @@ def _handle_group_intermediate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
     return True, False, None
 
 
+def _group_worker_budget_suspend(task, migration, group_id, error_msg):
+    """Charge retry budget for a group worker; fail the WHOLE GROUP when this
+    worker's own budget is exhausted.
+
+    The top-level task_runner's retry-ceiling check (see the `if error:` block
+    after phase dispatch) never runs for group workers -- they're routed to
+    _group_worker_phase_dispatch before that point. Without this, a worker
+    hitting a persistent error just suspended forever via plain _suspend_task,
+    never reaching a terminal state; the barrier it was blocking
+    (snap_copy_done / intermediates_done / cleanup_source_done) never noticed
+    it was stuck, so the whole group hung instead of failing.
+    """
+    migration.retry_count += 1
+    migration.error_message = error_msg
+    task.function_result = error_msg
+    if migration.retry_count >= migration.max_retries:
+        logger.error(
+            f"Group worker {migration.uuid[:8]}: exceeded max retries "
+            f"({migration.max_retries}); entering cleanup_target: {error_msg}")
+        task.retry += 1
+        task.status = JobSchedule.STATUS_SUSPENDED
+        migration.phase = LVolMigration.PHASE_CLEANUP_TARGET
+        migration.current_job_id = ""
+        task.write_to_db(db.kv_store)
+        migration.write_to_db(db.kv_store)
+        migration_events.migration_phase_changed(migration)
+
+        # This worker will never signal done to its barrier now -- fail the
+        # whole group rather than let siblings (and the orchestrator) wait
+        # on it forever.
+        try:
+            group = db.get_migration_group_by_id(group_id)
+            if group.phase not in (LVolMigrationGroup.PHASE_CLEANUP_TARGET,
+                                   LVolMigrationGroup.PHASE_CLEANUP_SOURCE,
+                                   LVolMigrationGroup.PHASE_COMPLETED):
+                group.phase = LVolMigrationGroup.PHASE_CLEANUP_TARGET
+                group.error_message = (
+                    f"worker {migration.uuid[:8]} (lvol={migration.lvol_id}) "
+                    f"exceeded max retries: {error_msg}")
+                group.write_to_db(db.kv_store)
+                logger.error(
+                    f"Group {group_id[:8]}: failing whole group — worker "
+                    f"{migration.uuid[:8]} exhausted its retry budget")
+        except KeyError:
+            pass
+        return False
+    return _suspend_task(task, migration, error_msg)
+
+
 def _group_worker_phase_dispatch(task, migration, phase, src_node, tgt_node, src_rpc, tgt_rpc):
     """
     Complete phase dispatcher for FN_LVOL_MIG tasks that belong to a batch
@@ -3424,7 +3473,7 @@ def _group_worker_phase_dispatch(task, migration, phase, src_node, tgt_node, src
             done, suspend, error = _handle_group_snap_copy(
                 migration, src_node, tgt_node, src_rpc, tgt_rpc)
             if error:
-                return _suspend_task(task, migration, error)
+                return _group_worker_budget_suspend(task, migration, group_id, error)
             if suspend:
                 return _suspend_task(task, migration, migration.error_message or "waiting")
             if done:
@@ -3467,7 +3516,7 @@ def _group_worker_phase_dispatch(task, migration, phase, src_node, tgt_node, src
             done, suspend, error = _handle_group_intermediate(
                 migration, src_node, tgt_node, src_rpc, tgt_rpc)
             if error:
-                return _suspend_task(task, migration, error)
+                return _group_worker_budget_suspend(task, migration, group_id, error)
             if suspend:
                 return _suspend_task(task, migration, migration.error_message or "waiting")
             if done:
@@ -3516,7 +3565,7 @@ def _group_worker_phase_dispatch(task, migration, phase, src_node, tgt_node, src
             return _suspend_task(task, migration, str(exc))
 
         if error:
-            return _suspend_task(task, migration, error)
+            return _group_worker_budget_suspend(task, migration, group_id, error)
         if suspend:
             return _suspend_task(task, migration, migration.error_message or "waiting")
         if done:
