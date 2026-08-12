@@ -264,6 +264,17 @@ def parse_args():
     verify = parser.add_argument_group("SPDK verification")
     verify.add_argument("--skip-spdk-verify", action="store_true",
                         help="Skip the in-container SPDK path/policy verification.")
+    verify.add_argument("--path-heal-timeout", type=int, default=900,
+                        help="Seconds to wait for ALL SPDK paths / policies / "
+                             "listeners to heal after an outage before the next "
+                             "iteration may start (default 900). Redundant-path "
+                             "re-add runs on the health-check/reconcile cadence "
+                             "and legitimately takes minutes; the wait is a gate, "
+                             "not a check — only exceeding the timeout fails the "
+                             "run. Healing time is logged per phase as a "
+                             "measurement.")
+    verify.add_argument("--path-heal-poll", type=int, default=30,
+                        help="Seconds between heal-gate polls (default 30).")
     verify.add_argument("--policy-sample", type=int, default=2,
                         help="Remote device bdevs per node to sample for multipath "
                              "policy. Hublvol bdevs are always all checked. Keep small: "
@@ -1346,13 +1357,19 @@ class SoakRunner:
             return "remote"
         return "other"
 
-    def verify_spdk_state(self, label, strict=True, retries=3, retry_delay=20):
-        """Verify path counts, multipath policy and listeners on every node.
+    def verify_spdk_state(self, label, strict=True, timeout=None, poll=None):
+        """Heal gate: block until path counts, multipath policies and
+        listeners are correct on every online node, then report how long
+        healing took.
 
-        Retried before being believed: a path repair or hublvol reconnect can
-        legitimately be in flight for a few seconds after an outage, and
-        failing the soak on a state that heals itself 20 s later wastes a
-        10-hour run. Only problems that persist across every attempt are real.
+        Redundant-path re-add after an outage runs on the health-check /
+        reconcile cadence and legitimately takes minutes (observed: hublvol
+        paths at 1/2 or 3/4 for several minutes after a 30 s NIC outage,
+        then fully healed). The next iteration must not start against a
+        cluster that is still repairing — a new outage on top of degraded
+        redundancy tests a different, unplanned scenario. So this waits for
+        full convergence, bounded by --path-heal-timeout, and only the
+        timeout is a failure. Healing duration is logged as a measurement.
 
         Only targeted ``bdev_get_bdevs -b <name>`` calls are used, never a
         full dump: unfiltered bdev dumps on a loaded cluster have wedged SPDK
@@ -1360,41 +1377,53 @@ class SoakRunner:
         """
         if self.args.skip_spdk_verify:
             return
-        self.logger.log(f"{label}: verifying SPDK multipath state")
+        timeout = timeout if timeout is not None else self.args.path_heal_timeout
+        poll = poll if poll is not None else self.args.path_heal_poll
+        self.logger.log(f"{label}: waiting for all SPDK paths to heal "
+                        f"(timeout {timeout}s)")
+        started = time.time()
+        attempt = 0
         problems = []
-        for attempt in range(1, max(1, retries) + 1):
+        while True:
+            attempt += 1
             problems = []
             for node in self.get_nodes():
                 uuid = node["uuid"]
                 if node["status"] != "online":
-                    self.logger.log(f"  {uuid[:12]}: SKIP (status={node['status']})")
+                    problems.append(f"{uuid[:12]}: node status={node['status']}")
                     continue
                 try:
                     problems.extend(self._verify_node_spdk(uuid))
                 except Exception as exc:
                     problems.append(f"{uuid[:12]}: verification error: {exc}")
+            elapsed = time.time() - started
             if not problems:
-                self.logger.log(
-                    f"{label}: SPDK multipath state OK on all online nodes"
-                    + (f" (attempt {attempt})" if attempt > 1 else ""))
+                if attempt == 1:
+                    self.logger.log(
+                        f"{label}: SPDK multipath state OK (already healed)")
+                else:
+                    self.logger.log(
+                        f"{label}: all paths healed after {elapsed:.0f}s "
+                        f"({attempt} checks)")
                 return
-            if attempt < retries:
-                self.logger.log(
-                    f"{label}: {len(problems)} problem(s) on attempt {attempt}/"
-                    f"{retries}, re-checking in {retry_delay}s (may be a repair "
-                    f"in flight)")
-                for problem in problems:
-                    self.logger.log(f"    transient? {problem}")
-                time.sleep(retry_delay)
+            if elapsed + poll > timeout:
+                break
+            self.logger.log(
+                f"{label}: {len(problems)} unhealed path problem(s) after "
+                f"{elapsed:.0f}s, polling again in {poll}s")
+            for problem in problems:
+                self.logger.log(f"    healing? {problem}")
+            time.sleep(poll)
 
         for problem in problems:
-            self.logger.log(f"  FAIL {problem}")
+            self.logger.log(f"  UNHEALED {problem}")
         if strict:
             raise TestRunError(
-                f"{label}: SPDK multipath verification failed with "
-                f"{len(problems)} persistent problem(s) across {retries} attempts")
+                f"{label}: {len(problems)} path problem(s) still unhealed after "
+                f"{timeout}s — repair is stuck, not merely slow")
         self.logger.log(
-            f"{label}: {len(problems)} SPDK problem(s), continuing (non-strict)")
+            f"{label}: {len(problems)} problem(s) unhealed after {timeout}s, "
+            f"continuing (non-strict)")
 
     def _verify_node_spdk(self, uuid):
         host = self._node_host(uuid)

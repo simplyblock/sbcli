@@ -9499,10 +9499,31 @@ def add_lvol_thread(lvol, snode: StorageNode, lvol_ana_state="optimized"):
         logger.info("Add BDev to subsystem " + f"{lvol.vuid:016X}")
         if not rpc_client.nvmf_subsystem_add_ns(
                 lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid, nsid=lvol.ns_id):
-            msg = (f"Failed to add namespace nsid={lvol.ns_id} ({lvol.top_bdev}) "
-                   f"to {lvol.nqn} on {snode.get_id()}")
-            logger.error(msg)
-            return False, msg
+            # An add_ns error is not by itself a reason to abandon the whole
+            # registration. What matters for the client is whether the
+            # namespace is on the subsystem now — it may already have been,
+            # which is exactly how SPDK answers a duplicate add: -32602
+            # "Invalid parameters" because the nsid is taken. Treating the
+            # error as terminal returns before the listener loop below and
+            # costs the volume a PATH, not just a namespace, and the repair
+            # in lvol_monitor then re-fails identically on every cycle
+            # (soak 2026-08-11: 20 such failures across two recovered nodes,
+            # the dominant cause of the namespace-without-listener state;
+            # the add_ns idempotency probe should absorb the duplicate case,
+            # so reaching here means either a real failure or a probe miss).
+            # Re-read the subsystem and only give up if the namespace is
+            # genuinely absent.
+            if _rpc_wait_subsystem_has_ns(rpc_client, lvol.nqn, nsid=lvol.ns_id,
+                                          bdev_name=lvol.top_bdev, uuid=lvol.uuid):
+                logger.warning(
+                    "add_ns for nsid=%s (%s) on %s reported failure but the "
+                    "namespace is present; continuing to listener setup",
+                    lvol.ns_id, lvol.top_bdev, lvol.nqn)
+            else:
+                msg = (f"Failed to add namespace nsid={lvol.ns_id} ({lvol.top_bdev}) "
+                       f"to {lvol.nqn} on {snode.get_id()}")
+                logger.error(msg)
+                return False, msg
 
     # Post-condition before publishing a listener: the subsystem MUST have the
     # namespace. A listener in front of an empty subsystem accepts connections
