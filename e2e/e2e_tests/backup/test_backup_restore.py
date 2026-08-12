@@ -3770,38 +3770,65 @@ class TestBackupCrossClusterRestore(BackupTestBase):
                 f"TC-BCK-075: restore triggered: {out3.strip()}")
             self._c2_lvols.append(restored_name)
 
-            # Wait for restore to complete on Cluster-2
+            # Wait for restore task to complete on Cluster-2, then wait
+            # for the lvol to reach 'online' status before connect/mount.
             self.logger.info(
-                "TC-BCK-075: waiting for Cluster-2 restore to complete…")
-            restored_id = None
-            deadline = time.time() + _RESTORE_COMPLETE_TIMEOUT
-            while time.time() < deadline:
-                lvol_out, _ = self._sbcli_c2("lvol list")
-                if restored_name in lvol_out:
-                    # Extract lvol ID from the table row containing the name
-                    import re as _re
-                    for line in lvol_out.split("\n"):
-                        if restored_name in line:
-                            id_match = _re.search(
-                                r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
-                                r"[0-9a-f]{4}-[0-9a-f]{12})", line)
-                            if id_match:
-                                restored_id = id_match.group(1)
+                "TC-BCK-075: waiting for Cluster-2 restore task to "
+                "complete…")
+
+            # Phase 1: wait for restore task to reach 'done'
+            import re as _re
+            task_deadline = time.time() + _RESTORE_COMPLETE_TIMEOUT
+            while time.time() < task_deadline:
+                try:
+                    task_out, _ = self._sbcli_c2(
+                        f"cluster list-tasks {self._cluster2_id}"
+                        f" --limit 0")
+                    for line in (task_out or "").splitlines():
+                        if "s3_backup_restore" in line and "done" in line:
+                            self.logger.info(
+                                "TC-BCK-075: restore task reached 'done'")
                             break
-                    self.logger.info(
-                        f"TC-BCK-075: restored lvol appeared on Cluster-2"
-                        f" (id={restored_id})")
-                    break
-                sleep_n_sec(_POLL_INTERVAL)
+                    else:
+                        sleep_n_sec(_POLL_INTERVAL)
+                        continue
+                    break  # task done
+                except Exception as e:
+                    self.logger.warning(
+                        f"TC-BCK-075: could not check task status: {e}")
+                    sleep_n_sec(_POLL_INTERVAL)
             else:
-                raise TimeoutError(
-                    f"TC-BCK-075: restored lvol {restored_name} did not "
-                    f"appear on Cluster-2 within "
-                    f"{_RESTORE_COMPLETE_TIMEOUT}s")
+                self.logger.warning(
+                    "TC-BCK-075: restore task did not reach 'done' "
+                    f"within {_RESTORE_COMPLETE_TIMEOUT}s — proceeding")
+
+            # Stabilisation wait after restore task completes
+            self.logger.info(
+                "TC-BCK-075: waiting 60s for restore to stabilise…")
+            sleep_n_sec(60)
+
+            # Phase 2: verify lvol is online and extract its ID
+            restored_id = None
+            lvol_out, _ = self._sbcli_c2("lvol list")
+            for line in lvol_out.split("\n"):
+                if restored_name in line:
+                    id_match = _re.search(
+                        r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+                        r"[0-9a-f]{4}-[0-9a-f]{12})", line)
+                    if id_match:
+                        restored_id = id_match.group(1)
+                    if "online" not in line.lower():
+                        self.logger.warning(
+                            f"TC-BCK-075: lvol {restored_name} not "
+                            f"online yet: {line.strip()}")
+                    break
+            self.logger.info(
+                f"TC-BCK-075: restored lvol on Cluster-2"
+                f" (id={restored_id})")
 
             assert restored_id, (
-                f"TC-BCK-075: could not extract lvol ID for "
-                f"{restored_name} from lvol list output")
+                f"TC-BCK-075: could not find restored lvol "
+                f"{restored_name} in lvol list:\n{lvol_out}")
 
             # TC-BCK-076: data integrity — connect via Cluster-2
             self.logger.info(
