@@ -204,9 +204,24 @@ def bootstrap_central(state):
     helpers.ssh(state, server, INSTALL_HELM, timeout=900)
     helpers.ssh(state, server, INSTALL_SBCTL, timeout=1800)
 
-    command = os.getenv("EDGE_E2E_BOOTSTRAP_CMD") or helm_install_cmd()
-    print(f"Installing simplyblock via helm on {server}...")
-    print(helpers.ssh(state, server, command, timeout=3600)[-2000:])
+    # Phase 1 (released image) ONLY on first bootstrap. Re-running it on an
+    # already-bootstrapped cluster downgrades the WHOLE control plane to the
+    # released build, whose services sweep and rewrite cluster records with
+    # the older schema — silently wiping fields the branch added
+    # (cluster_type flipped edge->hyperscale on every campaign rerun,
+    # 2026-08-13). The backend cluster's presence is the bootstrap marker.
+    already = helpers.ssh(
+        state, server,
+        f"sudo kubectl -n {K8S_NAMESPACE} get storagecluster "
+        f"{CENTRAL_CLUSTER_CR} -o jsonpath='{{.status.uuid}}' 2>/dev/null",
+        check=False, timeout=60).strip()
+    if already:
+        print(f"central already bootstrapped (cluster {already}); "
+              "skipping released-image phase")
+    else:
+        command = os.getenv("EDGE_E2E_BOOTSTRAP_CMD") or helm_install_cmd()
+        print(f"Installing simplyblock via helm on {server}...")
+        print(helpers.ssh(state, server, command, timeout=3600)[-2000:])
 
     # Poll from here with SHORT ssh calls rather than holding one session open
     # for a 10-minute `kubectl wait`: a dropped session failed the whole deploy
