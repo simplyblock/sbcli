@@ -58,6 +58,30 @@ Key rules:
 - **Comparison**: Use `hmac.compare_digest(secret.get_secret_value(), other)` for timing-safe comparison.
 - **Testing**: New secret-bearing code needs masking, wire-delivery, and FDB round-trip tests. See `tests/AGENTS.md` § Secret-handling tests for the required assertions and canonical examples.
 
+## Fixing Issues
+
+A reported fault is a symptom. Fix the symptom as asked — but a fix is only complete once you have also answered **why this class of fault was possible here**, and reported that answer.
+
+Always report the systemic cause, even when you are not asked to fix it and even when the fix itself is a one-liner. Silence implies the code was fine apart from one typo, which is usually false.
+
+### What to look for
+
+While tracing the fault, ask:
+
+- **Is an abstraction missing, or is the wrong one in place?** A concept the domain has but the code does not (so it lives as scattered tuples, dicts, or parallel lists), logic that belongs to one owner but is re-implemented at each caller, or a leaky boundary that forces callers to know a lower layer's details — CLI code reaching into FDB shapes, a controller hand-assembling JSON-RPC payloads. Equally, an abstraction that no longer fits: a base class or helper stretched by special-cases and flags until each caller needs different behaviour from it. If the correct fix reads as "remember to do X here too", the missing thing is a place where X happens once.
+- **Could the invalid state have been made unrepresentable?** A field that must never be empty, a status that must never be reached from another status, two fields that must agree — if an invariant is enforced by convention rather than by the type or a single guarded accessor, that is the real defect.
+- **Does the same latent bug exist elsewhere?** Copy-pasted call sites, sibling controllers, the other half of a create/delete pair, v1 vs. v2 of an endpoint. Grep for the pattern, not just the line.
+- **Did an error-handling pattern hide it?** A swallowed exception, a `None`/boolean return standing in for an error, a bare `except`, a retry loop that masks a permanent failure as a transient one. See `CONTRIBUTING.md` and the retry conventions above.
+- **Why did no test catch it?** A missing tier (unit vs. integration), a fixture that mocks away the failing layer, an assertion on the happy path only. A regression test for this bug is the minimum; a gap that would let the *next* bug through is a finding.
+- **Was the failure observable?** If reproducing it required adding logging, or if the logs pointed at the wrong component, the missing signal is part of the fault.
+- **Did an interface invite the mistake?** Positional arguments that are easy to swap, a parameter whose meaning depends on another, a helper that is correct only when called in a specific order.
+
+### How to report it
+
+End the work with a short **Systemic causes** section separate from the description of the fix. For each cause: state it in one or two sentences, point at the code (`file_path:line`), and say what a durable fix would be and roughly what it costs.
+
+Do not silently widen the change to include those fixes. Fix the reported fault plus anything genuinely inseparable from it; propose the rest and let the user decide. The exceptions — apply these without asking — are a regression test covering the fault, and identical instances of the same bug found by grep, which are part of the fix rather than an expansion of it.
+
 ## Verification
 
 After any code change, run the `tox-verify` skill (`.agents/skills/tox-verify.md`). The short version:
