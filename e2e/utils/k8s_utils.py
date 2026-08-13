@@ -2488,16 +2488,14 @@ class K8sUtils:
         """
         ns = namespace or self.namespace
 
-        # Quick pre-check: if the pod is stuck in PodInitializing or similar,
-        # report that immediately instead of waiting the full timeout.
+        # Quick pre-check: fail fast on image pull errors (unrecoverable).
+        # PodInitializing and ContainerCreating are normal transient states
+        # (e.g. init container running fio-warmup) — let them proceed.
         pod_name_pre = self.get_job_pod_name(job_name, namespace=ns)
         if pod_name_pre:
             detail = self.get_pod_status_detail(pod_name_pre, namespace=ns)
             reason = detail.get("reason", "")
-            if reason in (
-                "PodInitializing", "ContainerCreating",
-                "ErrImagePull", "ImagePullBackOff",
-            ):
+            if reason in ("ErrImagePull", "ImagePullBackOff"):
                 raise RuntimeError(
                     f"FIO Job '{job_name}' pod '{pod_name_pre}' never "
                     f"started: {reason} — {detail.get('message', '')}"
