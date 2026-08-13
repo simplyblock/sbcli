@@ -552,6 +552,22 @@ def failback(mgmt_ip, key_path, lvol_uuid, source_cluster_id=None):
     run(mgmt_ip, key_path, f"{SBCTL} -d volume replication-failback {lvol_uuid}{flag}")
 
 
+def failed_over_targets_any_state(mgmt_ip, key_path, src_lvols):
+    """Map source lvol -> target lvol for ANY live relationship state (used to
+    connect target paths as soon as the cutover task creates them)."""
+    return mgmt_py(mgmt_ip, key_path, f"""
+import json
+from simplyblock_core.db_controller import DBController
+db = DBController()
+wanted = {list(src_lvols)!r}
+out = {{}}
+for r in db.get_lvol_replication_objects():
+    if r.source_lvol and r.source_lvol.get_id() in wanted and r.target_lvol:
+        out[r.source_lvol.get_id()] = r.target_lvol.get_id()
+print(json.dumps(out))
+""")
+
+
 def failed_over_targets(mgmt_ip, key_path, src_lvols):
     """Map source lvol id -> target lvol id for failed_over relationships."""
     return mgmt_py(mgmt_ip, key_path, f"""
@@ -646,8 +662,14 @@ def test_case_1(meta):
     # 1. create + replicate (migration mode, 1-min auto snapshots)
     lvols = create_volumes(mgmt_ip, key_path, src["pool"], tgt_uuid, mode="migration")
 
-    # 2. connect/format/mount + start endless fio
+    # 2. connect/format/mount, write a baseline that fio NEVER touches, then fio.
+    #    The baseline is the only data that lives exclusively in the replicated
+    #    snapshot history: fio's sequential sweep rewrites its whole working set
+    #    every pass, so the final-step delta carries fio's data regardless of
+    #    whether replication works. Verifying the baseline post-cutover is the
+    #    only assertion here that exercises the replicated snapshots at all.
     mounts = connect_and_mount(client_ip, key_path, mgmt_ip, lvols, fmt=True)
+    baseline = write_baseline(client_ip, key_path, mounts)
     jobfile = write_fio_jobfile(client_ip, key_path, mounts)
     start_fio(client_ip, key_path, jobfile)
 
@@ -662,33 +684,31 @@ def test_case_1(meta):
     print("Performing online migration cutover (fio keeps running)...")
     for lv in lvols:
         run(mgmt_ip, key_path, f"{SBCTL} -d volume replication-commit {lv}")
-        # commit returns target lvol id; fetch its connect cmds and attach as extra paths
-        st = mgmt_py(mgmt_ip, key_path, f"""
-import json
-from simplyblock_core.db_controller import DBController
-db = DBController()
-tgt = ""
-for r in db.get_lvol_replication_objects():
-    if r.source_lvol and r.source_lvol.get_id() == {lv!r}:
-        tgt = r.target_lvol.get_id() if r.target_lvol else ""
-print(json.dumps({{"target_lvol": tgt}}))
-""")
-        if st["target_lvol"]:
-            conn = get_connect_cmds(mgmt_ip, key_path, st["target_lvol"])
-            for cmd in conn.get("connect", []):
-                run(client_ip, key_path, cmd, check=False)
 
-    # 5. wait for cutovers to complete, monitoring fio the whole time
+    # 5. wait for cutovers to complete, monitoring fio the whole time. The
+    #    commit runs an iterative delta-shrink first, so the target volume (and
+    #    its paths) appear minutes after the commit call: connect each target's
+    #    paths AS SOON as they exist — before the ANA flip — so multipath
+    #    follows the cutover without dropping IO.
     print("Waiting for cutover completion + monitoring fio...")
     start = time.time()
     states = {}
     done = 0
+    connected_targets = set()
     while time.time() - start < CUTOVER_WAIT_TIMEOUT:
         if not fio_alive(client_ip, key_path):
             raise RuntimeError("FAIL: fio stopped during online migration (interrupted)")
+        targets = failed_over_targets_any_state(mgmt_ip, key_path, lvols)
+        for src_lv, tgt_lv in targets.items():
+            if tgt_lv and tgt_lv not in connected_targets:
+                conn = get_connect_cmds(mgmt_ip, key_path, tgt_lv)
+                for cmd in conn.get("connect", []):
+                    run(client_ip, key_path, cmd, check=False)
+                connected_targets.add(tgt_lv)
         states = replication_states(mgmt_ip, key_path, lvols)
         done = sum(1 for s in states.values() if s in ("cutover_done", "failed_over"))
-        print(f"  cutovers done: {done}/{len(lvols)}  fio_alive=True")
+        print(f"  cutovers done: {done}/{len(lvols)}  targets_connected="
+              f"{len(connected_targets)}/{len(lvols)}  fio_alive=True")
         if done == len(lvols):
             break
         time.sleep(15)
@@ -699,7 +719,6 @@ print(json.dumps({{"target_lvol": tgt}}))
     errors = fio_error_count(client_ip, key_path)
     print(f"  fio_alive={alive} error_indicators={errors} cutovers_done={done}/{len(lvols)}")
     stop_fio(client_ip, key_path)
-    cleanup_client(client_ip, key_path, mounts)
     if not alive:
         raise RuntimeError("FAIL: fio did not survive the online migration")
     if errors:
@@ -711,7 +730,21 @@ print(json.dumps({{"target_lvol": tgt}}))
         raise RuntimeError(
             f"FAIL: only {done}/{len(lvols)} cutovers completed within "
             f"{CUTOVER_WAIT_TIMEOUT}s; states={states}")
-    print("CASE 1 PASSED: online migration completed with no fio interruption.")
+
+    # 7. FULL-SURFACE data verification through the cutover volume: remount
+    #    (fresh cache) and md5 the baseline, now served by the TARGET cluster.
+    print("Verifying deep data through the cutover volumes (baseline md5)...")
+    for m in mounts:
+        run(client_ip, key_path,
+            f"sudo timeout 30 umount {m['mount']} 2>/dev/null; "
+            f"sudo timeout 30 mount {m['dev']} {m['mount']}", check=False)
+    ok, details = verify_baseline(client_ip, key_path, mounts, baseline)
+    cleanup_client(client_ip, key_path, mounts)
+    if not ok:
+        raise RuntimeError(
+            "FAIL: pre-cutover data (baseline) is NOT intact on the target after "
+            f"migration — replicated snapshot history is broken: {details}")
+    print("CASE 1 PASSED: online migration, no fio interruption, deep data intact.")
 
 
 def test_case_2(meta):
