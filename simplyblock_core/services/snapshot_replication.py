@@ -104,6 +104,25 @@ def process_snap_replicate_start(task, snapshot):
         task.write_to_db()
         return
 
+    # Receive mode is MANDATORY before the transfer starts. migration_flag on
+    # the receiving lvol (a) stamps its blob writes special_io=1, which the
+    # raid layer encodes into the LBA and the distrib stack uses for
+    # receive-mode placement, and (b) arms the hub write handler's detection of
+    # the end-of-transfer signal (vbdev_lvol hublvol_write: flag + 1 page at
+    # page 0 -> process_migration_write_request finalises the receive). Without
+    # it the payload lands as ordinary client IO and the completion signal is
+    # written ONTO LBA 0 as data — the receive never finalises and every clone
+    # of the converted snapshot reads zeros. add_clone/convert clear the flag,
+    # completing the lifecycle. The migration runner has always set it
+    # (tasks_runner_lvol_migration step 3); replication never did.
+    if not remote_lv_node.rpc_client().bdev_lvol_set_migration_flag(remote_lv.top_bdev):
+        logger.error(f"set_migration_flag failed for {remote_lv.top_bdev}")
+        task.function_result = "set_migration_flag failed, retrying"
+        task.status = JobSchedule.STATUS_SUSPENDED
+        task.retry += 1
+        task.write_to_db()
+        return
+
     offset = 0
     if "offset" in task.function_params and task.function_params["offset"]:
         offset = task.function_params["offset"]
@@ -197,11 +216,16 @@ def _prune_internal_snapshots(source_lvol):
 
 def process_snap_replicate_finish(task, snapshot):
 
-    # NOTE: no per-volume controller to detach any more — transfers go over the
-    # target's shared transfer hublvol, which stays attached for reuse across
-    # cycles (same lifecycle as the migration runner's hub).
+    # Close the transfer session: detach the target's transfer hub from the
+    # source node. The connect -> transfer -> convert -> DISCONNECT cycle is
+    # part of the transfer contract; the next cycle re-attaches via
+    # ensure_hub_attached.
     remote_lv = db.get_lvol_by_id(task.function_params["remote_lvol_id"])
     remote_snode = db.get_storage_node_by_id(remote_lv.node_id)
+    _src_node = db.get_storage_node_by_id(snapshot.lvol.node_id)
+    if remote_snode.transfer_hublvol and remote_snode.transfer_hublvol.bdev_name:
+        _src_node.rpc_client().bdev_nvme_detach_controller(
+            remote_snode.transfer_hublvol.bdev_name)
     replicate_to_source = task.function_params["replicate_to_source"]
     if "replicate_as_snap_instance" in task.function_params:
         replicate_as_snap_instance = task.function_params["replicate_as_snap_instance"]
@@ -345,7 +369,14 @@ def task_runner(task: JobSchedule):
             snapshot.write_to_db()
 
         remote_lv = db.get_lvol_by_id(task.function_params["remote_lvol_id"])
-        # hub stays attached (shared transfer gateway); nothing to detach here
+        # abort path: close the transfer session here too
+        try:
+            _rl_node = db.get_storage_node_by_id(remote_lv.node_id)
+            if _rl_node.transfer_hublvol and _rl_node.transfer_hublvol.bdev_name:
+                snode.rpc_client().bdev_nvme_detach_controller(
+                    _rl_node.transfer_hublvol.bdev_name)
+        except KeyError:
+            pass
         lvol_controller.delete_lvol(remote_lv, force_delete=True)
 
         return True
