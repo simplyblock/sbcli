@@ -837,13 +837,10 @@ class K8sNativeMajorUpgrade(TestClusterBase):
             verify_cm = f"fio-verify-cfg-{pvc_name}"
 
             verify_config = self._build_verify_only_fio_config(pvc_name, fio_meta)
-            avoid = self.k8s_utils.get_pvc_primary_k8s_node(
-                pvc_name, self.sbcli_utils,
-            )
             self.k8s_utils.create_fio_job(
                 job_name=verify_job, pvc_name=pvc_name,
                 configmap_name=verify_cm, fio_config=verify_config,
-                image=self.FIO_IMAGE, avoid_node=avoid,
+                image=self.FIO_IMAGE,
             )
             verify_jobs.append((verify_job, pvc_name))
             sleep_n_sec(5)
