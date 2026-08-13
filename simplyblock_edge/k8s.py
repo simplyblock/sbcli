@@ -51,6 +51,17 @@ def _ca_file_for(cluster) -> str:
 def api_client(cluster) -> k8s_client.ApiClient:
     """kubernetes ApiClient for one edge cluster."""
     if not cluster.k8s_api_url:
+        # HARD ERROR for edge clusters. The in-cluster fallback exists for
+        # tests/single-site setups, but for an edge record with a lost or
+        # unset endpoint it silently redirects every operation to the CP's
+        # OWN cluster — observed 2026-08-13 after a schema round-trip wiped
+        # k8s_api_url: "edge" pod creates landed on the central cluster as
+        # the webappapi's service account (403), with nothing naming the
+        # actual problem. Refuse loudly instead.
+        if getattr(cluster, 'cluster_type', '') == 'edge':
+            raise EdgeK8sError(
+                f"edge cluster {cluster.uuid} has no k8s endpoint configured "
+                "(k8s_api_url is empty — record damaged or never set)")
         core_utils.load_kube_config_with_fallback()
         return k8s_client.ApiClient()
 
