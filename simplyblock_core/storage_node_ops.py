@@ -4494,6 +4494,20 @@ def _finalize_node_removal(removed_node: StorageNode):
     removed_node = db_controller.get_storage_node_by_id(removed_node.get_id())
     cluster = db_controller.get_cluster_by_id(removed_node.cluster_id)
 
+    # Case A/B (_teardown_replicas_of_primary, _relocate_replicas_hosted_on)
+    # already cleared this node's forward/back-reference fields as they
+    # relocated each side of the relationship elsewhere. lvstore_ports is
+    # the one piece of bookkeeping neither touches -- it isn't part of any
+    # relocation, just a port-reuse cache for THIS node's own restarts (see
+    # recreate_lvstore_on_non_leader) -- and by the time this function runs
+    # there won't be one: the node is about to flip to REMOVED for good.
+    # Left uncleared, `sn list`'s "LVS Ports" column keeps showing entries
+    # for a node with no SPDK process left to back them (2026-08-13, found
+    # live after a removal).
+    if removed_node.lvstore_ports:
+        removed_node.lvstore_ports = {}
+        removed_node.write_to_db()
+
     if cluster.mode == "docker":
         logger.info("Leaving swarm...")
         try:

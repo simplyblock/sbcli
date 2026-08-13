@@ -1051,6 +1051,45 @@ class TestNodeRemovalOrchestrateResumesPhase5(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# _finalize_node_removal — clearing the removed node's OWN stale bookkeeping
+#
+# Case A/B relocation clears every forward/back-reference field as each
+# relationship is moved elsewhere, but neither touches lvstore_ports -- it
+# isn't part of any relocation, just a port-reuse cache for this node's own
+# restarts. Left uncleared, `sn list`'s "LVS Ports" column keeps showing
+# entries for a node with no SPDK process left to back them (2026-08-13,
+# found live after a removal).
+# ---------------------------------------------------------------------------
+
+class TestFinalizeNodeRemovalClearsLvstorePorts(unittest.TestCase):
+
+    def _run(self, removed, cluster_mode="kubernetes", node_api_up=False):
+        cl = _cluster(mode=cluster_mode)
+        db = FakeDB(cl, [removed])
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops.health_controller, "_check_node_api",
+                          return_value=node_api_up):
+            storage_node_ops._finalize_node_removal(removed)
+        return removed
+
+    def test_clears_stale_lvstore_ports(self):
+        removed = _node("n1", lvstore="LVS_1")
+        removed.lvstore_ports = {"LVS_1": {"lvol_subsys_port": 4440, "hublvol_port": 4441},
+                                  "LVS_9": {"lvol_subsys_port": 4450, "hublvol_port": 4451}}
+        removed = self._run(removed)
+        self.assertEqual(removed.lvstore_ports, {})
+        removed.write_to_db.assert_called()
+
+    def test_no_op_when_already_empty(self):
+        # Don't write to the DB at all when there's nothing to clear.
+        removed = _node("n1", lvstore="LVS_1")
+        removed.lvstore_ports = {}
+        removed = self._run(removed)
+        self.assertEqual(removed.lvstore_ports, {})
+        removed.write_to_db.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # _connect_to_remote_jm_devs — bounded retry + degrade-not-crash on a
 # transient RPC/DNS failure during the fallback bdev-existence poll
 #
