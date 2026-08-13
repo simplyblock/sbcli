@@ -52,6 +52,12 @@ for i in $(seq 1 12); do apt-get update -y && break || sleep 10; done
 for i in $(seq 1 12); do
   apt-get install -y curl nvme-cli fio gdisk jq && break || sleep 10
 done
+# Hugepages BEFORE k3s installs, so the kubelet registers hugepages-2Mi
+# capacity from the start (the SPDK pod requests them; without this it is
+# unschedulable: "Insufficient hugepages-2Mi", live run 2026-08-13).
+# 1536 x 2MiB = 3GiB: covers the pod's 1GiB request with headroom.
+echo "vm.nr_hugepages=1536" > /etc/sysctl.d/90-hugepages.conf
+sysctl -w vm.nr_hugepages=1536
 """
 
 # cpu-manager-policy=static + reserved-cpus=0: exclusive reactor cores for

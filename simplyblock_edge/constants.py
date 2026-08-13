@@ -54,5 +54,7 @@ EDGE_CPU_TOPOLOGY_ENABLED = os.getenv("SIMPLYBLOCK_EDGE_CPU_TOPOLOGY", "false").
 EDGE_RESERVED_SYSTEM_CPUS = os.getenv("SIMPLYBLOCK_EDGE_RESERVED_SYSTEM_CPUS", "0")
 
 # Node add: how long to wait for the SPDK proxy to answer after pod deploy.
-EDGE_RPC_WAIT_TIMEOUT_SEC = 120
+# 600 not 120: the wait covers the SPDK pod's FIRST image pull on the edge
+# node (multi-GB over the edge site's uplink), not just process start.
+EDGE_RPC_WAIT_TIMEOUT_SEC = int(os.getenv("SIMPLYBLOCK_EDGE_RPC_WAIT_SEC", "600"))
 EDGE_RPC_WAIT_INTERVAL_SEC = 2
