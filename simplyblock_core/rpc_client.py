@@ -1775,6 +1775,11 @@ class RPCClient:
             "child_name": lvol_name,
         })
 
+    def bdev_lvol_decouple_parent(self, name):
+        """Copy the parent's allocated clusters into *name* (child lvol/snapshot)
+        so the parent can be deleted without destroying shared data."""
+        return self._request("bdev_lvol_decouple_parent", {"name": name})
+
     def bdev_lvol_convert(self, name):
         """
         Convert a writable lvol *name* (composite) into an immutable snapshot
