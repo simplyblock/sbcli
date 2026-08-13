@@ -118,9 +118,18 @@ spec:
         requests:
           cpu: "{{ cpu }}"
           memory: 1Gi
+          # NON-OPTIONAL, and not only for scheduling: kubernetes sets the
+          # POD-level hugetlb cgroup limit to exactly what is requested —
+          # nothing requested means hugetlb.2MB.max=0, and DPDK dies with
+          # "EAL: FATAL: Cannot init memory" even though the pod itself just
+          # reserved plenty of pages at OS level (verified live 2026-08-13).
+          # The launch script's nr_hugepages top-up and this request compose:
+          # one fills the OS pool, the other opens the cgroup.
+          hugepages-2Mi: {{ hugepages_mib }}Mi
         limits:
           cpu: "{{ cpu }}"
           memory: 3Gi
+          hugepages-2Mi: {{ hugepages_mib }}Mi
     - name: spdk-proxy-container
       image: {{ proxy_image }}
       imagePullPolicy: IfNotPresent
