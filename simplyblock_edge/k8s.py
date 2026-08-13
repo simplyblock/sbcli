@@ -26,6 +26,17 @@ class EdgeK8sError(Exception):
     pass
 
 
+def _api_err(e) -> str:
+    """Compress an ApiException body to its message: a bare status code in a
+    node's status_reason ("create pod ...: 403") left the actual k8s reason
+    unknowable after the fact (2026-08-13)."""
+    try:
+        import json as _json
+        return (_json.loads(e.body or "{}").get("message") or "")[:200]
+    except Exception:
+        return (getattr(e, "reason", "") or "")[:200]
+
+
 def _ca_file_for(cluster) -> str:
     cached = _ca_files.get(cluster.uuid)
     if cached and cached[0] == cluster.k8s_ca_cert:
@@ -211,7 +222,8 @@ def deploy_spdk_pod(cluster, node, spdk_image, proxy_image):
         if e.status == 409:  # already exists — idempotent redeploy
             logger.info(f"SPDK pod {pod_name(node)} already exists")
             return None
-        raise EdgeK8sError(f"create pod {pod_name(node)}: {e.status}") from e
+        raise EdgeK8sError(
+            f"create pod {pod_name(node)}: {e.status} {_api_err(e)}") from e
 
 
 def delete_spdk_pod(cluster, node):

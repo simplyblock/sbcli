@@ -3,6 +3,8 @@
 
 import os
 
+from simplyblock_core import constants as core_constants
+
 # Per-node service ports (hostNetwork pod).
 EDGE_RPC_PORT = 8080          # spdk proxy (JSON-RPC over HTTP, basic auth)
 EDGE_NVMF_PORT = 4420         # client-facing nvmf-tcp listener
@@ -38,8 +40,16 @@ EDGE_POD_PREFIX = "edge-spdk-"
 # vCPU dedicated to SPDK; larger boxes can raise this.
 EDGE_POD_CPU = int(os.getenv("SIMPLYBLOCK_EDGE_POD_CPU", "1"))
 EDGE_POD_HUGEPAGES_MIB = int(os.getenv("SIMPLYBLOCK_EDGE_POD_HUGEPAGES_MIB", "1024"))
-EDGE_SPDK_IMAGE = os.getenv("SIMPLYBLOCK_EDGE_SPDK_IMAGE", "simplyblock/spdk:edge-latest")
-EDGE_PROXY_IMAGE = os.getenv("SIMPLYBLOCK_EDGE_PROXY_IMAGE", "simplyblock/spdk-proxy:latest")
+# Same images the central k8s storage-node pods run: the ultra image IS the
+# spdk fork with the product processing edge depends on (primary/secondary
+# lvstore, bdev_lvol_register/update_lvstore/set_leader), and the proxy
+# container just runs the RPC http proxy from the simplyblock image. The
+# previous defaults were nonexistent placeholders — first live pod create
+# sat in ImagePullBackOff for 3h (2026-08-13).
+EDGE_SPDK_IMAGE = os.getenv("SIMPLYBLOCK_EDGE_SPDK_IMAGE",
+                            core_constants.SIMPLY_BLOCK_SPDK_ULTRA_IMAGE)
+EDGE_PROXY_IMAGE = os.getenv("SIMPLYBLOCK_EDGE_PROXY_IMAGE",
+                             core_constants.SIMPLY_BLOCK_DOCKER_IMAGE)
 # The same node-preparation CPU-topology Job central clusters run (kubelet
 # static cpu-manager policy + reserved system cpus).
 # Default OFF (2026-08-13): the central cpu-topology job mutates kubelet
