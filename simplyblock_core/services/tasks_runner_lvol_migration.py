@@ -1153,6 +1153,12 @@ def _post_process_snap(snap: SnapShot, tgt_node: StorageNode, tgt_rpc: RPCClient
     # Convert writable lvol → immutable snapshot.
     # Must succeed on both sides — a primary-only convert leaves secondary with
     # a writable bdev where primary has a read-only snapshot (split state).
+    # Leadership gate first: a convert on a non-leader returns success WITHOUT
+    # persisting anything (the fork's non-leader branch marks the blob CLEAN
+    # only) — a silent conversion error that must fail-and-retry instead.
+    from simplyblock_core.controllers import lvol_controller as _lc
+    if not _lc.is_node_leader(tgt_node, tgt_composite.split("/")[0]):
+        return False, f"target node not LVS leader for convert of {snap_uuid}, retrying"
     ret = tgt_rpc.bdev_lvol_convert(tgt_composite)
     if not ret:
         return False, f"bdev_lvol_convert failed for {snap_uuid}"

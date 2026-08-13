@@ -123,14 +123,33 @@ def wait_for_ssh(ip, timeout=300):
 
 
 def ssh_exec(ip, cmds, get_output=False, check=False):
-    ssh = paramiko.SSHClient()
-    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    ssh.connect(ip, username=USER, key_filename=KEY_PATH,
-                allow_agent=False, look_for_keys=False)
+    ssh = None
     results = []
     for cmd in cmds:
         print(f"  [{ip}] $ {cmd}")
-        stdin, stdout, stderr = ssh.exec_command(cmd, timeout=600)
+        # Reconnect-retry on the transport phase only: a 10054 reset mid-run has
+        # now killed two deployments at the finish line (same class as the
+        # perf-deploy fix dea07344). A reset before exec_command returns means
+        # the command never ran, so replaying is safe.
+        for attempt in range(4):
+            try:
+                if ssh is None:
+                    ssh = paramiko.SSHClient()
+                    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                    ssh.connect(ip, username=USER, key_filename=KEY_PATH,
+                                allow_agent=False, look_for_keys=False)
+                stdin, stdout, stderr = ssh.exec_command(cmd, timeout=600)
+                break
+            except (paramiko.SSHException, OSError, EOFError) as exc:
+                try:
+                    ssh.close()
+                except Exception:
+                    pass
+                ssh = None
+                if attempt == 3:
+                    raise
+                print(f"  [{ip}] transport failure ({exc}); reconnecting in {10*(attempt+1)}s")
+                time.sleep(10 * (attempt + 1))
         out = stdout.read().decode("utf-8")
         err = stderr.read().decode("utf-8")
         rc = stdout.channel.recv_exit_status()
@@ -148,7 +167,8 @@ def ssh_exec(ip, cmds, get_output=False, check=False):
             for line in out.strip().split("\n")[-2:]:
                 if line.strip():
                     print(f"    {line}")
-    ssh.close()
+    if ssh is not None:
+        ssh.close()
     return results
 
 

@@ -108,6 +108,15 @@ def process_snap_replicate_start(task, snapshot):
     # distrib-level special_io machinery of INTRA-cluster migration; it has no
     # place in a cross-cluster receive (the source cluster's map/COW context does
     # not exist on the target cluster).
+    # The hub rejects receive IO on a non-leader ("receive io for hublvol in
+    # nonleader mode"); do not start a transfer that cannot land.
+    if not _require_lvs_leader(remote_lv_node, remote_lv.lvs_name, "transfer receive"):
+        task.function_result = "target node not LVS leader, retrying"
+        task.status = JobSchedule.STATUS_SUSPENDED
+        task.retry += 1
+        task.write_to_db()
+        return
+
     offset = 0
     if "offset" in task.function_params and task.function_params["offset"]:
         offset = task.function_params["offset"]
@@ -127,6 +136,24 @@ def process_snap_replicate_start(task, snapshot):
     if snapshot.status != SnapShot.STATUS_IN_REPLICATION:
         snapshot.status = SnapShot.STATUS_IN_REPLICATION
         snapshot.write_to_db()
+
+
+def _require_lvs_leader(node, lvs_name, what):
+    """True when *node* currently holds LVS leadership for *lvs_name*.
+
+    Transfers into a hub on a non-leader fail loudly, but bdev_lvol_convert on a
+    non-leader DEGRADES SILENTLY: the fork's non-leader branch marks the blob
+    CLEAN and replies success without persisting anything — the "snapshot"
+    looks converted while its metadata never reached the journal. Leadership
+    must therefore be verified BEFORE the operation; on False the caller
+    suspends and retries rather than proceeding.
+    """
+    from simplyblock_core.controllers import lvol_controller
+    if lvol_controller.is_node_leader(node, lvs_name):
+        return True
+    logger.error("Node %s is not LVS leader of %s — refusing %s (retry)",
+                 node.get_id(), lvs_name, what)
+    return False
 
 
 def _has_dependent_clone(snapshot_uuid):
@@ -237,6 +264,11 @@ def process_snap_replicate_finish(task, snapshot):
                         break
             except KeyError as e:
                 logger.error(e)
+
+    # Leadership gate BEFORE chain/convert on the primary: a convert on a
+    # non-leader returns success without persisting (silent conversion error).
+    if not _require_lvs_leader(remote_snode, remote_lv.lvs_name, "add_clone/convert"):
+        return False
 
     # chain snaps on primary
     if target_prev_snap:

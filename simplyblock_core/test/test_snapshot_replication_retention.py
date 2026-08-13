@@ -200,3 +200,20 @@ def test_in_deletion_clone_does_not_pin_the_snapshot(monkeypatch):
     sr._prune_internal_snapshots(source_lvol)
 
     assert snapctl.deleted == ["T_old", "int_old"]
+
+
+def test_require_lvs_leader_gate(monkeypatch):
+    """Convert on a non-leader returns success WITHOUT persisting (silent
+    conversion error) — leadership must be checked BEFORE the operation and a
+    non-leader must fail-and-retry, never proceed."""
+    import simplyblock_core.controllers.lvol_controller as lc
+
+    class _N:
+        def get_id(self):
+            return "N1"
+
+    monkeypatch.setattr(lc, "is_node_leader", lambda node, lvs: False)
+    assert sr._require_lvs_leader(_N(), "LVS_1", "convert") is False
+
+    monkeypatch.setattr(lc, "is_node_leader", lambda node, lvs: True)
+    assert sr._require_lvs_leader(_N(), "LVS_1", "convert") is True
