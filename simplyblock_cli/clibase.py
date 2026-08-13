@@ -1037,14 +1037,14 @@ class CLIWrapperBase:
         return True
 
     def backup__restore(self, sub_command, args):
-        result, error = backup_controller.restore_backup(
-            args.backup_id, args.lvol_name, args.pool,
-            cluster_id=args.cluster_id,
-            target_node_id=getattr(args, 'node', None))
-        if error:
-            print(f"Error: {error}")
+        try:
+            lvol_id = backup_controller.restore_backup(
+                args.backup_id, args.lvol_name, args.pool,
+                target_node_id=getattr(args, 'node', None))
+        except (PreconditionError, RuntimeError) as e:
+            print(f"Error: {e}")
             return False
-        print(f"Restoring backup {args.backup_id} into new volume {result}")
+        print(f"Restoring backup {args.backup_id} into new volume {lvol_id}")
         return True
 
     def backup__export(self, sub_command, args):
