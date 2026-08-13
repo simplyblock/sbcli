@@ -125,56 +125,6 @@ def process_snap_replicate_start(task, snapshot):
         snapshot.write_to_db()
 
 
-def _decouple_snapshot_children(target_snapshot_uuid):
-    """Detach dependents from a target snapshot before retention deletes it.
-
-    On the target every replicated snapshot is chained onto its predecessor
-    (add_clone at receive time), so the newest snapshot READS THROUGH the older
-    ones. Deleting an older one without decoupling destroys the shared clusters
-    the survivors depend on: the newest snapshot keeps a valid superblock (its
-    own delta) but the file tree/content underneath is gone — the empty-XFS /
-    missing-baseline signature seen on the 2026-08-13 lab.
-
-    bdev_lvol_decouple_parent copies the parent's allocated clusters into the
-    child, after which the parent is safe to delete. Applied to every child
-    SPDK reports, on the primary and its online secondary. Returns False when
-    any decouple fails (caller keeps the snapshot and retries next pass).
-    """
-    try:
-        target_snap = db.get_snapshot_by_id(target_snapshot_uuid)
-        node = db.get_storage_node_by_id(target_snap.lvol.node_id)
-    except (KeyError, AttributeError):
-        return True  # snapshot or node record gone — nothing to protect
-
-    lvs = target_snap.snap_bdev.split("/")[0]
-    ret = node.rpc_client().get_bdevs(target_snap.snap_bdev)
-    try:
-        children = ret[0]["driver_specific"]["lvol"].get("clones") or []
-    except (TypeError, KeyError, IndexError):
-        children = []
-    if not children:
-        return True
-
-    nodes = [node]
-    if node.secondary_node_id:
-        try:
-            sec = db.get_storage_node_by_id(node.secondary_node_id)
-            if sec.status == StorageNode.STATUS_ONLINE:
-                nodes.append(sec)
-        except KeyError:
-            pass
-
-    for child in children:
-        for n in nodes:
-            if not n.rpc_client().bdev_lvol_decouple_parent(f"{lvs}/{child}"):
-                logger.error("decouple_parent failed for %s/%s on %s",
-                             lvs, child, n.get_id())
-                return False
-        logger.info("Decoupled %s/%s from %s before pruning", lvs, child,
-                    target_snap.snap_bdev)
-    return True
-
-
 def _has_dependent_clone(snapshot_uuid):
     """True when any live volume is cloned from *snapshot_uuid*.
 
@@ -224,10 +174,6 @@ def _prune_internal_snapshots(source_lvol):
             db.get_snapshot_by_id(target_uuid)
         except KeyError:
             target_uuid = ""  # already gone — fall through to source cleanup
-        if target_uuid and not _decouple_snapshot_children(target_uuid):
-            logger.warning("Keeping replicated snapshot pair %s/%s: could not "
-                           "decouple its dependent children yet", snap.get_id(), target_uuid)
-            continue
         if target_uuid and _has_dependent_clone(target_uuid):
             # Never prune a target snapshot a volume is cloned from. The delete
             # reaches SPDK as bdev_lvol_delete(sync=False) and frees the blocks
