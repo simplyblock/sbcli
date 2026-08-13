@@ -433,9 +433,20 @@ def deploy_edge_cluster(state, spec, admin_session):
     api = helpers.EdgeApi(base, created["uuid"], created["secret"])
     for node_name in entry["nodes"]:
         node_info = helpers.instance(state, node_name)
-        api.add_node(hostname=node_name, mgmt_ip=node_info["private_ip"],
-                     partitions=entry["device_paths"],
-                     spdk_cpus=int(os.getenv("EDGE_E2E_SPDK_CPUS", "1")))
+        existing = {n["hostname"]: n["status"] for n in api.nodes()}
+        if existing.get(node_name) == "online":
+            print(f"{spec.name}: node {node_name} already online")
+            continue
+        try:
+            api.add_node(hostname=node_name, mgmt_ip=node_info["private_ip"],
+                         partitions=entry["device_paths"],
+                         spdk_cpus=int(os.getenv("EDGE_E2E_SPDK_CPUS", "1")))
+        except Exception as e:
+            # Idempotent re-run: an earlier add's background thread may have
+            # finished after the previous campaign gave up waiting.
+            if "already part of the cluster" not in str(e):
+                raise
+            print(f"{spec.name}: node {node_name} already registered; waiting")
         helpers.wait_node_status(api, node_name, "online", timeout=900)
     helpers.wait_cluster_status(api, "active", timeout=300)
 
