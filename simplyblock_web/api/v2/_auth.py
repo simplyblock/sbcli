@@ -154,3 +154,24 @@ def verify_api_token(
 
     if cluster_id is not None and authorized_cluster_id != cluster_id:
         raise HTTPException(401, 'Invalid token')
+
+
+def verify_metrics_token(
+    sa_name: Annotated[Optional[str], Depends(authenticated_service_account)],
+    authorized_cluster_id: Annotated[Optional[UUID], Depends(authorized_cluster)],
+) -> None:
+    """FastAPI dependency: enforce read access to the metrics exporter.
+
+    Admits everything `verify_api_token` does, plus service accounts listed in
+    ``SB_K8S_METRICS_SERVICE_ACCOUNTS``. Those are authorized here and nowhere
+    else, so a scrape credential does not carry admin rights.
+
+    Raises 401 otherwise.
+    """
+    if sa_name is not None and sa_name in (
+        _web_settings.k8s_admin_service_accounts + _web_settings.k8s_metrics_service_accounts
+    ):
+        return
+
+    if authorized_cluster_id is None:
+        raise HTTPException(401, 'Invalid token')
