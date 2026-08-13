@@ -648,9 +648,6 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
     if not cluster.disable_monitoring:
         _create_update_user(cluster.uuid, cluster.grafana_endpoint, cluster.grafana_secret, cluster.secret)
 
-    if cluster.mode == "kubernetes":
-        utils.patch_prometheus_configmap(cluster.uuid, cluster.secret.get_secret_value())
-
     cluster.distr_ndcs = distr_ndcs
     cluster.distr_npcs = distr_npcs
     cluster.distr_bs = distr_bs

@@ -3087,61 +3087,6 @@ def build_graylog_patch(cluster_secret: str) -> dict:
     return graylog_patch
 
 
-def patch_prometheus_configmap(username: str, password: str):
-    load_kube_config_with_fallback()
-    v1 = client.CoreV1Api()
-
-    try:
-        cm = v1.read_namespaced_config_map(
-            name="simplyblock-prometheus-config",
-            namespace=constants.K8S_NAMESPACE
-        )
-    except client.exceptions.ApiException as e:
-        logger.error(f"Failed to read ConfigMap: {e}")
-        return False
-
-    try:
-        prometheus_yml = cm.data.get("prometheus.yml", "")
-        if not prometheus_yml:
-            logger.error("prometheus.yml key not found in ConfigMap.")
-            return False
-
-        try:
-            prometheus_yml = re.sub(r"username:.*", f"username: '{username}'", prometheus_yml)
-            prometheus_yml = re.sub(r"password:.*", f"password: '{password}'", prometheus_yml)
-            # The v2 exporter authenticates with a bearer token rather than
-            # basic auth, so the secret also has to reach `authorization:
-            # credentials:`. A no-op until the chart's ConfigMap declares the
-            # v2 job — without it that job would scrape with an empty token.
-            prometheus_yml = re.sub(r"credentials:.*", f"credentials: '{password}'", prometheus_yml)
-        except re.error as e:
-            logger.error(f"Regex error while patching Prometheus YAML: {e}")
-            return False
-
-        patch_body = {
-            "data": {
-                "prometheus.yml": prometheus_yml
-            }
-        }
-
-        v1.patch_namespaced_config_map(
-            name="simplyblock-prometheus-config",
-            namespace=constants.K8S_NAMESPACE,
-            body=patch_body
-        )
-
-        logger.info("Patched simplyblock-prometheus-config ConfigMap with new credentials.")
-        return True
-
-    except client.exceptions.ApiException as e:
-        logger.error(f"Failed to patch ConfigMap: {e}")
-        return False
-
-    except Exception as e:
-        logger.error(f"Unexpected error while patching ConfigMap: {e}")
-        return False
-
-
 def create_docker_service(cluster_docker: DockerClient, service_name: str, service_file: str, service_image: str):
     logger.info(f"Creating service: {service_name}")
     cluster_docker.services.create(
