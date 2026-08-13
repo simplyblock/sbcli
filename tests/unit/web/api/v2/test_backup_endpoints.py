@@ -70,7 +70,7 @@ class TestGetBackup:
 class TestRestoreBackup:
 
     def test_restores_backup(self, client, db, cluster, backup_controller):
-        backup_controller.restore_backup.return_value = (VOLUME_ID, None)
+        backup_controller.restore_backup.return_value = VOLUME_ID
 
         response = client.post(f'{BASE}/restore', json={
             'backup_id': BACKUP_ID,
@@ -81,8 +81,7 @@ class TestRestoreBackup:
         assert response.status_code == 202
         assert response.json() == {'lvol_id': VOLUME_ID}
         backup_controller.restore_backup.assert_called_once_with(
-            BACKUP_ID, 'restored-volume', 'pool-1',
-            cluster_id=CLUSTER_ID, target_node_id=None)
+            BACKUP_ID, 'restored-volume', 'pool-1', target_node_id=None)
 
 
 class TestBackupPolicies:
