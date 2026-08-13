@@ -156,6 +156,25 @@ def _require_lvs_leader(node, lvs_name, what):
     return False
 
 
+def _other_active_transfers_to_node(current_task, target_node_id):
+    """True when another RUNNING snapshot-replication task is transferring into
+    *target_node_id* — its writes ride the same shared hub session, so the hub
+    must not be detached under it."""
+    for t in db.get_job_tasks(current_task.cluster_id):
+        if (t.function_name == JobSchedule.FN_SNAPSHOT_REPLICATION
+                and t.get_id() != current_task.get_id()
+                and t.status == JobSchedule.STATUS_RUNNING):
+            rid = t.function_params.get("remote_lvol_id")
+            if not rid:
+                continue
+            try:
+                if db.get_lvol_by_id(rid).node_id == target_node_id:
+                    return True
+            except KeyError:
+                continue
+    return False
+
+
 def _has_dependent_clone(snapshot_uuid):
     """True when any live volume is cloned from *snapshot_uuid*.
 
@@ -228,16 +247,20 @@ def _prune_internal_snapshots(source_lvol):
 
 def process_snap_replicate_finish(task, snapshot):
 
-    # Close the transfer session: detach the target's transfer hub from the
-    # source node. The connect -> transfer -> convert -> DISCONNECT cycle is
-    # part of the transfer contract; the next cycle re-attaches via
-    # ensure_hub_attached.
+    # Close the transfer session — but ONLY when this was the last active
+    # transfer into that target node. The hub is ONE shared session per target
+    # node: a naive per-cycle detach rips the qpair out from under the other
+    # volumes' in-flight transfers, mass-failing their IO on the hub and
+    # churning LVS leadership on the target ("receive io for hublvol in
+    # nonleader mode" storms, observed live 2026-08-13). This is the refcount
+    # discipline the migration runner's hub_manager exists for.
     remote_lv = db.get_lvol_by_id(task.function_params["remote_lvol_id"])
     remote_snode = db.get_storage_node_by_id(remote_lv.node_id)
     _src_node = db.get_storage_node_by_id(snapshot.lvol.node_id)
     if remote_snode.transfer_hublvol and remote_snode.transfer_hublvol.bdev_name:
-        _src_node.rpc_client().bdev_nvme_detach_controller(
-            remote_snode.transfer_hublvol.bdev_name)
+        if not _other_active_transfers_to_node(task, remote_snode.get_id()):
+            _src_node.rpc_client().bdev_nvme_detach_controller(
+                remote_snode.transfer_hublvol.bdev_name)
     replicate_to_source = task.function_params["replicate_to_source"]
     if "replicate_as_snap_instance" in task.function_params:
         replicate_as_snap_instance = task.function_params["replicate_as_snap_instance"]
@@ -386,10 +409,11 @@ def task_runner(task: JobSchedule):
             snapshot.write_to_db()
 
         remote_lv = db.get_lvol_by_id(task.function_params["remote_lvol_id"])
-        # abort path: close the transfer session here too
+        # abort path: close the transfer session here too (last user only)
         try:
             _rl_node = db.get_storage_node_by_id(remote_lv.node_id)
-            if _rl_node.transfer_hublvol and _rl_node.transfer_hublvol.bdev_name:
+            if (_rl_node.transfer_hublvol and _rl_node.transfer_hublvol.bdev_name
+                    and not _other_active_transfers_to_node(task, _rl_node.get_id())):
                 snode.rpc_client().bdev_nvme_detach_controller(
                     _rl_node.transfer_hublvol.bdev_name)
         except KeyError:
