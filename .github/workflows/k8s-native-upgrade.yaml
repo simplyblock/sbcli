@@ -712,6 +712,7 @@ jobs:
             --create-namespace \
             --timeout 10m \
             --set ingress-nginx.controller.admissionWebhooks.enabled=false \
+            --set ports.lvolNvmfPortStart=9110 \
             ./
           echo "sbcli control plane chart installed"
 
@@ -800,7 +801,9 @@ jobs:
             sbcli-dev -d --dev cluster create \
               --mgmt-ip "$MGMT_IP" \
               --mode kubernetes \
-              --disable-monitoring 2>&1) || true
+              --disable-monitoring \
+              --data-chunks-per-stripe "${NDCS}" \
+              --parity-chunks-per-stripe "${NPCS}" 2>&1) || true
           echo "Cluster create output: $CREATE_OUTPUT"
 
           # Parse cluster ID and secret from output
@@ -895,7 +898,8 @@ jobs:
             --set logicalVolume.encryption=false \
             --set storagenode.ifname="${MGMT_IFC}" \
             --set storagenode.create=true \
-            --set storagenode.numPartitions=1 \
+            --set storagenode.numPartitions="${PARTITIONS}" \
+            --set storagenode.haJMCount="${JM_COUNT}" \
             --set storagenode.coresPercentage=50 \
             --set image.storageNode.tag="${STORAGENODE_TAG}"
 
@@ -911,6 +915,7 @@ jobs:
           NDCS: ${{ env.NDCS }}
           NPCS: ${{ env.NPCS }}
           PARTITIONS: ${{ env.PARTITIONS }}
+          JM_COUNT: ${{ env.JM_COUNT }}
           MGMT_IFC: ${{ env.MGMT_IFC }}
 
       - name: Wait for R25 storage nodes and cluster active
