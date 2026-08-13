@@ -1265,6 +1265,21 @@ jobs:
           done
           echo "=== Log collection complete (${CHUNK} chunks, newest-first): ${OUTPUT_DIR} ==="
 
+      - name: Notify Slack log collection complete
+        if: always()
+        shell: bash
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          SLACK_WF_NAME: "Stress Run Bootstrap"
+          RUN_BASE_DIR: ${{ env.RUN_BASE_DIR }}
+        run: |
+          if [ -z "${SLACK_WEBHOOK_URL:-}" ]; then exit 0; fi
+          MSG=":white_check_mark: *Log collection complete* for *SimplyBlock ${SLACK_WF_NAME}*\n:file_folder: \`${RUN_BASE_DIR:-N/A}/graylog_collected/\`\n:link: <${SLACK_RUN_URL}|View Run>"
+          curl -s -X POST "${SLACK_WEBHOOK_URL}" \
+            -H 'Content-Type: application/json' \
+            -d "{\"text\":\"${MSG}\"}" || true
+
       - name: Collect mgmt snapshots into RUN_BASE_DIR (on failure)
         id: collect-mgmt
         if: always()

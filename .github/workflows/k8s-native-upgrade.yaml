@@ -1310,43 +1310,270 @@ jobs:
         if: always()
         shell: bash
         run: |
-          set +e
+          set -euxo pipefail
+
           out_log="$GITHUB_WORKSPACE/e2e/output.log"
           dur_fmt="${TEST_TIME_HOURS:-0}h ${TEST_TIME_MINS:-0}m ${TEST_TIME_SECS:-0}s"
 
-          total_cases="$(grep -E 'Total Cases:|Total Test Cases:' "${out_log}" 2>/dev/null | tail -n 1 | grep -oE '[0-9]+' | tail -1 || echo '?')"
-          passed_cnt="$(grep -E 'Passed:' "${out_log}" 2>/dev/null | tail -n 1 | grep -oE '[0-9]+' | tail -1 || echo '?')"
-          failed_cnt="$(grep -E 'Failed:' "${out_log}" 2>/dev/null | tail -n 1 | grep -oE '[0-9]+' | tail -1 || echo '?')"
+          # --- Parse test counts from output.log (upgrade_e2e.py format) ---
+          total_cases=0; passed_cases=0; failed_cases=0; skipped_cases=0
+          if [[ -f "${out_log}" ]]; then
+            v="$(grep -m1 'Total Cases:'  "${out_log}" | grep -oE '[0-9]+$' 2>/dev/null || true)"; [[ "${v}" =~ ^[0-9]+$ ]] && total_cases="${v}"
+            v="$(grep -m1 'Passed:'       "${out_log}" | grep -oE '[0-9]+$' 2>/dev/null || true)"; [[ "${v}" =~ ^[0-9]+$ ]] && passed_cases="${v}"
+            v="$(grep -m1 'Failed:'       "${out_log}" | grep -oE '[0-9]+$' 2>/dev/null || true)"; [[ "${v}" =~ ^[0-9]+$ ]] && failed_cases="${v}"
+            v="$(grep -m1 'Skipped:'      "${out_log}" | grep -oE '[0-9]+$' 2>/dev/null || true)"; [[ "${v}" =~ ^[0-9]+$ ]] && skipped_cases="${v}"
+          fi
+
+          pass_pct=0; fail_pct=0; skip_pct=0
+          if [[ "${total_cases}" -gt 0 ]]; then
+            pass_pct=$(( (passed_cases  * 100) / total_cases ))
+            fail_pct=$(( (failed_cases  * 100) / total_cases ))
+            skip_pct=$(( (skipped_cases * 100) / total_cases ))
+          fi
+
+          # --- Parse per-test status ---
+          test_details_table=""
+          if [[ -f "${out_log}" ]]; then
+            while IFS= read -r line; do
+              clean="$(printf '%s' "${line}" | sed 's/\x1b\[[0-9;]*m//g')"
+              test_name="$(printf '%s' "${clean}" | grep -oE 'Test[A-Za-z0-9_]+' | head -n1 || true)"
+              [[ -z "${test_name}" ]] && continue
+              if   printf '%s' "${clean}" | grep -qi 'PASSED';  then icon="✅"; status="PASSED"
+              elif printf '%s' "${clean}" | grep -qi 'FAILED';  then icon="❌"; status="FAILED"
+              elif printf '%s' "${clean}" | grep -qi 'SKIPPED'; then icon="⏭"; status="SKIPPED"
+              else continue
+              fi
+              test_details_table+="| \`${test_name}\` | ${icon} ${status} |"$'\n'
+            done < <(grep -iE 'PASSED|FAILED|SKIPPED' "${out_log}" 2>/dev/null || true)
+          fi
+
+          # --- Failure reason ---
+          failure_reason=""
+          if [[ -f "${out_log}" ]]; then
+            multi="$(grep 'MultipleExceptions:' "${out_log}" | sed 's/\x1b\[[0-9;]*m//g' || true)"
+            if [[ -n "${multi}" ]]; then
+              failure_reason="${multi}"
+            elif grep -Eqi 'Traceback \(most recent call last\)|Exception:|AssertionError|Input/output error' "${out_log}"; then
+              failure_reason="$(grep -Ei 'Traceback \(most recent call last\)|Exception:|AssertionError|Input/output error' "${out_log}" | tail -n 3 | sed 's/\x1b\[[0-9;]*m//g' || true)"
+            fi
+          fi
+
+          # --- Overall result ---
+          conclusion="✅ SUCCESS"
+          if [[ "${{ job.status }}" != "success" ]]; then
+            conclusion="❌ FAILED"
+          fi
 
           {
-            echo "## K8s Native Upgrade Test Results"
+            echo "## SimplyBlock K8s Upgrade E2E Run Summary"
             echo ""
-            echo "| Metric | Value |"
-            echo "|--------|-------|"
-            echo "| Base Version | \`${{ github.event.inputs.base_simplyblock_image }}\` |"
-            echo "| Target Version | \`${{ github.event.inputs.target_simplyblock_image }}\` |"
-            echo "| Duration | ${dur_fmt} |"
-            echo "| Total | ${total_cases} |"
-            echo "| Passed | ${passed_cnt} |"
-            echo "| Failed | ${failed_cnt} |"
+            echo "**Result:** ${conclusion} &nbsp;|&nbsp; **Duration:** ${dur_fmt}"
             echo ""
-            if [ -n "${RUN_BASE_DIR:-}" ]; then
-              echo "**Logs:** \`${RUN_BASE_DIR}\`"
+
+            echo "### Upgrade"
+            echo "| | Image | SPDK Image |"
+            echo "|---|---|---|"
+            echo "| **Base**   | \`${BASE_IMAGE}\`   | \`${BASE_SPDK}\` |"
+            echo "| **Target** | \`${TARGET_IMAGE}\` | \`${TARGET_SPDK}\` |"
+            echo ""
+
+            echo "### Test Results"
+            echo "| | Count | % |"
+            echo "|---|---|---|"
+            echo "| ✅ Passed  | ${passed_cases}  | ${pass_pct}% |"
+            echo "| ❌ Failed  | ${failed_cases}  | ${fail_pct}% |"
+            echo "| ⏭ Skipped | ${skipped_cases} | ${skip_pct}% |"
+            echo "| **Total**  | **${total_cases}** | |"
+            echo ""
+
+            if [[ -n "${test_details_table}" ]]; then
+              echo "### Test Case Details"
+              echo "| Test | Result |"
+              echo "|---|---|"
+              printf '%s' "${test_details_table}"
+              echo ""
             fi
+
+            echo "### Run Info"
+            echo "- **Upgrade type:** \`${UPGRADE_TYPE}\`"
+            echo "- **Test class:** \`${TESTNAME:-all}\`"
+            echo "- **Cluster ID:** \`${CLUSTER_ID}\`"
+            echo "- **Environment:** \`${CLUSTER_ENV}\`"
+            echo "- **Branch:** \`${{ github.ref_name }}\`"
+            echo "- **NDCS/NPCS:** \`${NDCS:-?}/${NPCS:-?}\`"
             echo ""
+
+            if [[ -n "${failure_reason}" ]]; then
+              echo "### Failure Reason"
+              echo '```'
+              printf '%s\n' "${failure_reason}"
+              echo '```'
+              echo ""
+            fi
+
+            if [[ -n "${RUN_BASE_DIR:-}" ]]; then
+              echo "<details><summary>Run Artifacts (NFS)</summary>"
+              echo ""
+              echo "- **Run dir:** \`${RUN_BASE_DIR}/\`"
+              echo "- Graylog logs: \`${RUN_BASE_DIR}/graylog_collected/\`"
+              echo "- K8s pod logs: \`${RUN_BASE_DIR}/k8s_pod_logs/\`"
+              echo ""
+              echo "</details>"
+              echo ""
+            fi
+
             echo "> **Note:** Graylog/OpenSearch logs are currently being collected and will be available in the NFS log directory shortly."
           } >> "$GITHUB_STEP_SUMMARY"
+        env:
+          TESTNAME: ${{ github.event.inputs.testname || 'K8sNativeMajorUpgrade' }}
+          CLUSTER_ID: ${{ env.CLUSTER_ID }}
+          NDCS: ${{ env.NDCS }}
+          NPCS: ${{ env.NPCS }}
+          RUN_BASE_DIR: ${{ env.RUN_BASE_DIR }}
+          BASE_IMAGE: ${{ github.event.inputs.base_simplyblock_image }}
+          TARGET_IMAGE: ${{ github.event.inputs.target_simplyblock_image }}
+          BASE_SPDK: ${{ github.event.inputs.base_spdk_image }}
+          TARGET_SPDK: ${{ github.event.inputs.target_spdk_image }}
+          UPGRADE_TYPE: ${{ github.event.inputs.upgrade_type || 'rolling' }}
+          CLUSTER_ENV: ${{ github.event.inputs.cluster_environment || 'local' }}
 
-      - name: Send Slack notification
-        if: ${{ always() && github.event.inputs.send_slack_notification == 'true' }}
-        uses: slackapi/slack-github-action@v1.26.0
-        with:
-          payload: |
-            {
-              "text": "K8s Upgrade Test: ${{ job.status }} | ${{ github.event.inputs.base_simplyblock_image }} -> ${{ github.event.inputs.target_simplyblock_image }} | ${{ github.event.inputs.cluster_environment }} | Duration: ${{ env.TEST_TIME_HOURS }}h ${{ env.TEST_TIME_MINS }}m | <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run>\n:hourglass_flowing_sand: _Logs are being collected and will be available shortly._"
-            }
+      - name: Send Slack Notification
+        if: always() && (github.event.inputs.send_slack_notification == 'true')
+        shell: bash
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          JOB_STATUS: ${{ job.status }}
+          SLACK_RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          SLACK_WF_NAME: "K8s Upgrade (${{ github.event.inputs.upgrade_type || 'rolling' }})"
+          TESTNAME: ${{ github.event.inputs.testname || 'K8sNativeMajorUpgrade' }}
+          RUN_BASE_DIR: ${{ env.RUN_BASE_DIR }}
+          NDCS: ${{ env.NDCS }}
+          NPCS: ${{ env.NPCS }}
+          TEST_START_TIME: ${{ env.TEST_START_TIME }}
+          TEST_END_TIME: ${{ env.TEST_END_TIME }}
+          BASE_IMAGE: ${{ github.event.inputs.base_simplyblock_image }}
+          TARGET_IMAGE: ${{ github.event.inputs.target_simplyblock_image }}
+          BASE_SPDK: ${{ github.event.inputs.base_spdk_image }}
+          TARGET_SPDK: ${{ github.event.inputs.target_spdk_image }}
+          CLUSTER_ENV: ${{ github.event.inputs.cluster_environment || 'local' }}
+        run: |
+          python3 - <<'PYEOF'
+          import json, os, re, sys, urllib.request, urllib.error
+
+          webhook = os.environ.get("SLACK_WEBHOOK_URL", "")
+          if not webhook:
+              print("No SLACK_WEBHOOK_URL set, skipping.")
+              sys.exit(0)
+
+          out_log = os.path.join(os.environ.get("GITHUB_WORKSPACE", "."), "e2e", "output.log")
+          content = open(out_log).read() if os.path.isfile(out_log) else ""
+
+          # --- Counts (upgrade_e2e.py format) ---
+          def px(pat):
+              m = re.search(pat, content)
+              return int(m.group(1)) if m else 0
+          total   = px(r'Total Cases:\s*(\d+)')
+          passed  = px(r'Passed:\s*(\d+)')
+          failed  = px(r'Failed:\s*(\d+)')
+          skipped = px(r'Skipped:\s*(\d+)')
+          pass_pct = (passed * 100 // total) if total > 0 else 0
+
+          # --- Per-test results ---
+          ansi = re.compile(r'\x1b\[[0-9;]*m')
+          test_results = []
+          for line in content.splitlines():
+              clean = ansi.sub('', line)
+              m = re.search(r'Test[A-Za-z0-9_]+', clean)
+              if not m:
+                  continue
+              name = m.group(0)
+              if   'PASSED'  in clean: test_results.append(('PASSED',  name))
+              elif 'FAILED'  in clean: test_results.append(('FAILED',  name))
+              elif 'SKIPPED' in clean: test_results.append(('SKIPPED', name))
+
+          # --- Failure reason ---
+          failure_reason = ""
+          multi = [ansi.sub('', l) for l in content.splitlines() if 'MultipleExceptions:' in l]
+          if multi:
+              failure_reason = multi[0][:2000]
+          elif content:
+              exc_lines = [ansi.sub('', l) for l in content.splitlines()
+                           if re.search(r'(Exception:|AssertionError|Input/output error)', l)]
+              if exc_lines:
+                  failure_reason = '\n'.join(exc_lines[-5:])[:2000]
+
+          # --- Env ---
+          s    = int(os.environ.get("TEST_START_TIME", "0") or "0")
+          e    = int(os.environ.get("TEST_END_TIME",   "0") or "0")
+          secs = max(0, e - s) if e >= s > 0 else 0
+          dur  = f"{secs//3600}h {(secs%3600)//60}m {secs%60}s"
+          run_url       = os.environ.get("SLACK_RUN_URL",   "")
+          log_dir       = os.environ.get("RUN_BASE_DIR",    "N/A")
+          base_img      = os.environ.get("BASE_IMAGE",      "?")
+          base_spdk     = os.environ.get("BASE_SPDK",       "") or "default"
+          target_img    = os.environ.get("TARGET_IMAGE",     "?")
+          target_spdk   = os.environ.get("TARGET_SPDK",      "") or "default"
+          test_cls      = os.environ.get("TESTNAME",         "") or "all"
+          branch        = os.environ.get("GITHUB_REF_NAME",  "?")
+          ndcs          = os.environ.get("NDCS",             "?")
+          npcs          = os.environ.get("NPCS",             "?")
+          cluster_env   = os.environ.get("CLUSTER_ENV",      "?")
+          wf_name       = os.environ.get("SLACK_WF_NAME",    "Run")
+          ok            = os.environ.get("JOB_STATUS",       "") == "success"
+
+          icon    = ":white_check_mark:" if ok else ":x:"
+          status  = "SUCCESS" if ok else "FAILURE"
+          mention = "" if ok else " <!channel>"
+
+          lines = [
+              f"{icon} *SimplyBlock {wf_name}*{mention}",
+              f"*Status:* {status}  |  *Duration:* {dur}",
+              f"*Branch:* `{branch}`  |  *Test class:* `{test_cls}`",
+              f"*Upgrade:* `{base_img}` \u2192 `{target_img}`",
+              f"*Base SPDK:* `{base_spdk}`  |  *Target SPDK:* `{target_spdk}`",
+              f"*Environment:* `{cluster_env}`  |  *NDCS/NPCS:* `{ndcs}/{npcs}`",
+              "",
+          ]
+
+          if total > 0:
+              lines += [
+                  f":white_check_mark: *Passed:*  {passed}/{total}  ({pass_pct}%)",
+                  f":x: *Failed:*  {failed}",
+                  f":fast_forward: *Skipped:*  {skipped}",
+              ]
+          else:
+              lines.append("_(test counts not found in log)_")
+
+          if test_results:
+              lines.append("")
+              lines.append("*Test Results:*")
+              icons = {'PASSED': ':white_check_mark:', 'FAILED': ':x:', 'SKIPPED': ':fast_forward:'}
+              for st, nm in test_results:
+                  lines.append(f"{icons.get(st, ':grey_question:')} `{nm}`")
+
+          if failure_reason:
+              lines += ["", "*Failure:*", f"```{failure_reason}```"]
+
+          lines += [
+              "",
+              f":link: *Run:* <{run_url}|View on GitHub>",
+              f":file_folder: *Final Logs:* `{log_dir}`",
+              f":hourglass_flowing_sand: _Logs are being collected and will be available shortly._",
+          ]
+
+          payload = {"text": "\n".join(lines)}
+          req = urllib.request.Request(
+              webhook,
+              data=json.dumps(payload).encode(),
+              headers={"Content-Type": "application/json"},
+          )
+          try:
+              urllib.request.urlopen(req, timeout=15)
+              print("Slack notification sent.")
+          except Exception as exc:
+              print(f"WARN: Slack notification failed: {exc}", file=sys.stderr)
+          PYEOF
 
 
       - name: Collect Graylog/OpenSearch logs
@@ -1580,6 +1807,21 @@ jobs:
         env:
           CLUSTER_ID: ${{ env.CLUSTER_ID }}
           MON_SECRET: ${{ secrets.MON_SECRET }}
+
+      - name: Notify Slack log collection complete
+        if: always() && (github.event.inputs.send_slack_notification == 'true')
+        shell: bash
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          SLACK_WF_NAME: "K8s Upgrade (${{ github.event.inputs.upgrade_type || 'rolling' }})"
+          RUN_BASE_DIR: ${{ env.RUN_BASE_DIR }}
+        run: |
+          if [ -z "${SLACK_WEBHOOK_URL:-}" ]; then exit 0; fi
+          MSG=":white_check_mark: *Log collection complete* for *SimplyBlock ${SLACK_WF_NAME}*\n:file_folder: \`${RUN_BASE_DIR:-N/A}/graylog_collected/\`\n:link: <${SLACK_RUN_URL}|View Run>"
+          curl -s -X POST "${SLACK_WEBHOOK_URL}" \
+            -H 'Content-Type: application/json' \
+            -d "{\"text\":\"${MSG}\"}" || true
 
       - name: Cleanup build folder
         if: always()

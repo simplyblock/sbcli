@@ -440,63 +440,238 @@ jobs:
 
       - name: Write Job Summary
         if: always()
+        shell: bash
         run: |
-          {
-            echo "## K8s E2E HA Run Summary"
-            echo ""
-            if [[ "${{ job.status }}" == "success" ]]; then
-              echo "**Result:** SUCCESS"
-            else
-              echo "**Result:** FAILED"
+          set -euxo pipefail
+
+          dur_fmt="${TEST_TIME_HOURS:-0}h ${TEST_TIME_MINS:-0}m ${TEST_TIME_SECS:-0}s"
+
+          # --- Parse test counts ---
+          total_cases="${TOTAL_TESTS:-0}"
+          passed_cases="${PASSED_TESTS:-0}"
+          failed_cases="${FAILED_TESTS:-0}"
+          skipped_cases=0
+
+          pass_pct=0; fail_pct=0
+          if [[ "${total_cases}" =~ ^[0-9]+$ && "${total_cases}" -gt 0 ]]; then
+            pass_pct=$(( (passed_cases  * 100) / total_cases ))
+            fail_pct=$(( (failed_cases  * 100) / total_cases ))
+          fi
+
+          # --- Parse per-test status from log ---
+          test_details_table=""
+          log_file=""
+          for f in $GITHUB_WORKSPACE/e2e/logs/*.log; do
+            [ -s "$f" ] && log_file="$f"
+          done
+          if [[ -n "${log_file}" ]]; then
+            while IFS= read -r line; do
+              clean="$(printf '%s' "${line}" | sed 's/\x1b\[[0-9;]*m//g')"
+              test_name="$(printf '%s' "${clean}" | grep -oE 'Test[A-Za-z0-9_]+' | head -n1 || true)"
+              [[ -z "${test_name}" ]] && continue
+              if   printf '%s' "${clean}" | grep -qi 'PASSED CASE';  then icon="✅"; status="PASSED"
+              elif printf '%s' "${clean}" | grep -qi 'FAILED CASE';  then icon="❌"; status="FAILED"
+              elif printf '%s' "${clean}" | grep -qi 'SKIPPED CASE'; then icon="⏭"; status="SKIPPED"
+              else continue
+              fi
+              test_details_table+="| \`${test_name}\` | ${icon} ${status} |"$'\n'
+            done < <(grep -iE 'PASSED CASE|FAILED CASE|SKIPPED CASE' "${log_file}" 2>/dev/null || true)
+          fi
+
+          # --- Failure reason ---
+          failure_reason=""
+          if [[ -n "${log_file}" ]]; then
+            multi="$(grep 'MultipleExceptions:' "${log_file}" | sed 's/\x1b\[[0-9;]*m//g' || true)"
+            if [[ -n "${multi}" ]]; then
+              failure_reason="${multi}"
+            elif grep -Eqi 'Traceback \(most recent call last\)|Exception:|AssertionError|Input/output error' "${log_file}"; then
+              failure_reason="$(grep -Ei 'Traceback \(most recent call last\)|Exception:|AssertionError|Input/output error' "${log_file}" | tail -n 3 | sed 's/\x1b\[[0-9;]*m//g' || true)"
             fi
+          fi
+
+          # --- Overall result ---
+          conclusion="✅ SUCCESS"
+          if [[ "${{ job.status }}" != "success" ]]; then
+            conclusion="❌ FAILED"
+          fi
+
+          {
+            echo "## SimplyBlock K8s E2E HA Run Summary"
             echo ""
+            echo "**Result:** ${conclusion} &nbsp;|&nbsp; **Duration:** ${dur_fmt}"
+            echo ""
+
             echo "### Test Results"
-            echo "- **Total:** ${TOTAL_TESTS:-?} | **Passed:** ${PASSED_TESTS:-?} | **Failed:** ${FAILED_TESTS:-?}"
+            echo "| | Count | % |"
+            echo "|---|---|---|"
+            echo "| ✅ Passed  | ${passed_cases}  | ${pass_pct}% |"
+            echo "| ❌ Failed  | ${failed_cases}  | ${fail_pct}% |"
+            echo "| **Total**  | **${total_cases}** | |"
             echo ""
+
+            if [[ -n "${test_details_table}" ]]; then
+              echo "### Test Case Details"
+              echo "| Test | Result |"
+              echo "|---|---|"
+              printf '%s' "${test_details_table}"
+              echo ""
+            fi
+
             echo "### Run Info"
+            echo "- **Test class:** \`${TESTNAME:-all}\`"
             echo "- **Branch:** \`${{ github.ref_name }}\`"
-            echo "- **Duration:** ${TEST_TIME_HOURS:-0}h ${TEST_TIME_MINS:-0}m ${TEST_TIME_SECS:-0}s"
+            echo "- **NDCS/NPCS:** \`${NDCS}/${NPCS}\`"
+            echo "- **BS/Chunk BS:** \`${BS}/${CHUNK_BS}\`"
             echo ""
-            echo "> **Note:** Graylog/OpenSearch logs are currently being collected and will be available in the NFS log directory shortly."
+
+            if [[ -n "${failure_reason}" ]]; then
+              echo "### Failure Reason"
+              echo '```'
+              printf '%s\n' "${failure_reason}"
+              echo '```'
+              echo ""
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
+        env:
+          TESTNAME: ${{ github.event.inputs.testname || '' }}
+          NDCS: ${{ env.NDCS }}
+          NPCS: ${{ env.NPCS }}
+          BS: ${{ env.BS }}
+          CHUNK_BS: ${{ env.CHUNK_BS }}
 
       - name: Send Slack Notification
         if: always() && (github.event_name == 'schedule' || env.send_slack_notification == 'true')
+        shell: bash
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-          GITHUB_SERVER_URL: ${{ github.server_url }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          S3_BUCKET_NAME: "simplyblock-e2e-test-logs"
-          RUN_ID: ${{ github.run_id }}
-          PASSED_TESTS: ${{ env.PASSED_TESTS }}
-          FAILED_TESTS: ${{ env.FAILED_TESTS }}
-          TOTAL_TESTS: ${{ env.TOTAL_TESTS }}
-          PASSED_CASES: ${{ env.PASSED_CASES }}
-          FAILED_CASES: ${{ env.FAILED_CASES }}
-          PASSED_CASES_BULLETS: ${{ env.PASSED_CASES_BULLETS }}
-          FAILED_CASES_BULLETS: ${{ env.FAILED_CASES_BULLETS }}
-          BRANCH_NAME: ${{ github.ref_name }}
-          TEST_TIME_HOURS: ${{ env.TEST_TIME_HOURS }}
-          TEST_TIME_MINS: ${{ env.TEST_TIME_MINS }}
-          TEST_TIME_SECS: ${{ env.TEST_TIME_SECS }}
+          JOB_STATUS: ${{ job.status }}
+          SLACK_RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          SLACK_WF_NAME: "K8s E2E HA"
+          TESTNAME: ${{ github.event.inputs.testname || 'all' }}
           NDCS: ${{ env.NDCS }}
           NPCS: ${{ env.NPCS }}
-          CHUNK_BS: ${{ env.CHUNK_BS }}
           BS: ${{ env.BS }}
+          CHUNK_BS: ${{ env.CHUNK_BS }}
+          TEST_START_TIME: ${{ env.TEST_START_TIME }}
+          TEST_END_TIME: ${{ env.TEST_END_TIME }}
         run: |
-          GITHUB_RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}"
-          AWS_LOGS_URL="https://s3.console.aws.amazon.com/s3/buckets/${S3_BUCKET_NAME}?prefix=${RUN_ID}/&region=us-east-2"
-          if [[ ${{ job.status }} == 'success' ]]; then
-            OVERALL_STATUS=":white_check_mark: Overall Status: SUCCESS"
-          else
-            OVERALL_STATUS=":x: Overall Status: FAILURE <!channel>"
-          fi
+          python3 - <<'PYEOF'
+          import json, os, re, sys, urllib.request, urllib.error, glob
 
-          TIME_TAKEN="${TEST_TIME_HOURS}h ${TEST_TIME_MINS}m ${TEST_TIME_SECS}s"
+          webhook = os.environ.get("SLACK_WEBHOOK_URL", "")
+          if not webhook:
+              print("No SLACK_WEBHOOK_URL set, skipping.")
+              sys.exit(0)
 
-          MESSAGE="Python E2E *K8s* tests run triggered on branch *${BRANCH_NAME}*. \nTotal Time Taken to run the tests: ${TIME_TAKEN}. \n\n${OVERALL_STATUS}\nGitHub Run: ${GITHUB_RUN_URL}\nAWS Logs: ${AWS_LOGS_URL}\n\n*Configuration*: *NDCS: ${NDCS}, NPCS: ${NPCS}, Block Size: ${BS}, Chunk Block Size: ${CHUNK_BS}*\n\nTotal Tests: *${TOTAL_TESTS}*, Passed Tests: *${PASSED_TESTS}*, Failed Tests: *${FAILED_TESTS}*\n\n:hourglass_flowing_sand: _Logs are being collected and will be available shortly._\n\n-- Test Cases Passed :white_check_mark:\n${PASSED_CASES_BULLETS}\n\n-- Test Cases Failed :x:\n${FAILED_CASES_BULLETS}"
+          # Find latest log file
+          log_dir = os.path.join(os.environ.get("GITHUB_WORKSPACE", "."), "e2e", "logs")
+          log_files = sorted(glob.glob(os.path.join(log_dir, "*.log")), key=os.path.getmtime, reverse=True)
+          content = ""
+          for lf in log_files:
+              if os.path.getsize(lf) > 0:
+                  content = open(lf).read()
+                  break
 
-          curl -X POST -H 'Content-type: application/json' --data "{\"text\":\"${MESSAGE}\"}" $SLACK_WEBHOOK_URL
+          # --- Counts (e2e.py format) ---
+          def px(pat):
+              m = re.search(pat, content)
+              return int(m.group(1)) if m else 0
+          total   = px(r'Number of Total Cases:\s*(\d+)')
+          passed  = px(r'Number of Passed Cases:\s*(\d+)')
+          failed  = px(r'Number of Failed Cases:\s*(\d+)')
+          skipped = px(r'Number of Skipped Cases:\s*(\d+)')
+          pass_pct = (passed * 100 // total) if total > 0 else 0
+
+          # --- Per-test results ---
+          ansi = re.compile(r'\x1b\[[0-9;]*m')
+          test_results = []
+          for line in content.splitlines():
+              clean = ansi.sub('', line)
+              if not re.search(r'(PASSED|FAILED|SKIPPED) CASE', clean):
+                  continue
+              m = re.search(r'Test[A-Za-z0-9_]+', clean)
+              if not m:
+                  continue
+              name = m.group(0)
+              if   'PASSED CASE'  in clean: test_results.append(('PASSED',  name))
+              elif 'FAILED CASE'  in clean: test_results.append(('FAILED',  name))
+              elif 'SKIPPED CASE' in clean: test_results.append(('SKIPPED', name))
+
+          # --- Failure reason ---
+          failure_reason = ""
+          multi = [ansi.sub('', l) for l in content.splitlines() if 'MultipleExceptions:' in l]
+          if multi:
+              failure_reason = multi[0][:2000]
+          elif content:
+              exc_lines = [ansi.sub('', l) for l in content.splitlines()
+                           if re.search(r'(Exception:|AssertionError|Input/output error)', l)]
+              if exc_lines:
+                  failure_reason = '\n'.join(exc_lines[-5:])[:2000]
+
+          # --- Env ---
+          s    = int(os.environ.get("TEST_START_TIME", "0") or "0")
+          e    = int(os.environ.get("TEST_END_TIME",   "0") or "0")
+          secs = max(0, e - s) if e >= s > 0 else 0
+          dur  = f"{secs//3600}h {(secs%3600)//60}m {secs%60}s"
+          run_url  = os.environ.get("SLACK_RUN_URL",   "")
+          ndcs     = os.environ.get("NDCS",            "?")
+          npcs     = os.environ.get("NPCS",            "?")
+          bs       = os.environ.get("BS",              "?")
+          chunk_bs = os.environ.get("CHUNK_BS",        "?")
+          test_cls = os.environ.get("TESTNAME",        "") or "all"
+          branch   = os.environ.get("GITHUB_REF_NAME", "?")
+          wf_name  = os.environ.get("SLACK_WF_NAME",   "Run")
+          ok       = os.environ.get("JOB_STATUS",      "") == "success"
+
+          icon    = ":white_check_mark:" if ok else ":x:"
+          status  = "SUCCESS" if ok else "FAILURE"
+          mention = "" if ok else " <!channel>"
+
+          lines = [
+              f"{icon} *SimplyBlock {wf_name}*{mention}",
+              f"*Status:* {status}  |  *Duration:* {dur}",
+              f"*Branch:* `{branch}`  |  *Test class:* `{test_cls}`",
+              f"*Config:* NDCS={ndcs} NPCS={npcs} BS={bs} ChunkBS={chunk_bs}",
+              "",
+          ]
+
+          if total > 0:
+              lines += [
+                  f":white_check_mark: *Passed:*  {passed}/{total}  ({pass_pct}%)",
+                  f":x: *Failed:*  {failed}",
+                  f":fast_forward: *Skipped:*  {skipped}",
+              ]
+          else:
+              lines.append("_(test counts not found in log)_")
+
+          if test_results:
+              lines.append("")
+              lines.append("*Test Results:*")
+              icons = {'PASSED': ':white_check_mark:', 'FAILED': ':x:', 'SKIPPED': ':fast_forward:'}
+              for st, nm in test_results:
+                  lines.append(f"{icons.get(st, ':grey_question:')} `{nm}`")
+
+          if failure_reason:
+              lines += ["", "*Failure:*", f"```{failure_reason}```"]
+
+          lines += [
+              "",
+              f":link: *Run:* <{run_url}|View on GitHub>",
+          ]
+
+          payload = {"text": "\n".join(lines)}
+          req = urllib.request.Request(
+              webhook,
+              data=json.dumps(payload).encode(),
+              headers={"Content-Type": "application/json"},
+          )
+          try:
+              urllib.request.urlopen(req, timeout=15)
+              print("Slack notification sent.")
+          except Exception as exc:
+              print(f"WARN: Slack notification failed: {exc}", file=sys.stderr)
+          PYEOF
 
 
       - name: Upload automation and docker logs to s3
@@ -512,6 +687,151 @@ jobs:
           AWS_REGION: ${{ secrets.AWS_REGION }}
           S3_BUCKET_NAME: "simplyblock-e2e-test-logs"
           RUN_ID: ${{ github.run_id }}
+      - name: Collect Graylog/OpenSearch logs
+        if: '!cancelled()'
+        timeout-minutes: 60
+        run: |
+          set +e
+          echo "=== Collecting Graylog/OpenSearch logs ==="
+
+          MGMT_IP="${{ steps.terraform_outputs.outputs.mgmt_private_ip }}"
+          BASTION_IP="${{ steps.terraform_outputs.outputs.bastion_public_ip }}"
+          KEY_NAME="${{ steps.terraform_outputs.outputs.key_name }}"
+          CLUSTER_ID="${{ steps.bootstrap_cluster.outputs.cluster_id }}"
+
+          if [ -z "${MGMT_IP}" ] || [ -z "${BASTION_IP}" ]; then
+            echo "WARN: MGMT_IP or BASTION_IP not available, skipping"
+            exit 0
+          fi
+          if [ -z "${TEST_START_TIME:-}" ] || [ -z "${TEST_END_TIME:-}" ]; then
+            echo "WARN: TEST_START_TIME or TEST_END_TIME not set, skipping"
+            exit 0
+          fi
+
+          ELAPSED=$((TEST_END_TIME - TEST_START_TIME))
+          [ "${ELAPSED}" -le 0 ] && exit 0
+
+          SSH_OPTS=(-i "$HOME/.ssh/${KEY_NAME}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10)
+          PROXY_CMD="ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i $HOME/.ssh/${KEY_NAME} -W %h:%p ec2-user@${BASTION_IP}"
+          SSH_CMD=(ssh "${SSH_OPTS[@]}" -o "ProxyCommand=${PROXY_CMD}" "ec2-user@${MGMT_IP}")
+
+          WINDOW_START=$((TEST_START_TIME - 3600))
+          WINDOW_END=$((TEST_END_TIME + 3600))
+
+          OUTPUT_DIR="$GITHUB_WORKSPACE/e2e/logs/graylog_collected"
+          mkdir -p "${OUTPUT_DIR}" 2>/dev/null || true
+
+          epoch_to_iso() {
+            python3 -c "from datetime import datetime,timezone; print(datetime.fromtimestamp($1,tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%S'))"
+          }
+
+          _CHUNK_STARTS=()
+          _C=${WINDOW_START}
+          while [ ${_C} -lt ${WINDOW_END} ]; do
+            _CHUNK_STARTS+=(${_C})
+            _C=$((_C + 3600))
+          done
+          NUM_CHUNKS=${#_CHUNK_STARTS[@]}
+
+          run_collect() {
+            local iso=$1 mins=$2 outdir=$3 extra_flag=${4:-}
+            "${SSH_CMD[@]}" \
+              "python3 -m simplyblock_core.scripts.collect_logs \
+                '${iso}' '${mins}' \
+                --mode docker \
+                --output-dir '${outdir}' \
+                ${extra_flag} \
+                ${CLUSTER_ID:+--cluster-id '${CLUSTER_ID}'}" \
+            2>&1
+            local rc=$?
+            [ $rc -ne 0 ] && return $rc
+            local has_content
+            has_content=$("${SSH_CMD[@]}" "find '${outdir}' -name '*.tar.gz' -size +0 2>/dev/null | head -1")
+            [ -z "${has_content}" ] && return 1
+          }
+
+          collect_adaptive() {
+            local start_epoch=$1 end_epoch=$2 outdir=$3 extra_flag=${4:-}
+            local duration=$((end_epoch - start_epoch))
+            local mins=$(( (duration + 59) / 60 ))
+            local iso=$(epoch_to_iso ${start_epoch})
+            if run_collect "${iso}" "${mins}" "${outdir}" "${extra_flag}"; then
+              return 0
+            fi
+            echo "  WARN: ${mins}m window failed, retrying with 5-min sub-windows..."
+            local sub_start=${start_epoch}
+            while [ ${sub_start} -lt ${end_epoch} ]; do
+              local sub_end=$((sub_start + 300))
+              [ ${sub_end} -gt ${end_epoch} ] && sub_end=${end_epoch}
+              local sub_mins=$(( ((sub_end - sub_start) + 59) / 60 ))
+              local sub_iso=$(epoch_to_iso ${sub_start})
+              run_collect "${sub_iso}" "${sub_mins}" "${outdir}" "${extra_flag}" || \
+                echo "  WARN: 5-min sub-window at ${sub_iso} failed"
+              sub_start=${sub_end}
+            done
+          }
+
+          SCP_OPTS=(-i "$HOME/.ssh/${KEY_NAME}" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o "ProxyCommand=${PROXY_CMD}")
+
+          PREFER_OPENSEARCH=""
+          CHUNK=0
+          for (( _IDX=NUM_CHUNKS-1; _IDX>=0; _IDX-- )); do
+            CHUNK=$((CHUNK + 1))
+            CHUNK_START=${_CHUNK_STARTS[$_IDX]}
+            CHUNK_END=$((CHUNK_START + 3600))
+            [ ${CHUNK_END} -gt ${WINDOW_END} ] && CHUNK_END=${WINDOW_END}
+            CHUNK_MINUTES=$(( ((CHUNK_END - CHUNK_START) + 59) / 60 ))
+            CHUNK_ISO=$(epoch_to_iso ${CHUNK_START})
+            echo "--- Chunk ${CHUNK}/${NUM_CHUNKS}: ${CHUNK_ISO} for ${CHUNK_MINUTES}m ---"
+
+            REMOTE_DIR="/tmp/graylog_collect_chunk${CHUNK}"
+            "${SSH_CMD[@]}" "mkdir -p '${REMOTE_DIR}'" 2>/dev/null || true
+
+            if [ -z "${PREFER_OPENSEARCH}" ]; then
+              if run_collect "${CHUNK_ISO}" "${CHUNK_MINUTES}" "${REMOTE_DIR}" "--use-opensearch"; then
+                PREFER_OPENSEARCH=true
+                echo "  OpenSearch works — using it for all chunks"
+              else
+                PREFER_OPENSEARCH=false
+                echo "  OpenSearch unavailable — using Graylog"
+                "${SSH_CMD[@]}" "rm -rf '${REMOTE_DIR}'; mkdir -p '${REMOTE_DIR}'" 2>/dev/null || true
+                collect_adaptive ${CHUNK_START} ${CHUNK_END} "${REMOTE_DIR}" || true
+              fi
+            elif [ "${PREFER_OPENSEARCH}" = "true" ]; then
+              collect_adaptive ${CHUNK_START} ${CHUNK_END} "${REMOTE_DIR}" "--use-opensearch" || \
+                collect_adaptive ${CHUNK_START} ${CHUNK_END} "${REMOTE_DIR}" || true
+            else
+              collect_adaptive ${CHUNK_START} ${CHUNK_END} "${REMOTE_DIR}" || \
+                collect_adaptive ${CHUNK_START} ${CHUNK_END} "${REMOTE_DIR}" "--use-opensearch" || true
+            fi
+
+            TARBALLS=$("${SSH_CMD[@]}" "find '${REMOTE_DIR}' -name '*.tar.gz' -type f 2>/dev/null") || true
+            if [ -n "${TARBALLS}" ]; then
+              for TB in ${TARBALLS}; do
+                scp "${SCP_OPTS[@]}" "ec2-user@${MGMT_IP}:${TB}" "${OUTPUT_DIR}/$(basename ${TB})" 2>&1 || true
+              done
+              for TB_FILE in "${OUTPUT_DIR}"/*.tar.gz; do
+                [ -f "${TB_FILE}" ] && tar -xzf "${TB_FILE}" -C "${OUTPUT_DIR}/" 2>/dev/null || true
+              done
+            fi
+            "${SSH_CMD[@]}" "rm -rf '${REMOTE_DIR}'" 2>/dev/null || true
+          done
+          echo "=== Log collection complete (${CHUNK} chunks): ${OUTPUT_DIR} ==="
+
+      - name: Notify Slack log collection complete
+        if: always() && (github.event_name == 'schedule' || env.send_slack_notification == 'true')
+        shell: bash
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          SLACK_WF_NAME: "K8s E2E HA"
+        run: |
+          if [ -z "${SLACK_WEBHOOK_URL:-}" ]; then exit 0; fi
+          MSG=":white_check_mark: *Log collection complete* for *SimplyBlock ${SLACK_WF_NAME}*\n:link: <${SLACK_RUN_URL}|View Run>"
+          curl -s -X POST "${SLACK_WEBHOOK_URL}" \
+            -H 'Content-Type: application/json' \
+            -d "{\"text\":\"${MSG}\"}" || true
+
       - name: Destroy Cluster
         if: always()
         run: |
