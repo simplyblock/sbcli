@@ -643,23 +643,32 @@ def import_backups(s3_metadata_list, cluster_id=None):
         s3_metadata_list: list of dicts with backup metadata.
         cluster_id: Target cluster to import into.  Required for cross-cluster
             restore so the backups are visible in the local cluster's DB.
+
+    Raises:
+        PreconditionError: One of the given backup IDs is already known.  Backup
+            lookups are not scoped by cluster, so a UUID reused across clusters
+            would make either record unaddressable.  All IDs are checked before
+            the first record is written, so nothing is imported in that case.
     """
-    imported = 0
+    pending = {}
     for meta in s3_metadata_list:
         backup_id = meta.get("backup_id")
         if not backup_id:
             continue
 
-        source_cluster = meta.get("cluster_id", "")
-        target_cluster = cluster_id or source_cluster
+        if backup_id in pending:
+            raise PreconditionError(f"Backup {backup_id} is listed more than once")
 
-        # Skip only if already registered for the target cluster
         try:
             existing = db_controller.get_backup_by_id(backup_id)
-            if existing.cluster_id == target_cluster:
-                continue  # already imported for this cluster
         except KeyError:
-            pass
+            pending[backup_id] = meta
+        else:
+            raise PreconditionError(f"Backup {backup_id} already exists in cluster {existing.cluster_id}")
+
+    for backup_id, meta in pending.items():
+        source_cluster = meta.get("cluster_id", "")
+        target_cluster = cluster_id or source_cluster
 
         backup = Backup()
         backup.uuid = backup_id
@@ -678,9 +687,8 @@ def import_backups(s3_metadata_list, cluster_id=None):
         backup.status = Backup.STATUS_COMPLETED
         backup.s3_metadata = meta
         backup.write_to_db()
-        imported += 1
 
-    return imported
+    return len(pending)
 
 
 def get_backup_sources(cluster_id):
