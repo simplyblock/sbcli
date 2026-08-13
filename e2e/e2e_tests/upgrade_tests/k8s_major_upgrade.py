@@ -1945,7 +1945,25 @@ spec:
 
         apply_cmd = f"cat <<'CREOF' | kubectl apply -f -\n{cr_yaml}\nCREOF"
         out, err = self.k8s_utils._exec_kubectl(apply_cmd)
-        self.logger.info(f"CRs applied: {out}")
+        self.logger.info(f"CRs applied (stdout): {out}")
+        if err and err.strip():
+            self.logger.warning(f"CRs apply stderr: {err.strip()}")
+        # Verify critical CRs were actually created — fail early instead
+        # of discovering a missing CR much later during node restart.
+        for cr_kind, cr_name in [
+            ("storagecluster", self.cluster_cr_name),
+            ("storagenodeset", self.node_cr_name),
+        ]:
+            chk_out, _ = self.k8s_utils._exec_kubectl(
+                f"kubectl get {cr_kind} {cr_name} -n {_NAMESPACE} "
+                f"-o jsonpath='{{.metadata.name}}' 2>&1"
+            )
+            if cr_name not in (chk_out or ""):
+                raise RuntimeError(
+                    f"Critical CR {cr_kind}/{cr_name} was not created. "
+                    f"kubectl apply stderr: {err}"
+                )
+            self.logger.info(f"  Verified {cr_kind}/{cr_name} exists")
         sleep_n_sec(10)
 
     def _run_r25_to_r26_migration(self):
@@ -2468,7 +2486,23 @@ spec:
 
         apply_cmd = f"cat <<'CREOF' | kubectl apply -f -\n{cr_yaml}\nCREOF"
         out, err = self.k8s_utils._exec_kubectl(apply_cmd)
-        self.logger.info(f"CRs applied: {out}")
+        self.logger.info(f"CRs applied (stdout): {out}")
+        if err and err.strip():
+            self.logger.warning(f"CRs apply stderr: {err.strip()}")
+        for cr_kind, cr_name in [
+            ("storagecluster", self.cluster_cr_name),
+            ("storagenodeset", self.node_cr_name),
+        ]:
+            chk_out, _ = self.k8s_utils._exec_kubectl(
+                f"kubectl get {cr_kind} {cr_name} -n {_NAMESPACE} "
+                f"-o jsonpath='{{.metadata.name}}' 2>&1"
+            )
+            if cr_name not in (chk_out or ""):
+                raise RuntimeError(
+                    f"Critical CR {cr_kind}/{cr_name} was not created. "
+                    f"kubectl apply stderr: {err}"
+                )
+            self.logger.info(f"  Verified {cr_kind}/{cr_name} exists")
         sleep_n_sec(10)
 
     def _restart_nodes_sequentially(self, storage_node_list):
