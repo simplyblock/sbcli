@@ -1848,14 +1848,16 @@ def _delete_lvol_from_all_nodes(lvol, snode, force_delete, lock=True) -> None:
                             snode.cluster_id, lvol.lvs_name, node_id=nl.get_id(), enabled=_inner):
                         ok = _remove_lvol_subsys_from_node(lvol, nl.rpc_client())
                         if ok and async_completed["done"]:
-                            # The sync leg this non-leader owes. The leader's
-                            # async delete removes the blob but cannot clear
-                            # the peers' lvol REGISTRATIONS. Doing it here,
-                            # rather than leaving the whole sync stage to
-                            # lvol_monitor, is what keeps a delete at ~0.3s
-                            # instead of minutes behind a drain backlog.
-                            # -19 ("no such device") means this peer is
-                            # already clean and counts as done.
+                            # The sync leg this non-leader owes: it clears the
+                            # peer's lvol REGISTRATION. (The leader's async
+                            # delete only clears data clusters; the leader's
+                            # own blob/bdev removal is the sync delete that
+                            # lvol_monitor's finish phase issues.) Doing the
+                            # peer legs here, rather than leaving the whole
+                            # sync stage to lvol_monitor, is what keeps a
+                            # delete at ~0.3s instead of minutes behind a
+                            # drain backlog. -19 ("no such device") means this
+                            # peer is already clean and counts as done.
                             ret, err = nl.rpc_client().delete_lvol(
                                 f"{lvol.lvs_name}/{lvol.lvol_bdev}", sync=True)
                             synced = bool(ret) or bool(

@@ -275,18 +275,20 @@ def _rollback_snapshot_bdev(cluster_id, lvs_name, primary_node, snap_bdev_name,
     created on the leader but must be rolled back after a replica-registration
     failure.
 
-    Invariant (revised 2026-07-27, run 20260725): an async delete must ALWAYS
-    be followed by sync deletes on EVERY non-leader HA member of the LVS —
-    unconditionally, never on the leader. The async delete on the leader
-    removes the blob (and carries the deletion through the journal); what it
-    cannot remove is the peers' lvol REGISTRATIONS, and a failed register RPC
-    never proves a peer holds no registration: the peer may have registered
-    before the failure, a timed-out register may have landed anyway, and
-    journal replay on a restart-gated peer can materialize the blob with no
-    registration at all. The previous "registered + restart-gated only" set
-    left SNAP_3299 (register answered -19) with an async-only delete — the
-    exact async-without-sync the delete protocol forbids. A needless sync
-    delete is tolerated by design: -19 answers "already clean".
+    Invariant (revised 2026-08-13, upgrade run 20260812): an async delete must
+    ALWAYS be followed by a sync delete on the LEADER plus sync deletes on
+    EVERY non-leader HA member of the LVS. The async delete on the leader only
+    clears the data clusters — the blob metadata stays on disk and the bdev
+    stays registered until the leader's sync delete removes them (SPDK admits
+    it once the async pass reports done). The peers' sync deletes clear their
+    lvol REGISTRATIONS, and a failed register RPC never proves a peer holds no
+    registration: the peer may have registered before the failure, a timed-out
+    register may have landed anyway, and journal replay on a restart-gated
+    peer can materialize the blob with no registration at all. The previous
+    "registered + restart-gated only" set left SNAP_3299 (register answered
+    -19) with an async-only delete — the exact async-without-sync the delete
+    protocol forbids. A needless sync delete is tolerated by design: -19
+    answers "already clean".
 
     The primary's lvstore lock is held across the async delete AND its
     completion poll, so no other object create/delete interleaves with the
@@ -322,6 +324,15 @@ def _rollback_snapshot_bdev(cluster_id, lvs_name, primary_node, snap_bdev_name,
                 logger.error(f"Rollback: async delete of {bdev_name} did not "
                              f"complete within 15s on {primary_node.get_id()}; "
                              f"peers still get their sync deletes")
+            else:
+                # The async pass only cleared data clusters; this sync delete
+                # removes the leader's blob metadata and bdev registration
+                # (see invariant above). -19 answers "already clean".
+                ret2, err2 = rpc_client.delete_lvol(bdev_name, sync=True)
+                if not ret2 and not (err2 and err2.get("code") == -19):
+                    logger.error(f"Rollback: leader sync delete of {bdev_name} "
+                                 f"on {primary_node.get_id()[:8]} failed "
+                                 f"({err2})")
 
     # Every non-leader LVS member owes a sync delete (see invariant above).
     # Everyone reachable gets it now (under their own lvstore lock); everyone
