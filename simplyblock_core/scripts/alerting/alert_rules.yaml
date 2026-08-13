@@ -437,8 +437,8 @@ groups:
               datasourceUid: PBFA97CFB590B2093
               model:
                 disableTextWrap: false
-                editorMode: builder
-                expr: cluster_prov_cap_crit
+                editorMode: code
+                expr: cluster_size_prov_util / cluster_prov_cap_crit
                 fullMetaSearch: false
                 includeNullMetadata: true
                 instant: true
@@ -448,35 +448,6 @@ groups:
                 range: false
                 refId: A
                 useBackend: false
-            - refId: B
-              relativeTimeRange:
-                from: 600
-                to: 0
-              datasourceUid: PBFA97CFB590B2093
-              model:
-                disableTextWrap: false
-                editorMode: builder
-                expr: cluster_size_prov_util
-                fullMetaSearch: false
-                includeNullMetadata: true
-                instant: true
-                intervalMs: 1000
-                legendFormat: __auto
-                maxDataPoints: 43200
-                range: false
-                refId: B
-                useBackend: false
-            - refId: D  
-              relativeTimeRange:
-                from: 600
-                to: 0
-              datasourceUid: __expr__
-              model:
-                expression: $A <= $B
-                intervalMs: 1000
-                maxDataPoints: 43200
-                refId: D
-                type: math
             - refId: C
               relativeTimeRange:
                 from: 600
@@ -486,13 +457,14 @@ groups:
                 conditions:
                     - evaluator:
                         params:
-                            - 0
-                        type: gt
+                            - 1
+                            - 999999
+                        type: within_range
                       operator:
                         type: and
                       query:
                         params:
-                            - D
+                            - A
                       reducer:
                         params: []
                         type: last
@@ -500,7 +472,7 @@ groups:
                 datasource:
                     type: __expr__
                     uid: __expr__
-                expression: D
+                expression: A
                 intervalMs: 1000
                 maxDataPoints: 43200
                 refId: C
@@ -525,8 +497,8 @@ groups:
               datasourceUid: PBFA97CFB590B2093
               model:
                 disableTextWrap: false
-                editorMode: builder
-                expr: cluster_cap_crit
+                editorMode: code
+                expr: cluster_size_util / cluster_cap_crit
                 fullMetaSearch: false
                 includeNullMetadata: true
                 instant: true
@@ -536,35 +508,6 @@ groups:
                 range: false
                 refId: A
                 useBackend: false
-            - refId: B
-              relativeTimeRange:
-                from: 600
-                to: 0
-              datasourceUid: PBFA97CFB590B2093
-              model:
-                disableTextWrap: false
-                editorMode: builder
-                expr: cluster_size_util
-                fullMetaSearch: false
-                includeNullMetadata: true
-                instant: true
-                intervalMs: 1000
-                legendFormat: __auto
-                maxDataPoints: 43200
-                range: false
-                refId: B
-                useBackend: false
-            - refId: D  
-              relativeTimeRange:
-                from: 600
-                to: 0
-              datasourceUid: __expr__
-              model:
-                expression: $A <= $B
-                intervalMs: 1000
-                maxDataPoints: 43200
-                refId: D
-                type: math
             - refId: C
               relativeTimeRange:
                 from: 600
@@ -574,13 +517,14 @@ groups:
                 conditions:
                     - evaluator:
                         params:
-                            - 0
-                        type: gt
+                            - 1
+                            - 999999
+                        type: within_range
                       operator:
                         type: and
                       query:
                         params:
-                            - D
+                            - A
                       reducer:
                         params: []
                         type: last
@@ -588,7 +532,7 @@ groups:
                 datasource:
                     type: __expr__
                     uid: __expr__
-                expression: D
+                expression: A
                 intervalMs: 1000
                 maxDataPoints: 43200
                 refId: C
