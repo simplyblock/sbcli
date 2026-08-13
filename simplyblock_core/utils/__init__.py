@@ -2470,6 +2470,18 @@ def render_and_deploy_alerting_configs(contact_point, grafana_endpoint, cluster_
         subprocess.check_call(['sudo', 'mv', temp_file_path, destination_file_path])
         print(f"File moved to {destination_file_path} successfully.")
 
+    render_prometheus_config(cluster_uuid, cluster_secret)
+
+
+def render_prometheus_config(cluster_uuid, cluster_secret):
+    """Render scripts/prometheus.yml from its template next to the template itself.
+
+    The rendered file is the bind-mount source of the swarm prometheus service
+    (see scripts/docker-compose-swarm-monitoring.yml), so it lives on the
+    filesystem of the mgmt node this runs on — a multi-manager cluster needs it
+    rendered on each of them.
+    """
+    TOP_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
     scripts_folder = os.path.join(TOP_DIR, "simplyblock_core/scripts/")
     prometheus_file = "prometheus.yml"
     env = Environment(loader=FileSystemLoader(scripts_folder), trim_blocks=True, lstrip_blocks=True)
@@ -2486,6 +2498,36 @@ def render_and_deploy_alerting_configs(contact_point, grafana_endpoint, cluster_
         prometheus_file_path = os.path.join(scripts_folder, prometheus_file)
         subprocess.check_call(['sudo', 'mv', file_path, prometheus_file_path])
         print(f"File moved to {prometheus_file_path} successfully.")
+
+
+#: Swarm services that consume the rendered monitoring configuration and read it
+#: only at startup.
+MONITORING_CONFIG_SERVICES = ("monitoring_prometheus", "monitoring_grafana")
+
+
+def restart_monitoring_services(cluster_docker: DockerClient,
+                                service_names: Iterable[str] = MONITORING_CONFIG_SERVICES):
+    """Force-restart the swarm services that read their config only at startup.
+
+    Prometheus is deployed without ``--web.enable-lifecycle`` on clusters older
+    than that flag, so it has no ``/-/reload`` endpoint, and Grafana reads
+    ``/etc/grafana/provisioning`` (alert rules and contact points) only when it
+    starts. Restarting the task is the only way to apply a re-rendered config to
+    either. Dashboards are exempt: Grafana re-reads them from the bind-mounted
+    directory every 10s (see scripts/dashboard.yml).
+
+    Services that do not exist are skipped, so this is a no-op on a cluster
+    deployed with monitoring disabled.
+    """
+    for name in service_names:
+        try:
+            service = cluster_docker.services.get(name)
+        except NotFound:
+            logger.info(f"Service {name} not found, skipping restart")
+            continue
+
+        logger.info(f"Restarting service {name}")
+        service.update(force_update=True)
 
 
 # hostPath mount of the host's /etc/modules-load.d inside the k8s storage-node

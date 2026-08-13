@@ -82,6 +82,7 @@ services:
       - prometheus_data:/prometheus
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--web.enable-lifecycle"  # allow POST /-/reload
       - "--storage.tsdb.path=/prometheus"
       - "--storage.tsdb.no-lockfile"
       - "--storage.tsdb.retention.time=${RETENTION_PERIOD}"

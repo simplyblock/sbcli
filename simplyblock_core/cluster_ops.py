@@ -15,7 +15,8 @@ import docker
 from kubernetes import client as k8s_client
 import requests
 
-from docker.errors import DockerException
+from docker.errors import APIError, DockerException
+from jinja2 import TemplateError
 from pydantic import SecretStr
 
 from simplyblock_core import utils, scripts, constants, mgmt_node_ops, storage_node_ops
@@ -2277,6 +2278,40 @@ def get_cluster(cl_id) -> dict:
     return db_controller.get_cluster_by_id(cl_id).get_clean_dict()
 
 
+def _refresh_monitoring_config(cluster: Cluster, cluster_docker) -> None:
+    """Re-render the monitoring configuration from the installed package and restart its consumers.
+
+    `prometheus.yml` and `alerting/alert_resources.yaml` are rendered artifacts
+    that no package upgrade replaces, so without this an upgraded cluster keeps
+    scraping and alerting on whatever the templates said at deploy time — a new
+    scrape job or alert rule shipped with the release would never take effect.
+    Prometheus and Grafana then need a restart because both read the config only
+    at startup (see `utils.restart_monitoring_services`).
+
+    Renders on the mgmt node running this command only. Prometheus runs on every
+    manager with a host-local bind mount, so the package has to be upgraded (and
+    this therefore re-run) on each of them.
+
+    Monitoring is not on the data path, so failures are logged and the upgrade
+    continues.
+    """
+    if cluster.disable_monitoring:
+        logger.info("Monitoring disabled, skipping monitoring config refresh")
+        return
+
+    logger.info("Refreshing monitoring configuration")
+    try:
+        utils.render_and_deploy_alerting_configs(
+            cluster.contact_point, cluster.grafana_endpoint,
+            cluster.uuid, cluster.secret.get_secret_value())
+        utils.restart_monitoring_services(cluster_docker)
+        logger.info("Monitoring configuration refreshed. On a cluster with several mgmt nodes, "
+                    "upgrade the package on each of them so every prometheus instance picks up "
+                    "the new configuration.")
+    except (subprocess.CalledProcessError, TemplateError, APIError, DockerException) as e:
+        logger.error(f"Failed to refresh monitoring configuration, continuing update: {e}")
+
+
 def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, mgmt_image=None, **kwargs) -> None:
     cluster = db_controller.get_cluster_by_id(cluster_id)  # ensure exists
 
@@ -2330,6 +2365,8 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
                 service_name="app_BackupService",
                 service_file="python3 simplyblock_core/services/tasks_runner_fdb_backup.py",
                 service_image=service_image)
+
+        _refresh_monitoring_config(cluster, cluster_docker)
 
         logger.info("Done updating mgmt cluster")
 
