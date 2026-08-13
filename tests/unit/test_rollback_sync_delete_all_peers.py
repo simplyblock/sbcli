@@ -1,16 +1,19 @@
 # coding=utf-8
-"""Create-rollback delete protocol (run 20260725, SNAP_3299).
+"""Create-rollback delete protocol (run 20260725, SNAP_3299; revised
+upgrade run 20260812).
 
-An async delete must ALWAYS be followed by sync deletes on EVERY non-leader
-HA member of the LVS — never on the leader (sync deletes clear the peers'
-lvol registrations; the leader's async pass removed its own state). A failed
-register RPC never proves the peer holds no registration, so the owed set is
-unconditional. Unreachable peers get a durable sync-delete task; -19 ("No
-such device") counts as already-clean.
+An async delete must ALWAYS be followed by a sync delete on the LEADER
+(the async pass only clears data clusters — the leader's blob metadata
+and bdev registration survive until the sync delete removes them) plus
+sync deletes on EVERY non-leader HA member of the LVS (they clear the
+peers' lvol registrations). A failed register RPC never proves the peer
+holds no registration, so the owed set is unconditional. Unreachable
+peers get a durable sync-delete task; -19 ("No such device") counts as
+already-clean.
 """
 import types
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 from simplyblock_core.controllers import snapshot_controller
 from simplyblock_core.models.storage_node import StorageNode
@@ -46,8 +49,13 @@ class TestRollbackOwesAllNonLeaders(unittest.TestCase):
         tert = _mk_node("tert-3")
         self._rollback(leader, [leader, sec, tert])
 
-        # leader: two calls, one sync, one async
-        assert leader._rpc.delete_lvol.call_count == 2
+        # leader: phase-1 async first, then the sync delete that removes the
+        # blob metadata + bdev registration. Order and kwargs both matter:
+        # a bare call-count check would pass even if the leader never got
+        # its sync leg — the exact leak of upgrade run 20260812.
+        self.assertEqual(
+            leader._rpc.delete_lvol.call_args_list,
+            [call("LVS_1/SNAP_X"), call("LVS_1/SNAP_X", sync=True)])
         sec._rpc.delete_lvol.assert_called_once_with(
             "LVS_1/SNAP_X", sync=True)
         tert._rpc.delete_lvol.assert_called_once_with(
