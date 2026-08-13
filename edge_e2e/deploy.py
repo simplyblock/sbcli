@@ -385,10 +385,22 @@ def deploy_edge_cluster(state, spec, admin_session):
     credentials = mint_edge_credentials(state, spec)
 
     base = state["central"]["api_url"]
+    reusable = False
     if entry.get("cluster_id") and entry.get("secret"):
         # Re-run on the same fleet: the edge cluster is already registered
         # (its name is unique in the CP, so re-POSTing would fail) and node
-        # adds are retryable — continue from the recorded credentials.
+        # adds are retryable — continue from the recorded credentials. But
+        # VERIFY the record exists in THIS control plane first: state.json
+        # survives reprovisioning, and stale ids from a previous fleet made
+        # every call 404 (2026-08-13).
+        probe = helpers.EdgeApi(base, entry["cluster_id"], entry["secret"])
+        try:
+            probe.nodes()
+            reusable = True
+        except Exception as e:
+            print(f"{spec.name}: recorded cluster {entry['cluster_id']} not "
+                  f"usable in this control plane ({e}); re-registering")
+    if reusable:
         created = {"uuid": entry["cluster_id"], "secret": entry["secret"]}
         print(f"{spec.name}: reusing registered cluster {created['uuid']}")
     else:
