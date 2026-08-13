@@ -62,9 +62,6 @@ spec:
       hostPath:
         path: /var/crash
         type: DirectoryOrCreate
-    - name: hugepage
-      emptyDir:
-        medium: HugePages
   containers:
     - name: spdk-container
       image: {{ spdk_image }}
@@ -76,6 +73,18 @@ spec:
           if [ ! -e /dev/fd ]; then
             sudo ln -s /proc/self/fd /dev/fd
           fi
+          # Reserve hugepages at OS level from inside the pod (privileged, so
+          # /proc/sys is the HOST's). A k8s hugepages-2Mi resource request
+          # would instead make scheduling depend on the node being
+          # pre-provisioned with pages before the kubelet starts — an edge
+          # site prerequisite we deliberately avoid. Idempotent: only raises
+          # the reservation when the current one is short of TOTAL_HP.
+          NEED=$(( {{ hugepages_mib }} / 2 ))
+          CUR=$(cat /proc/sys/vm/nr_hugepages)
+          if [ "$CUR" -lt "$NEED" ]; then
+            echo "$NEED" | sudo tee /proc/sys/vm/nr_hugepages
+          fi
+          grep -E 'HugePages_(Total|Free)' /proc/meminfo
           sudo -E /root/scripts/run_distr_with_ssd.sh "{{ l_cores }}" "{{ spdk_mem_mb }}"
       env:
         - name: SSD_PCIE
@@ -108,11 +117,10 @@ spec:
       resources:
         requests:
           cpu: "{{ cpu }}"
-          hugepages-2Mi: {{ hugepages_mib }}Mi
           memory: 1Gi
         limits:
           cpu: "{{ cpu }}"
-          hugepages-2Mi: {{ hugepages_mib }}Mi
+          memory: 3Gi
     - name: spdk-proxy-container
       image: {{ proxy_image }}
       imagePullPolicy: IfNotPresent

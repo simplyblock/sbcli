@@ -346,7 +346,16 @@ def add_edge_node(cluster_id, hostname, mgmt_ip, partitions, data_ip="",
 
     established, retryable = check_node_admission(cluster_id, hostname)
 
-    # Drop stale attempts for this hostname so the retry starts clean.
+    # ADOPT the stale attempt's identity instead of minting a fresh one.
+    # A retry with a new uuid + new rpc password while the previous attempt's
+    # pod still runs is deterministically fatal (2026-08-13): the pods are
+    # hostNetwork, so the OLD pod keeps owning the rpc port — the new pod
+    # can't bind (proxy CrashLoop), get_version hits the old proxy with the
+    # NEW password (401 forever), and each orphan eats the node's hugepage
+    # reservation until nothing schedules. With the SAME uuid and credentials
+    # the pod name is stable, the 409-tolerant redeploy reuses the running
+    # pod, and the credentials match whatever is serving the port.
+    adopted = retryable[-1] if retryable else None
     for stale in retryable:
         stale.remove(db.kv_store())
 
@@ -354,7 +363,7 @@ def add_edge_node(cluster_id, hostname, mgmt_ip, partitions, data_ip="",
     first = nodes[0] if nodes else None
 
     node = EdgeNode()
-    node.uuid = str(uuid_lib.uuid4())
+    node.uuid = adopted.uuid if adopted else str(uuid_lib.uuid4())
     node.cluster_id = cluster_id
     node.hostname = hostname
     node.mgmt_ip = mgmt_ip
@@ -363,8 +372,10 @@ def add_edge_node(cluster_id, hostname, mgmt_ip, partitions, data_ip="",
     node.is_primary = first is None
     node.spdk_cpus = spdk_cpus or edge_constants.EDGE_POD_CPU
     stack.plan_cpu_layout(node.spdk_cpus)  # validate 1..6 before any side effect
-    node.rpc_username = "edge"
-    node.rpc_password = SecretStr(core_utils.generate_string(16))
+    node.rpc_username = (adopted.rpc_username if adopted else "") or "edge"
+    node.rpc_password = (adopted.rpc_password if adopted and
+                         adopted.rpc_password.get_secret_value()
+                         else SecretStr(core_utils.generate_string(16)))
     node.status = EdgeNode.STATUS_IN_CREATION
     node.write_to_db(db.kv_store())
 

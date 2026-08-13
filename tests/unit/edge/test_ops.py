@@ -368,3 +368,21 @@ def test_second_node_retry_admissible_after_partial_formation(env):
     spdk.for_ip("10.0.0.2").fail.clear()
     node = _add_node(cluster, "worker-2", "10.0.0.2", ["/dev/sdb1"])
     assert node.status == EdgeNode.STATUS_ONLINE
+
+
+def test_retry_adopts_stale_identity(env):
+    """A retry must reuse the failed attempt's uuid and rpc credentials:
+    fresh ones while the old hostNetwork pod still owns the rpc port are
+    deterministically fatal (port collision + 401s, 2026-08-13)."""
+    kv, spdk, fake_k8s = env
+    cluster = _create_cluster()
+    spdk.for_ip("10.0.0.1").fail.add("bdev_aio_create")
+    with pytest.raises(Exception):
+        _add_node(cluster, "worker-1", "10.0.0.1", ["/dev/sdb1"])
+    stale = edge_db.get_edge_nodes(cluster.uuid)[0]
+
+    spdk.for_ip("10.0.0.1").fail.clear()
+    node = _add_node(cluster, "worker-1", "10.0.0.1", ["/dev/sdb1"])
+    assert node.status == EdgeNode.STATUS_ONLINE
+    assert node.uuid == stale.uuid
+    assert node.rpc_password.get_secret_value() == stale.rpc_password.get_secret_value()
