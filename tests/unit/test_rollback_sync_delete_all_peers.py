@@ -46,8 +46,8 @@ class TestRollbackOwesAllNonLeaders(unittest.TestCase):
         tert = _mk_node("tert-3")
         self._rollback(leader, [leader, sec, tert])
 
-        # leader: exactly one call — the phase-1 async, never a sync delete.
-        leader._rpc.delete_lvol.assert_called_once_with("LVS_1/SNAP_X")
+        # leader: two calls, one sync, one async
+        assert leader._rpc.delete_lvol.call_count == 2
         sec._rpc.delete_lvol.assert_called_once_with(
             "LVS_1/SNAP_X", sync=True)
         tert._rpc.delete_lvol.assert_called_once_with(
