@@ -54,10 +54,18 @@ for i in $(seq 1 12); do
 done
 """
 
+# cpu-manager-policy=static + reserved-cpus=0: exclusive reactor cores for
+# Guaranteed integer-CPU pods (the edge SPDK pod) are a PROVISIONING-TIME
+# kubelet prerequisite — the central cpu-topology job that would set this is
+# disabled on edge (its kubeadm-style script crash-loops on k3s, and
+# restarting the kubelet of a 1-node cluster kills the API server mid
+# node-add). Static policy requires a non-zero system reservation, hence
+# reserved-cpus=0 (core 0 stays for the OS/k3s; SPDK reactors get the rest).
 K3S_SERVER_USERDATA = _PREAMBLE + """
 for i in $(seq 1 10); do
   curl -sfL https://get.k3s.io | K3S_TOKEN={token} sh -s - server \\
     --write-kubeconfig-mode 644 --disable traefik --node-name {node_name} \\
+    --kubelet-arg=cpu-manager-policy=static --kubelet-arg=reserved-cpus=0 \\
   && break || sleep 15
 done
 """
@@ -67,6 +75,7 @@ until curl -sk https://{server_ip}:6443 >/dev/null 2>&1; do sleep 5; done
 for i in $(seq 1 10); do
   curl -sfL https://get.k3s.io | K3S_URL=https://{server_ip}:6443 \\
     K3S_TOKEN={token} sh -s - agent --node-name {node_name} \\
+    --kubelet-arg=cpu-manager-policy=static --kubelet-arg=reserved-cpus=0 \\
   && break || sleep 15
 done
 """
