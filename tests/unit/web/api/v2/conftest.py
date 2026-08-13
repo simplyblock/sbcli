@@ -104,6 +104,7 @@ def app():
     app = FastAPI()
     app.include_router(v2.api, prefix='/api/v2')
     app.dependency_overrides[auth_module.verify_api_token] = lambda: None
+    app.dependency_overrides[auth_module.verify_metrics_token] = lambda: None
     return app
 
 

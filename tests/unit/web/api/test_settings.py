@@ -81,6 +81,34 @@ class TestSettings:
         assert s.k8s_admin_service_accounts == ["system:serviceaccount:default:my-operator"]
 
 
+class TestMetricsServiceAccountsSetting:
+    def test_default_is_empty_list(self, monkeypatch):
+        monkeypatch.delenv("SB_K8S_METRICS_SERVICE_ACCOUNTS", raising=False)
+        s = Settings()
+        assert s.k8s_metrics_service_accounts == []
+
+    def test_parses_env_var(self, monkeypatch):
+        monkeypatch.setenv(
+            "SB_K8S_METRICS_SERVICE_ACCOUNTS",
+            "system:serviceaccount:monitoring:prometheus,system:serviceaccount:ns:agent",
+        )
+        s = Settings()
+        assert s.k8s_metrics_service_accounts == [
+            "system:serviceaccount:monitoring:prometheus",
+            "system:serviceaccount:ns:agent",
+        ]
+
+    def test_independent_of_admin_accounts(self, monkeypatch):
+        monkeypatch.setenv("SB_K8S_ADMIN_SERVICE_ACCOUNTS", "system:serviceaccount:default:op")
+        monkeypatch.setenv(
+            "SB_K8S_METRICS_SERVICE_ACCOUNTS",
+            "system:serviceaccount:monitoring:prometheus",
+        )
+        s = Settings()
+        assert s.k8s_admin_service_accounts == ["system:serviceaccount:default:op"]
+        assert s.k8s_metrics_service_accounts == ["system:serviceaccount:monitoring:prometheus"]
+
+
 class TestApiVersionsSetting:
     def test_default_is_all_versions(self, monkeypatch):
         monkeypatch.delenv("SB_API_VERSIONS", raising=False)

@@ -18,7 +18,9 @@ Use these patterns when adding new v2 endpoints:
 
 **Dependencies** (`_dependencies.py`): FastAPI `Depends()`-based resource lookup. Typed aliases like `Cluster`, `StorageNode`, `Volume`, `Snapshot` resolve path parameters to core model objects (raising 404 on miss). Dependencies chain — e.g., `Volume` depends on `StoragePool` which depends on `Cluster` — enforcing hierarchical ownership.
 
-**Auth** (`_auth.py`): `verify_api_token` dependency on all routers. Supports k8s service account tokens (via TokenReview) and cluster-secret bearer tokens. Admin service accounts bypass per-cluster checks. Secret comparison uses `hmac.compare_digest(secret.get_secret_value(), token)` for timing safety.
+**Auth** (`_auth.py`): `verify_api_token` dependency on all routers. Supports k8s service account tokens (via TokenReview) and cluster-secret bearer tokens. Admin service accounts (`SB_K8S_ADMIN_SERVICE_ACCOUNTS`) bypass per-cluster checks. Secret comparison uses `hmac.compare_digest(secret.get_secret_value(), token)` for timing safety.
+
+The metrics router instead uses `verify_metrics_token`, which additionally admits service accounts listed in `SB_K8S_METRICS_SERVICE_ACCOUNTS` — a scrape credential that reaches `/api/v2/metrics` and nothing else. Grant a capability by adding a per-capability setting and a matching dependency, not by widening the admin list; the per-capability lists map onto a principal's scope set when authorization moves to scopes.
 
 **Access logging** (`app.py`): The `AccessLogMiddleware` logs only `request.url.path`, never the query string — query parameters can carry credentials (`?secret=…`, `?token=…`) and have no type info to mask by.
 

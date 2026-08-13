@@ -70,6 +70,19 @@ class Settings(BaseSettings):
         ),
         BeforeValidator(_parse_str_list),
     ] = []
+    k8s_metrics_service_accounts: Annotated[
+        list[str],
+        Field(
+            description=(
+                "Kubernetes service accounts granted read access to the metrics endpoint, "
+                "and nothing else. "
+                "Comma-separated list of fully-qualified names "
+                "(e.g. 'system:serviceaccount:monitoring:prometheus'). "
+                "Admin service accounts hold this access implicitly."
+            )
+        ),
+        BeforeValidator(_parse_str_list),
+    ] = []
 
     @model_validator(mode="after")
     def validate_cluster_secret_auth(self) -> "Settings":
