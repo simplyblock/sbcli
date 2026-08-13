@@ -1,3 +1,23 @@
+{#
+  Edge SPDK pod — mirrors simplyblock_web/templates/storage_deploy_spdk.yaml.j2
+  (the central storage-node pod), because the images define the contract:
+
+  - spdk-container runs the ultra image's /root/scripts/run_distr_with_ssd.sh
+    "<l_cores>" "<spdk_mem_mb>". That script wraps the fork's spdk target
+    (bdts); with PCI_ALLOWED empty ("none") and no distr bdevs ever created it
+    behaves as a plain spdk_tgt with the fork's lvol/lvstore/nvmf modules —
+    exactly the spdk-only processing edge uses. l_cores is a "i@cpu" map; the
+    image's adjust_cpu_mask.sh REMAPS it onto the cpuset the kubelet actually
+    granted, so a static 0@0,1@1,... map is correct here.
+  - The app starts with --wait-for-rpc: after the proxy answers, the add/
+    restart flows hand over the core masks via RPC (framework_start_init,
+    then bdev_lvol_create_poller_group once per process) — masks are NOT
+    container env; a first version invented SPDK_*_MASK env vars and the
+    image ignored them entirely (CrashLoopBackOff, 2026-08-13).
+  - spdk-proxy-container bridges HTTP -> /mnt/ramdisk/spdk_<port>/spdk.sock
+    (path convention hardcoded in spdk_http_proxy_server.py); the two
+    containers share that Memory-backed volume.
+#}
 apiVersion: v1
 kind: Pod
 metadata:
@@ -7,61 +27,121 @@ metadata:
     app: simplyblock-edge-spdk
 spec:
   hostNetwork: true
+  dnsPolicy: ClusterFirstWithHostNet
+  restartPolicy: Always
   nodeSelector:
     kubernetes.io/hostname: {{ hostname }}
-  restartPolicy: Always
+  tolerations:
+    - effect: NoSchedule
+      operator: Exists
+    - effect: NoExecute
+      operator: Exists
+  volumes:
+    - name: socket-dir
+      emptyDir:
+        medium: Memory
+        sizeLimit: 1Gi
+    - name: host-sys
+      hostPath:
+        path: /sys
+    - name: host-modules
+      hostPath:
+        path: /lib/modules
+    - name: dev-vol
+      hostPath:
+        path: /dev
+    - name: etc-simplyblock
+      hostPath:
+        path: /var/simplyblock
+        type: DirectoryOrCreate
+    - name: tmp-simplyblock
+      hostPath:
+        path: /var/run/simplyblock
+        type: DirectoryOrCreate
+    - name: var-crash
+      hostPath:
+        path: /var/crash
+        type: DirectoryOrCreate
+    - name: hugepage
+      emptyDir:
+        medium: HugePages
   containers:
     - name: spdk-container
       image: {{ spdk_image }}
       imagePullPolicy: IfNotPresent
-      securityContext:
-        privileged: true
+      command:
+        - sh
+        - -c
+        - |
+          if [ ! -e /dev/fd ]; then
+            sudo ln -s /proc/self/fd /dev/fd
+          fi
+          sudo -E /root/scripts/run_distr_with_ssd.sh "{{ l_cores }}" "{{ spdk_mem_mb }}"
       env:
+        - name: SSD_PCIE
+          value: ""
+        - name: PCI_ALLOWED
+          value: ""
+        - name: TOTAL_HP
+          value: "{{ hugepages_mib }}"
         - name: RPC_PORT
           value: "{{ rpc_port }}"
-        - name: SPDK_REACTOR_MASK
-          value: "{{ reactor_mask }}"
-        - name: SPDK_APP_MASK
-          value: "{{ app_mask }}"
-        - name: EDGE_LVS_MASK
-          value: "{{ lvs_mask }}"
-        - name: EDGE_NVMF_MASK
-          value: "{{ nvmf_mask }}"
+        - name: NSOCKET
+          value: "0"
+        - name: FW_PORT
+          value: "50001"
+      securityContext:
+        privileged: true
+      volumeMounts:
+        - name: socket-dir
+          mountPath: /mnt/ramdisk
+        - name: host-sys
+          mountPath: /sys
+        - name: host-modules
+          mountPath: /lib/modules
+        - name: dev-vol
+          mountPath: /dev
+        - name: etc-simplyblock
+          mountPath: /etc/simplyblock
+        - name: var-crash
+          mountPath: /var/crash
       resources:
         requests:
           cpu: "{{ cpu }}"
-          memory: 2Gi
           hugepages-2Mi: {{ hugepages_mib }}Mi
+          memory: 1Gi
         limits:
           cpu: "{{ cpu }}"
           hugepages-2Mi: {{ hugepages_mib }}Mi
-      volumeMounts:
-        - name: dev
-          mountPath: /dev
-        - name: hugepages
-          mountPath: /dev/hugepages
-        - name: shm
-          mountPath: /dev/shm
     - name: spdk-proxy-container
       image: {{ proxy_image }}
       imagePullPolicy: IfNotPresent
+      command: ["sudo", "-E", "python3", "simplyblock_core/services/spdk_http_proxy_server.py"]
+      securityContext:
+        privileged: true
       env:
+        - name: SERVER_IP
+          value: "{{ server_ip }}"
         - name: RPC_PORT
           value: "{{ rpc_port }}"
         - name: RPC_USERNAME
           value: "{{ rpc_username }}"
         - name: RPC_PASSWORD
           value: "{{ rpc_password }}"
+        - name: MULTI_THREADING_ENABLED
+          value: "True"
+        - name: TIMEOUT
+          value: "300"
+        - name: SB_TLS_SERVE
+          value: "False"
+        - name: SB_TLS_CONNECT
+          value: "disabled"
+        - name: SB_TLS_CLIENT_AUTH
+          value: "disabled"
+        - name: SB_TLS_PROVIDER
+          value: "None"
       volumeMounts:
-        - name: shm
-          mountPath: /dev/shm
-  volumes:
-    - name: dev
-      hostPath:
-        path: /dev
-    - name: hugepages
-      emptyDir:
-        medium: HugePages
-    - name: shm
-      emptyDir:
-        medium: Memory
+        - name: socket-dir
+          mountPath: /mnt/ramdisk
+        - name: tmp-simplyblock
+          mountPath: /var/run/simplyblock

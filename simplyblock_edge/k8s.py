@@ -118,10 +118,15 @@ def pod_running(cluster, node, timeout=edge_constants.EDGE_K8S_PROBE_TIMEOUT_SEC
 
 
 def render_spdk_pod(cluster, node, spdk_image, proxy_image) -> dict:
-    from simplyblock_edge.stack import CpuLayout, plan_cpu_layout
-    layout = plan_cpu_layout(node.spdk_cpus)
     env = jinja2.Environment(loader=jinja2.PackageLoader('simplyblock_edge', 'templates'),
                              autoescape=False)
+    # "i@cpu" map, remapped onto the kubelet-granted cpuset by the image's
+    # adjust_cpu_mask.sh at container start — the CP cannot know the final
+    # cpu ids at render time, so a static identity map is the contract.
+    # Reactor-core masks (lvs poller group etc.) are handed over via RPC
+    # AFTER framework init, from the actual reactor list — never here.
+    l_cores = ",".join(f"{i}@{i}" for i in range(node.spdk_cpus))
+    hugepages_mib = edge_constants.EDGE_POD_HUGEPAGES_MIB
     manifest = env.get_template('edge_spdk_pod.yaml.j2').render(
         pod_name=pod_name(node),
         namespace=cluster.k8s_namespace,
@@ -131,12 +136,11 @@ def render_spdk_pod(cluster, node, spdk_image, proxy_image) -> dict:
         rpc_port=node.rpc_port,
         rpc_username=node.rpc_username,
         rpc_password=node.rpc_password.get_secret_value(),
+        server_ip=node.mgmt_ip,
         cpu=node.spdk_cpus,
-        reactor_mask=CpuLayout.hex(layout.reactor_mask),
-        app_mask=CpuLayout.hex(layout.app_mask),
-        lvs_mask=CpuLayout.hex(layout.lvs_mask),
-        nvmf_mask=CpuLayout.hex(layout.nvmf_mask),
-        hugepages_mib=edge_constants.EDGE_POD_HUGEPAGES_MIB,
+        l_cores=l_cores,
+        spdk_mem_mb=max(512, int(hugepages_mib * 3 / 4)),
+        hugepages_mib=hugepages_mib,
     )
     return yaml.safe_load(manifest)
 

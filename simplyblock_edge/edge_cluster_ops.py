@@ -248,13 +248,49 @@ def _ns_bdev(volume) -> str:
 
 # -------------------------------------------------------------------- nodes
 
-def _apply_cpu_layout(rpc, node):
-    """Place the lvs poller per the deploy-time vCPU choice. The reactor and
-    nvmf-poller masks travel as pod env (the SPDK entrypoint applies them at
-    boot); the lvs poller group is an RPC."""
-    layout = stack.plan_cpu_layout(node.spdk_cpus)
+def _init_spdk_framework(rpc, node):
+    """Hand the core parameters to the just-started SPDK app, in ORDER.
+
+    The pod's entrypoint (run_distr_with_ssd.sh) starts the fork target with
+    --wait-for-rpc, and the image's adjust_cpu_mask.sh remaps our identity
+    l_cores map onto the cpuset the kubelet actually granted — so the CP does
+    NOT know the final core ids at render time. Masks therefore cannot travel
+    as env or render-time values (a first version did exactly that and the
+    image ignored it). Instead:
+
+      1. framework_start_init  — finish app startup (idempotent: a re-entered
+         add/restart flow on an already-initialized process skips ahead).
+      2. framework_get_reactors — learn the ACTUAL reactor lcores.
+      3. bdev_lvol_create_poller_group(<lvs core mask>) — the fork requires
+         this exactly ONCE per process lifetime before any lvstore work; the
+         mask is built from the real reactor list per the deploy-time layout.
+
+    nvmf poll-group masks (spdk_cpus >= 4, spec §7) are deliberately not set
+    yet: nvmf_set_config must happen PRE-init where the real core ids are
+    unknowable — needs a fork-side relative-mask option (spec §10 note).
+    """
+    fresh = True
     try:
-        rpc.bdev_lvol_create_poller_group(stack.CpuLayout.hex(layout.lvs_mask))
+        rpc.framework_start_init()
+    except RPCException as e:
+        if 'already' not in str(e.message).lower():
+            raise
+        fresh = False
+
+    if not fresh:
+        return
+
+    layout = stack.plan_cpu_layout(node.spdk_cpus)
+    reactors = rpc.framework_get_reactors() or {}
+    lcores = sorted(r.get('lcore', 0) for r in reactors.get('reactors', []))
+    if not lcores:
+        lcores = list(range(node.spdk_cpus))
+    lvs_mask = 0
+    for i, lcore in enumerate(lcores):
+        if layout.lvs_mask >> i & 1:
+            lvs_mask |= 1 << lcore
+    try:
+        rpc.bdev_lvol_create_poller_group(stack.CpuLayout.hex(lvs_mask or 1 << lcores[0]))
     except RPCException as e:
         if 'exist' not in str(e.message).lower():
             raise
@@ -342,7 +378,7 @@ def add_edge_node(cluster_id, hostname, mgmt_ip, partitions, data_ip="",
         rpc = node_rpc_client(node)
         _wait_for_rpc(rpc, timeout=rpc_wait_timeout or edge_constants.EDGE_RPC_WAIT_TIMEOUT_SEC)
 
-        _apply_cpu_layout(rpc, node)
+        _init_spdk_framework(rpc, node)
         two_node = first is not None
         plan = _build_local_stack(rpc, node, split=two_node)
         for i, part in enumerate(node.partitions):
@@ -882,7 +918,7 @@ def _reassemble_node(cluster, node, nodes) -> None:
     peers = [n for n in nodes if n.uuid != node.uuid
              and n.status != EdgeNode.STATUS_REMOVED]
     two_node = bool(peers)
-    _apply_cpu_layout(rpc, node)
+    _init_spdk_framework(rpc, node)
     plan = _build_local_stack(rpc, node, split=two_node)
     _expose_repl_subsystem(rpc, cluster, node, plan)
 

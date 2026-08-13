@@ -60,6 +60,20 @@ class FakeSpdk:
         self._rec("get_version")
         return "25.05-edge"
 
+    # -- app framework (the pod starts with --wait-for-rpc; the add/restart
+    #    flows finish init and hand over core masks via RPC)
+    def framework_start_init(self):
+        self._rec("framework_start_init")
+        if getattr(self, "_framework_initialized", False):
+            from simplyblock_core.rpc_client import RPCException
+            raise RPCException("framework already initialized")
+        self._framework_initialized = True
+        return True
+
+    def framework_get_reactors(self):
+        self._rec("framework_get_reactors")
+        return {"reactors": [{"lcore": i} for i in range(2)]}
+
     def _bdev_info(self, name):
         info = {"name": name}
         lvols = getattr(self, "lvols", {})
