@@ -1671,6 +1671,13 @@ if __name__ == "__main__":
         clusters = db.get_clusters()
         for cluster in clusters:
             cluster_id = cluster.get_id()
+            if getattr(cluster, 'cluster_type', Cluster.TYPE_HYPERSCALE) == Cluster.TYPE_EDGE:
+                # Edge clusters have no storage-node records; the hyperscale
+                # status formula would verdict them from an empty node list
+                # (observed 2026-08-13: rewrote 'degraded' every interval,
+                # fighting the edge monitor's 'active' forever). Their status
+                # is owned by simplyblock_edge.services.edge_monitor.
+                continue
             if cluster.status == Cluster.STATUS_IN_ACTIVATION:
                 logger.info(f"Cluster status is: {cluster.status}, skipping monitoring")
                 continue
