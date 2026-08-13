@@ -60,6 +60,20 @@ class FakeSpdk:
         self._rec("get_version")
         return "25.05-edge"
 
+    def iobuf_set_options(self, small_pool_count, large_pool_count,
+                          small_bufsize, large_bufsize):
+        self._rec("iobuf_set_options", small=small_pool_count, large=large_pool_count)
+        return True
+
+    def bdev_set_options(self, bdev_io_pool_size, bdev_io_cache_size,
+                         iobuf_small_cache_size, iobuf_large_cache_size):
+        self._rec("bdev_set_options", pool=bdev_io_pool_size)
+        return True
+
+    def accel_set_options(self):
+        self._rec("accel_set_options")
+        return True
+
     # -- app framework (the pod starts with --wait-for-rpc; the add/restart
     #    flows finish init and hand over core masks via RPC)
     def framework_start_init(self):

@@ -39,7 +39,16 @@ EDGE_POD_PREFIX = "edge-spdk-"
 # vCPUs for the SPDK pod. E2e/edge sites run 4-vCPU instances with a single
 # vCPU dedicated to SPDK; larger boxes can raise this.
 EDGE_POD_CPU = int(os.getenv("SIMPLYBLOCK_EDGE_POD_CPU", "1"))
-EDGE_POD_HUGEPAGES_MIB = int(os.getenv("SIMPLYBLOCK_EDGE_POD_HUGEPAGES_MIB", "1024"))
+EDGE_POD_HUGEPAGES_MIB = int(os.getenv("SIMPLYBLOCK_EDGE_POD_HUGEPAGES_MIB", "2048"))
+# Pre-init pool sizing (spec §7: lightweight nodes). The fork's compiled-in
+# defaults are sized for central nodes (~10GB SPDK memory) — with edge-scale
+# memory, framework init dies allocating the bdev_io pool ("could not
+# allocate spdk_bdev_io pool", live 2026-08-13). Handed over via
+# bdev_set_options / iobuf_set_options BEFORE framework_start_init.
+EDGE_BDEV_IO_POOL_SIZE = int(os.getenv("SIMPLYBLOCK_EDGE_BDEV_IO_POOL_SIZE", "16384"))
+EDGE_BDEV_IO_CACHE_SIZE = int(os.getenv("SIMPLYBLOCK_EDGE_BDEV_IO_CACHE_SIZE", "256"))
+EDGE_IOBUF_SMALL_POOL_COUNT = int(os.getenv("SIMPLYBLOCK_EDGE_IOBUF_SMALL_POOL", "8192"))
+EDGE_IOBUF_LARGE_POOL_COUNT = int(os.getenv("SIMPLYBLOCK_EDGE_IOBUF_LARGE_POOL", "2048"))
 # Same images the central k8s storage-node pods run: the ultra image IS the
 # spdk fork with the product processing edge depends on (primary/secondary
 # lvstore, bdev_lvol_register/update_lvstore/set_leader), and the proxy

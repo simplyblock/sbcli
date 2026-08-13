@@ -269,7 +269,19 @@ def _init_spdk_framework(rpc, node):
     yet: nvmf_set_config must happen PRE-init where the real core ids are
     unknowable — needs a fork-side relative-mask option (spec §10 note).
     """
+    # Pre-init pool downsizing — MUST land before framework_start_init.
+    # On an already-initialized process these fail; that is exactly the
+    # signal to skip ahead (the options only matter for a fresh init).
     fresh = True
+    try:
+        rpc.iobuf_set_options(edge_constants.EDGE_IOBUF_SMALL_POOL_COUNT,
+                              edge_constants.EDGE_IOBUF_LARGE_POOL_COUNT, 0, 0)
+        rpc.bdev_set_options(edge_constants.EDGE_BDEV_IO_POOL_SIZE,
+                             edge_constants.EDGE_BDEV_IO_CACHE_SIZE, 0, 0)
+        rpc.accel_set_options()
+    except RPCException as e:
+        logger.info("pre-init options rejected (already initialized?): %s", e.message)
+
     try:
         rpc.framework_start_init()
     except RPCException as e:
