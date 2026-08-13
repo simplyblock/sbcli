@@ -72,4 +72,4 @@ jobs:
       - name: Run slow integration tests
         run: tox run -e integration-slow
         env:
-          PYTEST_ADDOPTS: -v
+          PYTEST_ADDOPTS: -v --durations=0 --durations-min=0
