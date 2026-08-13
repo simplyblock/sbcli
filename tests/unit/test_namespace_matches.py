@@ -153,5 +153,51 @@ class TestWaitForNamespace(unittest.TestCase):
         self.assertEqual(rpc.subsystem_get.call_count, 4)
 
 
+class TestAddNsFailureDoesNotCostAListener(unittest.TestCase):
+    """The dominant failure path of soak 2026-08-11.
+
+    lvol_monitor's repair calls add_ns for a namespace that is already bound;
+    SPDK rejects it with -32602 "Invalid parameters" because nsid 1 is taken.
+    add_lvol_thread used to return on that error — before the listener loop —
+    so the volume lost a PATH rather than just a namespace, and the repair
+    re-failed identically on every monitor cycle. What matters is whether the
+    namespace is present now, not whether this particular add reported it.
+    """
+
+    def test_present_namespace_survives_a_failed_add(self):
+        from unittest.mock import patch
+        from simplyblock_core import storage_node_ops
+
+        rpc = MagicMock()
+        # add_ns rejects the duplicate ...
+        rpc.nvmf_subsystem_add_ns.return_value = None
+        # ... but the namespace is plainly there, reported under its raw UUID.
+        rpc.subsystem_get.return_value = {"namespaces": [OBSERVED_NS]}
+
+        with patch.object(storage_node_ops.time, "sleep"):
+            present = storage_node_ops._rpc_wait_subsystem_has_ns(
+                rpc, "nqn:lvol:ac386b9e", nsid=1, bdev_name=FRIENDLY,
+                uuid=LVOL_UUID)
+        self.assertTrue(
+            present,
+            "a failed add_ns must not be read as 'namespace absent' when the "
+            "namespace is on the subsystem — that is what skipped the listener")
+
+    def test_genuinely_absent_namespace_still_fails(self):
+        """The guard must still fail closed: no namespace means no listener."""
+        from unittest.mock import patch
+        from simplyblock_core import storage_node_ops
+
+        rpc = MagicMock()
+        rpc.nvmf_subsystem_add_ns.return_value = None
+        rpc.subsystem_get.return_value = {"namespaces": []}
+
+        with patch.object(storage_node_ops.time, "sleep"):
+            present = storage_node_ops._rpc_wait_subsystem_has_ns(
+                rpc, "nqn:lvol:ac386b9e", nsid=1, bdev_name=FRIENDLY,
+                uuid=LVOL_UUID, tries=3)
+        self.assertFalse(present)
+
+
 if __name__ == "__main__":
     unittest.main()

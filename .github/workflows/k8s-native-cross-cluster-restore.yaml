@@ -689,7 +689,7 @@ jobs:
           ${BACKUP_SPEC}
           ---
           apiVersion: storage.simplyblock.io/v1alpha1
-          kind: Pool
+          kind: StoragePool
           metadata:
             name: simplyblock-pool
             namespace: ${NS_C1}
@@ -710,7 +710,7 @@ jobs:
             mgmtIfname: ${MGMT_IFC}
             dataIfname:
               - ${DATA_NICS}
-            maxLogicalVolumeCount: ${MAX_LVOL}
+            maxSubsystemCount: ${MAX_LVOL}
             partitions: ${PARTITIONS}
             corePercentage: ${CORE_PERCENTAGE}
             journalManager:
@@ -784,7 +784,7 @@ jobs:
           ${BACKUP_SPEC}
           ---
           apiVersion: storage.simplyblock.io/v1alpha1
-          kind: Pool
+          kind: StoragePool
           metadata:
             name: simplyblock-pool
             namespace: ${NS_C2}
@@ -805,7 +805,7 @@ jobs:
             mgmtIfname: ${MGMT_IFC}
             dataIfname:
               - ${DATA_NICS}
-            maxLogicalVolumeCount: ${MAX_LVOL}
+            maxSubsystemCount: ${MAX_LVOL}
             partitions: ${PARTITIONS}
             corePercentage: ${CORE_PERCENTAGE}
             journalManager:

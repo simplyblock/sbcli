@@ -1848,14 +1848,16 @@ def _delete_lvol_from_all_nodes(lvol, snode, force_delete, lock=True) -> None:
                             snode.cluster_id, lvol.lvs_name, node_id=nl.get_id(), enabled=_inner):
                         ok = _remove_lvol_subsys_from_node(lvol, nl.rpc_client())
                         if ok and async_completed["done"]:
-                            # The sync leg this non-leader owes. The leader's
-                            # async delete removes the blob but cannot clear
-                            # the peers' lvol REGISTRATIONS. Doing it here,
-                            # rather than leaving the whole sync stage to
-                            # lvol_monitor, is what keeps a delete at ~0.3s
-                            # instead of minutes behind a drain backlog.
-                            # -19 ("no such device") means this peer is
-                            # already clean and counts as done.
+                            # The sync leg this non-leader owes: it clears the
+                            # peer's lvol REGISTRATION. (The leader's async
+                            # delete only clears data clusters; the leader's
+                            # own blob/bdev removal is the sync delete that
+                            # lvol_monitor's finish phase issues.) Doing the
+                            # peer legs here, rather than leaving the whole
+                            # sync stage to lvol_monitor, is what keeps a
+                            # delete at ~0.3s instead of minutes behind a
+                            # drain backlog. -19 ("no such device") means this
+                            # peer is already clean and counts as done.
                             ret, err = nl.rpc_client().delete_lvol(
                                 f"{lvol.lvs_name}/{lvol.lvol_bdev}", sync=True)
                             synced = bool(ret) or bool(
@@ -3252,6 +3254,27 @@ def replicate_lvol_on_target_cluster(lvol_id):
 
     new_lvol.status = LVol.STATUS_ONLINE
     new_lvol.write_to_db(db_controller.kv_store)
+
+    # Stop replicating FROM the source we just failed away from, BEFORE the
+    # relationship is recorded.
+    #
+    # Fail-over left do_replicate=True and the pending FN_SNAPSHOT_REPLICATION
+    # tasks queued. The source cluster is only assumed dead: it auto-recovers
+    # (SPDK containers restart within minutes), those tasks then finish, and each
+    # completion runs snapshot_replication._prune_internal_snapshots for the
+    # source volume. Retention keeps only the newest replicated internal snapshot
+    # and deletes the TARGET copies of the older ones — including the snapshot
+    # this fail-over volume was just cloned from. That delete goes to SPDK as
+    # bdev_lvol_delete(sync=False), which frees the blocks immediately, so the
+    # failed-over volume starts reading zeros ~90s after a successful fail-over:
+    # no filesystem, md5 mismatch, while every status field still says online
+    # (labs 2026-08-10 / 2026-08-11, validated in the spdk_proxy RPC logs).
+    #
+    # A failed-over volume no longer lives on the source, so there is nothing
+    # left to replicate from it; any further source delta is by definition past
+    # the RPO the fail-over accepted.
+    replication_stop(lvol_id)
+
     lvol = db_controller.get_lvol_by_id(lvol_id)
     lvol.from_source = False
     lvol.write_to_db()

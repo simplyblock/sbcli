@@ -209,29 +209,25 @@ def process_lvol_delete_finish(cluster, lvol):
                 non_leader_nodes.append(db.get_storage_node_by_id(node_id))
             except KeyError:
                 pass
-    # The leader gets NO sync delete. Its async delete already removed the
-    # blob AND unregistered the bdev; this function only runs once that async
-    # delete reported done (poll ret 0/2). Re-deleting on the leader walks the
-    # snapshot/clone metadata a second time and errors on every entry the
-    # async pass already cleaned:
+    # The leader NEEDS its sync delete. The async delete (sync=False) only
+    # clears the data clusters and strips the in-memory clone-list entries
+    # (bs_delete_blob_finish_async -> blob_clear_clusters_async); the blob
+    # metadata stays on disk and the bdev stays registered. This leader-side
+    # sync delete is the only operation that removes them
+    # (_vbdev_lvol_destroy is_sync=true), and SPDK admits it only after the
+    # async pass reported done — which is exactly when this function runs.
     #
-    #   run 20260807, LVS_1 (~7.5k objects): 4361 "Clone entry not found"
-    #   (blob_get_snapshot_and_clone_entries) plus 888 lvol_delete_async_cb
-    #   *ERROR* on the leader (vm201) — and exactly 0 on either non-leader,
-    #   because they get their one and only delete here. Same signature as
-    #   run 20260716 (1382x). The _remove_bdev_stack "already deleted,
-    #   skipping" guard did not fire once in that run, so it cannot be relied
-    #   on to suppress the second pass.
-    #
-    # Verified safe: of the 162 objects that took the create-rollback path in
-    # run 20260807 (async on the leader, sync on the non-leaders only, never
-    # on the leader), 0 were still present in the leader's end-of-run bdev
-    # dump — the async delete alone leaves nothing behind.
-    #
-    # This matches the delete protocol as stated in
-    # snapshot_controller._rollback_snapshot_bdev: an async delete must always
-    # be followed by sync deletes on EVERY non-leader HA member of the LVS —
-    # "unconditionally, never on the leader".
+    # Removing this leg (ae4679792, based on run 20260807) leaked the blob
+    # and bdev of EVERY deleted lvol on its leader: upgrade run 20260812
+    # (test_major_upgrade-20260812-170049) ended with all 4 LVSes retaining
+    # their complete object sets, and the follow-up snapshot delete failing
+    # EBUSY ("Cannot remove snapshot because it is open") because its
+    # children's blobs were still alive on the leader. The "Clone entry not
+    # found" storm this leg produces (4361x in run 20260807) is benign noise:
+    # blob_get_snapshot_and_clone_entries only logs when the async pass has
+    # already removed the in-memory entry, and the delete proceeds. The
+    # run-20260807 "0 leftovers without this leg" observation was drawn from
+    # create-rollback objects and does not hold for the regular delete path.
     primary_node = db.get_storage_node_by_id(leader_node.get_id())
     if primary_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
         # Check if any non-leader node needs sync lock
@@ -239,6 +235,11 @@ def process_lvol_delete_finish(cluster, lvol):
             if nln.status in [StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN, StorageNode.STATUS_UNREACHABLE]:
                 primary_node.lvol_del_sync_lock()
                 break
+        with snapshot_controller.lvstore_op_lock(
+                cluster.get_id(), lvol.lvs_name, node_id=primary_node.get_id()):
+            ret = lvol_controller.delete_lvol_from_node(lvol.get_id(), primary_node.get_id(), sync=True)
+        if not ret:
+            logger.error(f"Failed to delete lvol from primary_node node: {primary_node.get_id()}")
 
     lvol_bdev_name=f"{lvol.lvs_name}/{lvol.lvol_bdev}"
     for sec_node in non_leader_nodes:

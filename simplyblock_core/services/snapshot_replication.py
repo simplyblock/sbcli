@@ -6,6 +6,7 @@ from typing import Optional
 from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.controllers import lvol_controller, snapshot_events, snapshot_controller
 from simplyblock_core.models.job_schedule import JobSchedule
+from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
@@ -70,35 +71,38 @@ def process_snap_replicate_start(task, snapshot):
         task.write_to_db()
         return
 
-    # 2 connect to it
-    ret = snode.rpc_client().bdev_nvme_controller_list(remote_lv.top_bdev)
-    if not ret:
-        remote_snode = db.get_storage_node_by_id(remote_lv.node_id)
-        for nic in remote_snode.data_nics:
-            ip = nic.ip4_address
-            ret = snode.rpc_client().bdev_nvme_attach_controller(
-                remote_lv.top_bdev, remote_lv.nqn, ip, remote_lv.subsys_port, nic.trtype)
-            if not ret:
-                msg = "controller attach failed"
-                logger.error(msg)
-                raise RuntimeError(msg)
-            bdev_name = ret[0]
-            if not bdev_name:
-                msg = "Bdev name not returned from controller attach"
-                logger.error(msg)
-                raise RuntimeError(msg)
-            bdev_found = False
-            for i in range(5):
-                ret = snode.rpc_client().get_bdevs(bdev_name)
-                if ret:
-                    bdev_found = True
-                    break
-                else:
-                    time.sleep(1)
+    # 2 attach the TARGET NODE'S TRANSFER HUBLVOL on the source. Transfers must
+    # go over a hublvol: the fork demuxes each write by the map id carried in
+    # the top 16 bits of the LBA (lvol_map.lvol[offset >> 48]) and that demux
+    # only exists on a hublvol namespace. The receiving volume's own namespace
+    # is not a valid transfer gateway. This mirrors the (working) migration
+    # runner, which has always sent bulk transfers hub+map_id.
+    from simplyblock_core.services.replication_final_step import ensure_hub_attached
+    _hub_ctrl, hub_bdev, hub_err = ensure_hub_attached(snode.rpc_client(), remote_lv_node)
+    if hub_err:
+        logger.error(f"Transfer hub attach failed: {hub_err}")
+        task.function_result = "transfer hub attach failed, retrying"
+        task.status = JobSchedule.STATUS_SUSPENDED
+        task.retry += 1
+        task.write_to_db()
+        return
 
-            if not bdev_found:
-                logger.error("lvol Bdev not found after 5 attempts")
-                raise RuntimeError(f"Failed to connect to lvol: {remote_lv.get_id()}")
+    # The receiving volume's map id rides in every write's LBA (see above); the
+    # hub uses it to route the data into the receiving volume. Without it the
+    # transfer cannot land.
+    ret = remote_lv_node.rpc_client().get_bdevs(remote_lv.top_bdev)
+    try:
+        remote_map_id = ret[0]["driver_specific"]["lvol"]["map_id"]
+    except (TypeError, KeyError, IndexError):
+        remote_map_id = None
+    if not remote_map_id:
+        logger.error(f"map_id of receiving lvol {remote_lv.top_bdev} not found on "
+                     f"{remote_lv.node_id}; not starting a transfer that cannot land")
+        task.function_result = "receiving lvol map_id unavailable, retrying"
+        task.status = JobSchedule.STATUS_SUSPENDED
+        task.retry += 1
+        task.write_to_db()
+        return
 
     offset = 0
     if "offset" in task.function_params and task.function_params["offset"]:
@@ -108,8 +112,9 @@ def process_snap_replicate_start(task, snapshot):
         name=snapshot.snap_bdev,
         offset=offset,
         batch_size=16,
-        bdev_name=f"{remote_lv.top_bdev}n1",
-        operation="replicate"
+        bdev_name=hub_bdev,
+        operation="replicate",
+        lvol_id=remote_map_id
     )
     task.status = JobSchedule.STATUS_RUNNING
     task.function_params["start_time"] = int(time.time())
@@ -118,6 +123,72 @@ def process_snap_replicate_start(task, snapshot):
     if snapshot.status != SnapShot.STATUS_IN_REPLICATION:
         snapshot.status = SnapShot.STATUS_IN_REPLICATION
         snapshot.write_to_db()
+
+
+def _decouple_snapshot_children(target_snapshot_uuid):
+    """Detach dependents from a target snapshot before retention deletes it.
+
+    On the target every replicated snapshot is chained onto its predecessor
+    (add_clone at receive time), so the newest snapshot READS THROUGH the older
+    ones. Deleting an older one without decoupling destroys the shared clusters
+    the survivors depend on: the newest snapshot keeps a valid superblock (its
+    own delta) but the file tree/content underneath is gone — the empty-XFS /
+    missing-baseline signature seen on the 2026-08-13 lab.
+
+    bdev_lvol_decouple_parent copies the parent's allocated clusters into the
+    child, after which the parent is safe to delete. Applied to every child
+    SPDK reports, on the primary and its online secondary. Returns False when
+    any decouple fails (caller keeps the snapshot and retries next pass).
+    """
+    try:
+        target_snap = db.get_snapshot_by_id(target_snapshot_uuid)
+        node = db.get_storage_node_by_id(target_snap.lvol.node_id)
+    except (KeyError, AttributeError):
+        return True  # snapshot or node record gone — nothing to protect
+
+    lvs = target_snap.snap_bdev.split("/")[0]
+    ret = node.rpc_client().get_bdevs(target_snap.snap_bdev)
+    try:
+        children = ret[0]["driver_specific"]["lvol"].get("clones") or []
+    except (TypeError, KeyError, IndexError):
+        children = []
+    if not children:
+        return True
+
+    nodes = [node]
+    if node.secondary_node_id:
+        try:
+            sec = db.get_storage_node_by_id(node.secondary_node_id)
+            if sec.status == StorageNode.STATUS_ONLINE:
+                nodes.append(sec)
+        except KeyError:
+            pass
+
+    for child in children:
+        for n in nodes:
+            if not n.rpc_client().bdev_lvol_decouple_parent(f"{lvs}/{child}"):
+                logger.error("decouple_parent failed for %s/%s on %s",
+                             lvs, child, n.get_id())
+                return False
+        logger.info("Decoupled %s/%s from %s before pruning", lvs, child,
+                    target_snap.snap_bdev)
+    return True
+
+
+def _has_dependent_clone(snapshot_uuid):
+    """True when any live volume is cloned from *snapshot_uuid*.
+
+    A failed-over volume is a clone of the last replicated target snapshot, so
+    that snapshot must outlive it. Uses the mini index (same source the snapshot
+    delete path consults) and ignores volumes that are themselves going away.
+    """
+    for lvol in db.get_mini_lvols():
+        if lvol.cloned_from_snap != snapshot_uuid:
+            continue
+        if lvol.status == LVol.STATUS_IN_DELETION:
+            continue
+        return True
+    return False
 
 
 def _prune_internal_snapshots(source_lvol):
@@ -153,6 +224,21 @@ def _prune_internal_snapshots(source_lvol):
             db.get_snapshot_by_id(target_uuid)
         except KeyError:
             target_uuid = ""  # already gone — fall through to source cleanup
+        if target_uuid and not _decouple_snapshot_children(target_uuid):
+            logger.warning("Keeping replicated snapshot pair %s/%s: could not "
+                           "decouple its dependent children yet", snap.get_id(), target_uuid)
+            continue
+        if target_uuid and _has_dependent_clone(target_uuid):
+            # Never prune a target snapshot a volume is cloned from. The delete
+            # reaches SPDK as bdev_lvol_delete(sync=False) and frees the blocks
+            # there and then, so no downstream DB-level guard can save the clone:
+            # a failed-over volume built on this snapshot would silently start
+            # reading zeros. Keep both copies; the pair is released once the
+            # dependent volume is gone.
+            logger.info("Keeping replicated internal snapshot %s on source and "
+                        "%s on target: a volume is cloned from the target copy",
+                        snap.get_id(), target_uuid)
+            continue
         if target_uuid:
             logger.info("Pruning replicated internal snapshot on target: %s", target_uuid)
             if not snapshot_controller.delete(target_uuid):
@@ -165,10 +251,10 @@ def _prune_internal_snapshots(source_lvol):
 
 def process_snap_replicate_finish(task, snapshot):
 
-    # detach remote lvol
+    # NOTE: no per-volume controller to detach any more — transfers go over the
+    # target's shared transfer hublvol, which stays attached for reuse across
+    # cycles (same lifecycle as the migration runner's hub).
     remote_lv = db.get_lvol_by_id(task.function_params["remote_lvol_id"])
-    snode = db.get_storage_node_by_id(snapshot.lvol.node_id)
-    snode.rpc_client().bdev_nvme_detach_controller(remote_lv.top_bdev)
     remote_snode = db.get_storage_node_by_id(remote_lv.node_id)
     replicate_to_source = task.function_params["replicate_to_source"]
     if "replicate_as_snap_instance" in task.function_params:
@@ -313,7 +399,7 @@ def task_runner(task: JobSchedule):
             snapshot.write_to_db()
 
         remote_lv = db.get_lvol_by_id(task.function_params["remote_lvol_id"])
-        snode.rpc_client().bdev_nvme_detach_controller(remote_lv.top_bdev)
+        # hub stays attached (shared transfer gateway); nothing to detach here
         lvol_controller.delete_lvol(remote_lv, force_delete=True)
 
         return True

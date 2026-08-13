@@ -728,7 +728,7 @@ jobs:
               baseURL: \"https://openbao.vault:8200\""
             ENCRYPTION_POOL_YAML="---
           apiVersion: storage.simplyblock.io/v1alpha1
-          kind: Pool
+          kind: StoragePool
           metadata:
             name: encryption-pool
             namespace: ${NAMESPACE}
@@ -762,7 +762,7 @@ jobs:
           ${VAULT_SETTINGS}
           ---
           apiVersion: storage.simplyblock.io/v1alpha1
-          kind: Pool
+          kind: StoragePool
           metadata:
             name: simplyblock-pool
             namespace: ${NAMESPACE}
@@ -785,7 +785,7 @@ jobs:
             mgmtIfname: ${MGMT_IFC}
             dataIfname:
               - ${DATA_NICS}
-            maxLogicalVolumeCount: ${MAX_LVOL}
+            maxSubsystemCount: ${MAX_LVOL}
           ${RESERVED_CPU_YAML}
             partitions: ${PARTITIONS}
             corePercentage: ${CORE_PERCENTAGE}
@@ -825,7 +825,7 @@ jobs:
           ${VAULT_SETTINGS}
           ---
           apiVersion: storage.simplyblock.io/v1alpha1
-          kind: Pool
+          kind: StoragePool
           metadata:
             name: simplyblock-pool
             namespace: ${NAMESPACE}
@@ -848,7 +848,7 @@ jobs:
             mgmtIfname: ${MGMT_IFC}
             dataIfname:
               - ${DATA_NICS}
-            maxLogicalVolumeCount: ${MAX_LVOL}
+            maxSubsystemCount: ${MAX_LVOL}
           ${RESERVED_CPU_YAML}
             partitions: ${PARTITIONS}
             corePercentage: ${CORE_PERCENTAGE}

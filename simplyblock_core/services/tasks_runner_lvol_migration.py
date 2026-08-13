@@ -720,151 +720,138 @@ def _target_role_label(node_id, tgt_node):
     return 'unknown'
 
 
-def _ensure_target_nvmf_state(migration, lvol, src_node, tgt_node, src_rpc, tgt_rpc):
+def _ensure_nvmf_state_on_node(migration, lvol, nqn, path, label, owns_subsystem, ns_composite):
+    """Detect and repair a target-side node restart that wiped the migration's
+    NVMe-oF subsystem / listener / namespace on a single path. Raises on any
+    failure to reach or repair the node; the caller decides what that means
+    (mandatory for the primary, best-effort for secondary/tertiary)."""
+    node_id = path['node_id']
+    rpc = path['rpc']
+
+    sub = rpc.subsystem_get(nqn)
+
+    if not sub:
+        if not owns_subsystem:
+            raise RuntimeError(
+                f"target {label} node {node_id[:8]} is missing subsystem {nqn} "
+                f"that this migration does not own; waiting for node recovery")
+
+        logger.warning(
+            f"_ensure_nvmf_state_on_node: subsystem {nqn} missing on "
+            f"{label} target node {node_id[:8]} (likely node restart) — recreating")
+        lo, hi = _CNTLID_RANGES.get(label, (3, 500))
+        rpc.subsystem_create(
+            nqn, lvol.ha_type, lvol.uuid, min_cntlid=random.randint(lo, hi),
+            max_namespaces=lvol.max_namespace_per_subsys)
+        if lvol.allowed_hosts:
+            _reapply_allowed_hosts(lvol, path['node'], rpc)
+        for _ip in path['ips']:
+            rpc.listeners_create(nqn, path['trtype'], _ip, path['port'],
+                                 ana_state="inaccessible")
+        ns = rpc.nvmf_subsystem_add_ns(nqn, ns_composite, lvol.uuid, lvol.guid)
+        if not ns:
+            logger.warning(
+                f"_ensure_nvmf_state_on_node: namespace add failed on "
+                f"{label} {node_id[:8]} after subsystem recreate")
+        if node_id not in migration.target_subsystem_node_ids:
+            migration.target_subsystem_node_ids.append(node_id)
+        logger.info(
+            f"_ensure_nvmf_state_on_node: recreated subsystem+listener+ns "
+            f"for migration {migration.uuid} on {label} {node_id[:8]}")
+        return
+
+    # Subsystem present — verify our listener survived.
+    listeners = rpc.listeners_list(nqn) or []
+    listener_addrs = {
+        (ls.get('address', {}).get('traddr'), str(ls.get('address', {}).get('trsvcid')))
+        for ls in listeners
+    }
+    for _ip in path['ips']:
+        if (_ip, str(path['port'])) not in listener_addrs:
+            logger.warning(
+                f"_ensure_nvmf_state_on_node: listener {_ip}:{path['port']} "
+                f"missing on {label} target node {node_id[:8]} (likely node "
+                f"restart) — recreating as inaccessible")
+            rpc.listeners_create(nqn, path['trtype'], _ip, path['port'],
+                                 ana_state="inaccessible")
+
+    # Namespace check — only on nodes whose namespace lifecycle we own;
+    # overlap nodes legitimately still point at the SRC bdev pre-cutover
+    # (the namespace swap is _handle_lvol_migrate's job, not ours).
+    if owns_subsystem:
+        ns_list = sub.get('namespaces', []) if isinstance(sub, dict) else []
+        has_ns = any(ns.get('uuid') == lvol.uuid for ns in ns_list)
+        if not has_ns:
+            logger.warning(
+                f"_ensure_nvmf_state_on_node: namespace for {lvol.uuid} "
+                f"missing on {label} target node {node_id[:8]} — re-adding")
+            ns = rpc.nvmf_subsystem_add_ns(nqn, ns_composite, lvol.uuid, lvol.guid)
+            if not ns:
+                logger.warning(
+                    f"_ensure_nvmf_state_on_node: namespace re-add failed "
+                    f"on {label} {node_id[:8]}")
+
+
+def _ensure_and_prune_target_paths(migration, lvol, tgt_node, tgt_paths):
     """
     Detect and repair a target-side node restart that wiped the migration's
-    NVMe-oF subsystem / listener / namespace before cutover.
+    NVMe-oF subsystem / listener / namespace. Called ONCE, right before
+    cutover (from _handle_lvol_migrate, before the freeze/transfer/ANA-flip
+    sequence) — subsystem/listener/namespace state on the target only matters
+    at cutover, so there is no need to poll for it during PHASE_SNAP_COPY.
 
-    A restart is inferred rather than tracked explicitly: every call re-checks
-    that the subsystem, our TGT-port listener, and (on nodes whose subsystem
-    lifecycle we own) the namespace are still present on the target primary
-    and its online secondary/tertiary, recreating whatever SPDK lost.
+    Every path is attempted regardless of an earlier failure (the caller may
+    be running this after an already-irreversible step — e.g. batch
+    migration's cutover, which runs this after bdev_lvol_batch_final_step —
+    so bailing out early is not always safe). The target primary is always
+    kept in the returned list, whether or not its own check succeeded, so
+    callers can rely on tgt_paths[0] still being the primary; its failure is
+    reported separately via the returned error string, and it is up to the
+    caller whether that means suspend-without-charging-retry-budget (solo
+    migration, before its irreversible step) or just a logged, non-fatal
+    warning (batch migration, after it).
 
-    A recreated listener is always set to ana_state="inaccessible" — pre-cutover
-    that already is the desired state, and post-final-migration
-    _handle_lvol_migrate's Done handler unconditionally re-runs its ANA-flip
-    sequence on every call, correcting it within the same tick.
+    Secondary/tertiary are always best-effort: a failure there is logged and
+    that path is dropped from the returned list instead of failing anything
+    — the rest of the ANA-flip sequence only operates on whatever's in the
+    returned list, so a dropped replica's cutover state is simply skipped for
+    this attempt. If that node is still down when it eventually restarts, the
+    ordinary per-lvol restart reconciliation in storage_node_ops.py (keyed
+    off lvol.node_id, which points at the new primary once cutover
+    completes) recreates its subsystem the normal way — no special handling
+    needed here.
 
-    Overlap nodes (subsystem shared with the SRC role) never had their
-    subsystem created by this migration — if that subsystem is entirely gone,
-    something outside migration's control needs to fix it, so this only waits.
-
-    Returns None if everything is fine (or was successfully repaired), or an
-    error string describing the transient failure.
+    Returns (pruned_tgt_paths, primary_error). primary_error is None unless
+    the target primary itself could not be verified/repaired.
     """
     nqn = lvol.nqn
-    try:
-        _, tgt_paths, _overlap_ids = _build_paths(src_node, tgt_node, src_rpc, tgt_rpc)
-    except Exception as e:
-        logger.warning(f"_ensure_target_nvmf_state: could not build target paths: {e}")
-        migration.error_message = f"target topology unavailable: {e}"
-        return migration.error_message
-
     owned_node_ids = set(migration.target_subsystem_node_ids or [])
     short_bdev = _lvol_tgt_bdev_name(lvol.lvol_bdev)
     ns_bdev_short = f"crypto_{short_bdev}" if lvol.crypto_bdev else short_bdev
     ns_composite = f"{tgt_node.lvstore}/{ns_bdev_short}"
 
+    pruned_paths = []
+    primary_error = None
     for path in tgt_paths:
         node_id = path['node_id']
-        rpc = path['rpc']
         label = _target_role_label(node_id, tgt_node)
+        is_primary = (node_id == tgt_node.get_id())
         owns_subsystem = node_id in owned_node_ids
 
         try:
-            sub = rpc.subsystem_get(nqn)
+            _ensure_nvmf_state_on_node(migration, lvol, nqn, path, label,
+                                       owns_subsystem, ns_composite)
+            pruned_paths.append(path)
         except Exception as e:
-            logger.warning(
-                f"_ensure_target_nvmf_state: subsystem_get failed on "
-                f"{label} {node_id[:8]}: {e}")
-            migration.error_message = f"could not query subsystem on {label} target node: {e}"
-            return migration.error_message
-
-        if not sub:
-            if not owns_subsystem:
-                msg = (f"target {label} node {node_id[:8]} is missing subsystem "
-                       f"{nqn} that this migration does not own; waiting for "
-                       f"node recovery")
-                logger.warning(f"_ensure_target_nvmf_state: {msg}")
-                migration.error_message = msg
-                return migration.error_message
-
-            logger.warning(
-                f"_ensure_target_nvmf_state: subsystem {nqn} missing on "
-                f"{label} target node {node_id[:8]} (likely node restart) "
-                f"— recreating")
-            try:
-                lo, hi = _CNTLID_RANGES.get(label, (3, 500))
-                rpc.subsystem_create(
-                    nqn, lvol.ha_type, lvol.uuid, min_cntlid=random.randint(lo, hi),
-                    max_namespaces=lvol.max_namespace_per_subsys)
-                if lvol.allowed_hosts:
-                    _reapply_allowed_hosts(lvol, path['node'], rpc)
-                for _ip in path['ips']:
-                    rpc.listeners_create(nqn, path['trtype'], _ip, path['port'],
-                                         ana_state="inaccessible")
-                ns = rpc.nvmf_subsystem_add_ns(nqn, ns_composite, lvol.uuid, lvol.guid)
-                if not ns:
-                    logger.warning(
-                        f"_ensure_target_nvmf_state: namespace add failed on "
-                        f"{label} {node_id[:8]} after subsystem recreate")
-                if node_id not in migration.target_subsystem_node_ids:
-                    migration.target_subsystem_node_ids.append(node_id)
-                logger.info(
-                    f"_ensure_target_nvmf_state: recreated subsystem+listener+ns "
-                    f"for migration {migration.uuid} on {label} {node_id[:8]}")
-            except Exception as e:
+            if is_primary:
+                primary_error = str(e)
+                pruned_paths.append(path)  # keep it -- caller decides what a primary failure means
+            else:
                 logger.warning(
-                    f"_ensure_target_nvmf_state: recreate failed on {label} "
-                    f"{node_id[:8]}: {e}")
-                migration.error_message = f"failed to recreate target subsystem on {label} node: {e}"
-                return migration.error_message
-            continue
-
-        # Subsystem present — verify our listener survived.
-        try:
-            listeners = rpc.listeners_list(nqn) or []
-        except Exception as e:
-            logger.warning(
-                f"_ensure_target_nvmf_state: listeners_list failed on "
-                f"{label} {node_id[:8]}: {e}")
-            migration.error_message = f"could not query listeners on {label} target node: {e}"
-            return migration.error_message
-
-        listener_addrs = {
-            (ls.get('address', {}).get('traddr'), str(ls.get('address', {}).get('trsvcid')))
-            for ls in listeners
-        }
-        for _ip in path['ips']:
-            if (_ip, str(path['port'])) not in listener_addrs:
-                logger.warning(
-                    f"_ensure_target_nvmf_state: listener {_ip}:{path['port']} "
-                    f"missing on {label} target node {node_id[:8]} (likely node "
-                    f"restart) — recreating as inaccessible")
-                try:
-                    rpc.listeners_create(nqn, path['trtype'], _ip, path['port'],
-                                         ana_state="inaccessible")
-                except Exception as e:
-                    logger.warning(
-                        f"_ensure_target_nvmf_state: listener recreate failed on "
-                        f"{label} {node_id[:8]}: {e}")
-                    migration.error_message = f"failed to recreate target listener on {label} node: {e}"
-                    return migration.error_message
-
-        # Namespace check — only on nodes whose namespace lifecycle we own;
-        # overlap nodes legitimately still point at the SRC bdev pre-cutover
-        # (the namespace swap is _handle_lvol_migrate's job, not ours).
-        if owns_subsystem:
-            ns_list = sub.get('namespaces', []) if isinstance(sub, dict) else []
-            has_ns = any(ns.get('uuid') == lvol.uuid for ns in ns_list)
-            if not has_ns:
-                logger.warning(
-                    f"_ensure_target_nvmf_state: namespace for {lvol.uuid} "
-                    f"missing on {label} target node {node_id[:8]} — re-adding")
-                try:
-                    ns = rpc.nvmf_subsystem_add_ns(nqn, ns_composite, lvol.uuid, lvol.guid)
-                    if not ns:
-                        logger.warning(
-                            f"_ensure_target_nvmf_state: namespace re-add failed "
-                            f"on {label} {node_id[:8]}")
-                except Exception as e:
-                    logger.warning(
-                        f"_ensure_target_nvmf_state: namespace re-add errored on "
-                        f"{label} {node_id[:8]}: {e}")
-                    migration.error_message = f"failed to re-add namespace on {label} node: {e}"
-                    return migration.error_message
-
-    return None
+                    f"_ensure_and_prune_target_paths: {label} {node_id[:8]} "
+                    f"unreachable/repair failed — skipping its cutover state "
+                    f"for this attempt: {e}")
+    return pruned_paths, primary_error
 
 
 # ---------------------------------------------------------------------------
@@ -1321,7 +1308,7 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                     snap = db.get_snapshot_by_id(snap_uuid)
                 except KeyError:
                     return False, True, f"Snapshot {snap_uuid} not found in DB"
-                if snap.lvol.ha_type == "ha":
+                if snap.lvol.ha_type != "single":
                     tgt_sec, sec_err = _get_target_secondary_node(tgt_node, src_node.get_id())
                     if sec_err:
                         migration.error_message = sec_err
@@ -1331,16 +1318,13 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                         return False, True, None
                     if tgt_sec:
                         sec_rpc = _make_rpc(tgt_sec)
-                elif snap.lvol.ha_type == "ha3":
-                    tgt_sec, sec_err = _get_target_secondary_node(tgt_node, src_node.get_id())
-                    if sec_err:
-                        migration.error_message = sec_err
-                        migration.write_to_db(db.kv_store)
-                        # transient replica state: suspend (via error_message),
-                        # don't charge the retry budget toward cleanup_target
-                        return False, True, None
-                    if tgt_sec:
-                        sec_rpc = _make_rpc(tgt_sec)
+
+                    # Tertiary eligibility is a property of the target node's own
+                    # LVS topology (tgt_node.tertiary_node_id), not of this lvol's
+                    # ha_type -- match every other subsystem's detection
+                    # (snapshot_controller.delete, lvol_controller, health_controller,
+                    # snapshot_monitor, storage_node_monitor, cluster_expansion,
+                    # replication_final_step all check tertiary_node_id directly).
                     tgt_ter, ter_err = _get_target_tertiary_node(tgt_node, src_node.get_id())
                     if ter_err:
                         migration.error_message = ter_err
@@ -1558,7 +1542,7 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         sec_rpc = None
         tgt_ter = None
         ter_rpc = None
-        if snap.lvol.ha_type in ("ha", "ha3"):
+        if snap.lvol.ha_type != "single":
             tgt_sec, sec_err = _get_target_secondary_node(tgt_node, src_node.get_id())
             if sec_err:
                 migration.error_message = sec_err
@@ -1568,7 +1552,11 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                 return False, True, None
             if tgt_sec:
                 sec_rpc = _make_rpc(tgt_sec)
-        if snap.lvol.ha_type == "ha3":
+
+            # Tertiary eligibility is a property of the target node's own LVS
+            # topology (tgt_node.tertiary_node_id), not of this lvol's ha_type
+            # -- match every other subsystem's detection (see the identical
+            # comment at the snap-copy call site above).
             tgt_ter, ter_err = _get_target_tertiary_node(tgt_node, src_node.get_id())
             if ter_err:
                 migration.error_message = ter_err
@@ -1768,6 +1756,21 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
     src_paths, tgt_paths, overlap_ids = _build_paths(src_node, tgt_node, src_rpc, tgt_rpc)
     src_replica_paths = src_paths[1:]  # secondary/tertiary only; primary stays live until cutover
 
+    # Detect and repair a target-side node restart that wiped the migration's
+    # NVMe-oF subsystem/listener/namespace before cutover -- run once here,
+    # right before the freeze/transfer/ANA-flip sequence below, since that
+    # state is only ever consumed at cutover (not during PHASE_SNAP_COPY).
+    # Target primary failures suspend without charging the retry budget
+    # (mirroring PHASE_CLEANUP_TARGET/SOURCE's identical transient-connectivity
+    # carve-out); secondary/tertiary failures just drop that path so the rest
+    # of this function's best-effort ANA-flip steps skip it for this attempt.
+    tgt_paths, _ensure_err = _ensure_and_prune_target_paths(migration, lvol, tgt_node, tgt_paths)
+    if _ensure_err:
+        migration.error_message = _ensure_err
+        migration.write_to_db(db.kv_store)
+        # transient replica state: suspend, don't charge the retry budget
+        return False, True, None
+
     def _flip(rpc, ip, port, trtype, state, label):
         try:
             rpc.nvmf_subsystem_listener_set_ana_state(
@@ -1865,15 +1868,23 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         }
 
     else:
-        # --- Gate: check target secondary state before creating on target primary ---
-        if lvol.ha_type == "ha":
-            _, sec_err = _get_target_secondary_node(tgt_node, src_node.get_id())
-            if sec_err:
-                migration.error_message = sec_err
-                migration.write_to_db(db.kv_store)
-                # transient replica state: suspend (via error_message),
-                # don't charge the retry budget toward cleanup_target
-                return False, True, None
+        # --- Gate: check target secondary/tertiary state before creating on
+        # target primary. tgt_sec/tgt_ter were already resolved unconditionally
+        # above (node topology, not lvol.ha_type) -- match that here instead of
+        # re-deriving readiness from ha_type. ---
+        _, sec_err = _get_target_secondary_node(tgt_node, src_node.get_id())
+        if sec_err:
+            migration.error_message = sec_err
+            migration.write_to_db(db.kv_store)
+            # transient replica state: suspend (via error_message),
+            # don't charge the retry budget toward cleanup_target
+            return False, True, None
+        _, ter_err = _get_target_tertiary_node(tgt_node, src_node.get_id())
+        if ter_err:
+            migration.error_message = ter_err
+            migration.write_to_db(db.kv_store)
+            # transient replica state: suspend, don't charge retries
+            return False, True, None
 
         # --- Start the final migration ---
 
@@ -2632,7 +2643,7 @@ def _handle_cleanup_target(migration, tgt_node, tgt_rpc, src_rpc=None):
 
         # Per-node ownership: migration.target_subsystem_node_ids is the
         # authoritative record of which nodes had their subsystem *created*
-        # by this migration (see _ensure_target_nvmf_state). An overlap node
+        # by this migration (see _ensure_and_prune_target_paths). An overlap node
         # reuses a preexisting subsystem it doesn't own, so it's never added
         # to this list — cleanup must not delete a subsystem this migration
         # never created just because the transfer failed/was cancelled.
@@ -2948,26 +2959,6 @@ def task_runner(task):
     done = suspend = False
     error = None
     next_phase = ""
-
-    # --- Target-restart reconciliation ---
-    # Before cutover, nothing else re-verifies that the target subsystem/
-    # listener/namespace created by create_migration are still there; a
-    # target (or its secondary/tertiary) restarting mid-migration silently
-    # drops them, which would otherwise only surface as a hard ANA-flip
-    # failure once PHASE_LVOL_MIGRATE's Done handler runs.  Not applicable to
-    # group workers (batch migration's shared subsystem is reconciled by its
-    # own orchestrator).
-    if not migration.migration_group_id and phase in (
-            LVolMigration.PHASE_SNAP_COPY, LVolMigration.PHASE_LVOL_MIGRATE):
-        try:
-            lvol = db.get_lvol_by_id(migration.lvol_id)
-        except KeyError:
-            return _budget_suspend(task, migration, migration.get_id(), f"LVol {migration.lvol_id} not found")
-
-        nvmf_err = _ensure_target_nvmf_state(migration, lvol, src_node, tgt_node, src_rpc, tgt_rpc)
-        if nvmf_err:
-            return _budget_suspend(task, migration, migration.get_id(),
-                                   migration.error_message or nvmf_err)
 
     try:
         if migration.migration_group_id:
@@ -3402,6 +3393,59 @@ def _handle_group_intermediate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
     return True, False, None
 
 
+def _group_worker_budget_suspend(task, migration, group_id, error_msg):
+    """Charge retry budget for a group worker; fail the WHOLE GROUP when this
+    worker's own budget is exhausted.
+
+    The top-level task_runner's retry-ceiling check (see the `if error:` block
+    after phase dispatch) never runs for group workers -- they're routed to
+    _group_worker_phase_dispatch before that point. Without this, a worker
+    hitting a persistent error just suspended forever via plain _suspend_task,
+    never reaching a terminal state; the barrier it was blocking
+    (snap_copy_done / intermediates_done / cleanup_source_done) never noticed
+    it was stuck, so the whole group hung instead of failing.
+    """
+    migration.retry_count += 1
+    migration.error_message = error_msg
+    task.function_result = error_msg
+    if migration.retry_count >= migration.max_retries:
+        logger.error(
+            f"Group worker {migration.uuid[:8]}: exceeded max retries "
+            f"({migration.max_retries}); entering cleanup_target: {error_msg}")
+        task.retry += 1
+        task.status = JobSchedule.STATUS_SUSPENDED
+        migration.phase = LVolMigration.PHASE_CLEANUP_TARGET
+        migration.current_job_id = ""
+        task.write_to_db(db.kv_store)
+        migration.write_to_db(db.kv_store)
+        migration_events.migration_phase_changed(migration)
+
+        # This worker will never signal done to its barrier now -- fail the
+        # whole group rather than let siblings (and the orchestrator) wait
+        # on it forever.
+        try:
+            group = db.get_migration_group_by_id(group_id)
+            if group.phase not in (LVolMigrationGroup.PHASE_CLEANUP_TARGET,
+                                   LVolMigrationGroup.PHASE_CLEANUP_SOURCE,
+                                   LVolMigrationGroup.PHASE_COMPLETED):
+                group.phase = LVolMigrationGroup.PHASE_CLEANUP_TARGET
+                group.error_message = (
+                    f"worker {migration.uuid[:8]} (lvol={migration.lvol_id}) "
+                    f"exceeded max retries: {error_msg}")
+                group.write_to_db(db.kv_store)
+                logger.error(
+                    f"Group {group_id[:8]}: failing whole group — worker "
+                    f"{migration.uuid[:8]} exhausted its retry budget")
+        except KeyError:
+            # Group may already be removed/cleaned up by another workflow.
+            # We keep worker cleanup flow idempotent by not re-raising.
+            logger.warning(
+                f"Group {group_id[:8]} not found while propagating worker "
+                f"{migration.uuid[:8]} retry-budget exhaustion; continuing.")
+        return False
+    return _suspend_task(task, migration, error_msg)
+
+
 def _group_worker_phase_dispatch(task, migration, phase, src_node, tgt_node, src_rpc, tgt_rpc):
     """
     Complete phase dispatcher for FN_LVOL_MIG tasks that belong to a batch
@@ -3433,7 +3477,7 @@ def _group_worker_phase_dispatch(task, migration, phase, src_node, tgt_node, src
             done, suspend, error = _handle_group_snap_copy(
                 migration, src_node, tgt_node, src_rpc, tgt_rpc)
             if error:
-                return _suspend_task(task, migration, error)
+                return _group_worker_budget_suspend(task, migration, group_id, error)
             if suspend:
                 return _suspend_task(task, migration, migration.error_message or "waiting")
             if done:
@@ -3476,7 +3520,7 @@ def _group_worker_phase_dispatch(task, migration, phase, src_node, tgt_node, src
             done, suspend, error = _handle_group_intermediate(
                 migration, src_node, tgt_node, src_rpc, tgt_rpc)
             if error:
-                return _suspend_task(task, migration, error)
+                return _group_worker_budget_suspend(task, migration, group_id, error)
             if suspend:
                 return _suspend_task(task, migration, migration.error_message or "waiting")
             if done:
@@ -3525,7 +3569,7 @@ def _group_worker_phase_dispatch(task, migration, phase, src_node, tgt_node, src
             return _suspend_task(task, migration, str(exc))
 
         if error:
-            return _suspend_task(task, migration, error)
+            return _group_worker_budget_suspend(task, migration, group_id, error)
         if suspend:
             return _suspend_task(task, migration, migration.error_message or "waiting")
         if done:

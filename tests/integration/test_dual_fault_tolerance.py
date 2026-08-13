@@ -168,7 +168,7 @@ class TestCreateClusterValidation(unittest.TestCase):
     def test_max_ft_1_no_validation_error(self, mock_db):
         """max_fault_tolerance=1 should not hit the new validation even with single ha_type."""
         import simplyblock_core.cluster_ops as ops
-        # Will fail later (e.g. distr_ndcs/npcs both 0), but not on max_ft validation
+        # Will fail later (e.g. on the erasure coding scheme), but not on max_ft validation
         with self.assertRaises(ValueError) as ctx:
             ops.create_cluster(
                 4096, 2097152, "pass", 89, 99, 250, 500,
@@ -178,8 +178,8 @@ class TestCreateClusterValidation(unittest.TestCase):
                 None, "hostip", "", "tcp", False, "",
                 max_fault_tolerance=1,
             )
-        # Should fail on ndcs/npcs both 0, not on max_ft
-        assert "distr_ndcs" in str(ctx.exception)
+        # Should fail on the unsupported (0, 0) scheme, not on max_ft
+        assert "erasure coding scheme" in str(ctx.exception)
 
 
 # ===========================================================================
