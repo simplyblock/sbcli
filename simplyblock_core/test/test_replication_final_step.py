@@ -93,34 +93,43 @@ def _install_nodes(monkeypatch, nodes_by_id):
     })())
 
 
-def test_flip_ana_failover_ordering(monkeypatch):
+def test_fence_source_paths_peers_first(monkeypatch):
+    """All source paths inaccessible BEFORE the freeze, peers before primary:
+    once the final delta is taken the source must not accept IO by any means —
+    a write on a still-optimized source path after the delta of record is
+    silently lost, and target-live-before-source-dark is dual-writable."""
     events: list = []
-    tgt_sec = _Node("T2", events, "t2", "lvs_tgt")
-    tgt = _Node("T1", events, "t1", "lvs_tgt", secondary="T2")
-    src = _Node("S1", events, "s1", "lvs_src")
-    _install_nodes(monkeypatch, {"T1": tgt, "T2": tgt_sec, "S1": src})
+    src_sec = _Node("S2", events, "s2", "lvs_src")
+    src = _Node("S1", events, "s1", "lvs_src", secondary="S2")
+    _install_nodes(monkeypatch, {"S1": src, "S2": src_sec})
 
-    rfs.flip_ana_failover(src, tgt, "lvs_src", "lvs_tgt", "nqn.orig:lvol:LV1")
+    rfs.fence_source_paths(src, "lvs_src", "nqn.orig:lvol:LV1")
 
     ana = [(nid, state) for (kind, nid, state) in events if kind == "ana"]
     assert ana == [
-        ("T1", "optimized"),
-        ("T2", "non_optimized"),
-        ("S1", "inaccessible"),
+        ("S2", "inaccessible"),   # peers first
+        ("S1", "inaccessible"),   # primary last
     ]
 
 
-def test_flip_ana_failover_skips_dead_source(monkeypatch):
+def test_fence_skips_dead_source(monkeypatch):
     events: list = []
-    tgt = _Node("T1", events, "t1", "lvs_tgt")
     src = _Node("S1", events, "s1", "lvs_src", status=StorageNode.STATUS_UNREACHABLE)
-    _install_nodes(monkeypatch, {"T1": tgt, "S1": src})
+    _install_nodes(monkeypatch, {"S1": src})
+    rfs.fence_source_paths(src, "lvs_src", "nqn.orig:lvol:LV1")
+    assert [e for e in events if e[0] == "ana"] == []
 
-    rfs.flip_ana_failover(src, tgt, "lvs_src", "lvs_tgt", "nqn.orig:lvol:LV1")
+
+def test_enable_target_paths(monkeypatch):
+    events: list = []
+    tgt_sec = _Node("T2", events, "t2", "lvs_tgt")
+    tgt = _Node("T1", events, "t1", "lvs_tgt", secondary="T2")
+    _install_nodes(monkeypatch, {"T1": tgt, "T2": tgt_sec})
+
+    rfs.enable_target_paths(tgt, "lvs_tgt", "nqn.orig:lvol:LV1")
 
     ana = [(nid, state) for (kind, nid, state) in events if kind == "ana"]
-    # Source unreachable (cluster failure) -> only target paths flipped.
-    assert ana == [("T1", "optimized")]
+    assert ana == [("T1", "optimized"), ("T2", "non_optimized")]
 
 
 def test_run_cutover_happy_path(monkeypatch):
@@ -135,9 +144,15 @@ def test_run_cutover_happy_path(monkeypatch):
 
     assert ok is True and err is None
     kinds = [e[0] for e in events]
-    # final_step happens before add_clone on the peer, before ANA flips.
+    # Source fenced (first ana) BEFORE the freeze/final_step; target enabled
+    # (last ana) only after the peer add_clone.
+    first_ana = kinds.index("ana")
+    last_ana = len(kinds) - 1 - kinds[::-1].index("ana")
+    assert first_ana < kinds.index("final_step"), "source not fenced before freeze"
+    assert events[first_ana][2] == "inaccessible"
     assert kinds.index("final_step") < kinds.index("add_clone")
-    assert kinds.index("add_clone") < kinds.index("ana")
+    assert kinds.index("add_clone") < last_ana
+    assert events[last_ana][2] in ("optimized", "non_optimized")
 
     final = [e for e in events if e[0] == "final_step"][0]
     assert final[1] == "replicate"
@@ -184,6 +199,28 @@ def test_run_cutover_final_step_failure_no_ana(monkeypatch):
 
     assert ok is False
     assert "final_step" in err or "final" in err.lower()
-    # No ANA flip and no add_clone when the final step fails.
-    assert not [e for e in events if e[0] == "ana"]
+    # The source fence runs BEFORE the freeze (by design), but the target must
+    # never be enabled and no add_clone may run when the final step fails.
+    non_fence = [e for e in events if e[0] == "ana"
+                 and e[2] not in ("inaccessible", "optimized", "non_optimized")]
+    assert not non_fence
+    # the TARGET must never be enabled on failure
+    assert not [e for e in events if e[0] == "ana" and e[1].startswith("T")
+                and e[2] in ("optimized", "non_optimized")]
     assert not [e for e in events if e[0] == "add_clone"]
+
+
+def test_final_step_failure_unfences_the_source(monkeypatch):
+    """If the freeze fails after the source was fenced, the source must be
+    restored (it is still the authoritative copy) — never left dark."""
+    events: list = []
+    tgt = _Node("T1", events, "t1", "lvs_tgt")
+    src = _Node("S1", events, "s1", "lvs_src", final_step_ret=False)
+    _install_nodes(monkeypatch, {"T1": tgt, "S1": src})
+
+    ok, _err = rfs.run_cutover(src, tgt, _Lvol(), "lvs_tgt/LVOL_1", 42, "lvs_tgt/SNAP1")
+
+    assert ok is False
+    ana = [(e[1], e[2]) for e in events if e[0] == "ana"]
+    assert ana[0] == ("S1", "inaccessible"), "fence before freeze"
+    assert ana[-1] == ("S1", "optimized"), "source restored after failed freeze"

@@ -80,24 +80,46 @@ def _flip(path, state, nqn, label):
         logger.error(f"ANA flip {label} failed (non-fatal): {e}")
 
 
-def flip_ana_failover(src_node, tgt_node, src_lvstore, tgt_lvstore, nqn):
-    """Flip ANA so the client fails over from source to target.
+def fence_source_paths(src_node, src_lvstore, nqn):
+    """Make EVERY source path inaccessible BEFORE the freeze/final transfer.
 
-    Target primary → optimized, other target paths → non_optimized, every source
-    path → inaccessible. Cross-cluster: source and target never overlap, so the
-    target is brought live before the source is fenced.
+    Once the final delta is taken, the source must not receive IO by any means:
+    a write accepted on a still-optimized source path after the delta of record
+    is silently lost, and lighting the target while the source is still
+    optimized creates a dual-writable window. Client IO queues on all-dark
+    paths (NVMe multipath semantics) and drains to the target when it is
+    enabled — the dark window is bounded by freeze + residual delta, which the
+    shrink rounds keep to seconds. Peers first, primary last.
+
+    Source may be entirely gone (fail-over after a cluster failure); flips are
+    best-effort and skipped when the source node is unreachable.
     """
+    if src_node is not None and src_node.status in [
+            StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
+        paths = _node_paths(src_node, src_lvstore)
+        for src in paths[1:] + paths[:1]:      # peers first, primary last
+            _flip(src, "inaccessible", nqn, f"SRC-{src['node_id'][:8]}")
+
+
+def restore_source_paths(src_node, src_lvstore, nqn):
+    """Failure path: re-enable the fenced source (primary optimized, peers
+    non_optimized) — the cutover did not happen, the source remains the
+    authoritative copy and must serve again."""
+    if src_node is None:
+        return
+    paths = _node_paths(src_node, src_lvstore)
+    for i, src in enumerate(paths):
+        _flip(src, "optimized" if i == 0 else "non_optimized", nqn,
+              f"SRC-{src['node_id'][:8]}(restore)")
+
+
+def enable_target_paths(tgt_node, tgt_lvstore, nqn):
+    """Bring the target paths live AFTER the final transfer: primary optimized,
+    peers non_optimized. Queued client IO drains here."""
     tgt_paths = _node_paths(tgt_node, tgt_lvstore)
     for i, tgt in enumerate(tgt_paths):
         _flip(tgt, "optimized" if i == 0 else "non_optimized", nqn,
               f"TGT-{tgt['node_id'][:8]}")
-
-    # Source may be entirely gone (fail-over after a cluster failure); flips are
-    # best-effort. Skip when the source node is unreachable to avoid blocking.
-    if src_node is not None and src_node.status in [
-            StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
-        for src in _node_paths(src_node, src_lvstore):
-            _flip(src, "inaccessible", nqn, f"SRC-{src['node_id'][:8]}")
 
 
 def ensure_hub_attached(src_rpc, tgt_node):
@@ -170,6 +192,10 @@ def run_cutover(src_node, tgt_node, lvol, tgt_lvol_composite, tgt_map_id,
     if err:
         return False, err
 
+    # Fence the source FIRST: from here on the source cannot take IO by any
+    # means; the delta the freeze copies is definitively final.
+    fence_source_paths(src_node, src_node.lvstore, lvol.nqn)
+
     logger.info(
         f"[IO-FREEZE] bdev_lvol_transfer_final_step starting: lvol={lvol.uuid} "
         f"src={src_lvol_composite} tgt_snap={tgt_snap_composite} "
@@ -178,6 +204,10 @@ def run_cutover(src_node, tgt_node, lvol, tgt_lvol_composite, tgt_map_id,
         src_lvol_composite, tgt_map_id, tgt_snap_composite,
         _FINAL_STEP_BATCH, hub_bdev, operation)
     if ret is None:
+        # The freeze failed with the source fenced: restore the source paths so
+        # the client resumes there (nothing moved; source is still authoritative)
+        # rather than leaving the volume dark until a retry succeeds.
+        restore_source_paths(src_node, src_node.lvstore, lvol.nqn)
         return False, "bdev_lvol_transfer_final_step failed"
     logger.info(f"[IO-RESUME] final step Done: lvol={lvol.uuid} io now live on target")
 
@@ -189,6 +219,6 @@ def run_cutover(src_node, tgt_node, lvol, tgt_lvol_composite, tgt_map_id,
             logger.warning(
                 f"add_clone on peer {peer.get_id()[:8]} failed for final lvol (non-fatal)")
 
-    # Flip ANA so the client fails over to the target paths.
-    flip_ana_failover(src_node, tgt_node, src_node.lvstore, tgt_node.lvstore, lvol.nqn)
+    # Light the target: queued client IO drains here.
+    enable_target_paths(tgt_node, tgt_node.lvstore, lvol.nqn)
     return True, None
