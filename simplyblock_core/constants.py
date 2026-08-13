@@ -338,6 +338,11 @@ MAX_NAMESPACES_PER_SUBSYSTEM = 50
 # this; internal readers of an already-stored config clamp with a warning.
 MAX_SUBSYSTEMS_PER_NODE = 75
 
+# Cross-cluster cutover: upper bound for the iterative delta-shrink phase
+# (snapshot -> wait replicated -> snapshot -> wait) before the final freeze.
+# Two rounds normally complete within 2 replication intervals + transfer time.
+REPL_CUTOVER_SHRINK_TIMEOUT_SEC = 900
+
 SPDK_PROXY_MULTI_THREADING_ENABLED=True
 SPDK_PROXY_TIMEOUT=60*5
 LVOL_NVME_CONNECT_RECONNECT_DELAY=2

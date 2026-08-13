@@ -3326,15 +3326,19 @@ def _resolve_target_map_id(target_node, lvol_bdev):
 def replication_commit(lvol_id):
     """Planned cutover for migration mode (and the final step of fail-back).
 
-    Builds the writable target lvol on top of the last replicated snapshot,
-    exposes it inaccessible (so it does not serve IO until cutover), then
-    enqueues the FN_REPLICATION_FINAL task that freezes source IO, transfers the
-    remaining lvol delta via bdev_lvol_transfer_final_step, and flips ANA so the
-    client fails over to the target paths.
+    Enqueues the FN_REPLICATION_FINAL task, which performs an iterative
+    delta-shrink before the freeze: snapshot -> wait until replicated+converted
+    on the target -> snapshot again (the delta now covers only the wait
+    window) -> wait again -> IMMEDIATELY build the target clone on the last
+    replicated snapshot and run the final step. Two shrink rounds bound the
+    freeze-window residual to seconds of writes, and — unlike the previous
+    single fire-and-forget pre-snapshot — guarantee the cutover base actually
+    REACHED the target: the old flow selected a base 1-2 intervals old and
+    froze without waiting, silently losing the writes in between.
 
-    Continuous replication is expected to have kept the lag small; the final
-    step copies only the residual delta under a brief IO freeze. Returns a dict
-    describing the queued cutover, or (False, error).
+    The first shrink snapshot is taken here so the pipeline starts immediately;
+    the runner owns the rest. Returns a dict describing the queued cutover, or
+    (False, error).
     """
     db_controller = DBController()
     try:
@@ -3353,73 +3357,33 @@ def replication_commit(lvol_id):
         return False
 
     source_node = db_controller.get_storage_node_by_id(lvol.node_id)
-    source_cluster = db_controller.get_cluster_by_id(source_node.cluster_id)
-    target_cluster = db_controller.get_cluster_by_id(source_cluster.snapshot_replication_target_cluster)
 
-    # Take a final short internal snapshot to shrink the delta the freeze must
-    # copy. Best-effort: the final step covers whatever residual remains.
-    _snap_uuid, snap_err = snapshot_controller.add(
+    # Shrink round 1: freeze the current top delta and let the normal
+    # replication pipeline carry it (snapshot_controller.add auto-enqueues the
+    # replication task for do_replicate volumes).
+    snap_uuid, snap_err = snapshot_controller.add(
         lvol_id, f"repl_commit_{uuid.uuid4()}", snap_type=SnapShot.TYPE_INTERNAL)
     if snap_err:
-        logger.warning(f"Final pre-cutover snapshot failed (continuing): {snap_err}")
-
-    new_lvol, snapshot, error = _clone_from_last_replicated(
-        db_controller, lvol_id, lvol, target_node,
-        source_cluster.snapshot_replication_target_pool, source_node.cluster_id)
-    if error:
-        logger.error(f"Cutover clone failed for lvol {lvol_id}: {error}")
-        return False, error
-
-    new_lvol.status = LVol.STATUS_ONLINE
-    new_lvol.write_to_db(db_controller.kv_store)
-
-    # Expose inaccessible until cutover flips ANA — the client may already be
-    # multipath-connected to these target paths (migration mode).
-    suspend_lvol(new_lvol.get_id())
-
-    tgt_map_id = _resolve_target_map_id(target_node, new_lvol.lvol_bdev)
-    if tgt_map_id is None:
-        logger.error(f"Could not resolve target map_id for {new_lvol.lvol_bdev}")
-        delete_lvol_from_node(new_lvol, target_node)
-        db_controller.release_lvol_ns_slot(new_lvol)
-        return False, "Could not resolve target map_id"
-
-    lvol_replication = LVolReplication()
-    lvol_replication.uuid = str(uuid.uuid4())
-    lvol_replication.create_dt = str(datetime.now())
-    lvol_replication.source_lvol = lvol
-    lvol_replication.target_lvol = new_lvol
-    lvol_replication.source_cluster_id = source_cluster.get_id()
-    lvol_replication.target_cluster_id = target_cluster.get_id()
-    lvol_replication.mode = lvol.replication_mode
-    lvol_replication.state = LVolReplication.STATE_CUTOVER_PENDING
-    lvol_replication.direction = LVolReplication.DIRECTION_TO_TARGET
-    lvol_replication.target_nqn = new_lvol.nqn
-    lvol_replication.target_ns_id = new_lvol.ns_id
-    lvol_replication.write_to_db(db_controller.kv_store)
+        logger.error(f"Shrink snapshot failed: {snap_err}")
+        return False, f"Shrink snapshot failed: {snap_err}"
 
     task = tasks_controller.add_replication_final_task(
-        source_cluster.get_id(), source_node.get_id(),
+        source_node.cluster_id, source_node.get_id(),
         {
             "lvol_id": lvol_id,
             "src_node_id": source_node.get_id(),
             "tgt_node_id": target_node.get_id(),
-            "tgt_lvol_composite": new_lvol.top_bdev,
-            "tgt_map_id": tgt_map_id,
-            "tgt_snap_composite": snapshot.snap_bdev,
             "operation": "replicate",
-            "replication_id": lvol_replication.get_id(),
             "final_state": LVolReplication.STATE_CUTOVER_DONE,
+            "shrink_round": 1,
+            "shrink_snap_id": snap_uuid,
+            "shrink_deadline": int(time.time()) + constants.REPL_CUTOVER_SHRINK_TIMEOUT_SEC,
         })
     if not task:
         logger.error("Failed to enqueue replication-final task")
         return False, "Failed to enqueue cutover task"
 
-    return {
-        "replication_id": lvol_replication.get_id(),
-        "target_lvol_id": new_lvol.uuid,
-        "cutover_task_queued": True,
-    }
+    return {"cutover_task_queued": True, "task_id": task}
 
 
 def replication_failback(lvol_id, source_cluster_id=None, pool_uuid=None):
