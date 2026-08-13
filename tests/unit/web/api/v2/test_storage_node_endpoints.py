@@ -112,6 +112,32 @@ class TestDeleteStorageNode:
         storage_node_ops.delete_storage_node.assert_called_once_with(
             STORAGE_NODE_ID, force=True)
 
+    def test_refused_removal_returns_400_not_500(self, client, storage_node, storage_node_ops):
+        # remove_storage_node's precondition gates (FTT, failure-domain
+        # balance, replica-relocation feasibility, ...) signal refusal via
+        # `return False`. An unhandled exception with no registered FastAPI
+        # handler becomes a 500 -- and 500 is on the operator's *retryable*
+        # list, so a permanently-infeasible removal (e.g. would leave a
+        # failure domain unbalanced) got retried forever instead of the
+        # operator resuming the node it had already suspended and failing
+        # cleanly (2026-08-13 incident). Must be a 400: non-retryable there.
+        storage_node_ops.remove_storage_node.return_value = False
+
+        response = client.delete(f'{BASE}/{STORAGE_NODE_ID}/')
+
+        assert response.status_code == 400
+        storage_node_ops.delete_storage_node.assert_not_called()
+
+    def test_refused_delete_after_successful_remove_returns_400(
+            self, client, storage_node, storage_node_ops):
+        storage_node_ops.remove_storage_node.return_value = 'task-uuid-1'
+        storage_node_ops.delete_storage_node.return_value = False
+
+        response = client.delete(
+            f'{BASE}/{STORAGE_NODE_ID}/', params={'force_delete': True})
+
+        assert response.status_code == 400
+
 
 class TestStorageNodeLifecycle:
 

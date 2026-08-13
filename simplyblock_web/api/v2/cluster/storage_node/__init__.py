@@ -115,18 +115,28 @@ def get(cluster: Cluster, storage_node: StorageNode):
 @instance_api.delete('/', name='clusters:storage-nodes:delete')
 def delete(
         cluster: Cluster, storage_node: StorageNode, force_remove: bool = False, force_migrate: bool = False, force_delete: bool = False) -> Response:
+    # remove_storage_node's precondition gates (FTT, failure-domain balance,
+    # replica-relocation feasibility, ...) reject via `return False` rather
+    # than a specific exception (see the reason string it logs via
+    # logger.error) -- tracked as a bigger refactor, not done here. But an
+    # unhandled ValueError with no registered handler becomes an HTTP 500,
+    # and 500 is on the operator's *retryable* list (webapi/errorclass.go)
+    # -- so a permanently-infeasible removal (e.g. would unbalance failure
+    # domains) was retried forever instead of the operator resuming the
+    # node it had already suspended and failing cleanly (2026-08-13
+    # incident). 400 is correctly classified as non-retryable there.
     none_or_false = storage_node_ops.remove_storage_node(
             storage_node.get_id(), force_remove=force_remove, force_migrate=force_migrate
     )
     if none_or_false == False:  # noqa
-        raise ValueError('Failed to remove storage node')
+        raise HTTPException(400, 'Failed to remove storage node')
 
     if force_delete:
         none_or_false = storage_node_ops.delete_storage_node(
             storage_node.get_id(), force=force_delete
         )
         if none_or_false == False:  # noqa
-            raise ValueError('Failed to delete storage node')
+            raise HTTPException(400, 'Failed to delete storage node')
 
     return Response(status_code=204)
 
