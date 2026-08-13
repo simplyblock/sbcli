@@ -104,25 +104,10 @@ def process_snap_replicate_start(task, snapshot):
         task.write_to_db()
         return
 
-    # Receive mode is MANDATORY before the transfer starts. migration_flag on
-    # the receiving lvol (a) stamps its blob writes special_io=1, which the
-    # raid layer encodes into the LBA and the distrib stack uses for
-    # receive-mode placement, and (b) arms the hub write handler's detection of
-    # the end-of-transfer signal (vbdev_lvol hublvol_write: flag + 1 page at
-    # page 0 -> process_migration_write_request finalises the receive). Without
-    # it the payload lands as ordinary client IO and the completion signal is
-    # written ONTO LBA 0 as data — the receive never finalises and every clone
-    # of the converted snapshot reads zeros. add_clone/convert clear the flag,
-    # completing the lifecycle. The migration runner has always set it
-    # (tasks_runner_lvol_migration step 3); replication never did.
-    if not remote_lv_node.rpc_client().bdev_lvol_set_migration_flag(remote_lv.top_bdev):
-        logger.error(f"set_migration_flag failed for {remote_lv.top_bdev}")
-        task.function_result = "set_migration_flag failed, retrying"
-        task.status = JobSchedule.STATUS_SUSPENDED
-        task.retry += 1
-        task.write_to_db()
-        return
-
+    # NOTE deliberately NO bdev_lvol_set_migration_flag here: the flag drives the
+    # distrib-level special_io machinery of INTRA-cluster migration; it has no
+    # place in a cross-cluster receive (the source cluster's map/COW context does
+    # not exist on the target cluster).
     offset = 0
     if "offset" in task.function_params and task.function_params["offset"]:
         offset = task.function_params["offset"]
