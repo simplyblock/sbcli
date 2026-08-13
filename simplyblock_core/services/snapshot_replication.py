@@ -71,35 +71,38 @@ def process_snap_replicate_start(task, snapshot):
         task.write_to_db()
         return
 
-    # 2 connect to it
-    ret = snode.rpc_client().bdev_nvme_controller_list(remote_lv.top_bdev)
-    if not ret:
-        remote_snode = db.get_storage_node_by_id(remote_lv.node_id)
-        for nic in remote_snode.data_nics:
-            ip = nic.ip4_address
-            ret = snode.rpc_client().bdev_nvme_attach_controller(
-                remote_lv.top_bdev, remote_lv.nqn, ip, remote_lv.subsys_port, nic.trtype)
-            if not ret:
-                msg = "controller attach failed"
-                logger.error(msg)
-                raise RuntimeError(msg)
-            bdev_name = ret[0]
-            if not bdev_name:
-                msg = "Bdev name not returned from controller attach"
-                logger.error(msg)
-                raise RuntimeError(msg)
-            bdev_found = False
-            for i in range(5):
-                ret = snode.rpc_client().get_bdevs(bdev_name)
-                if ret:
-                    bdev_found = True
-                    break
-                else:
-                    time.sleep(1)
+    # 2 attach the TARGET NODE'S TRANSFER HUBLVOL on the source. Transfers must
+    # go over a hublvol: the fork demuxes each write by the map id carried in
+    # the top 16 bits of the LBA (lvol_map.lvol[offset >> 48]) and that demux
+    # only exists on a hublvol namespace. The receiving volume's own namespace
+    # is not a valid transfer gateway. This mirrors the (working) migration
+    # runner, which has always sent bulk transfers hub+map_id.
+    from simplyblock_core.services.replication_final_step import ensure_hub_attached
+    _hub_ctrl, hub_bdev, hub_err = ensure_hub_attached(snode.rpc_client(), remote_lv_node)
+    if hub_err:
+        logger.error(f"Transfer hub attach failed: {hub_err}")
+        task.function_result = "transfer hub attach failed, retrying"
+        task.status = JobSchedule.STATUS_SUSPENDED
+        task.retry += 1
+        task.write_to_db()
+        return
 
-            if not bdev_found:
-                logger.error("lvol Bdev not found after 5 attempts")
-                raise RuntimeError(f"Failed to connect to lvol: {remote_lv.get_id()}")
+    # The receiving volume's map id rides in every write's LBA (see above); the
+    # hub uses it to route the data into the receiving volume. Without it the
+    # transfer cannot land.
+    ret = remote_lv_node.rpc_client().get_bdevs(remote_lv.top_bdev)
+    try:
+        remote_map_id = ret[0]["driver_specific"]["lvol"]["map_id"]
+    except (TypeError, KeyError, IndexError):
+        remote_map_id = None
+    if not remote_map_id:
+        logger.error(f"map_id of receiving lvol {remote_lv.top_bdev} not found on "
+                     f"{remote_lv.node_id}; not starting a transfer that cannot land")
+        task.function_result = "receiving lvol map_id unavailable, retrying"
+        task.status = JobSchedule.STATUS_SUSPENDED
+        task.retry += 1
+        task.write_to_db()
+        return
 
     offset = 0
     if "offset" in task.function_params and task.function_params["offset"]:
@@ -109,8 +112,9 @@ def process_snap_replicate_start(task, snapshot):
         name=snapshot.snap_bdev,
         offset=offset,
         batch_size=16,
-        bdev_name=f"{remote_lv.top_bdev}n1",
-        operation="replicate"
+        bdev_name=hub_bdev,
+        operation="replicate",
+        lvol_id=remote_map_id
     )
     task.status = JobSchedule.STATUS_RUNNING
     task.function_params["start_time"] = int(time.time())
@@ -193,10 +197,10 @@ def _prune_internal_snapshots(source_lvol):
 
 def process_snap_replicate_finish(task, snapshot):
 
-    # detach remote lvol
+    # NOTE: no per-volume controller to detach any more — transfers go over the
+    # target's shared transfer hublvol, which stays attached for reuse across
+    # cycles (same lifecycle as the migration runner's hub).
     remote_lv = db.get_lvol_by_id(task.function_params["remote_lvol_id"])
-    snode = db.get_storage_node_by_id(snapshot.lvol.node_id)
-    snode.rpc_client().bdev_nvme_detach_controller(remote_lv.top_bdev)
     remote_snode = db.get_storage_node_by_id(remote_lv.node_id)
     replicate_to_source = task.function_params["replicate_to_source"]
     if "replicate_as_snap_instance" in task.function_params:
@@ -341,7 +345,7 @@ def task_runner(task: JobSchedule):
             snapshot.write_to_db()
 
         remote_lv = db.get_lvol_by_id(task.function_params["remote_lvol_id"])
-        snode.rpc_client().bdev_nvme_detach_controller(remote_lv.top_bdev)
+        # hub stays attached (shared transfer gateway); nothing to detach here
         lvol_controller.delete_lvol(remote_lv, force_delete=True)
 
         return True
