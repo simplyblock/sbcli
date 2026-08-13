@@ -102,7 +102,7 @@ tests = get_load_tests()
 selected_test = None
 
 for cls in tests:
-    if args.testname.lower() in cls.__name__.lower():
+    if args.testname.lower() == cls.__name__.lower():
         selected_test = cls
         break
 
