@@ -223,6 +223,54 @@ def _find_lvs_leader(cluster_id, lvs_name, all_nodes):
 _OBJECT_LOCK_PREFIX = "__obj__"
 
 
+# A peer that is not running owes nothing: its in-memory registration dies with
+# the process and is never rebuilt, because the object's record is already gone
+# from the DB by the time phase-2 runs. Only a LIVE peer (serving, or suspended
+# but still up) has state that a sync delete must clear.
+_PEER_ALIVE_STATUSES = (StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED)
+
+
+def sync_delete_on_peer(peer_node, bdev_name, primary_node_id, special_delete=False):
+    """Phase-2 sync delete on one peer. Returns True when nothing is owed.
+
+    Attempt first, classify afterwards. Pre-judging by node status queues a
+    durable task for every peer that is merely suspended, and those tasks then
+    refuse to run *because* the node is suspended — a pile that also blocks the
+    node's own shutdown (lab run 15 case 6: 46 queued sync-deletes, node stuck
+    in `suspended`). A failure is only worth a retry task when the peer is
+    still alive; when it is gone, the delete is already satisfied.
+    """
+    try:
+        ret, err = peer_node.rpc_client().delete_lvol(
+            bdev_name, sync=True, special_delete=special_delete)
+    except Exception as e:
+        ret, err = False, {"message": str(e)}
+    if ret:
+        return True
+    if isinstance(err, dict) and err.get("code") == -19:
+        logger.info(f"Sync delete of {bdev_name} on {peer_node.get_id()[:8]}: "
+                    f"already absent")
+        return True
+
+    try:
+        fresh = db_controller.get_storage_node_by_id(peer_node.get_id())
+        status = fresh.status
+    except Exception:
+        status = peer_node.status
+    if status not in _PEER_ALIVE_STATUSES:
+        logger.info(
+            f"Ignoring sync-delete failure for {bdev_name} on "
+            f"{peer_node.get_id()[:8]}: node is {status}, its registration is "
+            f"gone with the process and is not rebuilt")
+        return True
+
+    logger.error(f"Failed to sync delete bdev: {bdev_name} from node: "
+                 f"{peer_node.get_id()} ({err}), adding task...")
+    tasks_controller.add_lvol_sync_del_task(
+        peer_node.cluster_id, peer_node.get_id(), bdev_name, primary_node_id)
+    return False
+
+
 _CHAIN_WALK_MAX_HOPS = 256
 
 
