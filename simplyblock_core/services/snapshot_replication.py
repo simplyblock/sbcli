@@ -245,6 +245,64 @@ def _prune_internal_snapshots(source_lvol):
             logger.warning("Failed to delete source internal snapshot %s, will retry", snap.get_id())
 
 
+def _previous_replicated_snapshot(snapshot, replicate_to_source):
+    """The newest older snapshot of the same lvol whose copy already exists on
+    the remote cluster — the chain target for the snapshot being finalized.
+
+    ``snap_ref_id`` wins when populated, but internal replication snapshots
+    are created without it, so fall back to age ordering. Returns None only
+    when the snapshot genuinely has no replicated predecessor (first snapshot
+    of the volume)."""
+    if snapshot.snap_ref_id:
+        try:
+            return db.get_snapshot_by_id(snapshot.snap_ref_id)
+        except KeyError as e:
+            logger.error("snap_ref_id %s unresolvable: %s", snapshot.snap_ref_id, e)
+    attr = ("source_replicated_snap_uuid" if replicate_to_source
+            else "target_replicated_snap_uuid")
+    prev = None
+    for s in db.get_snapshots_by_node_id(snapshot.lvol.node_id):
+        if (s.lvol.get_id() == snapshot.lvol.get_id()
+                and s.get_id() != snapshot.get_id()
+                and getattr(s, attr, "")
+                and s.status != SnapShot.STATUS_IN_DELETION
+                and s.created_at < snapshot.created_at
+                and (prev is None or s.created_at > prev.created_at)):
+            prev = s
+    return prev
+
+
+def _resolve_chain_target(snapshot, replicate_to_source, remote_snode):
+    """Resolve the remote-cluster snapshot the new copy must be chained to.
+
+    Returns ``(target_prev_snap, prev_snap_for_db, ok)``. ``ok`` is False when
+    a replicated predecessor exists but its remote copy cannot be used — the
+    caller must fail-and-retry rather than finalize an unchained snapshot: an
+    unchained copy reads only its own delta (zeros elsewhere) and retention's
+    delete cannot swap-merge segments into a successor."""
+    prev_snap = _previous_replicated_snapshot(snapshot, replicate_to_source)
+    if not prev_snap:
+        return None, None, True
+    remote_copy_uuid = (prev_snap.source_replicated_snap_uuid
+                        if replicate_to_source
+                        else prev_snap.target_replicated_snap_uuid)
+    try:
+        _snap_obj = db.get_snapshot_by_id(remote_copy_uuid)
+    except KeyError as e:
+        logger.error(
+            "Predecessor snapshot %s has remote copy %s but it cannot be "
+            "resolved (%s); refusing to finalize an unchained snapshot",
+            prev_snap.get_id(), remote_copy_uuid, e)
+        return None, None, False
+    if _snap_obj.lvol.node_id != remote_snode.get_id():
+        logger.error(
+            "Predecessor remote copy %s lives on node %s but the new snapshot "
+            "is on %s; cannot chain across lvstores",
+            remote_copy_uuid, _snap_obj.lvol.node_id, remote_snode.get_id())
+        return None, None, False
+    return {"snap_bdev": _snap_obj.snap_bdev}, _snap_obj, True
+
+
 def process_snap_replicate_finish(task, snapshot):
 
     # Close the transfer session — but ONLY when this was the last active
@@ -266,27 +324,19 @@ def process_snap_replicate_finish(task, snapshot):
         replicate_as_snap_instance = task.function_params["replicate_as_snap_instance"]
     else:
         replicate_as_snap_instance = False
-    target_prev_snap: Optional[dict] = None
-    _prev_snap_for_db: Optional[SnapShot] = None
-    if replicate_to_source:
-        org_snap = db.get_snapshot_by_id(snapshot.snap_ref_id)
-        try:
-            _snap_obj = db.get_snapshot_by_id(org_snap.source_replicated_snap_uuid)
-            target_prev_snap = {"snap_bdev": _snap_obj.snap_bdev}
-            _prev_snap_for_db = _snap_obj
-        except KeyError as e:
-            logger.error(e)
-    else:
-        if snapshot.snap_ref_id:
-            try:
-                prev_snap = db.get_snapshot_by_id(snapshot.snap_ref_id)
-                for sn_inst in prev_snap.instances:
-                    if sn_inst["lvol"]["node_id"] == remote_snode.get_id():
-                        target_prev_snap = sn_inst
-                        _prev_snap_for_db = prev_snap
-                        break
-            except KeyError as e:
-                logger.error(e)
+    # Resolve the predecessor's copy on the REMOTE cluster and chain the new
+    # snapshot to it. Without this link every replicated snapshot is a
+    # standalone blob: a fail-over clone reads only the last delta and zeros
+    # elsewhere, and retention's delete cannot swap-merge segments into a
+    # successor (all-zeros DR fail-over, labs 2026-08-10..14; chain_attempts=0
+    # in every run because snap_ref_id is never populated on internal
+    # snapshots). Resolve the predecessor by lvol + age instead, and if one
+    # exists but its remote copy cannot be resolved, fail and retry rather
+    # than silently building an unchained snapshot.
+    target_prev_snap, _prev_snap_for_db, ok = _resolve_chain_target(
+        snapshot, replicate_to_source, remote_snode)
+    if not ok:
+        return False
 
     # Leadership gate BEFORE chain/convert on the primary: a convert on a
     # non-leader returns success without persisting (silent conversion error).
