@@ -3862,6 +3862,9 @@ def _delete_replica_on_peer(peer, primary, cluster):
     lvstore = primary.lvstore
     if not lvstore:
         return
+    # peer's own hublvol subsystem for this replica has no consumers -- only
+    # a promoted primary's hublvol is ever attached-to -- so it sits dormant
+    # and is cleaned up naturally on peer's next restart; left alone here.
     # try:
     #     nqn = peer.hublvol_nqn_for_lvstore(cluster.nqn, lvstore)
     #     if rpc_client.subsystem_get(nqn):
@@ -3872,6 +3875,24 @@ def _delete_replica_on_peer(peer, primary, cluster):
     #     rpc_client.bdev_lvol_delete_hublvol(lvstore)
     # except RPCException as e:
     #     logger.warning(f"hublvol bdev teardown for {lvstore} on {peer.get_id()} failed: {e}")
+
+    # UNLIKE the subsystem above, peer's NVMe-oF controller connecting TO
+    # primary's hublvol *is* a live consumer connection (kept attached the
+    # whole time peer held this replica, for fast failover) and must be
+    # detached here -- mirrors teardown_non_leader_lvstore's step 2. Leaving
+    # it dangling is not harmless: if peer is later re-selected to host a
+    # replica of this same primary again before its next restart, the stale
+    # controller can be found wedged in a non-enabled state, and the
+    # reconcile's detach-and-wait-gone can then time out and abort the
+    # rebuild (2026-08-14: this exact sequence took ffznh's SPDK down --
+    # this connection was left behind by an earlier splice eviction and
+    # ffznh was never restarted before being re-selected as 5bc9k's
+    # secondary again).
+    if primary.hublvol and primary.hublvol.bdev_name:
+        try:
+            rpc_client.bdev_nvme_detach_controller(primary.hublvol.bdev_name)
+        except RPCException as e:
+            logger.warning(f"hublvol controller detach for {lvstore} on {peer.get_id()} failed: {e}")
     try:
         # deepcopy: _remove_bdev_stack stamps bdev['status']; don't mutate the
         # primary's stored stack definition.
