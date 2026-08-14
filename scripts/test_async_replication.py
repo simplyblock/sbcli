@@ -32,6 +32,7 @@ before the cutover runner flips ANA.
 """
 import json
 import os
+import re
 import socket
 import sys
 import time
@@ -431,6 +432,15 @@ def prepare_mount_points(client_ip, key_path):
         "sudo timeout 15 umount -f \"$m\" 2>/dev/null "
         "|| sudo timeout 15 umount -l \"$m\" 2>/dev/null || true; "
         "sudo rmdir \"$m\" 2>/dev/null || true; done", check=False, timeout=180)
+    # Full NVMe reset: disconnect every simplyblock subsystem. Stale fenced
+    # paths from a previous case hold hung IO; a lazy umount pinned on one can
+    # complete minutes later and rip a freshly created mountpoint out from
+    # under the next case (run 12: baseline dd hit ENOENT on /mnt/repl0).
+    run(client_ip, key_path,
+        "for n in $(sudo nvme list-subsys 2>/dev/null "
+        "| grep -oE 'nqn\\.2023-02\\.io\\.simplyblock:[^ ,]+'); do "
+        "sudo timeout 20 nvme disconnect -n \"$n\" >/dev/null 2>&1 || true; done",
+        check=False, timeout=300)
 
 
 # --------------------------------------------------------------------------- #
@@ -714,15 +724,29 @@ def test_case_1(meta):
     states = {}
     done = 0
     connected_targets = set()
+    src_nqn_by_lvol = {m["lvol"]: m["nqn"] for m in mounts}
     while time.time() - start < CUTOVER_WAIT_TIMEOUT:
         if not fio_alive(client_ip, key_path):
             raise RuntimeError("FAIL: fio stopped during online migration (interrupted)")
         targets = failed_over_targets_any_state(mgmt_ip, key_path, lvols)
         for src_lv, tgt_lv in targets.items():
-            if tgt_lv and tgt_lv not in connected_targets:
+            if tgt_lv:
+                # Connect the TARGET-cluster paths under the SOURCE volume's
+                # NQN: the cutover mirrors the subsystem on the target nodes
+                # (same NQN, ANA-managed), so these paths aggregate into the
+                # client's existing multipath device and IO continues on the
+                # same /dev/nvmeXnY through the flip. Connecting the clone's
+                # own internal NQN instead creates a separate subsystem the
+                # mounts never use — the old device then loses all paths at
+                # the fence and every IO on it hangs (run 10). Re-attempt each
+                # poll until cutover completes: duplicates are rejected
+                # harmlessly and the mirror may appear mid-loop.
                 conn = get_connect_cmds(mgmt_ip, key_path, tgt_lv)
+                src_nqn = src_nqn_by_lvol.get(src_lv, "")
                 for cmd in conn.get("connect", []):
-                    run(client_ip, key_path, cmd, check=False)
+                    if src_nqn:
+                        cmd = re.sub(r"--nqn=\S+", f"--nqn={src_nqn}", cmd)
+                    run(client_ip, key_path, cmd, check=False, quiet=True)
                 connected_targets.add(tgt_lv)
         states = replication_states(mgmt_ip, key_path, lvols)
         done = sum(1 for s in states.values() if s in ("cutover_done", "failed_over"))
@@ -753,11 +777,35 @@ def test_case_1(meta):
     # 7. FULL-SURFACE data verification through the cutover volume: remount
     #    (fresh cache) and md5 the baseline, now served by the TARGET cluster.
     print("Verifying deep data through the cutover volumes (baseline md5)...")
-    for m in mounts:
+    # Reconnect cleanly instead of reusing the pre-cutover devices. Any source
+    # path the client still holds is fenced (ANA inaccessible), so IO on the old
+    # device blocks in the kernel forever — umount/mount then hang in D-state and
+    # `timeout` cannot kill them (runs 10 and 14). Drop every simplyblock path,
+    # attach the volume where it now lives, and verify there. This is the same
+    # pattern case 2 uses for its post-fail-over verification.
+    prepare_mount_points(client_ip, key_path)
+    targets = failed_over_targets_any_state(mgmt_ip, key_path, lvols)
+    verify_mounts = []
+    for idx, lv in enumerate(lvols):
+        tgt_lv = targets.get(lv) or lv
+        conn = get_connect_cmds(mgmt_ip, key_path, tgt_lv)
+        for cmd in conn.get("connect", []):
+            run(client_ip, key_path, cmd, check=False)
+        time.sleep(4)
+        devs = _newest_spdk_devs(client_ip, key_path, 1)
+        if not devs:
+            print(f"  vol{idx}: no device appeared for {tgt_lv}")
+            continue
+        mnt = f"{MOUNT_BASE}_cut{idx}"
         run(client_ip, key_path,
-            f"sudo timeout 30 umount {m['mount']} 2>/dev/null; "
-            f"sudo timeout 30 mount {m['dev']} {m['mount']}", check=False)
-    ok, details = verify_baseline(client_ip, key_path, mounts, baseline)
+            f"sudo mkdir -p {mnt} && sudo timeout 60 mount -o ro,norecovery {devs[0]} {mnt}",
+            check=False)
+        # verify_baseline keys on the SOURCE lvol id (that is how baseline was
+        # recorded), so keep that id on the mount record.
+        verify_mounts.append({"lvol": lv, "nqn": conn.get("nqn", ""),
+                              "dev": devs[0], "mount": mnt})
+    ok, details = verify_baseline(client_ip, key_path, verify_mounts, baseline)
+    mounts = verify_mounts or mounts
     cleanup_client(client_ip, key_path, mounts)
     if not ok:
         raise RuntimeError(
