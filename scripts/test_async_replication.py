@@ -310,6 +310,28 @@ def _newest_spdk_devs(client_ip, key_path, count):
     return [d for d in out.split() if d]
 
 
+def _dev_for_nqn(client_ip, key_path, nqn, tries=6):
+    """Resolve the namespace block device serving *nqn* via sysfs.
+
+    Device-node mtime ordering (`ls -1t`) is not a reliable identity: after a
+    fail-over the volume's device is an EXISTING node whose mtime never
+    changes, so the "newest" pick returned an unrelated stale device and the
+    mount failed with rc=32 (run 15, cases 3 and 4). The subsystem NQN is the
+    identity the control plane hands us, so match on it directly.
+    """
+    for _ in range(tries):
+        out = run(client_ip, key_path,
+                  "for s in /sys/class/nvme-subsystem/nvme-subsys*; do "
+                  f"[ \"$(cat $s/subsysnqn 2>/dev/null)\" = \"{nqn}\" ] || continue; "
+                  "ls $s 2>/dev/null | grep -E '^nvme[0-9]+n[0-9]+$' | head -1; "
+                  "done", check=False, quiet=True)
+        devs = [d for d in out.split() if d]
+        if devs:
+            return f"/dev/{devs[0]}"
+        time.sleep(3)
+    return ""
+
+
 def connect_and_mount(client_ip, key_path, mgmt_ip, lvols, fmt=True, mount_base=MOUNT_BASE):
     """Connect each lvol on the client and mount it. Returns [{lvol,nqn,dev,mount}]."""
     prepare_mount_points(client_ip, key_path)
@@ -320,7 +342,12 @@ def connect_and_mount(client_ip, key_path, mgmt_ip, lvols, fmt=True, mount_base=
         for cmd in conn["connect"]:
             run(client_ip, key_path, cmd)
         time.sleep(3)
-        dev = _newest_spdk_devs(client_ip, key_path, 1)[0]
+        dev = _dev_for_nqn(client_ip, key_path, conn.get("nqn", ""))
+        if not dev:
+            found = _newest_spdk_devs(client_ip, key_path, 1)
+            if not found:
+                raise RuntimeError(f"no device appeared for {lv} (nqn={conn.get('nqn')})")
+            dev = found[0]
         mnt = f"{mount_base}{idx}"
         if fmt:
             run(client_ip, key_path, f"sudo mkfs.xfs -f {dev}")
@@ -792,13 +819,16 @@ def test_case_1(meta):
         for cmd in conn.get("connect", []):
             run(client_ip, key_path, cmd, check=False)
         time.sleep(4)
-        devs = _newest_spdk_devs(client_ip, key_path, 1)
-        if not devs:
+        dev = _dev_for_nqn(client_ip, key_path, conn.get("nqn", ""))
+        if not dev:
+            devs = _newest_spdk_devs(client_ip, key_path, 1)
+            dev = devs[0] if devs else ""
+        if not dev:
             print(f"  vol{idx}: no device appeared for {tgt_lv}")
             continue
         mnt = f"{MOUNT_BASE}_cut{idx}"
         run(client_ip, key_path,
-            f"sudo mkdir -p {mnt} && sudo timeout 60 mount -o ro,norecovery {devs[0]} {mnt}",
+            f"sudo mkdir -p {mnt} && sudo timeout 60 mount -o ro,norecovery {dev} {mnt}",
             check=False)
         # verify_baseline keys on the SOURCE lvol id (that is how baseline was
         # recorded), so keep that id on the mount record.
