@@ -46,6 +46,8 @@ MAX_LVOL = "50"
 INSTANCE_TYPE = os.environ.get("SB_INSTANCE_TYPE", "m6i.2xlarge")
 EBS_IOPS, EBS_TPUT = 6000, 500
 
+ECR_REPO = "public.ecr.aws/simply-block/simplyblock"
+
 CONFIGS = {
     # volumes: (size_gb, ...) attached beyond the 30G root
     # partitions: None = whole disks; N = create N equal GPT partitions on
@@ -55,6 +57,54 @@ CONFIGS = {
     "2part": {"volumes": (160,), "partitions": 2, "ec": (1, 1)},
     "4part": {"volumes": (220,), "partitions": 4, "ec": (2, 1)},
 }
+
+def resolve_cp_image():
+    """Control-plane image to run the cluster with.
+
+    MUST match the branch the CLI is installed from: a CP stack from an
+    image that predates a model field DROPS that field on every
+    read-modify-write — a cluster created with device_mode=lblk silently
+    reverts to nvme within minutes under an older stack (2026-08-05), and
+    add-node then refuses the lblk node config. Derived from the repo HEAD
+    unless SB_CP_IMAGE overrides, and verified to exist on ECR.
+    """
+    override = os.environ.get("SB_CP_IMAGE")
+    if override:
+        return override
+    import subprocess
+    sha = subprocess.check_output(
+        ["git", "rev-parse", "--short=8", "HEAD"],
+        cwd=os.path.dirname(os.path.abspath(__file__)),
+    ).decode().strip()
+    tag = f"{BRANCH}-{sha}"
+    if not ecr_tag_exists(tag):
+        raise RuntimeError(
+            f"CP image {ECR_REPO}:{tag} not published yet (CI still building "
+            f"HEAD {sha}?). Wait for CI, or set SB_CP_IMAGE to a published "
+            f"image that carries the same model fields.")
+    return f"{ECR_REPO}:{tag}"
+
+
+def ecr_tag_exists(tag):
+    import urllib.error
+    import urllib.request
+    token = json.load(urllib.request.urlopen(
+        "https://public.ecr.aws/token/?scope=repository:"
+        "simply-block/simplyblock:pull", timeout=30))["token"]
+    req = urllib.request.Request(
+        f"https://public.ecr.aws/v2/simply-block/simplyblock/manifests/{tag}",
+        headers={"Authorization": f"Bearer {token}",
+                 "Accept": "application/vnd.docker.distribution.manifest.v2+json, "
+                           "application/vnd.oci.image.index.v1+json, "
+                           "application/vnd.oci.image.manifest.v1+json"})
+    try:
+        urllib.request.urlopen(req, timeout=30)
+        return True
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return False
+        raise
+
 
 SBCTL = "sudo /usr/local/bin/sbctl -d"
 
@@ -179,7 +229,7 @@ def install_sbcli(ips):
         "sudo dnf install git python3-pip nvme-cli fio gdisk parted -y",
         "sudo /usr/bin/python3 -m pip install --upgrade pip setuptools wheel",
         "sudo /usr/bin/python3 -m pip install ruamel.yaml",
-        f"sudo pip install git+https://github.com/simplyblock-io/sbcli@{BRANCH}"
+        f"sudo pip install git+https://github.com/simplyblock/sbcli@{BRANCH}"
         " --upgrade --force --ignore-installed requests",
     ]
     with ThreadPoolExecutor(max_workers=len(ips)) as ex:
@@ -205,8 +255,12 @@ def get_storage_node_uuid(mgmt_ip):
 
 def deploy(config_name, keep_metadata_path=None):
     cfg = CONFIGS[config_name]
+    cp_image = resolve_cp_image()
+    # Every command that starts or joins control-plane containers must pin
+    # the image (see resolve_cp_image).
+    sbctl_img = f"sudo SIMPLY_BLOCK_DOCKER_IMAGE={cp_image} /usr/local/bin/sbctl -d"
     print(f"=== single-node lblk deploy: config={config_name}, "
-          f"branch={BRANCH}, ec={cfg['ec']} ===")
+          f"branch={BRANCH}, ec={cfg['ec']}, image={cp_image} ===")
 
     mgmt, sn = launch_instances(config_name)
     mgmt_ip, sn_ip = mgmt.public_ip_address, sn.public_ip_address
@@ -219,7 +273,7 @@ def deploy(config_name, keep_metadata_path=None):
 
     ndcs, npcs = cfg["ec"]
     ssh_exec(mgmt_ip, [
-        f"{SBCTL} cluster create"
+        f"{sbctl_img} cluster create"
         " --device-mode lblk --is-single-node"
         f" --data-chunks-per-stripe {ndcs} --parity-chunks-per-stripe {npcs}"
     ], check=True, timeout=2400)
@@ -235,7 +289,7 @@ def deploy(config_name, keep_metadata_path=None):
                      f" --blk-names {','.join(names)}")
     ssh_exec(sn_ip, [configure], check=True)
 
-    ssh_exec(sn_ip, [f"{SBCTL} sn deploy --isolate-cores --ifname {IFACE}"],
+    ssh_exec(sn_ip, [f"{sbctl_img} sn deploy --isolate-cores --ifname {IFACE}"],
              check=True)
     ssh_exec(sn_ip, ["sudo reboot"])
     time.sleep(30)
@@ -247,7 +301,7 @@ def deploy(config_name, keep_metadata_path=None):
     for attempt in range(5):
         try:
             ssh_exec(mgmt_ip, [
-                f"{SBCTL} sn add-node {cluster_uuid} {sn_priv_ip}:5000 {IFACE}"
+                f"{sbctl_img} sn add-node {cluster_uuid} {sn_priv_ip}:5000 {IFACE}"
                 " --enable-journal-device"
             ], check=True, timeout=1800)
             break
