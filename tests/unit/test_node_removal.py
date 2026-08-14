@@ -21,7 +21,7 @@ from unittest.mock import DEFAULT, MagicMock, patch
 
 from simplyblock_core import storage_node_ops
 from simplyblock_core.models.storage_node import StorageNode
-from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice
+from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice, RemoteJMDevice
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.rpc_client import RPCConnectionError, RPCException
 
@@ -965,6 +965,61 @@ class TestDecommissionDevices(unittest.TestCase):
         # The stale peer's own bookkeeping is left alone -- it's dead, not "fixed".
         self.assertEqual(stale_peer.jm_ids, [removed.jm_device.get_id()])
         stale_peer.write_to_db.assert_not_called()
+
+    def test_refreshes_peer_holding_dead_jm_only_via_hosted_primary(self):
+        # 2026-08-14 incident: _connect_to_remote_jm_devs populates
+        # remote_jm_devices from TWO sources -- a node's own jm_ids (its
+        # redundancy set for its own JM), AND, separately, whichever
+        # primary it hosts as secondary/tertiary pulls in THAT primary's
+        # jm_ids too (lvstore_stack_secondary/_tertiary). A peer reachable
+        # only through the second path never touches its own jm_ids at
+        # all, so the jm_ids-only guard above never even looks at it, and
+        # its remote_jm_devices entry for the dead JM is left stale
+        # forever. A plain removal that never reshuffles who-hosts-whom
+        # never surfaces this (peer's remote_jm_devices happens to already
+        # be right) -- it takes a splice reshuffle to expose it.
+        cl = _cluster()
+        removed = _node("n1", n_devices=0, with_jm=True)
+        removed.jm_ids = []
+        peer = _node("peer1", stack_secondary="some-primary")
+        peer.jm_ids = []  # clean -- the dead JM was never in ITS OWN set
+        stale_remote = RemoteJMDevice()
+        stale_remote.uuid = removed.jm_device.get_id()
+        peer.remote_jm_devices = [stale_remote]
+        db = FakeDB(cl, [removed, peer])
+        dc = MagicMock()
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "device_controller", dc), \
+             patch.object(storage_node_ops, "_connect_to_remote_jm_devs",
+                          return_value=[]) as connect_mock:
+            ret = storage_node_ops._decommission_node_devices(removed)
+
+        self.assertTrue(ret)
+        dc.remove_jm_device.assert_called_once()
+        connect_mock.assert_called_once_with(peer, peer.jm_ids)
+        self.assertEqual(peer.remote_jm_devices, [])
+        peer.write_to_db.assert_called_once()
+
+    def test_does_not_refresh_peer_with_no_dead_jm_reference_at_all(self):
+        # Regression guard for the new elif's condition itself: a peer with
+        # neither the dead JM in its own jm_ids NOR in remote_jm_devices
+        # must be left completely untouched.
+        cl = _cluster()
+        removed = _node("n1", n_devices=0, with_jm=True)
+        removed.jm_ids = []
+        peer = _node("peer1")
+        peer.jm_ids = []
+        peer.remote_jm_devices = []
+        db = FakeDB(cl, [removed, peer])
+        dc = MagicMock()
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "device_controller", dc), \
+             patch.object(storage_node_ops, "_connect_to_remote_jm_devs") as connect_mock:
+            ret = storage_node_ops._decommission_node_devices(removed)
+
+        self.assertTrue(ret)
+        connect_mock.assert_not_called()
+        peer.write_to_db.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
