@@ -102,6 +102,17 @@ GRAYLOG_CHECK_INTERVAL_SEC = 60
 # (run 2026-07-21).
 FDB_CLEANUP_INTERVAL_SEC = 60 * 60
 
+# Deployment mode of the FDB backup agent. Set to 'kubernetes' to run the
+# fdbbackup/fdbrestore/fdbcli commands in the agent pod through the kubernetes
+# API; anything else falls back to the management node's docker daemon.
+FDB_BACKUP_MODE = os.getenv('FDB_BACKUP_MODE', '')
+
+# Timeout for a single command executed inside the FDB backup agent
+# (fdbbackup/fdbrestore/fdbcli). `fdbbackup start -w` blocks until the backup
+# completed, so this has to cover a full backup run - the docker client's
+# 60s default silently aborted long backups with a read timeout.
+FDB_AGENT_EXEC_TIMEOUT_SEC = int(os.getenv('FDB_AGENT_EXEC_TIMEOUT_SEC', 60 * 60))
+
 # Continuous per-lvol NVMf subsystem verification + auto-repair in the lvol
 # monitor. ON by default since 2026-08-10.
 #

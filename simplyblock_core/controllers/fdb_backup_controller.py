@@ -5,70 +5,82 @@ import re
 import time
 import uuid
 
-import docker
-
 from simplyblock_core import utils, constants
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.fdb_agent_client import (
+    MODE_KUBERNETES,
+    FdbAgent,
+    FdbAgentError,
+    FdbAgentNotFoundError,
+    KubernetesFdbAgent,
+    get_fdb_agent,
+)
 from simplyblock_core.models.job_schedule import JobSchedule
 
 logger = lg.getLogger()
 db_controller = DBController()
 
-def __get_fdb_cont():
-    snode = db_controller.get_mgmt_nodes()[0]
-    if not snode:
-        return
-    node_docker = docker.DockerClient(base_url=f"tcp://{snode.docker_ip_port}", version="auto")
-    for container in node_docker.containers.list():
-        if container.name.startswith("app_fdb-backup-agent"): # type: ignore[union-attr]
-            return container
+def __get_fdb_agent() -> FdbAgent:
+    """Return the agent executing FDB commands for this deployment.
+
+    ``FDB_BACKUP_MODE=kubernetes`` selects the kubernetes API backend
+    outright. Otherwise the management node's own mode decides, which needs
+    the node anyway for the address of its docker daemon.
+
+    :raises FdbAgentNotFoundError: the cluster has no management node
+    """
+    if constants.FDB_BACKUP_MODE == MODE_KUBERNETES:
+        return KubernetesFdbAgent()
+
+    nodes = db_controller.get_mgmt_nodes()
+    if not nodes:
+        raise FdbAgentNotFoundError("No management node found")
+    return get_fdb_agent(nodes[0])
 
 def create_backup(cluster_id):
-    container = __get_fdb_cont()
-    if container:
-        cluster = db_controller.get_cluster_by_id(cluster_id)
-        backup_path = cluster.get_backup_path()
-        if cluster.backup_s3_bucket and cluster.backup_s3_cred:
-            folder = f"backup-{str(datetime.datetime.now())}"
-            folder = folder.replace(" ", "-")
-            folder = folder.replace(":", "-")
-            folder = folder.split(".")[0]
-            backup_path = f"blobstore://{cluster.backup_s3_cred}@s3.{cluster.backup_s3_region}.amazonaws.com/{folder}?bucket={cluster.backup_s3_bucket}&region={cluster.backup_s3_region}&sc=0"
+    cluster = db_controller.get_cluster_by_id(cluster_id)
+    backup_path = cluster.get_backup_path()
+    if cluster.backup_s3_bucket and cluster.backup_s3_cred:
+        folder = f"backup-{str(datetime.datetime.now())}"
+        folder = folder.replace(" ", "-")
+        folder = folder.replace(":", "-")
+        folder = folder.split(".")[0]
+        backup_path = f"blobstore://{cluster.backup_s3_cred}@s3.{cluster.backup_s3_region}.amazonaws.com/{folder}?bucket={cluster.backup_s3_bucket}&region={cluster.backup_s3_region}&sc=0"
 
-        res = container.exec_run(cmd=f"fdbbackup start -d {backup_path} -w")
-        cont = res.output.decode("utf-8")
-        logger.info(cont)
-        return True
-    return False
+    try:
+        logger.info(__get_fdb_agent().exec(f"fdbbackup start -d {backup_path} -w"))
+    except FdbAgentError as e:
+        logger.error(f"Failed to create backup: {e}")
+        return False
+    return True
 
 def list_backups(cluster_id):
-    container = __get_fdb_cont()
+    cluster = db_controller.get_cluster_by_id(cluster_id)
+    backup_path = cluster.get_backup_path()
     data = []
-    if container:
-        cluster = db_controller.get_cluster_by_id(cluster_id)
-        backup_path = cluster.get_backup_path()
-        res = container.exec_run(cmd=f"fdbbackup list -b {backup_path}")
+    try:
+        agent = __get_fdb_agent()
+        output = agent.exec(f"fdbbackup list -b {backup_path}")
         logger.info(f"backup list from : {backup_path}")
-        cont = res.output.decode("utf-8")
-        for line in cont.splitlines():
+        for line in output.splitlines():
             if not line or "backup-" not in line:
                 continue
 
             name = line.split("/")[-1].strip()
             name = name.split("?")[0]
-            size = 0
-            restorable = 0
+            size = "0"
+            restorable = "0"
             date = ""
-            version = 0
-            res = container.exec_run(cmd=f"fdbbackup describe -d {cluster.get_backup_path(name)} --version-timestamps")
-            cont = res.output.decode("utf-8")
-            for line in cont.splitlines():
-                if line and line.startswith("SnapshotBytes"):
-                    size = line.split()[1].strip()
-                if line and line.startswith("Restorable"):
-                    restorable = line.split()[1].strip()
-                if line and line.startswith("Snapshot:"):
-                    for param in line.split():
+            version = "0"
+            description = agent.exec(
+                f"fdbbackup describe -d {cluster.get_backup_path(name)} --version-timestamps")
+            for desc_line in description.splitlines():
+                if desc_line and desc_line.startswith("SnapshotBytes"):
+                    size = desc_line.split()[1].strip()
+                if desc_line and desc_line.startswith("Restorable"):
+                    restorable = desc_line.split()[1].strip()
+                if desc_line and desc_line.startswith("Snapshot:"):
+                    for param in desc_line.split():
                         if param.startswith("startVersion"):
                             version = param.split("=")[1].strip()
                         elif param.startswith("(") and param.endswith(")") and not date:# 2025/12/28.10:10:20+0000
@@ -86,34 +98,36 @@ def list_backups(cluster_id):
                 "Restorable": restorable,
                 "Date": date,
             })
+    except FdbAgentError as e:
+        logger.error(f"Failed to list backups: {e}")
+        return False
 
-        return utils.print_table(data)
-
-    return True
+    return utils.print_table(data)
 
 
 
 def backup_status():
-    container = __get_fdb_cont()
-    if container:
-        res = container.exec_run(cmd="fdbbackup status")
-        cont = res.output.decode("utf-8")
-        logger.info(f"backup status: \n{cont.strip()}")
-        return True
+    try:
+        output = __get_fdb_agent().exec("fdbbackup status")
+    except FdbAgentError as e:
+        logger.error(f"Failed to get backup status: {e}")
+        return False
+    logger.info(f"backup status: \n{output.strip()}")
+    return True
 
 
 def backup_restore(backup_name, cluster_id):
-    container = __get_fdb_cont()
-    if container:
-        cluster = db_controller.get_cluster_by_id(cluster_id)
-        backup_path = cluster.get_backup_path(backup_name)
-        res = container.exec_run(cmd="fdbcli --exec \"writemode on; clearrange \\\"\\\" \\xff\"")
-        cont = res.output.decode("utf-8")
-        logger.info(cont.strip())
-        res = container.exec_run(cmd=f"fdbrestore start -r \"{backup_path}\" --dest-cluster-file {constants.KVD_DB_FILE_PATH}")
-        cont = res.output.decode("utf-8")
-        logger.info(cont.strip())
-        return True
+    cluster = db_controller.get_cluster_by_id(cluster_id)
+    backup_path = cluster.get_backup_path(backup_name)
+    try:
+        agent = __get_fdb_agent()
+        logger.info(agent.exec("fdbcli --exec \"writemode on; clearrange \\\"\\\" \\xff\"").strip())
+        logger.info(agent.exec(
+            f"fdbrestore start -r \"{backup_path}\" --dest-cluster-file {constants.KVD_DB_FILE_PATH}").strip())
+    except FdbAgentError as e:
+        logger.error(f"Failed to restore backup {backup_name}: {e}")
+        return False
+    return True
 
 
 def parse_history_param(history_string):
@@ -155,22 +169,20 @@ def backup_configure(cluster_id, backup_path, backup_frequency, bucket_name, reg
             cluster.write_to_db()
             return True
         else:
-            container = __get_fdb_cont()
-            if container:
-                backup_path = f"blobstore://{backup_credentials}@s3.{region_name}.amazonaws.com/?bucket={bucket_name}&region={region_name}&sc=0"
-                res = container.exec_run(cmd=f"fdbbackup list -b {backup_path}")
-                cont = res.output.decode("utf-8")
-                if res.exit_code == 0:
-                    logger.info(f"backup list from : {backup_path}")
-                    logger.info(cont)
-                    cluster.backup_s3_region = region_name if region_name else ""
-                    cluster.backup_s3_bucket = bucket_name if bucket_name else ""
-                    cluster.backup_s3_cred = backup_credentials if backup_credentials else ""
-                    cluster.write_to_db()
-                else:
-                    logger.error(f"Failed to list backup from s3: {backup_path}")
-                    logger.error(cont)
-                    return False
+            backup_path = f"blobstore://{backup_credentials}@s3.{region_name}.amazonaws.com/?bucket={bucket_name}&region={region_name}&sc=0"
+            try:
+                output = __get_fdb_agent().exec(f"fdbbackup list -b {backup_path}")
+            except FdbAgentError as e:
+                logger.error(f"Failed to list backup from s3: {backup_path}")
+                logger.error(e)
+                return False
+
+            logger.info(f"backup list from : {backup_path}")
+            logger.info(output)
+            cluster.backup_s3_region = region_name if region_name else ""
+            cluster.backup_s3_bucket = bucket_name if bucket_name else ""
+            cluster.backup_s3_cred = backup_credentials if backup_credentials else ""
+            cluster.write_to_db()
         return True
 
 def add_backup_task(cluster_id):
