@@ -265,26 +265,22 @@ def process_lvol_delete_finish(cluster, lvol):
                 f"Sync delete of {lvol_bdev_name} on {sec_node.get_id()[:8]} "
                 f"already done inline; skipping")
             continue
-        if sec_node.status in [StorageNode.STATUS_ONLINE]:
-            logger.info(f"Sync delete bdev: {lvol_bdev_name} from node: {sec_node.get_id()}")
-            # Same per-node serialization as the primary: the sync delete
-            # mutates the replica blob tree and must not interleave with a
-            # create/register of another object on this node ("operation
-            # sneaked in between async and sync delete").
-            with snapshot_controller.lvstore_op_lock(
-                    cluster.get_id(), lvol.lvs_name, node_id=sec_node.get_id()):
-                ret, err = sec_node.rpc_client().delete_lvol(lvol_bdev_name, sync=True)
-            if not ret:
-                if "code" in err and err["code"] == -19:
-                    logger.error(f"Sync delete completed with error: {err}")
-                else:
-                    msg = f"Failed to sync delete bdev: {lvol_bdev_name} from node: {sec_node.get_id()}, adding task..."
-                    logger.error(msg)
-                    tasks_controller.add_lvol_sync_del_task(sec_node.cluster_id, sec_node.get_id(), lvol_bdev_name,
-                                                            primary_node.get_id())
-        elif sec_node.status in [StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN, StorageNode.STATUS_UNREACHABLE]:
-            # async delete lvol bdev from secondary
-            tasks_controller.add_lvol_sync_del_task(sec_node.cluster_id, sec_node.get_id(), lvol_bdev_name, primary_node.get_id())
+        # Attempt first, classify afterwards: a suspended peer is still up and
+        # can clear its registration, and a peer that is gone owes nothing —
+        # its in-memory state dies with the process and is not rebuilt, because
+        # the record is already deleted. Only a failure on a live peer earns a
+        # retry task. Pre-judging by status queued a task for every non-online
+        # peer, and those tasks then refused to run *because* the node was
+        # suspended, which also blocked the node's own shutdown (run 15 case 6).
+        logger.info(f"Sync delete bdev: {lvol_bdev_name} from node: {sec_node.get_id()}")
+        # Same per-node serialization as the primary: the sync delete
+        # mutates the replica blob tree and must not interleave with a
+        # create/register of another object on this node ("operation
+        # sneaked in between async and sync delete").
+        with snapshot_controller.lvstore_op_lock(
+                cluster.get_id(), lvol.lvs_name, node_id=sec_node.get_id()):
+            snapshot_controller.sync_delete_on_peer(
+                sec_node, lvol_bdev_name, primary_node.get_id())
 
     lvol_events.lvol_delete(lvol)
     lvol.remove(db.kv_store)

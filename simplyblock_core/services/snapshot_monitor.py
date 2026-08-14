@@ -103,21 +103,15 @@ def process_snap_delete_finish(snap, completed_node):
 
     lvol_bdev_name = snap.snap_bdev
     for non_leader in non_leaders:
-        if non_leader.status in [StorageNode.STATUS_ONLINE]:
-            logger.info(f"Sync delete bdev: {lvol_bdev_name} from node: {non_leader.get_id()}")
-            with snapshot_controller.lvstore_op_lock(
-                    snap.cluster_id, snap.lvol.lvs_name, node_id=non_leader.get_id()):
-                ret, err = non_leader.rpc_client().delete_lvol(lvol_bdev_name, sync=True, special_delete=special_delete)
-            if not ret:
-                if "code" in err and err["code"] == -19:
-                    logger.error(f"Sync delete completed with error: {err}")
-                else:
-                    msg = f"Failed to sync delete bdev: {lvol_bdev_name} from node: {non_leader.get_id()}, adding task..."
-                    logger.error(msg)
-                    tasks_controller.add_lvol_sync_del_task(non_leader.cluster_id, non_leader.get_id(), lvol_bdev_name, primary_node.get_id())
-
-        elif non_leader.status in [StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN, StorageNode.STATUS_UNREACHABLE]:
-            tasks_controller.add_lvol_sync_del_task(non_leader.cluster_id, non_leader.get_id(), lvol_bdev_name, primary_node.get_id())
+        # Attempt first, classify afterwards: a peer that is merely suspended
+        # is still up and can clear its registration, and one that is gone owes
+        # nothing at all. Only a failure on a live peer earns a retry task.
+        logger.info(f"Sync delete bdev: {lvol_bdev_name} from node: {non_leader.get_id()}")
+        with snapshot_controller.lvstore_op_lock(
+                snap.cluster_id, snap.lvol.lvs_name, node_id=non_leader.get_id()):
+            snapshot_controller.sync_delete_on_peer(
+                non_leader, lvol_bdev_name, primary_node.get_id(),
+                special_delete=special_delete)
 
     if snap.instances:
         logger.info("Snapshot has instances, processing them...")
