@@ -111,7 +111,7 @@ commands:
             type: str
             default: ""
           - name: "--lblk"
-            help: "Configure the node with Linux block devices (lblk cluster mode) instead of NVMe PCIe devices: eligible unmounted, unheld, unpartitioned whole disks are wrapped in SPDK AIO bdevs. Select devices with --blk-names, --blk-names-exclude or --blk-serials; without a selector, every eligible disk is used."
+            help: "Configure the node with Linux block devices (lblk cluster mode) instead of NVMe PCIe devices: eligible whole disks or partitions (unmounted, unheld; disks additionally unpartitioned) are wrapped in SPDK AIO bdevs. Select devices with --blk-names, --blk-names-exclude or --blk-serials; without a selector, every eligible whole disk is used (partitions must be selected explicitly). Minimum 2 partitions or SSDs per node. When the selection contains partitions, the smallest one is split in two at configure time: a journal partition (--jm-percent of total capacity) and a data partition."
             dest: lblk
             type: bool
             action: store_true
@@ -133,6 +133,12 @@ commands:
             required: false
             type: str
             default: ""
+          - name: "--jm-percent"
+            help: "Journal size in percent of the node's total selected capacity when the journal is carved by splitting a selected partition (requires --lblk with partitions). Default: `3`."
+            dest: jm_percent
+            required: false
+            type: int
+            default: 3
           - name: "--force"
             help: "Force format detected or passed nvme pci address to 4K and clean partitions. With --lblk: mark partitioned disks eligible; the partition wipe happens at add-node with --force-format."
             dest: force

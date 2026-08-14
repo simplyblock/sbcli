@@ -94,6 +94,15 @@ AIO_DEVICE_ABSENT_POLLS = 2
 # Kernel block devices never eligible for lblk data placement.
 LBLK_EXCLUDED_NAME_PREFIXES = ("ram", "loop", "sr", "fd", "zram", "nbd",
                                "md", "dm-", "drbd")
+# Minimum storage units (whole SSDs or partitions) per lblk node: one journal
+# home plus at least one data device.
+LBLK_MIN_DEVICES_PER_NODE = 2
+# Journal sizing when the journal is carved out of a selected unit by
+# splitting it in two (partition-backed lblk nodes): jm_percent of the node's
+# total selected capacity, floored here, and never more than
+# LBLK_JM_SPLIT_MAX_FRACTION of the unit being split.
+LBLK_JM_MIN_SIZE = 2 * 1024 * 1024 * 1024
+LBLK_JM_SPLIT_MAX_FRACTION = 0.5
 
 PMEM_DIR = '/tmp/pmem'
 

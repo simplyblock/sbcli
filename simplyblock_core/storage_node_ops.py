@@ -2496,6 +2496,26 @@ def _cluster_add_lock_heartbeat(db_controller, cluster_id, owner, stop_event):
             return
 
 
+def _find_flagged_journal_device(snode, devices):
+    """The device matching a journal-flagged lblk config entry, or None.
+
+    Partition-backed lblk nodes get their journal from the configure-time
+    partition split, which flags the resulting journal partition in the node
+    config (``journal: true``). Size-based selection would be wrong there:
+    the journal partition is not necessarily the smallest unit."""
+    jm_serials = {e.get("serial") for e in (snode.lblk_devices or [])
+                  if e.get("journal") and e.get("serial")}
+    if not jm_serials:
+        return None
+    for dev in devices:
+        if dev.serial_number in jm_serials:
+            return dev
+    logger.warning(f"Journal-flagged lblk entry {sorted(jm_serials)} not found "
+                   f"among the node's devices; falling back to smallest-device "
+                   f"journal selection")
+    return None
+
+
 def _classify_existing_endpoint_record(db_controller, cluster_id, node_addr, ssd_pcie,
                                        lblk_serials=None):
     """Classify a pre-existing storage-node record for ``node_addr`` that owns
@@ -2735,10 +2755,19 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 return False
             # Phase 1: lblk requires journal-on-device (the GPT-partition JM
             # mode detaches/re-attaches NVMe controllers to re-examine).
+            # Partition-backed nodes get their journal from the configure-time
+            # partition split (journal-flagged entry) — still the
+            # journal-on-device layout, the "device" being that partition.
             if num_partitions_per_dev != 0 and jm_percent != 0:
                 logger.error("lblk device mode requires --enable-journal-device "
                              "(journal on a dedicated device); partitioned "
                              "journal mode is not supported")
+                return False
+            if len(lblk_configured) < constants.LBLK_MIN_DEVICES_PER_NODE:
+                logger.error(
+                    f"lblk device mode requires at least "
+                    f"{constants.LBLK_MIN_DEVICES_PER_NODE} partitions or SSDs "
+                    f"per node; the node config carries {len(lblk_configured)}")
                 return False
         elif lblk_configured and not ssd_pcie:
             logger.error(
@@ -3377,10 +3406,15 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             # prepare devices
             if snode.num_partitions_per_dev == 0 or snode.jm_percent == 0:
 
-                jm_device = nvme_devs[0]
-                for index, nvme in enumerate(nvme_devs):
-                    if nvme.size < jm_device.size:
-                        jm_device = nvme
+                # Partition-backed lblk nodes carry an explicit journal entry
+                # (the configure-time partition split); otherwise the
+                # smallest device becomes the journal.
+                jm_device = _find_flagged_journal_device(snode, nvme_devs)
+                if jm_device is None:
+                    jm_device = nvme_devs[0]
+                    for index, nvme in enumerate(nvme_devs):
+                        if nvme.size < jm_device.size:
+                            jm_device = nvme
                 jm_device.status = NVMeDevice.STATUS_JM
 
                 ret = _prepare_cluster_devices_jm_on_dev(snode, nvme_devs)
@@ -4991,10 +5025,12 @@ def _restart_storage_node_impl(
         # prepare devices on new node
         if snode.num_partitions_per_dev == 0 or snode.jm_percent == 0:
 
-            jm_device = snode.nvme_devices[0]
-            for index, nvme in enumerate(snode.nvme_devices):
-                if nvme.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_NEW] and nvme.size < jm_device.size:
-                    jm_device = nvme
+            jm_device = _find_flagged_journal_device(snode, snode.nvme_devices)
+            if jm_device is None:
+                jm_device = snode.nvme_devices[0]
+                for index, nvme in enumerate(snode.nvme_devices):
+                    if nvme.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_NEW] and nvme.size < jm_device.size:
+                        jm_device = nvme
             jm_device.status = NVMeDevice.STATUS_JM
 
             if snode.jm_device and snode.jm_device.get_id():
@@ -6330,7 +6366,8 @@ def upgrade_automated_deployment_config():
 
 def generate_automated_deployment_config(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_allowed, pci_blocked,
                                          cores_percentage=0, force=False, device_model="", size_range="", nvme_names=None, k8s=False,
-                                         calculate_hp_only=False, number_of_devices=0, lblk_selection=None):
+                                         calculate_hp_only=False, number_of_devices=0, lblk_selection=None,
+                                         jm_percent=3):
     # Reject an over-cap max_lvol here rather than only in the CLI: this is the
     # single entry point shared by `sn configure` and the k8s node-configure
     # job, and the value it writes into NODES_CONFIG_FILE becomes the node's
@@ -6361,7 +6398,7 @@ def generate_automated_deployment_config(max_lvol, max_prov, sockets_to_use, nod
         nodes_config, system_info = utils.generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket,
                                                            pci_allowed, pci_blocked, cores_percentage, force=force,
                                                            device_model=device_model, size_range=size_range, nvme_names=nvme_names,
-                                                           lblk_selection=lblk_selection)
+                                                           lblk_selection=lblk_selection, jm_percent=jm_percent)
         if not nodes_config or not nodes_config.get("nodes"):
             return False
         utils.store_config_file(nodes_config, constants.NODES_CONFIG_FILE, create_read_only_file=True)
