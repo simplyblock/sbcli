@@ -1049,6 +1049,21 @@ def _cluster_activate_impl(cl_id, force=False, force_lvstore_create=False) -> No
         raise
 
 
+def is_single_node_activation(cluster, online_nodes) -> bool:
+    """A cluster with exactly one storage node activates as non-HA regardless
+    of the chosen ha_type / EC schema: no secondary roles, no HA journaling
+    (single local journal), no physical labels. This is what makes 1-node
+    deployments activatable with the API defaults (ha_type='ha')."""
+    return bool(cluster.is_single_node or len(online_nodes) == 1)
+
+
+def activation_minimum_devices(cluster, single_node_cluster) -> int:
+    """ndcs+npcs devices are needed for placement; the +1 spare is rebuild
+    headroom that a single-node cluster (no data redundancy to rebuild onto
+    a spare) does not require."""
+    return cluster.distr_ndcs + cluster.distr_npcs + (0 if single_node_cluster else 1)
+
+
 def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     cluster = db_controller.get_cluster_by_id(cl_id)
 
@@ -1114,7 +1129,12 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                 if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY,
                                   NVMeDevice.STATUS_CANNOT_ALLOCATE]:
                     dev_count += 1
-    minimum_devices = cluster.distr_ndcs + cluster.distr_npcs + 1
+    single_node_cluster = is_single_node_activation(cluster, online_nodes)
+    if single_node_cluster and cluster.ha_type == "ha":
+        logger.warning("Single-node cluster: activating as non-HA "
+                       "(no secondary nodes, single journal) regardless of ha_type")
+
+    minimum_devices = activation_minimum_devices(cluster, single_node_cluster)
     if dev_count < minimum_devices:
         set_cluster_status(cl_id, ols_status)
         raise ValueError(f"Failed to activate cluster, No enough online device.. Minimum is {minimum_devices}")
@@ -1206,6 +1226,17 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
             node.physical_label = 0
         else:
             node.physical_label = storage_node_ops.get_next_physical_device_order(node)
+        # Keep the per-device label copies in sync — the distrib cluster map
+        # emits dev.physical_label, not the node's, so a stale non-zero copy
+        # from node-add would re-enable label anti-affinity in the data plane.
+        for dev in node.nvme_devices:
+            dev.physical_label = node.physical_label
+        if single_node_cluster and node.enable_ha_jm and not node.lvstore:
+            # Fresh node in a single-node cluster: force the single-journal
+            # shape before the LVS is created (jm_vuid=1, no remote JMs). A
+            # node that already carries an lvstore keeps its shape.
+            logger.info(f"Single-node cluster: disabling HA journaling on node {node.get_id()}")
+            node.enable_ha_jm = False
         node.write_to_db()
 
     records = db_controller.get_cluster_capacity(cluster)
@@ -1214,7 +1245,7 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     used_nodes_as_sec: t.List[str] = []
     used_nodes_as_tertiary: t.List[str] = []
     snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
-    if cluster.ha_type == "ha":
+    if cluster.ha_type == "ha" and not single_node_cluster:
         for snode in snodes:
             # Do not assign secondary to removed node
             if snode.status == StorageNode.STATUS_REMOVED:
@@ -1723,7 +1754,7 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     # RE-ACTIVATION is a recovery path that may legitimately run with one
     # or two nodes unhealthy, so it repairs best-effort and only warns —
     # the verifier already skips JMs whose owner node is not ONLINE.
-    if cluster.ha_type == "ha":
+    if cluster.ha_type == "ha" and not single_node_cluster:
         jm_problems = storage_node_ops.verify_jm_mesh_coverage(cl_id, repair=True)
         if jm_problems:
             if is_fresh_activation:

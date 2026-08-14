@@ -2451,6 +2451,18 @@ def get_required_ha_jm_count(cluster) -> int:
     return 3
 
 
+def resolve_enable_ha_jm(cluster, enable_ha_jm) -> bool:
+    """Single-node clusters run without HA journaling: one local journal
+    (deterministic jm_vuid=1 / LVS_1), no fabric export, no remote JMs. This
+    is a deployment-time property of the cluster, overriding the CLI/API
+    default of enable_ha_jm=True."""
+    if cluster.is_single_node and enable_ha_jm:
+        logger.info("Single-node cluster: disabling HA journaling for this node "
+                    "(single local journal)")
+        return False
+    return enable_ha_jm
+
+
 def resolve_ha_jm_count(cluster, ha_jm_count) -> int:
     required_ha_jm_count = get_required_ha_jm_count(cluster)
 
@@ -2607,6 +2619,8 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         except KeyError:
             logger.error("Cluster not found: %s", cluster_id)
             return False
+
+        enable_ha_jm = resolve_enable_ha_jm(cluster, enable_ha_jm)
 
         ha_jm_count = resolve_ha_jm_count(cluster, ha_jm_count)
 
