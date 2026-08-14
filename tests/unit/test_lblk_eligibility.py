@@ -55,9 +55,32 @@ class TestEligibility(unittest.TestCase):
         self.assertEqual([d["name"] for d in sel], ["sdb"])
         self.assertEqual(rej, [])
 
-    def test_partition_type_rejected(self):
-        reasons = self._reasons([_blk("sdb1", dtype="part")])
-        self.assertIn("not a whole disk", reasons["sdb1"])
+    def test_non_disk_non_part_type_rejected(self):
+        reasons = self._reasons([_blk("dax0.0", dtype="lvm")])
+        self.assertIn("not a disk or partition", reasons["dax0.0"])
+
+    def test_idle_partition_is_eligible_when_requested(self):
+        devs = [_blk("sdb1", dtype="part")]
+        sel, _ = utils.filter_eligible_block_devices(devs, include_names=["sdb1"])
+        self.assertEqual([d["name"] for d in sel], ["sdb1"])
+
+    def test_mounted_partition_rejected(self):
+        reasons = self._reasons([_blk("sdb1", dtype="part", mounted=True)])
+        self.assertIn("busy", reasons["sdb1"])
+
+    def test_partition_never_auto_selected(self):
+        devs = [_blk("sdb"), _blk("sdc1", dtype="part")]
+        sel, _ = utils.filter_eligible_block_devices(devs)
+        self.assertEqual([d["name"] for d in sel], ["sdb"])
+
+    def test_disk_and_own_partition_conflict(self):
+        part = _blk("sdb1", dtype="part")
+        part["parent_name"] = "sdb"
+        devs = [_blk("sdb", parts=True), part]
+        with self.assertRaises(ValueError) as ctx:
+            utils.filter_eligible_block_devices(
+                devs, include_names=["sdb", "sdb1"], force_format=True)
+        self.assertIn("itself selected", str(ctx.exception))
 
     def test_special_prefixes_rejected(self):
         for name in ("ram0", "loop3", "sr0", "zram1", "nbd0", "md127", "dm-0", "drbd0", "fd0"):
@@ -148,16 +171,35 @@ class TestDetectLblkDevices(unittest.TestCase):
 
     def test_maps_config_entry_shape(self):
         devs = [_blk("sdb", serial="S1", by_id="/dev/disk/by-id/wwn-0x1",
-                     size=42, numa=1)]
+                     size=42, numa=1),
+                _blk("sdc", serial="S2", size=42, numa=0)]
         with patch.object(utils.node_utils, "get_block_devices_info", return_value=devs):
             result = utils.detect_lblk_devices()
-        self.assertEqual(result, {
-            "sdb": {"name": "sdb", "serial": "S1",
-                    "by_id": "/dev/disk/by-id/wwn-0x1", "size": 42, "numa": 1},
-        })
+        self.assertEqual(result["sdb"], {
+            "name": "sdb", "serial": "S1",
+            "by_id": "/dev/disk/by-id/wwn-0x1", "size": 42, "numa": 1})
+
+    def test_partition_config_entry_carries_identity(self):
+        part = _blk("sdc1", dtype="part", serial="S2-part-uuid1", size=42, numa=0)
+        part["partuuid"] = "uuid1"
+        part["parent_serial"] = "S2"
+        devs = [_blk("sdb", serial="S1", size=42), part]
+        with patch.object(utils.node_utils, "get_block_devices_info", return_value=devs):
+            result = utils.detect_lblk_devices(include_names=["sdb", "sdc1"])
+        self.assertEqual(result["sdc1"]["type"], "part")
+        self.assertEqual(result["sdc1"]["partuuid"], "uuid1")
+        self.assertEqual(result["sdc1"]["parent_serial"], "S2")
+
+    def test_fewer_than_minimum_units_raises(self):
+        devs = [_blk("sdb", serial="S1")]
+        with patch.object(utils.node_utils, "get_block_devices_info", return_value=devs):
+            with self.assertRaises(ValueError) as ctx:
+                utils.detect_lblk_devices()
+        self.assertIn("at least 2", str(ctx.exception))
 
     def test_synthetic_serial_warns_but_passes(self):
-        devs = [_blk("sdb", serial="SYN-abc123", synthetic=True)]
+        devs = [_blk("sdb", serial="SYN-abc123", synthetic=True),
+                _blk("sdc", serial="S2")]
         with patch.object(utils.node_utils, "get_block_devices_info", return_value=devs), \
                 patch.object(utils, "logger") as mock_logger:
             result = utils.detect_lblk_devices()
@@ -292,7 +334,24 @@ class TestValidateNodeConfig(unittest.TestCase):
         self.assertTrue(utils.validate_node_config(self._node(ssd_pcis=["0000:00:1e.0"])))
 
     def test_valid_lblk_config(self):
+        node = self._node(lblk_devices=[{"name": "sdb", "serial": "S1", "size": 100},
+                                        {"name": "sdc", "serial": "S2", "size": 100}])
+        self.assertTrue(utils.validate_node_config(node))
+
+    def test_single_lblk_entry_rejected(self):
         node = self._node(lblk_devices=[{"name": "sdb", "serial": "S1", "size": 100}])
+        self.assertFalse(utils.validate_node_config(node))
+
+    def test_two_journal_flags_rejected(self):
+        node = self._node(lblk_devices=[
+            {"name": "sdb1", "serial": "S1", "size": 100, "journal": True},
+            {"name": "sdb2", "serial": "S2", "size": 100, "journal": True}])
+        self.assertFalse(utils.validate_node_config(node))
+
+    def test_one_journal_flag_valid(self):
+        node = self._node(lblk_devices=[
+            {"name": "sdb1", "serial": "S1", "size": 100, "journal": True},
+            {"name": "sdb2", "serial": "S2", "size": 100}])
         self.assertTrue(utils.validate_node_config(node))
 
     def test_nvme_config_without_lblk_key_still_valid(self):

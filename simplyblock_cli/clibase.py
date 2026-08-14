@@ -178,7 +178,7 @@ class CLIWrapperBase:
             pci_allowed, pci_blocked, force=args.force, device_model=args.device_model,
             size_range=args.size_range, vcpu_count=vcpu_count, nvme_names=nvme_names,
             calculate_hp_only=args.calculate_hp_only, number_of_devices=number_of_devices,
-            lblk_selection=lblk_selection)
+            lblk_selection=lblk_selection, jm_percent=int(getattr(args, 'jm_percent', 3) or 3))
 
     def storage_node__deploy_cleaner(self, sub_command, args):
         storage_ops.deploy_cleaner()
