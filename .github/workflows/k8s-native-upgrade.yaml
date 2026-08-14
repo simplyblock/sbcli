@@ -981,7 +981,7 @@ jobs:
           for i in $(seq 1 60); do
             ONLINE_COUNT=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- \
               sbcli-dev sn list --json 2>/dev/null \
-              | jq '[.[] | select(.status == "online")] | length' 2>/dev/null || echo "0")
+              | jq '[.[] | select(.Status == "online")] | length' 2>/dev/null || echo "0")
             echo "Storage nodes online: $ONLINE_COUNT/$EXPECTED_SNODES ($i/60)"
             if [ "$ONLINE_COUNT" -ge "$EXPECTED_SNODES" ]; then
               echo "All storage nodes are online"
