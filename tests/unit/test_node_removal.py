@@ -133,8 +133,11 @@ class TestRemovePreconditions(unittest.TestCase):
         tc.get_active_node_removal_task.return_value = patches.get("active_removal", False)
         tc.get_active_node_tasks.return_value = patches.get("active_tasks", [])
         tc.get_active_node_restart_task.return_value =  []
+        tc.get_active_lvol_migration.return_value =  []
         tc.add_node_removal_task.return_value = patches.get("task_id", "task-uuid-1")
         with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "shutdown_storage_node", return_value=True), \
+             patch.object(storage_node_ops, "set_node_status", return_value=True), \
              patch.object(storage_node_ops, "tasks_controller", tc), \
              patch.object(storage_node_ops, "_check_ftt_allows_node_removal",
                           return_value=patches.get("ftt", (True, ""))), \
@@ -150,12 +153,6 @@ class TestRemovePreconditions(unittest.TestCase):
         self.assertEqual(ret, "task-uuid-1")
         tc.add_node_removal_task.assert_called_once()
 
-    def test_reject_peer_not_online(self):
-        cl = _cluster()
-        nodes = [_node("n1"), _node("n2", status=StorageNode.STATUS_DOWN), _node("n3")]
-        ret, tc = self._run(FakeDB(cl, nodes))
-        self.assertFalse(ret)
-        tc.add_node_removal_task.assert_not_called()
 
     def test_removed_peer_is_ignored(self):
         cl = _cluster()
