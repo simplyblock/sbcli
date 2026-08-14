@@ -4459,6 +4459,27 @@ def _decommission_node_devices(removed_node: StorageNode):
                     node.write_to_db()
                 else:
                     logger.error(f"no jm_id found for {node.get_id()}")
+            elif any(d.uuid == removed_node.jm_device.get_id() for d in (node.remote_jm_devices or [])):
+                # node.jm_ids is this node's OWN redundancy set for its OWN JM
+                # -- but _connect_to_remote_jm_devs also connects to a SECOND
+                # source: whichever primary this node hosts as secondary/
+                # tertiary pulls in THAT primary's jm_ids too (so the hublvol
+                # journal stays consistent with the primary it's replicating).
+                # A node reachable only via that second path never touches
+                # node.jm_ids at all, so the branch above never even looks at
+                # it, and its remote_jm_devices entry for the dead JM is left
+                # stale forever (2026-08-14 incident: exposed by a splice
+                # reshuffling who hosts whom -- a plain removal that never
+                # changes any hosting relationship never surfaces this gap,
+                # which is why the FIRST of two removals in the same test
+                # showed no symptom and the second, spliced one did). No
+                # "replacement" pick needed here, unlike the jm_ids branch --
+                # this isn't a fixed-size redundancy slot, just a stale
+                # connection to drop; a plain refresh naturally excludes the
+                # now-removed JM since it can no longer be reached through
+                # either source.
+                node.remote_jm_devices = _connect_to_remote_jm_devs(node, node.jm_ids)
+                node.write_to_db()
 
     removed_node = db_controller.get_storage_node_by_id(removed_node.get_id())
     for dev in removed_node.nvme_devices:
