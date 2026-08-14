@@ -113,6 +113,14 @@ def process_snap_delete_finish(snap, completed_node):
                 non_leader, lvol_bdev_name, primary_node.get_id(),
                 special_delete=special_delete)
 
+    # Release the primary's del-sync gate. It is set above whenever a peer
+    # looked down, it BLOCKS snapshot/lvol creation on this node, and it is
+    # cleared only by the sync-del task runner — so once a peer is handled
+    # inline (or owes nothing at all) nothing would ever clear it and creation
+    # on this node stops for good. Reset re-checks for pending sync-del tasks
+    # and keeps the gate only while some remain.
+    primary_node.lvol_del_sync_lock_reset()
+
     if snap.instances:
         logger.info("Snapshot has instances, processing them...")
         new_main_instance = SnapShot(snap.instances[0])

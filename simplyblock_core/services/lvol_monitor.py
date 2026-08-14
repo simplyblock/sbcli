@@ -282,6 +282,12 @@ def process_lvol_delete_finish(cluster, lvol):
             snapshot_controller.sync_delete_on_peer(
                 sec_node, lvol_bdev_name, primary_node.get_id())
 
+    # Release the primary's del-sync gate — see the note in
+    # snapshot_monitor.process_snap_delete_finish: it is set whenever a peer
+    # looks down, it blocks creation on this node, and only the sync-del task
+    # runner clears it. Reset keeps it only while sync-del tasks are pending.
+    primary_node.lvol_del_sync_lock_reset()
+
     lvol_events.lvol_delete(lvol)
     lvol.remove(db.kv_store)
 
