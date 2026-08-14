@@ -2058,6 +2058,9 @@ jobs:
           else
             echo "No MinIO trace log found (backup tests may not have run)"
           fi
+          # Cleanup: delete trace logs and kill any orphaned mc trace processes
+          rm -f /tmp/minio-trace-*.log 2>/dev/null || true
+          pkill -f "mc admin trace" 2>/dev/null || true
 
       - name: Upload MinIO trace log
         if: always()

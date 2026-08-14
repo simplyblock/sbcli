@@ -1190,6 +1190,9 @@ jobs:
           if [ -f "${MINIO_TRACE_LOG:-}" ]; then
             cp "${MINIO_TRACE_LOG}" $GITHUB_WORKSPACE/e2e/minio-trace.log 2>/dev/null || true
           fi
+          # Cleanup: delete trace logs and kill any orphaned mc trace processes
+          rm -f /tmp/minio-trace-*.log 2>/dev/null || true
+          pkill -f "mc admin trace" 2>/dev/null || true
 
       - name: Upload MinIO trace log
         if: always()
