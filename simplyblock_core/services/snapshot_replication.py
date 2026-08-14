@@ -1,7 +1,6 @@
 # coding=utf-8
 import time
 import uuid
-from typing import Optional
 
 from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.controllers import lvol_controller, snapshot_events, snapshot_controller
