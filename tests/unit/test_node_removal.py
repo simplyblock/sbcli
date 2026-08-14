@@ -446,57 +446,58 @@ class TestTeardownOwnReplicas(unittest.TestCase):
 # _delete_replica_on_peer — the peer-side hublvol+bdev teardown _teardown_
 # replicas_of_primary and _relocate_replica_between both call.
 #
-# Regression coverage for a real bug found live (2026-08-10): the hublvol
-# subsystem check called rpc_client.subsystem_list(nqn), but subsystem_list()
-# takes no arguments at all (it lists everything, unfiltered) -- every call
-# raised TypeError, silently swallowed by the surrounding best-effort
-# try/except, so the hublvol subsystem was never actually torn down on any
-# peer during node removal. subsystem_get(nqn) is the existing, correct,
-# server-side-filtered method for this.
+# peer's own hublvol subsystem/bdev teardown (subsystem_get/subsystem_delete/
+# bdev_lvol_delete_hublvol) is deliberately commented out as of f5a052f3 --
+# that subsystem has no consumers and is harmless to leave until peer's next
+# restart -- so these tests do NOT assert those calls.
+#
+# Regression coverage for a real bug found live (2026-08-14): peer's NVMe-oF
+# controller connecting TO primary's hublvol (kept live the whole time peer
+# held this replica) was never detached on eviction. Left dangling, it can
+# later be found wedged in a non-enabled state when peer is re-selected to
+# host a replica again, and the reconcile's detach-and-wait-gone can then
+# time out and abort the rebuild -- this exact sequence took ffznh's SPDK
+# down after a splice eviction left this connection behind.
 # ---------------------------------------------------------------------------
 
 class TestDeleteReplicaOnPeer(unittest.TestCase):
 
-    def test_deletes_subsystem_when_present(self):
+    def test_detaches_hublvol_controller_when_present(self):
         cl = _cluster()
         primary = _node("p1", lvstore="LVS_1")
-        peer = _node("peer1", lvstore="LVS_1")  # hublvol_nqn_for_lvstore's mocked return value bakes in this lvstore
+        primary.hublvol = MagicMock(bdev_name="LVS_1/hublvol")
+        peer = _node("peer1", lvstore="LVS_1")
         rpc = peer.rpc_client()
-        rpc.subsystem_get.return_value = {"nqn": "nqn:hub:LVS_1"}
         storage_node_ops._delete_replica_on_peer(peer, primary, cl)
-        rpc.subsystem_get.assert_called_once_with("nqn:hub:LVS_1")
-        rpc.subsystem_delete.assert_called_once_with("nqn:hub:LVS_1")
+        rpc.bdev_nvme_detach_controller.assert_called_once_with("LVS_1/hublvol")
 
-    def test_skips_delete_when_subsystem_absent(self):
+    def test_skips_hublvol_detach_when_primary_has_no_hublvol(self):
         cl = _cluster()
         primary = _node("p1", lvstore="LVS_1")
-        peer = _node("peer1", lvstore="LVS_1")  # hublvol_nqn_for_lvstore's mocked return value bakes in this lvstore
+        primary.hublvol = None
+        peer = _node("peer1", lvstore="LVS_1")
         rpc = peer.rpc_client()
-        rpc.subsystem_get.return_value = None
         storage_node_ops._delete_replica_on_peer(peer, primary, cl)
-        rpc.subsystem_get.assert_called_once_with("nqn:hub:LVS_1")
-        rpc.subsystem_delete.assert_not_called()
+        rpc.bdev_nvme_detach_controller.assert_not_called()
 
-    def test_subsystem_get_failure_is_caught_not_raised(self):
+    def test_hublvol_detach_failure_is_caught_not_raised(self):
         # Best-effort: an RPC failure here must not propagate and block removal.
         cl = _cluster()
         primary = _node("p1", lvstore="LVS_1")
-        peer = _node("peer1", lvstore="LVS_1")  # hublvol_nqn_for_lvstore's mocked return value bakes in this lvstore
+        primary.hublvol = MagicMock(bdev_name="LVS_1/hublvol")
+        peer = _node("peer1", lvstore="LVS_1")
         rpc = peer.rpc_client()
-        rpc.subsystem_get.side_effect = RPCConnectionError("connection error")
+        rpc.bdev_nvme_detach_controller.side_effect = RPCConnectionError("connection error")
         storage_node_ops._delete_replica_on_peer(peer, primary, cl)  # must not raise
-        rpc.subsystem_delete.assert_not_called()
-        # Teardown of the other artifacts still proceeds despite this failure.
-        rpc.bdev_lvol_delete_hublvol.assert_called_once_with("LVS_1")
 
     def test_no_op_when_primary_has_no_lvstore(self):
         cl = _cluster()
         primary = _node("p1", lvstore="")
-        peer = _node("peer1", lvstore="LVS_1")  # hublvol_nqn_for_lvstore's mocked return value bakes in this lvstore
+        primary.hublvol = MagicMock(bdev_name="LVS_1/hublvol")
+        peer = _node("peer1", lvstore="LVS_1")
         rpc = peer.rpc_client()
         storage_node_ops._delete_replica_on_peer(peer, primary, cl)
-        rpc.subsystem_get.assert_not_called()
-        rpc.bdev_lvol_delete_hublvol.assert_not_called()
+        rpc.bdev_nvme_detach_controller.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
