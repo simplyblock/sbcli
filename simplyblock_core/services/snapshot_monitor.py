@@ -1,5 +1,7 @@
 # coding=utf-8
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 
@@ -23,6 +25,17 @@ def set_snapshot_health_check(snap, health_check_status):
     snap.health_check = health_check_status
     snap.updated_at = str(datetime.now())
     snap.write_to_db()
+
+
+def _await_delete_completion(node, bdev_name, wait_sec):
+    """Poll the async-delete status until it leaves "in progress" (1) or the
+    budget runs out. Returns the last status seen."""
+    deadline = time.time() + max(0, wait_sec)
+    ret = node.rpc_client().bdev_lvol_get_lvol_delete_status(bdev_name)
+    while ret == 1 and time.time() < deadline:
+        time.sleep(0.2)
+        ret = node.rpc_client().bdev_lvol_get_lvol_delete_status(bdev_name)
+    return ret
 
 
 def process_snap_delete_finish(snap, completed_node):
@@ -78,7 +91,13 @@ def process_snap_delete_finish(snap, completed_node):
         # process_lvol_delete_finish; leak evidence: upgrade run 20260812).
         # The "Clone entry not found" errors it produces are benign noise
         # from entries the async pass already stripped.
-        ret, _ = primary_node.rpc_client().delete_lvol(snap.snap_bdev, sync=True, special_delete=special_delete)
+        # Inner lock: synchronous single-node operations are mutually exclusive
+        # per node (same key space as the creators, "<lvs>@<node8>"). The chain
+        # lock is already held by the caller — outer chain, inner node, always
+        # in that order.
+        with snapshot_controller.lvstore_op_lock(
+                snap.cluster_id, snap.lvol.lvs_name, node_id=primary_node.get_id()):
+            ret, _ = primary_node.rpc_client().delete_lvol(snap.snap_bdev, sync=True, special_delete=special_delete)
         if not ret:
             logger.error(f"Failed to delete snap from node: {snode.get_id()}")
 
@@ -86,7 +105,9 @@ def process_snap_delete_finish(snap, completed_node):
     for non_leader in non_leaders:
         if non_leader.status in [StorageNode.STATUS_ONLINE]:
             logger.info(f"Sync delete bdev: {lvol_bdev_name} from node: {non_leader.get_id()}")
-            ret, err = non_leader.rpc_client().delete_lvol(lvol_bdev_name, sync=True, special_delete=special_delete)
+            with snapshot_controller.lvstore_op_lock(
+                    snap.cluster_id, snap.lvol.lvs_name, node_id=non_leader.get_id()):
+                ret, err = non_leader.rpc_client().delete_lvol(lvol_bdev_name, sync=True, special_delete=special_delete)
             if not ret:
                 if "code" in err and err["code"] == -19:
                     logger.error(f"Sync delete completed with error: {err}")
@@ -331,7 +352,17 @@ def process_snap_delete(snap, snode, all_mini_lvols=None, leader_cache=None):
             return False
 
     try:
-        ret = leader_node.rpc_client().bdev_lvol_get_lvol_delete_status(snap.snap_bdev)
+        # Bounded wait so phase-1 (async) and phase-2 (the 2-3 sync deletes)
+        # complete inside ONE chain-lock hold: the whole delete of a chain
+        # member must be atomic against any other operation in that chain,
+        # because a delete swap-merges segments into the neighbouring snapshot
+        # and re-links parents. Returning here on "in progress" would release
+        # the chain and let a create/clone/delete interleave between the async
+        # and the syncs. If the async outlives the budget we release and retry
+        # on a later cycle — still one uninterrupted attempt each time.
+        ret = _await_delete_completion(
+            leader_node, snap.snap_bdev,
+            constants.SNAP_DELETE_COMPLETION_WAIT_SEC)
     except Exception as e:
         logger.error(e)
         # timeout detected, check other node
@@ -493,24 +524,55 @@ def main():
                       for n in db.get_storage_nodes_by_cluster_id(cluster.get_id())}
             all_mini_lvols = db.get_mini_lvols()
             leader_cache: dict = {}
+            leader_cache_guard = threading.Lock()
+
+            # Chains are independent: no blob link crosses them, so they delete
+            # in parallel. Members of ONE chain must not run concurrently (a
+            # delete swap-merges into its neighbour), so each chain's records
+            # go to a single worker AND every delete takes the chain lock,
+            # which also excludes creates/clones in that chain running in other
+            # CP processes.
+            chains: dict = {}
             for mini in in_deletion:
                 try:
-                    snap = db.get_snapshot_by_id(mini.get_id())
-                except KeyError:
-                    continue
-                # Re-check on the authoritative record; also skip snapshots
-                # of other clusters (the mini table is not cluster-scoped).
-                if snap.status != SnapShot.STATUS_IN_DELETION:
-                    continue
-                if snap.cluster_id and snap.cluster_id != cluster.get_id():
-                    continue
-                snode = snodes.get(snap.lvol.node_id)
-                if snode is None:
-                    continue
-                try:
-                    process_snap_delete(snap, snode, all_mini_lvols, leader_cache)
-                except Exception as e:
-                    logger.error(e)
+                    root, _lvs = snapshot_controller.resolve_chain_root(mini.get_id())
+                except Exception:
+                    root = mini.get_id()
+                chains.setdefault(root, []).append(mini)
+
+            def _process_chain(minis):
+                for mini in minis:
+                    try:
+                        snap = db.get_snapshot_by_id(mini.get_id())
+                    except KeyError:
+                        continue
+                    # Re-check on the authoritative record; also skip snapshots
+                    # of other clusters (the mini table is not cluster-scoped).
+                    if snap.status != SnapShot.STATUS_IN_DELETION:
+                        continue
+                    if snap.cluster_id and snap.cluster_id != cluster.get_id():
+                        continue
+                    snode = snodes.get(snap.lvol.node_id)
+                    if snode is None:
+                        continue
+                    try:
+                        with leader_cache_guard:
+                            local_cache = dict(leader_cache)
+                        # The whole delete — async, then the sync deletes in
+                        # process_snap_delete_finish — runs inside this lock.
+                        # The inner recursion (next instance of the same
+                        # snapshot) is already under it and must NOT re-acquire.
+                        with snapshot_controller.object_mutation_lock(
+                                snap.cluster_id or cluster.get_id(), snap.get_id()):
+                            process_snap_delete(snap, snode, all_mini_lvols, local_cache)
+                        with leader_cache_guard:
+                            leader_cache.update(local_cache)
+                    except Exception as e:
+                        logger.error(e)
+
+            workers = max(1, min(constants.CHAIN_DELETE_WORKERS, len(chains)))
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                list(ex.map(_process_chain, chains.values()))
 
         # Adaptive cadence: chained deletes (clone -> snapshot -> parent)
         # advance one hop per cycle, so the idle 30s interval alone adds

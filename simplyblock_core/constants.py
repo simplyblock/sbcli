@@ -44,6 +44,14 @@ LVOL_MONITOR_INTERVAL_SEC = 30
 # -> parent snapshot), so the idle 30s interval alone added minutes per
 # chain (run 20260730).
 LVOL_MONITOR_DELETION_INTERVAL_SEC = 2
+# How long a monitor waits for an async delete to finish while holding the
+# chain lock, so async + the following sync deletes stay one atomic sequence.
+SNAP_DELETE_COMPLETION_WAIT_SEC = 15
+# Chains deleted concurrently by a monitor. Members of one chain always run on
+# one worker (and the chain lock enforces it across processes).
+CHAIN_DELETE_WORKERS = 16
+# Storage nodes swept concurrently by the lvol monitor.
+LVOL_MONITOR_NODE_WORKERS = 16
 DEV_MONITOR_INTERVAL_SEC = 10
 # Collector cadence (#5, 2026-07-21): the idle-cluster baseline measured
 # 4,290 RPCs/min cluster-wide (get_iostat 16k / alceml_get_pages_usage 15k /

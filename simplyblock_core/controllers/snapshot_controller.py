@@ -223,20 +223,72 @@ def _find_lvs_leader(cluster_id, lvs_name, all_nodes):
 _OBJECT_LOCK_PREFIX = "__obj__"
 
 
+_CHAIN_WALK_MAX_HOPS = 256
+
+
+def resolve_chain_root(object_uuid):
+    """Return ``(chain_root_uuid, lvs_name)`` for any lvol/snapshot uuid.
+
+    A blob chain is the transitive closure of "is derived from": a volume, all
+    snapshots taken of it, every clone made from those snapshots, that clone's
+    snapshots, and so on. Deleting inside a chain rewrites its links (a delete
+    swap-merges the snapshot's segments into its successor), so operations on
+    ANY member mutate the same structure and must not interleave — while
+    different chains are independent and may run fully in parallel.
+
+    Walking upwards: a clone points at the snapshot it came from
+    (``LVol.cloned_from_snap``), a snapshot points at the volume it was taken
+    from (``SnapShot.lvol``). The walk ends at the base volume, whose uuid
+    names the chain. Unknown uuids and broken links resolve to the uuid itself
+    (its own one-member chain — never a shared key, so a corrupt record can
+    only under-share the lock, never wrongly alias two real chains).
+    """
+    current = object_uuid
+    lvs_name = ""
+    for _ in range(_CHAIN_WALK_MAX_HOPS):
+        obj = None
+        try:
+            obj = db_controller.get_lvol_by_id(current)
+        except Exception:
+            obj = None
+        if obj is not None:
+            lvs_name = getattr(obj, "lvs_name", "") or lvs_name
+            parent = getattr(obj, "cloned_from_snap", "")
+            if not parent:
+                return current, lvs_name
+            current = parent
+            continue
+        try:
+            snap = db_controller.get_snapshot_by_id(current)
+        except Exception:
+            return current, lvs_name
+        snap_lvol = getattr(snap, "lvol", None)
+        lvs_name = getattr(snap_lvol, "lvs_name", "") or lvs_name
+        parent_lvol_id = snap_lvol.get_id() if snap_lvol is not None else ""
+        if not parent_lvol_id or parent_lvol_id == current:
+            return current, lvs_name
+        current = parent_lvol_id
+    logger.warning("Chain walk for %s exceeded %d hops; using %s as chain root",
+                   object_uuid, _CHAIN_WALK_MAX_HOPS, current)
+    return current, lvs_name
+
+
 @contextlib.contextmanager
 def object_mutation_lock(cluster_id, object_uuid, *, enabled=True):
     """OUTER lock — serialize the WHOLE multi-node sequence of one operation on
-    a single object (lvol / snapshot / clone) and exclude any other operation
-    (create / delete / resize / clone) on that SAME object while it runs.
+    a CHAIN (a volume, its snapshots, their clones, recursively) and exclude
+    any other operation (create / delete / resize / clone) on that same chain
+    while it runs.
 
     Held across the entire controller action; the inner per-lvstore lock
     (``lvstore_op_lock``) is taken and released around each single-node RPC
-    inside it. Because same-object operations serialize here, the per-object
-    blob chain (snapshots of one lvol, clones of one snapshot) is always
-    created and registered in order — which is the only place blobid order
-    matters; distinct objects live in distinct chains.
+    inside it. The scope is the chain, not the single object: a delete
+    swap-merges segments into the neighbouring snapshot and re-links parents,
+    so a concurrent create/clone/delete anywhere in the same chain mutates the
+    structure the first operation is walking. Distinct chains never share blob
+    links, so they proceed concurrently.
 
-    Reuses the lvstore-lock primitive keyed on the object uuid (namespaced via
+    Reuses the lvstore-lock primitive keyed on the CHAIN ROOT (namespaced via
     ``_OBJECT_LOCK_PREFIX`` so it never collides with a real lvs_name). The
     outer key and the inner lvs_name are different keys in the same lock table,
     always acquired outer-then-inner, so the two never deadlock.
@@ -244,11 +296,13 @@ def object_mutation_lock(cluster_id, object_uuid, *, enabled=True):
     if not enabled or not cluster_id or not object_uuid:
         yield
         return
-    key = f"{_OBJECT_LOCK_PREFIX}/{object_uuid}"
+    chain_root, chain_lvs = resolve_chain_root(object_uuid)
+    key = f"{_OBJECT_LOCK_PREFIX}/{chain_lvs}:{chain_root}"
     owner = _new_lvstore_lock_owner()
     if not _acquire_lvstore_lock_blocking(db_controller, cluster_id, key, owner):
         raise PreconditionError(
-            f"Timed out acquiring object lock on {object_uuid}")
+            f"Timed out acquiring chain lock on {chain_root} "
+            f"(for {object_uuid})")
     stop = threading.Event()
     threading.Thread(
         target=_lvstore_lock_heartbeat,
