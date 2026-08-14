@@ -833,7 +833,7 @@ def test_case_1(meta):
         # verify_baseline keys on the SOURCE lvol id (that is how baseline was
         # recorded), so keep that id on the mount record.
         verify_mounts.append({"lvol": lv, "nqn": conn.get("nqn", ""),
-                              "dev": devs[0], "mount": mnt})
+                              "dev": dev, "mount": mnt})
     ok, details = verify_baseline(client_ip, key_path, verify_mounts, baseline)
     mounts = verify_mounts or mounts
     cleanup_client(client_ip, key_path, mounts)
