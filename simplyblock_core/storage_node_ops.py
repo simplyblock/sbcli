@@ -5543,20 +5543,38 @@ def check_node_shutdown_preconditions(node_id, force=False, current_restart_task
             return False, reason
         logger.warning("%s — proceeding with force", reason)
 
-    tasks = tasks_controller.get_active_node_tasks(snode.cluster_id, snode.get_id())
+    # Only DATA-MOVEMENT tasks may block a shutdown, which is what this check
+    # has always claimed to be about. get_active_node_tasks returns every
+    # non-done task on the node, so any durable, re-drivable work counted too:
+    # a replicating cluster has a snapshot_replication task in flight almost
+    # every minute, which made graceful shutdown impossible (lab run 18 —
+    # "Migration task found: 2" was one running replication task). Replication
+    # and sync-delete work survives the outage and resumes on return; a
+    # migration in progress does not.
+    migration_fns = {
+        JobSchedule.FN_DEV_MIG,
+        JobSchedule.FN_FAILED_DEV_MIG,
+        JobSchedule.FN_NEW_DEV_MIG,
+        JobSchedule.FN_LVOL_MIG,
+        JobSchedule.FN_LVOL_BATCH_MIG,
+    }
+    tasks = [t for t in tasks_controller.get_active_node_tasks(
+        snode.cluster_id, snode.get_id()) if t.function_name in migration_fns]
     if tasks:
+        blocking = ", ".join(sorted({t.function_name for t in tasks}))
         if not force and _allow_shutdown_with_migration_tasks(snode, db_controller):
             logger.warning(
-                "Migration task found: %s, proceeding with shutdown because FTT=2 allows node outage",
-                len(tasks),
+                "Migration task found: %s (%s), proceeding with shutdown because FTT=2 allows node outage",
+                len(tasks), blocking,
             )
         elif force:
             logger.warning(
-                "Migration task found: %s, proceeding with forced shutdown",
-                len(tasks),
+                "Migration task found: %s (%s), proceeding with forced shutdown",
+                len(tasks), blocking,
             )
         else:
-            reason = f"Migration task found: {len(tasks)}, can not shutdown storage node or use --force"
+            reason = (f"Migration task found: {len(tasks)} ({blocking}), "
+                      f"can not shutdown storage node or use --force")
             logger.error(reason)
             return False, reason
 
