@@ -1,7 +1,5 @@
 # coding=utf-8
-import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 
@@ -16,38 +14,6 @@ from simplyblock_core.models.storage_node import StorageNode
 logger = utils.get_logger(__name__)
 
 utils.init_sentry_sdk(__name__)
-
-
-# Repeatedly failing deletes must not consume a slot every cycle. Without this
-# a snapshot that can never complete is retried forever, the in_deletion set
-# only grows, and the cycle cost grows with it (lab 2026-08-14: 1298 records
-# retried per cycle, internal-snapshot creation starved to a standstill).
-_DELETE_BACKOFF: dict = {}
-_DELETE_BACKOFF_GUARD = threading.Lock()
-_BACKOFF_BASE_SEC = 5
-_BACKOFF_MAX_SEC = 300
-
-
-def delete_attempt_due(snap_uuid, now_ts):
-    with _DELETE_BACKOFF_GUARD:
-        _attempts, next_ts = _DELETE_BACKOFF.get(snap_uuid, (0, 0))
-    return now_ts >= next_ts
-
-
-def note_delete_attempt(snap_uuid, now_ts, progressed):
-    """Clear the backoff when a delete advanced; otherwise back off harder."""
-    with _DELETE_BACKOFF_GUARD:
-        if progressed:
-            _DELETE_BACKOFF.pop(snap_uuid, None)
-            return
-        attempts = _DELETE_BACKOFF.get(snap_uuid, (0, 0))[0] + 1
-        delay = min(_BACKOFF_MAX_SEC, _BACKOFF_BASE_SEC * (2 ** min(attempts, 6)))
-        _DELETE_BACKOFF[snap_uuid] = (attempts, now_ts + delay)
-
-
-def forget_delete_backoff(snap_uuid):
-    with _DELETE_BACKOFF_GUARD:
-        _DELETE_BACKOFF.pop(snap_uuid, None)
 
 
 def set_snapshot_health_check(snap, health_check_status):
@@ -100,15 +66,6 @@ def process_snap_delete_finish(snap, completed_node):
         if sec_id != primary_node.get_id():
             non_leaders.append(db.get_storage_node_by_id(sec_id))
 
-    lvol_bdev_name = snap.snap_bdev
-    lvs_name = snap.lvol.lvs_name
-    # Mutual exclusion covers the RPC phase only, and it must use the SAME key
-    # space as the creators: lvstore_op_lock is keyed "<lvs>@<node8>" when a
-    # node is named, so a sync delete on a node excludes a create/delete/resize
-    # of ANY other object (lvol, snapshot, clone) on that node's copy of the
-    # lvstore — which is the blob-tree invariant. A whole-lvstore key would
-    # take a DIFFERENT key and exclude nothing the creators hold. The DB
-    # finalize below (events, unindex, remove) stays outside the lock.
     if primary_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
         any_sec_down = any(
             nl.status in [StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN, StorageNode.STATUS_UNREACHABLE]
@@ -121,18 +78,15 @@ def process_snap_delete_finish(snap, completed_node):
         # process_lvol_delete_finish; leak evidence: upgrade run 20260812).
         # The "Clone entry not found" errors it produces are benign noise
         # from entries the async pass already stripped.
-        with snapshot_controller.lvstore_op_lock(
-                snap.cluster_id, lvs_name, node_id=primary_node.get_id()):
-            ret, _ = primary_node.rpc_client().delete_lvol(snap.snap_bdev, sync=True, special_delete=special_delete)
+        ret, _ = primary_node.rpc_client().delete_lvol(snap.snap_bdev, sync=True, special_delete=special_delete)
         if not ret:
             logger.error(f"Failed to delete snap from node: {snode.get_id()}")
 
+    lvol_bdev_name = snap.snap_bdev
     for non_leader in non_leaders:
         if non_leader.status in [StorageNode.STATUS_ONLINE]:
             logger.info(f"Sync delete bdev: {lvol_bdev_name} from node: {non_leader.get_id()}")
-            with snapshot_controller.lvstore_op_lock(
-                    snap.cluster_id, lvs_name, node_id=non_leader.get_id()):
-                ret, err = non_leader.rpc_client().delete_lvol(lvol_bdev_name, sync=True, special_delete=special_delete)
+            ret, err = non_leader.rpc_client().delete_lvol(lvol_bdev_name, sync=True, special_delete=special_delete)
             if not ret:
                 if "code" in err and err["code"] == -19:
                     logger.error(f"Sync delete completed with error: {err}")
@@ -515,93 +469,48 @@ def main():
             time.sleep(3)
             continue
         deletions_in_flight = 0
-        active_clusters = [c for c in db.get_clusters()
-                           if c.status not in [Cluster.STATUS_INACTIVE, Cluster.STATUS_UNREADY,
-                                               Cluster.STATUS_IN_ACTIVATION]]
+        for cluster in db.get_clusters():
 
-        # Creation FIRST, for every cluster, before any delete work. Interval
-        # snapshots drive replication, and a delete backlog must never delay
-        # them: sharing one serial pass is how a stuck-delete pile stopped
-        # snapshot creation entirely (lab 2026-08-14 — 5 replicated volumes
-        # went a full hour with zero snapshots while 1298 deletes retried).
-        for cluster in active_clusters:
+            if cluster.status in [Cluster.STATUS_INACTIVE, Cluster.STATUS_UNREADY, Cluster.STATUS_IN_ACTIVATION]:
+                logger.warning(f"Cluster {cluster.get_id()} is in {cluster.status} state, skipping")
+                continue
+
             try:
                 take_due_internal_snapshots(cluster.get_id(), int(time.time()))
             except Exception as e:
                 logger.error(f"Internal snapshot scheduling failed for cluster {cluster.get_id()}: {e}")
 
-        for cluster in active_clusters:
             # Only in-deletion snapshots need any processing. Find them via
             # the mini table (cheap; no embedded LVol dict) and fetch the few
             # full records individually — the previous full-SnapShot scan per
             # cycle was a steady multi-second FDB read at 10k+ snapshots.
-            now_ts = int(time.time())
             in_deletion = [m for m in db.get_mini_snapshots()
                            if m.status == SnapShot.STATUS_IN_DELETION]
             if not in_deletion:
                 continue
             deletions_in_flight += len(in_deletion)
-            due = [m for m in in_deletion if delete_attempt_due(m.get_id(), now_ts)]
-            if not due:
-                continue
             snodes = {n.get_id(): n
                       for n in db.get_storage_nodes_by_cluster_id(cluster.get_id())}
             all_mini_lvols = db.get_mini_lvols()
             leader_cache: dict = {}
-            leader_cache_guard = threading.Lock()
-
-            # Group by owning volume: a delete chain (clone -> snapshot ->
-            # parent) always lives on one volume and must advance in order,
-            # so each group is processed serially by a single worker while
-            # different volumes run concurrently. Everything the workers do
-            # is per-snapshot except the phase-2 sync deletes, which take the
-            # per-lvstore mutex in process_snap_delete_finish.
-            groups: dict = {}
-            for mini in due:
+            for mini in in_deletion:
                 try:
-                    key = mini.lvol.get_id()
-                except Exception:
-                    key = mini.get_id()
-                groups.setdefault(key, []).append(mini)
-
-            def _process_group(minis):
-                for mini in minis:
-                    try:
-                        snap = db.get_snapshot_by_id(mini.get_id())
-                    except KeyError:
-                        forget_delete_backoff(mini.get_id())
-                        continue
-                    # Re-check on the authoritative record; also skip snapshots
-                    # of other clusters (the mini table is not cluster-scoped).
-                    if snap.status != SnapShot.STATUS_IN_DELETION:
-                        forget_delete_backoff(mini.get_id())
-                        continue
-                    if snap.cluster_id and snap.cluster_id != cluster.get_id():
-                        continue
-                    snode = snodes.get(snap.lvol.node_id)
-                    if snode is None:
-                        continue
-                    progressed = False
-                    try:
-                        with leader_cache_guard:
-                            local_cache = dict(leader_cache)
-                        process_snap_delete(snap, snode, all_mini_lvols, local_cache)
-                        with leader_cache_guard:
-                            leader_cache.update(local_cache)
-                        # "Progress" = the record left in_deletion (finished, or
-                        # handed to the next hop). Anything else backs off.
-                        try:
-                            progressed = (db.get_snapshot_by_id(snap.get_id()).status
-                                          != SnapShot.STATUS_IN_DELETION)
-                        except KeyError:
-                            progressed = True
-                    except Exception as e:
-                        logger.error(e)
-                    note_delete_attempt(mini.get_id(), now_ts, progressed)
-
-            workers = max(1, min(constants.SNAP_DELETE_WORKERS, len(groups)))
-            with ThreadPoolExecutor(max_workers=workers) as ex:
-                list(ex.map(_process_group, groups.values()))
+                    snap = db.get_snapshot_by_id(mini.get_id())
+                except KeyError:
+                    continue
+                # Re-check on the authoritative record; also skip snapshots
+                # of other clusters (the mini table is not cluster-scoped).
+                if snap.status != SnapShot.STATUS_IN_DELETION:
+                    continue
+                if snap.cluster_id and snap.cluster_id != cluster.get_id():
+                    continue
+                snode = snodes.get(snap.lvol.node_id)
+                if snode is None:
+                    continue
+                try:
+                    process_snap_delete(snap, snode, all_mini_lvols, leader_cache)
+                except Exception as e:
+                    logger.error(e)
 
         # Adaptive cadence: chained deletes (clone -> snapshot -> parent)
         # advance one hop per cycle, so the idle 30s interval alone adds
