@@ -95,7 +95,7 @@ SSH_RETRIES = 4
 SSH_RETRY_BACKOFF = 5
 
 
-def run(ip, key_path, cmd, check=True, quiet=False, timeout=900):
+def run(ip, key_path, cmd, check=True, quiet=False, timeout=900, replayable=False):
     if not quiet:
         print(f"  [{ip}] $ {cmd}")
 
@@ -104,45 +104,64 @@ def run(ip, key_path, cmd, check=True, quiet=False, timeout=900):
     # been dispatched and re-running it could repeat a non-idempotent step
     # (nvme connect, mkfs, volume delete). Long polling loops open a fresh
     # connection per call and can trip sshd's rate limiting -> WinError 10054.
-    ssh = out = err = None
-    for attempt in range(1, SSH_RETRIES + 1):
-        try:
-            ssh = _ssh(ip, key_path)
-            _in, out, err = ssh.exec_command(cmd, timeout=timeout)
-            break
-        except (paramiko.SSHException, OSError, EOFError) as exc:
-            if ssh is not None:
-                try:
-                    ssh.close()
-                except Exception:
-                    pass
-            if attempt == SSH_RETRIES:
-                raise RuntimeError(
-                    f"SSH transport failure on {ip} after {SSH_RETRIES} attempts: {exc}") from exc
-            delay = SSH_RETRY_BACKOFF * attempt
-            print(f"  [{ip}] SSH transport failure ({exc}); reconnecting in {delay}s "
-                  f"({attempt + 1}/{SSH_RETRIES})")
-            time.sleep(delay)
+    # `replayable=True` marks a read-only command (DB/status query) whose whole
+    # dispatch may be repeated: a mid-exec socket reset then retries instead of
+    # failing the case (a 10054 during a cutover-wait poll aborted a healthy
+    # case 1 on 2026-08-14, run 9).
+    for replay in range(1, SSH_RETRIES + 1):
+        ssh = out = err = None
+        for attempt in range(1, SSH_RETRIES + 1):
+            try:
+                ssh = _ssh(ip, key_path)
+                _in, out, err = ssh.exec_command(cmd, timeout=timeout)
+                break
+            except (paramiko.SSHException, OSError, EOFError) as exc:
+                if ssh is not None:
+                    try:
+                        ssh.close()
+                    except Exception:
+                        pass
+                if attempt == SSH_RETRIES:
+                    raise RuntimeError(
+                        f"SSH transport failure on {ip} after {SSH_RETRIES} attempts: {exc}") from exc
+                delay = SSH_RETRY_BACKOFF * attempt
+                print(f"  [{ip}] SSH transport failure ({exc}); reconnecting in {delay}s "
+                      f"({attempt + 1}/{SSH_RETRIES})")
+                time.sleep(delay)
 
-    try:
-        o = out.read().decode()
-        e = err.read().decode()
-        rc = out.channel.recv_exit_status()
-    except (socket.timeout, TimeoutError, OSError, paramiko.SSHException) as exc:
-        # The command was dispatched, so we cannot safely replay it. For
-        # best-effort work (check=False) a hang must not kill the run: an
-        # `umount`/`nvme disconnect` can block indefinitely once the cutover has
-        # moved the device, which is exactly how a PASSING case 1 still took the
-        # driver down before case 2 could start.
         try:
-            ssh.close()
-        except Exception:
-            pass
-        if check:
-            raise RuntimeError(f"SSH read failed on {ip} for: {cmd} ({exc})") from exc
-        print(f"  [{ip}] read timed out on best-effort command, continuing: {cmd}")
-        return ""
-    ssh.close()
+            o = out.read().decode()
+            e = err.read().decode()
+            rc = out.channel.recv_exit_status()
+        except (socket.timeout, TimeoutError, OSError, paramiko.SSHException) as exc:
+            # The command was dispatched, so we cannot safely replay it unless
+            # the caller marked it replayable. For best-effort work
+            # (check=False) a hang must not kill the run: an `umount`/`nvme
+            # disconnect` can block indefinitely once the cutover has moved the
+            # device, which is exactly how a PASSING case 1 still took the
+            # driver down before case 2 could start.
+            try:
+                ssh.close()
+            except Exception:
+                pass
+            if replayable and replay < SSH_RETRIES:
+                print(f"  [{ip}] read failed on replayable command ({exc}); replaying "
+                      f"({replay + 1}/{SSH_RETRIES})")
+                time.sleep(SSH_RETRY_BACKOFF * replay)
+                continue
+            if check:
+                raise RuntimeError(f"SSH read failed on {ip} for: {cmd} ({exc})") from exc
+            print(f"  [{ip}] read timed out on best-effort command, continuing: {cmd}")
+            return ""
+        ssh.close()
+        # rc == -1: the channel died without delivering an exit status (socket
+        # reset mid-read). Output is unreliable; replay a replayable command.
+        if rc == -1 and replayable and replay < SSH_RETRIES:
+            print(f"  [{ip}] channel died without exit status; replaying "
+                  f"({replay + 1}/{SSH_RETRIES})")
+            time.sleep(SSH_RETRY_BACKOFF * replay)
+            continue
+        break
     if rc != 0 and check:
         print(o[-2000:])
         print(e[-2000:])
@@ -150,9 +169,9 @@ def run(ip, key_path, cmd, check=True, quiet=False, timeout=900):
     return o
 
 
-def mgmt_py(mgmt_ip, key_path, snippet):
+def mgmt_py(mgmt_ip, key_path, snippet, replayable=False):
     script = "sudo python3 - <<'PY'\n" + snippet + "\nPY"
-    out = run(mgmt_ip, key_path, script)
+    out = run(mgmt_ip, key_path, script, replayable=replayable)
     last = [ln for ln in out.strip().splitlines() if ln.strip()][-1]
     return json.loads(last)
 
@@ -174,7 +193,7 @@ from simplyblock_core.db_controller import DBController
 db = DBController()
 lv = db.get_lvol_by_name({name!r})
 print(json.dumps({{"uuid": lv.get_id(), "nqn": lv.nqn}}))
-""")
+""", replayable=True)
 
 
 def get_connect_cmds(mgmt_ip, key_path, lvol_uuid):
@@ -206,7 +225,7 @@ for u in {list(lvol_uuids)!r}:
     info = lvol_controller.get_replication_info(u) or {{}}
     out[u] = {{k: info.get(k) for k in fields}}
 print(json.dumps(out))
-""")
+""", replayable=True)
 
 
 def do_failover(mgmt_ip, key_path, lvol_uuid):
@@ -238,7 +257,7 @@ for r in db.get_lvol_replication_objects():
     if r.source_lvol and r.source_lvol.get_id() in states:
         states[r.source_lvol.get_id()] = r.state
 print(json.dumps(states))
-""")
+""", replayable=True)
 
 
 def wait_replication_caught_up(mgmt_ip, key_path, lvol_uuids, timeout=REPL_WAIT_TIMEOUT):
@@ -442,7 +461,7 @@ print(json.dumps({{"node_id": lv.node_id,
                    "replication_node_id": lv.replication_node_id,
                    "cluster_id": n.cluster_id,
                    "secondary_node_id": n.secondary_node_id}}))
-""")
+""", replayable=True)
 
 
 def node_status(mgmt_ip, key_path, node_id):
@@ -452,7 +471,7 @@ from simplyblock_core.db_controller import DBController
 db = DBController()
 n = db.get_storage_node_by_id({node_id!r})
 print(json.dumps({{"status": n.status, "health": n.health_check}}))
-""")["status"]
+""", replayable=True)["status"]
 
 
 def wait_node_status(mgmt_ip, key_path, node_id, wanted, timeout=NODE_STATE_TIMEOUT):
