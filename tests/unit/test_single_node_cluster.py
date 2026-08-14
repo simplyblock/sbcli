@@ -167,6 +167,87 @@ class TestSingleNodeActivation(unittest.TestCase):
         self.assertEqual(cluster_ops.activation_minimum_devices(cluster, False), 4)
 
 
+class TestNoParityClusterStatus(unittest.TestCase):
+    """A cluster with npcs=0 (EC 1+0 — the natural single-node schema) has
+    k=0, so the "we are exactly at the parity limit" DEGRADED rule matched
+    on affected_nodes == 0, i.e. while perfectly healthy. Live 1-node
+    cluster 2026-08-14 sat in DEGRADED with every device online."""
+
+    def _status(self, nodes, ndcs, npcs):
+        from simplyblock_core.services import storage_node_monitor as mod
+        cluster = MagicMock(spec=Cluster)
+        cluster.uuid = "cluster-1"
+        cluster.status = Cluster.STATUS_ACTIVE
+        cluster.distr_ndcs = ndcs
+        cluster.distr_npcs = npcs
+        cluster.max_fault_tolerance = max(npcs, 1)
+        cluster.strict_node_anti_affinity = False
+        cluster.enable_failure_domain = False
+        cluster.suspend_drain_complete = False
+        cluster.get_id = MagicMock(return_value="cluster-1")
+        with patch.object(mod, "db") as mock_db:
+            mock_db.get_cluster_by_id.return_value = cluster
+            mock_db.get_primary_storage_nodes_by_cluster_id.return_value = nodes
+            mock_db.get_job_tasks.return_value = []
+            return mod.get_next_cluster_status("cluster-1")
+
+    def _mock_node(self, uuid, status=StorageNode.STATUS_ONLINE, online_devs=1,
+                   offline_devs=0):
+        from simplyblock_core.models.nvme_device import NVMeDevice
+        n = MagicMock(spec=StorageNode)
+        n.status = status
+        n.cluster_id = "cluster-1"
+        n.mgmt_ip = f"10.0.0.{abs(hash(uuid)) % 250 + 1}"
+        n.auto_restart_disabled = False
+        n.failure_domain = -1
+        n.jm_vuid = 1
+        n.rpc_port = 8080
+        n.online_since = ""
+        n.down_since = ""
+        n.lvstore = "LVS_1"
+        n.lvstore_status = "ready"
+        n.get_id = MagicMock(return_value=uuid)
+
+        def _dev(st, did):
+            d = MagicMock(spec=NVMeDevice)
+            d.status = st
+            d.get_id = MagicMock(return_value=did)
+            return d
+
+        n.nvme_devices = (
+            [_dev(NVMeDevice.STATUS_ONLINE, f"{uuid}-on-{i}") for i in range(online_devs)]
+            + [_dev(NVMeDevice.STATUS_UNAVAILABLE, f"{uuid}-off-{i}")
+               for i in range(offline_devs)])
+        return n
+
+    def test_healthy_single_node_no_parity_is_active(self):
+        node = self._mock_node("node-1", online_devs=1)
+        self.assertEqual(self._status([node], ndcs=1, npcs=0),
+                         Cluster.STATUS_ACTIVE)
+
+    def test_healthy_multi_node_no_parity_is_active(self):
+        nodes = [self._mock_node("node-1"), self._mock_node("node-2")]
+        self.assertEqual(self._status(nodes, ndcs=1, npcs=0),
+                         Cluster.STATUS_ACTIVE)
+
+    def test_no_parity_with_a_failed_device_is_not_active(self):
+        # k=0 tolerates nothing: an affected node must still leave ACTIVE.
+        nodes = [self._mock_node("node-1", online_devs=1),
+                 self._mock_node("node-2", online_devs=1, offline_devs=1)]
+        self.assertNotEqual(self._status(nodes, ndcs=1, npcs=0),
+                            Cluster.STATUS_ACTIVE)
+
+    def test_healthy_parity_cluster_unaffected_by_the_guard(self):
+        # npcs>=1 with nothing affected was ACTIVE before and stays ACTIVE.
+        # The k>0 "exactly at the limit -> DEGRADED" path needs the
+        # data-plane probe fixtures and is covered in
+        # tests/integration/test_cluster_suspend_recovery.py.
+        nodes = [self._mock_node("node-1", online_devs=2),
+                 self._mock_node("node-2", online_devs=2)]
+        self.assertEqual(self._status(nodes, ndcs=1, npcs=1),
+                         Cluster.STATUS_ACTIVE)
+
+
 class TestCheckSnapHaGating(unittest.TestCase):
 
     def _run_check_snap(self, ha_type, secondary_node_id):

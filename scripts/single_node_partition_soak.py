@@ -140,7 +140,9 @@ def restart_storage_node(meta):
     while time.time() < deadline:
         sn_list = ssh_exec(mgmt, [f"{SBCTL} sn list"], get_output=True)[0]
         status = ssh_exec(mgmt, [f"{SBCTL} cluster list"], get_output=True)[0]
-        if "online" in sn_list and "active" in status:
+        # `sn list` prints the node status lowercase, `cluster list` prints
+        # the cluster status uppercase (ACTIVE) — compare case-insensitively.
+        if "online" in sn_list.lower() and "active" in status.lower():
             print("  node online, cluster active")
             return
         time.sleep(15)
