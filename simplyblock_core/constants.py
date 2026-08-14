@@ -44,6 +44,10 @@ LVOL_MONITOR_INTERVAL_SEC = 30
 # -> parent snapshot), so the idle 30s interval alone added minutes per
 # chain (run 20260730).
 LVOL_MONITOR_DELETION_INTERVAL_SEC = 2
+# Snapshot deletes the monitor processes concurrently (one worker per volume,
+# so a clone -> snapshot -> parent chain still advances in order). Only the
+# per-node sync-delete RPC is mutually exclusive, via lvstore_op_lock.
+SNAP_DELETE_WORKERS = 16
 DEV_MONITOR_INTERVAL_SEC = 10
 # Collector cadence (#5, 2026-07-21): the idle-cluster baseline measured
 # 4,290 RPCs/min cluster-wide (get_iostat 16k / alceml_get_pages_usage 15k /
