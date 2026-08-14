@@ -509,12 +509,17 @@ class K8sNativeMajorUpgrade(TestClusterBase):
             self._save_fio_pod_logs(detail["job_name"], clone_name)
             self.k8s_utils.validate_fio_job(detail["job_name"], timeout=timeout)
 
-    def _cleanup_fio_jobs_only(self):
+    def _cleanup_fio_jobs_only(self, wait_for_termination: bool = True,
+                               termination_timeout: int = 120):
         """Delete FIO jobs and configmaps but leave PVCs/snapshots/clones intact.
 
         Unlike ``k8s_utils.cleanup_stale_fio_resources()`` which also removes
         clone PVCs, snapshots, and test PVCs, this only removes the FIO
         workload resources so PVCs are freed for utility pod mounting.
+
+        When *wait_for_termination* is True (default), waits for all FIO
+        pods to fully terminate and gives CSI time to finish unmounting
+        before returning.  This ensures no stale mounts remain.
         """
         ns = self.k8s_utils.namespace
         cmds = [
@@ -533,7 +538,40 @@ class K8sNativeMajorUpgrade(TestClusterBase):
                 self.k8s_utils._exec_kubectl(cmd)
             except Exception as exc:
                 self.logger.warning(f"FIO job cleanup step failed: {exc}")
-        self.logger.info("FIO jobs and configmaps cleaned up (PVCs preserved)")
+        self.logger.info("FIO jobs and configmaps deleted")
+
+        if not wait_for_termination:
+            return
+
+        # Wait for all FIO pods to fully terminate
+        import time
+        deadline = time.time() + termination_timeout
+        self.logger.info(
+            f"Waiting up to {termination_timeout}s for FIO pods to terminate..."
+        )
+        while time.time() < deadline:
+            out, _ = self.k8s_utils._exec_kubectl(
+                f"kubectl get pods -n {ns} -l app=fio-benchmark "
+                f"--no-headers 2>/dev/null || true",
+                supress_logs=True,
+            )
+            pods = [l for l in out.strip().splitlines() if l.strip()]
+            if not pods:
+                self.logger.info("All FIO pods terminated")
+                break
+            self.logger.info(f"  {len(pods)} FIO pod(s) still terminating...")
+            time.sleep(5)
+        else:
+            self.logger.warning(
+                f"FIO pods did not fully terminate within {termination_timeout}s"
+            )
+
+        # Give CSI NodeUnstageVolume / NodeUnpublishVolume time to complete
+        # after pods are gone — ensures no stale mounts remain on worker nodes
+        self.logger.info("Waiting 15s for CSI unmount to complete...")
+        time.sleep(15)
+
+        self.logger.info("FIO jobs and pods cleaned up (PVCs preserved)")
 
     def _capture_pvc_checksums(self, pvc_names: list[str]) -> dict[str, dict]:
         """Capture MD5 checksums for all files on the given PVCs.
@@ -2204,10 +2242,9 @@ spec:
         self._validate_all_fio(fio_timeout)
         self.logger.info("Pre-upgrade FIO completed and validated on all PVCs")
 
-        # Clean up FIO jobs/pods (preserve PVCs for snapshots + checksums)
-        self.logger.info("Pre-upgrade: Cleaning up FIO jobs")
-        self._cleanup_fio_jobs_only()
-        sleep_n_sec(10)
+        # Clean up FIO jobs/pods and wait for full termination + volume detach
+        self.logger.info("Pre-upgrade: Cleaning up FIO jobs and waiting for clean unmount")
+        self._cleanup_fio_jobs_only(wait_for_termination=True)
 
         self.logger.info("Pre-upgrade Step 4: Creating snapshots and clones")
         self._create_snapshots_and_clones(skip_clone_fio=True)
