@@ -299,40 +299,44 @@ def _rollback_snapshot_bdev(cluster_id, lvs_name, primary_node, snap_bdev_name,
     bdev_name = f"{lvs_name}/{snap_bdev_name}"
 
     delete_completed = False
-    with lvstore_op_lock(cluster_id, lvs_name,
-                         node_id=primary_node.get_id(), enabled=lock):
-        ret, _ = rpc_client.delete_lvol(bdev_name)  # async initial delete
-        if not ret:
-            logger.error(f"Rollback: failed to delete {bdev_name} from node: "
-                         f"{primary_node.get_id()}")
+    # The async delete and its completion poll run WITHOUT the lvstore lock:
+    # async deletes are safe in parallel with each other and with other
+    # objects' operations. Only synchronous single-node operations are
+    # mutually exclusive per node. Holding the lock across the async pass
+    # blocked every create/delete on this node for up to 15s per rollback.
+    ret, _ = rpc_client.delete_lvol(bdev_name)  # async initial delete
+    if not ret:
+        logger.error(f"Rollback: failed to delete {bdev_name} from node: "
+                     f"{primary_node.get_id()}")
+    else:
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            try:
+                st = rpc_client.bdev_lvol_get_lvol_delete_status(bdev_name)
+            except Exception as e:
+                logger.error(f"Rollback: delete-status poll for {bdev_name} "
+                             f"failed: {e}")
+                break
+            if st in (0, 2, -2, -19):  # completed / not found
+                delete_completed = True
+                break
+            time.sleep(0.5)
+        if not delete_completed:
+            logger.error(f"Rollback: async delete of {bdev_name} did not "
+                         f"complete within 15s on {primary_node.get_id()}; "
+                         f"peers still get their sync deletes")
         else:
-            # Bounded completion poll INSIDE the lock: the delete window on
-            # the leader stays exclusive until the async pass has finished.
-            deadline = time.time() + 15
-            while time.time() < deadline:
-                try:
-                    st = rpc_client.bdev_lvol_get_lvol_delete_status(bdev_name)
-                except Exception as e:
-                    logger.error(f"Rollback: delete-status poll for {bdev_name} "
-                                 f"failed: {e}")
-                    break
-                if st in (0, 2, -2, -19):  # completed / not found
-                    delete_completed = True
-                    break
-                time.sleep(0.5)
-            if not delete_completed:
-                logger.error(f"Rollback: async delete of {bdev_name} did not "
-                             f"complete within 15s on {primary_node.get_id()}; "
-                             f"peers still get their sync deletes")
-            else:
-                # The async pass only cleared data clusters; this sync delete
-                # removes the leader's blob metadata and bdev registration
-                # (see invariant above). -19 answers "already clean".
+            # The async pass only cleared data clusters; this sync delete
+            # removes the leader's blob metadata and bdev registration
+            # (see invariant above). -19 answers "already clean". Sync ->
+            # exclusive on this node.
+            with lvstore_op_lock(cluster_id, lvs_name,
+                                 node_id=primary_node.get_id(), enabled=lock):
                 ret2, err2 = rpc_client.delete_lvol(bdev_name, sync=True)
-                if not ret2 and not (err2 and err2.get("code") == -19):
-                    logger.error(f"Rollback: leader sync delete of {bdev_name} "
-                                 f"on {primary_node.get_id()[:8]} failed "
-                                 f"({err2})")
+            if not ret2 and not (err2 and err2.get("code") == -19):
+                logger.error(f"Rollback: leader sync delete of {bdev_name} "
+                             f"on {primary_node.get_id()[:8]} failed "
+                             f"({err2})")
 
     # Every non-leader LVS member owes a sync delete (see invariant above).
     # Everyone reachable gets it now (under their own lvstore lock); everyone
@@ -929,9 +933,9 @@ def _delete_locked(snap, snapshot_uuid, force_delete=False, lock=True):
         if snode.status == StorageNode.STATUS_ONLINE:
             rpc_client = snode.rpc_client()
 
-            with lvstore_op_lock(snap.cluster_id, snap.lvol.lvs_name,
-                                 node_id=snode.get_id(), enabled=lock and not force_delete):
-                ret, _ = rpc_client.delete_lvol(snap.snap_bdev)
+            # Async delete: no lvstore lock (parallel-safe; only synchronous
+            # single-node operations are mutually exclusive per node).
+            ret, _ = rpc_client.delete_lvol(snap.snap_bdev)
             if not ret:
                 logger.error(f"Failed to delete snap from node: {snode.get_id()}")
                 if not force_delete:
@@ -998,9 +1002,9 @@ def _delete_locked(snap, snapshot_uuid, force_delete=False, lock=True):
         # clone, no migration, yet went out special_delete=True).
         special_delete = len(snap.instances) > 0
 
-        with lvstore_op_lock(snap.cluster_id, snap.lvol.lvs_name,
-                             node_id=primary_node.get_id(), enabled=lock and not force_delete):
-            ret, _ = rpc_client.delete_lvol(snap.snap_bdev, sync=False, special_delete=special_delete)
+        # Async delete: no lvstore lock (parallel-safe; only synchronous
+        # single-node operations are mutually exclusive per node).
+        ret, _ = rpc_client.delete_lvol(snap.snap_bdev, sync=False, special_delete=special_delete)
         if not ret:
             logger.error(f"Failed to delete snap from node: {snode.get_id()}")
             if not force_delete:
