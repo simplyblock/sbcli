@@ -98,11 +98,18 @@ def create_and_connect_lvols(meta):
     return devices
 
 
+# The verify pass must REPLAY the write job with --verify_only: fio then
+# skips the writes and only reads back and checks the crc32c headers it
+# wrote. A --rw=read job would not reproduce the same pattern layout and
+# would verify nothing, so both jobs share one parameter string.
+_FIO_VERIFY_JOB = (f"--name=stamp {FIO_COMMON} --rw=write --bs=256k"
+                   f" --iodepth=8 --size={VERIFY_REGION}"
+                   " --verify=crc32c --verify_state_save=0")
+
+
 def fio_verify_write(mgmt, dev):
     ssh_exec(mgmt, [
-        f"sudo fio --name=stamp {FIO_COMMON} --filename={dev} --rw=write"
-        f" --bs=256k --iodepth=8 --size={VERIFY_REGION}"
-        " --verify=crc32c --do_verify=0 --verify_state_save=0"
+        f"sudo fio {_FIO_VERIFY_JOB} --filename={dev} --do_verify=0"
     ], check=True, timeout=3600)
 
 
@@ -110,9 +117,8 @@ def fio_verify_read(mgmt, dev):
     """crc32c verify-only pass over the stamped region — fails on any
     corruption or read error."""
     ssh_exec(mgmt, [
-        f"sudo fio --name=check {FIO_COMMON} --filename={dev} --rw=read"
-        f" --bs=256k --iodepth=8 --size={VERIFY_REGION}"
-        " --verify=crc32c --verify_only --verify_fatal=1 --verify_state_save=0"
+        f"sudo fio {_FIO_VERIFY_JOB} --filename={dev}"
+        " --verify_only --verify_fatal=1"
     ], check=True, timeout=3600)
 
 
