@@ -3646,7 +3646,7 @@ def node_removal_orchestrate(node_id, force_remove=False):
     cluster_ops.set_cluster_status(cluster.get_id(), Cluster.STATUS_IN_SHRINK)
     try:
         # Phase 1 — shut the node down (graceful). Skipped on re-entry.
-        if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_PENDING_REMOVAL]:
+        if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:
             logger.info(f"[REMOVAL] {node_id}: phase 1 — shutdown")
             ret = shutdown_storage_node(node_id, force=force_remove)
             if isinstance(ret, tuple):
