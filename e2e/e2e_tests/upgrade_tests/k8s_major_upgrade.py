@@ -184,7 +184,7 @@ class K8sNativeMajorUpgrade(TestClusterBase):
         self.pvc_details: dict[str, dict] = {}
         self.snapshot_details: dict[str, dict] = {}
         self.clone_details: dict[str, dict] = {}
-        self.pre_upgrade_checksums: dict[str, dict] = {}
+
 
         self.logger.info(
             f"K8s native upgrade: {self.base_version} -> {self.target_version} "
@@ -539,6 +539,10 @@ class K8sNativeMajorUpgrade(TestClusterBase):
         """Capture MD5 checksums for all files on the given PVCs.
 
         Returns ``{pvc_name: {filepath: md5hash, ...}, ...}``.
+
+        NOTE: Currently unused in the upgrade flow — FIO's built-in
+        ``verify=md5`` + ``verify_only`` mode (Phase 4.1) is used instead.
+        Kept for future use when unmount/remount verification is needed.
         """
         all_checksums = {}
         for pvc_name in pvc_names:
@@ -577,6 +581,10 @@ class K8sNativeMajorUpgrade(TestClusterBase):
         """Verify that current PVC data matches previously captured checksums.
 
         Raises ``AssertionError`` if any checksum mismatch is found.
+
+        NOTE: Currently unused in the upgrade flow — FIO's built-in
+        ``verify=md5`` + ``verify_only`` mode (Phase 4.1) is used instead.
+        Kept for future use when unmount/remount verification is needed.
         """
         mismatches = []
         for pvc_name, expected in pre_checksums.items():
@@ -2208,11 +2216,6 @@ spec:
         self.logger.info("Pre-upgrade Step 4.1: Running FIO on clones")
         self._run_fio_on_clones(runtime=60)
 
-        # Capture MD5 checksums on all PVCs and clones before upgrade
-        self.logger.info("Pre-upgrade Step 5: Capturing MD5 checksums before upgrade")
-        all_volume_names = list(self.pvc_details.keys()) + list(self.clone_details.keys())
-        self.pre_upgrade_checksums = self._capture_pvc_checksums(all_volume_names)
-
         # Phase 2.7: Capture pre-upgrade state
         self._capture_pre_upgrade_state()
 
@@ -2287,17 +2290,6 @@ spec:
             cluster_id=self.cluster_id, status="active", timeout=600,
         )
         self._assert_all_nodes_healthy()
-
-        # Verify MD5 checksums match post-upgrade
-        if hasattr(self, "pre_upgrade_checksums") and self.pre_upgrade_checksums:
-            self.logger.info(
-                "Post-upgrade: Verifying MD5 checksums match pre-upgrade data"
-            )
-            self._verify_pvc_checksums(self.pre_upgrade_checksums, "post-upgrade")
-        else:
-            self.logger.warning(
-                "No pre-upgrade checksums available — skipping MD5 verification"
-            )
 
         # Phase 4.1–4.3: Verify old data survives the upgrade
         self.logger.info("Post-upgrade: Verifying old data integrity")
