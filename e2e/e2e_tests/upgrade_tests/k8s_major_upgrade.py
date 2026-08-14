@@ -510,7 +510,7 @@ class K8sNativeMajorUpgrade(TestClusterBase):
             self.k8s_utils.validate_fio_job(detail["job_name"], timeout=timeout)
 
     def _cleanup_fio_jobs_only(self, wait_for_termination: bool = True,
-                               termination_timeout: int = 120):
+                               termination_timeout: int = 300):
         """Delete FIO jobs and configmaps but leave PVCs/snapshots/clones intact.
 
         Unlike ``k8s_utils.cleanup_stale_fio_resources()`` which also removes
@@ -568,8 +568,8 @@ class K8sNativeMajorUpgrade(TestClusterBase):
 
         # Give CSI NodeUnstageVolume / NodeUnpublishVolume time to complete
         # after pods are gone — ensures no stale mounts remain on worker nodes
-        self.logger.info("Waiting 15s for CSI unmount to complete...")
-        time.sleep(15)
+        self.logger.info("Waiting 60s for CSI unmount to complete...")
+        time.sleep(60)
 
         self.logger.info("FIO jobs and pods cleaned up (PVCs preserved)")
 
