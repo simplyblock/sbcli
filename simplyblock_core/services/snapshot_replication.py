@@ -62,9 +62,12 @@ def process_snap_replicate_start(task, snapshot):
             return
 
     remote_lv = db.get_lvol_by_id(task.function_params["remote_lvol_id"])
-    remote_lv_node = db.get_storage_node_by_id(remote_lv.node_id)
-    if remote_lv_node.status != StorageNode.STATUS_ONLINE:
-        task.function_result = "Target node is not online, retrying"
+    # Send to whichever member of the target lvstore currently leads it — the
+    # hub only accepts receive IO on the leader, and leadership does not
+    # return to the recorded node on its own after an outage.
+    remote_lv_node = _receiving_leader_node(remote_lv)
+    if remote_lv_node is None:
+        task.function_result = "No online LVS leader on the target, retrying"
         task.status = JobSchedule.STATUS_SUSPENDED
         task.retry += 1
         task.write_to_db()
@@ -135,6 +138,39 @@ def process_snap_replicate_start(task, snapshot):
     if snapshot.status != SnapShot.STATUS_IN_REPLICATION:
         snapshot.status = SnapShot.STATUS_IN_REPLICATION
         snapshot.write_to_db()
+
+
+def _receiving_leader_node(remote_lv):
+    """The node that currently leads *remote_lv*'s lvstore, or None.
+
+    The receiving lvol is HA — it exists on every member of the target
+    lvstore — but only the LEADER can accept hub receive IO or persist a
+    convert. ``remote_lv.node_id`` records where the lvol was created, which
+    is not where leadership sits after the target node has been down: case 5
+    (target node offline mid-replication) parked leadership on the peer, the
+    pinned node kept failing the leadership gate, and the volume retried
+    forever without ever converging — lag grew one snapshot per minute while
+    the other four volumes replicated normally. Follow leadership instead of
+    the recorded node; nothing moves leadership back on its own.
+    """
+    from simplyblock_core.controllers import lvol_controller
+    candidates = []
+    for node_id in (remote_lv.nodes or [remote_lv.node_id]):
+        try:
+            candidates.append(db.get_storage_node_by_id(node_id))
+        except KeyError:
+            continue
+    # Prefer the recorded node when it still leads: keeps a stable chain home.
+    candidates.sort(key=lambda n: n.get_id() != remote_lv.node_id)
+    for node in candidates:
+        if node.status != StorageNode.STATUS_ONLINE:
+            continue
+        try:
+            if lvol_controller.is_node_leader(node, remote_lv.lvs_name):
+                return node
+        except Exception as e:
+            logger.warning("Leadership probe failed on %s: %s", node.get_id(), e)
+    return None
 
 
 def _require_lvs_leader(node, lvs_name, what):
@@ -312,7 +348,11 @@ def process_snap_replicate_finish(task, snapshot):
     # nonleader mode" storms, observed live 2026-08-13). This is the refcount
     # discipline the migration runner's hub_manager exists for.
     remote_lv = db.get_lvol_by_id(task.function_params["remote_lvol_id"])
-    remote_snode = db.get_storage_node_by_id(remote_lv.node_id)
+    # add_clone/convert must run on the leader too — a convert on a non-leader
+    # reports success and persists nothing. Follow leadership, not the node the
+    # receiving lvol was created on (see _receiving_leader_node).
+    remote_snode = (_receiving_leader_node(remote_lv)
+                    or db.get_storage_node_by_id(remote_lv.node_id))
     _src_node = db.get_storage_node_by_id(snapshot.lvol.node_id)
     if remote_snode.transfer_hublvol and remote_snode.transfer_hublvol.bdev_name:
         if not _other_active_transfers_to_node(task, remote_snode.get_id()):
