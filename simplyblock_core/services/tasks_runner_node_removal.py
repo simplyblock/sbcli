@@ -6,7 +6,7 @@ from simplyblock_core import db_controller, storage_node_ops, utils, constants
 from simplyblock_core.controllers import tasks_controller
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.cluster import Cluster
-
+from simplyblock_core.models.storage_node import StorageNode
 
 logger = utils.get_logger(__name__)
 
