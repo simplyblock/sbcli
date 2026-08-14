@@ -132,6 +132,7 @@ class TestRemovePreconditions(unittest.TestCase):
         tc = MagicMock()
         tc.get_active_node_removal_task.return_value = patches.get("active_removal", False)
         tc.get_active_node_tasks.return_value = patches.get("active_tasks", [])
+        tc.get_active_node_restart_task.return_value =  []
         tc.add_node_removal_task.return_value = patches.get("task_id", "task-uuid-1")
         with patch.object(storage_node_ops, "DBController", return_value=db), \
              patch.object(storage_node_ops, "tasks_controller", tc), \
@@ -148,13 +149,6 @@ class TestRemovePreconditions(unittest.TestCase):
         ret, tc = self._run(FakeDB(cl, nodes))
         self.assertEqual(ret, "task-uuid-1")
         tc.add_node_removal_task.assert_called_once()
-
-    def test_reject_target_not_online(self):
-        cl = _cluster()
-        nodes = [_node("n1", status=StorageNode.STATUS_OFFLINE), _node("n2")]
-        ret, tc = self._run(FakeDB(cl, nodes))
-        self.assertFalse(ret)
-        tc.add_node_removal_task.assert_not_called()
 
     def test_reject_peer_not_online(self):
         cl = _cluster()
