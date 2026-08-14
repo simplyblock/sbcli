@@ -27,7 +27,13 @@ def pytest_collection_modifyitems(items):
         if str(item.fspath).startswith(_TIER_DIR):
             item.add_marker(pytest.mark.edge_e2e)
             if item.get_closest_marker("timeout") is None:
-                item.add_marker(pytest.mark.timeout(EDGE_E2E_DEFAULT_TIMEOUT))
+                # method="thread": the campaign driver runs on Windows, where
+                # pytest-timeout's default signal method dies collecting with
+                # "module 'signal' has no attribute 'SIGALRM'" — it aborted
+                # every test stage of the first run that reached them
+                # (2026-08-14) before a single test executed.
+                item.add_marker(pytest.mark.timeout(EDGE_E2E_DEFAULT_TIMEOUT,
+                                                    method="thread"))
 
 
 def pytest_report_header(config):
