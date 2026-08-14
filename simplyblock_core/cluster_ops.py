@@ -984,6 +984,7 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     online_nodes = []
     dev_count = 0
 
+    raw_device_size = 0
     for node in snodes:
         if node.is_secondary_node:  # pass
             continue
@@ -993,6 +994,7 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                 if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY,
                                   NVMeDevice.STATUS_CANNOT_ALLOCATE]:
                     dev_count += 1
+                    raw_device_size += int(dev.size or 0)
     single_node_cluster = is_single_node_activation(cluster, online_nodes)
     if single_node_cluster and cluster.ha_type == "ha":
         logger.warning("Single-node cluster: activating as non-HA "
@@ -1103,8 +1105,20 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
             node.enable_ha_jm = False
         node.write_to_db()
 
+    # Cluster raw capacity, for the reported cluster_max_size (create_lvstore
+    # takes it but sizes its distribs from DISTRIB_SIZE_BYTES instead). The
+    # capacity collector has not necessarily run yet on a freshly deployed
+    # cluster — a single-node deployment reaches activation seconds after
+    # add-node — and the unguarded records[0] aborted activation with a bare
+    # "list index out of range". Fall back to the raw device sum.
     records = db_controller.get_cluster_capacity(cluster)
-    max_size = records[0]['size_total']
+    if records:
+        max_size = records[0]['size_total']
+    else:
+        max_size = raw_device_size
+        logger.warning(
+            "No cluster capacity record yet (stats collector has not run); "
+            "using the raw online-device sum %s as cluster max size", max_size)
 
     used_nodes_as_sec: t.List[str] = []
     used_nodes_as_tertiary: t.List[str] = []
