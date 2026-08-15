@@ -2529,14 +2529,11 @@ spec:
         # leftover mount-points and NVMe-oF connections on every worker node.
         # This prevents stale device references from causing I/O errors when
         # storage nodes are shut down and restarted during the upgrade.
-        # NOTE: Explicit NVMe disconnect disabled — nvme list confirmed only
-        # local Samsung SSDs visible on workers, no NVMe-oF fabric devices.
-        # CSI unmount + FIO pod termination wait is sufficient.
-        # self.logger.info(
-        #     "Pre-upgrade: Cleaning worker node connections "
-        #     "(unmount + NVMe disconnect)"
-        # )
-        # self._cleanup_worker_connections()
+        self.logger.info(
+            "Pre-upgrade: Cleaning worker node connections "
+            "(unmount + NVMe disconnect)"
+        )
+        self._cleanup_worker_connections()
 
         # Capture worker dmesg BEFORE upgrade for comparison
         try:
