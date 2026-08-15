@@ -414,10 +414,19 @@ class K8sNativeMajorUpgrade(TestClusterBase):
             pvc_name = f"upgrade-pvc-{_rand_seq(4)}-{i}"
             job_name = f"fio-{pvc_name}"
             cm_name = f"fio-cfg-{pvc_name}"
-            sc_name = random.choice(
+            # Pick a random SC; deduplicate so that when both names are
+            # identical (e.g. R25 chart has no XFS variant) we don't
+            # incorrectly label volumes as XFS.
+            sc_choices = list(dict.fromkeys(
                 [self.STORAGE_CLASS_NAME, self.XFS_STORAGE_CLASS_NAME]
+            ))
+            sc_name = random.choice(sc_choices)
+            fs_type = (
+                "xfs"
+                if sc_name == self.XFS_STORAGE_CLASS_NAME
+                and self.XFS_STORAGE_CLASS_NAME != self.STORAGE_CLASS_NAME
+                else "ext4"
             )
-            fs_type = "xfs" if sc_name == self.XFS_STORAGE_CLASS_NAME else "ext4"
 
             self.k8s_utils.create_pvc(
                 name=pvc_name, size=self.pvc_size, storage_class=sc_name,
@@ -700,6 +709,82 @@ class K8sNativeMajorUpgrade(TestClusterBase):
         self.logger.info("Worker connection cleanup complete")
         # Brief pause for cleanup to propagate
         time.sleep(10)
+
+    def _collect_worker_dmesg(self, label: str = ""):
+        """Collect dmesg and journalctl from every worker node.
+
+        Saves output to ``<docker_logs_path>/worker_dmesg/`` so that kernel-
+        level NVMe connect/disconnect, filesystem mount, and I/O error events
+        are captured even when the node reboots (journalctl persists).
+        """
+        import shlex
+
+        worker_nodes_env = os.environ.get("WORKER_NODES", "")
+        if worker_nodes_env:
+            worker_names = [n.strip() for n in worker_nodes_env.split(",")
+                           if n.strip()]
+        else:
+            out, _ = self.k8s_utils._exec_kubectl(
+                "kubectl get nodes -l node-role.kubernetes.io/worker "
+                "-o jsonpath='{.items[*].metadata.name}' 2>/dev/null || "
+                "kubectl get nodes --no-headers "
+                "-o custom-columns=NAME:.metadata.name",
+                supress_logs=True,
+            )
+            worker_names = [n.strip() for n in (out or "").replace("'", "").split()
+                            if n.strip()]
+
+        if not worker_names:
+            self.logger.warning("No worker nodes found, skipping dmesg collection")
+            return
+
+        suffix = f"_{label}" if label else ""
+        out_dir = os.path.join(self.docker_logs_path, "worker_dmesg")
+        os.makedirs(out_dir, exist_ok=True)
+
+        is_openshift = self.k8s_utils.detect_openshift()
+
+        collect_script = (
+            'echo "=== dmesg (NVMe/ext4/xfs/IO) ==="; '
+            "dmesg -T 2>/dev/null | "
+            'grep -iE "nvme|ext4|xfs|Buffer I/O|no available path|'
+            'shut down requested|mounted filesystem|unmounting|'
+            'Removing ctrl|new ctrl|I/O error" || echo "(no matches)"; '
+            'echo "=== journalctl -k (NVMe/IO, last 2h) ==="; '
+            "journalctl -k --since '2 hours ago' --no-pager 2>/dev/null | "
+            'grep -iE "nvme|ext4|xfs|Buffer I/O|no available path|'
+            'shut down requested|mounted|I/O error" || echo "(no matches)"'
+        )
+
+        self.logger.info(
+            f"Collecting dmesg/journalctl from {len(worker_names)} workers "
+            f"(label={label or 'none'})"
+        )
+
+        for node_name in worker_names:
+            try:
+                quoted = shlex.quote(collect_script)
+                if is_openshift:
+                    cmd = (
+                        f"oc debug node/{node_name} "
+                        f"-- chroot /host bash -c {quoted}"
+                    )
+                else:
+                    cmd = (
+                        f"kubectl debug node/{node_name} -q "
+                        f"--image=busybox:latest -- chroot /host sh -c {quoted}"
+                    )
+                out, _ = self.k8s_utils._exec_kubectl(cmd, timeout=120)
+                fname = os.path.join(
+                    out_dir, f"{node_name}{suffix}.log"
+                )
+                with open(fname, "w") as f:
+                    f.write(out or "(empty)")
+                self.logger.info(f"  {node_name}: dmesg saved ({len(out or '')} bytes)")
+            except Exception as exc:
+                self.logger.warning(
+                    f"  {node_name}: dmesg collection failed: {exc}"
+                )
 
     def _capture_pvc_checksums(self, pvc_names: list[str]) -> dict[str, dict]:
         """Capture MD5 checksums for all files on the given PVCs.
@@ -2453,6 +2538,12 @@ spec:
         # )
         # self._cleanup_worker_connections()
 
+        # Capture worker dmesg BEFORE upgrade for comparison
+        try:
+            self._collect_worker_dmesg(label="pre_upgrade")
+        except Exception as exc:
+            self.logger.warning(f"Pre-upgrade dmesg collection failed: {exc}")
+
         # ── Begin maintenance window ──
         self.logger.info("=" * 40 + " MAINTENANCE WINDOW START " + "=" * 40)
 
@@ -2524,6 +2615,12 @@ spec:
             cluster_id=self.cluster_id, status="active", timeout=600,
         )
         self._assert_all_nodes_healthy()
+
+        # Capture worker dmesg AFTER upgrade for NVMe/IO error analysis
+        try:
+            self._collect_worker_dmesg(label="post_upgrade")
+        except Exception as exc:
+            self.logger.warning(f"Post-upgrade dmesg collection failed: {exc}")
 
         # Phase 4.1–4.3: Verify old data survives the upgrade
         self.logger.info("Post-upgrade: Verifying old data integrity")
