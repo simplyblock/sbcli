@@ -679,13 +679,9 @@ jobs:
           set -euxo pipefail
 
           # 1. Install mc (MinIO Client)
-          if curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o /usr/local/bin/mc 2>/dev/null; then
-            chmod +x /usr/local/bin/mc
-          else
-            curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o /tmp/mc
-            chmod +x /tmp/mc
-            export PATH="/tmp:$PATH"
-          fi
+          curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o /tmp/mc
+          chmod +x /tmp/mc
+          export PATH="/tmp:$PATH"
 
           # 2. Port-forward MinIO service to localhost
           kubectl -n minio port-forward svc/minio 9000:9000 &

@@ -490,13 +490,9 @@ jobs:
       - name: Start MinIO trace logging
         run: |
           set -euxo pipefail
-          if curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o /usr/local/bin/mc 2>/dev/null; then
-            chmod +x /usr/local/bin/mc
-          else
-            curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o /tmp/mc
-            chmod +x /tmp/mc
-            export PATH="/tmp:$PATH"
-          fi
+          curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o /tmp/mc
+          chmod +x /tmp/mc
+          export PATH="/tmp:$PATH"
           kubectl -n minio port-forward svc/minio 9000:9000 &
           echo "MC_PORT_FWD_PID=$!" >> "$GITHUB_ENV"
           sleep 3
