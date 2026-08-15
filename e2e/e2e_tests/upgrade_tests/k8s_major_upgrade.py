@@ -492,6 +492,7 @@ class K8sNativeMajorUpgrade(TestClusterBase):
                 "snap_name": snap_name, "job_name": clone_job,
                 "configmap_name": clone_cm, "storage_class": clone_sc,
                 "fs_type": clone_fs_type,
+                **({"fio_meta": _clone_meta} if not skip_clone_fio else {}),
             }
             sleep_n_sec(5)
 
@@ -2443,11 +2444,14 @@ spec:
         # leftover mount-points and NVMe-oF connections on every worker node.
         # This prevents stale device references from causing I/O errors when
         # storage nodes are shut down and restarted during the upgrade.
-        self.logger.info(
-            "Pre-upgrade: Cleaning worker node connections "
-            "(unmount + NVMe disconnect)"
-        )
-        self._cleanup_worker_connections()
+        # NOTE: Explicit NVMe disconnect disabled — nvme list confirmed only
+        # local Samsung SSDs visible on workers, no NVMe-oF fabric devices.
+        # CSI unmount + FIO pod termination wait is sufficient.
+        # self.logger.info(
+        #     "Pre-upgrade: Cleaning worker node connections "
+        #     "(unmount + NVMe disconnect)"
+        # )
+        # self._cleanup_worker_connections()
 
         # ── Begin maintenance window ──
         self.logger.info("=" * 40 + " MAINTENANCE WINDOW START " + "=" * 40)
