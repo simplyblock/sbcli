@@ -573,6 +573,124 @@ class K8sNativeMajorUpgrade(TestClusterBase):
 
         self.logger.info("FIO jobs and pods cleaned up (PVCs preserved)")
 
+    def _cleanup_worker_connections(self):
+        """Unmount stale CSI volumes and disconnect NVMe-oF on every worker.
+
+        After FIO pods are deleted and CSI has had time to unmount, there
+        may still be stale mount-points or NVMe-oF connections left on
+        worker nodes (especially if CSI cleanup didn't fully succeed).
+        This method runs host-level cleanup on each worker via
+        ``oc debug node/`` (OpenShift) or ``kubectl debug node/`` (K8s).
+
+        Also deletes any lingering VolumeAttachment objects for upgrade
+        PVCs so Kubernetes doesn't think the volumes are still attached.
+        """
+        import time
+
+        # --- 1. Get worker node names ---
+        worker_nodes_env = os.environ.get("WORKER_NODES", "")
+        worker_names = []
+        if worker_nodes_env:
+            worker_names = [n.strip() for n in worker_nodes_env.split(",")
+                           if n.strip()]
+        else:
+            out, _ = self.k8s_utils._exec_kubectl(
+                "kubectl get nodes -l node-role.kubernetes.io/worker "
+                "-o jsonpath='{.items[*].metadata.name}' 2>/dev/null || "
+                "kubectl get nodes --no-headers "
+                "-o custom-columns=NAME:.metadata.name",
+                supress_logs=True,
+            )
+            worker_names = [n.strip() for n in (out or "").replace("'", "").split()
+                            if n.strip()]
+
+        if not worker_names:
+            self.logger.warning("No worker nodes found, skipping connection cleanup")
+            return
+
+        self.logger.info(
+            f"Cleaning stale mounts and NVMe connections on {len(worker_names)} "
+            f"worker(s): {worker_names}"
+        )
+
+        is_openshift = self.k8s_utils.detect_openshift()
+
+        # Host-level cleanup script:
+        # 1) Find and unmount any simplyblock CSI volume mounts
+        # 2) Disconnect all NVMe-oF subsystems
+        cleanup_script = (
+            "for mp in $(mount | grep 'kubernetes.io~csi' | awk '{print $3}'); do "
+            "  umount -f \"$mp\" 2>/dev/null || true; "
+            "done; "
+            "nvme disconnect-all 2>/dev/null || true; "
+            "echo CLEANUP_DONE"
+        )
+
+        for node_name in worker_names:
+            self.logger.info(f"  Cleaning worker: {node_name}")
+            try:
+                if is_openshift:
+                    cmd = (
+                        f"oc debug node/{node_name} "
+                        f"-- chroot /host bash -c "
+                        f"'{cleanup_script}'"
+                    )
+                else:
+                    cmd = (
+                        f"kubectl debug node/{node_name} -q "
+                        f"--image=busybox:latest -- chroot /host sh -c "
+                        f"'{cleanup_script}'"
+                    )
+                out, _ = self.k8s_utils._exec_kubectl(cmd, timeout=120)
+                if "CLEANUP_DONE" in (out or ""):
+                    self.logger.info(f"  Worker {node_name}: cleanup completed")
+                else:
+                    self.logger.warning(
+                        f"  Worker {node_name}: cleanup may not have completed "
+                        f"(output: {(out or '')[:200]})"
+                    )
+            except Exception as exc:
+                self.logger.warning(
+                    f"  Worker {node_name}: cleanup failed: {exc}"
+                )
+
+        # --- 2. Delete stale VolumeAttachments for upgrade PVCs ---
+        ns = self.k8s_utils.namespace
+        pvc_names = list(self.pvc_details.keys()) + list(self.clone_details.keys())
+        if pvc_names:
+            self.logger.info("Checking for stale VolumeAttachments...")
+            try:
+                out, _ = self.k8s_utils._exec_kubectl(
+                    "kubectl get volumeattachments -o json 2>/dev/null || true",
+                    supress_logs=True,
+                )
+                if out and out.strip():
+                    va_data = json.loads(out)
+                    for va in va_data.get("items", []):
+                        pv_name = va.get("spec", {}).get("source", {}).get(
+                            "persistentVolumeName", ""
+                        )
+                        va_name = va.get("metadata", {}).get("name", "")
+                        # Check if this VA references one of our PVs
+                        # PV names match PVC names in CSI provisioner
+                        for pvc in pvc_names:
+                            if pvc in pv_name:
+                                self.logger.info(
+                                    f"  Deleting stale VolumeAttachment: {va_name} "
+                                    f"(PV: {pv_name})"
+                                )
+                                self.k8s_utils._exec_kubectl(
+                                    f"kubectl delete volumeattachment {va_name} "
+                                    f"--ignore-not-found",
+                                )
+                                break
+            except Exception as exc:
+                self.logger.warning(f"VolumeAttachment cleanup failed: {exc}")
+
+        self.logger.info("Worker connection cleanup complete")
+        # Brief pause for cleanup to propagate
+        time.sleep(10)
+
     def _capture_pvc_checksums(self, pvc_names: list[str]) -> dict[str, dict]:
         """Capture MD5 checksums for all files on the given PVCs.
 
@@ -2255,6 +2373,17 @@ spec:
 
         # Phase 2.7: Capture pre-upgrade state
         self._capture_pre_upgrade_state()
+
+        # Phase 2.8: Clean stale mounts and NVMe connections on worker nodes
+        # After all FIO pods are gone and CSI has unmounted, force-clean any
+        # leftover mount-points and NVMe-oF connections on every worker node.
+        # This prevents stale device references from causing I/O errors when
+        # storage nodes are shut down and restarted during the upgrade.
+        self.logger.info(
+            "Pre-upgrade: Cleaning worker node connections "
+            "(unmount + NVMe disconnect)"
+        )
+        self._cleanup_worker_connections()
 
         # ── Begin maintenance window ──
         self.logger.info("=" * 40 + " MAINTENANCE WINDOW START " + "=" * 40)
