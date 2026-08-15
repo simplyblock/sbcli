@@ -619,9 +619,12 @@ class K8sNativeMajorUpgrade(TestClusterBase):
         # 1) Find and unmount any simplyblock CSI volume mounts
         # 2) Disconnect all NVMe-oF subsystems
         # Try without sudo first; fall back to sudo if the command fails.
+        # NOTE: The script is passed via shlex.quote() to avoid nested
+        # quoting issues with oc debug / kubectl debug.
+        import shlex
         cleanup_script = (
-            "for mp in $(mount | grep 'kubernetes.io~csi' | awk '{print $3}'); do "
-            "  umount -f \"$mp\" 2>/dev/null || sudo umount -f \"$mp\" 2>/dev/null || true; "
+            'for mp in $(mount | grep kubernetes.io~csi | awk "{print \\$3}"); do '
+            '  umount -f "$mp" 2>/dev/null || sudo umount -f "$mp" 2>/dev/null || true; '
             "done; "
             "nvme disconnect-all 2>/dev/null || sudo nvme disconnect-all 2>/dev/null || true; "
             "echo CLEANUP_DONE"
@@ -630,17 +633,16 @@ class K8sNativeMajorUpgrade(TestClusterBase):
         for node_name in worker_names:
             self.logger.info(f"  Cleaning worker: {node_name}")
             try:
+                quoted = shlex.quote(cleanup_script)
                 if is_openshift:
                     cmd = (
                         f"oc debug node/{node_name} "
-                        f"-- chroot /host bash -c "
-                        f"'{cleanup_script}'"
+                        f"-- chroot /host bash -c {quoted}"
                     )
                 else:
                     cmd = (
                         f"kubectl debug node/{node_name} -q "
-                        f"--image=busybox:latest -- chroot /host sh -c "
-                        f"'{cleanup_script}'"
+                        f"--image=busybox:latest -- chroot /host sh -c {quoted}"
                     )
                 out, _ = self.k8s_utils._exec_kubectl(cmd, timeout=120)
                 if "CLEANUP_DONE" in (out or ""):
