@@ -618,11 +618,12 @@ class K8sNativeMajorUpgrade(TestClusterBase):
         # Host-level cleanup script:
         # 1) Find and unmount any simplyblock CSI volume mounts
         # 2) Disconnect all NVMe-oF subsystems
+        # Try without sudo first; fall back to sudo if the command fails.
         cleanup_script = (
             "for mp in $(mount | grep 'kubernetes.io~csi' | awk '{print $3}'); do "
-            "  umount -f \"$mp\" 2>/dev/null || true; "
+            "  umount -f \"$mp\" 2>/dev/null || sudo umount -f \"$mp\" 2>/dev/null || true; "
             "done; "
-            "nvme disconnect-all 2>/dev/null || true; "
+            "nvme disconnect-all 2>/dev/null || sudo nvme disconnect-all 2>/dev/null || true; "
             "echo CLEANUP_DONE"
         )
 
