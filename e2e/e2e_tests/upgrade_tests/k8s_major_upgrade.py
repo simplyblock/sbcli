@@ -618,15 +618,22 @@ class K8sNativeMajorUpgrade(TestClusterBase):
         # Host-level cleanup script:
         # 1) Find and unmount any simplyblock CSI volume mounts
         # 2) Disconnect all NVMe-oF subsystems
+        # 3) Print nvme list to confirm all connections are gone
         # Try without sudo first; fall back to sudo if the command fails.
         # NOTE: The script is passed via shlex.quote() to avoid nested
         # quoting issues with oc debug / kubectl debug.
         import shlex
         cleanup_script = (
+            'echo "=== CSI mounts before cleanup ==="; '
+            "mount | grep kubernetes.io~csi || echo '(none)'; "
+            'echo "=== NVMe devices before cleanup ==="; '
+            "nvme list 2>/dev/null || sudo nvme list 2>/dev/null || echo '(nvme list failed)'; "
             'for mp in $(mount | grep kubernetes.io~csi | awk "{print \\$3}"); do '
             '  umount -f "$mp" 2>/dev/null || sudo umount -f "$mp" 2>/dev/null || true; '
             "done; "
             "nvme disconnect-all 2>/dev/null || sudo nvme disconnect-all 2>/dev/null || true; "
+            'echo "=== NVMe devices after cleanup ==="; '
+            "nvme list 2>/dev/null || sudo nvme list 2>/dev/null || echo '(nvme list failed)'; "
             "echo CLEANUP_DONE"
         )
 
@@ -989,8 +996,12 @@ class K8sNativeMajorUpgrade(TestClusterBase):
             "Post-upgrade Phase 4.1: Verify old data integrity (FIO verify-only)"
         )
 
-        # 4.1 — Verify-only FIO on each pre-upgrade PVC
-        verify_jobs: list[tuple[str, str]] = []
+        # 4.1 — Verify-only FIO on each pre-upgrade PVC AND clone PVC
+        # We verify both originals and clones, collecting all failures
+        # instead of stopping on the first error.
+        verify_jobs: list[tuple[str, str, str]] = []  # (job, pvc, type)
+
+        # Original PVCs
         for pvc_name, detail in self.pvc_details.items():
             fio_meta = detail.get("fio_meta")
             if not fio_meta:
@@ -1008,16 +1019,67 @@ class K8sNativeMajorUpgrade(TestClusterBase):
                 configmap_name=verify_cm, fio_config=verify_config,
                 image=self.FIO_IMAGE,
             )
-            verify_jobs.append((verify_job, pvc_name))
+            verify_jobs.append((verify_job, pvc_name, "original"))
             sleep_n_sec(5)
 
-        for job_name, pvc_name in verify_jobs:
-            self.logger.info(f"Validating verify-only FIO for PVC: {pvc_name}")
+        # Clone PVCs
+        for clone_name, detail in self.clone_details.items():
+            fio_meta = detail.get("fio_meta")
+            if not fio_meta:
+                self.logger.warning(
+                    f"No FIO metadata for clone {clone_name}, skipping verify-only"
+                )
+                continue
+
+            verify_job = f"verify-{clone_name}"
+            verify_cm = f"fio-verify-cfg-{clone_name}"
+
+            verify_config = self._build_verify_only_fio_config(
+                clone_name, fio_meta,
+            )
+            self.k8s_utils.create_fio_job(
+                job_name=verify_job, pvc_name=clone_name,
+                configmap_name=verify_cm, fio_config=verify_config,
+                image=self.FIO_IMAGE,
+            )
+            verify_jobs.append((verify_job, clone_name, "clone"))
+            sleep_n_sec(5)
+
+        # Validate ALL verify jobs, collecting failures
+        verify_failures: list[str] = []
+        for job_name, pvc_name, pvc_type in verify_jobs:
+            self.logger.info(
+                f"Validating verify-only FIO for {pvc_type} PVC: {pvc_name}"
+            )
             self._save_fio_pod_logs(job_name, f"{pvc_name}-verify")
-            self.k8s_utils.validate_fio_job(job_name, timeout=600)
+            try:
+                self.k8s_utils.validate_fio_job(job_name, timeout=600)
+                self.logger.info(
+                    f"  PASSED: {pvc_type} PVC {pvc_name} data verified"
+                )
+            except Exception as exc:
+                self.logger.error(
+                    f"  FAILED: {pvc_type} PVC {pvc_name} verification "
+                    f"failed: {exc}"
+                )
+                verify_failures.append(
+                    f"{pvc_type} PVC '{pvc_name}': {exc}"
+                )
+
+        if verify_failures:
+            summary = "\n  ".join(verify_failures)
+            self.logger.error(
+                f"Phase 4.1: {len(verify_failures)}/{len(verify_jobs)} "
+                f"PVC verifications failed:\n  {summary}"
+            )
+            raise RuntimeError(
+                f"Phase 4.1: {len(verify_failures)}/{len(verify_jobs)} "
+                f"PVC verifications failed:\n  {summary}"
+            )
 
         self.logger.info(
-            "Post-upgrade Phase 4.1 PASSED: All old PVC data verified intact"
+            f"Post-upgrade Phase 4.1 PASSED: All {len(verify_jobs)} PVC "
+            f"data verified intact (originals + clones)"
         )
 
         # 4.2 — Fresh randrw FIO on old PVCs
