@@ -656,7 +656,6 @@ class K8sNativeMajorUpgrade(TestClusterBase):
                 )
 
         # --- 2. Delete stale VolumeAttachments for upgrade PVCs ---
-        ns = self.k8s_utils.namespace
         pvc_names = list(self.pvc_details.keys()) + list(self.clone_details.keys())
         if pvc_names:
             self.logger.info("Checking for stale VolumeAttachments...")
