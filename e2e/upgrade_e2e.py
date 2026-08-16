@@ -140,12 +140,15 @@ def main():
 
 def check_for_dumps():
     """Validates whether core dumps present on machines
-    
+
     Returns:
         bool: If there are core dumps or not
     """
     logger.info("Checking for core dumps!!")
     cluster_base = TestClusterBase()
+    if not cluster_base.api_base_url:
+        logger.info("No cluster API URL configured (K8s-native); skipping core dump check")
+        return False
     ssh_obj = SshUtils(bastion_server=cluster_base.bastion_server)
     sbcli_utils = SbcliUtils(
         cluster_api_url=cluster_base.api_base_url,
