@@ -325,19 +325,24 @@ class K8sNativeMajorUpgrade(TestClusterBase):
             f"[job1]\n"
         )
 
+        # Warmup: sequential write with verify=md5 at the same bs/seed as
+        # the main config.  This pre-fills every block in the file with valid
+        # FIO verify headers so that a later verify_only pass (rw=read) can
+        # verify the ENTIRE file, not just the ~3-4 % of blocks that randrw
+        # happened to overwrite.
         warmup_config = (
             f"[global]\n"
             f"name={name}-warmup\n"
             f"filename_format=/spdkvol/fio-{run_id}.$jobnum\n"
             f"rw=write\n"
-            f"bs=1m\n"
+            f"bs={bs}\n"
             f"iodepth=32\n"
             f"direct=1\n"
             f"ioengine=libaio\n"
             f"size={self.fio_size}\n"
             f"numjobs={self.fio_num_jobs}\n"
-            f"group_reporting\n"
-            f"zero_buffers\n"
+            f"verify=md5\n"
+            f"randseed={randseed}\n"
             f"\n"
             f"[job1]\n"
         )
@@ -2510,10 +2515,14 @@ spec:
             npcs=self.npcs,
             fs_type="xfs",
         )
+        # Use XFS exclusively for the R25 upgrade test.  The chart-created
+        # ext4 SC hits FEATURE_C12 incompatibility (R25's mkfs.ext4 enables
+        # features that the host's e2fsck 1.46.5 cannot handle after upgrade).
+        # Point both SC names to XFS so _create_pvcs_with_fio picks only XFS.
+        self.STORAGE_CLASS_NAME = self.XFS_STORAGE_CLASS_NAME
         self.logger.info(
-            f"Using chart ext4 SC '{self.STORAGE_CLASS_NAME}' + "
-            f"new XFS SC '{self.XFS_STORAGE_CLASS_NAME}' "
-            f"(same pool={pool_name})"
+            f"Using XFS SC '{self.XFS_STORAGE_CLASS_NAME}' exclusively "
+            f"(ext4 FEATURE_C12 workaround, pool={pool_name})"
         )
 
         pre_fio_runtime = 60  # 1 minute — just write data before upgrade

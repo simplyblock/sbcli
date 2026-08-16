@@ -1661,12 +1661,12 @@ class K8sUtils:
                 pod on (typically the primary storage node for the lvol).
                 When set, a nodeAffinity rule excludes that node so the FIO
                 pod runs on a secondary / non-primary node instead.
-            warmup_config: Optional FIO config for a write-only warmup pass.
+            warmup_config: Optional FIO config for a sequential write pass.
                 When provided, an init container runs FIO with this config
-                to pre-fill all data files with valid verify headers (same
-                randseed, filenames, size) before the main randrw test.
-                This prevents false err=84 from stale FIO headers on
-                thin-provisioned storage.
+                to pre-fill every block with valid MD5 verify headers (same
+                bs, randseed, filenames, size as the main config) before the
+                main randrw test.  This ensures a later verify_only pass can
+                verify the entire file, not just the blocks randrw touched.
         """
         ns = namespace or self.namespace
         # Indent fio_config for YAML embedding (each line indented by 8 spaces)
