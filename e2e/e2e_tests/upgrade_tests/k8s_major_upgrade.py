@@ -32,6 +32,7 @@ import json
 import os
 import random
 import string
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
 from e2e_tests.cluster_test_base import TestClusterBase
@@ -1133,9 +1134,10 @@ class K8sNativeMajorUpgrade(TestClusterBase):
             verify_jobs.append((verify_job, clone_name, "clone"))
             sleep_n_sec(5)
 
-        # Validate ALL verify jobs, collecting failures
+        # Validate ALL verify jobs in parallel to avoid sequential timeouts
         verify_failures: list[str] = []
-        for job_name, pvc_name, pvc_type in verify_jobs:
+
+        def _validate_one(job_name, pvc_name, pvc_type):
             self.logger.info(
                 f"Validating verify-only FIO for {pvc_type} PVC: {pvc_name}"
             )
@@ -1145,14 +1147,23 @@ class K8sNativeMajorUpgrade(TestClusterBase):
                 self.logger.info(
                     f"  PASSED: {pvc_type} PVC {pvc_name} data verified"
                 )
+                return None
             except Exception as exc:
                 self.logger.error(
                     f"  FAILED: {pvc_type} PVC {pvc_name} verification "
                     f"failed: {exc}"
                 )
-                verify_failures.append(
-                    f"{pvc_type} PVC '{pvc_name}': {exc}"
-                )
+                return f"{pvc_type} PVC '{pvc_name}': {exc}"
+
+        with ThreadPoolExecutor(max_workers=len(verify_jobs)) as pool:
+            futures = {
+                pool.submit(_validate_one, job, pvc, ptype): (job, pvc, ptype)
+                for job, pvc, ptype in verify_jobs
+            }
+            for future in as_completed(futures):
+                result = future.result()
+                if result is not None:
+                    verify_failures.append(result)
 
         if verify_failures:
             summary = "\n  ".join(verify_failures)
