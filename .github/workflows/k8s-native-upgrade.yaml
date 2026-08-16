@@ -737,6 +737,9 @@ jobs:
           echo "R25 control plane pods ready"
           kubectl get pods -n $NAMESPACE
 
+          echo "Waiting 60s for FoundationDB to fully initialize..."
+          sleep 60
+
       - name: Create R25 cluster via sbcli-dev
         if: ${{ github.event.inputs.use_existing_cluster != 'true' && github.event.inputs.upgrade_type == 'r25-to-r2x' }}
         run: |
