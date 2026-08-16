@@ -902,6 +902,8 @@ class K8sNativeMajorUpgrade(TestClusterBase):
                 image=self.FIO_IMAGE, avoid_node=avoid,
                 warmup_config=warmup_config,
             )
+            # Store FIO metadata so Phase 4.1 can build verify-only jobs
+            detail["fio_meta"] = _meta
             clone_jobs.append((clone_job, clone_name))
             sleep_n_sec(5)
 
