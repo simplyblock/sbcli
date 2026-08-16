@@ -1820,11 +1820,13 @@ class TestClusterBase:
                 sleep_n_sec(2)
                 self.sbcli_utils.delete_all_storage_pools()
                 sleep_n_sec(2)
-                latest_util = self.get_latest_cluster_util()
-                if latest_util:
+                try:
+                    latest_util = self.get_latest_cluster_util()
                     size_used = latest_util["size_used"]
                     if size_used >= 500 * 1024 * 1024:
                         self.logger.warning(f"Cluster capacity more than 500MB after cleanup: {size_used // (1024 * 1024)}MB")
+                except (IndexError, TypeError, KeyError):
+                    self.logger.warning("Cluster capacity not available after cleanup (may happen during upgrade teardown)")
                 # for node in self.fio_node:
                 #     self.ssh_obj.remove_dir(node, "/mnt/*")
             except Exception as _:
@@ -3810,9 +3812,6 @@ class TestClusterBase:
 
     def get_latest_cluster_util(self):
         result = self.sbcli_utils.get_cluster_capacity()
-        if not result:
-            self.logger.warning("Cluster capacity returned empty; skipping util check")
-            return None
         sorted_results = sorted(result, key=lambda x: x["date"], reverse=True)
         latest_entry = sorted_results[0]
 
