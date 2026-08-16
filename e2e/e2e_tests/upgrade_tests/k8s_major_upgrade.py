@@ -1397,9 +1397,10 @@ class K8sNativeMajorUpgrade(TestClusterBase):
         self.logger.info("  All storage nodes online ✓")
 
         # All PVCs bound
+        ns = self.k8s_utils.namespace
         for pvc_name in self.pvc_details:
             out, _ = self.k8s_utils._exec_kubectl(
-                f"kubectl get pvc {pvc_name} -o jsonpath='{{.status.phase}}'"
+                f"kubectl get pvc {pvc_name} -n {ns} -o jsonpath='{{.status.phase}}'"
             )
             phase = (out or "").strip().replace("'", "")
             assert phase == "Bound", (
@@ -1410,7 +1411,7 @@ class K8sNativeMajorUpgrade(TestClusterBase):
         # Snapshots ready
         for snap_name in self.snapshot_details:
             out, _ = self.k8s_utils._exec_kubectl(
-                f"kubectl get volumesnapshot {snap_name} "
+                f"kubectl get volumesnapshot {snap_name} -n {ns} "
                 f"-o jsonpath='{{.status.readyToUse}}'"
             )
             ready = (out or "").strip().replace("'", "")
