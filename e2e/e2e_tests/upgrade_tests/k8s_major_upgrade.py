@@ -415,18 +415,13 @@ class K8sNativeMajorUpgrade(TestClusterBase):
             pvc_name = f"upgrade-pvc-{_rand_seq(4)}-{i}"
             job_name = f"fio-{pvc_name}"
             cm_name = f"fio-cfg-{pvc_name}"
-            # Pick a random SC; deduplicate so that when both names are
-            # identical (e.g. R25 chart has no XFS variant) we don't
-            # incorrectly label volumes as XFS.
+            # Pick a random SC; deduplicate when both names are identical.
             sc_choices = list(dict.fromkeys(
                 [self.STORAGE_CLASS_NAME, self.XFS_STORAGE_CLASS_NAME]
             ))
             sc_name = random.choice(sc_choices)
             fs_type = (
-                "xfs"
-                if sc_name == self.XFS_STORAGE_CLASS_NAME
-                and self.XFS_STORAGE_CLASS_NAME != self.STORAGE_CLASS_NAME
-                else "ext4"
+                "xfs" if sc_name == self.XFS_STORAGE_CLASS_NAME else "ext4"
             )
 
             self.k8s_utils.create_pvc(
@@ -2499,12 +2494,25 @@ spec:
 
         # R25: StorageClass "simplyblock-csi-sc" was auto-created by the
         # spdk-csi chart's logicalVolume config during helm install.
-        # Do NOT create StorageClasses here — use the chart-created one.
-        # Map XFS SC to the same chart-created SC (R25 chart has no XFS variant).
+        # Recreate it as XFS to avoid the ext4 FEATURE_C12 incompatibility
+        # where R25's newer mkfs.ext4 creates features that the host's
+        # older e2fsck/tune2fs (v1.46.5) cannot handle after upgrade.
+        self.logger.info(
+            "Recreating chart StorageClass as XFS to avoid ext4 FEATURE_C12 "
+            "incompatibility during upgrade"
+        )
+        self.k8s_utils.create_storage_class(
+            name=self.STORAGE_CLASS_NAME,
+            cluster_id=self.cluster_id,
+            pool_name=pool_name,
+            ndcs=self.ndcs,
+            npcs=self.npcs,
+            fs_type="xfs",
+        )
         self.XFS_STORAGE_CLASS_NAME = self.STORAGE_CLASS_NAME
         self.logger.info(
-            f"Using chart-created StorageClass '{self.STORAGE_CLASS_NAME}' "
-            f"(from logicalVolume config, pool_name={pool_name})"
+            f"Using XFS StorageClass '{self.STORAGE_CLASS_NAME}' "
+            f"(pool_name={pool_name})"
         )
 
         pre_fio_runtime = 60  # 1 minute — just write data before upgrade
