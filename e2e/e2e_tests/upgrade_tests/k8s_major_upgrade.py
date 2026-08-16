@@ -2493,26 +2493,27 @@ spec:
         sleep_n_sec(10)
 
         # R25: StorageClass "simplyblock-csi-sc" was auto-created by the
-        # spdk-csi chart's logicalVolume config during helm install.
-        # Recreate it as XFS to avoid the ext4 FEATURE_C12 incompatibility
-        # where R25's newer mkfs.ext4 creates features that the host's
-        # older e2fsck/tune2fs (v1.46.5) cannot handle after upgrade.
+        # spdk-csi chart's logicalVolume config during helm install (ext4).
+        # Create a separate XFS SC on the same pool to avoid the ext4
+        # FEATURE_C12 incompatibility where R25's newer mkfs.ext4 creates
+        # features that the host's e2fsck/tune2fs (v1.46.5) cannot handle
+        # after upgrade.
         self.logger.info(
-            "Recreating chart StorageClass as XFS to avoid ext4 FEATURE_C12 "
-            "incompatibility during upgrade"
+            "Creating XFS StorageClass on same pool to avoid ext4 "
+            "FEATURE_C12 incompatibility during upgrade"
         )
         self.k8s_utils.create_storage_class(
-            name=self.STORAGE_CLASS_NAME,
+            name=self.XFS_STORAGE_CLASS_NAME,
             cluster_id=self.cluster_id,
             pool_name=pool_name,
             ndcs=self.ndcs,
             npcs=self.npcs,
             fs_type="xfs",
         )
-        self.XFS_STORAGE_CLASS_NAME = self.STORAGE_CLASS_NAME
         self.logger.info(
-            f"Using XFS StorageClass '{self.STORAGE_CLASS_NAME}' "
-            f"(pool_name={pool_name})"
+            f"Using chart ext4 SC '{self.STORAGE_CLASS_NAME}' + "
+            f"new XFS SC '{self.XFS_STORAGE_CLASS_NAME}' "
+            f"(same pool={pool_name})"
         )
 
         pre_fio_runtime = 60  # 1 minute — just write data before upgrade
