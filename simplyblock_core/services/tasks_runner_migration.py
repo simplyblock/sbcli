@@ -86,6 +86,12 @@ def task_runner(task):
             _migration_retry_allowed(task, unavailable)
         return False
 
+    if snode.status == StorageNode.STATUS_REMOVED:
+        task.status = JobSchedule.STATUS_DONE
+        task.function_result = f"Node found in r: {task.node_id}"
+        task.write_to_db(db.kv_store)
+        return True
+
     cluster = db.get_cluster_by_id(task.cluster_id)
     if cluster.status not in Cluster.OPERABLE_STATUSES:
         task.function_result = "cluster is not active, retrying"
