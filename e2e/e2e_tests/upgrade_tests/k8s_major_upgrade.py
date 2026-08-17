@@ -1651,37 +1651,51 @@ class K8sNativeMajorUpgrade(TestClusterBase):
         self.logger.info("FDB keep annotation step complete")
 
     def _inject_keep_annotations_via_helm_upgrade(self, chart_path: str) -> bool:
-        """Edit FDB template files on disk and run helm upgrade --reuse-values.
+        """Edit chart template files on disk and run helm upgrade --reuse-values.
 
         This is the correct way to add keep annotations: modify the chart
         templates so Helm stores the annotation in its release manifest,
         then ``helm uninstall`` will see it and skip deletion.
 
+        Scans ALL template files in the chart for matching resource names
+        (FDB resources, prometheus config, etc.) rather than just a single
+        template, since resources may live in different template files.
+
         Returns True if successful, False otherwise.
         """
-        fdb_template = os.path.join(chart_path, "templates", "foundationdb.yaml")
-        if not os.path.isfile(fdb_template):
-            self.logger.warning(f"FDB template not found at {fdb_template}")
+        import glob
+        templates_dir = os.path.join(chart_path, "templates")
+        if not os.path.isdir(templates_dir):
+            self.logger.warning(f"Templates directory not found at {templates_dir}")
             return False
 
-        self.logger.info(f"Editing FDB template: {fdb_template}")
+        template_files = sorted(glob.glob(os.path.join(templates_dir, "*.yaml")))
+        if not template_files:
+            self.logger.warning(f"No YAML templates found in {templates_dir}")
+            return False
+
+        self.logger.info(f"Scanning {len(template_files)} template files in {templates_dir}")
 
         try:
-            with open(fdb_template, "r") as f:
-                content = f.read()
+            import re
+            keep_names = {name for _, name in _FDB_KEEP_RESOURCES}
+            remaining_names = set(keep_names)
 
-            if "helm.sh/resource-policy" in content:
-                self.logger.info("FDB template already has resource-policy annotations")
-            else:
-                # Inject "helm.sh/resource-policy: keep" annotation after each
-                # "metadata:" block. The template has multiple YAML documents
-                # separated by "---". Each resource has a "metadata:" line
-                # followed by "  name: ...". We add an annotations block.
-                import re
-                # Match "metadata:\n  name: <fdb-resource-name>" and inject annotation
-                fdb_names = {name for _, name in _FDB_KEEP_RESOURCES}
-                for name in fdb_names:
-                    # Pattern: metadata:\n  name: <name> (with optional labels after)
+            for template_file in template_files:
+                with open(template_file, "r") as f:
+                    content = f.read()
+
+                # Check which keep-resources exist in this template
+                names_in_file = {n for n in remaining_names if f"name: {n}" in content}
+                if not names_in_file:
+                    continue
+
+                self.logger.info(f"Editing template: {template_file}")
+                modified = False
+
+                for name in names_in_file:
+                    # Pattern: metadata:\n  name: <name>
+                    # (won't match if annotations block was already injected between them)
                     pattern = rf'(metadata:\n)(  name: {re.escape(name)}\n)'
                     replacement = (
                         r'\1  annotations:\n'
@@ -1691,9 +1705,17 @@ class K8sNativeMajorUpgrade(TestClusterBase):
                     content, count = re.subn(pattern, replacement, content)
                     if count > 0:
                         self.logger.info(f"  Injected keep annotation for: {name}")
+                        modified = True
+                        remaining_names.discard(name)
 
-                with open(fdb_template, "w") as f:
-                    f.write(content)
+                if modified:
+                    with open(template_file, "w") as f:
+                        f.write(content)
+
+            if remaining_names:
+                self.logger.warning(
+                    f"Could not find templates for: {remaining_names}"
+                )
 
             # Run helm upgrade --reuse-values to persist annotations
             self.logger.info(
