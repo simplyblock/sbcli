@@ -75,7 +75,6 @@ def _backup(db, uuid, s3_id, prev="", **overrides):
     b.uuid = uuid
     b.s3_id = s3_id
     b.cluster_id = CLUSTER_ID
-    b.source_cluster_id = CLUSTER_ID
     b.lvol_id = "lvol-1"
     b.lvol_name = "vol"
     b.snapshot_id = f"snap-{uuid}"
@@ -194,7 +193,6 @@ class TestExportImportRoundTrip:
         assert restored.s3_id == 2
         assert restored.prev_backup_id == "b-1"
         assert restored.cluster_id == "cluster-2"
-        assert restored.source_cluster_id == CLUSTER_ID
         assert restored.get_location().bucket_name == "simplyblock-backup-cluster-1"
         assert restored.encrypted is True
 
