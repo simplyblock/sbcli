@@ -664,6 +664,12 @@ BACKUP_POLL_INTERVAL_SEC = 5
 BACKUP_MAX_RETRIES = 10
 BACKUP_MERGE_SERVICE_INTERVAL_SEC = 60
 
+#: Longest backup chain the data plane will accept. bdev_lvol_s3_backup and
+#: bdev_lvol_s3_recovery copy the decoded arrays into fixed 40-element stack
+#: buffers (vbdev_lvol_rpc.c), so a longer chain corrupts the node's stack. The
+#: control plane refuses first; raise this only together with those buffers.
+BACKUP_MAX_CHAIN_LENGTH = 40
+
 #: Upper bound on a backup's s3_id. The data plane packs it into bits 33..62 of
 #: the synthetic bdev offset (S3_ID_BITS in spdk_internal/lvolstore.h) and masks
 #: rather than validates, so a larger value silently aliases onto another
