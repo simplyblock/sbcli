@@ -1627,7 +1627,7 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc, primary_s
             tgt_sec=tgt_sec, sec_rpc=sec_rpc,
             tgt_ter=tgt_ter, ter_rpc=ter_rpc,
             lvol_size_mib=_snap_lvol_size_mib,
-            migration=migration)
+            migration=migration, primary_src_node=primary_src_node)
         if t is None:
             return False, True, err
 
