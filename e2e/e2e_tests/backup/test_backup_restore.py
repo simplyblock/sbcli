@@ -2008,23 +2008,43 @@ class TestBackupPolicy(BackupTestBase):
         # Retention is eventually enforced; we just log the count for now
 
         # --- TC-BCK-025b: restore a retained backup to verify chain integrity ---
-        # After retention prunes/merges, remaining backups must still be
-        # restorable.  If restore fails with "Incomplete backups in chain"
-        # that is a product bug — retention should not break restorability.
-        if retained:
-            rst_bk_id = (retained[-1].get("id") or retained[-1].get("ID")
-                         or retained[-1].get("uuid") or "")
-            if rst_bk_id:
-                self.logger.info(
-                    f"TC-BCK-025b: restoring {rst_bk_id} to verify post-retention chain")
-                rst_name = f"pol_rst_{_rand_suffix()}"
-                self._restore_backup(rst_bk_id, rst_name)
-                self._wait_for_restore(rst_name)
-                self.logger.info(f"TC-BCK-025b: restore {rst_name} PASSED")
-            else:
-                self.logger.warning("TC-BCK-025b: SKIPPED — could not extract backup id")
+        # Retention triggers merges asynchronously; wait for all merges to
+        # finish before attempting restore (restoring during a merge is
+        # correctly rejected by the product with "Incomplete backups in chain").
+        self.logger.info("TC-BCK-025b: waiting for retention merges to complete …")
+        for _poll in range(18):  # up to 3 minutes
+            out, _ = self._sbcli(f"cluster list-tasks {self.cluster_id} --limit 0")
+            merging = [
+                line for line in (out or "").splitlines()
+                if "s3_backup_merge" in line
+                and "done" not in line.lower()
+                and "---" not in line
+            ]
+            if not merging:
+                break
+            self.logger.info(
+                f"TC-BCK-025b: {len(merging)} merge tasks still running, waiting …")
+            sleep_n_sec(10)
+
+        retained = self._list_backups()
+        # Pick a backup with 'completed' status for restore
+        rst_bk_id = ""
+        for b in reversed(retained):
+            status = (b.get("status") or b.get("Status") or "").lower()
+            if status == "completed":
+                rst_bk_id = (b.get("id") or b.get("ID")
+                             or b.get("uuid") or "")
+                if rst_bk_id:
+                    break
+        if rst_bk_id:
+            self.logger.info(
+                f"TC-BCK-025b: restoring {rst_bk_id} to verify post-retention chain")
+            rst_name = f"pol_rst_{_rand_suffix()}"
+            self._restore_backup(rst_bk_id, rst_name)
+            self._wait_for_restore(rst_name)
+            self.logger.info(f"TC-BCK-025b: restore {rst_name} PASSED")
         else:
-            self.logger.warning("TC-BCK-025b: SKIPPED — no retained backups found")
+            self.logger.warning("TC-BCK-025b: SKIPPED — no completed backup found")
 
         # --- TC-BCK-026: policy-detach from lvol ---
         self.logger.info("TC-BCK-026: policy-detach from lvol")
