@@ -537,7 +537,6 @@ class BackupDTO(BaseModel):
     allowed_hosts: List[dict]
     created_at: int
     completed_at: int
-    source_cluster_id: str
     encrypted: bool
 
     @staticmethod
@@ -556,7 +555,6 @@ class BackupDTO(BaseModel):
             allowed_hosts=model.allowed_hosts or [],
             created_at=model.created_at,
             completed_at=model.completed_at,
-            source_cluster_id=model.source_cluster_id or "",
             encrypted=model.encrypted,
         )
 

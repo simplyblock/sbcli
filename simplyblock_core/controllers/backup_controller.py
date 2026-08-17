@@ -241,11 +241,13 @@ def build_manifest(backup: Backup) -> backup_manifest.BackupManifest:
       cannot contradict itself. And the volume's settings, which the manifest
       records and the record does not, so an imported backup knows less about its
       volume than the manifest it was imported from did.
-    * Actively wrong: `dataplane.cluster_size` is recomputed here from the
-      *current* cluster. Re-exporting an imported backup therefore restamps it
-      with the importing cluster's page size, silently, even though it describes
-      objects a different cluster wrote. Nothing reads it yet, so nothing is
-      broken today.
+    * Actively wrong: `dataplane.cluster_size` and `source` are recomputed here
+      from the *current* cluster, because the record does not keep what an import
+      read. Re-exporting an imported backup therefore restamps both with the
+      importing cluster's identity and page size, silently, though they describe
+      objects a different cluster wrote. Nothing reads either yet, so nothing is
+      broken today -- and a bucket's own manifests, which is what a recovery
+      reads, are written once by the cluster that made the backup and are correct.
 
     The fix for all three is the same and is not attempted here: make the
     manifest the canonical document, store it on the record, and reduce `Backup`
@@ -310,7 +312,7 @@ def build_manifest(backup: Backup) -> backup_manifest.BackupManifest:
             {**(backup.encryption or {}), "encrypted": backup.encrypted}),
         location=backup.get_location(),
         source=backup_manifest.Source(
-            cluster_id=backup.source_cluster_id or backup.cluster_id,
+            cluster_id=backup.cluster_id,
             cluster_name=cluster_name,
             node_id=backup.node_id,
         ),
@@ -474,10 +476,8 @@ def _resolve_crypto_key(backup: Backup, cluster):
     except KMSException as e:
         raise RuntimeError(
             f"Cannot reach the key for backup {backup.uuid} at "
-            f"{descriptor.dek_path}. It was written by cluster "
-            f"{backup.source_cluster_id or backup.cluster_id} using "
-            f"{descriptor.kms}, which has to be reachable to restore it: "
-            f"{e}") from e
+            f"{descriptor.dek_path} using {descriptor.kms}, which has to be "
+            f"reachable to restore it: {e}") from e
 
 
 def _config_for(backup: Backup) -> BackupConfig:
@@ -517,17 +517,6 @@ def write_manifest(backup: Backup) -> None:
 
 def delete_manifest(backup: Backup) -> None:
     backup_manifest.delete(_config_for(backup), backup.uuid)
-
-
-def _s3_bucket_exists(config: BackupConfig, bucket_name) -> bool:
-    try:
-        backup_manifest.s3_client(config).head_bucket(Bucket=bucket_name)
-        return True
-    except ClientError as e:
-        error_code = int(e.response["Error"]["Code"])
-        if error_code == 404:
-            return False
-        raise
 
 
 def _ensure_s3_bucket(config: BackupConfig, bucket_name):
@@ -686,7 +675,6 @@ def _create_single_backup(snapshot, lvol, node_id, cluster_id, prev_backup, loca
     backup.uuid = backup_id
     backup.s3_id = db_controller.next_s3_id()
     backup.cluster_id = cluster_id
-    backup.source_cluster_id = cluster_id  # provenance only
     backup.location = location.model_dump(mode="json")
     backup.lvol_id = lvol.get_id()
     backup.lvol_name = lvol.lvol_name
@@ -742,12 +730,6 @@ def backup_snapshot(snapshot_id, cluster_id=None):
         snode = db_controller.get_storage_node_by_id(node_id)
     except KeyError as e:
         return None, str(e)
-
-    # Block new backups when S3 source is switched to an external cluster
-    if not is_local_backup_source(snode.cluster_id):
-        return None, ("Cannot create backups while backup source is "
-                      "switched to an external cluster. Switch back "
-                      "to local first.")
 
     if snode.status != StorageNode.STATUS_ONLINE:
         return None, f"Node {node_id} is not online (status: {snode.status})"
@@ -852,17 +834,6 @@ def restore_backup(backup_id: str, lvol_name: str, pool_id_or_name: str,
             raise PreconditionError("Incomplete backups in chain: " + ", ".join(backup.uuid for backup in incomplete))
     except KeyError as e:
         raise PreconditionError(str(e)) from e
-
-    # Verify the backup's source matches the active S3 source.
-    # If the backup came from an external cluster, the S3 bdev must be
-    # switched to that cluster's bucket before restoring.
-    backup_src = backup.source_cluster_id or backup.cluster_id
-    active_src = cluster.backup_source or cluster.uuid
-    if backup_src != active_src:
-        raise PreconditionError(
-            f"Backup source is {backup_src[:8]} but active S3 source "
-            f"is {active_src[:8]}. Use 'sbctl backup source-switch "
-            f"{backup_src}' first.")
 
     # The chain has to be restorable as a unit, and short enough for the data
     # plane. Checked before the volume is created so a doomed restore leaves
@@ -1018,8 +989,6 @@ def list_backups(cluster_id=None):
     data = []
     for b in backups:
         logger.debug(b)
-        source = b.source_cluster_id or b.cluster_id
-        is_external = source != b.cluster_id
         entry = {
             "ID": b.uuid,
             "S3 ID": b.s3_id,
@@ -1029,7 +998,6 @@ def list_backups(cluster_id=None):
             "Status": b.status,
             "Prev": b.prev_backup_id[:8] if b.prev_backup_id else "-",
             "Created": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(b.created_at)) if b.created_at else "",
-            "Source": source[:8] if is_external else "local",
         }
         data.append(entry)
     return data
@@ -1178,7 +1146,6 @@ def import_backups(manifests: Iterable[backup_manifest.BackupManifest],
         backup.uuid = backup_id
         backup.s3_id = manifest.s3_id
         backup.cluster_id = cluster_id or manifest.source.cluster_id
-        backup.source_cluster_id = manifest.source.cluster_id
         backup.lvol_id = manifest.volume.lvol_id
         backup.lvol_name = manifest.volume.lvol_name
         backup.snapshot_id = manifest.volume.snapshot_id
@@ -1208,107 +1175,6 @@ def import_from_bucket(config: BackupConfig, cluster_id=None) -> int:
         PreconditionError: the manifests it holds cannot be imported as a batch.
     """
     return import_backups(discover_backups(config), cluster_id=cluster_id)
-
-
-def get_backup_sources(cluster_id):
-    """List all distinct backup sources (local + imported clusters).
-
-    Returns a list of dicts with source_cluster_id, count, and whether
-    it is the currently active source.
-    """
-    try:
-        cluster = db_controller.get_cluster_by_id(cluster_id)
-    except KeyError:
-        return []
-
-    backups = db_controller.get_backups(cluster_id)
-    sources = {}
-    for b in backups:
-        src = b.source_cluster_id or cluster_id
-        if src not in sources:
-            sources[src] = {"source_cluster_id": src, "count": 0, "is_local": src == cluster_id}
-        sources[src]["count"] += 1
-
-    active_source = cluster.backup_source or cluster_id
-    result = []
-    for src_id, info in sources.items():
-        info["active"] = (src_id == active_source)
-        result.append(info)
-
-    # Always include local even if no backups
-    if cluster_id not in sources:
-        result.append({
-            "source_cluster_id": cluster_id,
-            "count": 0,
-            "is_local": True,
-            "active": active_source == cluster_id,
-        })
-
-    return result
-
-
-def switch_backup_source(cluster_id, source_cluster_id) -> None:
-    """Switch the active backup source for all nodes in the cluster.
-
-    Reconfigures the S3 bdev on every node to read from the bucket
-    belonging to source_cluster_id.  While switched to an external
-    source, new backups cannot be created.
-
-    Args:
-        cluster_id: The local cluster ID.
-        source_cluster_id: The cluster ID whose S3 bucket to activate.
-            Use the local cluster_id (or "local") to switch back.
-
-    Returns (success, error_message).
-    """
-    try:
-        cluster = db_controller.get_cluster_by_id(cluster_id)
-    except KeyError as e:
-        raise PreconditionError("Precondition not met") from e
-
-    if source_cluster_id == "local":
-        source_cluster_id = cluster_id
-
-    # Determine the bucket name for the source cluster
-    config = cluster.get_backup_config()
-    if source_cluster_id == cluster_id:
-        bucket_name = config.bucket_name
-    else:
-        bucket_name = f"simplyblock-backup-{source_cluster_id}"
-
-    # Verify the bucket exists
-    try:
-        if not _s3_bucket_exists(config, bucket_name):
-            raise PreconditionError(f"S3 bucket {bucket_name} does not exist")
-    except BotoCoreError as e:
-        raise RuntimeError(f"S3 bucket {bucket_name} not accessible: {e}")
-
-    # Reconfigure S3 bdev bucket on all online nodes
-    nodes = db_controller.get_storage_nodes_by_cluster_id(cluster_id)
-    for node in nodes:
-        if node.status != StorageNode.STATUS_ONLINE or not node.lvstore:
-            continue
-
-        rpc_client = node.rpc_client()
-        s3_bdev_name = f"s3_{node.lvstore}"
-        rpc_client.bdev_s3_add_bucket_name(s3_bdev_name, bucket_name, allow_existing=True)
-        logger.info(f"Switched S3 bucket to {bucket_name} on node {node.get_id()}")
-
-    # Persist the active source in the cluster record. Atomic: the long
-    # per-node RPC loop above means a concurrent cluster.status change could be
-    # clobbered by a full write here (lost-update class — incident 2026-06-18).
-    db_controller.atomic_update(
-        db_controller.get_cluster_by_id(cluster_id),
-        lambda c, v=source_cluster_id: setattr(c, "backup_source", v))
-
-
-def is_local_backup_source(cluster_id):
-    """Check if the cluster is currently using its own local backup source."""
-    try:
-        cluster = db_controller.get_cluster_by_id(cluster_id)
-    except KeyError:
-        return True
-    return not cluster.backup_source or cluster.backup_source == cluster_id
 
 
 # ---- Backup Policy Management ----
