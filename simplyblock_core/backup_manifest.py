@@ -29,12 +29,12 @@ for where the two genuinely differ and where they should be collapsed.
 """
 import json
 import logging
-from typing import Iterable, List, Optional
+from typing import Iterable, List, Literal, Optional
 
 import boto3
 from botocore.config import Config as BotoConfig
 from botocore.exceptions import BotoCoreError, ClientError
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 
 from simplyblock_core.models.backup_config import BackupConfig, BackupLocation
 from simplyblock_core.utils.secrets import unwrap_secret
@@ -104,6 +104,57 @@ class Volume(BaseModel):
     w_mbytes_per_sec: Optional[int] = None
 
 
+class KeyDescriptor(BaseModel):
+    """Where this backup's data encryption key lives. Never the key itself.
+
+    Restoring an encrypted backup means reaching the KMS named here. The working
+    assumption is that a KMS is recoverable independently of the cluster that
+    used it -- a Vault deployment outlives one cluster, and the FoundationDB
+    behind LocalKMS is itself backed up -- so recording the dependency is enough,
+    and no key material has to travel with the ciphertext.
+
+    Recording it as a document rather than as loose fields is also what leaves
+    room to change that assumption: a scheme that wraps the keys under an
+    operator-held secret adds a sibling field here and a branch in
+    _resolve_crypto_key, and touches nothing else.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    #: Which backend holds the key. Named rather than free text, because a reader
+    #: years later has to know which of the fields below mean anything.
+    kms: Literal["hashicorp_vault", "local"]
+
+    dek_path: str
+    kek_name: str
+
+    #: Vault only; absent for the local backend.
+    vault_base_url: Optional[str] = None
+    transit_mount: Optional[str] = None
+    kv_mount: Optional[str] = None
+
+
+class Encryption(BaseModel):
+    """Whether this backup is ciphertext, and if so how to reach its key."""
+    model_config = ConfigDict(extra="forbid")
+
+    encrypted: bool
+
+    #: Where the key lives. Required for an encrypted backup and meaningless
+    #: otherwise, so the two cannot disagree.
+    descriptor: Optional[KeyDescriptor] = None
+
+    @model_validator(mode="after")
+    def _descriptor_matches_encrypted(self) -> "Encryption":
+        if self.encrypted and self.descriptor is None:
+            raise ValueError(
+                "An encrypted backup must record where its key lives; without "
+                "that, nothing can decrypt it and nothing can say why")
+        if not self.encrypted and self.descriptor is not None:
+            raise ValueError(
+                "An unencrypted backup has no key to describe")
+        return self
+
+
 class DataPlane(BaseModel):
     """How the objects are laid out, so a later format change is detectable."""
     model_config = ConfigDict(extra="forbid")
@@ -127,7 +178,6 @@ class BackupManifest(BaseModel):
     created_at: int
     completed_at: int
     size: int
-    encrypted: bool
 
     #: The backup this one is a delta against, or absent when it is a full
     #: backup and therefore the root of its chain.
@@ -141,6 +191,7 @@ class BackupManifest(BaseModel):
     prev_backup_id: Optional[str] = None
 
     location: BackupLocation
+    encryption: Encryption
     source: Source
     volume: Volume
     dataplane: DataPlane

@@ -186,8 +186,11 @@ def build_manifest(backup: Backup) -> backup_manifest.BackupManifest:
         created_at=backup.created_at,
         completed_at=backup.completed_at,
         size=backup.size,
-        encrypted=backup.encrypted,
         prev_backup_id=backup.prev_backup_id or None,
+        # backup.encrypted is authoritative -- overlaying it here means the two
+        # cannot disagree in a manifest, whatever is stored in the dict.
+        encryption=backup_manifest.Encryption.model_validate(
+            {**(backup.encryption or {}), "encrypted": backup.encrypted}),
         location=backup.get_location(),
         source=backup_manifest.Source(
             cluster_id=backup.source_cluster_id or backup.cluster_id,
@@ -197,6 +200,48 @@ def build_manifest(backup: Backup) -> backup_manifest.BackupManifest:
         volume=volume,
         dataplane=backup_manifest.DataPlane(cluster_size=cluster_size),
     )
+
+
+def _resolve_crypto_key(backup: Backup, cluster):
+    """Recover the key needed to read an encrypted backup.
+
+    An encrypted backup is ciphertext whose key lives in a KMS, and the backup
+    records which one. Restoring it therefore needs that KMS reachable -- the
+    assumption being that a KMS is recoverable independently of any one cluster.
+    Nothing about the key travels with the backup.
+
+    Returns None for an unencrypted backup.
+
+    Raises:
+        PreconditionError: The backup records nothing about its key, so no amount
+            of reachable infrastructure can decrypt it.
+        RuntimeError: The recorded KMS could not be reached. Raised before the
+            volume is created, so a restore that cannot decrypt fails without
+            leaving a half-built volume behind -- and, more importantly, without
+            silently producing a plaintext volume over ciphertext.
+    """
+    if not backup.encrypted:
+        return None
+
+    encryption = backup_manifest.Encryption.model_validate(
+        {**(backup.encryption or {}), "encrypted": backup.encrypted})
+
+    descriptor = encryption.descriptor
+    if descriptor is None:
+        raise PreconditionError(
+            f"Backup {backup.uuid} is encrypted but records nothing about its "
+            "key; it predates self-describing backups and cannot be restored")
+
+    try:
+        with create_kms_connection(cluster) as kms:
+            return kms.get_data_encryption_keys(descriptor.dek_path, descriptor.kek_name)
+    except KMSException as e:
+        raise RuntimeError(
+            f"Cannot reach the key for backup {backup.uuid} at "
+            f"{descriptor.dek_path}. It was written by cluster "
+            f"{backup.source_cluster_id or backup.cluster_id} using "
+            f"{descriptor.kms}, which has to be reachable to restore it: "
+            f"{e}") from e
 
 
 def _config_for(backup: Backup) -> BackupConfig:
@@ -360,6 +405,31 @@ def _snapshot_has_backup(snapshot_id):
                             Backup.STATUS_COMPLETED, Backup.STATUS_MERGED) for b in backups)
 
 
+def _build_encryption(cluster, backup: Backup) -> backup_manifest.Encryption:
+    """Describe where an encrypted backup's key lives.
+
+    The dependency on a KMS is not removed -- it is written down. Nothing before
+    this recorded it at all, so an encrypted backup's key was reachable only by
+    someone who already knew which cluster had made it and how that cluster was
+    configured.
+    """
+    descriptor = backup_manifest.KeyDescriptor(
+        kms="local",
+        dek_path=backup_dek_path(cluster.get_id(), backup.uuid),
+        kek_name=backup_kek_name(backup.uuid),
+    )
+    if cluster.hashicorp_vault_settings is not None:
+        vault = cluster.hashicorp_vault_settings
+        descriptor = descriptor.model_copy(update={
+            "kms": "hashicorp_vault",
+            "vault_base_url": vault.base_url,
+            "transit_mount": vault.transit_mount,
+            "kv_mount": vault.kv_mount,
+        })
+
+    return backup_manifest.Encryption(encrypted=True, descriptor=descriptor)
+
+
 def _create_single_backup(snapshot, lvol, node_id, cluster_id, prev_backup, location: BackupLocation):
     """Create a single backup record and task for one snapshot.
 
@@ -402,6 +472,7 @@ def _create_single_backup(snapshot, lvol, node_id, cluster_id, prev_backup, loca
                 backup_dek_path(cluster_id, backup.uuid),
                 backup_kek_name(backup.uuid),
             )
+        backup.encryption = _build_encryption(cluster, backup).model_dump(mode="json")
 
     backup.write_to_db()
 
@@ -557,17 +628,7 @@ def restore_backup(backup_id: str, lvol_name: str, pool_id_or_name: str,
             raise PreconditionError(
                 f"Target node {target_node_id} has no lvstore (S3 bdev requires lvstore)")
 
-    if backup.encrypted:
-        with create_kms_connection(cluster) as kms:
-            try:
-                crypto_key = kms.get_data_encryption_keys(
-                    backup_dek_path(pool.cluster_id, backup.uuid),
-                    backup_kek_name(backup.uuid),
-                )
-            except KMSException as e:
-                raise RuntimeError("Failed to retrieve backup crypto keys") from e
-    else:
-        crypto_key = None
+    crypto_key = _resolve_crypto_key(backup, cluster)
 
     logger.info(f"Backup allowed hosts: {backup.allowed_hosts}")
     lvol_id, error = lvol_controller.add_lvol_ha(
@@ -799,7 +860,8 @@ def import_backups(manifests: Iterable[backup_manifest.BackupManifest],
         backup.location = manifest.location.model_dump(mode="json")
         # Import used to drop this, so an imported encrypted backup restored as
         # use_crypto=False -- a plaintext volume over ciphertext, silently.
-        backup.encrypted = manifest.encrypted
+        backup.encrypted = manifest.encryption.encrypted
+        backup.encryption = manifest.encryption.model_dump(mode="json")
         backup.write_to_db()
 
     return len(pending)
