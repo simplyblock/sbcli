@@ -16,6 +16,8 @@ import json
 import unittest
 from unittest.mock import patch, MagicMock
 
+from pydantic import SecretStr
+
 from simplyblock_core import utils
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.nvme_device import NVMeDevice
@@ -24,7 +26,7 @@ from simplyblock_core.rpc_client import RPCClient
 
 def _make_rpc_client():
     with patch("requests.session"):
-        return RPCClient("127.0.0.1", 8081, "user", "pass", timeout=1, retry=0)
+        return RPCClient("127.0.0.1", 8081, "user", SecretStr("pass"), timeout=1, retry=0)
 
 
 # ---------------------------------------------------------------------------
