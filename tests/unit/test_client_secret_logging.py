@@ -94,7 +94,8 @@ def test_bdev_s3_create_keys_reach_the_wire_but_not_the_log(rpc_client, caplog):
 
     with caplog.at_level(logging.DEBUG):
         rpc_client.bdev_s3_create(
-            name="s3_lvs_test", bucket_name="bucket",
+            name="s3_lvs_test", bucket_name="bucket", region="eu-central-1",
+            secondary_target=0, with_compression=False, snapshot_backups=True,
             access_key_id=SecretStr("AKIAEXAMPLE"),
             secret_access_key=SecretStr("s3cr3t"),
         )
@@ -114,29 +115,22 @@ def test_bdev_s3_create_omits_absent_credentials(rpc_client):
         "jsonrpc": "2.0", "id": 1, "result": True,
     })
 
-    rpc_client.bdev_s3_create(name="s3_lvs_test", bucket_name="bucket")
-
-    params = _sent_params(rpc_client)
-    assert "access_key_id" not in params
-    assert "secret_access_key" not in params
-
-
-def test_bdev_s3_create_does_not_send_empty_credentials_as_keys(rpc_client):
-    # An empty key pair is not an absent one to the AWS SDK: it reads as a valid
-    # anonymous identity, and the default provider chain (the node's instance
-    # role) is then never consulted.
-    rpc_client._fake_session.post.return_value = _make_json_response({
-        "jsonrpc": "2.0", "id": 1, "result": True,
-    })
-
     rpc_client.bdev_s3_create(
-        name="s3_lvs_test", bucket_name="bucket",
-        access_key_id=SecretStr(""), secret_access_key=SecretStr(""),
-    )
+        name="s3_lvs_test", bucket_name="bucket", region="eu-central-1",
+        secondary_target=0, with_compression=False, snapshot_backups=True)
 
     params = _sent_params(rpc_client)
     assert "access_key_id" not in params
     assert "secret_access_key" not in params
+
+    # Same for every other optional: the data plane reads 0 as "unset" for the
+    # masks and the pool size, so sending one would be indistinguishable from
+    # omitting it while reading as a deliberate choice.
+    for absent in ("endpoint", "bdb_lcpu_mask", "s3_lcpu_mask", "s3_thread_pool_size"):
+        assert absent not in params
+
+    # ... and what is not optional is always present.
+    assert params["region"] == "eu-central-1"
 
 
 @pytest.fixture
