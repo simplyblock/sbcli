@@ -13,6 +13,7 @@ import pytest
 
 from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.models.backup import Backup
+from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.storage_node import StorageNode
 
 
@@ -52,10 +53,16 @@ def db():
         pool.cluster_id = TARGET_CLUSTER
         db.get_pool_by_id_or_name.return_value = pool
 
-        cluster = MagicMock()
+        # A real Cluster, not a mock: restore compares the backup's recorded
+        # location against the cluster's own configuration, and a mock compares
+        # unequal to everything.
+        cluster = Cluster()
         cluster.uuid = TARGET_CLUSTER
-        cluster.backup_source = ""
+        cluster.backup_config = dict(LOCATION)
         db.get_cluster_by_id.return_value = cluster
+
+        node = _node("target-node", TARGET_CLUSTER)
+        db.get_storage_node_by_id.return_value = node
 
         lvol = MagicMock()
         lvol.node_id = "target-node"
