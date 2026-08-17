@@ -440,6 +440,10 @@ class TestTeardownOwnReplicas(unittest.TestCase):
         self.assertEqual(sec.lvstore_stack_secondary, "")
         self.assertEqual(tert.lvstore_stack_tertiary, "")
         self.assertEqual(drp.call_count, 2)
+        # Case A: removed IS the node going away -- destroying its lvstore
+        # here is correct (default destroy_lvstore=True, not overridden).
+        drp.assert_any_call(sec, removed, cl)
+        drp.assert_any_call(tert, removed, cl)
 
 
 # ---------------------------------------------------------------------------
@@ -498,6 +502,40 @@ class TestDeleteReplicaOnPeer(unittest.TestCase):
         rpc = peer.rpc_client()
         storage_node_ops._delete_replica_on_peer(peer, primary, cl)
         rpc.bdev_nvme_detach_controller.assert_not_called()
+
+    # -----------------------------------------------------------------
+    # destroy_lvstore -- regression coverage for a real bug found live
+    # (2026-08-16): the splice/relocation eviction path called this with
+    # the default (destroy) behavior, which calls bdev_lvol_delete_lvstore
+    # on a peer holding only a non-leader examine copy -- destroying the
+    # SHARED on-disk blobstore metadata out from under the still-live
+    # primary elsewhere. This corrupted LVS_1's on-disk metadata during a
+    # splice eviction, surfacing later as a superblock validation failure
+    # when the primary tried to reload it on restart.
+    # -----------------------------------------------------------------
+
+    def test_destroy_lvstore_default_true_deletes_shared_blobstore(self):
+        # Case A (node removal): primary IS the node going away, so
+        # destroying its lvstore here is correct.
+        cl = _cluster()
+        primary = _node("p1", lvstore="LVS_1")
+        peer = _node("peer1", lvstore="LVS_1")
+        rpc = peer.rpc_client()
+        storage_node_ops._delete_replica_on_peer(peer, primary, cl)
+        rpc.bdev_lvol_delete_lvstore.assert_called_once_with("LVS_1")
+
+    def test_destroy_lvstore_false_never_deletes_shared_blobstore(self):
+        # Splice/relocation eviction: primary survives, only its host on
+        # this peer is moving -- the shared blobstore must NOT be touched,
+        # only the local raid/distrib examine bdevs hot-removed.
+        cl = _cluster()
+        primary = _node("p1", lvstore="LVS_1")
+        peer = _node("peer1", lvstore="LVS_1")
+        rpc = peer.rpc_client()
+        storage_node_ops._delete_replica_on_peer(peer, primary, cl, destroy_lvstore=False)
+        rpc.bdev_lvol_delete_lvstore.assert_not_called()
+        rpc.bdev_raid_delete.assert_called_once_with("raid_1")
+        rpc.bdev_distrib_delete.assert_called_once_with("distrib_1")
 
 
 # ---------------------------------------------------------------------------
@@ -595,7 +633,11 @@ class TestRelocateOneReplicaSpliceExecution(unittest.TestCase):
             ret = storage_node_ops._relocate_one_replica(removed, "stranded", "secondary")
 
         self.assertTrue(ret)
-        drp.assert_called_once()  # occupant's old replica torn down off x
+        # occupant's old replica torn down off x -- must NOT destroy the
+        # shared lvstore: occupant survives this relocation, only its host
+        # moves (2026-08-16: destroying it here corrupted the on-disk
+        # blobstore for a still-live primary).
+        drp.assert_called_once_with(x, occupant, cl, destroy_lvstore=False)
         self.assertEqual(occupant.secondary_node_id, "stranded")  # occupant re-homed onto stranded
         self.assertEqual(stranded.secondary_node_id, "x")  # stranded takes over x's freed slot
         self.assertEqual(x.lvstore_stack_secondary, "stranded")
