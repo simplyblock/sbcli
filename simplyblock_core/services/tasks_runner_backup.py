@@ -84,7 +84,9 @@ def _run_backup(task):
 
     if backup.status == Backup.STATUS_PENDING:
         try:
-            ret = rpc_client.bdev_lvol_s3_backup(backup.s3_id, [snap_bdev_name], cluster_batch=16)
+            ret = rpc_client.bdev_lvol_s3_backup(
+                backup.s3_id, [snap_bdev_name],
+                backup_controller.primary_s3_bdev_name(snode), cluster_batch=16)
             if not ret:
                 _fail_backup(backup, task, "bdev_lvol_s3_backup RPC failed")
                 return
@@ -408,7 +410,10 @@ def _run_merge(task):
 
     if not merge_started:
         try:
-            ret = rpc_client.bdev_lvol_s3_merge(keep_backup.s3_id, old_backup.s3_id, cluster_batch=16, lvs_name=snode.lvstore)
+            ret = rpc_client.bdev_lvol_s3_merge(
+                keep_backup.s3_id, old_backup.s3_id, cluster_batch=16,
+                s3_bdev=backup_controller.primary_s3_bdev_name(snode),
+                lvs_name=snode.lvstore)
             if not ret:
                 task.function_result = "bdev_lvol_s3_merge RPC failed"
                 task.retry += 1
