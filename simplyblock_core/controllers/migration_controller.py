@@ -102,10 +102,20 @@ def start_migration(migration_id,
     if lvol.status != LVol.STATUS_ONLINE:
         raise ValueError(f"Volume is not online (status={lvol.status})")
 
-    source_node_id = lvol.node_id
+    # source_node_id / active_source_node_id are read from the migration record
+    # (set once by create_migration()), never re-derived from lvol.node_id here —
+    # re-deriving could pick a different fallback than create_migration did if
+    # node health changed in between.
+    source_node_id = migration.source_node_id
 
     try:
-        source_node = db.get_storage_node_by_id(source_node_id)
+        db.get_storage_node_by_id(source_node_id)
+    except KeyError as e:
+        raise ValueError(str(e))
+
+    active_source_node_id = migration.active_source_node_id or source_node_id
+    try:
+        active_source_node = db.get_storage_node_by_id(active_source_node_id)
     except KeyError as e:
         raise ValueError(str(e))
 
@@ -117,11 +127,16 @@ def start_migration(migration_id,
     if source_node_id == target_node_id:
         raise ValueError("Source and target nodes must be different")
 
-    if source_node.status not in (StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED):
-        raise ValueError(f"Source node is not online (status={source_node.status})")
+    if active_source_node.status not in (StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED):
+        raise ValueError(f"Source node is not online (status={active_source_node.status})")
 
     if target_node.status != StorageNode.STATUS_ONLINE:
         raise ValueError(f"Target node is not online (status={target_node.status})")
+
+    if active_source_node_id != source_node_id:
+        logger.info(
+            f"start_migration {migration.uuid}: source primary {source_node_id} is offline; "
+            f"continuing with pre-selected fallback source {active_source_node_id}")
 
     cluster = db.get_cluster_by_id(migration.cluster_id)
     if cluster.status != Cluster.STATUS_ACTIVE:
@@ -129,7 +144,7 @@ def start_migration(migration_id,
     if not _can_add_lvol_migration(cluster.get_id()):
         raise PreconditionError(f"Cluster {cluster.get_id()} is rebalancing; wait for it to finish before migrating")
 
-    for node_id in (source_node_id, target_node_id):
+    for node_id in {source_node_id, active_source_node_id, target_node_id}:
         if tasks_controller.get_active_node_mig_task(migration.cluster_id, node_id):
             raise PreconditionError(f"Node {node_id} has a data migration in progress; wait for it to finish")
 
@@ -439,6 +454,50 @@ def get_snapshot_chain(lvol_id, source_node_id=None):
         _add(snap.uuid)
 
     return result
+
+
+def _resolve_active_source_node(primary_node, target_node_id):
+    """
+    Decide which node the migration will actually issue source-side RPCs
+    against: *primary_node* itself when reachable, otherwise its online
+    secondary, otherwise its online tertiary.
+
+    This is called exactly once, at create time (create_migration /
+    create_batch_migration). The result is persisted as
+    migration.active_source_node_id / group.active_source_node_id and must
+    never be re-derived afterward — start_migration/start_batch_migration and
+    the task runners only ever read it.
+
+    Raises ValueError if the primary is unreachable and no replica is
+    online either. Raises PreconditionError if the resolved node is the
+    same as target_node_id (can't migrate a replica onto itself).
+    """
+    if primary_node.status in (StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED):
+        active_node = primary_node
+    else:
+        active_node = None
+        for replica_id in (primary_node.secondary_node_id, primary_node.tertiary_node_id):
+            if not replica_id:
+                continue
+            try:
+                replica = db.get_storage_node_by_id(replica_id)
+            except KeyError:
+                continue
+            if replica.status == StorageNode.STATUS_ONLINE:
+                active_node = replica
+                break
+        if active_node is None:
+            raise ValueError(
+                f"Source node is not online (status={primary_node.status}) "
+                f"and no online secondary/tertiary replica is available")
+
+    if active_node.get_id() == target_node_id:
+        raise PreconditionError(
+            f"Cannot migrate to node {target_node_id}: source primary "
+            f"{primary_node.get_id()} is offline and {target_node_id} is "
+            f"currently serving as the fallback source for this volume")
+
+    return active_node
 
 
 def _is_snap_on_node(snap_id, node_id):
@@ -952,6 +1011,12 @@ def create_migration(lvol_id, target_node_id,
     except KeyError:
         raise ValueError(f"Source node {src_node_id} not found")
 
+    active_src_node = _resolve_active_source_node(src_node, target_node_id)
+    if active_src_node.get_id() != src_node_id:
+        logger.warning(
+            f"create_migration: source primary {src_node_id} is offline; "
+            f"using {active_src_node.get_id()} as the effective source for lvol={lvol_id}")
+
     cluster = db.get_cluster_by_id(tgt_node.cluster_id)
     if cluster.status != Cluster.STATUS_ACTIVE:
         raise PreconditionError(f"Cluster {cluster.get_id()} is not active (status={cluster.status})")
@@ -1233,6 +1298,7 @@ def create_migration(lvol_id, target_node_id,
     migration.cluster_id = tgt_node.cluster_id
     migration.lvol_id = lvol_id
     migration.source_node_id = lvol.node_id
+    migration.active_source_node_id = active_src_node.get_id()
     migration.target_node_id = target_node_id
     migration.phase = LVolMigration.PHASE_PRE_CREATED
     migration.status = LVolMigration.STATUS_NEW
@@ -1319,6 +1385,10 @@ def create_batch_migration(lvol_id, target_node_id,
 
     # Pre-create individual migration records for each member.
     # connect_strings come from the master (ns_id=1) since the NQN is shared.
+    # Each create_migration() call independently resolves the same active
+    # source node (all members share the same primary/lvstore), so the
+    # group's own active_source_node_id below is read from the first member's
+    # already-resolved record rather than re-resolved here.
     member_records = []   # list of (ns_id, migration_id)
     master_connect_strings = []
     for member in members:
@@ -1331,6 +1401,14 @@ def create_batch_migration(lvol_id, target_node_id,
         member_records.append({"ns_id": member.ns_id, "migration_id": migration_id})
         if member.ns_id == 1:
             master_connect_strings = connect_strings
+
+    active_source_node_id = source_node_id
+    if member_records:
+        try:
+            active_source_node_id = db.get_migration_by_id(
+                member_records[0]["migration_id"]).active_source_node_id or source_node_id
+        except KeyError:
+            pass
 
     # Compute snap ownership: snap_uuid → lvol_uuid, then remap to migration_id.
     lvol_uuid_to_migration_id = {
@@ -1356,6 +1434,11 @@ def create_batch_migration(lvol_id, target_node_id,
     group.uuid = str(uuid.uuid4())
     group.cluster_id = tgt_node.cluster_id
     group.source_node_id = source_node_id
+    group.active_source_node_id = active_source_node_id
+    if active_source_node_id != source_node_id:
+        logger.warning(
+            f"create_batch_migration: source primary {source_node_id} is offline; "
+            f"using {active_source_node_id} as the effective source for group NQN={lvol.nqn}")
     group.target_node_id = target_node_id
     group.target_nqn = lvol.nqn
     group.members = member_records
@@ -1409,7 +1492,22 @@ def start_batch_migration(group_id,
         raise PreconditionError(f"Cluster {cluster.get_id()} is not active (status={cluster.status})")
     if not _can_add_lvol_migration(cluster.get_id()):
         raise PreconditionError(f"Cluster {cluster.get_id()} is rebalancing; wait for it to finish before migrating")
-    for node_id in (group.source_node_id, group.target_node_id):
+
+    # active_source_node_id is read-only here — it was resolved once, at
+    # create_batch_migration() time, and must never be re-derived.
+    active_source_node_id = group.active_source_node_id or group.source_node_id
+    try:
+        active_source_node = db.get_storage_node_by_id(active_source_node_id)
+    except KeyError as e:
+        raise ValueError(str(e))
+    if active_source_node.status not in (StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED):
+        raise ValueError(f"Source node is not online (status={active_source_node.status})")
+    if active_source_node_id != group.source_node_id:
+        logger.info(
+            f"start_batch_migration {group_id}: source primary {group.source_node_id} is offline; "
+            f"continuing with pre-selected fallback source {active_source_node_id}")
+
+    for node_id in {group.source_node_id, active_source_node_id, group.target_node_id}:
         if tasks_controller.get_active_node_mig_task(group.cluster_id, node_id):
             raise PreconditionError(f"Node {node_id} has a data migration in progress; wait for it to finish")
 
@@ -1442,7 +1540,6 @@ def start_batch_migration(group_id,
                                  if s not in snaps_on_target
                                  and group.snap_owners.get(s) != migration_id]
 
-        migration.source_node_id = lvol.node_id
         migration.phase = LVolMigration.PHASE_SNAP_COPY
         migration.snap_migration_plan = owned_snaps
         migration.snaps_migrated = []
