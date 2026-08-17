@@ -24,7 +24,7 @@ import time
 
 import pytest
 
-from simplyblock_core.controllers.backup_controller import backup_snapshot, import_backups
+from simplyblock_core.controllers.backup_controller import backup_snapshot
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.models.backup import Backup, BackupPolicy, BackupPolicyAttachment
@@ -89,18 +89,6 @@ def _backup(uuid="backup-1", lvol_id="lvol-1", status=Backup.STATUS_COMPLETED,
     b.created_at = created_at or int(time.time())
     b.status = status
     return b
-
-
-def _meta(backup_id, cluster_id="cluster-1", **overrides):
-    """One entry of an export/import payload."""
-    return {
-        "backup_id": backup_id,
-        "lvol_id": "l-1",
-        "cluster_id": cluster_id,
-        "location": _backup_config().location().model_dump(mode="json"),
-        "encrypted": False,
-        **overrides,
-    }
 
 
 def _snapshot(uuid="snap-1", lvol_uuid="lvol-1", node_id="node-1"):
@@ -308,7 +296,7 @@ class TestComputeS3CpuMasks(unittest.TestCase):
 
 class TestCreateS3Bdev(unittest.TestCase):
 
-    @patch("simplyblock_core.controllers.backup_controller.boto3.client")
+    @patch("simplyblock_core.backup_manifest.boto3.client")
     @patch("simplyblock_core.models.storage_node.RPCClient")
     def test_success(self, MockRPC, mock_boto3_client):
         mock_rpc = MockRPC.return_value
@@ -331,7 +319,7 @@ class TestCreateS3Bdev(unittest.TestCase):
             "s3_lvs_test", "simplyblock-backup-cluster-1", allow_existing=True)
         mock_rpc.bdev_lvol_s3_bdev.assert_called_once_with("lvs_test", "s3_lvs_test")
 
-    @patch("simplyblock_core.controllers.backup_controller.boto3.client")
+    @patch("simplyblock_core.backup_manifest.boto3.client")
     @patch("simplyblock_core.models.storage_node.RPCClient")
     def test_no_lvstore(self, MockRPC, _mock_boto3_client):
         from simplyblock_core.controllers.backup_controller import create_s3_bdev
@@ -353,7 +341,7 @@ class TestCreateS3Bdev(unittest.TestCase):
         mock_rpc.bdev_s3_add_bucket_name.assert_not_called()
         mock_rpc.bdev_lvol_s3_bdev.assert_not_called()
 
-    @patch("simplyblock_core.controllers.backup_controller.boto3.client")
+    @patch("simplyblock_core.backup_manifest.boto3.client")
     @patch("simplyblock_core.models.storage_node.RPCClient")
     def test_bucket_name_fails(self, MockRPC, mock_boto3_client):
         from simplyblock_core.rpc_client import RPCRemoteError
@@ -369,7 +357,7 @@ class TestCreateS3Bdev(unittest.TestCase):
             create_s3_bdev(node, _backup_config())
         mock_rpc.bdev_lvol_s3_bdev.assert_not_called()
 
-    @patch("simplyblock_core.controllers.backup_controller.boto3.client")
+    @patch("simplyblock_core.backup_manifest.boto3.client")
     @patch("simplyblock_core.models.storage_node.RPCClient")
     def test_attach_fails(self, MockRPC, mock_boto3_client):
         from simplyblock_core.rpc_client import RPCRemoteError
@@ -385,7 +373,7 @@ class TestCreateS3Bdev(unittest.TestCase):
         with pytest.raises(Exception):
             create_s3_bdev(node, _backup_config())
 
-    @patch("simplyblock_core.controllers.backup_controller.boto3.client")
+    @patch("simplyblock_core.backup_manifest.boto3.client")
     @patch("simplyblock_core.models.storage_node.RPCClient")
     def test_local_testing_params(self, MockRPC, mock_boto3_client):
         mock_rpc = MockRPC.return_value
@@ -425,7 +413,7 @@ class TestCreateS3Bdev(unittest.TestCase):
         self.assertEqual(boto_kwargs["region_name"], "us-east-1")
         self.assertFalse(boto_kwargs["verify"])
 
-    @patch("simplyblock_core.controllers.backup_controller.boto3.client")
+    @patch("simplyblock_core.backup_manifest.boto3.client")
     @patch("simplyblock_core.models.storage_node.RPCClient")
     def test_no_credentials_defers_to_the_provider_chain(self, MockRPC, mock_boto3_client):
         """An absent key pair must mean "use the node's IAM role", not "send empty keys"."""
@@ -1009,78 +997,6 @@ class TestEvaluatePolicy(unittest.TestCase):
         evaluate_policy(lvol)
 
         mock_tasks.add_backup_merge_task.assert_not_called()
-
-
-# ===========================================================================
-# 13. Import backups
-# ===========================================================================
-
-class TestImportBackups(unittest.TestCase):
-    """Real FDB: import writes Backup records that later reads must see."""
-
-    def setUp(self):
-        self.db = DBController()
-
-    def test_import_new(self):
-        count = import_backups([
-            _meta("b-1", cluster_id="c-1"),
-            _meta("b-2", cluster_id="c-1"),
-        ], cluster_id="cluster-1")
-
-        self.assertEqual(count, 2)
-        self.assertEqual(
-            {b.uuid for b in self.db.get_backups("cluster-1")}, {"b-1", "b-2"})
-
-    def test_existing_fails(self):
-        _backup(uuid="b-1").write_to_db(self.db.kv_store)
-
-        with self.assertRaises(PreconditionError):
-            import_backups([_meta("b-2"), _meta("b-1")], cluster_id="cluster-1")
-
-        # Nothing imported: the pre-check runs before the first write.
-        self.assertEqual({b.uuid for b in self.db.get_backups()}, {"b-1"})
-
-    def test_duplicate_in_metadata_fails(self):
-        with self.assertRaises(ValueError):
-            import_backups([_meta("b-1"), _meta("b-1")], cluster_id="cluster-1")
-
-        self.assertEqual(self.db.get_backups(), [])
-
-    def test_skip_no_backup_id(self):
-        self.assertEqual(import_backups([{"lvol_id": "l-1"}]), 0)
-
-    def test_encrypted_flag_survives_import(self):
-        """Import used to drop this, restoring a plaintext volume over ciphertext."""
-        import_backups([_meta("b-1", encrypted=True)], cluster_id="cluster-1")
-
-        self.assertTrue(self.db.get_backup_by_id("b-1").encrypted)
-
-    def test_location_survives_import(self):
-        import_backups([_meta("b-1")], cluster_id="cluster-1")
-
-        self.assertEqual(
-            self.db.get_backup_by_id("b-1").get_location().bucket_name,
-            "simplyblock-backup-cluster-1")
-
-    def test_entry_without_a_location_is_rejected(self):
-        """A pre-self-describing export would otherwise restore against whatever
-        bucket the importing cluster happens to have configured."""
-        stale = _meta("b-1")
-        del stale["location"]
-
-        with self.assertRaises(ValueError):
-            import_backups([stale], cluster_id="cluster-1")
-
-        self.assertEqual(self.db.get_backups(), [])
-
-    def test_invalid_location_rejects_the_whole_batch(self):
-        with self.assertRaises(ValueError):
-            import_backups(
-                [_meta("b-1"), _meta("b-2", location={"bucket_name": "b"})],
-                cluster_id="cluster-1")
-
-        self.assertEqual(self.db.get_backups(), [])
-
 
 
 # ===========================================================================

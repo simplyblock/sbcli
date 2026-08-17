@@ -20,6 +20,7 @@ from simplyblock_core.models.replication import ReplicationPolicy, ReplicationTa
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.backup import Backup, BackupPolicy
+from simplyblock_core.backup_manifest import BackupManifest
 from simplyblock_core.models.backup_config import BackupConfig
 from simplyblock_core.models.stats import StatsObject
 from simplyblock_core.models.lvol_migration import LVolMigration
@@ -524,6 +525,15 @@ class VolumeDTO(BaseModel):
 #: the wire format can diverge from ``BackupConfig`` later by turning this into a
 #: real class, without touching a single route signature.
 BackupConfigDTO = BackupConfig
+
+#: A backup's manifest as the API exchanges it: the response body of
+#: export/discover and the entries of an inline import.
+#:
+#: An alias for the same reason ``BackupConfigDTO`` is one -- except that here the
+#: shapes have a reason to stay locked together, since the wire form of a manifest
+#: is also its form in the bucket. Naming it separately still lets the API grow a
+#: field the stored document does not have.
+BackupManifestDTO = BackupManifest
 
 
 class BackupDTO(BaseModel):

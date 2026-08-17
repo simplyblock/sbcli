@@ -10,7 +10,9 @@ Handles three task types:
 import time
 
 from simplyblock_core import constants, db_controller, utils
-from simplyblock_core.controllers import backup_events
+from simplyblock_core.backup_manifest import ManifestError
+from simplyblock_core.controllers import backup_controller, backup_events
+from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.models.backup import Backup
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
@@ -109,8 +111,19 @@ def _run_backup(task):
     if stat and isinstance(stat, dict):
         state = stat.get("transfer_state", "")
         if state == "Done":
-            backup.status = Backup.STATUS_COMPLETED
             backup.completed_at = int(time.time())
+
+            # Publish the manifest BEFORE marking the backup completed, so that
+            # COMPLETED implies "identifiable from the bucket alone". Data with
+            # no manifest is data nobody can attribute to a volume later, so a
+            # manifest failure fails the backup rather than leaving that behind.
+            try:
+                backup_controller.write_manifest(backup)
+            except (ManifestError, PreconditionError) as e:
+                _fail_backup(backup, task, f"Failed to publish backup manifest: {e}")
+                return
+
+            backup.status = Backup.STATUS_COMPLETED
             backup.write_to_db()
             backup_events.backup_completed(backup.cluster_id, backup.node_id, backup)
             task.function_result = "Backup completed"
@@ -359,6 +372,24 @@ def _run_merge(task):
 
     old_backup.status = Backup.STATUS_MERGED
     old_backup.write_to_db()
+
+    # Two objects, and only two: the survivor's manifest, whose prev_backup_id
+    # just changed, and the merged-away one, which describes keys the data plane
+    # has unmapped. Every descendant's manifest stays valid because none of them
+    # names anything but its own immediate predecessor -- the chain is walked at
+    # read time rather than stored, precisely so a merge does not have to rewrite
+    # the whole line of descent and cannot half-succeed at it.
+    try:
+        backup_controller.write_manifest(keep_backup)
+        backup_controller.delete_manifest(old_backup)
+    except (ManifestError, PreconditionError) as e:
+        # The S3 merge already happened and is not reversible, so the task
+        # cannot be failed here -- retry the manifest work instead.
+        task.function_result = f"Merge done, manifest update failed: {e}"
+        task.retry += 1
+        task.status = JobSchedule.STATUS_SUSPENDED
+        task.write_to_db(db.kv_store)
+        return
 
     task.function_result = "Merge completed"
     task.status = JobSchedule.STATUS_DONE

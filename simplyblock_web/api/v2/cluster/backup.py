@@ -1,16 +1,17 @@
-from typing import List, Optional
+from typing import List, Optional, Union
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
+from simplyblock_core.backup_manifest import ManifestError
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.controllers import backup_controller
 from simplyblock_core.models.cluster import Cluster as ClusterModel
 from simplyblock_core.models.lvol_model import LVol
 
 from .._dependencies import BackupResource, Cluster, Policy
-from .._dtos import BackupDTO, BackupPolicyDTO
+from .._dtos import BackupConfigDTO, BackupDTO, BackupManifestDTO, BackupPolicyDTO
 from ..util import CreationResponseFormatParameter, creation_response
 
 
@@ -59,20 +60,63 @@ def restore_backup(cluster: Cluster, parameters: _RestoreParams):
         parameters.backup_id, parameters.lvol_name, parameters.pool, target_node_id=parameters.target_node_id)}
 
 
-class _ImportParams(BaseModel):
-    metadata: list[dict]
+class _ImportManifests(BaseModel):
+    """Manifests carried in the request itself, e.g. from an export file."""
+    model_config = ConfigDict(extra="forbid")
+
+    metadata: List[BackupManifestDTO]
+
+
+class _ImportFromBucket(BaseModel):
+    """Import whatever a bucket turns out to contain.
+
+    The disaster-recovery path: it needs a bucket and credentials for it, and
+    nothing from the cluster that wrote the backups.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    bucket: BackupConfigDTO
+
+
+#: The two ways to name what to import. A union rather than one model with two
+#: optional fields and a validator forbidding both/neither: pydantic then rejects
+#: a malformed body itself, and the OpenAPI schema says "one of these two" rather
+#: than "everything optional, good luck".
+_ImportParams = Union[_ImportManifests, _ImportFromBucket]
 
 
 @api.post('/import', name='clusters:backups:import')
 def import_backups(cluster: Cluster, parameters: _ImportParams):
     try:
-        count = backup_controller.import_backups(parameters.metadata, cluster_id=cluster.get_id())
+        count = (
+            backup_controller.import_from_bucket(
+                parameters.bucket, cluster_id=cluster.get_id())
+            if isinstance(parameters, _ImportFromBucket) else
+            backup_controller.import_backups(
+                parameters.metadata, cluster_id=cluster.get_id())
+        )
+    except ManifestError as e:
+        # The bucket named in the request could not be read. 400 rather than
+        # 502: nothing here proxies for an upstream service, and what the caller
+        # supplied is the only thing that can be wrong from here.
+        raise HTTPException(400, str(e)) from e
     except ValueError as e:
-        # The request body could not be read as backup descriptions, which is a
-        # bad request rather than an unmet precondition (those reach 400 through
-        # app.py's PreconditionError handler).
         raise HTTPException(400, str(e)) from e
     return {"imported": count}
+
+
+@api.post('/discover', name='clusters:backups:discover')
+def discover_backups(parameters: BackupConfigDTO) -> List[BackupManifestDTO]:
+    """List the backups a bucket contains, without importing anything.
+
+    A POST because it carries credentials, which have no business in a query
+    string. Takes no cluster state at all: this is what an operator runs when
+    the cluster that wrote the backups no longer exists.
+    """
+    try:
+        return backup_controller.discover_backups(parameters)
+    except ManifestError as e:
+        raise HTTPException(400, str(e)) from e
 
 
 @api.get('/export', name='clusters:backups:export')
@@ -80,7 +124,7 @@ def export_backups(
     cluster: Cluster,
     backup_id: Optional[str] = Query(None, description="Export only the chain containing this backup UUID"),
     lvol_name: Optional[str] = Query(None, description="Export all completed backups for this lvol name"),
-):
+) -> List[BackupManifestDTO]:
     lvol_name_filter = lvol_name
     if backup_id and not lvol_name_filter:
         try:
@@ -88,9 +132,8 @@ def export_backups(
             lvol_name_filter = backup.lvol_name
         except KeyError:
             raise HTTPException(404, f"Backup {backup_id} not found")
-    data = backup_controller.export_backups(
+    return backup_controller.export_backups(
         cluster_id=cluster.get_id(), lvol_name=lvol_name_filter)
-    return data
 
 
 class _BackupSourceSwitchParams(BaseModel):
