@@ -2516,14 +2516,10 @@ spec:
             npcs=self.npcs,
             fs_type="xfs",
         )
-        # Use XFS exclusively for the R25 upgrade test.  The chart-created
-        # ext4 SC hits FEATURE_C12 incompatibility (R25's mkfs.ext4 enables
-        # features that the host's e2fsck 1.46.5 cannot handle after upgrade).
-        # Point both SC names to XFS so _create_pvcs_with_fio picks only XFS.
-        self.STORAGE_CLASS_NAME = self.XFS_STORAGE_CLASS_NAME
         self.logger.info(
-            f"Using XFS SC '{self.XFS_STORAGE_CLASS_NAME}' exclusively "
-            f"(ext4 FEATURE_C12 workaround, pool={pool_name})"
+            f"Using chart ext4 SC '{self.STORAGE_CLASS_NAME}' + "
+            f"new XFS SC '{self.XFS_STORAGE_CLASS_NAME}' "
+            f"(same pool={pool_name})"
         )
 
         pre_fio_runtime = 60  # 1 minute — just write data before upgrade
