@@ -532,7 +532,10 @@ def sn_shutdown(mgmt_ip, key_path, node_id):
     heal itself mid-test), which silently invalidates an outage scenario.
     """
     print(f"Shutting down node {node_id[:8]} ...")
-    run(mgmt_ip, key_path, f"{SBCTL} -d sn suspend {node_id}", check=False)
+    # Straight to shutdown: suspending first buys nothing and actively hurts —
+    # a suspended node makes its own queued work defer ("node is not online,
+    # retrying"), and that backlog then blocks the shutdown itself (run 15
+    # case 6: the node never left `suspended`).
     run(mgmt_ip, key_path, f"{SBCTL} -d sn shutdown {node_id}", check=False)
     wait_node_status(mgmt_ip, key_path, node_id, "offline")
 
@@ -1060,6 +1063,12 @@ def test_case_4(meta):
 
     tgt_lvols, baseline, mounts = _setup_failed_over_volumes(meta, "case4")
 
+    # This is an ONLINE MIGRATION, exactly like case 1 — only the source is the
+    # fail-over site and the copy is full instead of delta. The volumes are live
+    # and serving, so IO must not be interrupted by moving them to the new site.
+    jobfile = write_fio_jobfile(client_ip, key_path, mounts)
+    start_fio(client_ip, key_path, jobfile)
+
     # "Primary removed": drop the original source volumes so nothing can be
     # reused as a delta base — the fresh cluster must receive the FULL dataset.
     print("Removing the original primary's volumes (fresh fail-back must be full)...")
@@ -1072,19 +1081,43 @@ def test_case_4(meta):
         failback(mgmt_ip, key_path, lv, source_cluster_id=fresh_uuid)
     wait_replication_caught_up(mgmt_ip, key_path, tgt_lvols)
 
-    print("Committing the cutover onto the fresh cluster...")
+    print("Committing the cutover onto the fresh cluster while fio runs...")
     for lv in tgt_lvols:
         run(mgmt_ip, key_path, f"{SBCTL} -d volume replication-commit {lv}")
 
     start = time.time()
     done = 0
+    connected = set()
+    src_nqn_by_lvol = {m["lvol"]: m["nqn"] for m in mounts}
     while time.time() - start < CUTOVER_WAIT_TIMEOUT:
+        if not fio_alive(client_ip, key_path):
+            raise RuntimeError(
+                "FAIL: fio stopped during the migration to the fresh cluster (interrupted)")
+        # Same choreography as case 1: attach the new site's paths under the
+        # volume's own NQN before the ANA flip, so multipath follows the move.
+        targets = failed_over_targets_any_state(mgmt_ip, key_path, tgt_lvols)
+        for src_lv, new_lv in targets.items():
+            if new_lv:
+                conn = get_connect_cmds(mgmt_ip, key_path, new_lv)
+                src_nqn = src_nqn_by_lvol.get(src_lv, "")
+                for cmd in conn.get("connect", []):
+                    if src_nqn:
+                        cmd = re.sub(r"--nqn=\S+", f"--nqn={src_nqn}", cmd)
+                    run(client_ip, key_path, cmd, check=False, quiet=True)
+                connected.add(new_lv)
         states = replication_states(mgmt_ip, key_path, tgt_lvols)
         done = sum(1 for s in states.values() if s in ("cutover_done", "failed_over"))
-        print(f"  cutovers onto fresh cluster: {done}/{len(tgt_lvols)}")
+        print(f"  cutovers onto fresh cluster: {done}/{len(tgt_lvols)}  "
+              f"paths_connected={len(connected)}/{len(tgt_lvols)}  fio_alive=True")
         if done == len(tgt_lvols):
             break
         time.sleep(15)
+
+    time.sleep(20)
+    alive = fio_alive(client_ip, key_path)
+    errors = fio_error_count(client_ip, key_path)
+    print(f"  fio_alive={alive} error_indicators={errors} cutovers_done={done}/{len(tgt_lvols)}")
+    stop_fio(client_ip, key_path)
 
     back = failed_over_targets(mgmt_ip, key_path, tgt_lvols)
     cleanup_client(client_ip, key_path, mounts)

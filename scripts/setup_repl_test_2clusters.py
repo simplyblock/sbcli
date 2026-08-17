@@ -104,7 +104,10 @@ ec2 = boto3.resource("ec2", region_name="us-east-1")
 # --------------------------------------------------------------------------- #
 # SSH / AWS helpers (same patterns as setup_perf_test1.py)
 # --------------------------------------------------------------------------- #
-def wait_for_ssh(ip, timeout=300):
+def wait_for_ssh(ip, timeout=900):
+    # 300s was not enough headroom: a freshly launched instance can take
+    # longer than that to finish cloud-init, and the deploy then aborts
+    # with every instance healthy moments later (deploy 17).
     print(f"--> SSH handshake on {ip} ...")
     start = time.time()
     while time.time() - start < timeout:
