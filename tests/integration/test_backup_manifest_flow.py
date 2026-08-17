@@ -179,7 +179,8 @@ class TestExportImportRoundTrip:
 
     def test_backups_survive_losing_the_database(self, db, cluster, lvol):
         _backup(db, "b-1", 1)
-        _backup(db, "b-2", 2, prev="b-1", encrypted=True)
+        _backup(db, "b-2", 2, prev="b-1", encrypted=True,
+                encryption={"encrypted": True, "descriptor": {"kms": "local"}})
 
         exported = backup_controller.export_backups(cluster_id=CLUSTER_ID)
         for backup in db.get_backups():
@@ -199,7 +200,8 @@ class TestExportImportRoundTrip:
 
     def test_encrypted_flag_survives(self, db, cluster, lvol):
         """It used to be dropped, restoring a plaintext volume over ciphertext."""
-        _backup(db, "b-1", 1, encrypted=True)
+        _backup(db, "b-1", 1, encrypted=True,
+                encryption={"encrypted": True, "descriptor": {"kms": "local"}})
         exported = backup_controller.export_backups(cluster_id=CLUSTER_ID)
         db.get_backup_by_id("b-1").remove(db.kv_store)
 

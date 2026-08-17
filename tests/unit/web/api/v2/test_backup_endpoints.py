@@ -83,6 +83,25 @@ class TestRestoreBackup:
         backup_controller.restore_backup.assert_called_once_with(
             BACKUP_ID, 'restored-volume', 'pool-1', target_node_id=None)
 
+    def test_a_precondition_error_is_not_mapped_here(self, client, db, cluster,
+                                                     backup_controller):
+        """app.py maps PreconditionError to 400 for the whole API; a second,
+        disagreeing mapping in this one router made it inconsistent with itself.
+
+        (This test app deliberately mounts only the routers, so an unhandled
+        exception surfaces here instead of reaching that handler.)
+        """
+        import pytest
+        from simplyblock_core.exceptions import PreconditionError
+        backup_controller.restore_backup.side_effect = PreconditionError('node offline')
+
+        with pytest.raises(PreconditionError):
+            client.post(f'{BASE}/restore', json={
+                'backup_id': BACKUP_ID,
+                'lvol_name': 'restored-volume',
+                'pool': 'pool-1',
+            })
+
 
 class TestImportBackups:
     """The body is a union of two shapes, not one model with everything optional."""
@@ -94,7 +113,7 @@ class TestImportBackups:
         'created_at': 100,
         'completed_at': 200,
         'size': 4096,
-        'encrypted': False,
+        'encryption': {'encrypted': False},
         'location': {'bucket_name': 'backups', 'region': 'eu-central-1'},
         'source': {'cluster_id': CLUSTER_ID, 'node_id': 'node-1'},
         'volume': {'lvol_id': VOLUME_ID, 'lvol_name': 'vol',
