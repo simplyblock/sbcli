@@ -94,7 +94,7 @@ def test_bdev_s3_create_keys_reach_the_wire_but_not_the_log(rpc_client, caplog):
 
     with caplog.at_level(logging.DEBUG):
         rpc_client.bdev_s3_create(
-            name="s3_lvs_test",
+            name="s3_lvs_test", bucket_name="bucket",
             access_key_id=SecretStr("AKIAEXAMPLE"),
             secret_access_key=SecretStr("s3cr3t"),
         )
@@ -114,7 +114,7 @@ def test_bdev_s3_create_omits_absent_credentials(rpc_client):
         "jsonrpc": "2.0", "id": 1, "result": True,
     })
 
-    rpc_client.bdev_s3_create(name="s3_lvs_test")
+    rpc_client.bdev_s3_create(name="s3_lvs_test", bucket_name="bucket")
 
     params = _sent_params(rpc_client)
     assert "access_key_id" not in params
@@ -130,7 +130,7 @@ def test_bdev_s3_create_does_not_send_empty_credentials_as_keys(rpc_client):
     })
 
     rpc_client.bdev_s3_create(
-        name="s3_lvs_test",
+        name="s3_lvs_test", bucket_name="bucket",
         access_key_id=SecretStr(""), secret_access_key=SecretStr(""),
     )
 

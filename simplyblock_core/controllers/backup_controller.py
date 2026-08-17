@@ -343,18 +343,20 @@ def create_restore_s3_bdev(node, config: BackupConfig, name: str) -> None:
     try:
         rpc_client.bdev_s3_create(
             name=name,
+            bucket_name=config.bucket_name,
             secondary_target=config.secondary_target,
             with_compression=config.with_compression,
             snapshot_backups=config.snapshot_backups,
-            local_testing=config.endpoint is not None,
-            local_endpoint=config.endpoint_url or "",
+            endpoint=config.endpoint_url or "",
+            region=config.region,
+            verify_tls=config.verify_tls,
+            use_path_style=config.use_path_style,
             access_key_id=config.credentials.access_key_id if config.credentials else None,
             secret_access_key=config.credentials.secret_access_key if config.credentials else None,
             bdb_lcpu_mask=bdb_lcpu_mask,
             s3_lcpu_mask=s3_lcpu_mask,
             s3_thread_pool_size=config.s3_thread_pool_size or 0,
         )
-        rpc_client.bdev_s3_add_bucket_name(name, config.bucket_name, allow_existing=True)
         rpc_client.bdev_lvol_s3_bdev(node.lvstore, name)
     except RPCException as e:
         raise RuntimeError(
@@ -559,33 +561,25 @@ def create_s3_bdev(node, config: BackupConfig) -> None:
     # #938): a second creation with a different mask that either failed
     # noisily on every activate or put the pollers on the wrong core.
 
-    # The data plane still takes the pre-BackupConfig parameter shape; phase 2
-    # replaces it. Two lossy mappings live here until then:
-    #  * `local_testing` is not a mode, it is the only condition under which the
-    #    data plane honours an endpoint override at all (bdev_s3_impl.hpp
-    #    init_client), so it tracks "an endpoint was configured".
-    #  * region, verify_tls and use_path_style have nowhere to go -- the data
-    #    plane hardcodes us-east-1 and path-style under local_testing, and
-    #    resolves the region from the environment otherwise.
     try:
+        _ensure_s3_bucket(config, config.bucket_name)
+
         rpc_client.bdev_s3_create(
             name=s3_bdev_name,
+            bucket_name=config.bucket_name,
             secondary_target=config.secondary_target,
             with_compression=config.with_compression,
             snapshot_backups=config.snapshot_backups,
-            local_testing=config.endpoint is not None,
-            local_endpoint=config.endpoint_url or "",
+            endpoint=config.endpoint_url or "",
+            region=config.region,
+            verify_tls=config.verify_tls,
+            use_path_style=config.use_path_style,
             access_key_id=config.credentials.access_key_id if config.credentials else None,
             secret_access_key=config.credentials.secret_access_key if config.credentials else None,
             bdb_lcpu_mask=bdb_lcpu_mask,
             s3_lcpu_mask=s3_lcpu_mask,
             s3_thread_pool_size=config.s3_thread_pool_size or 0,
         )
-
-        _ensure_s3_bucket(config, config.bucket_name)
-
-        rpc_client.bdev_s3_add_bucket_name(s3_bdev_name, config.bucket_name, allow_existing=True)
-        logger.info(f"S3 bdev bucket set: {config.bucket_name} on {s3_bdev_name}")
 
         rpc_client.bdev_lvol_s3_bdev(node.lvstore, s3_bdev_name)
         logger.info(f"S3 bdev created and attached: {s3_bdev_name} on node {node.get_id()}")
