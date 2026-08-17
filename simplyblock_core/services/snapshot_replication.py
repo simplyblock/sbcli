@@ -327,7 +327,35 @@ def _previous_replicated_snapshot(snapshot, replicate_to_source):
                 and s.created_at < snapshot.created_at
                 and (prev is None or s.created_at > prev.created_at)):
             prev = s
-    return prev
+    if prev is not None:
+        return prev
+
+    # No older SIBLING — but a fail-over volume is a CLONE, and its first
+    # snapshot's chain parent is the snapshot it was cloned from, not a
+    # sibling. On fail-back that parent is the replicated copy of the
+    # fail-over point (n(1)' on the target), whose counterpart on the original
+    # source is n(1) — exactly the snapshot the delta must be chained onto.
+    # Without this the first fail-back delta lands as a standalone blob and
+    # reads its own clusters plus zeros, the same failure as the unchained
+    # forward replication (case 2).
+    lvol = snapshot.lvol
+    try:
+        lvol = db.get_lvol_by_id(snapshot.lvol.get_id())
+    except (KeyError, AttributeError):
+        pass
+    parent_uuid = getattr(lvol, "cloned_from_snap", "")
+    if not parent_uuid:
+        return None
+    try:
+        parent = db.get_snapshot_by_id(parent_uuid)
+    except KeyError as e:
+        logger.error("clone parent %s unresolvable: %s", parent_uuid, e)
+        return None
+    if getattr(parent, attr, ""):
+        logger.info("Chain parent for %s is the clone's origin snapshot %s",
+                    snapshot.get_id(), parent.get_id())
+        return parent
+    return None
 
 
 def _resolve_chain_target(snapshot, replicate_to_source, remote_snode):

@@ -2247,6 +2247,13 @@ def get_replication_info(lvol_id_or_name):
         "outstanding_count": 0,         # snapshots queued but not yet replicated
         "outstanding_bytes": 0,         # bytes still to transfer
         "outstanding": "0B",            # human-readable outstanding bytes
+        # Health verdict — replication errors live in per-task strings, which
+        # nobody reads until a fail-over returns stale data. These summarise it.
+        "state": "not_replicating",      # in_sync|replicating|lagging|degraded|error
+        "healthy": False,
+        "last_error": "",               # newest failing task's reason
+        "failing_count": 0,             # tasks retrying right now
+        "max_retry_reached": 0,         # tasks that gave up
         "snaps": [],
         "tasks": [],
     }
@@ -2307,6 +2314,41 @@ def get_replication_info(lvol_id_or_name):
         else:
             duration = ""
         out["last_replication_duration"] = duration
+
+        # --- health verdict -------------------------------------------------
+        # A task that keeps retrying is the ONLY signal that replication is
+        # broken (network partition, node down, no LVS leader). It used to be
+        # buried in task.function_result, so a volume could sit hours behind
+        # while every status view looked normal.
+        failing = [t for t in tasks
+                   if t.status == JobSchedule.STATUS_SUSPENDED and not t.canceled]
+        gave_up = [t for t in tasks
+                   if t.status == JobSchedule.STATUS_DONE
+                   and str(t.function_result or "").startswith(("max retry", "task cancelled"))]
+        out["failing_count"] = len(failing)
+        out["max_retry_reached"] = len(gave_up)
+        if failing:
+            out["last_error"] = str(failing[-1].function_result or "")
+        elif gave_up:
+            out["last_error"] = str(gave_up[-1].function_result or "")
+
+        # Lag budget: three snapshot intervals (one missed cycle is not an
+        # incident), floor 5 min so a tiny interval does not flap the verdict.
+        interval_sec = max(1, lvol.replication_interval_min or 1) * 60
+        lag_budget = max(3 * interval_sec, 300)
+        lag = out["lag_seconds"]
+        if gave_up:
+            out["state"] = "error"
+        elif failing:
+            out["state"] = "degraded"
+        elif lag is not None and lag > lag_budget:
+            out["state"] = "lagging"
+        elif out["outstanding_count"] > 0:
+            out["state"] = "replicating"
+        else:
+            out["state"] = "in_sync"
+        out["healthy"] = out["state"] in ("in_sync", "replicating")
+        out["lag_budget_seconds"] = lag_budget
 
     return out
 
