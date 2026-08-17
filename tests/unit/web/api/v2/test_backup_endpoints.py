@@ -84,6 +84,127 @@ class TestRestoreBackup:
             BACKUP_ID, 'restored-volume', 'pool-1', target_node_id=None)
 
 
+class TestImportBackups:
+    """The body is a union of two shapes, not one model with everything optional."""
+
+    _MANIFEST = {
+        'schema_version': 1,
+        'backup_id': BACKUP_ID,
+        's3_id': 7,
+        'created_at': 100,
+        'completed_at': 200,
+        'size': 4096,
+        'encrypted': False,
+        'location': {'bucket_name': 'backups', 'region': 'eu-central-1'},
+        'source': {'cluster_id': CLUSTER_ID, 'node_id': 'node-1'},
+        'volume': {'lvol_id': VOLUME_ID, 'lvol_name': 'vol',
+                   'snapshot_id': SNAPSHOT_ID, 'snapshot_name': 'snap',
+                   'size': 4096},
+        'dataplane': {},
+    }
+
+    _BUCKET = {'bucket_name': 'backups', 'region': 'eu-central-1'}
+
+    def test_inline_manifests_are_validated_by_the_body_type(
+            self, client, db, cluster, backup_controller):
+        backup_controller.import_backups.return_value = 1
+
+        response = client.post(f'{BASE}/import', json={'metadata': [self._MANIFEST]})
+
+        assert response.status_code == 200
+        assert response.json() == {'imported': 1}
+        (manifests,), kwargs = backup_controller.import_backups.call_args
+        assert [m.backup_id for m in manifests] == [BACKUP_ID]
+
+    def test_a_malformed_manifest_is_rejected_before_the_controller(
+            self, client, db, cluster, backup_controller):
+        response = client.post(
+            f'{BASE}/import',
+            json={'metadata': [{**self._MANIFEST, 's3_id': 'not-an-int'}]})
+
+        assert response.status_code == 422
+        backup_controller.import_backups.assert_not_called()
+
+    def test_a_bucket_reads_the_manifests_itself(
+            self, client, db, cluster, backup_controller):
+        backup_controller.import_from_bucket.return_value = 3
+
+        response = client.post(f'{BASE}/import', json={'bucket': self._BUCKET})
+
+        assert response.status_code == 200
+        assert response.json() == {'imported': 3}
+        backup_controller.import_backups.assert_not_called()
+
+    def test_naming_both_sources_is_rejected(
+            self, client, db, cluster, backup_controller):
+        """extra="forbid" on both arms is what makes the union decide."""
+        response = client.post(f'{BASE}/import', json={
+            'metadata': [self._MANIFEST], 'bucket': self._BUCKET})
+
+        assert response.status_code == 422
+
+    def test_naming_neither_source_is_rejected(
+            self, client, db, cluster, backup_controller):
+        response = client.post(f'{BASE}/import', json={})
+
+        assert response.status_code == 422
+
+    def test_an_unreadable_bucket_is_a_bad_request_not_a_bad_gateway(
+            self, client, db, cluster, backup_controller):
+        """Nothing here proxies for S3, and the bucket came from the request."""
+        from simplyblock_core.backup_manifest import ManifestError
+        backup_controller.import_from_bucket.side_effect = ManifestError('no such bucket')
+
+        response = client.post(f'{BASE}/import', json={'bucket': self._BUCKET})
+
+        assert response.status_code == 400
+        assert 'no such bucket' in response.json()['detail']
+
+    def test_a_precondition_error_is_not_mapped_here(
+            self, client, db, cluster, backup_controller):
+        """It used to become a 409, contradicting app.py, which maps every
+        PreconditionError to 400 for the whole API. The endpoint lets it through.
+
+        (This test app deliberately mounts only the routers, so an unhandled
+        exception surfaces here instead of reaching that handler.)
+        """
+        import pytest
+        from simplyblock_core.exceptions import PreconditionError
+        backup_controller.import_backups.side_effect = PreconditionError('already exists')
+
+        with pytest.raises(PreconditionError):
+            client.post(f'{BASE}/import', json={'metadata': [self._MANIFEST]})
+
+
+class TestDiscoverBackups:
+
+    def test_returns_the_manifests_the_bucket_holds(
+            self, client, db, backup_controller):
+        from simplyblock_core.backup_manifest import BackupManifest
+        backup_controller.discover_backups.return_value = [
+            BackupManifest.model_validate(TestImportBackups._MANIFEST)]
+
+        response = client.post(
+            f'{BASE}/discover',
+            json={'bucket_name': 'backups', 'region': 'eu-central-1'})
+
+        assert response.status_code == 200
+        assert [entry['backup_id'] for entry in response.json()] == [BACKUP_ID]
+
+    def test_credentials_are_masked_in_the_response_of_a_failure(
+            self, client, db, backup_controller):
+        from simplyblock_core.backup_manifest import ManifestError
+        backup_controller.discover_backups.side_effect = ManifestError('unreachable')
+
+        response = client.post(f'{BASE}/discover', json={
+            'bucket_name': 'backups', 'region': 'eu-central-1',
+            'credentials': {'access_key_id': 'AKIA', 'secret_access_key': 's3cr3t'},
+        })
+
+        assert response.status_code == 400
+        assert 's3cr3t' not in response.text
+
+
 class TestBackupPolicies:
 
     def test_list_policies(self, client, db, backup_policy):

@@ -3,12 +3,11 @@ import logging
 import re
 import time
 import uuid
-from typing import Optional
+from typing import Iterable, List, Optional
 
-import boto3
-from botocore.config import Config as BotoConfig
 from botocore.exceptions import BotoCoreError, ClientError
 
+from simplyblock_core import backup_manifest, constants
 from simplyblock_core.controllers import backup_events, tasks_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.backup import Backup, BackupPolicy, BackupPolicyAttachment
@@ -18,7 +17,6 @@ from simplyblock_core.kms import (
     KMSException, backup_dek_path, backup_kek_name, create_kms_connection,
     lvol_dek_path, pool_kek_name,
 )
-from simplyblock_core.utils.secrets import unwrap_secret
 from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.rpc_client import RPCException
 
@@ -103,30 +101,143 @@ def _compute_s3_cpu_masks(node):
     return bdb_lcpu_mask, s3_lcpu_mask
 
 
-def _s3_client(config: BackupConfig):
-    """A boto3 client for a backup location.
+def build_manifest(backup: Backup) -> backup_manifest.BackupManifest:
+    """Assemble the self-describing record for a completed backup.
 
-    Credentials are passed only when configured; omitting them lets boto3 fall
-    back to its default provider chain (instance IAM role, environment, profile),
-    which is the point of ``credentials`` being Optional.
+    Everything a restore needs is collected here, from the backup itself and
+    from the volume/pool/cluster it came from, so that after this point no part
+    of the restore path has to consult the originating cluster.
+
+    This function exists because `Backup` and `BackupManifest` describe the same
+    thing in two shapes. Most of that overlap is not justified, and this is the
+    seam where it shows:
+
+    * Justified: `status` and `error_message` are on the record and not in the
+      manifest, because they are mutable control-plane state with no meaning in a
+      bucket. `schema_version` and `dataplane` are in the manifest and not on the
+      record, because they are claims about the byte format, which the cluster
+      that wrote them does not need told back to it.
+    * Not justified: `pool_uuid` on the record against `volume.pool_name` in the
+      manifest -- the same fact, keyed differently, so neither can be derived from
+      the other. `encrypted` living both as its own field and inside `encryption`,
+      which is why this function has to overlay one onto the other so a manifest
+      cannot contradict itself. And the volume's settings, which the manifest
+      records and the record does not, so an imported backup knows less about its
+      volume than the manifest it was imported from did.
+    * Actively wrong: `dataplane.cluster_size` is recomputed here from the
+      *current* cluster. Re-exporting an imported backup therefore restamps it
+      with the importing cluster's page size, silently, even though it describes
+      objects a different cluster wrote. Nothing reads it yet, so nothing is
+      broken today.
+
+    The fix for all three is the same and is not attempted here: make the
+    manifest the canonical document, store it on the record, and reduce `Backup`
+    to control-plane state plus the fields FoundationDB is queried by. That is
+    cheaper than it looks -- every backup query in `db_controller` already filters
+    in Python over a full scan, so nesting costs nothing there -- but it touches
+    `BackupDTO`, the `backup list` table and existing records, so it wants its own
+    change.
     """
-    return boto3.client("s3",
-        region_name=config.region,
-        endpoint_url=config.endpoint_url,
-        verify=config.verify_tls,
-        config=BotoConfig(s3={"addressing_style": "path" if config.use_path_style else "auto"}),
-        aws_access_key_id=(
-            unwrap_secret(config.credentials.access_key_id)
-            if config.credentials is not None else None),
-        aws_secret_access_key=(
-            unwrap_secret(config.credentials.secret_access_key)
-            if config.credentials is not None else None),
+    volume = backup_manifest.Volume(
+        lvol_id=backup.lvol_id,
+        lvol_name=backup.lvol_name,
+        snapshot_id=backup.snapshot_id,
+        snapshot_name=backup.snapshot_name,
+        size=backup.size,
+        allowed_hosts=backup.allowed_hosts or [],
     )
+
+    # The volume's own settings, where it still exists. Absent together once it
+    # is gone, which is a different answer from 0 -- for a QoS cap that means
+    # unlimited.
+    try:
+        lvol = db_controller.get_lvol_by_id(backup.lvol_id)
+    except KeyError:
+        logger.warning("Volume %s is gone; manifest for backup %s records only "
+                       "the shape carried on the backup itself",
+                       backup.lvol_id, backup.uuid)
+    else:
+        volume = volume.model_copy(update={
+            "pool_name": lvol.pool_name,
+            "ha_type": lvol.ha_type or "default",
+            "fabric": lvol.fabric or "tcp",
+            "lvol_priority_class": lvol.lvol_priority_class,
+            "max_size": lvol.max_size,
+            "rw_ios_per_sec": lvol.rw_ios_per_sec,
+            "rw_mbytes_per_sec": lvol.rw_mbytes_per_sec,
+            "r_mbytes_per_sec": lvol.r_mbytes_per_sec,
+            "w_mbytes_per_sec": lvol.w_mbytes_per_sec,
+        })
+
+    cluster_name = None
+    cluster_size = None
+    try:
+        cluster = db_controller.get_cluster_by_id(backup.cluster_id)
+    except KeyError:
+        logger.warning("Cluster %s is gone; manifest for backup %s records no "
+                       "object size", backup.cluster_id, backup.uuid)
+    else:
+        cluster_name = cluster.cluster_name
+        cluster_size = cluster.page_size_in_blocks * constants.LVOL_CLUSTER_RATIO
+
+    return backup_manifest.BackupManifest(
+        backup_id=backup.uuid,
+        s3_id=backup.s3_id,
+        created_at=backup.created_at,
+        completed_at=backup.completed_at,
+        size=backup.size,
+        encrypted=backup.encrypted,
+        prev_backup_id=backup.prev_backup_id or None,
+        location=backup.get_location(),
+        source=backup_manifest.Source(
+            cluster_id=backup.source_cluster_id or backup.cluster_id,
+            cluster_name=cluster_name,
+            node_id=backup.node_id,
+        ),
+        volume=volume,
+        dataplane=backup_manifest.DataPlane(cluster_size=cluster_size),
+    )
+
+
+def _config_for(backup: Backup) -> BackupConfig:
+    """Credentials for a backup's own bucket.
+
+    The location comes from the backup; only the credentials come from the
+    cluster, and only because a manifest must never carry them.
+
+    Raises:
+        PreconditionError: The cluster's configured bucket is not the one this
+            backup lives in, so its credentials cannot be assumed to reach it.
+    """
+    config = db_controller.get_cluster_by_id(backup.cluster_id).get_backup_config()
+    location = backup.get_location()
+
+    if config.location() != location:
+        raise PreconditionError(
+            f"Backup {backup.uuid} lives in bucket {location.bucket_name}, but "
+            f"cluster {backup.cluster_id} is configured for "
+            f"{config.bucket_name}; supply credentials for the backup's bucket")
+
+    return config
+
+
+def write_manifest(backup: Backup) -> None:
+    """Publish a backup's manifest.
+
+    Raises:
+        ManifestError: the manifest could not be stored.
+        PreconditionError: the backup's bucket is not the cluster's own.
+    """
+    backup_manifest.write(_config_for(backup), build_manifest(backup))
+
+
+def delete_manifest(backup: Backup) -> None:
+    backup_manifest.delete(_config_for(backup), backup.uuid)
 
 
 def _s3_bucket_exists(config: BackupConfig, bucket_name) -> bool:
     try:
-        _s3_client(config).head_bucket(Bucket=bucket_name)
+        backup_manifest.s3_client(config).head_bucket(Bucket=bucket_name)
         return True
     except ClientError as e:
         error_code = int(e.response["Error"]["Code"])
@@ -137,7 +248,7 @@ def _s3_bucket_exists(config: BackupConfig, bucket_name) -> bool:
 
 def _ensure_s3_bucket(config: BackupConfig, bucket_name):
     try:
-        s3_client = _s3_client(config)
+        s3_client = backup_manifest.s3_client(config)
         try:
             s3_client.head_bucket(Bucket=bucket_name)
             logger.info(f"S3 bucket already exists: {bucket_name}")
@@ -524,7 +635,16 @@ def _cleanup_backup_kms_keys(backups):
 
 def delete_backups(lvol_id):
     """Delete all backups for a given lvol.
-    Returns (success, error_message)."""
+
+    Removes the database records, not the objects: bdev_lvol_s3_delete does not
+    exist on the data plane, so the S3 data outlives this call. The manifests
+    are deliberately left in place too -- they are the only thing that can still
+    identify those objects, and deleting them would turn a reclaimable orphan
+    set into anonymous bucket weight. `backup discover` therefore keeps showing
+    them, which is the honest answer about what the bucket contains.
+
+    Returns (success, error_message).
+    """
     backups = db_controller.get_backups_by_lvol_id(lvol_id)
     if not backups:
         return False, f"No backups found for lvol {lvol_id}"
@@ -589,112 +709,110 @@ def list_backups(cluster_id=None):
     return data
 
 
-def export_backups(cluster_id=None, lvol_name=None):
-    """Export completed backup metadata as a list of dicts suitable for import
-    into another cluster via import_backups().
+def export_backups(cluster_id=None, lvol_name=None) -> List[backup_manifest.BackupManifest]:
+    """Export completed backups as manifests, for import into another cluster.
 
-    Returns a list of metadata dicts including s3_id, chain links, and size.
+    Emits the same shape that lives in the bucket, so a hand-carried file and a
+    bucket read are interchangeable. Previously this produced a third, narrower
+    format of its own -- which is how it came to omit `encrypted`.
+
+    Returns the manifests themselves; whoever is writing them out decides how
+    they are rendered.
     """
     backups = db_controller.get_backups(cluster_id)
     completed = [b for b in backups if b.status == Backup.STATUS_COMPLETED]
     if lvol_name:
         completed = [b for b in completed if b.lvol_name == lvol_name]
 
-    result = []
-    for b in completed:
-        result.append({
-            "backup_id": b.uuid,
-            "s3_id": b.s3_id,
-            "cluster_id": b.cluster_id,
-            "lvol_id": b.lvol_id,
-            "lvol_name": b.lvol_name,
-            "snapshot_id": b.snapshot_id,
-            "snapshot_name": b.snapshot_name,
-            "node_id": b.node_id,
-            "prev_backup_id": b.prev_backup_id,
-            "size": b.size,
-            "allowed_hosts": b.allowed_hosts,
-            "location": b.location,
-            "encrypted": b.encrypted,
-            "created_at": b.created_at,
-        })
-    return result
+    return [build_manifest(b) for b in completed]
 
 
-def import_backups(s3_metadata_list, cluster_id=None):
-    """Import backup metadata from another cluster's S3 metadata.
+def discover_backups(config: BackupConfig) -> List[backup_manifest.BackupManifest]:
+    """Every backup in a bucket, read from its manifests alone.
 
-    Backups are stored in the local cluster's DB namespace but keep their
-    original s3_ids (scoped to source_cluster_id).  The source_cluster_id
-    field tracks which cluster originally created the backup.
-
-    Args:
-        s3_metadata_list: list of dicts with backup metadata.
-        cluster_id: Target cluster to import into.  Required for cross-cluster
-            restore so the backups are visible in the local cluster's DB.
+    The disaster-recovery entry point: given a bucket and credentials for it,
+    this answers "what is in here" with no reference to any cluster, live or
+    dead.
 
     Raises:
-        ValueError: One of the given entries is not a usable backup description.
-        PreconditionError: One of the given backup IDs is already known.  Backup
-            lookups are not scoped by cluster, so a UUID reused across clusters
-            would make either record unaddressable.  All IDs are checked before
-            the first record is written, so nothing is imported in that case.
+        ManifestError: The bucket could not be listed, or one of its manifests
+            could not be parsed.
     """
-    pending = {}
-    for meta in s3_metadata_list:
-        backup_id = meta.get("backup_id")
-        if not backup_id:
-            continue
+    return backup_manifest.list_all(config)
+
+
+def import_backups(manifests: Iterable[backup_manifest.BackupManifest],
+                   cluster_id=None) -> int:
+    """Register backups described by manifests into this cluster's database.
+
+    The backups keep their original ids -- both their uuid and their s3_id,
+    which names their objects in the bucket and therefore cannot be reassigned.
+
+    Args:
+        manifests: validated manifests, from `discover_backups`,
+            `export_backups`, or a file parsed into them. Taking the models
+            rather than dicts means "is this a manifest at all" is answered by
+            whoever read the bytes -- the API by its request body's type, the CLI
+            when it parses the file -- and reported where the input came from.
+        cluster_id: Target cluster to import into, so the backups are visible in
+            its namespace.
+
+    Raises:
+        PreconditionError: One of the backup IDs is already known -- backup
+            lookups are not scoped by cluster, so a UUID reused across clusters
+            would make either record unaddressable. Everything is checked before
+            the first record is written, so a bad batch imports nothing rather
+            than half of itself.
+        ValueError: The same backup is listed twice.
+    """
+    pending: dict = {}
+    for manifest in manifests:
+        backup_id = manifest.backup_id
 
         if backup_id in pending:
             raise ValueError(f"Backup {backup_id} is listed more than once")
 
-        # An entry that cannot say where its objects are, or whether they are
-        # encrypted, is not importable at any price: the first produces a
-        # restore against whatever bucket happens to be configured, the second a
-        # plaintext volume over ciphertext. Checked here so a stale export file
-        # is rejected whole rather than half-imported.
-        for required in ("location", "encrypted"):
-            if required not in meta:
-                raise ValueError(
-                    f"Backup {backup_id} is missing '{required}'; it predates "
-                    "self-describing backups and cannot be imported")
-
-        BackupLocation.model_validate(meta["location"])
-
         try:
             existing = db_controller.get_backup_by_id(backup_id)
         except KeyError:
-            pending[backup_id] = meta
+            pending[backup_id] = manifest
         else:
             raise PreconditionError(f"Backup {backup_id} already exists in cluster {existing.cluster_id}")
 
-    for backup_id, meta in pending.items():
-        source_cluster = meta.get("cluster_id", "")
-        target_cluster = cluster_id or source_cluster
-
+    for backup_id, manifest in pending.items():
         backup = Backup()
         backup.uuid = backup_id
-        backup.s3_id = meta.get("s3_id", 0)
-        backup.cluster_id = target_cluster
-        backup.source_cluster_id = source_cluster
-        backup.lvol_id = meta.get("lvol_id", "")
-        backup.lvol_name = meta.get("lvol_name", "")
-        backup.snapshot_id = meta.get("snapshot_id", "")
-        backup.snapshot_name = meta.get("snapshot_name", "")
-        backup.node_id = meta.get("node_id", "")
-        backup.prev_backup_id = meta.get("prev_backup_id", "")
-        backup.size = meta.get("size", 0)
-        backup.allowed_hosts = meta.get("allowed_hosts", [])
-        backup.created_at = meta.get("created_at", 0)
+        backup.s3_id = manifest.s3_id
+        backup.cluster_id = cluster_id or manifest.source.cluster_id
+        backup.source_cluster_id = manifest.source.cluster_id
+        backup.lvol_id = manifest.volume.lvol_id
+        backup.lvol_name = manifest.volume.lvol_name
+        backup.snapshot_id = manifest.volume.snapshot_id
+        backup.snapshot_name = manifest.volume.snapshot_name
+        backup.node_id = manifest.source.node_id
+        backup.prev_backup_id = manifest.prev_backup_id or ""
+        backup.size = manifest.size
+        backup.allowed_hosts = manifest.volume.allowed_hosts
+        backup.created_at = manifest.created_at
+        backup.completed_at = manifest.completed_at
         backup.status = Backup.STATUS_COMPLETED
-        backup.location = meta["location"]
+        backup.location = manifest.location.model_dump(mode="json")
         # Import used to drop this, so an imported encrypted backup restored as
         # use_crypto=False -- a plaintext volume over ciphertext, silently.
-        backup.encrypted = meta["encrypted"]
+        backup.encrypted = manifest.encrypted
         backup.write_to_db()
 
     return len(pending)
+
+
+def import_from_bucket(config: BackupConfig, cluster_id=None) -> int:
+    """Import every backup found in a bucket.
+
+    Raises:
+        ManifestError: the bucket could not be read.
+        PreconditionError: the manifests it holds cannot be imported as a batch.
+    """
+    return import_backups(discover_backups(config), cluster_id=cluster_id)
 
 
 def get_backup_sources(cluster_id):
