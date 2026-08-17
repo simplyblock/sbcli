@@ -19,7 +19,10 @@ db = db_controller.DBController()
 def process_snap_replicate_start(task, snapshot):
     # 1 create lvol on remote node
     logger.info("Starting snapshot replication task")
-    snode = db.get_storage_node_by_id(snapshot.lvol.node_id)
+    # Drive the transfer from whichever member of the SOURCE lvstore leads it
+    # now — the snapshot exists on every member, so an outage of the recorded
+    # primary must not stop replication (see _source_leader_node).
+    snode = _source_leader_node(snapshot) or db.get_storage_node_by_id(snapshot.lvol.node_id)
     replicate_to_source = task.function_params["replicate_to_source"]
     if "remote_lvol_id" not in task.function_params or not task.function_params["remote_lvol_id"]:
         if replicate_to_source:
@@ -153,24 +156,44 @@ def _receiving_leader_node(remote_lv):
     the other four volumes replicated normally. Follow leadership instead of
     the recorded node; nothing moves leadership back on its own.
     """
+    return _lvs_leader_among(remote_lv.nodes, remote_lv.node_id, remote_lv.lvs_name)
+
+
+def _lvs_leader_among(nodes_ids, preferred_id, lvs_name):
+    """The online node among *nodes_ids* that currently leads *lvs_name*."""
     from simplyblock_core.controllers import lvol_controller
     candidates = []
-    for node_id in (remote_lv.nodes or [remote_lv.node_id]):
+    for node_id in (nodes_ids or ([preferred_id] if preferred_id else [])):
         try:
             candidates.append(db.get_storage_node_by_id(node_id))
         except KeyError:
             continue
-    # Prefer the recorded node when it still leads: keeps a stable chain home.
-    candidates.sort(key=lambda n: n.get_id() != remote_lv.node_id)
+    # Prefer the recorded node while it still leads: keeps a stable home.
+    candidates.sort(key=lambda n: n.get_id() != preferred_id)
     for node in candidates:
         if node.status != StorageNode.STATUS_ONLINE:
             continue
         try:
-            if lvol_controller.is_node_leader(node, remote_lv.lvs_name):
+            if lvol_controller.is_node_leader(node, lvs_name):
                 return node
         except Exception as e:
             logger.warning("Leadership probe failed on %s: %s", node.get_id(), e)
     return None
+
+
+def _source_leader_node(snapshot):
+    """The node that currently leads the SOURCE lvstore, or None.
+
+    A snapshot is registered on every member of its lvstore, so the transfer
+    can be driven from whichever member holds leadership — which is the point
+    of HA. Pinning to ``snapshot.lvol.node_id`` means an outage of that one
+    node stops replication entirely even though the promoted peer serves the
+    volume and holds the same snapshot: case 6 (source primary offline,
+    secondary survives) saw zero replications during the whole outage, every
+    task parked on "node is not online, retrying".
+    """
+    lv = snapshot.lvol
+    return _lvs_leader_among(getattr(lv, "nodes", None), lv.node_id, lv.lvs_name)
 
 
 def _require_lvs_leader(node, lvs_name, what):
@@ -353,7 +376,8 @@ def process_snap_replicate_finish(task, snapshot):
     # receiving lvol was created on (see _receiving_leader_node).
     remote_snode = (_receiving_leader_node(remote_lv)
                     or db.get_storage_node_by_id(remote_lv.node_id))
-    _src_node = db.get_storage_node_by_id(snapshot.lvol.node_id)
+    _src_node = (_source_leader_node(snapshot)
+                 or db.get_storage_node_by_id(snapshot.lvol.node_id))
     if remote_snode.transfer_hublvol and remote_snode.transfer_hublvol.bdev_name:
         if not _other_active_transfers_to_node(task, remote_snode.get_id()):
             _src_node.rpc_client().bdev_nvme_detach_controller(
@@ -471,15 +495,19 @@ def task_runner(task: JobSchedule):
         return True
 
     try:
-        snode = db.get_storage_node_by_id(snapshot.lvol.node_id)
+        db.get_storage_node_by_id(snapshot.lvol.node_id)
     except KeyError:
         task.function_result = "node not found"
         task.status = JobSchedule.STATUS_DONE
         task.write_to_db(db.kv_store)
         return True
 
-    if snode.status != StorageNode.STATUS_ONLINE:
-        task.function_result = "node is not online, retrying"
+    # Any online member of the source lvstore that holds leadership can drive
+    # this; waiting for the recorded primary stalls replication for the whole
+    # duration of its outage even though the promoted peer holds the snapshot.
+    snode = _source_leader_node(snapshot)
+    if snode is None:
+        task.function_result = "no online source LVS leader, retrying"
         task.status = JobSchedule.STATUS_SUSPENDED
         task.retry += 1
         task.write_to_db(db.kv_store)
@@ -516,7 +544,7 @@ def task_runner(task: JobSchedule):
         process_snap_replicate_start(task, snapshot)
 
     elif task.status == JobSchedule.STATUS_RUNNING:
-        snode = db.get_storage_node_by_id(snapshot.lvol.node_id)
+        snode = _source_leader_node(snapshot) or db.get_storage_node_by_id(snapshot.lvol.node_id)
         ret = snode.rpc_client().bdev_lvol_transfer_stat(snapshot.snap_bdev)
         if not ret:
             logger.error("Failed to get transfer stat")
