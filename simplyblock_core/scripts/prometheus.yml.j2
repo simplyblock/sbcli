@@ -6,10 +6,6 @@ global:
 
 scrape_configs:
 
-  # Both exporters are scraped during the migration to the v2 metric names. The
-  # two publish disjoint series (v2 namespaces everything under `simplyblock_`),
-  # so collecting both is safe, and it keeps the dashboards and alert rules
-  # working until they are switched over. Remove this job once they are.
   - job_name: 'cluster_metrics'
     scrape_timeout: 50s
     static_configs:
@@ -19,14 +15,6 @@ scrape_configs:
     basic_auth:
       username: '{{ CLUSTER_ID }}'
       password: '{{ CLUSTER_SECRET }}'
-
-  - job_name: 'simplyblock_metrics'
-    scrape_timeout: 30s
-    static_configs:
-      - targets: ['HAProxy:80']
-    metrics_path: '/api/v2/metrics'
-    authorization:
-      credentials: '{{ CLUSTER_SECRET }}'
 
   - job_name: 'node'
     dns_sd_configs:
