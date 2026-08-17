@@ -6474,7 +6474,6 @@ def shutdown_storage_node(node_id, force=False, keep_auto_restart=False,
             continue
         if task.function_name in [
             JobSchedule.FN_DEV_MIG,
-            JobSchedule.FN_FAILED_DEV_MIG,
             JobSchedule.FN_NEW_DEV_MIG,
         ]:
             task.canceled = True
