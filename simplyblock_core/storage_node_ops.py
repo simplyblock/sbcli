@@ -3854,10 +3854,31 @@ def _teardown_replicas_of_primary(removed_node: StorageNode):
     return True
 
 
-def _delete_replica_on_peer(peer, primary, cluster):
+def _delete_replica_on_peer(peer, primary, cluster, destroy_lvstore=True):
     """Best-effort teardown of ``primary``'s replica lvstore (+ hublvol) on the
     online ``peer``. RPC failures are logged, not fatal: the peer is healthy and
-    a lingering empty bdev is harmless, while blocking removal on it is not."""
+    a lingering empty bdev is harmless, while blocking removal on it is not.
+
+    ``destroy_lvstore``: whether the shared on-disk blobstore backing this
+    lvstore may be destroyed once the local bdev stack comes down.
+
+    - ``True`` (default -- Case A, node removal): ``primary`` IS the node
+      being removed; nothing else will ever read this lvstore again once
+      its own devices are decommissioned, so destroying it here is correct.
+    - ``False`` (splice/relocation eviction): ``primary`` is a SURVIVING
+      node whose replica is only being *moved* off ``peer`` onto a new
+      host -- the lvstore itself stays alive and in use elsewhere.
+      ``peer`` only ever held a non-leader examine copy, so
+      ``bdev_lvol_delete_lvstore`` here would destroy the shared blobstore
+      metadata out from under the still-live primary and any other
+      surviving replica (2026-08-16: this is what actually corrupted
+      LVS_1's on-disk metadata during a splice eviction, surfacing later
+      as `bs_super_validate: unsupported version on super block` when the
+      primary tried to reload it on restart -- caught only after the fact
+      via log analysis, not before). Pass ``False`` here; only the local
+      raid/distrib examine bdevs get hot-removed, matching
+      ``teardown_non_leader_lvstore``'s existing, correct pattern for the
+      identical non-leader-eviction case."""
     rpc_client = peer.rpc_client()
     lvstore = primary.lvstore
     if not lvstore:
@@ -3896,7 +3917,8 @@ def _delete_replica_on_peer(peer, primary, cluster):
     try:
         # deepcopy: _remove_bdev_stack stamps bdev['status']; don't mutate the
         # primary's stored stack definition.
-        _remove_bdev_stack(copy.deepcopy(primary.lvstore_stack), rpc_client)
+        _remove_bdev_stack(copy.deepcopy(primary.lvstore_stack), rpc_client,
+                           remove_distr_only=not destroy_lvstore)
     except RPCException as e:
         logger.warning(f"replica bdev-stack teardown for {lvstore} on {peer.get_id()} failed: {e}")
 
@@ -4134,7 +4156,12 @@ def _relocate_replica_between(occupant_primary_id, old_host_id, new_host_id, rol
     if getattr(old_host, backref) == occupant_primary_id:
         cluster = db_controller.get_cluster_by_id(occupant_primary.cluster_id)
         if old_host.status == StorageNode.STATUS_ONLINE:
-            _delete_replica_on_peer(old_host, occupant_primary, cluster)
+            # occupant_primary survives this relocation (only its host is
+            # moving) -- must NOT destroy the shared lvstore, only vacate
+            # old_host's local examine copy. See _delete_replica_on_peer's
+            # destroy_lvstore docstring.
+            _delete_replica_on_peer(old_host, occupant_primary, cluster,
+                                    destroy_lvstore=False)
             _prune_stale_lvstore_ports(old_host_id, occupant_primary.lvstore, db_controller)
         old_host = db_controller.get_storage_node_by_id(old_host_id)
         setattr(old_host, backref, "")
