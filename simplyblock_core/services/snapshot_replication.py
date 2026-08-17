@@ -569,7 +569,19 @@ def task_runner(task: JobSchedule):
             snapshot.status = SnapShot.STATUS_ONLINE
             snapshot.write_to_db()
 
-        remote_lv = db.get_lvol_by_id(task.function_params["remote_lvol_id"])
+        # A task can reach max retry BEFORE it ever created a receiving lvol
+        # (e.g. every attempt failed at the leadership gate). Reading the param
+        # unconditionally raised KeyError out of main() and killed the whole
+        # replication runner — one unlucky task stopped replication for every
+        # volume in the cluster (lab run 19: the service crash-looped, so no
+        # snapshot was ever chained or pruned).
+        remote_lv_id = task.function_params.get("remote_lvol_id")
+        if not remote_lv_id:
+            return True
+        try:
+            remote_lv = db.get_lvol_by_id(remote_lv_id)
+        except KeyError:
+            return True
         # abort path: close the transfer session here too (last user only)
         try:
             _rl_node = db.get_storage_node_by_id(remote_lv.node_id)
@@ -577,9 +589,13 @@ def task_runner(task: JobSchedule):
                     and not _other_active_transfers_to_node(task, _rl_node.get_id())):
                 snode.rpc_client().bdev_nvme_detach_controller(
                     _rl_node.transfer_hublvol.bdev_name)
-        except KeyError:
-            pass
-        lvol_controller.delete_lvol(remote_lv, force_delete=True)
+        except Exception as e:
+            logger.warning("Abort-path hub detach failed (non-fatal): %s", e)
+        try:
+            lvol_controller.delete_lvol(remote_lv, force_delete=True)
+        except Exception as e:
+            logger.warning("Abort-path cleanup of %s failed (non-fatal): %s",
+                           remote_lv_id, e)
 
         return True
 
@@ -657,7 +673,17 @@ def main():
                         if task.status != JobSchedule.STATUS_DONE:
                             # get new task object because it could be changed from cancel task
                             task = db.get_task_by_id(task.uuid)
-                            res = task_runner(task)
+                            # One task must never take the runner down with it:
+                            # an RPC to a node that just went offline, or a
+                            # malformed param, used to propagate out of main()
+                            # and stop replication for the whole cluster until
+                            # the container restarted (and then again).
+                            try:
+                                res = task_runner(task)
+                            except Exception as e:
+                                logger.error("Replication task %s failed: %s",
+                                             task.get_id(), e)
+                                res = False
                             if not res:
                                 time.sleep(3)
 
