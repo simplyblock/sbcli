@@ -3,7 +3,7 @@ import json
 
 from pydantic import SecretStr
 
-from simplyblock_web.api.v2.cluster import BackupConfigParams
+from simplyblock_core.models.backup_config import BackupConfig
 from simplyblock_web.api.v2._dtos import ClusterDTO, CapacityStatDTO
 from uuid import uuid4
 
@@ -13,25 +13,53 @@ def _build_capacity():
     return CapacityStatDTO.from_model(StatsObject())
 
 
+_BACKUP_CONFIG = {
+    "bucket_name": "backups",
+    "region": "eu-central-1",
+    "access_key_id": "AKID",
+    "secret_access_key": "SK",
+}
+
+
 def test_backup_config_params_carry_secretstr():
-    params = BackupConfigParams.model_validate({
-        "access_key_id": "AKID",
-        "secret_access_key": "SK",
-    })
-    assert isinstance(params.access_key_id, SecretStr)
-    assert isinstance(params.secret_access_key, SecretStr)
-    assert params.access_key_id.get_secret_value() == "AKID"
-    assert params.secret_access_key.get_secret_value() == "SK"
+    params = BackupConfig.model_validate(_BACKUP_CONFIG)
+    assert params.credentials is not None
+    assert isinstance(params.credentials.access_key_id, SecretStr)
+    assert isinstance(params.credentials.secret_access_key, SecretStr)
+    assert params.credentials.access_key_id.get_secret_value() == "AKID"
+    assert params.credentials.secret_access_key.get_secret_value() == "SK"
 
 
 def test_backup_config_repr_masks_secret_values():
-    params = BackupConfigParams.model_validate({
-        "access_key_id": "AKID",
-        "secret_access_key": "SK",
-    })
-    text = repr(params)
+    text = repr(BackupConfig.model_validate(_BACKUP_CONFIG))
     assert "AKID" not in text
     assert "SK" not in text
+
+
+def test_backup_config_storage_dict_keeps_secrets_wrapped():
+    """write_to_db unwraps at the last moment; anything earlier leaks into logs."""
+    stored = BackupConfig.model_validate(_BACKUP_CONFIG).to_storage_dict()
+    assert isinstance(stored["credentials"]["access_key_id"], SecretStr)
+    assert "AKID" not in repr(stored)
+
+
+def test_backup_config_storage_dict_is_json_serializable():
+    """Cluster.backup_config is a plain dict written through BaseModel to FDB."""
+    from simplyblock_core.models.base_model import BaseModel as CoreBaseModel
+
+    stored = BackupConfig.model_validate({
+        **_BACKUP_CONFIG, "local_endpoint": "http://minio:9000",
+    }).to_storage_dict()
+
+    class _Holder(CoreBaseModel):
+        backup_config: dict = {}
+
+    holder = _Holder()
+    holder.backup_config = stored
+    json.dumps(holder.to_dict(unwrap_secrets=True))
+
+    assert stored["endpoint"] == "http://minio:9000"
+    assert stored["secondary_target"] == "s3"
 
 
 def _build_cluster_dto():

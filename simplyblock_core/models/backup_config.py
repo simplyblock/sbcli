@@ -174,3 +174,19 @@ class BackupConfig(BackupLocation):
         return BackupLocation.model_validate(
             self.model_dump(include=set(BackupLocation.model_fields))
         )
+
+    def to_storage_dict(self) -> dict:
+        """A dict for ``Cluster.backup_config``: JSON-safe, but secrets still wrapped.
+
+        Not ``model_dump(mode="json")`` -- that renders ``SecretStr`` as
+        ``**********`` and would silently destroy the credentials on write.
+        Python-mode dump keeps the wrappers, so ``BaseModel.write_to_db``'s
+        ``unwrap_secrets=True`` pass still produces plaintext at the last moment
+        while every log line in between stays masked. Only the two values that
+        python mode leaves non-JSON-serializable are converted here.
+        """
+        data = self.model_dump(exclude_none=True)
+        if self.endpoint is not None:
+            data["endpoint"] = self.endpoint_url
+        data["secondary_target"] = self.secondary_target.value
+        return data
