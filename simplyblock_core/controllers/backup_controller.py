@@ -102,6 +102,108 @@ def _compute_s3_cpu_masks(node):
     return bdb_lcpu_mask, s3_lcpu_mask
 
 
+def _validate_chain_length(length: int, what: str) -> None:
+    """Refuse a chain the data plane cannot accept.
+
+    Raises:
+        PreconditionError: The chain is longer than the data plane's fixed
+            arrays, where it would smash the storage node's stack rather than
+            return an error.
+    """
+    if length > constants.BACKUP_MAX_CHAIN_LENGTH:
+        raise PreconditionError(
+            f"{what} is {length} backups long; the data plane accepts at most "
+            f"{constants.BACKUP_MAX_CHAIN_LENGTH}. Merge older backups to "
+            "shorten the chain, or start a new chain with a full backup.")
+
+
+def _validate_backup_target(config: BackupConfig) -> None:
+    """Check that the configured location can hold backups at all.
+
+    Raises:
+        PreconditionError: The location selects the secondary-tiering object
+            layout, whose keys are ``{tiering_id}/{lpgi}``. Backups written
+            there would be unreadable by the restore path, which addresses
+            ``{s3_id}/{mid}/{extent}``.
+    """
+    if not config.snapshot_backups:
+        raise PreconditionError(
+            f"Bucket {config.bucket_name} is configured with snapshot_backups "
+            "disabled, which selects the secondary-tiering object layout. "
+            "Backups cannot be written there.")
+
+
+def _validate_key_wrapping(config: BackupConfig, encrypted: bool) -> None:
+    """Check the configured key-wrapping secret can actually wrap a key.
+
+    A cluster that asked for key wrapping must not silently get backups without
+    it -- that is the difference between a recoverable backup and one that dies
+    with its cluster. Checked here so an unusable secret fails the request
+    rather than the background task, after the snapshot already exists.
+
+    Raises:
+        PreconditionError: The secret is configured but unusable.
+    """
+    if not encrypted or config.key_wrapping_secret is None:
+        return
+
+    try:
+        backup_key_wrapping.wrap(("probe", "probe"), config.key_wrapping_secret)
+    except backup_key_wrapping.KeyWrappingError as e:
+        raise PreconditionError(
+            f"Cluster is configured to wrap backup keys, but the configured "
+            f"secret cannot be used: {e}") from e
+
+
+def _existing_chain_backups(snap_chain) -> list:
+    """The backups that already exist for a snapshot chain, oldest first."""
+    existing = []
+    for snap in snap_chain:
+        for backup in db_controller.get_backups_by_snapshot_id(snap.get_id()):
+            if backup.status in (Backup.STATUS_PENDING, Backup.STATUS_IN_PROGRESS,
+                                 Backup.STATUS_COMPLETED):
+                existing.append(backup)
+    return existing
+
+
+def _validate_chain_is_coherent(backups, location: BackupLocation,
+                                will_be_encrypted: Optional[bool] = None) -> None:
+    """Check that a set of backups can actually be restored together.
+
+    A restore reads clusters from every backup in the chain in one operation,
+    against one bucket, decrypting all of it with one key. So the chain has to
+    agree on where it lives, how it is encoded, and whether it is encrypted --
+    nothing anywhere in the stack could express a chain split across two buckets
+    or half encrypted.
+
+    Checked at creation, at import and at restore, because each is a point where
+    a chain could otherwise become incoherent without anyone noticing. At
+    creation the new backup does not exist yet, hence ``will_be_encrypted``.
+
+    Raises:
+        PreconditionError: The backups disagree.
+    """
+    for backup in backups:
+        if backup.get_location() != location:
+            raise PreconditionError(
+                f"Backup {backup.uuid} lives in bucket "
+                f"{backup.get_location().bucket_name}, but the rest of its "
+                f"chain is in {location.bucket_name}. A chain cannot span "
+                "buckets or encodings; start a new chain with a full backup.")
+
+    encrypted = {b.encrypted for b in backups}
+    if will_be_encrypted is not None:
+        encrypted.add(will_be_encrypted)
+
+    if len(encrypted) > 1:
+        raise PreconditionError(
+            "A chain cannot mix encrypted and unencrypted backups: "
+            + ", ".join(f"{b.uuid}={'encrypted' if b.encrypted else 'plain'}"
+                        for b in backups)
+            + (f", new backup={'encrypted' if will_be_encrypted else 'plain'}"
+               if will_be_encrypted is not None else ""))
+
+
 def build_manifest(backup: Backup) -> backup_manifest.BackupManifest:
     """Assemble the self-describing record for a completed backup.
 
@@ -524,12 +626,23 @@ def backup_snapshot(snapshot_id, cluster_id=None):
     if not cluster_id:
         cluster_id = snode.cluster_id
 
+    snap_chain = _get_snapshot_chain(snapshot)
+
+    # Everything that could make this backup unrestorable is checked here,
+    # before the chain lock is taken, before any KMS key is created and before
+    # any task is enqueued. A backup either is restorable or was never created.
     try:
-        location = db_controller.get_cluster_by_id(cluster_id).get_backup_config().location()
+        config = db_controller.get_cluster_by_id(cluster_id).get_backup_config()
+        location = config.location()
+        _validate_backup_target(config)
+        _validate_chain_length(len(snap_chain), "This snapshot chain")
+        _validate_chain_is_coherent(
+            _existing_chain_backups(snap_chain), location,
+            will_be_encrypted=bool(lvol.crypto_bdev))
+        _validate_key_wrapping(config, encrypted=bool(lvol.crypto_bdev))
     except (KeyError, PreconditionError) as e:
         return None, str(e)
 
-    snap_chain = _get_snapshot_chain(snapshot)
     chain_snapshot_ids = [snap.get_id() for snap in snap_chain]
     acquired, existing_lock = db_controller.acquire_backup_chain_locks(
         chain_snapshot_ids, snapshot_id, lvol.get_id())
@@ -620,6 +733,12 @@ def restore_backup(backup_id: str, lvol_name: str, pool_id_or_name: str,
             f"Backup source is {backup_src[:8]} but active S3 source "
             f"is {active_src[:8]}. Use 'sbctl backup source-switch "
             f"{backup_src}' first.")
+
+    # The chain has to be restorable as a unit, and short enough for the data
+    # plane. Checked before the volume is created so a doomed restore leaves
+    # nothing behind.
+    _validate_chain_length(len(chain), f"The chain ending at backup {backup_id}")
+    _validate_chain_is_coherent(chain, backup.get_location())
 
     size = backup.size
     if size <= 0:
@@ -812,6 +931,52 @@ def discover_backups(config: BackupConfig) -> list:
     return [m.model_dump(mode="json") for m in backup_manifest.list_all(config)]
 
 
+def _validate_importable(pending: dict) -> None:
+    """Check a batch of manifests forms something restorable before writing any.
+
+    An import that lands a backup whose ancestors are missing produces a record
+    that looks restorable in ``backup list`` and fails only when someone tries
+    it -- typically during the recovery it was meant to serve. The chain is
+    recorded in each manifest precisely so this is answerable up front.
+
+    Raises:
+        PreconditionError: A chain is incomplete, too long for the data plane,
+            or spans buckets.
+    """
+    known = set(pending)
+    for backup_id, manifest in pending.items():
+        _validate_chain_length(len(manifest.chain), f"The chain of backup {backup_id}")
+
+        missing = [
+            entry.backup_id for entry in manifest.chain
+            if entry.backup_id not in known
+            and not _backup_exists(entry.backup_id)
+        ]
+        if missing:
+            raise PreconditionError(
+                f"Backup {backup_id} depends on backups that are neither in "
+                f"this import nor already known: {', '.join(missing)}. A "
+                "backup is a delta and cannot be restored without its chain.")
+
+        divergent = [
+            entry.backup_id for entry in manifest.chain
+            if entry.backup_id in pending
+            and pending[entry.backup_id].location != manifest.location
+        ]
+        if divergent:
+            raise PreconditionError(
+                f"Backup {backup_id} shares a chain with backups in a "
+                f"different bucket or encoding: {', '.join(divergent)}")
+
+
+def _backup_exists(backup_id: str) -> bool:
+    try:
+        db_controller.get_backup_by_id(backup_id)
+    except KeyError:
+        return False
+    return True
+
+
 def import_backups(manifests, cluster_id=None):
     """Register backups described by manifests into this cluster's database.
 
@@ -851,6 +1016,8 @@ def import_backups(manifests, cluster_id=None):
             pending[backup_id] = manifest
         else:
             raise PreconditionError(f"Backup {backup_id} already exists in cluster {existing.cluster_id}")
+
+    _validate_importable(pending)
 
     for backup_id, manifest in pending.items():
         backup = Backup()
