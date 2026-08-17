@@ -1058,6 +1058,61 @@ class DBController(metaclass=Singleton):
         fdb.transactional(DBController._seed_vuid_tx)(self, self.kv_store, seed)
         return fdb.transactional(DBController._incr_vuid_tx)(self, self.kv_store)
 
+    # ---- s3_id allocation (monotonic sequence) ----
+    #
+    # An s3_id names a backup's object keys in S3 ({s3_id}/{mid}/{extent}). The
+    # old allocator was max-plus-one over the local cluster's Backup records,
+    # which had three problems: it raced (two concurrent backups got the same
+    # id), it recycled the id of a deleted backup whose objects may still exist
+    # (nothing reclaims them -- bdev_lvol_s3_delete does not exist on the data
+    # plane), and after an import it counted foreign backups it should not have.
+    # A monotonic sequence makes reuse impossible by construction.
+    #
+    # Unlike vuid this space is NOT unbounded: the data plane packs s3_id into
+    # 30 bits and masks rather than validates, so callers must check
+    # BACKUP_MAX_S3_ID. 2^30 is ~1.07e9 backups per control plane.
+    _S3_ID_SEQ_KEY = b"sequence/s3_id"
+
+    def _incr_s3_id_tx(self, tr):
+        raw = tr.get(DBController._S3_ID_SEQ_KEY).wait()
+        if not raw.present():
+            return None
+        nxt = int(json.loads(raw)) + 1
+        tr[DBController._S3_ID_SEQ_KEY] = json.dumps(nxt).encode()
+        return nxt
+
+    def _seed_s3_id_tx(self, tr, seed):
+        # Only-if-absent CAS, as for vuid: the first allocator across all API
+        # workers seeds it; concurrent racers see it present and skip.
+        raw = tr.get(DBController._S3_ID_SEQ_KEY).wait()
+        if raw.present():
+            return
+        tr[DBController._S3_ID_SEQ_KEY] = json.dumps(int(seed)).encode()
+
+    def _max_existing_s3_id(self) -> int:
+        """Highest s3_id in use across every backup this control plane knows of.
+
+        Read once to seed the counter on an upgraded cluster so the sequence
+        never reuses an id the old max-plus-one allocator handed out; never read
+        again. Deliberately unscoped by cluster -- imported backups keep their
+        originating cluster's ids, and seeding above those too costs nothing.
+        """
+        return max((b.s3_id or 0 for b in self.get_backups()), default=0)
+
+    def next_s3_id(self) -> int:
+        """Allocate the next globally-unique s3_id (monotonic, O(1))."""
+        val = fdb.transactional(DBController._incr_s3_id_tx)(self, self.kv_store)
+        if val is None:
+            seed = self._max_existing_s3_id()
+            fdb.transactional(DBController._seed_s3_id_tx)(self, self.kv_store, seed)
+            val = fdb.transactional(DBController._incr_s3_id_tx)(self, self.kv_store)
+
+        if val > constants.BACKUP_MAX_S3_ID:
+            raise ValueError(
+                f"s3_id space exhausted: {val} exceeds the data plane's "
+                f"{constants.BACKUP_MAX_S3_ID} limit")
+        return val
+
     # ---- snapshot indexes (replace per-create cluster-wide scans) ----
     #
     # Snapshot create used to read EVERY snapshot in the cluster on each request

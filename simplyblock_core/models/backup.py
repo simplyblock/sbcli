@@ -2,6 +2,7 @@
 import datetime
 from typing import List
 
+from simplyblock_core.models.backup_config import BackupLocation
 from simplyblock_core.models.base_model import BaseModel
 
 
@@ -41,12 +42,30 @@ class Backup(BaseModel):
     error_message: str = ""
     # Security params from the source lvol (for cross-cluster restore)
     allowed_hosts: List[dict] = []
-    # S3 metadata written to metadata bucket
-    s3_metadata: dict = {}
+    #: Where this backup's objects live and how to interpret them, as a
+    #: ``BackupLocation``. Stored as a dict because ``BaseModel`` cannot nest
+    #: pydantic models; read it through :meth:`get_location`.
+    location: dict = {}
     encrypted: bool = False
 
     def get_id(self):
         return "%s/%s" % (self.cluster_id, self.uuid)
+
+    def get_location(self) -> BackupLocation:
+        """Validate and return where this backup's objects live.
+
+        Raises:
+            ValueError: The backup predates self-describing locations, or its
+                recorded location is not valid. Either way it cannot be read
+                without knowing what wrote it. ``ValidationError`` is a
+                ``ValueError``, so one except clause covers both.
+        """
+        if not self.location:
+            raise ValueError(
+                f"Backup {self.uuid} has no recorded location "
+                "(created before backups became self-describing)")
+
+        return BackupLocation.model_validate(self.location)
 
     def write_to_db(self, kv_store=None):
         self.updated_at = str(datetime.datetime.now(datetime.timezone.utc))

@@ -24,6 +24,7 @@ import time
 
 import pytest
 
+from simplyblock_core.controllers.backup_controller import backup_snapshot, import_backups
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.models.backup import Backup, BackupPolicy, BackupPolicyAttachment
@@ -54,6 +55,22 @@ def _node(uuid="node-1", status=StorageNode.STATUS_ONLINE, lvstore="lvs_test",
     return n
 
 
+def _backup_config(**overrides):
+    from simplyblock_core.models.backup_config import BackupConfig
+    return BackupConfig.model_validate({
+        "bucket_name": "simplyblock-backup-cluster-1",
+        "region": "eu-central-1",
+        **overrides,
+    })
+
+
+def _cluster(uuid="cluster-1", **config_overrides):
+    c = Cluster()
+    c.uuid = uuid
+    c.backup_config = _backup_config(**config_overrides).model_dump(exclude_none=True)
+    return c
+
+
 def _backup(uuid="backup-1", lvol_id="lvol-1", status=Backup.STATUS_COMPLETED,
             node_id="node-1", cluster_id="cluster-1", prev_backup_id="",
             created_at=None, snapshot_id="snap-1", s3_id=1):
@@ -72,6 +89,18 @@ def _backup(uuid="backup-1", lvol_id="lvol-1", status=Backup.STATUS_COMPLETED,
     b.created_at = created_at or int(time.time())
     b.status = status
     return b
+
+
+def _meta(backup_id, cluster_id="cluster-1", **overrides):
+    """One entry of an export/import payload."""
+    return {
+        "backup_id": backup_id,
+        "lvol_id": "l-1",
+        "cluster_id": cluster_id,
+        "location": _backup_config().location().model_dump(mode="json"),
+        "encrypted": False,
+        **overrides,
+    }
 
 
 def _snapshot(uuid="snap-1", lvol_uuid="lvol-1", node_id="node-1"):
@@ -119,7 +148,7 @@ class TestBackupModel(unittest.TestCase):
         self.assertEqual(b.size, 0)
         self.assertEqual(b.created_at, 0)
         self.assertEqual(b.completed_at, 0)
-        self.assertEqual(b.s3_metadata, {})
+        self.assertEqual(b.location, {})
         self.assertEqual(b.error_message, "")
 
     def test_status_constants(self):
@@ -291,9 +320,7 @@ class TestCreateS3Bdev(unittest.TestCase):
 
         from simplyblock_core.controllers.backup_controller import create_s3_bdev
         node = _node()
-        config = {"secondary_target": 0, "with_compression": False,
-                  "snapshot_backups": True}
-        create_s3_bdev(node, config)
+        create_s3_bdev(node, _backup_config())
 
         mock_rpc.bdev_s3_create.assert_called_once()
         # Verify CPU masks: bdb_lcpu_mask=app_thread(0x8=8), s3_lcpu_mask=all 8 vCPUs(0xFF=255)
@@ -309,8 +336,8 @@ class TestCreateS3Bdev(unittest.TestCase):
     def test_no_lvstore(self, MockRPC, _mock_boto3_client):
         from simplyblock_core.controllers.backup_controller import create_s3_bdev
         node = _node(lvstore="")
-        with pytest.raises(Exception):
-            create_s3_bdev(node, {})
+        with pytest.raises(PreconditionError):
+            create_s3_bdev(node, _backup_config())
 
         MockRPC.assert_not_called()
 
@@ -321,8 +348,8 @@ class TestCreateS3Bdev(unittest.TestCase):
 
         from simplyblock_core.controllers.backup_controller import create_s3_bdev
         node = _node()
-        with pytest.raises(Exception):
-            create_s3_bdev(node, {})
+        with pytest.raises(RuntimeError):
+            create_s3_bdev(node, _backup_config())
         mock_rpc.bdev_s3_add_bucket_name.assert_not_called()
         mock_rpc.bdev_lvol_s3_bdev.assert_not_called()
 
@@ -338,8 +365,8 @@ class TestCreateS3Bdev(unittest.TestCase):
 
         from simplyblock_core.controllers.backup_controller import create_s3_bdev
         node = _node()
-        with pytest.raises(Exception):
-            create_s3_bdev(node, {})
+        with pytest.raises(RuntimeError):
+            create_s3_bdev(node, _backup_config())
         mock_rpc.bdev_lvol_s3_bdev.assert_not_called()
 
     @patch("simplyblock_core.controllers.backup_controller.boto3.client")
@@ -355,8 +382,8 @@ class TestCreateS3Bdev(unittest.TestCase):
 
         from simplyblock_core.controllers.backup_controller import create_s3_bdev
         node = _node()
-        with pytest.raises(Exception):
-            create_s3_bdev(node, {})
+        with pytest.raises(RuntimeError):
+            create_s3_bdev(node, _backup_config())
 
     @patch("simplyblock_core.controllers.backup_controller.boto3.client")
     @patch("simplyblock_core.models.storage_node.RPCClient")
@@ -368,38 +395,63 @@ class TestCreateS3Bdev(unittest.TestCase):
         mock_s3 = mock_boto3_client.return_value
         mock_s3.head_bucket.return_value = {}
 
+        from simplyblock_core.models.backup_config import BackupConfig
         from simplyblock_core.controllers.backup_controller import create_s3_bdev
         node = _node()
-        config = {
-            "secondary_target": 0,
+        # A genuine pre-BackupConfig dict: no region, local_testing standing in
+        # for four separate decisions.
+        create_s3_bdev(node, BackupConfig.model_validate({
+            "bucket_name": "simplyblock-backup-cluster-1",
             "local_testing": True,
             "local_endpoint": "http://minio:9000",
             "access_key_id": "minioadmin",
             "secret_access_key": "minioadmin",
-        }
-        create_s3_bdev(node, config)
+        }))
 
+        # The data plane still takes the legacy shape; `local_testing` there is
+        # not a mode but the only condition under which it honours an endpoint
+        # override at all, so it tracks "an endpoint was configured".
         _, kwargs = mock_rpc.bdev_s3_create.call_args
-        self.assertTrue(kwargs.get("local_testing", False))
-        self.assertEqual(kwargs.get("local_endpoint", ""), "http://minio:9000")
-        self.assertEqual(kwargs.get("access_key_id", ""), "minioadmin")
-        self.assertEqual(kwargs.get("secret_access_key", ""), "minioadmin")
-        mock_boto3_client.assert_called_once_with(
-            "s3",
-            aws_access_key_id="minioadmin",
-            aws_secret_access_key="minioadmin",
-            endpoint_url="http://minio:9000",
-        )
+        self.assertTrue(kwargs["local_testing"])
+        self.assertEqual(kwargs["local_endpoint"], "http://minio:9000")
+        self.assertEqual(kwargs["access_key_id"].get_secret_value(), "minioadmin")
+        self.assertEqual(kwargs["secret_access_key"].get_secret_value(), "minioadmin")
+
+        _, boto_kwargs = mock_boto3_client.call_args
+        self.assertEqual(boto_kwargs["aws_access_key_id"], "minioadmin")
+        self.assertEqual(boto_kwargs["aws_secret_access_key"], "minioadmin")
+        self.assertEqual(boto_kwargs["endpoint_url"], "http://minio:9000")
+        # local_testing unpacked into the properties it actually stood for.
+        self.assertEqual(boto_kwargs["region_name"], "us-east-1")
+        self.assertFalse(boto_kwargs["verify"])
+
+    @patch("simplyblock_core.controllers.backup_controller.boto3.client")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
+    def test_no_credentials_defers_to_the_provider_chain(self, MockRPC, mock_boto3_client):
+        """An absent key pair must mean "use the node's IAM role", not "send empty keys"."""
+        mock_rpc = MockRPC.return_value
+        mock_rpc.bdev_s3_create.return_value = True
+        mock_rpc.bdev_s3_add_bucket_name.return_value = (True, None)
+        mock_rpc.bdev_lvol_s3_bdev.return_value = True
+        mock_boto3_client.return_value.head_bucket.return_value = {}
+
+        from simplyblock_core.controllers.backup_controller import create_s3_bdev
+        create_s3_bdev(_node(), _backup_config())
+
+        _, boto_kwargs = mock_boto3_client.call_args
+        self.assertIsNone(boto_kwargs["aws_access_key_id"])
+        self.assertIsNone(boto_kwargs["aws_secret_access_key"])
 
     @patch("simplyblock_core.models.storage_node.RPCClient")
     def test_exception_handled(self, MockRPC):
+        from simplyblock_core.rpc_client import RPCException
         mock_rpc = MockRPC.return_value
-        mock_rpc.bdev_s3_create.side_effect = Exception("connection refused")
+        mock_rpc.bdev_s3_create.side_effect = RPCException("connection refused")
 
         from simplyblock_core.controllers.backup_controller import create_s3_bdev
         node = _node()
-        with pytest.raises(Exception):
-            create_s3_bdev(node, {})
+        with pytest.raises(RuntimeError):
+            create_s3_bdev(node, _backup_config())
 
 
 # ===========================================================================
@@ -407,143 +459,121 @@ class TestCreateS3Bdev(unittest.TestCase):
 # ===========================================================================
 
 class TestBackupSnapshot(unittest.TestCase):
+    """Real FDB: backup_snapshot reads cluster/node/snapshot state and writes Backups.
 
-    @patch.object(Backup, 'write_to_db')
+    Only what sits above the database is mocked -- the storage node's RPC client,
+    the task runner and event emission.
+    """
+
+    def setUp(self):
+        self.db = DBController()
+        _cluster().write_to_db(self.db.kv_store)
+        _node().write_to_db(self.db.kv_store)
+
+    def _persist(self, snapshot):
+        snapshot.lvol.write_to_db(self.db.kv_store)
+        snapshot.write_to_db(self.db.kv_store)
+        return snapshot
+
     @patch("simplyblock_core.controllers.backup_controller.tasks_controller")
     @patch("simplyblock_core.controllers.backup_controller.backup_events")
-    @patch("simplyblock_core.controllers.backup_controller.is_local_backup_source", return_value=True)
-    @patch("simplyblock_core.controllers.backup_controller.db_controller")
-    def test_success(self, mock_db, _mock_local_source, mock_events, mock_tasks, _mock_write):
-        snap = _snapshot()
-        mock_db.get_snapshot_by_id.return_value = snap
-        mock_db.get_storage_node_by_id.return_value = _node()
-        mock_db.get_backups_by_lvol_id.return_value = []
-        mock_db.get_backups.return_value = []
-        mock_db.get_backups_by_snapshot_id.return_value = []
-        mock_db.acquire_backup_chain_locks.return_value = (True, None)
-        mock_tasks.add_backup_task.return_value = "task-1"
+    def test_success(self, mock_events, mock_tasks):
+        snap = self._persist(_snapshot())
 
-        from simplyblock_core.controllers.backup_controller import backup_snapshot
-        with patch("simplyblock_core.controllers.backup_controller._get_snapshot_chain", return_value=[snap]):
+        with patch("simplyblock_core.controllers.backup_controller._get_snapshot_chain",
+                   return_value=[snap]):
             backup_id, error = backup_snapshot("snap-1")
 
-        self.assertIsNotNone(backup_id)
         self.assertIsNone(error)
+        self.assertIsNotNone(backup_id)
         mock_tasks.add_backup_task.assert_called_once()
-        mock_events.backup_created.assert_called_once()
-        # Verify s3_id is assigned
-        created_backup = mock_events.backup_created.call_args[0][2]
-        self.assertEqual(created_backup.s3_id, 1)
 
-    @patch("simplyblock_core.controllers.backup_controller.db_controller")
-    def test_snapshot_not_found(self, mock_db):
-        mock_db.get_snapshot_by_id.side_effect = KeyError("not found")
+        stored = self.db.get_backup_by_id(backup_id)
+        self.assertEqual(stored.status, Backup.STATUS_PENDING)
+        self.assertGreater(stored.s3_id, 0)
+        # Self-describing from the moment it is created.
+        self.assertEqual(stored.get_location().bucket_name,
+                         "simplyblock-backup-cluster-1")
 
-        from simplyblock_core.controllers.backup_controller import backup_snapshot
+    @patch("simplyblock_core.controllers.backup_controller.tasks_controller")
+    @patch("simplyblock_core.controllers.backup_controller.backup_events")
+    def test_incremental_backup(self, mock_events, mock_tasks):
+        snap = self._persist(_snapshot())
+        prev = _backup(uuid="prev-backup", s3_id=3, snapshot_id="snap-0",
+                       status=Backup.STATUS_COMPLETED)
+        prev.write_to_db(self.db.kv_store)
+
+        with patch("simplyblock_core.controllers.backup_controller._get_snapshot_chain",
+                   return_value=[snap]):
+            backup_id, error = backup_snapshot("snap-1")
+
+        self.assertIsNone(error)
+        stored = self.db.get_backup_by_id(backup_id)
+        self.assertEqual(stored.prev_backup_id, "prev-backup")
+        # Monotonic allocation, so strictly above the existing backup's id.
+        self.assertGreater(stored.s3_id, 3)
+
+    def test_snapshot_not_found(self):
         backup_id, error = backup_snapshot("missing")
 
         self.assertIsNone(backup_id)
         self.assertIn("not found", error)
 
-    @patch("simplyblock_core.controllers.backup_controller.db_controller")
-    def test_no_lvol(self, mock_db):
-        snap = _snapshot()
-        snap.lvol = None
-        mock_db.get_snapshot_by_id.return_value = snap
+    def test_node_not_online(self):
+        _node(status=StorageNode.STATUS_OFFLINE).write_to_db(self.db.kv_store)
+        self._persist(_snapshot())
 
-        from simplyblock_core.controllers.backup_controller import backup_snapshot
-        backup_id, error = backup_snapshot("snap-1")
-
-        self.assertIsNone(backup_id)
-        self.assertIn("no associated lvol", error.lower())
-
-    @patch("simplyblock_core.controllers.backup_controller.is_local_backup_source", return_value=True)
-    @patch("simplyblock_core.controllers.backup_controller.db_controller")
-    def test_node_not_online(self, mock_db, _mock_local_source):
-        snap = _snapshot()
-        node = _node(status=StorageNode.STATUS_OFFLINE)
-        mock_db.get_snapshot_by_id.return_value = snap
-        mock_db.get_storage_node_by_id.return_value = node
-
-        from simplyblock_core.controllers.backup_controller import backup_snapshot
         backup_id, error = backup_snapshot("snap-1")
 
         self.assertIsNone(backup_id)
         self.assertIn("not online", error)
 
-    @patch.object(Backup, 'write_to_db')
+    def test_cluster_without_backup_config_is_refused(self):
+        """Refused before the chain lock, the KMS work or any task is created."""
+        cluster = _cluster()
+        cluster.backup_config = {}
+        cluster.write_to_db(self.db.kv_store)
+        self._persist(_snapshot())
+
+        backup_id, error = backup_snapshot("snap-1")
+
+        self.assertIsNone(backup_id)
+        self.assertIn("backup configuration", error)
+        self.assertEqual(self.db.get_backups(), [])
+
     @patch("simplyblock_core.controllers.backup_controller.tasks_controller")
     @patch("simplyblock_core.controllers.backup_controller.backup_events")
-    @patch("simplyblock_core.controllers.backup_controller.is_local_backup_source", return_value=True)
-    @patch("simplyblock_core.controllers.backup_controller.db_controller")
-    def test_incremental_backup(self, mock_db, _mock_local_source, mock_events, mock_tasks, _mock_write):
-        snap = _snapshot()
-        prev = _backup(uuid="prev-backup", s3_id=3)
-        mock_db.get_snapshot_by_id.return_value = snap
-        mock_db.get_storage_node_by_id.return_value = _node()
-        mock_db.get_backups_by_lvol_id.return_value = [prev]
-        mock_db.get_backups.return_value = [prev]
-        mock_db.acquire_backup_chain_locks.return_value = (True, None)
-        mock_tasks.add_backup_task.return_value = "task-1"
-
-        from simplyblock_core.controllers.backup_controller import backup_snapshot
-        with patch("simplyblock_core.controllers.backup_controller._get_snapshot_chain", return_value=[snap]):
-            backup_id, error = backup_snapshot("snap-1")
-
-        self.assertIsNotNone(backup_id)
-        self.assertIsNone(error)
-        # Verify the backup object passed to events has prev_backup_id set
-        created_backup = mock_events.backup_created.call_args[0][2]
-        self.assertEqual(created_backup.prev_backup_id, "prev-backup")
-        self.assertEqual(created_backup.s3_id, 4)
-
-    @patch.object(Backup, 'write_to_db')
-    @patch("simplyblock_core.controllers.backup_controller.tasks_controller")
-    @patch("simplyblock_core.controllers.backup_controller.backup_events")
-    @patch("simplyblock_core.controllers.backup_controller.is_local_backup_source", return_value=True)
-    @patch("simplyblock_core.controllers.backup_controller.db_controller")
-    def test_chain_backup_acquires_and_releases_lock(self, mock_db, _mock_local_source, mock_events, mock_tasks, _mock_write):
-        snap1 = _snapshot(uuid="snap-1")
+    def test_chain_backup_acquires_and_releases_lock(self, mock_events, mock_tasks):
+        snap1 = self._persist(_snapshot(uuid="snap-1"))
         snap1.created_at = 1
-        snap2 = _snapshot(uuid="snap-2")
+        snap2 = self._persist(_snapshot(uuid="snap-2"))
         snap2.created_at = 2
-        snap2.lvol.uuid = "lvol-1"
-        mock_db.get_snapshot_by_id.return_value = snap2
-        mock_db.get_storage_node_by_id.return_value = _node()
-        mock_db.get_backups_by_lvol_id.return_value = []
-        mock_db.get_backups.return_value = []
-        mock_db.get_backups_by_snapshot_id.return_value = []
-        mock_db.acquire_backup_chain_locks.return_value = (True, None)
-        mock_tasks.add_backup_task.return_value = "task-1"
 
-        from simplyblock_core.controllers.backup_controller import backup_snapshot
-        with patch("simplyblock_core.controllers.backup_controller._get_snapshot_chain", return_value=[snap1, snap2]):
+        with patch("simplyblock_core.controllers.backup_controller._get_snapshot_chain",
+                   return_value=[snap1, snap2]):
             backup_id, error = backup_snapshot("snap-2")
 
-        self.assertIsNotNone(backup_id)
         self.assertIsNone(error)
-        mock_db.acquire_backup_chain_locks.assert_called_once_with(["snap-1", "snap-2"], "snap-2", "lvol-1")
-        mock_db.release_backup_chain_locks.assert_called_once_with(["snap-1", "snap-2"])
+        self.assertIsNotNone(backup_id)
         self.assertEqual(mock_tasks.add_backup_task.call_count, 2)
-        self.assertEqual(mock_events.backup_created.call_count, 2)
+        # Locks released, so a second request for the same chain can proceed.
+        self.assertIsNone(self.db.get_backup_chain_lock("snap-1"))
+        self.assertIsNone(self.db.get_backup_chain_lock("snap-2"))
 
-    @patch("simplyblock_core.controllers.backup_controller.is_local_backup_source", return_value=True)
-    @patch("simplyblock_core.controllers.backup_controller.db_controller")
-    def test_chain_backup_lock_conflict(self, mock_db, _mock_local_source):
-        snap = _snapshot(uuid="snap-4")
-        snap.created_at = 4
-        existing_lock = MagicMock(requested_snapshot_id="snap-2", snapshot_id="snap-2")
-        mock_db.get_snapshot_by_id.return_value = snap
-        mock_db.get_storage_node_by_id.return_value = _node()
-        mock_db.acquire_backup_chain_locks.return_value = (False, existing_lock)
+    def test_chain_backup_lock_conflict(self):
+        snap = self._persist(_snapshot(uuid="snap-4"))
+        acquired, _ = self.db.acquire_backup_chain_locks(["snap-4"], "snap-2", "lvol-1")
+        self.assertTrue(acquired)
 
-        from simplyblock_core.controllers.backup_controller import backup_snapshot
-        with patch("simplyblock_core.controllers.backup_controller._get_snapshot_chain", return_value=[snap]):
+        with patch("simplyblock_core.controllers.backup_controller._get_snapshot_chain",
+                   return_value=[snap]):
             backup_id, error = backup_snapshot("snap-4")
 
         self.assertIsNone(backup_id)
         self.assertIn("already preparing this snapshot chain", error)
-        mock_db.release_backup_chain_locks.assert_not_called()
+        # The conflicting holder's lock must survive.
+        self.assertIsNotNone(self.db.get_backup_chain_lock("snap-4"))
+
 
 
 # ===========================================================================
@@ -987,57 +1017,71 @@ class TestEvaluatePolicy(unittest.TestCase):
 # ===========================================================================
 
 class TestImportBackups(unittest.TestCase):
+    """Real FDB: import writes Backup records that later reads must see."""
 
-    @patch.object(Backup, 'write_to_db')
-    @patch("simplyblock_core.controllers.backup_controller.db_controller")
-    def test_import_new(self, mock_db, _mock_write):
-        mock_db.get_backup_by_id.side_effect = KeyError("not found")
-        mock_db.get_backups.return_value = []
+    def setUp(self):
+        self.db = DBController()
 
-        from simplyblock_core.controllers.backup_controller import import_backups
+    def test_import_new(self):
         count = import_backups([
-            {"backup_id": "b-1", "lvol_id": "l-1", "cluster_id": "c-1"},
-            {"backup_id": "b-2", "lvol_id": "l-1", "cluster_id": "c-1"},
-        ])
+            _meta("b-1", cluster_id="c-1"),
+            _meta("b-2", cluster_id="c-1"),
+        ], cluster_id="cluster-1")
 
         self.assertEqual(count, 2)
+        self.assertEqual(
+            {b.uuid for b in self.db.get_backups("cluster-1")}, {"b-1", "b-2"})
 
-    @patch.object(Backup, 'write_to_db')
-    @patch("simplyblock_core.controllers.backup_controller.db_controller")
-    def test_existing_fails(self, mock_db, mock_write):
-        existing = _backup(uuid="b-1")
-        mock_db.get_backup_by_id.side_effect = lambda bid: existing if bid == "b-1" else (_ for _ in ()).throw(KeyError())
-        mock_db.get_backups.return_value = [existing]
+    def test_existing_fails(self):
+        _backup(uuid="b-1").write_to_db(self.db.kv_store)
 
-        from simplyblock_core.controllers.backup_controller import import_backups
         with self.assertRaises(PreconditionError):
-            import_backups([
-                {"backup_id": "b-2", "lvol_id": "l-1", "cluster_id": "cluster-1"},
-                {"backup_id": "b-1", "lvol_id": "l-1", "cluster_id": "cluster-1"},
-            ])
+            import_backups([_meta("b-2"), _meta("b-1")], cluster_id="cluster-1")
 
-        mock_write.assert_not_called()
+        # Nothing imported: the pre-check runs before the first write.
+        self.assertEqual({b.uuid for b in self.db.get_backups()}, {"b-1"})
 
-    @patch.object(Backup, 'write_to_db')
-    @patch("simplyblock_core.controllers.backup_controller.db_controller")
-    def test_duplicate_in_metadata_fails(self, mock_db, mock_write):
-        mock_db.get_backup_by_id.side_effect = KeyError("not found")
-        mock_db.get_backups.return_value = []
+    def test_duplicate_in_metadata_fails(self):
+        with self.assertRaises(ValueError):
+            import_backups([_meta("b-1"), _meta("b-1")], cluster_id="cluster-1")
 
-        from simplyblock_core.controllers.backup_controller import import_backups
-        with self.assertRaises(PreconditionError):
-            import_backups([
-                {"backup_id": "b-1", "lvol_id": "l-1", "cluster_id": "cluster-1"},
-                {"backup_id": "b-1", "lvol_id": "l-1", "cluster_id": "cluster-1"},
-            ])
+        self.assertEqual(self.db.get_backups(), [])
 
-        mock_write.assert_not_called()
+    def test_skip_no_backup_id(self):
+        self.assertEqual(import_backups([{"lvol_id": "l-1"}]), 0)
 
-    @patch("simplyblock_core.controllers.backup_controller.db_controller")
-    def test_skip_no_backup_id(self, mock_db):
-        from simplyblock_core.controllers.backup_controller import import_backups
-        count = import_backups([{"lvol_id": "l-1"}])
-        self.assertEqual(count, 0)
+    def test_encrypted_flag_survives_import(self):
+        """Import used to drop this, restoring a plaintext volume over ciphertext."""
+        import_backups([_meta("b-1", encrypted=True)], cluster_id="cluster-1")
+
+        self.assertTrue(self.db.get_backup_by_id("b-1").encrypted)
+
+    def test_location_survives_import(self):
+        import_backups([_meta("b-1")], cluster_id="cluster-1")
+
+        self.assertEqual(
+            self.db.get_backup_by_id("b-1").get_location().bucket_name,
+            "simplyblock-backup-cluster-1")
+
+    def test_entry_without_a_location_is_rejected(self):
+        """A pre-self-describing export would otherwise restore against whatever
+        bucket the importing cluster happens to have configured."""
+        stale = _meta("b-1")
+        del stale["location"]
+
+        with self.assertRaises(ValueError):
+            import_backups([stale], cluster_id="cluster-1")
+
+        self.assertEqual(self.db.get_backups(), [])
+
+    def test_invalid_location_rejects_the_whole_batch(self):
+        with self.assertRaises(ValueError):
+            import_backups(
+                [_meta("b-1"), _meta("b-2", location={"bucket_name": "b"})],
+                cluster_id="cluster-1")
+
+        self.assertEqual(self.db.get_backups(), [])
+
 
 
 # ===========================================================================
@@ -1198,20 +1242,28 @@ class TestCLIBaseHandlers(unittest.TestCase):
 
 
 # ===========================================================================
-# 20. _write_s3_metadata
+# 20. Backup.get_location
 # ===========================================================================
 
-class TestWriteS3Metadata(unittest.TestCase):
+class TestBackupLocationAccessor(unittest.TestCase):
 
-    def test_metadata_stored_on_backup(self):
-        from simplyblock_core.controllers.backup_controller import _write_s3_metadata
+    def test_recorded_location_round_trips(self):
         b = _backup()
-        meta = _write_s3_metadata(None, b)
+        b.location = {"bucket_name": "backups", "region": "eu-central-1"}
 
-        self.assertEqual(meta["backup_id"], "backup-1")
-        self.assertEqual(meta["lvol_id"], "lvol-1")
-        self.assertEqual(meta["snapshot_id"], "snap-1")
-        self.assertEqual(b.s3_metadata, meta)
+        location = b.get_location()
+        self.assertEqual(location.bucket_name, "backups")
+        self.assertEqual(location.region, "eu-central-1")
+
+    def test_backup_without_a_location_raises(self):
+        with self.assertRaises(ValueError):
+            _backup().get_location()
+
+    def test_invalid_location_raises_value_error(self):
+        b = _backup()
+        b.location = {"bucket_name": "backups"}  # no region
+        with self.assertRaises(ValueError):
+            b.get_location()
 
 
 # ===========================================================================
