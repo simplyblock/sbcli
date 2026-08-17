@@ -16,6 +16,11 @@ Absence is expressed as ``None`` rather than as ``""`` or ``0``, so no caller ha
 to guess whether a field was configured or merely left at its default. Where the
 AWS SDK has its own resolution chain -- credentials, region, endpoint -- absent
 means "let it resolve", which is a real configuration rather than a gap.
+
+Both models serialize straight into the untyped ``dict`` fields the FoundationDB
+records still use: a plain ``model_dump()`` is JSON-safe, while ``SecretStr``
+stays wrapped so the plaintext is produced only by ``BaseModel.write_to_db``'s
+own ``unwrap_secrets`` pass, at the last possible moment.
 """
 from enum import IntEnum
 from typing import Any, Optional
@@ -26,6 +31,7 @@ from pydantic import (
     Field,
     HttpUrl,
     SecretStr,
+    field_serializer,
     model_validator,
 )
 
@@ -90,6 +96,14 @@ class BackupLocation(BaseModel):
     def endpoint_url(self) -> Optional[str]:
         """The endpoint as the AWS SDK and boto3 want it, without a trailing slash."""
         return str(self.endpoint).rstrip("/") if self.endpoint is not None else None
+
+    @field_serializer("endpoint", when_used="unless-none")
+    def _serialize_endpoint(self, endpoint: HttpUrl) -> str:
+        return self.endpoint_url  # type: ignore[return-value]
+
+    @field_serializer("secondary_target")
+    def _serialize_secondary_target(self, target: SecondaryTarget) -> int:
+        return int(target)
 
     @model_validator(mode="before")
     @classmethod
