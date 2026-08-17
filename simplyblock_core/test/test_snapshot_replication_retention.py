@@ -74,15 +74,17 @@ def test_prunes_older_internal_keeps_newest_and_users(monkeypatch):
     snaps = [
         _mk_snap("int_old", 100, SnapShot.TYPE_INTERNAL, "LV1", "N1", target="T_old"),
         _mk_snap("user_mid", 150, SnapShot.TYPE_USER, "LV1", "N1", target="T_user"),
-        _mk_snap("int_new", 200, SnapShot.TYPE_INTERNAL, "LV1", "N1", target="T_new"),
+        _mk_snap("int_mid", 200, SnapShot.TYPE_INTERNAL, "LV1", "N1", target="T_mid"),
+        _mk_snap("int_new", 300, SnapShot.TYPE_INTERNAL, "LV1", "N1", target="T_new"),
     ]
-    snapctl = _patch(monkeypatch, snaps, {"T_old", "T_user", "T_new"})
+    snapctl = _patch(monkeypatch, snaps, {"T_old", "T_user", "T_mid", "T_new"})
 
     sr._prune_internal_snapshots(source_lvol)
 
-    # Target copy deleted before the source snapshot, oldest internal only.
+    # Target copy deleted before the source snapshot; the newest PAIR is kept
+    # so an arriving snapshot always has a predecessor to chain onto.
     assert snapctl.deleted == ["T_old", "int_old"]
-    for kept in ("int_new", "T_new", "user_mid", "T_user"):
+    for kept in ("int_mid", "T_mid", "int_new", "T_new", "user_mid", "T_user"):
         assert kept not in snapctl.deleted
 
 
@@ -124,10 +126,11 @@ def test_missing_target_still_cleans_source(monkeypatch):
 
     snaps = [
         _mk_snap("int_old", 100, SnapShot.TYPE_INTERNAL, "LV1", "N1", target="T_gone"),
-        _mk_snap("int_new", 200, SnapShot.TYPE_INTERNAL, "LV1", "N1", target="T_new"),
+        _mk_snap("int_mid", 200, SnapShot.TYPE_INTERNAL, "LV1", "N1", target="T_mid"),
+        _mk_snap("int_new", 300, SnapShot.TYPE_INTERNAL, "LV1", "N1", target="T_new"),
     ]
     # T_gone already deleted on target -> only source snapshot is cleaned up.
-    snapctl = _patch(monkeypatch, snaps, {"T_new"})
+    snapctl = _patch(monkeypatch, snaps, {"T_mid", "T_new"})
 
     sr._prune_internal_snapshots(source_lvol)
 
@@ -141,12 +144,13 @@ def test_other_lvol_snapshots_untouched(monkeypatch):
 
     snaps = [
         _mk_snap("int_old", 100, SnapShot.TYPE_INTERNAL, "LV1", "N1", target="T_old"),
-        _mk_snap("int_new", 200, SnapShot.TYPE_INTERNAL, "LV1", "N1", target="T_new"),
+        _mk_snap("int_mid", 200, SnapShot.TYPE_INTERNAL, "LV1", "N1", target="T_mid"),
+        _mk_snap("int_new", 300, SnapShot.TYPE_INTERNAL, "LV1", "N1", target="T_new"),
         # Different lvol on same node — must never be pruned.
         _mk_snap("other_old", 50, SnapShot.TYPE_INTERNAL, "LV2", "N1", target="TO_old"),
         _mk_snap("other_new", 250, SnapShot.TYPE_INTERNAL, "LV2", "N1", target="TO_new"),
     ]
-    snapctl = _patch(monkeypatch, snaps, {"T_old", "T_new", "TO_old", "TO_new"})
+    snapctl = _patch(monkeypatch, snaps, {"T_old", "T_mid", "T_new", "TO_old", "TO_new"})
 
     sr._prune_internal_snapshots(source_lvol)
 
@@ -192,9 +196,10 @@ def test_in_deletion_clone_does_not_pin_the_snapshot(monkeypatch):
 
     snaps = [
         _mk_snap("int_old", 100, SnapShot.TYPE_INTERNAL, "LV1", "N1", target="T_old"),
-        _mk_snap("int_new", 200, SnapShot.TYPE_INTERNAL, "LV1", "N1", target="T_new"),
+        _mk_snap("int_mid", 200, SnapShot.TYPE_INTERNAL, "LV1", "N1", target="T_mid"),
+        _mk_snap("int_new", 300, SnapShot.TYPE_INTERNAL, "LV1", "N1", target="T_new"),
     ]
-    snapctl = _patch(monkeypatch, snaps, {"T_old", "T_new"},
+    snapctl = _patch(monkeypatch, snaps, {"T_old", "T_mid", "T_new"},
                      clones=[_Clone("DYING", "T_old", status=LVol.STATUS_IN_DELETION)])
 
     sr._prune_internal_snapshots(source_lvol)
@@ -217,3 +222,26 @@ def test_require_lvs_leader_gate(monkeypatch):
 
     monkeypatch.setattr(lc, "is_node_leader", lambda node, lvs: True)
     assert sr._require_lvs_leader(_N(), "LVS_1", "convert") is True
+
+
+def test_newest_pair_is_kept_so_arrivals_have_a_chain_parent(monkeypatch):
+    """Chain continuity: a replicated snapshot holds only its own clusters, and
+    deleting one swap-merges its segments into the successor CHAINED to it.
+    Keeping just the newest pruned the predecessor the instant a replication
+    finished, so the next arrival had nothing to chain onto and kept only its
+    delta — the target then held the last delta over holes (labs run 15 vs 19,
+    same case passing then failing on timing alone)."""
+    source_lvol = LVol()
+    source_lvol.uuid = "LV1"
+    source_lvol.node_id = "N1"
+
+    snaps = [
+        _mk_snap("int_prev", 100, SnapShot.TYPE_INTERNAL, "LV1", "N1", target="T_prev"),
+        _mk_snap("int_new", 200, SnapShot.TYPE_INTERNAL, "LV1", "N1", target="T_new"),
+    ]
+    snapctl = _patch(monkeypatch, snaps, {"T_prev", "T_new"})
+
+    sr._prune_internal_snapshots(source_lvol)
+
+    assert snapctl.deleted == [], (
+        "pruned the predecessor the next arrival must chain onto")
