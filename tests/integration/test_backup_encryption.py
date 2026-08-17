@@ -57,7 +57,6 @@ def _backup(db, uuid="b-1", encrypted=True, encryption=None):
     b.uuid = uuid
     b.s3_id = 1
     b.cluster_id = CLUSTER_ID
-    b.source_cluster_id = CLUSTER_ID
     b.lvol_id = "lvol-1"
     b.lvol_name = "vol"
     b.size = 4096

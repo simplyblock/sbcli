@@ -2809,24 +2809,6 @@ commands:
             help: "The target id (storage pool or logical volume id)."
             dest: target_id
             type: str
-      - name: source-list
-        help: "List backup sources (local and imported clusters)."
-        arguments:
-          - name: "--cluster-id"
-            help: "The cluster id."
-            dest: cluster_id
-            type: str
-      - name: source-switch
-        help: "Switch the active S3 backup source to a different cluster. Use 'local' or the local cluster id to switch back."
-        arguments:
-          - name: "source_cluster_id"
-            help: "The source cluster id or 'local'."
-            dest: source_cluster_id
-            type: str
-          - name: "--cluster-id"
-            help: "The cluster id."
-            dest: cluster_id
-            type: str
   - name: "qos"
     help: "QoS Commands"
     weight: 700

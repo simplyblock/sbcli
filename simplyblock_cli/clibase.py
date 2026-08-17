@@ -1251,31 +1251,6 @@ class CLIWrapperBase:
         print("Policy detached")
         return True
 
-    def backup__source_list(self, sub_command, args):
-        cluster_id = args.cluster_id
-        if not cluster_id:
-            db = db_controller.DBController()
-            clusters = db.get_clusters()
-            if clusters:
-                cluster_id = clusters[0].get_id()
-        sources = backup_controller.get_backup_sources(cluster_id)
-        return sources
-
-    def backup__source_switch(self, sub_command, args):
-        cluster_id = args.cluster_id
-        if not cluster_id:
-            db = db_controller.DBController()
-            clusters = db.get_clusters()
-            if clusters:
-                cluster_id = clusters[0].get_id()
-        backup_controller.switch_backup_source(cluster_id, args.source_cluster_id)
-        target = args.source_cluster_id
-        if target == cluster_id or target == "local":
-            print("Switched to local backup source")
-        else:
-            print(f"Switched to external backup source: {target}")
-        return True
-
     def db_backup__create(self, sub_command, args):
         return fdb_backup_controller.add_backup_task(args.cluster_id)
 

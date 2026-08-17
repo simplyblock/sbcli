@@ -1103,8 +1103,6 @@ class CLIWrapper(CLIWrapperBase):
         self.init_backup__policy_list(subparser)
         self.init_backup__policy_attach(subparser)
         self.init_backup__policy_detach(subparser)
-        self.init_backup__source_list(subparser)
-        self.init_backup__source_switch(subparser)
 
 
     def init_backup__list(self, subparser):
@@ -1160,15 +1158,6 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('policy_id', help='The backup policy id.', type=str)
         subcommand.add_argument('target_type', help='The target type.', type=str, choices=['pool','lvol',])
         subcommand.add_argument('target_id', help='The target id (storage pool or logical volume id).', type=str)
-
-    def init_backup__source_list(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'source-list', 'List backup sources (local and imported clusters).')
-        subcommand.add_argument('--cluster-id', help='The cluster id.', type=str, dest='cluster_id')
-
-    def init_backup__source_switch(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'source-switch', 'Switch the active S3 backup source to a different cluster. Use \'local\' or the local cluster id to switch back.')
-        subcommand.add_argument('source_cluster_id', help='The source cluster id or \'local\'.', type=str)
-        subcommand.add_argument('--cluster-id', help='The cluster id.', type=str, dest='cluster_id')
 
 
     def init_qos(self):
@@ -1681,10 +1670,6 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.backup__policy_attach(sub_command, args)
                 elif sub_command in ['policy-detach']:
                     ret = self.backup__policy_detach(sub_command, args)
-                elif sub_command in ['source-list']:
-                    ret = self.backup__source_list(sub_command, args)
-                elif sub_command in ['source-switch']:
-                    ret = self.backup__source_switch(sub_command, args)
                 else:
                     self.parser.print_help()
 

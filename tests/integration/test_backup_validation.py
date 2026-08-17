@@ -100,7 +100,6 @@ def _backup(db, uuid, s3_id, snapshot_id, prev="", location=None, encrypted=Fals
     b.uuid = uuid
     b.s3_id = s3_id
     b.cluster_id = CLUSTER_ID
-    b.source_cluster_id = CLUSTER_ID
     b.lvol_id = "lvol-1"
     b.lvol_name = "vol"
     b.snapshot_id = snapshot_id
