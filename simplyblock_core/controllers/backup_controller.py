@@ -6,11 +6,13 @@ import uuid
 from typing import Optional
 
 import boto3
+from botocore.config import Config as BotoConfig
 from botocore.exceptions import BotoCoreError, ClientError
 
 from simplyblock_core.controllers import backup_events, tasks_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.backup import Backup, BackupPolicy, BackupPolicyAttachment
+from simplyblock_core.models.backup_config import BackupConfig
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.kms import (
     KMSException, backup_dek_path, backup_kek_name, create_kms_connection,
@@ -133,16 +135,30 @@ def _compute_s3_cpu_masks(node):
     return bdb_lcpu_mask, s3_lcpu_mask
 
 
-def _s3_client(backup_config):
+def _s3_client(config: BackupConfig):
+    """A boto3 client for a backup location.
+
+    Credentials are passed only when configured; omitting them lets boto3 fall
+    back to its default provider chain (instance IAM role, environment, profile),
+    which is the point of ``credentials`` being Optional.
+    """
     return boto3.client("s3",
-        aws_access_key_id=unwrap_secret(backup_config.get("access_key_id")),
-        aws_secret_access_key=unwrap_secret(backup_config.get("secret_access_key")),
-        endpoint_url=backup_config.get("local_endpoint"),
+        region_name=config.region,
+        endpoint_url=config.endpoint_url,
+        verify=config.verify_tls,
+        config=BotoConfig(s3={"addressing_style": "path" if config.use_path_style else "auto"}),
+        aws_access_key_id=(
+            unwrap_secret(config.credentials.access_key_id)
+            if config.credentials is not None else None),
+        aws_secret_access_key=(
+            unwrap_secret(config.credentials.secret_access_key)
+            if config.credentials is not None else None),
     )
 
-def _s3_bucket_exists(backup_config, bucket_name) -> bool:
+
+def _s3_bucket_exists(config: BackupConfig, bucket_name) -> bool:
     try:
-        _s3_client(backup_config).head_bucket(Bucket=bucket_name)
+        _s3_client(config).head_bucket(Bucket=bucket_name)
         return True
     except ClientError as e:
         error_code = int(e.response["Error"]["Code"])
@@ -151,9 +167,9 @@ def _s3_bucket_exists(backup_config, bucket_name) -> bool:
         raise
 
 
-def _ensure_s3_bucket(backup_config, bucket_name):
+def _ensure_s3_bucket(config: BackupConfig, bucket_name):
     try:
-        s3_client = _s3_client(backup_config)
+        s3_client = _s3_client(config)
         try:
             s3_client.head_bucket(Bucket=bucket_name)
             logger.info(f"S3 bucket already exists: {bucket_name}")
@@ -168,12 +184,12 @@ def _ensure_s3_bucket(backup_config, bucket_name):
         raise RuntimeError(f"Error ensuring S3 bucket {bucket_name} exists") from e
 
 
-def create_s3_bdev(node, backup_config) -> None:
+def create_s3_bdev(node, config: BackupConfig) -> None:
     """Create the S3 bdev and attach it to a node's lvstore.
     Called during cluster activate / node restart.
     Args:
         node: StorageNode with lvstore set
-        backup_config: dict from cluster.backup_config with S3/MinIO connection params
+        config: the cluster's validated backup configuration
     """
     if not node.lvstore:
         raise PreconditionError("Node does not have an lvstore")
@@ -191,26 +207,33 @@ def create_s3_bdev(node, backup_config) -> None:
     # #938): a second creation with a different mask that either failed
     # noisily on every activate or put the pollers on the wrong core.
 
+    # The data plane still takes the pre-BackupConfig parameter shape; phase 2
+    # replaces it. Two lossy mappings live here until then:
+    #  * `local_testing` is not a mode, it is the only condition under which the
+    #    data plane honours an endpoint override at all (bdev_s3_impl.hpp
+    #    init_client), so it tracks "an endpoint was configured".
+    #  * region, verify_tls and use_path_style have nowhere to go -- the data
+    #    plane hardcodes us-east-1 and path-style under local_testing, and
+    #    resolves the region from the environment otherwise.
     try:
         rpc_client.bdev_s3_create(
             name=s3_bdev_name,
-            secondary_target=backup_config.get("secondary_target", 0),
-            with_compression=backup_config.get("with_compression", False),
-            snapshot_backups=backup_config.get("snapshot_backups", True),
-            local_testing=backup_config.get("local_testing", False),
-            local_endpoint=backup_config.get("local_endpoint", ""),
-            access_key_id=backup_config.get("access_key_id", ""),
-            secret_access_key=backup_config.get("secret_access_key", ""),
+            secondary_target=config.secondary_target,
+            with_compression=config.with_compression,
+            snapshot_backups=config.snapshot_backups,
+            local_testing=config.endpoint is not None,
+            local_endpoint=config.endpoint_url or "",
+            access_key_id=config.credentials.access_key_id if config.credentials else None,
+            secret_access_key=config.credentials.secret_access_key if config.credentials else None,
             bdb_lcpu_mask=bdb_lcpu_mask,
             s3_lcpu_mask=s3_lcpu_mask,
-            s3_thread_pool_size=backup_config.get("s3_thread_pool_size", 0),
+            s3_thread_pool_size=config.s3_thread_pool_size or 0,
         )
 
-        bucket_name = backup_config.get("bucket_name", f"simplyblock-backup-{node.cluster_id}")
-        _ensure_s3_bucket(backup_config, bucket_name)
+        _ensure_s3_bucket(config, config.bucket_name)
 
-        rpc_client.bdev_s3_add_bucket_name(s3_bdev_name, bucket_name, allow_existing=True)
-        logger.info(f"S3 bdev bucket set: {bucket_name} on {s3_bdev_name}")
+        rpc_client.bdev_s3_add_bucket_name(s3_bdev_name, config.bucket_name, allow_existing=True)
+        logger.info(f"S3 bdev bucket set: {config.bucket_name} on {s3_bdev_name}")
 
         rpc_client.bdev_lvol_s3_bdev(node.lvstore, s3_bdev_name)
         logger.info(f"S3 bdev created and attached: {s3_bdev_name} on node {node.get_id()}")
@@ -745,16 +768,15 @@ def switch_backup_source(cluster_id, source_cluster_id) -> None:
         source_cluster_id = cluster_id
 
     # Determine the bucket name for the source cluster
-    backup_config = cluster.backup_config or {}
+    config = cluster.get_backup_config()
     if source_cluster_id == cluster_id:
-        bucket_name = backup_config.get("bucket_name",
-                                        f"simplyblock-backup-{cluster_id}")
+        bucket_name = config.bucket_name
     else:
         bucket_name = f"simplyblock-backup-{source_cluster_id}"
 
     # Verify the bucket exists
     try:
-        if not _s3_bucket_exists(backup_config, bucket_name):
+        if not _s3_bucket_exists(config, bucket_name):
             raise PreconditionError(f"S3 bucket {bucket_name} does not exist")
     except BotoCoreError as e:
         raise RuntimeError(f"S3 bucket {bucket_name} not accessible: {e}")
