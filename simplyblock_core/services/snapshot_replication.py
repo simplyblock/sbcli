@@ -249,6 +249,9 @@ def _has_dependent_clone(snapshot_uuid):
     return False
 
 
+_KEEP_REPLICATED_INTERNAL = 2
+
+
 def _prune_internal_snapshots(source_lvol):
     """Retention for replication-driven internal snapshots.
 
@@ -271,12 +274,25 @@ def _prune_internal_snapshots(source_lvol):
         and s.status == SnapShot.STATUS_ONLINE
         and s.target_replicated_snap_uuid
     ]
-    if len(replicated_internal) <= 1:
+    if len(replicated_internal) <= _KEEP_REPLICATED_INTERNAL:
         return
 
     replicated_internal.sort(key=lambda s: s.created_at)
-    # Keep the newest replicated internal snapshot; prune everything older.
-    for snap in replicated_internal[:-1]:
+    # Keep the newest TWO replicated internal snapshots, not just one.
+    #
+    # A replicated snapshot holds only its own clusters; the rest of the data
+    # lives in the chain below it, and deleting a snapshot swap-merges its
+    # segments into the successor that is CHAINED to it. Keeping only the
+    # newest meant the predecessor was pruned the instant a replication
+    # finished, so the NEXT arrival had nothing to chain onto and kept just
+    # its delta — the target then holds the last delta over holes. Whether it
+    # broke was pure timing, which is why the same fail-over case passed twice
+    # and then failed (labs run 15 vs 19).
+    #
+    # With two kept, the successor is always chained onto the predecessor
+    # before that predecessor becomes prunable, so the merge has somewhere to
+    # go and no data is dropped.
+    for snap in replicated_internal[:-_KEEP_REPLICATED_INTERNAL]:
         target_uuid = snap.target_replicated_snap_uuid
         try:
             db.get_snapshot_by_id(target_uuid)
