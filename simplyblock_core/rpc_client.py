@@ -1947,17 +1947,22 @@ class RPCClient:
             "s3_bdev": bdev_name,
         })
 
-    def bdev_lvol_s3_backup(self, s3_id, snapshot_names, cluster_batch=1):
+    def bdev_lvol_s3_backup(self, s3_id, snapshot_names, s3_bdev, cluster_batch=1):
         """Start an async backup of snapshots to S3.
         Args:
-            s3_id: unique backup identifier (uint32)
-            snapshot_names: list of snapshot composite bdev names
+            s3_id: unique backup identifier (uint32, < 2**30)
+            snapshot_names: snapshot composite bdev names, NEWEST first -- the
+                data plane unions their cluster maps first-writer-wins, so the
+                newest snapshot's allocation must be seen first.
+            s3_bdev: which S3 device to write through. Required: an lvstore may
+                carry several, and "the first" is ambiguous.
             cluster_batch: batch size in clusters (default 1)
         Returns RPC result (truthy on success). Poll with bdev_lvol_transfer_stat.
         """
         params = {
             "s3_id": s3_id,
             "snapshot_names": snapshot_names,
+            "s3_bdev": s3_bdev,
             "cluster_batch": cluster_batch,
         }
         return self._request("bdev_lvol_s3_backup", params)
@@ -1967,19 +1972,23 @@ class RPCClient:
     # (pass snapshot bdev name) and recovery (pass target lvol name).
     # Merge has lvol=NULL on data plane so transfer_stat cannot poll it.
 
-    def bdev_lvol_s3_merge(self, s3_id, old_s3_id, cluster_batch, lvs_name=None):
+    def bdev_lvol_s3_merge(self, s3_id, old_s3_id, cluster_batch, s3_bdev, lvs_name=None):
         """Merge two backups: keep s3_id and merge old_s3_id into it.
-        This shortens the backup chain."""
+
+        This shortens the backup chain. Both backups must live in the bucket
+        served by s3_bdev -- a merge reads one and writes the other.
+        """
         params = {
             "s3_id": s3_id,
             "old_s3_id": old_s3_id,
             "cluster_batch": cluster_batch,
+            "s3_bdev": s3_bdev,
         }
         if lvs_name:
             params["lvs_name"] = lvs_name
         return self._request("bdev_lvol_s3_merge", params)
 
-    def bdev_lvol_s3_recovery(self, lvol_name, s3_ids, cluster_batch, s3_bdev=None):
+    def bdev_lvol_s3_recovery(self, lvol_name, s3_ids, cluster_batch, s3_bdev):
         """Restore a chain of S3 backups into a new lvol.
         Args:
             lvol_name: target lvol name to restore into
@@ -1988,18 +1997,16 @@ class RPCClient:
                 offers it (prepare_s3_clusters is first-writer-wins), so the
                 newest backup's data must win.
             cluster_batch: batch size in clusters
-            s3_bdev: which S3 device to read from. Omitted, the data plane picks
-                the first S3 device attached to the lvstore, which is ambiguous
-                once a restore has attached a second one for a foreign bucket.
+            s3_bdev: which S3 device to read from. Required: a restore from a
+                foreign bucket attaches a second device, so "the first" is
+                ambiguous exactly when it matters.
         """
-        params = {
+        return self._request("bdev_lvol_s3_recovery", {
             "lvol_name": lvol_name,
             "cluster_batch": cluster_batch,
             "s3_ids": s3_ids,
-        }
-        if s3_bdev:
-            params["s3_bdev"] = s3_bdev
-        return self._request("bdev_lvol_s3_recovery", params)
+            "s3_bdev": s3_bdev,
+        })
 
     def bdev_s3_delete(self, name):
         """Delete an S3 bdev.
