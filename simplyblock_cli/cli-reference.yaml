@@ -2708,6 +2708,14 @@ commands:
             help: "The target storage node id."
             dest: node
             type: str
+          - name: "--access-key-id"
+            help: "Access key for the backup's bucket, when it is not this cluster's own."
+            dest: access_key_id
+            type: secret
+          - name: "--secret-access-key"
+            help: "Secret key for the backup's bucket, when it is not this cluster's own."
+            dest: secret_access_key
+            type: secret
       - name: export
         help: "Export backup metadata to a JSON file for cross-cluster restore."
         arguments:
@@ -2725,17 +2733,81 @@ commands:
             help: "The output file path."
             dest: output
             type: str
-      - name: import
-        help: "Import backup metadata from a JSON file."
+      - name: discover
+        help: "List the backups a bucket contains, reading its manifests. Needs no cluster."
         arguments:
-          - name: "metadata_file"
-            help: "The path to JSON metadata file."
-            dest: metadata_file
+          - name: "--bucket"
+            help: "The bucket holding the backups."
+            dest: bucket
             type: str
+            required: true
+          - name: "--region"
+            help: "The bucket's region. Omit to let the AWS SDK resolve it."
+            dest: region
+            type: str
+          - name: "--endpoint"
+            help: "Endpoint of an S3-compatible store, e.g. http://minio:9000. Omit for AWS."
+            dest: endpoint
+            type: str
+          - name: "--access-key-id"
+            help: "Access key for the bucket. Omit to use the node's instance role."
+            dest: access_key_id
+            type: secret
+          - name: "--secret-access-key"
+            help: "Secret key for the bucket. Omit to use the node's instance role."
+            dest: secret_access_key
+            type: secret
+          - name: "--no-verify-tls"
+            help: "Skip certificate verification for the endpoint."
+            dest: no_verify_tls
+            type: bool
+            action: store_true
+          - name: "--path-style"
+            help: "Use path-style addressing, as MinIO and most S3-compatible stores need."
+            dest: path_style
+            type: bool
+            action: store_true
+      - name: import
+        help: "Register backups into this cluster, from a bucket or from an exported file."
+        arguments:
           - name: "--cluster-id"
             help: "The target cluster to import into (required for cross-cluster restore)."
             dest: cluster_id
             type: str
+          - name: "--from-file"
+            help: "Path to a JSON file produced by 'backup export'. Mutually exclusive with --bucket."
+            dest: from_file
+            type: str
+          - name: "--bucket"
+            help: "Read manifests straight from this bucket. Mutually exclusive with --from-file."
+            dest: bucket
+            type: str
+          - name: "--region"
+            help: "The bucket's region. Omit to let the AWS SDK resolve it."
+            dest: region
+            type: str
+          - name: "--endpoint"
+            help: "Endpoint of an S3-compatible store, e.g. http://minio:9000. Omit for AWS."
+            dest: endpoint
+            type: str
+          - name: "--access-key-id"
+            help: "Access key for the bucket. Omit to use the node's instance role."
+            dest: access_key_id
+            type: secret
+          - name: "--secret-access-key"
+            help: "Secret key for the bucket. Omit to use the node's instance role."
+            dest: secret_access_key
+            type: secret
+          - name: "--no-verify-tls"
+            help: "Skip certificate verification for the endpoint."
+            dest: no_verify_tls
+            type: bool
+            action: store_true
+          - name: "--path-style"
+            help: "Use path-style addressing, as MinIO and most S3-compatible stores need."
+            dest: path_style
+            type: bool
+            action: store_true
       - name: policy-add
         help: "Create a new backup policy."
         arguments:
