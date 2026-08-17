@@ -57,7 +57,8 @@ class _RestoreParams(BaseModel):
 @api.post('/restore', name='clusters:backups:restore', status_code=202)
 def restore_backup(cluster: Cluster, parameters: _RestoreParams):
     return {"lvol_id": backup_controller.restore_backup(
-        parameters.backup_id, parameters.lvol_name, parameters.pool, target_node_id=parameters.target_node_id)}
+        parameters.backup_id, parameters.lvol_name, parameters.pool,
+        target_node_id=parameters.target_node_id)}
 
 
 class _ImportManifests(BaseModel):

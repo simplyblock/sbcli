@@ -47,6 +47,10 @@ class Backup(BaseModel):
     #: pydantic models; read it through :meth:`get_location`.
     location: dict = {}
     encrypted: bool = False
+    #: Which KMS holds this backup's key, and under what path. A
+    #: ``backup_manifest.Encryption``; stored as a dict for the same reason
+    #: ``location`` is. Empty for an unencrypted backup.
+    encryption: dict = {}
 
     def get_id(self):
         return "%s/%s" % (self.cluster_id, self.uuid)
