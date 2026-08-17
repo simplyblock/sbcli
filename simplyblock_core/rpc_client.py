@@ -1868,10 +1868,13 @@ class RPCClient:
 
     # ---- S3 Backup RPCs ----
 
-    def bdev_s3_create(self, name, secondary_target=0, with_compression=False,
-                       snapshot_backups=True, local_testing=False, local_endpoint="",
-                       access_key_id="", secret_access_key="",
-                       bdb_lcpu_mask=0, s3_lcpu_mask=0, s3_thread_pool_size=0):
+    def bdev_s3_create(self, name: str, secondary_target: int = 0,
+                       with_compression: bool = False, snapshot_backups: bool = True,
+                       local_testing: bool = False, local_endpoint: str = "",
+                       access_key_id: Optional[SecretStr] = None,
+                       secret_access_key: Optional[SecretStr] = None,
+                       bdb_lcpu_mask: int = 0, s3_lcpu_mask: int = 0,
+                       s3_thread_pool_size: int = 0):
         """Create the S3 bdev device.
         Must be called before bdev_lvol_s3_bdev to attach it to an lvstore.
         Args:
@@ -1881,13 +1884,16 @@ class RPCClient:
             snapshot_backups: Snapshot backup mode
             local_testing: Use local endpoint (e.g. MinIO)
             local_endpoint: Local endpoint URL
-            access_key_id: AWS access key (optional if using IAM roles)
-            secret_access_key: AWS secret key (optional if using IAM roles)
+            access_key_id / secret_access_key: leave both ``None`` to use the
+                node's instance role via the SDK's default credential provider
+                chain. An empty ``SecretStr`` counts as absent too, rather than
+                travelling as a key: the SDK reads empty credentials as a valid
+                anonymous identity and then never consults the chain.
             bdb_lcpu_mask: CPU mask for the SPDK thread of this bdev (uint64)
             s3_lcpu_mask: CPU mask for the internal AWS S3 thread pool (uint64)
             s3_thread_pool_size: AWS S3 thread pool size (default 32 on data plane)
         """
-        params = {
+        params: dict[str, Any] = {
             "name": name,
             "secondary_target": secondary_target,
             "with_compression": with_compression,
