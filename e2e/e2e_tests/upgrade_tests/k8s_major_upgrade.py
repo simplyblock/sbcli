@@ -92,7 +92,8 @@ for snap in db_controller.get_snapshots():
 print("done")
 """
 
-# FDB resources that need the keep annotation (Step 1 of migration guide)
+# Resources that need the keep annotation so they survive helm uninstall
+# (Step 1 of migration guide: FDB + prometheus config)
 _FDB_KEEP_RESOURCES = [
     ("deployment", "simplyblock-fdb-controller-manager"),
     ("serviceaccount", "simplyblock-fdb-controller-manager"),
@@ -102,6 +103,7 @@ _FDB_KEEP_RESOURCES = [
     ("clusterrolebinding", "simplyblock-fdb-manager-clusterrolebinding"),
     ("foundationdbcluster", "simplyblock-fdb-cluster"),
     ("configmap", "simplyblock-fdb-cluster-config"),
+    ("configmap", "simplyblock-prometheus-config"),
 ]
 
 # Default CR names matching the k8s-native-e2e.yaml workflow
