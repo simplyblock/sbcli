@@ -1083,6 +1083,7 @@ class CLIWrapper(CLIWrapperBase):
         self.init_backup__delete(subparser)
         self.init_backup__restore(subparser)
         self.init_backup__export(subparser)
+        self.init_backup__discover(subparser)
         self.init_backup__import(subparser)
         self.init_backup__policy_add(subparser)
         self.init_backup__policy_remove(subparser)
@@ -1105,6 +1106,8 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--lvol', help='The new logical volume name.', type=str, dest='lvol_name', required=True)
         subcommand.add_argument('--pool', help='The target pool name or id.', type=str, dest='pool', required=True)
         subcommand.add_argument('--node', help='The target storage node id.', type=str, dest='node')
+        subcommand.add_argument('--access-key-id', help='Access key for the backup\'s bucket, when it is not this cluster\'s own.', type=SecretStr, dest='access_key_id')
+        subcommand.add_argument('--secret-access-key', help='Secret key for the backup\'s bucket, when it is not this cluster\'s own.', type=SecretStr, dest='secret_access_key')
 
     def init_backup__export(self, subparser):
         subcommand = self.add_sub_command(subparser, 'export', 'Export backup metadata to a JSON file for cross-cluster restore.')
@@ -1112,10 +1115,27 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--lvol', help='Filter exports to a specific logical volume name.', type=str, dest='lvol_name')
         subcommand.add_argument('-o', '--output', help='The output file path.', type=str, dest='output')
 
+    def init_backup__discover(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'discover', 'List the backups a bucket contains, reading its manifests. Needs no cluster.')
+        subcommand.add_argument('--bucket', help='The bucket holding the backups.', type=str, dest='bucket', required=True)
+        subcommand.add_argument('--region', help='The bucket\'s region. Omit to let the AWS SDK resolve it.', type=str, dest='region')
+        subcommand.add_argument('--endpoint', help='Endpoint of an S3-compatible store, e.g. http://minio:9000. Omit for AWS.', type=str, dest='endpoint')
+        subcommand.add_argument('--access-key-id', help='Access key for the bucket. Omit to use the node\'s instance role.', type=SecretStr, dest='access_key_id')
+        subcommand.add_argument('--secret-access-key', help='Secret key for the bucket. Omit to use the node\'s instance role.', type=SecretStr, dest='secret_access_key')
+        subcommand.add_argument('--no-verify-tls', help='Skip certificate verification for the endpoint.', dest='no_verify_tls', action='store_true')
+        subcommand.add_argument('--path-style', help='Use path-style addressing, as MinIO and most S3-compatible stores need.', dest='path_style', action='store_true')
+
     def init_backup__import(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'import', 'Import backup metadata from a JSON file.')
-        subcommand.add_argument('metadata_file', help='The path to JSON metadata file.', type=str)
+        subcommand = self.add_sub_command(subparser, 'import', 'Register backups into this cluster, from a bucket or from an exported file.')
         subcommand.add_argument('--cluster-id', help='The target cluster to import into (required for cross-cluster restore).', type=str, dest='cluster_id')
+        subcommand.add_argument('--from-file', help='Path to a JSON file produced by \'backup export\'. Mutually exclusive with --bucket.', type=str, dest='from_file')
+        subcommand.add_argument('--bucket', help='Read manifests straight from this bucket. Mutually exclusive with --from-file.', type=str, dest='bucket')
+        subcommand.add_argument('--region', help='The bucket\'s region. Omit to let the AWS SDK resolve it.', type=str, dest='region')
+        subcommand.add_argument('--endpoint', help='Endpoint of an S3-compatible store, e.g. http://minio:9000. Omit for AWS.', type=str, dest='endpoint')
+        subcommand.add_argument('--access-key-id', help='Access key for the bucket. Omit to use the node\'s instance role.', type=SecretStr, dest='access_key_id')
+        subcommand.add_argument('--secret-access-key', help='Secret key for the bucket. Omit to use the node\'s instance role.', type=SecretStr, dest='secret_access_key')
+        subcommand.add_argument('--no-verify-tls', help='Skip certificate verification for the endpoint.', dest='no_verify_tls', action='store_true')
+        subcommand.add_argument('--path-style', help='Use path-style addressing, as MinIO and most S3-compatible stores need.', dest='path_style', action='store_true')
 
     def init_backup__policy_add(self, subparser):
         subcommand = self.add_sub_command(subparser, 'policy-add', 'Create a new backup policy.')
@@ -1641,6 +1661,8 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.backup__restore(sub_command, args)
                 elif sub_command in ['export']:
                     ret = self.backup__export(sub_command, args)
+                elif sub_command in ['discover']:
+                    ret = self.backup__discover(sub_command, args)
                 elif sub_command in ['import']:
                     ret = self.backup__import(sub_command, args)
                 elif sub_command in ['policy-add']:

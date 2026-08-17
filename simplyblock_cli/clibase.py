@@ -9,6 +9,7 @@ import time
 import argcomplete
 
 from simplyblock_core import cluster_ops, utils, db_controller, constants
+from simplyblock_core import backup_manifest
 from simplyblock_core.backup_manifest import BackupManifest
 from simplyblock_core.exceptions import MigrationConflictError, PreconditionError
 from simplyblock_core import storage_node_ops as storage_ops
@@ -18,6 +19,8 @@ from simplyblock_core.controllers import pool_controller, lvol_controller, snaps
     replication_policy_controller
 from simplyblock_core.controllers import health_controller
 from simplyblock_core.models.pool import Pool
+from simplyblock_core.backup_manifest import ManifestError
+from simplyblock_core.models.backup_config import BackupConfig, S3Credentials
 from simplyblock_core.models.cluster import Cluster, HashicorpVaultSettings
 
 
@@ -72,6 +75,44 @@ def _format_json(data, *, sort_keys: bool = False) -> str:
 
 def _format_result(data, *, json: bool) -> str:
     return _format_json(data) if json else utils.print_table(data, unwrap_secrets=True)
+
+
+def _format_timestamp(seconds) -> str:
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(seconds)) if seconds else ""
+
+
+def _s3_credentials(args):
+    """The bucket credentials given on the command line, if any.
+
+    Returns None when neither key is supplied, which means "use the node's
+    instance role" rather than "use empty credentials".
+    """
+    access_key_id = getattr(args, 'access_key_id', None)
+    secret_access_key = getattr(args, 'secret_access_key', None)
+    if not access_key_id and not secret_access_key:
+        return None
+    if not (access_key_id and secret_access_key):
+        raise ValueError(
+            "give both --access-key-id and --secret-access-key, or neither")
+    return S3Credentials(access_key_id=access_key_id,
+                         secret_access_key=secret_access_key)
+
+
+def _bucket_config(args) -> BackupConfig:
+    """A backup configuration assembled from bucket arguments.
+
+    Used by the commands that read a bucket directly rather than through a
+    cluster -- which is the point of them, since after a disaster there may be no
+    cluster left to ask.
+    """
+    return BackupConfig(
+        bucket_name=args.bucket,
+        region=getattr(args, 'region', None) or None,
+        endpoint=getattr(args, 'endpoint', None) or None,
+        verify_tls=not getattr(args, 'no_verify_tls', False),
+        use_path_style=getattr(args, 'path_style', False),
+        credentials=_s3_credentials(args),
+    )
 
 
 class CLIWrapperBase:
@@ -1130,12 +1171,43 @@ class CLIWrapperBase:
         try:
             lvol_id = backup_controller.restore_backup(
                 args.backup_id, args.lvol_name, args.pool,
-                target_node_id=getattr(args, 'node', None))
-        except (PreconditionError, RuntimeError) as e:
+                target_node_id=getattr(args, 'node', None),
+                s3_credentials=_s3_credentials(args))
+        except (PreconditionError, RuntimeError, ValueError) as e:
             print(f"Error: {e}")
             return False
         print(f"Restoring backup {args.backup_id} into new volume {lvol_id}")
         return True
+
+    def backup__discover(self, sub_command, args):
+        try:
+            manifests = backup_controller.discover_backups(_bucket_config(args))
+        except (ManifestError, ValueError) as e:
+            print(f"Error: {e}")
+            return False
+        if not manifests:
+            print(f"No backups found in {args.bucket}")
+            return False
+        # Each manifest names only its predecessor, so the chain is walked over
+        # the set. A bucket holding a manifest whose ancestor is missing is worth
+        # showing rather than refusing: that IS the finding.
+        def chain_length(manifest):
+            try:
+                return str(len(backup_manifest.chain_of(manifest, manifests)))
+            except ManifestError:
+                return "incomplete"
+
+        return [{
+            "ID": m.backup_id,
+            "Volume": m.volume.lvol_name,
+            "Snapshot": m.volume.snapshot_name,
+            "Size": m.size,
+            "Chain": chain_length(m),
+            "Encrypted": "yes" if m.encryption.encrypted else "no",
+            "Needs KMS": (
+                m.encryption.descriptor.kms if m.encryption.descriptor else "-"),
+            "Created": _format_timestamp(m.created_at),
+        } for m in manifests]
 
     def backup__export(self, sub_command, args):
         manifests = backup_controller.export_backups(
@@ -1155,25 +1227,31 @@ class CLIWrapperBase:
         return True
 
     def backup__import(self, sub_command, args):
-        try:
-            with open(args.metadata_file, 'r') as f:
-                entries = json.load(f)
-        except Exception as e:
-            print(f"Error reading metadata file: {e}")
-            return False
-        if not isinstance(entries, list):
-            entries = [entries]
+        from_file = getattr(args, 'from_file', None)
+        bucket = getattr(args, 'bucket', None)
 
-        # Parsed here rather than in the controller so a malformed file is
-        # reported as a problem with the file, naming it.
-        try:
-            manifests = [BackupManifest.model_validate(entry) for entry in entries]
-        except ValueError as e:
-            print(f"{args.metadata_file} is not a backup export: {e}")
+        if bool(from_file) == bool(bucket):
+            print("Error: give exactly one of --from-file or --bucket")
             return False
 
-        count = backup_controller.import_backups(
-            manifests, cluster_id=getattr(args, 'cluster_id', None))
+        cluster_id = getattr(args, 'cluster_id', None)
+        try:
+            if bucket:
+                count = backup_controller.import_from_bucket(
+                    _bucket_config(args), cluster_id=cluster_id)
+            else:
+                with open(str(from_file), 'r') as f:
+                    entries = json.load(f)
+                if not isinstance(entries, list):
+                    entries = [entries]
+                # Parsed here rather than in the controller so a malformed file
+                # is reported as a problem with the file, naming it.
+                manifests = [BackupManifest.model_validate(e) for e in entries]
+                count = backup_controller.import_backups(manifests, cluster_id=cluster_id)
+        except (ManifestError, PreconditionError, ValueError, OSError) as e:
+            print(f"Error: {e}")
+            return False
+
         print(f"Imported {count} backup(s)")
         return True
 
