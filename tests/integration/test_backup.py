@@ -271,7 +271,9 @@ class TestComputeS3CpuMasks(unittest.TestCase):
         node = _node()
         node.app_thread_mask = ""
         bdb, s3 = _compute_s3_cpu_masks(node)
-        self.assertEqual(bdb, 0)          # falls back to data plane default
+        # None, not 0: a zero mask selects no CPUs, and the RPC omits the
+        # parameter so the data plane derives one from the app core mask.
+        self.assertIsNone(bdb)
         self.assertEqual(s3, 0xFF)
 
     def test_no_cpu_count(self):
@@ -280,7 +282,7 @@ class TestComputeS3CpuMasks(unittest.TestCase):
         node.cpu = 0
         bdb, s3 = _compute_s3_cpu_masks(node)
         self.assertEqual(bdb, 0x8)
-        self.assertEqual(s3, 0)           # falls back to data plane default
+        self.assertIsNone(s3)             # omitted; data plane picks
 
     def test_large_cpu_count(self):
         from simplyblock_core.controllers.backup_controller import _compute_s3_cpu_masks
