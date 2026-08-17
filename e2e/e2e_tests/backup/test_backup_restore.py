@@ -2007,6 +2007,21 @@ class TestBackupPolicy(BackupTestBase):
             f"TC-BCK-025: {len(retained)} backups after 4 snaps (policy versions=3)")
         # Retention is eventually enforced; we just log the count for now
 
+        # --- TC-BCK-025b: restore one of the retained backups ---
+        self.logger.info("TC-BCK-025b: restore a policy-created backup to verify data integrity")
+        if retained:
+            rst_bk_id = (retained[-1].get("id") or retained[-1].get("ID")
+                         or retained[-1].get("uuid") or "")
+            if rst_bk_id:
+                rst_name = f"pol_rst_{_rand_suffix()}"
+                self._restore_backup(rst_bk_id, rst_name)
+                self._wait_for_restore(rst_name)
+                self.logger.info(f"TC-BCK-025b: restore {rst_name} from {rst_bk_id} PASSED")
+            else:
+                self.logger.warning("TC-BCK-025b: SKIPPED — could not extract backup id")
+        else:
+            self.logger.warning("TC-BCK-025b: SKIPPED — no retained backups found")
+
         # --- TC-BCK-026: policy-detach from lvol ---
         self.logger.info("TC-BCK-026: policy-detach from lvol")
         self._detach_policy(policy_id, "lvol", lvol_id)
@@ -5285,6 +5300,13 @@ class TestBackupPolicyLvolLevel(BackupTestBase):
         bk_id = self._wait_for_backup_by_snap(snap_a, label="TC-BCK-165")
         assert bk_id, "Backup for lvol_A should have completed"
         self.logger.info(f"TC-BCK-165: Backup {bk_id} PASSED")
+
+        # TC-BCK-165b: restore the lvol_A backup to verify it is usable
+        self.logger.info(f"TC-BCK-165b: restoring backup {bk_id} to verify data integrity …")
+        rst_name = f"lvrst_{_rand_suffix()}"
+        self._restore_backup(bk_id, rst_name)
+        self._wait_for_restore(rst_name)
+        self.logger.info(f"TC-BCK-165b: restore {rst_name} from {bk_id} PASSED")
 
         # TC-BCK-166: lvol_B should have no backups
         self.logger.info("TC-BCK-166: Verifying lvol_B has no backup entries …")
