@@ -670,13 +670,18 @@ def _build_paths(src_node, tgt_node, src_rpc, tgt_rpc, primary_src_node=None):
             'node_id': node.get_id(),
         }
 
-    src_paths = [_entry(src_node, src_rpc, src_node.lvstore)]
+    # The lvstore NAME is always the true primary's own lvstore — a replica
+    # node hosts this data under the primary's lvstore name, not its own (a
+    # node's own .lvstore is whatever IT owns as a primary elsewhere in the
+    # HA ring, which is unrelated). Only the node/rpc/IP differ per entry.
+    src_lvstore = primary_src_node.lvstore
+    src_paths = [_entry(src_node, src_rpc, src_lvstore)]
     _src_seen_ids = {src_node.get_id()}
     if primary_src_node.secondary_node_id and primary_src_node.secondary_node_id not in _src_seen_ids:
         try:
             ss = db.get_storage_node_by_id(primary_src_node.secondary_node_id)
             if ss.status == StorageNode.STATUS_ONLINE:
-                src_paths.append(_entry(ss, _make_rpc(ss), src_node.lvstore))
+                src_paths.append(_entry(ss, _make_rpc(ss), src_lvstore))
                 _src_seen_ids.add(ss.get_id())
         except KeyError:
             pass
@@ -684,7 +689,7 @@ def _build_paths(src_node, tgt_node, src_rpc, tgt_rpc, primary_src_node=None):
         try:
             ts = db.get_storage_node_by_id(primary_src_node.tertiary_node_id)
             if ts.status == StorageNode.STATUS_ONLINE:
-                src_paths.append(_entry(ts, _make_rpc(ts), src_node.lvstore))
+                src_paths.append(_entry(ts, _make_rpc(ts), src_lvstore))
         except KeyError:
             pass
 
@@ -925,7 +930,7 @@ def _cleanup_final_migration(src_rpc, ctx, tgt_rpc=None, rollback_target=False,
 def _setup_snap_transfer(snap, snap_index, src_node, tgt_node,
                          src_rpc, tgt_rpc, trtype,
                          tgt_sec=None, sec_rpc=None, tgt_ter=None, ter_rpc=None,
-                         lvol_size_mib=None, migration=None):
+                         lvol_size_mib=None, migration=None, primary_src_node=None):
     """
     Prepare a single snapshot for async transfer:
       1. Create writable lvol on target primary
@@ -940,7 +945,7 @@ def _setup_snap_transfer(snap, snap_index, src_node, tgt_node,
     """
     snap_uuid = snap.uuid
     snap_short = _snap_tgt_short_name(snap)
-    src_composite = _snap_composite(src_node.lvstore, snap)
+    src_composite = _snap_composite((primary_src_node or src_node).lvstore, snap)
     tgt_composite = f"{tgt_node.lvstore}/{snap_short}"
 
     # Step 1: create target lvol on primary.
@@ -1210,7 +1215,7 @@ def _post_process_snap(snap: SnapShot, tgt_node: StorageNode, tgt_rpc: RPCClient
     return True, None
 
 
-def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
+def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc, primary_src_node=None):
     """
     Drive the SNAP_COPY phase.
 
@@ -1251,6 +1256,10 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
     plan = migration.snap_migration_plan
     trtype, _ = _get_migration_nic(tgt_node)
     ctx = migration.transfer_context or {}
+    # The lvstore NAME is always the true primary's own lvstore, regardless
+    # of which node (primary, secondary, or tertiary) is actually driving the
+    # transfer as src_node/src_rpc — see _build_paths' matching comment.
+    src_lvstore = (primary_src_node or src_node).lvstore
 
     # Snap bdevs on TGT must cover the full logical address range of the lvol,
     # not just each snap's own allocated clusters.
@@ -1365,7 +1374,7 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                     return False, True, f"Snapshot {snap_uuid} not found in DB"
 
                 snap_short_tgt = _snap_tgt_short_name(snap)
-                src_composite = _snap_composite(src_node.lvstore, snap)
+                src_composite = _snap_composite(src_lvstore, snap)
                 tgt_composite = f"{tgt_node.lvstore}/{snap_short_tgt}"
 
                 # Idempotency: transfer already running from a previous crashed run
@@ -1410,7 +1419,7 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                     tgt_sec=tgt_sec, sec_rpc=sec_rpc,
                     tgt_ter=tgt_ter, ter_rpc=ter_rpc,
                     lvol_size_mib=_snap_lvol_size_mib,
-                    migration=migration)
+                    migration=migration, primary_src_node=primary_src_node)
                 if t is None:
                     return False, True, err
 
@@ -1460,7 +1469,7 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                 migration.write_to_db(db.kv_store)
                 return False, True, f"Snapshot {snap_uuid} disappeared during transfer"
 
-            src_composite = _snap_composite(src_node.lvstore, snap)
+            src_composite = _snap_composite(src_lvstore, snap)
 
             # Update transfer-done status for this entry
             if not t['transfer_done']:
@@ -1532,7 +1541,7 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
     # additional shrink pass is worth the overhead.
     while migration.intermediate_snap_rounds < migration.max_intermediate_snap_rounds:
         _lvol = db.get_lvol_by_id(migration.lvol_id)
-        _src_composite = f"{src_node.lvstore}/{_lvol.lvol_bdev}"
+        _src_composite = f"{src_lvstore}/{_lvol.lvol_bdev}"
         _delta = _get_lvol_delta_bytes(src_rpc, _src_composite)
         _threshold = constants.LVOL_MIG_INTERMEDIATE_SNAP_THRESHOLD_BYTES
         if migration.intermediate_snap_rounds > 0 and _delta is not None and _delta <= _threshold:
@@ -1588,7 +1597,7 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                 ter_rpc = _make_rpc(tgt_ter)
 
         snap_short_tgt = _snap_tgt_short_name(snap)
-        src_composite  = _snap_composite(src_node.lvstore, snap)
+        src_composite  = _snap_composite(src_lvstore, snap)
         tgt_composite  = f"{tgt_node.lvstore}/{snap_short_tgt}"
 
         # Pre-cleanup: if a bdev exists on the target it is a writable leftover
@@ -1758,7 +1767,7 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc, primar
         return False, True, str(e)
 
     trtype, _ = _get_migration_nic(tgt_node)
-    src_lvol_composite = f"{src_node.lvstore}/{lvol.lvol_bdev}"
+    src_lvol_composite = f"{(primary_src_node or src_node).lvstore}/{lvol.lvol_bdev}"
     tgt_lvol_bdev = _lvol_tgt_bdev_name(lvol.lvol_bdev)
     tgt_lvol_composite = f"{tgt_node.lvstore}/{tgt_lvol_bdev}"
     ctx = migration.transfer_context or {}
@@ -2564,12 +2573,12 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc, prim
         try:
             snap = db.get_snapshot_by_id(snap_uuid)
             bdev_name = (source_snap_bdevs.get(snap_uuid)
-                         or f"{src_node.lvstore}/{_snap_short_name(snap)}")
+                         or f"{_primary_src_node.lvstore}/{_snap_short_name(snap)}")
             try:
                 _delete_bdev_blocking(bdev_name, src_rpc,
                                       secondary_rpc=src_sec_rpc, tertiary_rpc=src_ter_rpc,
                                       all_nodes=[n for n in [src_node, src_sec, src_ter] if n],
-                                      lvs_name=src_node.lvstore)
+                                      lvs_name=_primary_src_node.lvstore)
                 logger.info(f"Deleted source bdev {bdev_name}")
             except Exception as e:
                 logger.warning(f"delete source bdev {bdev_name}: {e}")
@@ -2598,13 +2607,13 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc, prim
     # lvol.lvol_bdev in the DB to the target name, so we must not use lvol.lvol_bdev.
     src_bdev_short = ctx.get('source_lvol_bdev')
     if lvol is not None and src_bdev_short:
-        src_lvol_composite = f"{src_node.lvstore}/{src_bdev_short}"
+        src_lvol_composite = f"{_primary_src_node.lvstore}/{src_bdev_short}"
         try:
             _delete_bdev_blocking(
                 src_lvol_composite, src_rpc,
                 secondary_rpc=src_sec_rpc, tertiary_rpc=src_ter_rpc,
                 all_nodes=[n for n in [src_node, src_sec, src_ter] if n],
-                lvs_name=src_node.lvstore)
+                lvs_name=_primary_src_node.lvstore)
             logger.info(f"Deleted source lvol bdev {src_lvol_composite}")
         except Exception as e:
             logger.warning(f"Source lvol delete failed: {e}")
@@ -3012,7 +3021,8 @@ def task_runner(task):
 
         if phase == LVolMigration.PHASE_SNAP_COPY:
             done, suspend, error = _handle_snap_copy(
-                migration, src_node, tgt_node, src_rpc, tgt_rpc)
+                migration, src_node, tgt_node, src_rpc, tgt_rpc,
+                primary_src_node=primary_src_node)
             next_phase = LVolMigration.PHASE_LVOL_MIGRATE
 
         elif phase == LVolMigration.PHASE_LVOL_MIGRATE:
@@ -3176,7 +3186,7 @@ def _post_process_snap_group(snap, migration):
     return True, None
 
 
-def _handle_group_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
+def _handle_group_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc, primary_src_node=None):
     """
     SNAP_COPY phase for a group worker.
 
@@ -3190,6 +3200,10 @@ def _handle_group_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
     plan = migration.snap_migration_plan
     trtype, _ = _get_migration_nic(tgt_node)
     ctx = migration.transfer_context or {}
+    # See _build_paths' matching comment: the lvstore NAME is always the true
+    # primary's own lvstore, regardless of which node is actually driving the
+    # transfer as src_node/src_rpc.
+    src_lvstore = (primary_src_node or src_node).lvstore
 
     try:
         _lvol_for_size = db.get_lvol_by_id(migration.lvol_id)
@@ -3213,7 +3227,7 @@ def _handle_group_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             return False, True, f"Snapshot {snap_uuid} not found in DB"
 
         snap_short_tgt = _snap_tgt_short_name(snap)
-        src_composite = _snap_composite(src_node.lvstore, snap)
+        src_composite = _snap_composite(src_lvstore, snap)
         tgt_composite = f"{tgt_node.lvstore}/{snap_short_tgt}"
 
         existing_stat = src_rpc.bdev_lvol_transfer_stat(src_composite)
@@ -3259,7 +3273,7 @@ def _handle_group_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             tgt_sec=_g_tgt_sec, sec_rpc=_g_sec_rpc,
             tgt_ter=_g_tgt_ter, ter_rpc=_g_ter_rpc,
             lvol_size_mib=_snap_lvol_size_mib,
-            migration=migration)
+            migration=migration, primary_src_node=primary_src_node)
         if t is None:
             return False, True, err
 
@@ -3284,7 +3298,7 @@ def _handle_group_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                 migration.write_to_db(db.kv_store)
                 return False, True, f"Snapshot {snap_uuid} disappeared during transfer"
 
-            src_composite = _snap_composite(src_node.lvstore, snap)
+            src_composite = _snap_composite(src_lvstore, snap)
             if not t['transfer_done']:
                 result = src_rpc.bdev_lvol_transfer_stat(src_composite)
                 if result is None:
@@ -3322,7 +3336,7 @@ def _handle_group_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
     return True, False, None
 
 
-def _handle_group_intermediate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
+def _handle_group_intermediate(migration, src_node, tgt_node, src_rpc, tgt_rpc, primary_src_node=None):
     """
     INTERMEDIATE phase for a group worker.
 
@@ -3334,6 +3348,10 @@ def _handle_group_intermediate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
     """
     trtype, _ = _get_migration_nic(tgt_node)
     ctx = migration.transfer_context or {}
+    # See _build_paths' matching comment: the lvstore NAME is always the true
+    # primary's own lvstore, regardless of which node is actually driving the
+    # transfer as src_node/src_rpc.
+    src_lvstore = (primary_src_node or src_node).lvstore
 
     # If we already took and transferred the intermediate snap, we're done.
     if ctx.get('stage') == 'intermediate_done':
@@ -3393,7 +3411,7 @@ def _handle_group_intermediate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             tgt_sec=_g_tgt_sec, sec_rpc=_g_sec_rpc,
             tgt_ter=_g_tgt_ter, ter_rpc=_g_ter_rpc,
             lvol_size_mib=_snap_lvol_size_mib,
-            migration=migration)
+            migration=migration, primary_src_node=primary_src_node)
         if t is None:
             return False, True, err
 
@@ -3414,7 +3432,7 @@ def _handle_group_intermediate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         migration.write_to_db(db.kv_store)
         return False, True, f"Intermediate snap {snap_uuid} disappeared"
 
-    src_composite = _snap_composite(src_node.lvstore, snap)
+    src_composite = _snap_composite(src_lvstore, snap)
     if not t.get('transfer_done'):
         result = src_rpc.bdev_lvol_transfer_stat(src_composite)
         if result is None:
@@ -3524,7 +3542,8 @@ def _group_worker_phase_dispatch(task, migration, phase, src_node, tgt_node, src
         if migration_id not in group.snap_copy_done:
             # Still transferring owned snaps.
             done, suspend, error = _handle_group_snap_copy(
-                migration, src_node, tgt_node, src_rpc, tgt_rpc)
+                migration, src_node, tgt_node, src_rpc, tgt_rpc,
+                primary_src_node=primary_src_node)
             if error:
                 return _group_worker_budget_suspend(task, migration, group_id, error)
             if suspend:
@@ -3567,7 +3586,8 @@ def _group_worker_phase_dispatch(task, migration, phase, src_node, tgt_node, src
     if phase == LVolMigration.PHASE_LVOL_MIGRATE:
         if migration_id not in group.intermediates_done:
             done, suspend, error = _handle_group_intermediate(
-                migration, src_node, tgt_node, src_rpc, tgt_rpc)
+                migration, src_node, tgt_node, src_rpc, tgt_rpc,
+                primary_src_node=primary_src_node)
             if error:
                 return _group_worker_budget_suspend(task, migration, group_id, error)
             if suspend:
