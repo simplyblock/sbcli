@@ -5,6 +5,8 @@ from typing import List, Optional
 from pydantic import SecretStr
 
 from simplyblock_core import constants
+from simplyblock_core.exceptions import PreconditionError
+from simplyblock_core.models.backup_config import BackupConfig
 from simplyblock_core.models.base_model import BaseModel
 
 
@@ -223,6 +225,28 @@ class Cluster(BaseModel):
         if len(qos_classes) > 1:
             return True
         return False
+
+    def get_backup_config(self) -> BackupConfig:
+        """Validate and return this cluster's volume-backup configuration.
+
+        ``backup_config`` stays an untyped dict on the record because
+        ``BaseModel`` cannot nest pydantic models; validating on read gives the
+        typing without an FDB migration.
+
+        Raises:
+            PreconditionError: The cluster has no backup configuration, or the
+                stored one is not valid -- most commonly a pre-existing config
+                that predates the mandatory ``region``.
+        """
+        if not self.backup_config:
+            raise PreconditionError(f"Cluster {self.get_id()} has no backup configuration")
+
+        try:
+            return BackupConfig.model_validate(self.backup_config)
+        except ValueError as e:
+            raise PreconditionError(
+                f"Cluster {self.get_id()} has an invalid backup configuration: {e}"
+            ) from e
 
     def get_backup_path(self, path=""):
         if self.backup_s3_bucket and self.backup_s3_cred:
