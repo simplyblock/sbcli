@@ -9,6 +9,7 @@ import time
 import argcomplete
 
 from simplyblock_core import cluster_ops, utils, db_controller, constants
+from simplyblock_core.backup_manifest import BackupManifest
 from simplyblock_core.exceptions import MigrationConflictError, PreconditionError
 from simplyblock_core import storage_node_ops as storage_ops
 from simplyblock_core import mgmt_node_ops as mgmt_ops
@@ -1137,18 +1138,18 @@ class CLIWrapperBase:
         return True
 
     def backup__export(self, sub_command, args):
-        data = backup_controller.export_backups(
+        manifests = backup_controller.export_backups(
             cluster_id=getattr(args, 'cluster_id', None),
             lvol_name=getattr(args, 'lvol_name', None))
-        if not data:
+        if not manifests:
             print("No completed backups found")
             return False
-        output = _format_json(data)
+        output = _format_json([m.model_dump(mode="json") for m in manifests])
         output_file = getattr(args, 'output', None)
         if output_file:
             with open(output_file, 'w') as f:
                 f.write(output)
-            print(f"Exported {len(data)} backup(s) to {output_file}")
+            print(f"Exported {len(manifests)} backup(s) to {output_file}")
         else:
             print(output)
         return True
@@ -1156,14 +1157,23 @@ class CLIWrapperBase:
     def backup__import(self, sub_command, args):
         try:
             with open(args.metadata_file, 'r') as f:
-                metadata_list = json.load(f)
+                entries = json.load(f)
         except Exception as e:
             print(f"Error reading metadata file: {e}")
             return False
-        if not isinstance(metadata_list, list):
-            metadata_list = [metadata_list]
+        if not isinstance(entries, list):
+            entries = [entries]
+
+        # Parsed here rather than in the controller so a malformed file is
+        # reported as a problem with the file, naming it.
+        try:
+            manifests = [BackupManifest.model_validate(entry) for entry in entries]
+        except ValueError as e:
+            print(f"{args.metadata_file} is not a backup export: {e}")
+            return False
+
         count = backup_controller.import_backups(
-            metadata_list, cluster_id=getattr(args, 'cluster_id', None))
+            manifests, cluster_id=getattr(args, 'cluster_id', None))
         print(f"Imported {count} backup(s)")
         return True
 
