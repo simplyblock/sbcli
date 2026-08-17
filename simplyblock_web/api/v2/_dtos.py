@@ -22,6 +22,7 @@ from simplyblock_core.models.replication import (
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.backup import Backup, BackupPolicy
+from simplyblock_core.models.backup_config import BackupConfig
 from simplyblock_core.models.stats import StatsObject
 from simplyblock_core.models.lvol_migration import LVolMigration
 from simplyblock_core.models.lvol_migration_group import LVolMigrationGroup
@@ -595,6 +596,16 @@ class VolumeDTO(BaseModel):
             group_id=model.group_id,
             group_seq=_grp_seq,
         )
+
+
+#: A cluster's backup configuration as the API exchanges it, in both
+#: directions: the request body of the PUT and the response body of the GET.
+#:
+#: An alias rather than a hand-copied duplicate, because the two shapes are
+#: identical today and a copy would only drift. It is still a name of its own, so
+#: the wire format can diverge from ``BackupConfig`` later by turning this into a
+#: real class, without touching a single route signature.
+BackupConfigDTO = BackupConfig
 
 
 class BackupDTO(BaseModel):
