@@ -603,65 +603,79 @@ class TestDBControllerBackupChainLocks(unittest.TestCase):
 # ===========================================================================
 
 class TestRestoreBackup(unittest.TestCase):
+    """Real FDB: restore reads backup/pool/cluster state and creates a volume.
+
+    add_lvol_ha and the task runner are mocked -- they sit above the database
+    and drive RPC to storage nodes.
+    """
+
+    CLUSTER_ID = "00000000-0000-0000-0000-000000000001"
+
+    def setUp(self):
+        from simplyblock_core.models.pool import Pool
+        self.db = DBController()
+
+        cluster = _cluster(uuid=self.CLUSTER_ID)
+        cluster.write_to_db(self.db.kv_store)
+
+        pool = Pool()
+        pool.uuid = "pool-1"
+        pool.pool_name = "pool-1"  # resolved by name: "pool-1" is not a UUID
+        pool.cluster_id = self.CLUSTER_ID
+        pool.write_to_db(self.db.kv_store)
+
+    def _backup(self, **overrides):
+        backup = _backup(cluster_id=self.CLUSTER_ID, **overrides)
+        backup.location = _backup_config().location().model_dump(mode="json")
+        backup.write_to_db(self.db.kv_store)
+        return backup
 
     @patch("simplyblock_core.controllers.backup_controller.tasks_controller")
-    @patch("simplyblock_core.controllers.backup_controller.db_controller")
-    def test_success(self, mock_db, mock_tasks):
-        cluster_uuid = "00000000-0000-0000-0000-000000000001"
-        backup = _backup(s3_id=5, cluster_id=cluster_uuid)
-        mock_db.get_backup_by_id.return_value = backup
-        mock_db.get_backup_chain.return_value = [backup]
+    def test_success(self, mock_tasks):
+        self._backup(s3_id=5)
         mock_tasks.add_backup_restore_task.return_value = True
 
-        mock_cluster = MagicMock()
-        mock_cluster.uuid = cluster_uuid
-        mock_cluster.backup_source = ""
-        mock_db.get_cluster_by_id.return_value = mock_cluster
+        lvol = LVol()
+        lvol.uuid = "lvol-new"
+        lvol.node_id = "node-1"
+        lvol.lvs_name = "lvs_test"
+        lvol.lvol_bdev = "LVOL_123"
+        lvol.pool_uuid = "pool-1"
+        lvol.write_to_db(self.db.kv_store)
 
-        # Mock the lvol created by add_lvol_ha
-        mock_lvol = MagicMock()
-        mock_lvol.node_id = "node-1"
-        mock_lvol.lvs_name = "lvs_test"
-        mock_lvol.lvol_bdev = "LVOL_123"
-        mock_lvol.write_to_db = MagicMock()
-        mock_db.get_lvol_by_id.return_value = mock_lvol
-
-        with patch("simplyblock_core.controllers.lvol_controller.add_lvol_ha") as mock_add_ha:
-            mock_add_ha.return_value = ("lvol-new", None)
-
+        with patch("simplyblock_core.controllers.lvol_controller.add_lvol_ha",
+                   return_value=("lvol-new", None)):
             from simplyblock_core.controllers.backup_controller import restore_backup
             result = restore_backup("backup-1", "restored_lvol", "pool-1")
 
         self.assertEqual(result, "lvol-new")
-        # Verify s3_id integers are passed, not UUIDs
-        call_args = mock_tasks.add_backup_restore_task.call_args
-        self.assertEqual(call_args[0][4], [5])
+        # s3_id integers reach the data plane, not backup UUIDs.
+        self.assertEqual(mock_tasks.add_backup_restore_task.call_args[0][4], [5])
+        self.assertEqual(self.db.get_lvol_by_id("lvol-new").status, LVol.STATUS_RESTORING)
 
-    @patch("simplyblock_core.controllers.backup_controller.db_controller")
-    def test_backup_not_found(self, mock_db):
-        mock_db.get_backup_by_id.side_effect = KeyError("not found")
-
+    def test_backup_not_found(self):
         from simplyblock_core.controllers.backup_controller import restore_backup
         with self.assertRaises(PreconditionError):
             restore_backup("missing", "lvol", "pool-1")
 
-    @patch("simplyblock_core.controllers.backup_controller.db_controller")
-    def test_add_lvol_ha_fails(self, mock_db):
-        cluster_uuid = "00000000-0000-0000-0000-000000000001"
-        mock_db.get_backup_by_id.return_value = _backup(cluster_id=cluster_uuid)
-        mock_db.get_backup_chain.return_value = [_backup(cluster_id=cluster_uuid)]
+    def test_add_lvol_ha_fails(self):
+        self._backup()
 
-        mock_cluster = MagicMock()
-        mock_cluster.uuid = cluster_uuid
-        mock_cluster.backup_source = ""
-        mock_db.get_cluster_by_id.return_value = mock_cluster
-
-        with patch("simplyblock_core.controllers.lvol_controller.add_lvol_ha") as mock_add_ha:
-            mock_add_ha.return_value = (None, "Pool not found")
-
+        with patch("simplyblock_core.controllers.lvol_controller.add_lvol_ha",
+                   return_value=(None, "Pool not found")):
             from simplyblock_core.controllers.backup_controller import restore_backup
             with self.assertRaisesRegex(RuntimeError, "Failed to create restore volume"):
-                restore_backup("backup-1", "lvol", "bad-pool")
+                restore_backup("backup-1", "lvol", "pool-1")
+
+    def test_incomplete_chain_is_refused(self):
+        self._backup(uuid="b-old", s3_id=1, status=Backup.STATUS_IN_PROGRESS)
+        self._backup(uuid="backup-1", s3_id=2, prev_backup_id="b-old")
+
+        from simplyblock_core.controllers.backup_controller import restore_backup
+        with self.assertRaisesRegex(PreconditionError, "Incomplete backups in chain"):
+            restore_backup("backup-1", "lvol", "pool-1")
+
+        self.assertEqual(self.db.get_lvols(), [])
 
 
 # ===========================================================================

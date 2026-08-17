@@ -20,6 +20,9 @@ TARGET_CLUSTER = "00000000-0000-0000-0000-00000000000c"
 SOURCE_CLUSTER = "00000000-0000-0000-0000-00000000000f"
 
 
+LOCATION = {"bucket_name": "backups", "region": "eu-central-1"}
+
+
 def _backup(node_id, cluster_id=TARGET_CLUSTER, source_cluster_id=""):
     backup = Backup()
     backup.uuid = "backup-1"
@@ -29,6 +32,7 @@ def _backup(node_id, cluster_id=TARGET_CLUSTER, source_cluster_id=""):
     backup.source_cluster_id = source_cluster_id
     backup.size = 1024
     backup.status = Backup.STATUS_COMPLETED
+    backup.location = dict(LOCATION)
     return backup
 
 
