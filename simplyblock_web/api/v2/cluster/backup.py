@@ -2,10 +2,13 @@ from typing import List, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
+from simplyblock_core.backup_manifest import ManifestError
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.controllers import backup_controller
+from simplyblock_core.exceptions import PreconditionError
+from simplyblock_core.models.backup_config import BackupConfig
 from simplyblock_core.models.cluster import Cluster as ClusterModel
 from simplyblock_core.models.lvol_model import LVol
 
@@ -60,13 +63,50 @@ def restore_backup(cluster: Cluster, parameters: _RestoreParams):
 
 
 class _ImportParams(BaseModel):
-    metadata: list[dict]
+    """Manifests to import, either supplied inline or read from a bucket.
+
+    Exactly one source: `metadata` for a hand-carried file, `source` to read the
+    bucket directly. The latter is the disaster-recovery path -- it needs only a
+    bucket and credentials for it.
+    """
+    metadata: Optional[list[dict]] = None
+    source: Optional[BackupConfig] = None
+
+    @model_validator(mode="after")
+    def exactly_one_source(self):
+        if (self.metadata is None) == (self.source is None):
+            raise ValueError("Provide exactly one of 'metadata' or 'source'")
+        return self
 
 
 @api.post('/import', name='clusters:backups:import')
 def import_backups(cluster: Cluster, parameters: _ImportParams):
-    count = backup_controller.import_backups(parameters.metadata, cluster_id=cluster.get_id())
+    try:
+        if parameters.source is not None:
+            count = backup_controller.import_from_bucket(
+                parameters.source, cluster_id=cluster.get_id())
+        else:
+            count = backup_controller.import_backups(
+                parameters.metadata, cluster_id=cluster.get_id())
+    except ManifestError as e:
+        raise HTTPException(502, str(e)) from e
+    except PreconditionError as e:
+        raise HTTPException(409, str(e)) from e
     return {"imported": count}
+
+
+@api.post('/discover', name='clusters:backups:discover')
+def discover_backups(parameters: BackupConfig):
+    """List the backups a bucket contains, without importing anything.
+
+    A POST because it carries credentials, which have no business in a query
+    string. Takes no cluster state at all: this is what an operator runs when
+    the cluster that wrote the backups no longer exists.
+    """
+    try:
+        return backup_controller.discover_backups(parameters)
+    except ManifestError as e:
+        raise HTTPException(502, str(e)) from e
 
 
 @api.get('/export', name='clusters:backups:export')
