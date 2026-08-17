@@ -65,7 +65,13 @@ class _ImportParams(BaseModel):
 
 @api.post('/import', name='clusters:backups:import')
 def import_backups(cluster: Cluster, parameters: _ImportParams):
-    count = backup_controller.import_backups(parameters.metadata, cluster_id=cluster.get_id())
+    try:
+        count = backup_controller.import_backups(parameters.metadata, cluster_id=cluster.get_id())
+    except ValueError as e:
+        # The request body could not be read as backup descriptions, which is a
+        # bad request rather than an unmet precondition (those reach 400 through
+        # app.py's PreconditionError handler).
+        raise HTTPException(400, str(e)) from e
     return {"imported": count}
 
 
