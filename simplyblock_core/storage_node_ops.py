@@ -6224,7 +6224,7 @@ def _restart_storage_node_impl(
             from simplyblock_core.controllers import backup_controller
             logger.info("Creating S3 bdev on restarted node")
             try:
-                backup_controller.create_s3_bdev(snode, cluster.backup_config)
+                backup_controller.create_s3_bdev(snode, cluster.get_backup_config())
             except Exception as e:
                 logger.exception(str(e))
                 return False

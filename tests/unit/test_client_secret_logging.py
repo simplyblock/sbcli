@@ -80,6 +80,65 @@ def test_rpc_client_response_body_logged_when_flag_on(rpc_client, caplog, monkey
     assert "RESPVALUE" in _captured_logs_text(caplog)
 
 
+def _sent_params(client):
+    return json.loads(client._fake_session.post.call_args.kwargs["data"])["params"]
+
+
+def test_bdev_s3_create_keys_reach_the_wire_but_not_the_log(rpc_client, caplog):
+    # bdev_s3_create is the only RPC carrying S3 keys, and it goes through
+    # _request3, which logs its parameter dict directly -- only a SecretStr
+    # masks there.
+    rpc_client._fake_session.post.return_value = _make_json_response({
+        "jsonrpc": "2.0", "id": 1, "result": True,
+    })
+
+    with caplog.at_level(logging.DEBUG):
+        rpc_client.bdev_s3_create(
+            name="s3_lvs_test",
+            access_key_id=SecretStr("AKIAEXAMPLE"),
+            secret_access_key=SecretStr("s3cr3t"),
+        )
+
+    params = _sent_params(rpc_client)
+    assert params["access_key_id"] == "AKIAEXAMPLE"
+    assert params["secret_access_key"] == "s3cr3t"
+
+    logged = _captured_logs_text(caplog)
+    assert "AKIAEXAMPLE" not in logged
+    assert "s3cr3t" not in logged
+    assert "**********" in logged
+
+
+def test_bdev_s3_create_omits_absent_credentials(rpc_client):
+    rpc_client._fake_session.post.return_value = _make_json_response({
+        "jsonrpc": "2.0", "id": 1, "result": True,
+    })
+
+    rpc_client.bdev_s3_create(name="s3_lvs_test")
+
+    params = _sent_params(rpc_client)
+    assert "access_key_id" not in params
+    assert "secret_access_key" not in params
+
+
+def test_bdev_s3_create_does_not_send_empty_credentials_as_keys(rpc_client):
+    # An empty key pair is not an absent one to the AWS SDK: it reads as a valid
+    # anonymous identity, and the default provider chain (the node's instance
+    # role) is then never consulted.
+    rpc_client._fake_session.post.return_value = _make_json_response({
+        "jsonrpc": "2.0", "id": 1, "result": True,
+    })
+
+    rpc_client.bdev_s3_create(
+        name="s3_lvs_test",
+        access_key_id=SecretStr(""), secret_access_key=SecretStr(""),
+    )
+
+    params = _sent_params(rpc_client)
+    assert "access_key_id" not in params
+    assert "secret_access_key" not in params
+
+
 @pytest.fixture
 def snode_client():
     with patch("simplyblock_core.snode_client.requests.session") as session_factory:
