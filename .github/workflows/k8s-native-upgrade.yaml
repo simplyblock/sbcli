@@ -804,6 +804,7 @@ jobs:
             sbcli-dev -d --dev cluster create \
               --mgmt-ip "$MGMT_IP" \
               --mode kubernetes \
+              --disable-monitoring \
               --data-chunks-per-stripe "${NDCS}" \
               --parity-chunks-per-stripe "${NPCS}" 2>&1) || true
           echo "Cluster create output: $CREATE_OUTPUT"
