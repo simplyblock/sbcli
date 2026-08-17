@@ -29,22 +29,85 @@ class _Clone:
         return self.uuid
 
 
+class _TargetCopy:
+    """A replicated snapshot as it exists on the remote cluster.
+
+    ``prev_snap_uuid`` is the chain link retention checks before it deletes a
+    predecessor: it is only written once bdev_lvol_add_clone + convert succeeded.
+    """
+
+    def __init__(self, uuid, prev_snap_uuid="", node_id="TN1"):
+        self.uuid = uuid
+        self.prev_snap_uuid = prev_snap_uuid
+        self.snap_bdev = f"LVS_T/{uuid}"
+        self.snap_uuid = f"uuid-{uuid}"
+        lv = LVol()
+        lv.uuid = "T_LV1"
+        lv.node_id = node_id
+        self.lvol = lv
+
+    def get_id(self):
+        return self.uuid
+
+
+class _FakeNode:
+    """Target node. Offline by default so the SPDK fallback stays out of the
+    way unless a test explicitly opts into it."""
+
+    def __init__(self, status=LVol.STATUS_OFFLINE, bdevs=None):
+        self.status = status
+        self._bdevs = bdevs or []
+
+    def rpc_client(self):
+        node = self
+
+        class _RPC:
+            def get_bdevs(self, name):
+                return [b for b in node._bdevs if b.get("name") == name]
+
+        return _RPC()
+
+
 class _FakeDB:
-    def __init__(self, source_snaps, existing_uuids, clones=()):
+    def __init__(self, source_snaps, existing_uuids, clones=(), chain=None, node=None):
         self._source_snaps = source_snaps
         self._existing = set(existing_uuids)
         self._clones = list(clones)
+        self._chain = dict(chain or {})
+        self._node = node or _FakeNode()
 
     def get_snapshots_by_node_id(self, node_id):
         return [s for s in self._source_snaps if s.lvol.node_id == node_id]
 
     def get_snapshot_by_id(self, uuid):
         if uuid in self._existing:
-            return object()
+            return _TargetCopy(uuid, self._chain.get(uuid, ""))
         raise KeyError(uuid)
+
+    def get_storage_node_by_id(self, node_id):
+        return self._node
 
     def get_mini_lvols(self):
         return self._clones
+
+
+def _healthy_chain(source_snaps):
+    """Link each replicated internal target copy onto its predecessor's.
+
+    This is the state a converged replication leaves behind, so it is the
+    default for the existing cases: they assert on retention, not on chaining.
+    """
+    chain = {}
+    per_lvol = {}
+    for s in source_snaps:
+        if s.snap_type != SnapShot.TYPE_INTERNAL or not s.target_replicated_snap_uuid:
+            continue
+        per_lvol.setdefault(s.lvol.get_id(), []).append(s)
+    for snaps in per_lvol.values():
+        snaps.sort(key=lambda s: s.created_at)
+        for prev, nxt in zip(snaps, snaps[1:]):
+            chain[nxt.target_replicated_snap_uuid] = prev.target_replicated_snap_uuid
+    return chain
 
 
 class _FakeSnapCtl:
@@ -58,8 +121,10 @@ class _FakeSnapCtl:
         return True
 
 
-def _patch(monkeypatch, source_snaps, existing_uuids, clones=()):
-    db = _FakeDB(source_snaps, existing_uuids, clones)
+def _patch(monkeypatch, source_snaps, existing_uuids, clones=(), chain=None, node=None):
+    if chain is None:
+        chain = _healthy_chain(source_snaps)
+    db = _FakeDB(source_snaps, existing_uuids, clones, chain, node)
     snapctl = _FakeSnapCtl(db)
     monkeypatch.setattr(sr, "db", db)
     monkeypatch.setattr(sr, "snapshot_controller", snapctl)
@@ -245,3 +310,105 @@ def test_newest_pair_is_kept_so_arrivals_have_a_chain_parent(monkeypatch):
 
     assert snapctl.deleted == [], (
         "pruned the predecessor the next arrival must chain onto")
+
+
+def test_defers_prune_until_the_successor_is_actually_chained(monkeypatch):
+    """The count cushion is not the precondition — the chain link is.
+
+    Keeping the newest N only widens the window in which chaining is expected to
+    have happened. If it lagged or failed for one snapshot while newer ones kept
+    arriving, the predecessor was still pruned, and because the delete reaches
+    SPDK as bdev_lvol_delete(sync=False) its segments were freed instead of
+    swap-merged into the successor. The target then holds the newest delta over
+    holes and a fail-over clone reads zeros (labs 2026-08-10..17). Retention must
+    verify the link and defer while it is absent.
+    """
+    source_lvol = LVol()
+    source_lvol.uuid = "LV1"
+    source_lvol.node_id = "N1"
+
+    snaps = [
+        _mk_snap("int_old", 100, SnapShot.TYPE_INTERNAL, "LV1", "N1", target="T_old"),
+        _mk_snap("int_mid", 200, SnapShot.TYPE_INTERNAL, "LV1", "N1", target="T_mid"),
+        _mk_snap("int_new", 300, SnapShot.TYPE_INTERNAL, "LV1", "N1", target="T_new"),
+    ]
+    # T_mid arrived but was never chained onto T_old.
+    snapctl = _patch(monkeypatch, snaps, {"T_old", "T_mid", "T_new"}, chain={})
+
+    sr._prune_internal_snapshots(source_lvol)
+
+    assert snapctl.deleted == [], (
+        "pruned a predecessor whose successor is not chained onto it — SPDK frees "
+        "the blocks immediately, so those segments are lost rather than merged")
+
+
+def test_prunes_once_the_chain_is_established(monkeypatch):
+    """The deferral must release as soon as chaining catches up (no livelock)."""
+    source_lvol = LVol()
+    source_lvol.uuid = "LV1"
+    source_lvol.node_id = "N1"
+
+    snaps = [
+        _mk_snap("int_old", 100, SnapShot.TYPE_INTERNAL, "LV1", "N1", target="T_old"),
+        _mk_snap("int_mid", 200, SnapShot.TYPE_INTERNAL, "LV1", "N1", target="T_mid"),
+        _mk_snap("int_new", 300, SnapShot.TYPE_INTERNAL, "LV1", "N1", target="T_new"),
+    ]
+    snapctl = _patch(monkeypatch, snaps, {"T_old", "T_mid", "T_new"},
+                     chain={"T_mid": "T_old", "T_new": "T_mid"})
+
+    sr._prune_internal_snapshots(source_lvol)
+
+    assert snapctl.deleted == ["T_old", "int_old"]
+
+
+def test_spdk_verdict_releases_a_missing_db_link(monkeypatch):
+    """A missing link must not pin the pair for ever.
+
+    The link write is best-effort, and snapshots replicated before chaining was
+    implemented have none at all. SPDK is the real authority, so when the DB has
+    no link we ask the target node before giving up — otherwise retention would
+    never release those snapshots and both chains would grow without bound.
+    """
+    source_lvol = LVol()
+    source_lvol.uuid = "LV1"
+    source_lvol.node_id = "N1"
+
+    snaps = [
+        _mk_snap("int_old", 100, SnapShot.TYPE_INTERNAL, "LV1", "N1", target="T_old"),
+        _mk_snap("int_mid", 200, SnapShot.TYPE_INTERNAL, "LV1", "N1", target="T_mid"),
+        _mk_snap("int_new", 300, SnapShot.TYPE_INTERNAL, "LV1", "N1", target="T_new"),
+    ]
+    # SPDK reports T_mid as a clone whose base is T_old, while the DB link is absent.
+    node = _FakeNode(status=LVol.STATUS_ONLINE, bdevs=[{
+        "name": "LVS_T/T_mid",
+        "driver_specific": {"lvol": {"clone": True, "base_snapshot": "LVS_T/T_old"}},
+    }])
+    snapctl = _patch(monkeypatch, snaps, {"T_old", "T_mid", "T_new"},
+                     chain={}, node=node)
+
+    sr._prune_internal_snapshots(source_lvol)
+
+    assert snapctl.deleted == ["T_old", "int_old"]
+
+
+def test_unchained_in_spdk_is_not_pruned_even_when_node_is_reachable(monkeypatch):
+    """An online target that reports a standalone blob must still defer."""
+    source_lvol = LVol()
+    source_lvol.uuid = "LV1"
+    source_lvol.node_id = "N1"
+
+    snaps = [
+        _mk_snap("int_old", 100, SnapShot.TYPE_INTERNAL, "LV1", "N1", target="T_old"),
+        _mk_snap("int_mid", 200, SnapShot.TYPE_INTERNAL, "LV1", "N1", target="T_mid"),
+        _mk_snap("int_new", 300, SnapShot.TYPE_INTERNAL, "LV1", "N1", target="T_new"),
+    ]
+    node = _FakeNode(status=LVol.STATUS_ONLINE, bdevs=[{
+        "name": "LVS_T/T_mid",
+        "driver_specific": {"lvol": {"clone": False, "base_snapshot": None}},
+    }])
+    snapctl = _patch(monkeypatch, snaps, {"T_old", "T_mid", "T_new"},
+                     chain={}, node=node)
+
+    sr._prune_internal_snapshots(source_lvol)
+
+    assert snapctl.deleted == []
