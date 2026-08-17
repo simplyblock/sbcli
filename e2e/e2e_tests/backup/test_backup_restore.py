@@ -2007,16 +2007,20 @@ class TestBackupPolicy(BackupTestBase):
             f"TC-BCK-025: {len(retained)} backups after 4 snaps (policy versions=3)")
         # Retention is eventually enforced; we just log the count for now
 
-        # --- TC-BCK-025b: restore one of the retained backups ---
-        self.logger.info("TC-BCK-025b: restore a policy-created backup to verify data integrity")
+        # --- TC-BCK-025b: restore a retained backup to verify chain integrity ---
+        # After retention prunes/merges, remaining backups must still be
+        # restorable.  If restore fails with "Incomplete backups in chain"
+        # that is a product bug — retention should not break restorability.
         if retained:
             rst_bk_id = (retained[-1].get("id") or retained[-1].get("ID")
                          or retained[-1].get("uuid") or "")
             if rst_bk_id:
+                self.logger.info(
+                    f"TC-BCK-025b: restoring {rst_bk_id} to verify post-retention chain")
                 rst_name = f"pol_rst_{_rand_suffix()}"
                 self._restore_backup(rst_bk_id, rst_name)
                 self._wait_for_restore(rst_name)
-                self.logger.info(f"TC-BCK-025b: restore {rst_name} from {rst_bk_id} PASSED")
+                self.logger.info(f"TC-BCK-025b: restore {rst_name} PASSED")
             else:
                 self.logger.warning("TC-BCK-025b: SKIPPED — could not extract backup id")
         else:
