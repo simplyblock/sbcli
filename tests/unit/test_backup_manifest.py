@@ -10,6 +10,8 @@ from simplyblock_core import backup_manifest
 from simplyblock_core.backup_manifest import (
     BackupManifest,
     DataPlane,
+    Encryption,
+    KeyDescriptor,
     ManifestError,
     MANIFEST_SCHEMA_VERSION,
     Source,
@@ -28,7 +30,7 @@ def _manifest(**overrides):
         "created_at": 100,
         "completed_at": 200,
         "size": 4096,
-        "encrypted": False,
+        "encryption": Encryption(encrypted=False),
         "location": BackupLocation.model_validate(LOCATION),
         "source": Source(cluster_id="c-1", node_id="n-1"),
         "volume": Volume(lvol_id="l-1", lvol_name="vol", snapshot_id="s-1",
@@ -49,7 +51,9 @@ class TestManifestKey:
 
 class TestSchema:
     def test_round_trip(self):
-        original = _manifest(encrypted=True, prev_backup_id="b-0")
+        original = _manifest(prev_backup_id="b-0", encryption=Encryption(
+            encrypted=True,
+            descriptor=KeyDescriptor(kms="local", dek_path="p", kek_name="k")))
 
         restored = backup_manifest._parse(original.model_dump_json().encode(), "k")
 
