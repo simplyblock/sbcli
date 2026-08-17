@@ -742,6 +742,10 @@ jobs:
         run: |
           set -euxo pipefail
 
+          # 0. Kill orphaned mc trace processes and stale logs from previous runs
+          pkill -f "mc admin trace" 2>/dev/null || true
+          sudo rm -f /tmp/minio-trace-*.log
+
           # 1. Install mc (MinIO Client)
           sudo rm -f /tmp/mc
           curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o /tmp/mc
