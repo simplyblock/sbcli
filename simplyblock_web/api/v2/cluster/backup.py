@@ -143,22 +143,6 @@ def export_backups(
         cluster_id=cluster.get_id(), lvol_name=lvol_name_filter)
 
 
-class _BackupSourceSwitchParams(BaseModel):
-    source_cluster_id: str
-
-
-@api.post('/source-switch', name='clusters:backups:source-switch')
-def source_switch(cluster: Cluster, parameters: _BackupSourceSwitchParams):
-    backup_controller.switch_backup_source(cluster.get_id(), parameters.source_cluster_id)
-    return {"source_cluster_id": parameters.source_cluster_id}
-
-
-@api.get('/sources', name='clusters:backups:sources')
-def list_sources(cluster: Cluster):
-    sources = backup_controller.get_backup_sources(cluster.get_id())
-    return sources
-
-
 def _lookup_lvol_in_cluster(volume_id: str, cluster: ClusterModel) -> LVol:
     try:
         volume = db.get_lvol_by_id(volume_id)
