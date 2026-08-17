@@ -1984,18 +1984,34 @@ class RPCClient:
             params["lvs_name"] = lvs_name
         return self._request("bdev_lvol_s3_merge", params)
 
-    def bdev_lvol_s3_recovery(self, lvol_name, s3_ids, cluster_batch):
+    def bdev_lvol_s3_recovery(self, lvol_name, s3_ids, cluster_batch, s3_bdev=None):
         """Restore a chain of S3 backups into a new lvol.
         Args:
             lvol_name: target lvol name to restore into
-            s3_ids: list of S3 backup IDs (uint32) forming the chain (oldest first)
+            s3_ids: list of S3 backup IDs (uint32) forming the chain, NEWEST
+                first: the data plane claims each cluster for the first id that
+                offers it (prepare_s3_clusters is first-writer-wins), so the
+                newest backup's data must win.
             cluster_batch: batch size in clusters
+            s3_bdev: which S3 device to read from. Omitted, the data plane picks
+                the first S3 device attached to the lvstore, which is ambiguous
+                once a restore has attached a second one for a foreign bucket.
         """
-        return self._request("bdev_lvol_s3_recovery", {
+        params = {
             "lvol_name": lvol_name,
             "cluster_batch": cluster_batch,
             "s3_ids": s3_ids,
-        })
+        }
+        if s3_bdev:
+            params["s3_bdev"] = s3_bdev
+        return self._request("bdev_lvol_s3_recovery", params)
+
+    def bdev_s3_delete(self, name):
+        """Delete an S3 bdev.
+
+        Used to release the device a restore attached for a foreign bucket.
+        """
+        return self._request3("bdev_s3_delete", name=name)
 
     def bdev_lvol_s3_delete(self, s3_ids):
         """Delete all S3 backups for the given IDs (list of uint32)."""
