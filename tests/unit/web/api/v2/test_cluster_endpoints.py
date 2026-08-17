@@ -59,6 +59,29 @@ class TestCreateCluster:
         response = client.post('/api/v2/clusters/', json={'name': 'cluster-1', 'distr_ndcs': -1, 'distr_npcs': 2})
         assert response.status_code == 422
 
+    def test_passes_inline_checksum_and_atomic_4k(self, client, db, cluster, cluster_ops):
+        cluster_ops.add_cluster.return_value = CLUSTER_ID
+
+        response = client.post('/api/v2/clusters/', json={
+            'name': 'cluster-1', 'distr_ndcs': 1, 'distr_npcs': 2,
+            'inline_checksum': True, 'atomic_4k': True,
+        })
+        response.raise_for_status()
+
+        kwargs = cluster_ops.add_cluster.call_args.kwargs
+        assert kwargs['inline_checksum'] is True
+        assert kwargs['atomic_4k'] is True
+
+    def test_inline_checksum_and_atomic_4k_default_false(self, client, db, cluster, cluster_ops):
+        cluster_ops.add_cluster.return_value = CLUSTER_ID
+
+        response = client.post('/api/v2/clusters/', json={'name': 'cluster-1', 'distr_ndcs': 1, 'distr_npcs': 2})
+        response.raise_for_status()
+
+        kwargs = cluster_ops.add_cluster.call_args.kwargs
+        assert kwargs['inline_checksum'] is False
+        assert kwargs['atomic_4k'] is False
+
 
 class TestGetCluster:
 

@@ -89,6 +89,8 @@ class ClusterParams(BaseModel):
     max_subsys: util.Unsigned
     hugepages_mem: util.Size
     spdk_vcpu_count: util.Unsigned
+    inline_checksum: bool = False
+    atomic_4k: bool = False
 
     @model_validator(mode="after")
     def validate_erasure_coding_scheme(self):
