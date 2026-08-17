@@ -64,6 +64,23 @@ DATA2_SG        = "sg-069a5f96309b8dbdd"      # allow only from 172.31.97.0/24
 SUBNET_ID      = MGMT_SUBNET_ID
 STORAGE_SG     = MGMT_SG
 BRANCH       = "main"
+#: SPDK/ultra image for the storage nodes. Empty string = let sbcli use its
+#: default (``ultra:main-latest``).
+#:
+#: PINNED BY DIGEST 2026-08-17. The ``main-latest`` manifest list is broken for
+#: amd64: its arm64 entry points at the current build (main-e4eea249-arm64,
+#: pushed 11:10) but its amd64 entry still points at the PREVIOUS commit's image
+#: (main-b1b0d3e2-amd64, pushed Aug 13 01:54), so every x86 node silently ran
+#: five-day-old code. The correctly built amd64 image exists and is tagged
+#: main-latest-amd64 / main-e4eea249-amd64 — this digest — and was byte-verified
+#: to contain the new "anti-affinity dropped" / "fault tolerance degraded"
+#: instrumentation with a binary linked 2026-08-17 09:15:25 UTC.
+#: Cause is in build_image_spdk_ultra_amd.yml: the workflow re-resolves the
+#: floating ``$TAG-latest-amd64`` tag 14 s after pushing it and embeds the
+#: pre-push digest in ``docker manifest create``. Drop this pin once the
+#: workflow uses the digest it just pushed.
+SPDK_IMAGE   = ("public.ecr.aws/simply-block/ultra@sha256:"
+                "428dfbf1b4cb6d85097cba6405479813ce50ca4163d71a88a8b70b9460466339")
 USER         = "ec2-user"
 MGMT_IFACE   = "eth0"
 DATA_NICS    = ["eth1", "eth2"]          # Names the OS assigns to ENI index 1, 2
@@ -627,14 +644,20 @@ def main():
     # NIC names. Space-separating spills extra NICs into argv as
     # positional args which sbctl rejects with "unrecognized arguments".
     data_nics_arg = ",".join(DATA_NICS)
+    spdk_image_arg = f" --spdk-image {SPDK_IMAGE}" if SPDK_IMAGE else ""
+    if SPDK_IMAGE:
+        print(f"  Pinning SPDK image: {SPDK_IMAGE}")
     for priv_ip in sn_priv_ips:
         for attempt in range(5):
             try:
                 ssh_exec(mgmt_ip, [
-                    f"sudo /usr/local/bin/sbctl -d sn add-node {cluster_uuid}"
+                    # --dev (not -d) is what sets developer_mode in cli.py:16, and
+                    # --spdk-image is registered only under it.
+                    f"sudo /usr/local/bin/sbctl -d --dev sn add-node {cluster_uuid}"
                     f" {priv_ip}:5000 {MGMT_IFACE}"
                     f" --data-nics {data_nics_arg}"
                     f" --ha-jm-count {HA_JM_COUNT}"
+                    f"{spdk_image_arg}"
                 ], check=True)
                 break
             except RuntimeError:
