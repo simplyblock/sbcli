@@ -8,7 +8,7 @@ from simplyblock_core.backup_manifest import ManifestError
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.controllers import backup_controller
 from simplyblock_core.exceptions import PreconditionError
-from simplyblock_core.models.backup_config import BackupConfig
+from simplyblock_core.models.backup_config import BackupConfig, S3Credentials
 from simplyblock_core.models.cluster import Cluster as ClusterModel
 from simplyblock_core.models.lvol_model import LVol
 
@@ -55,9 +55,13 @@ class _RestoreParams(BaseModel):
     pool: str
     target_node_id: Optional[str] = None
 
-    #: Required when the backup's key is wrapped. Never persisted -- it opens
+    #: Required when the backup's key is wrapped. Never persisted -- it unwraps
     #: the key and is discarded.
     key_wrapping_passphrase: Optional[SecretStr] = None
+
+    #: Credentials for the backup's bucket, when that is not this cluster's own
+    #: -- the disaster-recovery case. Omit to use the nodes' instance role.
+    s3_credentials: Optional[S3Credentials] = None
 
 
 @api.post('/restore', name='clusters:backups:restore', status_code=202)
@@ -66,7 +70,8 @@ def restore_backup(cluster: Cluster, parameters: _RestoreParams):
         return {"lvol_id": backup_controller.restore_backup(
             parameters.backup_id, parameters.lvol_name, parameters.pool,
             target_node_id=parameters.target_node_id,
-            key_wrapping_passphrase=parameters.key_wrapping_passphrase)}
+            key_wrapping_passphrase=parameters.key_wrapping_passphrase,
+            s3_credentials=parameters.s3_credentials)}
     except PreconditionError as e:
         raise HTTPException(409, str(e)) from e
 

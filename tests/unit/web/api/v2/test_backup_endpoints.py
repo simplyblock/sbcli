@@ -82,7 +82,7 @@ class TestRestoreBackup:
         assert response.json() == {'lvol_id': VOLUME_ID}
         backup_controller.restore_backup.assert_called_once_with(
             BACKUP_ID, 'restored-volume', 'pool-1', target_node_id=None,
-            key_wrapping_passphrase=None)
+            key_wrapping_passphrase=None, s3_credentials=None)
 
     def test_passes_the_key_wrapping_passphrase_through(self, client, db, cluster,
                                                         backup_controller):
@@ -100,6 +100,22 @@ class TestRestoreBackup:
         passphrase = backup_controller.restore_backup.call_args.kwargs[
             'key_wrapping_passphrase']
         assert passphrase.get_secret_value() == 'correct horse battery staple'
+
+    def test_passes_bucket_credentials_through(self, client, db, cluster,
+                                               backup_controller):
+        """Restoring another cluster's bucket needs credentials for it."""
+        backup_controller.restore_backup.return_value = VOLUME_ID
+
+        response = client.post(f'{BASE}/restore', json={
+            'backup_id': BACKUP_ID,
+            'lvol_name': 'restored-volume',
+            'pool': 'pool-1',
+            's3_credentials': {'access_key_id': 'AKIA', 'secret_access_key': 'shh'},
+        })
+
+        assert response.status_code == 202
+        credentials = backup_controller.restore_backup.call_args.kwargs['s3_credentials']
+        assert credentials.access_key_id.get_secret_value() == 'AKIA'
 
     def test_precondition_failure_is_a_conflict(self, client, db, cluster,
                                                 backup_controller):
