@@ -81,7 +81,40 @@ class TestRestoreBackup:
         assert response.status_code == 202
         assert response.json() == {'lvol_id': VOLUME_ID}
         backup_controller.restore_backup.assert_called_once_with(
-            BACKUP_ID, 'restored-volume', 'pool-1', target_node_id=None)
+            BACKUP_ID, 'restored-volume', 'pool-1', target_node_id=None,
+            key_wrapping_passphrase=None)
+
+    def test_passes_the_key_wrapping_passphrase_through(self, client, db, cluster,
+                                                        backup_controller):
+        """Needed to unwrap the key of an encrypted backup; never persisted."""
+        backup_controller.restore_backup.return_value = VOLUME_ID
+
+        response = client.post(f'{BASE}/restore', json={
+            'backup_id': BACKUP_ID,
+            'lvol_name': 'restored-volume',
+            'pool': 'pool-1',
+            'key_wrapping_passphrase': 'correct horse battery staple',
+        })
+
+        assert response.status_code == 202
+        passphrase = backup_controller.restore_backup.call_args.kwargs[
+            'key_wrapping_passphrase']
+        assert passphrase.get_secret_value() == 'correct horse battery staple'
+
+    def test_precondition_failure_is_a_conflict(self, client, db, cluster,
+                                                backup_controller):
+        """e.g. an encrypted backup whose key cannot be reached."""
+        from simplyblock_core.exceptions import PreconditionError
+        backup_controller.restore_backup.side_effect = PreconditionError(
+            'supply the key-wrapping passphrase')
+
+        response = client.post(f'{BASE}/restore', json={
+            'backup_id': BACKUP_ID,
+            'lvol_name': 'restored-volume',
+            'pool': 'pool-1',
+        })
+
+        assert response.status_code == 409
 
 
 class TestBackupPolicies:

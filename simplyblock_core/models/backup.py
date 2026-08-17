@@ -51,6 +51,22 @@ class Backup(BaseModel):
     #: pydantic models; read it through :meth:`get_location`.
     location: dict = {}
     encrypted: bool = False
+    #: Where this backup's key lives and, when the cluster has key wrapping
+    #: configured, the key itself wrapped under the operator's passphrase.
+    #: A ``backup_manifest.Encryption``; stored as a dict for the same reason
+    #: ``location`` is.
+    encryption: dict = {}
+
+    @property
+    def dr_capable(self) -> bool:
+        """Whether this backup can be restored without its originating cluster.
+
+        False for an encrypted backup with no wrapped key: recovering it needs
+        the KMS named in its descriptor, which a disaster may have taken with
+        the cluster. Surfaced so the gap is visible in ``backup list`` rather
+        than discovered during a recovery.
+        """
+        return not self.encrypted or bool((self.encryption or {}).get("wrapped_key"))
 
     def get_id(self):
         return "%s/%s" % (self.cluster_id, self.uuid)

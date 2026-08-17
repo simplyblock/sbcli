@@ -96,7 +96,7 @@ class TestBackupConfig:
         config = BackupConfig.model_validate(MINIMAL)
         assert config.credentials is None
         assert config.s3_thread_pool_size is None
-        assert config.escrow_secret is None
+        assert config.key_wrapping_secret is None
 
     def test_thread_pool_size_must_be_positive(self):
         """Legacy 0 is rewritten to absent by the migrator; anything else below 1 is a bug."""
@@ -108,7 +108,7 @@ class TestBackupConfig:
             {
                 **MINIMAL,
                 "credentials": {"access_key_id": "AKIA", "secret_access_key": "s3cr3t"},
-                "escrow_secret": "passphrase",
+                "key_wrapping_secret": "passphrase",
                 "s3_thread_pool_size": 16,
             }
         )
@@ -117,7 +117,7 @@ class TestBackupConfig:
         assert type(location) is BackupLocation
         assert set(location.model_dump()) == set(BackupLocation.model_fields)
         assert "credentials" not in location.model_dump()
-        assert "escrow_secret" not in location.model_dump()
+        assert "key_wrapping_secret" not in location.model_dump()
 
     def test_location_preserves_every_interpretation_field(self):
         config = BackupConfig.model_validate(
@@ -139,7 +139,7 @@ class TestBackupConfig:
 
     def test_secrets_are_masked_in_repr(self):
         config = BackupConfig.model_validate(
-            {**MINIMAL, "escrow_secret": "passphrase", "credentials": {
+            {**MINIMAL, "key_wrapping_secret": "passphrase", "credentials": {
                 "access_key_id": "AKIA", "secret_access_key": "s3cr3t"}}
         )
         assert "passphrase" not in repr(config)

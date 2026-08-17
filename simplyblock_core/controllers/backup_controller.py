@@ -6,8 +6,9 @@ import uuid
 from typing import Optional
 
 from botocore.exceptions import BotoCoreError, ClientError
+from pydantic import SecretStr
 
-from simplyblock_core import backup_manifest, constants
+from simplyblock_core import backup_key_wrapping, backup_manifest, constants
 from simplyblock_core.controllers import backup_events, tasks_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.backup import Backup, BackupPolicy, BackupPolicyAttachment
@@ -157,14 +158,74 @@ def build_manifest(backup: Backup) -> backup_manifest.BackupManifest:
         created_at=backup.created_at,
         completed_at=backup.completed_at,
         size=backup.size,
-        encrypted=backup.encrypted,
         prev_backup_id=backup.prev_backup_id,
+        # backup.encrypted is authoritative -- overlaying it here means the two
+        # cannot disagree in a manifest, whatever is stored in the dict.
+        encryption=backup_manifest.Encryption.model_validate(
+            {**(backup.encryption or {}), "encrypted": backup.encrypted}),
         location=backup.get_location(),
         chain=[backup_manifest.ChainEntry(backup_id=b.uuid, s3_id=b.s3_id) for b in chain],
         source=source,
         volume=volume,
         dataplane=dataplane,
     )
+
+
+def _resolve_crypto_key(backup: Backup, cluster, key_wrapping_passphrase: Optional[SecretStr]):
+    """Recover the key needed to read an encrypted backup.
+
+    Two routes, in order of independence from the cluster that made the backup:
+
+    1. Key wrapping -- the key wrapped into the backup's own metadata. Needs only the
+       operator's passphrase, so it works when the originating cluster is gone.
+    2. The KMS named in the backup's descriptor. Needs that KMS to still be
+       reachable, which after a disaster it may not be.
+
+    Returns None for an unencrypted backup.
+
+    Raises:
+        PreconditionError: The key cannot be obtained. Raised before the volume
+            is created, so a restore that cannot decrypt fails without leaving a
+            half-built volume behind -- and, more importantly, without silently
+            producing a plaintext volume over ciphertext.
+    """
+    if not backup.encrypted:
+        return None
+
+    encryption = backup_manifest.Encryption.model_validate(
+        {**(backup.encryption or {}), "encrypted": backup.encrypted})
+
+    if encryption.wrapped_key is not None:
+        if key_wrapping_passphrase is None:
+            raise PreconditionError(
+                f"Backup {backup.uuid} is encrypted and its key is wrapped; "
+                "supply the wrapped_key passphrase to restore it")
+        try:
+            return backup_key_wrapping.unwrap(encryption.wrapped_key, key_wrapping_passphrase)
+        except backup_key_wrapping.KeyWrappingError as e:
+            raise PreconditionError(f"Cannot open wrapped key: {e}") from e
+
+    descriptor = encryption.descriptor
+    if descriptor is None:
+        raise PreconditionError(
+            f"Backup {backup.uuid} is encrypted but records nothing about its "
+            "key; it predates self-describing backups and cannot be restored")
+
+    if not backup.dr_capable:
+        logger.info(
+            "Backup %s has no wrapped key; resolving it via %s as recorded in "
+            "its descriptor", backup.uuid, descriptor.kms or "its KMS")
+
+    try:
+        with create_kms_connection(cluster) as kms:
+            return kms.get_data_encryption_keys(descriptor.dek_path, descriptor.kek_name)
+    except KMSException as e:
+        raise PreconditionError(
+            f"Cannot reach the key for backup {backup.uuid} at "
+            f"{descriptor.dek_path}. It was written by cluster "
+            f"{backup.source_cluster_id or backup.cluster_id} using "
+            f"{descriptor.kms or 'an unrecorded KMS'}, and no key was wrapped "
+            f"with the backup: {e}") from e
 
 
 def _config_for(backup: Backup) -> BackupConfig:
@@ -328,6 +389,46 @@ def _snapshot_has_backup(snapshot_id):
                             Backup.STATUS_COMPLETED, Backup.STATUS_MERGED) for b in backups)
 
 
+def _build_encryption(cluster, backup: Backup, kms) -> backup_manifest.Encryption:
+    """Describe a backup's key, and wrapped_key it when the cluster is configured to.
+
+    The descriptor alone makes the dependency on the originating KMS explicit
+    but does not remove it. Key wrapping removes it, at the cost of putting the key --
+    wrapped under a passphrase held only by the operator -- next to the
+    ciphertext. That trade is the cluster's to make, hence opt-in.
+
+    Args:
+        kms: an open connection, reused so this does not re-authenticate.
+
+    Raises:
+        KMSException: the keys could not be read back for wrapped_key. Raised rather
+            than degraded to a backup without a wrapped key, because a cluster that asked
+            for wrapped_key must not silently get a backup without it.
+        KeyWrappingError: the keys could not be wrapped.
+    """
+    descriptor = backup_manifest.KeyDescriptor(
+        dek_path=backup_dek_path(cluster.get_id(), backup.uuid),
+        kek_name=backup_kek_name(backup.uuid),
+    )
+    if cluster.hashicorp_vault_settings is not None:
+        vault = cluster.hashicorp_vault_settings
+        descriptor.kms = "hashicorp_vault"
+        descriptor.vault_base_url = vault.base_url
+        descriptor.transit_mount = vault.transit_mount
+        descriptor.kv_mount = vault.kv_mount
+    else:
+        descriptor.kms = "local"
+
+    encryption = backup_manifest.Encryption(encrypted=True, descriptor=descriptor)
+
+    config = cluster.get_backup_config()
+    if config.key_wrapping_secret is not None:
+        keys = kms.get_data_encryption_keys(descriptor.dek_path, descriptor.kek_name)
+        encryption.wrapped_key = backup_key_wrapping.wrap(keys, config.key_wrapping_secret)
+
+    return encryption
+
+
 def _create_single_backup(snapshot, lvol, node_id, cluster_id, prev_backup, location: BackupLocation):
     """Create a single backup record and task for one snapshot.
 
@@ -370,6 +471,16 @@ def _create_single_backup(snapshot, lvol, node_id, cluster_id, prev_backup, loca
                 backup_dek_path(cluster_id, backup.uuid),
                 backup_kek_name(backup.uuid),
             )
+            backup.encryption = _build_encryption(cluster, backup, kms).model_dump(mode="json")
+
+        if not backup.dr_capable:
+            logger.warning(
+                "Backup %s of encrypted volume %s has no wrapped key: restoring "
+                "it will require reaching %s. Configure key_wrapping_secret on cluster "
+                "%s to make it recoverable on its own.",
+                backup.uuid, lvol.get_id(),
+                backup.encryption.get("descriptor", {}).get("kms", "its KMS"),
+                cluster_id)
 
     backup.write_to_db()
 
@@ -462,7 +573,8 @@ def backup_snapshot(snapshot_id, cluster_id=None):
 
 
 def restore_backup(backup_id: str, lvol_name: str, pool_id_or_name: str,
-                   target_node_id: Optional[str] = None):
+                   target_node_id: Optional[str] = None,
+                   key_wrapping_passphrase: Optional[SecretStr] = None):
     """Restore a backup chain into a new fully-accessible lvol.
 
     Creates the volume (with subsystem, listeners, namespace) via
@@ -471,6 +583,8 @@ def restore_backup(backup_id: str, lvol_name: str, pool_id_or_name: str,
     until the data transfer completes.
 
     Args:
+        key_wrapping_passphrase: Required when the backup's key is wrapped. Never
+            persisted -- it is used to open the key and discarded.
         target_node_id: Optional node to restore onto. If not provided, a node
             of the target cluster is auto-selected. Any node in the cluster
             can restore any backup because S3 keys are node-agnostic
@@ -525,17 +639,7 @@ def restore_backup(backup_id: str, lvol_name: str, pool_id_or_name: str,
             raise PreconditionError(
                 f"Target node {target_node_id} has no lvstore (S3 bdev requires lvstore)")
 
-    if backup.encrypted:
-        with create_kms_connection(cluster) as kms:
-            try:
-                crypto_key = kms.get_data_encryption_keys(
-                    backup_dek_path(pool.cluster_id, backup.uuid),
-                    backup_kek_name(backup.uuid),
-                )
-            except KMSException as e:
-                raise RuntimeError("Failed to retrieve backup crypto keys") from e
-    else:
-        crypto_key = None
+    crypto_key = _resolve_crypto_key(backup, cluster, key_wrapping_passphrase)
 
     logger.info(f"Backup allowed hosts: {backup.allowed_hosts}")
     lvol_id, error = lvol_controller.add_lvol_ha(
@@ -672,6 +776,8 @@ def list_backups(cluster_id=None):
             "Prev": b.prev_backup_id[:8] if b.prev_backup_id else "-",
             "Created": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(b.created_at)) if b.created_at else "",
             "Source": source[:8] if is_external else "local",
+            # Visible here rather than discovered during a recovery.
+            "DR": "yes" if b.dr_capable else "needs source KMS",
         }
         data.append(entry)
     return data
@@ -766,7 +872,8 @@ def import_backups(manifests, cluster_id=None):
         backup.location = manifest.location.model_dump(mode="json")
         # Import used to drop this, so an imported encrypted backup restored as
         # use_crypto=False -- a plaintext volume over ciphertext, silently.
-        backup.encrypted = manifest.encrypted
+        backup.encrypted = manifest.encryption.encrypted
+        backup.encryption = manifest.encryption.model_dump(mode="json")
         backup.write_to_db()
 
     return len(pending)

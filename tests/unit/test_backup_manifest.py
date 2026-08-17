@@ -10,6 +10,7 @@ from simplyblock_core import backup_manifest
 from simplyblock_core.backup_manifest import (
     BackupManifest,
     ChainEntry,
+    Encryption,
     ManifestError,
     MANIFEST_SCHEMA_VERSION,
 )
@@ -39,7 +40,8 @@ class TestManifestKey:
 class TestSchema:
     def test_round_trip(self):
         original = _manifest(
-            created_at=100, completed_at=200, size=4096, encrypted=True,
+            created_at=100, completed_at=200, size=4096,
+            encryption=Encryption(encrypted=True),
             prev_backup_id="b-0",
             chain=[ChainEntry(backup_id="b-0", s3_id=6),
                    ChainEntry(backup_id="b-1", s3_id=7)],
@@ -58,7 +60,7 @@ class TestSchema:
         """A manifest sits next to the ciphertext; it must not carry keys."""
         data = json.loads(_manifest().model_dump_json())
         assert "credentials" not in data["location"]
-        assert "escrow_secret" not in data["location"]
+        assert "key_wrapping_secret" not in data["location"]
         assert "access_key_id" not in json.dumps(data)
 
     def test_unknown_field_is_rejected(self):

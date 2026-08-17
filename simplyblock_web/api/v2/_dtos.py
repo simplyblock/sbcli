@@ -517,6 +517,10 @@ class BackupDTO(BaseModel):
     created_at: int
     completed_at: int
     source_cluster_id: str
+    encrypted: bool
+    #: False when this backup cannot be restored without its originating
+    #: cluster's KMS -- encrypted, with no wrapped key.
+    dr_capable: bool
 
     @staticmethod
     def from_model(model: Backup):
@@ -535,6 +539,8 @@ class BackupDTO(BaseModel):
             created_at=model.created_at,
             completed_at=model.completed_at,
             source_cluster_id=model.source_cluster_id or "",
+            encrypted=model.encrypted,
+            dr_capable=model.dr_capable,
         )
 
 

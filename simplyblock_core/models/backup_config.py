@@ -164,11 +164,11 @@ class BackupConfig(BackupLocation):
     #: Absent means the data plane's own default (32 at the time of writing).
     s3_thread_pool_size: Optional[ThreadPoolSize] = None
 
-    #: When set, each encrypted backup escrows its data encryption keys under a
+    #: When set, each encrypted backup wraps its data encryption keys under a
     #: key derived from this secret, making the backup recoverable without the
     #: originating cluster's KMS. Absent means encrypted backups depend on that
     #: KMS remaining reachable.
-    escrow_secret: Optional[SecretStr] = None
+    key_wrapping_secret: Optional[SecretStr] = None
 
     def location(self) -> BackupLocation:
         return BackupLocation.model_validate(

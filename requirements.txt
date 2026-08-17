@@ -29,3 +29,4 @@ paramiko
 pydantic-settings
 botocore
 tenacity
+cryptography>=44  # Argon2id KDF for backup key escrow (simplyblock_core/backup_escrow.py)

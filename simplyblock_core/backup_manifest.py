@@ -25,6 +25,7 @@ from botocore.config import Config as BotoConfig
 from botocore.exceptions import BotoCoreError, ClientError
 from pydantic import BaseModel, ConfigDict
 
+from simplyblock_core.backup_key_wrapping import WrappedKeys
 from simplyblock_core.models.backup_config import BackupConfig, BackupLocation
 from simplyblock_core.utils.secrets import unwrap_secret
 
@@ -89,6 +90,45 @@ class Volume(BaseModel):
     w_mbytes_per_sec: int = 0
 
 
+class KeyDescriptor(BaseModel):
+    """Where this backup's data encryption key lives. Never the key itself.
+
+    Provenance, and a restore path for a cluster that can still reach the same
+    KMS. It is not sufficient on its own for disaster recovery -- that is what
+    wrapped_key is for -- but it makes the dependency visible instead of implicit.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    #: "hashicorp_vault" or "local". The local backend keeps keys in the
+    #: originating cluster's own FoundationDB, so a backup recorded as "local"
+    #: with no wrapped_key cannot be recovered by anyone once that cluster is gone.
+    kms: str = ""
+    vault_base_url: str = ""
+    transit_mount: str = ""
+    kv_mount: str = ""
+    dek_path: str = ""
+    kek_name: str = ""
+
+
+class Encryption(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    encrypted: bool = False
+
+    #: Where the key lives. Present for any encrypted backup.
+    descriptor: Optional[KeyDescriptor] = None
+
+    #: The key itself, wrapped under an operator passphrase. Present only when
+    #: the originating cluster had wrapped_key configured. Its absence on an
+    #: encrypted backup means recovery depends on the descriptor's KMS still
+    #: being reachable.
+    wrapped_key: Optional[WrappedKeys] = None
+
+    @property
+    def recoverable_without_source_kms(self) -> bool:
+        return not self.encrypted or self.wrapped_key is not None
+
+
 class DataPlane(BaseModel):
     """How the objects are laid out, so a later format change is detectable."""
     model_config = ConfigDict(extra="forbid")
@@ -110,7 +150,6 @@ class BackupManifest(BaseModel):
     created_at: int = 0
     completed_at: int = 0
     size: int = 0
-    encrypted: bool = False
     prev_backup_id: str = ""
 
     location: BackupLocation
@@ -120,6 +159,7 @@ class BackupManifest(BaseModel):
     #: fetch. prev_backup_id alone would require walking manifest by manifest.
     chain: List[ChainEntry] = []
 
+    encryption: Encryption = Encryption()
     source: Source = Source()
     volume: Volume = Volume()
     dataplane: DataPlane = DataPlane()

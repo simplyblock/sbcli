@@ -2,7 +2,7 @@ from typing import List, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, Request, Response
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, SecretStr, model_validator
 
 from simplyblock_core.backup_manifest import ManifestError
 from simplyblock_core.db_controller import DBController
@@ -55,11 +55,20 @@ class _RestoreParams(BaseModel):
     pool: str
     target_node_id: Optional[str] = None
 
+    #: Required when the backup's key is wrapped. Never persisted -- it opens
+    #: the key and is discarded.
+    key_wrapping_passphrase: Optional[SecretStr] = None
+
 
 @api.post('/restore', name='clusters:backups:restore', status_code=202)
 def restore_backup(cluster: Cluster, parameters: _RestoreParams):
-    return {"lvol_id": backup_controller.restore_backup(
-        parameters.backup_id, parameters.lvol_name, parameters.pool, target_node_id=parameters.target_node_id)}
+    try:
+        return {"lvol_id": backup_controller.restore_backup(
+            parameters.backup_id, parameters.lvol_name, parameters.pool,
+            target_node_id=parameters.target_node_id,
+            key_wrapping_passphrase=parameters.key_wrapping_passphrase)}
+    except PreconditionError as e:
+        raise HTTPException(409, str(e)) from e
 
 
 class _ImportParams(BaseModel):
