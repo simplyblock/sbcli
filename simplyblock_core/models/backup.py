@@ -2,6 +2,8 @@
 import datetime
 from typing import List
 
+from simplyblock_core.exceptions import PreconditionError
+from simplyblock_core.models.backup_config import BackupLocation
 from simplyblock_core.models.base_model import BaseModel
 
 
@@ -35,18 +37,42 @@ class Backup(BaseModel):
     prev_backup_id: str = ""
     pool_uuid: str = ""
     size: int = 0
-    source_cluster_id: str = ""  # original cluster that created this backup
+    #: The cluster that originally created this backup. Provenance only --
+    #: nothing may resolve configuration or encryption keys through it. That is
+    #: what made backups unrestorable once their source cluster was gone.
+    source_cluster_id: str = ""
     created_at: int = 0
     completed_at: int = 0
     error_message: str = ""
     # Security params from the source lvol (for cross-cluster restore)
     allowed_hosts: List[dict] = []
-    # S3 metadata written to metadata bucket
-    s3_metadata: dict = {}
+    #: Where this backup's objects live and how to interpret them, as a
+    #: ``BackupLocation``. Stored as a dict because ``BaseModel`` cannot nest
+    #: pydantic models; read it through :meth:`get_location`.
+    location: dict = {}
     encrypted: bool = False
 
     def get_id(self):
         return "%s/%s" % (self.cluster_id, self.uuid)
+
+    def get_location(self) -> BackupLocation:
+        """Validate and return where this backup's objects live.
+
+        Raises:
+            PreconditionError: The backup predates self-describing locations, or
+                its recorded location is not valid. Either way it cannot be read
+                without knowing what wrote it.
+        """
+        if not self.location:
+            raise PreconditionError(
+                f"Backup {self.uuid} has no recorded location "
+                "(created before backups became self-describing)")
+
+        try:
+            return BackupLocation.model_validate(self.location)
+        except ValueError as e:
+            raise PreconditionError(
+                f"Backup {self.uuid} has an invalid location: {e}") from e
 
     def write_to_db(self, kv_store=None):
         self.updated_at = str(datetime.datetime.now(datetime.timezone.utc))

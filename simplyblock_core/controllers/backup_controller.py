@@ -12,7 +12,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 from simplyblock_core.controllers import backup_events, tasks_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.backup import Backup, BackupPolicy, BackupPolicyAttachment
-from simplyblock_core.models.backup_config import BackupConfig
+from simplyblock_core.models.backup_config import BackupConfig, BackupLocation
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.kms import (
     KMSException, backup_dek_path, backup_kek_name, create_kms_connection,
@@ -29,15 +29,6 @@ db_controller = DBController()
 
 def _generate_backup_id():
     return str(uuid.uuid4())
-
-
-def _next_s3_id(cluster_id):
-    """Return the next cluster-wide unique s3_id (uint32) for data-plane RPCs."""
-    max_id = 0
-    for b in db_controller.get_backups(cluster_id):
-        if b.s3_id > max_id:
-            max_id = b.s3_id
-    return max_id + 1
 
 
 def _parse_age_string(age_str):
@@ -75,29 +66,6 @@ def _parse_schedule(schedule_str):
         if tiers[i][0] <= tiers[i - 1][0]:
             raise ValueError("Schedule tier intervals must be strictly increasing")
     return tiers
-
-
-def _write_s3_metadata(rpc_client, backup):
-    """Write backup metadata to the S3 metadata bucket.
-    This metadata is needed for cross-cluster recovery."""
-    metadata = {
-        "backup_id": backup.uuid,
-        "lvol_id": backup.lvol_id,
-        "lvol_name": backup.lvol_name,
-        "snapshot_id": backup.snapshot_id,
-        "snapshot_name": backup.snapshot_name,
-        "node_id": backup.node_id,
-        "cluster_id": backup.cluster_id,
-        "prev_backup_id": backup.prev_backup_id,
-        "created_at": backup.created_at,
-        "size": backup.size,
-        "allowed_hosts": backup.allowed_hosts,
-    }
-    backup.s3_metadata = metadata
-    # The actual S3 metadata write is done via the data plane's S3 bdev.
-    # For now we store it in the backup object itself.
-    # In production, this would write to the metadata bucket via S3 API.
-    return metadata
 
 
 def _get_latest_backup_for_lvol(lvol_id):
@@ -281,16 +249,25 @@ def _snapshot_has_backup(snapshot_id):
                             Backup.STATUS_COMPLETED, Backup.STATUS_MERGED) for b in backups)
 
 
-def _create_single_backup(snapshot, lvol, node_id, cluster_id, prev_backup):
+def _create_single_backup(snapshot, lvol, node_id, cluster_id, prev_backup, location: BackupLocation):
     """Create a single backup record and task for one snapshot.
-    Returns the created Backup object."""
+
+    Args:
+        location: where this backup's objects will be written. Passed in rather
+            than read from the cluster here so that every backup in one chain is
+            guaranteed to share it -- the caller resolves it once and validates
+            the chain against it.
+
+    Returns the created Backup object.
+    """
     backup_id = _generate_backup_id()
 
     backup = Backup()
     backup.uuid = backup_id
-    backup.s3_id = _next_s3_id(cluster_id)
+    backup.s3_id = db_controller.next_s3_id()
     backup.cluster_id = cluster_id
-    backup.source_cluster_id = cluster_id  # local backup
+    backup.source_cluster_id = cluster_id  # provenance only
+    backup.location = location.model_dump(mode="json")
     backup.lvol_id = lvol.get_id()
     backup.lvol_name = lvol.lvol_name
     backup.snapshot_id = snapshot.get_id()
@@ -317,9 +294,6 @@ def _create_single_backup(snapshot, lvol, node_id, cluster_id, prev_backup):
 
     backup.write_to_db()
 
-    _write_s3_metadata(None, backup)
-    backup.write_to_db()
-
     backup_events.backup_created(cluster_id, node_id, backup)
     tasks_controller.add_backup_task(backup)
 
@@ -341,21 +315,6 @@ def backup_snapshot(snapshot_id, cluster_id=None):
     except KeyError as e:
         return None, str(e)
 
-    # Block new backups when S3 source is switched to an external cluster
-    node_id = snapshot.lvol.node_id if snapshot.lvol else None
-    if node_id:
-        try:
-            snode = db_controller.get_storage_node_by_id(node_id)
-            if not is_local_backup_source(snode.cluster_id):
-                return None, ("Cannot create backups while backup source is "
-                              "switched to an external cluster. Switch back "
-                              "to local first.")
-        except KeyError:
-            pass
-
-    if not snapshot.lvol:
-        return None, "Snapshot has no associated lvol"
-
     lvol = snapshot.lvol
     node_id = lvol.node_id
     try:
@@ -363,11 +322,22 @@ def backup_snapshot(snapshot_id, cluster_id=None):
     except KeyError as e:
         return None, str(e)
 
+    # Block new backups when S3 source is switched to an external cluster
+    if not is_local_backup_source(snode.cluster_id):
+        return None, ("Cannot create backups while backup source is "
+                      "switched to an external cluster. Switch back "
+                      "to local first.")
+
     if snode.status != StorageNode.STATUS_ONLINE:
         return None, f"Node {node_id} is not online (status: {snode.status})"
 
     if not cluster_id:
         cluster_id = snode.cluster_id
+
+    try:
+        location = db_controller.get_cluster_by_id(cluster_id).get_backup_config().location()
+    except (KeyError, PreconditionError) as e:
+        return None, str(e)
 
     snap_chain = _get_snapshot_chain(snapshot)
     chain_snapshot_ids = [snap.get_id() for snap in snap_chain]
@@ -397,7 +367,7 @@ def backup_snapshot(snapshot_id, cluster_id=None):
                     prev_backup = existing
                 continue
 
-            backup = _create_single_backup(snap, lvol, node_id, cluster_id, prev_backup)
+            backup = _create_single_backup(snap, lvol, node_id, cluster_id, prev_backup, location)
             time.sleep(1)
             prev_backup = backup
             if snap.get_id() == snapshot_id:
@@ -644,6 +614,8 @@ def export_backups(cluster_id=None, lvol_name=None):
             "prev_backup_id": b.prev_backup_id,
             "size": b.size,
             "allowed_hosts": b.allowed_hosts,
+            "location": b.location,
+            "encrypted": b.encrypted,
             "created_at": b.created_at,
         })
     return result
@@ -676,6 +648,22 @@ def import_backups(s3_metadata_list, cluster_id=None):
         if backup_id in pending:
             raise PreconditionError(f"Backup {backup_id} is listed more than once")
 
+        # An entry that cannot say where its objects are, or whether they are
+        # encrypted, is not importable at any price: the first produces a
+        # restore against whatever bucket happens to be configured, the second a
+        # plaintext volume over ciphertext. Checked here so a stale export file
+        # is rejected whole rather than half-imported.
+        for required in ("location", "encrypted"):
+            if required not in meta:
+                raise PreconditionError(
+                    f"Backup {backup_id} is missing '{required}'; it predates "
+                    "self-describing backups and cannot be imported")
+
+        try:
+            BackupLocation.model_validate(meta["location"])
+        except ValueError as e:
+            raise PreconditionError(f"Backup {backup_id} has an invalid location: {e}") from e
+
         try:
             existing = db_controller.get_backup_by_id(backup_id)
         except KeyError:
@@ -702,7 +690,10 @@ def import_backups(s3_metadata_list, cluster_id=None):
         backup.allowed_hosts = meta.get("allowed_hosts", [])
         backup.created_at = meta.get("created_at", 0)
         backup.status = Backup.STATUS_COMPLETED
-        backup.s3_metadata = meta
+        backup.location = meta["location"]
+        # Import used to drop this, so an imported encrypted backup restored as
+        # use_crypto=False -- a plaintext volume over ciphertext, silently.
+        backup.encrypted = meta["encrypted"]
         backup.write_to_db()
 
     return len(pending)
@@ -1046,6 +1037,20 @@ def _auto_backup_lvol(lvol):
     incremental chain is maintained without re-backing all ancestors.
     """
     from simplyblock_core.controllers import snapshot_controller
+
+    # Resolve everything the backup needs BEFORE taking the snapshot. This used
+    # to create the snapshot first and discover afterwards that the node or
+    # cluster was unusable, leaving an orphaned auto_* snapshot behind on every
+    # scheduler tick.
+    node_id = lvol.node_id
+    try:
+        snode = db_controller.get_storage_node_by_id(node_id)
+        cluster_id = snode.cluster_id
+        location = db_controller.get_cluster_by_id(cluster_id).get_backup_config().location()
+    except (KeyError, PreconditionError) as e:
+        logger.warning(f"Auto-backup skipped for lvol {lvol.get_id()}: {e}")
+        return
+
     snap_name = f"auto_{lvol.lvol_name}_{int(time.time())}"
     snap_id, error = snapshot_controller.add(lvol.get_id(), snap_name)
     if error:
@@ -1058,16 +1063,8 @@ def _auto_backup_lvol(lvol):
         logger.warning(f"Auto-backup: snapshot {snap_id} not found after creation")
         return
 
-    node_id = lvol.node_id
-    try:
-        snode = db_controller.get_storage_node_by_id(node_id)
-    except KeyError:
-        logger.warning(f"Auto-backup: node {node_id} not found")
-        return
-
-    cluster_id = snode.cluster_id
     prev_backup = _get_latest_backup_for_lvol(lvol.get_id())
-    _create_single_backup(snapshot, lvol, node_id, cluster_id, prev_backup)
+    _create_single_backup(snapshot, lvol, node_id, cluster_id, prev_backup, location)
 
 
 def _trigger_merge(keep_backup, old_backup):
