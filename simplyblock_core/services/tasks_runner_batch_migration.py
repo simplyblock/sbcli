@@ -269,12 +269,17 @@ def _handle_snap_copy_barrier(group, member_migrations, tgt_node, tgt_rpc):
     return True, None
 
 
-def _build_batch_final_args(group, member_migrations, src_node, tgt_node, tgt_rpc):
+def _build_batch_final_args(group, member_migrations, src_node, tgt_node, tgt_rpc,
+                            primary_src_node=None):
     """
     Build the argument lists for bdev_lvol_batch_final_step, ordered by ns_id.
 
     Returns (lvol_names, lvol_ids, snapshot_names) or raises ValueError.
     """
+    # The lvstore NAME is always the true primary's own lvstore, regardless
+    # of which node is actually driving the transfer as src_node/src_rpc —
+    # see tasks_runner_lvol_migration._build_paths' matching comment.
+    src_lvstore = (primary_src_node or src_node).lvstore
     mid_to_migration = {m.uuid: m for m in member_migrations}
     ordered_ids = group.ordered_migration_ids()
 
@@ -295,7 +300,7 @@ def _build_batch_final_args(group, member_migrations, src_node, tgt_node, tgt_rp
             raise ValueError(f"migration {migration_id} not found in member_migrations")
 
         lvol = db.get_lvol_by_id(m.lvol_id)
-        src_composite = f"{src_node.lvstore}/{lvol.lvol_bdev}"
+        src_composite = f"{src_lvstore}/{lvol.lvol_bdev}"
         lvol_names.append(src_composite)
 
         tgt_bdev_short = _lvol_tgt_bdev_name(lvol.lvol_bdev)
@@ -717,7 +722,8 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
 
     try:
         lvol_names, lvol_ids, snapshot_names = _build_batch_final_args(
-            group, member_migrations, src_node, tgt_node, tgt_rpc)
+            group, member_migrations, src_node, tgt_node, tgt_rpc,
+            primary_src_node=primary_src_node)
     except (ValueError, KeyError) as e:
         # Hub controller left attached — hub_manager owns its lifecycle
         # entirely via its own idle timeout.
