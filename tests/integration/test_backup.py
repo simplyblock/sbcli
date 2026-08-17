@@ -315,8 +315,7 @@ class TestCreateS3Bdev(unittest.TestCase):
         _, kwargs = mock_rpc.bdev_s3_create.call_args
         self.assertEqual(kwargs["bdb_lcpu_mask"], 0x8)
         self.assertEqual(kwargs["s3_lcpu_mask"], 0xFF)
-        mock_rpc.bdev_s3_add_bucket_name.assert_called_once_with(
-            "s3_lvs_test", "simplyblock-backup-cluster-1", allow_existing=True)
+        self.assertEqual(kwargs["bucket_name"], "simplyblock-backup-cluster-1")
         mock_rpc.bdev_lvol_s3_bdev.assert_called_once_with("lvs_test", "s3_lvs_test")
 
     @patch("simplyblock_core.backup_manifest.boto3.client")
@@ -343,19 +342,21 @@ class TestCreateS3Bdev(unittest.TestCase):
 
     @patch("simplyblock_core.backup_manifest.boto3.client")
     @patch("simplyblock_core.models.storage_node.RPCClient")
-    def test_bucket_name_fails(self, MockRPC, mock_boto3_client):
-        from simplyblock_core.rpc_client import RPCRemoteError
+    def test_bucket_is_a_create_parameter(self, MockRPC, mock_boto3_client):
+        """A device cannot exist without its bucket, so there is no window in
+        which one is attached to an lvstore with no bucket registered."""
         mock_rpc = MockRPC.return_value
         mock_rpc.bdev_s3_create.return_value = True
-        mock_rpc.bdev_s3_add_bucket_name.side_effect = RPCRemoteError("error", code=-1)
-        mock_s3 = mock_boto3_client.return_value
-        mock_s3.head_bucket.return_value = {}
+        mock_rpc.bdev_lvol_s3_bdev.return_value = True
+        mock_boto3_client.return_value.head_bucket.return_value = {}
 
         from simplyblock_core.controllers.backup_controller import create_s3_bdev
-        node = _node()
-        with pytest.raises(RuntimeError):
-            create_s3_bdev(node, _backup_config())
-        mock_rpc.bdev_lvol_s3_bdev.assert_not_called()
+        create_s3_bdev(_node(), _backup_config())
+
+        _, kwargs = mock_rpc.bdev_s3_create.call_args
+        assert kwargs["bucket_name"] == "simplyblock-backup-cluster-1"
+        assert not hasattr(mock_rpc, "_mock_children") or \
+            "bdev_s3_add_bucket_name" not in mock_rpc.method_calls
 
     @patch("simplyblock_core.backup_manifest.boto3.client")
     @patch("simplyblock_core.models.storage_node.RPCClient")
@@ -396,12 +397,11 @@ class TestCreateS3Bdev(unittest.TestCase):
             "secret_access_key": "minioadmin",
         }))
 
-        # The data plane still takes the legacy shape; `local_testing` there is
-        # not a mode but the only condition under which it honours an endpoint
-        # override at all, so it tracks "an endpoint was configured".
         _, kwargs = mock_rpc.bdev_s3_create.call_args
-        self.assertTrue(kwargs["local_testing"])
-        self.assertEqual(kwargs["local_endpoint"], "http://minio:9000")
+        self.assertEqual(kwargs["endpoint"], "http://minio:9000")
+        self.assertEqual(kwargs["region"], "us-east-1")
+        self.assertFalse(kwargs["verify_tls"])
+        self.assertTrue(kwargs["use_path_style"])
         self.assertEqual(kwargs["access_key_id"].get_secret_value(), "minioadmin")
         self.assertEqual(kwargs["secret_access_key"].get_secret_value(), "minioadmin")
 
@@ -1078,9 +1078,15 @@ class TestRPCClientBackupMethods(unittest.TestCase):
         from simplyblock_core.rpc_client import RPCClient
         self.assertTrue(hasattr(RPCClient, 'bdev_s3_create'))
 
-    def test_bdev_s3_add_bucket_name_exists(self):
+    def test_bdev_s3_add_bucket_name_is_gone(self):
+        """The bucket is a create parameter now; the separate call was the
+        mechanism behind the non-functional source switch."""
         from simplyblock_core.rpc_client import RPCClient
-        self.assertTrue(hasattr(RPCClient, 'bdev_s3_add_bucket_name'))
+        self.assertFalse(hasattr(RPCClient, 'bdev_s3_add_bucket_name'))
+
+    def test_bdev_s3_delete_exists(self):
+        from simplyblock_core.rpc_client import RPCClient
+        self.assertTrue(hasattr(RPCClient, 'bdev_s3_delete'))
 
     def test_bdev_lvol_s3_bdev_exists(self):
         from simplyblock_core.rpc_client import RPCClient

@@ -1868,41 +1868,56 @@ class RPCClient:
 
     # ---- S3 Backup RPCs ----
 
-    def bdev_s3_create(self, name: str, secondary_target: int = 0,
+    def bdev_s3_create(self, name: str, bucket_name: str, secondary_target: int = 0,
                        with_compression: bool = False, snapshot_backups: bool = True,
-                       local_testing: bool = False, local_endpoint: str = "",
+                       endpoint: str = "", region: str = "", verify_tls: bool = True,
+                       use_path_style: bool = False,
                        access_key_id: Optional[SecretStr] = None,
                        secret_access_key: Optional[SecretStr] = None,
                        bdb_lcpu_mask: int = 0, s3_lcpu_mask: int = 0,
                        s3_thread_pool_size: int = 0):
-        """Create the S3 bdev device.
-        Must be called before bdev_lvol_s3_bdev to attach it to an lvstore.
+        """Create an S3 bdev for one bucket.
+
+        A device serves exactly one bucket with one set of credentials, so
+        reading a second bucket means creating a second device. Attach it to an
+        lvstore with bdev_lvol_s3_bdev.
+
         Args:
-            name: Bdev name
-            secondary_target: 0=S3, 1=FileSystem
-            with_compression: Enable ISA-L compression
-            snapshot_backups: Snapshot backup mode
-            local_testing: Use local endpoint (e.g. MinIO)
-            local_endpoint: Local endpoint URL
+            bucket_name: the bucket this device reads and writes. Required -- a
+                device without one cannot service any I/O.
+            endpoint: an S3-compatible endpoint, e.g. "http://minio:9000".
+                Empty means the SDK resolves AWS's endpoint from the region.
+            region: AWS region. Empty means the SDK resolves it from the
+                environment or instance metadata.
+            verify_tls: verify the endpoint's certificate.
+            use_path_style: path-style addressing, needed by MinIO and most
+                S3-compatible stores.
             access_key_id / secret_access_key: leave both ``None`` to use the
                 node's instance role via the SDK's default credential provider
                 chain. An empty ``SecretStr`` counts as absent too, rather than
                 travelling as a key: the SDK reads empty credentials as a valid
                 anonymous identity and then never consults the chain.
+            secondary_target: 0=S3, 1=FileSystem
+            with_compression: Enable ISA-L compression
+            snapshot_backups: selects the backup object layout
+                ({s3_id}/{mid}/{extent}) rather than the tiering one
             bdb_lcpu_mask: CPU mask for the SPDK thread of this bdev (uint64)
             s3_lcpu_mask: CPU mask for the internal AWS S3 thread pool (uint64)
             s3_thread_pool_size: AWS S3 thread pool size (default 32 on data plane)
         """
         params: dict[str, Any] = {
             "name": name,
+            "bucket_name": bucket_name,
             "secondary_target": secondary_target,
             "with_compression": with_compression,
             "snapshot_backups": snapshot_backups,
+            "verify_tls": verify_tls,
+            "use_path_style": use_path_style,
         }
-        if local_testing:
-            params["local_testing"] = True
-        if local_endpoint:
-            params["local_endpoint"] = local_endpoint
+        if endpoint:
+            params["endpoint"] = endpoint
+        if region:
+            params["region"] = region
         if access_key_id:
             params["access_key_id"] = access_key_id
         if secret_access_key:
@@ -1931,26 +1946,6 @@ class RPCClient:
             "lvs_name": lvs_name,
             "s3_bdev": bdev_name,
         })
-
-    def bdev_s3_add_bucket_name(self, name, bucket_name, allow_existing: bool = False):
-        """Register a bucket name with the S3 bdev.
-        Must be called after bdev_s3_create and before any backup/recovery operations.
-        Args:
-            name: S3 bdev name (e.g. 's3_LVS_1234')
-            bucket_name: S3/MinIO bucket name to use for data storage
-        Returns (result, error) tuple.
-        """
-        try:
-            return self._request3(
-                "bdev_s3_add_bucket_name",
-                name=name,
-                bucket_name=bucket_name,
-            )
-        except RPCRemoteError as e:
-            if allow_existing and e.code == -17:
-                logger.debug("Bucket %s already registered with %s", name, bucket_name)
-                return None
-            raise
 
     def bdev_lvol_s3_backup(self, s3_id, snapshot_names, cluster_batch=1):
         """Start an async backup of snapshots to S3.
