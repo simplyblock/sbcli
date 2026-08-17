@@ -5083,12 +5083,12 @@ class MassCreateDeleteRestart_300x10_10Snap_K8s(_MassCreateDeleteK8s):
 
 
 class MassCreateRapidRestart_6k_3Snap_Docker(_MassCreateDeleteDocker):
-    """6000 entity cap, 1:3 ratio (3 snaps/lvol → 1500 lvols + 4500 snaps),
+    """12000 entity cap, 1:3 ratio (3 snaps/lvol → 3000 lvols + 9000 snaps),
     30 rapid container stop/restart cycles per phase."""
     PERSISTENT_RETRY = True
-    MAX_ENTITY_COUNT = 6000
-    NUM_SUBSYSTEMS = 30
-    NS_PER_SUBSYSTEM = 50
+    MAX_ENTITY_COUNT = 12000
+    NUM_SUBSYSTEMS = 40
+    NS_PER_SUBSYSTEM = 75
     SNAPSHOTS_PER_LVOL = 3
     RAPID_RESTART_ITERATIONS = 30
     RAPID_RESTART_COOLDOWN = 60
@@ -5109,12 +5109,12 @@ class MassCreateRapidRestart_6k_3Snap_Docker(_MassCreateDeleteDocker):
 
 
 class MassCreateRapidRestart_6k_3Snap_K8s(_MassCreateDeleteK8s):
-    """6000 entity cap, 1:3 ratio (3 snaps/lvol → 1500 PVCs + 4500 snaps),
+    """12000 entity cap, 1:3 ratio (3 snaps/lvol → 3000 PVCs + 9000 snaps),
     30 rapid pod delete/restart cycles per phase."""
     PERSISTENT_RETRY = True
-    MAX_ENTITY_COUNT = 6000
-    NUM_SUBSYSTEMS = 30
-    NS_PER_SUBSYSTEM = 50
+    MAX_ENTITY_COUNT = 12000
+    NUM_SUBSYSTEMS = 40
+    NS_PER_SUBSYSTEM = 75
     SNAPSHOTS_PER_LVOL = 3
     RAPID_RESTART_ITERATIONS = 30
     RAPID_RESTART_COOLDOWN = 60
