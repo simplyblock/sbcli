@@ -648,6 +648,7 @@ class MigrationDTO(BaseModel):
     id: UUID
     lvol_id: str
     source_node_id: str
+    active_source_node_id: str
     target_node_id: str
     phase: str
     status: str
@@ -668,6 +669,7 @@ class MigrationDTO(BaseModel):
             id=UUID(model.uuid),
             lvol_id=model.lvol_id,
             source_node_id=model.source_node_id,
+            active_source_node_id=model.active_source_node_id or model.source_node_id,
             target_node_id=model.target_node_id,
             phase=model.phase,
             status=model.status,
@@ -688,6 +690,7 @@ class BatchMigrationDTO(BaseModel):
     id: UUID
     cluster_id: str
     source_node_id: str
+    active_source_node_id: str
     target_node_id: str
     target_nqn: str
     phase: str
@@ -702,6 +705,7 @@ class BatchMigrationDTO(BaseModel):
             id=UUID(model.uuid),
             cluster_id=model.cluster_id,
             source_node_id=model.source_node_id,
+            active_source_node_id=model.active_source_node_id or model.source_node_id,
             target_node_id=model.target_node_id,
             target_nqn=model.target_nqn,
             phase=model.phase,

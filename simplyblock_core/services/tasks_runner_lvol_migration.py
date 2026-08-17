@@ -581,7 +581,7 @@ def _get_source_tertiary_node(src_node):
 
 
 
-def _build_paths(src_node, tgt_node, src_rpc, tgt_rpc):
+def _build_paths(src_node, tgt_node, src_rpc, tgt_rpc, primary_src_node=None):
     """Build ordered path lists for source and target nodes and compute overlap.
 
     Returns (src_paths, tgt_paths, overlap_ids) where each path entry is:
@@ -593,7 +593,20 @@ def _build_paths(src_node, tgt_node, src_rpc, tgt_rpc):
     Port is role-specific: SRC entries use src_node.lvstore; TGT entries use
     tgt_node.lvstore.  Adding tertiary support = append one more entry to each
     list; all callers automatically handle it via loop/set operations.
+
+    *src_node* is the node actually driving the transfer (position 0 in
+    src_paths) — normally the source primary, but the online secondary/
+    tertiary when the primary was offline at migration create time
+    (migration.active_source_node_id). *primary_src_node* — defaulting to
+    src_node when the fallback isn't in play — is only consulted for its own
+    secondary_node_id/tertiary_node_id fields, which describe the primary's
+    true HA replicas; a replica node's own such fields describe an unrelated
+    pairing and must never be used for this lookup. Whichever replica was
+    chosen as src_node is excluded from the discovered peer set so it isn't
+    listed twice.
     """
+    primary_src_node = primary_src_node or src_node
+
     def _entry(node, rpc, lvstore):
         trtype, ip = _get_migration_nic(node)
         fabric = trtype.lower()
@@ -611,16 +624,18 @@ def _build_paths(src_node, tgt_node, src_rpc, tgt_rpc):
         }
 
     src_paths = [_entry(src_node, src_rpc, src_node.lvstore)]
-    if src_node.secondary_node_id:
+    _src_seen_ids = {src_node.get_id()}
+    if primary_src_node.secondary_node_id and primary_src_node.secondary_node_id not in _src_seen_ids:
         try:
-            ss = db.get_storage_node_by_id(src_node.secondary_node_id)
+            ss = db.get_storage_node_by_id(primary_src_node.secondary_node_id)
             if ss.status == StorageNode.STATUS_ONLINE:
                 src_paths.append(_entry(ss, _make_rpc(ss), src_node.lvstore))
+                _src_seen_ids.add(ss.get_id())
         except KeyError:
             pass
-    if src_node.tertiary_node_id:
+    if primary_src_node.tertiary_node_id and primary_src_node.tertiary_node_id not in _src_seen_ids:
         try:
-            ts = db.get_storage_node_by_id(src_node.tertiary_node_id)
+            ts = db.get_storage_node_by_id(primary_src_node.tertiary_node_id)
             if ts.status == StorageNode.STATUS_ONLINE:
                 src_paths.append(_entry(ts, _make_rpc(ts), src_node.lvstore))
         except KeyError:
@@ -1717,7 +1732,7 @@ def _take_intermediate_snapshot(migration):
     )
 
 
-def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
+def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc, primary_src_node=None):
     """
     Drive the LVOL_MIGRATE phase.
 
@@ -1754,7 +1769,8 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
     # overlap_ids: nodes that appear in BOTH source and target paths — they
     # already have a subsystem (from SRC role); their namespace is swapped in
     # the Done handler's step 4.
-    src_paths, tgt_paths, overlap_ids = _build_paths(src_node, tgt_node, src_rpc, tgt_rpc)
+    src_paths, tgt_paths, overlap_ids = _build_paths(
+        src_node, tgt_node, src_rpc, tgt_rpc, primary_src_node=primary_src_node)
     src_replica_paths = src_paths[1:]  # secondary/tertiary only; primary stays live until cutover
 
     # Detect and repair a target-side node restart that wiped the migration's
@@ -2490,7 +2506,7 @@ def _rename_migrated_bdevs(migration, tgt_node, tgt_rpc, tgt_sec_rpc=None, tgt_t
         lvol.write_to_db(db.kv_store)
 
 
-def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
+def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc, primary_src_node=None):
     """
     Best-effort source cleanup after a successful migration.  The lvol is
     already live on the target — this phase only removes source-side artifacts
@@ -2562,9 +2578,19 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
         migration.transfer_context = ctx
         migration.write_to_db(db.kv_store)
 
-    src_sec = _get_source_secondary_node(src_node)
+    # Peer discovery must key off the true primary's own secondary_node_id/
+    # tertiary_node_id fields (a replica node's own such fields describe an
+    # unrelated pairing — see _build_paths). Whichever replica is already
+    # src_node (the active fallback source) is excluded so it isn't cleaned
+    # up twice.
+    _primary_src_node = primary_src_node or src_node
+    src_sec = _get_source_secondary_node(_primary_src_node)
+    if src_sec is not None and src_sec.get_id() == src_node.get_id():
+        src_sec = None
     src_sec_rpc = _make_rpc(src_sec) if src_sec else None
-    src_ter = _get_source_tertiary_node(src_node)
+    src_ter = _get_source_tertiary_node(_primary_src_node)
+    if src_ter is not None and src_ter.get_id() == src_node.get_id():
+        src_ter = None
     src_ter_rpc = _make_rpc(src_ter) if src_ter else None
 
     # --- Delete source snapshots (best-effort, leader-routed) ---
@@ -2603,7 +2629,7 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
         else:
             logger.info(f"Step 8: removing source NVMe-oF subsystem {lvol.nqn}")
             _src_paths_cu, _, _overlap_ids_cu = _build_paths(
-                src_node, tgt_node, src_rpc, tgt_rpc)
+                src_node, tgt_node, src_rpc, tgt_rpc, primary_src_node=_primary_src_node)
             for _sp in _src_paths_cu:
                 if _sp['node_id'] in _overlap_ids_cu:
                     logger.info(
@@ -2964,10 +2990,22 @@ def task_runner(task):
             migration_events.migration_phase_changed(migration)
 
     # --- Load nodes ---
+    # primary_src_node is the true primary (lvol.node_id) — kept only for HA
+    # topology lookups (its own secondary_node_id/tertiary_node_id fields).
+    # src_node is the node this migration actually issues source-side RPCs
+    # against: the primary when reachable, otherwise the online replica
+    # pinned once at create_migration() time as active_source_node_id. Every
+    # data-plane call below must use src_node/src_rpc, never primary_src_node.
     try:
-        src_node = db.get_storage_node_by_id(migration.source_node_id)
+        primary_src_node = db.get_storage_node_by_id(migration.source_node_id)
     except KeyError:
         return _budget_suspend(task, migration, migration_id, "source node not found")
+
+    try:
+        src_node = db.get_storage_node_by_id(
+            migration.active_source_node_id or migration.source_node_id)
+    except KeyError:
+        return _budget_suspend(task, migration, migration_id, "active source node not found")
 
     try:
         tgt_node = db.get_storage_node_by_id(migration.target_node_id)
@@ -3050,7 +3088,8 @@ def task_runner(task):
     try:
         if migration.migration_group_id:
             return _group_worker_phase_dispatch(
-                task, migration, phase, src_node, tgt_node, src_rpc, tgt_rpc)
+                task, migration, phase, src_node, tgt_node, src_rpc, tgt_rpc,
+                primary_src_node=primary_src_node)
 
         if phase == LVolMigration.PHASE_SNAP_COPY:
             done, suspend, error = _handle_snap_copy(
@@ -3059,11 +3098,14 @@ def task_runner(task):
 
         elif phase == LVolMigration.PHASE_LVOL_MIGRATE:
             done, suspend, error = _handle_lvol_migrate(
-                migration, src_node, tgt_node, src_rpc, tgt_rpc)
+                migration, src_node, tgt_node, src_rpc, tgt_rpc,
+                primary_src_node=primary_src_node)
             next_phase = LVolMigration.PHASE_CLEANUP_SOURCE
 
         elif phase == LVolMigration.PHASE_CLEANUP_SOURCE:
-            done, suspend, error = _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc)
+            done, suspend, error = _handle_cleanup_source(
+                migration, src_node, src_rpc, tgt_node, tgt_rpc,
+                primary_src_node=primary_src_node)
             next_phase = LVolMigration.PHASE_COMPLETED
 
         elif phase == LVolMigration.PHASE_CLEANUP_TARGET:
@@ -3561,7 +3603,8 @@ def _group_worker_budget_suspend(task, migration, group_id, error_msg):
     return _suspend_task(task, migration, error_msg)
 
 
-def _group_worker_phase_dispatch(task, migration, phase, src_node, tgt_node, src_rpc, tgt_rpc):
+def _group_worker_phase_dispatch(task, migration, phase, src_node, tgt_node, src_rpc, tgt_rpc,
+                                  primary_src_node=None):
     """
     Complete phase dispatcher for FN_LVOL_MIG tasks that belong to a batch
     migration group (``migration.migration_group_id`` is set).
@@ -3625,13 +3668,13 @@ def _group_worker_phase_dispatch(task, migration, phase, src_node, tgt_node, src
             migration_events.migration_phase_changed(migration)
             return _group_worker_phase_dispatch(
                 task, migration, LVolMigration.PHASE_LVOL_MIGRATE,
-                src_node, tgt_node, src_rpc, tgt_rpc)
+                src_node, tgt_node, src_rpc, tgt_rpc, primary_src_node=primary_src_node)
         if group.phase == LVolMigrationGroup.PHASE_CLEANUP_TARGET:
             migration.phase = LVolMigration.PHASE_CLEANUP_TARGET
             migration.write_to_db(db.kv_store)
             return _group_worker_phase_dispatch(
                 task, migration, LVolMigration.PHASE_CLEANUP_TARGET,
-                src_node, tgt_node, src_rpc, tgt_rpc)
+                src_node, tgt_node, src_rpc, tgt_rpc, primary_src_node=primary_src_node)
         # Still waiting for other workers.
         task.write_to_db(db.kv_store)
         return False
@@ -3710,7 +3753,7 @@ def _group_worker_phase_dispatch(task, migration, phase, src_node, tgt_node, src
             migration_events.migration_phase_changed(migration)
             return _group_worker_phase_dispatch(
                 task, migration, LVolMigration.PHASE_CLEANUP_SOURCE,
-                src_node, tgt_node, src_rpc, tgt_rpc)
+                src_node, tgt_node, src_rpc, tgt_rpc, primary_src_node=primary_src_node)
         if group.batch_result is False:
             migration.phase = LVolMigration.PHASE_CLEANUP_TARGET
             migration.transfer_context = {}
@@ -3718,7 +3761,7 @@ def _group_worker_phase_dispatch(task, migration, phase, src_node, tgt_node, src
             migration_events.migration_phase_changed(migration)
             return _group_worker_phase_dispatch(
                 task, migration, LVolMigration.PHASE_CLEANUP_TARGET,
-                src_node, tgt_node, src_rpc, tgt_rpc)
+                src_node, tgt_node, src_rpc, tgt_rpc, primary_src_node=primary_src_node)
         task.write_to_db(db.kv_store)
         return False
 
@@ -3726,7 +3769,8 @@ def _group_worker_phase_dispatch(task, migration, phase, src_node, tgt_node, src
     if phase == LVolMigration.PHASE_CLEANUP_SOURCE:
         try:
             done, suspend, error = _handle_cleanup_source(
-                migration, src_node, src_rpc, tgt_node, tgt_rpc)
+                migration, src_node, src_rpc, tgt_node, tgt_rpc,
+                primary_src_node=primary_src_node)
         except RPCException as exc:
             return _suspend_task(task, migration, str(exc))
 
