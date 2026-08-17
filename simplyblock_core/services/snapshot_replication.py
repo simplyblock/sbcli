@@ -249,6 +249,58 @@ def _has_dependent_clone(snapshot_uuid):
     return False
 
 
+def _successor_is_chained_to(successor, predecessor_target_uuid):
+    """True when *successor*'s remote copy is chained onto *predecessor_target_uuid*.
+
+    Retention deletes a predecessor expecting SPDK to swap-merge its segments
+    into the successor that is CHAINED to it. If the chain link was never
+    established, that delete does not merge — it drops the segments, and the
+    target is left holding the newest delta over holes (all-zeros DR fail-over,
+    labs 2026-08-10..17). Keeping N snapshots only widens the race; it never
+    establishes the precondition, so verify it explicitly before pruning.
+
+    The DB link is authoritative when present: ``prev_snap_uuid`` is only
+    written after bdev_lvol_add_clone and bdev_lvol_convert both succeeded, on
+    the primary and on an online secondary (every failure returns before the
+    record is written). The converse does not hold — the link write is
+    best-effort — so when the link is absent we ask SPDK on the target node,
+    which is the real authority, rather than blocking the prune forever.
+    """
+    successor_target_uuid = successor.target_replicated_snap_uuid
+    if not successor_target_uuid:
+        return False
+    try:
+        successor_copy = db.get_snapshot_by_id(successor_target_uuid)
+    except KeyError:
+        return False
+
+    if successor_copy.prev_snap_uuid == predecessor_target_uuid:
+        return True
+
+    # No DB link. Ask the target node whether the blob is actually chained, so a
+    # missing link (best-effort write, or a snapshot replicated before chaining
+    # was implemented) cannot make the pair unprunable for ever.
+    try:
+        predecessor_copy = db.get_snapshot_by_id(predecessor_target_uuid)
+        remote_snode = db.get_storage_node_by_id(successor_copy.lvol.node_id)
+        if remote_snode.status != StorageNode.STATUS_ONLINE:
+            return False
+        for bdev in (remote_snode.rpc_client().get_bdevs(successor_copy.snap_bdev) or []):
+            driver = (bdev.get("driver_specific") or {}).get("lvol") or {}
+            if not driver.get("clone"):
+                continue
+            if driver.get("base_snapshot") in (predecessor_copy.snap_bdev,
+                                               predecessor_copy.snap_uuid):
+                logger.info("Snapshot %s is chained onto %s in SPDK but the DB link is "
+                            "missing; pruning on the SPDK verdict",
+                            successor_copy.get_id(), predecessor_target_uuid)
+                return True
+    except Exception as e:
+        logger.warning("Could not verify the chain of %s onto %s: %s",
+                       successor_target_uuid, predecessor_target_uuid, e)
+    return False
+
+
 _KEEP_REPLICATED_INTERNAL = 2
 
 
@@ -289,15 +341,29 @@ def _prune_internal_snapshots(source_lvol):
     # broke was pure timing, which is why the same fail-over case passed twice
     # and then failed (labs run 15 vs 19).
     #
-    # With two kept, the successor is always chained onto the predecessor
-    # before that predecessor becomes prunable, so the merge has somewhere to
-    # go and no data is dropped.
-    for snap in replicated_internal[:-_KEEP_REPLICATED_INTERNAL]:
+    # Two kept widens the window in which the successor gets chained, but a
+    # count can never establish the precondition: if chaining lagged or failed
+    # for one snapshot while newer ones kept arriving, the predecessor was still
+    # pruned and its segments were dropped instead of merged. So the chain is
+    # verified per candidate below, and an unchained successor defers the prune.
+    for index, snap in enumerate(replicated_internal[:-_KEEP_REPLICATED_INTERNAL]):
         target_uuid = snap.target_replicated_snap_uuid
         try:
             db.get_snapshot_by_id(target_uuid)
         except KeyError:
             target_uuid = ""  # already gone — fall through to source cleanup
+        if target_uuid and not _successor_is_chained_to(
+                replicated_internal[index + 1], target_uuid):
+            # The successor does not (yet) sit on top of this snapshot. Deleting
+            # it now would drop its segments rather than swap-merge them, which
+            # is exactly how a fail-over clone ends up reading zeros. Leave both
+            # copies and retry next cycle: replication is still converging, or
+            # chaining failed and its own retry has to land first.
+            logger.warning("Deferring prune of replicated internal snapshot %s: its "
+                           "successor %s is not chained onto target copy %s",
+                           snap.get_id(), replicated_internal[index + 1].get_id(),
+                           target_uuid)
+            continue
         if target_uuid and _has_dependent_clone(target_uuid):
             # Never prune a target snapshot a volume is cloned from. The delete
             # reaches SPDK as bdev_lvol_delete(sync=False) and frees the blocks
@@ -505,13 +571,22 @@ def process_snap_replicate_finish(task, snapshot):
             snapshot.target_replicated_snap_uuid = new_snapshot_uuid
             new_snapshot.source_replicated_snap_uuid = snapshot.uuid
 
-        try:
-            if _prev_snap_for_db:
-                new_snapshot.prev_snap_uuid = _prev_snap_for_db.get_id()
-                _prev_snap_for_db.next_snap_uuid = new_snapshot_uuid
+        if _prev_snap_for_db:
+            # The chain link is what lets retention delete this snapshot's
+            # predecessor safely: the prune path refuses to drop a predecessor
+            # until it can see the successor sitting on top of it. Swallowing a
+            # failure here used to leave SPDK chained but the record unlinked,
+            # so record it before the snapshot is published, and fail the task
+            # (it retries) rather than publishing a snapshot that looks
+            # unchained to retention.
+            new_snapshot.prev_snap_uuid = _prev_snap_for_db.get_id()
+            _prev_snap_for_db.next_snap_uuid = new_snapshot_uuid
+            try:
                 _prev_snap_for_db.write_to_db()
-        except Exception as e:
-            logger.error(e)
+            except Exception as e:
+                logger.error("Failed to record the chain back-link on %s: %s",
+                             _prev_snap_for_db.get_id(), e)
+                return False
 
     new_snapshot.write_to_db()
 
