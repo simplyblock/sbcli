@@ -756,7 +756,7 @@ jobs:
           set -euxo pipefail
 
           # 1. Install mc (MinIO Client)
-          rm -f /tmp/mc
+          sudo rm -f /tmp/mc
           curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o /tmp/mc
           chmod +x /tmp/mc
           export PATH="/tmp:$PATH"
