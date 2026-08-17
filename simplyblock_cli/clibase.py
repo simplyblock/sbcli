@@ -766,13 +766,17 @@ class CLIWrapperBase:
         if not info:
             return False
         return utils.print_table([
-            {"Last Snapshot": info["last_snapshot_id"],
+            {"State": info.get("state", "-"),
+             "Healthy": info.get("healthy", False),
+             "Last Snapshot": info["last_snapshot_id"],
              "Last Replication": info["last_replication_time"],
              "Last Duration": info["last_replication_duration"],
              "Replicated Count": info["replicated_count"],
              "Time Lag": info["lag"] or "-",
              "Outstanding": info["outstanding"],
-             "Outstanding Count": info["outstanding_count"]},
+             "Outstanding Count": info["outstanding_count"],
+             "Retrying": info.get("failing_count", 0),
+             "Last Error": (info.get("last_error") or "-")[:60]},
         ])
 
     def volume__replication_trigger(self, sub_command, args):
