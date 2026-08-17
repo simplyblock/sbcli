@@ -271,6 +271,10 @@ def test_merge_done_finalizes(runner, monkeypatch):
     rpc = MagicMock()
     rpc.bdev_lvol_s3_merge_stat.return_value = {"transfer_state": "Done"}
     monkeypatch.setattr(runner, "db", _merge_db(keep_backup, old_backup, _online_snode(), rpc))
+    write_manifest = MagicMock()
+    delete_manifest = MagicMock()
+    monkeypatch.setattr(runner.backup_controller, "write_manifest", write_manifest)
+    monkeypatch.setattr(runner.backup_controller, "delete_manifest", delete_manifest)
 
     task = _merge_task()
     runner._run_merge(task)
@@ -280,6 +284,11 @@ def test_merge_done_finalizes(runner, monkeypatch):
     assert keep_backup.prev_backup_id == "older-0"
     assert old_backup.status == Backup.STATUS_MERGED
     assert task.status == JobSchedule.STATUS_DONE
+    # The bucket has to agree with the database: the survivor's manifest now
+    # names a different predecessor, and the merged-away one describes keys the
+    # data plane has unmapped.
+    write_manifest.assert_called_once_with(keep_backup)
+    delete_manifest.assert_called_once_with(old_backup)
 
 
 def test_merge_failed_reverts_old_backup_and_terminates(runner, monkeypatch):
