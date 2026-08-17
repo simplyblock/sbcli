@@ -14,6 +14,7 @@ from simplyblock_core.backup_manifest import ManifestError
 from simplyblock_core.controllers import backup_controller, backup_events
 from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.models.backup import Backup
+from simplyblock_core.models.backup_config import BackupConfig
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.storage_node import StorageNode
@@ -192,6 +193,51 @@ def _set_lvol_restore_failed(task, reason):
         logger.warning(f"Restored lvol {lvol_id} not found in DB")
 
 
+def _restore_s3_bdev(task, snode) -> str:
+    """The S3 device this restore reads from.
+
+    A foreign bucket gets its own device, named from the backup id so a retry
+    re-derives the same name instead of leaking one per attempt. Otherwise the
+    node's own backup device already points at the right bucket.
+    """
+    if task.function_params.get("s3_config"):
+        return backup_controller.restore_s3_bdev_name(
+            task.function_params["backup_id"])
+    return backup_controller.primary_s3_bdev_name(snode)
+
+
+def _ensure_restore_s3_bdev(task, snode) -> None:
+    """Create the foreign-bucket device if this restore needs one.
+
+    Idempotent, and re-run on every attempt rather than once: a node restart
+    mid-restore takes the device with it, and the runner is the only component
+    positioned to put it back.
+    """
+    config = task.function_params.get("s3_config")
+    if not config:
+        return
+
+    backup_controller.create_restore_s3_bdev(
+        snode, BackupConfig.model_validate(config), _restore_s3_bdev(task, snode))
+
+
+def _release_restore_s3_bdev(task, snode) -> None:
+    """Delete the foreign-bucket device and forget its credentials.
+
+    Called on every terminal path. The credentials are scrubbed from the task
+    record because a task is retained for weeks after it finishes, and there is
+    no reason for another cluster's S3 keys to outlive the restore that needed
+    them.
+    """
+    if not task.function_params.get("s3_config"):
+        return
+
+    if snode is not None:
+        backup_controller.delete_restore_s3_bdev(snode, _restore_s3_bdev(task, snode))
+
+    task.function_params["s3_config"] = None
+
+
 def _run_restore(task):
     backup_id = task.function_params.get("backup_id")
     lvol_name = task.function_params.get("lvol_name")
@@ -222,19 +268,35 @@ def _run_restore(task):
             from simplyblock_core.models.lvol_model import LVol
             lvol = db.get_lvol_by_id(lvol_id)
             if lvol.status == LVol.STATUS_IN_DELETION:
+                _release_restore_s3_bdev(task, snode)
                 task.function_result = f"Restore target {lvol_id} has been deleted"
                 task.status = JobSchedule.STATUS_DONE
                 task.write_to_db(db.kv_store)
                 return
         except KeyError:
+            _release_restore_s3_bdev(task, snode)
             task.function_result = f"Restore target {lvol_id} no longer exists"
             task.status = JobSchedule.STATUS_DONE
             task.write_to_db(db.kv_store)
             return
 
     if not recovery_started:
+        # The device is established here, not when the restore was requested:
+        # only now is the node known (add_lvol_ha chooses it), and only the
+        # runner can put it back after a node restart wipes it mid-restore.
         try:
-            ret = rpc_client.bdev_lvol_s3_recovery(lvol_name, chain_ids, cluster_batch=16)
+            _ensure_restore_s3_bdev(task, snode)
+        except (RuntimeError, ValueError) as e:
+            task.function_result = f"Could not attach the backup's bucket: {e}"
+            task.retry += 1
+            task.status = JobSchedule.STATUS_SUSPENDED
+            task.write_to_db(db.kv_store)
+            return
+
+        try:
+            ret = rpc_client.bdev_lvol_s3_recovery(
+                lvol_name, chain_ids, cluster_batch=16,
+                s3_bdev=_restore_s3_bdev(task, snode))
             if not ret:
                 task.function_result = "bdev_lvol_s3_recovery RPC failed"
                 task.retry += 1
@@ -274,6 +336,7 @@ def _run_restore(task):
                     task.cluster_id, node_id, backup, lvol_name)
             except KeyError:
                 pass
+            _release_restore_s3_bdev(task, snode)
             task.function_result = f"Restore completed: {lvol_name}"
             task.status = JobSchedule.STATUS_DONE
             task.write_to_db(db.kv_store)
@@ -292,6 +355,7 @@ def _run_restore(task):
                     logger.warning(
                         "Backup %s not found in DB; restore-failed event skipped for lvol %s",
                         backup_id, lvol_name)
+                _release_restore_s3_bdev(task, snode)
                 task.status = JobSchedule.STATUS_DONE
             else:
                 task.retry += 1
@@ -415,6 +479,12 @@ def _terminate_task(task, reason):
                 pass
     elif task.function_name == JobSchedule.FN_BACKUP_RESTORE:
         _set_lvol_restore_failed(task, reason)
+        # This is the timeout / retry-ceiling path, so it is terminal too and
+        # owes the same cleanup as a normal failure.
+        try:
+            _release_restore_s3_bdev(task, db.get_storage_node_by_id(task.node_id))
+        except KeyError:
+            _release_restore_s3_bdev(task, None)
     elif task.function_name == JobSchedule.FN_BACKUP_MERGE:
         old_bid = task.function_params.get("old_backup_id")
         if old_bid:
