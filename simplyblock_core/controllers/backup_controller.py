@@ -83,21 +83,24 @@ def _get_latest_backup_for_lvol(lvol_id):
     return valid[0]
 
 
-def _compute_s3_cpu_masks(node):
-    """Compute CPU masks for the S3 bdev.
+def _compute_s3_cpu_masks(node: StorageNode):
+    """CPU masks for the S3 bdev, or None where the node does not say.
+
     Returns (bdb_lcpu_mask, s3_lcpu_mask):
         bdb_lcpu_mask: app_thread core (SPDK lightweight thread, low overhead)
         s3_lcpu_mask: all system vCPUs (no pinning — let Linux scheduler handle
                       the AWS SDK thread pool; the data plane default would
                       wrongly pin onto SPDK reactor cores)
+
+    None rather than 0 for "the node does not tell us": a zero mask selects no
+    CPUs at all, and the data plane reads it as "unset" anyway, so returning it
+    would be a sentinel dressed as a value.
     """
     # SPDK thread for the bdev poller — reuse the app thread core
-    bdb_lcpu_mask = 0
-    if node.app_thread_mask:
-        bdb_lcpu_mask = int(node.app_thread_mask, 16)
+    bdb_lcpu_mask = int(node.app_thread_mask, 16) if node.app_thread_mask else None
 
     # AWS SDK thread pool — set all system vCPU bits so threads are unconstrained
-    s3_lcpu_mask = (1 << node.cpu) - 1 if node.cpu > 0 else 0
+    s3_lcpu_mask = (1 << node.cpu) - 1 if node.cpu > 0 else None
 
     return bdb_lcpu_mask, s3_lcpu_mask
 
@@ -322,12 +325,12 @@ def build_manifest(backup: Backup) -> backup_manifest.BackupManifest:
     )
 
 
-def primary_s3_bdev_name(node) -> str:
+def primary_s3_bdev_name(node: StorageNode) -> str:
     """The S3 device holding the cluster's own backup bucket."""
     return f"s3_{node.lvstore}"
 
 
-def create_restore_s3_bdev(node, config: BackupConfig, name: str) -> None:
+def create_restore_s3_bdev(node: StorageNode, config: BackupConfig, name: str) -> None:
     """Attach a second S3 device to a node, for a bucket that is not its own.
 
     A restore from a foreign bucket needs different credentials, a different
@@ -348,7 +351,7 @@ def create_restore_s3_bdev(node, config: BackupConfig, name: str) -> None:
             secondary_target=config.secondary_target,
             with_compression=config.with_compression,
             snapshot_backups=config.snapshot_backups,
-            endpoint=config.endpoint_url or "",
+            endpoint=config.endpoint_url,
             region=config.region,
             verify_tls=config.verify_tls,
             use_path_style=config.use_path_style,
@@ -356,7 +359,7 @@ def create_restore_s3_bdev(node, config: BackupConfig, name: str) -> None:
             secret_access_key=config.credentials.secret_access_key if config.credentials else None,
             bdb_lcpu_mask=bdb_lcpu_mask,
             s3_lcpu_mask=s3_lcpu_mask,
-            s3_thread_pool_size=config.s3_thread_pool_size or 0,
+            s3_thread_pool_size=config.s3_thread_pool_size,
         )
         rpc_client.bdev_lvol_s3_bdev(node.lvstore, name)
     except RPCException as e:
@@ -368,7 +371,7 @@ def create_restore_s3_bdev(node, config: BackupConfig, name: str) -> None:
                 name, config.bucket_name, node.get_id())
 
 
-def delete_restore_s3_bdev(node, name: str) -> None:
+def delete_restore_s3_bdev(node: StorageNode, name: str) -> None:
     """Detach a device created by :func:`create_restore_s3_bdev`.
 
     Best-effort by design: this runs on the restore's terminal paths, and a
@@ -539,7 +542,7 @@ def _ensure_s3_bucket(config: BackupConfig, bucket_name):
         raise RuntimeError(f"Error ensuring S3 bucket {bucket_name} exists") from e
 
 
-def create_s3_bdev(node, config: BackupConfig) -> None:
+def create_s3_bdev(node: StorageNode, config: BackupConfig) -> None:
     """Create the S3 bdev and attach it to a node's lvstore.
     Called during cluster activate / node restart.
     Args:
@@ -571,7 +574,7 @@ def create_s3_bdev(node, config: BackupConfig) -> None:
             secondary_target=config.secondary_target,
             with_compression=config.with_compression,
             snapshot_backups=config.snapshot_backups,
-            endpoint=config.endpoint_url or "",
+            endpoint=config.endpoint_url,
             region=config.region,
             verify_tls=config.verify_tls,
             use_path_style=config.use_path_style,
@@ -579,7 +582,7 @@ def create_s3_bdev(node, config: BackupConfig) -> None:
             secret_access_key=config.credentials.secret_access_key if config.credentials else None,
             bdb_lcpu_mask=bdb_lcpu_mask,
             s3_lcpu_mask=s3_lcpu_mask,
-            s3_thread_pool_size=config.s3_thread_pool_size or 0,
+            s3_thread_pool_size=config.s3_thread_pool_size,
         )
 
         rpc_client.bdev_lvol_s3_bdev(node.lvstore, s3_bdev_name)
