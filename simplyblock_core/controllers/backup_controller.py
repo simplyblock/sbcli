@@ -111,10 +111,11 @@ def _compute_s3_cpu_masks(node):
 
 
 def chain_fits(length: int) -> bool:
-    """Whether the data plane can accept a chain this long.
+    """Whether a chain this long is accepted.
 
-    Beyond this it copies the decoded array into a fixed stack buffer, smashing
-    the storage node's stack rather than returning an error.
+    The bound is the control plane's own; see BACKUP_MAX_CHAIN_LENGTH for what it
+    is a bound on. The data plane's own limit is higher and refuses rather than
+    overruns, so this is where a too-long chain is reported usefully.
     """
     return length <= constants.BACKUP_MAX_CHAIN_LENGTH
 
