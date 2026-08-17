@@ -664,10 +664,19 @@ BACKUP_POLL_INTERVAL_SEC = 5
 BACKUP_MAX_RETRIES = 10
 BACKUP_MERGE_SERVICE_INTERVAL_SEC = 60
 
-#: Longest backup chain the data plane will accept. bdev_lvol_s3_backup and
-#: bdev_lvol_s3_recovery copy the decoded arrays into fixed 40-element stack
-#: buffers (vbdev_lvol_rpc.c), so a longer chain corrupts the node's stack. The
-#: control plane refuses first; raise this only together with those buffers.
+#: Longest backup chain the control plane will accept.
+#:
+#: This used to be a memory-safety bound: bdev_lvol_s3_backup and
+#: bdev_lvol_s3_recovery copied the decoded arrays into fixed 40-element stack
+#: buffers, so a longer chain corrupted the storage node's stack. Those buffers
+#: are now sized to the decoder's own bound (RPC_MAX_LVOL_VBDEV, 255), so the
+#: data plane rejects rather than overruns and this number is the control plane's
+#: own policy.
+#:
+#: It stays at 40 because a restore reads every backup in the chain in one
+#: operation: the chain length is a multiplier on restore time and on the objects
+#: a recovery has to fetch, and 40 tiered backups is already a long retention
+#: history. Raising it is safe up to 255 and needs no data-plane change.
 BACKUP_MAX_CHAIN_LENGTH = 40
 
 #: Upper bound on a backup's s3_id. The data plane packs it into bits 33..62 of

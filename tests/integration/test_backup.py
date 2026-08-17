@@ -301,7 +301,6 @@ class TestCreateS3Bdev(unittest.TestCase):
     def test_success(self, MockRPC, mock_boto3_client):
         mock_rpc = MockRPC.return_value
         mock_rpc.bdev_s3_create.return_value = True
-        mock_rpc.bdev_s3_add_bucket_name.return_value = (True, None)
         mock_rpc.bdev_lvol_s3_bdev.return_value = True
         mock_s3 = mock_boto3_client.return_value
         mock_s3.head_bucket.return_value = {}
@@ -337,7 +336,6 @@ class TestCreateS3Bdev(unittest.TestCase):
         node = _node()
         with pytest.raises(Exception):
             create_s3_bdev(node, _backup_config())
-        mock_rpc.bdev_s3_add_bucket_name.assert_not_called()
         mock_rpc.bdev_lvol_s3_bdev.assert_not_called()
 
     @patch("simplyblock_core.backup_manifest.boto3.client")
@@ -355,8 +353,6 @@ class TestCreateS3Bdev(unittest.TestCase):
 
         _, kwargs = mock_rpc.bdev_s3_create.call_args
         assert kwargs["bucket_name"] == "simplyblock-backup-cluster-1"
-        assert not hasattr(mock_rpc, "_mock_children") or \
-            "bdev_s3_add_bucket_name" not in mock_rpc.method_calls
 
     @patch("simplyblock_core.backup_manifest.boto3.client")
     @patch("simplyblock_core.models.storage_node.RPCClient")
@@ -364,7 +360,6 @@ class TestCreateS3Bdev(unittest.TestCase):
         from simplyblock_core.rpc_client import RPCRemoteError
         mock_rpc = MockRPC.return_value
         mock_rpc.bdev_s3_create.return_value = True
-        mock_rpc.bdev_s3_add_bucket_name.return_value = (True, None)
         mock_rpc.bdev_lvol_s3_bdev.side_effect = RPCRemoteError("attach failed", code=-1)
         mock_s3 = mock_boto3_client.return_value
         mock_s3.head_bucket.return_value = {}
@@ -379,7 +374,6 @@ class TestCreateS3Bdev(unittest.TestCase):
     def test_local_testing_params(self, MockRPC, mock_boto3_client):
         mock_rpc = MockRPC.return_value
         mock_rpc.bdev_s3_create.return_value = True
-        mock_rpc.bdev_s3_add_bucket_name.return_value = (True, None)
         mock_rpc.bdev_lvol_s3_bdev.return_value = True
         mock_s3 = mock_boto3_client.return_value
         mock_s3.head_bucket.return_value = {}
@@ -419,7 +413,6 @@ class TestCreateS3Bdev(unittest.TestCase):
         """An absent key pair must mean "use the node's IAM role", not "send empty keys"."""
         mock_rpc = MockRPC.return_value
         mock_rpc.bdev_s3_create.return_value = True
-        mock_rpc.bdev_s3_add_bucket_name.return_value = (True, None)
         mock_rpc.bdev_lvol_s3_bdev.return_value = True
         mock_boto3_client.return_value.head_bucket.return_value = {}
 
