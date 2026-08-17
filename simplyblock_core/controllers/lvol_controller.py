@@ -2940,23 +2940,73 @@ def replication_start(lvol_id, replication_cluster_id=None, mode=None, interval_
     logger.info("Setting LVol do_replicate: True")
 
     all_snaps = db_controller.get_snapshots()
-    for snap in all_snaps:
-        if snap.lvol.uuid == lvol.uuid:
-            if not snap.target_replicated_snap_uuid:
-                matched = False
-                for sn in all_snaps:
-                    if sn.lvol.node_id == lvol.replication_node_id and sn.data_uuid == snap.data_uuid:
-                        snap = db_controller.get_snapshot_by_id(snap.get_id())
-                        snap.target_replicated_snap_uuid = sn.get_id()
-                        snap.write_to_db()
-                        matched = True
-                        break
-                if not matched:
-                    task = tasks_controller.add_snapshot_replication_task(snap.cluster_id, snap.lvol.node_id, snap.get_id())
-                    # task may be None if the scheduler is at capacity; the next poll cycle will retry
-                    if task:
-                        snapshot_events.replication_task_created(snap)
+    for snap in replication_backlog(db_controller, lvol, all_snaps):
+        if not snap.target_replicated_snap_uuid:
+            matched = False
+            for sn in all_snaps:
+                if sn.lvol.node_id == lvol.replication_node_id and sn.data_uuid == snap.data_uuid:
+                    snap = db_controller.get_snapshot_by_id(snap.get_id())
+                    snap.target_replicated_snap_uuid = sn.get_id()
+                    snap.write_to_db()
+                    matched = True
+                    break
+            if not matched:
+                task = tasks_controller.add_snapshot_replication_task(snap.cluster_id, snap.lvol.node_id, snap.get_id())
+                # task may be None if the scheduler is at capacity; the next poll cycle will retry
+                if task:
+                    snapshot_events.replication_task_created(snap)
     return True
+
+
+def replication_backlog(db_controller, lvol, all_snaps=None, max_depth=64):
+    """Every snapshot the volume's data depends on, oldest first.
+
+    A volume's data lives in a blob chain: its own clusters, plus everything
+    inherited from the snapshots below it. A volume sitting on a snapshot of
+    another volume is no different structurally — so the backlog is the whole
+    ancestor chain, not just the snapshots recorded against this volume's uuid.
+
+    Queueing only ``snap.lvol.uuid == lvol.uuid`` happens to be complete for a
+    volume that owns its whole chain, which is why plain migration works. For a
+    volume that sits on someone else's snapshot (a failed-over volume is the
+    common case) the ancestors were skipped, so a destination that does not
+    already hold them receives the upper deltas with holes underneath.
+
+    Only ancestors at or below each branch point are included: snapshots taken
+    on an ancestor volume AFTER we branched off it are not part of our data.
+    """
+    if all_snaps is None:
+        all_snaps = db_controller.get_snapshots()
+    by_lvol = {}
+    for s in all_snaps:
+        by_lvol.setdefault(s.lvol.uuid, []).append(s)
+
+    wanted = {}
+    current = lvol
+    cutoff = None          # None == no branch point yet: take all of ours
+    seen_lvols = set()
+    for _ in range(max_depth):
+        if current is None or current.uuid in seen_lvols:
+            break
+        seen_lvols.add(current.uuid)
+        for s in by_lvol.get(current.uuid, []):
+            if cutoff is None or s.created_at <= cutoff:
+                wanted[s.get_id()] = s
+        parent_uuid = getattr(current, "cloned_from_snap", "")
+        if not parent_uuid:
+            break
+        try:
+            parent = db_controller.get_snapshot_by_id(parent_uuid)
+        except KeyError:
+            logger.warning("Chain of %s stops at missing snapshot %s",
+                           lvol.get_id(), parent_uuid)
+            break
+        wanted[parent.get_id()] = parent      # the branch point itself
+        cutoff = parent.created_at
+        current = parent.lvol
+
+    # Oldest first: the destination chains each arrival onto its predecessor.
+    return sorted(wanted.values(), key=lambda s: s.created_at)
 
 
 def list_by_node(node_id=None):

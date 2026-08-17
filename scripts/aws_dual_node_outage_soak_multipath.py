@@ -1396,6 +1396,10 @@ class SoakRunner:
                     problems.extend(self._verify_node_spdk(uuid))
                 except Exception as exc:
                     problems.append(f"{uuid[:12]}: verification error: {exc}")
+            try:
+                problems.extend(self._verify_client_paths())
+            except Exception as exc:
+                problems.append(f"client: path verification error: {exc}")
             elapsed = time.time() - started
             if not problems:
                 if attempt == 1:
@@ -1424,6 +1428,89 @@ class SoakRunner:
         self.logger.log(
             f"{label}: {len(problems)} problem(s) unhealed after {timeout}s, "
             f"continuing (non-strict)")
+
+    def _verify_client_paths(self):
+        """Verify the CLIENT's view of every volume's paths.
+
+        Target-side state being perfect is not sufficient, and assuming it was
+        cost a whole run: soak 2026-08-12 iteration 7 lost all IO on a volume
+        whose tertiary paths were TCP-live with subsystem, namespace and both
+        listeners verified present on the target, while the client's multipath
+        head reported "no usable path" and EIO'd the application. Only the
+        client's own per-path state shows that.
+
+        For each volume this checks, per path controller:
+          * a namespace block device exists under the controller
+          * its ANA state is usable (optimized / non-optimized, not
+            inaccessible and not a transient/unknown state)
+        and that the number of usable paths equals the number of paths the
+        subsystem claims. A live controller carrying no usable namespace is
+        exactly the silent redundancy loss this gate exists to catch.
+        """
+        script = r"""
+set -u
+for subsys in /sys/class/nvme-subsystem/nvme-subsys*; do
+    [ -e "$subsys/subsysnqn" ] || continue
+    nqn=$(cat "$subsys/subsysnqn")
+    case "$nqn" in *:lvol:*) ;; *) continue ;; esac
+    vol=${nqn##*:lvol:}
+    total=0; usable=0; detail=""
+    for ctrl in "$subsys"/nvme*; do
+        [ -d "$ctrl" ] || continue
+        cname=$(basename "$ctrl")
+        case "$cname" in nvme*) ;; *) continue ;; esac
+        [ -e "$ctrl/state" ] || continue
+        total=$((total+1))
+        cstate=$(cat "$ctrl/state" 2>/dev/null || echo unknown)
+        ns_found=0; ana=none
+        for ns in "$ctrl"/"$cname"c*n* "$ctrl"/"$cname"n*; do
+            [ -d "$ns" ] || continue
+            ns_found=1
+            if [ -e "$ns/ana_state" ]; then
+                ana=$(cat "$ns/ana_state" 2>/dev/null || echo unknown)
+            else
+                ana=noana
+            fi
+            break
+        done
+        case "$ana" in
+            optimized|non-optimized|non_optimized|noana) usable=$((usable+1)) ;;
+        esac
+        if [ "$ns_found" = 0 ] || [ "$ana" = inaccessible ]; then
+            detail="$detail $cname:state=$cstate,ns=$ns_found,ana=$ana"
+        fi
+    done
+    echo "VOL $vol total=$total usable=$usable$detail"
+done
+"""
+        _, stdout_text, _ = self.client.run(
+            f"bash -lc {shlex.quote(script)}", timeout=120, check=False,
+            label="verify client paths")
+        problems = []
+        seen = set()
+        for line in (stdout_text or "").splitlines():
+            if not line.startswith("VOL "):
+                continue
+            fields = line.split()
+            volume = fields[1]
+            seen.add(volume)
+            info = dict(
+                part.split("=", 1) for part in fields[2:4] if "=" in part)
+            total = int(info.get("total", 0))
+            usable = int(info.get("usable", 0))
+            detail = " ".join(fields[4:])
+            if total == 0:
+                problems.append(f"client: {volume[:12]} has no path controllers")
+            elif usable < total:
+                problems.append(
+                    f"client: {volume[:12]} has {usable}/{total} usable path(s) "
+                    f"— a live controller with no usable namespace is invisible "
+                    f"to every target-side check [{detail}]")
+        tracked = {job.volume_id for job in self.fio_jobs}
+        for volume_id in tracked - seen:
+            problems.append(
+                f"client: {volume_id[:12]} has no nvme-subsystem entry at all")
+        return problems
 
     def _verify_node_spdk(self, uuid):
         host = self._node_host(uuid)
