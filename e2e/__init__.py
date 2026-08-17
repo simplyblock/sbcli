@@ -222,6 +222,7 @@ from e2e_tests.test_pool_dhchap import TestPoolDhchap
 from e2e_tests.test_pool_capacity_limits import TestPoolCapacityLimits
 from e2e_tests.test_namespace_e2e import TestNamespaceE2E
 from e2e_tests.test_device_restart import TestDeviceRestart
+from e2e_tests.test_checksum_corruption_detection import TestChecksumCorruptionDetection  # UNCERTAIN: requires --enable-inline-checksum and --enable-test-device on the target cluster/node
 from e2e_tests.test_volume_priority import TestVolumePriority                # UNCERTAIN: volume priority enforcement unclear
 from e2e_tests.test_shared_placement import TestSharedPlacement              # UNCERTAIN: requires cluster set-shared-placement
 from e2e_tests.test_qpair_tuning import TestQpairTuning                     # UNCERTAIN: requires RDMA-enabled cluster
@@ -521,6 +522,7 @@ ALL_TESTS = [
     TestPoolCapacityLimits,
     TestNamespaceE2E,
     TestDeviceRestart,
+    TestChecksumCorruptionDetection,
     TestVolumePriority,
     TestSharedPlacement,
     TestQpairTuning,
@@ -607,6 +609,7 @@ def get_all_tests(custom=True, ha_test=False):
         # TestPoolCapacityLimits,
         # TestNamespaceE2E,
         # TestDeviceRestart,
+        # # TestChecksumCorruptionDetection, # UNCERTAIN: requires --enable-inline-checksum and --enable-test-device on the target cluster/node
         # # TestVolumePriority,             # UNCERTAIN: volume priority enforcement unclear
         # # TestSharedPlacement,            # UNCERTAIN: requires cluster set-shared-placement
         # # TestQpairTuning,               # UNCERTAIN: requires RDMA-enabled cluster
