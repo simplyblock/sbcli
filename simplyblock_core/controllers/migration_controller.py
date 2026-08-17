@@ -472,6 +472,29 @@ def _resolve_active_source_node(primary_node, target_node_id):
     online either. Raises PreconditionError if the resolved node is the
     same as target_node_id (can't migrate a replica onto itself).
     """
+    # ─── TEMP DEBUG: force migrate-from-secondary ───────────────────────────
+    # Always fall back to the online secondary, ignoring primary_node.status,
+    # so the secondary/tertiary-source path can be exercised end-to-end
+    # without actually having to take the primary node offline.
+    # REMOVE this block once manual testing of the fallback-source feature
+    # is complete.
+    if primary_node.secondary_node_id:
+        try:
+            forced_secondary = db.get_storage_node_by_id(primary_node.secondary_node_id)
+        except KeyError:
+            forced_secondary = None
+        if forced_secondary is not None and forced_secondary.status == StorageNode.STATUS_ONLINE:
+            logger.warning(
+                f"[TEMP DEBUG] forcing migration source to secondary "
+                f"{forced_secondary.get_id()} instead of primary {primary_node.get_id()}")
+            if forced_secondary.get_id() == target_node_id:
+                raise PreconditionError(
+                    f"Cannot migrate to node {target_node_id}: [TEMP DEBUG] "
+                    f"forced source is the secondary of {primary_node.get_id()}, "
+                    f"which is the requested target")
+            return forced_secondary
+    # ─── END TEMP DEBUG ──────────────────────────────────────────────────────
+
     if primary_node.status in (StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED):
         active_node = primary_node
     else:
