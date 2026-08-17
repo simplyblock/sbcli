@@ -227,7 +227,7 @@ class CLIWrapper(CLIWrapperBase):
     def init_storage_node__device_testing_mode(self, subparser):
         subcommand = self.add_sub_command(subparser, 'device-testing-mode', 'Sets a device to testing mode.')
         subcommand.add_argument('device_id', help='The storage device id.', type=str)
-        subcommand.add_argument('mode', help='The testing mode. Default: `full_pass_through`.', type=str, default='full_pass_through', choices=['full_pass_through','io_error_on_write','io_error_on_all','hotplug_removal','discard_io_all','io_error_on_unmap','io_error_on_read',])
+        subcommand.add_argument('mode', help='The testing mode. Default: `full_pass_through`.', type=str, default='full_pass_through', choices=['full_pass_through','io_error_on_write','io_error_on_all','hotplug_removal','discard_io_all','io_error_on_unmap','io_error_on_read','corrupt_data_on_write',])
 
     def init_storage_node__device_hang(self, subparser):
         subcommand = self.add_sub_command(subparser, 'device-hang', 'Make a device hang for N seconds (0 to release). Requires --enable-hang-device at cluster create.')
