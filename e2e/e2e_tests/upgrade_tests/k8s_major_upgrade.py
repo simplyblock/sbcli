@@ -1480,7 +1480,7 @@ class K8sNativeMajorUpgrade(TestClusterBase):
             f"--set controlplane.observability.enabled=true "
             f"--set opensearch.persistence.storageClass=local-hostpath "
             f"--set controlplane.observability.minio.storageClass=local-hostpath "
-            f"--set prometheus.server.persistentVolume.storageClass=local-hostpath "
+
             f"{tls_flags} {csi_flags}"
         ).strip()
 
@@ -2140,7 +2140,7 @@ class K8sNativeMajorUpgrade(TestClusterBase):
             f"--set controlplane.observability.enabled=true "
             f"--set opensearch.persistence.storageClass=local-hostpath "
             f"--set controlplane.observability.minio.storageClass=local-hostpath "
-            f"--set prometheus.server.persistentVolume.storageClass=local-hostpath "
+
             f"{tls_flags} {csi_flags}"
         ).strip()
 
