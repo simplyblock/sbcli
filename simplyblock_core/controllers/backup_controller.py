@@ -2,7 +2,7 @@ import logging
 import re
 import time
 import uuid
-from typing import Iterable, List
+from collections.abc import Iterable
 
 from botocore.exceptions import BotoCoreError, ClientError
 
@@ -10,7 +10,8 @@ from simplyblock_core import backup_manifest, constants
 from simplyblock_core.controllers import backup_events, tasks_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.backup import Backup, BackupPolicy, BackupPolicyAttachment
-from simplyblock_core.models.backup_config import BackupConfig, BackupLocation
+from simplyblock_core.models.backup_config import (
+    BackupConfig, BackupLocation, S3Credentials)
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.kms import (
     KMSException, backup_dek_path, backup_kek_name, create_kms_connection,
@@ -128,7 +129,7 @@ def location_holds_backups(location: BackupLocation) -> bool:
 
 
 def chain_is_coherent(backups, location: BackupLocation,
-                      encrypted: Optional[bool] = None) -> bool:
+                      encrypted: bool | None = None) -> bool:
     """Whether these backups can be restored together.
 
     A restore reads clusters from every backup in the chain in one operation,
@@ -150,7 +151,7 @@ def chain_is_coherent(backups, location: BackupLocation,
 
 
 def _describe_incoherence(backups, location: BackupLocation,
-                          encrypted: Optional[bool]) -> str:
+                          encrypted: bool | None) -> str:
     for backup in backups:
         if backup.get_location() != location:
             return (
@@ -168,8 +169,8 @@ def _describe_incoherence(backups, location: BackupLocation,
 
 
 def require_restorable(location: BackupLocation, backups=(),
-                       chain_length: Optional[int] = None,
-                       encrypted: Optional[bool] = None,
+                       chain_length: int | None = None,
+                       encrypted: bool | None = None,
                        what: str = "This chain") -> None:
     """Refuse a chain that could not be restored, naming the rule it breaks.
 
@@ -317,6 +318,125 @@ def build_manifest(backup: Backup) -> backup_manifest.BackupManifest:
     )
 
 
+def primary_s3_bdev_name(node) -> str:
+    """The S3 device holding the cluster's own backup bucket."""
+    return f"s3_{node.lvstore}"
+
+
+def create_restore_s3_bdev(node, config: BackupConfig, name: str) -> None:
+    """Attach a second S3 device to a node, for a bucket that is not its own.
+
+    A restore from a foreign bucket needs different credentials, a different
+    endpoint and a different region than the node's own backup device carries.
+    Since a device holds exactly one bucket, the way to read another one is to
+    create another device -- which the lvstore supports, its transfer devices
+    being a list.
+
+    The caller owns the result and must delete it when the restore ends.
+    """
+    rpc_client = node.rpc_client()
+    bdb_lcpu_mask, s3_lcpu_mask = _compute_s3_cpu_masks(node)
+
+    try:
+        rpc_client.bdev_s3_create(
+            name=name,
+            secondary_target=config.secondary_target,
+            with_compression=config.with_compression,
+            snapshot_backups=config.snapshot_backups,
+            local_testing=config.endpoint is not None,
+            local_endpoint=config.endpoint_url or "",
+            access_key_id=config.credentials.access_key_id if config.credentials else None,
+            secret_access_key=config.credentials.secret_access_key if config.credentials else None,
+            bdb_lcpu_mask=bdb_lcpu_mask,
+            s3_lcpu_mask=s3_lcpu_mask,
+            s3_thread_pool_size=config.s3_thread_pool_size or 0,
+        )
+        rpc_client.bdev_s3_add_bucket_name(name, config.bucket_name, allow_existing=True)
+        rpc_client.bdev_lvol_s3_bdev(node.lvstore, name)
+    except RPCException as e:
+        raise RuntimeError(
+            f"Failed to attach S3 device {name} for bucket {config.bucket_name} "
+            f"on node {node.get_id()}") from e
+
+    logger.info("Attached restore S3 device %s for bucket %s on node %s",
+                name, config.bucket_name, node.get_id())
+
+
+def delete_restore_s3_bdev(node, name: str) -> None:
+    """Detach a device created by :func:`create_restore_s3_bdev`.
+
+    Best-effort by design: this runs on the restore's terminal paths, and a
+    failure to clean up must not turn a completed restore into a failed one. It
+    is logged rather than raised, because the consequence is a leaked device --
+    which does block the lvstore from being destroyed, so it is worth noticing.
+    """
+    try:
+        node.rpc_client().bdev_s3_delete(name)
+    except Exception as e:
+        # Deliberately broad and deliberately not re-raised: this runs on a
+        # restore's terminal paths, where the alternative to a leaked device is
+        # reporting a completed restore as failed.
+        logger.warning("Could not delete restore S3 device %s on node %s: %s",
+                       name, node.get_id(), e)
+    else:
+        logger.info("Deleted restore S3 device %s on node %s", name, node.get_id())
+
+
+def foreign_bucket_config(backup: Backup, cluster,
+                          credentials: S3Credentials | None) -> BackupConfig | None:
+    """How to reach this backup's bucket, when it is not the cluster's own.
+
+    Returns ``None`` when the node's existing backup device already points at
+    the right bucket -- there is no foreign bucket, so there is nothing to
+    describe. Otherwise returns the configuration for a device that reads the
+    backup's own recorded location, which is what makes a restore from another
+    cluster's bucket possible at all.
+
+    Decides only. The device itself is created by the task runner, which is the
+    component that knows which node the volume landed on and the only one that
+    can put the device back after a node restart mid-restore.
+
+    Raises:
+        PreconditionError: The bucket is foreign and unreachable -- no
+            credentials were supplied for it, while the cluster uses static
+            credentials that say nothing about it.
+    """
+    location = backup.get_location()
+
+    try:
+        own = cluster.get_backup_config()
+    except ValueError:
+        # No usable configuration of its own, so every bucket is foreign to it.
+        own = None
+
+    if own is not None and own.location() == location and credentials is None:
+        return None
+
+    config = BackupConfig.model_validate({
+        **location.model_dump(exclude_none=True),
+        **({"credentials": credentials.model_dump()} if credentials is not None else {}),
+    })
+
+    if config.credentials is None and own is not None and own.credentials is not None:
+        # Falling back to the cluster's own static credentials would fail deep
+        # in the data plane with nothing to point at the cause.
+        raise PreconditionError(
+            f"Backup {backup.uuid} lives in bucket {location.bucket_name}, which "
+            f"is not this cluster's own. Supply credentials for that bucket, or "
+            "configure the nodes with an instance role that can read it.")
+
+    return config
+
+
+def restore_s3_bdev_name(backup_id: str) -> str:
+    """Name of the device created to read a foreign bucket for one restore.
+
+    Derived from the backup id so a retry re-derives the same name rather than
+    leaking a device per attempt.
+    """
+    return f"s3_restore_{backup_id[:8]}"
+
+
 def _resolve_crypto_key(backup: Backup, cluster):
     """Recover the key needed to read an encrypted backup.
 
@@ -368,6 +488,9 @@ def _config_for(backup: Backup) -> BackupConfig:
     Raises:
         PreconditionError: The cluster's configured bucket is not the one this
             backup lives in, so its credentials cannot be assumed to reach it.
+            A precondition rather than a failure: it means the cluster's backup
+            configuration was repointed while this backup was in flight, which is
+            visible through GET /clusters/{id}/backup-config.
     """
     config = db_controller.get_cluster_by_id(backup.cluster_id).get_backup_config()
     location = backup.get_location()
@@ -692,7 +815,8 @@ def backup_snapshot(snapshot_id, cluster_id=None):
 
 
 def restore_backup(backup_id: str, lvol_name: str, pool_id_or_name: str,
-                   target_node_id: str | None = None):
+                   target_node_id: str | None = None,
+                   s3_credentials: S3Credentials | None = None):
     """Restore a backup chain into a new fully-accessible lvol.
 
     Creates the volume (with subsystem, listeners, namespace) via
@@ -701,6 +825,8 @@ def restore_backup(backup_id: str, lvol_name: str, pool_id_or_name: str,
     until the data transfer completes.
 
     Args:
+        s3_credentials: Credentials for the backup's bucket, when that is not
+            the cluster's own. Omit to use the nodes' instance role.
         target_node_id: Optional node to restore onto. If not provided, a node
             of the target cluster is auto-selected. Any node in the cluster
             can restore any backup because S3 keys are node-agnostic
@@ -762,6 +888,10 @@ def restore_backup(backup_id: str, lvol_name: str, pool_id_or_name: str,
                 f"Target node {target_node_id} has no lvstore (S3 bdev requires lvstore)")
 
     crypto_key = _resolve_crypto_key(backup, cluster)
+    # Resolved before the volume exists, so an unreachable bucket is refused
+    # here rather than after a volume has been created for a restore that
+    # cannot run.
+    s3_config = foreign_bucket_config(backup, cluster, s3_credentials)
 
     logger.info("Backup allowed hosts: %s",
                 [h["nqn"] if isinstance(h, dict) else h
@@ -806,7 +936,8 @@ def restore_backup(backup_id: str, lvol_name: str, pool_id_or_name: str,
     # incremental data wins, with older backups filling any remaining gaps.
     if not tasks_controller.add_backup_restore_task(
             pool.cluster_id, lvol.node_id, backup_id, bdev_name,
-            [b.s3_id for b in reversed(chain)], lvol_id=lvol_id):
+            [b.s3_id for b in reversed(chain)], lvol_id=lvol_id,
+            s3_config=s3_config.model_dump(exclude_none=True) if s3_config is not None else None):
         raise RuntimeError("Failed to create restore task")
 
     return lvol_id
@@ -904,7 +1035,7 @@ def list_backups(cluster_id=None):
     return data
 
 
-def export_backups(cluster_id=None, lvol_name=None) -> List[backup_manifest.BackupManifest]:
+def export_backups(cluster_id=None, lvol_name=None) -> list[backup_manifest.BackupManifest]:
     """Export completed backups as manifests, for import into another cluster.
 
     Emits the same shape that lives in the bucket, so a hand-carried file and a
@@ -922,7 +1053,7 @@ def export_backups(cluster_id=None, lvol_name=None) -> List[backup_manifest.Back
     return [build_manifest(b) for b in completed]
 
 
-def discover_backups(config: BackupConfig) -> List[backup_manifest.BackupManifest]:
+def discover_backups(config: BackupConfig) -> list[backup_manifest.BackupManifest]:
     """Every backup in a bucket, read from its manifests alone.
 
     The disaster-recovery entry point: given a bucket and credentials for it,
