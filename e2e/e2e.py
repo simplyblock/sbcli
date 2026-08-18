@@ -218,7 +218,7 @@ def main():
         seen = set()
         for needle in needles:
             for cls in ALL_TESTS:
-                if needle in cls.__name__.lower().replace("_", "") and cls not in seen:
+                if needle == cls.__name__.lower().replace("_", "") and cls not in seen:
                     if cls.__name__ == "TestAddNodesDuringFioRun" and len(new_nodes) == 0:
                         raise ValueError("TestAddNodesDuringFioRun requires --new-nodes with at least 1 IP.")
                     if cls.__name__ == "TestAddNodesDualNodePerHost" and len(new_nodes) == 0:

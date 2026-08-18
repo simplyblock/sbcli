@@ -2208,8 +2208,18 @@ def list_lvols(cluster_id, pool_id_or_name, all=False):
         if records:
             size_used = records[0].size_used
         if lvol.ndcs == 0 and lvol.npcs == 0:
-            cl = db_controller.get_cluster_by_id(cluster_id)
-            mode = f"{cl.distr_ndcs}x{cl.distr_npcs}"
+            cid = cluster_id
+            if not cid and lvol.node_id:
+                try:
+                    cid = db_controller.get_storage_node_by_id(lvol.node_id).cluster_id
+                except KeyError:
+                    logger.warning(
+                        "Storage node %s not found for lvol %s; "
+                        "falling back to mode 0x0",
+                        lvol.node_id, lvol.get_id(),
+                    )
+            cl = db_controller.get_cluster_by_id(cid) if cid else None
+            mode = f"{cl.distr_ndcs}x{cl.distr_npcs}" if cl else "0x0"
         else:
             mode = f"{lvol.ndcs}x{lvol.npcs}"
 
@@ -2509,7 +2519,7 @@ def _connect_entries_for_volume(db_controller, lvol, ctrl_loss_tmo, host_entry, 
                 ns_id=lvol.ns_id,
                 allowed_hosts=[h["nqn"] for h in lvol.allowed_hosts] if lvol.allowed_hosts else [],
             ))
-    return out, None
+    return out
 
 
 def _resize_lvol_on_all_nodes(lvol, snode, size_in_mib, lock=True) -> None:
