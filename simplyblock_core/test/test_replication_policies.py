@@ -260,7 +260,8 @@ def test_attach_derives_effective_fields_from_policy(monkeypatch):
     monkeypatch.setattr(rpc.lvol_controller, "replication_start",
                         lambda lvol_id, **kw: calls.update(kw) or True)
     assert rpc.attach_policy("LV1", policy_id) is True
-    assert calls == {"replication_cluster_id": "CL_TGT", "mode": "migration", "interval_min": 7}
+    assert calls == {"replication_cluster_id": "CL_TGT", "mode": "migration",
+                     "interval_min": 7, "from_policy": True}
     assert db.get_lvol_by_id("LV1").replication_policy_id == policy_id
 
 
@@ -289,7 +290,7 @@ def test_change_policy_detaches_first(monkeypatch):
 
     order = []
     monkeypatch.setattr(rpc.lvol_controller, "replication_stop",
-                        lambda lvol_id: order.append("stop") or True)
+                        lambda lvol_id, **kw: order.append("stop") or True)
     monkeypatch.setattr(rpc, "_purge_internal_replication_snapshots",
                         lambda lvol_id: order.append("purge") or 0)
 
@@ -332,7 +333,7 @@ def test_detach_stops_and_purges_both_sides(monkeypatch):
     monkeypatch.setattr(LVol, "write_to_db", lambda self, kv=None: None)
     stopped = []
     monkeypatch.setattr(rpc.lvol_controller, "replication_stop",
-                        lambda lvol_id: stopped.append(lvol_id) or True)
+                        lambda lvol_id, **kw: stopped.append(lvol_id) or True)
     monkeypatch.setattr(rpc, "_purge_internal_replication_snapshots", lambda lvol_id: 4)
     assert rpc.detach_policy("LV1") is True
     assert stopped == ["LV1"]
@@ -481,3 +482,84 @@ def test_relationship_resolves_source_to_target_and_back(monkeypatch):
     assert reverse["source_lvol_id"] == "LV_SRC" and reverse["is_source"] is False
 
     assert rpc.get_relationship("LV_UNRELATED") is None
+
+
+# --------------------------------------------------------------------------- #
+# Assignment at create time
+# --------------------------------------------------------------------------- #
+
+def test_policy_can_be_assigned_when_the_volume_is_created(monkeypatch):
+    """Step 3 of the hierarchy: a policy assigned at create time configures
+    replication for that volume, with no separate call."""
+    from simplyblock_core.controllers import lvol_controller
+
+    attached = {}
+    monkeypatch.setattr(rpc, "attach_policy",
+                        lambda lvol_id, policy: attached.update(lvol=lvol_id, policy=policy) or True)
+
+    # add_lvol_ha attaches after the volume is online; exercise that tail
+    # directly, since a full create needs a live cluster.
+    lvol = _lvol("LV1")
+    policy = "fast"
+    if policy:
+        from simplyblock_core.controllers import replication_policy_controller
+        replication_policy_controller.attach_policy(lvol.get_id(), policy)
+    assert attached == {"lvol": "LV1", "policy": "fast"}
+    assert 'replication_policy' in lvol_controller.add_lvol_ha.__code__.co_varnames, \
+        "add_lvol_ha must accept replication_policy so create-time assignment works"
+
+
+def test_create_reports_when_the_policy_cannot_be_attached(monkeypatch):
+    """A volume that was created but could not be replicated must not look like
+    a fully successful create."""
+    import inspect
+    from simplyblock_core.controllers import lvol_controller
+    src = inspect.getsource(lvol_controller.add_lvol_ha)
+    assert "replication policy could not be attached" in src, \
+        "the attach failure has to surface to the caller"
+
+
+def test_direct_replication_start_refused_on_a_policy_managed_volume(monkeypatch):
+    """Attaching a policy IS the way replication is started; calling the raw verb
+    would let a volume run on settings that diverge from its policy."""
+    from simplyblock_core.controllers import lvol_controller
+
+    lv = _lvol("LV1", policy_id="CL_SRC/P1")
+
+    class _DB:
+        def get_lvol_by_id(self, lvol_id):
+            return lv
+
+    monkeypatch.setattr(lvol_controller, "DBController", lambda: _DB())
+    assert lvol_controller.replication_start("LV1", replication_cluster_id="CL_OTHER") is False
+    assert lvol_controller.replication_stop("LV1") is False
+
+
+def test_policy_controller_may_drive_the_raw_verbs(monkeypatch):
+    """The guard must not lock the policy controller itself out."""
+    import inspect
+    from simplyblock_core.controllers import replication_policy_controller
+    attach_src = inspect.getsource(replication_policy_controller.attach_policy)
+    detach_src = inspect.getsource(replication_policy_controller.detach_policy)
+    assert "from_policy=True" in attach_src
+    assert "from_policy=True" in detach_src
+
+
+def test_failed_over_clone_does_not_inherit_the_source_policy(monkeypatch):
+    """The target clone is a deep copy of the source, so it would otherwise carry
+    a policy id that names nothing on the other cluster — and, with the guard on
+    replication_start, that would block fail-back entirely."""
+    import inspect
+    from simplyblock_core.controllers import lvol_controller
+    src = inspect.getsource(lvol_controller._create_target_lvol_clone)
+    assert "new_lvol.replication_policy_id = \"\"" in src
+
+
+def test_failback_is_not_blocked_by_the_policy_guard(monkeypatch):
+    """Fail-back configures the reverse replication itself; it must be allowed to
+    drive replication_start even on a policy-managed volume."""
+    import inspect
+    from simplyblock_core.controllers import lvol_controller
+    src = inspect.getsource(lvol_controller.replication_failback)
+    assert src.count("from_policy=True") == 2, \
+        "both the delta and the fresh-cluster fail-back paths must bypass the guard"

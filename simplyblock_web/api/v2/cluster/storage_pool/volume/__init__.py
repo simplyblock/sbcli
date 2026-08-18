@@ -48,6 +48,9 @@ class _CreateParams(BaseModel):
     max_namespace_per_subsys: Optional[int] = None
     do_replicate: bool = False
     replication_cluster_id: Optional[str] = None
+    # Optional replication policy (id or name): assigning it at create time
+    # configures replication for the volume.
+    replication_policy: Optional[str] = None
     encrypt: bool = False
 
 
@@ -98,6 +101,7 @@ def add(
             max_namespace_per_subsys=data.max_namespace_per_subsys,
             do_replicate=data.do_replicate,
             replication_cluster_id=data.replication_cluster_id,
+            replication_policy=data.replication_policy,
         )
     elif isinstance(data, _CloneParams):
         volume_id_or_false, error = snapshot_controller.clone(

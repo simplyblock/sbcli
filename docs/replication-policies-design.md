@@ -127,12 +127,14 @@ is not a cheap operation.
 
 ## Compatibility
 
-- On upgrade, if `snapshot_replication_target_cluster` is set, synthesise one
-  `ReplicationTarget` named `default` from the three scalars, plus one
-  `ReplicationPolicy` named `default` carrying the interval already in use, and
-  point existing replicated volumes at it. Nothing stops replicating.
-- `cluster add-replication` stays as an alias that creates/updates the `default`
-  target, and is documented as deprecated.
+No migration path is needed. Clusters in the field upgrade from a release that
+predates async replication altogether, so none of them carries a configured
+`snapshot_replication_target_*` triple or volumes replicating under the old
+scheme — there is nothing to adopt. The legacy scalars therefore stay only as
+the input of the deprecated `cluster add-replication`.
+
+- `cluster add-replication` keeps working as-is and is documented as deprecated
+  in favour of targets and policies.
 - `volume replication-start --replication-cluster-id/--mode/--interval-min`
   stays for volumes managed without a policy; a volume with a policy rejects
   those flags rather than silently diverging from its policy.

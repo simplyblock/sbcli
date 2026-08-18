@@ -209,6 +209,7 @@ def attach_policy(lvol_id, policy):
         replication_cluster_id=target.target_cluster_id,
         mode=pol.mode,
         interval_min=pol.interval_min,
+        from_policy=True,
     )
     if not ret:
         # Do not leave the volume pointing at a policy that never started.
@@ -244,7 +245,7 @@ def detach_policy(lvol_id):
     lvol.write_to_db()
 
     # Stops streaming and cancels the non-DONE FN_SNAPSHOT_REPLICATION tasks.
-    lvol_controller.replication_stop(lvol_id)
+    lvol_controller.replication_stop(lvol_id, from_policy=True)
 
     removed = _purge_internal_replication_snapshots(lvol_id)
     logger.info("Volume %s detached from its replication policy (%d internal "
