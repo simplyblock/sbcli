@@ -4,9 +4,10 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel, ConfigDict
 
-from simplyblock_core.backup_manifest import ManifestError
 from simplyblock_core.db_controller import DBController
-from simplyblock_core.controllers import backup_controller
+from simplyblock_core.controllers.backup import controller as backup_controller
+from simplyblock_core.controllers.backup import policy as backup_policy
+from simplyblock_core.controllers.backup.manifest import ManifestError
 from simplyblock_core.models.backup_config import S3Credentials
 from simplyblock_core.models.cluster import Cluster as ClusterModel
 from simplyblock_core.models.lvol_model import LVol
@@ -195,7 +196,7 @@ class _PolicyCreateParams(BaseModel):
 
 @policy_api.post('/', name='clusters:backup-policies:create', status_code=201, responses={201: {"content": None}})
 def create_policy(cluster: Cluster, parameters: _PolicyCreateParams) -> Response:
-    policy_id, error = backup_controller.add_policy(
+    policy_id, error = backup_policy.add_policy(
         cluster.get_id(), parameters.name,
         max_versions=parameters.versions or 0,
         max_age=parameters.age or "",
@@ -219,7 +220,7 @@ def _validate_attachment_target(target_type: str, target_id: str, cluster: Clust
 
 @policy_api.delete('/{policy_id}', name='clusters:backup-policies:delete', status_code=204, responses={204: {"content": None}})
 def delete_policy(cluster: Cluster, policy: Policy) -> Response:
-    success, error = backup_controller.remove_policy(policy.uuid)
+    success, error = backup_policy.remove_policy(policy.uuid)
     if error:
         raise HTTPException(400, error)
     return Response(status_code=204)
@@ -233,7 +234,7 @@ class _AttachParams(BaseModel):
 @policy_api.post('/{policy_id}/attach', name='clusters:backup-policies:attach', status_code=201)
 def attach_policy(cluster: Cluster, policy: Policy, parameters: _AttachParams):
     _validate_attachment_target(parameters.target_type, parameters.target_id, cluster)
-    att_id, error = backup_controller.attach_policy(
+    att_id, error = backup_policy.attach_policy(
         policy.uuid, parameters.target_type, parameters.target_id)
     if error:
         raise HTTPException(400, error)
@@ -243,7 +244,7 @@ def attach_policy(cluster: Cluster, policy: Policy, parameters: _AttachParams):
 @policy_api.post('/{policy_id}/detach', name='clusters:backup-policies:detach', status_code=204, responses={204: {"content": None}})
 def detach_policy(cluster: Cluster, policy: Policy, parameters: _AttachParams) -> Response:
     _validate_attachment_target(parameters.target_type, parameters.target_id, cluster)
-    success, error = backup_controller.detach_policy(
+    success, error = backup_policy.detach_policy(
         policy.uuid, parameters.target_type, parameters.target_id)
     if error:
         raise HTTPException(400, error)

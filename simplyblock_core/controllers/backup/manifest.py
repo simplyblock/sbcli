@@ -24,7 +24,7 @@ and could half-fail, leaving the bucket advertising keys the data plane had
 already unmapped.
 
 This document overlaps the ``Backup`` record in FoundationDB by design, and
-substantially -- see the note at the top of ``controllers/backup_controller.py``
+substantially -- see the note on ``controller.build_manifest``
 for where the two genuinely differ and where they should be collapsed.
 """
 import json
