@@ -539,6 +539,68 @@ class TestDeleteReplicaOnPeer(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# _update_lvol_nodes_for_replica_move — regression coverage for a real bug
+# found live (2026-08-18): a node-removal relocation correctly repointed the
+# storage-node-level secondary_node_id/tertiary_node_id bookkeeping, but left
+# every LVol hosted on the surviving primary with the just-removed/vacated
+# host still listed in its own `nodes` -- the field the CSI/host initiator
+# actually connects to for multipath failover. That stranded a live lvol on
+# a single path (the primary only) with nothing ever repointing it, since
+# nothing re-syncs `nodes` later. Mirrors the identical fix already applied
+# for expansion-triggered rebalancing in cluster_expansion/executor.py.
+# ---------------------------------------------------------------------------
+
+def _lvol(node_id, nodes):
+    lv = MagicMock()
+    lv.nodes = list(nodes)
+    lv.write_to_db = MagicMock()
+    return lv
+
+
+class TestUpdateLvolNodesForReplicaMove(unittest.TestCase):
+
+    def test_repoints_old_host_to_new_host(self):
+        cl = _cluster()
+        db = FakeDB(cl, [], lvols={"p1": [_lvol("p1", ["p1", "old"])]})
+        storage_node_ops._update_lvol_nodes_for_replica_move("p1", "old", "new", db)
+        lvol = db.lvols["p1"][0]
+        self.assertEqual(lvol.nodes, ["p1", "new"])
+        lvol.write_to_db.assert_called_once()
+
+    def test_leaves_unrelated_hosts_untouched(self):
+        cl = _cluster()
+        db = FakeDB(cl, [], lvols={"p1": [_lvol("p1", ["p1", "old", "tert"])]})
+        storage_node_ops._update_lvol_nodes_for_replica_move("p1", "old", "new", db)
+        self.assertEqual(db.lvols["p1"][0].nodes, ["p1", "new", "tert"])
+
+    def test_no_op_when_old_host_not_present(self):
+        # e.g. a tertiary-only move must not touch an lvol with no tertiary.
+        cl = _cluster()
+        lvol = _lvol("p1", ["p1", "sec"])
+        db = FakeDB(cl, [], lvols={"p1": [lvol]})
+        storage_node_ops._update_lvol_nodes_for_replica_move("p1", "old", "new", db)
+        self.assertEqual(lvol.nodes, ["p1", "sec"])
+        lvol.write_to_db.assert_not_called()
+
+    def test_multiple_lvols_on_the_same_primary_all_updated(self):
+        cl = _cluster()
+        lvols = [_lvol("p1", ["p1", "old"]) for _ in range(3)]
+        db = FakeDB(cl, [], lvols={"p1": lvols})
+        storage_node_ops._update_lvol_nodes_for_replica_move("p1", "old", "new", db)
+        for lvol in lvols:
+            self.assertEqual(lvol.nodes, ["p1", "new"])
+
+    def test_redundant_call_is_a_safe_no_op(self):
+        # Simulates a retry after an earlier attempt already applied it.
+        cl = _cluster()
+        lvol = _lvol("p1", ["p1", "new"])
+        db = FakeDB(cl, [], lvols={"p1": [lvol]})
+        storage_node_ops._update_lvol_nodes_for_replica_move("p1", "old", "new", db)
+        self.assertEqual(lvol.nodes, ["p1", "new"])
+        lvol.write_to_db.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # Case B — relocate a hosted replica
 # ---------------------------------------------------------------------------
 
@@ -607,6 +669,43 @@ class TestRelocateOneReplica(unittest.TestCase):
         self.assertTrue(ret)
         self.assertEqual(removed.lvstore_stack_secondary, "")
 
+    def test_relocate_repoints_primarys_lvol_nodes_off_the_removed_host(self):
+        # Regression: the direct (non-splice) relocation path must repoint
+        # every LVol hosted on the primary from the removed host to the new
+        # one -- see TestUpdateLvolNodesForReplicaMove's docstring.
+        cl = _cluster()
+        removed = _node("n1", stack_secondary="p1")
+        primary = _node("p1", secondary_id="n1", lvstore="LVS_p1")
+        new = _node("n3")
+        lvol = _lvol("p1", ["p1", "n1"])
+        db = FakeDB(cl, [removed, primary, new], lvols={"p1": [lvol]})
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "_pick_replica_relocation_node",
+                          return_value="n3"), \
+             patch.object(storage_node_ops, "recreate_lvstore_on_non_leader",
+                          return_value=True):
+            ret = storage_node_ops._relocate_one_replica(removed, "p1", "secondary")
+        self.assertTrue(ret)
+        self.assertEqual(lvol.nodes, ["p1", "n3"])
+
+    def test_relocate_failure_does_not_repoint_lvol_nodes(self):
+        # A failed rebuild must leave the lvol pointed at the still-intact
+        # old copy -- nothing to repoint to yet.
+        cl = _cluster()
+        removed = _node("n1", stack_secondary="p1")
+        primary = _node("p1", secondary_id="n1", lvstore="LVS_p1")
+        new = _node("n3")
+        lvol = _lvol("p1", ["p1", "n1"])
+        db = FakeDB(cl, [removed, primary, new], lvols={"p1": [lvol]})
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "_pick_replica_relocation_node",
+                          return_value="n3"), \
+             patch.object(storage_node_ops, "recreate_lvstore_on_non_leader",
+                          return_value=False):
+            ret = storage_node_ops._relocate_one_replica(removed, "p1", "secondary")
+        self.assertFalse(ret)
+        self.assertEqual(lvol.nodes, ["p1", "n1"])
+
 
 # ---------------------------------------------------------------------------
 # Case B, splice fallback — _pick_replica_relocation_node returned a BUSY
@@ -643,6 +742,32 @@ class TestRelocateOneReplicaSpliceExecution(unittest.TestCase):
         self.assertEqual(x.lvstore_stack_secondary, "stranded")
         self.assertEqual(rec.call_count, 2)  # occupant's rebuild + stranded's own rebuild
         self.assertEqual(removed.lvstore_stack_secondary, "")
+
+    def test_relocate_via_splice_repoints_lvol_nodes_for_both_moved_primaries(self):
+        # Regression: BOTH moves this splice performs -- occupant's replica
+        # x -> stranded, and stranded's own replica n1 -> x -- must repoint
+        # every lvol hosted on their respective primaries. See
+        # TestUpdateLvolNodesForReplicaMove's docstring.
+        cl = _cluster()
+        removed = _node("n1", stack_secondary="stranded")
+        stranded = _node("stranded", secondary_id="n1", lvstore="LVS_stranded")
+        occupant = _node("occupant", secondary_id="x", lvstore="LVS_occupant")
+        x = _node("x", stack_secondary="occupant")
+        occupant_lvol = _lvol("occupant", ["occupant", "x"])
+        stranded_lvol = _lvol("stranded", ["stranded", "n1"])
+        db = FakeDB(cl, [removed, stranded, occupant, x],
+                     lvols={"occupant": [occupant_lvol], "stranded": [stranded_lvol]})
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "_pick_replica_relocation_node",
+                          return_value="x"), \
+             patch.object(storage_node_ops, "recreate_lvstore_on_non_leader",
+                          return_value=True), \
+             patch.object(storage_node_ops, "_delete_replica_on_peer"):
+            ret = storage_node_ops._relocate_one_replica(removed, "stranded", "secondary")
+
+        self.assertTrue(ret)
+        self.assertEqual(occupant_lvol.nodes, ["occupant", "stranded"])
+        self.assertEqual(stranded_lvol.nodes, ["stranded", "x"])
 
     def test_relocate_via_splice_occupant_rebuild_failure_leaves_old_copy_untouched(self):
         # Create-before-destroy: a failed rebuild on the stranded node must
