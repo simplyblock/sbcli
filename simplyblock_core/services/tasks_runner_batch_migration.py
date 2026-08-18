@@ -685,9 +685,6 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
                     logger.warning(
                         f"Group {group.uuid[:8]}: add_clone for member {m.uuid[:8]} (non-fatal): {e}")
 
-        logger.info(f"Group {group.uuid[:8]}: sleeping 120s after batch_final_step "
-                   f"before switching ANA states")
-        time.sleep(120)
         _flip_ana_to_optimized(group, member_migrations, src_node, src_rpc, tgt_node, tgt_rpc)
 
     try:
