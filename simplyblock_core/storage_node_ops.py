@@ -3451,24 +3451,11 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
         logger.warning(f"Node already removed: {node_id}")
         return False
 
-    if snode.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:
+    if snode.status not in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED,
+                            StorageNode.STATUS_PENDING_REMOVAL, StorageNode.STATUS_IN_REMOVAL,
+                            StorageNode.STATUS_OFFLINE, StorageNode.STATUS_UNREACHABLE]:
         logger.error(
-            f"Can not remove node {node_id}: it must be ONLINE or SUSPENDED to start removal "
-            f"(current status: {snode.status}). Removal shuts the node down itself.")
-        return False
-
-    # All other nodes must be online — removal rewires LVS replicas and drives
-    # device migration across the surviving nodes, which requires every peer up.
-    not_online = [
-        n for n in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id)
-        if n.get_id() != node_id
-        and n.status not in (StorageNode.STATUS_ONLINE, StorageNode.STATUS_REMOVED)
-    ]
-    if not_online:
-        offending = ", ".join(f"{n.get_id()}({n.status})" for n in not_online)
-        logger.error(
-            f"Can not remove node {node_id}: all nodes must be online. "
-            f"Not-online node(s): {offending}")
+            f"Can not remove node {node_id}: (current status: {snode.status}).")
         return False
 
     allowed, reason = _check_ftt_allows_node_removal(node_id, db_controller)
@@ -3519,6 +3506,23 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
     if not feasible:
         logger.error(f"Can not remove node {node_id}: {reason}")
         return False
+
+    if snode.status not in [StorageNode.STATUS_PENDING_REMOVAL, StorageNode.STATUS_IN_REMOVAL,
+                            StorageNode.STATUS_OFFLINE, StorageNode.STATUS_REMOVED]:
+        logger.info(f"[REMOVAL] {node_id}: phase 1 — shutdown")
+        ret = shutdown_storage_node(node_id, force=force_remove)
+        if isinstance(ret, tuple):
+            ret, reason = ret
+            if not ret:
+                logger.error(f"[REMOVAL] {node_id}: shutdown failed: {reason}")
+                return False
+        elif not ret:
+            logger.error(f"[REMOVAL] {node_id}: shutdown failed")
+            return False
+        snode = db_controller.get_storage_node_by_id(node_id)
+
+    if snode.status != StorageNode.STATUS_PENDING_REMOVAL:
+        set_node_status(node_id, StorageNode.STATUS_PENDING_REMOVAL, caused_by="remove")
 
     task_id = tasks_controller.add_node_removal_task(
         snode.cluster_id, node_id, {"force_remove": force_remove})
@@ -3655,6 +3659,9 @@ def node_removal_orchestrate(node_id, force_remove=False):
                 return False
             snode = db_controller.get_storage_node_by_id(node_id)
 
+        if snode.status != StorageNode.STATUS_IN_REMOVAL:
+            set_node_status(node_id, StorageNode.STATUS_IN_REMOVAL, caused_by="remove")
+
         # Phase 3a — tear down the (empty) secondary/tertiary replicas of THIS
         # node's own primary LVS, on the peers that host them (Case A).
         logger.info(f"[REMOVAL] {node_id}: phase 3a — tear down own replicas")
@@ -3670,9 +3677,6 @@ def node_removal_orchestrate(node_id, force_remove=False):
         logger.info(f"[REMOVAL] {node_id}: phase 4 — finalize")
         _finalize_node_removal(snode)
         set_node_status(node_id, StorageNode.STATUS_REMOVED, caused_by="remove")
-        snode = db_controller.get_storage_node_by_id(node_id)
-        # storage_events.snode_status_change(
-        #     snode, StorageNode.STATUS_REMOVED, StorageNode.STATUS_IN_REMOVAL, caused_by="remove")
 
         # Phase 4 — remove + fail devices, then wait for failure-migration to finish.
         logger.info(f"[REMOVAL] {node_id}: phase 5 — devices remove/fail/migrate")
@@ -3680,9 +3684,9 @@ def node_removal_orchestrate(node_id, force_remove=False):
             return False
 
         logger.info(f"[REMOVAL] {node_id}: done")
-        return True
     finally:
         cluster_ops.set_cluster_status(cluster.get_id(), prev_cluster_status)
+    return True
 
 
 def _teardown_replicas_of_primary(removed_node: StorageNode):
