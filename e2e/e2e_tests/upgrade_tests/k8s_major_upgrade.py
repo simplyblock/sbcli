@@ -94,6 +94,9 @@ print("done")
 
 # Resources that need the keep annotation so they survive helm uninstall
 # (Step 1 of migration guide: FDB + prometheus config)
+# NOTE: FDB resources are NOT prefixed with the Helm release name.
+# The prometheus configmap IS prefixed (e.g. "sbcli-simplyblock-prometheus-config").
+# Use _get_keep_resources(release_name) to get the full list with correct names.
 _FDB_KEEP_RESOURCES = [
     ("deployment", "simplyblock-fdb-controller-manager"),
     ("serviceaccount", "simplyblock-fdb-controller-manager"),
@@ -103,8 +106,25 @@ _FDB_KEEP_RESOURCES = [
     ("clusterrolebinding", "simplyblock-fdb-manager-clusterrolebinding"),
     ("foundationdbcluster", "simplyblock-fdb-cluster"),
     ("configmap", "simplyblock-fdb-cluster-config"),
-    ("configmap", "simplyblock-prometheus-config"),
 ]
+
+# Base name for the prometheus configmap (gets prefixed with helm release name)
+_PROMETHEUS_CM_BASE = "simplyblock-prometheus-config"
+
+
+def _get_keep_resources(helm_release: str = "") -> list:
+    """Return the full keep-resources list with correctly prefixed names.
+
+    The prometheus configmap is created by Helm with the release prefix
+    (e.g. 'sbcli-simplyblock-prometheus-config'), unlike FDB resources
+    which use fixed names.
+    """
+    resources = list(_FDB_KEEP_RESOURCES)
+    if helm_release:
+        resources.append(("configmap", f"{helm_release}-{_PROMETHEUS_CM_BASE}"))
+    else:
+        resources.append(("configmap", _PROMETHEUS_CM_BASE))
+    return resources
 
 # Default CR names matching the k8s-native-e2e.yaml workflow
 _DEFAULT_CLUSTER_CR = "simplyblock-cluster"
@@ -750,6 +770,126 @@ class K8sNativeMajorUpgrade(TestClusterBase):
                     break
         except Exception as e:
             self.logger.warning(f"Failed to log configmaps ({label}): {e}")
+
+    def _migrate_prometheus_credentials(self):
+        """Copy basic_auth credentials from old prometheus configmap to new one.
+
+        After R25→R2x upgrade the old configmap (e.g. sbcli-simplyblock-prometheus-config)
+        has the cluster credentials, but the new chart creates a fresh configmap
+        (simplyblock-prometheus-config) with empty username/password.  The new chart
+        also switches to https with mTLS, so we can't just swap configmaps — we
+        need to inject the old credentials into the new configmap.
+        """
+        old_cm = f"{self.helm_release_sbcli}-{_PROMETHEUS_CM_BASE}"
+        new_cm = _PROMETHEUS_CM_BASE
+        self.logger.info(
+            f"Migrating prometheus credentials: {old_cm} → {new_cm}"
+        )
+
+        try:
+            import yaml as pyyaml
+        except ImportError:
+            # Inline YAML parsing fallback — extract basic_auth via regex
+            pyyaml = None
+
+        try:
+            # Read old configmap
+            old_out, _ = self.k8s_utils._exec_kubectl(
+                f"kubectl get configmap {old_cm} -n {_NAMESPACE} "
+                f"-o jsonpath='{{.data.prometheus\\.yml}}' 2>/dev/null || true"
+            )
+            if not old_out or "basic_auth" not in old_out:
+                self.logger.warning(
+                    f"Old configmap {old_cm} not found or has no basic_auth, "
+                    f"skipping credential migration"
+                )
+                return
+
+            # Extract username and password from old config
+            import re
+            user_match = re.search(
+                r"basic_auth:\s*\n\s*username:\s*['\"]?([^'\"\n]+)", old_out
+            )
+            pass_match = re.search(
+                r"basic_auth:\s*\n\s*username:\s*[^\n]*\n\s*password:\s*['\"]?([^'\"\n]+)",
+                old_out,
+            )
+            if not user_match or not pass_match:
+                self.logger.warning(
+                    "Could not parse username/password from old prometheus config"
+                )
+                return
+
+            username = user_match.group(1).strip()
+            password = pass_match.group(1).strip()
+            self.logger.info(
+                f"Extracted credentials from {old_cm}: "
+                f"username={username[:8]}..."
+            )
+
+            # Read new configmap
+            new_json, _ = self.k8s_utils._exec_kubectl(
+                f"kubectl get configmap {new_cm} -n {_NAMESPACE} "
+                f"-o json 2>/dev/null || true"
+            )
+            if not new_json or "apiVersion" not in new_json:
+                self.logger.warning(
+                    f"New configmap {new_cm} not found, skipping credential migration"
+                )
+                return
+
+            import json as json_mod
+            cm_obj = json_mod.loads(new_json)
+            prom_yml = cm_obj.get("data", {}).get("prometheus.yml", "")
+
+            if not prom_yml:
+                self.logger.warning(f"New configmap {new_cm} has no prometheus.yml")
+                return
+
+            # Replace empty username/password with old values
+            # Handle both empty and quoted-empty forms
+            prom_yml = re.sub(
+                r"(username:)\s*['\"]?['\"]?\s*$",
+                rf"\1 '{username}'",
+                prom_yml,
+                count=1,
+                flags=re.MULTILINE,
+            )
+            prom_yml = re.sub(
+                r"(password:)\s*['\"]?['\"]?\s*$",
+                rf"\1 '{password}'",
+                prom_yml,
+                count=1,
+                flags=re.MULTILINE,
+            )
+
+            cm_obj["data"]["prometheus.yml"] = prom_yml
+
+            # Remove resourceVersion/uid to avoid conflicts, keep name/namespace
+            cm_obj.get("metadata", {}).pop("resourceVersion", None)
+            cm_obj.get("metadata", {}).pop("uid", None)
+            cm_obj.get("metadata", {}).pop("creationTimestamp", None)
+            cm_obj.get("metadata", {}).pop("managedFields", None)
+
+            # Apply the updated configmap
+            patched_json = json_mod.dumps(cm_obj)
+            self.k8s_utils._exec_kubectl(
+                f"echo '{patched_json}' | kubectl replace -f - -n {_NAMESPACE}"
+            )
+            self.logger.info(
+                f"Injected credentials into {new_cm}, "
+                f"restarting prometheus pod"
+            )
+
+            # Restart prometheus to pick up the new config
+            self.k8s_utils._exec_kubectl(
+                f"kubectl delete pod simplyblock-prometheus-0 -n {_NAMESPACE} "
+                f"--ignore-not-found"
+            )
+            sleep_n_sec(30)
+
+        except Exception as e:
+            self.logger.warning(f"Failed to migrate prometheus credentials: {e}")
 
     def _collect_worker_dmesg(self, label: str = ""):
         """Collect dmesg and journalctl from every worker node.
@@ -1679,7 +1819,8 @@ class K8sNativeMajorUpgrade(TestClusterBase):
             self._patch_helm_release_keep_annotations(self.helm_release_sbcli)
 
         # Also annotate live resources (belt-and-suspenders, not sufficient alone)
-        for kind, name in _FDB_KEEP_RESOURCES:
+        keep_resources = _get_keep_resources(self.helm_release_sbcli)
+        for kind, name in keep_resources:
             ns_flag = f"-n {_NAMESPACE}" if kind not in ("clusterrole", "clusterrolebinding") else ""
             cmd = (
                 f"kubectl annotate {kind} {name} {ns_flag} "
@@ -1716,7 +1857,10 @@ class K8sNativeMajorUpgrade(TestClusterBase):
 
         try:
             import re
+            # For template matching, use unprefixed names (Helm templates
+            # contain the base name, the release prefix is added at render time)
             keep_names = {name for _, name in _FDB_KEEP_RESOURCES}
+            keep_names.add(_PROMETHEUS_CM_BASE)
             remaining_names = set(keep_names)
 
             for template_file in template_files:
@@ -1814,7 +1958,7 @@ class K8sNativeMajorUpgrade(TestClusterBase):
             self.logger.warning("No Helm release name provided, skipping secret patch")
             return
 
-        fdb_resource_names = {name for _, name in _FDB_KEEP_RESOURCES}
+        fdb_resource_names = {name for _, name in _get_keep_resources(release_name)}
 
         # Find the latest Helm release secret
         cmd = (
@@ -2689,6 +2833,9 @@ spec:
 
         # Log configmaps after operator install (for debugging)
         self._log_configmaps("post_operator_install")
+
+        # Step 6.0.1: Migrate prometheus credentials from old configmap to new
+        self._migrate_prometheus_credentials()
 
         # Step 6.1: Shut down nodes again (prevent auto-restart)
         self.logger.info("Migration Step 6.1: Shutting down nodes again (prevent auto-restart)")
