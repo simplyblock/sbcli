@@ -8,6 +8,7 @@ the process, so replication stopped for EVERY volume, and no snapshot was ever
 chained or pruned. The visible symptom was a fail-over target full of zeros —
 five layers away from the actual cause.
 """
+from typing import cast
 import inspect
 
 from simplyblock_core.models.job_schedule import JobSchedule
@@ -30,6 +31,9 @@ class _Snap:
         pass
 
 
+# Duck-typed stand-in for JobSchedule: task_runner only touches the handful
+# of attributes set below, and building a real JobSchedule would pull in FDB.
+# cast() at the call sites keeps that explicit for the type checker.
 class _Task:
     def __init__(self, params, retry=99, max_retry=5):
         self.uuid = "T1"
@@ -66,7 +70,7 @@ def test_max_retry_without_a_receiving_lvol_does_not_raise(monkeypatch):
     monkeypatch.setattr(sr, "_source_leader_node", lambda s: node)
 
     task = _Task({"snapshot_id": "SNAP1", "replicate_to_source": False})
-    assert sr.task_runner(task) is True          # must not raise KeyError
+    assert sr.task_runner(cast(JobSchedule, task)) is True          # must not raise KeyError
     assert task.status == JobSchedule.STATUS_DONE
 
 
@@ -91,7 +95,7 @@ def test_max_retry_with_a_vanished_receiving_lvol_does_not_raise(monkeypatch):
 
     task = _Task({"snapshot_id": "SNAP1", "replicate_to_source": False,
                   "remote_lvol_id": "GONE"})
-    assert sr.task_runner(task) is True
+    assert sr.task_runner(cast(JobSchedule, task)) is True
 
 
 def test_runner_loop_catches_task_exceptions():
