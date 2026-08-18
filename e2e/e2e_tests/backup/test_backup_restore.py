@@ -5868,110 +5868,112 @@ class TestBackupRestoreEdgeCases(BackupTestBase):
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  TC-BCK-186..190 – Backup source switch local → remote (if configured)
+#  COMMENTED OUT: source-switch is no longer required — backups now
+#  self-describe their S3 bucket and can be restored directly.
 # ═══════════════════════════════════════════════════════════════════════════
 
-class TestBackupSourceSwitch(BackupTestBase):
-    """
-    If a secondary backup target is configured, verifies that backups can
-    be created before and after a source switch, and both are restorable.
-    Skips gracefully if secondary target is not configured.
-
-    TC-BCK-186  Create lvol + backup to primary (local) S3 target
-    TC-BCK-187  Verify secondary backup target is configured; skip if not
-    TC-BCK-188  Create new backup after verifying source config
-    TC-BCK-189  Restore the first backup; verify data
-    TC-BCK-190  Restore the second backup; verify data
-    """
-
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.test_name = "backup_source_switch"
-
-    def run(self):
-        self.logger.info("=== TestBackupSourceSwitch START ===")
-        self.fio_node = self.fio_node[0]
-        self._ensure_pool_and_sc()
-
-        # TC-BCK-186: create first backup (primary target)
-        self.logger.info("TC-BCK-186: Creating lvol and first backup …")
-        lvol_name, lvol_id = self._create_lvol()
-        device, mount = self._connect_and_mount(lvol_name, lvol_id)
-        log_file = f"{self.log_path}/{lvol_name}_w1.log"
-        self._run_fio(lvol_name, mount, log_file, rw="write", runtime=20)
-        checksums_1 = self._get_checksums(self.fio_node, mount)
-        self._safe_unmount(mount)
-        sleep_n_sec(2)
-        self._disconnect_lvol(lvol_id=lvol_id)
-        self.connected = [x for x in self.connected if x != lvol_id]
-
-        snap_1 = f"snpsw1{_rand_suffix()}"
-        self._create_snapshot(lvol_id, snap_1, backup=True)
-        sleep_n_sec(3)
-        bk_id_1 = self._wait_for_backup_by_snap(snap_1, label="TC-BCK-186")
-        self.logger.info(f"TC-BCK-186: First backup {bk_id_1} PASSED")
-
-        # TC-BCK-187: check secondary target configured
-        self.logger.info("TC-BCK-187: Checking secondary backup target …")
-        cluster_details = self.sbcli_utils.get_cluster_details()
-        secondary_target = cluster_details.get("secondary_target") or \
-                           cluster_details.get("backup_secondary_target")
-        if not secondary_target:
-            self.logger.info(
-                "TC-BCK-187: No secondary backup target configured – skipping source-switch TCs")
-            # Still run TC-BCK-189 with first backup
-            self.logger.info("TC-BCK-187: SKIPPED (no secondary target)")
-        else:
-            self.logger.info(f"TC-BCK-187: Secondary target found: {secondary_target} PASSED")
-
-        # TC-BCK-188: create second backup (regardless of secondary target)
-        self.logger.info("TC-BCK-188: Creating second backup …")
-        device2, mount2 = self._connect_and_mount(
-            lvol_name, lvol_id,
-            mount=f"{self.mount_path}/{lvol_name}_v2",
-            format_disk=False)
-        log_file2 = f"{self.log_path}/{lvol_name}_w2.log"
-        self._run_fio(lvol_name, mount2, log_file2, rw="write", runtime=15)
-        checksums_2 = self._get_checksums(self.fio_node, mount2)
-        self._safe_unmount(mount2)
-        sleep_n_sec(2)
-        self._disconnect_lvol(lvol_id=lvol_id)
-        self.connected = [x for x in self.connected if x != lvol_id]
-
-        snap_2 = f"snpsw2{_rand_suffix()}"
-        self._create_snapshot(lvol_id, snap_2, backup=True)
-        sleep_n_sec(3)
-        bk_id_2 = self._wait_for_backup_by_snap(snap_2, label="TC-BCK-188")
-        self.logger.info(f"TC-BCK-188: Second backup {bk_id_2} PASSED")
-
-        # TC-BCK-189: restore first backup
-        self.logger.info("TC-BCK-189: Restoring first backup …")
-        rst_1 = f"rstsw1{_rand_suffix()}"
-        self._restore_backup(bk_id_1, rst_1)
-        self._wait_for_restore(rst_1)
-        rst_1_id = self._get_lvol_id(rst_1)
-        assert rst_1_id
-        _, rst_1_mnt = self._connect_and_mount(
-            rst_1, rst_1_id,
-            mount=f"{self.mount_path}/rsw1{rst_1[-6:]}",
-            format_disk=False)
-        self._verify_checksums(self.fio_node, rst_1_mnt, checksums_1)
-        self.logger.info("TC-BCK-189: First backup restore data integrity PASSED")
-
-        # TC-BCK-190: restore second backup
-        self.logger.info("TC-BCK-190: Restoring second backup …")
-        rst_2 = f"rstsw2{_rand_suffix()}"
-        self._restore_backup(bk_id_2, rst_2)
-        self._wait_for_restore(rst_2)
-        rst_2_id = self._get_lvol_id(rst_2)
-        assert rst_2_id
-        _, rst_2_mnt = self._connect_and_mount(
-            rst_2, rst_2_id,
-            mount=f"{self.mount_path}/rsw2{rst_2[-6:]}",
-            format_disk=False)
-        self._verify_checksums(self.fio_node, rst_2_mnt, checksums_2)
-        self.logger.info("TC-BCK-190: Second backup restore data integrity PASSED")
-
-        self.logger.info("=== TestBackupSourceSwitch PASSED ===")
+# class TestBackupSourceSwitch(BackupTestBase):
+#     """
+#     If a secondary backup target is configured, verifies that backups can
+#     be created before and after a source switch, and both are restorable.
+#     Skips gracefully if secondary target is not configured.
+#
+#     TC-BCK-186  Create lvol + backup to primary (local) S3 target
+#     TC-BCK-187  Verify secondary backup target is configured; skip if not
+#     TC-BCK-188  Create new backup after verifying source config
+#     TC-BCK-189  Restore the first backup; verify data
+#     TC-BCK-190  Restore the second backup; verify data
+#     """
+#
+#     def __init__(self, **kwargs):
+#         super().__init__(**kwargs)
+#         self.test_name = "backup_source_switch"
+#
+#     def run(self):
+#         self.logger.info("=== TestBackupSourceSwitch START ===")
+#         self.fio_node = self.fio_node[0]
+#         self._ensure_pool_and_sc()
+#
+#         # TC-BCK-186: create first backup (primary target)
+#         self.logger.info("TC-BCK-186: Creating lvol and first backup …")
+#         lvol_name, lvol_id = self._create_lvol()
+#         device, mount = self._connect_and_mount(lvol_name, lvol_id)
+#         log_file = f"{self.log_path}/{lvol_name}_w1.log"
+#         self._run_fio(lvol_name, mount, log_file, rw="write", runtime=20)
+#         checksums_1 = self._get_checksums(self.fio_node, mount)
+#         self._safe_unmount(mount)
+#         sleep_n_sec(2)
+#         self._disconnect_lvol(lvol_id=lvol_id)
+#         self.connected = [x for x in self.connected if x != lvol_id]
+#
+#         snap_1 = f"snpsw1{_rand_suffix()}"
+#         self._create_snapshot(lvol_id, snap_1, backup=True)
+#         sleep_n_sec(3)
+#         bk_id_1 = self._wait_for_backup_by_snap(snap_1, label="TC-BCK-186")
+#         self.logger.info(f"TC-BCK-186: First backup {bk_id_1} PASSED")
+#
+#         # TC-BCK-187: check secondary target configured
+#         self.logger.info("TC-BCK-187: Checking secondary backup target …")
+#         cluster_details = self.sbcli_utils.get_cluster_details()
+#         secondary_target = cluster_details.get("secondary_target") or \
+#                            cluster_details.get("backup_secondary_target")
+#         if not secondary_target:
+#             self.logger.info(
+#                 "TC-BCK-187: No secondary backup target configured – skipping source-switch TCs")
+#             # Still run TC-BCK-189 with first backup
+#             self.logger.info("TC-BCK-187: SKIPPED (no secondary target)")
+#         else:
+#             self.logger.info(f"TC-BCK-187: Secondary target found: {secondary_target} PASSED")
+#
+#         # TC-BCK-188: create second backup (regardless of secondary target)
+#         self.logger.info("TC-BCK-188: Creating second backup …")
+#         device2, mount2 = self._connect_and_mount(
+#             lvol_name, lvol_id,
+#             mount=f"{self.mount_path}/{lvol_name}_v2",
+#             format_disk=False)
+#         log_file2 = f"{self.log_path}/{lvol_name}_w2.log"
+#         self._run_fio(lvol_name, mount2, log_file2, rw="write", runtime=15)
+#         checksums_2 = self._get_checksums(self.fio_node, mount2)
+#         self._safe_unmount(mount2)
+#         sleep_n_sec(2)
+#         self._disconnect_lvol(lvol_id=lvol_id)
+#         self.connected = [x for x in self.connected if x != lvol_id]
+#
+#         snap_2 = f"snpsw2{_rand_suffix()}"
+#         self._create_snapshot(lvol_id, snap_2, backup=True)
+#         sleep_n_sec(3)
+#         bk_id_2 = self._wait_for_backup_by_snap(snap_2, label="TC-BCK-188")
+#         self.logger.info(f"TC-BCK-188: Second backup {bk_id_2} PASSED")
+#
+#         # TC-BCK-189: restore first backup
+#         self.logger.info("TC-BCK-189: Restoring first backup …")
+#         rst_1 = f"rstsw1{_rand_suffix()}"
+#         self._restore_backup(bk_id_1, rst_1)
+#         self._wait_for_restore(rst_1)
+#         rst_1_id = self._get_lvol_id(rst_1)
+#         assert rst_1_id
+#         _, rst_1_mnt = self._connect_and_mount(
+#             rst_1, rst_1_id,
+#             mount=f"{self.mount_path}/rsw1{rst_1[-6:]}",
+#             format_disk=False)
+#         self._verify_checksums(self.fio_node, rst_1_mnt, checksums_1)
+#         self.logger.info("TC-BCK-189: First backup restore data integrity PASSED")
+#
+#         # TC-BCK-190: restore second backup
+#         self.logger.info("TC-BCK-190: Restoring second backup …")
+#         rst_2 = f"rstsw2{_rand_suffix()}"
+#         self._restore_backup(bk_id_2, rst_2)
+#         self._wait_for_restore(rst_2)
+#         rst_2_id = self._get_lvol_id(rst_2)
+#         assert rst_2_id
+#         _, rst_2_mnt = self._connect_and_mount(
+#             rst_2, rst_2_id,
+#             mount=f"{self.mount_path}/rsw2{rst_2[-6:]}",
+#             format_disk=False)
+#         self._verify_checksums(self.fio_node, rst_2_mnt, checksums_2)
+#         self.logger.info("TC-BCK-190: Second backup restore data integrity PASSED")
+#
+#         self.logger.info("=== TestBackupSourceSwitch PASSED ===")
 
 
 # ════════════════════════════════════════════════════════════════════════════
