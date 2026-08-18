@@ -790,7 +790,7 @@ class K8sNativeMajorUpgrade(TestClusterBase):
             import yaml as pyyaml
         except ImportError:
             # Inline YAML parsing fallback — extract basic_auth via regex
-            pyyaml = None
+            pass
 
         try:
             # Read old configmap
@@ -1896,7 +1896,7 @@ class K8sNativeMajorUpgrade(TestClusterBase):
 
                     # Fallback: match metadata + name with Helm template expression
                     # e.g. "metadata:\n  name: {{ $name }}"
-                    pattern = rf'(metadata:\n)(  name: \{{{{.*\}}}}\n)'
+                    pattern = r'(metadata:\n)(  name: \{{.*\}}\n)'
                     content, count = re.subn(pattern, (
                         r'\1  annotations:\n'
                         r'    "helm.sh/resource-policy": keep\n'

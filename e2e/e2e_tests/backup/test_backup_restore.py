@@ -2155,8 +2155,8 @@ class TestBackupNegative(BackupTestBase):
         # --- TC-BCK-030: restore invalid backup_id → error ---
         self.logger.info("TC-BCK-030: restore invalid backup_id")
         out, err = self._sbcli(
-            f"backup restore 00000000-0000-0000-0000-000000000000 "
-            f"--lvol invalid_restore --pool bck_test_pool")
+            "backup restore 00000000-0000-0000-0000-000000000000 "
+            "--lvol invalid_restore --pool bck_test_pool")
         assert err or "error" in out.lower(), \
             "TC-BCK-030: expected error for invalid backup_id"
         self.logger.info("TC-BCK-030: got expected error ✓")
