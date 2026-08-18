@@ -2537,21 +2537,26 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
     # Use the verified list from first-entry; on crash-recovery re-run (ctx already
     # at 'cleanup_src') snaps_to_delete was saved, so re-deletes are safe (idempotent).
     source_snap_bdevs = ctx.get('source_snap_bdevs', {})
+    # TEMPORARILY DISABLED for a diagnostic test: skip deleting source
+    # snapshots so they're left intact for inspection. Re-enable once the
+    # test is done.
     for snap_uuid in ctx.get('snaps_to_delete', []):
-        try:
-            snap = db.get_snapshot_by_id(snap_uuid)
-            bdev_name = (source_snap_bdevs.get(snap_uuid)
-                         or f"{src_node.lvstore}/{_snap_short_name(snap)}")
-            try:
-                _delete_bdev_blocking(bdev_name, src_rpc,
-                                      secondary_rpc=src_sec_rpc, tertiary_rpc=src_ter_rpc,
-                                      all_nodes=[n for n in [src_node, src_sec, src_ter] if n],
-                                      lvs_name=src_node.lvstore)
-                logger.info(f"Deleted source bdev {bdev_name}")
-            except Exception as e:
-                logger.warning(f"delete source bdev {bdev_name}: {e}")
-        except KeyError:
-            logger.warning(f"Source snapshot {snap_uuid} not found in DB; skipping")
+        logger.info(f"Source snapshot delete SKIPPED (diagnostic): {snap_uuid}")
+    # for snap_uuid in ctx.get('snaps_to_delete', []):
+    #     try:
+    #         snap = db.get_snapshot_by_id(snap_uuid)
+    #         bdev_name = (source_snap_bdevs.get(snap_uuid)
+    #                      or f"{src_node.lvstore}/{_snap_short_name(snap)}")
+    #         try:
+    #             _delete_bdev_blocking(bdev_name, src_rpc,
+    #                                   secondary_rpc=src_sec_rpc, tertiary_rpc=src_ter_rpc,
+    #                                   all_nodes=[n for n in [src_node, src_sec, src_ter] if n],
+    #                                   lvs_name=src_node.lvstore)
+    #             logger.info(f"Deleted source bdev {bdev_name}")
+    #         except Exception as e:
+    #             logger.warning(f"delete source bdev {bdev_name}: {e}")
+    #     except KeyError:
+    #         logger.warning(f"Source snapshot {snap_uuid} not found in DB; skipping")
 
     # --- Source NVMe-oF subsystem teardown (best-effort) ---
     lvol = None
@@ -2574,17 +2579,23 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
     # Use the saved pre-apply name; apply_migration_to_db already renamed
     # lvol.lvol_bdev in the DB to the target name, so we must not use lvol.lvol_bdev.
     src_bdev_short = ctx.get('source_lvol_bdev')
+    # TEMPORARILY DISABLED for a diagnostic test: skip deleting the source
+    # lvol bdev so it's left intact for inspection. Re-enable once the test
+    # is done.
     if lvol is not None and src_bdev_short:
         src_lvol_composite = f"{src_node.lvstore}/{src_bdev_short}"
-        try:
-            _delete_bdev_blocking(
-                src_lvol_composite, src_rpc,
-                secondary_rpc=src_sec_rpc, tertiary_rpc=src_ter_rpc,
-                all_nodes=[n for n in [src_node, src_sec, src_ter] if n],
-                lvs_name=src_node.lvstore)
-            logger.info(f"Deleted source lvol bdev {src_lvol_composite}")
-        except Exception as e:
-            logger.warning(f"Source lvol delete failed: {e}")
+        logger.info(f"Source lvol bdev delete SKIPPED (diagnostic): {src_lvol_composite}")
+    # if lvol is not None and src_bdev_short:
+    #     src_lvol_composite = f"{src_node.lvstore}/{src_bdev_short}"
+    #     try:
+    #         _delete_bdev_blocking(
+    #             src_lvol_composite, src_rpc,
+    #             secondary_rpc=src_sec_rpc, tertiary_rpc=src_ter_rpc,
+    #             all_nodes=[n for n in [src_node, src_sec, src_ter] if n],
+    #             lvs_name=src_node.lvstore)
+    #         logger.info(f"Deleted source lvol bdev {src_lvol_composite}")
+    #     except Exception as e:
+    #         logger.warning(f"Source lvol delete failed: {e}")
 
     # --- DB update ---
     tgt_lvol_uuid = ctx.get('tgt_lvol_uuid')
