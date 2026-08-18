@@ -248,10 +248,6 @@ def connect(cluster: Cluster, pool: StoragePool, volume: Volume, host_nqn: Optio
     details, err = lvol_controller.connect_lvol(volume.get_id(), host_nqn=host_nqn)
     if err:
         return Response(status_code=404, content=err)
-    # connect_lvol returns a list of HostConnectEntry dicts; the CSI driver
-    # expects a single JSON object, so return only the first entry.
-    if isinstance(details, list) and len(details) == 1:
-        return details[0]
     return details
 
 
