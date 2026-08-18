@@ -9,17 +9,29 @@ import time
 import argcomplete
 
 from simplyblock_core import cluster_ops, utils, db_controller, constants
-from simplyblock_core import backup_manifest
-from simplyblock_core.backup_manifest import BackupManifest
+from simplyblock_core.controllers.backup import controller as backup_controller
+from simplyblock_core.controllers.backup import manifest as backup_manifest
+from simplyblock_core.controllers.backup import policy as backup_policy
+from simplyblock_core.controllers.backup.manifest import (
+    BackupManifest, ManifestError)
 from simplyblock_core.exceptions import MigrationConflictError, PreconditionError
 from simplyblock_core import storage_node_ops as storage_ops
 from simplyblock_core import mgmt_node_ops as mgmt_ops
-from simplyblock_core.controllers import pool_controller, lvol_controller, snapshot_controller, device_controller, \
-    tasks_controller, qos_controller, migration_controller, backup_controller, fdb_backup_controller, \
-    replication_policy_controller
+from simplyblock_core.controllers import (
+    backup_controller,
+    pool_controller,
+    lvol_controller,
+    snapshot_controller,
+    device_controller,
+    tasks_controller,
+    qos_controller,
+    migration_controller,
+    backup_controller,
+    fdb_backup_controller,
+    replication_policy_controller,
+)
 from simplyblock_core.controllers import health_controller
 from simplyblock_core.models.pool import Pool
-from simplyblock_core.backup_manifest import ManifestError
 from simplyblock_core.models.backup_config import BackupConfig, S3Credentials
 from simplyblock_core.models.cluster import Cluster, HashicorpVaultSettings
 
@@ -1285,7 +1297,7 @@ class CLIWrapperBase:
         return True
 
     def backup__policy_add(self, sub_command, args):
-        policy_id, error = backup_controller.add_policy(
+        policy_id, error = backup_policy.add_policy(
             args.cluster_id, args.name,
             max_versions=args.versions or 0,
             max_age=args.age or "",
@@ -1297,7 +1309,7 @@ class CLIWrapperBase:
         return True
 
     def backup__policy_remove(self, sub_command, args):
-        success, error = backup_controller.remove_policy(args.policy_id)
+        success, error = backup_policy.remove_policy(args.policy_id)
         if error:
             print(f"Error: {error}")
             return False
@@ -1306,13 +1318,13 @@ class CLIWrapperBase:
 
     def backup__policy_list(self, sub_command, args):
         cluster_id = getattr(args, 'cluster_id', None)
-        data = backup_controller.list_policies(cluster_id)
+        data = backup_policy.list_policies(cluster_id)
         if data:
             return utils.print_table(data)
         return "No policies found"
 
     def backup__policy_attach(self, sub_command, args):
-        att_id, error = backup_controller.attach_policy(
+        att_id, error = backup_policy.attach_policy(
             args.policy_id, args.target_type, args.target_id)
         if error:
             print(f"Error: {error}")
@@ -1321,7 +1333,7 @@ class CLIWrapperBase:
         return True
 
     def backup__policy_detach(self, sub_command, args):
-        success, error = backup_controller.detach_policy(
+        success, error = backup_policy.detach_policy(
             args.policy_id, args.target_type, args.target_id)
         if error:
             print(f"Error: {error}")
