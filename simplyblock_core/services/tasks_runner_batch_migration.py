@@ -98,19 +98,36 @@ def _reconstruct_snap_tree(group, member_migrations, tgt_node, tgt_rpc) -> Optio
     tgt_ter, _ = _get_target_tertiary_node(tgt_node, "")
     ter_rpc = _make_rpc(tgt_ter) if tgt_ter else None
 
+    # A member's snaps_preexisting_on_target (set at create_batch_migration_continue
+    # time) conflates two very different things: snaps truly already on the
+    # target from OUTSIDE this group (a prior, unrelated migration), and
+    # "non_owned_preexisting" snaps -- ancestor snaps in this member's own
+    # chain that a DIFFERENT member of THIS SAME group owns and hasn't
+    # transferred/committed yet. Only the former may seed `committed` up
+    # front; seeding from the latter marks every ancestor snap "already
+    # committed" before its true owner ever gets a turn in the loop below,
+    # so add_clone/convert never runs for ANY snapshot in the tree.
+    owned_or_pending_uuids: set = set()
+    for m in member_migrations:
+        owned_or_pending_uuids.update(m.snap_migration_plan or [])
+        owned_or_pending_uuids.update(m.snaps_transferred_group or [])
+
     # Global set of snaps that have been committed as immutable on the target,
     # either pre-existing or reconstructed in this call.
     committed: set = set()
     all_preexisting: set = set()
     for m in member_migrations:
+        truly_external_preexisting = [
+            s for s in m.snaps_preexisting_on_target if s not in owned_or_pending_uuids]
         logger.info(
             f"Group {group.uuid[:8]}: DIAG reconstruct seed member {m.uuid[:8]} "
             f"(lvol={m.lvol_id[:8] if m.lvol_id else None}): "
             f"snaps_preexisting_on_target={list(m.snaps_preexisting_on_target)} "
+            f"truly_external_preexisting={truly_external_preexisting} "
             f"snaps_migrated={list(m.snaps_migrated)} "
             f"snaps_transferred_group={list(m.snaps_transferred_group)}")
-        committed.update(m.snaps_preexisting_on_target)
-        all_preexisting.update(m.snaps_preexisting_on_target)
+        committed.update(truly_external_preexisting)
+        all_preexisting.update(truly_external_preexisting)
         # Snaps already committed in a prior (crashed) run are in snaps_migrated.
         # Seeding committed from them prevents re-convert on re-entry (SPDK rejects
         # converting an already-immutable bdev, which would stall the group forever).
