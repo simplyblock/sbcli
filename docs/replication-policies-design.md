@@ -163,3 +163,98 @@ Two REST defects to fix while touching this surface:
    `pool | lvol`; a pool-level default would auto-enrol new volumes.
 3. **Does the policy own cutover behaviour** (commit/failback), or only cadence,
    mode and retention?
+
+## Fail-over, fail-back and connection strings
+
+### Rule: nothing depends on cluster status
+
+Replication behaviour is decided by the **replication relationship**
+(`LVolReplication.state`/`direction`), never by `Cluster.status`. Cluster status
+is a health signal that changes on its own — a "dead" source cluster
+auto-recovers within minutes when its SPDK containers restart — so any decision
+keyed on it silently reverts itself.
+
+There is exactly one violation today, in `connect_lvol`
+(`lvol_controller.py:2399-2407`):
+
+```python
+if cluster.status == Cluster.STATUS_SUSPENDED and cluster.snapshot_replication_target_cluster:
+    for lv in db_controller.get_mini_lvols():
+        if lv.nqn == lvol.nqn:  # ... redirect to the copy on the target cluster
+```
+
+It is wrong three times over: it stops redirecting as soon as the source cluster
+recovers (while the volume is still live on the target), it consults the single
+cluster-scoped target field instead of the relationship (so it breaks outright
+once a cluster has several targets), and it never fires for a planned migration
+because the source is healthy. It must be replaced by the resolution table
+below.
+
+### Connection-string resolution
+
+`connect_lvol` resolves paths from the relationship, unconditionally:
+
+| Relationship state | Paths returned |
+|---|---|
+| none / `replicating` | source volume's nodes (primary, secondary, tertiary) |
+| `cutover_pending` | **both** source and target paths — the client must already hold the target paths when ANA flips, which is what makes a planned cutover non-disruptive |
+| `failed_over` | **target** paths only, unconditionally — no dependency on source-cluster status |
+| `cutover_done` | **only** the post-move nodes: the new primary and its secondary/tertiary. Paths to the pre-migration nodes are no longer returned |
+
+Because the clone preserves the source NQN and `ns_id`, every path in every row
+aggregates into one multipath device on the client, so returning both during
+`cutover_pending` is safe.
+
+### Group fail-over
+
+Per-volume fail-over (`POST .../volumes/{v}/replicate_lvol`) is the only trigger
+today: there is no CLI verb, and no automatic trigger anywhere in the control
+plane — the Kubernetes operator supplies the automation by polling health and
+calling that route per volume. A site loss needs to fail over **every** volume
+replicating to a given destination, so add a group call:
+
+- `POST /clusters/{c}/replication-targets/{target_id}/failover` — fails over
+  every volume whose policy points at that target.
+- `POST /clusters/{c}/replication-policies/{policy_id}/failover` — same, scoped
+  to one policy.
+
+Both run as background tasks, are idempotent per volume (a volume already
+`failed_over` is skipped, matching the existing NQN-match short-circuit in
+`replicate_lvol_on_target_cluster`), and report per-volume results so a partial
+failure is visible instead of silent. Mirror them on the CLI, which today has no
+fail-over verb at all.
+
+### How fail-back is configured (current behaviour)
+
+`replication_failback(lvol_id, source_cluster_id=None, pool_uuid=None)`
+(`lvol_controller.py:3481`) is called on the **failed-over volume**, i.e. the
+copy now living on the target cluster. It only *configures* the return trip; the
+cutover itself is `replication_commit` — fail-back and the migration final step
+are the same operation. It finds the relationship by scanning
+`get_lvol_replication_objects()` in reverse for one whose `target_lvol` is this
+volume, then:
+
+- **Recovered original source** — `source_cluster_id` omitted, or equal to
+  `rep.source_cluster_id`. The original source node must exist and be ONLINE
+  (else `"Original source node not available"`). `replication_node_id` is
+  pre-set to that node so the backlog match in `replication_start` links the
+  snapshots already there by `data_uuid`, and only the **delta** by which the
+  target advanced is sent. This is case 3.
+- **Fresh cluster** — a different `source_cluster_id` is required (else
+  `"source_cluster_id required"`); a node is picked there and the **full**
+  dataset is replicated. This is case 4, and it is mechanically a forward
+  migration, not a fail-back.
+
+Both paths force `mode="migration"`, so the volume ends up pre-created and
+inaccessible on the destination until `replication_commit`.
+
+Two consequences for this design:
+
+1. Fail-back configuration reads `LVolReplication`, which **no API exposes**, so
+   an upper layer cannot even enumerate which volumes are failed over in order
+   to fail them back. The relationship endpoint above is a prerequisite, not a
+   nicety.
+2. Destination-pool resolution currently falls back to the *destination
+   cluster's own outgoing* `snapshot_replication_target_pool`, which is only
+   coincidentally right. With targets, the pool is explicit
+   (`ReplicationTarget.target_pool_uuid`) and that ambiguity disappears.
