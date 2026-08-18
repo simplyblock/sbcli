@@ -10391,7 +10391,27 @@ def add_lvol_thread(lvol, snode: StorageNode, lvol_ana_state="optimized"):
         logger.error(msg)
         return False, msg
 
-    # Use per-lvstore port for this lvol's lvstore
+    # Use per-lvstore port for this lvol's lvstore. get_lvol_subsys_port()'s
+    # fallback to snode.lvol_subsys_port is only correct for lvol.lvs_name ==
+    # snode.lvstore (this node's OWN primary, which legitimately has no
+    # lvstore_ports entry -- it uses the plain node-level port). For any
+    # OTHER lvs_name, a missing entry means the relocation that assigned
+    # snode this non-leader role hasn't finished committing lvstore_ports
+    # yet -- snode here can be a stale, caller-held object (same hazard as
+    # the in_deletion check above). Silently falling back would register
+    # the listener on snode's OWN leader port instead of lvol.lvs_name's
+    # real one (2026-08-18: raced a node-removal relocation live, leaving
+    # two lvols' secondaries listening on the wrong port indefinitely, with
+    # nothing to ever revisit or correct it). Re-fetch once and refuse
+    # rather than guess; the next lvol_monitor repair cycle retries.
+    if lvol.lvs_name != snode.lvstore and lvol.lvs_name not in snode.lvstore_ports:
+        snode = db_controller.get_storage_node_by_id(snode.get_id())
+        if lvol.lvs_name not in snode.lvstore_ports:
+            msg = (f"{snode.get_id()} has no lvstore_ports entry for "
+                   f"{lvol.lvs_name} yet; refusing to add a listener for "
+                   f"{lvol.nqn} on a guessed port")
+            logger.warning(msg)
+            return False, msg
     listener_port = snode.get_lvol_subsys_port(lvol.lvs_name)
     for iface in snode.data_nics:
         if iface.ip4_address and lvol.fabric == iface.trtype.lower():
