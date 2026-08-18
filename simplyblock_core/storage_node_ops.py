@@ -4226,6 +4226,33 @@ def _prune_stale_lvstore_ports(node_id, lvstore, db_controller):
         node.write_to_db()
 
 
+def _update_lvol_nodes_for_replica_move(primary_id, old_host_id, new_host_id, db_controller):
+    """Re-point every LVol hosted on ``primary_id`` from ``old_host_id`` to
+    ``new_host_id`` in its own ``nodes`` list, once that primary's
+    secondary/tertiary replica has been relocated between the two hosts.
+
+    ``lvol.nodes`` is what the CSI/host initiator actually connects to for
+    multipath failover -- a separate record from the storage-node-level
+    ``secondary_node_id``/``tertiary_node_id`` bookkeeping the relocation
+    itself already updates. Leaving the old host listed here strands every
+    LVol hosted on ``primary_id`` on a single path (the primary only) once
+    the old host is gone/unreachable, with nothing ever repointing it --
+    mirrors cluster_expansion/executor.py's identical fix for the
+    expansion-rebalancing case. (2026-08-18: found live during node
+    removal -- a splice-relocated secondary left a still-online lvol's
+    ``nodes`` naming the just-removed node; the CSI initiator never
+    reconnected to the actual new secondary.)
+
+    Safe to call redundantly (e.g. on a retry after an earlier attempt
+    already applied it): each lvol is only rewritten if ``old_host_id`` is
+    still present in its ``nodes``."""
+    for lvol in db_controller.get_lvols_by_node_id(primary_id):
+        nodes = list(lvol.nodes or [])
+        if old_host_id in nodes:
+            lvol.nodes = [new_host_id if n == old_host_id else n for n in nodes]
+            lvol.write_to_db()
+
+
 def _relocate_replicas_hosted_on(removed_node: StorageNode):
     """Case B: ``removed_node`` holds a secondary and/or tertiary replica for
     other primaries. Re-host each on a fresh, anti-affinity-valid node so the
@@ -4305,6 +4332,13 @@ def _relocate_one_replica(removed_node: StorageNode, primary_id, role):
         logger.error(
             f"[REMOVAL] failed to rebuild {role} replica of {primary_id} on {new_id}, will retry")
         return False
+
+    # Re-point every LVol hosted on primary before dropping removed_node's
+    # side of the relationship -- see _update_lvol_nodes_for_replica_move's
+    # docstring. Unconditional (not gated on "did we just build it above")
+    # so a retry that resumes past the build-skip branch still catches up
+    # if an earlier attempt crashed between the build and this step.
+    _update_lvol_nodes_for_replica_move(primary_id, removed_node.get_id(), new_id, db_controller)
 
     _clear_replica_backref(removed_node, backref)
     return True
@@ -4435,6 +4469,13 @@ def _relocate_replica_between(occupant_primary_id, old_host_id, new_host_id, rol
             "hublvol_port": occupant_primary.hublvol.nvmf_port if occupant_primary.hublvol else 0,
         }
         new_host.write_to_db()
+
+    # Re-point every LVol hosted on occupant_primary before the old_host
+    # teardown below -- see _update_lvol_nodes_for_replica_move's docstring.
+    # Unconditional (outside the "if not already built" guard above) so a
+    # retry that skips straight past that guard still catches up if an
+    # earlier attempt crashed between the build and this step.
+    _update_lvol_nodes_for_replica_move(occupant_primary_id, old_host_id, new_host_id, db_controller)
 
     old_host = db_controller.get_storage_node_by_id(old_host_id)
     if getattr(old_host, backref) == occupant_primary_id:
