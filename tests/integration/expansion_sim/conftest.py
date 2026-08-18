@@ -161,7 +161,7 @@ def patched_rpc_router():
         "simplyblock_core.controllers.device_controller",
         "simplyblock_core.controllers.snapshot_controller",
         "simplyblock_core.controllers.pool_controller",
-        "simplyblock_core.controllers.backup_controller",
+        "simplyblock_core.controllers.backup.device",
     ]
     saved_rpc = install_rpc_router(target_modules)
     saved_fw = install_firewall_stub([

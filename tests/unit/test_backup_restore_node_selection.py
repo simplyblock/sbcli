@@ -47,7 +47,7 @@ def _node(uuid, cluster_id, status=StorageNode.STATUS_ONLINE, lvstore="lvs_test"
 
 @pytest.fixture
 def db():
-    with patch("simplyblock_core.controllers.backup_controller.db_controller") as db:
+    with patch("simplyblock_core.controllers.backup.controller.db_controller") as db:
         pool = MagicMock()
         pool.cluster_id = TARGET_CLUSTER
         db.get_pool_by_id_or_name.return_value = pool
@@ -80,13 +80,13 @@ def add_lvol_ha():
 
 @pytest.fixture
 def tasks():
-    with patch("simplyblock_core.controllers.backup_controller.tasks_controller") as tasks:
+    with patch("simplyblock_core.controllers.backup.controller.tasks_controller") as tasks:
         tasks.add_backup_restore_task.return_value = True
         yield tasks
 
 
 def _restore(**kwargs):
-    from simplyblock_core.controllers.backup_controller import restore_backup
+    from simplyblock_core.controllers.backup.controller import restore_backup
     return restore_backup("backup-1", "restored_lvol", "pool-1", **kwargs)
 
 

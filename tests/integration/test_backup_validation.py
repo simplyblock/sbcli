@@ -10,8 +10,9 @@ from unittest.mock import patch
 import pytest
 
 from simplyblock_core import constants
-from simplyblock_core.backup_manifest import BackupManifest
-from simplyblock_core.controllers import backup_controller
+from simplyblock_core.controllers.backup import controller as backup_controller
+from simplyblock_core.controllers.backup import validation
+from simplyblock_core.controllers.backup.manifest import BackupManifest
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.models.backup import Backup
@@ -327,22 +328,22 @@ class TestPredicates:
     """The rules answer a yes/no question as well as blocking an operation."""
 
     def test_chain_fits_at_the_limit(self):
-        assert backup_controller.chain_fits(constants.BACKUP_MAX_CHAIN_LENGTH)
-        assert not backup_controller.chain_fits(constants.BACKUP_MAX_CHAIN_LENGTH + 1)
+        assert validation.chain_fits(constants.BACKUP_MAX_CHAIN_LENGTH)
+        assert not validation.chain_fits(constants.BACKUP_MAX_CHAIN_LENGTH + 1)
 
     def test_a_tiering_bucket_holds_no_backups(self):
-        assert backup_controller.location_holds_backups(_config().location())
-        assert not backup_controller.location_holds_backups(
+        assert validation.location_holds_backups(_config().location())
+        assert not validation.location_holds_backups(
             _config(snapshot_backups=False).location())
 
     def test_an_empty_chain_is_coherent(self):
-        assert backup_controller.chain_is_coherent([], _config().location())
+        assert validation.chain_is_coherent([], _config().location())
 
     def test_coherence_covers_a_backup_that_does_not_exist_yet(self, db, cluster):
         chain = [_backup(db, "b-1", 1, snapshot_id="snap-1", encrypted=False)]
 
-        assert backup_controller.chain_is_coherent(chain, _config().location())
-        assert backup_controller.chain_is_coherent(
+        assert validation.chain_is_coherent(chain, _config().location())
+        assert validation.chain_is_coherent(
             chain, _config().location(), encrypted=False)
-        assert not backup_controller.chain_is_coherent(
+        assert not validation.chain_is_coherent(
             chain, _config().location(), encrypted=True)

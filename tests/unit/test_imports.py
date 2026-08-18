@@ -35,7 +35,11 @@ _IMPORT_TARGETS = [
     "simplyblock_core.controllers.lvol_controller",
     "simplyblock_core.controllers.snapshot_controller",
     "simplyblock_core.controllers.migration_controller",
-    "simplyblock_core.controllers.backup_controller",
+    "simplyblock_core.controllers.backup.controller",
+    "simplyblock_core.controllers.backup.device",
+    "simplyblock_core.controllers.backup.manifest",
+    "simplyblock_core.controllers.backup.policy",
+    "simplyblock_core.controllers.backup.validation",
     "simplyblock_core.controllers.tasks_controller",
     # --- Models ---
     "simplyblock_core.models.lvol_migration",

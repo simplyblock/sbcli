@@ -10,8 +10,8 @@ from unittest.mock import patch
 
 import pytest
 
-from simplyblock_core import backup_manifest
-from simplyblock_core.controllers import backup_controller
+from simplyblock_core.controllers.backup import controller as backup_controller
+from simplyblock_core.controllers.backup import manifest as backup_manifest
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.models.backup import Backup

@@ -188,7 +188,7 @@ class TestImportBackups:
     def test_an_unreadable_bucket_is_a_bad_request_not_a_bad_gateway(
             self, client, db, cluster, backup_controller):
         """Nothing here proxies for S3, and the bucket came from the request."""
-        from simplyblock_core.backup_manifest import ManifestError
+        from simplyblock_core.controllers.backup.manifest import ManifestError
         backup_controller.import_from_bucket.side_effect = ManifestError('no such bucket')
 
         response = client.post(f'{BASE}/import', json={'bucket': self._BUCKET})
@@ -216,7 +216,7 @@ class TestDiscoverBackups:
 
     def test_returns_the_manifests_the_bucket_holds(
             self, client, db, backup_controller):
-        from simplyblock_core.backup_manifest import BackupManifest
+        from simplyblock_core.controllers.backup.manifest import BackupManifest
         backup_controller.discover_backups.return_value = [
             BackupManifest.model_validate(TestImportBackups._MANIFEST)]
 
@@ -229,7 +229,7 @@ class TestDiscoverBackups:
 
     def test_credentials_are_masked_in_the_response_of_a_failure(
             self, client, db, backup_controller):
-        from simplyblock_core.backup_manifest import ManifestError
+        from simplyblock_core.controllers.backup.manifest import ManifestError
         backup_controller.discover_backups.side_effect = ManifestError('unreachable')
 
         response = client.post(f'{BASE}/discover', json={

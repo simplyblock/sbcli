@@ -10,8 +10,10 @@ Handles three task types:
 import time
 
 from simplyblock_core import constants, db_controller, utils
-from simplyblock_core.backup_manifest import ManifestError
-from simplyblock_core.controllers import backup_controller, backup_events
+from simplyblock_core.controllers import backup_events
+from simplyblock_core.controllers.backup import controller as backup_controller
+from simplyblock_core.controllers.backup import device as backup_device
+from simplyblock_core.controllers.backup.manifest import ManifestError
 from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.models.backup import Backup
 from simplyblock_core.models.backup_config import BackupConfig
@@ -86,7 +88,7 @@ def _run_backup(task):
         try:
             ret = rpc_client.bdev_lvol_s3_backup(
                 backup.s3_id, [snap_bdev_name],
-                backup_controller.primary_s3_bdev_name(snode), cluster_batch=16)
+                backup_device.primary_s3_bdev_name(snode), cluster_batch=16)
             if not ret:
                 _fail_backup(backup, task, "bdev_lvol_s3_backup RPC failed")
                 return
@@ -203,9 +205,9 @@ def _restore_s3_bdev(task, snode) -> str:
     node's own backup device already points at the right bucket.
     """
     if task.function_params.get("s3_config"):
-        return backup_controller.restore_s3_bdev_name(
+        return backup_device.restore_s3_bdev_name(
             task.function_params["backup_id"])
-    return backup_controller.primary_s3_bdev_name(snode)
+    return backup_device.primary_s3_bdev_name(snode)
 
 
 def _ensure_restore_s3_bdev(task, snode) -> None:
@@ -219,7 +221,7 @@ def _ensure_restore_s3_bdev(task, snode) -> None:
     if not config:
         return
 
-    backup_controller.create_restore_s3_bdev(
+    backup_device.create_restore_s3_bdev(
         snode, BackupConfig.model_validate(config), _restore_s3_bdev(task, snode))
 
 
@@ -235,7 +237,7 @@ def _release_restore_s3_bdev(task, snode) -> None:
         return
 
     if snode is not None:
-        backup_controller.delete_restore_s3_bdev(snode, _restore_s3_bdev(task, snode))
+        backup_device.delete_restore_s3_bdev(snode, _restore_s3_bdev(task, snode))
 
     task.function_params["s3_config"] = None
 
@@ -412,7 +414,7 @@ def _run_merge(task):
         try:
             ret = rpc_client.bdev_lvol_s3_merge(
                 keep_backup.s3_id, old_backup.s3_id, cluster_batch=16,
-                s3_bdev=backup_controller.primary_s3_bdev_name(snode),
+                s3_bdev=backup_device.primary_s3_bdev_name(snode),
                 lvs_name=snode.lvstore)
             if not ret:
                 task.function_result = "bdev_lvol_s3_merge RPC failed"

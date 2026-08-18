@@ -6,8 +6,8 @@ import json
 
 import pytest
 
-from simplyblock_core import backup_manifest
-from simplyblock_core.backup_manifest import (
+from simplyblock_core.controllers.backup import manifest as backup_manifest
+from simplyblock_core.controllers.backup.manifest import (
     BackupManifest,
     DataPlane,
     Encryption,
