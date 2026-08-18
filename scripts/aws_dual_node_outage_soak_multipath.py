@@ -578,6 +578,8 @@ class SoakRunner:
         self._forbidden_pairs = set()
         #: Cumulative count of tolerated (phase-2) max_latency violations.
         self.latency_violations = 0
+        #: volume_id -> path count observed at baseline (see _verify_client_paths)
+        self._baseline_client_paths = {}
 
     # ----- hosts / plumbing -------------------------------------------------
 
@@ -1434,80 +1436,76 @@ class SoakRunner:
 
         Target-side state being perfect is not sufficient, and assuming it was
         cost a whole run: soak 2026-08-12 iteration 7 lost all IO on a volume
-        whose tertiary paths were TCP-live with subsystem, namespace and both
-        listeners verified present on the target, while the client's multipath
-        head reported "no usable path" and EIO'd the application. Only the
-        client's own per-path state shows that.
+        whose paths were TCP-live and whose target had subsystem, namespace and
+        both listeners verified present, while the client's multipath head
+        reported "no usable path" and EIO'd the application.
 
-        For each volume this checks, per path controller:
-          * a namespace block device exists under the controller
-          * its ANA state is usable (optimized / non-optimized, not
-            inaccessible and not a transient/unknown state)
-        and that the number of usable paths equals the number of paths the
-        subsystem claims. A live controller carrying no usable namespace is
-        exactly the silent redundancy loss this gate exists to catch.
+        Scope note: this checks what the client actually exposes on this kernel
+        — per-subsystem path count and per-path State from ``nvme list-subsys``,
+        plus the head namespace block device. It deliberately does NOT try to
+        read per-path namespace nodes or ANA state: with nvme_core multipath
+        this kernel publishes only the head namespace (``nvme1n1``) and the
+        controllers, no ``nvmeXcYnZ`` per-path nodes, and this nvme-cli reports
+        no ANAState field. An earlier version of this check globbed for those
+        and reported 5-of-6 paths dead on every healthy volume.
+
+        The expected path count per volume is learned at baseline rather than
+        hardcoded, so a path that vanishes entirely is caught as well as one
+        that goes non-live.
         """
-        script = r"""
-set -u
-for subsys in /sys/class/nvme-subsystem/nvme-subsys*; do
-    [ -e "$subsys/subsysnqn" ] || continue
-    nqn=$(cat "$subsys/subsysnqn")
-    case "$nqn" in *:lvol:*) ;; *) continue ;; esac
-    vol=${nqn##*:lvol:}
-    total=0; usable=0; detail=""
-    for ctrl in "$subsys"/nvme*; do
-        [ -d "$ctrl" ] || continue
-        cname=$(basename "$ctrl")
-        case "$cname" in nvme*) ;; *) continue ;; esac
-        [ -e "$ctrl/state" ] || continue
-        total=$((total+1))
-        cstate=$(cat "$ctrl/state" 2>/dev/null || echo unknown)
-        ns_found=0; ana=none
-        for ns in "$ctrl"/"$cname"c*n* "$ctrl"/"$cname"n*; do
-            [ -d "$ns" ] || continue
-            ns_found=1
-            if [ -e "$ns/ana_state" ]; then
-                ana=$(cat "$ns/ana_state" 2>/dev/null || echo unknown)
-            else
-                ana=noana
-            fi
-            break
-        done
-        case "$ana" in
-            optimized|non-optimized|non_optimized|noana) usable=$((usable+1)) ;;
-        esac
-        if [ "$ns_found" = 0 ] || [ "$ana" = inaccessible ]; then
-            detail="$detail $cname:state=$cstate,ns=$ns_found,ana=$ana"
-        fi
-    done
-    echo "VOL $vol total=$total usable=$usable$detail"
-done
-"""
         _, stdout_text, _ = self.client.run(
-            f"bash -lc {shlex.quote(script)}", timeout=120, check=False,
+            "sudo nvme list-subsys -o json", timeout=120, check=False,
             label="verify client paths")
+        text = (stdout_text or "").strip()
+        if not text:
+            return ["client: nvme list-subsys returned nothing"]
+        try:
+            doc = json.loads(text)
+        except json.JSONDecodeError as exc:
+            return [f"client: cannot parse nvme list-subsys output: {exc}"]
+
+        subsystems = []
+        for entry in (doc if isinstance(doc, list) else [doc]):
+            if isinstance(entry, dict):
+                subsystems.extend(entry.get("Subsystems") or [])
         problems = []
-        seen = set()
-        for line in (stdout_text or "").splitlines():
-            if not line.startswith("VOL "):
+        seen = {}
+        for subsystem in subsystems:
+            nqn = subsystem.get("NQN", "")
+            if ":lvol:" not in nqn:
                 continue
-            fields = line.split()
-            volume = fields[1]
-            seen.add(volume)
-            info = dict(
-                part.split("=", 1) for part in fields[2:4] if "=" in part)
-            total = int(info.get("total", 0))
-            usable = int(info.get("usable", 0))
-            detail = " ".join(fields[4:])
-            if total == 0:
-                problems.append(f"client: {volume[:12]} has no path controllers")
-            elif usable < total:
+            volume = nqn.split(":lvol:")[-1]
+            paths = subsystem.get("Paths") or []
+            not_live = [
+                f"{p.get('Name')}={p.get('State')}" for p in paths
+                if p.get("State") != "live"
+            ]
+            # ANAState is absent on this nvme-cli; honour it when present.
+            bad_ana = [
+                f"{p.get('Name')}:ana={p.get('ANAState')}" for p in paths
+                if p.get("ANAState") not in (None, "optimized", "non-optimized",
+                                             "non_optimized")
+            ]
+            seen[volume] = len(paths)
+            expected = self._baseline_client_paths.get(volume)
+            if expected is None:
+                self._baseline_client_paths[volume] = len(paths)
+            elif len(paths) < expected:
                 problems.append(
-                    f"client: {volume[:12]} has {usable}/{total} usable path(s) "
-                    f"— a live controller with no usable namespace is invisible "
-                    f"to every target-side check [{detail}]")
+                    f"client: {volume[:12]} has {len(paths)} path(s), "
+                    f"expected {expected} — a path disappeared from the "
+                    f"multipath head")
+            if not_live:
+                problems.append(
+                    f"client: {volume[:12]} path(s) not live: "
+                    f"{', '.join(not_live)}")
+            if bad_ana:
+                problems.append(
+                    f"client: {volume[:12]} unusable ANA state: "
+                    f"{', '.join(bad_ana)}")
+
         tracked = {job.volume_id for job in self.fio_jobs}
-        for volume_id in tracked - seen:
+        for volume_id in tracked - set(seen):
             problems.append(
                 f"client: {volume_id[:12]} has no nvme-subsystem entry at all")
         return problems
