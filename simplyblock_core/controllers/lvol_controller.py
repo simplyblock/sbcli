@@ -5,7 +5,7 @@ import sys
 import time
 import uuid
 from datetime import datetime
-from typing import List, Tuple, Optional
+from typing import Any, Dict, List, Tuple, Optional
 
 from simplyblock_core import utils, constants
 from simplyblock_core.controllers import snapshot_controller, pool_controller, lvol_events, tasks_controller, \
@@ -2236,7 +2236,10 @@ def get_replication_info(lvol_id_or_name):
 
     tasks = []
     snaps = []
-    out = {
+    # Heterogeneous status payload (str / int / None / list). Annotated so the
+    # numeric comparisons further down ("lag > lag_budget",
+    # "outstanding_count > 0") are not inferred as int-vs-object.
+    out: Dict[str, Any] = {
         "last_snapshot_id": "",
         "last_replication_time": "",
         "last_replication_duration": "",
@@ -2394,18 +2397,68 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
     except ValueError as e:
         return False, str(e)
 
-    node = db_controller.get_storage_node_by_id(lvol.node_id)
-    cluster = db_controller.get_cluster_by_id(node.cluster_id)
-    if cluster.status == Cluster.STATUS_SUSPENDED and cluster.snapshot_replication_target_cluster:
-        logger.error("Cluster is suspended, looking for replicated lvol")
-        for lv in db_controller.get_mini_lvols():
-            if lv.nqn == lvol.nqn:
-                n = db_controller.get_storage_node_by_id(lv.node_id)
-                if n.cluster_id == cluster.snapshot_replication_target_cluster:
-                    logger.info(f"LVol with same nqn already exists on target cluster: {lv.get_id()}")
-                    lvol = lv # type: ignore[assignment]
-                    break
-    lvol = db_controller.get_lvol_by_id(lvol.get_id())
+    out = []
+    for path_lvol in _connect_path_volumes(db_controller, lvol):
+        out.extend(_connect_entries_for_volume(
+            db_controller, path_lvol, ctrl_loss_tmo, host_entry, host_nqn))
+    return out, None
+
+
+def _connect_path_volumes(db_controller, lvol):
+    """The volume(s) whose paths a client must connect, newest role first.
+
+    Driven purely by the replication relationship — NEVER by Cluster.status. A
+    source cluster that is merely assumed dead auto-recovers within minutes when
+    its SPDK containers restart, so the old "if cluster is SUSPENDED, look for a
+    copy with the same NQN" redirect stopped redirecting exactly when the volume
+    was still living on the target. It also consulted the single cluster-scoped
+    target field (wrong as soon as a cluster has several targets) and never fired
+    for a planned migration, because there the source is healthy.
+
+      replicating / none  -> the volume itself
+      cutover_pending     -> BOTH sides: the client must already hold the target
+                             paths when ANA flips, which is what makes a planned
+                             cutover non-disruptive
+      failed_over         -> the target copy, unconditionally
+      cutover_done        -> ONLY the post-move volume; the pre-migration paths
+                             are not handed out any more
+
+    The clone preserves the source NQN and ns_id, so every path returned here
+    aggregates into one multipath device on the client.
+    """
+    from simplyblock_core.models.lvol_model import LVolReplication
+
+    lvol_id = lvol.get_id()
+    rep = None
+    for candidate in reversed(db_controller.get_lvol_replication_objects()):
+        source_id = candidate.source_lvol.get_id() if candidate.source_lvol else ""
+        target_id = candidate.target_lvol.get_id() if candidate.target_lvol else ""
+        if lvol_id in (source_id, target_id):
+            rep = candidate
+            break
+
+    if rep is None or rep.state == LVolReplication.STATE_REPLICATING:
+        return [lvol]
+
+    def _live(candidate):
+        if candidate is None:
+            return None
+        try:
+            fresh = db_controller.get_lvol_by_id(candidate.get_id())
+        except KeyError:
+            return None
+        return None if fresh.status == LVol.STATUS_DELETED else fresh
+
+    source = _live(rep.source_lvol)
+    target = _live(rep.target_lvol)
+
+    if rep.state == LVolReplication.STATE_CUTOVER_PENDING:
+        return [v for v in (target, source) if v is not None] or [lvol]
+    # failed_over and cutover_done: the volume now lives on the target side.
+    return [target or source or lvol]
+
+
+def _connect_entries_for_volume(db_controller, lvol, ctrl_loss_tmo, host_entry, host_nqn):
     out = []
     nodes_ids = []
     if lvol.ha_type == 'single':
@@ -2977,7 +3030,7 @@ def replication_backlog(db_controller, lvol, all_snaps=None, max_depth=64):
     """
     if all_snaps is None:
         all_snaps = db_controller.get_snapshots()
-    by_lvol = {}
+    by_lvol: Dict[str, list] = {}
     for s in all_snaps:
         by_lvol.setdefault(s.lvol.uuid, []).append(s)
 

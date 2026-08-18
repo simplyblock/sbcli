@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field, RootModel
 
 from simplyblock_core.db_controller import DBController
 from simplyblock_core import utils as core_utils
-from simplyblock_core.controllers import backup_controller, lvol_controller, snapshot_controller
+from simplyblock_core.controllers import backup_controller, lvol_controller, snapshot_controller, replication_policy_controller
 from simplyblock_core.models.lvol_model import LVol
 
 from ...._dependencies import Cluster, StoragePool, Volume
@@ -229,9 +229,29 @@ def replication_trigger(cluster: Cluster, pool: StoragePool, volume: Volume) -> 
 
     return Response(status_code=204)
 
+class ReplicationStartParams(BaseModel):
+    replication_cluster_id: Optional[str] = None   # destination; None = cluster default
+    mode: Optional[str] = None                     # failover | migration
+    interval_min: Optional[int] = Field(None, ge=0)
+
+
 @instance_api.post('/replication_start', name='clusters:storage-pools:volumes:replication_start', status_code=204, responses={204: {"content": None}})
-def replication_start(cluster: Cluster, pool: StoragePool, volume: Volume) -> Response:
-    if not lvol_controller.replication_start(volume.get_id(), cluster.get_id()):
+def replication_start(cluster: Cluster, pool: StoragePool, volume: Volume,
+                      body: Optional[ReplicationStartParams] = None) -> Response:
+    """Start replicating a volume.
+
+    The destination is the request's replication_cluster_id, else the cluster's
+    configured target. It used to pass the PATH cluster — the volume's OWN
+    cluster — as the destination, which self-targets and never falls back to the
+    configured target, so replication could not be started correctly over REST
+    at all. mode/interval_min were likewise unreachable.
+    """
+    params = body or ReplicationStartParams()
+    if not lvol_controller.replication_start(
+            volume.get_id(),
+            replication_cluster_id=params.replication_cluster_id,
+            mode=params.mode,
+            interval_min=params.interval_min):
         raise ValueError('Failed to start volume snapshot replication')
 
     return Response(status_code=204)
@@ -392,6 +412,69 @@ def delete_backups(cluster: Cluster, pool: StoragePool, volume: Volume) -> Respo
     success, error = backup_controller.delete_backups(volume.get_id())
     if error:
         raise HTTPException(400, error)
+    return Response(status_code=204)
+
+
+
+class PolicyAssignParams(BaseModel):
+    policy: str                                   # policy id or name
+
+
+class ReplicationRelationshipDTO(BaseModel):
+    replication_id: str
+    source_lvol_id: str
+    target_lvol_id: str
+    source_cluster_id: str
+    target_cluster_id: str
+    mode: str
+    state: str
+    direction: str
+    target_nqn: str
+    target_ns_id: int
+    is_source: bool
+
+
+@instance_api.get('/replication', name='clusters:storage-pools:volumes:replication')
+def get_replication_relationship(cluster: Cluster, pool: StoragePool, volume: Volume) -> ReplicationRelationshipDTO:
+    """Resolve a volume to its counterpart on the other cluster.
+
+    Answers "what is the TARGET volume uuid for this SOURCE volume uuid" (and the
+    reverse). Before this the ids were only returned by the fail-over or commit
+    call itself, so a caller that had not kept them could not find the target
+    volume through the API at all -- LVolReplication was exposed nowhere.
+    """
+    rel = replication_policy_controller.get_relationship(volume.get_id())
+    if rel is None:
+        raise HTTPException(status_code=404, detail='Volume has no replication relationship')
+    return ReplicationRelationshipDTO(**rel)
+
+
+@instance_api.put('/replication-policy', name='clusters:storage-pools:volumes:replication-policy:set',
+                  status_code=204, responses={204: {"content": None}})
+def set_replication_policy(cluster: Cluster, pool: StoragePool, volume: Volume,
+                           body: PolicyAssignParams) -> Response:
+    """Attach a policy, or change it (detach then attach, so the new target
+    receives a FULL copy)."""
+    try:
+        replication_policy_controller.attach_policy(volume.get_id(), body.policy)
+    except replication_policy_controller.ReplicationConfigError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return Response(status_code=204)
+
+
+@instance_api.delete('/replication-policy', name='clusters:storage-pools:volumes:replication-policy:clear',
+                     status_code=204, responses={204: {"content": None}})
+def clear_replication_policy(cluster: Cluster, pool: StoragePool, volume: Volume) -> Response:
+    """Detach: stop replicating and delete the internal replication snapshots on
+    both sides. Refused while a cutover is in flight."""
+    try:
+        replication_policy_controller.detach_policy(volume.get_id())
+    except replication_policy_controller.ReplicationConfigError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
     return Response(status_code=204)
 
 
