@@ -1041,7 +1041,12 @@ def task_runner(task):
             task.write_to_db(db.kv_store)
             return False
 
-        _delete_source_subsystem(group, src_node, src_rpc, tgt_node, tgt_rpc)
+        # TEMPORARILY DISABLED for a diagnostic test: skip deleting the source
+        # subsystem so we can tell whether post-migration corruption still
+        # occurs with the source side left completely intact. Re-enable once
+        # the test is done.
+        # _delete_source_subsystem(group, src_node, src_rpc, tgt_node, tgt_rpc)
+        logger.info(f"Group {group_id[:8]}: source subsystem cleanup SKIPPED (diagnostic)")
 
         group.phase = LVolMigrationGroup.PHASE_COMPLETED
         group.status = LVolMigrationGroup.STATUS_DONE
