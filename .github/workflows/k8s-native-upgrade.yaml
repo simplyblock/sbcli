@@ -746,11 +746,30 @@ jobs:
           set -euxo pipefail
           NAMESPACE=simplyblock
 
-          # Find a worker node IP for mgmt-ip
-          IFS=',' read -ra NODES <<< "${{ github.event.inputs.worker_nodes }}"
-          FIRST_WORKER="${NODES[0]}"
-          MGMT_IP=$(kubectl get node "$FIRST_WORKER" -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}')
-          echo "Using worker node $FIRST_WORKER IP=$MGMT_IP as mgmt-ip"
+          # Find ingress controller pod IP for mgmt-ip
+          MGMT_IP=""
+          # Try label selector first
+          MGMT_IP=$(kubectl get pods -n $NAMESPACE \
+            -l app.kubernetes.io/component=controller,app.kubernetes.io/name=ingress \
+            -o jsonpath='{.items[0].status.podIP}' 2>/dev/null) || true
+
+          # Fallback: grep by pod name
+          if [ -z "$MGMT_IP" ]; then
+            echo "Label selector did not find ingress pod, trying name grep..."
+            INGRESS_POD=$(kubectl get pods -n $NAMESPACE --no-headers 2>/dev/null \
+              | grep "sbcli-ingress-controller" | grep "Running" | head -1 | awk '{print $1}') || true
+            if [ -n "$INGRESS_POD" ]; then
+              MGMT_IP=$(kubectl get pod -n $NAMESPACE "$INGRESS_POD" \
+                -o jsonpath='{.status.podIP}' 2>/dev/null) || true
+            fi
+          fi
+
+          if [ -z "$MGMT_IP" ]; then
+            echo "ERROR: Could not find ingress controller pod IP"
+            kubectl get pods -n $NAMESPACE
+            exit 1
+          fi
+          echo "Using ingress controller pod IP=$MGMT_IP as mgmt-ip"
 
           # Find a pod to exec sbcli-dev from
           ADMIN_POD=""
@@ -1674,6 +1693,18 @@ jobs:
           MGMT_IP=$(kubectl get svc -n ${NAMESPACE} | grep graylog | awk '{print $3}')
           OPENSEARCH_IP=$(kubectl get svc opensearch-cluster-master -n ${NAMESPACE} -o jsonpath='{.spec.clusterIP}' 2>/dev/null || echo "")
 
+          # Fallback: ingress controller pod IP for log collection
+          INGRESS_IP=$(kubectl get pods -n ${NAMESPACE} \
+            -l app.kubernetes.io/component=controller,app.kubernetes.io/name=ingress \
+            -o jsonpath='{.items[0].status.podIP}' 2>/dev/null) || true
+          if [ -z "$INGRESS_IP" ]; then
+            INGRESS_IP=$(kubectl get pods -n ${NAMESPACE} --no-headers 2>/dev/null \
+              | grep "sbcli-ingress-controller" | grep "Running" | head -1 \
+              | awk '{print $1}' | xargs -I{} kubectl get pod -n ${NAMESPACE} {} \
+                -o jsonpath='{.status.podIP}' 2>/dev/null) || true
+          fi
+          echo "Graylog IP=${MGMT_IP}, OpenSearch IP=${OPENSEARCH_IP}, Ingress fallback IP=${INGRESS_IP}"
+
           OUTPUT_DIR=""
           if [ -n "${RUN_BASE_DIR:-}" ] && [ -d "${RUN_BASE_DIR}" ]; then
             OUTPUT_DIR="${RUN_BASE_DIR}/graylog_collected"
@@ -1723,6 +1754,21 @@ jobs:
                 ${CLUSTER_ID:+--cluster-id "${CLUSTER_ID}"} \
             2>&1
             local rc=$?
+            if [ $rc -ne 0 ] && [ -n "${INGRESS_IP}" ] && [ "${mgmt_ip_to_use}" != "${INGRESS_IP}" ]; then
+              echo "  Primary IP (${mgmt_ip_to_use}) failed, retrying with ingress IP (${INGRESS_IP})..."
+              kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- \
+                python3 "${COLLECT_SCRIPT}" \
+                  "${iso}" "${mins}" \
+                  --mode kubernetes \
+                  --namespace "${NAMESPACE}" \
+                  --monitoring-secret "${MON_SECRET}" \
+                  --output-dir "${outdir}" \
+                  ${extra_flag} \
+                  --mgmt-ip "${INGRESS_IP}" \
+                  ${CLUSTER_ID:+--cluster-id "${CLUSTER_ID}"} \
+              2>&1
+              rc=$?
+            fi
             [ $rc -ne 0 ] && return $rc
             local has_content
             has_content=$(kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- \
