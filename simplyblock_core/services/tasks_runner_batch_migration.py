@@ -450,75 +450,84 @@ def _flip_ana_to_optimized(group, member_migrations, src_node, src_rpc, tgt_node
                           "inaccessible", f"SRC-{src['node_id'][:8]}")
 
         # Step 4: namespace swap on overlap TGT paths.
-        # Each member has its own namespace in the shared NQN. We look up each
-        # member's nsid by matching ns['uuid'] == lvol.uuid so we never remove
-        # the wrong namespace (positional removal would corrupt I/O for other members).
-        # Query subsystem once per overlap node, then match by UUID for each member.
-        for tgt in tgt_paths:
-            if tgt['node_id'] not in overlap_ids:
-                continue
-            try:
-                s = tgt['rpc'].subsystem_get(nqn)
-                ns_by_uuid = {
-                    ns.get('uuid'): ns['nsid']
-                    for ns in (s.get('namespaces', []) if s else [])
-                }
-            except Exception as e:
-                logger.warning(
-                    f"Group {group.uuid[:8]}: subsystem_get on {tgt['node_id'][:8]} "
-                    f"(non-fatal): {e}")
-                ns_by_uuid = {}
-
-            # Two-pass swap: remove ALL old namespaces first, then add ALL new ones.
-            # A per-member remove+add loop would cause N sequential "namespace gone"
-            # events visible to initiators — each one triggering a reconnect. Batching
-            # the removes into one pass and the adds into a second pass collapses this
-            # into a single collective disruption, which initiators handle cleanly.
-            ns_adds = []  # (tgt_ns_bdev, uuid, guid) — collected during remove pass
-            for m in member_migrations:
+        # TEMPORARILY DISABLED for a diagnostic test: skip the remove/add-ns
+        # swap entirely -- just flip TGT optimized / SRC inaccessible (steps
+        # 2/3/5) and leave each overlap node's existing namespaces (still
+        # pointing at the pre-migration SRC bdev) untouched, to isolate
+        # whether the corruption is introduced by this swap or is already
+        # present in the final-step/add_clone data regardless of it.
+        # Re-enable once the test is done.
+        logger.info(f"Group {group.uuid[:8]}: overlap namespace swap SKIPPED (diagnostic)")
+        if False:
+            # Each member has its own namespace in the shared NQN. We look up each
+            # member's nsid by matching ns['uuid'] == lvol.uuid so we never remove
+            # the wrong namespace (positional removal would corrupt I/O for other members).
+            # Query subsystem once per overlap node, then match by UUID for each member.
+            for tgt in tgt_paths:
+                if tgt['node_id'] not in overlap_ids:
+                    continue
                 try:
-                    lvol = db.get_lvol_by_id(m.lvol_id)
-                    tgt_bdev_short = _lvol_tgt_bdev_name(lvol.lvol_bdev)
-                    tgt_ns_bdev = (
-                        f"crypto_{tgt_bdev_short}" if lvol.crypto_bdev
-                        else f"{tgt_node.lvstore}/{tgt_bdev_short}"
-                    )
-                    nsid = ns_by_uuid.get(lvol.uuid)
-                    if nsid:
-                        try:
-                            tgt['rpc'].nvmf_subsystem_remove_ns(nqn, nsid)
+                    s = tgt['rpc'].subsystem_get(nqn)
+                    ns_by_uuid = {
+                        ns.get('uuid'): ns['nsid']
+                        for ns in (s.get('namespaces', []) if s else [])
+                    }
+                except Exception as e:
+                    logger.warning(
+                        f"Group {group.uuid[:8]}: subsystem_get on {tgt['node_id'][:8]} "
+                        f"(non-fatal): {e}")
+                    ns_by_uuid = {}
+
+                # Two-pass swap: remove ALL old namespaces first, then add ALL new ones.
+                # A per-member remove+add loop would cause N sequential "namespace gone"
+                # events visible to initiators — each one triggering a reconnect. Batching
+                # the removes into one pass and the adds into a second pass collapses this
+                # into a single collective disruption, which initiators handle cleanly.
+                ns_adds = []  # (tgt_ns_bdev, uuid, guid) — collected during remove pass
+                for m in member_migrations:
+                    try:
+                        lvol = db.get_lvol_by_id(m.lvol_id)
+                        tgt_bdev_short = _lvol_tgt_bdev_name(lvol.lvol_bdev)
+                        tgt_ns_bdev = (
+                            f"crypto_{tgt_bdev_short}" if lvol.crypto_bdev
+                            else f"{tgt_node.lvstore}/{tgt_bdev_short}"
+                        )
+                        nsid = ns_by_uuid.get(lvol.uuid)
+                        if nsid:
+                            try:
+                                tgt['rpc'].nvmf_subsystem_remove_ns(nqn, nsid)
+                                logger.info(
+                                    f"Group {group.uuid[:8]}: swap NS {tgt['node_id'][:8]}: "
+                                    f"removed nsid={nsid} for lvol {lvol.uuid[:8]}")
+                            except Exception as e:
+                                logger.warning(
+                                    f"Group {group.uuid[:8]}: remove ns {tgt['node_id'][:8]} "
+                                    f"nsid={nsid} (non-fatal): {e}")
+                        else:
+                            logger.warning(
+                                f"Group {group.uuid[:8]}: no namespace for uuid={lvol.uuid[:8]} "
+                                f"on {tgt['node_id'][:8]}; skipping remove")
+                        ns_adds.append((tgt_ns_bdev, lvol.uuid, lvol.guid))
+                    except Exception as e:
+                        logger.warning(
+                            f"Group {group.uuid[:8]}: namespace swap member {m.uuid[:8]} "
+                            f"on {tgt['node_id'][:8]} (non-fatal): {e}")
+
+                for tgt_ns_bdev, uuid, guid in ns_adds:
+                    try:
+                        ret = tgt['rpc'].nvmf_subsystem_add_ns(nqn, tgt_ns_bdev, uuid, guid)
+                        if not ret:
+                            logger.error(
+                                f"Group {group.uuid[:8]}: add ns {tgt_ns_bdev} failed "
+                                f"on {tgt['node_id'][:8]}")
+                        else:
                             logger.info(
                                 f"Group {group.uuid[:8]}: swap NS {tgt['node_id'][:8]}: "
-                                f"removed nsid={nsid} for lvol {lvol.uuid[:8]}")
-                        except Exception as e:
-                            logger.warning(
-                                f"Group {group.uuid[:8]}: remove ns {tgt['node_id'][:8]} "
-                                f"nsid={nsid} (non-fatal): {e}")
-                    else:
+                                f"added {tgt_ns_bdev}")
+                    except Exception as e:
                         logger.warning(
-                            f"Group {group.uuid[:8]}: no namespace for uuid={lvol.uuid[:8]} "
-                            f"on {tgt['node_id'][:8]}; skipping remove")
-                    ns_adds.append((tgt_ns_bdev, lvol.uuid, lvol.guid))
-                except Exception as e:
-                    logger.warning(
-                        f"Group {group.uuid[:8]}: namespace swap member {m.uuid[:8]} "
-                        f"on {tgt['node_id'][:8]} (non-fatal): {e}")
-
-            for tgt_ns_bdev, uuid, guid in ns_adds:
-                try:
-                    ret = tgt['rpc'].nvmf_subsystem_add_ns(nqn, tgt_ns_bdev, uuid, guid)
-                    if not ret:
-                        logger.error(
-                            f"Group {group.uuid[:8]}: add ns {tgt_ns_bdev} failed "
-                            f"on {tgt['node_id'][:8]}")
-                    else:
-                        logger.info(
-                            f"Group {group.uuid[:8]}: swap NS {tgt['node_id'][:8]}: "
-                            f"added {tgt_ns_bdev}")
-                except Exception as e:
-                    logger.warning(
-                        f"Group {group.uuid[:8]}: add ns {tgt_ns_bdev} "
-                        f"on {tgt['node_id'][:8]} (non-fatal): {e}")
+                            f"Group {group.uuid[:8]}: add ns {tgt_ns_bdev} "
+                            f"on {tgt['node_id'][:8]} (non-fatal): {e}")
 
         # Step 5: all TGT paths → correct ANA state at TGT port
         primary_tgt = tgt_paths[0]
@@ -685,14 +694,7 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
                     logger.warning(
                         f"Group {group.uuid[:8]}: add_clone for member {m.uuid[:8]} (non-fatal): {e}")
 
-        # TEMPORARILY DISABLED for a diagnostic test: skip the ANA-state
-        # switch entirely so clients stay pinned on the SRC path after
-        # batch_final_step/add_clone, to isolate whether the corruption is
-        # introduced by the final-step/add_clone data itself (independent of
-        # any client-visible path change) or by the ANA/NS-swap sequence.
-        # Re-enable once the test is done.
-        logger.info(f"Group {group.uuid[:8]}: ANA state switch SKIPPED (diagnostic)")
-        # _flip_ana_to_optimized(group, member_migrations, src_node, src_rpc, tgt_node, tgt_rpc)
+        _flip_ana_to_optimized(group, member_migrations, src_node, src_rpc, tgt_node, tgt_rpc)
 
     try:
         src_rpc.bdev_nvme_detach_controller(ctrl_name)
