@@ -8,7 +8,8 @@ from sse_starlette import EventSourceResponse
 
 from simplyblock_core.db_controller import DBController
 from simplyblock_core import utils as core_utils
-from simplyblock_core.controllers import backup_controller, lvol_controller, snapshot_controller
+from simplyblock_core.controllers import lvol_controller, snapshot_controller
+from simplyblock_core.controllers.backup import controller as backup_controller
 from simplyblock_core.models.lvol_model import LVol
 
 from ...._dependencies import Cluster, StoragePool, Volume
