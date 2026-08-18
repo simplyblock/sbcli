@@ -1,6 +1,4 @@
 """D2 unit tests for internal-snapshot retention on source + target."""
-import itertools
-
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.services import snapshot_replication as sr
@@ -107,7 +105,7 @@ def _healthy_chain(source_snaps):
         per_lvol.setdefault(s.lvol.get_id(), []).append(s)
     for snaps in per_lvol.values():
         snaps.sort(key=lambda s: s.created_at)
-        for prev, nxt in itertools.pairwise(snaps):
+        for prev, nxt in zip(snaps, snaps[1:]):
             chain[nxt.target_replicated_snap_uuid] = prev.target_replicated_snap_uuid
     return chain
 
