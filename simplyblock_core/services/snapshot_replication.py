@@ -16,6 +16,23 @@ utils.init_sentry_sdk(__name__)
 db = db_controller.DBController()
 
 
+def _destination_pool_uuid(remote_node):
+    """The pool a replicated copy should be created in on *remote_node*.
+
+    The cluster's configured replication pool wins; otherwise the first ACTIVE
+    pool on that cluster. Shared by both directions so a fail-back into a
+    freshly installed cluster resolves a pool the same way a forward
+    replication does.
+    """
+    cluster = db.get_cluster_by_id(remote_node.cluster_id)
+    if cluster.snapshot_replication_target_pool:
+        return cluster.snapshot_replication_target_pool
+    for pool in db.get_pools(remote_node.cluster_id):
+        if pool.status == Pool.STATUS_ACTIVE:
+            return pool.uuid
+    return None
+
+
 def process_snap_replicate_start(task, snapshot):
     # 1 create lvol on remote node
     logger.info("Starting snapshot replication task")
@@ -26,7 +43,6 @@ def process_snap_replicate_start(task, snapshot):
     replicate_to_source = task.function_params["replicate_to_source"]
     if "remote_lvol_id" not in task.function_params or not task.function_params["remote_lvol_id"]:
         if replicate_to_source:
-            org_snap = db.get_snapshot_by_id(snapshot.source_replicated_snap_uuid)
             try:
                 remote_node_uuid = db.get_storage_node_by_id(task.node_id)
             except KeyError:
@@ -36,18 +52,35 @@ def process_snap_replicate_start(task, snapshot):
                 task.status = JobSchedule.STATUS_DONE
                 task.write_to_db()
                 return
-            remote_pool_uuid = org_snap.lvol.pool_uuid
+            # A snapshot only has a counterpart on the destination when it was
+            # replicated FROM there. Anything created after the fail-over — and
+            # everything at all when failing back to a freshly installed cluster
+            # — has source_replicated_snap_uuid empty, and looking that up used
+            # to hand an empty id to get_snapshot_by_id, which degenerates into a
+            # whole-table scan and dies with "Multiple values present" (348 such
+            # failures in labs 2026-08-17/18: every fail-back task died here on
+            # its first step, so nothing ever replicated back). Reuse the
+            # counterpart's pool when there is one, otherwise resolve the pool on
+            # the destination cluster the same way the forward direction does.
+            remote_pool_uuid = None
+            if snapshot.source_replicated_snap_uuid:
+                try:
+                    remote_pool_uuid = db.get_snapshot_by_id(
+                        snapshot.source_replicated_snap_uuid).lvol.pool_uuid
+                except KeyError:
+                    logger.warning(
+                        "Counterpart snapshot %s of %s is gone; resolving the "
+                        "destination pool from the cluster instead",
+                        snapshot.source_replicated_snap_uuid, snapshot.get_id())
+            if not remote_pool_uuid:
+                remote_pool_uuid = _destination_pool_uuid(remote_node_uuid)
+            if not remote_pool_uuid:
+                logger.error("Unable to find pool on remote cluster: %s",
+                             remote_node_uuid.cluster_id)
+                return
         else:  # replicate to target
             remote_node_uuid = db.get_storage_node_by_id(snapshot.lvol.replication_node_id)
-            cluster = db.get_cluster_by_id(remote_node_uuid.cluster_id)
-            remote_pool_uuid = None
-            if cluster.snapshot_replication_target_pool:
-                remote_pool_uuid = cluster.snapshot_replication_target_pool
-            else:
-                for bool in db.get_pools(remote_node_uuid.cluster_id):
-                    if bool.status == Pool.STATUS_ACTIVE:
-                        remote_pool_uuid = bool.uuid
-                        break
+            remote_pool_uuid = _destination_pool_uuid(remote_node_uuid)
             if not remote_pool_uuid:
                 logger.error(f"Unable to find pool on remote cluster: {remote_node_uuid.cluster_id}")
                 return

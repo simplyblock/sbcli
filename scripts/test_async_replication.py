@@ -229,6 +229,62 @@ print(json.dumps(out))
 """, replayable=True)
 
 
+def newest_replicated_snap_ts(mgmt_ip, key_path, lvol_uuids):
+    """Per volume: created_at of the newest snapshot that IS on the target."""
+    return mgmt_py(mgmt_ip, key_path, f"""
+import json
+from simplyblock_core.db_controller import DBController
+db = DBController()
+wanted = set({list(lvol_uuids)!r})
+out = {{u: 0 for u in wanted}}
+for s in db.get_snapshots():
+    if s.deleted or not s.lvol:
+        continue
+    u = s.lvol.get_id()
+    if u in wanted and s.target_replicated_snap_uuid:
+        out[u] = max(out[u], s.created_at or 0)
+print(json.dumps(out))
+""", replayable=True)
+
+
+def wait_data_replicated(mgmt_ip, key_path, lvol_uuids, after_ts,
+                         timeout=REPL_WAIT_TIMEOUT):
+    """Wait until every volume has a REPLICATED snapshot newer than *after_ts*.
+
+    A bounded lag is not enough to fail over onto. `replication-start` takes its
+    first internal snapshot immediately, before mkfs and before the baseline is
+    written, so `lag_seconds` and `replicated_count > 0` are both satisfied by an
+    EMPTY (used_size=0) point-in-time. Lab 2026-08-18 did exactly that: the gate
+    passed at worst_lag=77s while `outstanding=4`, fail-over cloned the empty
+    snapshot, and all five mounts died with a bad superblock — the 202 MiB
+    post-baseline snapshot was still in flight. The product behaved correctly on
+    the input it was given; the harness simply had not replicated the data yet.
+
+    Force a snapshot so we do not wait out a whole interval, then require the
+    newest replicated point-in-time to be newer than the data we are about to
+    verify.
+    """
+    for lvol in lvol_uuids:
+        run(mgmt_ip, key_path, f"{SBCTL} volume replication-trigger {lvol}",
+            check=False, quiet=True)
+    print(f"Waiting for a replicated snapshot newer than the baseline "
+          f"(after_ts={int(after_ts)}) on all volumes...")
+    start = time.time()
+    while time.time() - start < timeout:
+        stamps = newest_replicated_snap_ts(mgmt_ip, key_path, lvol_uuids)
+        behind = {u: ts for u, ts in stamps.items() if (ts or 0) <= after_ts}
+        print(f"  volumes still without post-baseline data on the target: "
+              f"{len(behind)}/{len(lvol_uuids)}")
+        if not behind:
+            print("The data itself is on the target; fail-over is meaningful now.")
+            return True
+        time.sleep(15)
+    raise RuntimeError(
+        f"FAIL: no post-baseline snapshot replicated within {timeout}s for "
+        f"{sorted(behind)} — failing over now would clone a point-in-time that "
+        f"predates the filesystem")
+
+
 def do_failover(mgmt_ip, key_path, lvol_uuid):
     return mgmt_py(mgmt_ip, key_path, f"""
 import json
@@ -951,7 +1007,11 @@ def _setup_failed_over_volumes(meta, tag):
     lvols = create_volumes(mgmt_ip, key_path, src["pool"], tgt_uuid, mode="failover")
     mounts = connect_and_mount(client_ip, key_path, mgmt_ip, lvols, fmt=True)
     baseline = write_baseline(client_ip, key_path, mounts)
+    baseline_done_ts = time.time()
     wait_replication_caught_up(mgmt_ip, key_path, lvols)
+    # Steady lag alone would let us fail over onto the empty snapshot taken
+    # before mkfs; require the baseline itself to be on the target.
+    wait_data_replicated(mgmt_ip, key_path, lvols, baseline_done_ts)
 
     print(f"[{tag}] taking the source cluster down (both nodes)...")
     for ip in src["storage_public_ips"][:2]:
@@ -1047,7 +1107,14 @@ def test_case_3(meta):
 
 
 def test_case_4(meta):
-    """Fail-back to a FRESH, empty cluster (full replication, not delta)."""
+    """Migration onto a FRESHLY INSTALLED cluster after the primary collapsed.
+
+    Logically "back replication" (the new cluster stands on the old site), but
+    technically a brand-new cluster, so it must behave exactly like case 1: a
+    full forward replication in migration mode plus a cutover, with no delta
+    base and no fail-back semantics. Case 3 is the only case that replicates
+    back into the SAME cluster.
+    """
     print("\n========== CASE 4: fail-back to a fresh empty cluster ==========")
     key_path = meta["key_path"]
     mgmt_ip = meta["mgmt"]["public_ip"]
@@ -1063,23 +1130,38 @@ def test_case_4(meta):
 
     tgt_lvols, baseline, mounts = _setup_failed_over_volumes(meta, "case4")
 
-    # This is an ONLINE MIGRATION, exactly like case 1 — only the source is the
-    # fail-over site and the copy is full instead of delta. The volumes are live
-    # and serving, so IO must not be interrupted by moving them to the new site.
+    # This is an ONLINE MIGRATION, mechanically IDENTICAL to case 1 — only the
+    # pair differs (fail-over site -> freshly installed site instead of
+    # site 1 -> site 2). It is "back replication" only in the geographic sense:
+    # the destination is a brand-new cluster that has never held this data, so
+    # there is no delta base and nothing to fail BACK onto. Driving it through
+    # the fail-back verb was wrong — that path exists for case 3, where the
+    # ORIGINAL cluster is recovered and its pre-existing snapshots are matched
+    # by data_uuid for a delta. Replication back into the SAME cluster is
+    # case 3 only.
     jobfile = write_fio_jobfile(client_ip, key_path, mounts)
     start_fio(client_ip, key_path, jobfile)
 
-    # "Primary removed": drop the original source volumes so nothing can be
-    # reused as a delta base — the fresh cluster must receive the FULL dataset.
-    print("Removing the original primary's volumes (fresh fail-back must be full)...")
+    # The original site collapsed and has been reinstalled: drop its volumes so
+    # nothing of the old cluster can be mistaken for a delta base.
+    print("Clearing the collapsed primary's volumes (the fresh site starts empty)...")
     delete_test_volumes(mgmt_ip, key_path, [src["pool"]])
 
     set_cluster_replication(mgmt_ip, key_path, tgt_uuid, fresh_uuid,
                             pool_uuid_of(mgmt_ip, key_path, fresh["pool"]))
 
+    # Forward replication in migration mode, exactly as case 1 does it.
     for lv in tgt_lvols:
-        failback(mgmt_ip, key_path, lv, source_cluster_id=fresh_uuid)
+        run(mgmt_ip, key_path,
+            f"{SBCTL} volume replication-start {lv}"
+            f" --replication-cluster-id {fresh_uuid} --mode migration"
+            f" --interval-min {REPL_INTERVAL_MIN}")
+    replication_started_ts = time.time()
     wait_replication_caught_up(mgmt_ip, key_path, tgt_lvols)
+    # The volumes already hold the data, so any snapshot taken from here on
+    # carries it: require one such snapshot to be ON the fresh cluster before
+    # cutting over (lag alone would accept a point-in-time that predates it).
+    wait_data_replicated(mgmt_ip, key_path, tgt_lvols, replication_started_ts)
 
     print("Committing the cutover onto the fresh cluster while fio runs...")
     for lv in tgt_lvols:

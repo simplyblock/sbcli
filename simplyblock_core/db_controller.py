@@ -167,6 +167,8 @@ class DBController(metaclass=Singleton):
         ]
 
     def get_storage_node_by_id(self, id: str) -> StorageNode:
+        if not id:
+            raise KeyError('StorageNode lookup with a blank id')
         node = single_or_none(StorageNode().read_from_db(self.kv_store, id))
         if node is None:
             raise KeyError(f'StorageNode {id} not found')
@@ -195,6 +197,8 @@ class DBController(metaclass=Singleton):
         return pools
 
     def get_pool_by_id(self, id: str) -> Pool:
+        if not id:
+            raise KeyError('Pool lookup with a blank id')
         pool = single_or_none(Pool().read_from_db(self.kv_store, id))
         if pool is None:
             raise KeyError(f'Pool {id} not found')
@@ -293,12 +297,16 @@ class DBController(metaclass=Singleton):
         return ret
 
     def get_snapshot_by_id(self, id: str) -> SnapShot:
+        if not id:
+            raise KeyError('Snapshot lookup with a blank id')
         snap = single_or_none(SnapShot().read_from_db(self.kv_store, id))
         if snap is None:
             raise KeyError(f'Snapshot {id} not found')
         return snap
 
     def get_lvol_by_id(self, id: str) -> LVol:
+        if not id:
+            raise KeyError('LVol lookup with a blank id')
         lvol = single_or_none(LVol().read_from_db(self.kv_store, id=id))
         if lvol is None:
             raise KeyError(f'LVol {id} not found')
@@ -321,6 +329,8 @@ class DBController(metaclass=Singleton):
         return lvol
 
     def get_mgmt_node_by_id(self, id: str) -> MgmtNode:
+        if not id:
+            raise KeyError('MgmtNode lookup with a blank id')
         node = single_or_none(MgmtNode().read_from_db(self.kv_store, id))
         if node is None:
             raise KeyError(f'ManagementNode {id} not found')
@@ -389,6 +399,8 @@ class DBController(metaclass=Singleton):
         return ret[0]
 
     def get_cluster_by_id(self, cluster_id: str) -> Cluster:
+        if not cluster_id:
+            raise KeyError('Cluster lookup with a blank id')
         cluster = single_or_none(Cluster().read_from_db(self.kv_store, id=cluster_id))
         if cluster is None:
             raise KeyError(f'Cluster {cluster_id} not found')
