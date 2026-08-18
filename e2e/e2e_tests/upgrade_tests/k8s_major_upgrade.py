@@ -713,6 +713,44 @@ class K8sNativeMajorUpgrade(TestClusterBase):
         # Brief pause for cleanup to propagate
         time.sleep(10)
 
+    def _log_configmaps(self, label: str):
+        """Log configmap names and save prometheus config YAML to NFS share."""
+        try:
+            out, _ = self.k8s_utils._exec_kubectl(
+                f"kubectl get configmap -n {_NAMESPACE} -o name 2>/dev/null || true"
+            )
+            self.logger.info(f"Configmaps ({label}):\n{out}")
+
+            out_dir = os.path.join(self.docker_logs_path, "configmaps")
+            os.makedirs(out_dir, exist_ok=True)
+
+            # Save full list
+            list_file = os.path.join(out_dir, f"{label}_configmap_list.txt")
+            with open(list_file, "w") as f:
+                f.write(out or "")
+
+            # Save prometheus configmap YAML (try prefixed then unprefixed name)
+            for cm_name in [
+                f"{self.helm_release_sbcli}-simplyblock-prometheus-config",
+                "simplyblock-prometheus-config",
+            ]:
+                yaml_out, _ = self.k8s_utils._exec_kubectl(
+                    f"kubectl get configmap {cm_name} -n {_NAMESPACE} "
+                    f"-o yaml 2>/dev/null || true"
+                )
+                if yaml_out and "apiVersion" in yaml_out:
+                    yaml_file = os.path.join(
+                        out_dir, f"{label}_prometheus_config.yaml"
+                    )
+                    with open(yaml_file, "w") as f:
+                        f.write(yaml_out)
+                    self.logger.info(
+                        f"Saved {cm_name} YAML to {yaml_file}"
+                    )
+                    break
+        except Exception as e:
+            self.logger.warning(f"Failed to log configmaps ({label}): {e}")
+
     def _collect_worker_dmesg(self, label: str = ""):
         """Collect dmesg and journalctl from every worker node.
 
@@ -1686,7 +1724,12 @@ class K8sNativeMajorUpgrade(TestClusterBase):
                     content = f.read()
 
                 # Check which keep-resources exist in this template
-                names_in_file = {n for n in remaining_names if f"name: {n}" in content}
+                # Match literal "name: <exact>" OR name appearing anywhere
+                # in file (e.g. Helm variable defs like printf "%s-<name>")
+                names_in_file = set()
+                for n in remaining_names:
+                    if f"name: {n}" in content or n in content:
+                        names_in_file.add(n)
                 if not names_in_file:
                     continue
 
@@ -1694,17 +1737,32 @@ class K8sNativeMajorUpgrade(TestClusterBase):
                 modified = False
 
                 for name in names_in_file:
-                    # Pattern: metadata:\n  name: <name>
-                    # (won't match if annotations block was already injected between them)
+                    # Try literal name first
                     pattern = rf'(metadata:\n)(  name: {re.escape(name)}\n)'
-                    replacement = (
+                    content, count = re.subn(pattern, (
                         r'\1  annotations:\n'
                         r'    "helm.sh/resource-policy": keep\n'
                         r'\2'
-                    )
-                    content, count = re.subn(pattern, replacement, content)
+                    ), content)
                     if count > 0:
                         self.logger.info(f"  Injected keep annotation for: {name}")
+                        modified = True
+                        remaining_names.discard(name)
+                        continue
+
+                    # Fallback: match metadata + name with Helm template expression
+                    # e.g. "metadata:\n  name: {{ $name }}"
+                    pattern = rf'(metadata:\n)(  name: \{{{{.*\}}}}\n)'
+                    content, count = re.subn(pattern, (
+                        r'\1  annotations:\n'
+                        r'    "helm.sh/resource-policy": keep\n'
+                        r'\2'
+                    ), content, count=1)
+                    if count > 0:
+                        self.logger.info(
+                            f"  Injected keep annotation for: {name} "
+                            f"(Helm template variable)"
+                        )
                         modified = True
                         remaining_names.discard(name)
 
@@ -2607,6 +2665,9 @@ spec:
         # Step 1: Annotate FDB resources
         self._annotate_fdb_keep()
 
+        # Log configmaps before helm uninstall (for debugging)
+        self._log_configmaps("pre_uninstall")
+
         # Step 2: Shut down all storage nodes
         self.logger.info("Migration Step 2: Shutting down all storage nodes")
         self._shutdown_all_nodes(storage_node_list)
@@ -2625,6 +2686,9 @@ spec:
 
         # Step 6: Install new operator chart (FDB disabled)
         self._install_operator_chart()
+
+        # Log configmaps after operator install (for debugging)
+        self._log_configmaps("post_operator_install")
 
         # Step 6.1: Shut down nodes again (prevent auto-restart)
         self.logger.info("Migration Step 6.1: Shutting down nodes again (prevent auto-restart)")
