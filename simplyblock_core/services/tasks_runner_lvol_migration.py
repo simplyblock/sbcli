@@ -2614,10 +2614,16 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
     tgt_ter_rpc = _make_rpc(tgt_ter) if tgt_ter else None
     try:
         if migration.intermediate_snaps:
-            _delete_intermediate_snaps_on_target(
-                migration, tgt_rpc, tgt_sec_rpc, tgt_ter_rpc,
-                tgt_all_nodes=[n for n in [tgt_node, tgt_sec, tgt_ter] if n],
-                tgt_lvs_name=tgt_node.lvstore)
+            # TEMPORARILY DISABLED for a diagnostic test: skip deleting the
+            # target-side intermediate ("_mig_*") snapshots so we can tell
+            # whether post-migration corruption still occurs with them left
+            # intact. Re-enable once the test is done.
+            logger.info(f"Intermediate snap delete on target SKIPPED (diagnostic): "
+                       f"{migration.intermediate_snaps}")
+            # _delete_intermediate_snaps_on_target(
+            #     migration, tgt_rpc, tgt_sec_rpc, tgt_ter_rpc,
+            #     tgt_all_nodes=[n for n in [tgt_node, tgt_sec, tgt_ter] if n],
+            #     tgt_lvs_name=tgt_node.lvstore)
         _rename_migrated_bdevs(migration, tgt_node, tgt_rpc, tgt_sec_rpc, tgt_ter_rpc,
                                warnings=_warnings)
     except Exception as e:
