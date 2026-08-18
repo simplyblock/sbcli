@@ -1,16 +1,17 @@
 # coding=utf-8
+"""Creating, restoring, importing, exporting and discovering backups."""
 import logging
-import re
 import time
 import uuid
 from typing import Iterable, List, Optional
 
-from botocore.exceptions import BotoCoreError, ClientError
-
-from simplyblock_core import backup_manifest, constants
+from simplyblock_core import constants
 from simplyblock_core.controllers import backup_events, tasks_controller
+from simplyblock_core.controllers.backup import manifest as backup_manifest
+from simplyblock_core.controllers.backup.validation import (
+    chain_fits, require_restorable)
 from simplyblock_core.db_controller import DBController
-from simplyblock_core.models.backup import Backup, BackupPolicy, BackupPolicyAttachment
+from simplyblock_core.models.backup import Backup
 from simplyblock_core.models.backup_config import (
     BackupConfig, BackupLocation, S3Credentials)
 from simplyblock_core.models.storage_node import StorageNode
@@ -19,7 +20,6 @@ from simplyblock_core.kms import (
     lvol_dek_path, pool_kek_name,
 )
 from simplyblock_core.exceptions import PreconditionError
-from simplyblock_core.rpc_client import RPCException
 
 logger = logging.getLogger()
 
@@ -30,44 +30,7 @@ def _generate_backup_id():
     return str(uuid.uuid4())
 
 
-def _parse_age_string(age_str):
-    """Parse age strings like '2d', '12h', '1w', '30m' into seconds."""
-    match = re.match(r'^(\d+)([mhdw])$', age_str.strip())
-    if not match:
-        raise ValueError(f"Invalid age format: {age_str}. Use <number><m|h|d|w> e.g. 2d, 12h, 1w")
-    value = int(match.group(1))
-    unit = match.group(2)
-    multipliers = {'m': 60, 'h': 3600, 'd': 86400, 'w': 604800}
-    return value * multipliers[unit]
-
-
-def _parse_schedule(schedule_str):
-    """Parse schedule string like '15m,4 60m,11 24h,7' into list of (interval_seconds, keep_count) tuples.
-    Returns sorted list by interval ascending. Raises ValueError on invalid input."""
-    if not schedule_str or not schedule_str.strip():
-        return []
-    tiers = []
-    for part in schedule_str.strip().split():
-        parts = part.split(',')
-        if len(parts) != 2:
-            raise ValueError(f"Invalid schedule tier: {part}. Expected format: <interval>,<count> e.g. 15m,4")
-        interval_seconds = _parse_age_string(parts[0])
-        try:
-            keep_count = int(parts[1])
-        except ValueError:
-            raise ValueError(f"Invalid keep count in tier: {part}. Must be an integer.")
-        if keep_count < 1:
-            raise ValueError(f"Keep count must be >= 1 in tier: {part}")
-        tiers.append((interval_seconds, keep_count))
-    tiers.sort(key=lambda t: t[0])
-    # Validate intervals are strictly increasing
-    for i in range(1, len(tiers)):
-        if tiers[i][0] <= tiers[i - 1][0]:
-            raise ValueError("Schedule tier intervals must be strictly increasing")
-    return tiers
-
-
-def _get_latest_backup_for_lvol(lvol_id):
+def get_latest_backup_for_lvol(lvol_id):
     """Get the most recent non-failed backup for a given lvol.
 
     Includes pending/in-progress backups so that chain links are set
@@ -81,134 +44,6 @@ def _get_latest_backup_for_lvol(lvol_id):
         return None
     valid.sort(key=lambda b: b.created_at, reverse=True)
     return valid[0]
-
-
-def _compute_s3_cpu_masks(node: StorageNode):
-    """CPU masks for the S3 bdev, or None where the node does not say.
-
-    Returns (bdb_lcpu_mask, s3_lcpu_mask):
-        bdb_lcpu_mask: app_thread core (SPDK lightweight thread, low overhead)
-        s3_lcpu_mask: all system vCPUs (no pinning — let Linux scheduler handle
-                      the AWS SDK thread pool; the data plane default would
-                      wrongly pin onto SPDK reactor cores)
-
-    None rather than 0 for "the node does not tell us": a zero mask selects no
-    CPUs at all, and the data plane reads it as "unset" anyway, so returning it
-    would be a sentinel dressed as a value.
-    """
-    # SPDK thread for the bdev poller — reuse the app thread core
-    bdb_lcpu_mask = int(node.app_thread_mask, 16) if node.app_thread_mask else None
-
-    # AWS SDK thread pool — set all system vCPU bits so threads are unconstrained
-    s3_lcpu_mask = (1 << node.cpu) - 1 if node.cpu > 0 else None
-
-    return bdb_lcpu_mask, s3_lcpu_mask
-
-
-# --- Restorability rules ---------------------------------------------------
-#
-# Predicates, so the same rule can answer a question ("can this bucket hold
-# backups?") as well as block an operation. `require_restorable` is the one place
-# that turns a false answer into a refusal, so the wording an operator sees is
-# written once rather than at each of the entry points that enforce the rules.
-
-
-def chain_fits(length: int) -> bool:
-    """Whether a chain this long is accepted.
-
-    The bound is the control plane's own; see BACKUP_MAX_CHAIN_LENGTH for what it
-    is a bound on. The data plane's own limit is higher and refuses rather than
-    overruns, so this is where a too-long chain is reported usefully.
-    """
-    return length <= constants.BACKUP_MAX_CHAIN_LENGTH
-
-
-def location_holds_backups(location: BackupLocation) -> bool:
-    """Whether backups written to this location could be read back.
-
-    ``snapshot_backups=False`` selects the secondary-tiering object layout, whose
-    keys are ``{tiering_id}/{lpgi}``. The restore path addresses
-    ``{s3_id}/{mid}/{extent}``, so it can never find them.
-    """
-    return location.snapshot_backups
-
-
-def chain_is_coherent(backups, location: BackupLocation,
-                      encrypted: Optional[bool] = None) -> bool:
-    """Whether these backups can be restored together.
-
-    A restore reads clusters from every backup in the chain in one operation,
-    against one bucket, decrypting all of it with one key. So the chain has to
-    agree on where it lives, how it is encoded, and whether it is encrypted --
-    nothing anywhere in the stack could express a chain split across two buckets
-    or half encrypted.
-
-    ``encrypted`` folds in a backup that does not exist yet, which is the case at
-    creation time.
-    """
-    if any(backup.get_location() != location for backup in backups):
-        return False
-
-    variants = {backup.encrypted for backup in backups}
-    if encrypted is not None:
-        variants.add(encrypted)
-    return len(variants) <= 1
-
-
-def _describe_incoherence(backups, location: BackupLocation,
-                          encrypted: Optional[bool]) -> str:
-    for backup in backups:
-        if backup.get_location() != location:
-            return (
-                f"backup {backup.uuid} lives in bucket "
-                f"{backup.get_location().bucket_name}, but the rest of its chain "
-                f"is in {location.bucket_name}. A chain cannot span buckets or "
-                "encodings; start a new chain with a full backup")
-
-    return (
-        "a chain cannot mix encrypted and unencrypted backups: "
-        + ", ".join(f"{b.uuid}={'encrypted' if b.encrypted else 'plain'}"
-                    for b in backups)
-        + (f", new backup={'encrypted' if encrypted else 'plain'}"
-           if encrypted is not None else ""))
-
-
-def require_restorable(location: BackupLocation, backups=(),
-                       chain_length: Optional[int] = None,
-                       encrypted: Optional[bool] = None,
-                       what: str = "This chain") -> None:
-    """Refuse a chain that could not be restored, naming the rule it breaks.
-
-    Applied at creation, at import and at restore, because each is a point where
-    a chain could otherwise become unrestorable without anyone noticing -- and
-    each used to find out from whatever failed first, usually the data plane
-    mid-operation.
-
-    Args:
-        chain_length: The eventual length, where it differs from ``len(backups)``
-            -- at creation the ancestors are snapshots that have no backup yet.
-        encrypted: Whether the backup about to be created will be encrypted.
-
-    Raises:
-        PreconditionError: One of the rules above does not hold.
-    """
-    if not location_holds_backups(location):
-        raise PreconditionError(
-            f"Bucket {location.bucket_name} is configured with snapshot_backups "
-            "disabled, which selects the secondary-tiering object layout. "
-            "Backups cannot be written there.")
-
-    length = len(backups) if chain_length is None else chain_length
-    if not chain_fits(length):
-        raise PreconditionError(
-            f"{what} is {length} backups long; the data plane accepts at most "
-            f"{constants.BACKUP_MAX_CHAIN_LENGTH}. Merge older backups to "
-            "shorten the chain, or start a new chain with a full backup.")
-
-    if not chain_is_coherent(backups, location, encrypted):
-        raise PreconditionError(
-            f"{what} cannot be restored as a unit: "
-            + _describe_incoherence(backups, location, encrypted))
 
 
 def _existing_chain_backups(snap_chain) -> list:
@@ -325,72 +160,6 @@ def build_manifest(backup: Backup) -> backup_manifest.BackupManifest:
     )
 
 
-def primary_s3_bdev_name(node: StorageNode) -> str:
-    """The S3 device holding the cluster's own backup bucket."""
-    return f"s3_{node.lvstore}"
-
-
-def create_restore_s3_bdev(node: StorageNode, config: BackupConfig, name: str) -> None:
-    """Attach a second S3 device to a node, for a bucket that is not its own.
-
-    A restore from a foreign bucket needs different credentials, a different
-    endpoint and a different region than the node's own backup device carries.
-    Since a device holds exactly one bucket, the way to read another one is to
-    create another device -- which the lvstore supports, its transfer devices
-    being a list.
-
-    The caller owns the result and must delete it when the restore ends.
-    """
-    rpc_client = node.rpc_client()
-    bdb_lcpu_mask, s3_lcpu_mask = _compute_s3_cpu_masks(node)
-
-    try:
-        rpc_client.bdev_s3_create(
-            name=name,
-            bucket_name=config.bucket_name,
-            secondary_target=config.secondary_target,
-            with_compression=config.with_compression,
-            snapshot_backups=config.snapshot_backups,
-            endpoint=config.endpoint_url,
-            region=config.region,
-            verify_tls=config.verify_tls,
-            use_path_style=config.use_path_style,
-            access_key_id=config.credentials.access_key_id if config.credentials else None,
-            secret_access_key=config.credentials.secret_access_key if config.credentials else None,
-            bdb_lcpu_mask=bdb_lcpu_mask,
-            s3_lcpu_mask=s3_lcpu_mask,
-            s3_thread_pool_size=config.s3_thread_pool_size,
-        )
-        rpc_client.bdev_lvol_s3_bdev(node.lvstore, name)
-    except RPCException as e:
-        raise RuntimeError(
-            f"Failed to attach S3 device {name} for bucket {config.bucket_name} "
-            f"on node {node.get_id()}") from e
-
-    logger.info("Attached restore S3 device %s for bucket %s on node %s",
-                name, config.bucket_name, node.get_id())
-
-
-def delete_restore_s3_bdev(node: StorageNode, name: str) -> None:
-    """Detach a device created by :func:`create_restore_s3_bdev`.
-
-    Best-effort by design: this runs on the restore's terminal paths, and a
-    failure to clean up must not turn a completed restore into a failed one. It
-    is logged rather than raised, because the consequence is a leaked device --
-    which does block the lvstore from being destroyed, so it is worth noticing.
-    """
-    try:
-        node.rpc_client().bdev_s3_delete(name)
-    except Exception as e:
-        # Deliberately broad and deliberately not re-raised: this runs on a
-        # restore's terminal paths, where the alternative to a leaked device is
-        # reporting a completed restore as failed.
-        logger.warning("Could not delete restore S3 device %s on node %s: %s",
-                       name, node.get_id(), e)
-    else:
-        logger.info("Deleted restore S3 device %s on node %s", name, node.get_id())
-
-
 def foreign_bucket_config(backup: Backup, cluster,
                           credentials: Optional[S3Credentials]) -> Optional[BackupConfig]:
     """How to reach this backup's bucket, when it is not the cluster's own.
@@ -435,15 +204,6 @@ def foreign_bucket_config(backup: Backup, cluster,
             "configure the nodes with an instance role that can read it.")
 
     return config
-
-
-def restore_s3_bdev_name(backup_id: str) -> str:
-    """Name of the device created to read a foreign bucket for one restore.
-
-    Derived from the backup id so a retry re-derives the same name rather than
-    leaking a device per attempt.
-    """
-    return f"s3_restore_{backup_id[:8]}"
 
 
 def _resolve_crypto_key(backup: Backup, cluster):
@@ -525,72 +285,6 @@ def delete_manifest(backup: Backup) -> None:
     backup_manifest.delete(_config_for(backup), backup.uuid)
 
 
-def _ensure_s3_bucket(config: BackupConfig, bucket_name):
-    try:
-        s3_client = backup_manifest.s3_client(config)
-        try:
-            s3_client.head_bucket(Bucket=bucket_name)
-            logger.info(f"S3 bucket already exists: {bucket_name}")
-        except ClientError as e:
-            error_code = int(e.response["Error"]["Code"])
-            if error_code == 404:
-                s3_client.create_bucket(Bucket=bucket_name)
-                logger.info(f"S3 bucket created: {bucket_name}")
-            else:
-                raise
-    except BotoCoreError as e:
-        raise RuntimeError(f"Error ensuring S3 bucket {bucket_name} exists") from e
-
-
-def create_s3_bdev(node: StorageNode, config: BackupConfig) -> None:
-    """Create the S3 bdev and attach it to a node's lvstore.
-    Called during cluster activate / node restart.
-    Args:
-        node: StorageNode with lvstore set
-        config: the cluster's validated backup configuration
-    """
-    if not node.lvstore:
-        raise PreconditionError("Node does not have an lvstore")
-
-    rpc_client = node.rpc_client()
-    s3_bdev_name = f"s3_{node.lvstore}"
-
-    bdb_lcpu_mask, s3_lcpu_mask = _compute_s3_cpu_masks(node)
-
-    # NO bdev_lvol_create_poller_group here: the lvstore-create poller group
-    # is created exactly ONCE per SPDK process lifetime — right after
-    # framework init in the add-node / restart-node flows, on the JC
-    # singleton's thread/core. This function used to re-call it with
-    # app_thread_mask (fix f0fed785, which predates the bring-up call from
-    # #938): a second creation with a different mask that either failed
-    # noisily on every activate or put the pollers on the wrong core.
-
-    try:
-        _ensure_s3_bucket(config, config.bucket_name)
-
-        rpc_client.bdev_s3_create(
-            name=s3_bdev_name,
-            bucket_name=config.bucket_name,
-            secondary_target=config.secondary_target,
-            with_compression=config.with_compression,
-            snapshot_backups=config.snapshot_backups,
-            endpoint=config.endpoint_url,
-            region=config.region,
-            verify_tls=config.verify_tls,
-            use_path_style=config.use_path_style,
-            access_key_id=config.credentials.access_key_id if config.credentials else None,
-            secret_access_key=config.credentials.secret_access_key if config.credentials else None,
-            bdb_lcpu_mask=bdb_lcpu_mask,
-            s3_lcpu_mask=s3_lcpu_mask,
-            s3_thread_pool_size=config.s3_thread_pool_size,
-        )
-
-        rpc_client.bdev_lvol_s3_bdev(node.lvstore, s3_bdev_name)
-        logger.info(f"S3 bdev created and attached: {s3_bdev_name} on node {node.get_id()}")
-    except (RPCException, RuntimeError) as e:
-        raise RuntimeError(f"Error S3 bdev on node {node.get_id()}") from e
-
-
 def _get_snapshot_chain(snapshot):
     """Build the snapshot chain ending at this snapshot, oldest first.
 
@@ -656,7 +350,7 @@ def _build_encryption(cluster, backup: Backup) -> backup_manifest.Encryption:
     return backup_manifest.Encryption(encrypted=True, descriptor=descriptor)
 
 
-def _create_single_backup(snapshot, lvol, node_id, cluster_id, prev_backup, location: BackupLocation):
+def create_single_backup(snapshot, lvol, node_id, cluster_id, prev_backup, location: BackupLocation):
     """Create a single backup record and task for one snapshot.
 
     Args:
@@ -763,7 +457,7 @@ def backup_snapshot(snapshot_id, cluster_id=None):
             + (f" (requested snapshot {lock_snapshot})" if lock_snapshot else "")
         )
 
-    prev_backup = _get_latest_backup_for_lvol(lvol.get_id())
+    prev_backup = get_latest_backup_for_lvol(lvol.get_id())
     final_backup_id = None
     try:
         # Walk the snapshot chain and back up all unbacked ancestors first
@@ -780,7 +474,7 @@ def backup_snapshot(snapshot_id, cluster_id=None):
                     prev_backup = existing
                 continue
 
-            backup = _create_single_backup(snap, lvol, node_id, cluster_id, prev_backup, location)
+            backup = create_single_backup(snap, lvol, node_id, cluster_id, prev_backup, location)
             time.sleep(1)
             prev_backup = backup
             if snap.get_id() == snapshot_id:
@@ -1173,287 +867,3 @@ def import_from_bucket(config: BackupConfig, cluster_id=None) -> int:
         PreconditionError: the manifests it holds cannot be imported as a batch.
     """
     return import_backups(discover_backups(config), cluster_id=cluster_id)
-
-
-# ---- Backup Policy Management ----
-
-def add_policy(cluster_id, name, max_versions=0, max_age="", schedule=""):
-    """Create a new backup policy.
-    Returns (policy_id, error_message)."""
-    max_age_seconds = 0
-    if max_age:
-        try:
-            max_age_seconds = _parse_age_string(max_age)
-        except ValueError as e:
-            return None, str(e)
-
-    if schedule:
-        try:
-            _parse_schedule(schedule)
-        except ValueError as e:
-            return None, str(e)
-
-    if max_versions <= 0 and max_age_seconds <= 0 and not schedule:
-        return None, "At least one of --versions, --age, or --schedule must be specified"
-
-    # Check name uniqueness
-    for p in db_controller.get_backup_policies(cluster_id):
-        if p.policy_name == name:
-            return None, f"Policy name already exists: {name}"
-
-    policy = BackupPolicy()
-    policy.uuid = str(uuid.uuid4())
-    policy.cluster_id = cluster_id
-    policy.policy_name = name
-    policy.max_versions = max_versions
-    policy.max_age_seconds = max_age_seconds
-    policy.max_age_display = max_age
-    policy.backup_schedule = schedule
-    policy.status = BackupPolicy.STATUS_ACTIVE
-    policy.write_to_db()
-
-    return policy.uuid, None
-
-
-def remove_policy(policy_id):
-    """Remove a backup policy and all its attachments.
-    Returns (success, error_message)."""
-    try:
-        policy = db_controller.get_backup_policy_by_id(policy_id)
-    except KeyError as e:
-        return False, str(e)
-
-    # Remove attachments
-    for att in db_controller.get_backup_policy_attachments(policy.cluster_id):
-        if att.policy_id == policy_id:
-            att.remove(db_controller.kv_store)
-
-    policy.remove(db_controller.kv_store)
-    return True, None
-
-
-def attach_policy(policy_id, target_type, target_id):
-    """Attach a backup policy to a pool or lvol.
-    Returns (attachment_id, error_message)."""
-    try:
-        policy = db_controller.get_backup_policy_by_id(policy_id)
-    except KeyError as e:
-        return None, str(e)
-
-    if target_type not in ("pool", "lvol"):
-        return None, f"Invalid target_type: {target_type}. Use 'pool' or 'lvol'"
-
-    # Validate target exists
-    try:
-        if target_type == "pool":
-            db_controller.get_pool_by_id(target_id)
-        else:
-            db_controller.get_lvol_by_id(target_id)
-    except KeyError as e:
-        return None, str(e)
-
-    # Check if already attached
-    for att in db_controller.get_backup_policy_attachments(policy.cluster_id):
-        if att.policy_id == policy_id and att.target_type == target_type and att.target_id == target_id:
-            return att.uuid, None  # already attached
-
-    att = BackupPolicyAttachment()
-    att.uuid = str(uuid.uuid4())
-    att.cluster_id = policy.cluster_id
-    att.policy_id = policy_id
-    att.target_type = target_type
-    att.target_id = target_id
-    att.write_to_db()
-
-    return att.uuid, None
-
-
-def detach_policy(policy_id, target_type, target_id):
-    """Detach a backup policy from a pool or lvol.
-    Returns (success, error_message)."""
-    try:
-        policy = db_controller.get_backup_policy_by_id(policy_id)
-    except KeyError as e:
-        return False, str(e)
-
-    for att in db_controller.get_backup_policy_attachments(policy.cluster_id):
-        if att.policy_id == policy_id and att.target_type == target_type and att.target_id == target_id:
-            att.remove(db_controller.kv_store)
-            return True, None
-
-    return False, "Attachment not found"
-
-
-def list_policies(cluster_id=None):
-    """List all backup policies."""
-    policies = db_controller.get_backup_policies(cluster_id)
-    data = []
-    for p in policies:
-        data.append({
-            "ID": p.uuid,
-            "Name": p.policy_name,
-            "Versions": p.max_versions if p.max_versions > 0 else "-",
-            "Max Age": p.max_age_display if p.max_age_display else "-",
-            "Schedule": p.backup_schedule if p.backup_schedule else "-",
-            "Status": p.status,
-        })
-    return data
-
-
-def evaluate_policy(lvol):
-    """Evaluate backup policy for an lvol and trigger merges if needed.
-    Called by the backup merge service."""
-    policy = db_controller.get_policy_for_lvol(lvol)
-    if not policy:
-        return
-
-    backups = db_controller.get_backups_by_lvol_id(lvol.get_id())
-    completed = [b for b in backups if b.status == Backup.STATUS_COMPLETED]
-    if len(completed) < 2:
-        return
-
-    completed.sort(key=lambda b: b.created_at)
-    now = int(time.time())
-
-    versions_exceeded = policy.max_versions > 0 and len(completed) > policy.max_versions
-    age_exceeded = False
-    if policy.max_age_seconds > 0 and completed:
-        oldest_age = now - completed[0].created_at
-        age_exceeded = oldest_age > policy.max_age_seconds
-
-    # Either condition triggers a merge
-    if versions_exceeded or age_exceeded:
-        oldest = completed[0]
-        second = completed[1]
-        _trigger_merge(second, oldest)
-
-
-def evaluate_schedule(lvol):
-    """Evaluate the backup schedule for an lvol and trigger auto-backups + tiered merges.
-    Called by the backup merge service."""
-    policy = db_controller.get_policy_for_lvol(lvol)
-    if not policy or not policy.backup_schedule:
-        return
-
-    try:
-        tiers = _parse_schedule(policy.backup_schedule)
-    except ValueError:
-        return
-
-    if not tiers:
-        return
-
-    now = int(time.time())
-
-    # Check if we need to create a new auto-backup based on the smallest tier interval
-    smallest_interval = tiers[0][0]
-    backups = db_controller.get_backups_by_lvol_id(lvol.get_id())
-    completed = [b for b in backups if b.status == Backup.STATUS_COMPLETED]
-    pending_or_running = [b for b in backups if b.status in (Backup.STATUS_PENDING, Backup.STATUS_IN_PROGRESS)]
-
-    # Don't create a new backup if one is already in progress
-    if not pending_or_running:
-        needs_backup = True
-        if completed:
-            completed.sort(key=lambda b: b.created_at, reverse=True)
-            latest = completed[0]
-            elapsed = now - latest.created_at
-            if elapsed < smallest_interval:
-                needs_backup = False
-
-        if needs_backup:
-            _auto_backup_lvol(lvol)
-            return  # Skip merge evaluation this cycle — let the backup complete first
-
-    # Tiered merge: enforce keep_count per tier.
-    # Each tier covers an age range.  Backups age from tier 0 (newest)
-    # into higher tiers.  When a tier exceeds its keep_count, the oldest
-    # backup in that tier is merged into its successor.
-    # All tiers are evaluated each cycle so limits are maintained in parallel.
-    if len(completed) < 2:
-        return
-
-    completed.sort(key=lambda b: b.created_at)
-
-    # Don't merge while another merge is already in progress
-    merging = [b for b in backups if b.status == Backup.STATUS_MERGING]
-    if merging:
-        return
-
-    for tier_idx, (interval, keep_count) in enumerate(tiers):
-        # Age boundaries for this tier
-        if tier_idx == 0:
-            lower_age = 0
-        else:
-            lower_age = tiers[tier_idx - 1][0]
-
-        if tier_idx + 1 < len(tiers):
-            upper_age = tiers[tier_idx + 1][0]
-        else:
-            upper_age = float('inf')
-
-        tier_backups = [b for b in completed
-                        if lower_age <= (now - b.created_at) < upper_age]
-
-        if len(tier_backups) > keep_count:
-            tier_backups.sort(key=lambda b: b.created_at)
-            oldest = tier_backups[0]
-            second = tier_backups[1]
-            _trigger_merge(second, oldest)
-            return  # One merge per cycle to avoid conflicts
-
-
-def _auto_backup_lvol(lvol):
-    """Create an automatic snapshot + backup for scheduled backups.
-
-    Unlike manual backup_snapshot() which walks the full ancestor chain,
-    auto-backups create a single snapshot and a single backup for it.
-    The prev_backup_id is set to the latest existing backup so the
-    incremental chain is maintained without re-backing all ancestors.
-    """
-    from simplyblock_core.controllers import snapshot_controller
-
-    # Resolve everything the backup needs BEFORE taking the snapshot. This used
-    # to create the snapshot first and discover afterwards that the node or
-    # cluster was unusable, leaving an orphaned auto_* snapshot behind on every
-    # scheduler tick.
-    node_id = lvol.node_id
-    try:
-        snode = db_controller.get_storage_node_by_id(node_id)
-        cluster_id = snode.cluster_id
-        location = db_controller.get_cluster_by_id(cluster_id).get_backup_config().location()
-    except (KeyError, ValueError) as e:
-        logger.warning(f"Auto-backup skipped for lvol {lvol.get_id()}: {e}")
-        return
-
-    snap_name = f"auto_{lvol.lvol_name}_{int(time.time())}"
-    snap_id, error = snapshot_controller.add(lvol.get_id(), snap_name)
-    if error:
-        logger.warning(f"Auto-backup snapshot failed for lvol {lvol.get_id()}: {error}")
-        return
-
-    try:
-        snapshot = db_controller.get_snapshot_by_id(snap_id)
-    except KeyError:
-        logger.warning(f"Auto-backup: snapshot {snap_id} not found after creation")
-        return
-
-    prev_backup = _get_latest_backup_for_lvol(lvol.get_id())
-    _create_single_backup(snapshot, lvol, node_id, cluster_id, prev_backup, location)
-
-
-def _trigger_merge(keep_backup, old_backup):
-    """Trigger a merge of old_backup into keep_backup."""
-    if old_backup.status != Backup.STATUS_COMPLETED:
-        return
-    if keep_backup.status != Backup.STATUS_COMPLETED:
-        return
-
-    old_backup.status = Backup.STATUS_MERGING
-    old_backup.write_to_db()
-
-    tasks_controller.add_backup_merge_task(
-        keep_backup.cluster_id,
-        keep_backup.node_id,
-        keep_backup.uuid,
-        old_backup.uuid)

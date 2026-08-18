@@ -20,7 +20,8 @@ from pydantic import SecretStr
 
 from simplyblock_core import utils, scripts, constants, mgmt_node_ops, storage_node_ops
 from simplyblock_core.utils import port_block
-from simplyblock_core.controllers import backup_controller, cluster_events, device_controller, qos_controller, tasks_controller, tcp_ports_events
+from simplyblock_core.controllers import cluster_events, device_controller, qos_controller, tasks_controller, tcp_ports_events
+from simplyblock_core.controllers.backup import device as backup_device
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.backup_config import BackupConfig
 from simplyblock_core.models.cluster import Cluster, HashicorpVaultSettings, DeployConfig
@@ -1184,7 +1185,7 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
             # Create S3 bdev for backup support (only if backup is configured)
             if cluster.backup_config:
                 snode = db_controller.get_storage_node_by_id(node_id)
-                backup_controller.create_s3_bdev(snode, cluster.get_backup_config())
+                backup_device.create_s3_bdev(snode, cluster.get_backup_config())
 
         else:
             _set_lvstore_status(node_id, "failed")

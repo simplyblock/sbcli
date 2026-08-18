@@ -147,9 +147,15 @@ def snapshot_controller(monkeypatch):
 
 @pytest.fixture()
 def backup_controller(monkeypatch):
+    """One mock standing in for both halves of the backup package.
+
+    The router reaches `controller` for backups and `policy` for policies; the
+    tests assert against a single object, so the same mock is installed as both.
+    """
     mock = MagicMock()
     monkeypatch.setattr(volume_module, 'backup_controller', mock)
     monkeypatch.setattr(backup_module, 'backup_controller', mock)
+    monkeypatch.setattr(backup_module, 'backup_policy', mock)
     return mock
 
 

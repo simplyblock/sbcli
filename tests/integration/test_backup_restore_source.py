@@ -13,7 +13,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from simplyblock_core.controllers import backup_controller
+from simplyblock_core.controllers.backup import controller as backup_controller
+from simplyblock_core.controllers.backup import device as backup_device
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.models.backup import Backup
@@ -123,10 +124,10 @@ class TestSourceSelection:
 
     def test_device_name_is_derived_from_the_backup(self, db):
         """Stable across retries, so an attempt cannot leak a device per try."""
-        assert (backup_controller.restore_s3_bdev_name("b-1234567890")
-                == backup_controller.restore_s3_bdev_name("b-1234567890"))
-        assert backup_controller.restore_s3_bdev_name(
-            "b-1234567890") != backup_controller.restore_s3_bdev_name("c-1234567890")
+        assert (backup_device.restore_s3_bdev_name("b-1234567890")
+                == backup_device.restore_s3_bdev_name("b-1234567890"))
+        assert backup_device.restore_s3_bdev_name(
+            "b-1234567890") != backup_device.restore_s3_bdev_name("c-1234567890")
 
 
 def _restore_task(db, s3_config=None, **params):
@@ -153,7 +154,7 @@ class TestRunnerOwnsTheDevice:
     def test_own_bucket_creates_nothing(self, db, cluster, node):
         task = _restore_task(db)
 
-        with patch.object(backup_controller, "create_restore_s3_bdev") as create:
+        with patch.object(backup_device, "create_restore_s3_bdev") as create:
             tasks_runner_backup._ensure_restore_s3_bdev(task, node)
 
         create.assert_not_called()
@@ -161,35 +162,35 @@ class TestRunnerOwnsTheDevice:
     def test_foreign_bucket_device_is_created_by_the_runner(self, db, cluster, node):
         task = _restore_task(db, s3_config=_config(FOREIGN_BUCKET).model_dump(exclude_none=True))
 
-        with patch.object(backup_controller, "create_restore_s3_bdev") as create:
+        with patch.object(backup_device, "create_restore_s3_bdev") as create:
             tasks_runner_backup._ensure_restore_s3_bdev(task, node)
 
         _, kwargs = create.call_args
         args = create.call_args[0]
         assert args[0] is node
         assert args[1].bucket_name == FOREIGN_BUCKET
-        assert args[2] == backup_controller.restore_s3_bdev_name("b-1")
+        assert args[2] == backup_device.restore_s3_bdev_name("b-1")
 
     def test_creation_is_idempotent_across_retries(self, db, cluster, node):
         """A node restart mid-restore takes the device with it; the runner rebuilds it."""
         task = _restore_task(db, s3_config=_config(FOREIGN_BUCKET).model_dump(exclude_none=True))
 
-        with patch.object(backup_controller, "create_restore_s3_bdev") as create:
+        with patch.object(backup_device, "create_restore_s3_bdev") as create:
             tasks_runner_backup._ensure_restore_s3_bdev(task, node)
             tasks_runner_backup._ensure_restore_s3_bdev(task, node)
 
         assert create.call_count == 2
         assert {c[0][2] for c in create.call_args_list} == {
-            backup_controller.restore_s3_bdev_name("b-1")}
+            backup_device.restore_s3_bdev_name("b-1")}
 
     def test_release_deletes_the_device(self, db, cluster, node):
         task = _restore_task(db, s3_config=_config(FOREIGN_BUCKET).model_dump(exclude_none=True))
 
-        with patch.object(backup_controller, "delete_restore_s3_bdev") as delete:
+        with patch.object(backup_device, "delete_restore_s3_bdev") as delete:
             tasks_runner_backup._release_restore_s3_bdev(task, node)
 
         delete.assert_called_once_with(
-            node, backup_controller.restore_s3_bdev_name("b-1"))
+            node, backup_device.restore_s3_bdev_name("b-1"))
 
     def test_release_scrubs_the_credentials(self, db, cluster, node):
         """A task record outlives the restore by weeks; foreign keys must not."""
@@ -198,7 +199,7 @@ class TestRunnerOwnsTheDevice:
             credentials={"access_key_id": "theirs", "secret_access_key": "theirs"},
         ).model_dump(exclude_none=True))
 
-        with patch.object(backup_controller, "delete_restore_s3_bdev"):
+        with patch.object(backup_device, "delete_restore_s3_bdev"):
             tasks_runner_backup._release_restore_s3_bdev(task, node)
 
         assert task.function_params["s3_config"] is None
@@ -207,7 +208,7 @@ class TestRunnerOwnsTheDevice:
         """The node's own device is shared; a restore must never delete it."""
         task = _restore_task(db)
 
-        with patch.object(backup_controller, "delete_restore_s3_bdev") as delete:
+        with patch.object(backup_device, "delete_restore_s3_bdev") as delete:
             tasks_runner_backup._release_restore_s3_bdev(task, node)
 
         delete.assert_not_called()
@@ -231,10 +232,10 @@ class TestRunnerOwnsTheDevice:
         task = _restore_task(db, s3_config=_config(FOREIGN_BUCKET).model_dump(exclude_none=True))
 
         assert tasks_runner_backup._restore_s3_bdev(task, node) == \
-            backup_controller.restore_s3_bdev_name("b-1")
+            backup_device.restore_s3_bdev_name("b-1")
 
     def test_recovery_falls_back_to_the_nodes_own_device(self, db, cluster, node):
         task = _restore_task(db)
 
         assert tasks_runner_backup._restore_s3_bdev(task, node) == \
-            backup_controller.primary_s3_bdev_name(node)
+            backup_device.primary_s3_bdev_name(node)

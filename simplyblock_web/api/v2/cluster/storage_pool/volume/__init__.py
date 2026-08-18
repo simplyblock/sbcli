@@ -6,7 +6,8 @@ from pydantic import BaseModel, Field, RootModel
 
 from simplyblock_core.db_controller import DBController
 from simplyblock_core import utils as core_utils
-from simplyblock_core.controllers import backup_controller, lvol_controller, snapshot_controller, replication_policy_controller
+from simplyblock_core.controllers import lvol_controller, snapshot_controller, replication_policy_controller
+from simplyblock_core.controllers.backup import controller as backup_controller
 from simplyblock_core.models.lvol_model import LVol
 
 from ...._dependencies import Cluster, StoragePool, Volume

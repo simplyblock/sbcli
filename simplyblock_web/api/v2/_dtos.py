@@ -19,7 +19,7 @@ from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.backup import Backup, BackupPolicy
-from simplyblock_core.backup_manifest import BackupManifest
+from simplyblock_core.controllers.backup.manifest import BackupManifest
 from simplyblock_core.models.backup_config import BackupConfig
 from simplyblock_core.models.stats import StatsObject
 from simplyblock_core.models.lvol_migration import LVolMigration
