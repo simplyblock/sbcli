@@ -97,8 +97,8 @@ def _healthy_chain(source_snaps):
     This is the state a converged replication leaves behind, so it is the
     default for the existing cases: they assert on retention, not on chaining.
     """
-    chain = {}
-    per_lvol = {}
+    chain: dict = {}
+    per_lvol: dict = {}
     for s in source_snaps:
         if s.snap_type != SnapShot.TYPE_INTERNAL or not s.target_replicated_snap_uuid:
             continue
