@@ -1418,8 +1418,27 @@ def _spdk_is_dead(snode):
 # again.
 LVSTORE_IN_CREATION_STALE_SEC = 600
 
+#: How long the monitor will keep deferring to an "active" restart task before
+#: it stops trusting it and resumes its own liveness handling.
+#:
+#: The deferral below assumed a restart task always terminates (max_retry +
+#: transient-reset). Incident 2026-08-17 22:03 broke that assumption: a restart
+#: wedged *inside a single execution* — an unbounded JM-replication wait against
+#: a peer that had just been rebooted — so it never completed an attempt, never
+#: consumed a retry and never finished. The peer's own restart was in turn
+#: deferred by the one-restart-at-a-time rule, and this monitor stood down for
+#: 50 minutes, so the peer's SPDK was never brought back: a three-way deadlock.
+#: Comfortably longer than a healthy restart (measured 2-6 min on a 6-node
+#: multipath cluster) so a legitimate restart is never fought (the 2026-06-24
+#: monitor-vs-restart churn), but bounded so a wedged one cannot freeze
+#: recovery for good.
+RESTART_TASK_DEFER_MAX_SEC = 1200
+
 # node_id -> monotonic-ish first time this monitor saw the marker set.
 _lvstore_in_creation_first_seen: dict = {}
+
+# node_id -> first time we deferred to that node's active restart task.
+_restart_task_defer_first_seen: dict = {}
 
 
 def check_node(snode):
@@ -1497,13 +1516,29 @@ def check_node(snode):
     # OFFLINE and queue a SECOND restart that fights the one already in flight
     # (incident 2026-06-24: device-25 JC abort, then ~90s of monitor-vs-restart
     # kill/restart churn). Defer until the task reaches DONE/canceled; the
-    # restart runner owns recovery and has its own max_retry + transient-reset,
-    # so this cannot defer forever.
+    # restart runner owns recovery and has its own max_retry + transient-reset.
+    #
+    # That is true only for a task that keeps making attempts. A task wedged
+    # inside one execution never consumes a retry, so the deferral is bounded
+    # by RESTART_TASK_DEFER_MAX_SEC — see that constant for the 2026-08-17
+    # deadlock this guards against.
     if tasks_controller.get_active_node_restart_task(snode.cluster_id, snode.get_id()):
-        logger.info(
-            "Node %s has an active restart task; monitor deferring liveness "
-            "checks until it completes", snode.get_id())
-        return True
+        deferred_since = _restart_task_defer_first_seen.setdefault(
+            snode.get_id(), time.time())
+        deferred_for = time.time() - deferred_since
+        if deferred_for < RESTART_TASK_DEFER_MAX_SEC:
+            logger.info(
+                "Node %s has an active restart task; monitor deferring liveness "
+                "checks until it completes (%.0fs so far)",
+                snode.get_id(), deferred_for)
+            return True
+        logger.error(
+            "Node %s has had an active restart task for %.0fs (> %ds) — the "
+            "task is not progressing. Resuming monitor liveness handling so a "
+            "wedged restart cannot block this node's recovery indefinitely.",
+            snode.get_id(), deferred_for, RESTART_TASK_DEFER_MAX_SEC)
+    else:
+        _restart_task_defer_first_seen.pop(snode.get_id(), None)
 
     logger.info(f"Checking node {snode.hostname}")
 
