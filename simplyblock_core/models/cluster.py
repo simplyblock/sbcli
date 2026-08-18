@@ -1,6 +1,6 @@
 # coding=utf-8
 import os.path
-from typing import List, Optional
+from typing import Any, List, Mapping, Optional
 
 from pydantic import SecretStr
 
@@ -224,26 +224,61 @@ class Cluster(BaseModel):
             return True
         return False
 
+    def default_backup_bucket_name(self) -> str:
+        """The bucket this cluster backs up to when its configuration names none.
+
+        A config that names no bucket gets the one the bucket name used to be
+        derived from at device-creation time, so a cluster configured before
+        ``bucket_name`` existed keeps addressing the bucket it has been writing
+        to. Callers that configure a bucket per cluster (``StorageCluster``'s
+        ``spec.backup`` has no bucket field at all) never name one, so this is
+        the normal case rather than a fallback.
+        """
+        return f"simplyblock-backup-{self.uuid}"
+
+    def _resolve_backup_config(self, config: Mapping[str, Any]) -> BackupConfig:
+        return BackupConfig.model_validate({
+            "bucket_name": self.default_backup_bucket_name(),
+            **config,
+        })
+
     def get_backup_config(self) -> BackupConfig:
         """Validate and return this cluster's volume-backup configuration.
 
         ``backup_config`` stays an untyped dict on the record because
         ``BaseModel`` cannot nest pydantic models; validating on read gives the
-        typing without an FDB migration.
+        typing without an FDB migration. Stored configs are never rewritten by
+        reading them, so :meth:`default_backup_bucket_name` stays derived rather
+        than frozen into the record.
 
         Raises:
             ValueError: The cluster has no backup configuration, or the stored
-                one is not valid -- most commonly a pre-existing config that
-                predates the mandatory ``region``. ``ValidationError`` is a
-                ``ValueError``, so one except clause covers both.
+                one is not valid. ``ValidationError`` is a ``ValueError``, so one
+                except clause covers both.
         """
         if not self.backup_config:
             raise ValueError(f"Cluster {self.get_id()} has no backup configuration")
 
-        raw_config = self.backup_config
-        raw_config.setdefault("bucket_name", f"simplyblock-backup-{self.cluster_id}")
+        return self._resolve_backup_config(self.backup_config)
 
-        return BackupConfig.model_validate(raw_config)
+    def set_backup_config(self, config: Mapping[str, Any]) -> None:
+        """Validate a raw backup configuration and store it on this record.
+
+        The only way to put a configuration on a cluster. Validating on write as
+        well as on read is what stops a configuration no cluster could act on
+        from being accepted at cluster-create and then failing activation on
+        every node, arbitrarily long after the mistake was made and with nothing
+        in the failure pointing back at it.
+
+        What gets stored is what the caller passed, so an absent ``bucket_name``
+        stays absent and keeps resolving through
+        :meth:`default_backup_bucket_name`.
+
+        Raises:
+            ValueError: The configuration is not one this cluster could act on.
+        """
+        self._resolve_backup_config(config)
+        self.backup_config = dict(config)
 
     def get_backup_path(self, path=""):
         if self.backup_s3_bucket and self.backup_s3_cred:

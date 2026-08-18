@@ -238,6 +238,96 @@ class TestClusterAccessor:
     def test_invalid_config_raises(self):
         """ValidationError is a ValueError, so one except clause covers both cases."""
         cluster = Cluster()
-        cluster.backup_config = {"region": "eu-central-1"}  # no bucket to write to
+        cluster.backup_config = {"region": "eu-central-1", "endpoint": "minio:9000"}
         with pytest.raises(ValueError):
             cluster.get_backup_config()
+
+    def test_a_config_without_a_bucket_gets_the_derived_one(self):
+        """The shape every operator-created cluster stores.
+
+        ``StorageCluster.spec.backup`` has no bucket field (the operator's
+        ``utils.BackupConfig`` cannot express one), so the config that reaches
+        ``Cluster.backup_config`` names credentials and an endpoint and nothing
+        else. Rejecting it here fails cluster activation, which validates the
+        config for every node it brings up
+        (``cluster_ops._finish_pass1_node`` -> ``create_s3_bdev``).
+        """
+        cluster = Cluster()
+        cluster.uuid = "7f4c1b2e-0000-4000-8000-000000000001"
+        cluster.backup_config = {
+            "access_key_id": "minioadmin",
+            "secret_access_key": "minioadmin",
+            "local_endpoint": "http://minio:9000",
+        }
+
+        config = cluster.get_backup_config()
+
+        assert config.bucket_name == "simplyblock-backup-7f4c1b2e-0000-4000-8000-000000000001"
+
+    def test_an_explicitly_configured_bucket_is_not_overridden(self):
+        cluster = Cluster()
+        cluster.uuid = "7f4c1b2e-0000-4000-8000-000000000001"
+        cluster.backup_config = {"bucket_name": "chosen-by-the-operator"}
+
+        assert cluster.get_backup_config().bucket_name == "chosen-by-the-operator"
+
+    def test_deriving_a_bucket_leaves_the_record_alone(self):
+        """Otherwise the next write of this cluster persists the derived name as
+        if someone had configured it, and renaming the derivation would orphan
+        every backup written before the rename."""
+        cluster = Cluster()
+        cluster.uuid = "7f4c1b2e-0000-4000-8000-000000000001"
+        cluster.backup_config = {"region": "eu-central-1"}
+
+        cluster.get_backup_config()
+
+        assert cluster.backup_config == {"region": "eu-central-1"}
+
+
+class TestClusterMutator:
+    """``Cluster.set_backup_config`` is the only way a config reaches a record.
+
+    Before it existed, ``add_cluster`` stored whatever dict the caller handed it
+    -- a JSON file for ``sbctl cluster create --use-backup``, a request body for
+    the API -- and nothing looked at it until activation validated it once per
+    node. So a typo made at cluster-create surfaced as a failed activation.
+    """
+
+    def test_a_config_that_cannot_be_validated_is_refused(self):
+        cluster = Cluster()
+
+        with pytest.raises(ValueError):
+            cluster.set_backup_config({**MINIMAL, "endpoint": "minio:9000"})
+
+        assert cluster.backup_config == {}
+
+    def test_a_misspelled_field_is_refused(self):
+        """The failure this catches earliest: ``extra="forbid"`` turns a typo into
+        a rejection, but only where something validates. Stored unvalidated, a
+        misspelled key is a setting that silently does nothing."""
+        cluster = Cluster()
+
+        with pytest.raises(ValueError):
+            cluster.set_backup_config({"buckt_name": "backups"})
+
+    def test_a_config_without_a_bucket_is_accepted_and_stored_as_given(self):
+        """The bucket is the one field a valid config may omit, and omitting it
+        has to survive the round trip -- storing the derived name would freeze
+        this cluster's bucket into a record that never chose one."""
+        cluster = Cluster()
+        cluster.uuid = "7f4c1b2e-0000-4000-8000-000000000001"
+
+        cluster.set_backup_config({"region": "eu-central-1"})
+
+        assert cluster.backup_config == {"region": "eu-central-1"}
+        assert cluster.get_backup_config().bucket_name == cluster.default_backup_bucket_name()
+
+    def test_a_stored_config_is_not_the_caller_dict(self):
+        """A caller that keeps mutating its dict must not be editing the record."""
+        cluster = Cluster()
+        config = dict(MINIMAL)
+
+        cluster.set_backup_config(config)
+        config["bucket_name"] = "somewhere-else"
+
+        assert cluster.get_backup_config().bucket_name == "backups"
