@@ -70,6 +70,6 @@ jobs:
       - name: Install tox
         run: pip install tox
       - name: Run slow integration tests
-        run: tox run -e integration-slow
+        run: tox run -e integration-slow -- tests/integration/ -m slow --durations=0 --durations-min=0
         env:
           PYTEST_ADDOPTS: -v
