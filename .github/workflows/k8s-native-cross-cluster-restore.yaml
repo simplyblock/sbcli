@@ -490,8 +490,9 @@ jobs:
       - name: Start MinIO trace logging
         run: |
           set -euxo pipefail
-          curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o /usr/local/bin/mc
-          chmod +x /usr/local/bin/mc
+          curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o /tmp/mc
+          chmod +x /tmp/mc
+          export PATH="/tmp:$PATH"
           kubectl -n minio port-forward svc/minio 9000:9000 &
           echo "MC_PORT_FWD_PID=$!" >> "$GITHUB_ENV"
           sleep 3
@@ -1072,29 +1073,112 @@ jobs:
         if: always()
         shell: bash
         run: |
-          set +e
+          set -euxo pipefail
+
           out_log="$GITHUB_WORKSPACE/e2e/output.log"
           dur_fmt="${TEST_TIME_HOURS:-0}h ${TEST_TIME_MINS:-0}m ${TEST_TIME_SECS:-0}s"
-          conclusion="SUCCESS"
-          [[ "${{ job.status }}" != "success" ]] && conclusion="FAILED"
+
+          # --- Parse test counts ---
+          total_cases=0; passed_cases=0; failed_cases=0; skipped_cases=0
+          if [[ -f "${out_log}" ]]; then
+            v="$(grep -m1 'Number of Total Cases:'  "${out_log}" | grep -oE '[0-9]+$' 2>/dev/null || true)"; [[ "${v}" =~ ^[0-9]+$ ]] && total_cases="${v}"
+            v="$(grep -m1 'Number of Passed Cases:'  "${out_log}" | grep -oE '[0-9]+$' 2>/dev/null || true)"; [[ "${v}" =~ ^[0-9]+$ ]] && passed_cases="${v}"
+            v="$(grep -m1 'Number of Failed Cases:'  "${out_log}" | grep -oE '[0-9]+$' 2>/dev/null || true)"; [[ "${v}" =~ ^[0-9]+$ ]] && failed_cases="${v}"
+            v="$(grep -m1 'Number of Skipped Cases:' "${out_log}" | grep -oE '[0-9]+$' 2>/dev/null || true)"; [[ "${v}" =~ ^[0-9]+$ ]] && skipped_cases="${v}"
+          fi
+
+          pass_pct=0; fail_pct=0; skip_pct=0
+          if [[ "${total_cases}" -gt 0 ]]; then
+            pass_pct=$(( (passed_cases  * 100) / total_cases ))
+            fail_pct=$(( (failed_cases  * 100) / total_cases ))
+            skip_pct=$(( (skipped_cases * 100) / total_cases ))
+          fi
+
+          # --- Parse per-test status ---
+          test_details_table=""
+          if [[ -f "${out_log}" ]]; then
+            while IFS= read -r line; do
+              clean="$(printf '%s' "${line}" | sed 's/\x1b\[[0-9;]*m//g')"
+              test_name="$(printf '%s' "${clean}" | grep -oE 'Test[A-Za-z0-9_]+' | head -n1 || true)"
+              [[ -z "${test_name}" ]] && continue
+              if   printf '%s' "${clean}" | grep -qi 'PASSED';  then icon="✅"; status="PASSED"
+              elif printf '%s' "${clean}" | grep -qi 'FAILED';  then icon="❌"; status="FAILED"
+              elif printf '%s' "${clean}" | grep -qi 'SKIPPED'; then icon="⏭"; status="SKIPPED"
+              else continue
+              fi
+              test_details_table+="| \`${test_name}\` | ${icon} ${status} |"$'\n'
+            done < <(grep -iE 'PASSED CASE|FAILED CASE|SKIPPED CASE' "${out_log}" 2>/dev/null || true)
+          fi
+
+          # --- Failure reason ---
+          failure_reason=""
+          if [[ -f "${out_log}" ]]; then
+            multi="$(grep 'MultipleExceptions:' "${out_log}" | sed 's/\x1b\[[0-9;]*m//g' || true)"
+            if [[ -n "${multi}" ]]; then
+              failure_reason="${multi}"
+            elif grep -Eqi 'Traceback \(most recent call last\)|Exception:|AssertionError|Input/output error' "${out_log}"; then
+              failure_reason="$(grep -Ei 'Traceback \(most recent call last\)|Exception:|AssertionError|Input/output error' "${out_log}" | tail -n 3 | sed 's/\x1b\[[0-9;]*m//g' || true)"
+            fi
+          fi
+
+          # --- Overall result ---
+          conclusion="✅ SUCCESS"
+          if [[ "${{ job.status }}" != "success" ]]; then
+            conclusion="❌ FAILED"
+          fi
+
           {
-            echo "## K8s Cross-Cluster Restore Test Summary"
+            echo "## SimplyBlock K8s Cross-Cluster Restore Test Summary"
             echo ""
-            echo "**Result:** ${conclusion}"
+            echo "**Result:** ${conclusion} &nbsp;|&nbsp; **Duration:** ${dur_fmt}"
             echo ""
+
+            echo "### Test Results"
+            echo "| | Count | % |"
+            echo "|---|---|---|"
+            echo "| ✅ Passed  | ${passed_cases}  | ${pass_pct}% |"
+            echo "| ❌ Failed  | ${failed_cases}  | ${fail_pct}% |"
+            echo "| ⏭ Skipped | ${skipped_cases} | ${skip_pct}% |"
+            echo "| **Total**  | **${total_cases}** | |"
+            echo ""
+
+            if [[ -n "${test_details_table}" ]]; then
+              echo "### Test Case Details"
+              echo "| Test | Result |"
+              echo "|---|---|"
+              printf '%s' "${test_details_table}"
+              echo ""
+            fi
+
             echo "### Run Info"
             echo "- **Cluster-1 ID:** \`${C1_CLUSTER_ID}\` (namespace: \`${NS_C1}\`)"
             echo "- **Cluster-2 ID:** \`${C2_CLUSTER_ID}\` (namespace: \`${NS_C2}\`)"
             echo "- **C1 workers:** \`${C1_WORKERS}\`"
             echo "- **C2 workers:** \`${C2_WORKERS}\`"
             echo "- **NDCS/NPCS:** \`${NDCS}/${NPCS}\`"
-            echo "- **Duration:** ${dur_fmt}"
+            echo "- **Branch:** \`${{ github.ref_name }}\`"
             echo ""
+
+            if [[ -n "${failure_reason}" ]]; then
+              echo "### Failure Reason"
+              echo '```'
+              printf '%s\n' "${failure_reason}"
+              echo '```'
+              echo ""
+            fi
+
             if [[ -f "${out_log}" ]]; then
-              echo "### Last 30 lines"
+              echo "<details><summary>Last 30 lines of output.log</summary>"
+              echo ""
               echo '```'
               tail -n 30 "${out_log}" | sed 's/\x1b\[[0-9;]*m//g' || true
               echo '```'
+              echo "</details>"
+            fi
+
+            if [[ -n "${RUN_BASE_DIR:-}" ]]; then
+              echo ""
+              echo "**Logs:** \`${RUN_BASE_DIR}\`"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -1107,6 +1191,9 @@ jobs:
           if [ -f "${MINIO_TRACE_LOG:-}" ]; then
             cp "${MINIO_TRACE_LOG}" $GITHUB_WORKSPACE/e2e/minio-trace.log 2>/dev/null || true
           fi
+          # Cleanup: delete trace logs and kill any orphaned mc trace processes
+          rm -f /tmp/minio-trace-*.log 2>/dev/null || true
+          pkill -f "mc admin trace" 2>/dev/null || true
 
       - name: Upload MinIO trace log
         if: always()
@@ -1125,11 +1212,408 @@ jobs:
         shell: bash
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
           JOB_STATUS: ${{ job.status }}
           SLACK_RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          SLACK_WF_NAME: "K8s Cross-Cluster Restore"
+          C1_CLUSTER_ID: ${{ env.C1_CLUSTER_ID }}
+          C2_CLUSTER_ID: ${{ env.C2_CLUSTER_ID }}
+          RUN_BASE_DIR: ${{ env.RUN_BASE_DIR }}
+          NDCS: ${{ env.NDCS }}
+          NPCS: ${{ env.NPCS }}
+          TEST_START_TIME: ${{ env.TEST_START_TIME }}
+          TEST_END_TIME: ${{ env.TEST_END_TIME }}
         run: |
-          if [ -z "${SLACK_WEBHOOK_URL:-}" ]; then exit 0; fi
-          STATUS_EMOJI="$([ "$JOB_STATUS" = "success" ] && echo ":white_check_mark:" || echo ":x:")"
-          curl -s -X POST "${SLACK_WEBHOOK_URL}" \
-            -H 'Content-Type: application/json' \
-            -d "{\"text\":\"${STATUS_EMOJI} *K8s Cross-Cluster Restore*: ${JOB_STATUS}\\nC1: \`${C1_CLUSTER_ID:-?}\` | C2: \`${C2_CLUSTER_ID:-?}\`\\nNDCS/NPCS: ${NDCS}/${NPCS}\\n<${SLACK_RUN_URL}|View Run>\"}" || true
+          python3 - <<'PYEOF'
+          import json, os, re, sys, urllib.request, urllib.error
+
+          bot_token = os.environ.get("SLACK_BOT_TOKEN", "")
+          channel   = os.environ.get("SLACK_CHANNEL_ID", "")
+          webhook   = os.environ.get("SLACK_WEBHOOK_URL", "")
+          if not bot_token and not webhook:
+              print("No SLACK_BOT_TOKEN or SLACK_WEBHOOK_URL set, skipping.")
+              sys.exit(0)
+
+          out_log = os.path.join(os.environ.get("GITHUB_WORKSPACE", "."), "e2e", "output.log")
+          content = open(out_log).read() if os.path.isfile(out_log) else ""
+
+          # --- Counts ---
+          def px(pat):
+              m = re.search(pat, content)
+              return int(m.group(1)) if m else 0
+          total   = px(r'Number of Total Cases:\s*(\d+)')
+          passed  = px(r'Number of Passed Cases:\s*(\d+)')
+          failed  = px(r'Number of Failed Cases:\s*(\d+)')
+          skipped = px(r'Number of Skipped Cases:\s*(\d+)')
+          pass_pct = (passed * 100 // total) if total > 0 else 0
+
+          # --- Per-test results ---
+          ansi = re.compile(r'\x1b\[[0-9;]*m')
+          test_results = []
+          for line in content.splitlines():
+              clean = ansi.sub('', line)
+              if not re.search(r'(PASSED|FAILED|SKIPPED) CASE', clean):
+                  continue
+              m = re.search(r'Test[A-Za-z0-9_]+', clean)
+              if not m:
+                  continue
+              name = m.group(0)
+              if   'PASSED CASE'  in clean: test_results.append(('PASSED',  name))
+              elif 'FAILED CASE'  in clean: test_results.append(('FAILED',  name))
+              elif 'SKIPPED CASE' in clean: test_results.append(('SKIPPED', name))
+
+          # --- Failure reason ---
+          failure_reason = ""
+          multi = [ansi.sub('', l) for l in content.splitlines() if 'MultipleExceptions:' in l]
+          if multi:
+              failure_reason = multi[0][:2000]
+          elif content:
+              exc_lines = [ansi.sub('', l) for l in content.splitlines()
+                           if re.search(r'(Exception:|AssertionError|Input/output error)', l)]
+              if exc_lines:
+                  failure_reason = '\n'.join(exc_lines[-5:])[:2000]
+
+          # --- Env ---
+          s    = int(os.environ.get("TEST_START_TIME", "0") or "0")
+          e    = int(os.environ.get("TEST_END_TIME",   "0") or "0")
+          secs = max(0, e - s) if e >= s > 0 else 0
+          dur  = f"{secs//3600}h {(secs%3600)//60}m {secs%60}s"
+          run_url  = os.environ.get("SLACK_RUN_URL",   "")
+          log_dir  = os.environ.get("RUN_BASE_DIR",    "N/A")
+          c1_id    = os.environ.get("C1_CLUSTER_ID",   "?")
+          c2_id    = os.environ.get("C2_CLUSTER_ID",   "?")
+          ndcs     = os.environ.get("NDCS",            "?")
+          npcs     = os.environ.get("NPCS",            "?")
+          branch   = os.environ.get("GITHUB_REF_NAME", "?")
+          wf_name  = os.environ.get("SLACK_WF_NAME",   "Run")
+          ok       = os.environ.get("JOB_STATUS",      "") == "success"
+
+          icon    = ":white_check_mark:" if ok else ":x:"
+          status  = "SUCCESS" if ok else "FAILURE"
+          mention = "" if ok else " <!channel>"
+
+          lines = [
+              f"{icon} *SimplyBlock {wf_name}*{mention}",
+              f"*Status:* {status}  |  *Duration:* {dur}",
+              f"*Branch:* `{branch}`  |  *NDCS/NPCS:* `{ndcs}/{npcs}`",
+              f"*C1:* `{c1_id}`  |  *C2:* `{c2_id}`",
+              "",
+          ]
+
+          if total > 0:
+              lines += [
+                  f":white_check_mark: *Passed:*  {passed}/{total}  ({pass_pct}%)",
+                  f":x: *Failed:*  {failed}",
+                  f":fast_forward: *Skipped:*  {skipped}",
+              ]
+          else:
+              lines.append("_(test counts not found in log)_")
+
+          if test_results:
+              lines.append("")
+              lines.append("*Test Results:*")
+              icons = {'PASSED': ':white_check_mark:', 'FAILED': ':x:', 'SKIPPED': ':fast_forward:'}
+              for st, nm in test_results:
+                  lines.append(f"{icons.get(st, ':grey_question:')} `{nm}`")
+
+          if failure_reason:
+              lines += ["", "*Failure:*", f"```{failure_reason}```"]
+
+          lines += [
+              "",
+              f":file_folder: *Final Logs:* `{log_dir}`",
+              f":link: *Run:* <{run_url}|View on GitHub>",
+          ]
+
+          # --- Send ---
+          gh_env = os.environ.get("GITHUB_ENV", "")
+          text   = "\n".join(lines)
+
+          if bot_token and channel:
+              api_payload = json.dumps({"channel": channel, "text": text}).encode()
+              req = urllib.request.Request(
+                  "https://slack.com/api/chat.postMessage",
+                  data=api_payload,
+                  headers={
+                      "Content-Type": "application/json; charset=utf-8",
+                      "Authorization": f"Bearer {bot_token}",
+                  },
+              )
+              try:
+                  resp = urllib.request.urlopen(req, timeout=15)
+                  body = json.loads(resp.read().decode())
+                  if body.get("ok"):
+                      ts = body.get("ts", "")
+                      print(f"Slack notification sent via Bot API (ts={ts}).")
+                      if gh_env and ts:
+                          with open(gh_env, "a") as f:
+                              f.write(f"SLACK_MSG_TS={ts}\n")
+                  else:
+                      print(f"WARN: Slack API error: {body.get('error')}", file=sys.stderr)
+              except Exception as exc:
+                  print(f"WARN: Slack Bot API failed: {exc}", file=sys.stderr)
+          elif webhook:
+              req = urllib.request.Request(
+                  webhook,
+                  data=json.dumps({"text": text}).encode(),
+                  headers={"Content-Type": "application/json"},
+              )
+              try:
+                  urllib.request.urlopen(req, timeout=15)
+                  print("Slack notification sent via webhook (no thread support).")
+              except Exception as exc:
+                  print(f"WARN: Slack webhook failed: {exc}", file=sys.stderr)
+          else:
+              print("No SLACK_BOT_TOKEN or SLACK_WEBHOOK_URL set, skipping.")
+          PYEOF
+
+      - name: Calculate log collection timeout
+        if: always()
+        run: |
+          TEST_TIME=$((${TEST_END_TIME:-0} - ${TEST_START_TIME:-0}))
+          LOG_COLLECT_TIMEOUT_MINS=$(( (TEST_TIME + 119) / 120 ))
+          [ "$LOG_COLLECT_TIMEOUT_MINS" -lt 30 ] && LOG_COLLECT_TIMEOUT_MINS=30
+          echo "LOG_COLLECT_TIMEOUT_MINS=$LOG_COLLECT_TIMEOUT_MINS" >> $GITHUB_ENV
+
+      - name: Collect Graylog/OpenSearch logs
+        if: '!cancelled()'
+        timeout-minutes: ${{ fromJSON(env.LOG_COLLECT_TIMEOUT_MINS || '60') }}
+        run: |
+          set +e
+          echo "=== Collecting Graylog/OpenSearch logs ==="
+          NAMESPACE=${NS_C1}
+
+          if [ -z "${TEST_START_TIME}" ] || [ -z "${TEST_END_TIME}" ]; then
+            echo "WARN: TEST_START_TIME or TEST_END_TIME not set, skipping"
+            exit 0
+          fi
+
+          ELAPSED=$((TEST_END_TIME - TEST_START_TIME))
+          if [ "${ELAPSED}" -le 0 ]; then
+            echo "WARN: Elapsed time is zero or negative, skipping"
+            exit 0
+          fi
+
+          WINDOW_START=$((TEST_START_TIME - 3600))
+          WINDOW_END=$((TEST_END_TIME + 3600))
+          TOTAL_SECONDS=$((WINDOW_END - WINDOW_START))
+          TOTAL_HOURS=$(( (TOTAL_SECONDS + 3599) / 3600 ))
+          echo "  Total window: ${TOTAL_HOURS} hour(s) to collect"
+
+          ADMIN_POD=""
+          for i in $(seq 1 12); do
+            ADMIN_POD=$(kubectl -n ${NAMESPACE} get pods \
+              -l app=simplyblock-admin-control \
+              -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) || true
+            if [ -n "${ADMIN_POD}" ]; then
+              PHASE=$(kubectl -n ${NAMESPACE} get pod "${ADMIN_POD}" \
+                -o jsonpath='{.status.phase}' 2>/dev/null) || true
+              [ "${PHASE}" = "Running" ] && break
+              ADMIN_POD=""
+            fi
+            sleep 10
+          done
+          if [ -z "${ADMIN_POD}" ]; then
+            echo "ERROR: No running admin pod found, skipping"
+            exit 0
+          fi
+
+          BUILTIN_SCRIPT="/usr/local/lib/python3.12/site-packages/simplyblock_core/scripts/collect_logs.py"
+          DEPLOYED_SCRIPT="/tmp/collect_logs.py"
+          SCRIPT_SRC="${GITHUB_WORKSPACE}/scripts/collect_logs.py"
+          if [ -f "${SCRIPT_SRC}" ]; then
+            kubectl -n ${NAMESPACE} cp "${SCRIPT_SRC}" "${ADMIN_POD}:${DEPLOYED_SCRIPT}" 2>/dev/null || \
+              echo "WARN: failed to deploy updated collect_logs.py, using built-in version"
+          fi
+          COLLECT_SCRIPT="${BUILTIN_SCRIPT}"
+          if kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- test -f "${DEPLOYED_SCRIPT}" 2>/dev/null; then
+            COLLECT_SCRIPT="${DEPLOYED_SCRIPT}"
+            echo "  Using deployed script: ${COLLECT_SCRIPT}"
+          else
+            echo "  Using built-in script: ${COLLECT_SCRIPT}"
+          fi
+
+          MGMT_IP=$(kubectl get svc -n ${NAMESPACE} | grep graylog | awk '{print $3}')
+          OPENSEARCH_IP=$(kubectl get svc opensearch-cluster-master -n ${NAMESPACE} -o jsonpath='{.spec.clusterIP}' 2>/dev/null || echo "")
+
+          OUTPUT_DIR=""
+          if [ -n "${RUN_BASE_DIR:-}" ] && [ -d "${RUN_BASE_DIR}" ]; then
+            OUTPUT_DIR="${RUN_BASE_DIR}/graylog_collected"
+          else
+            NFS_BASE="${NFS_MOUNTPOINT:-/mnt/nfs_share}"
+            TIMESTAMP=$(date -u "+%Y%m%d-%H%M%S")
+            OUTPUT_DIR="${NFS_BASE}/graylog_collected-${TIMESTAMP}"
+          fi
+          mkdir -p "${OUTPUT_DIR}" 2>/dev/null || true
+
+          epoch_to_iso() {
+            local ep=$1
+            local iso
+            iso=$(date -u -d "@${ep}" "+%Y-%m-%dT%H:%M:%S" 2>/dev/null)
+            if [ -z "${iso}" ]; then
+              iso=$(python3 -c "from datetime import datetime,timezone; print(datetime.fromtimestamp(${ep},tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%S'))")
+            fi
+            echo "${iso}"
+          }
+
+          _CHUNK_STARTS=()
+          _C=${WINDOW_START}
+          while [ ${_C} -lt ${WINDOW_END} ]; do
+            _CHUNK_STARTS+=(${_C})
+            _C=$((_C + 3600))
+          done
+          NUM_CHUNKS=${#_CHUNK_STARTS[@]}
+
+          run_collect() {
+            local iso=$1 mins=$2 outdir=$3 extra_flag=${4:-}
+            local mgmt_ip_to_use="${MGMT_IP}"
+            if [[ "${extra_flag}" == *"--use-opensearch"* ]] && [ -n "${OPENSEARCH_IP}" ]; then
+              mgmt_ip_to_use="${OPENSEARCH_IP}"
+            fi
+            kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- \
+              python3 "${COLLECT_SCRIPT}" \
+                "${iso}" "${mins}" \
+                --mode kubernetes \
+                --namespace "${NAMESPACE}" \
+                --monitoring-secret "${MON_SECRET}" \
+                --output-dir "${outdir}" \
+                ${extra_flag} \
+                ${mgmt_ip_to_use:+--mgmt-ip "${mgmt_ip_to_use}"} \
+                ${C1_CLUSTER_ID:+--cluster-id "${C1_CLUSTER_ID}"} \
+            2>&1
+            local rc=$?
+            [ $rc -ne 0 ] && return $rc
+            local has_content
+            has_content=$(kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- \
+              find "${outdir}" -name "*.tar.gz" -size +0 2>/dev/null | head -1)
+            if [ -z "${has_content}" ]; then
+              echo "  WARN: collect_logs.py succeeded but no .tar.gz output found"
+              return 1
+            fi
+          }
+
+          collect_adaptive() {
+            local start_epoch=$1 end_epoch=$2 outdir=$3 extra_flag=${4:-}
+            local duration=$((end_epoch - start_epoch))
+            local mins=$(( (duration + 59) / 60 ))
+            local iso=$(epoch_to_iso ${start_epoch})
+            if run_collect "${iso}" "${mins}" "${outdir}" "${extra_flag}"; then
+              return 0
+            fi
+            echo "  WARN: ${mins}m window failed, retrying with 5-min sub-windows..."
+            local sub_start=${start_epoch}
+            while [ ${sub_start} -lt ${end_epoch} ]; do
+              local sub_end=$((sub_start + 300))
+              [ ${sub_end} -gt ${end_epoch} ] && sub_end=${end_epoch}
+              local sub_mins=$(( ((sub_end - sub_start) + 59) / 60 ))
+              local sub_iso=$(epoch_to_iso ${sub_start})
+              if ! run_collect "${sub_iso}" "${sub_mins}" "${outdir}" "${extra_flag}"; then
+                echo "  WARN: 5-min window at ${sub_iso} failed, retrying with 1-min windows..."
+                local micro_start=${sub_start}
+                while [ ${micro_start} -lt ${sub_end} ]; do
+                  local micro_end=$((micro_start + 60))
+                  [ ${micro_end} -gt ${sub_end} ] && micro_end=${sub_end}
+                  local micro_mins=$(( ((micro_end - micro_start) + 59) / 60 ))
+                  local micro_iso=$(epoch_to_iso ${micro_start})
+                  run_collect "${micro_iso}" "${micro_mins}" "${outdir}" "${extra_flag}" || \
+                    echo "  WARN: 1-min window at ${micro_iso} also failed"
+                  micro_start=${micro_end}
+                done
+              fi
+              sub_start=${sub_end}
+            done
+          }
+
+          PREFER_OPENSEARCH=""
+          CHUNK=0
+
+          for (( _IDX=NUM_CHUNKS-1; _IDX>=0; _IDX-- )); do
+            CHUNK=$((CHUNK + 1))
+            CHUNK_START=${_CHUNK_STARTS[$_IDX]}
+            CHUNK_END=$((CHUNK_START + 3600))
+            [ ${CHUNK_END} -gt ${WINDOW_END} ] && CHUNK_END=${WINDOW_END}
+            CHUNK_MINUTES=$(( ((CHUNK_END - CHUNK_START) + 59) / 60 ))
+            CHUNK_ISO=$(epoch_to_iso ${CHUNK_START})
+
+            echo ""
+            echo "--- Chunk ${CHUNK}/${NUM_CHUNKS}: ${CHUNK_ISO} for ${CHUNK_MINUTES}m (newest-first) ---"
+
+            POD_OUTPUT_DIR="/tmp/graylog_collect_chunk${CHUNK}"
+            kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- mkdir -p "${POD_OUTPUT_DIR}" 2>/dev/null || true
+
+            if [ -z "${PREFER_OPENSEARCH}" ]; then
+              echo "  Probing OpenSearch availability..."
+              if run_collect "${CHUNK_ISO}" "${CHUNK_MINUTES}" "${POD_OUTPUT_DIR}" "--use-opensearch"; then
+                PREFER_OPENSEARCH=true
+                echo "  OpenSearch works — using it for all chunks"
+              else
+                PREFER_OPENSEARCH=false
+                echo "  OpenSearch unavailable — using Graylog for all chunks"
+                kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- rm -rf "${POD_OUTPUT_DIR}" 2>/dev/null || true
+                kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- mkdir -p "${POD_OUTPUT_DIR}" 2>/dev/null || true
+                collect_adaptive ${CHUNK_START} ${CHUNK_END} "${POD_OUTPUT_DIR}" || \
+                  echo "WARN: Graylog also failed for chunk ${CHUNK}"
+              fi
+            elif [ "${PREFER_OPENSEARCH}" = "true" ]; then
+              collect_adaptive ${CHUNK_START} ${CHUNK_END} "${POD_OUTPUT_DIR}" "--use-opensearch" || {
+                echo "WARN: OpenSearch failed for chunk ${CHUNK}, falling back to Graylog..."
+                collect_adaptive ${CHUNK_START} ${CHUNK_END} "${POD_OUTPUT_DIR}" || \
+                  echo "WARN: Graylog fallback also failed for chunk ${CHUNK}"
+              }
+            else
+              collect_adaptive ${CHUNK_START} ${CHUNK_END} "${POD_OUTPUT_DIR}" || {
+                echo "WARN: Graylog failed for chunk ${CHUNK}, falling back to OpenSearch..."
+                collect_adaptive ${CHUNK_START} ${CHUNK_END} "${POD_OUTPUT_DIR}" "--use-opensearch" || \
+                  echo "WARN: OpenSearch fallback also failed for chunk ${CHUNK}"
+              }
+            fi
+
+            TARBALLS=$(kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- \
+              find "${POD_OUTPUT_DIR}" -name "*.tar.gz" -type f 2>/dev/null) || true
+            if [ -n "${TARBALLS}" ]; then
+              for TB in ${TARBALLS}; do
+                TB_NAME=$(basename "${TB}")
+                echo "  Copying ${TB_NAME}..."
+                kubectl -n ${NAMESPACE} cp "${ADMIN_POD}:${TB}" "${OUTPUT_DIR}/${TB_NAME}" 2>&1 || true
+              done
+              for TB_FILE in "${OUTPUT_DIR}"/*.tar.gz; do
+                [ -f "${TB_FILE}" ] && tar -xzf "${TB_FILE}" -C "${OUTPUT_DIR}/" 2>/dev/null || true
+              done
+            else
+              echo "WARN: No tarballs found for chunk ${CHUNK}"
+            fi
+
+            kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- rm -rf "${POD_OUTPUT_DIR}" 2>/dev/null || true
+          done
+
+          echo ""
+          echo "=== Log collection complete (${CHUNK} chunks, newest-first): ${OUTPUT_DIR} ==="
+          ls -la "${OUTPUT_DIR}/" 2>/dev/null || true
+        env:
+          C1_CLUSTER_ID: ${{ env.C1_CLUSTER_ID }}
+          MON_SECRET: ${{ secrets.MON_SECRET }}
+
+      - name: Notify Slack log collection complete
+        if: always() && (github.event.inputs.send_slack_notification || 'true') == 'true'
+        shell: bash
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
+          SLACK_MSG_TS: ${{ env.SLACK_MSG_TS }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          RUN_BASE_DIR: ${{ env.RUN_BASE_DIR }}
+        run: |
+          MSG=":white_check_mark: *Log collection complete* for *SimplyBlock K8s Cross-Cluster Restore*\n:file_folder: \`${RUN_BASE_DIR:-N/A}/graylog_collected/\`\n:link: <${SLACK_RUN_URL}|View Run>"
+          if [ -n "${SLACK_BOT_TOKEN:-}" ] && [ -n "${SLACK_CHANNEL_ID:-}" ] && [ -n "${SLACK_MSG_TS:-}" ]; then
+            curl -s -X POST "https://slack.com/api/chat.postMessage" \
+              -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" \
+              -H "Content-Type: application/json; charset=utf-8" \
+              -d "{\"channel\":\"${SLACK_CHANNEL_ID}\",\"thread_ts\":\"${SLACK_MSG_TS}\",\"text\":\"${MSG}\"}" || true
+          elif [ -n "${SLACK_WEBHOOK_URL:-}" ]; then
+            curl -s -X POST "${SLACK_WEBHOOK_URL}" \
+              -H "Content-Type: application/json" \
+              -d "{\"text\":\"${MSG}\"}" || true
+          fi

@@ -275,7 +275,7 @@ from e2e_tests.backup.test_backup_restore import (
     TestBackupListFields,
     TestBackupUpgradeCompatibility,
     TestBackupRestoreEdgeCases,
-    TestBackupSourceSwitch,
+    # TestBackupSourceSwitch,  # COMMENTED OUT: source-switch no longer required
     # Interrupted backup/restore E2E tests (TC-BCK-080..097)
     TestBackupInterruptedBackup,
     TestBackupInterruptedRestore,
@@ -404,7 +404,7 @@ ALL_TESTS = [
     TestBackupListFields,
     TestBackupUpgradeCompatibility,
     TestBackupRestoreEdgeCases,
-    TestBackupSourceSwitch,
+    # TestBackupSourceSwitch,  # COMMENTED OUT: source-switch no longer required
     # Backup node-add / node-migration edge cases
     TestBackupAfterNodeAdd,
     TestBackupWithFioOnNewNode,
@@ -864,7 +864,7 @@ def get_backup_tests():
         TestBackupResizedLvol,
         TestBackupListFields,
         TestBackupRestoreEdgeCases,
-        TestBackupSourceSwitch,
+        # TestBackupSourceSwitch,  # COMMENTED OUT: source-switch no longer required
         # Outage tests — run last (involves node shutdown/restart)
         TestBackupUpgradeCompatibility,
         TestBackupInterruptedBackup,

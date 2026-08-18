@@ -983,9 +983,9 @@ print("done")
                 if not self.k8s_test:
                     for node in self.storage_nodes:
                         self.ssh_obj.restart_docker_logging(
-                            node_ip=snode,
+                            node_ip=node,
                             containers=self.container_nodes[node],
-                            log_dir=os.path.join(self.docker_logs_path, snode),
+                            log_dir=os.path.join(self.docker_logs_path, node),
                             test_name=self.test_name,
                         )
                 else:
@@ -998,7 +998,7 @@ print("done")
             self.validate_migration_for_node(
                 timestamp=migration_ts,
                 timeout=1800,
-                node_id=node_id,
+                node_id=None,
                 check_interval=30,
                 no_task_ok=(not self.fio_during_upgrade),
             )
@@ -1602,7 +1602,7 @@ class TestMajorUpgradeDualNode(TestMajorUpgrade):
                 self.validate_migration_for_node(
                     timestamp=migration_ts,
                     timeout=1800,
-                    node_id=nid,
+                    node_id=None,
                     check_interval=30,
                     no_task_ok=(not self.fio_during_upgrade),
                 )
