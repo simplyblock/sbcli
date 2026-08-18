@@ -42,6 +42,28 @@ class TestGetBdevs(unittest.TestCase):
         self.assertEqual(mock_req.call_count, 2)
 
 
+class TestRegisterRecoveryBucket(unittest.TestCase):
+
+    @patch.object(RPCClient, "_request3")
+    def test_sends_bucket_and_ids(self, mock_req):
+        mock_req.return_value = True
+        client = _make_client()
+
+        self.assertIsNone(
+            client.bdev_s3_register_recovery_bucket("s3_LVS_21", "bucket-c1", [1, 2]))
+        mock_req.assert_called_once_with(
+            "bdev_s3_register_recovery_bucket",
+            name="s3_LVS_21", bucket_name="bucket-c1", s3_ids=[1, 2])
+
+    @patch.object(RPCClient, "_request3")
+    def test_rejection_propagates(self, mock_req):
+        mock_req.side_effect = RPCRemoteError("no such bdev", code=-errno.ENODEV)
+        client = _make_client()
+
+        with self.assertRaises(RPCRemoteError):
+            client.bdev_s3_register_recovery_bucket("s3_LVS_21", "bucket-c1", [1])
+
+
 class TestSubsystem(unittest.TestCase):
 
     @patch.object(RPCClient, "_request3")

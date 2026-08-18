@@ -168,6 +168,41 @@ def _ensure_s3_bucket(backup_config, bucket_name):
         raise RuntimeError(f"Error ensuring S3 bucket {bucket_name} exists") from e
 
 
+def backup_bucket_name(backup_config, cluster_id, source_cluster_id=None):
+    """The S3 bucket holding the backups a given cluster produced.
+
+    A cluster may override the name of its own bucket in its backup config;
+    other clusters' buckets are only reachable under the default name.
+    """
+    if source_cluster_id in (None, "", cluster_id):
+        return (backup_config or {}).get("bucket_name", f"simplyblock-backup-{cluster_id}")
+    return f"simplyblock-backup-{source_cluster_id}"
+
+
+def register_recovery_buckets(rpc_client, node, cluster, backups) -> None:
+    """Tell a node's S3 bdev which foreign buckets the given backups live in.
+
+    Imported backups keep the s3_ids they had on the cluster that created
+    them, but their objects stay in that cluster's bucket. Without this the
+    data plane resolves them against the local bucket and every GET 404s.
+    """
+    backup_config = cluster.backup_config or {}
+    cluster_id = cluster.get_id()
+    local_bucket = backup_bucket_name(backup_config, cluster_id)
+
+    s3_ids_by_bucket: dict = {}
+    for backup in backups:
+        bucket_name = backup_bucket_name(backup_config, cluster_id, backup.source_cluster_id)
+        if bucket_name != local_bucket:
+            s3_ids_by_bucket.setdefault(bucket_name, []).append(backup.s3_id)
+
+    s3_bdev_name = f"s3_{node.lvstore}"
+    for bucket_name, s3_ids in s3_ids_by_bucket.items():
+        rpc_client.bdev_s3_register_recovery_bucket(s3_bdev_name, bucket_name, s3_ids)
+        logger.info(f"Recovery bucket {bucket_name} registered for s3_ids {s3_ids} "
+                    f"on {s3_bdev_name} of node {node.get_id()}")
+
+
 def create_s3_bdev(node, backup_config) -> None:
     """Create the S3 bdev and attach it to a node's lvstore.
     Called during cluster activate / node restart.
@@ -206,7 +241,7 @@ def create_s3_bdev(node, backup_config) -> None:
             s3_thread_pool_size=backup_config.get("s3_thread_pool_size", 0),
         )
 
-        bucket_name = backup_config.get("bucket_name", f"simplyblock-backup-{node.cluster_id}")
+        bucket_name = backup_bucket_name(backup_config, node.cluster_id)
         _ensure_s3_bucket(backup_config, bucket_name)
 
         rpc_client.bdev_s3_add_bucket_name(s3_bdev_name, bucket_name, allow_existing=True)
@@ -424,9 +459,6 @@ def restore_backup(backup_id: str, lvol_name: str, pool_id_or_name: str,
     except KeyError as e:
         raise PreconditionError(str(e)) from e
 
-    # Verify the backup's source matches the active S3 source.
-    # If the backup came from an external cluster, the S3 bdev must be
-    # switched to that cluster's bucket before restoring.
     backup_src = backup.source_cluster_id or backup.cluster_id
     active_src = cluster.backup_source or cluster.uuid
     if backup_src != active_src:
@@ -734,7 +766,10 @@ def switch_backup_source(cluster_id, source_cluster_id) -> None:
         source_cluster_id: The cluster ID whose S3 bucket to activate.
             Use the local cluster_id (or "local") to switch back.
 
-    Returns (success, error_message).
+    Restoring an imported backup no longer requires this — see
+    register_recovery_buckets.
+
+    Raises PreconditionError if the cluster or the bucket is unavailable.
     """
     try:
         cluster = db_controller.get_cluster_by_id(cluster_id)
@@ -744,13 +779,8 @@ def switch_backup_source(cluster_id, source_cluster_id) -> None:
     if source_cluster_id == "local":
         source_cluster_id = cluster_id
 
-    # Determine the bucket name for the source cluster
     backup_config = cluster.backup_config or {}
-    if source_cluster_id == cluster_id:
-        bucket_name = backup_config.get("bucket_name",
-                                        f"simplyblock-backup-{cluster_id}")
-    else:
-        bucket_name = f"simplyblock-backup-{source_cluster_id}"
+    bucket_name = backup_bucket_name(backup_config, cluster_id, source_cluster_id)
 
     # Verify the bucket exists
     try:
