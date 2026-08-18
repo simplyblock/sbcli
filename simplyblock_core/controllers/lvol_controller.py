@@ -408,7 +408,8 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
                 distr_vuid=0, max_rw_iops=0, max_rw_mbytes=0, max_r_mbytes=0, max_w_mbytes=0,
                 with_snapshot=False, max_size=0, lvol_priority_class=0,
                 uid=None, pvc_name=None, namespaced=None, max_namespace_per_subsys=None, fabric="tcp", ndcs=0, npcs=0,
-                allowed_hosts=None, do_replicate=False, replication_cluster_id=None, crypto_key=None):
+                allowed_hosts=None, do_replicate=False, replication_cluster_id=None, crypto_key=None,
+                replication_policy=None):
     db_controller = DBController()
     logger.info(f"Adding LVol: {name}")
     if max_namespace_per_subsys is None:
@@ -918,6 +919,20 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         for host_nqn in pool.allowed_hosts:
             logger.info(f"Adding host {host_nqn} to lvol {lvol.get_id()}")
             add_host_to_lvol(lvol.get_id(), host_nqn)
+
+    if replication_policy:
+        # Optional at create time: assigning a policy configures replication for
+        # the volume (destination, cadence and mode all come from the policy).
+        # Imported here because replication_policy_controller imports this module.
+        from simplyblock_core.controllers import replication_policy_controller
+        try:
+            replication_policy_controller.attach_policy(lvol.get_id(), replication_policy)
+        except Exception as e:
+            # The volume itself is created and usable; surface the failure
+            # instead of silently leaving it unreplicated.
+            logger.error("Volume %s created but replication policy %s could not be "
+                         "attached: %s", lvol.get_id(), replication_policy, e)
+            return lvol.uuid, f"Volume created but replication policy could not be attached: {e}"
 
     return lvol.uuid, None
 
@@ -2947,12 +2962,27 @@ def replication_trigger(lvol_id):
 
     return out
 
-def replication_start(lvol_id, replication_cluster_id=None, mode=None, interval_min=None):
+def replication_start(lvol_id, replication_cluster_id=None, mode=None, interval_min=None,
+                      from_policy=False):
+    """Enable replication for a volume and pick its destination node.
+
+    This is the step a replication POLICY performs for you: attaching a policy
+    calls it with the target, cadence and mode taken from the policy. Calling it
+    directly on a policy-managed volume is refused, because the volume would then
+    replicate on settings that silently diverge from its policy. It stays
+    available for volumes that are managed without a policy.
+    """
     db_controller = DBController()
     try:
         lvol = db_controller.get_lvol_by_id(lvol_id)
     except KeyError as e:
         logger.error(e)
+        return False
+
+    if not from_policy and getattr(lvol, 'replication_policy_id', ''):
+        logger.error("LVol %s follows replication policy %s; change the policy "
+                     "instead of starting replication directly",
+                     lvol_id, lvol.replication_policy_id)
         return False
 
     lvol.do_replicate = True
@@ -3157,12 +3187,25 @@ def clone_lvol(lvol_id, clone_name, new_size=None, pvc_name=None):
 
 
 
-def replication_stop(lvol_id, delete=False):
+def replication_stop(lvol_id, delete=False, from_policy=False):
+    """Stop replicating a volume.
+
+    Detaching a replication POLICY does this for you, and additionally cleans up
+    the internal replication snapshots on both sides. Calling it directly on a
+    policy-managed volume is refused: the volume would stop replicating while
+    still claiming to follow a policy.
+    """
     db_controller = DBController()
     try:
         lvol = db_controller.get_lvol_by_id(lvol_id)
     except KeyError as e:
         logger.error(e)
+        return False
+
+    if not from_policy and getattr(lvol, 'replication_policy_id', ''):
+        logger.error("LVol %s follows replication policy %s; detach the policy "
+                     "instead of stopping replication directly",
+                     lvol_id, lvol.replication_policy_id)
         return False
 
     logger.info("Setting LVol do_replicate: False")
@@ -3202,6 +3245,9 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
         new_lvol.nodes.append(target_node.tertiary_node_id)
     new_lvol.replication_node_id = ""
     new_lvol.do_replicate = False
+    # The policy belongs to the SOURCE cluster; a deep copy would carry its id to
+    # the other cluster, where it names nothing and would block fail-back.
+    new_lvol.replication_policy_id = ""
     new_lvol.cloned_from_snap = snapshot.get_id()
     new_lvol.pool_uuid = pool_uuid
     new_lvol.lvs_name = target_node.lvstore
@@ -3573,14 +3619,16 @@ def replication_failback(lvol_id, source_cluster_id=None, pool_uuid=None):
         lvol.replication_node_id = orig_node_id
         lvol.write_to_db()
         return replication_start(
-            lvol_id, replication_cluster_id=rep.source_cluster_id, mode="migration")
+            lvol_id, replication_cluster_id=rep.source_cluster_id, mode="migration",
+            from_policy=True)
 
     # Fresh source cluster: full replication to a freshly selected node.
     if not source_cluster_id:
         logger.error("source_cluster_id required for fail-back to a fresh cluster")
         return False, "source_cluster_id required"
     return replication_start(
-        lvol_id, replication_cluster_id=source_cluster_id, mode="migration")
+        lvol_id, replication_cluster_id=source_cluster_id, mode="migration",
+        from_policy=True)
 
 
 def list_replication_tasks(lvol_id):

@@ -62,6 +62,7 @@ class TestCreateVolume:
             max_namespace_per_subsys=None,
             do_replicate=False,
             replication_cluster_id=None,
+            replication_policy=None,
         )
         assert response.headers['Location'].endswith(f'/volumes/{VOLUME_ID}/')
 
