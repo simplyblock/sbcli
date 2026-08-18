@@ -787,12 +787,6 @@ class K8sNativeMajorUpgrade(TestClusterBase):
         )
 
         try:
-            import yaml as pyyaml
-        except ImportError:
-            # Inline YAML parsing fallback — extract basic_auth via regex
-            pass
-
-        try:
             # Read old configmap
             old_out, _ = self.k8s_utils._exec_kubectl(
                 f"kubectl get configmap {old_cm} -n {_NAMESPACE} "
