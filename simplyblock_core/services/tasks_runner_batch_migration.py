@@ -103,12 +103,20 @@ def _reconstruct_snap_tree(group, member_migrations, tgt_node, tgt_rpc) -> Optio
     committed: set = set()
     all_preexisting: set = set()
     for m in member_migrations:
+        logger.info(
+            f"Group {group.uuid[:8]}: DIAG reconstruct seed member {m.uuid[:8]} "
+            f"(lvol={m.lvol_id[:8] if m.lvol_id else None}): "
+            f"snaps_preexisting_on_target={list(m.snaps_preexisting_on_target)} "
+            f"snaps_migrated={list(m.snaps_migrated)} "
+            f"snaps_transferred_group={list(m.snaps_transferred_group)}")
         committed.update(m.snaps_preexisting_on_target)
         all_preexisting.update(m.snaps_preexisting_on_target)
         # Snaps already committed in a prior (crashed) run are in snaps_migrated.
         # Seeding committed from them prevents re-convert on re-entry (SPDK rejects
         # converting an already-immutable bdev, which would stall the group forever).
         committed.update(m.snaps_migrated)
+    logger.info(f"Group {group.uuid[:8]}: DIAG reconstruct initial committed set "
+               f"({len(committed)}): {list(committed)}")
 
     _lvstore_prefix = tgt_node.lvstore + "/"
 
@@ -124,9 +132,16 @@ def _reconstruct_snap_tree(group, member_migrations, tgt_node, tgt_rpc) -> Optio
 
     for m in sorted(member_migrations, key=lambda x: getattr(x, '_sort_ns_id', 999)):
         chain = migration_controller.get_snapshot_chain(m.lvol_id, m.source_node_id)
+        logger.info(
+            f"Group {group.uuid[:8]}: DIAG reconstruct member {m.uuid[:8]} "
+            f"(ns_id={getattr(m, '_sort_ns_id', '?')}, lvol={m.lvol_id[:8] if m.lvol_id else None}): "
+            f"chain={list(chain)} snaps_transferred_group={list(m.snaps_transferred_group)}")
 
         for snap_uuid in m.snaps_transferred_group:
             if snap_uuid in committed:
+                logger.info(
+                    f"Group {group.uuid[:8]}: DIAG reconstruct snap {snap_uuid[:8]} "
+                    f"(member {m.uuid[:8]}) already in committed -- SKIPPING add_clone/convert")
                 continue
 
             try:
@@ -145,6 +160,10 @@ def _reconstruct_snap_tree(group, member_migrations, tgt_node, tgt_rpc) -> Optio
                     break
                 if sid in committed:
                     pred_uuid = sid
+            logger.info(
+                f"Group {group.uuid[:8]}: DIAG reconstruct snap {snap_uuid[:8]} "
+                f"(member {m.uuid[:8]}, bdev={tgt_composite}): pred_uuid="
+                f"{pred_uuid[:8] if pred_uuid else None}")
 
             if pred_uuid:
                 try:
@@ -171,6 +190,10 @@ def _reconstruct_snap_tree(group, member_migrations, tgt_node, tgt_rpc) -> Optio
                     else:
                         pred_short = _snap_tgt_short_name(pred_snap)
                     pred_composite = f"{tgt_node.lvstore}/{pred_short}"
+                    logger.info(
+                        f"Group {group.uuid[:8]}: DIAG reconstruct add_clone "
+                        f"{tgt_composite} -> parent {pred_composite} "
+                        f"(preexisting={pred_uuid in all_preexisting})")
                     if not tgt_rpc.bdev_lvol_add_clone(tgt_composite, pred_composite):
                         return f"bdev_lvol_add_clone failed: {snap_uuid} → {pred_uuid}"
                     if sec_rpc:
@@ -179,12 +202,24 @@ def _reconstruct_snap_tree(group, member_migrations, tgt_node, tgt_rpc) -> Optio
                     if ter_rpc:
                         if not ter_rpc.bdev_lvol_add_clone(tgt_composite, pred_composite):
                             return f"bdev_lvol_add_clone on tertiary failed: {snap_uuid} → {pred_uuid}"
+                    logger.info(
+                        f"Group {group.uuid[:8]}: DIAG reconstruct add_clone OK "
+                        f"{tgt_composite} -> {pred_composite}")
                 except KeyError:
                     logger.warning(f"Predecessor {pred_uuid} not found; skipping add_clone")
+            else:
+                logger.info(
+                    f"Group {group.uuid[:8]}: DIAG reconstruct snap {snap_uuid[:8]} "
+                    f"has no committed predecessor -- converting as a root snapshot "
+                    f"(no add_clone)")
 
             # Leadership gate: convert on a non-leader silently persists nothing.
             from simplyblock_core.controllers import lvol_controller as _lc
-            if not _lc.is_node_leader(tgt_node, tgt_composite.split("/")[0]):
+            _is_leader = _lc.is_node_leader(tgt_node, tgt_composite.split("/")[0])
+            logger.info(
+                f"Group {group.uuid[:8]}: DIAG reconstruct convert {tgt_composite} "
+                f"is_leader={_is_leader}")
+            if not _is_leader:
                 return f"target node not LVS leader for convert of {snap_uuid}, retrying"
             if not tgt_rpc.bdev_lvol_convert(tgt_composite):
                 return f"bdev_lvol_convert failed for {snap_uuid}"
@@ -194,6 +229,9 @@ def _reconstruct_snap_tree(group, member_migrations, tgt_node, tgt_rpc) -> Optio
             if ter_rpc:
                 if not ter_rpc.bdev_lvol_convert(tgt_composite):
                     return f"bdev_lvol_convert on tertiary failed for {snap_uuid}"
+            logger.info(
+                f"Group {group.uuid[:8]}: DIAG reconstruct convert OK {tgt_composite} "
+                f"(snap {snap_uuid[:8]} now committed)")
 
             # Early partial DB update: route health-check/delete to the target
             # node right away rather than waiting for apply_migration_to_db()
@@ -222,6 +260,9 @@ def _reconstruct_snap_tree(group, member_migrations, tgt_node, tgt_rpc) -> Optio
 
         m.write_to_db(db.kv_store)
 
+    logger.info(
+        f"Group {group.uuid[:8]}: DIAG reconstruct done, final committed set "
+        f"({len(committed)}): {list(committed)}")
     return None  # success
 
 
@@ -258,6 +299,8 @@ def _build_batch_final_args(group, member_migrations, src_node, tgt_node, tgt_rp
     """
     mid_to_migration = {m.uuid: m for m in member_migrations}
     ordered_ids = group.ordered_migration_ids()
+    logger.info(f"Group {group.uuid[:8]}: DIAG build_final_args ordered_ids "
+               f"({len(ordered_ids)}): {[mid[:8] for mid in ordered_ids]}")
 
     lvol_names = []
     lvol_ids = []
@@ -288,6 +331,13 @@ def _build_batch_final_args(group, member_migrations, src_node, tgt_node, tgt_rp
         if map_id is None:
             raise ValueError(f"map_id missing for {tgt_bdev_short}")
         lvol_ids.append(map_id)
+        logger.info(
+            f"Group {group.uuid[:8]}: DIAG build_final_args migration {migration_id[:8]} "
+            f"lvol={m.lvol_id[:8] if m.lvol_id else None} src_bdev={src_composite} "
+            f"tgt_bdev_short={tgt_bdev_short} map_id={map_id} "
+            f"snaps_migrated={list(m.snaps_migrated)} "
+            f"snaps_preexisting_on_target={list(m.snaps_preexisting_on_target)} "
+            f"snaps_transferred_group={list(m.snaps_transferred_group)}")
 
         # Last transferred snap = last entry in snaps_migrated (the intermediate).
         tgt_snap_composite = ""
@@ -325,8 +375,14 @@ def _build_batch_final_args(group, member_migrations, src_node, tgt_node, tgt_rp
                     last_uuid,
                     migration_id,
                 )
+        logger.info(
+            f"Group {group.uuid[:8]}: DIAG build_final_args migration {migration_id[:8]} "
+            f"resolved tgt_snap_composite={tgt_snap_composite!r}")
         snapshot_names.append(tgt_snap_composite)
 
+    logger.info(
+        f"Group {group.uuid[:8]}: DIAG build_final_args final pairing: "
+        f"{[(mid[:8], sn) for mid, sn in zip(ordered_ids, snapshot_names)]}")
     return lvol_names, lvol_ids, snapshot_names
 
 
@@ -667,9 +723,17 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
         if sec_node or ter_node:
             sec_rpc_extra = _make_rpc(sec_node) if sec_node else None
             ter_rpc_extra = _make_rpc(ter_node) if ter_node else None
-            snap_by_migration_id = dict(zip(group.ordered_migration_ids(), snapshot_names))
+            _reordered_ids = group.ordered_migration_ids()
+            snap_by_migration_id = dict(zip(_reordered_ids, snapshot_names))
+            logger.info(
+                f"Group {group.uuid[:8]}: DIAG extra-add_clone snap_by_migration_id: "
+                f"{[(mid[:8], sn) for mid, sn in snap_by_migration_id.items()]}")
             for m in member_migrations:
                 snap_composite = snap_by_migration_id.get(m.uuid, "")
+                logger.info(
+                    f"Group {group.uuid[:8]}: DIAG extra-add_clone member {m.uuid[:8]} "
+                    f"(lvol={m.lvol_id[:8] if m.lvol_id else None}) -> snap_composite="
+                    f"{snap_composite!r}")
                 if not snap_composite:
                     continue
                 try:
