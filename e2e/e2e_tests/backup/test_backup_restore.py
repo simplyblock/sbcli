@@ -1047,6 +1047,41 @@ class BackupTestBase(TestClusterBase):
         out, _ = self._sbcli("backup policy-list")
         return self._parse_table(out)
 
+    # ── lvol property verification ────────────────────────────────────────────
+
+    def _verify_lvol_crypto(self, lvol_id: str, label: str = ""):
+        """Assert that the lvol has crypto enabled via API details.
+
+        Returns the details dict for further checks if needed.
+        """
+        details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
+        assert details, f"{label}: get_lvol_details returned empty for {lvol_id}"
+        d = details[0] if isinstance(details, list) else details
+        crypto_val = d.get("crypto") or d.get("encryption") or d.get("Crypto")
+        self.logger.info(f"{label}: lvol {lvol_id} crypto={crypto_val}")
+        assert crypto_val, (
+            f"{label}: restored lvol {lvol_id} expected crypto=True, "
+            f"got {crypto_val!r}. Full details: {d}")
+        return d
+
+    def _verify_lvol_dhchap(self, lvol_id: str, label: str = ""):
+        """Assert that the lvol's connect string includes DHCHAP keys.
+
+        This verifies the restored lvol preserves DHCHAP authentication.
+        Returns the connect output for further inspection if needed.
+        """
+        connect_out, _ = self._sbcli(f"volume connect {lvol_id}")
+        self.logger.info(f"{label}: connect output: {connect_out[:300]}")
+        has_dhchap = (
+            "--dhchap-secret" in connect_out
+            or "--dhchap-ctrl-secret" in connect_out
+        )
+        self.logger.info(f"{label}: lvol {lvol_id} has_dhchap={has_dhchap}")
+        assert has_dhchap, (
+            f"{label}: restored lvol {lvol_id} expected DHCHAP keys in "
+            f"connect string, but none found: {connect_out}")
+        return connect_out
+
     # ── lvol / mount helpers ──────────────────────────────────────────────────
 
     def _create_lvol(self, name: str = None, size: str = None,
@@ -2288,9 +2323,14 @@ class TestBackupCryptoLvol(BackupTestBase):
         self._restore_backup(bk_id, restored_name)
         self._wait_for_restore(restored_name)
 
+        # --- TC-BCK-052b: verify restored lvol has crypto enabled ---
+        rest_id = self._get_lvol_id(restored_name)
+        self.logger.info("TC-BCK-052b: verify restored lvol has crypto property")
+        self._verify_lvol_crypto(rest_id, label="TC-BCK-052b")
+        self.logger.info("TC-BCK-052b: crypto property preserved ✓")
+
         # --- TC-BCK-053: restored crypto lvol is connectable ---
         self.logger.info("TC-BCK-053: connect restored crypto lvol")
-        rest_id = self._get_lvol_id(restored_name)
         r_device, r_mount = self._connect_and_mount(
             restored_name, rest_id,
             mount=f"{self.mount_path}/cr_{_rand_suffix()}",
@@ -2991,10 +3031,9 @@ class TestBackupCrossClusterRestore(BackupTestBase):
     1. On Cluster-1: create lvol → write data → snapshot + S3 backup → wait for done.
     2. Export backup metadata from Cluster-1 via `backup list` → JSON file.
     3. On Cluster-2: `backup import <metadata.json>` to register the chain.
-    4. On Cluster-2: `backup source-switch <cluster1_id>` to point to Cluster-1's S3.
-    5. On Cluster-2: `backup restore <backup_id>` to restore from Cluster-1's S3.
-    6. Verify checksums match the data written on Cluster-1.
-    7. On Cluster-2: `backup source-switch local` to restore Cluster-2's own source.
+    4. On Cluster-2: `backup restore <backup_id>` to restore from Cluster-1's S3.
+       (Backups self-describe their S3 bucket — no source-switch needed.)
+    5. Verify checksums match the data written on Cluster-1.
 
     Both clusters must share the same S3 / MinIO endpoint so the backup
     objects are reachable from Cluster-2.
@@ -3024,10 +3063,8 @@ class TestBackupCrossClusterRestore(BackupTestBase):
     TC-BCK-072  Export backup metadata to local JSON file
     TC-BCK-073  Cluster-2: `backup import` succeeds
     TC-BCK-074  Cluster-2: `backup list` shows imported backup
-    TC-BCK-074b Cluster-2: `backup source-switch <cluster1_id>` succeeds
     TC-BCK-075  Cluster-2: `backup restore` creates new lvol
     TC-BCK-076  Data integrity: checksum on Cluster-2 restored lvol matches Cluster-1 original
-    TC-BCK-076b Cluster-2: `backup source-switch local` restores own source
     """
 
     # Minimum storage nodes per cluster for cross-cluster restore
@@ -3642,8 +3679,7 @@ class TestBackupCrossClusterRestore(BackupTestBase):
           3. Create BackupRestore CR on C2 with pvcTemplate → wait Done.
           4. Verify data integrity via utility pod on restored PVC.
 
-        The controller handles source-switching automatically — no manual
-        ``backup source-switch`` is needed.
+        Backups self-describe their S3 bucket — no source-switch needed.
         """
         k8s_c1 = self._ensure_k8s_utils()
         c2_cluster_name = os.environ.get(
@@ -3770,8 +3806,12 @@ class TestBackupCrossClusterRestore(BackupTestBase):
 
     def _run_cli_cross_cluster_restore(self, backup_id: str,
                                         orig_checksums: dict):
-        """Cross-cluster restore via CLI (export → import → source-switch →
-        restore → verify → switch-back)."""
+        """Cross-cluster restore via CLI (export → import → restore → verify).
+
+        Backups self-describe their S3 bucket, so no manual source-switch
+        is needed — Cluster-2 reads directly from the bucket embedded in
+        the imported backup metadata.
+        """
 
         # TC-BCK-072: export metadata from Cluster-1
         self.logger.info("TC-BCK-072: exporting backup metadata from Cluster-1")
@@ -3797,189 +3837,159 @@ class TestBackupCrossClusterRestore(BackupTestBase):
         self.logger.info(
             f"TC-BCK-074: Cluster-2 backup list snippet: {out2[:200]}")
 
-        # TC-BCK-074b: switch Cluster-2's backup source to Cluster-1's S3
-        self.logger.info(
-            f"TC-BCK-074b: Cluster-2 — backup source-switch to "
-            f"Cluster-1 ({self.cluster_id})")
-        out_sw, err_sw = self._sbcli_c2(
-            f"backup source-switch {self.cluster_id}"
-            f" --cluster-id {self._cluster2_id}")
-        assert not (err_sw and "error" in err_sw.lower()), \
-            f"TC-BCK-074b: source-switch to Cluster-1 failed: {err_sw}"
-        self.logger.info(
-            f"TC-BCK-074b: source switched to Cluster-1 — "
-            f"{out_sw.strip()}")
+        import re as _re
 
-        try:
-            import re as _re
+        # Pick a C2 storage node for restore (backup.node_id is from C1)
+        sn_out, _ = self._sbcli_c2(
+            f"sn list --cluster-id {self._cluster2_id}")
+        c2_node_id = None
+        for line in (sn_out or "").splitlines():
+            if "online" not in line.lower():
+                continue
+            m = _re.search(
+                r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+                r"[0-9a-f]{4}-[0-9a-f]{12})", line)
+            if m:
+                c2_node_id = m.group(0)
+                break
+        assert c2_node_id, (
+            f"TC-BCK-075: no online C2 storage node found in:\n{sn_out}")
+        self.logger.info(
+            f"TC-BCK-075: using C2 storage node {c2_node_id}")
 
-            # Pick a C2 storage node for restore (backup.node_id is from C1)
-            sn_out, _ = self._sbcli_c2(
-                f"sn list --cluster-id {self._cluster2_id}")
-            c2_node_id = None
-            for line in (sn_out or "").splitlines():
-                if "online" not in line.lower():
-                    continue
-                m = _re.search(
+        # TC-BCK-075: restore on Cluster-2
+        # No source-switch needed — backups self-describe their S3 bucket.
+        restored_name = f"cc_rest_{_rand_suffix()}"
+        self.logger.info(
+            f"TC-BCK-075: Cluster-2 — backup restore "
+            f"{backup_id} → {restored_name}")
+        out3, err3 = self._sbcli_c2(
+            f"backup restore {backup_id} "
+            f"--lvol {restored_name} "
+            f"--pool {self._cluster2_pool_name} "
+            f"--node {c2_node_id} "
+            f"--cluster-id {self._cluster2_id}")
+        assert not (err3 and "error" in err3.lower()), \
+            f"TC-BCK-075: restore on Cluster-2 failed: {err3}"
+        self.logger.info(
+            f"TC-BCK-075: restore triggered: {out3.strip()}")
+        self._c2_lvols.append(restored_name)
+
+        # Wait for restore task to complete on Cluster-2, then wait
+        # for the lvol to reach 'online' status before connect/mount.
+        self.logger.info(
+            "TC-BCK-075: waiting for Cluster-2 restore task to "
+            "complete…")
+
+        # Phase 1: wait for restore task to reach 'done'
+        task_deadline = time.time() + _RESTORE_COMPLETE_TIMEOUT
+        restore_task_done = False
+        while time.time() < task_deadline:
+            try:
+                task_out, _ = self._sbcli_c2(
+                    f"cluster list-tasks {self._cluster2_id}"
+                    f" --limit 0")
+                for line in (task_out or "").splitlines():
+                    if "s3_backup_restore" not in line:
+                        continue
+                    if "done" in line:
+                        self.logger.info(
+                            "TC-BCK-075: restore task reached 'done'")
+                        restore_task_done = True
+                        break
+                    # Detect fatal task failure: max retries exhausted
+                    retry_match = _re.search(
+                        r"(\d+)/(\d+)", line)
+                    if retry_match:
+                        cur, mx = int(retry_match.group(1)), int(retry_match.group(2))
+                        if cur >= mx:
+                            raise AssertionError(
+                                f"TC-BCK-075: restore task exhausted "
+                                f"retries ({cur}/{mx}): {line.strip()}")
+                if restore_task_done:
+                    break
+                sleep_n_sec(_POLL_INTERVAL)
+            except AssertionError:
+                raise
+            except Exception as e:
+                self.logger.warning(
+                    f"TC-BCK-075: could not check task status: {e}")
+                sleep_n_sec(_POLL_INTERVAL)
+        else:
+            raise AssertionError(
+                "TC-BCK-075: restore task did not reach 'done' "
+                f"within {_RESTORE_COMPLETE_TIMEOUT}s")
+
+        # Stabilisation wait after restore task completes
+        self.logger.info(
+            "TC-BCK-075: waiting 60s for restore to stabilise…")
+        sleep_n_sec(60)
+
+        # Phase 2: verify lvol is online and extract its ID
+        restored_id = None
+        lvol_out, _ = self._sbcli_c2("lvol list")
+        for line in lvol_out.split("\n"):
+            if restored_name in line:
+                id_match = _re.search(
                     r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
                     r"[0-9a-f]{4}-[0-9a-f]{12})", line)
-                if m:
-                    c2_node_id = m.group(0)
-                    break
-            assert c2_node_id, (
-                f"TC-BCK-075: no online C2 storage node found in:\n{sn_out}")
-            self.logger.info(
-                f"TC-BCK-075: using C2 storage node {c2_node_id}")
-
-            # TC-BCK-075: restore on Cluster-2
-            restored_name = f"cc_rest_{_rand_suffix()}"
-            self.logger.info(
-                f"TC-BCK-075: Cluster-2 — backup restore "
-                f"{backup_id} → {restored_name}")
-            out3, err3 = self._sbcli_c2(
-                f"backup restore {backup_id} "
-                f"--lvol {restored_name} "
-                f"--pool {self._cluster2_pool_name} "
-                f"--node {c2_node_id} "
-                f"--cluster-id {self._cluster2_id}")
-            assert not (err3 and "error" in err3.lower()), \
-                f"TC-BCK-075: restore on Cluster-2 failed: {err3}"
-            self.logger.info(
-                f"TC-BCK-075: restore triggered: {out3.strip()}")
-            self._c2_lvols.append(restored_name)
-
-            # Wait for restore task to complete on Cluster-2, then wait
-            # for the lvol to reach 'online' status before connect/mount.
-            self.logger.info(
-                "TC-BCK-075: waiting for Cluster-2 restore task to "
-                "complete…")
-
-            # Phase 1: wait for restore task to reach 'done'
-            task_deadline = time.time() + _RESTORE_COMPLETE_TIMEOUT
-            restore_task_done = False
-            while time.time() < task_deadline:
-                try:
-                    task_out, _ = self._sbcli_c2(
-                        f"cluster list-tasks {self._cluster2_id}"
-                        f" --limit 0")
-                    for line in (task_out or "").splitlines():
-                        if "s3_backup_restore" not in line:
-                            continue
-                        if "done" in line:
-                            self.logger.info(
-                                "TC-BCK-075: restore task reached 'done'")
-                            restore_task_done = True
-                            break
-                        # Detect fatal task failure: max retries exhausted
-                        retry_match = _re.search(
-                            r"(\d+)/(\d+)", line)
-                        if retry_match:
-                            cur, mx = int(retry_match.group(1)), int(retry_match.group(2))
-                            if cur >= mx:
-                                raise AssertionError(
-                                    f"TC-BCK-075: restore task exhausted "
-                                    f"retries ({cur}/{mx}): {line.strip()}")
-                    if restore_task_done:
-                        break
-                    sleep_n_sec(_POLL_INTERVAL)
-                except AssertionError:
-                    raise
-                except Exception as e:
+                if id_match:
+                    restored_id = id_match.group(1)
+                if "restore_failed" in line.lower():
+                    raise AssertionError(
+                        f"TC-BCK-075: lvol {restored_name} has "
+                        f"restore_failed status: {line.strip()}")
+                if "online" not in line.lower():
                     self.logger.warning(
-                        f"TC-BCK-075: could not check task status: {e}")
-                    sleep_n_sec(_POLL_INTERVAL)
-            else:
-                raise AssertionError(
-                    "TC-BCK-075: restore task did not reach 'done' "
-                    f"within {_RESTORE_COMPLETE_TIMEOUT}s")
+                        f"TC-BCK-075: lvol {restored_name} not "
+                        f"online yet: {line.strip()}")
+                break
+        self.logger.info(
+            f"TC-BCK-075: restored lvol on Cluster-2"
+            f" (id={restored_id})")
 
-            # Stabilisation wait after restore task completes
-            self.logger.info(
-                "TC-BCK-075: waiting 60s for restore to stabilise…")
-            sleep_n_sec(60)
+        assert restored_id, (
+            f"TC-BCK-075: could not find restored lvol "
+            f"{restored_name} in lvol list:\n{lvol_out}")
 
-            # Phase 2: verify lvol is online and extract its ID
-            restored_id = None
-            lvol_out, _ = self._sbcli_c2("lvol list")
-            for line in lvol_out.split("\n"):
-                if restored_name in line:
-                    id_match = _re.search(
-                        r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
-                        r"[0-9a-f]{4}-[0-9a-f]{12})", line)
-                    if id_match:
-                        restored_id = id_match.group(1)
-                    if "restore_failed" in line.lower():
-                        raise AssertionError(
-                            f"TC-BCK-075: lvol {restored_name} has "
-                            f"restore_failed status: {line.strip()}")
-                    if "online" not in line.lower():
-                        self.logger.warning(
-                            f"TC-BCK-075: lvol {restored_name} not "
-                            f"online yet: {line.strip()}")
-                    break
-            self.logger.info(
-                f"TC-BCK-075: restored lvol on Cluster-2"
-                f" (id={restored_id})")
+        # TC-BCK-076: data integrity — connect via Cluster-2
+        self.logger.info(
+            "TC-BCK-076: connecting restored lvol from Cluster-2")
+        c2_connect_out, c2_connect_err = self._sbcli_c2(
+            f"volume connect {restored_id}")
+        connect_lines = [
+            line.strip()
+            for line in c2_connect_out.strip().split("\n")
+            if line.strip() and "nvme connect" in line
+        ]
+        assert connect_lines, (
+            f"TC-BCK-076: no nvme connect strings from Cluster-2: "
+            f"{c2_connect_out}")
 
-            assert restored_id, (
-                f"TC-BCK-075: could not find restored lvol "
-                f"{restored_name} in lvol list:\n{lvol_out}")
-
-            # TC-BCK-076: data integrity — connect via Cluster-2
-            self.logger.info(
-                "TC-BCK-076: connecting restored lvol from Cluster-2")
-            c2_connect_out, c2_connect_err = self._sbcli_c2(
-                f"volume connect {restored_id}")
-            connect_lines = [
-                line.strip()
-                for line in c2_connect_out.strip().split("\n")
-                if line.strip() and "nvme connect" in line
-            ]
-            assert connect_lines, (
-                f"TC-BCK-076: no nvme connect strings from Cluster-2: "
-                f"{c2_connect_out}")
-
-            initial_devs = self.ssh_obj.get_devices(node=self.fio_node)
-            for cmd in connect_lines:
-                self.ssh_obj.exec_command(
-                    node=self.fio_node, command=cmd)
-            sleep_n_sec(3)
-            final_devs = self.ssh_obj.get_devices(node=self.fio_node)
-            new_devs = [d for d in final_devs if d not in initial_devs]
-            assert new_devs, (
-                "TC-BCK-076: no new block device after connecting "
-                "Cluster-2 lvol")
-
-            r_device = f"/dev/{new_devs[0]}"
-            r_mount = f"{self.mount_path}/cc_rest_{_rand_suffix()}"
+        initial_devs = self.ssh_obj.get_devices(node=self.fio_node)
+        for cmd in connect_lines:
             self.ssh_obj.exec_command(
-                self.fio_node, f"mkdir -p {r_mount}")
-            self.ssh_obj.mount_path(
-                node=self.fio_node, device=r_device,
-                mount_path=r_mount)
-            self.mounted.append((self.fio_node, r_mount))
+                node=self.fio_node, command=cmd)
+        sleep_n_sec(3)
+        final_devs = self.ssh_obj.get_devices(node=self.fio_node)
+        new_devs = [d for d in final_devs if d not in initial_devs]
+        assert new_devs, (
+            "TC-BCK-076: no new block device after connecting "
+            "Cluster-2 lvol")
 
-            self._verify_checksums(
-                self.fio_node, r_mount, orig_checksums)
-            self.logger.info(
-                "TC-BCK-076: cross-cluster restore checksums match")
+        r_device = f"/dev/{new_devs[0]}"
+        r_mount = f"{self.mount_path}/cc_rest_{_rand_suffix()}"
+        self.ssh_obj.exec_command(
+            self.fio_node, f"mkdir -p {r_mount}")
+        self.ssh_obj.mount_path(
+            node=self.fio_node, device=r_device,
+            mount_path=r_mount)
+        self.mounted.append((self.fio_node, r_mount))
 
-        finally:
-            # TC-BCK-076b: switch Cluster-2 source back to local
-            self.logger.info(
-                "TC-BCK-076b: Cluster-2 — backup source-switch "
-                "back to local")
-            out_back, err_back = self._sbcli_c2(
-                f"backup source-switch local"
-                f" --cluster-id {self._cluster2_id}")
-            if err_back and "error" in err_back.lower():
-                self.logger.warning(
-                    f"TC-BCK-076b: source-switch-back warning: "
-                    f"{err_back}")
-            else:
-                self.logger.info(
-                    f"TC-BCK-076b: source switched back to local — "
-                    f"{out_back.strip()}")
+        self._verify_checksums(
+            self.fio_node, r_mount, orig_checksums)
+        self.logger.info(
+            "TC-BCK-076: cross-cluster restore checksums match")
 
     # ── main run ──────────────────────────────────────────────────────────────
 
@@ -4036,17 +4046,6 @@ class TestBackupCrossClusterRestore(BackupTestBase):
     # ── teardown ──────────────────────────────────────────────────────────────
 
     def teardown(self, delete_lvols=True, close_ssh=True, skip_k8s_cleanup=False):
-        # Safety: ensure Cluster-2's source is switched back to local
-        # (CLI mode only — K8s-native mode uses CRDs, no manual source-switch)
-        if not self.k8s_test:
-            try:
-                self._sbcli_c2(
-                    f"backup source-switch local"
-                    f" --cluster-id {self._cluster2_id}")
-            except Exception as e:
-                self.logger.warning(
-                    f"source-switch-back in teardown warning: {e}")
-
         if delete_lvols:
             # Best-effort cleanup of Cluster-2 resources
             for name in list(self._c2_lvols):
@@ -5056,10 +5055,20 @@ class TestBackupSecurityLvol(BackupTestBase):
         self._wait_for_restore(restored_name)
         self.logger.info("TC-BCK-153: Restore PASSED")
 
-        # TC-BCK-154: connect and verify data
-        self.logger.info("TC-BCK-154: Verifying restored lvol data …")
+        # TC-BCK-153b: verify restored lvol preserves crypto property
         restored_id = self._get_lvol_id(restored_name)
         assert restored_id, f"Could not find ID for {restored_name}"
+        self.logger.info("TC-BCK-153b: verify restored lvol has crypto property")
+        self._verify_lvol_crypto(restored_id, label="TC-BCK-153b")
+        self.logger.info("TC-BCK-153b: crypto property preserved ✓")
+
+        # TC-BCK-153c: verify restored lvol has DHCHAP authentication
+        self.logger.info("TC-BCK-153c: verify restored lvol has DHCHAP keys in connect string")
+        self._verify_lvol_dhchap(restored_id, label="TC-BCK-153c")
+        self.logger.info("TC-BCK-153c: DHCHAP property preserved ✓")
+
+        # TC-BCK-154: connect and verify data
+        self.logger.info("TC-BCK-154: Verifying restored lvol data …")
         _, r_mount = self._connect_and_mount(restored_name, restored_id,
                                               mount=f"{self.mount_path}/r{restored_name[-8:]}",
                                               format_disk=False)
