@@ -358,6 +358,30 @@ class TestCreateS3Bdev(unittest.TestCase):
 
     @patch("simplyblock_core.controllers.backup.manifest.boto3.client")
     @patch("simplyblock_core.models.storage_node.RPCClient")
+    def test_a_cluster_that_configured_no_bucket_still_gets_a_device(
+            self, MockRPC, mock_boto3_client):
+        """Activation hands ``cluster.get_backup_config()`` straight to this
+        function for every node it brings up (``cluster_ops._finish_pass1_node``),
+        so a stored config that names no bucket -- what a cluster created through
+        the operator has, its CR having no bucket field -- failed the activation
+        rather than the backup that would have used the bucket."""
+        mock_rpc = MockRPC.return_value
+        mock_rpc.bdev_s3_create.return_value = True
+        mock_rpc.bdev_lvol_s3_bdev.return_value = True
+        mock_boto3_client.return_value.head_bucket.return_value = {}
+
+        cluster = Cluster()
+        cluster.uuid = "cluster-1"
+        cluster.backup_config = {"region": "eu-central-1"}
+
+        from simplyblock_core.controllers.backup.device import create_s3_bdev
+        create_s3_bdev(_node(), cluster.get_backup_config())
+
+        _, kwargs = mock_rpc.bdev_s3_create.call_args
+        assert kwargs["bucket_name"] == "simplyblock-backup-cluster-1"
+
+    @patch("simplyblock_core.controllers.backup.manifest.boto3.client")
+    @patch("simplyblock_core.models.storage_node.RPCClient")
     def test_attach_fails(self, MockRPC, mock_boto3_client):
         from simplyblock_core.rpc_client import RPCRemoteError
         mock_rpc = MockRPC.return_value

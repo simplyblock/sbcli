@@ -296,6 +296,11 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         if not dns_name:
             raise ValueError("--dns-name is required when --ingress-host-source is dns or loadbalancer")
 
+    if backup_config:
+        # Validate the backup config before doing real work, standing in for the
+        # bucket name Cluster.set_backup_config defaults below.
+        BackupConfig.model_validate({"bucket_name": "dummy", **backup_config})
+
     if name and db_controller.kv_store is not None:
         existing_clusters = db_controller.get_clusters()
         for existing in existing_clusters:
@@ -429,7 +434,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         cluster.tls_config = nvmeof_tls_config
 
     if backup_config:
-        cluster.backup_config = backup_config
+        cluster.set_backup_config(backup_config)
 
     if not disable_monitoring:
         utils.render_and_deploy_alerting_configs(contact_point, cluster.grafana_endpoint, cluster.uuid, cluster.secret.get_secret_value())
@@ -684,7 +689,7 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
     cluster.snode_api_port = snode_api_port
     cluster.hashicorp_vault_settings = hashicorp_vault_settings
     if backup_config:
-        cluster.backup_config = backup_config
+        cluster.set_backup_config(backup_config)
 
     cluster.backup_local_path = os.path.join(constants.KVD_DB_BACKUP_PATH, cluster.uuid)
     cluster.status = Cluster.STATUS_UNREADY
@@ -709,7 +714,7 @@ def set_backup_config(cl_id, config: BackupConfig) -> None:
     """
     db_controller.atomic_update(
         db_controller.get_cluster_by_id(cl_id),
-        lambda c, v=config.model_dump(exclude_none=True): setattr(c, "backup_config", v))
+        lambda c, v=config.model_dump(exclude_none=True): c.set_backup_config(v))
 
 
 def set_name(cl_id, name) -> Cluster:
