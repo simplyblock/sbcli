@@ -389,7 +389,7 @@ def backup_snapshot(snapshot_id, cluster_id=None):
     return final_backup_id, None
 
 
-def restore_backup(backup_id: str, lvol_name: str, pool_id_or_name: str, cluster_id: str,
+def restore_backup(backup_id: str, lvol_name: str, pool_id_or_name: str,
                    target_node_id: Optional[str] = None):
     """Restore a backup chain into a new fully-accessible lvol.
 
@@ -399,22 +399,30 @@ def restore_backup(backup_id: str, lvol_name: str, pool_id_or_name: str, cluster
     until the data transfer completes.
 
     Args:
-        target_node_id: Optional node to restore onto. If not provided,
-            restores to the original backup node. Any node in the cluster
+        target_node_id: Optional node to restore onto. If not provided, a node
+            of the target cluster is auto-selected. Any node in the cluster
             can restore any backup because S3 keys are node-agnostic
             ({s3_id}/{mid_flag}/{extent}) and all nodes share the same
             S3 bucket and credentials.
 
-    Returns (lvol_uuid, error_message).
+    Returns the uuid of the created volume.
     """
     from simplyblock_core.controllers import lvol_controller
     from simplyblock_core.models.lvol_model import LVol
 
     try:
         backup = db_controller.get_backup_by_id(backup_id)
-        cluster = db_controller.get_cluster_by_id(cluster_id)
+        pool = db_controller.get_pool_by_id_or_name(pool_id_or_name)
+        cluster = db_controller.get_cluster_by_id(pool.cluster_id)
+        target_node = db_controller.get_storage_node_by_id(target_node_id) if target_node_id is not None else None
+        chain = db_controller.get_backup_chain(backup_id)
+        if (incomplete := [
+            backup for backup in chain
+            if backup.status != Backup.STATUS_COMPLETED
+        ]):
+            raise PreconditionError("Incomplete backups in chain: " + ", ".join(backup.uuid for backup in incomplete))
     except KeyError as e:
-        return None, str(e)
+        raise PreconditionError(str(e)) from e
 
     # Verify the backup's source matches the active S3 source.
     # If the backup came from an external cluster, the S3 bdev must be
@@ -422,45 +430,38 @@ def restore_backup(backup_id: str, lvol_name: str, pool_id_or_name: str, cluster
     backup_src = backup.source_cluster_id or backup.cluster_id
     active_src = cluster.backup_source or cluster.uuid
     if backup_src != active_src:
-        return None, (
+        raise PreconditionError(
             f"Backup source is {backup_src[:8]} but active S3 source "
             f"is {active_src[:8]}. Use 'sbctl backup source-switch "
             f"{backup_src}' first.")
 
-    # Build the backup chain
-    chain = db_controller.get_backup_chain(backup_id)
-    if not chain:
-        return None, f"Could not build backup chain for {backup_id}"
-
     size = backup.size
     if size <= 0:
-        return None, "Backup has no size information"
+        raise PreconditionError("Backup has no size information")
 
-    # Determine target node: use explicit target, or fall back to backup node
-    restore_node_id = target_node_id or backup.node_id
+    if target_node is not None:
+        if target_node.cluster_id != cluster.uuid:
+            raise PreconditionError(
+                f"Target node {target_node_id} belongs to cluster "
+                f"{target_node.cluster_id[:8]}, not {cluster.uuid[:8]}")
 
-    # Validate target node is online and has an S3 bdev
-    try:
-        target_node = db_controller.get_storage_node_by_id(restore_node_id)
-    except KeyError:
-        return None, f"Target node {restore_node_id} not found"
+        if target_node.status != StorageNode.STATUS_ONLINE:
+            raise PreconditionError(f"Target node {target_node_id} is not online "
+                                    f"(status: {target_node.status})")
 
-    if target_node.status != StorageNode.STATUS_ONLINE:
-        return None, (f"Target node {restore_node_id} is not online "
-                      f"(status: {target_node.status})")
-
-    if not target_node.lvstore:
-        return None, f"Target node {restore_node_id} has no lvstore (S3 bdev requires lvstore)"
+        if not target_node.lvstore:
+            raise PreconditionError(
+                f"Target node {target_node_id} has no lvstore (S3 bdev requires lvstore)")
 
     if backup.encrypted:
         with create_kms_connection(cluster) as kms:
             try:
                 crypto_key = kms.get_data_encryption_keys(
-                    backup_dek_path(cluster_id, backup.uuid),
+                    backup_dek_path(pool.cluster_id, backup.uuid),
                     backup_kek_name(backup.uuid),
                 )
-            except KMSException:
-                return None, "Failed to retrieve backup crypto keys"
+            except KMSException as e:
+                raise RuntimeError("Failed to retrieve backup crypto keys") from e
     else:
         crypto_key = None
 
@@ -475,7 +476,7 @@ def restore_backup(backup_id: str, lvol_name: str, pool_id_or_name: str, cluster
         max_rw_mbytes=0,
         max_r_mbytes=0,
         max_w_mbytes=0,
-        host_id_or_name=restore_node_id,
+        host_id_or_name=target_node_id,
         ha_type="default",
         crypto_key=crypto_key,
         use_comp=False,
@@ -486,13 +487,13 @@ def restore_backup(backup_id: str, lvol_name: str, pool_id_or_name: str, cluster
         fabric="tcp",
     )
     if error or not lvol_id:
-        return None, f"Failed to create restore volume: {error}"
+        raise RuntimeError(f"Failed to create restore volume: {error}")
 
     # Mark volume as restoring
     try:
         lvol = db_controller.get_lvol_by_id(lvol_id)
-    except KeyError:
-        return None, f"Volume created but not found in DB: {lvol_id}"
+    except KeyError as e:
+        raise RuntimeError(f"Volume created but not found in DB: {lvol_id}") from e
 
     lvol.status = LVol.STATUS_RESTORING
     lvol.write_to_db()
@@ -500,22 +501,15 @@ def restore_backup(backup_id: str, lvol_name: str, pool_id_or_name: str, cluster
     # The bdev name the data plane expects (e.g. LVS_7744/LVOL_12345)
     bdev_name = f"{lvol.lvs_name}/{lvol.lvol_bdev}"
 
-    # Only include completed backups — incomplete ones have no metadata in S3
     # Data plane processes s3_ids in array order: the first entry's clusters
     # take priority (skip-if-populated).  Newest-first means the latest
     # incremental data wins, with older backups filling any remaining gaps.
-    completed_chain = [b for b in reversed(chain)
-                       if b.status == Backup.STATUS_COMPLETED]
-    if not completed_chain:
-        return None, "No completed backups in chain"
+    if not tasks_controller.add_backup_restore_task(
+            pool.cluster_id, lvol.node_id, backup_id, bdev_name,
+            [b.s3_id for b in reversed(chain)], lvol_id=lvol_id):
+        raise RuntimeError("Failed to create restore task")
 
-    result = tasks_controller.add_backup_restore_task(
-        cluster_id, lvol.node_id, backup_id, bdev_name,
-        [b.s3_id for b in completed_chain], lvol_id=lvol_id)
-
-    if result:
-        return lvol_id, None
-    return None, "Failed to create restore task"
+    return lvol_id
 
 
 def _cleanup_backup_kms_keys(backups):
@@ -643,23 +637,32 @@ def import_backups(s3_metadata_list, cluster_id=None):
         s3_metadata_list: list of dicts with backup metadata.
         cluster_id: Target cluster to import into.  Required for cross-cluster
             restore so the backups are visible in the local cluster's DB.
+
+    Raises:
+        PreconditionError: One of the given backup IDs is already known.  Backup
+            lookups are not scoped by cluster, so a UUID reused across clusters
+            would make either record unaddressable.  All IDs are checked before
+            the first record is written, so nothing is imported in that case.
     """
-    imported = 0
+    pending = {}
     for meta in s3_metadata_list:
         backup_id = meta.get("backup_id")
         if not backup_id:
             continue
 
-        source_cluster = meta.get("cluster_id", "")
-        target_cluster = cluster_id or source_cluster
+        if backup_id in pending:
+            raise PreconditionError(f"Backup {backup_id} is listed more than once")
 
-        # Skip only if already registered for the target cluster
         try:
             existing = db_controller.get_backup_by_id(backup_id)
-            if existing.cluster_id == target_cluster:
-                continue  # already imported for this cluster
         except KeyError:
-            pass
+            pending[backup_id] = meta
+        else:
+            raise PreconditionError(f"Backup {backup_id} already exists in cluster {existing.cluster_id}")
+
+    for backup_id, meta in pending.items():
+        source_cluster = meta.get("cluster_id", "")
+        target_cluster = cluster_id or source_cluster
 
         backup = Backup()
         backup.uuid = backup_id
@@ -678,9 +681,8 @@ def import_backups(s3_metadata_list, cluster_id=None):
         backup.status = Backup.STATUS_COMPLETED
         backup.s3_metadata = meta
         backup.write_to_db()
-        imported += 1
 
-    return imported
+    return len(pending)
 
 
 def get_backup_sources(cluster_id):

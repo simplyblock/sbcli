@@ -3,15 +3,17 @@ from typing import Annotated, List, Literal, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, Response
-from pydantic import BaseModel, Field, SecretStr
+from pydantic import BaseModel, Field, SecretStr, computed_field, model_validator
 from pydantic.networks import AnyUrl, UrlConstraints
 
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import HashicorpVaultSettings as ModelVaultSettings
 from simplyblock_core import cluster_ops
+from simplyblock_core.cluster_ops import SUPPORTED_ERASURE_CODING_SCHEMES
 
 from .._dependencies import Cluster
 from .backup import api as backup_api
+from .replication import api as replication_api
 from .storage_pool import api as pool_api
 from .storage_node import api as storage_node_api
 from .subsystem import api as subsystem_api
@@ -78,13 +80,22 @@ class ClusterParams(BaseModel):
     cr_namespace: str = ""
     cr_plural: str = ""
     client_data_nic: str = ""
-    max_fault_tolerance: int = 1
     nvmf_base_port: int = 4420
     rpc_base_port: int = 8080
     snode_api_port: int = 50001
     backup_config: Optional[BackupConfigParams] = None
     hashicorp_vault_settings: Optional[HashicorpVaultSettings] = None
     enable_failure_domain: bool = False
+
+    @model_validator(mode="after")
+    def validate_erasure_coding_scheme(self):
+        if (self.distr_ndcs, self.distr_npcs) not in SUPPORTED_ERASURE_CODING_SCHEMES:
+            raise ValueError("Invalid erasure coding scheme selected")
+        return self
+
+    @computed_field
+    def max_fault_tolerance(self) -> int:
+        return self.distr_npcs
 
 
 @api.get('/', name='clusters:list')
@@ -103,8 +114,6 @@ def list() -> List[ClusterDTO]:
 def add(request: Request, parameters: ClusterParams, response_format: util.CreationResponseFormatParameter = "full"):
     try:
         params = parameters.model_dump(exclude_none=True)
-        npcs = params.get('distr_npcs', 1)
-        params['max_fault_tolerance'] = min(npcs, 2) if npcs >= 1 else 1
         if "hashicorp_vault_settings" in params:
             params["hashicorp_vault_settings"] = ModelVaultSettings(params["hashicorp_vault_settings"])
         cluster_id_or_false = cluster_ops.add_cluster(**params)
@@ -254,4 +263,5 @@ instance_api.include_router(task_api, prefix='/tasks')
 instance_api.include_router(pool_api, prefix='/storage-pools')
 instance_api.include_router(backup_api, prefix='/backups')
 instance_api.include_router(subsystem_api, prefix='/subsystems')
+instance_api.include_router(replication_api)
 api.include_router(instance_api)

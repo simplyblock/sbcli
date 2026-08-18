@@ -182,6 +182,10 @@ def _reconstruct_snap_tree(group, member_migrations, tgt_node, tgt_rpc) -> Optio
                 except KeyError:
                     logger.warning(f"Predecessor {pred_uuid} not found; skipping add_clone")
 
+            # Leadership gate: convert on a non-leader silently persists nothing.
+            from simplyblock_core.controllers import lvol_controller as _lc
+            if not _lc.is_node_leader(tgt_node, tgt_composite.split("/")[0]):
+                return f"target node not LVS leader for convert of {snap_uuid}, retrying"
             if not tgt_rpc.bdev_lvol_convert(tgt_composite):
                 return f"bdev_lvol_convert failed for {snap_uuid}"
             if sec_rpc:

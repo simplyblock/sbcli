@@ -5,7 +5,7 @@ import sys
 import time
 import uuid
 from datetime import datetime
-from typing import List, Tuple, Optional
+from typing import Any, Dict, List, Tuple, Optional
 
 from simplyblock_core import utils, constants
 from simplyblock_core.controllers import snapshot_controller, pool_controller, lvol_events, tasks_controller, \
@@ -408,7 +408,8 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
                 distr_vuid=0, max_rw_iops=0, max_rw_mbytes=0, max_r_mbytes=0, max_w_mbytes=0,
                 with_snapshot=False, max_size=0, lvol_priority_class=0,
                 uid=None, pvc_name=None, namespaced=None, max_namespace_per_subsys=None, fabric="tcp", ndcs=0, npcs=0,
-                allowed_hosts=None, do_replicate=False, replication_cluster_id=None, crypto_key=None):
+                allowed_hosts=None, do_replicate=False, replication_cluster_id=None, crypto_key=None,
+                replication_policy=None):
     db_controller = DBController()
     logger.info(f"Adding LVol: {name}")
     if max_namespace_per_subsys is None:
@@ -918,6 +919,20 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         for host_nqn in pool.allowed_hosts:
             logger.info(f"Adding host {host_nqn} to lvol {lvol.get_id()}")
             add_host_to_lvol(lvol.get_id(), host_nqn)
+
+    if replication_policy:
+        # Optional at create time: assigning a policy configures replication for
+        # the volume (destination, cadence and mode all come from the policy).
+        # Imported here because replication_policy_controller imports this module.
+        from simplyblock_core.controllers import replication_policy_controller
+        try:
+            replication_policy_controller.attach_policy(lvol.get_id(), replication_policy)
+        except Exception as e:
+            # The volume itself is created and usable; surface the failure
+            # instead of silently leaving it unreplicated.
+            logger.error("Volume %s created but replication policy %s could not be "
+                         "attached: %s", lvol.get_id(), replication_policy, e)
+            return lvol.uuid, f"Volume created but replication policy could not be attached: {e}"
 
     return lvol.uuid, None
 
@@ -1848,14 +1863,16 @@ def _delete_lvol_from_all_nodes(lvol, snode, force_delete, lock=True) -> None:
                             snode.cluster_id, lvol.lvs_name, node_id=nl.get_id(), enabled=_inner):
                         ok = _remove_lvol_subsys_from_node(lvol, nl.rpc_client())
                         if ok and async_completed["done"]:
-                            # The sync leg this non-leader owes. The leader's
-                            # async delete removes the blob but cannot clear
-                            # the peers' lvol REGISTRATIONS. Doing it here,
-                            # rather than leaving the whole sync stage to
-                            # lvol_monitor, is what keeps a delete at ~0.3s
-                            # instead of minutes behind a drain backlog.
-                            # -19 ("no such device") means this peer is
-                            # already clean and counts as done.
+                            # The sync leg this non-leader owes: it clears the
+                            # peer's lvol REGISTRATION. (The leader's async
+                            # delete only clears data clusters; the leader's
+                            # own blob/bdev removal is the sync delete that
+                            # lvol_monitor's finish phase issues.) Doing the
+                            # peer legs here, rather than leaving the whole
+                            # sync stage to lvol_monitor, is what keeps a
+                            # delete at ~0.3s instead of minutes behind a
+                            # drain backlog. -19 ("no such device") means this
+                            # peer is already clean and counts as done.
                             ret, err = nl.rpc_client().delete_lvol(
                                 f"{lvol.lvs_name}/{lvol.lvol_bdev}", sync=True)
                             synced = bool(ret) or bool(
@@ -2240,7 +2257,10 @@ def get_replication_info(lvol_id_or_name):
 
     tasks = []
     snaps = []
-    out = {
+    # Heterogeneous status payload (str / int / None / list). Annotated so the
+    # numeric comparisons further down ("lag > lag_budget",
+    # "outstanding_count > 0") are not inferred as int-vs-object.
+    out: Dict[str, Any] = {
         "last_snapshot_id": "",
         "last_replication_time": "",
         "last_replication_duration": "",
@@ -2251,6 +2271,13 @@ def get_replication_info(lvol_id_or_name):
         "outstanding_count": 0,         # snapshots queued but not yet replicated
         "outstanding_bytes": 0,         # bytes still to transfer
         "outstanding": "0B",            # human-readable outstanding bytes
+        # Health verdict — replication errors live in per-task strings, which
+        # nobody reads until a fail-over returns stale data. These summarise it.
+        "state": "not_replicating",      # in_sync|replicating|lagging|degraded|error
+        "healthy": False,
+        "last_error": "",               # newest failing task's reason
+        "failing_count": 0,             # tasks retrying right now
+        "max_retry_reached": 0,         # tasks that gave up
         "snaps": [],
         "tasks": [],
     }
@@ -2312,6 +2339,41 @@ def get_replication_info(lvol_id_or_name):
             duration = ""
         out["last_replication_duration"] = duration
 
+        # --- health verdict -------------------------------------------------
+        # A task that keeps retrying is the ONLY signal that replication is
+        # broken (network partition, node down, no LVS leader). It used to be
+        # buried in task.function_result, so a volume could sit hours behind
+        # while every status view looked normal.
+        failing = [t for t in tasks
+                   if t.status == JobSchedule.STATUS_SUSPENDED and not t.canceled]
+        gave_up = [t for t in tasks
+                   if t.status == JobSchedule.STATUS_DONE
+                   and str(t.function_result or "").startswith(("max retry", "task cancelled"))]
+        out["failing_count"] = len(failing)
+        out["max_retry_reached"] = len(gave_up)
+        if failing:
+            out["last_error"] = str(failing[-1].function_result or "")
+        elif gave_up:
+            out["last_error"] = str(gave_up[-1].function_result or "")
+
+        # Lag budget: three snapshot intervals (one missed cycle is not an
+        # incident), floor 5 min so a tiny interval does not flap the verdict.
+        interval_sec = max(1, lvol.replication_interval_min or 1) * 60
+        lag_budget = max(3 * interval_sec, 300)
+        lag = out["lag_seconds"]
+        if gave_up:
+            out["state"] = "error"
+        elif failing:
+            out["state"] = "degraded"
+        elif lag is not None and lag > lag_budget:
+            out["state"] = "lagging"
+        elif out["outstanding_count"] > 0:
+            out["state"] = "replicating"
+        else:
+            out["state"] = "in_sync"
+        out["healthy"] = out["state"] in ("in_sync", "replicating")
+        out["lag_budget_seconds"] = lag_budget
+
     return out
 
 
@@ -2356,18 +2418,68 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
     except ValueError as e:
         return False, str(e)
 
-    node = db_controller.get_storage_node_by_id(lvol.node_id)
-    cluster = db_controller.get_cluster_by_id(node.cluster_id)
-    if cluster.status == Cluster.STATUS_SUSPENDED and cluster.snapshot_replication_target_cluster:
-        logger.error("Cluster is suspended, looking for replicated lvol")
-        for lv in db_controller.get_mini_lvols():
-            if lv.nqn == lvol.nqn:
-                n = db_controller.get_storage_node_by_id(lv.node_id)
-                if n.cluster_id == cluster.snapshot_replication_target_cluster:
-                    logger.info(f"LVol with same nqn already exists on target cluster: {lv.get_id()}")
-                    lvol = lv # type: ignore[assignment]
-                    break
-    lvol = db_controller.get_lvol_by_id(lvol.get_id())
+    out = []
+    for path_lvol in _connect_path_volumes(db_controller, lvol):
+        out.extend(_connect_entries_for_volume(
+            db_controller, path_lvol, ctrl_loss_tmo, host_entry, host_nqn))
+    return out, None
+
+
+def _connect_path_volumes(db_controller, lvol):
+    """The volume(s) whose paths a client must connect, newest role first.
+
+    Driven purely by the replication relationship — NEVER by Cluster.status. A
+    source cluster that is merely assumed dead auto-recovers within minutes when
+    its SPDK containers restart, so the old "if cluster is SUSPENDED, look for a
+    copy with the same NQN" redirect stopped redirecting exactly when the volume
+    was still living on the target. It also consulted the single cluster-scoped
+    target field (wrong as soon as a cluster has several targets) and never fired
+    for a planned migration, because there the source is healthy.
+
+      replicating / none  -> the volume itself
+      cutover_pending     -> BOTH sides: the client must already hold the target
+                             paths when ANA flips, which is what makes a planned
+                             cutover non-disruptive
+      failed_over         -> the target copy, unconditionally
+      cutover_done        -> ONLY the post-move volume; the pre-migration paths
+                             are not handed out any more
+
+    The clone preserves the source NQN and ns_id, so every path returned here
+    aggregates into one multipath device on the client.
+    """
+    from simplyblock_core.models.lvol_model import LVolReplication
+
+    lvol_id = lvol.get_id()
+    rep = None
+    for candidate in reversed(db_controller.get_lvol_replication_objects()):
+        source_id = candidate.source_lvol.get_id() if candidate.source_lvol else ""
+        target_id = candidate.target_lvol.get_id() if candidate.target_lvol else ""
+        if lvol_id in (source_id, target_id):
+            rep = candidate
+            break
+
+    if rep is None or rep.state == LVolReplication.STATE_REPLICATING:
+        return [lvol]
+
+    def _live(candidate):
+        if candidate is None:
+            return None
+        try:
+            fresh = db_controller.get_lvol_by_id(candidate.get_id())
+        except KeyError:
+            return None
+        return None if fresh.status == LVol.STATUS_DELETED else fresh
+
+    source = _live(rep.source_lvol)
+    target = _live(rep.target_lvol)
+
+    if rep.state == LVolReplication.STATE_CUTOVER_PENDING:
+        return [v for v in (target, source) if v is not None] or [lvol]
+    # failed_over and cutover_done: the volume now lives on the target side.
+    return [target or source or lvol]
+
+
+def _connect_entries_for_volume(db_controller, lvol, ctrl_loss_tmo, host_entry, host_nqn):
     out = []
     nodes_ids = []
     if lvol.ha_type == 'single':
@@ -2856,12 +2968,27 @@ def replication_trigger(lvol_id):
 
     return out
 
-def replication_start(lvol_id, replication_cluster_id=None, mode=None, interval_min=None):
+def replication_start(lvol_id, replication_cluster_id=None, mode=None, interval_min=None,
+                      from_policy=False):
+    """Enable replication for a volume and pick its destination node.
+
+    This is the step a replication POLICY performs for you: attaching a policy
+    calls it with the target, cadence and mode taken from the policy. Calling it
+    directly on a policy-managed volume is refused, because the volume would then
+    replicate on settings that silently diverge from its policy. It stays
+    available for volumes that are managed without a policy.
+    """
     db_controller = DBController()
     try:
         lvol = db_controller.get_lvol_by_id(lvol_id)
     except KeyError as e:
         logger.error(e)
+        return False
+
+    if not from_policy and getattr(lvol, 'replication_policy_id', ''):
+        logger.error("LVol %s follows replication policy %s; change the policy "
+                     "instead of starting replication directly",
+                     lvol_id, lvol.replication_policy_id)
         return False
 
     lvol.do_replicate = True
@@ -2902,23 +3029,73 @@ def replication_start(lvol_id, replication_cluster_id=None, mode=None, interval_
     logger.info("Setting LVol do_replicate: True")
 
     all_snaps = db_controller.get_snapshots()
-    for snap in all_snaps:
-        if snap.lvol.uuid == lvol.uuid:
-            if not snap.target_replicated_snap_uuid:
-                matched = False
-                for sn in all_snaps:
-                    if sn.lvol.node_id == lvol.replication_node_id and sn.data_uuid == snap.data_uuid:
-                        snap = db_controller.get_snapshot_by_id(snap.get_id())
-                        snap.target_replicated_snap_uuid = sn.get_id()
-                        snap.write_to_db()
-                        matched = True
-                        break
-                if not matched:
-                    task = tasks_controller.add_snapshot_replication_task(snap.cluster_id, snap.lvol.node_id, snap.get_id())
-                    # task may be None if the scheduler is at capacity; the next poll cycle will retry
-                    if task:
-                        snapshot_events.replication_task_created(snap)
+    for snap in replication_backlog(db_controller, lvol, all_snaps):
+        if not snap.target_replicated_snap_uuid:
+            matched = False
+            for sn in all_snaps:
+                if sn.lvol.node_id == lvol.replication_node_id and sn.data_uuid == snap.data_uuid:
+                    snap = db_controller.get_snapshot_by_id(snap.get_id())
+                    snap.target_replicated_snap_uuid = sn.get_id()
+                    snap.write_to_db()
+                    matched = True
+                    break
+            if not matched:
+                task = tasks_controller.add_snapshot_replication_task(snap.cluster_id, snap.lvol.node_id, snap.get_id())
+                # task may be None if the scheduler is at capacity; the next poll cycle will retry
+                if task:
+                    snapshot_events.replication_task_created(snap)
     return True
+
+
+def replication_backlog(db_controller, lvol, all_snaps=None, max_depth=64):
+    """Every snapshot the volume's data depends on, oldest first.
+
+    A volume's data lives in a blob chain: its own clusters, plus everything
+    inherited from the snapshots below it. A volume sitting on a snapshot of
+    another volume is no different structurally — so the backlog is the whole
+    ancestor chain, not just the snapshots recorded against this volume's uuid.
+
+    Queueing only ``snap.lvol.uuid == lvol.uuid`` happens to be complete for a
+    volume that owns its whole chain, which is why plain migration works. For a
+    volume that sits on someone else's snapshot (a failed-over volume is the
+    common case) the ancestors were skipped, so a destination that does not
+    already hold them receives the upper deltas with holes underneath.
+
+    Only ancestors at or below each branch point are included: snapshots taken
+    on an ancestor volume AFTER we branched off it are not part of our data.
+    """
+    if all_snaps is None:
+        all_snaps = db_controller.get_snapshots()
+    by_lvol: Dict[str, list] = {}
+    for s in all_snaps:
+        by_lvol.setdefault(s.lvol.uuid, []).append(s)
+
+    wanted = {}
+    current = lvol
+    cutoff = None          # None == no branch point yet: take all of ours
+    seen_lvols = set()
+    for _ in range(max_depth):
+        if current is None or current.uuid in seen_lvols:
+            break
+        seen_lvols.add(current.uuid)
+        for s in by_lvol.get(current.uuid, []):
+            if cutoff is None or s.created_at <= cutoff:
+                wanted[s.get_id()] = s
+        parent_uuid = getattr(current, "cloned_from_snap", "")
+        if not parent_uuid:
+            break
+        try:
+            parent = db_controller.get_snapshot_by_id(parent_uuid)
+        except KeyError:
+            logger.warning("Chain of %s stops at missing snapshot %s",
+                           lvol.get_id(), parent_uuid)
+            break
+        wanted[parent.get_id()] = parent      # the branch point itself
+        cutoff = parent.created_at
+        current = parent.lvol
+
+    # Oldest first: the destination chains each arrival onto its predecessor.
+    return sorted(wanted.values(), key=lambda s: s.created_at)
 
 
 def list_by_node(node_id=None):
@@ -3016,12 +3193,25 @@ def clone_lvol(lvol_id, clone_name, new_size=None, pvc_name=None):
 
 
 
-def replication_stop(lvol_id, delete=False):
+def replication_stop(lvol_id, delete=False, from_policy=False):
+    """Stop replicating a volume.
+
+    Detaching a replication POLICY does this for you, and additionally cleans up
+    the internal replication snapshots on both sides. Calling it directly on a
+    policy-managed volume is refused: the volume would stop replicating while
+    still claiming to follow a policy.
+    """
     db_controller = DBController()
     try:
         lvol = db_controller.get_lvol_by_id(lvol_id)
     except KeyError as e:
         logger.error(e)
+        return False
+
+    if not from_policy and getattr(lvol, 'replication_policy_id', ''):
+        logger.error("LVol %s follows replication policy %s; detach the policy "
+                     "instead of stopping replication directly",
+                     lvol_id, lvol.replication_policy_id)
         return False
 
     logger.info("Setting LVol do_replicate: False")
@@ -3061,6 +3251,9 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
         new_lvol.nodes.append(target_node.tertiary_node_id)
     new_lvol.replication_node_id = ""
     new_lvol.do_replicate = False
+    # The policy belongs to the SOURCE cluster; a deep copy would carry its id to
+    # the other cluster, where it names nothing and would block fail-back.
+    new_lvol.replication_policy_id = ""
     new_lvol.cloned_from_snap = snapshot.get_id()
     new_lvol.pool_uuid = pool_uuid
     new_lvol.lvs_name = target_node.lvstore
@@ -3330,15 +3523,19 @@ def _resolve_target_map_id(target_node, lvol_bdev):
 def replication_commit(lvol_id):
     """Planned cutover for migration mode (and the final step of fail-back).
 
-    Builds the writable target lvol on top of the last replicated snapshot,
-    exposes it inaccessible (so it does not serve IO until cutover), then
-    enqueues the FN_REPLICATION_FINAL task that freezes source IO, transfers the
-    remaining lvol delta via bdev_lvol_transfer_final_step, and flips ANA so the
-    client fails over to the target paths.
+    Enqueues the FN_REPLICATION_FINAL task, which performs an iterative
+    delta-shrink before the freeze: snapshot -> wait until replicated+converted
+    on the target -> snapshot again (the delta now covers only the wait
+    window) -> wait again -> IMMEDIATELY build the target clone on the last
+    replicated snapshot and run the final step. Two shrink rounds bound the
+    freeze-window residual to seconds of writes, and — unlike the previous
+    single fire-and-forget pre-snapshot — guarantee the cutover base actually
+    REACHED the target: the old flow selected a base 1-2 intervals old and
+    froze without waiting, silently losing the writes in between.
 
-    Continuous replication is expected to have kept the lag small; the final
-    step copies only the residual delta under a brief IO freeze. Returns a dict
-    describing the queued cutover, or (False, error).
+    The first shrink snapshot is taken here so the pipeline starts immediately;
+    the runner owns the rest. Returns a dict describing the queued cutover, or
+    (False, error).
     """
     db_controller = DBController()
     try:
@@ -3357,73 +3554,33 @@ def replication_commit(lvol_id):
         return False
 
     source_node = db_controller.get_storage_node_by_id(lvol.node_id)
-    source_cluster = db_controller.get_cluster_by_id(source_node.cluster_id)
-    target_cluster = db_controller.get_cluster_by_id(source_cluster.snapshot_replication_target_cluster)
 
-    # Take a final short internal snapshot to shrink the delta the freeze must
-    # copy. Best-effort: the final step covers whatever residual remains.
-    _snap_uuid, snap_err = snapshot_controller.add(
+    # Shrink round 1: freeze the current top delta and let the normal
+    # replication pipeline carry it (snapshot_controller.add auto-enqueues the
+    # replication task for do_replicate volumes).
+    snap_uuid, snap_err = snapshot_controller.add(
         lvol_id, f"repl_commit_{uuid.uuid4()}", snap_type=SnapShot.TYPE_INTERNAL)
     if snap_err:
-        logger.warning(f"Final pre-cutover snapshot failed (continuing): {snap_err}")
-
-    new_lvol, snapshot, error = _clone_from_last_replicated(
-        db_controller, lvol_id, lvol, target_node,
-        source_cluster.snapshot_replication_target_pool, source_node.cluster_id)
-    if error:
-        logger.error(f"Cutover clone failed for lvol {lvol_id}: {error}")
-        return False, error
-
-    new_lvol.status = LVol.STATUS_ONLINE
-    new_lvol.write_to_db(db_controller.kv_store)
-
-    # Expose inaccessible until cutover flips ANA — the client may already be
-    # multipath-connected to these target paths (migration mode).
-    suspend_lvol(new_lvol.get_id())
-
-    tgt_map_id = _resolve_target_map_id(target_node, new_lvol.lvol_bdev)
-    if tgt_map_id is None:
-        logger.error(f"Could not resolve target map_id for {new_lvol.lvol_bdev}")
-        delete_lvol_from_node(new_lvol, target_node)
-        db_controller.release_lvol_ns_slot(new_lvol)
-        return False, "Could not resolve target map_id"
-
-    lvol_replication = LVolReplication()
-    lvol_replication.uuid = str(uuid.uuid4())
-    lvol_replication.create_dt = str(datetime.now())
-    lvol_replication.source_lvol = lvol
-    lvol_replication.target_lvol = new_lvol
-    lvol_replication.source_cluster_id = source_cluster.get_id()
-    lvol_replication.target_cluster_id = target_cluster.get_id()
-    lvol_replication.mode = lvol.replication_mode
-    lvol_replication.state = LVolReplication.STATE_CUTOVER_PENDING
-    lvol_replication.direction = LVolReplication.DIRECTION_TO_TARGET
-    lvol_replication.target_nqn = new_lvol.nqn
-    lvol_replication.target_ns_id = new_lvol.ns_id
-    lvol_replication.write_to_db(db_controller.kv_store)
+        logger.error(f"Shrink snapshot failed: {snap_err}")
+        return False, f"Shrink snapshot failed: {snap_err}"
 
     task = tasks_controller.add_replication_final_task(
-        source_cluster.get_id(), source_node.get_id(),
+        source_node.cluster_id, source_node.get_id(),
         {
             "lvol_id": lvol_id,
             "src_node_id": source_node.get_id(),
             "tgt_node_id": target_node.get_id(),
-            "tgt_lvol_composite": new_lvol.top_bdev,
-            "tgt_map_id": tgt_map_id,
-            "tgt_snap_composite": snapshot.snap_bdev,
             "operation": "replicate",
-            "replication_id": lvol_replication.get_id(),
             "final_state": LVolReplication.STATE_CUTOVER_DONE,
+            "shrink_round": 1,
+            "shrink_snap_id": snap_uuid,
+            "shrink_deadline": int(time.time()) + constants.REPL_CUTOVER_SHRINK_TIMEOUT_SEC,
         })
     if not task:
         logger.error("Failed to enqueue replication-final task")
         return False, "Failed to enqueue cutover task"
 
-    return {
-        "replication_id": lvol_replication.get_id(),
-        "target_lvol_id": new_lvol.uuid,
-        "cutover_task_queued": True,
-    }
+    return {"cutover_task_queued": True, "task_id": task}
 
 
 def replication_failback(lvol_id, source_cluster_id=None, pool_uuid=None):
@@ -3468,14 +3625,16 @@ def replication_failback(lvol_id, source_cluster_id=None, pool_uuid=None):
         lvol.replication_node_id = orig_node_id
         lvol.write_to_db()
         return replication_start(
-            lvol_id, replication_cluster_id=rep.source_cluster_id, mode="migration")
+            lvol_id, replication_cluster_id=rep.source_cluster_id, mode="migration",
+            from_policy=True)
 
     # Fresh source cluster: full replication to a freshly selected node.
     if not source_cluster_id:
         logger.error("source_cluster_id required for fail-back to a fresh cluster")
         return False, "source_cluster_id required"
     return replication_start(
-        lvol_id, replication_cluster_id=source_cluster_id, mode="migration")
+        lvol_id, replication_cluster_id=source_cluster_id, mode="migration",
+        from_policy=True)
 
 
 def list_replication_tasks(lvol_id):

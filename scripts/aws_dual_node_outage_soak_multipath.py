@@ -578,6 +578,8 @@ class SoakRunner:
         self._forbidden_pairs = set()
         #: Cumulative count of tolerated (phase-2) max_latency violations.
         self.latency_violations = 0
+        #: volume_id -> path count observed at baseline (see _verify_client_paths)
+        self._baseline_client_paths = {}
 
     # ----- hosts / plumbing -------------------------------------------------
 
@@ -1396,6 +1398,10 @@ class SoakRunner:
                     problems.extend(self._verify_node_spdk(uuid))
                 except Exception as exc:
                     problems.append(f"{uuid[:12]}: verification error: {exc}")
+            try:
+                problems.extend(self._verify_client_paths())
+            except Exception as exc:
+                problems.append(f"client: path verification error: {exc}")
             elapsed = time.time() - started
             if not problems:
                 if attempt == 1:
@@ -1424,6 +1430,85 @@ class SoakRunner:
         self.logger.log(
             f"{label}: {len(problems)} problem(s) unhealed after {timeout}s, "
             f"continuing (non-strict)")
+
+    def _verify_client_paths(self):
+        """Verify the CLIENT's view of every volume's paths.
+
+        Target-side state being perfect is not sufficient, and assuming it was
+        cost a whole run: soak 2026-08-12 iteration 7 lost all IO on a volume
+        whose paths were TCP-live and whose target had subsystem, namespace and
+        both listeners verified present, while the client's multipath head
+        reported "no usable path" and EIO'd the application.
+
+        Scope note: this checks what the client actually exposes on this kernel
+        — per-subsystem path count and per-path State from ``nvme list-subsys``,
+        plus the head namespace block device. It deliberately does NOT try to
+        read per-path namespace nodes or ANA state: with nvme_core multipath
+        this kernel publishes only the head namespace (``nvme1n1``) and the
+        controllers, no ``nvmeXcYnZ`` per-path nodes, and this nvme-cli reports
+        no ANAState field. An earlier version of this check globbed for those
+        and reported 5-of-6 paths dead on every healthy volume.
+
+        The expected path count per volume is learned at baseline rather than
+        hardcoded, so a path that vanishes entirely is caught as well as one
+        that goes non-live.
+        """
+        _, stdout_text, _ = self.client.run(
+            "sudo nvme list-subsys -o json", timeout=120, check=False,
+            label="verify client paths")
+        text = (stdout_text or "").strip()
+        if not text:
+            return ["client: nvme list-subsys returned nothing"]
+        try:
+            doc = json.loads(text)
+        except json.JSONDecodeError as exc:
+            return [f"client: cannot parse nvme list-subsys output: {exc}"]
+
+        subsystems = []
+        for entry in (doc if isinstance(doc, list) else [doc]):
+            if isinstance(entry, dict):
+                subsystems.extend(entry.get("Subsystems") or [])
+        problems = []
+        seen = {}
+        for subsystem in subsystems:
+            nqn = subsystem.get("NQN", "")
+            if ":lvol:" not in nqn:
+                continue
+            volume = nqn.split(":lvol:")[-1]
+            paths = subsystem.get("Paths") or []
+            not_live = [
+                f"{p.get('Name')}={p.get('State')}" for p in paths
+                if p.get("State") != "live"
+            ]
+            # ANAState is absent on this nvme-cli; honour it when present.
+            bad_ana = [
+                f"{p.get('Name')}:ana={p.get('ANAState')}" for p in paths
+                if p.get("ANAState") not in (None, "optimized", "non-optimized",
+                                             "non_optimized")
+            ]
+            seen[volume] = len(paths)
+            expected = self._baseline_client_paths.get(volume)
+            if expected is None:
+                self._baseline_client_paths[volume] = len(paths)
+            elif len(paths) < expected:
+                problems.append(
+                    f"client: {volume[:12]} has {len(paths)} path(s), "
+                    f"expected {expected} — a path disappeared from the "
+                    f"multipath head")
+            if not_live:
+                problems.append(
+                    f"client: {volume[:12]} path(s) not live: "
+                    f"{', '.join(not_live)}")
+            if bad_ana:
+                problems.append(
+                    f"client: {volume[:12]} unusable ANA state: "
+                    f"{', '.join(bad_ana)}")
+
+        tracked = {job.volume_id for job in self.fio_jobs}
+        for volume_id in tracked - set(seen):
+            problems.append(
+                f"client: {volume_id[:12]} has no nvme-subsystem entry at all")
+        return problems
 
     def _verify_node_spdk(self, uuid):
         host = self._node_host(uuid)

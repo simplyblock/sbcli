@@ -223,20 +223,120 @@ def _find_lvs_leader(cluster_id, lvs_name, all_nodes):
 _OBJECT_LOCK_PREFIX = "__obj__"
 
 
+# A peer that is not running owes nothing: its in-memory registration dies with
+# the process and is never rebuilt, because the object's record is already gone
+# from the DB by the time phase-2 runs. Only a LIVE peer (serving, or suspended
+# but still up) has state that a sync delete must clear.
+_PEER_ALIVE_STATUSES = (StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED)
+
+
+def sync_delete_on_peer(peer_node, bdev_name, primary_node_id, special_delete=False):
+    """Phase-2 sync delete on one peer. Returns True when nothing is owed.
+
+    Attempt first, classify afterwards. Pre-judging by node status queues a
+    durable task for every peer that is merely suspended, and those tasks then
+    refuse to run *because* the node is suspended — a pile that also blocks the
+    node's own shutdown (lab run 15 case 6: 46 queued sync-deletes, node stuck
+    in `suspended`). A failure is only worth a retry task when the peer is
+    still alive; when it is gone, the delete is already satisfied.
+    """
+    try:
+        ret, err = peer_node.rpc_client().delete_lvol(
+            bdev_name, sync=True, special_delete=special_delete)
+    except Exception as e:
+        ret, err = False, {"message": str(e)}
+    if ret:
+        return True
+    if isinstance(err, dict) and err.get("code") == -19:
+        logger.info(f"Sync delete of {bdev_name} on {peer_node.get_id()[:8]}: "
+                    f"already absent")
+        return True
+
+    try:
+        fresh = db_controller.get_storage_node_by_id(peer_node.get_id())
+        status = fresh.status
+    except Exception:
+        status = peer_node.status
+    if status not in _PEER_ALIVE_STATUSES:
+        logger.info(
+            f"Ignoring sync-delete failure for {bdev_name} on "
+            f"{peer_node.get_id()[:8]}: node is {status}, its registration is "
+            f"gone with the process and is not rebuilt")
+        return True
+
+    logger.error(f"Failed to sync delete bdev: {bdev_name} from node: "
+                 f"{peer_node.get_id()} ({err}), adding task...")
+    tasks_controller.add_lvol_sync_del_task(
+        peer_node.cluster_id, peer_node.get_id(), bdev_name, primary_node_id)
+    return False
+
+
+_CHAIN_WALK_MAX_HOPS = 256
+
+
+def resolve_chain_root(object_uuid):
+    """Return ``(chain_root_uuid, lvs_name)`` for any lvol/snapshot uuid.
+
+    A blob chain is the transitive closure of "is derived from": a volume, all
+    snapshots taken of it, every clone made from those snapshots, that clone's
+    snapshots, and so on. Deleting inside a chain rewrites its links (a delete
+    swap-merges the snapshot's segments into its successor), so operations on
+    ANY member mutate the same structure and must not interleave — while
+    different chains are independent and may run fully in parallel.
+
+    Walking upwards: a clone points at the snapshot it came from
+    (``LVol.cloned_from_snap``), a snapshot points at the volume it was taken
+    from (``SnapShot.lvol``). The walk ends at the base volume, whose uuid
+    names the chain. Unknown uuids and broken links resolve to the uuid itself
+    (its own one-member chain — never a shared key, so a corrupt record can
+    only under-share the lock, never wrongly alias two real chains).
+    """
+    current = object_uuid
+    lvs_name = ""
+    for _ in range(_CHAIN_WALK_MAX_HOPS):
+        obj = None
+        try:
+            obj = db_controller.get_lvol_by_id(current)
+        except Exception:
+            obj = None
+        if obj is not None:
+            lvs_name = getattr(obj, "lvs_name", "") or lvs_name
+            parent = getattr(obj, "cloned_from_snap", "")
+            if not parent:
+                return current, lvs_name
+            current = parent
+            continue
+        try:
+            snap = db_controller.get_snapshot_by_id(current)
+        except Exception:
+            return current, lvs_name
+        snap_lvol = getattr(snap, "lvol", None)
+        lvs_name = getattr(snap_lvol, "lvs_name", "") or lvs_name
+        parent_lvol_id = snap_lvol.get_id() if snap_lvol is not None else ""
+        if not parent_lvol_id or parent_lvol_id == current:
+            return current, lvs_name
+        current = parent_lvol_id
+    logger.warning("Chain walk for %s exceeded %d hops; using %s as chain root",
+                   object_uuid, _CHAIN_WALK_MAX_HOPS, current)
+    return current, lvs_name
+
+
 @contextlib.contextmanager
 def object_mutation_lock(cluster_id, object_uuid, *, enabled=True):
     """OUTER lock — serialize the WHOLE multi-node sequence of one operation on
-    a single object (lvol / snapshot / clone) and exclude any other operation
-    (create / delete / resize / clone) on that SAME object while it runs.
+    a CHAIN (a volume, its snapshots, their clones, recursively) and exclude
+    any other operation (create / delete / resize / clone) on that same chain
+    while it runs.
 
     Held across the entire controller action; the inner per-lvstore lock
     (``lvstore_op_lock``) is taken and released around each single-node RPC
-    inside it. Because same-object operations serialize here, the per-object
-    blob chain (snapshots of one lvol, clones of one snapshot) is always
-    created and registered in order — which is the only place blobid order
-    matters; distinct objects live in distinct chains.
+    inside it. The scope is the chain, not the single object: a delete
+    swap-merges segments into the neighbouring snapshot and re-links parents,
+    so a concurrent create/clone/delete anywhere in the same chain mutates the
+    structure the first operation is walking. Distinct chains never share blob
+    links, so they proceed concurrently.
 
-    Reuses the lvstore-lock primitive keyed on the object uuid (namespaced via
+    Reuses the lvstore-lock primitive keyed on the CHAIN ROOT (namespaced via
     ``_OBJECT_LOCK_PREFIX`` so it never collides with a real lvs_name). The
     outer key and the inner lvs_name are different keys in the same lock table,
     always acquired outer-then-inner, so the two never deadlock.
@@ -244,11 +344,13 @@ def object_mutation_lock(cluster_id, object_uuid, *, enabled=True):
     if not enabled or not cluster_id or not object_uuid:
         yield
         return
-    key = f"{_OBJECT_LOCK_PREFIX}/{object_uuid}"
+    chain_root, chain_lvs = resolve_chain_root(object_uuid)
+    key = f"{_OBJECT_LOCK_PREFIX}/{chain_lvs}:{chain_root}"
     owner = _new_lvstore_lock_owner()
     if not _acquire_lvstore_lock_blocking(db_controller, cluster_id, key, owner):
         raise PreconditionError(
-            f"Timed out acquiring object lock on {object_uuid}")
+            f"Timed out acquiring chain lock on {chain_root} "
+            f"(for {object_uuid})")
     stop = threading.Event()
     threading.Thread(
         target=_lvstore_lock_heartbeat,
@@ -275,18 +377,20 @@ def _rollback_snapshot_bdev(cluster_id, lvs_name, primary_node, snap_bdev_name,
     created on the leader but must be rolled back after a replica-registration
     failure.
 
-    Invariant (revised 2026-07-27, run 20260725): an async delete must ALWAYS
-    be followed by sync deletes on EVERY non-leader HA member of the LVS —
-    unconditionally, never on the leader. The async delete on the leader
-    removes the blob (and carries the deletion through the journal); what it
-    cannot remove is the peers' lvol REGISTRATIONS, and a failed register RPC
-    never proves a peer holds no registration: the peer may have registered
-    before the failure, a timed-out register may have landed anyway, and
-    journal replay on a restart-gated peer can materialize the blob with no
-    registration at all. The previous "registered + restart-gated only" set
-    left SNAP_3299 (register answered -19) with an async-only delete — the
-    exact async-without-sync the delete protocol forbids. A needless sync
-    delete is tolerated by design: -19 answers "already clean".
+    Invariant (revised 2026-08-13, upgrade run 20260812): an async delete must
+    ALWAYS be followed by a sync delete on the LEADER plus sync deletes on
+    EVERY non-leader HA member of the LVS. The async delete on the leader only
+    clears the data clusters — the blob metadata stays on disk and the bdev
+    stays registered until the leader's sync delete removes them (SPDK admits
+    it once the async pass reports done). The peers' sync deletes clear their
+    lvol REGISTRATIONS, and a failed register RPC never proves a peer holds no
+    registration: the peer may have registered before the failure, a timed-out
+    register may have landed anyway, and journal replay on a restart-gated
+    peer can materialize the blob with no registration at all. The previous
+    "registered + restart-gated only" set left SNAP_3299 (register answered
+    -19) with an async-only delete — the exact async-without-sync the delete
+    protocol forbids. A needless sync delete is tolerated by design: -19
+    answers "already clean".
 
     The primary's lvstore lock is held across the async delete AND its
     completion poll, so no other object create/delete interleaves with the
@@ -322,6 +426,15 @@ def _rollback_snapshot_bdev(cluster_id, lvs_name, primary_node, snap_bdev_name,
                 logger.error(f"Rollback: async delete of {bdev_name} did not "
                              f"complete within 15s on {primary_node.get_id()}; "
                              f"peers still get their sync deletes")
+            else:
+                # The async pass only cleared data clusters; this sync delete
+                # removes the leader's blob metadata and bdev registration
+                # (see invariant above). -19 answers "already clean".
+                ret2, err2 = rpc_client.delete_lvol(bdev_name, sync=True)
+                if not ret2 and not (err2 and err2.get("code") == -19):
+                    logger.error(f"Rollback: leader sync delete of {bdev_name} "
+                                 f"on {primary_node.get_id()[:8]} failed "
+                                 f"({err2})")
 
     # Every non-leader LVS member owes a sync delete (see invariant above).
     # Everyone reachable gets it now (under their own lvstore lock); everyone

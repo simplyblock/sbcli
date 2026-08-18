@@ -224,3 +224,77 @@ class TestVerifyApiToken:
             with pytest.raises(HTTPException) as exc_info:
                 auth.verify_api_token(sa_name=None, authorized_cluster_id=None, cluster_id=None)
         assert exc_info.value.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# verify_metrics_token
+# ---------------------------------------------------------------------------
+
+class TestVerifyMetricsToken:
+    """The metrics gate is wider than the general one, and only wider there.
+
+    Every test that admits the metrics service account is paired with the same
+    principal being refused by `verify_api_token`, since the split is only
+    worth anything if the scrape credential stays confined to the exporter.
+    """
+
+    _ADMIN_SA = "system:serviceaccount:default:op"
+    _METRICS_SA = "system:serviceaccount:monitoring:prometheus"
+
+    def _settings(self, admins: list[str], metrics: list[str]) -> MagicMock:
+        s = MagicMock()
+        s.k8s_admin_service_accounts = admins
+        s.k8s_metrics_service_accounts = metrics
+        return s
+
+    def _both_lists(self) -> MagicMock:
+        return self._settings([self._ADMIN_SA], [self._METRICS_SA])
+
+    def test_passes_for_metrics_sa(self):
+        import simplyblock_web.api.v2._auth as auth
+
+        with patch.object(auth, "_web_settings", self._both_lists()):
+            auth.verify_metrics_token(sa_name=self._METRICS_SA, authorized_cluster_id=None)
+
+    def test_metrics_sa_is_refused_by_the_general_gate(self):
+        import simplyblock_web.api.v2._auth as auth
+
+        with patch.object(auth, "_web_settings", self._both_lists()):
+            with pytest.raises(HTTPException) as exc_info:
+                auth.verify_api_token(
+                    sa_name=self._METRICS_SA,
+                    authorized_cluster_id=None,
+                    cluster_id=None,
+                )
+        assert exc_info.value.status_code == 401
+
+    def test_passes_for_admin_sa(self):
+        import simplyblock_web.api.v2._auth as auth
+
+        with patch.object(auth, "_web_settings", self._both_lists()):
+            auth.verify_metrics_token(sa_name=self._ADMIN_SA, authorized_cluster_id=None)
+
+    def test_passes_for_cluster_auth(self):
+        import simplyblock_web.api.v2._auth as auth
+
+        with patch.object(auth, "_web_settings", self._both_lists()):
+            auth.verify_metrics_token(sa_name=None, authorized_cluster_id=uuid4())
+
+    def test_raises_401_for_unlisted_sa(self):
+        import simplyblock_web.api.v2._auth as auth
+
+        with patch.object(auth, "_web_settings", self._both_lists()):
+            with pytest.raises(HTTPException) as exc_info:
+                auth.verify_metrics_token(
+                    sa_name="system:serviceaccount:default:stranger",
+                    authorized_cluster_id=None,
+                )
+        assert exc_info.value.status_code == 401
+
+    def test_raises_401_when_metrics_list_is_empty(self):
+        import simplyblock_web.api.v2._auth as auth
+
+        with patch.object(auth, "_web_settings", self._settings([self._ADMIN_SA], [])):
+            with pytest.raises(HTTPException) as exc_info:
+                auth.verify_metrics_token(sa_name=self._METRICS_SA, authorized_cluster_id=None)
+        assert exc_info.value.status_code == 401

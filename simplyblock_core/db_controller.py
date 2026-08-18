@@ -20,13 +20,14 @@ from simplyblock_core.models.port_stat import PortStat
 from simplyblock_core.models.backup import Backup, BackupChainLock, BackupPolicy, BackupPolicyAttachment
 from simplyblock_core.models.lvol_migration import LVolMigration
 from simplyblock_core.models.lvol_migration_group import LVolMigrationGroup
+from simplyblock_core.models.replication import ReplicationPolicy, ReplicationTarget
 from simplyblock_core.models.qos import QOSClass
 from simplyblock_core.models.snapshot import SnapShot, SnapShotMini
 from simplyblock_core.models.stats import DeviceStatObject, NodeStatObject, ClusterStatObject, LVolStatObject, \
     PoolStatObject, CachedLVolStatObject
 from simplyblock_core.models.storage_node import StorageNode, NodeLVolDelLock
 from simplyblock_core.models.lvstore_lock import LVStoreMutationLock
-from simplyblock_core.utils.helpers import single_or_none
+from simplyblock_core.utils.helpers import single, single_or_none
 
 logger = logging.getLogger(__name__)
 
@@ -167,6 +168,8 @@ class DBController(metaclass=Singleton):
         ]
 
     def get_storage_node_by_id(self, id: str) -> StorageNode:
+        if not id:
+            raise KeyError('StorageNode lookup with a blank id')
         node = single_or_none(StorageNode().read_from_db(self.kv_store, id))
         if node is None:
             raise KeyError(f'StorageNode {id} not found')
@@ -195,6 +198,8 @@ class DBController(metaclass=Singleton):
         return pools
 
     def get_pool_by_id(self, id: str) -> Pool:
+        if not id:
+            raise KeyError('Pool lookup with a blank id')
         pool = single_or_none(Pool().read_from_db(self.kv_store, id))
         if pool is None:
             raise KeyError(f'Pool {id} not found')
@@ -293,12 +298,16 @@ class DBController(metaclass=Singleton):
         return ret
 
     def get_snapshot_by_id(self, id: str) -> SnapShot:
+        if not id:
+            raise KeyError('Snapshot lookup with a blank id')
         snap = single_or_none(SnapShot().read_from_db(self.kv_store, id))
         if snap is None:
             raise KeyError(f'Snapshot {id} not found')
         return snap
 
     def get_lvol_by_id(self, id: str) -> LVol:
+        if not id:
+            raise KeyError('LVol lookup with a blank id')
         lvol = single_or_none(LVol().read_from_db(self.kv_store, id=id))
         if lvol is None:
             raise KeyError(f'LVol {id} not found')
@@ -321,6 +330,8 @@ class DBController(metaclass=Singleton):
         return lvol
 
     def get_mgmt_node_by_id(self, id: str) -> MgmtNode:
+        if not id:
+            raise KeyError('MgmtNode lookup with a blank id')
         node = single_or_none(MgmtNode().read_from_db(self.kv_store, id))
         if node is None:
             raise KeyError(f'ManagementNode {id} not found')
@@ -389,6 +400,8 @@ class DBController(metaclass=Singleton):
         return ret[0]
 
     def get_cluster_by_id(self, cluster_id: str) -> Cluster:
+        if not cluster_id:
+            raise KeyError('Cluster lookup with a blank id')
         cluster = single_or_none(Cluster().read_from_db(self.kv_store, id=cluster_id))
         if cluster is None:
             raise KeyError(f'Cluster {cluster_id} not found')
@@ -1371,19 +1384,82 @@ class DBController(metaclass=Singleton):
 
     def get_backup_chain(self, backup_id: str) -> List[Backup]:
         """Return the full backup chain ending at backup_id, oldest first."""
+        backups = self.get_backups()  # Avoid retrieving all backups multiple times
+
+        def find_backup(id_):
+            return single(backup for backup in backups if backup.uuid == id_)
+
+        next_id = backup_id
         chain = []
-        current_id = backup_id
-        visited = set()
-        while current_id and current_id not in visited:
-            visited.add(current_id)
-            try:
-                backup = self.get_backup_by_id(current_id)
-            except KeyError:
-                break
-            chain.append(backup)
-            current_id = backup.prev_backup_id
+        while next_id:
+            chain.append(find_backup(next_id))
+            next_id = chain[-1].prev_backup_id
+
         chain.reverse()
         return chain
+
+    def get_replication_targets(self, cluster_id: Optional[str] = None) -> List[ReplicationTarget]:
+        prefix = cluster_id if cluster_id else " "
+        return ReplicationTarget().read_from_db(self.kv_store, id=prefix)
+
+    def get_replication_target_by_id(self, target_id: str) -> ReplicationTarget:
+        if not target_id:
+            raise KeyError('ReplicationTarget lookup with a blank id')
+        # Accept the composite "cluster/uuid" as well as the bare uuid.
+        wanted = target_id.split('/')[-1]
+        target = single_or_none(t for t in self.get_replication_targets() if t.uuid == wanted)
+        if target is None:
+            raise KeyError(f'ReplicationTarget {target_id} not found')
+        return target
+
+    def get_replication_target_by_name(self, cluster_id: str, name: str) -> ReplicationTarget:
+        if not cluster_id or not name:
+            raise KeyError('ReplicationTarget lookup with a blank cluster id or name')
+        target = single_or_none(
+            t for t in self.get_replication_targets(cluster_id) if t.target_name == name)
+        if target is None:
+            raise KeyError(f'ReplicationTarget {name} not found on cluster {cluster_id}')
+        return target
+
+    def get_replication_policies(self, cluster_id: Optional[str] = None) -> List[ReplicationPolicy]:
+        prefix = cluster_id if cluster_id else " "
+        return ReplicationPolicy().read_from_db(self.kv_store, id=prefix)
+
+    def get_replication_policy_by_id(self, policy_id: str) -> ReplicationPolicy:
+        if not policy_id:
+            raise KeyError('ReplicationPolicy lookup with a blank id')
+        wanted = policy_id.split('/')[-1]
+        policy = single_or_none(p for p in self.get_replication_policies() if p.uuid == wanted)
+        if policy is None:
+            raise KeyError(f'ReplicationPolicy {policy_id} not found')
+        return policy
+
+    def get_replication_policy_by_name(self, cluster_id: str, name: str) -> ReplicationPolicy:
+        if not cluster_id or not name:
+            raise KeyError('ReplicationPolicy lookup with a blank cluster id or name')
+        policy = single_or_none(
+            p for p in self.get_replication_policies(cluster_id) if p.policy_name == name)
+        if policy is None:
+            raise KeyError(f'ReplicationPolicy {name} not found on cluster {cluster_id}')
+        return policy
+
+    def get_replication_policy_for_lvol(self, lvol) -> Optional[ReplicationPolicy]:
+        """The policy a volume follows, or None when it is not policy-managed."""
+        if not getattr(lvol, 'replication_policy_id', ''):
+            return None
+        try:
+            return self.get_replication_policy_by_id(lvol.replication_policy_id)
+        except KeyError:
+            return None
+
+    def get_lvols_by_replication_policy(self, policy_id: str) -> List[LVol]:
+        wanted = policy_id.split('/')[-1] if policy_id else ""
+        if not wanted:
+            return []
+        return [
+            lvol for lvol in self.get_lvols()
+            if getattr(lvol, 'replication_policy_id', '').split('/')[-1] == wanted
+        ]
 
     def get_backup_policies(self, cluster_id: Optional[str] = None) -> List[BackupPolicy]:
         prefix = cluster_id if cluster_id else " "

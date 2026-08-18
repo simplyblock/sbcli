@@ -32,6 +32,7 @@ before the cutover runner flips ANA.
 """
 import json
 import os
+import re
 import socket
 import sys
 import time
@@ -95,7 +96,7 @@ SSH_RETRIES = 4
 SSH_RETRY_BACKOFF = 5
 
 
-def run(ip, key_path, cmd, check=True, quiet=False, timeout=900):
+def run(ip, key_path, cmd, check=True, quiet=False, timeout=900, replayable=False):
     if not quiet:
         print(f"  [{ip}] $ {cmd}")
 
@@ -104,45 +105,64 @@ def run(ip, key_path, cmd, check=True, quiet=False, timeout=900):
     # been dispatched and re-running it could repeat a non-idempotent step
     # (nvme connect, mkfs, volume delete). Long polling loops open a fresh
     # connection per call and can trip sshd's rate limiting -> WinError 10054.
-    ssh = out = err = None
-    for attempt in range(1, SSH_RETRIES + 1):
-        try:
-            ssh = _ssh(ip, key_path)
-            _in, out, err = ssh.exec_command(cmd, timeout=timeout)
-            break
-        except (paramiko.SSHException, OSError, EOFError) as exc:
-            if ssh is not None:
-                try:
-                    ssh.close()
-                except Exception:
-                    pass
-            if attempt == SSH_RETRIES:
-                raise RuntimeError(
-                    f"SSH transport failure on {ip} after {SSH_RETRIES} attempts: {exc}") from exc
-            delay = SSH_RETRY_BACKOFF * attempt
-            print(f"  [{ip}] SSH transport failure ({exc}); reconnecting in {delay}s "
-                  f"({attempt + 1}/{SSH_RETRIES})")
-            time.sleep(delay)
+    # `replayable=True` marks a read-only command (DB/status query) whose whole
+    # dispatch may be repeated: a mid-exec socket reset then retries instead of
+    # failing the case (a 10054 during a cutover-wait poll aborted a healthy
+    # case 1 on 2026-08-14, run 9).
+    for replay in range(1, SSH_RETRIES + 1):
+        ssh = out = err = None
+        for attempt in range(1, SSH_RETRIES + 1):
+            try:
+                ssh = _ssh(ip, key_path)
+                _in, out, err = ssh.exec_command(cmd, timeout=timeout)
+                break
+            except (paramiko.SSHException, OSError, EOFError) as exc:
+                if ssh is not None:
+                    try:
+                        ssh.close()
+                    except Exception:
+                        pass
+                if attempt == SSH_RETRIES:
+                    raise RuntimeError(
+                        f"SSH transport failure on {ip} after {SSH_RETRIES} attempts: {exc}") from exc
+                delay = SSH_RETRY_BACKOFF * attempt
+                print(f"  [{ip}] SSH transport failure ({exc}); reconnecting in {delay}s "
+                      f"({attempt + 1}/{SSH_RETRIES})")
+                time.sleep(delay)
 
-    try:
-        o = out.read().decode()
-        e = err.read().decode()
-        rc = out.channel.recv_exit_status()
-    except (socket.timeout, TimeoutError, OSError, paramiko.SSHException) as exc:
-        # The command was dispatched, so we cannot safely replay it. For
-        # best-effort work (check=False) a hang must not kill the run: an
-        # `umount`/`nvme disconnect` can block indefinitely once the cutover has
-        # moved the device, which is exactly how a PASSING case 1 still took the
-        # driver down before case 2 could start.
         try:
-            ssh.close()
-        except Exception:
-            pass
-        if check:
-            raise RuntimeError(f"SSH read failed on {ip} for: {cmd} ({exc})") from exc
-        print(f"  [{ip}] read timed out on best-effort command, continuing: {cmd}")
-        return ""
-    ssh.close()
+            o = out.read().decode()
+            e = err.read().decode()
+            rc = out.channel.recv_exit_status()
+        except (socket.timeout, TimeoutError, OSError, paramiko.SSHException) as exc:
+            # The command was dispatched, so we cannot safely replay it unless
+            # the caller marked it replayable. For best-effort work
+            # (check=False) a hang must not kill the run: an `umount`/`nvme
+            # disconnect` can block indefinitely once the cutover has moved the
+            # device, which is exactly how a PASSING case 1 still took the
+            # driver down before case 2 could start.
+            try:
+                ssh.close()
+            except Exception:
+                pass
+            if replayable and replay < SSH_RETRIES:
+                print(f"  [{ip}] read failed on replayable command ({exc}); replaying "
+                      f"({replay + 1}/{SSH_RETRIES})")
+                time.sleep(SSH_RETRY_BACKOFF * replay)
+                continue
+            if check:
+                raise RuntimeError(f"SSH read failed on {ip} for: {cmd} ({exc})") from exc
+            print(f"  [{ip}] read timed out on best-effort command, continuing: {cmd}")
+            return ""
+        ssh.close()
+        # rc == -1: the channel died without delivering an exit status (socket
+        # reset mid-read). Output is unreliable; replay a replayable command.
+        if rc == -1 and replayable and replay < SSH_RETRIES:
+            print(f"  [{ip}] channel died without exit status; replaying "
+                  f"({replay + 1}/{SSH_RETRIES})")
+            time.sleep(SSH_RETRY_BACKOFF * replay)
+            continue
+        break
     if rc != 0 and check:
         print(o[-2000:])
         print(e[-2000:])
@@ -150,9 +170,9 @@ def run(ip, key_path, cmd, check=True, quiet=False, timeout=900):
     return o
 
 
-def mgmt_py(mgmt_ip, key_path, snippet):
+def mgmt_py(mgmt_ip, key_path, snippet, replayable=False):
     script = "sudo python3 - <<'PY'\n" + snippet + "\nPY"
-    out = run(mgmt_ip, key_path, script)
+    out = run(mgmt_ip, key_path, script, replayable=replayable)
     last = [ln for ln in out.strip().splitlines() if ln.strip()][-1]
     return json.loads(last)
 
@@ -174,7 +194,7 @@ from simplyblock_core.db_controller import DBController
 db = DBController()
 lv = db.get_lvol_by_name({name!r})
 print(json.dumps({{"uuid": lv.get_id(), "nqn": lv.nqn}}))
-""")
+""", replayable=True)
 
 
 def get_connect_cmds(mgmt_ip, key_path, lvol_uuid):
@@ -206,7 +226,63 @@ for u in {list(lvol_uuids)!r}:
     info = lvol_controller.get_replication_info(u) or {{}}
     out[u] = {{k: info.get(k) for k in fields}}
 print(json.dumps(out))
-""")
+""", replayable=True)
+
+
+def newest_replicated_snap_ts(mgmt_ip, key_path, lvol_uuids):
+    """Per volume: created_at of the newest snapshot that IS on the target."""
+    return mgmt_py(mgmt_ip, key_path, f"""
+import json
+from simplyblock_core.db_controller import DBController
+db = DBController()
+wanted = set({list(lvol_uuids)!r})
+out = {{u: 0 for u in wanted}}
+for s in db.get_snapshots():
+    if s.deleted or not s.lvol:
+        continue
+    u = s.lvol.get_id()
+    if u in wanted and s.target_replicated_snap_uuid:
+        out[u] = max(out[u], s.created_at or 0)
+print(json.dumps(out))
+""", replayable=True)
+
+
+def wait_data_replicated(mgmt_ip, key_path, lvol_uuids, after_ts,
+                         timeout=REPL_WAIT_TIMEOUT):
+    """Wait until every volume has a REPLICATED snapshot newer than *after_ts*.
+
+    A bounded lag is not enough to fail over onto. `replication-start` takes its
+    first internal snapshot immediately, before mkfs and before the baseline is
+    written, so `lag_seconds` and `replicated_count > 0` are both satisfied by an
+    EMPTY (used_size=0) point-in-time. Lab 2026-08-18 did exactly that: the gate
+    passed at worst_lag=77s while `outstanding=4`, fail-over cloned the empty
+    snapshot, and all five mounts died with a bad superblock — the 202 MiB
+    post-baseline snapshot was still in flight. The product behaved correctly on
+    the input it was given; the harness simply had not replicated the data yet.
+
+    Force a snapshot so we do not wait out a whole interval, then require the
+    newest replicated point-in-time to be newer than the data we are about to
+    verify.
+    """
+    for lvol in lvol_uuids:
+        run(mgmt_ip, key_path, f"{SBCTL} volume replication-trigger {lvol}",
+            check=False, quiet=True)
+    print(f"Waiting for a replicated snapshot newer than the baseline "
+          f"(after_ts={int(after_ts)}) on all volumes...")
+    start = time.time()
+    while time.time() - start < timeout:
+        stamps = newest_replicated_snap_ts(mgmt_ip, key_path, lvol_uuids)
+        behind = {u: ts for u, ts in stamps.items() if (ts or 0) <= after_ts}
+        print(f"  volumes still without post-baseline data on the target: "
+              f"{len(behind)}/{len(lvol_uuids)}")
+        if not behind:
+            print("The data itself is on the target; fail-over is meaningful now.")
+            return True
+        time.sleep(15)
+    raise RuntimeError(
+        f"FAIL: no post-baseline snapshot replicated within {timeout}s for "
+        f"{sorted(behind)} — failing over now would clone a point-in-time that "
+        f"predates the filesystem")
 
 
 def do_failover(mgmt_ip, key_path, lvol_uuid):
@@ -238,7 +314,7 @@ for r in db.get_lvol_replication_objects():
     if r.source_lvol and r.source_lvol.get_id() in states:
         states[r.source_lvol.get_id()] = r.state
 print(json.dumps(states))
-""")
+""", replayable=True)
 
 
 def wait_replication_caught_up(mgmt_ip, key_path, lvol_uuids, timeout=REPL_WAIT_TIMEOUT):
@@ -290,6 +366,28 @@ def _newest_spdk_devs(client_ip, key_path, count):
     return [d for d in out.split() if d]
 
 
+def _dev_for_nqn(client_ip, key_path, nqn, tries=6):
+    """Resolve the namespace block device serving *nqn* via sysfs.
+
+    Device-node mtime ordering (`ls -1t`) is not a reliable identity: after a
+    fail-over the volume's device is an EXISTING node whose mtime never
+    changes, so the "newest" pick returned an unrelated stale device and the
+    mount failed with rc=32 (run 15, cases 3 and 4). The subsystem NQN is the
+    identity the control plane hands us, so match on it directly.
+    """
+    for _ in range(tries):
+        out = run(client_ip, key_path,
+                  "for s in /sys/class/nvme-subsystem/nvme-subsys*; do "
+                  f"[ \"$(cat $s/subsysnqn 2>/dev/null)\" = \"{nqn}\" ] || continue; "
+                  "ls $s 2>/dev/null | grep -E '^nvme[0-9]+n[0-9]+$' | head -1; "
+                  "done", check=False, quiet=True)
+        devs = [d for d in out.split() if d]
+        if devs:
+            return f"/dev/{devs[0]}"
+        time.sleep(3)
+    return ""
+
+
 def connect_and_mount(client_ip, key_path, mgmt_ip, lvols, fmt=True, mount_base=MOUNT_BASE):
     """Connect each lvol on the client and mount it. Returns [{lvol,nqn,dev,mount}]."""
     prepare_mount_points(client_ip, key_path)
@@ -300,7 +398,12 @@ def connect_and_mount(client_ip, key_path, mgmt_ip, lvols, fmt=True, mount_base=
         for cmd in conn["connect"]:
             run(client_ip, key_path, cmd)
         time.sleep(3)
-        dev = _newest_spdk_devs(client_ip, key_path, 1)[0]
+        dev = _dev_for_nqn(client_ip, key_path, conn.get("nqn", ""))
+        if not dev:
+            found = _newest_spdk_devs(client_ip, key_path, 1)
+            if not found:
+                raise RuntimeError(f"no device appeared for {lv} (nqn={conn.get('nqn')})")
+            dev = found[0]
         mnt = f"{mount_base}{idx}"
         if fmt:
             run(client_ip, key_path, f"sudo mkfs.xfs -f {dev}")
@@ -412,6 +515,15 @@ def prepare_mount_points(client_ip, key_path):
         "sudo timeout 15 umount -f \"$m\" 2>/dev/null "
         "|| sudo timeout 15 umount -l \"$m\" 2>/dev/null || true; "
         "sudo rmdir \"$m\" 2>/dev/null || true; done", check=False, timeout=180)
+    # Full NVMe reset: disconnect every simplyblock subsystem. Stale fenced
+    # paths from a previous case hold hung IO; a lazy umount pinned on one can
+    # complete minutes later and rip a freshly created mountpoint out from
+    # under the next case (run 12: baseline dd hit ENOENT on /mnt/repl0).
+    run(client_ip, key_path,
+        "for n in $(sudo nvme list-subsys 2>/dev/null "
+        "| grep -oE 'nqn\\.2023-02\\.io\\.simplyblock:[^ ,]+'); do "
+        "sudo timeout 20 nvme disconnect -n \"$n\" >/dev/null 2>&1 || true; done",
+        check=False, timeout=300)
 
 
 # --------------------------------------------------------------------------- #
@@ -442,7 +554,7 @@ print(json.dumps({{"node_id": lv.node_id,
                    "replication_node_id": lv.replication_node_id,
                    "cluster_id": n.cluster_id,
                    "secondary_node_id": n.secondary_node_id}}))
-""")
+""", replayable=True)
 
 
 def node_status(mgmt_ip, key_path, node_id):
@@ -452,7 +564,7 @@ from simplyblock_core.db_controller import DBController
 db = DBController()
 n = db.get_storage_node_by_id({node_id!r})
 print(json.dumps({{"status": n.status, "health": n.health_check}}))
-""")["status"]
+""", replayable=True)["status"]
 
 
 def wait_node_status(mgmt_ip, key_path, node_id, wanted, timeout=NODE_STATE_TIMEOUT):
@@ -476,7 +588,10 @@ def sn_shutdown(mgmt_ip, key_path, node_id):
     heal itself mid-test), which silently invalidates an outage scenario.
     """
     print(f"Shutting down node {node_id[:8]} ...")
-    run(mgmt_ip, key_path, f"{SBCTL} -d sn suspend {node_id}", check=False)
+    # Straight to shutdown: suspending first buys nothing and actively hurts —
+    # a suspended node makes its own queued work defer ("node is not online,
+    # retrying"), and that backlog then blocks the shutdown itself (run 15
+    # case 6: the node never left `suspended`).
     run(mgmt_ip, key_path, f"{SBCTL} -d sn shutdown {node_id}", check=False)
     wait_node_status(mgmt_ip, key_path, node_id, "offline")
 
@@ -550,6 +665,22 @@ def failback(mgmt_ip, key_path, lvol_uuid, source_cluster_id=None):
     kind = "fresh (full)" if source_cluster_id else "recovered source (delta)"
     print(f"  fail-back {lvol_uuid[:8]} -> {kind}")
     run(mgmt_ip, key_path, f"{SBCTL} -d volume replication-failback {lvol_uuid}{flag}")
+
+
+def failed_over_targets_any_state(mgmt_ip, key_path, src_lvols):
+    """Map source lvol -> target lvol for ANY live relationship state (used to
+    connect target paths as soon as the cutover task creates them)."""
+    return mgmt_py(mgmt_ip, key_path, f"""
+import json
+from simplyblock_core.db_controller import DBController
+db = DBController()
+wanted = {list(src_lvols)!r}
+out = {{}}
+for r in db.get_lvol_replication_objects():
+    if r.source_lvol and r.source_lvol.get_id() in wanted and r.target_lvol:
+        out[r.source_lvol.get_id()] = r.target_lvol.get_id()
+print(json.dumps(out))
+""")
 
 
 def failed_over_targets(mgmt_ip, key_path, src_lvols):
@@ -646,8 +777,14 @@ def test_case_1(meta):
     # 1. create + replicate (migration mode, 1-min auto snapshots)
     lvols = create_volumes(mgmt_ip, key_path, src["pool"], tgt_uuid, mode="migration")
 
-    # 2. connect/format/mount + start endless fio
+    # 2. connect/format/mount, write a baseline that fio NEVER touches, then fio.
+    #    The baseline is the only data that lives exclusively in the replicated
+    #    snapshot history: fio's sequential sweep rewrites its whole working set
+    #    every pass, so the final-step delta carries fio's data regardless of
+    #    whether replication works. Verifying the baseline post-cutover is the
+    #    only assertion here that exercises the replicated snapshots at all.
     mounts = connect_and_mount(client_ip, key_path, mgmt_ip, lvols, fmt=True)
+    baseline = write_baseline(client_ip, key_path, mounts)
     jobfile = write_fio_jobfile(client_ip, key_path, mounts)
     start_fio(client_ip, key_path, jobfile)
 
@@ -662,33 +799,45 @@ def test_case_1(meta):
     print("Performing online migration cutover (fio keeps running)...")
     for lv in lvols:
         run(mgmt_ip, key_path, f"{SBCTL} -d volume replication-commit {lv}")
-        # commit returns target lvol id; fetch its connect cmds and attach as extra paths
-        st = mgmt_py(mgmt_ip, key_path, f"""
-import json
-from simplyblock_core.db_controller import DBController
-db = DBController()
-tgt = ""
-for r in db.get_lvol_replication_objects():
-    if r.source_lvol and r.source_lvol.get_id() == {lv!r}:
-        tgt = r.target_lvol.get_id() if r.target_lvol else ""
-print(json.dumps({{"target_lvol": tgt}}))
-""")
-        if st["target_lvol"]:
-            conn = get_connect_cmds(mgmt_ip, key_path, st["target_lvol"])
-            for cmd in conn.get("connect", []):
-                run(client_ip, key_path, cmd, check=False)
 
-    # 5. wait for cutovers to complete, monitoring fio the whole time
+    # 5. wait for cutovers to complete, monitoring fio the whole time. The
+    #    commit runs an iterative delta-shrink first, so the target volume (and
+    #    its paths) appear minutes after the commit call: connect each target's
+    #    paths AS SOON as they exist — before the ANA flip — so multipath
+    #    follows the cutover without dropping IO.
     print("Waiting for cutover completion + monitoring fio...")
     start = time.time()
     states = {}
     done = 0
+    connected_targets = set()
+    src_nqn_by_lvol = {m["lvol"]: m["nqn"] for m in mounts}
     while time.time() - start < CUTOVER_WAIT_TIMEOUT:
         if not fio_alive(client_ip, key_path):
             raise RuntimeError("FAIL: fio stopped during online migration (interrupted)")
+        targets = failed_over_targets_any_state(mgmt_ip, key_path, lvols)
+        for src_lv, tgt_lv in targets.items():
+            if tgt_lv:
+                # Connect the TARGET-cluster paths under the SOURCE volume's
+                # NQN: the cutover mirrors the subsystem on the target nodes
+                # (same NQN, ANA-managed), so these paths aggregate into the
+                # client's existing multipath device and IO continues on the
+                # same /dev/nvmeXnY through the flip. Connecting the clone's
+                # own internal NQN instead creates a separate subsystem the
+                # mounts never use — the old device then loses all paths at
+                # the fence and every IO on it hangs (run 10). Re-attempt each
+                # poll until cutover completes: duplicates are rejected
+                # harmlessly and the mirror may appear mid-loop.
+                conn = get_connect_cmds(mgmt_ip, key_path, tgt_lv)
+                src_nqn = src_nqn_by_lvol.get(src_lv, "")
+                for cmd in conn.get("connect", []):
+                    if src_nqn:
+                        cmd = re.sub(r"--nqn=\S+", f"--nqn={src_nqn}", cmd)
+                    run(client_ip, key_path, cmd, check=False, quiet=True)
+                connected_targets.add(tgt_lv)
         states = replication_states(mgmt_ip, key_path, lvols)
         done = sum(1 for s in states.values() if s in ("cutover_done", "failed_over"))
-        print(f"  cutovers done: {done}/{len(lvols)}  fio_alive=True")
+        print(f"  cutovers done: {done}/{len(lvols)}  targets_connected="
+              f"{len(connected_targets)}/{len(lvols)}  fio_alive=True")
         if done == len(lvols):
             break
         time.sleep(15)
@@ -699,7 +848,6 @@ print(json.dumps({{"target_lvol": tgt}}))
     errors = fio_error_count(client_ip, key_path)
     print(f"  fio_alive={alive} error_indicators={errors} cutovers_done={done}/{len(lvols)}")
     stop_fio(client_ip, key_path)
-    cleanup_client(client_ip, key_path, mounts)
     if not alive:
         raise RuntimeError("FAIL: fio did not survive the online migration")
     if errors:
@@ -711,7 +859,48 @@ print(json.dumps({{"target_lvol": tgt}}))
         raise RuntimeError(
             f"FAIL: only {done}/{len(lvols)} cutovers completed within "
             f"{CUTOVER_WAIT_TIMEOUT}s; states={states}")
-    print("CASE 1 PASSED: online migration completed with no fio interruption.")
+
+    # 7. FULL-SURFACE data verification through the cutover volume: remount
+    #    (fresh cache) and md5 the baseline, now served by the TARGET cluster.
+    print("Verifying deep data through the cutover volumes (baseline md5)...")
+    # Reconnect cleanly instead of reusing the pre-cutover devices. Any source
+    # path the client still holds is fenced (ANA inaccessible), so IO on the old
+    # device blocks in the kernel forever — umount/mount then hang in D-state and
+    # `timeout` cannot kill them (runs 10 and 14). Drop every simplyblock path,
+    # attach the volume where it now lives, and verify there. This is the same
+    # pattern case 2 uses for its post-fail-over verification.
+    prepare_mount_points(client_ip, key_path)
+    targets = failed_over_targets_any_state(mgmt_ip, key_path, lvols)
+    verify_mounts = []
+    for idx, lv in enumerate(lvols):
+        tgt_lv = targets.get(lv) or lv
+        conn = get_connect_cmds(mgmt_ip, key_path, tgt_lv)
+        for cmd in conn.get("connect", []):
+            run(client_ip, key_path, cmd, check=False)
+        time.sleep(4)
+        dev = _dev_for_nqn(client_ip, key_path, conn.get("nqn", ""))
+        if not dev:
+            devs = _newest_spdk_devs(client_ip, key_path, 1)
+            dev = devs[0] if devs else ""
+        if not dev:
+            print(f"  vol{idx}: no device appeared for {tgt_lv}")
+            continue
+        mnt = f"{MOUNT_BASE}_cut{idx}"
+        run(client_ip, key_path,
+            f"sudo mkdir -p {mnt} && sudo timeout 60 mount -o ro,norecovery {dev} {mnt}",
+            check=False)
+        # verify_baseline keys on the SOURCE lvol id (that is how baseline was
+        # recorded), so keep that id on the mount record.
+        verify_mounts.append({"lvol": lv, "nqn": conn.get("nqn", ""),
+                              "dev": dev, "mount": mnt})
+    ok, details = verify_baseline(client_ip, key_path, verify_mounts, baseline)
+    mounts = verify_mounts or mounts
+    cleanup_client(client_ip, key_path, mounts)
+    if not ok:
+        raise RuntimeError(
+            "FAIL: pre-cutover data (baseline) is NOT intact on the target after "
+            f"migration — replicated snapshot history is broken: {details}")
+    print("CASE 1 PASSED: online migration, no fio interruption, deep data intact.")
 
 
 def test_case_2(meta):
@@ -818,7 +1007,11 @@ def _setup_failed_over_volumes(meta, tag):
     lvols = create_volumes(mgmt_ip, key_path, src["pool"], tgt_uuid, mode="failover")
     mounts = connect_and_mount(client_ip, key_path, mgmt_ip, lvols, fmt=True)
     baseline = write_baseline(client_ip, key_path, mounts)
+    baseline_done_ts = time.time()
     wait_replication_caught_up(mgmt_ip, key_path, lvols)
+    # Steady lag alone would let us fail over onto the empty snapshot taken
+    # before mkfs; require the baseline itself to be on the target.
+    wait_data_replicated(mgmt_ip, key_path, lvols, baseline_done_ts)
 
     print(f"[{tag}] taking the source cluster down (both nodes)...")
     for ip in src["storage_public_ips"][:2]:
@@ -914,7 +1107,14 @@ def test_case_3(meta):
 
 
 def test_case_4(meta):
-    """Fail-back to a FRESH, empty cluster (full replication, not delta)."""
+    """Migration onto a FRESHLY INSTALLED cluster after the primary collapsed.
+
+    Logically "back replication" (the new cluster stands on the old site), but
+    technically a brand-new cluster, so it must behave exactly like case 1: a
+    full forward replication in migration mode plus a cutover, with no delta
+    base and no fail-back semantics. Case 3 is the only case that replicates
+    back into the SAME cluster.
+    """
     print("\n========== CASE 4: fail-back to a fresh empty cluster ==========")
     key_path = meta["key_path"]
     mgmt_ip = meta["mgmt"]["public_ip"]
@@ -930,31 +1130,76 @@ def test_case_4(meta):
 
     tgt_lvols, baseline, mounts = _setup_failed_over_volumes(meta, "case4")
 
-    # "Primary removed": drop the original source volumes so nothing can be
-    # reused as a delta base — the fresh cluster must receive the FULL dataset.
-    print("Removing the original primary's volumes (fresh fail-back must be full)...")
+    # This is an ONLINE MIGRATION, mechanically IDENTICAL to case 1 — only the
+    # pair differs (fail-over site -> freshly installed site instead of
+    # site 1 -> site 2). It is "back replication" only in the geographic sense:
+    # the destination is a brand-new cluster that has never held this data, so
+    # there is no delta base and nothing to fail BACK onto. Driving it through
+    # the fail-back verb was wrong — that path exists for case 3, where the
+    # ORIGINAL cluster is recovered and its pre-existing snapshots are matched
+    # by data_uuid for a delta. Replication back into the SAME cluster is
+    # case 3 only.
+    jobfile = write_fio_jobfile(client_ip, key_path, mounts)
+    start_fio(client_ip, key_path, jobfile)
+
+    # The original site collapsed and has been reinstalled: drop its volumes so
+    # nothing of the old cluster can be mistaken for a delta base.
+    print("Clearing the collapsed primary's volumes (the fresh site starts empty)...")
     delete_test_volumes(mgmt_ip, key_path, [src["pool"]])
 
     set_cluster_replication(mgmt_ip, key_path, tgt_uuid, fresh_uuid,
                             pool_uuid_of(mgmt_ip, key_path, fresh["pool"]))
 
+    # Forward replication in migration mode, exactly as case 1 does it.
     for lv in tgt_lvols:
-        failback(mgmt_ip, key_path, lv, source_cluster_id=fresh_uuid)
+        run(mgmt_ip, key_path,
+            f"{SBCTL} volume replication-start {lv}"
+            f" --replication-cluster-id {fresh_uuid} --mode migration"
+            f" --interval-min {REPL_INTERVAL_MIN}")
+    replication_started_ts = time.time()
     wait_replication_caught_up(mgmt_ip, key_path, tgt_lvols)
+    # The volumes already hold the data, so any snapshot taken from here on
+    # carries it: require one such snapshot to be ON the fresh cluster before
+    # cutting over (lag alone would accept a point-in-time that predates it).
+    wait_data_replicated(mgmt_ip, key_path, tgt_lvols, replication_started_ts)
 
-    print("Committing the cutover onto the fresh cluster...")
+    print("Committing the cutover onto the fresh cluster while fio runs...")
     for lv in tgt_lvols:
         run(mgmt_ip, key_path, f"{SBCTL} -d volume replication-commit {lv}")
 
     start = time.time()
     done = 0
+    connected = set()
+    src_nqn_by_lvol = {m["lvol"]: m["nqn"] for m in mounts}
     while time.time() - start < CUTOVER_WAIT_TIMEOUT:
+        if not fio_alive(client_ip, key_path):
+            raise RuntimeError(
+                "FAIL: fio stopped during the migration to the fresh cluster (interrupted)")
+        # Same choreography as case 1: attach the new site's paths under the
+        # volume's own NQN before the ANA flip, so multipath follows the move.
+        targets = failed_over_targets_any_state(mgmt_ip, key_path, tgt_lvols)
+        for src_lv, new_lv in targets.items():
+            if new_lv:
+                conn = get_connect_cmds(mgmt_ip, key_path, new_lv)
+                src_nqn = src_nqn_by_lvol.get(src_lv, "")
+                for cmd in conn.get("connect", []):
+                    if src_nqn:
+                        cmd = re.sub(r"--nqn=\S+", f"--nqn={src_nqn}", cmd)
+                    run(client_ip, key_path, cmd, check=False, quiet=True)
+                connected.add(new_lv)
         states = replication_states(mgmt_ip, key_path, tgt_lvols)
         done = sum(1 for s in states.values() if s in ("cutover_done", "failed_over"))
-        print(f"  cutovers onto fresh cluster: {done}/{len(tgt_lvols)}")
+        print(f"  cutovers onto fresh cluster: {done}/{len(tgt_lvols)}  "
+              f"paths_connected={len(connected)}/{len(tgt_lvols)}  fio_alive=True")
         if done == len(tgt_lvols):
             break
         time.sleep(15)
+
+    time.sleep(20)
+    alive = fio_alive(client_ip, key_path)
+    errors = fio_error_count(client_ip, key_path)
+    print(f"  fio_alive={alive} error_indicators={errors} cutovers_done={done}/{len(tgt_lvols)}")
+    stop_fio(client_ip, key_path)
 
     back = failed_over_targets(mgmt_ip, key_path, tgt_lvols)
     cleanup_client(client_ip, key_path, mounts)

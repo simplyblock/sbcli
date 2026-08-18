@@ -129,3 +129,98 @@ def test_target_offline_suspends(monkeypatch):
     assert res is False
     assert task.status == JobSchedule.STATUS_SUSPENDED
     assert calls == []
+
+
+# ---- delta-shrink state machine ------------------------------------------ #
+
+class _ShrinkSnap:
+    def __init__(self, replicated):
+        self.target_replicated_snap_uuid = "T1" if replicated else ""
+
+
+class _ShrinkLvol:
+    uuid = "LV1"
+
+    def get_id(self):
+        return self.uuid
+
+
+class _ShrinkDB:
+    kv_store = "KV"
+
+    def __init__(self, snaps):
+        self._snaps = snaps
+
+    def get_snapshot_by_id(self, sid):
+        if sid not in self._snaps:
+            raise KeyError(sid)
+        return self._snaps[sid]
+
+
+class _ShrinkTask:
+    max_retry = 100
+    canceled = False
+
+    def __init__(self, params):
+        self.function_params = params
+        self.function_result = ""
+        self.retry = 0
+        self.status = "running"
+
+    def write_to_db(self, kv=None):
+        pass
+
+
+def _mk(monkeypatch, snaps, params):
+    import simplyblock_core.services.tasks_runner_replication_final as runner
+    monkeypatch.setattr(runner, "db", _ShrinkDB(snaps))
+    return runner, _ShrinkTask(params)
+
+
+def test_shrink_waits_until_replicated(monkeypatch):
+    runner, task = _mk(monkeypatch, {"S1": _ShrinkSnap(replicated=False)},
+                       {"shrink_round": 1, "shrink_snap_id": "S1",
+                        "shrink_deadline": 2**60})
+    done, err = runner._shrink_step(task, _ShrinkLvol())
+    assert (done, err) == (False, None)
+    assert "waiting" in task.function_result
+
+
+def test_shrink_takes_next_snapshot_immediately(monkeypatch):
+    runner, task = _mk(monkeypatch, {"S1": _ShrinkSnap(replicated=True)},
+                       {"shrink_round": 1, "shrink_snap_id": "S1",
+                        "shrink_deadline": 2**60})
+    taken = []
+
+    def _add(lid, name, snap_type="user"):
+        taken.append((lid, snap_type))
+        return "S2", None
+    import simplyblock_core.controllers.snapshot_controller as sc
+    monkeypatch.setattr(sc, "add", _add)
+
+    done, err = runner._shrink_step(task, _ShrinkLvol())
+    assert (done, err) == (False, None)
+    assert taken == [("LV1", "internal")] or taken[0][0] == "LV1"
+    assert task.function_params["shrink_round"] == 2
+    assert task.function_params["shrink_snap_id"] == "S2"
+
+
+def test_shrink_completes_after_last_round(monkeypatch):
+    runner, task = _mk(monkeypatch, {"S2": _ShrinkSnap(replicated=True)},
+                       {"shrink_round": runner_rounds(), "shrink_snap_id": "S2",
+                        "shrink_deadline": 2**60})
+    done, err = runner._shrink_step(task, _ShrinkLvol())
+    assert (done, err) == (True, None), "cutover must start IMMEDIATELY after the last round"
+
+
+def runner_rounds():
+    import simplyblock_core.services.tasks_runner_replication_final as runner
+    return runner.SHRINK_ROUNDS
+
+
+def test_shrink_deadline_aborts(monkeypatch):
+    runner, task = _mk(monkeypatch, {"S1": _ShrinkSnap(replicated=False)},
+                       {"shrink_round": 1, "shrink_snap_id": "S1",
+                        "shrink_deadline": 1})
+    done, err = runner._shrink_step(task, _ShrinkLvol())
+    assert done is False and err and "timed out" in err

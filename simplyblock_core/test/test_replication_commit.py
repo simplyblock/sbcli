@@ -133,48 +133,36 @@ def patched(monkeypatch):
 
 
 def test_commit_enqueues_final_task(patched):
+    """Commit takes shrink snapshot #1 and enqueues the task; the clone/base
+    selection moved into the runner (after the shrink rounds), so the enqueued
+    params carry the shrink state instead of tgt_* composites."""
     result = lvol_controller.replication_commit("LV1")
 
     assert result["cutover_task_queued"] is True
-    assert "replication_id" in result and "target_lvol_id" in result
 
-    # A final internal snapshot was taken to minimize the delta.
+    # Shrink snapshot #1 taken at commit time.
     assert patched["snap_add"] and patched["snap_add"][0][1] == SnapShot.TYPE_INTERNAL
-    # Target writable clone created from the last replicated snapshot in the target pool.
-    assert patched["create_calls"] == [("N_tgt", "POOL_tgt", "t1")]
-    # Target exposed inaccessible until cutover.
-    assert patched["suspended"] == ["LV_TGT"]
+    # The clone is NOT built at commit time any more: the base must be the
+    # LAST replicated shrink snapshot, which only exists after the runner's
+    # shrink rounds complete.
+    assert patched["create_calls"] == []
+    assert patched["suspended"] == []
 
     p = patched["task_params"]
     assert p["lvol_id"] == "LV1"
     assert p["src_node_id"] == "N_src"
     assert p["tgt_node_id"] == "N_tgt"
-    assert p["tgt_lvol_composite"] == "lvs_tgt/LVOL_9"
-    assert p["tgt_map_id"] == 42
-    assert p["tgt_snap_composite"] == "lvs_tgt/SNAP1"
     assert p["operation"] == "replicate"
     assert p["final_state"] == LVolReplication.STATE_CUTOVER_DONE
+    assert p["shrink_round"] == 1
+    assert p["shrink_snap_id"] == "snap"
+    assert p["shrink_deadline"] > 0
+    assert "tgt_lvol_composite" not in p, "clone base chosen before shrink completed"
     assert p["_cluster"] == "CL_src" and p["_node"] == "N_src"
 
-    # Replication record stamped cutover-pending.
-    assert patched["rep_state"] == LVolReplication.STATE_CUTOVER_PENDING
 
-
-def test_commit_no_replicated_snapshot(monkeypatch):
-    monkeypatch.setattr(LVol, "write_to_db", lambda self, kv=None: None)
-    nodes = {
-        "N_src": _node("N_src", "CL_src", lvstore="lvs_src"),
-        "N_tgt": _node("N_tgt", "CL_tgt", lvstore="lvs_tgt"),
-    }
-    clusters = {
-        "CL_src": _cluster("CL_src", target_cluster="CL_tgt", target_pool="POOL_tgt"),
-        "CL_tgt": _cluster("CL_tgt"),
-    }
-    monkeypatch.setattr(lvol_controller, "DBController", lambda: _FakeDB(nodes, clusters))
+def test_commit_fails_when_shrink_snapshot_fails(patched, monkeypatch):
     monkeypatch.setattr(lvol_controller.snapshot_controller, "add",
-                        lambda lid, name, snap_type="user": ("snap", None))
-    monkeypatch.setattr(lvol_controller, "_last_replicated_target_snapshot",
-                        lambda db, lid, cid: None)
-
+                        lambda lid, name, snap_type="user": (None, "no space"))
     result = lvol_controller.replication_commit("LV1")
     assert result[0] is False

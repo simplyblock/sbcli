@@ -3067,6 +3067,11 @@ def patch_prometheus_configmap(username: str, password: str):
         try:
             prometheus_yml = re.sub(r"username:.*", f"username: '{username}'", prometheus_yml)
             prometheus_yml = re.sub(r"password:.*", f"password: '{password}'", prometheus_yml)
+            # The v2 exporter authenticates with a bearer token rather than
+            # basic auth, so the secret also has to reach `authorization:
+            # credentials:`. A no-op until the chart's ConfigMap declares the
+            # v2 job — without it that job would scrape with an empty token.
+            prometheus_yml = re.sub(r"credentials:.*", f"credentials: '{password}'", prometheus_yml)
         except re.error as e:
             logger.error(f"Regex error while patching Prometheus YAML: {e}")
             return False

@@ -55,7 +55,8 @@ def patched(monkeypatch):
             calls["node_writes"].append(self.replication_node_id)
     monkeypatch.setattr(LVol, "write_to_db", _lvol_write)
 
-    def _replication_start(lvol_id, replication_cluster_id=None, mode=None, interval_min=None):
+    def _replication_start(lvol_id, replication_cluster_id=None, mode=None, interval_min=None,
+                           from_policy=False):
         calls["lvol_id"] = lvol_id
         calls["cluster"] = replication_cluster_id
         calls["mode"] = mode

@@ -1,5 +1,6 @@
 # coding=utf-8
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 
@@ -138,6 +139,17 @@ def post_lvol_delete_rebalance(cluster, lvol):
             resume_comp(lvol)
 
 
+def _await_delete_completion(node, bdev_name, wait_sec):
+    """Poll the async-delete status until it leaves "in progress" (1) or the
+    budget runs out. Returns the last status seen."""
+    deadline = time.time() + max(0, wait_sec)
+    ret = node.rpc_client().bdev_lvol_get_lvol_delete_status(bdev_name)
+    while ret == 1 and time.time() < deadline:
+        time.sleep(0.2)
+        ret = node.rpc_client().bdev_lvol_get_lvol_delete_status(bdev_name)
+    return ret
+
+
 def process_lvol_delete_finish(cluster, lvol):
     logger.info(f"LVol deleted successfully, id: {lvol.get_id()}")
 
@@ -209,29 +221,25 @@ def process_lvol_delete_finish(cluster, lvol):
                 non_leader_nodes.append(db.get_storage_node_by_id(node_id))
             except KeyError:
                 pass
-    # The leader gets NO sync delete. Its async delete already removed the
-    # blob AND unregistered the bdev; this function only runs once that async
-    # delete reported done (poll ret 0/2). Re-deleting on the leader walks the
-    # snapshot/clone metadata a second time and errors on every entry the
-    # async pass already cleaned:
+    # The leader NEEDS its sync delete. The async delete (sync=False) only
+    # clears the data clusters and strips the in-memory clone-list entries
+    # (bs_delete_blob_finish_async -> blob_clear_clusters_async); the blob
+    # metadata stays on disk and the bdev stays registered. This leader-side
+    # sync delete is the only operation that removes them
+    # (_vbdev_lvol_destroy is_sync=true), and SPDK admits it only after the
+    # async pass reported done — which is exactly when this function runs.
     #
-    #   run 20260807, LVS_1 (~7.5k objects): 4361 "Clone entry not found"
-    #   (blob_get_snapshot_and_clone_entries) plus 888 lvol_delete_async_cb
-    #   *ERROR* on the leader (vm201) — and exactly 0 on either non-leader,
-    #   because they get their one and only delete here. Same signature as
-    #   run 20260716 (1382x). The _remove_bdev_stack "already deleted,
-    #   skipping" guard did not fire once in that run, so it cannot be relied
-    #   on to suppress the second pass.
-    #
-    # Verified safe: of the 162 objects that took the create-rollback path in
-    # run 20260807 (async on the leader, sync on the non-leaders only, never
-    # on the leader), 0 were still present in the leader's end-of-run bdev
-    # dump — the async delete alone leaves nothing behind.
-    #
-    # This matches the delete protocol as stated in
-    # snapshot_controller._rollback_snapshot_bdev: an async delete must always
-    # be followed by sync deletes on EVERY non-leader HA member of the LVS —
-    # "unconditionally, never on the leader".
+    # Removing this leg (ae4679792, based on run 20260807) leaked the blob
+    # and bdev of EVERY deleted lvol on its leader: upgrade run 20260812
+    # (test_major_upgrade-20260812-170049) ended with all 4 LVSes retaining
+    # their complete object sets, and the follow-up snapshot delete failing
+    # EBUSY ("Cannot remove snapshot because it is open") because its
+    # children's blobs were still alive on the leader. The "Clone entry not
+    # found" storm this leg produces (4361x in run 20260807) is benign noise:
+    # blob_get_snapshot_and_clone_entries only logs when the async pass has
+    # already removed the in-memory entry, and the delete proceeds. The
+    # run-20260807 "0 leftovers without this leg" observation was drawn from
+    # create-rollback objects and does not hold for the regular delete path.
     primary_node = db.get_storage_node_by_id(leader_node.get_id())
     if primary_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
         # Check if any non-leader node needs sync lock
@@ -239,6 +247,11 @@ def process_lvol_delete_finish(cluster, lvol):
             if nln.status in [StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN, StorageNode.STATUS_UNREACHABLE]:
                 primary_node.lvol_del_sync_lock()
                 break
+        with snapshot_controller.lvstore_op_lock(
+                cluster.get_id(), lvol.lvs_name, node_id=primary_node.get_id()):
+            ret = lvol_controller.delete_lvol_from_node(lvol.get_id(), primary_node.get_id(), sync=True)
+        if not ret:
+            logger.error(f"Failed to delete lvol from primary_node node: {primary_node.get_id()}")
 
     lvol_bdev_name=f"{lvol.lvs_name}/{lvol.lvol_bdev}"
     for sec_node in non_leader_nodes:
@@ -252,26 +265,28 @@ def process_lvol_delete_finish(cluster, lvol):
                 f"Sync delete of {lvol_bdev_name} on {sec_node.get_id()[:8]} "
                 f"already done inline; skipping")
             continue
-        if sec_node.status in [StorageNode.STATUS_ONLINE]:
-            logger.info(f"Sync delete bdev: {lvol_bdev_name} from node: {sec_node.get_id()}")
-            # Same per-node serialization as the primary: the sync delete
-            # mutates the replica blob tree and must not interleave with a
-            # create/register of another object on this node ("operation
-            # sneaked in between async and sync delete").
-            with snapshot_controller.lvstore_op_lock(
-                    cluster.get_id(), lvol.lvs_name, node_id=sec_node.get_id()):
-                ret, err = sec_node.rpc_client().delete_lvol(lvol_bdev_name, sync=True)
-            if not ret:
-                if "code" in err and err["code"] == -19:
-                    logger.error(f"Sync delete completed with error: {err}")
-                else:
-                    msg = f"Failed to sync delete bdev: {lvol_bdev_name} from node: {sec_node.get_id()}, adding task..."
-                    logger.error(msg)
-                    tasks_controller.add_lvol_sync_del_task(sec_node.cluster_id, sec_node.get_id(), lvol_bdev_name,
-                                                            primary_node.get_id())
-        elif sec_node.status in [StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN, StorageNode.STATUS_UNREACHABLE]:
-            # async delete lvol bdev from secondary
-            tasks_controller.add_lvol_sync_del_task(sec_node.cluster_id, sec_node.get_id(), lvol_bdev_name, primary_node.get_id())
+        # Attempt first, classify afterwards: a suspended peer is still up and
+        # can clear its registration, and a peer that is gone owes nothing —
+        # its in-memory state dies with the process and is not rebuilt, because
+        # the record is already deleted. Only a failure on a live peer earns a
+        # retry task. Pre-judging by status queued a task for every non-online
+        # peer, and those tasks then refused to run *because* the node was
+        # suspended, which also blocked the node's own shutdown (run 15 case 6).
+        logger.info(f"Sync delete bdev: {lvol_bdev_name} from node: {sec_node.get_id()}")
+        # Same per-node serialization as the primary: the sync delete
+        # mutates the replica blob tree and must not interleave with a
+        # create/register of another object on this node ("operation
+        # sneaked in between async and sync delete").
+        with snapshot_controller.lvstore_op_lock(
+                cluster.get_id(), lvol.lvs_name, node_id=sec_node.get_id()):
+            snapshot_controller.sync_delete_on_peer(
+                sec_node, lvol_bdev_name, primary_node.get_id())
+
+    # Release the primary's del-sync gate — see the note in
+    # snapshot_monitor.process_snap_delete_finish: it is set whenever a peer
+    # looks down, it blocks creation on this node, and only the sync-del task
+    # runner clears it. Reset keeps it only while sync-del tasks are pending.
+    primary_node.lvol_del_sync_lock_reset()
 
     lvol_events.lvol_delete(lvol)
     lvol.remove(db.kv_store)
@@ -382,157 +397,170 @@ def check_node(cluster, snode, all_lvols, subsys_check=False):
 
             deletions_processed += 1
 
-            # check leadership (cached per pass, see leader_cache above)
-            cache_key = (snode.get_id(), tuple(lvol.nodes[1:]))
-            leader_node = leader_cache.get(cache_key)
-            if leader_node is None:
-                snode = db.get_storage_node_by_id(snode.get_id())
-                if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
-                    ret = snode.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
-                    if not ret:
-                        raise Exception("Failed to get LVol info")
-                    lvs_info = ret[0]
-                    if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
-                        leader_node = snode
+            # The FULL delete of a chain member — the async delete, its
+            # completion wait, and the sync deletes that follow — is one
+            # atomic sequence per LVS+chain: a delete swap-merges segments
+            # into the neighbouring snapshot and re-links parents, so no
+            # create/clone/delete anywhere else in the chain may interleave.
+            # Distinct chains hold different keys and run in parallel.
+            with snapshot_controller.object_mutation_lock(
+                    cluster.get_id(), lvol.get_id()):
 
-                if not leader_node:
-                    for sec_id in lvol.nodes[1:]:
-                        try:
-                            _sec = db.get_storage_node_by_id(sec_id)
-                        except KeyError:
-                            continue
-                        if _sec.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
-                            ret = _sec.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
-                            if ret:
-                                lvs_info = ret[0]
-                                if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
-                                    leader_node = _sec
-                                    break
+                # check leadership (cached per pass, see leader_cache above)
+                cache_key = (snode.get_id(), tuple(lvol.nodes[1:]))
+                leader_node = leader_cache.get(cache_key)
+                if leader_node is None:
+                    snode = db.get_storage_node_by_id(snode.get_id())
+                    if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
+                        ret = snode.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
+                        if not ret:
+                            raise Exception("Failed to get LVol info")
+                        lvs_info = ret[0]
+                        if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
+                            leader_node = snode
 
-                if not leader_node:
-                    raise Exception("Failed to get leader node")
-                leader_cache[cache_key] = leader_node
+                    if not leader_node:
+                        for sec_id in lvol.nodes[1:]:
+                            try:
+                                _sec = db.get_storage_node_by_id(sec_id)
+                            except KeyError:
+                                continue
+                            if _sec.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
+                                ret = _sec.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
+                                if ret:
+                                    lvs_info = ret[0]
+                                    if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
+                                        leader_node = _sec
+                                        break
 
-            # Leader stickiness: while the node that owns the in-flight
-            # async delete (deletion_status) is still reachable, keep
-            # polling IT — even if another node currently claims lvs
-            # leadership. During the 2026-07-16 flap a secondary claimed
-            # leadership while the real owner was merely marked down, and
-            # this branch re-issued 139 full initial deletes against the
-            # secondary, mutating shared snapshot metadata from two nodes.
-            # Only re-target when the owner is genuinely gone; the poll's
-            # own error codes (-35/4) handle real leadership changes.
-            if lvol.deletion_status and lvol.deletion_status != leader_node.get_id():
+                    if not leader_node:
+                        raise Exception("Failed to get leader node")
+                    leader_cache[cache_key] = leader_node
+
+                # Leader stickiness: while the node that owns the in-flight
+                # async delete (deletion_status) is still reachable, keep
+                # polling IT — even if another node currently claims lvs
+                # leadership. During the 2026-07-16 flap a secondary claimed
+                # leadership while the real owner was merely marked down, and
+                # this branch re-issued 139 full initial deletes against the
+                # secondary, mutating shared snapshot metadata from two nodes.
+                # Only re-target when the owner is genuinely gone; the poll's
+                # own error codes (-35/4) handle real leadership changes.
+                if lvol.deletion_status and lvol.deletion_status != leader_node.get_id():
+                    try:
+                        owner = db.get_storage_node_by_id(lvol.deletion_status)
+                        if owner.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED,
+                                            StorageNode.STATUS_DOWN]:
+                            leader_node = owner
+                    except KeyError:
+                        pass
+
+                if lvol.deletion_status == "" or lvol.deletion_status != leader_node.get_id():
+                    # Serialize against creates/registers on the target node —
+                    # an unlocked delete interleaving with another object's
+                    # create on the same lvstore corrupts the replica blob tree.
+                    with snapshot_controller.lvstore_op_lock(
+                            cluster.get_id(), lvol.lvs_name, node_id=leader_node.get_id()):
+                        lvol_controller.delete_lvol_from_node(lvol.get_id(), leader_node.get_id())
+                    # NOTE no inline sleep here: the loop is SERIAL over every
+                    # in-deletion lvol, so a per-object pause multiplies into
+                    # minutes of added latency for every object in a mass-delete
+                    # wave (run 20260730: cycle times of 4-5 min, single deletes
+                    # taking 5+ min end-to-end). The status poll below handles a
+                    # still-running async delete (ret == 1) by simply retrying on
+                    # the next cycle.
+
                 try:
-                    owner = db.get_storage_node_by_id(lvol.deletion_status)
-                    if owner.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED,
-                                        StorageNode.STATUS_DOWN]:
-                        leader_node = owner
-                except KeyError:
-                    pass
+                    # Bounded wait so the async delete and the sync deletes that
+                    # follow stay ONE atomic sequence inside the chain lock (see
+                    # the chain-lock note where this block is entered).
+                    ret = _await_delete_completion(
+                        leader_node, f"{lvol.lvs_name}/{lvol.lvol_bdev}",
+                        constants.SNAP_DELETE_COMPLETION_WAIT_SEC)
+                except Exception as e:
+                    logger.error(e)
+                    # timeout detected, check other node
+                    break
 
-            if lvol.deletion_status == "" or lvol.deletion_status != leader_node.get_id():
-                # Serialize against creates/registers on the target node —
-                # an unlocked delete interleaving with another object's
-                # create on the same lvstore corrupts the replica blob tree.
-                with snapshot_controller.lvstore_op_lock(
-                        cluster.get_id(), lvol.lvs_name, node_id=leader_node.get_id()):
-                    lvol_controller.delete_lvol_from_node(lvol.get_id(), leader_node.get_id())
-                # NOTE no inline sleep here: the loop is SERIAL over every
-                # in-deletion lvol, so a per-object pause multiplies into
-                # minutes of added latency for every object in a mass-delete
-                # wave (run 20260730: cycle times of 4-5 min, single deletes
-                # taking 5+ min end-to-end). The status poll below handles a
-                # still-running async delete (ret == 1) by simply retrying on
-                # the next cycle.
+                if ret == 0 or ret == 2:  # Lvol may have already been deleted (not found) or delete completed
+                    process_lvol_delete_finish(cluster, lvol)
 
-            try:
-                ret = leader_node.rpc_client().bdev_lvol_get_lvol_delete_status(
-                    f"{lvol.lvs_name}/{lvol.lvol_bdev}")
-            except Exception as e:
-                logger.error(e)
-                # timeout detected, check other node
-                break
+                elif ret == 1:  # Async lvol deletion is in progress or queued
+                    logger.info(f"LVol deletion in progress, id: {lvol.get_id()}")
+                    pre_lvol_delete_rebalance()
 
-            if ret == 0 or ret == 2:  # Lvol may have already been deleted (not found) or delete completed
-                process_lvol_delete_finish(cluster, lvol)
+                elif ret == 3:  # Async deletion is done, but leadership has changed (sync deletion is now blocked)
+                    logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
+                    logger.error("Async deletion is done, but leadership has changed (sync deletion is now blocked)")
 
-            elif ret == 1:  # Async lvol deletion is in progress or queued
-                logger.info(f"LVol deletion in progress, id: {lvol.get_id()}")
-                pre_lvol_delete_rebalance()
+                elif ret == 4:  # No async delete request exists for this lvol
+                    # Transient during leadership/RPC churn (e.g. a peer down +
+                    # post-unblock drain): the async-delete request was never
+                    # registered on the node we polled because leadership flipped or
+                    # the re-issue RPC didn't land on a flaky leader. This is NOT a
+                    # terminal error — flipping the lvol OFFLINE + io_error here
+                    # abandons the deletion and strands it (incident
+                    # mass_create_delete_docker-20260629: 14 lvols stuck offline).
+                    # Reset deletion_status so the next pass re-issues the async
+                    # delete on the then-current leader; the lvol stays in_deletion
+                    # and drains once leadership/RPC settles (same handling as the
+                    # -35 "leadership changed" case).
+                    logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
+                    logger.warning("No async delete request exists for this lvol; re-issuing on next pass")
+                    process_lvol_delete_try_again(lvol)
 
-            elif ret == 3:  # Async deletion is done, but leadership has changed (sync deletion is now blocked)
-                logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
-                logger.error("Async deletion is done, but leadership has changed (sync deletion is now blocked)")
+                elif ret == -1:  # Operation not permitted
+                    logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
+                    logger.error("Operation not permitted")
+                    lvol = db.atomic_update(db.get_lvol_by_id(lvol.get_id()),
+                                            lambda x: setattr(x, "io_error", True))
+                    set_lvol_status(lvol, LVol.STATUS_OFFLINE)
 
-            elif ret == 4:  # No async delete request exists for this lvol
-                # Transient during leadership/RPC churn (e.g. a peer down +
-                # post-unblock drain): the async-delete request was never
-                # registered on the node we polled because leadership flipped or
-                # the re-issue RPC didn't land on a flaky leader. This is NOT a
-                # terminal error — flipping the lvol OFFLINE + io_error here
-                # abandons the deletion and strands it (incident
-                # mass_create_delete_docker-20260629: 14 lvols stuck offline).
-                # Reset deletion_status so the next pass re-issues the async
-                # delete on the then-current leader; the lvol stays in_deletion
-                # and drains once leadership/RPC settles (same handling as the
-                # -35 "leadership changed" case).
-                logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
-                logger.warning("No async delete request exists for this lvol; re-issuing on next pass")
-                process_lvol_delete_try_again(lvol)
+                elif ret == -2:  # No such file or directory
+                    logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
+                    logger.error("No such file or directory")
+                    process_lvol_delete_finish(cluster, lvol)
 
-            elif ret == -1:  # Operation not permitted
-                logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
-                logger.error("Operation not permitted")
-                lvol = db.atomic_update(db.get_lvol_by_id(lvol.get_id()),
-                                        lambda x: setattr(x, "io_error", True))
-                set_lvol_status(lvol, LVol.STATUS_OFFLINE)
+                elif ret == -5:  # I/O error
+                    logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
+                    logger.error("I/O error")
+                    process_lvol_delete_try_again(lvol)
 
-            elif ret == -2:  # No such file or directory
-                logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
-                logger.error("No such file or directory")
-                process_lvol_delete_finish(cluster, lvol)
+                elif ret == -11:  # Try again
+                    logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
+                    logger.error("Try again")
+                    process_lvol_delete_try_again(lvol)
 
-            elif ret == -5:  # I/O error
-                logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
-                logger.error("I/O error")
-                process_lvol_delete_try_again(lvol)
+                elif ret == -12:  # Out of memory
+                    logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
+                    logger.error("Out of memory")
+                    process_lvol_delete_try_again(lvol)
 
-            elif ret == -11:  # Try again
-                logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
-                logger.error("Try again")
-                process_lvol_delete_try_again(lvol)
+                elif ret == -16:  # Device or resource busy
+                    logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
+                    logger.error("Device or resource busy")
+                    process_lvol_delete_try_again(lvol)
 
-            elif ret == -12:  # Out of memory
-                logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
-                logger.error("Out of memory")
-                process_lvol_delete_try_again(lvol)
+                elif ret == -19:  # No such device
+                    logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
+                    logger.error("Finishing lvol delete")
+                    process_lvol_delete_finish(cluster, lvol)
 
-            elif ret == -16:  # Device or resource busy
-                logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
-                logger.error("Device or resource busy")
-                process_lvol_delete_try_again(lvol)
+                elif ret == -35:  # Leadership changed
+                    logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
+                    logger.error("Leadership changed")
+                    process_lvol_delete_try_again(lvol)
 
-            elif ret == -19:  # No such device
-                logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
-                logger.error("Finishing lvol delete")
-                process_lvol_delete_finish(cluster, lvol)
+                elif ret == -36:  # Failed to update lvol for deletion
+                    logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
+                    logger.error("Failed to update lvol for deletion")
+                    process_lvol_delete_try_again(lvol)
 
-            elif ret == -35:  # Leadership changed
-                logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
-                logger.error("Leadership changed")
-                process_lvol_delete_try_again(lvol)
+                else:  # Failed to update lvol for deletion
+                    logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
+                    logger.error("Failed to update lvol for deletion")
 
-            elif ret == -36:  # Failed to update lvol for deletion
-                logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
-                logger.error("Failed to update lvol for deletion")
-                process_lvol_delete_try_again(lvol)
-
-            else:  # Failed to update lvol for deletion
-                logger.info(f"LVol deletion error, id: {lvol.get_id()}, error code: {ret}")
-                logger.error("Failed to update lvol for deletion")
-
-            continue
+                continue
 
         # Continuous per-lvol subsystem verification + repair. On by default;
         # the caller decides once per cycle whether the (2 RPCs per lvol)
@@ -640,12 +668,26 @@ def main():
             all_lvols = db.get_mini_lvols()
             # Decided once per cycle so a sweep covers every node consistently.
             subsys_check = constants.LVOL_MONITOR_SUBSYS_CHECK and _subsys_sweep_due()
-            for snode in db.get_storage_nodes_by_cluster_id(cluster.get_id()):
+            # Nodes are swept concurrently: a node's work is independent, and
+            # anything that mutates a blob chain takes the chain lock, so two
+            # workers can never interleave inside one chain (nor with a
+            # create/clone running in another CP process). One serial sweep
+            # made every node wait for the slowest one, and a delete backlog
+            # on a single node stalled the whole cluster's monitoring.
+            snodes = db.get_storage_nodes_by_cluster_id(cluster.get_id())
+
+            def _sweep(snode):
                 try:
-                    deletions_in_flight += check_node(
-                        cluster, snode, all_lvols, subsys_check=subsys_check) or 0
+                    return check_node(cluster, snode, all_lvols,
+                                      subsys_check=subsys_check) or 0
                 except Exception as e:
                     logger.error(e)
+                    return 0
+
+            if snodes:
+                workers = max(1, min(constants.LVOL_MONITOR_NODE_WORKERS, len(snodes)))
+                with ThreadPoolExecutor(max_workers=workers) as ex:
+                    deletions_in_flight += sum(ex.map(_sweep, snodes))
 
         # Adaptive cadence: while deletes are draining, every full-interval
         # sleep adds up to 30s of latency PER CHAIN HOP (a clone must fully
