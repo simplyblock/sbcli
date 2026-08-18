@@ -550,10 +550,12 @@ class TestDeleteReplicaOnPeer(unittest.TestCase):
 # for expansion-triggered rebalancing in cluster_expansion/executor.py.
 # ---------------------------------------------------------------------------
 
-def _lvol(node_id, nodes):
+def _lvol(node_id, nodes, lvol_id=None, nqn=None):
     lv = MagicMock()
     lv.nodes = list(nodes)
     lv.write_to_db = MagicMock()
+    lv.get_id = MagicMock(return_value=lvol_id or f"lvol-{node_id}")
+    lv.nqn = nqn or f"nqn:{node_id}"
     return lv
 
 
@@ -598,6 +600,62 @@ class TestUpdateLvolNodesForReplicaMove(unittest.TestCase):
         storage_node_ops._update_lvol_nodes_for_replica_move("p1", "old", "new", db)
         self.assertEqual(lvol.nodes, ["p1", "new"])
         lvol.write_to_db.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# _teardown_lvol_subsystems_on_vacated_peer — regression coverage for a real
+# bug found live (2026-08-18): _delete_replica_on_peer(destroy_lvstore=False)
+# tears down the vacated peer's raid/distrib bdev stack (which cascades to
+# remove each hosted lvol's namespace), but never touches the per-lvol NVMe-
+# oF subsystem+listener registered separately via add_lvol_thread. Left
+# behind, the listener keeps accepting connections in front of a now-empty
+# subsystem, and since the peer is no longer in lvol.nodes nothing ever
+# tells the CSI/host initiator to drop that connection either -- the volume
+# carries a third, live-but-empty path indefinitely alongside its correct
+# two.
+# ---------------------------------------------------------------------------
+
+class TestTeardownLvolSubsystemsOnVacatedPeer(unittest.TestCase):
+
+    def test_deletes_subsystem_for_every_lvol_hosted_on_the_primary(self):
+        cl = _cluster()
+        primary = _node("p1", lvstore="LVS_1")
+        peer = _node("peer1")
+        rpc = peer.rpc_client()
+        lvols = [
+            _lvol("p1", ["p1", "peer1"], lvol_id="lv-a", nqn="nqn:a"),
+            _lvol("p1", ["p1", "peer1"], lvol_id="lv-b", nqn="nqn:b"),
+        ]
+        db = FakeDB(cl, [primary, peer], lvols={"p1": lvols})
+        storage_node_ops._teardown_lvol_subsystems_on_vacated_peer(peer, primary, db)
+        rpc.subsystem_delete.assert_any_call("nqn:a")
+        rpc.subsystem_delete.assert_any_call("nqn:b")
+        self.assertEqual(rpc.subsystem_delete.call_count, 2)
+
+    def test_no_op_when_primary_hosts_no_lvols(self):
+        cl = _cluster()
+        primary = _node("p1", lvstore="LVS_1")
+        peer = _node("peer1")
+        rpc = peer.rpc_client()
+        db = FakeDB(cl, [primary, peer], lvols={})
+        storage_node_ops._teardown_lvol_subsystems_on_vacated_peer(peer, primary, db)
+        rpc.subsystem_delete.assert_not_called()
+
+    def test_rpc_failure_on_one_lvol_does_not_block_the_others(self):
+        # Best-effort: an RPC failure here must not propagate and must not
+        # stop the remaining lvols from being cleaned up.
+        cl = _cluster()
+        primary = _node("p1", lvstore="LVS_1")
+        peer = _node("peer1")
+        rpc = peer.rpc_client()
+        rpc.subsystem_delete.side_effect = [RPCConnectionError("connection error"), None]
+        lvols = [
+            _lvol("p1", ["p1", "peer1"], lvol_id="lv-a", nqn="nqn:a"),
+            _lvol("p1", ["p1", "peer1"], lvol_id="lv-b", nqn="nqn:b"),
+        ]
+        db = FakeDB(cl, [primary, peer], lvols={"p1": lvols})
+        storage_node_ops._teardown_lvol_subsystems_on_vacated_peer(peer, primary, db)  # must not raise
+        self.assertEqual(rpc.subsystem_delete.call_count, 2)
 
 
 # ---------------------------------------------------------------------------
@@ -768,6 +826,31 @@ class TestRelocateOneReplicaSpliceExecution(unittest.TestCase):
         self.assertTrue(ret)
         self.assertEqual(occupant_lvol.nodes, ["occupant", "stranded"])
         self.assertEqual(stranded_lvol.nodes, ["stranded", "x"])
+
+    def test_relocate_via_splice_tears_down_lvol_subsystems_on_the_vacated_peer(self):
+        # Regression: evicting occupant's replica off x must also delete
+        # occupant's own lvols' NVMe-oF subsystems on x -- see
+        # TestTeardownLvolSubsystemsOnVacatedPeer's docstring. Must NOT run
+        # for stranded's own vacate-of-n1 (n1 is the node being removed,
+        # already shut down, not a surviving peer to clean up on).
+        cl = _cluster()
+        removed = _node("n1", stack_secondary="stranded")
+        stranded = _node("stranded", secondary_id="n1", lvstore="LVS_stranded")
+        occupant = _node("occupant", secondary_id="x", lvstore="LVS_occupant")
+        x = _node("x", stack_secondary="occupant")
+        db = FakeDB(cl, [removed, stranded, occupant, x])
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "_pick_replica_relocation_node",
+                          return_value="x"), \
+             patch.object(storage_node_ops, "recreate_lvstore_on_non_leader",
+                          return_value=True), \
+             patch.object(storage_node_ops, "_delete_replica_on_peer"), \
+             patch.object(storage_node_ops,
+                          "_teardown_lvol_subsystems_on_vacated_peer") as teardown:
+            ret = storage_node_ops._relocate_one_replica(removed, "stranded", "secondary")
+
+        self.assertTrue(ret)
+        teardown.assert_called_once_with(x, occupant, db)
 
     def test_relocate_via_splice_occupant_rebuild_failure_leaves_old_copy_untouched(self):
         # Create-before-destroy: a failed rebuild on the stranded node must

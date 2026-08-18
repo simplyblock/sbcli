@@ -4226,6 +4226,37 @@ def _prune_stale_lvstore_ports(node_id, lvstore, db_controller):
         node.write_to_db()
 
 
+def _teardown_lvol_subsystems_on_vacated_peer(peer, primary, db_controller):
+    """Best-effort: delete every LVol-of-``primary``'s own NVMe-oF subsystem
+    on ``peer`` after ``peer`` stops hosting ``primary``'s replica.
+
+    ``_delete_replica_on_peer(..., destroy_lvstore=False)`` tears down
+    ``peer``'s local raid/distrib bdev stack for the lvstore, which cascades
+    to remove each hosted LVol's *namespace* -- but the per-LVol NVMe-oF
+    *subsystem and listener* (registered separately, per lvol, via
+    add_lvol_thread) are never touched by that teardown. Left behind, the
+    listener keeps accepting connections in front of a now-empty subsystem
+    -- exactly the "live but no path" failure test_missing_namespace_path_
+    loss.py guards against, just reached by a different door: the CSI/host
+    initiator's own connection to peer stays live, and since peer is no
+    longer in lvol.nodes nothing ever tells it to drop that connection
+    either. The volume ends up with an extra path that looks healthy but
+    carries no I/O, alongside the correct new one (2026-08-18: found live
+    after the lvol.nodes/wrong-port fixes above -- both corrected lvols
+    still carried this stale-but-live third path to their pre-relocation
+    host). RPC failures are logged, not fatal: peer is healthy and a
+    lingering empty subsystem is harmless to leave for the next restart to
+    clear, while blocking the relocation on it is not."""
+    rpc_client = peer.rpc_client()
+    for lvol in db_controller.get_lvols_by_node_id(primary.get_id()):
+        try:
+            rpc_client.subsystem_delete(lvol.nqn)
+        except RPCException as e:
+            logger.warning(
+                f"subsystem teardown for lvol {lvol.get_id()} ({lvol.nqn}) "
+                f"on vacated peer {peer.get_id()} failed: {e}")
+
+
 def _update_lvol_nodes_for_replica_move(primary_id, old_host_id, new_host_id, db_controller):
     """Re-point every LVol hosted on ``primary_id`` from ``old_host_id`` to
     ``new_host_id`` in its own ``nodes`` list, once that primary's
@@ -4487,6 +4518,7 @@ def _relocate_replica_between(occupant_primary_id, old_host_id, new_host_id, rol
             # destroy_lvstore docstring.
             _delete_replica_on_peer(old_host, occupant_primary, cluster,
                                     destroy_lvstore=False)
+            _teardown_lvol_subsystems_on_vacated_peer(old_host, occupant_primary, db_controller)
             _prune_stale_lvstore_ports(old_host_id, occupant_primary.lvstore, db_controller)
         old_host = db_controller.get_storage_node_by_id(old_host_id)
         setattr(old_host, backref, "")
