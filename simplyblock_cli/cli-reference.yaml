@@ -490,7 +490,6 @@ commands:
               - discard_io_all
               - io_error_on_unmap
               - io_error_on_read
-              - corrupt_data_on_write
             default: full_pass_through
       - name: device-hang
         help: "Make a device hang for N seconds (0 to release). Requires --enable-hang-device at cluster create."
