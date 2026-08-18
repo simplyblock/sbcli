@@ -2191,8 +2191,14 @@ def list_lvols(cluster_id, pool_id_or_name, all=False):
         if records:
             size_used = records[0].size_used
         if lvol.ndcs == 0 and lvol.npcs == 0:
-            cl = db_controller.get_cluster_by_id(cluster_id)
-            mode = f"{cl.distr_ndcs}x{cl.distr_npcs}"
+            cid = cluster_id
+            if not cid and lvol.node_id:
+                try:
+                    cid = db_controller.get_storage_node_by_id(lvol.node_id).cluster_id
+                except KeyError:
+                    pass
+            cl = db_controller.get_cluster_by_id(cid) if cid else None
+            mode = f"{cl.distr_ndcs}x{cl.distr_npcs}" if cl else "0x0"
         else:
             mode = f"{lvol.ndcs}x{lvol.npcs}"
 
