@@ -337,6 +337,23 @@ def _successor_is_chained_to(successor, predecessor_target_uuid):
 _KEEP_REPLICATED_INTERNAL = 2
 
 
+
+def _keep_replicated_for(source_lvol):
+    """How many replicated internal snapshots to retain for *source_lvol*.
+
+    A volume under a replication policy uses the policy's ``keep_replicated``
+    (never below its floor, since fewer than a pair leaves an arrival with
+    nothing to chain onto); otherwise the module default applies.
+    """
+    try:
+        policy = db.get_replication_policy_for_lvol(source_lvol)
+    except Exception:
+        policy = None
+    if policy is None:
+        return _KEEP_REPLICATED_INTERNAL
+    from simplyblock_core.models.replication import ReplicationPolicy
+    return max(policy.keep_replicated, ReplicationPolicy.MIN_KEEP_REPLICATED)
+
 def _prune_internal_snapshots(source_lvol):
     """Retention for replication-driven internal snapshots.
 
@@ -359,7 +376,8 @@ def _prune_internal_snapshots(source_lvol):
         and s.status == SnapShot.STATUS_ONLINE
         and s.target_replicated_snap_uuid
     ]
-    if len(replicated_internal) <= _KEEP_REPLICATED_INTERNAL:
+    keep = _keep_replicated_for(source_lvol)
+    if len(replicated_internal) <= keep:
         return
 
     replicated_internal.sort(key=lambda s: s.created_at)
@@ -379,7 +397,7 @@ def _prune_internal_snapshots(source_lvol):
     # for one snapshot while newer ones kept arriving, the predecessor was still
     # pruned and its segments were dropped instead of merged. So the chain is
     # verified per candidate below, and an unchained successor defers the prune.
-    for index, snap in enumerate(replicated_internal[:-_KEEP_REPLICATED_INTERNAL]):
+    for index, snap in enumerate(replicated_internal[:-keep]):
         target_uuid = snap.target_replicated_snap_uuid
         try:
             db.get_snapshot_by_id(target_uuid)

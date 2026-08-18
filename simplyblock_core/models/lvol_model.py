@@ -84,6 +84,11 @@ class LVol(BaseModel):
     # Interval in minutes for automatic internal snapshots that drive
     # replication. 0 disables interval snapshots (only user snaps replicate).
     replication_interval_min: int = 0
+    # ReplicationPolicy.get_id() this volume follows, "" when it is not managed
+    # by a policy. The fields above stay as the RESOLVED effective values so the
+    # replication service keeps reading exactly what it reads today; attaching a
+    # policy derives them from policy + target.
+    replication_policy_id: str = ""
 
     def has_qos(self):
         return (self.rw_ios_per_sec > 0 or self.rw_mbytes_per_sec > 0 or self.r_mbytes_per_sec > 0 or self.w_mbytes_per_sec > 0)
