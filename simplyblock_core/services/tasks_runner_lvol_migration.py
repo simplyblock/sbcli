@@ -3150,7 +3150,10 @@ def _post_process_snap_group(snap, migration):
     if snap_uuid not in migration.snaps_transferred_group:
         migration.snaps_transferred_group.append(snap_uuid)
     migration_events.migration_snap_copied(migration, snap_uuid)
-    logger.info(f"Group worker: snap {snap_uuid} raw-transferred (pending tree reconstruction)")
+    logger.info(
+        f"Group worker {migration.uuid[:8]}: DIAG snap {snap_uuid[:8]} raw-transferred "
+        f"(pending tree reconstruction), lvol={migration.lvol_id[:8] if migration.lvol_id else None}, "
+        f"snaps_transferred_group now={list(migration.snaps_transferred_group)}")
     return True, None
 
 
