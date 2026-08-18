@@ -634,6 +634,8 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
             lvol_names, lvol_ids, snapshot_names, 2, hub_bdev, "migrate")
         logger.info(f"Group {group.uuid[:8]}: bdev_lvol_batch_transfer_final_step returned {ret!r}")
         batch_ok = True
+        logger.info(f"Group {group.uuid[:8]}: sleeping 30s after batch_final_step")
+        time.sleep(30)
     except RPCRemoteError as e:
         logger.error(f"Group {group.uuid[:8]}: bdev_lvol_batch_transfer_final_step RPC error code={e.code}: {e}")
         batch_err = str(e)
@@ -685,12 +687,19 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
                     logger.warning(
                         f"Group {group.uuid[:8]}: add_clone for member {m.uuid[:8]} (non-fatal): {e}")
 
+            logger.info(f"Group {group.uuid[:8]}: sleeping 30s after add_clone (secondary/tertiary)")
+            time.sleep(30)
+
         _flip_ana_to_optimized(group, member_migrations, src_node, src_rpc, tgt_node, tgt_rpc)
+        logger.info(f"Group {group.uuid[:8]}: sleeping 30s after switching ANA states")
+        time.sleep(30)
 
     try:
         src_rpc.bdev_nvme_detach_controller(ctrl_name)
     except Exception as e:
         logger.warning(f"Group {group.uuid[:8]}: hub detach (non-fatal): {e}")
+    logger.info(f"Group {group.uuid[:8]}: sleeping 30s after hub detach")
+    time.sleep(30)
 
     return batch_ok, batch_err
 
