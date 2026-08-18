@@ -2428,6 +2428,22 @@ class K8sNativeMajorUpgrade(TestClusterBase):
         """Step 7: Apply StorageCluster, Pool, StorageNode CRs."""
         self.logger.info("Migration Step 7: Applying custom resources")
 
+        # Remove stale StoragePool CRDs from previous runs.  Their finalizers
+        # block the operator reconciler with 404 errors because the backend
+        # pools no longer exist after the re-install.
+        self.logger.info("Cleaning up stale StoragePool CRDs")
+        self.k8s_utils._exec_kubectl(
+            f"kubectl get storagepool -n {_NAMESPACE} --no-headers "
+            f"-o custom-columns=NAME:.metadata.name 2>/dev/null "
+            f"| xargs -r -I{{}} kubectl patch storagepool {{}} -n {_NAMESPACE} "
+            f"--type=merge -p '{{\"metadata\":{{\"finalizers\":[]}}}}' 2>/dev/null || true"
+        )
+        self.k8s_utils._exec_kubectl(
+            f"kubectl delete storagepool --all -n {_NAMESPACE} "
+            f"--wait=false 2>/dev/null || true"
+        )
+        sleep_n_sec(5)
+
         # Build worker nodes YAML from the known storage nodes
         worker_yaml = ""
         worker_nodes_env = os.environ.get("WORKER_NODES", "")

@@ -2515,7 +2515,7 @@ def _connect_entries_for_volume(db_controller, lvol, ctrl_loss_tmo, host_entry, 
                 ns_id=lvol.ns_id,
                 allowed_hosts=[h["nqn"] for h in lvol.allowed_hosts] if lvol.allowed_hosts else [],
             ))
-    return out, None
+    return out
 
 
 def _resize_lvol_on_all_nodes(lvol, snode, size_in_mib, lock=True) -> None:
