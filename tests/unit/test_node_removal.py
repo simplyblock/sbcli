@@ -86,6 +86,16 @@ def _node(node_id, status=StorageNode.STATUS_ONLINE, lvstore="",
         jm.uuid = f"jm-{node_id}"
         jm.node_id = node_id
         jm.status = JMDevice.STATUS_ONLINE
+        # BaseModel.from_dict() binds a bare JMDevice()'s dict-typed
+        # defaults to the CLASS-level object itself (setattr(self, attr,
+        # getattr(self, attr)) when the attr is absent from data) -- every
+        # JMDevice() built this way shares ONE override_name_on_node dict
+        # until something reassigns it. Production is unaffected (every DB
+        # read round-trips through from_dict(data) with the key present,
+        # which always constructs a fresh dict), but bare-constructed test
+        # fixtures aren't -- give each one its own so an in-place mutation
+        # in one test can't bleed into another via the shared class default.
+        jm.override_name_on_node = {}
         n.jm_device = jm
     else:
         n.jm_device = None
@@ -1336,6 +1346,52 @@ class TestDecommissionDevices(unittest.TestCase):
         self.assertEqual(
             replacement.jm_device.override_name_on_node.get("consumer"), "jm_A")
         replacement.write_to_db.assert_called()
+
+    def test_skips_a_candidate_the_consumer_already_reaches_via_another_path(self):
+        # SPDK won't attach a second, distinctly-named local controller to a
+        # target the consumer already has a live connection to under
+        # another name (found live 2026-08-19: "Bdev name not returned from
+        # controller attach", the JM group excluded from further operation
+        # on an ongoing SPDK retry loop, while the DB metadata claimed the
+        # override connected fine). "colliding" is already in
+        # consumer.remote_jm_devices (e.g. reached via hosting some OTHER
+        # primary's secondary copy) even though it was never in
+        # consumer.jm_ids -- it must be skipped in favor of "clean", the
+        # next candidate that isn't already reachable by any path.
+        cl = _cluster()
+        removed = _node("n1", n_devices=0, with_jm=True)
+        removed.jm_ids = []
+        consumer = _node("consumer", n_devices=0, with_jm=True)
+        consumer.jm_ids = [removed.jm_device.get_id()]
+        colliding = _node("colliding", n_devices=0, with_jm=True)
+        colliding.jm_ids = []
+        already_connected = RemoteJMDevice()
+        already_connected.uuid = colliding.jm_device.get_id()
+        already_connected.remote_bdev = "remote_jm_colliding-own-namen1"
+        consumer.remote_jm_devices = [already_connected]
+        clean = _node("clean", n_devices=0, with_jm=True)
+        clean.jm_ids = []
+        db = FakeDB(cl, [removed, consumer, colliding, clean])
+        db.get_jm_device_by_id = MagicMock(side_effect=lambda jid: {
+            removed.jm_device.get_id(): removed.jm_device,
+            colliding.jm_device.get_id(): colliding.jm_device,
+            clean.jm_device.get_id(): clean.jm_device,
+        }[jid])
+        dc = MagicMock()
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "device_controller", dc), \
+             patch.object(storage_node_ops, "get_sorted_ha_jms",
+                          return_value=[colliding.jm_device.get_id(), clean.jm_device.get_id()]), \
+             patch.object(storage_node_ops, "_connect_to_remote_jm_devs", return_value=[]):
+            ret = storage_node_ops._decommission_node_devices(removed)
+
+        self.assertTrue(ret)
+        self.assertEqual(colliding.jm_device.override_name_on_node, {})
+        self.assertEqual(
+            clean.jm_device.override_name_on_node.get("consumer"),
+            removed.jm_device.jm_bdev)
+        clean.write_to_db.assert_called()
+        colliding.write_to_db.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

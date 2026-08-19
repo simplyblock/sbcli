@@ -4612,9 +4612,28 @@ def _decommission_node_devices(removed_node: StorageNode):
                 node.jm_ids.remove(removed_node.jm_device.get_id())
                 jm_ids = get_sorted_ha_jms(node)
                 logger.debug(f"online_jms: {str(jm_ids)}")
+                # A candidate node already reaches via some path OTHER than
+                # its own jm_ids -- most commonly the hosted-primary route:
+                # node hosts some OTHER primary's secondary/tertiary copy,
+                # and that primary's own jm_ids already includes this
+                # candidate -- can't serve as an override stand-in here.
+                # SPDK won't attach a second, distinctly-named local
+                # controller to a target it already has a live connection
+                # to under another name, so the override name would never
+                # actually connect: the attach RPC returns without a bdev
+                # name, _connect_to_remote_jm_devs' fallback silently reuses
+                # the OTHER (pre-existing) connection's name for remote_bdev,
+                # and the DB ends up claiming a healthy override that was
+                # never live (found live 2026-08-19: "Bdev name not returned
+                # from controller attach", the JM group "excluded from
+                # further operation" on an ongoing SPDK retry loop, while
+                # the DB metadata reported success). Skip any candidate
+                # node already reaches, however it reaches it, so a fresh
+                # pick never collides this way.
+                already_reachable = {rd.uuid for rd in (node.remote_jm_devices or [])}
                 new_jm_dev = ""
                 for jm_id in jm_ids:
-                    if jm_id not in node.jm_ids:
+                    if jm_id not in node.jm_ids and jm_id not in already_reachable:
                         new_jm_dev = jm_id
                         break
                 if new_jm_dev:
