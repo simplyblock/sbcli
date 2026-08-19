@@ -157,13 +157,25 @@ class KeyDescriptor(BaseModel):
     #: years later has to know which of the fields below mean anything.
     kms: Literal["hashicorp_vault", "local"]
 
+    #: Where the keys themselves are: the FoundationDB key under LocalKMS, the
+    #: KV path under Vault. Meaningful for every backend, so always recorded.
     dek_path: str
-    kek_name: str
 
-    #: Vault only; absent for the local backend.
+    #: Vault only; absent for the local backend, which has no key-encryption key
+    #: at all -- its DEKs are stored as they are and its KEK operations are
+    #: no-ops, so a name here would describe nothing.
+    kek_name: Optional[str] = None
     vault_base_url: Optional[HttpUrl] = None
     transit_mount: Optional[str] = None
     kv_mount: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _vault_keys_are_named(self) -> "KeyDescriptor":
+        if self.kms == "hashicorp_vault" and not self.kek_name:
+            raise ValueError(
+                "A Vault-held key is unwrapped by a named transit key; without "
+                "that name the ciphertext cannot be decrypted")
+        return self
 
 
 class Encryption(BaseModel):

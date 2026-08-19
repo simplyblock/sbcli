@@ -48,7 +48,6 @@ def _descriptor(**overrides):
     return {
         "kms": "local",
         "dek_path": backup_dek_path(CLUSTER_ID, "b-1"),
-        "kek_name": backup_kek_name("b-1"),
         **overrides,
     }
 
@@ -94,13 +93,16 @@ class TestKeyDescriptor:
         assert encryption.descriptor.transit_mount == "sb/transit"
         assert encryption.descriptor.kv_mount == "sb/kv"
 
-    def test_local_kms_records_no_vault_mounts(self, db):
+    def test_local_kms_records_no_vault_fields(self, db):
         """Absent rather than "" -- they mean nothing for this backend."""
         encryption = backup_controller._build_encryption(_cluster(db), _backup(db))
 
         assert encryption.descriptor.vault_base_url is None
         assert encryption.descriptor.transit_mount is None
         assert encryption.descriptor.kv_mount is None
+        # LocalKMS stores its DEKs as they are; its KEK operations are no-ops, so
+        # a name here would describe nothing.
+        assert encryption.descriptor.kek_name is None
 
     def test_descriptor_points_at_the_key_path(self, db):
         cluster = _cluster(db)
@@ -109,7 +111,6 @@ class TestKeyDescriptor:
         encryption = backup_controller._build_encryption(cluster, backup)
 
         assert encryption.descriptor.dek_path == backup_dek_path(CLUSTER_ID, "b-1")
-        assert encryption.descriptor.kek_name == backup_kek_name("b-1")
 
     def test_descriptor_carries_no_key_material(self, db):
         cluster = _cluster(db)
@@ -121,6 +122,20 @@ class TestKeyDescriptor:
         encryption = backup_controller._build_encryption(cluster, backup)
 
         assert KEYS[0] not in encryption.model_dump_json()
+
+    def test_a_vault_key_must_name_the_transit_key_that_wraps_it(self, db):
+        """A KEK name is what unwraps the DEK; Vault cannot be reached without it."""
+        cluster = _cluster(db)
+        cluster.hashicorp_vault_settings = HashicorpVaultSettings()
+        cluster.hashicorp_vault_settings.base_url = "https://vault.example.com"
+
+        with pytest.raises(ValueError):
+            backup_manifest.KeyDescriptor.model_validate(
+                _descriptor(kms="hashicorp_vault"))
+
+        # ...and the cluster's own descriptor does name one.
+        assert backup_controller._build_encryption(
+            cluster, _backup(db)).descriptor.kek_name == backup_kek_name("b-1")
 
     def test_an_unknown_backend_is_refused_rather_than_guessed(self, db):
         """Which fields of a descriptor mean anything depends on the backend."""

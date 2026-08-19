@@ -1241,9 +1241,23 @@ class TestBackupLocationAccessor(unittest.TestCase):
 
     def test_invalid_location_raises_value_error(self):
         b = _backup()
-        b.location = {"bucket_name": "backups"}  # no region
+        b.location = {"bucket_name": ""}
         with self.assertRaises(ValueError):
             b.get_location()
+
+    def test_unknown_location_field_raises_value_error(self):
+        """A location nobody can interpret is refused rather than half-read."""
+        b = _backup()
+        b.location = {"bucket_name": "backups", "regoin": "eu-central-1"}
+        with self.assertRaises(ValueError):
+            b.get_location()
+
+    def test_location_without_a_region_is_accepted(self):
+        """The region is recoverable: S3 can be asked where a bucket lives."""
+        b = _backup()
+        b.location = {"bucket_name": "backups"}
+
+        self.assertIsNone(b.get_location().region)
 
 
 # ===========================================================================
