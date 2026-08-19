@@ -53,14 +53,27 @@ def scp(paths, host, dest, timeout=900):
 
 
 def deploy():
+    """Run the deployer, streaming BOTH streams to their own log file.
+
+    capture_output() with only a stdout tail logged made a failure
+    undiagnosable (2026-08-19 13:15: rc=1 with the traceback sitting in the
+    discarded stderr), so stderr is merged into a real deployer log.
+    """
     log("=== deploying MP cluster ===")
-    proc = subprocess.run([sys.executable, "setup_perf_test_multipath.py"],
-                          cwd=str(HERE), capture_output=True, text=True,
-                          timeout=5400)
-    tail = "\n".join((proc.stdout or "").splitlines()[-25:])
+    dlog = HERE / f"mp_deploy_{time.strftime('%Y%m%d_%H%M%S')}.log"
+    log(f"deployer output -> {dlog.name}")
+    with open(dlog, "w", encoding="utf-8") as fh:
+        proc = subprocess.run([sys.executable, "setup_perf_test_multipath.py"],
+                              cwd=str(HERE), stdout=fh,
+                              stderr=subprocess.STDOUT, timeout=5400)
+    tail = "\n".join(
+        dlog.read_text(encoding="utf-8", errors="replace").splitlines()[-30:])
     log(f"deployer rc={proc.returncode}; tail:\n{tail}")
     if proc.returncode != 0:
-        raise RuntimeError("deployment failed — leaving instances for inspection")
+        raise RuntimeError(
+            f"deployment failed (rc={proc.returncode}); full output in "
+            f"{dlog.name}. Instances are left running for inspection — "
+            f"terminate them by tag before retrying.")
 
 
 def stage(mgmt):
