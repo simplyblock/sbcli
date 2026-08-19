@@ -2158,20 +2158,31 @@ def _connect_to_remote_jm_devs(this_node: StorageNode, jm_ids=None, only_node_id
         # member of the new jm_vuid. Runtime re-attach paths (rejoin,
         # restart-task) carry their own reachability gating.
 
+        # Resolve the name this_node actually connects under FIRST: a JM
+        # device that's standing in as a replacement for a removed peer's JM
+        # (see _decommission_node_devices) is reachable under the OLD peer's
+        # name for this_node specifically, not org_dev's own. remote_device.
+        # jm_bdev must record that resolved name, not org_dev.jm_bdev
+        # unconditionally -- health_controller's diagnostic controller lookup
+        # (f'remote_{remote_device.jm_bdev}') reads this field back and was
+        # querying org_dev's natural (unconnected) name every cycle,
+        # producing a spurious "ctrlr does not exist" SPDK error for every
+        # overridden slot (found live 2026-08-19 on a replacement JM host
+        # serving two overridden consumers at once).
+        resolved_name = org_dev.jm_bdev
+        if org_dev.override_name_on_node and this_node.get_id() in org_dev.override_name_on_node:
+            resolved_name = org_dev.override_name_on_node[this_node.get_id()]
+
         remote_device = RemoteJMDevice()
         remote_device.uuid = org_dev.uuid
         remote_device.alceml_name = org_dev.alceml_name
         remote_device.node_id = org_dev.node_id
         remote_device.size = org_dev.size
-        remote_device.jm_bdev = org_dev.jm_bdev
+        remote_device.jm_bdev = resolved_name
         remote_device.status = NVMeDevice.STATUS_ONLINE
         remote_device.nvmf_multipath = org_dev.nvmf_multipath
-        expected_bdev = f"remote_{org_dev.jm_bdev}n1"
-        controller_name = f"remote_{org_dev.jm_bdev}"
-        if org_dev.override_name_on_node and this_node.get_id() in org_dev.override_name_on_node:
-            new_name = org_dev.override_name_on_node[this_node.get_id()]
-            expected_bdev = f"remote_{new_name}n1"
-            controller_name = f"remote_{new_name}"
+        expected_bdev = f"remote_{resolved_name}n1"
+        controller_name = f"remote_{resolved_name}"
         connect_failed = False
         try:
             remote_device.remote_bdev = str(connect_device(
