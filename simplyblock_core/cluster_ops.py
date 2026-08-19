@@ -2280,6 +2280,54 @@ def get_cluster(cl_id) -> dict:
 def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, mgmt_image=None, **kwargs) -> None:
     cluster = db_controller.get_cluster_by_id(cluster_id)  # ensure exists
 
+    # stop jm replication on all leader nodes
+    for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+        if node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN, StorageNode.STATUS_SUSPENDED]:
+            ret = node.rpc_client().bdev_lvol_get_lvstores(node.lvstore)
+            if ret:
+                lvs_info = ret[0]
+                if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
+                    ret, err = node.rpc_client().jc_suspend_compression(jm_vuid=node.jm_vuid, suspend=True)
+                    if not ret:
+                        logger.warning(f"Failed to stop JC compression on node: {node.get_id()}, JM:{node.jm_vuid}")
+            if node.lvstore_stack_secondary:
+                sec_node = db_controller.get_storage_node_by_id(node.lvstore_stack_secondary)
+                ret = node.rpc_client().bdev_lvol_get_lvstores(sec_node.lvstore)
+                if ret:
+                    lvs_info = ret[0]
+                    if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
+                        ret, err = node.rpc_client().jc_suspend_compression(jm_vuid=sec_node.jm_vuid, suspend=True)
+                        if not ret:
+                            logger.warning(f"Failed to stop JC compression on node: {node.get_id()}, JM:{sec_node.jm_vuid}")
+
+    jc_compression_is_active=False
+    # check for jm replication on all nodes ()
+    for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+        if node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN, StorageNode.STATUS_SUSPENDED]:
+            try:
+                ret = node.rpc_client().bdev_lvol_get_lvstores(node.lvstore)
+                if ret:
+                    lvs_info = ret[0]
+                    if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
+                        jc_compression_is_active = node.rpc_client().jc_compression_get_status(node.jm_vuid)
+                        retries = 10
+                        while jc_compression_is_active:
+                            if retries <= 0:
+                                logger.warning("Timeout waiting for JC compression task to finish")
+                                break
+                            retries -= 1
+                            logger.info(
+                                f"JC compression task found on node: {node.get_id()}, retrying in 60 seconds")
+                            time.sleep(30)
+                            jc_compression_is_active = node.rpc_client().jc_compression_get_status(node.jm_vuid)
+            except Exception as e:
+                logger.error(e)
+                return
+
+    if jc_compression_is_active:
+        logger.error(f"JC compression task found.")
+        return
+
     logger.info("Updating mgmt cluster")
     if cluster.mode == "docker":
         cluster_docker = utils.get_docker_client(cluster_id)
