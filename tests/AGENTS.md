@@ -71,6 +71,25 @@ tox run -e integration      # Requires Docker + libfdb_c on host. EXCLUDES slow 
 tox run -e integration-slow # Slow tier only (the migration suite, ~20min).
 ```
 
+Each tier also has a `py314t-` twin (`tox run -e py314t-unit`, `py314t-integration`) running the
+free-threaded 3.14 interpreter the container image ships; the un-prefixed envs use python3.9, the
+floor `requires-python` promises. tox-uv fetches both, so neither has to be installed on the host.
+
+`passenv` is deliberately minimal — it lists only `PYTEST_ADDOPTS`, so a machine-specific value
+cannot leak into a run and change its result. Pass local infrastructure overrides on the command
+line with `-x` instead of widening it. The common case is a non-default container socket: the FDB
+testcontainer otherwise falls back to `/var/run/docker.sock` and the tier dies with
+`PermissionError(13)` before collecting a test.
+
+```bash
+# rootless podman (DOCKER_HOST already exported in the shell)
+tox run -e integration -x testenv:integration.passenv+=DOCKER_HOST
+
+# or skip the container entirely by pointing at an FDB you already run
+FDB_CLUSTER_FILE=/etc/foundationdb/fdb.cluster \
+  tox run -e integration -x testenv:integration.passenv+=FDB_CLUSTER_FILE
+```
+
 ### Test timeouts
 
 Every test has a **budget**, enforced by `pytest-timeout`. A test that blows it fails
