@@ -18,7 +18,6 @@ from simplyblock_core.exceptions import MigrationConflictError, PreconditionErro
 from simplyblock_core import storage_node_ops as storage_ops
 from simplyblock_core import mgmt_node_ops as mgmt_ops
 from simplyblock_core.controllers import (
-    backup_controller,
     pool_controller,
     lvol_controller,
     snapshot_controller,
@@ -26,7 +25,6 @@ from simplyblock_core.controllers import (
     tasks_controller,
     qos_controller,
     migration_controller,
-    backup_controller,
     fdb_backup_controller,
     replication_policy_controller,
 )
