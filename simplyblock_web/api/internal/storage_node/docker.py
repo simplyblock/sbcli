@@ -19,7 +19,7 @@ import simplyblock_core.utils.pci as pci_utils
 import simplyblock_core.utils as init_utils
 from simplyblock_web import utils, node_utils
 
-from ._node_info import get_static_node_info
+from .._node_info import get_static_node_info
 
 logger = core_utils.get_logger(__name__)
 

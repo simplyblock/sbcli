@@ -18,7 +18,7 @@ from simplyblock_web import utils, node_utils, node_utils_k8s
 from simplyblock_web.node_utils_k8s import namespace_id_file
 
 from . import docker as snode_ops
-from ._node_info import get_static_node_info
+from .._node_info import get_static_node_info
 
 
 logger = logging.getLogger(__name__)
