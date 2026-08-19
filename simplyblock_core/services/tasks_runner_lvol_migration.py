@@ -2554,19 +2554,29 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
             logger.warning(f"Source snapshot {snap_uuid} not found in DB; skipping")
 
     # --- Source NVMe-oF subsystem teardown (best-effort) ---
+    # Batch group workers share ONE subsystem across every member -- deleting
+    # it here, per worker, would mean up to N-1 redundant attempts before the
+    # group orchestrator's own _delete_source_subsystem() runs once, after
+    # the barrier, on the master thread. Skip it here for group workers;
+    # single-lvol migrations (no group) still own their own subsystem and
+    # must still delete it themselves.
     lvol = None
     try:
         lvol = db.get_lvol_by_id(migration.lvol_id)
-        logger.info(f"Step 8: removing source NVMe-oF subsystem {lvol.nqn}")
-        _src_paths_cu, _, _overlap_ids_cu = _build_paths(
-            src_node, tgt_node, src_rpc, tgt_rpc)
-        for _sp in _src_paths_cu:
-            if _sp['node_id'] in _overlap_ids_cu:
-                logger.info(
-                    f"Step 8: skip subsystem delete on overlap node "
-                    f"{_sp['node_id'][:8]} (now serving TGT)")
-            else:
-                migration_controller.cleanup_subsystem_or_ns(lvol.nqn, lvol.uuid, True, _sp['rpc'])
+        if migration.migration_group_id:
+            logger.info(f"Step 8: source subsystem delete deferred to group "
+                       f"orchestrator (worker of group {migration.migration_group_id[:8]})")
+        else:
+            logger.info(f"Step 8: removing source NVMe-oF subsystem {lvol.nqn}")
+            _src_paths_cu, _, _overlap_ids_cu = _build_paths(
+                src_node, tgt_node, src_rpc, tgt_rpc)
+            for _sp in _src_paths_cu:
+                if _sp['node_id'] in _overlap_ids_cu:
+                    logger.info(
+                        f"Step 8: skip subsystem delete on overlap node "
+                        f"{_sp['node_id'][:8]} (now serving TGT)")
+                else:
+                    migration_controller.cleanup_subsystem_or_ns(lvol.nqn, lvol.uuid, True, _sp['rpc'])
     except Exception as e:
         logger.warning(f"Source subsystem cleanup failed: {e}")
 
