@@ -588,7 +588,7 @@ class K8sNativeMajorUpgrade(TestClusterBase):
                 f"--no-headers 2>/dev/null || true",
                 supress_logs=True,
             )
-            pods = [l for l in out.strip().splitlines() if l.strip()]
+            pods = [line for line in out.strip().splitlines() if line.strip()]
             if not pods:
                 self.logger.info("All FIO pods terminated")
                 break

@@ -119,7 +119,7 @@ def _lvol(uuid="LV1", ns_id=1, nqn="nqn.test:shared"):
 
 def test_per_volume_flip_carries_its_namespace():
     node = _Node()
-    storage_node_ops._set_lvol_ana_on_node(_lvol(ns_id=3), node, "optimized")
+    storage_node_ops._set_lvol_ana_on_node(_lvol(ns_id=3), node, "optimized")  # type: ignore[arg-type]
     assert node._rpc.calls[0]["anagrpid"] == 3
 
 
@@ -128,7 +128,8 @@ def test_volumes_sharing_a_subsystem_flip_independently():
     group, or promoting one would promote the other."""
     node = _Node()
     for ns in (1, 2):
-        storage_node_ops._set_lvol_ana_on_node(_lvol(uuid=f"LV{ns}", ns_id=ns), node, "optimized")
+        lvol = _lvol(uuid=f"LV{ns}", ns_id=ns)
+        storage_node_ops._set_lvol_ana_on_node(lvol, node, "optimized")  # type: ignore[arg-type]
     groups = [c["anagrpid"] for c in node._rpc.calls]
     nqns = {c["nqn"] for c in node._rpc.calls}
     assert groups == [1, 2]
@@ -171,7 +172,7 @@ def test_failover_promotes_every_namespace_of_a_shared_subsystem(monkeypatch):
         lv.status = LVol.STATUS_ONLINE
     _install_db(monkeypatch, _DB(lvols, [primary, secondary]))
 
-    storage_node_ops._failover_primary_ana(primary)
+    storage_node_ops._failover_primary_ana(primary)  # type: ignore[arg-type]
 
     promoted = sorted(c["anagrpid"] for c in secondary._rpc.calls)
     assert promoted == [1, 2, 3], "every namespace of the shared subsystem must be promoted"
@@ -188,7 +189,7 @@ def test_failover_still_dedupes_identical_namespace_records(monkeypatch):
         lv.status = LVol.STATUS_ONLINE
     _install_db(monkeypatch, _DB(duplicate, [primary, secondary]))
 
-    storage_node_ops._failover_primary_ana(primary)
+    storage_node_ops._failover_primary_ana(primary)  # type: ignore[arg-type]
     assert len(secondary._rpc.calls) == 1
 
 
@@ -201,7 +202,7 @@ def test_failback_demotes_every_namespace(monkeypatch):
         lv.status = LVol.STATUS_ONLINE
     _install_db(monkeypatch, _DB(lvols, [primary, secondary]))
 
-    storage_node_ops._failback_primary_ana(primary)
+    storage_node_ops._failback_primary_ana(primary)  # type: ignore[arg-type]
 
     assert sorted(c["anagrpid"] for c in secondary._rpc.calls) == [1, 2]
     assert all(c["ana"] == "non_optimized" for c in secondary._rpc.calls)

@@ -238,7 +238,7 @@ def test_final_step_failure_unfences_the_source(monkeypatch):
 def test_cutover_flips_are_confined_to_the_volumes_namespace(monkeypatch):
     """A cutover must not move the other namespaces of a shared subsystem: they
     reach the client through the same controller but are not being migrated."""
-    events = []
+    events: list = []
     src = _Node("SRC", events, "10.0.0.1", "lvs_src", secondary="SEC")
     sec = _Node("SEC", events, "10.0.0.2", "lvs_src")
     tgt = _Node("TGT", events, "10.0.1.1", "lvs_tgt")
