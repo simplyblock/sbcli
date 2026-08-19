@@ -814,16 +814,23 @@ def _require_importable(pending: dict) -> None:
             plane, or spans buckets.
     """
     for backup_id, manifest in pending.items():
-        chain, seen = [manifest], {backup_id}
+        # A chain reaching back before this batch spans both shapes of the same
+        # thing -- manifests being imported and Backup records already stored,
+        # which name their id and their location differently. Reduced to the two
+        # facts the rules below need, the two become comparable.
+        chain = [(backup_id, manifest.location)]
+        seen = {backup_id}
+        current = manifest
 
-        while (previous := chain[-1].prev_backup_id) is not None:
+        while (previous := current.prev_backup_id) is not None:
             if previous in seen:
                 raise PreconditionError(
                     f"Backup {backup_id} has a cyclic chain at {previous}")
             seen.add(previous)
 
             if previous in pending:
-                chain.append(pending[previous])
+                current = pending[previous]
+                chain.append((previous, current.location))
                 continue
 
             if not _backup_exists(previous):
@@ -834,17 +841,19 @@ def _require_importable(pending: dict) -> None:
 
             # Already imported, and checked then. Its own ancestry still counts
             # towards the length the data plane has to accept.
-            chain.extend(db_controller.get_backup_chain(previous))
+            chain.extend((stored.uuid, stored.get_location())
+                         for stored in db_controller.get_backup_chain(previous))
             break
 
-        # Manifests carry their location as a value, so coherence over the batch
-        # is a plain comparison; require_restorable wants Backup records, and
-        # these are not in the database yet.
+        # Locations are values, so coherence over the chain is a plain
+        # comparison; require_restorable wants Backup records, and the manifests
+        # in this batch are not in the database yet.
         divergent = next(
-            (m for m in chain if m.location != manifest.location), None)
+            (other for other, location in chain if location != manifest.location),
+            None)
         if divergent is not None:
             raise PreconditionError(
-                f"Backup {backup_id} shares a chain with {divergent.backup_id}, "
+                f"Backup {backup_id} shares a chain with {divergent}, "
                 "which is in a different bucket or encoding")
 
         if not chain_fits(len(chain)):
