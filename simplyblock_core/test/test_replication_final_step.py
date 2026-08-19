@@ -24,6 +24,7 @@ class _RPC:
         self.events = events
         self._final_step_ret = final_step_ret
         self.final_step_gateways = []
+        self.ana_groups = []
 
     # hub attach fast-path: pretend the remote bdev already exists
     def get_bdevs(self, name=None):
@@ -47,8 +48,13 @@ class _RPC:
         self.events.append(("add_clone", self.node_id, lvol_name, parent))
         return ["ok"]
 
-    def nvmf_subsystem_listener_set_ana_state(self, nqn, ip, port, trtype="TCP", ana=None):
+    def nvmf_subsystem_listener_set_ana_state(self, nqn, ip, port, trtype="TCP", ana=None,
+                                             anagrpid=None):
+        # anagrpid is recorded separately: flips are scoped to one ANA group
+        # (group id == namespace id) so a subsystem carrying several namespaces
+        # only moves the volume being cut over.
         self.events.append(("ana", self.node_id, ana))
+        self.ana_groups.append(anagrpid)
         return ["ok"]
 
 
@@ -85,6 +91,9 @@ class _Lvol:
     uuid = "LV1"
     lvol_bdev = "LVOL_1"
     nqn = "nqn.orig:lvol:LV1"
+    # A subsystem can hold several namespaces; ANA flips are confined to this
+    # volume's ANA group (group id == namespace id).
+    ns_id = 2
 
 
 def _install_nodes(monkeypatch, nodes_by_id):
@@ -224,3 +233,20 @@ def test_final_step_failure_unfences_the_source(monkeypatch):
     ana = [(e[1], e[2]) for e in events if e[0] == "ana"]
     assert ana[0] == ("S1", "inaccessible"), "fence before freeze"
     assert ana[-1] == ("S1", "optimized"), "source restored after failed freeze"
+
+
+def test_cutover_flips_are_confined_to_the_volumes_namespace(monkeypatch):
+    """A cutover must not move the other namespaces of a shared subsystem: they
+    reach the client through the same controller but are not being migrated."""
+    events = []
+    src = _Node("SRC", events, "10.0.0.1", "lvs_src", secondary="SEC")
+    sec = _Node("SEC", events, "10.0.0.2", "lvs_src")
+    tgt = _Node("TGT", events, "10.0.1.1", "lvs_tgt")
+    _install_nodes(monkeypatch, {"SRC": src, "SEC": sec, "TGT": tgt})
+
+    rfs.fence_source_paths(src, "lvs_src", _Lvol.nqn, _Lvol.ns_id)
+    rfs.enable_target_paths(tgt, "lvs_tgt", _Lvol.nqn, _Lvol.ns_id)
+
+    groups = src._rpc.ana_groups + sec._rpc.ana_groups + tgt._rpc.ana_groups
+    assert groups, "the flips must have happened"
+    assert set(groups) == {_Lvol.ns_id}, f"every flip must name ns {_Lvol.ns_id}, got {groups}"

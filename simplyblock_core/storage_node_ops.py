@@ -221,12 +221,17 @@ def _set_lvol_ana_on_node(lvol: LVol, node: StorageNode, ana_state):
     for iface in node.data_nics:
         if iface.ip4_address and (lvol.fabric == iface.trtype.lower() or (lvol.fabric == "tcp" and node.active_tcp)):
             trtype = iface.trtype if lvol.fabric == iface.trtype.lower() else "TCP"
+            # Scope the flip to this volume's ANA group (group id == namespace
+            # id): a subsystem can carry several namespaces whose volumes are
+            # migrated, suspended or failed over independently.
             ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
-                lvol.nqn, iface.ip4_address, listener_port, trtype=trtype, ana=ana_state)
+                lvol.nqn, iface.ip4_address, listener_port, trtype=trtype, ana=ana_state,
+                anagrpid=lvol.ns_id)
             if not ret:
                 logger.warning("Failed to set ANA state %s for %s on %s", ana_state, lvol.nqn, node.get_id())
             else:
-                logger.info("ANA: %s on %s (%s) → %s", lvol.nqn, node.get_id(), iface.ip4_address, ana_state)
+                logger.info("ANA: %s ns %s on %s (%s) → %s", lvol.nqn, lvol.ns_id,
+                            node.get_id(), iface.ip4_address, ana_state)
 
 
 def _failover_primary_ana(primary_node: StorageNode):
@@ -242,15 +247,17 @@ def _failover_primary_ana(primary_node: StorageNode):
     if primary_node.secondary_node_id:
         first_sec = db_ctrl.get_storage_node_by_id(primary_node.secondary_node_id)
 
-    # Namespaces share subsystems (one NQN hosts many lvols) and the listener
-    # RPC is per-subsystem — repeating it per lvol multiplies the ANA calls
-    # (and, for stale records whose subsystem is gone, the error spam) by the
-    # namespace count. One call per (nqn, lvs) covers every lvol in it.
-    seen_subsystems = set()
+    # Dedupe per NAMESPACE, not per subsystem. The old per-(nqn, lvs) dedupe was
+    # correct only while the flip was subsystem-wide: now that each volume's
+    # state is confined to its own ANA group, skipping the other namespaces of a
+    # shared subsystem would leave every volume but the first one unpromoted.
+    # Records that share (nqn, lvs, ns_id) are genuine duplicates and still cost
+    # only one call.
+    seen_namespaces = set()
     for lvol in lvol_list:
-        if (lvol.nqn, lvol.lvs_name) in seen_subsystems:
+        if (lvol.nqn, lvol.lvs_name, lvol.ns_id) in seen_namespaces:
             continue
-        seen_subsystems.add((lvol.nqn, lvol.lvs_name))
+        seen_namespaces.add((lvol.nqn, lvol.lvs_name, lvol.ns_id))
         if first_sec and first_sec.status == StorageNode.STATUS_ONLINE:
             _set_lvol_ana_on_node(lvol, first_sec, "optimized")
 
@@ -268,12 +275,12 @@ def _failback_primary_ana(primary_node: StorageNode):
     if primary_node.secondary_node_id:
         first_sec = db_ctrl.get_storage_node_by_id(primary_node.secondary_node_id)
 
-    # Same per-subsystem dedupe as _failover_primary_ana.
-    seen_subsystems = set()
+    # Same per-namespace dedupe as _failover_primary_ana.
+    seen_namespaces = set()
     for lvol in lvol_list:
-        if (lvol.nqn, lvol.lvs_name) in seen_subsystems:
+        if (lvol.nqn, lvol.lvs_name, lvol.ns_id) in seen_namespaces:
             continue
-        seen_subsystems.add((lvol.nqn, lvol.lvs_name))
+        seen_namespaces.add((lvol.nqn, lvol.lvs_name, lvol.ns_id))
         if first_sec and first_sec.status == StorageNode.STATUS_ONLINE:
             _set_lvol_ana_on_node(lvol, first_sec, "non_optimized")
 
