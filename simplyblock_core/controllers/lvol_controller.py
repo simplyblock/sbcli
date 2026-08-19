@@ -3048,6 +3048,21 @@ def replication_start(lvol_id, replication_cluster_id=None, mode=None, interval_
                     matched = True
                     break
             if not matched:
+                # Only snapshots of a volume that HAS a replication destination
+                # can be replicated forward. replication_backlog walks the clone
+                # ancestry across volumes, and on a failed-over volume that
+                # ancestry runs into the target-side REP_* receiving volumes,
+                # which exist only to receive a transfer and therefore carry
+                # replication_node_id="" / do_replicate=False. Queueing them
+                # produced tasks that could never resolve a destination node
+                # (330 x "StorageNode lookup with a blank id" in lab 2026-08-19,
+                # the same bug that used to surface as "Multiple values
+                # present"), and their endless retries starved the replication
+                # runner and wedged every volume delete behind them.
+                if not snap.lvol.replication_node_id:
+                    logger.debug("Skipping backlog snapshot %s: its volume %s has no "
+                                 "replication destination", snap.get_id(), snap.lvol.get_id())
+                    continue
                 task = tasks_controller.add_snapshot_replication_task(snap.cluster_id, snap.lvol.node_id, snap.get_id())
                 # task may be None if the scheduler is at capacity; the next poll cycle will retry
                 if task:
