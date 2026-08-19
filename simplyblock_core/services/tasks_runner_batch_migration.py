@@ -119,21 +119,12 @@ def _reconstruct_snap_tree(group, member_migrations, tgt_node, tgt_rpc) -> Optio
     for m in member_migrations:
         truly_external_preexisting = [
             s for s in m.snaps_preexisting_on_target if s not in owned_or_pending_uuids]
-        logger.info(
-            f"Group {group.uuid[:8]}: DIAG reconstruct seed member {m.uuid[:8]} "
-            f"(lvol={m.lvol_id[:8] if m.lvol_id else None}): "
-            f"snaps_preexisting_on_target={list(m.snaps_preexisting_on_target)} "
-            f"truly_external_preexisting={truly_external_preexisting} "
-            f"snaps_migrated={list(m.snaps_migrated)} "
-            f"snaps_transferred_group={list(m.snaps_transferred_group)}")
         committed.update(truly_external_preexisting)
         all_preexisting.update(truly_external_preexisting)
         # Snaps already committed in a prior (crashed) run are in snaps_migrated.
         # Seeding committed from them prevents re-convert on re-entry (SPDK rejects
         # converting an already-immutable bdev, which would stall the group forever).
         committed.update(m.snaps_migrated)
-    logger.info(f"Group {group.uuid[:8]}: DIAG reconstruct initial committed set "
-               f"({len(committed)}): {list(committed)}")
 
     _lvstore_prefix = tgt_node.lvstore + "/"
 
@@ -149,16 +140,9 @@ def _reconstruct_snap_tree(group, member_migrations, tgt_node, tgt_rpc) -> Optio
 
     for m in sorted(member_migrations, key=lambda x: getattr(x, '_sort_ns_id', 999)):
         chain = migration_controller.get_snapshot_chain(m.lvol_id, m.source_node_id)
-        logger.info(
-            f"Group {group.uuid[:8]}: DIAG reconstruct member {m.uuid[:8]} "
-            f"(ns_id={getattr(m, '_sort_ns_id', '?')}, lvol={m.lvol_id[:8] if m.lvol_id else None}): "
-            f"chain={list(chain)} snaps_transferred_group={list(m.snaps_transferred_group)}")
 
         for snap_uuid in m.snaps_transferred_group:
             if snap_uuid in committed:
-                logger.info(
-                    f"Group {group.uuid[:8]}: DIAG reconstruct snap {snap_uuid[:8]} "
-                    f"(member {m.uuid[:8]}) already in committed -- SKIPPING add_clone/convert")
                 continue
 
             try:
@@ -177,10 +161,6 @@ def _reconstruct_snap_tree(group, member_migrations, tgt_node, tgt_rpc) -> Optio
                     break
                 if sid in committed:
                     pred_uuid = sid
-            logger.info(
-                f"Group {group.uuid[:8]}: DIAG reconstruct snap {snap_uuid[:8]} "
-                f"(member {m.uuid[:8]}, bdev={tgt_composite}): pred_uuid="
-                f"{pred_uuid[:8] if pred_uuid else None}")
 
             if pred_uuid:
                 try:
@@ -207,10 +187,6 @@ def _reconstruct_snap_tree(group, member_migrations, tgt_node, tgt_rpc) -> Optio
                     else:
                         pred_short = _snap_tgt_short_name(pred_snap)
                     pred_composite = f"{tgt_node.lvstore}/{pred_short}"
-                    logger.info(
-                        f"Group {group.uuid[:8]}: DIAG reconstruct add_clone "
-                        f"{tgt_composite} -> parent {pred_composite} "
-                        f"(preexisting={pred_uuid in all_preexisting})")
                     if not tgt_rpc.bdev_lvol_add_clone(tgt_composite, pred_composite):
                         return f"bdev_lvol_add_clone failed: {snap_uuid} → {pred_uuid}"
                     if sec_rpc:
@@ -219,24 +195,12 @@ def _reconstruct_snap_tree(group, member_migrations, tgt_node, tgt_rpc) -> Optio
                     if ter_rpc:
                         if not ter_rpc.bdev_lvol_add_clone(tgt_composite, pred_composite):
                             return f"bdev_lvol_add_clone on tertiary failed: {snap_uuid} → {pred_uuid}"
-                    logger.info(
-                        f"Group {group.uuid[:8]}: DIAG reconstruct add_clone OK "
-                        f"{tgt_composite} -> {pred_composite}")
                 except KeyError:
                     logger.warning(f"Predecessor {pred_uuid} not found; skipping add_clone")
-            else:
-                logger.info(
-                    f"Group {group.uuid[:8]}: DIAG reconstruct snap {snap_uuid[:8]} "
-                    f"has no committed predecessor -- converting as a root snapshot "
-                    f"(no add_clone)")
 
             # Leadership gate: convert on a non-leader silently persists nothing.
             from simplyblock_core.controllers import lvol_controller as _lc
-            _is_leader = _lc.is_node_leader(tgt_node, tgt_composite.split("/")[0])
-            logger.info(
-                f"Group {group.uuid[:8]}: DIAG reconstruct convert {tgt_composite} "
-                f"is_leader={_is_leader}")
-            if not _is_leader:
+            if not _lc.is_node_leader(tgt_node, tgt_composite.split("/")[0]):
                 return f"target node not LVS leader for convert of {snap_uuid}, retrying"
             if not tgt_rpc.bdev_lvol_convert(tgt_composite):
                 return f"bdev_lvol_convert failed for {snap_uuid}"
@@ -246,9 +210,6 @@ def _reconstruct_snap_tree(group, member_migrations, tgt_node, tgt_rpc) -> Optio
             if ter_rpc:
                 if not ter_rpc.bdev_lvol_convert(tgt_composite):
                     return f"bdev_lvol_convert on tertiary failed for {snap_uuid}"
-            logger.info(
-                f"Group {group.uuid[:8]}: DIAG reconstruct convert OK {tgt_composite} "
-                f"(snap {snap_uuid[:8]} now committed)")
 
             # Early partial DB update: route health-check/delete to the target
             # node right away rather than waiting for apply_migration_to_db()
@@ -277,9 +238,6 @@ def _reconstruct_snap_tree(group, member_migrations, tgt_node, tgt_rpc) -> Optio
 
         m.write_to_db(db.kv_store)
 
-    logger.info(
-        f"Group {group.uuid[:8]}: DIAG reconstruct done, final committed set "
-        f"({len(committed)}): {list(committed)}")
     return None  # success
 
 
@@ -316,8 +274,6 @@ def _build_batch_final_args(group, member_migrations, src_node, tgt_node, tgt_rp
     """
     mid_to_migration = {m.uuid: m for m in member_migrations}
     ordered_ids = group.ordered_migration_ids()
-    logger.info(f"Group {group.uuid[:8]}: DIAG build_final_args ordered_ids "
-               f"({len(ordered_ids)}): {[mid[:8] for mid in ordered_ids]}")
 
     lvol_names = []
     lvol_ids = []
@@ -348,13 +304,6 @@ def _build_batch_final_args(group, member_migrations, src_node, tgt_node, tgt_rp
         if map_id is None:
             raise ValueError(f"map_id missing for {tgt_bdev_short}")
         lvol_ids.append(map_id)
-        logger.info(
-            f"Group {group.uuid[:8]}: DIAG build_final_args migration {migration_id[:8]} "
-            f"lvol={m.lvol_id[:8] if m.lvol_id else None} src_bdev={src_composite} "
-            f"tgt_bdev_short={tgt_bdev_short} map_id={map_id} "
-            f"snaps_migrated={list(m.snaps_migrated)} "
-            f"snaps_preexisting_on_target={list(m.snaps_preexisting_on_target)} "
-            f"snaps_transferred_group={list(m.snaps_transferred_group)}")
 
         # Last transferred snap = last entry in snaps_migrated (the intermediate).
         tgt_snap_composite = ""
@@ -392,14 +341,8 @@ def _build_batch_final_args(group, member_migrations, src_node, tgt_node, tgt_rp
                     last_uuid,
                     migration_id,
                 )
-        logger.info(
-            f"Group {group.uuid[:8]}: DIAG build_final_args migration {migration_id[:8]} "
-            f"resolved tgt_snap_composite={tgt_snap_composite!r}")
         snapshot_names.append(tgt_snap_composite)
 
-    logger.info(
-        f"Group {group.uuid[:8]}: DIAG build_final_args final pairing: "
-        f"{[(mid[:8], sn) for mid, sn in zip(ordered_ids, snapshot_names)]}")
     return lvol_names, lvol_ids, snapshot_names
 
 
@@ -407,22 +350,23 @@ def _flip_ana_to_optimized(group, member_migrations, src_node, src_rpc, tgt_node
     """
     After a successful bdev_lvol_batch_final_step, drive clients to the new target.
 
-    Mirrors the single-lvol Done-handler ANA sequence exactly:
+    Mirrors the single-lvol Done-handler ANA sequence, minus the SRC-inaccessible
+    step: _handle_intermediate_barrier's pre-final-step freeze already drives
+    every SRC path (primary + secondary/tertiary) inaccessible before
+    batch_final_step even runs, so re-flipping them here would just repeat
+    the same RPC calls with no effect.
 
     No-overlap:
       1. TGT primary → optimized  (required; logs error on failure but continues
          since bdev_lvol_batch_final_step cannot be undone)
       2. TGT secondary/tertiary → non_optimized
-      3. All SRC paths → inaccessible
 
     Overlap:
       1. First non-overlap TGT → optimized  (live path before touching overlap)
-      2. Overlap SRC paths → inaccessible  (at SRC port)
-      3. Non-overlap SRC paths → inaccessible
-      4. Namespace swap on overlap TGT paths: SRC bdev → migrated TGT bdev
+      2. Namespace swap on overlap TGT paths: SRC bdev → migrated TGT bdev
          (uses _swap_namespace which dynamically re-queries nsid; respects crypto_bdev)
-      5. All TGT paths → correct ANA state at TGT port
-      6. Remove old SRC-port listener from overlap TGT nodes if port changed
+      3. All TGT paths → correct ANA state at TGT port
+      4. Remove old SRC-port listener from overlap TGT nodes if port changed
     """
     nqn = group.target_nqn
     src_paths, tgt_paths, overlap_ids = _build_paths(src_node, tgt_node, src_rpc, tgt_rpc)
@@ -492,13 +436,10 @@ def _flip_ana_to_optimized(group, member_migrations, src_node, src_rpc, tgt_node
         # Step 2: TGT secondary/tertiary → non_optimized
         for i, tp in enumerate(tgt_paths[1:], 1):
             _flip_all(tp['rpc'], tp['ips'], tp['port'], tp['trtype'], "non_optimized", f"TGT-rep{i}")
-
-        # Step 3: all SRC paths → inaccessible
-        for src in src_paths:
-            _flip_all(src['rpc'], src['ips'], src['port'], src['trtype'],
-                      "inaccessible", f"SRC-{src['node_id'][:8]}")
     else:
-        # Step 1: first non-overlap TGT → optimized before making any SRC inaccessible
+        # Step 1: first non-overlap TGT → optimized. SRC paths (overlap and
+        # non-overlap alike) are already inaccessible from the pre-final-step
+        # freeze -- no need to re-flip them here.
         non_overlap_tgt = next(
             (t for t in tgt_paths if t['node_id'] not in overlap_ids), None)
         if non_overlap_tgt:
@@ -510,19 +451,7 @@ def _flip_ana_to_optimized(group, member_migrations, src_node, src_rpc, tgt_node
                     f"Group {group.uuid[:8]}: ANA flip non-overlap TGT→optimized failed; "
                     f"proceeding anyway")
 
-        # Step 2: overlap SRC paths → inaccessible at SRC port
-        for src in src_paths:
-            if src['node_id'] in overlap_ids:
-                _flip_all(src['rpc'], src['ips'], src['port'], src['trtype'],
-                          "inaccessible", f"SRC-{src['node_id'][:8]}(overlap)")
-
-        # Step 3: non-overlap SRC paths → inaccessible
-        for src in src_paths:
-            if src['node_id'] not in overlap_ids:
-                _flip_all(src['rpc'], src['ips'], src['port'], src['trtype'],
-                          "inaccessible", f"SRC-{src['node_id'][:8]}")
-
-        # Step 4: namespace swap on overlap TGT paths.
+        # Step 2: namespace swap on overlap TGT paths.
         # Each member has its own namespace in the shared NQN. We look up each
         # member's nsid by matching ns['uuid'] == lvol.uuid so we never remove
         # the wrong namespace (positional removal would corrupt I/O for other members).
@@ -593,18 +522,18 @@ def _flip_ana_to_optimized(group, member_migrations, src_node, src_rpc, tgt_node
                         f"Group {group.uuid[:8]}: add ns {tgt_ns_bdev} "
                         f"on {tgt['node_id'][:8]} (non-fatal): {e}")
 
-        # Step 5: all TGT paths → correct ANA state at TGT port
+        # Step 3: all TGT paths → correct ANA state at TGT port
         primary_tgt = tgt_paths[0]
         if not _flip_all_required(primary_tgt['rpc'], primary_tgt['ips'], primary_tgt['port'],
                                    primary_tgt['trtype'], "optimized",
                                    f"TGT-{primary_tgt['node_id'][:8]}"):
             logger.error(
-                f"Group {group.uuid[:8]}: ANA flip TGT primary→optimized (step 5) failed")
+                f"Group {group.uuid[:8]}: ANA flip TGT primary→optimized (step 3) failed")
         for tgt in tgt_paths[1:]:
             _flip_all(tgt['rpc'], tgt['ips'], tgt['port'], tgt['trtype'],
                       "non_optimized", f"TGT-{tgt['node_id'][:8]}")
 
-        # Step 6: remove old SRC-port listener from overlap TGT nodes if port changed
+        # Step 4: remove old SRC-port listener from overlap TGT nodes if port changed
         for tgt in tgt_paths:
             if tgt['node_id'] in overlap_ids:
                 old_port = src_port_by_id.get(tgt['node_id'])
@@ -745,15 +674,8 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
             ter_rpc_extra = _make_rpc(ter_node) if ter_node else None
             _reordered_ids = group.ordered_migration_ids()
             snap_by_migration_id = dict(zip(_reordered_ids, snapshot_names))
-            logger.info(
-                f"Group {group.uuid[:8]}: DIAG extra-add_clone snap_by_migration_id: "
-                f"{[(mid[:8], sn) for mid, sn in snap_by_migration_id.items()]}")
             for m in member_migrations:
                 snap_composite = snap_by_migration_id.get(m.uuid, "")
-                logger.info(
-                    f"Group {group.uuid[:8]}: DIAG extra-add_clone member {m.uuid[:8]} "
-                    f"(lvol={m.lvol_id[:8] if m.lvol_id else None}) -> snap_composite="
-                    f"{snap_composite!r}")
                 if not snap_composite:
                     continue
                 try:
