@@ -130,7 +130,6 @@ class TestImportBackups:
         'created_at': 100,
         'completed_at': 200,
         'size': 4096,
-        'encryption': {'encrypted': False},
         'location': {'bucket_name': 'backups', 'region': 'eu-central-1'},
         'source': {'cluster_id': CLUSTER_ID, 'node_id': 'node-1'},
         'volume': {'lvol_id': VOLUME_ID, 'lvol_name': 'vol',
