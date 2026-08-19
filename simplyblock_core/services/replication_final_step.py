@@ -122,14 +122,59 @@ def enable_target_paths(tgt_node, tgt_lvstore, nqn):
               f"TGT-{tgt['node_id'][:8]}")
 
 
+def _transfer_hub_live(tgt_node):
+    """True when the target's transfer hublvol exists in SPDK, not just in the DB.
+
+    Both halves matter: the bdev carries the data and the subsystem is what the
+    source connects to, and a restart removes both while leaving the DB record
+    behind.
+    """
+    hub = tgt_node.transfer_hublvol
+    if hub is None or not hub.bdev_name:
+        return False
+    try:
+        rpc_client = tgt_node.rpc_client()
+        if not rpc_client.get_bdevs(hub.bdev_name):
+            logger.info("Transfer hublvol bdev %s missing on %s (restart wipes SPDK "
+                        "state); recreating", hub.bdev_name, tgt_node.get_id())
+            return False
+        if not rpc_client.subsystem_get(hub.nqn):
+            logger.info("Transfer hublvol subsystem %s missing on %s; recreating",
+                        hub.nqn, tgt_node.get_id())
+            return False
+    except Exception as e:
+        # Unreachable target: let the caller's attach fail and retry rather than
+        # recreating blindly against a node we cannot talk to.
+        logger.warning("Could not verify the transfer hublvol on %s: %s",
+                       tgt_node.get_id(), e)
+        return True
+    return True
+
+
 def ensure_hub_attached(src_rpc, tgt_node):
     """Ensure the target's transfer-hub lvol is NVMe-oF attached on the source.
 
     The hub lvol is the gateway the source pushes the final delta through.
     Returns (hub_bdev_name, remote_bdev_name, error_string|None).
     """
-    if tgt_node.transfer_hublvol is None or not tgt_node.transfer_hublvol.bdev_name:
-        tgt_node.create_transfer_hublvol()
+    # Trusting the DB record here is what broke every fail-back into a restarted
+    # node (215 attach failures, labs 2026-08-17/18): a restart wipes SPDK's
+    # bdevs and subsystems while ``transfer_hublvol`` survives in the DB, so this
+    # branch was skipped and the source attached to a subsystem that no longer
+    # existed -- bdev_nvme_attach_controller returned -5 (EIO) and afterwards
+    # "Controller ... does not exist". The HA hublvol is recreated by the restart
+    # flow (recreate_hublvol); the transfer hublvol is not recreated anywhere, so
+    # verify it on the TARGET and heal it here. create_transfer_hublvol is
+    # idempotent: it reuses the record, recreates the bdev only when SPDK lacks
+    # it, and re-exposes the subsystem.
+    if not _transfer_hub_live(tgt_node):
+        try:
+            tgt_node.create_transfer_hublvol()
+        except Exception as e:
+            return None, None, f"Failed to (re)create the transfer hublvol on {tgt_node.get_id()}: {e}"
+        if not _transfer_hub_live(tgt_node):
+            return None, None, (f"Transfer hublvol still absent on {tgt_node.get_id()} "
+                                f"after recreation")
 
     hub = tgt_node.transfer_hublvol
     # Already attached (prior iteration or crash recovery).
