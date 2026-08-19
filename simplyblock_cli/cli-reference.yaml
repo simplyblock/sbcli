@@ -1572,6 +1572,127 @@ commands:
             help: "Target cluster pool ID or name"
             dest: target_pool
             type: str
+      - name: replication-target-add
+        help: Adds a named replication destination to a cluster (several are allowed)
+        arguments:
+          - name: "cluster_id"
+            help: "Source cluster id"
+            dest: cluster_id
+            type: str
+            completer: _completer_get_cluster_list
+          - name: "name"
+            help: "Name of the replication target, unique per source cluster"
+            dest: target_name
+            type: str
+          - name: "target_cluster_id"
+            help: "Destination cluster id"
+            dest: target_cluster_id
+            type: str
+            completer: _completer_get_cluster_list
+          - name: "--target-pool"
+            help: "Pool on the destination cluster (ID or name). Stored as a UUID."
+            dest: target_pool
+            type: str
+          - name: "--timeout"
+            help: "Replication network timeout in seconds. Default: `600`."
+            dest: timeout
+            type: int
+      - name: replication-target-list
+        help: Lists the replication targets of a cluster
+        arguments:
+          - name: "--cluster-id"
+            help: "Source cluster id"
+            dest: cluster_id
+            type: str
+            completer: _completer_get_cluster_list
+          - name: "--json"
+            help: "Print outputs in json format."
+            dest: json
+            type: bool
+            action: store_true
+      - name: replication-target-remove
+        help: Removes a replication target. Refused while a policy still uses it.
+        arguments:
+          - name: "target_id"
+            help: "Replication target id"
+            dest: target_id
+            type: str
+      - name: replication-target-failover
+        help: Fails over EVERY volume replicating to this target (site loss)
+        arguments:
+          - name: "target_id"
+            help: "Replication target id"
+            dest: target_id
+            type: str
+          - name: "--json"
+            help: "Print outputs in json format."
+            dest: json
+            type: bool
+            action: store_true
+      - name: replication-policy-add
+        help: Adds a replication policy on a target, defining the replication cadence
+        arguments:
+          - name: "cluster_id"
+            help: "Source cluster id"
+            dest: cluster_id
+            type: str
+            completer: _completer_get_cluster_list
+          - name: "name"
+            help: "Name of the policy, unique per source cluster"
+            dest: policy_name
+            type: str
+          - name: "--target"
+            help: "Replication target id or name"
+            dest: target
+            type: str
+            required: true
+          - name: "--interval-min"
+            help: "Cadence: minutes between internal replication snapshots. 0 replicates user snapshots only. Default: `1`."
+            dest: interval_min
+            type: int
+          - name: "--mode"
+            help: "Replication mode. Default: `failover`."
+            dest: mode
+            type: str
+            choices:
+              - failover
+              - migration
+          - name: "--keep"
+            help: "Replicated internal snapshots to retain on each side. Minimum (and default): `2`."
+            dest: keep_replicated
+            type: int
+      - name: replication-policy-list
+        help: Lists the replication policies of a cluster
+        arguments:
+          - name: "--cluster-id"
+            help: "Source cluster id"
+            dest: cluster_id
+            type: str
+            completer: _completer_get_cluster_list
+          - name: "--json"
+            help: "Print outputs in json format."
+            dest: json
+            type: bool
+            action: store_true
+      - name: replication-policy-remove
+        help: Removes a replication policy. Refused while a volume still follows it.
+        arguments:
+          - name: "policy_id"
+            help: "Replication policy id"
+            dest: policy_id
+            type: str
+      - name: replication-policy-failover
+        help: Fails over EVERY volume following this policy
+        arguments:
+          - name: "policy_id"
+            help: "Replication policy id"
+            dest: policy_id
+            type: str
+          - name: "--json"
+            help: "Print outputs in json format."
+            dest: json
+            type: bool
+            action: store_true
   - name: "volume"
     help: "Logical Volume Commands"
     aliases:
@@ -1708,6 +1829,10 @@ commands:
             dest: npcs
             type: int
             default: 0
+          - name: "--replication-policy"
+            help: "Replication policy (id or name) to assign at create time. Configures replication for this volume."
+            dest: replication_policy
+            type: str
           - name: "--replicate"
             help: "Replicate LVol snapshot"
             dest: replicate
@@ -1913,6 +2038,39 @@ commands:
             help: "The logical volume id."
             dest: volume_id
             type: str
+      - name: replication-policy-set
+        help: Puts a volume under a replication policy, or changes it (a change re-replicates in full)
+        arguments:
+          - name: "volume_id"
+            help: "Logical volume id"
+            dest: volume_id
+            type: str
+
+          - name: "policy"
+            help: "Replication policy id or name"
+            dest: policy
+            type: str
+      - name: replication-policy-clear
+        help: Takes a volume out of its replication policy, stopping replication and deleting the internal replication snapshots on both sides
+        arguments:
+          - name: "volume_id"
+            help: "Logical volume id"
+            dest: volume_id
+            type: str
+
+      - name: replication-relationship
+        help: Shows the volume's counterpart on the other cluster (source to target volume id, and the reverse)
+        arguments:
+          - name: "volume_id"
+            help: "Logical volume id"
+            dest: volume_id
+            type: str
+
+          - name: "--json"
+            help: "Print outputs in json format."
+            dest: json
+            type: bool
+            action: store_true
       - name: replication-start
         help: "Start snapshot replication taken from lvol"
         arguments:
