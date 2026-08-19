@@ -639,17 +639,12 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
                 f"failure (non-fatal): {detach_exc}")
         return None, str(e)
 
-    # Pre-freeze: take SRC secondary/tertiary out of the read path before the
-    # synchronous final-step transfer below. bdev_lvol_batch_transfer_final_step
-    # freezes the SRC primary internally for the duration of the transfer, but
-    # a client sitting on a SRC replica path is not covered by that freeze —
-    # without this, a write accepted by a SRC replica during the transfer (or
-    # in the gap before cutover flips SRC paths inaccessible) never reaches
-    # the copy that already ran, and is silently lost. Mirrors the single-lvol
-    # path's identical pre-freeze (tasks_runner_lvol_migration.py).
+    # Pre-freeze: take SRC/TGT paths out of the read/write path before the
+    # synchronous final-step transfer below (see the diagnostic block further
+    # down for the current, temporarily-widened version of this).
     nqn = group.target_nqn
-    src_paths, _, _ = _build_paths(src_node, tgt_node, src_rpc, tgt_rpc)
-    src_replica_paths = src_paths[1:]  # secondary/tertiary only; primary is frozen internally by the RPC below
+    src_paths, tgt_paths, _ = _build_paths(src_node, tgt_node, src_rpc, tgt_rpc)
+    src_replica_paths = src_paths[1:]  # secondary/tertiary only; used for the failure-path revert below
 
     def _flip(rpc, ip, port, trtype, state, label):
         try:
@@ -664,6 +659,18 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
         for _ip in ips:
             _flip(rpc, _ip, port, trtype, state, label)
 
+    def _flip_all_required(rpc, ips, port, trtype, state, label, attempts=3):
+        ok = True
+        for _ip in ips:
+            for i in range(attempts):
+                if _flip(rpc, _ip, port, trtype, state, label):
+                    break
+                if i < attempts - 1:
+                    time.sleep(1.0)
+            else:
+                ok = False
+        return ok
+
     def _revert_src_replicas(reason):
         # Final step didn't complete — put SRC secondary/tertiary back into
         # the read path (their pre-freeze state) so clients keep multipath
@@ -675,11 +682,23 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
             _flip_all(p['rpc'], p['ips'], p['port'], p['trtype'],
                       "non_optimized", f"SRC-{p['node_id'][:8]}(revert)")
 
-    if src_replica_paths:
-        logger.info(f"Group {group.uuid[:8]}: setting SRC secondary/tertiary inaccessible pre-final-step")
-        for p in src_replica_paths:
-            _flip_all(p['rpc'], p['ips'], p['port'], p['trtype'],
-                      "inaccessible", f"SRC-{p['node_id'][:8]}(pre-freeze)")
+    # TEMPORARILY CHANGED for a diagnostic test: instead of only freezing SRC
+    # secondary/tertiary pre-final-step (primary relied on the RPC's own
+    # internal freeze), make EVERY path -- all SRC (primary included) and all
+    # TGT -- inaccessible up front, wait 10s so any in-flight client I/O has
+    # time to fully settle/drain before the data actually moves, THEN call
+    # final_step. Re-enable the narrower pre-freeze once this test is done.
+    logger.info(f"Group {group.uuid[:8]}: setting ALL SRC and TGT paths inaccessible "
+               f"pre-final-step (diagnostic)")
+    for p in src_paths:
+        _flip_all(p['rpc'], p['ips'], p['port'], p['trtype'],
+                  "inaccessible", f"SRC-{p['node_id'][:8]}(pre-freeze)")
+    for p in tgt_paths:
+        _flip_all(p['rpc'], p['ips'], p['port'], p['trtype'],
+                  "inaccessible", f"TGT-{p['node_id'][:8]}(pre-freeze)")
+    logger.info(f"Group {group.uuid[:8]}: sleeping 10s after all-paths-inaccessible "
+               f"before batch_final_step (diagnostic)")
+    time.sleep(10)
 
     logger.info(
         f"Group {group.uuid[:8]}: batch_final_step "
@@ -703,8 +722,9 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
 
     if not batch_ok:
         _revert_src_replicas("batch_final_step failed")
-    # else: left as-is — the Done handler's ANA sequence (_flip_ana_to_optimized)
-    # already drives every SRC path (including primary) to inaccessible on success.
+    # else: left as-is — all SRC/TGT paths were already driven inaccessible
+    # before final_step (diagnostic, see above); only TGT primary needs to
+    # come back optimized on success, handled below.
 
     if batch_ok:
         # bdev_lvol_batch_final_step handles add_clone on the primary internally.
@@ -750,7 +770,20 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
                     logger.warning(
                         f"Group {group.uuid[:8]}: add_clone for member {m.uuid[:8]} (non-fatal): {e}")
 
-        _flip_ana_to_optimized(group, member_migrations, src_node, src_rpc, tgt_node, tgt_rpc)
+        # TEMPORARILY CHANGED for a diagnostic test: SRC/TGT were already
+        # driven inaccessible before final_step (see above) -- no need to
+        # re-flip SRC here. Just wait 2s, then bring TGT primary optimized.
+        # Re-enable _flip_ana_to_optimized() once this test is done.
+        logger.info(f"Group {group.uuid[:8]}: sleeping 2s after batch_final_step "
+                   f"before TGT primary optimized (diagnostic)")
+        time.sleep(2)
+        primary_tgt = tgt_paths[0]
+        if not _flip_all_required(primary_tgt['rpc'], primary_tgt['ips'], primary_tgt['port'],
+                                   primary_tgt['trtype'], "optimized",
+                                   f"TGT-{primary_tgt['node_id'][:8]}"):
+            logger.error(
+                f"Group {group.uuid[:8]}: ANA flip TGT primary→optimized failed; "
+                f"clients may be on degraded path")
 
     # TEMPORARILY DISABLED for a diagnostic test: no RPC calls at all after
     # the two ANA flips above -- not even the hub controller detach.
