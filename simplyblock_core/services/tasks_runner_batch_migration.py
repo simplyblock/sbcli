@@ -498,37 +498,39 @@ def _flip_ana_to_optimized(group, member_migrations, src_node, src_rpc, tgt_node
             _flip_all(src['rpc'], src['ips'], src['port'], src['trtype'],
                       "inaccessible", f"SRC-{src['node_id'][:8]}")
     else:
-        # Step 1: first non-overlap TGT → optimized before making any SRC inaccessible
-        non_overlap_tgt = next(
-            (t for t in tgt_paths if t['node_id'] not in overlap_ids), None)
-        if non_overlap_tgt:
-            if not _flip_all_required(non_overlap_tgt['rpc'], non_overlap_tgt['ips'],
-                                       non_overlap_tgt['port'], non_overlap_tgt['trtype'],
-                                       "optimized",
-                                       f"TGT-{non_overlap_tgt['node_id'][:8]}(pre)"):
-                logger.error(
-                    f"Group {group.uuid[:8]}: ANA flip non-overlap TGT→optimized failed; "
-                    f"proceeding anyway")
-
-        # Step 2: overlap SRC paths → inaccessible at SRC port
+        # TEMPORARILY SIMPLIFIED for a diagnostic test: skip the overlap-aware
+        # TGT-first ordering and the namespace swap entirely. Just:
+        #   1. All SRC paths -> inaccessible (secondary/tertiary were already
+        #      made inaccessible pre-final-step; this covers the primary and
+        #      harmlessly re-covers secondary/tertiary).
+        #   2. Sleep 5s.
+        #   3. All TGT paths -> optimized (primary) / non_optimized (replicas).
+        # Re-enable the original overlap-aware sequence once this test is done.
         for src in src_paths:
-            if src['node_id'] in overlap_ids:
-                _flip_all(src['rpc'], src['ips'], src['port'], src['trtype'],
-                          "inaccessible", f"SRC-{src['node_id'][:8]}(overlap)")
+            _flip_all(src['rpc'], src['ips'], src['port'], src['trtype'],
+                      "inaccessible", f"SRC-{src['node_id'][:8]}")
 
-        # Step 3: non-overlap SRC paths → inaccessible
-        for src in src_paths:
-            if src['node_id'] not in overlap_ids:
-                _flip_all(src['rpc'], src['ips'], src['port'], src['trtype'],
-                          "inaccessible", f"SRC-{src['node_id'][:8]}")
+        logger.info(f"Group {group.uuid[:8]}: sleeping 5s after SRC inaccessible "
+                   f"before TGT flip (diagnostic)")
+        time.sleep(5)
 
-        # Step 4: namespace swap on overlap TGT paths.
+        primary_tgt = tgt_paths[0]
+        if not _flip_all_required(primary_tgt['rpc'], primary_tgt['ips'], primary_tgt['port'],
+                                   primary_tgt['trtype'], "optimized",
+                                   f"TGT-{primary_tgt['node_id'][:8]}"):
+            logger.error(
+                f"Group {group.uuid[:8]}: ANA flip TGT primary→optimized failed; "
+                f"clients may be on degraded path")
+        for tgt in tgt_paths[1:]:
+            _flip_all(tgt['rpc'], tgt['ips'], tgt['port'], tgt['trtype'],
+                      "non_optimized", f"TGT-{tgt['node_id'][:8]}")
+
+        # Namespace swap on overlap TGT paths.
         # TEMPORARILY DISABLED for a diagnostic test: skip the remove/add-ns
-        # swap entirely -- just flip TGT optimized / SRC inaccessible (steps
-        # 2/3/5) and leave each overlap node's existing namespaces (still
-        # pointing at the pre-migration SRC bdev) untouched, to isolate
-        # whether the corruption is introduced by this swap or is already
-        # present in the final-step/add_clone data regardless of it.
+        # swap entirely -- leave each overlap node's existing namespaces
+        # (still pointing at the pre-migration SRC bdev) untouched, to
+        # isolate whether the corruption is introduced by this swap or is
+        # already present in the final-step/add_clone data regardless of it.
         # Re-enable once the test is done.
         logger.info(f"Group {group.uuid[:8]}: overlap namespace swap SKIPPED (diagnostic)")
         if False:
@@ -602,18 +604,7 @@ def _flip_ana_to_optimized(group, member_migrations, src_node, src_rpc, tgt_node
                             f"Group {group.uuid[:8]}: add ns {tgt_ns_bdev} "
                             f"on {tgt['node_id'][:8]} (non-fatal): {e}")
 
-        # Step 5: all TGT paths → correct ANA state at TGT port
-        primary_tgt = tgt_paths[0]
-        if not _flip_all_required(primary_tgt['rpc'], primary_tgt['ips'], primary_tgt['port'],
-                                   primary_tgt['trtype'], "optimized",
-                                   f"TGT-{primary_tgt['node_id'][:8]}"):
-            logger.error(
-                f"Group {group.uuid[:8]}: ANA flip TGT primary→optimized (step 5) failed")
-        for tgt in tgt_paths[1:]:
-            _flip_all(tgt['rpc'], tgt['ips'], tgt['port'], tgt['trtype'],
-                      "non_optimized", f"TGT-{tgt['node_id'][:8]}")
-
-        # Step 6: remove old SRC-port listener from overlap TGT nodes if port changed
+        # Remove old SRC-port listener from overlap TGT nodes if port changed
         for tgt in tgt_paths:
             if tgt['node_id'] in overlap_ids:
                 old_port = src_port_by_id.get(tgt['node_id'])
