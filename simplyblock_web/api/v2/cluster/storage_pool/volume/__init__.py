@@ -236,7 +236,7 @@ def replication_trigger(cluster: Cluster, pool: StoragePool, volume: Volume) -> 
 class ReplicationStartParams(BaseModel):
     replication_cluster_id: Optional[str] = None   # destination; None = cluster default
     mode: Optional[str] = None                     # failover | migration
-    interval_min: Optional[int] = Field(None, ge=0)
+    interval_min: Annotated[Optional[int], Field(None, ge=0)] = None
 
 
 @instance_api.post('/replication_start', name='clusters:storage-pools:volumes:replication_start', status_code=204, responses={204: {"content": None}})
