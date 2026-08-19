@@ -138,7 +138,26 @@ class TestBuildManifest:
         assert manifest.volume.ha_type == "ha"
         assert manifest.volume.rw_ios_per_sec == 5000
         assert manifest.volume.max_size == 8192
-        assert manifest.volume.allowed_hosts == [{"nqn": "nqn.2024-01.io.test:host"}]
+        assert manifest.volume.allowed_hosts == ["nqn.2024-01.io.test:host"]
+
+    def test_host_keys_never_reach_the_bucket(self, db, cluster, lvol):
+        """A manifest carries no authentication material, host keys included.
+
+        Restore takes the NQNs and mints fresh keys from the target pool, so
+        publishing these would be a plaintext copy of the volume's DHCHAP keys
+        and PSK in a bucket, for no reader.
+        """
+        backup = _backup(db, "b-1", 1, allowed_hosts=[{
+            "nqn": "nqn.2024-01.io.test:host",
+            "dhchap_key": "DHHC-1:00:secret-dhchap:",
+            "psk": "NVMeTLSkey-1:01:secret-psk:",
+        }])
+
+        manifest = backup_controller.build_manifest(backup)
+
+        assert manifest.volume.allowed_hosts == ["nqn.2024-01.io.test:host"]
+        assert "secret-dhchap" not in manifest.model_dump_json()
+        assert "secret-psk" not in manifest.model_dump_json()
 
     def test_survives_a_deleted_volume(self, db, cluster, lvol):
         """A backup outlives its volume; that must not stop the manifest."""

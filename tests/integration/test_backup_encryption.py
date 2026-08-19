@@ -7,6 +7,7 @@ key material, and that a restore which cannot reach the key fails instead of
 producing a plaintext volume over ciphertext.
 """
 import pytest
+from pydantic import HttpUrl
 
 from simplyblock_core.controllers.backup import controller as backup_controller
 from simplyblock_core.controllers.backup import manifest as backup_manifest
@@ -89,7 +90,7 @@ class TestKeyDescriptor:
         encryption = backup_controller._build_encryption(cluster, backup)
 
         assert encryption.descriptor.kms == "hashicorp_vault"
-        assert encryption.descriptor.vault_base_url == "https://vault.example.com"
+        assert encryption.descriptor.vault_base_url == HttpUrl("https://vault.example.com")
         assert encryption.descriptor.transit_mount == "sb/transit"
         assert encryption.descriptor.kv_mount == "sb/kv"
 

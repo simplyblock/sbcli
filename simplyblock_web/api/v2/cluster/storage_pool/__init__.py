@@ -1,8 +1,8 @@
-from typing import Annotated, List, Optional
+from typing import List, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.controllers import pool_controller
@@ -130,7 +130,7 @@ def iostats(cluster: Cluster, pool: StoragePool, limit: int = 20):
 
 
 class PoolHostParams(BaseModel):
-    host_nqn: Annotated[str, Field(pattern=core_utils.NQN_PATTERN)]
+    host_nqn: util.NQN
 
 
 @instance_api.post('/host', name='clusters:storage-pools:add-host', status_code=204,

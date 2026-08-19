@@ -29,14 +29,15 @@ for where the two genuinely differ and where they should be collapsed.
 """
 import json
 import logging
-from typing import Iterable, List, Literal, Optional
+from typing import Any, Iterable, List, Literal, Optional
 
 import boto3
 from botocore.config import Config as BotoConfig
 from botocore.exceptions import BotoCoreError, ClientError
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, HttpUrl, model_validator
 
 from simplyblock_core.models.backup_config import BackupConfig, BackupLocation
+from simplyblock_core.utils import NQN
 from simplyblock_core.utils.secrets import unwrap_secret
 
 
@@ -91,17 +92,49 @@ class Volume(BaseModel):
     snapshot_id: str
     snapshot_name: str
     size: int
-    allowed_hosts: List[dict] = []
+
+    #: The NQNs allowed to attach, so a restore recreates the volume's
+    #: allow-list rather than an open subsystem. NQNs alone: the control plane's
+    #: own host entries also carry that host's DHCHAP keys and PSK, which no
+    #: reader of a manifest needs -- restore passes the NQNs to add_lvol_ha,
+    #: which mints fresh keys from the target pool -- and which a manifest must
+    #: not carry any more than it carries bucket credentials.
+    allowed_hosts: List[NQN] = []
 
     pool_name: Optional[str] = None
-    ha_type: Optional[str] = None
-    fabric: Optional[str] = None
+
+    #: "default" is not among these: it is the request-time way of saying "the
+    #: cluster's", which the volume no longer has once it exists. A volume whose
+    #: record does not say is recorded as absent rather than as a guess.
+    ha_type: Optional[Literal["single", "ha"]] = None
+
+    fabric: Optional[Literal["tcp", "rdma", "tcp,rdma"]] = None
     lvol_priority_class: Optional[int] = None
     max_size: Optional[int] = None
     rw_ios_per_sec: Optional[int] = None
     rw_mbytes_per_sec: Optional[int] = None
     r_mbytes_per_sec: Optional[int] = None
     w_mbytes_per_sec: Optional[int] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _hosts_to_nqns(cls, data: Any) -> Any:
+        """Take the NQN out of a host entry that carries more than one.
+
+        Two inputs arrive this way: the control plane's own ``allowed_hosts``
+        dicts, which is where the key material would otherwise come from, and a
+        manifest written before this field was narrowed. Both are read for the
+        NQNs they hold rather than refused, and the rest is dropped here -- so
+        the next write of that manifest no longer republishes it.
+        """
+        if isinstance(data, dict) and isinstance(data.get("allowed_hosts"), list):
+            data = dict(data)
+            data["allowed_hosts"] = [
+                host["nqn"] if isinstance(host, dict) else host
+                for host in data["allowed_hosts"]
+            ]
+
+        return data
 
 
 class KeyDescriptor(BaseModel):
@@ -128,7 +161,7 @@ class KeyDescriptor(BaseModel):
     kek_name: str
 
     #: Vault only; absent for the local backend.
-    vault_base_url: Optional[str] = None
+    vault_base_url: Optional[HttpUrl] = None
     transit_mount: Optional[str] = None
     kv_mount: Optional[str] = None
 
