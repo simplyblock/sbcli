@@ -96,15 +96,6 @@ def build_manifest(backup: Backup) -> backup_manifest.BackupManifest:
     `BackupDTO`, the `backup list` table and existing records, so it wants its own
     change.
     """
-    volume = backup_manifest.Volume(
-        lvol_id=backup.lvol_id,
-        lvol_name=backup.lvol_name,
-        snapshot_id=backup.snapshot_id,
-        snapshot_name=backup.snapshot_name,
-        size=backup.size,
-        allowed_hosts=backup.allowed_hosts or [],
-    )
-
     # The volume's own settings, where it still exists. Absent together once it
     # is gone, which is a different answer from 0 -- for a QoS cap that means
     # unlimited.
@@ -114,18 +105,34 @@ def build_manifest(backup: Backup) -> backup_manifest.BackupManifest:
         logger.warning("Volume %s is gone; manifest for backup %s records only "
                        "the shape carried on the backup itself",
                        backup.lvol_id, backup.uuid)
+        settings = {}
     else:
-        volume = volume.model_copy(update={
+        settings = {
             "pool_name": lvol.pool_name,
-            "ha_type": lvol.ha_type or "default",
-            "fabric": lvol.fabric or "tcp",
+            "ha_type": lvol.ha_type or None,
+            "fabric": lvol.fabric or None,
             "lvol_priority_class": lvol.lvol_priority_class,
             "max_size": lvol.max_size,
             "rw_ios_per_sec": lvol.rw_ios_per_sec,
             "rw_mbytes_per_sec": lvol.rw_mbytes_per_sec,
             "r_mbytes_per_sec": lvol.r_mbytes_per_sec,
             "w_mbytes_per_sec": lvol.w_mbytes_per_sec,
-        })
+        }
+
+    # Validated in one go rather than copied onto: model_copy does not validate,
+    # and every value above comes off an untyped record -- an ha_type or an
+    # allowed-host entry the model does not recognise has to be caught here,
+    # while the backup is still being written, not by whoever reads the manifest
+    # during a recovery.
+    volume = backup_manifest.Volume.model_validate({
+        "lvol_id": backup.lvol_id,
+        "lvol_name": backup.lvol_name,
+        "snapshot_id": backup.snapshot_id,
+        "snapshot_name": backup.snapshot_name,
+        "size": backup.size,
+        "allowed_hosts": backup.allowed_hosts or [],
+        **settings,
+    })
 
     cluster_name = None
     cluster_size = None
@@ -333,19 +340,28 @@ def _build_encryption(cluster, backup: Backup) -> backup_manifest.Encryption:
     someone who already knew which cluster had made it and how that cluster was
     configured.
     """
-    descriptor = backup_manifest.KeyDescriptor(
-        kms="local",
-        dek_path=backup_dek_path(cluster.get_id(), backup.uuid),
-        kek_name=backup_kek_name(backup.uuid),
+    dek_path = backup_dek_path(cluster.get_id(), backup.uuid)
+    kek_name = backup_kek_name(backup.uuid)
+    vault = cluster.hashicorp_vault_settings
+
+    # Two constructions rather than a model_copy onto one: model_copy does not
+    # validate, so the Vault fields would enter the descriptor unchecked.
+    descriptor = (
+        backup_manifest.KeyDescriptor(
+            kms="hashicorp_vault",
+            dek_path=dek_path,
+            kek_name=kek_name,
+            vault_base_url=vault.base_url or None,
+            transit_mount=vault.transit_mount,
+            kv_mount=vault.kv_mount,
+        )
+        if vault is not None else
+        backup_manifest.KeyDescriptor(
+            kms="local",
+            dek_path=dek_path,
+            kek_name=kek_name,
+        )
     )
-    if cluster.hashicorp_vault_settings is not None:
-        vault = cluster.hashicorp_vault_settings
-        descriptor = descriptor.model_copy(update={
-            "kms": "hashicorp_vault",
-            "vault_base_url": vault.base_url,
-            "transit_mount": vault.transit_mount,
-            "kv_mount": vault.kv_mount,
-        })
 
     return backup_manifest.Encryption(encrypted=True, descriptor=descriptor)
 
@@ -376,7 +392,11 @@ def create_single_backup(snapshot, lvol, node_id, cluster_id, prev_backup, locat
     backup.pool_uuid = lvol.pool_uuid
     backup.prev_backup_id = prev_backup.uuid if prev_backup else ""
     backup.size = snapshot.size
-    backup.allowed_hosts = lvol.allowed_hosts
+    # NQNs only. The volume's entries also carry that host's DHCHAP keys and
+    # PSK; copying them here would duplicate live authentication material into a
+    # second record, and from there into every manifest, for no reader -- restore
+    # uses the NQNs and mints fresh keys from the target pool.
+    backup.allowed_hosts = [{"nqn": host["nqn"]} for host in (lvol.allowed_hosts or [])]
     backup.created_at = int(time.time())
     backup.status = Backup.STATUS_PENDING
     backup.encrypted = bool(lvol.crypto_bdev)
@@ -845,7 +865,7 @@ def import_backups(manifests: Iterable[backup_manifest.BackupManifest],
         backup.node_id = manifest.source.node_id
         backup.prev_backup_id = manifest.prev_backup_id or ""
         backup.size = manifest.size
-        backup.allowed_hosts = manifest.volume.allowed_hosts
+        backup.allowed_hosts = [{"nqn": nqn} for nqn in manifest.volume.allowed_hosts]
         backup.created_at = manifest.created_at
         backup.completed_at = manifest.completed_at
         backup.status = Backup.STATUS_COMPLETED

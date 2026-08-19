@@ -244,7 +244,7 @@ class StoragePoolDTO(BaseModel):
     max_w_mbytes: util.Unsigned
     capacity: Optional[CapacityStatDTO]
     dhchap: bool = False
-    allowed_hosts: List[str] = []
+    allowed_hosts: List[util.NQN] = []
 
     @staticmethod
     def from_model(model: Pool, stat_obj: Optional[StatsObject] = None):
@@ -439,7 +439,7 @@ class VolumeDTO(BaseModel):
     max_rw_mbytes: util.Unsigned
     max_r_mbytes: util.Unsigned
     max_w_mbytes: util.Unsigned
-    allowed_hosts: List[str]
+    allowed_hosts: List[util.NQN]
     policy: str
     capacity: CapacityStatDTO
     rep_info: Optional[dict] = None
@@ -547,7 +547,13 @@ class BackupDTO(BaseModel):
     status: str
     prev_backup_id: str
     size: int
-    allowed_hosts: List[dict]
+
+    #: The NQNs allowed to attach. The record's host entries also carry that
+    #: host's DHCHAP keys and PSK, which listing backups has no business handing
+    #: out; ``LVolDTO`` already exposes the same field this way, and a volume's
+    #: per-host keys are read through the endpoint authorised for exactly that.
+    allowed_hosts: List[util.NQN]
+
     created_at: int
     completed_at: int
     encrypted: bool
@@ -565,7 +571,7 @@ class BackupDTO(BaseModel):
             status=model.status,
             prev_backup_id=model.prev_backup_id,
             size=model.size,
-            allowed_hosts=model.allowed_hosts or [],
+            allowed_hosts=[host["nqn"] for host in (model.allowed_hosts or [])],
             created_at=model.created_at,
             completed_at=model.completed_at,
             encrypted=model.encrypted,

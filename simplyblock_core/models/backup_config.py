@@ -66,7 +66,7 @@ class BackupLocation(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    bucket_name: str
+    bucket_name: str = Field(min_length=1)
 
     #: Absent means the AWS SDK resolves it the way it resolves credentials:
     #: from the environment, the profile, or instance metadata. Recording it is
@@ -76,7 +76,7 @@ class BackupLocation(BaseModel):
     #: globally unique, so S3 can be asked where a bucket lives, and every layer
     #: below already treats an absent region this way (boto3's own resolution,
     #: and `if (region && *region)` in the data plane's init_client).
-    region: Optional[str] = None
+    region: Optional[str] = Field(default=None, min_length=1)
 
     #: Absent means the AWS SDK resolves the endpoint from the region.
     endpoint: Optional[HttpUrl] = None
@@ -129,6 +129,13 @@ class BackupLocation(BaseModel):
                 "access_key_id": access_key_id,
                 "secret_access_key": secret_access_key,
             }
+
+        # "" was how the untyped dict said "unset"; the model says None. Dropped
+        # before the defaults below, so `local_testing` can still fill a region
+        # that was stored as empty rather than left out.
+        for key in ("region", "endpoint"):
+            if data.get(key) == "":
+                del data[key]
 
         # `local_testing` bundled three separate decisions into one flag. It set
         # plain HTTP, disabled certificate verification, forced path-style
