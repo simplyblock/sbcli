@@ -85,6 +85,7 @@ class CLIWrapper(CLIWrapperBase):
         self.init_storage_node__repair_lvstore(subparser)
         if self.developer_mode:
             self.init_storage_node__lvs_dump_tree(subparser)
+        self.init_storage_node__get_bdevs(subparser)
 
 
     def init_storage_node__deploy(self, subparser):
@@ -348,6 +349,11 @@ class CLIWrapper(CLIWrapperBase):
     def init_storage_node__lvs_dump_tree(self, subparser):
         subcommand = self.add_sub_command(subparser, 'lvs-dump-tree', 'Dump lvstore tree for debugging.')
         subcommand.add_argument('node_id', help='The storage node id.', type=str)
+
+    def init_storage_node__get_bdevs(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'get-bdevs', 'Runs bdev_get_bdevs on a storage node and prints the result.')
+        subcommand.add_argument('node_id', help='The storage node id.', type=str).completer = self._completer_get_sn_list
+        argument = subcommand.add_argument('--name', help='Only return the bdev with this name.', type=str, dest='name')
 
 
     def init_cluster(self):
@@ -1243,6 +1249,8 @@ class CLIWrapper(CLIWrapperBase):
                         ret = False
                     else:
                         ret = self.storage_node__lvs_dump_tree(sub_command, args)
+                elif sub_command in ['get-bdevs']:
+                    ret = self.storage_node__get_bdevs(sub_command, args)
                 else:
                     self.parser.print_help()
 

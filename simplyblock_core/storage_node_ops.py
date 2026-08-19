@@ -7258,3 +7258,26 @@ def lvs_dump_tree(node_id):
         return False
 
     return json.dumps(ret, indent=2)
+
+
+def get_node_bdevs(node_id, name=None):
+    """Run bdev_get_bdevs on the given storage node and return the result as JSON.
+
+    Deliberately does not require the node to be ONLINE in the DB: this is a
+    debugging command and the SPDK process may well be answering while the
+    node record is offline/in_restart (e.g. a failed restart).
+    """
+    db_controller = DBController()
+    try:
+        snode = db_controller.get_storage_node_by_id(node_id)
+    except KeyError:
+        logger.error("Can not find storage node")
+        return False
+
+    rpc_client = snode.rpc_client(timeout=30, retry=1)
+    ret = rpc_client.get_bdevs(name)
+    if ret is None:
+        logger.error(f"Failed to get bdevs from node {node_id}")
+        return False
+
+    return json.dumps(ret, indent=2)
