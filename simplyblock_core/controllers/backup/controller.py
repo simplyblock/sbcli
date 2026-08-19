@@ -167,6 +167,47 @@ def build_manifest(backup: Backup) -> backup_manifest.BackupManifest:
     )
 
 
+def _credentials_for_foreign_location(backup: Backup, location: BackupLocation,
+                                      own: BackupConfig) -> Optional[S3Credentials]:
+    """The cluster's own credentials, where they can speak for another location.
+
+    Credentials authenticate against an S3 service, not against one bucket: keys
+    that open the cluster's own bucket open every bucket the same account can
+    reach at the same endpoint. That is what an ordinary cross-cluster restore
+    looks like -- two clusters backing up to their own buckets of one store -- so
+    the configuration the cluster already has is the answer, and demanding the
+    same keys again on the command line would be asking for what is already
+    known.
+
+    Returns ``None`` where the cluster names no keys, which is a configuration
+    and not a gap: the nodes' instance role may well cover the other bucket, and
+    nothing here can tell whether it does.
+
+    Raises:
+        PreconditionError: The backup lives at a different endpoint, where the
+            cluster's keys authenticate nothing, and none were supplied for it.
+            Refused here because the alternative is a failure deep in the data
+            plane with nothing to point at the cause.
+    """
+    if own.endpoint_url != location.endpoint_url:
+        if own.credentials is not None:
+            raise PreconditionError(
+                f"Backup {backup.uuid} lives in bucket {location.bucket_name} at "
+                f"{location.endpoint_url or 'AWS S3'}, which this cluster's own "
+                f"credentials do not authenticate against. Supply credentials for "
+                f"that bucket, or configure the nodes with an instance role that "
+                "can read it.")
+        return None
+
+    if own.credentials is not None:
+        logger.info("Reaching bucket %s for backup %s with this cluster's own "
+                    "credentials; they authenticate against the same endpoint (%s)",
+                    location.bucket_name, backup.uuid,
+                    location.endpoint_url or "AWS S3")
+
+    return own.credentials
+
+
 def foreign_bucket_config(backup: Backup, cluster,
                           credentials: Optional[S3Credentials]) -> Optional[BackupConfig]:
     """How to reach this backup's bucket, when it is not the cluster's own.
@@ -177,14 +218,17 @@ def foreign_bucket_config(backup: Backup, cluster,
     backup's own recorded location, which is what makes a restore from another
     cluster's bucket possible at all.
 
+    Explicit credentials win; absent them the cluster's own are inherited where
+    they can apply, per :func:`_credentials_for_foreign_location`.
+
     Decides only. The device itself is created by the task runner, which is the
     component that knows which node the volume landed on and the only one that
     can put the device back after a node restart mid-restore.
 
     Raises:
-        PreconditionError: The bucket is foreign and unreachable -- no
-            credentials were supplied for it, while the cluster uses static
-            credentials that say nothing about it.
+        PreconditionError: The bucket is foreign and unreachable -- it sits at
+            another endpoint than the cluster's own credentials authenticate
+            against, and none were supplied for it.
     """
     location = backup.get_location()
 
@@ -197,20 +241,13 @@ def foreign_bucket_config(backup: Backup, cluster,
     if own is not None and own.location() == location and credentials is None:
         return None
 
-    config = BackupConfig.model_validate({
+    if credentials is None and own is not None:
+        credentials = _credentials_for_foreign_location(backup, location, own)
+
+    return BackupConfig.model_validate({
         **location.model_dump(exclude_none=True),
         **({"credentials": credentials.model_dump()} if credentials is not None else {}),
     })
-
-    if config.credentials is None and own is not None and own.credentials is not None:
-        # Falling back to the cluster's own static credentials would fail deep
-        # in the data plane with nothing to point at the cause.
-        raise PreconditionError(
-            f"Backup {backup.uuid} lives in bucket {location.bucket_name}, which "
-            f"is not this cluster's own. Supply credentials for that bucket, or "
-            "configure the nodes with an instance role that can read it.")
-
-    return config
 
 
 def _resolve_crypto_key(backup: Backup, cluster):
