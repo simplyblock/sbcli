@@ -319,9 +319,6 @@ class CLIWrapperBase:
             return ok
         return ret
 
-    def storage_node__resume(self, sub_command, args):
-        return storage_ops.resume_storage_node(args.node_id)
-
     def storage_node__get_io_stats(self, sub_command, args):
         node_id = args.node_id
         history = args.history

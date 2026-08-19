@@ -124,3 +124,22 @@ def test_failover_output_is_explicit_when_nothing_matched(cli):
         json = False
 
     assert cli._format_failover_results([], _Args()) == "No volumes to fail over"
+
+
+def test_storage_node_resume_is_gone(cli):
+    """`storage-node resume` was removed: it only ever lifted a SUSPENDED node,
+    so callers that used it after a restart were no-ops, and nothing in the
+    product needs it."""
+    with pytest.raises(SystemExit):
+        _parse(cli, ["storage-node", "resume", "N1"])
+    assert not hasattr(cli, "storage_node__resume")
+
+
+def test_storage_node_suspend_is_kept(cli):
+    """suspend stays: the documented upgrade procedure suspends a node and waits
+    for the SUSPENDED state before restarting it onto the new image, and four e2e
+    paths drive it (both upgrade flows, data-migration HA, journal-device
+    restart). Removing it would break them."""
+    args = _parse(cli, ["storage-node", "suspend", "N1"])
+    assert args.node_id == "N1"
+    assert hasattr(cli, "storage_node__suspend")

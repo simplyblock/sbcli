@@ -3371,9 +3371,6 @@ class K8sSbcliUtils:
     def suspend_node(self, node_uuid, expected_error_code=None):
         self.k8s.exec_sbcli(f"{self.sbcli_cmd} -d sn suspend {node_uuid}")
 
-    def resume_node(self, node_uuid):
-        self.k8s.exec_sbcli(f"{self.sbcli_cmd} -d sn resume {node_uuid}")
-
     def restart_node(self, node_uuid, expected_error_code=None, force=False):
         force_flag = " --force" if force else ""
         self.k8s.exec_sbcli(f"{self.sbcli_cmd} -d sn restart {node_uuid}{force_flag}")

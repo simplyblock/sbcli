@@ -47,9 +47,8 @@ class CLIWrapper(CLIWrapperBase):
         self.init_storage_node__list(subparser)
         self.init_storage_node__get(subparser)
         self.init_storage_node__restart(subparser)
-        self.init_storage_node__shutdown(subparser)
         self.init_storage_node__suspend(subparser)
-        self.init_storage_node__resume(subparser)
+        self.init_storage_node__shutdown(subparser)
         self.init_storage_node__get_io_stats(subparser)
         self.init_storage_node__get_capacity(subparser)
         self.init_storage_node__list_devices(subparser)
@@ -205,18 +204,15 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             subcommand.add_argument('--spdk-proxy-image', help='The SPDK proxy image URI.', type=str, dest='spdk_proxy_image')
 
+    def init_storage_node__suspend(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'suspend', 'Exclude node from lvol allocation.')
+        subcommand.add_argument('node_id', help='Storage node id', type=str).completer = self._completer_get_sn_list
+        subcommand.add_argument('--force', help='Force suspend', default=False, dest='force', action='store_true')
+
     def init_storage_node__shutdown(self, subparser):
         subcommand = self.add_sub_command(subparser, 'shutdown', 'Initiates a storage node shutdown.')
         subcommand.add_argument('node_id', help='Storage node id', type=str).completer = self._completer_get_sn_list
         subcommand.add_argument('--force', help='Force node shutdown.', dest='force', action='store_true')
-
-    def init_storage_node__suspend(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'suspend', 'Exclude node from lvol allocation.')
-        subcommand.add_argument('node_id', help='Storage node id', type=str).completer = self._completer_get_sn_list
-
-    def init_storage_node__resume(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'resume', 'Include node in lvol allocation.')
-        subcommand.add_argument('node_id', help='Storage node id', type=str).completer = self._completer_get_sn_list
 
     def init_storage_node__get_io_stats(self, subparser):
         subcommand = self.add_sub_command(subparser, 'get-io-stats', 'Gets storage node IO statistics.')
@@ -1280,12 +1276,10 @@ class CLIWrapper(CLIWrapperBase):
                         args.large_bufsize = 0
                         args.spdk_proxy_image = None
                     ret = self.storage_node__restart(sub_command, args)
-                elif sub_command in ['shutdown']:
-                    ret = self.storage_node__shutdown(sub_command, args)
                 elif sub_command in ['suspend']:
                     ret = self.storage_node__suspend(sub_command, args)
-                elif sub_command in ['resume']:
-                    ret = self.storage_node__resume(sub_command, args)
+                elif sub_command in ['shutdown']:
+                    ret = self.storage_node__shutdown(sub_command, args)
                 elif sub_command in ['get-io-stats']:
                     ret = self.storage_node__get_io_stats(sub_command, args)
                 elif sub_command in ['get-capacity']:
