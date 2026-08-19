@@ -31,7 +31,7 @@ class _Args:
             max_rw_iops=0, max_rw_mbytes=0, max_r_mbytes=0, max_w_mbytes=0,
             lvol_priority_class=0, ndcs=0, npcs=0, uid=None, pvc_name=None,
             namespaced=False, max_namespace_per_subsys=None, fabric="tcp",
-            replicate=False, allowed_hosts=None,
+            replicate=False, replication_policy=None, allowed_hosts=None,
         )
         defaults.update(kwargs)
         for key, value in defaults.items():

@@ -28,11 +28,14 @@ from simplyblock_core.services import tasks_runner_backup
 CLUSTER_ID = "cluster-1"
 OWN_BUCKET = "simplyblock-backup-cluster-1"
 FOREIGN_BUCKET = "someone-elses-bucket"
+OWN_ENDPOINT = "http://minio.example.com:9000"
+OTHER_ENDPOINT = "https://s3.eu-central-1.amazonaws.com"
 
 
 def _config(bucket=OWN_BUCKET, **overrides):
     return BackupConfig.model_validate({
-        "bucket_name": bucket, "region": "eu-central-1", **overrides})
+        "bucket_name": bucket, "region": "eu-central-1",
+        "endpoint": OWN_ENDPOINT, **overrides})
 
 
 @pytest.fixture
@@ -66,7 +69,7 @@ def node(db):
     return n
 
 
-def _backup(db, bucket=OWN_BUCKET, uuid="b-1"):
+def _backup(db, bucket=OWN_BUCKET, uuid="b-1", **location_overrides):
     b = Backup()
     b.uuid = uuid
     b.s3_id = 1
@@ -74,7 +77,7 @@ def _backup(db, bucket=OWN_BUCKET, uuid="b-1"):
     b.lvol_id = "lvol-1"
     b.size = 4096
     b.status = Backup.STATUS_COMPLETED
-    b.location = _config(bucket).location().model_dump(mode="json")
+    b.location = _config(bucket, **location_overrides).location().model_dump(mode="json")
     b.write_to_db(db.kv_store)
     return b
 
@@ -94,11 +97,24 @@ class TestSourceSelection:
         assert config.bucket_name == FOREIGN_BUCKET
         assert config.credentials.access_key_id.get_secret_value() == "theirs"
 
-    def test_foreign_bucket_without_credentials_is_refused(self, db, cluster, node):
-        """The cluster's own static keys say nothing about someone else's bucket."""
-        with pytest.raises(PreconditionError, match="not this cluster's own"):
+    def test_foreign_bucket_at_the_same_endpoint_inherits_own_credentials(self, db, cluster, node):
+        """The ordinary cross-cluster restore: two clusters, one store.
+
+        The keys that open this cluster's bucket open the other one's, so the
+        configuration it already has is the answer -- being asked to repeat those
+        keys on the command line is what a restore has no business demanding.
+        """
+        config = backup_controller.foreign_bucket_config(
+            _backup(db, FOREIGN_BUCKET), cluster, None)
+
+        assert config.bucket_name == FOREIGN_BUCKET
+        assert config.credentials.access_key_id.get_secret_value() == "own"
+
+    def test_bucket_at_another_endpoint_without_credentials_is_refused(self, db, cluster, node):
+        """Keys authenticate against a store, so another store's bucket needs its own."""
+        with pytest.raises(PreconditionError, match="do not authenticate against"):
             backup_controller.foreign_bucket_config(
-                _backup(db, FOREIGN_BUCKET), cluster, None)
+                _backup(db, FOREIGN_BUCKET, endpoint=OTHER_ENDPOINT), cluster, None)
 
     def test_instance_role_cluster_may_reach_a_foreign_bucket(self, db, node):
         """With no static credentials anywhere, the node's role is the only answer."""
@@ -111,6 +127,19 @@ class TestSourceSelection:
             _backup(db, FOREIGN_BUCKET), c, None)
 
         assert config.bucket_name == FOREIGN_BUCKET
+        assert config.credentials is None
+
+    def test_instance_role_cluster_may_reach_another_endpoint(self, db, node):
+        """Not refused: a role can be granted access across stores, and nothing
+        here can tell whether this one was."""
+        c = Cluster()
+        c.uuid = CLUSTER_ID
+        c.backup_config = _config().model_dump(exclude_none=True)  # no credentials
+        c.write_to_db(db.kv_store)
+
+        config = backup_controller.foreign_bucket_config(
+            _backup(db, FOREIGN_BUCKET, endpoint=OTHER_ENDPOINT), c, None)
+
         assert config.credentials is None
 
     def test_explicit_credentials_override_the_own_bucket_shortcut(self, db, cluster, node):
@@ -226,7 +255,7 @@ class TestRunnerOwnsTheDevice:
         node.rpc_client = MagicMock()
         node.rpc_client.return_value.bdev_s3_delete.side_effect = RuntimeError("gone")
 
-        backup_controller.delete_restore_s3_bdev(node, "s3_restore_b-1")
+        backup_device.delete_restore_s3_bdev(node, "s3_restore_b-1")
 
     def test_recovery_names_the_device_it_reads_from(self, db, cluster, node):
         task = _restore_task(db, s3_config=_config(FOREIGN_BUCKET).model_dump(exclude_none=True))
