@@ -79,6 +79,18 @@ def process_snap_replicate_start(task, snapshot):
                              remote_node_uuid.cluster_id)
                 return
         else:  # replicate to target
+            # A task can outlive the configuration that created it (or be queued
+            # for a volume that never had a destination, e.g. a REP_* receiving
+            # volume). Retrying it for ever burns the runner's cycles and blocks
+            # every delete waiting behind its snapshot, so end it here.
+            if not snapshot.lvol.replication_node_id:
+                msg = (f"LVol {snapshot.lvol.get_id()} has no replication destination; "
+                       f"dropping replication task for snapshot {snapshot.get_id()}")
+                logger.error(msg)
+                task.function_result = msg
+                task.status = JobSchedule.STATUS_DONE
+                task.write_to_db()
+                return
             remote_node_uuid = db.get_storage_node_by_id(snapshot.lvol.replication_node_id)
             remote_pool_uuid = _destination_pool_uuid(remote_node_uuid)
             if not remote_pool_uuid:
