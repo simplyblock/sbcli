@@ -2989,7 +2989,11 @@ def replication_start(lvol_id, replication_cluster_id=None, mode=None, interval_
         logger.error(e)
         return False
 
-    if not from_policy and (getattr(lvol, 'replication_policy_id', None) is not None):
+    if not from_policy and getattr(lvol, 'replication_policy_id', ''):
+        # Truthiness, NOT `is not None`: the field defaults to the empty
+        # string, so an `is not None` test treats EVERY volume as
+        # policy-managed and refuses all replication starts (commit
+        # 95a35804a did exactly that and broke all six lab cases).
         logger.error("LVol %s follows replication policy %s; change the policy "
                      "instead of starting replication directly",
                      lvol_id, lvol.replication_policy_id)
@@ -3212,7 +3216,11 @@ def replication_stop(lvol_id, delete=False, from_policy=False):
         logger.error(e)
         return False
 
-    if not from_policy and (getattr(lvol, 'replication_policy_id', None) is not None):
+    if not from_policy and getattr(lvol, 'replication_policy_id', ''):
+        # Truthiness, NOT `is not None`: the field defaults to the empty
+        # string, so an `is not None` test treats EVERY volume as
+        # policy-managed and refuses all replication starts (commit
+        # 95a35804a did exactly that and broke all six lab cases).
         logger.error("LVol %s follows replication policy %s; detach the policy "
                      "instead of stopping replication directly",
                      lvol_id, lvol.replication_policy_id)
