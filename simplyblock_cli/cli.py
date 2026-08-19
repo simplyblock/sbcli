@@ -613,7 +613,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('name', help='The new cluster name.', type=str)
 
     def init_cluster__add_replication(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'add-replication', 'Assigns the snapshot replication target cluster')
+        subcommand = self.add_sub_command(subparser, 'add-replication', 'DEPRECATED: use replication-target-add and replication-policy-add. Assigns the single snapshot replication target cluster.')
         subcommand.add_argument('cluster_id', help='Cluster id', type=str).completer = self._completer_get_cluster_list
         subcommand.add_argument('target_cluster_id', help='Target Cluster id', type=str).completer = self._completer_get_cluster_list
         subcommand.add_argument('--timeout', help='Snapshot replication network timeout', type=int, default=3600, dest='timeout')
