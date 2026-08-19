@@ -426,6 +426,7 @@ def _flip_ana_to_optimized(group, member_migrations, src_node, src_rpc, tgt_node
     """
     nqn = group.target_nqn
     src_paths, tgt_paths, overlap_ids = _build_paths(src_node, tgt_node, src_rpc, tgt_rpc)
+    src_port_by_id = {p['node_id']: p['port'] for p in src_paths}
 
     # Detect and repair a target-side node restart that wiped the migration's
     # NVMe-oF subsystem/listener/namespace, right before this ANA-flip
@@ -497,112 +498,127 @@ def _flip_ana_to_optimized(group, member_migrations, src_node, src_rpc, tgt_node
             _flip_all(src['rpc'], src['ips'], src['port'], src['trtype'],
                       "inaccessible", f"SRC-{src['node_id'][:8]}")
     else:
-        # TEMPORARILY SIMPLIFIED for a diagnostic test: the ONLY RPC calls
-        # this branch makes after batch_final_step are (1) SRC primary ->
-        # inaccessible, (2) a 5s sleep, (3) TGT primary -> optimized. No
-        # secondary/tertiary re-flip, no namespace swap, no old-listener
-        # cleanup -- everything else in the original overlap-aware sequence
-        # is skipped so those steps cannot be the source of the corruption.
-        # Re-enable the original overlap-aware sequence once this test is done.
-        primary_src = src_paths[0]
-        _flip_all(primary_src['rpc'], primary_src['ips'], primary_src['port'],
-                  primary_src['trtype'], "inaccessible", f"SRC-{primary_src['node_id'][:8]}")
+        # Step 1: first non-overlap TGT → optimized before making any SRC inaccessible
+        non_overlap_tgt = next(
+            (t for t in tgt_paths if t['node_id'] not in overlap_ids), None)
+        if non_overlap_tgt:
+            if not _flip_all_required(non_overlap_tgt['rpc'], non_overlap_tgt['ips'],
+                                       non_overlap_tgt['port'], non_overlap_tgt['trtype'],
+                                       "optimized",
+                                       f"TGT-{non_overlap_tgt['node_id'][:8]}(pre)"):
+                logger.error(
+                    f"Group {group.uuid[:8]}: ANA flip non-overlap TGT→optimized failed; "
+                    f"proceeding anyway")
 
-        logger.info(f"Group {group.uuid[:8]}: sleeping 5s after SRC primary inaccessible "
-                   f"before TGT flip (diagnostic)")
-        time.sleep(5)
+        # Step 2: overlap SRC paths → inaccessible at SRC port
+        for src in src_paths:
+            if src['node_id'] in overlap_ids:
+                _flip_all(src['rpc'], src['ips'], src['port'], src['trtype'],
+                          "inaccessible", f"SRC-{src['node_id'][:8]}(overlap)")
 
+        # Step 3: non-overlap SRC paths → inaccessible
+        for src in src_paths:
+            if src['node_id'] not in overlap_ids:
+                _flip_all(src['rpc'], src['ips'], src['port'], src['trtype'],
+                          "inaccessible", f"SRC-{src['node_id'][:8]}")
+
+        # Step 4: namespace swap on overlap TGT paths.
+        # Each member has its own namespace in the shared NQN. We look up each
+        # member's nsid by matching ns['uuid'] == lvol.uuid so we never remove
+        # the wrong namespace (positional removal would corrupt I/O for other members).
+        # Query subsystem once per overlap node, then match by UUID for each member.
+        for tgt in tgt_paths:
+            if tgt['node_id'] not in overlap_ids:
+                continue
+            try:
+                s = tgt['rpc'].subsystem_get(nqn)
+                ns_by_uuid = {
+                    ns.get('uuid'): ns['nsid']
+                    for ns in (s.get('namespaces', []) if s else [])
+                }
+            except Exception as e:
+                logger.warning(
+                    f"Group {group.uuid[:8]}: subsystem_get on {tgt['node_id'][:8]} "
+                    f"(non-fatal): {e}")
+                ns_by_uuid = {}
+
+            # Two-pass swap: remove ALL old namespaces first, then add ALL new ones.
+            # A per-member remove+add loop would cause N sequential "namespace gone"
+            # events visible to initiators — each one triggering a reconnect. Batching
+            # the removes into one pass and the adds into a second pass collapses this
+            # into a single collective disruption, which initiators handle cleanly.
+            ns_adds = []  # (tgt_ns_bdev, uuid, guid) — collected during remove pass
+            for m in member_migrations:
+                try:
+                    lvol = db.get_lvol_by_id(m.lvol_id)
+                    tgt_bdev_short = _lvol_tgt_bdev_name(lvol.lvol_bdev)
+                    tgt_ns_bdev = (
+                        f"crypto_{tgt_bdev_short}" if lvol.crypto_bdev
+                        else f"{tgt_node.lvstore}/{tgt_bdev_short}"
+                    )
+                    nsid = ns_by_uuid.get(lvol.uuid)
+                    if nsid:
+                        try:
+                            tgt['rpc'].nvmf_subsystem_remove_ns(nqn, nsid)
+                            logger.info(
+                                f"Group {group.uuid[:8]}: swap NS {tgt['node_id'][:8]}: "
+                                f"removed nsid={nsid} for lvol {lvol.uuid[:8]}")
+                        except Exception as e:
+                            logger.warning(
+                                f"Group {group.uuid[:8]}: remove ns {tgt['node_id'][:8]} "
+                                f"nsid={nsid} (non-fatal): {e}")
+                    else:
+                        logger.warning(
+                            f"Group {group.uuid[:8]}: no namespace for uuid={lvol.uuid[:8]} "
+                            f"on {tgt['node_id'][:8]}; skipping remove")
+                    ns_adds.append((tgt_ns_bdev, lvol.uuid, lvol.guid))
+                except Exception as e:
+                    logger.warning(
+                        f"Group {group.uuid[:8]}: namespace swap member {m.uuid[:8]} "
+                        f"on {tgt['node_id'][:8]} (non-fatal): {e}")
+
+            for tgt_ns_bdev, uuid, guid in ns_adds:
+                try:
+                    ret = tgt['rpc'].nvmf_subsystem_add_ns(nqn, tgt_ns_bdev, uuid, guid)
+                    if not ret:
+                        logger.error(
+                            f"Group {group.uuid[:8]}: add ns {tgt_ns_bdev} failed "
+                            f"on {tgt['node_id'][:8]}")
+                    else:
+                        logger.info(
+                            f"Group {group.uuid[:8]}: swap NS {tgt['node_id'][:8]}: "
+                            f"added {tgt_ns_bdev}")
+                except Exception as e:
+                    logger.warning(
+                        f"Group {group.uuid[:8]}: add ns {tgt_ns_bdev} "
+                        f"on {tgt['node_id'][:8]} (non-fatal): {e}")
+
+        # Step 5: all TGT paths → correct ANA state at TGT port
         primary_tgt = tgt_paths[0]
         if not _flip_all_required(primary_tgt['rpc'], primary_tgt['ips'], primary_tgt['port'],
                                    primary_tgt['trtype'], "optimized",
                                    f"TGT-{primary_tgt['node_id'][:8]}"):
             logger.error(
-                f"Group {group.uuid[:8]}: ANA flip TGT primary→optimized failed; "
-                f"clients may be on degraded path")
+                f"Group {group.uuid[:8]}: ANA flip TGT primary→optimized (step 5) failed")
+        for tgt in tgt_paths[1:]:
+            _flip_all(tgt['rpc'], tgt['ips'], tgt['port'], tgt['trtype'],
+                      "non_optimized", f"TGT-{tgt['node_id'][:8]}")
 
-        # Namespace swap on overlap TGT paths.
-        # TEMPORARILY DISABLED for a diagnostic test: skip the remove/add-ns
-        # swap entirely -- leave each overlap node's existing namespaces
-        # (still pointing at the pre-migration SRC bdev) untouched, to
-        # isolate whether the corruption is introduced by this swap or is
-        # already present in the final-step/add_clone data regardless of it.
-        # Re-enable once the test is done.
-        logger.info(f"Group {group.uuid[:8]}: overlap namespace swap SKIPPED (diagnostic)")
-        if False:
-            # Each member has its own namespace in the shared NQN. We look up each
-            # member's nsid by matching ns['uuid'] == lvol.uuid so we never remove
-            # the wrong namespace (positional removal would corrupt I/O for other members).
-            # Query subsystem once per overlap node, then match by UUID for each member.
-            for tgt in tgt_paths:
-                if tgt['node_id'] not in overlap_ids:
-                    continue
-                try:
-                    s = tgt['rpc'].subsystem_get(nqn)
-                    ns_by_uuid = {
-                        ns.get('uuid'): ns['nsid']
-                        for ns in (s.get('namespaces', []) if s else [])
-                    }
-                except Exception as e:
-                    logger.warning(
-                        f"Group {group.uuid[:8]}: subsystem_get on {tgt['node_id'][:8]} "
-                        f"(non-fatal): {e}")
-                    ns_by_uuid = {}
-
-                # Two-pass swap: remove ALL old namespaces first, then add ALL new ones.
-                # A per-member remove+add loop would cause N sequential "namespace gone"
-                # events visible to initiators — each one triggering a reconnect. Batching
-                # the removes into one pass and the adds into a second pass collapses this
-                # into a single collective disruption, which initiators handle cleanly.
-                ns_adds = []  # (tgt_ns_bdev, uuid, guid) — collected during remove pass
-                for m in member_migrations:
-                    try:
-                        lvol = db.get_lvol_by_id(m.lvol_id)
-                        tgt_bdev_short = _lvol_tgt_bdev_name(lvol.lvol_bdev)
-                        tgt_ns_bdev = (
-                            f"crypto_{tgt_bdev_short}" if lvol.crypto_bdev
-                            else f"{tgt_node.lvstore}/{tgt_bdev_short}"
-                        )
-                        nsid = ns_by_uuid.get(lvol.uuid)
-                        if nsid:
-                            try:
-                                tgt['rpc'].nvmf_subsystem_remove_ns(nqn, nsid)
-                                logger.info(
-                                    f"Group {group.uuid[:8]}: swap NS {tgt['node_id'][:8]}: "
-                                    f"removed nsid={nsid} for lvol {lvol.uuid[:8]}")
-                            except Exception as e:
-                                logger.warning(
-                                    f"Group {group.uuid[:8]}: remove ns {tgt['node_id'][:8]} "
-                                    f"nsid={nsid} (non-fatal): {e}")
-                        else:
-                            logger.warning(
-                                f"Group {group.uuid[:8]}: no namespace for uuid={lvol.uuid[:8]} "
-                                f"on {tgt['node_id'][:8]}; skipping remove")
-                        ns_adds.append((tgt_ns_bdev, lvol.uuid, lvol.guid))
-                    except Exception as e:
-                        logger.warning(
-                            f"Group {group.uuid[:8]}: namespace swap member {m.uuid[:8]} "
-                            f"on {tgt['node_id'][:8]} (non-fatal): {e}")
-
-                for tgt_ns_bdev, uuid, guid in ns_adds:
-                    try:
-                        ret = tgt['rpc'].nvmf_subsystem_add_ns(nqn, tgt_ns_bdev, uuid, guid)
-                        if not ret:
-                            logger.error(
-                                f"Group {group.uuid[:8]}: add ns {tgt_ns_bdev} failed "
-                                f"on {tgt['node_id'][:8]}")
-                        else:
+        # Step 6: remove old SRC-port listener from overlap TGT nodes if port changed
+        for tgt in tgt_paths:
+            if tgt['node_id'] in overlap_ids:
+                old_port = src_port_by_id.get(tgt['node_id'])
+                if old_port and old_port != tgt['port']:
+                    for _ip in tgt['ips']:
+                        try:
+                            tgt['rpc'].listeners_del(nqn, tgt['trtype'], _ip, old_port)
                             logger.info(
-                                f"Group {group.uuid[:8]}: swap NS {tgt['node_id'][:8]}: "
-                                f"added {tgt_ns_bdev}")
-                    except Exception as e:
-                        logger.warning(
-                            f"Group {group.uuid[:8]}: add ns {tgt_ns_bdev} "
-                            f"on {tgt['node_id'][:8]} (non-fatal): {e}")
-
-        # TEMPORARILY DISABLED for a diagnostic test: skip removing the old
-        # SRC-port listener from overlap TGT nodes -- no RPC calls after the
-        # two ANA flips above. Re-enable once the test is done.
-        logger.info(f"Group {group.uuid[:8]}: old SRC-port listener cleanup SKIPPED (diagnostic)")
+                                f"Group {group.uuid[:8]}: removed old SRC listener "
+                                f"{_ip}:{old_port} from overlap {tgt['node_id'][:8]}")
+                        except Exception as e:
+                            logger.warning(
+                                f"Group {group.uuid[:8]}: remove old SRC listener "
+                                f"{tgt['node_id'][:8]} (non-fatal): {e}")
 
 
 def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, src_rpc, tgt_rpc):
@@ -659,25 +675,17 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
         for _ip in ips:
             _flip(rpc, _ip, port, trtype, state, label)
 
-    def _flip_all_required(rpc, ips, port, trtype, state, label, attempts=3):
-        ok = True
-        for _ip in ips:
-            for i in range(attempts):
-                if _flip(rpc, _ip, port, trtype, state, label):
-                    break
-                if i < attempts - 1:
-                    time.sleep(1.0)
-            else:
-                ok = False
-        return ok
-
     def _revert_src_replicas(reason):
-        # Final step didn't complete — put SRC secondary/tertiary back into
-        # the read path (their pre-freeze state) so clients keep multipath
-        # access to the still-live source instead of being stuck on primary only.
-        if not src_replica_paths:
-            return
-        logger.warning(f"Group {group.uuid[:8]}: {reason}; reverting SRC secondary/tertiary to non_optimized")
+        # Final step didn't complete — put every SRC path back into the
+        # read/write path (their pre-freeze state) so clients keep access to
+        # the still-live source instead of being stuck with nothing reachable.
+        # Primary -> optimized (it was driven inaccessible pre-final-step by
+        # the diagnostic widened freeze above); secondary/tertiary -> non_optimized.
+        logger.warning(f"Group {group.uuid[:8]}: {reason}; reverting SRC paths "
+                       f"(primary optimized, replicas non_optimized)")
+        primary_src = src_paths[0]
+        _flip_all(primary_src['rpc'], primary_src['ips'], primary_src['port'],
+                  primary_src['trtype'], "optimized", f"SRC-{primary_src['node_id'][:8]}(revert)")
         for p in src_replica_paths:
             _flip_all(p['rpc'], p['ips'], p['port'], p['trtype'],
                       "non_optimized", f"SRC-{p['node_id'][:8]}(revert)")
@@ -685,7 +693,7 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
     # TEMPORARILY CHANGED for a diagnostic test: instead of only freezing SRC
     # secondary/tertiary pre-final-step (primary relied on the RPC's own
     # internal freeze), make EVERY path -- all SRC (primary included) and all
-    # TGT -- inaccessible up front, wait 10s so any in-flight client I/O has
+    # TGT -- inaccessible up front, wait 2s so any in-flight client I/O has
     # time to fully settle/drain before the data actually moves, THEN call
     # final_step. Re-enable the narrower pre-freeze once this test is done.
     logger.info(f"Group {group.uuid[:8]}: setting ALL SRC and TGT paths inaccessible "
@@ -770,29 +778,12 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
                     logger.warning(
                         f"Group {group.uuid[:8]}: add_clone for member {m.uuid[:8]} (non-fatal): {e}")
 
-        # TEMPORARILY CHANGED for a diagnostic test: SRC/TGT were already
-        # driven inaccessible before final_step (see above) -- no need to
-        # re-flip SRC here. Just wait 2s, then bring TGT primary optimized.
-        # Re-enable _flip_ana_to_optimized() once this test is done.
-        logger.info(f"Group {group.uuid[:8]}: sleeping 2s after batch_final_step "
-                   f"before TGT primary optimized (diagnostic)")
-        time.sleep(2)
-        primary_tgt = tgt_paths[0]
-        if not _flip_all_required(primary_tgt['rpc'], primary_tgt['ips'], primary_tgt['port'],
-                                   primary_tgt['trtype'], "optimized",
-                                   f"TGT-{primary_tgt['node_id'][:8]}"):
-            logger.error(
-                f"Group {group.uuid[:8]}: ANA flip TGT primary→optimized failed; "
-                f"clients may be on degraded path")
+        _flip_ana_to_optimized(group, member_migrations, src_node, src_rpc, tgt_node, tgt_rpc)
 
-    # TEMPORARILY DISABLED for a diagnostic test: no RPC calls at all after
-    # the two ANA flips above -- not even the hub controller detach.
-    # Re-enable once the test is done.
-    logger.info(f"Group {group.uuid[:8]}: hub detach SKIPPED (diagnostic)")
-    # try:
-    #     src_rpc.bdev_nvme_detach_controller(ctrl_name)
-    # except Exception as e:
-    #     logger.warning(f"Group {group.uuid[:8]}: hub detach (non-fatal): {e}")
+    try:
+        src_rpc.bdev_nvme_detach_controller(ctrl_name)
+    except Exception as e:
+        logger.warning(f"Group {group.uuid[:8]}: hub detach (non-fatal): {e}")
 
     return batch_ok, batch_err
 
@@ -1140,12 +1131,7 @@ def task_runner(task):
             task.write_to_db(db.kv_store)
             return False
 
-        # TEMPORARILY DISABLED for a diagnostic test: skip deleting the source
-        # subsystem so we can tell whether post-migration corruption still
-        # occurs with the source side left completely intact. Re-enable once
-        # the test is done.
-        # _delete_source_subsystem(group, src_node, src_rpc, tgt_node, tgt_rpc)
-        logger.info(f"Group {group_id[:8]}: source subsystem cleanup SKIPPED (diagnostic)")
+        _delete_source_subsystem(group, src_node, src_rpc, tgt_node, tgt_rpc)
 
         group.phase = LVolMigrationGroup.PHASE_COMPLETED
         group.status = LVolMigrationGroup.STATUS_DONE
