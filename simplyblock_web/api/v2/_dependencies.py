@@ -14,6 +14,10 @@ from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.mgmt_node import MgmtNode
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.pool import Pool as PoolModel
+from simplyblock_core.models.replication import (
+    ReplicationPolicy as ReplicationPolicyModel,
+    ReplicationTarget as ReplicationTargetModel,
+)
 from simplyblock_core.models.snapshot import SnapShot as SnapshotModel
 from simplyblock_core.models.storage_node import StorageNode as StorageNodeModel
 
@@ -141,6 +145,32 @@ def _lookup_backup_policy(policy_id: UUID, cluster: Cluster) -> BackupPolicy:
 
 
 Policy = Annotated[BackupPolicy, Depends(_lookup_backup_policy)]
+
+
+def _lookup_replication_target(target_id: UUID, cluster: Cluster) -> ReplicationTargetModel:
+    try:
+        target = _db.get_replication_target_by_id(str(target_id))
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    if target.cluster_id != cluster.get_id():
+        raise HTTPException(404, f'ReplicationTarget {target_id} not found')
+    return target
+
+
+ReplicationTarget = Annotated[ReplicationTargetModel, Depends(_lookup_replication_target)]
+
+
+def _lookup_replication_policy(policy_id: UUID, cluster: Cluster) -> ReplicationPolicyModel:
+    try:
+        policy = _db.get_replication_policy_by_id(str(policy_id))
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    if policy.cluster_id != cluster.get_id():
+        raise HTTPException(404, f'ReplicationPolicy {policy_id} not found')
+    return policy
+
+
+ReplicationPolicy = Annotated[ReplicationPolicyModel, Depends(_lookup_replication_policy)]
 
 
 def _lookup_subsystem(nqn: str, cluster: Cluster) -> str:
