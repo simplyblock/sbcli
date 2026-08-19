@@ -184,6 +184,13 @@ class Cluster(BaseModel):
     # Deploy-time only — set at cluster create/add, never toggled at runtime;
     # an existing cluster must be redeployed to gain the feature.
     enable_failure_domain: bool = False
+    # Storage-device mode for the whole cluster. "nvme" (default): NVMe PCIe
+    # controllers auto-detected and attached through the SPDK nvme bdev.
+    # "lblk": arbitrary Linux block devices wrapped in SPDK AIO bdevs (one
+    # per device); everything from alceml upward is identical. Deploy-time
+    # only — set at cluster create/add, never toggled at runtime. Inter-node
+    # fabric (nvme-tcp/rdma) is unaffected by this mode.
+    device_mode: str = "nvme"
     snapshot_replication_target_cluster: str = ""
     snapshot_replication_target_pool: str = ""
     snapshot_replication_timeout: int = 60*10

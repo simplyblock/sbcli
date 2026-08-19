@@ -404,6 +404,26 @@ def check_lvstore_object_limit(host_node, all_lvols, all_snaps, new_objects=1):
     return None
 
 
+def resolve_effective_ha_type(ha_type, host_node):
+    """The ha_type an lvol can actually be created with on ``host_node``.
+
+    A host without a secondary (single-node / non-HA cluster) cannot serve an
+    HA lvol — every lifecycle op must then run on exactly one node. Downgrade
+    instead of failing: cluster ha_type defaults to "ha" even on deployments
+    that never assign secondaries."""
+    if ha_type == "ha" and not host_node.secondary_node_id:
+        return "single"
+    return ha_type
+
+
+def role_secondary_ids(host_node):
+    """The host's non-empty secondary/tertiary node ids, in role order.
+    Non-HA topologies have none; never emit empty-string ids into
+    ``lvol.nodes`` (every ``lvol.nodes[1:]`` consumer would iterate them)."""
+    return [i for i in (host_node.secondary_node_id,
+                        host_node.tertiary_node_id) if i]
+
+
 def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=False, use_crypto=False,
                 distr_vuid=0, max_rw_iops=0, max_rw_mbytes=0, max_r_mbytes=0, max_w_mbytes=0,
                 with_snapshot=False, max_size=0, lvol_priority_class=0,
@@ -620,14 +640,20 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         logger.error(error)
         return False, error
 
-    s_node = db_controller.get_storage_node_by_id(host_node.secondary_node_id)
+    effective_ha_type = resolve_effective_ha_type(ha_type, host_node)
+    if effective_ha_type != ha_type:
+        logger.info(f"Host node {host_node.get_id()} has no secondary node; "
+                    f"creating lvol with ha_type=single")
+        ha_type = effective_ha_type
+        lvol.ha_type = effective_ha_type
+
     attr_name = f"active_{fabric}"
-    is_active_primary = getattr(host_node, attr_name)
-    is_active_secondary = getattr(s_node, attr_name)
-    if not is_active_primary:
+    if not getattr(host_node, attr_name):
         return False, f"Primary node fabric {fabric} is not active"
-    if not is_active_secondary:
-        return False, f"Secondary node fabric {fabric} is not active"
+    if ha_type == "ha":
+        s_node = db_controller.get_storage_node_by_id(host_node.secondary_node_id)
+        if not getattr(s_node, attr_name):
+            return False, f"Secondary node fabric {fabric} is not active"
 
     lvol.hostname = host_node.hostname
     lvol.node_id = host_node.get_id()
@@ -767,10 +793,8 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
             execute_on_leader_with_failover,
         )
 
-        # Build nodes list
-        secondary_ids = [host_node.secondary_node_id]
-        if host_node.tertiary_node_id:
-            secondary_ids.append(host_node.tertiary_node_id)
+        # Build nodes list (skip empty role ids — non-HA topologies)
+        secondary_ids = role_secondary_ids(host_node)
         lvol.nodes = [host_node.get_id()] + secondary_ids
 
         all_nodes = [host_node]

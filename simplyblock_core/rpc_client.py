@@ -1277,6 +1277,36 @@ class RPCClient:
     def bdev_wait_for_examine(self):
         return self._request("bdev_wait_for_examine")
 
+    def bdev_aio_create(self, name, filename, block_size=0):
+        """Create an SPDK AIO bdev over a Linux block device (lblk cluster
+        mode). ``filename`` is the device path — prefer the stable
+        /dev/disk/by-id symlink. ``block_size`` 0 lets SPDK use the device's
+        logical block size."""
+        params = {"name": name, "filename": filename}
+        if block_size:
+            params["block_size"] = block_size
+        return self._request("bdev_aio_create", params)
+
+    def bdev_aio_delete(self, name):
+        return self._request("bdev_aio_delete", {"name": name})
+
+    def bdev_aio_rescan(self, name):
+        """Re-read the backing device's size (device grow pickup)."""
+        return self._request("bdev_aio_rescan", {"name": name})
+
+    def bdev_set_qd_sampling_period(self, name, period_us):
+        """Enable queue-depth sampling on a bdev so bdev_get_iostat reports
+        queue_depth/io_time — the hung-IO watchdog's signal for AIO base
+        bdevs (period 0 disables)."""
+        params = {"name": name, "period": period_us}
+        return self._request("bdev_set_qd_sampling_period", params)
+
+    def get_bdevs_2(self, name):
+        """(ret, err) probe variant of bdev_get_bdevs, mirroring
+        bdev_nvme_controller_list_2 — used where the caller must distinguish
+        'bdev gone' from RPC failure without raising."""
+        return self._request2("bdev_get_bdevs", {"name": name})
+
     def bdev_enable_histogram(self, name, enable=True, opc=None):
         # opc filters to a single I/O type (e.g. "read"/"write"); requires
         # SPDK >= 24.01. Toggling disable->enable clears the collected data,
