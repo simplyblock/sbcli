@@ -2204,7 +2204,7 @@ class TestBackupNegative(BackupTestBase):
             self.ssh_obj.exec_command(
                 self.mgmt_nodes[0],
                 f"echo '{{not valid json}}' > {bad_json}")
-            out, err = self._sbcli(f"backup import {bad_json}")
+            out, err = self._sbcli(f"backup import --from-file {bad_json}")
             assert err or "error" in out.lower(), \
                 "TC-BCK-035: expected error for malformed JSON import"
             self.logger.info("TC-BCK-035: got expected error ✓")
@@ -2214,7 +2214,7 @@ class TestBackupNegative(BackupTestBase):
             self.ssh_obj.exec_command(
                 self.mgmt_nodes[0],
                 f"echo '[]' > {good_json}")
-            out, err = self._sbcli(f"backup import {good_json}")
+            out, err = self._sbcli(f"backup import --from-file {good_json}")
             # Empty list → 0 imported; should not error
             assert "error" not in out.lower() or "0" in out, \
                 f"TC-BCK-036: unexpected error for empty-list import: {err}"
@@ -3820,7 +3820,7 @@ class TestBackupCrossClusterRestore(BackupTestBase):
         # TC-BCK-073: import metadata on Cluster-2
         self.logger.info(f"TC-BCK-073: Cluster-2 — backup import {meta_file}")
         out, err = self._sbcli_c2(
-            f"backup import {meta_file} --cluster-id {self._cluster2_id}")
+            f"backup import --from-file {meta_file} --cluster-id {self._cluster2_id}")
         assert not (err and "error" in err.lower()), \
             f"TC-BCK-073: backup import on Cluster-2 failed: {err}"
         self.logger.info(f"TC-BCK-073: import result: {out.strip()}")
@@ -3867,8 +3867,7 @@ class TestBackupCrossClusterRestore(BackupTestBase):
             f"backup restore {backup_id} "
             f"--lvol {restored_name} "
             f"--pool {self._cluster2_pool_name} "
-            f"--node {c2_node_id} "
-            f"--cluster-id {self._cluster2_id}")
+            f"--node {c2_node_id}")
         assert not (err3 and "error" in err3.lower()), \
             f"TC-BCK-075: restore on Cluster-2 failed: {err3}"
         self.logger.info(
