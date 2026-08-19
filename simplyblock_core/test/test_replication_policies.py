@@ -144,6 +144,15 @@ def _lvol(uuid, policy_id="", status=LVol.STATUS_ONLINE):
     return lv
 
 
+def _recording(sink, tag=None, returns=True):
+    """A stub recording every call in `sink` — `tag`, or the call's first
+    positional argument when no tag is given."""
+    def _stub(arg, **kwargs):
+        sink.append(arg if tag is None else tag)
+        return returns
+    return _stub
+
+
 # --------------------------------------------------------------------------- #
 # Targets
 # --------------------------------------------------------------------------- #
@@ -288,11 +297,10 @@ def test_change_policy_detaches_first(monkeypatch):
     second = rpc.add_policy("CL_SRC", "hourly", target_id, interval_min=60)
     monkeypatch.setattr(rpc.lvol_controller, "replication_start", lambda lvol_id, **kw: True)
 
-    order = []
-    monkeypatch.setattr(rpc.lvol_controller, "replication_stop",
-                        lambda lvol_id, **kw: order.append("stop") or True)
+    order: list[str] = []
+    monkeypatch.setattr(rpc.lvol_controller, "replication_stop", _recording(order, "stop"))
     monkeypatch.setattr(rpc, "_purge_internal_replication_snapshots",
-                        lambda lvol_id: order.append("purge") or 0)
+                        _recording(order, "purge", returns=0))
 
     rpc.attach_policy("LV1", first)
     rpc.attach_policy("LV1", second)
@@ -306,9 +314,8 @@ def test_attach_same_policy_twice_is_a_noop(monkeypatch):
     monkeypatch.setattr(LVol, "write_to_db", lambda self, kv=None: None)
     target_id = rpc.add_target("CL_SRC", "site-a", "CL_TGT")
     policy_id = rpc.add_policy("CL_SRC", "fast", target_id)
-    starts = []
-    monkeypatch.setattr(rpc.lvol_controller, "replication_start",
-                        lambda lvol_id, **kw: starts.append(lvol_id) or True)
+    starts: list[str] = []
+    monkeypatch.setattr(rpc.lvol_controller, "replication_start", _recording(starts))
     rpc.attach_policy("LV1", policy_id)
     rpc.attach_policy("LV1", policy_id)
     assert starts == ["LV1"], "re-attaching the same policy must not restart replication"
@@ -331,9 +338,8 @@ def test_detach_stops_and_purges_both_sides(monkeypatch):
     db = _FakeDB(lvols=[lv])
     _install(monkeypatch, db)
     monkeypatch.setattr(LVol, "write_to_db", lambda self, kv=None: None)
-    stopped = []
-    monkeypatch.setattr(rpc.lvol_controller, "replication_stop",
-                        lambda lvol_id, **kw: stopped.append(lvol_id) or True)
+    stopped: list[str] = []
+    monkeypatch.setattr(rpc.lvol_controller, "replication_stop", _recording(stopped))
     monkeypatch.setattr(rpc, "_purge_internal_replication_snapshots", lambda lvol_id: 4)
     assert rpc.detach_policy("LV1") is True
     assert stopped == ["LV1"]
@@ -362,9 +368,8 @@ def test_purge_deletes_internal_snapshots_on_both_sides(monkeypatch):
     tgt = _snap("S_TGT", remote)
     db = _FakeDB(lvols=[lv, remote], snapshots=[src, tgt])
     _install(monkeypatch, db)
-    deleted = []
-    monkeypatch.setattr(rpc.snapshot_controller, "delete",
-                        lambda uuid, **kw: deleted.append(uuid) or True)
+    deleted: list[str] = []
+    monkeypatch.setattr(rpc.snapshot_controller, "delete", _recording(deleted))
     rpc._purge_internal_replication_snapshots("LV1")
     assert deleted == ["S_TGT", "S_SRC"], "target copy first, then the source snapshot"
 
@@ -374,9 +379,8 @@ def test_purge_never_touches_user_snapshots(monkeypatch):
     user = _snap("S_USER", lv, snap_type=SnapShot.TYPE_USER, target="S_USER_TGT")
     db = _FakeDB(lvols=[lv], snapshots=[user])
     _install(monkeypatch, db)
-    deleted = []
-    monkeypatch.setattr(rpc.snapshot_controller, "delete",
-                        lambda uuid, **kw: deleted.append(uuid) or True)
+    deleted: list[str] = []
+    monkeypatch.setattr(rpc.snapshot_controller, "delete", _recording(deleted))
     rpc._purge_internal_replication_snapshots("LV1")
     assert deleted == []
 
@@ -392,9 +396,8 @@ def test_purge_keeps_a_snapshot_a_live_clone_depends_on(monkeypatch):
     clone.cloned_from_snap = "S_TGT"
     db = _FakeDB(lvols=[lv, remote, clone], snapshots=[src, tgt])
     _install(monkeypatch, db)
-    deleted = []
-    monkeypatch.setattr(rpc.snapshot_controller, "delete",
-                        lambda uuid, **kw: deleted.append(uuid) or True)
+    deleted: list[str] = []
+    monkeypatch.setattr(rpc.snapshot_controller, "delete", _recording(deleted))
     rpc._purge_internal_replication_snapshots("LV1")
     assert "S_TGT" not in deleted
 
@@ -493,7 +496,7 @@ def test_policy_can_be_assigned_when_the_volume_is_created(monkeypatch):
     replication for that volume, with no separate call."""
     from simplyblock_core.controllers import lvol_controller
 
-    attached = {}
+    attached: dict[str, str] = {}
     monkeypatch.setattr(rpc, "attach_policy",
                         lambda lvol_id, policy: attached.update(lvol=lvol_id, policy=policy) or True)
 
