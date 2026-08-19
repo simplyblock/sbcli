@@ -15,11 +15,15 @@ Core business logic, data models, and background services for the Simplyblock co
 
 All models extend `BaseModel` (`models/base_model.py`). Key conventions:
 
-- Models define fields as **class-level type annotations with defaults**. `BaseModel.from_dict()` / `to_dict()` handle serialization automatically via introspection of annotations.
+- `BaseModel` is hand-rolled, **not** a Pydantic model. Models define fields as **class-level type annotations with defaults**; `BaseModel.from_dict()` / `to_dict()` handle serialization automatically via introspection of annotations.
 - Identity: `uuid` field; `get_id()` returns it. `get_db_id()` returns the FDB key as `<object_type>/<class_name>/<uuid>`.
 - Persistence: `write_to_db(kv_store)` and `read_from_db(kv_store)` serialize to/from JSON in FDB.
 - `BaseNodeObject` extends `BaseModel` with standard node status constants (`STATUS_ONLINE`, `STATUS_OFFLINE`, etc.) and a status code map.
 - **Secret fields** use `SecretStr` (from `pydantic`) as the type annotation with `SecretStr("")` default. `from_dict()` auto-wraps plain strings from FDB into `SecretStr`. `to_dict()` keeps wrappers (safe for logging); only `write_to_db()` calls `to_dict(unwrap_secrets=True)` to persist plaintext. When adding a new secret field, follow existing examples in `cluster.py`, `storage_node.py`, or `pool.py`.
+
+## Pydantic Models
+
+Genuine Pydantic models in this package — `settings.py` (`pydantic-settings`) and any new validated payload or config object — follow the annotated pattern: constraints and metadata inside `Annotated[...]`, the default on the right-hand side of the assignment. `settings.py` is the reference example. Reusable constrained types live next to their domain (`utils/pci.py` defines `PCIAddress`). See root `AGENTS.md` § Pydantic Fields. This does not apply to `BaseModel` subclasses in `models/`, which are not Pydantic.
 
 ## Display & Logging JSON
 
