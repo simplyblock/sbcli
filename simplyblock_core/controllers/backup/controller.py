@@ -5,6 +5,8 @@ import time
 import uuid
 from typing import Iterable, List, Optional
 
+from pydantic import ValidationError
+
 from simplyblock_core import constants
 from simplyblock_core.controllers import backup_events, tasks_controller
 from simplyblock_core.controllers.backup import manifest as backup_manifest
@@ -75,11 +77,11 @@ def build_manifest(backup: Backup) -> backup_manifest.BackupManifest:
       that wrote them does not need told back to it.
     * Not justified: `pool_uuid` on the record against `volume.pool_name` in the
       manifest -- the same fact, keyed differently, so neither can be derived from
-      the other. `encrypted` living both as its own field and inside `encryption`,
-      which is why this function has to overlay one onto the other so a manifest
-      cannot contradict itself. And the volume's settings, which the manifest
-      records and the record does not, so an imported backup knows less about its
-      volume than the manifest it was imported from did.
+      the other. `encrypted` beside `encryption` on the record, where the manifest
+      keeps one optional document, so the record can still say a thing the
+      manifest cannot express (see below). And the volume's settings, which the
+      manifest records and the record does not, so an imported backup knows less
+      about its volume than the manifest it was imported from did.
     * Actively wrong: `dataplane.cluster_size` and `source` are recomputed here
       from the *current* cluster, because the record does not keep what an import
       read. Re-exporting an imported backup therefore restamps both with the
@@ -95,15 +97,20 @@ def build_manifest(backup: Backup) -> backup_manifest.BackupManifest:
     in Python over a full scan, so nesting costs nothing there -- but it touches
     `BackupDTO`, the `backup list` table and existing records, so it wants its own
     change.
+
+    Raises:
+        ValueError: The backup has no recorded location, or is encrypted without
+            recording where its key is -- neither is describable.
     """
-    volume = backup_manifest.Volume(
-        lvol_id=backup.lvol_id,
-        lvol_name=backup.lvol_name,
-        snapshot_id=backup.snapshot_id,
-        snapshot_name=backup.snapshot_name,
-        size=backup.size,
-        allowed_hosts=backup.allowed_hosts or [],
-    )
+    # A record that predates self-describing backups carries `encrypted` without
+    # a descriptor. No manifest says that: an absent descriptor means plaintext,
+    # so writing one here would advertise ciphertext as readable and a restore
+    # from it would silently produce a plaintext volume over the ciphertext.
+    if backup.encrypted and not backup.encryption:
+        raise ValueError(
+            f"Backup {backup.uuid} is encrypted but records nothing about its "
+            "key; it predates self-describing backups and cannot be described "
+            "by a manifest")
 
     # The volume's own settings, where it still exists. Absent together once it
     # is gone, which is a different answer from 0 -- for a QoS cap that means
@@ -114,18 +121,34 @@ def build_manifest(backup: Backup) -> backup_manifest.BackupManifest:
         logger.warning("Volume %s is gone; manifest for backup %s records only "
                        "the shape carried on the backup itself",
                        backup.lvol_id, backup.uuid)
+        settings = {}
     else:
-        volume = volume.model_copy(update={
+        settings = {
             "pool_name": lvol.pool_name,
-            "ha_type": lvol.ha_type or "default",
-            "fabric": lvol.fabric or "tcp",
+            "ha_type": lvol.ha_type or None,
+            "fabric": lvol.fabric or None,
             "lvol_priority_class": lvol.lvol_priority_class,
             "max_size": lvol.max_size,
             "rw_ios_per_sec": lvol.rw_ios_per_sec,
             "rw_mbytes_per_sec": lvol.rw_mbytes_per_sec,
             "r_mbytes_per_sec": lvol.r_mbytes_per_sec,
             "w_mbytes_per_sec": lvol.w_mbytes_per_sec,
-        })
+        }
+
+    # Validated in one go rather than copied onto: model_copy does not validate,
+    # and every value above comes off an untyped record -- an ha_type or an
+    # allowed-host entry the model does not recognise has to be caught here,
+    # while the backup is still being written, not by whoever reads the manifest
+    # during a recovery.
+    volume = backup_manifest.Volume.model_validate({
+        "lvol_id": backup.lvol_id,
+        "lvol_name": backup.lvol_name,
+        "snapshot_id": backup.snapshot_id,
+        "snapshot_name": backup.snapshot_name,
+        "size": backup.size,
+        "allowed_hosts": backup.allowed_hosts or [],
+        **settings,
+    })
 
     cluster_name = None
     cluster_size = None
@@ -145,10 +168,8 @@ def build_manifest(backup: Backup) -> backup_manifest.BackupManifest:
         completed_at=backup.completed_at,
         size=backup.size,
         prev_backup_id=backup.prev_backup_id or None,
-        # backup.encrypted is authoritative -- overlaying it here means the two
-        # cannot disagree in a manifest, whatever is stored in the dict.
-        encryption=backup_manifest.Encryption.model_validate(
-            {**(backup.encryption or {}), "encrypted": backup.encrypted}),
+        encryption=(backup_manifest.parse_key_descriptor(backup.encryption)
+                    if backup.encryption else None),
         location=backup.get_location(),
         source=backup_manifest.Source(
             cluster_id=backup.cluster_id,
@@ -217,8 +238,9 @@ def _resolve_crypto_key(backup: Backup, cluster):
     Returns None for an unencrypted backup.
 
     Raises:
-        PreconditionError: The backup records nothing about its key, so no amount
-            of reachable infrastructure can decrypt it.
+        PreconditionError: The backup records nothing about its key, or too
+            little of it to reach the KMS, so no amount of reachable
+            infrastructure can decrypt it.
         RuntimeError: The recorded KMS could not be reached. Raised before the
             volume is created, so a restore that cannot decrypt fails without
             leaving a half-built volume behind -- and, more importantly, without
@@ -227,22 +249,25 @@ def _resolve_crypto_key(backup: Backup, cluster):
     if not backup.encrypted:
         return None
 
-    encryption = backup_manifest.Encryption.model_validate(
-        {**(backup.encryption or {}), "encrypted": backup.encrypted})
-
-    descriptor = encryption.descriptor
-    if descriptor is None:
+    if not backup.encryption:
         raise PreconditionError(
             f"Backup {backup.uuid} is encrypted but records nothing about its "
             "key; it predates self-describing backups and cannot be restored")
 
     try:
+        descriptor = backup_manifest.parse_key_descriptor(backup.encryption)
+    except ValidationError as e:
+        raise PreconditionError(
+            f"Backup {backup.uuid} is encrypted but records nothing about its "
+            f"key that a KMS can be reached with: {e}") from e
+
+    try:
         with create_kms_connection(cluster) as kms:
-            return kms.get_data_encryption_keys(descriptor.dek_path, descriptor.kek_name)
+            return descriptor.read_keys(kms)
     except KMSException as e:
         raise RuntimeError(
             f"Cannot reach the key for backup {backup.uuid} at "
-            f"{descriptor.dek_path} using {descriptor.kms}, which has to be "
+            f"{descriptor.dek_path} using {descriptor.type}, which has to be "
             f"reachable to restore it: {e}") from e
 
 
@@ -325,7 +350,7 @@ def _snapshot_has_backup(snapshot_id):
                             Backup.STATUS_COMPLETED, Backup.STATUS_MERGED) for b in backups)
 
 
-def _build_encryption(cluster, backup: Backup) -> backup_manifest.Encryption:
+def _build_key_descriptor(cluster, backup: Backup) -> backup_manifest.KeyDescriptor:
     """Describe where an encrypted backup's key lives.
 
     The dependency on a KMS is not removed -- it is written down. Nothing before
@@ -333,21 +358,19 @@ def _build_encryption(cluster, backup: Backup) -> backup_manifest.Encryption:
     someone who already knew which cluster had made it and how that cluster was
     configured.
     """
-    descriptor = backup_manifest.KeyDescriptor(
-        kms="local",
-        dek_path=backup_dek_path(cluster.get_id(), backup.uuid),
-        kek_name=backup_kek_name(backup.uuid),
-    )
-    if cluster.hashicorp_vault_settings is not None:
-        vault = cluster.hashicorp_vault_settings
-        descriptor = descriptor.model_copy(update={
-            "kms": "hashicorp_vault",
-            "vault_base_url": vault.base_url,
-            "transit_mount": vault.transit_mount,
-            "kv_mount": vault.kv_mount,
-        })
+    dek_path = backup_dek_path(cluster.get_id(), backup.uuid)
+    vault = cluster.hashicorp_vault_settings
 
-    return backup_manifest.Encryption(encrypted=True, descriptor=descriptor)
+    if vault is None:
+        return backup_manifest.FDBKeyDescriptor(dek_path=dek_path)
+
+    return backup_manifest.HCPKeyDescriptor(
+        dek_path=dek_path,
+        kek_name=backup_kek_name(backup.uuid),
+        vault_base_url=vault.base_url or None,
+        transit_mount=vault.transit_mount,
+        kv_mount=vault.kv_mount,
+    )
 
 
 def create_single_backup(snapshot, lvol, node_id, cluster_id, prev_backup, location: BackupLocation):
@@ -376,7 +399,11 @@ def create_single_backup(snapshot, lvol, node_id, cluster_id, prev_backup, locat
     backup.pool_uuid = lvol.pool_uuid
     backup.prev_backup_id = prev_backup.uuid if prev_backup else ""
     backup.size = snapshot.size
-    backup.allowed_hosts = lvol.allowed_hosts
+    # NQNs only. The volume's entries also carry that host's DHCHAP keys and
+    # PSK; copying them here would duplicate live authentication material into a
+    # second record, and from there into every manifest, for no reader -- restore
+    # uses the NQNs and mints fresh keys from the target pool.
+    backup.allowed_hosts = [{"nqn": host["nqn"]} for host in (lvol.allowed_hosts or [])]
     backup.created_at = int(time.time())
     backup.status = Backup.STATUS_PENDING
     backup.encrypted = bool(lvol.crypto_bdev)
@@ -391,7 +418,7 @@ def create_single_backup(snapshot, lvol, node_id, cluster_id, prev_backup, locat
                 backup_dek_path(cluster_id, backup.uuid),
                 backup_kek_name(backup.uuid),
             )
-        backup.encryption = _build_encryption(cluster, backup).model_dump(mode="json")
+        backup.encryption = _build_key_descriptor(cluster, backup).model_dump(mode="json")
 
     backup.write_to_db()
 
@@ -854,15 +881,17 @@ def import_backups(manifests: Iterable[backup_manifest.BackupManifest],
         backup.node_id = manifest.source.node_id
         backup.prev_backup_id = manifest.prev_backup_id or ""
         backup.size = manifest.size
-        backup.allowed_hosts = manifest.volume.allowed_hosts
+        backup.allowed_hosts = [{"nqn": nqn} for nqn in manifest.volume.allowed_hosts]
         backup.created_at = manifest.created_at
         backup.completed_at = manifest.completed_at
         backup.status = Backup.STATUS_COMPLETED
         backup.location = manifest.location.model_dump(mode="json")
         # Import used to drop this, so an imported encrypted backup restored as
         # use_crypto=False -- a plaintext volume over ciphertext, silently.
-        backup.encrypted = manifest.encryption.encrypted
-        backup.encryption = manifest.encryption.model_dump(mode="json")
+        backup.encrypted = manifest.encryption is not None
+        backup.encryption = (
+            manifest.encryption.model_dump(mode="json")
+            if manifest.encryption is not None else {})
         backup.write_to_db()
 
     return len(pending)
