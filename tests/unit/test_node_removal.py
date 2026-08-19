@@ -1393,6 +1393,71 @@ class TestDecommissionDevices(unittest.TestCase):
         clean.write_to_db.assert_called()
         colliding.write_to_db.assert_not_called()
 
+    def test_falls_back_to_a_colliding_candidate_when_no_clean_one_exists(self):
+        # No collision-free candidate anywhere -- rather than leave the
+        # slot permanently and silently short, accept the colliding one.
+        # It won't actually connect until consumer's own next restart (that
+        # restart's drop_stale_overrides=True refresh cleans this exact
+        # entry up and reconnects correctly), but a visible, self-healing
+        # degraded state beats an invisible, permanent gap.
+        cl = _cluster()
+        removed = _node("n1", n_devices=0, with_jm=True)
+        removed.jm_ids = []
+        consumer = _node("consumer", n_devices=0, with_jm=True)
+        consumer.jm_ids = [removed.jm_device.get_id()]
+        colliding = _node("colliding", n_devices=0, with_jm=True)
+        colliding.jm_ids = []
+        already_connected = RemoteJMDevice()
+        already_connected.uuid = colliding.jm_device.get_id()
+        already_connected.remote_bdev = "remote_jm_colliding-own-namen1"
+        consumer.remote_jm_devices = [already_connected]
+        db = FakeDB(cl, [removed, consumer, colliding])
+        db.get_jm_device_by_id = MagicMock(side_effect=lambda jid: {
+            removed.jm_device.get_id(): removed.jm_device,
+            colliding.jm_device.get_id(): colliding.jm_device,
+        }[jid])
+        dc = MagicMock()
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "device_controller", dc), \
+             patch.object(storage_node_ops, "get_sorted_ha_jms",
+                          return_value=[colliding.jm_device.get_id()]), \
+             patch.object(storage_node_ops, "_connect_to_remote_jm_devs", return_value=[]):
+            ret = storage_node_ops._decommission_node_devices(removed)
+
+        self.assertTrue(ret)
+        self.assertEqual(
+            colliding.jm_device.override_name_on_node.get("consumer"),
+            removed.jm_device.jm_bdev)
+        self.assertIn(colliding.jm_device.get_id(), consumer.jm_ids)
+        colliding.write_to_db.assert_called()
+        consumer.write_to_db.assert_called()
+
+    def test_no_candidate_at_all_still_persists_the_removed_jm_id(self):
+        # Regression guard for a real bug found while explaining this
+        # branch: the ONLY prior action, "no jm_id found" -> logger.error,
+        # never called node.write_to_db(). The node.jm_ids.remove() earlier
+        # in this same code path was therefore silently discarded -- the DB
+        # kept referencing a JM device that no longer exists, forever, with
+        # nothing left to show even that removal was attempted. An
+        # explicitly short jm_ids is a strictly more honest persisted state.
+        cl = _cluster()
+        removed = _node("n1", n_devices=0, with_jm=True)
+        removed.jm_ids = []
+        consumer = _node("consumer", n_devices=0, with_jm=True)
+        consumer.jm_ids = [removed.jm_device.get_id()]
+        db = FakeDB(cl, [removed, consumer])
+        dc = MagicMock()
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "device_controller", dc), \
+             patch.object(storage_node_ops, "get_sorted_ha_jms", return_value=[]), \
+             patch.object(storage_node_ops, "_connect_to_remote_jm_devs") as connect_mock:
+            ret = storage_node_ops._decommission_node_devices(removed)
+
+        self.assertTrue(ret)
+        self.assertNotIn(removed.jm_device.get_id(), consumer.jm_ids)
+        consumer.write_to_db.assert_called()
+        connect_mock.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # node_removal_orchestrate — phase-5 resume gap
