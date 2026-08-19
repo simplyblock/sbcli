@@ -81,7 +81,7 @@ def wait_for_spdk_ready():
     while not spdk_ready:
         sock = None
         try:
-            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)  # type: ignore[attr-defined]  # AF_UNIX: Linux-only, absent on Windows
             sock.settimeout(5)
             sock.connect(rpc_sock)
             sock.sendall(payload)
@@ -153,7 +153,7 @@ def rpc_call(req, client_timeout=None):
         spdk_semaphore.release()
 
 def _rpc_call_inner(req, req_data, req_time, sock_timeout):
-    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)  # type: ignore[attr-defined]  # AF_UNIX: Linux-only, absent on Windows
     unix_sockets.append(sock)
     try:
         sock.settimeout(sock_timeout)
