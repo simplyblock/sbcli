@@ -1,6 +1,7 @@
 # Ignore build and dependency directories
 dist
 build
+*.egg-info
 sbcli*
 
 # Ignore logs
@@ -14,9 +15,23 @@ sbcli*
 # these can carry outdated, vulnerable copies of pip/setuptools/wheel
 # that trip up the Trivy image scan)
 .tox
+.venv
+venv
 .mypy_cache
 .ruff_cache
 .pytest_cache
+__pycache__
+
+# Ignore the test suite and the tooling that only ever runs on a developer
+# machine or a CI runner — keeping them out of the context means editing them
+# does not invalidate the image's source layer.
+tests
+.github
+.agents
+.claude
+docs
+assets
+tox.ini
 
 # Ignore Docker-related files
 Dockerfile
@@ -33,5 +48,3 @@ Thumbs.db
 
 # git folder
 .git
-
-# Ignore generated sbcli files
