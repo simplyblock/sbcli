@@ -8,6 +8,8 @@ from simplyblock_core import constants
 
 SBCLI_NAME = constants.SIMPLY_BLOCK_CLI_NAME
 
+logger = logging.getLogger()
+
 cluster_commands = [
     f"{SBCLI_NAME} cluster show",
     f"{SBCLI_NAME} cluster get-capacity",
@@ -17,15 +19,13 @@ cluster_commands = [
 ]
 
 def setup_logger():
-    """Set up the custom logger."""
+    """Attach the stdout and GELF handlers to the module logger."""
     logger_handler = logging.StreamHandler(stream=sys.stdout)
     logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
     gelf_handler = GELFTCPHandler('0.0.0.0', constants.GELF_PORT)
-    logger = logging.getLogger()
     logger.addHandler(gelf_handler)
     logger.addHandler(logger_handler)
     logger.setLevel(logging.DEBUG)
-    return logger
 
 def execute_command(command):
     """Execute a shell command and return the result."""
