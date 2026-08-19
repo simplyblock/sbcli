@@ -4632,10 +4632,36 @@ def _decommission_node_devices(removed_node: StorageNode):
                 # pick never collides this way.
                 already_reachable = {rd.uuid for rd in (node.remote_jm_devices or [])}
                 new_jm_dev = ""
+                fallback_jm_dev = ""
                 for jm_id in jm_ids:
-                    if jm_id not in node.jm_ids and jm_id not in already_reachable:
+                    if jm_id in node.jm_ids:
+                        continue
+                    if jm_id not in already_reachable:
                         new_jm_dev = jm_id
                         break
+                    elif not fallback_jm_dev:
+                        fallback_jm_dev = jm_id
+                if not new_jm_dev and fallback_jm_dev:
+                    # No collision-free candidate at all -- rather than
+                    # leave this redundancy slot permanently and silently
+                    # short (the alternative: log an error and walk away,
+                    # which never gets revisited by anything), accept the
+                    # colliding one. It won't actually connect until node
+                    # itself next restarts -- that restart's own full
+                    # refresh (drop_stale_overrides=True) drops this exact
+                    # override and reconnects under the name that's already
+                    # live, self-healing cleanly -- but until then this is a
+                    # visible, ongoing SPDK JC retry/exclude loop rather than
+                    # an invisible, permanent gap. Visible-and-self-healing
+                    # beats invisible-and-permanent.
+                    logger.warning(
+                        f"No collision-free JM candidate for {node.get_id()}; "
+                        f"falling back to {fallback_jm_dev}, which node "
+                        f"already reaches via another path. This override "
+                        f"will not actually connect until node's own next "
+                        f"restart clears it and reconnects under the correct "
+                        f"name.")
+                    new_jm_dev = fallback_jm_dev
                 if new_jm_dev:
                     d = db_controller.get_jm_device_by_id(new_jm_dev)
                     jm_node = db_controller.get_storage_node_by_id(d.node_id)
@@ -4655,9 +4681,14 @@ def _decommission_node_devices(removed_node: StorageNode):
                     jm_node.write_to_db()
                     node.jm_ids.append(new_jm_dev)
                     node.remote_jm_devices = _connect_to_remote_jm_devs(node, node.jm_ids)
-                    node.write_to_db()
                 else:
+                    # Truly nothing available (not even a colliding
+                    # candidate) -- still persist the .remove() above rather
+                    # than silently dropping it: an explicitly short jm_ids
+                    # is a strictly more honest state than one that still
+                    # references a JM device that no longer exists.
                     logger.error(f"no jm_id found for {node.get_id()}")
+                node.write_to_db()
             elif any(d.uuid == removed_node.jm_device.get_id() for d in (node.remote_jm_devices or [])):
                 # node.jm_ids is this node's OWN redundancy set for its OWN JM
                 # -- but _connect_to_remote_jm_devs also connects to a SECOND
