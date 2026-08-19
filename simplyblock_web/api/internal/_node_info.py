@@ -9,11 +9,16 @@ actually on that cloud.
 
 None of it changes for the life of the process, so it is gathered lazily on
 first use and memoized with ``lru_cache`` rather than at import time.
-``docker.py`` and ``kubernetes.py`` are imported transitively by almost
-anything that touches ``simplyblock_web`` (test collection, the CLI,
-OpenAPI-schema generation, ...), so computing this at module scope paid the
-network-probe cost there regardless of whether a ``/info`` request was ever
-served -- that's what made test collection slow.
+``node_api_basic.py``, ``storage_node/docker.py`` and
+``storage_node/kubernetes.py`` are imported transitively by almost anything
+that touches ``simplyblock_web`` (test collection, the CLI, OpenAPI-schema
+generation, ...), so computing this at module scope paid the network-probe cost
+there regardless of whether a ``/info`` request was ever served -- that's what
+made test collection slow. ``cpuinfo.get_cpu_info()`` additionally spawns a
+child that probes CPUID by executing machine code from an mmap'd page; on
+kernels that enforce W^X that child dies with SIGSEGV. py-cpuinfo expects this
+and falls back to ``/proc/cpuinfo``, but each occurrence still costs a
+multi-megabyte core dump, so it should not happen once per import.
 """
 import functools
 import os
