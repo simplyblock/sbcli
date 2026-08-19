@@ -45,10 +45,16 @@ class Backup(BaseModel):
     #: ``BackupLocation``. Stored as a dict because ``BaseModel`` cannot nest
     #: pydantic models; read it through :meth:`get_location`.
     location: dict = default_factory(dict)
+    #: Kept beside `encryption` rather than derived from it, because a record
+    #: written before backups described their own keys says only this much, and
+    #: reading that as "not encrypted" would restore a plaintext volume over
+    #: ciphertext.
     encrypted: bool = False
+
     #: Which KMS holds this backup's key, and under what path. A
-    #: ``backup_manifest.Encryption``; stored as a dict for the same reason
-    #: ``location`` is. Empty for an unencrypted backup.
+    #: ``backup_manifest.KeyDescriptor``; stored as a dict for the same reason
+    #: ``location`` is. Empty for an unencrypted backup, and for one whose
+    #: record predates self-describing backups.
     encryption: dict = {}
 
     def get_id(self):
