@@ -541,7 +541,7 @@ db = db_controller.DBController()
 threads_maps: dict[str, threading.Thread] = {}
 
 
-def _main():
+def main():
     logger.info("Starting health check service")
     while True:
         try:
@@ -563,5 +563,4 @@ def _main():
 
 
 if __name__ == "__main__":
-    _main()
-
+    main()

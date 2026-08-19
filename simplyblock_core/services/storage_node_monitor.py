@@ -1777,7 +1777,7 @@ def loop_for_node(snode):
         time.sleep(constants.NODE_MONITOR_INTERVAL_SEC)
 
 
-if __name__ == "__main__":
+def main():
     logger.info("Starting node monitor")
     threads_maps: dict[str, threading.Thread] = {}
 
@@ -1812,3 +1812,7 @@ if __name__ == "__main__":
                 logger.error("Error while updating cluster status")
             _run_periodic_housekeeping(cluster_id)
         time.sleep(constants.NODE_MONITOR_INTERVAL_SEC)
+
+
+if __name__ == "__main__":
+    main()

@@ -1065,7 +1065,7 @@ def exec_port_allow_task(task):
     task.write_to_db(db.kv_store)
 
 
-def _main():
+def main():
     logger.info("Starting Tasks runner...")
     while True:
         try:
@@ -1104,4 +1104,4 @@ def _main():
 
 
 if __name__ == "__main__":
-    _main()
+    main()
