@@ -3673,7 +3673,9 @@ def suspend_lvol(lvol_id):
     for iface in snode.data_nics:
         if iface.ip4_address and lvol.fabric == iface.trtype.lower():
             logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
-            ret = snode.rpc_client().nvmf_subsystem_listener_set_ana_state(lvol.nqn, iface.ip4_address, lvol.subsys_port, ana="inaccessible")
+            ret = snode.rpc_client().nvmf_subsystem_listener_set_ana_state(
+                lvol.nqn, iface.ip4_address, lvol.subsys_port, ana="inaccessible",
+                anagrpid=lvol.ns_id)
             if not ret:
                 logger.error(f"Failed to set subsystem listener state for {lvol.nqn} on {iface.ip4_address}")
                 return False
@@ -3684,7 +3686,9 @@ def suspend_lvol(lvol_id):
             for iface in sec_node.data_nics:
                 if iface.ip4_address and lvol.fabric == iface.trtype.lower():
                     logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
-                    ret = sec_node.rpc_client().nvmf_subsystem_listener_set_ana_state(lvol.nqn, iface.ip4_address, lvol.subsys_port, ana="inaccessible")
+                    ret = sec_node.rpc_client().nvmf_subsystem_listener_set_ana_state(
+                        lvol.nqn, iface.ip4_address, lvol.subsys_port, ana="inaccessible",
+                        anagrpid=lvol.ns_id)
                     if not ret:
                         logger.error(f"Failed to set subsystem listener state for {lvol.nqn} on {iface.ip4_address}")
                         return False
@@ -3706,7 +3710,8 @@ def resume_lvol(lvol_id):
         if iface.ip4_address and lvol.fabric == iface.trtype.lower():
             logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
             ret = snode.rpc_client().nvmf_subsystem_listener_set_ana_state(
-                lvol.nqn, iface.ip4_address, lvol.subsys_port, is_optimized=True)
+                lvol.nqn, iface.ip4_address, lvol.subsys_port, is_optimized=True,
+                anagrpid=lvol.ns_id)
             if not ret:
                 logger.error(f"Failed to set subsystem listener state for {lvol.nqn} on {iface.ip4_address}")
                 return False
@@ -3718,7 +3723,8 @@ def resume_lvol(lvol_id):
                 if iface.ip4_address and lvol.fabric == iface.trtype.lower():
                     logger.info("adding listener for %s on IP %s" % (lvol.nqn, iface.ip4_address))
                     ret = sec_node.rpc_client().nvmf_subsystem_listener_set_ana_state(
-                        lvol.nqn, iface.ip4_address, lvol.subsys_port, is_optimized=False)
+                        lvol.nqn, iface.ip4_address, lvol.subsys_port, is_optimized=False,
+                        anagrpid=lvol.ns_id)
                     if not ret:
                         logger.error(f"Failed to set subsystem listener state for {lvol.nqn} on {iface.ip4_address}")
                         return False

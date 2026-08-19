@@ -1779,9 +1779,12 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
 
     def _flip(rpc, ip, port, trtype, state, label):
         try:
+            # anagrpid == the volume's namespace id: a subsystem may carry other
+            # namespaces whose volumes are NOT migrating, and a subsystem-wide
+            # flip would move their IO too (they share the client's controller).
             rpc.nvmf_subsystem_listener_set_ana_state(
-                nqn, ip, port, trtype=trtype, ana=state)
-            logger.info(f"ANA {nqn} {label} {ip}:{port} → {state}")
+                nqn, ip, port, trtype=trtype, ana=state, anagrpid=lvol.ns_id)
+            logger.info(f"ANA {nqn} ns {lvol.ns_id} {label} {ip}:{port} → {state}")
             return True
         except Exception as e:
             logger.error(f"ANA {label} failed: {e}")

@@ -569,7 +569,20 @@ class RPCClient:
             logger.debug("nvmf_subsystem_ns_update not available or failed: %s", e)
             return None
 
-    def nvmf_subsystem_listener_set_ana_state(self, nqn, ip, port, trtype="TCP", is_optimized=True, ana=None):
+    def nvmf_subsystem_listener_set_ana_state(self, nqn, ip, port, trtype="TCP", is_optimized=True,
+                                              ana=None, anagrpid=None):
+        """Set a listener's ANA state, optionally for a SINGLE ANA group.
+
+        Without ``anagrpid`` the state applies to the whole subsystem, which is
+        wrong once a subsystem carries several namespaces: volumes sharing one
+        subsystem (and therefore one controller on the client) can be migrated,
+        suspended or failed over independently, and a subsystem-wide flip would
+        drag the others with it. In SPDK every namespace gets its own ANA group
+        whose id equals the namespace id, so pass ``anagrpid=lvol.ns_id`` to
+        confine the change to that volume. The parameter is optional in the SPDK
+        RPC decoder, so omitting it keeps the old subsystem-wide behaviour for
+        single-namespace subsystems such as the hublvols.
+        """
         params = {
             "nqn": nqn,
             "listen_address": {
@@ -587,6 +600,9 @@ class RPCClient:
 
         if ana:
             params['ana_state'] = ana
+
+        if anagrpid is not None:
+            params['anagrpid'] = int(anagrpid)
 
         return self._request("nvmf_subsystem_listener_set_ana_state", params)
 
