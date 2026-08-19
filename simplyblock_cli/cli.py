@@ -397,6 +397,14 @@ class CLIWrapper(CLIWrapperBase):
         self.init_cluster__set_shared_placement(subparser)
         self.init_cluster__change_name(subparser)
         self.init_cluster__add_replication(subparser)
+        self.init_cluster__replication_target_add(subparser)
+        self.init_cluster__replication_target_list(subparser)
+        self.init_cluster__replication_target_remove(subparser)
+        self.init_cluster__replication_target_failover(subparser)
+        self.init_cluster__replication_policy_add(subparser)
+        self.init_cluster__replication_policy_list(subparser)
+        self.init_cluster__replication_policy_remove(subparser)
+        self.init_cluster__replication_policy_failover(subparser)
 
 
     def init_cluster__create(self, subparser):
@@ -611,6 +619,51 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--timeout', help='Snapshot replication network timeout', type=int, default=3600, dest='timeout')
         subcommand.add_argument('--target-pool', help='Target cluster pool ID or name', type=str, dest='target_pool')
 
+    def init_cluster__replication_target_add(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'replication-target-add', 'Adds a named replication destination to a cluster (several are allowed)')
+        subcommand.add_argument('cluster_id', help='Source cluster id', type=str).completer = self._completer_get_cluster_list
+        subcommand.add_argument('name', help='Name of the replication target, unique per source cluster', type=str)
+        subcommand.add_argument('target_cluster_id', help='Destination cluster id', type=str).completer = self._completer_get_cluster_list
+        subcommand.add_argument('--target-pool', help='Pool on the destination cluster (ID or name). Stored as a UUID.', type=str, dest='target_pool')
+        subcommand.add_argument('--timeout', help='Replication network timeout in seconds. Default: `600`.', type=int, dest='timeout')
+
+    def init_cluster__replication_target_list(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'replication-target-list', 'Lists the replication targets of a cluster')
+        subcommand.add_argument('--cluster-id', help='Source cluster id', type=str, dest='cluster_id').completer = self._completer_get_cluster_list
+        subcommand.add_argument('--json', help='Print outputs in json format.', dest='json', action='store_true')
+
+    def init_cluster__replication_target_remove(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'replication-target-remove', 'Removes a replication target. Refused while a policy still uses it.')
+        subcommand.add_argument('target_id', help='Replication target id', type=str)
+
+    def init_cluster__replication_target_failover(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'replication-target-failover', 'Fails over EVERY volume replicating to this target (site loss)')
+        subcommand.add_argument('target_id', help='Replication target id', type=str)
+        subcommand.add_argument('--json', help='Print outputs in json format.', dest='json', action='store_true')
+
+    def init_cluster__replication_policy_add(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'replication-policy-add', 'Adds a replication policy on a target, defining the replication cadence')
+        subcommand.add_argument('cluster_id', help='Source cluster id', type=str).completer = self._completer_get_cluster_list
+        subcommand.add_argument('name', help='Name of the policy, unique per source cluster', type=str)
+        subcommand.add_argument('--target', help='Replication target id or name', type=str, dest='target', required=True)
+        subcommand.add_argument('--interval-min', help='Cadence: minutes between internal replication snapshots. 0 replicates user snapshots only. Default: `1`.', type=int, dest='interval_min')
+        subcommand.add_argument('--mode', help='Replication mode. Default: `failover`.', type=str, dest='mode', choices=['failover','migration',])
+        subcommand.add_argument('--keep', help='Replicated internal snapshots to retain on each side. Minimum (and default): `2`.', type=int, dest='keep_replicated')
+
+    def init_cluster__replication_policy_list(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'replication-policy-list', 'Lists the replication policies of a cluster')
+        subcommand.add_argument('--cluster-id', help='Source cluster id', type=str, dest='cluster_id').completer = self._completer_get_cluster_list
+        subcommand.add_argument('--json', help='Print outputs in json format.', dest='json', action='store_true')
+
+    def init_cluster__replication_policy_remove(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'replication-policy-remove', 'Removes a replication policy. Refused while a volume still follows it.')
+        subcommand.add_argument('policy_id', help='Replication policy id', type=str)
+
+    def init_cluster__replication_policy_failover(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'replication-policy-failover', 'Fails over EVERY volume following this policy')
+        subcommand.add_argument('policy_id', help='Replication policy id', type=str)
+        subcommand.add_argument('--json', help='Print outputs in json format.', dest='json', action='store_true')
+
 
     def init_volume(self):
         subparser = self.add_command('volume', 'Logical Volume Commands', aliases=['lvol',])
@@ -629,6 +682,9 @@ class CLIWrapper(CLIWrapperBase):
         self.init_volume__get_io_stats(subparser)
         self.init_volume__check(subparser)
         self.init_volume__inflate(subparser)
+        self.init_volume__replication_policy_set(subparser)
+        self.init_volume__replication_policy_clear(subparser)
+        self.init_volume__replication_relationship(subparser)
         self.init_volume__replication_start(subparser)
         self.init_volume__replication_commit(subparser)
         self.init_volume__replication_failback(subparser)
@@ -675,6 +731,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--pvc-name', '--pvc_name', help='Set logical volume PVC name for k8s clients', type=str, dest='pvc_name')
         subcommand.add_argument('--data-chunks-per-stripe', help='The erasure coding schema parameter k (distributed raid). Default: `0`.', type=int, default=0, dest='ndcs')
         subcommand.add_argument('--parity-chunks-per-stripe', help='The erasure coding schema parameter n (distributed raid). Default: `0`.', type=int, default=0, dest='npcs')
+        subcommand.add_argument('--replication-policy', help='Replication policy (id or name) to assign at create time. Configures replication for this volume.', type=str, dest='replication_policy')
         subcommand.add_argument('--replicate', help='Replicate LVol snapshot', dest='replicate', action='store_true')
 
     def init_volume__qos_set(self, subparser):
@@ -750,6 +807,20 @@ class CLIWrapper(CLIWrapperBase):
     def init_volume__inflate(self, subparser):
         subcommand = self.add_sub_command(subparser, 'inflate', 'Inflate a logical volume.')
         subcommand.add_argument('volume_id', help='The logical volume id.', type=str)
+
+    def init_volume__replication_policy_set(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'replication-policy-set', 'Puts a volume under a replication policy, or changes it (a change re-replicates in full)')
+        subcommand.add_argument('volume_id', help='Logical volume id', type=str)
+        subcommand.add_argument('policy', help='Replication policy id or name', type=str)
+
+    def init_volume__replication_policy_clear(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'replication-policy-clear', 'Takes a volume out of its replication policy, stopping replication and deleting the internal replication snapshots on both sides')
+        subcommand.add_argument('volume_id', help='Logical volume id', type=str)
+
+    def init_volume__replication_relationship(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'replication-relationship', 'Shows the volume\'s counterpart on the other cluster (source to target volume id, and the reverse)')
+        subcommand.add_argument('volume_id', help='Logical volume id', type=str)
+        subcommand.add_argument('--json', help='Print outputs in json format.', dest='json', action='store_true')
 
     def init_volume__replication_start(self, subparser):
         subcommand = self.add_sub_command(subparser, 'replication-start', 'Start snapshot replication taken from lvol')
@@ -1397,6 +1468,24 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.cluster__change_name(sub_command, args)
                 elif sub_command in ['add-replication']:
                     ret = self.cluster__add_replication(sub_command, args)
+                elif sub_command in ['replication-target-add']:
+                    args.target_name = args.name
+                    ret = self.cluster__replication_target_add(sub_command, args)
+                elif sub_command in ['replication-target-list']:
+                    ret = self.cluster__replication_target_list(sub_command, args)
+                elif sub_command in ['replication-target-remove']:
+                    ret = self.cluster__replication_target_remove(sub_command, args)
+                elif sub_command in ['replication-target-failover']:
+                    ret = self.cluster__replication_target_failover(sub_command, args)
+                elif sub_command in ['replication-policy-add']:
+                    args.policy_name = args.name
+                    ret = self.cluster__replication_policy_add(sub_command, args)
+                elif sub_command in ['replication-policy-list']:
+                    ret = self.cluster__replication_policy_list(sub_command, args)
+                elif sub_command in ['replication-policy-remove']:
+                    ret = self.cluster__replication_policy_remove(sub_command, args)
+                elif sub_command in ['replication-policy-failover']:
+                    ret = self.cluster__replication_policy_failover(sub_command, args)
                 else:
                     self.parser.print_help()
 
@@ -1441,6 +1530,12 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.volume__check(sub_command, args)
                 elif sub_command in ['inflate']:
                     ret = self.volume__inflate(sub_command, args)
+                elif sub_command in ['replication-policy-set']:
+                    ret = self.volume__replication_policy_set(sub_command, args)
+                elif sub_command in ['replication-policy-clear']:
+                    ret = self.volume__replication_policy_clear(sub_command, args)
+                elif sub_command in ['replication-relationship']:
+                    ret = self.volume__replication_relationship(sub_command, args)
                 elif sub_command in ['replication-start']:
                     ret = self.volume__replication_start(sub_command, args)
                 elif sub_command in ['replication-commit']:

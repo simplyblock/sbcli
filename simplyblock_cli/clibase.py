@@ -13,7 +13,8 @@ from simplyblock_core.exceptions import MigrationConflictError, PreconditionErro
 from simplyblock_core import storage_node_ops as storage_ops
 from simplyblock_core import mgmt_node_ops as mgmt_ops
 from simplyblock_core.controllers import pool_controller, lvol_controller, snapshot_controller, device_controller, \
-    tasks_controller, qos_controller, migration_controller, backup_controller, fdb_backup_controller
+    tasks_controller, qos_controller, migration_controller, backup_controller, fdb_backup_controller, \
+    replication_policy_controller
 from simplyblock_core.controllers import health_controller
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.cluster import Cluster, HashicorpVaultSettings
@@ -614,6 +615,89 @@ class CLIWrapperBase:
     def cluster__add_replication(self, sub_command, args):
         return cluster_ops.add_replication(args.cluster_id, args.target_cluster_id, args.timeout, args.target_pool)
 
+    def cluster__replication_target_add(self, sub_command, args):
+        return replication_policy_controller.add_target(
+            args.cluster_id, args.name, args.target_cluster_id,
+            target_pool=args.target_pool, timeout_sec=args.timeout)
+
+    def cluster__replication_target_list(self, sub_command, args):
+        data = [{
+            "ID": t.get_id(),
+            "Name": t.target_name,
+            "Target Cluster": t.target_cluster_id,
+            "Target Pool": t.target_pool_uuid or "-",
+            "Timeout": t.timeout_sec,
+            "Status": t.status,
+        } for t in replication_policy_controller.list_targets(args.cluster_id)]
+        return _format_result(data, json=args.json)
+
+    def cluster__replication_target_remove(self, sub_command, args):
+        return replication_policy_controller.remove_target(args.target_id)
+
+    def cluster__replication_target_failover(self, sub_command, args):
+        return self._format_failover_results(
+            replication_policy_controller.failover_target(args.target_id), args)
+
+    def cluster__replication_policy_add(self, sub_command, args):
+        return replication_policy_controller.add_policy(
+            args.cluster_id, args.name, args.target,
+            interval_min=args.interval_min, mode=args.mode,
+            keep_replicated=args.keep_replicated)
+
+    def cluster__replication_policy_list(self, sub_command, args):
+        data = [{
+            "ID": p.get_id(),
+            "Name": p.policy_name,
+            "Target": p.target_id,
+            "Interval (min)": p.interval_min,
+            "Mode": p.mode,
+            "Keep": p.keep_replicated,
+            "Status": p.status,
+        } for p in replication_policy_controller.list_policies(args.cluster_id)]
+        return _format_result(data, json=args.json)
+
+    def cluster__replication_policy_remove(self, sub_command, args):
+        return replication_policy_controller.remove_policy(args.policy_id)
+
+    def cluster__replication_policy_failover(self, sub_command, args):
+        return self._format_failover_results(
+            replication_policy_controller.failover_policy(args.policy_id), args)
+
+    def _format_failover_results(self, results, args):
+        """One row per volume: a partial failure has to be visible, not silent."""
+        if args.json:
+            return _format_json(results)
+        if not results:
+            return "No volumes to fail over"
+        return utils.print_table([{
+            "Volume": r.get("lvol_id", ""),
+            "Status": r.get("status", ""),
+            "Target Volume": r.get("target_lvol_id", "") or "-",
+            "Detail": r.get("detail", "") or "",
+        } for r in results])
+
+    def volume__replication_policy_set(self, sub_command, args):
+        return replication_policy_controller.attach_policy(args.volume_id, args.policy)
+
+    def volume__replication_policy_clear(self, sub_command, args):
+        return replication_policy_controller.detach_policy(args.volume_id)
+
+    def volume__replication_relationship(self, sub_command, args):
+        rel = replication_policy_controller.get_relationship(args.volume_id)
+        if not rel:
+            return "Volume has no replication relationship"
+        if args.json:
+            return _format_json(rel)
+        return utils.print_table([{
+            "Source Volume": rel["source_lvol_id"],
+            "Target Volume": rel["target_lvol_id"],
+            "Source Cluster": rel["source_cluster_id"],
+            "Target Cluster": rel["target_cluster_id"],
+            "State": rel["state"],
+            "Direction": rel["direction"],
+            "Mode": rel["mode"],
+        }])
+
     def volume__add(self, sub_command, args):
         import json as _json
         name = args.name
@@ -652,7 +736,8 @@ class CLIWrapperBase:
             uid=args.uid, pvc_name=args.pvc_name, namespaced=args.namespaced,
             max_namespace_per_subsys=args.max_namespace_per_subsys, ndcs=ndcs, npcs=npcs, fabric=args.fabric,
             allowed_hosts=allowed_hosts,
-            do_replicate=args.replicate)
+            do_replicate=args.replicate,
+            replication_policy=args.replication_policy)
         if results:
             return results
         else:
