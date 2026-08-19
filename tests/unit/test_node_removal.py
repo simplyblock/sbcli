@@ -1493,6 +1493,103 @@ class TestConnectToRemoteJmDevsDegradesOnRpcException(unittest.TestCase):
         self.assertEqual(result[0].remote_bdev, "remote_jm_owner_bdevn1")
 
 
+# ---------------------------------------------------------------------------
+# _connect_to_remote_jm_devs — remote_device.jm_bdev must record the name
+# THIS NODE actually connects under, override included
+#
+# override_name_on_node lets a replacement JM connect under a removed peer's
+# old bdev name so the consumer's own already-built JM raid doesn't need
+# touching (see _decommission_node_devices). remote_device.jm_bdev must
+# record that SAME resolved name, not org_dev's own natural name, or
+# health_controller's diagnostic controller lookup
+# (f'remote_{remote_device.jm_bdev}') queries the wrong, never-connected name
+# every cycle. Found live 2026-08-19: a replacement JM host serving two
+# overridden consumers logged a spurious SPDK "ctrlr ... does not exist"
+# error on every health-check pass.
+# ---------------------------------------------------------------------------
+
+class TestConnectToRemoteJmDevsRecordsResolvedName(unittest.TestCase):
+
+    def _owner_setup(self, this_node_id="this-node", override=None):
+        jm_dev = JMDevice()
+        jm_dev.uuid = "jm-owner"
+        jm_dev.jm_bdev = "jm_owner_bdev"
+        jm_dev.status = NVMeDevice.STATUS_ONLINE
+        jm_dev.override_name_on_node = override or {}
+
+        owner_node = MagicMock(spec=StorageNode)
+        owner_node.get_id = MagicMock(return_value="owner-node")
+        owner_node.status = StorageNode.STATUS_ONLINE
+        owner_node.jm_device = jm_dev
+
+        this_node = MagicMock(spec=StorageNode)
+        this_node.get_id = MagicMock(return_value=this_node_id)
+        this_node.jm_ids = []
+        this_node.lvstore_stack_secondary = ""
+        this_node.lvstore_stack_tertiary = ""
+        this_node.remote_jm_devices = []
+        rpc_client = MagicMock()
+        this_node.rpc_client = MagicMock(return_value=rpc_client)
+
+        db = MagicMock()
+        db.get_jm_device_by_id.return_value = jm_dev
+        db.get_storage_nodes.return_value = [owner_node]
+
+        return this_node, rpc_client, db
+
+    def test_no_override_uses_owners_own_natural_name(self):
+        this_node, rpc_client, db = self._owner_setup()
+        rpc_client.get_bdevs.return_value = {"name": "remote_jm_owner_bdevn1"}
+
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "connect_device",
+                          return_value="remote_jm_owner_bdevn1") as connect_mock:
+            result = storage_node_ops._connect_to_remote_jm_devs(
+                this_node, jm_ids=["jm-owner"])
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].jm_bdev, "jm_owner_bdev")
+        self.assertEqual(connect_mock.call_args[0][0], "remote_jm_owner_bdev")
+
+    def test_override_present_records_the_override_name_not_owners_own(self):
+        this_node, rpc_client, db = self._owner_setup(
+            this_node_id="this-node",
+            override={"this-node": "jm_removed_peer_bdev"})
+        rpc_client.get_bdevs.return_value = {"name": "remote_jm_removed_peer_bdevn1"}
+
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "connect_device",
+                          return_value="remote_jm_removed_peer_bdevn1") as connect_mock:
+            result = storage_node_ops._connect_to_remote_jm_devs(
+                this_node, jm_ids=["jm-owner"])
+
+        self.assertEqual(len(result), 1)
+        # jm_bdev must match the name actually connected under (the
+        # override), not org_dev's own "jm_owner_bdev" -- this is the exact
+        # field health_controller reads back to build its diagnostic lookup.
+        self.assertEqual(result[0].jm_bdev, "jm_removed_peer_bdev")
+        self.assertEqual(result[0].remote_bdev, "remote_jm_removed_peer_bdevn1")
+        self.assertEqual(connect_mock.call_args[0][0], "remote_jm_removed_peer_bdev")
+
+    def test_override_keyed_to_a_different_node_does_not_apply(self):
+        # The override only applies to the specific consumer it was recorded
+        # for -- a DIFFERENT this_node connecting to the same owner must
+        # still get the owner's own natural name.
+        this_node, rpc_client, db = self._owner_setup(
+            this_node_id="this-node",
+            override={"some-other-node": "jm_removed_peer_bdev"})
+        rpc_client.get_bdevs.return_value = {"name": "remote_jm_owner_bdevn1"}
+
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "connect_device",
+                          return_value="remote_jm_owner_bdevn1"):
+            result = storage_node_ops._connect_to_remote_jm_devs(
+                this_node, jm_ids=["jm-owner"])
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].jm_bdev, "jm_owner_bdev")
+
+
 class TestShrinkStatusDoesNotDeadlockRemoval(unittest.TestCase):
     """``node_removal_orchestrate`` holds ``Cluster.STATUS_IN_SHRINK`` for the
     duration of an attempt, so that the restart phases its replica relocation
