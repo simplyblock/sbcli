@@ -26,7 +26,7 @@ jobs:
         cache: 'pip'
 
     - name: Install tox
-      run: pip install tox
+      run: pip install tox tox-uv
 
     - name: Checking cli.py status
       run: |
@@ -37,6 +37,23 @@ jobs:
           echo "${changes}"
           exit 1
         fi
+
+
+  lock:
+    name: Lockfile up to date
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Install uv
+      run: pip install uv
+
+    # Fails if uv.lock no longer matches pyproject.toml. The image build uses
+    # `uv sync --locked`, so a stale lock breaks the build rather than silently
+    # resolving something new -- this reports it on the PR instead.
+    - name: Check uv.lock
+      run: uv lock --check
 
 
   lint:
@@ -58,6 +75,14 @@ jobs:
     - name: Execute linter
       run: ruff check
 
+    # ruff's target version comes from requires-python (>=3.9); this asserts the
+    # sources also parse on the interpreter the image actually runs.
+    - name: Check sources parse on the image interpreter
+      run: |
+        pip install uv
+        uv run --python 3.14t --no-project -- \
+          python -m compileall -q simplyblock_core simplyblock_web simplyblock_cli
+
 
   types:
     name: Type checker
@@ -72,11 +97,8 @@ jobs:
         python-version: '3.9'
         cache: 'pip'
 
-    - name: Install type checker
-      run: pip install mypy 
+    - name: Install tox
+      run: pip install tox tox-uv
 
     - name: Execute type checker
-      run: |
-        pip install -r requirements.txt
-        pip install -r type-requirements.txt
-        mypy simplyblock_web simplyblock_cli simplyblock_core
+      run: tox run -e types
