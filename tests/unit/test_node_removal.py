@@ -1590,6 +1590,125 @@ class TestConnectToRemoteJmDevsRecordsResolvedName(unittest.TestCase):
         self.assertEqual(result[0].jm_bdev, "jm_owner_bdev")
 
 
+# ---------------------------------------------------------------------------
+# _connect_to_remote_jm_devs — drop_stale_overrides retires the legacy-name
+# crutch once this_node itself rebuilds its own JM-consuming construct
+#
+# override_name_on_node exists only to keep an ALREADY-BUILT distrib/JM-raid
+# on this_node pointed at a stable name across a JM replacement elsewhere.
+# Once this_node is about to (re)build that construct from scratch --
+# restart, LVS recreate, or a brand-new create_lvstore, all of which call
+# with drop_stale_overrides=True immediately ahead of the rebuild -- there
+# is nothing left for the override to protect, so it must be dropped rather
+# than baked into the fresh build. A DELTA reconnect (drop_stale_overrides
+# left False, e.g. a peer reconnecting to a node that just restarted) must
+# keep honoring it: this_node's own construct did not change.
+# ---------------------------------------------------------------------------
+
+class TestConnectToRemoteJmDevsDropsStaleOverrideOnRebuild(unittest.TestCase):
+
+    def _owner_setup(self, this_node_id="this-node", override=None):
+        jm_dev = JMDevice()
+        jm_dev.uuid = "jm-owner"
+        jm_dev.jm_bdev = "jm_owner_bdev"
+        jm_dev.status = NVMeDevice.STATUS_ONLINE
+        jm_dev.override_name_on_node = override or {}
+
+        owner_node = MagicMock(spec=StorageNode)
+        owner_node.get_id = MagicMock(return_value="owner-node")
+        owner_node.status = StorageNode.STATUS_ONLINE
+        owner_node.jm_device = jm_dev
+
+        this_node = MagicMock(spec=StorageNode)
+        this_node.get_id = MagicMock(return_value=this_node_id)
+        this_node.jm_ids = []
+        this_node.lvstore_stack_secondary = ""
+        this_node.lvstore_stack_tertiary = ""
+        this_node.remote_jm_devices = []
+        rpc_client = MagicMock()
+        this_node.rpc_client = MagicMock(return_value=rpc_client)
+
+        db = MagicMock()
+        db.get_jm_device_by_id.return_value = jm_dev
+        db.get_storage_nodes.return_value = [owner_node]
+
+        return this_node, rpc_client, db, owner_node
+
+    def test_rebuild_ignores_the_override_and_uses_the_owners_current_name(self):
+        this_node, rpc_client, db, owner_node = self._owner_setup(
+            override={"this-node": "jm_removed_peer_bdev"})
+        rpc_client.get_bdevs.return_value = {"name": "remote_jm_owner_bdevn1"}
+
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "connect_device",
+                          return_value="remote_jm_owner_bdevn1") as connect_mock:
+            result = storage_node_ops._connect_to_remote_jm_devs(
+                this_node, jm_ids=["jm-owner"], drop_stale_overrides=True)
+
+        self.assertEqual(len(result), 1)
+        # Uses the owner's own current name, NOT the stale override --
+        # this_node is rebuilding its own construct right now, so there is
+        # nothing left for the legacy name to protect.
+        self.assertEqual(result[0].jm_bdev, "jm_owner_bdev")
+        self.assertEqual(connect_mock.call_args[0][0], "remote_jm_owner_bdev")
+
+    def test_rebuild_clears_the_override_entry_via_atomic_update(self):
+        this_node, rpc_client, db, owner_node = self._owner_setup(
+            override={"this-node": "jm_removed_peer_bdev", "other-node": "jm_something_else"})
+        rpc_client.get_bdevs.return_value = {"name": "remote_jm_owner_bdevn1"}
+
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "connect_device",
+                          return_value="remote_jm_owner_bdevn1"):
+            storage_node_ops._connect_to_remote_jm_devs(
+                this_node, jm_ids=["jm-owner"], drop_stale_overrides=True)
+
+        db.atomic_update.assert_called_once()
+        target, mutate_fn = db.atomic_update.call_args.args[:2]
+        self.assertIs(target, owner_node)
+
+        # The mutate_fn only removes THIS consumer's entry from a fresh copy
+        # -- it must not clear another consumer's still-live override.
+        fresh_jm_dev = JMDevice()
+        fresh_jm_dev.override_name_on_node = {
+            "this-node": "jm_removed_peer_bdev", "other-node": "jm_something_else"}
+        fresh_owner = MagicMock(spec=StorageNode)
+        fresh_owner.jm_device = fresh_jm_dev
+        mutate_fn(fresh_owner)
+        self.assertEqual(fresh_jm_dev.override_name_on_node, {"other-node": "jm_something_else"})
+
+    def test_delta_reconnect_leaves_the_override_untouched(self):
+        # only_node_id set (a peer reconnecting after ITS restart) with
+        # drop_stale_overrides left at its default False: this_node's own
+        # construct hasn't changed, so the override must still be honored
+        # and nothing should be cleared.
+        this_node, rpc_client, db, owner_node = self._owner_setup(
+            override={"this-node": "jm_removed_peer_bdev"})
+        rpc_client.get_bdevs.return_value = {"name": "remote_jm_removed_peer_bdevn1"}
+
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "connect_device",
+                          return_value="remote_jm_removed_peer_bdevn1"):
+            result = storage_node_ops._connect_to_remote_jm_devs(
+                this_node, jm_ids=["jm-owner"], only_node_id="owner-node")
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].jm_bdev, "jm_removed_peer_bdev")
+        db.atomic_update.assert_not_called()
+
+    def test_no_override_present_never_calls_atomic_update(self):
+        this_node, rpc_client, db, owner_node = self._owner_setup()
+        rpc_client.get_bdevs.return_value = {"name": "remote_jm_owner_bdevn1"}
+
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "connect_device",
+                          return_value="remote_jm_owner_bdevn1"):
+            storage_node_ops._connect_to_remote_jm_devs(
+                this_node, jm_ids=["jm-owner"], drop_stale_overrides=True)
+
+        db.atomic_update.assert_not_called()
+
+
 class TestShrinkStatusDoesNotDeadlockRemoval(unittest.TestCase):
     """``node_removal_orchestrate`` holds ``Cluster.STATUS_IN_SHRINK`` for the
     duration of an attempt, so that the restart phases its replica relocation

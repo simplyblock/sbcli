@@ -2025,7 +2025,8 @@ def _peer_reachable_via_jm_quorum(target_node_id, this_node: StorageNode, peer_p
     return not probed
 
 
-def _connect_to_remote_jm_devs(this_node: StorageNode, jm_ids=None, only_node_id=None):
+def _connect_to_remote_jm_devs(this_node: StorageNode, jm_ids=None, only_node_id=None,
+                                drop_stale_overrides=False):
     """Connect ``this_node`` to remote JM devices and return the refreshed
     remote-JM records.
 
@@ -2033,6 +2034,23 @@ def _connect_to_remote_jm_devs(this_node: StorageNode, jm_ids=None, only_node_id
     node are (re)connected; records for JMs owned by other nodes are carried
     over from ``this_node.remote_jm_devices`` untouched (same rationale and
     measurement as _connect_to_remote_devs delta mode).
+
+    ``drop_stale_overrides``: a JM device standing in as a replacement for a
+    removed peer's JM (see _decommission_node_devices) is reachable, for
+    this_node specifically, under the OLD peer's name via
+    ``JMDevice.override_name_on_node`` -- kept stable so this_node's
+    ALREADY-BUILT distrib/JM-raid (which has that name baked in as a member)
+    doesn't need touching. That crutch must not outlive its purpose: once
+    this_node itself is about to (re)build that construct from scratch --
+    restart, LVS recreate, or a brand-new create_lvstore -- there is nothing
+    left for the override to protect, and continuing to honor it would just
+    bake the stale name into the fresh build. Callers immediately ahead of
+    such a rebuild pass True to ignore any override for this_node and use
+    the JM owner's current name, clearing the stale entry as they go. Every
+    other caller (decommission-time reconnect, where the override is being
+    freshly established, or a DELTA reconnect where this_node's own
+    construct is unchanged) must leave the default False so the override is
+    honored.
     """
     db_controller = DBController()
 
@@ -2110,20 +2128,38 @@ def _connect_to_remote_jm_devs(this_node: StorageNode, jm_ids=None, only_node_id
         # member of the new jm_vuid. Runtime re-attach paths (rejoin,
         # restart-task) carry their own reachability gating.
 
-        # Resolve the name this_node actually connects under FIRST: a JM
-        # device that's standing in as a replacement for a removed peer's JM
-        # (see _decommission_node_devices) is reachable under the OLD peer's
-        # name for this_node specifically, not org_dev's own. remote_device.
-        # jm_bdev must record that resolved name, not org_dev.jm_bdev
+        # Resolve the name this_node actually connects under. remote_device.
+        # jm_bdev must record this resolved name, not org_dev.jm_bdev
         # unconditionally -- health_controller's diagnostic controller lookup
         # (f'remote_{remote_device.jm_bdev}') reads this field back and was
-        # querying org_dev's natural (unconnected) name every cycle,
-        # producing a spurious "ctrlr does not exist" SPDK error for every
-        # overridden slot (found live 2026-08-19 on a replacement JM host
-        # serving two overridden consumers at once).
+        # querying org_dev's natural (unconnected) name every cycle whenever
+        # an override applied, producing a spurious "ctrlr does not exist"
+        # SPDK error on every health-check pass (found live 2026-08-19 on a
+        # replacement JM host serving two overridden consumers at once).
+        override_applies = bool(
+            org_dev.override_name_on_node
+            and this_node.get_id() in org_dev.override_name_on_node)
         resolved_name = org_dev.jm_bdev
-        if org_dev.override_name_on_node and this_node.get_id() in org_dev.override_name_on_node:
+        if override_applies and not drop_stale_overrides:
             resolved_name = org_dev.override_name_on_node[this_node.get_id()]
+        elif override_applies and drop_stale_overrides and org_dev_node is not None:
+            # this_node is about to (re)build the very construct the
+            # override was protecting -- nothing left to protect, so drop it
+            # and settle on org_dev's own current name (resolved_name above)
+            # going forward. See the docstring for why this is scoped to
+            # callers that pass drop_stale_overrides=True.
+            consumer_id = this_node.get_id()
+
+            def _drop_stale_override(n, consumer_id=consumer_id):
+                if n.jm_device and consumer_id in (n.jm_device.override_name_on_node or {}):
+                    del n.jm_device.override_name_on_node[consumer_id]
+
+            try:
+                db_controller.atomic_update(org_dev_node, _drop_stale_override)
+            except Exception as e:
+                logger.warning(
+                    f"Failed to drop stale JM name override for "
+                    f"{consumer_id} on {org_dev_node.get_id()}: {e}")
 
         remote_device = RemoteJMDevice()
         remote_device.uuid = org_dev.uuid
@@ -3294,7 +3330,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
 
             if snode.enable_ha_jm:
                 logger.info("Connecting to remote JMs")
-                snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
+                snode.remote_jm_devices = _connect_to_remote_jm_devs(snode, drop_stale_overrides=True)
 
             snode.write_to_db(kv_store)
 
@@ -5261,7 +5297,7 @@ def _restart_storage_node_impl(
 
         def _jm_reconcile():
             try:
-                jm_result["devices"] = _connect_to_remote_jm_devs(snode)
+                jm_result["devices"] = _connect_to_remote_jm_devs(snode, drop_stale_overrides=True)
             except Exception as e:
                 jm_result["error"] = e
 
@@ -8030,7 +8066,7 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
             logger.warning("Soft reconnect of remote devices failed on %s: %s",
                            snode.get_id(), e)
         try:
-            fresh_remote_jms = _connect_to_remote_jm_devs(snode)
+            fresh_remote_jms = _connect_to_remote_jm_devs(snode, drop_stale_overrides=True)
             snode = db_controller.get_storage_node_by_id(snode.get_id())
             snode.remote_jm_devices = fresh_remote_jms or snode.remote_jm_devices
             snode.write_to_db()
@@ -9059,7 +9095,7 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
 
     if not is_takeover:
         snode = db_controller.get_storage_node_by_id(snode.get_id())
-        snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
+        snode.remote_jm_devices = _connect_to_remote_jm_devs(snode, drop_stale_overrides=True)
         snode.write_to_db()
 
     # Gather peer nodes for this LVS, EXCLUDING snode itself
@@ -10743,7 +10779,7 @@ def create_lvstore(snode: StorageNode, ndcs, npcs, distr_bs, distr_chunk_bs, pag
         jm_vuid = utils.get_random_vuid()
         jm_ids = get_sorted_ha_jms(snode)
         logger.debug(f"online_jms: {str(jm_ids)}")
-        snode.remote_jm_devices = _connect_to_remote_jm_devs(snode, jm_ids)
+        snode.remote_jm_devices = _connect_to_remote_jm_devs(snode, jm_ids, drop_stale_overrides=True)
         snode.jm_ids = jm_ids
         snode.jm_vuid = jm_vuid
         snode.write_to_db()
@@ -10878,7 +10914,7 @@ def create_lvstore(snode: StorageNode, ndcs, npcs, distr_bs, distr_chunk_bs, pag
         sec_node.lvstore_ports[lvs_name] = snode.lvstore_ports[lvs_name].copy()
 
         # creating lvstore on secondary
-        sec_node.remote_jm_devices = _connect_to_remote_jm_devs(sec_node)
+        sec_node.remote_jm_devices = _connect_to_remote_jm_devs(sec_node, drop_stale_overrides=True)
         sec_node.write_to_db()
         ret, err = _create_bdev_stack(sec_node, lvstore_stack, primary_node=snode)
         if err:
