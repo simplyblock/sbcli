@@ -426,7 +426,6 @@ def _flip_ana_to_optimized(group, member_migrations, src_node, src_rpc, tgt_node
     """
     nqn = group.target_nqn
     src_paths, tgt_paths, overlap_ids = _build_paths(src_node, tgt_node, src_rpc, tgt_rpc)
-    src_port_by_id = {p['node_id']: p['port'] for p in src_paths}
 
     # Detect and repair a target-side node restart that wiped the migration's
     # NVMe-oF subsystem/listener/namespace, right before this ANA-flip
@@ -498,19 +497,18 @@ def _flip_ana_to_optimized(group, member_migrations, src_node, src_rpc, tgt_node
             _flip_all(src['rpc'], src['ips'], src['port'], src['trtype'],
                       "inaccessible", f"SRC-{src['node_id'][:8]}")
     else:
-        # TEMPORARILY SIMPLIFIED for a diagnostic test: skip the overlap-aware
-        # TGT-first ordering and the namespace swap entirely. Just:
-        #   1. All SRC paths -> inaccessible (secondary/tertiary were already
-        #      made inaccessible pre-final-step; this covers the primary and
-        #      harmlessly re-covers secondary/tertiary).
-        #   2. Sleep 5s.
-        #   3. All TGT paths -> optimized (primary) / non_optimized (replicas).
+        # TEMPORARILY SIMPLIFIED for a diagnostic test: the ONLY RPC calls
+        # this branch makes after batch_final_step are (1) SRC primary ->
+        # inaccessible, (2) a 5s sleep, (3) TGT primary -> optimized. No
+        # secondary/tertiary re-flip, no namespace swap, no old-listener
+        # cleanup -- everything else in the original overlap-aware sequence
+        # is skipped so those steps cannot be the source of the corruption.
         # Re-enable the original overlap-aware sequence once this test is done.
-        for src in src_paths:
-            _flip_all(src['rpc'], src['ips'], src['port'], src['trtype'],
-                      "inaccessible", f"SRC-{src['node_id'][:8]}")
+        primary_src = src_paths[0]
+        _flip_all(primary_src['rpc'], primary_src['ips'], primary_src['port'],
+                  primary_src['trtype'], "inaccessible", f"SRC-{primary_src['node_id'][:8]}")
 
-        logger.info(f"Group {group.uuid[:8]}: sleeping 5s after SRC inaccessible "
+        logger.info(f"Group {group.uuid[:8]}: sleeping 5s after SRC primary inaccessible "
                    f"before TGT flip (diagnostic)")
         time.sleep(5)
 
@@ -521,9 +519,6 @@ def _flip_ana_to_optimized(group, member_migrations, src_node, src_rpc, tgt_node
             logger.error(
                 f"Group {group.uuid[:8]}: ANA flip TGT primary→optimized failed; "
                 f"clients may be on degraded path")
-        for tgt in tgt_paths[1:]:
-            _flip_all(tgt['rpc'], tgt['ips'], tgt['port'], tgt['trtype'],
-                      "non_optimized", f"TGT-{tgt['node_id'][:8]}")
 
         # Namespace swap on overlap TGT paths.
         # TEMPORARILY DISABLED for a diagnostic test: skip the remove/add-ns
@@ -604,21 +599,10 @@ def _flip_ana_to_optimized(group, member_migrations, src_node, src_rpc, tgt_node
                             f"Group {group.uuid[:8]}: add ns {tgt_ns_bdev} "
                             f"on {tgt['node_id'][:8]} (non-fatal): {e}")
 
-        # Remove old SRC-port listener from overlap TGT nodes if port changed
-        for tgt in tgt_paths:
-            if tgt['node_id'] in overlap_ids:
-                old_port = src_port_by_id.get(tgt['node_id'])
-                if old_port and old_port != tgt['port']:
-                    for _ip in tgt['ips']:
-                        try:
-                            tgt['rpc'].listeners_del(nqn, tgt['trtype'], _ip, old_port)
-                            logger.info(
-                                f"Group {group.uuid[:8]}: removed old SRC listener "
-                                f"{_ip}:{old_port} from overlap {tgt['node_id'][:8]}")
-                        except Exception as e:
-                            logger.warning(
-                                f"Group {group.uuid[:8]}: remove old SRC listener "
-                                f"{tgt['node_id'][:8]} (non-fatal): {e}")
+        # TEMPORARILY DISABLED for a diagnostic test: skip removing the old
+        # SRC-port listener from overlap TGT nodes -- no RPC calls after the
+        # two ANA flips above. Re-enable once the test is done.
+        logger.info(f"Group {group.uuid[:8]}: old SRC-port listener cleanup SKIPPED (diagnostic)")
 
 
 def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, src_rpc, tgt_rpc):
@@ -768,12 +752,14 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
 
         _flip_ana_to_optimized(group, member_migrations, src_node, src_rpc, tgt_node, tgt_rpc)
 
-    try:
-        src_rpc.bdev_nvme_detach_controller(ctrl_name)
-    except Exception as e:
-        logger.warning(f"Group {group.uuid[:8]}: hub detach (non-fatal): {e}")
-    logger.info(f"Group {group.uuid[:8]}: sleeping 30s after hub detach")
-    time.sleep(30)
+    # TEMPORARILY DISABLED for a diagnostic test: no RPC calls at all after
+    # the two ANA flips above -- not even the hub controller detach.
+    # Re-enable once the test is done.
+    logger.info(f"Group {group.uuid[:8]}: hub detach SKIPPED (diagnostic)")
+    # try:
+    #     src_rpc.bdev_nvme_detach_controller(ctrl_name)
+    # except Exception as e:
+    #     logger.warning(f"Group {group.uuid[:8]}: hub detach (non-fatal): {e}")
 
     return batch_ok, batch_err
 
