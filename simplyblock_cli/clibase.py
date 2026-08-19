@@ -776,6 +776,14 @@ class CLIWrapperBase:
             if not isinstance(allowed_hosts, list):
                 print("Error: --allowed-hosts JSON must be a list of host NQN strings")
                 return False
+            # The API validates its own request body, so this file is the one
+            # way an unchecked NQN reaches a volume's allow-list -- and from
+            # there every DTO and backup manifest that carries it.
+            invalid = [nqn for nqn in allowed_hosts
+                       if not isinstance(nqn, str) or utils.NQN_PATTERN.match(nqn) is None]
+            if invalid:
+                print("Error: not host NQNs: " + ", ".join(repr(nqn) for nqn in invalid))
+                return False
 
         results, error = lvol_controller.add_lvol_ha(
             name, size, host_id, ha_type, pool, comp, crypto,

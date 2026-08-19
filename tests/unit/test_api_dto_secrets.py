@@ -111,3 +111,28 @@ def test_cluster_dto_repr_masks_secret():
 def test_cluster_dto_json_unwraps_secret():
     payload = json.loads(_build_cluster_dto().model_dump_json())
     assert payload["secret"] == "CLUSTER-SECRET"
+
+
+def test_backup_dto_lists_host_nqns_without_their_keys():
+    """Listing backups must not hand out the volume's host authentication.
+
+    The record's entries carry each host's DHCHAP keys and PSK next to its NQN,
+    so a DTO that copied them through would publish them to anyone who may list
+    backups -- a wider audience than the endpoint that exists to read them.
+    """
+    from simplyblock_core.models.backup import Backup
+    from simplyblock_web.api.v2._dtos import BackupDTO
+
+    backup = Backup()
+    backup.uuid = str(uuid4())
+    backup.allowed_hosts = [{
+        "nqn": "nqn.2024-01.io.test:host",
+        "dhchap_key": "DHHC-1:00:secret-dhchap:",
+        "dhchap_ctrlr_key": "DHHC-1:00:secret-ctrlr:",
+        "psk": "NVMeTLSkey-1:01:secret-psk:",
+    }]
+
+    dto = BackupDTO.from_model(backup)
+
+    assert dto.allowed_hosts == ["nqn.2024-01.io.test:host"]
+    assert "secret-" not in dto.model_dump_json()

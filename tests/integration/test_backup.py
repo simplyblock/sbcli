@@ -504,6 +504,31 @@ class TestBackupSnapshot(unittest.TestCase):
 
     @patch("simplyblock_core.controllers.backup.controller.tasks_controller")
     @patch("simplyblock_core.controllers.backup.controller.backup_events")
+    def test_records_host_nqns_without_copying_their_keys(self, mock_events, mock_tasks):
+        """The record takes the allow-list, not the volume's authentication.
+
+        Copying the keys here would duplicate live key material into a second
+        record and from there into every manifest, while restore only ever uses
+        the NQNs and mints fresh keys from the target pool.
+        """
+        snap = _snapshot()
+        snap.lvol.allowed_hosts = [{
+            "nqn": "nqn.2024-01.io.test:host",
+            "dhchap_key": "DHHC-1:00:secret-dhchap:",
+            "psk": "NVMeTLSkey-1:01:secret-psk:",
+        }]
+        self._persist(snap)
+
+        with patch("simplyblock_core.controllers.backup.controller._get_snapshot_chain",
+                   return_value=[snap]):
+            backup_id, error = backup_snapshot("snap-1")
+
+        self.assertIsNone(error)
+        stored = self.db.get_backup_by_id(backup_id)
+        self.assertEqual(stored.allowed_hosts, [{"nqn": "nqn.2024-01.io.test:host"}])
+
+    @patch("simplyblock_core.controllers.backup.controller.tasks_controller")
+    @patch("simplyblock_core.controllers.backup.controller.backup_events")
     def test_incremental_backup(self, mock_events, mock_tasks):
         snap = self._persist(_snapshot())
         prev = _backup(uuid="prev-backup", s3_id=3, snapshot_id="snap-0",
