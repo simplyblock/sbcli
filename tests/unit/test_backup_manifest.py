@@ -10,8 +10,8 @@ from simplyblock_core.controllers.backup import manifest as backup_manifest
 from simplyblock_core.controllers.backup.manifest import (
     BackupManifest,
     DataPlane,
-    Encryption,
-    KeyDescriptor,
+    FDBKeyDescriptor,
+    HCPKeyDescriptor,
     ManifestError,
     MANIFEST_SCHEMA_VERSION,
     Source,
@@ -30,7 +30,6 @@ def _manifest(**overrides):
         "created_at": 100,
         "completed_at": 200,
         "size": 4096,
-        "encryption": Encryption(encrypted=False),
         "location": BackupLocation.model_validate(LOCATION),
         "source": Source(cluster_id="c-1", node_id="n-1"),
         "volume": Volume(lvol_id="l-1", lvol_name="vol", snapshot_id="s-1",
@@ -51,13 +50,25 @@ class TestManifestKey:
 
 class TestSchema:
     def test_round_trip(self):
-        original = _manifest(prev_backup_id="b-0", encryption=Encryption(
-            encrypted=True,
-            descriptor=KeyDescriptor(kms="local", dek_path="p", kek_name="k")))
+        original = _manifest(prev_backup_id="b-0",
+                             encryption=FDBKeyDescriptor(dek_path="p"))
 
         restored = backup_manifest._parse(original.model_dump_json().encode(), "k")
 
         assert restored == original
+
+    def test_round_trip_keeps_the_backend_that_wrote_the_descriptor(self):
+        """The tag is what makes a Vault descriptor read back as one."""
+        original = _manifest(encryption=HCPKeyDescriptor(
+            dek_path="p", kek_name="k", transit_mount="sb/transit"))
+
+        restored = backup_manifest._parse(original.model_dump_json().encode(), "k")
+
+        assert isinstance(restored.encryption, HCPKeyDescriptor)
+        assert restored == original
+
+    def test_an_unencrypted_backup_describes_no_key(self):
+        assert _manifest().encryption is None
 
     def test_serializes_to_plain_json(self):
         data = json.loads(_manifest().model_dump_json())
