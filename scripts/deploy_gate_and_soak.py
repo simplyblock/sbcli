@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 deploy_gate_and_soak.py — deploy an MP cluster, verify the SPDK image really
 carries the instrumentation, then start the soak. One process, no human in the
