@@ -71,13 +71,10 @@ def lvol(db):
 
 
 def _encryption(uuid):
-    """What `_build_encryption` records for a cluster without Vault."""
+    """What `_build_key_descriptor` records for a cluster without Vault."""
     return {
-        "encrypted": True,
-        "descriptor": {
-            "kms": "local",
-            "dek_path": f"cluster/{CLUSTER_ID}/backup/{uuid}",
-        },
+        "type": "fdb",
+        "dek_path": f"cluster/{CLUSTER_ID}/backup/{uuid}",
     }
 
 

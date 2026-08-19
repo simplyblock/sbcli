@@ -1250,9 +1250,8 @@ class CLIWrapperBase:
             "Snapshot": m.volume.snapshot_name,
             "Size": m.size,
             "Chain": chain_length(m),
-            "Encrypted": "yes" if m.encryption.encrypted else "no",
-            "Needs KMS": (
-                m.encryption.descriptor.kms if m.encryption.descriptor else "-"),
+            "Encrypted": "yes" if m.encryption is not None else "no",
+            "Needs KMS": m.encryption.type if m.encryption is not None else "-",
             "Created": _format_timestamp(m.created_at),
         } for m in manifests]
 
