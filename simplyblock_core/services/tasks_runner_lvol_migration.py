@@ -2483,12 +2483,37 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
                 "source bdev deletion will be skipped")
             _warnings.append("source_lvol_bdev not in ctx; source bdev not deleted")
 
-        # TEMPORARILY DISABLED for a diagnostic test: skip the safe-to-delete
-        # verification (it queried tgt_rpc.bdev_lvol_get_lvols) since source
-        # snapshot deletion itself is disabled below -- no RPC calls here at
-        # all. Re-enable once the test is done.
-        logger.info("Source snapshot safe-to-delete verification SKIPPED (diagnostic)")
+        # Build the safe-to-delete list, cross-checking each snap exists on the
+        # target before we touch the source.  If the target is unreachable, skip
+        # all source snap deletions to avoid accidental data loss.
         _snaps_to_delete_src: list = []
+        try:
+            to_delete_all = migration_controller.get_snaps_safe_to_delete_on_source(migration)
+            tgt_lvols = tgt_rpc.bdev_lvol_get_lvols(tgt_node.lvstore) or []
+            tgt_names = {e.get('name', '').split('/')[-1] for e in tgt_lvols}
+            for snap_uuid in to_delete_all:
+                try:
+                    snap = db.get_snapshot_by_id(snap_uuid)
+                    _snap_bdev = snap.snap_bdev or ''
+                    _primary  = _snap_bdev.split('/', 1)[1] if '/' in _snap_bdev else _snap_bdev
+                    _m_name   = _snap_tgt_short_name(snap)
+                    _canonical = _snap_short_name(snap)
+                    _am_name  = _canonical + _MIGRATION_BDEV_SUFFIX_DONE
+                    if any(n in tgt_names for n in (_primary, _m_name, _canonical, _am_name)):
+                        _snaps_to_delete_src.append(snap_uuid)
+                    else:
+                        logger.warning(
+                            f"Target missing snapshot {_m_name} ({snap_uuid}); "
+                            "skipping source delete to protect data")
+                        _warnings.append(f"target missing snap {_m_name}; source copy kept")
+                except KeyError:
+                    pass  # already gone from DB; safe to skip
+        except Exception as _ve:
+            logger.warning(
+                f"Could not verify snapshots on target ({_ve}); "
+                "skipping all source snap deletions")
+            _warnings.append(f"snap target-verification failed: {_ve}")
+            _snaps_to_delete_src = []
 
         ctx = {
             'stage': 'cleanup_src',
@@ -2512,44 +2537,36 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
     # Use the verified list from first-entry; on crash-recovery re-run (ctx already
     # at 'cleanup_src') snaps_to_delete was saved, so re-deletes are safe (idempotent).
     source_snap_bdevs = ctx.get('source_snap_bdevs', {})
-    # TEMPORARILY DISABLED for a diagnostic test: skip deleting source
-    # snapshots so they're left intact for inspection. Re-enable once the
-    # test is done.
     for snap_uuid in ctx.get('snaps_to_delete', []):
-        logger.info(f"Source snapshot delete SKIPPED (diagnostic): {snap_uuid}")
-    # for snap_uuid in ctx.get('snaps_to_delete', []):
-    #     try:
-    #         snap = db.get_snapshot_by_id(snap_uuid)
-    #         bdev_name = (source_snap_bdevs.get(snap_uuid)
-    #                      or f"{src_node.lvstore}/{_snap_short_name(snap)}")
-    #         try:
-    #             _delete_bdev_blocking(bdev_name, src_rpc,
-    #                                   secondary_rpc=src_sec_rpc, tertiary_rpc=src_ter_rpc,
-    #                                   all_nodes=[n for n in [src_node, src_sec, src_ter] if n],
-    #                                   lvs_name=src_node.lvstore)
-    #             logger.info(f"Deleted source bdev {bdev_name}")
-    #         except Exception as e:
-    #             logger.warning(f"delete source bdev {bdev_name}: {e}")
-    #     except KeyError:
-    #         logger.warning(f"Source snapshot {snap_uuid} not found in DB; skipping")
+        try:
+            snap = db.get_snapshot_by_id(snap_uuid)
+            bdev_name = (source_snap_bdevs.get(snap_uuid)
+                        or f"{src_node.lvstore}/{_snap_short_name(snap)}")
+            try:
+                _delete_bdev_blocking(bdev_name, src_rpc,
+                                      secondary_rpc=src_sec_rpc, tertiary_rpc=src_ter_rpc,
+                                      all_nodes=[n for n in [src_node, src_sec, src_ter] if n],
+                                      lvs_name=src_node.lvstore)
+                logger.info(f"Deleted source bdev {bdev_name}")
+            except Exception as e:
+                logger.warning(f"delete source bdev {bdev_name}: {e}")
+        except KeyError:
+            logger.warning(f"Source snapshot {snap_uuid} not found in DB; skipping")
 
     # --- Source NVMe-oF subsystem teardown (best-effort) ---
     lvol = None
     try:
         lvol = db.get_lvol_by_id(migration.lvol_id)
-        # TEMPORARILY DISABLED for a diagnostic test: skip removing the
-        # source NVMe-oF subsystem/namespace entirely -- no RPC calls here
-        # at all. Re-enable once the test is done.
-        logger.info(f"Step 8: source NVMe-oF subsystem removal SKIPPED (diagnostic): {lvol.nqn}")
-        # _src_paths_cu, _, _overlap_ids_cu = _build_paths(
-        #     src_node, tgt_node, src_rpc, tgt_rpc)
-        # for _sp in _src_paths_cu:
-        #     if _sp['node_id'] in _overlap_ids_cu:
-        #         logger.info(
-        #             f"Step 8: skip subsystem delete on overlap node "
-        #             f"{_sp['node_id'][:8]} (now serving TGT)")
-        #     else:
-        #         migration_controller.cleanup_subsystem_or_ns(lvol.nqn, lvol.uuid, True, _sp['rpc'])
+        logger.info(f"Step 8: removing source NVMe-oF subsystem {lvol.nqn}")
+        _src_paths_cu, _, _overlap_ids_cu = _build_paths(
+            src_node, tgt_node, src_rpc, tgt_rpc)
+        for _sp in _src_paths_cu:
+            if _sp['node_id'] in _overlap_ids_cu:
+                logger.info(
+                    f"Step 8: skip subsystem delete on overlap node "
+                    f"{_sp['node_id'][:8]} (now serving TGT)")
+            else:
+                migration_controller.cleanup_subsystem_or_ns(lvol.nqn, lvol.uuid, True, _sp['rpc'])
     except Exception as e:
         logger.warning(f"Source subsystem cleanup failed: {e}")
 
@@ -2557,23 +2574,17 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
     # Use the saved pre-apply name; apply_migration_to_db already renamed
     # lvol.lvol_bdev in the DB to the target name, so we must not use lvol.lvol_bdev.
     src_bdev_short = ctx.get('source_lvol_bdev')
-    # TEMPORARILY DISABLED for a diagnostic test: skip deleting the source
-    # lvol bdev so it's left intact for inspection. Re-enable once the test
-    # is done.
     if lvol is not None and src_bdev_short:
         src_lvol_composite = f"{src_node.lvstore}/{src_bdev_short}"
-        logger.info(f"Source lvol bdev delete SKIPPED (diagnostic): {src_lvol_composite}")
-    # if lvol is not None and src_bdev_short:
-    #     src_lvol_composite = f"{src_node.lvstore}/{src_bdev_short}"
-    #     try:
-    #         _delete_bdev_blocking(
-    #             src_lvol_composite, src_rpc,
-    #             secondary_rpc=src_sec_rpc, tertiary_rpc=src_ter_rpc,
-    #             all_nodes=[n for n in [src_node, src_sec, src_ter] if n],
-    #             lvs_name=src_node.lvstore)
-    #         logger.info(f"Deleted source lvol bdev {src_lvol_composite}")
-    #     except Exception as e:
-    #         logger.warning(f"Source lvol delete failed: {e}")
+        try:
+            _delete_bdev_blocking(
+                src_lvol_composite, src_rpc,
+                secondary_rpc=src_sec_rpc, tertiary_rpc=src_ter_rpc,
+                all_nodes=[n for n in [src_node, src_sec, src_ter] if n],
+                lvs_name=src_node.lvstore)
+            logger.info(f"Deleted source lvol bdev {src_lvol_composite}")
+        except Exception as e:
+            logger.warning(f"Source lvol delete failed: {e}")
 
     # --- DB update ---
     tgt_lvol_uuid = ctx.get('tgt_lvol_uuid')
@@ -2592,22 +2603,12 @@ def _handle_cleanup_source(migration, src_node, src_rpc, tgt_node, tgt_rpc):
     tgt_ter_rpc = _make_rpc(tgt_ter) if tgt_ter else None
     try:
         if migration.intermediate_snaps:
-            # TEMPORARILY DISABLED for a diagnostic test: skip deleting the
-            # target-side intermediate ("_mig_*") snapshots so we can tell
-            # whether post-migration corruption still occurs with them left
-            # intact. Re-enable once the test is done.
-            logger.info(f"Intermediate snap delete on target SKIPPED (diagnostic): "
-                       f"{migration.intermediate_snaps}")
-            # _delete_intermediate_snaps_on_target(
-            #     migration, tgt_rpc, tgt_sec_rpc, tgt_ter_rpc,
-            #     tgt_all_nodes=[n for n in [tgt_node, tgt_sec, tgt_ter] if n],
-            #     tgt_lvs_name=tgt_node.lvstore)
-        # TEMPORARILY DISABLED for a diagnostic test: skip renaming migrated
-        # bdevs on the target back to their canonical names, so no RPC calls
-        # happen here at all. Re-enable once the test is done.
-        logger.info("Target bdev rename SKIPPED (diagnostic)")
-        # _rename_migrated_bdevs(migration, tgt_node, tgt_rpc, tgt_sec_rpc, tgt_ter_rpc,
-        #                        warnings=_warnings)
+            _delete_intermediate_snaps_on_target(
+                migration, tgt_rpc, tgt_sec_rpc, tgt_ter_rpc,
+                tgt_all_nodes=[n for n in [tgt_node, tgt_sec, tgt_ter] if n],
+                tgt_lvs_name=tgt_node.lvstore)
+        _rename_migrated_bdevs(migration, tgt_node, tgt_rpc, tgt_sec_rpc, tgt_ter_rpc,
+                               warnings=_warnings)
     except Exception as e:
         logger.warning(f"Target artifact cleanup (rename/intermediate snaps) failed: {e}")
         _warnings.append(f"target rename/intermediate-snap cleanup failed: {e}")
