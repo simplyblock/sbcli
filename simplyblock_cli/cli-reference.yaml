@@ -1551,7 +1551,7 @@ commands:
             dest: name
             type: str
       - name: add-replication
-        help: Assigns the snapshot replication target cluster
+        help: "DEPRECATED: use replication-target-add and replication-policy-add. Assigns the single snapshot replication target cluster."
         arguments:
           - name: "cluster_id"
             help: "Cluster id"

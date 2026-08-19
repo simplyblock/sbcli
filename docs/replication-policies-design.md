@@ -260,3 +260,51 @@ Two consequences for this design:
    cluster's own outgoing* `snapshot_replication_target_pool`, which is only
    coincidentally right. With targets, the pool is explicit
    (`ReplicationTarget.target_pool_uuid`) and that ambiguity disappears.
+
+## Implementation status
+
+Shipped (`daeec2f87`, `9ae7b631c`, `a629427aa`):
+
+- `ReplicationTarget` and `ReplicationPolicy` models, DB getters (by id, by name,
+  by-policy volume lookup), `LVol.replication_policy_id`.
+- `replication_policy_controller`: target and policy CRUD with the referential
+  guards, volume attach/detach/change, group fail-over per target and per policy,
+  and the source/target relationship lookup.
+- Retention is policy-driven: `_prune_internal_snapshots` reads the volume's
+  policy `keep_replicated` (floored at 2) instead of the module constant.
+- `connect_lvol` resolves paths from the relationship only. The
+  `Cluster.STATUS_SUSPENDED` redirect is gone.
+- REST: targets, policies, per-volume policy set/clear, `GET .../replication`,
+  group fail-over, `replication_policy` on volume create, and
+  `replication_start` no longer self-targeting.
+- CLI: `cluster replication-target-*`, `cluster replication-policy-*`,
+  `volume replication-policy-set/clear`, `volume replication-relationship`,
+  `volume add --replication-policy`. `cluster add-replication` is marked
+  DEPRECATED in its help.
+- `replication_start` / `replication_stop` are refused on a policy-managed
+  volume; the policy controller and the fail-back path pass `from_policy=True`.
+- The fail-over clone no longer inherits `replication_policy_id` from the source
+  volume (it named nothing on the target cluster and blocked fail-back).
+
+Open questions were resolved as: one policy per volume, volumes only (no
+pool-level attachment), and the policy owns cadence/mode/retention but not
+cutover behaviour.
+
+### Finding: `mode` is advisory today
+
+`replication_mode` is read in exactly two places
+(`lvol_controller.py`, `tasks_runner_replication_final.py`) and both only copy it
+onto the `LVolReplication` record. **Nothing branches on it.** The
+`LVol.replication_mode` docstring claims migration mode pre-creates the target
+subsystem "up front", but the writable target volume is in fact created at the
+ending in both paths — `replication_commit` and the fail-over clone. So a
+migration and a fail-over share one identical replication stream and differ only
+in which ending is invoked. Either implement the pre-create or correct the
+docstring; the policy carries `mode` through regardless.
+
+### Not implemented
+
+- Public documentation pages for the hierarchy (the simplyblock/documentation
+  repo).
+- The transfer-hub attach `-5 EIO` against killed-and-restored nodes, which still
+  blocks case 3 in the lab and needs target-side SPDK logs to diagnose.
