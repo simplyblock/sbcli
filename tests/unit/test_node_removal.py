@@ -1272,6 +1272,71 @@ class TestDecommissionDevices(unittest.TestCase):
         connect_mock.assert_not_called()
         peer.write_to_db.assert_not_called()
 
+    def test_picks_replacement_and_records_override_with_no_prior_chain(self):
+        # Baseline (no prior chain): removed node was never itself an
+        # override stand-in, so the new replacement inherits removed_node's
+        # OWN natural jm_bdev, same as always.
+        cl = _cluster()
+        removed = _node("n1", n_devices=0, with_jm=True)
+        removed.jm_ids = []
+        consumer = _node("consumer", n_devices=0, with_jm=True)
+        consumer.jm_ids = [removed.jm_device.get_id()]
+        replacement = _node("replacement", n_devices=0, with_jm=True)
+        replacement.jm_ids = []
+        db = FakeDB(cl, [removed, consumer, replacement])
+        db.get_jm_device_by_id = MagicMock(side_effect=lambda jid: {
+            removed.jm_device.get_id(): removed.jm_device,
+            replacement.jm_device.get_id(): replacement.jm_device,
+        }[jid])
+        dc = MagicMock()
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "device_controller", dc), \
+             patch.object(storage_node_ops, "get_sorted_ha_jms",
+                          return_value=[replacement.jm_device.get_id()]), \
+             patch.object(storage_node_ops, "_connect_to_remote_jm_devs", return_value=[]):
+            ret = storage_node_ops._decommission_node_devices(removed)
+
+        self.assertTrue(ret)
+        self.assertEqual(
+            replacement.jm_device.override_name_on_node.get("consumer"),
+            removed.jm_device.jm_bdev)
+        replacement.write_to_db.assert_called()
+
+    def test_removed_node_was_itself_an_override_stand_in_chains_the_original_name(self):
+        # Two-hop chain, no restart in between: A removed, "removed" (here
+        # playing C) was picked as consumer's replacement JM under the
+        # override name "jm_A" -- consumer's still-unrebuilt raid construct
+        # references THAT name, never "removed"'s own. "removed" is now
+        # itself removed before consumer (or "removed") ever restarted --
+        # the next replacement must inherit "jm_A", not removed's own
+        # natural name, which consumer's construct never referenced.
+        cl = _cluster()
+        removed = _node("n1", n_devices=0, with_jm=True)
+        removed.jm_ids = []
+        removed.jm_device.override_name_on_node = {"consumer": "jm_A"}
+        consumer = _node("consumer", n_devices=0, with_jm=True)
+        consumer.jm_ids = [removed.jm_device.get_id()]
+        replacement = _node("replacement", n_devices=0, with_jm=True)
+        replacement.jm_ids = []
+        db = FakeDB(cl, [removed, consumer, replacement])
+        db.get_jm_device_by_id = MagicMock(side_effect=lambda jid: {
+            removed.jm_device.get_id(): removed.jm_device,
+            replacement.jm_device.get_id(): replacement.jm_device,
+        }[jid])
+        dc = MagicMock()
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "device_controller", dc), \
+             patch.object(storage_node_ops, "get_sorted_ha_jms",
+                          return_value=[replacement.jm_device.get_id()]), \
+             patch.object(storage_node_ops, "_connect_to_remote_jm_devs", return_value=[]):
+            ret = storage_node_ops._decommission_node_devices(removed)
+
+        self.assertTrue(ret)
+        # Inherits "jm_A" -- NOT removed.jm_device.jm_bdev ("jm_n1").
+        self.assertEqual(
+            replacement.jm_device.override_name_on_node.get("consumer"), "jm_A")
+        replacement.write_to_db.assert_called()
+
 
 # ---------------------------------------------------------------------------
 # node_removal_orchestrate — phase-5 resume gap
