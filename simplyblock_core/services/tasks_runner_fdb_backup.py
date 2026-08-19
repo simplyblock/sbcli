@@ -44,8 +44,7 @@ def process_fdb_backup_task(task):
         task.write_to_db(db.kv_store)
 
 
-
-if __name__ == "__main__":
+def main():
     logger.info("Starting Tasks runner fdb backup...")
 
     while True:
@@ -64,3 +63,7 @@ if __name__ == "__main__":
                             process_fdb_backup_task(task)
 
         time.sleep(constants.TASK_EXEC_INTERVAL_SEC)
+
+
+if __name__ == "__main__":
+    main()

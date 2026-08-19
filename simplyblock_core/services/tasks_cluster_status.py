@@ -102,8 +102,8 @@ def list_clusters():
         logger.critical(f"Exception occurred while listing clusters: {e}", exc_info=True)
         return []
 
-if __name__ == "__main__":
-    logger = setup_logger()
+def main():
+    setup_logger()
     logger.info("Starting SBCLI worker.")
 
     while True:
@@ -119,3 +119,7 @@ if __name__ == "__main__":
                 check_storage_node(node_id)
             logger.info("Sleeping for 5 minutes...")
             time.sleep(300)
+
+
+if __name__ == "__main__":
+    main()
