@@ -70,6 +70,14 @@ def lvol(db):
     return volume
 
 
+def _encryption(uuid):
+    """What `_build_key_descriptor` records for a cluster without Vault."""
+    return {
+        "type": "fdb",
+        "dek_path": f"cluster/{CLUSTER_ID}/backup/{uuid}",
+    }
+
+
 def _backup(db, uuid, s3_id, prev="", **overrides):
     b = Backup()
     b.uuid = uuid
@@ -138,7 +146,26 @@ class TestBuildManifest:
         assert manifest.volume.ha_type == "ha"
         assert manifest.volume.rw_ios_per_sec == 5000
         assert manifest.volume.max_size == 8192
-        assert manifest.volume.allowed_hosts == [{"nqn": "nqn.2024-01.io.test:host"}]
+        assert manifest.volume.allowed_hosts == ["nqn.2024-01.io.test:host"]
+
+    def test_host_keys_never_reach_the_bucket(self, db, cluster, lvol):
+        """A manifest carries no authentication material, host keys included.
+
+        Restore takes the NQNs and mints fresh keys from the target pool, so
+        publishing these would be a plaintext copy of the volume's DHCHAP keys
+        and PSK in a bucket, for no reader.
+        """
+        backup = _backup(db, "b-1", 1, allowed_hosts=[{
+            "nqn": "nqn.2024-01.io.test:host",
+            "dhchap_key": "DHHC-1:00:secret-dhchap:",
+            "psk": "NVMeTLSkey-1:01:secret-psk:",
+        }])
+
+        manifest = backup_controller.build_manifest(backup)
+
+        assert manifest.volume.allowed_hosts == ["nqn.2024-01.io.test:host"]
+        assert "secret-dhchap" not in manifest.model_dump_json()
+        assert "secret-psk" not in manifest.model_dump_json()
 
     def test_survives_a_deleted_volume(self, db, cluster, lvol):
         """A backup outlives its volume; that must not stop the manifest."""
@@ -179,7 +206,7 @@ class TestExportImportRoundTrip:
     def test_backups_survive_losing_the_database(self, db, cluster, lvol):
         _backup(db, "b-1", 1)
         _backup(db, "b-2", 2, prev="b-1", encrypted=True,
-                encryption={"encrypted": True, "descriptor": {"kms": "local"}})
+                encryption=_encryption("b-2"))
 
         exported = backup_controller.export_backups(cluster_id=CLUSTER_ID)
         for backup in db.get_backups():
@@ -199,7 +226,7 @@ class TestExportImportRoundTrip:
     def test_encrypted_flag_survives(self, db, cluster, lvol):
         """It used to be dropped, restoring a plaintext volume over ciphertext."""
         _backup(db, "b-1", 1, encrypted=True,
-                encryption={"encrypted": True, "descriptor": {"kms": "local"}})
+                encryption=_encryption("b-1"))
         exported = backup_controller.export_backups(cluster_id=CLUSTER_ID)
         db.get_backup_by_id("b-1").remove(db.kv_store)
 
