@@ -2989,7 +2989,7 @@ def replication_start(lvol_id, replication_cluster_id=None, mode=None, interval_
         logger.error(e)
         return False
 
-    if not from_policy and getattr(lvol, 'replication_policy_id', ''):
+    if not from_policy and lvol.replication_policy_id:
         # Truthiness, NOT `is not None`: the field defaults to the empty
         # string, so an `is not None` test treats EVERY volume as
         # policy-managed and refuses all replication starts (commit
@@ -3216,7 +3216,7 @@ def replication_stop(lvol_id, delete=False, from_policy=False):
         logger.error(e)
         return False
 
-    if not from_policy and getattr(lvol, 'replication_policy_id', ''):
+    if not from_policy and lvol.replication_policy_id:
         # Truthiness, NOT `is not None`: the field defaults to the empty
         # string, so an `is not None` test treats EVERY volume as
         # policy-managed and refuses all replication starts (commit
