@@ -77,9 +77,18 @@ class LVol(BaseModel):
     do_replicate: bool = False
     replication_node_id: str = ""
     from_source: bool = True
-    # "failover": async DR — target volume is materialised only on fail-over.
-    # "migration": target subsystem is pre-created (ANA inaccessible) up front
-    # and the volume is cut over to it on an explicit commit.
+    # Declared intent, NOT a behaviour switch: this field is only ever copied
+    # onto the LVolReplication record (lvol_controller, tasks_runner_replication
+    # _final) and nothing branches on it, so both modes share one identical
+    # replication stream and differ purely in which ending is invoked.
+    #   "failover":  async DR — the target volume is materialised by
+    #                replicate_lvol_on_target_cluster, cloned from the last
+    #                replicated snapshot, with IO already interrupted.
+    #   "migration": planned move — the target volume is materialised by
+    #                replication_commit, which shrinks the delta first and flips
+    #                ANA, so the client is not interrupted.
+    # An earlier comment claimed migration mode pre-creates the target subsystem
+    # up front; it does not. The clone is built at the ending in both paths.
     replication_mode: str = "failover"
     # Interval in minutes for automatic internal snapshots that drive
     # replication. 0 disables interval snapshots (only user snaps replicate).
