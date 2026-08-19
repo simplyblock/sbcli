@@ -247,7 +247,7 @@ class TestImportPreconditions:
             "created_at": 100,
             "completed_at": 200,
             "size": 4096,
-            "encrypted": False,
+            "encryption": {"encrypted": False},
             "prev_backup_id": prev,
             "location": _config(bucket_name=bucket).location().model_dump(mode="json"),
             "source": {"cluster_id": CLUSTER_ID, "node_id": "node-1"},
