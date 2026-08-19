@@ -4620,7 +4620,19 @@ def _decommission_node_devices(removed_node: StorageNode):
                 if new_jm_dev:
                     d = db_controller.get_jm_device_by_id(new_jm_dev)
                     jm_node = db_controller.get_storage_node_by_id(d.node_id)
-                    jm_node.jm_device.override_name_on_node[node.get_id()]=removed_node.jm_device.jm_bdev
+                    # Chain the name node actually needs, not removed_node's
+                    # own natural name: removed_node may itself have been
+                    # standing in as an override for node (a second removal,
+                    # no restart in between -- e.g. A removed, C picked as
+                    # node's replacement JM under the name "jm_A", then C
+                    # itself removed before anyone restarted). In that case
+                    # node's still-unrebuilt construct references THAT
+                    # older name, never removed_node's own -- propagate it
+                    # forward instead of jumping to a name node never used.
+                    inherited_name = (removed_node.jm_device.override_name_on_node or {}).get(
+                        node.get_id())
+                    jm_node.jm_device.override_name_on_node[node.get_id()] = (
+                        inherited_name or removed_node.jm_device.jm_bdev)
                     jm_node.write_to_db()
                     node.jm_ids.append(new_jm_dev)
                     node.remote_jm_devices = _connect_to_remote_jm_devs(node, node.jm_ids)
