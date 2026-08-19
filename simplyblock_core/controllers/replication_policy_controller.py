@@ -166,6 +166,10 @@ def _active_relationship(lvol_id):
 
 
 def _resolve_policy(policy):
+    if not policy or not str(policy).strip():
+        # An empty policy is not "no policy": attaching it would clear the
+        # volume's replication configuration while claiming to set one.
+        raise ReplicationConfigError("A replication policy id or name is required")
     try:
         return db.get_replication_policy_by_id(policy)
     except KeyError:
