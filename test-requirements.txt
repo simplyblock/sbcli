@@ -1,6 +1,0 @@
-httpx  # fastapi.testclient
-pytest
-pytest-randomly  # per-run seed + per-test reseed; see tests/AGENTS.md
-pytest-timeout
-requests
-testcontainers>=4.0

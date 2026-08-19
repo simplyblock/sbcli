@@ -1,5 +1,8 @@
 import logging
 import os
+
+from simplyblock_core._version import __version__
+
 SCRIPT_PATH = os.path.dirname(os.path.realpath(__file__))
 
 
@@ -291,7 +294,7 @@ SIMPLY_BLOCK_CLI_NAME = get_config_var(
         "SIMPLY_BLOCK_COMMAND_NAME", "sbcli")
 SIMPLY_BLOCK_SPDK_ULTRA_IMAGE = get_config_var(
         "SIMPLY_BLOCK_SPDK_ULTRA_IMAGE", "public.ecr.aws/simply-block/ultra:main-latest")
-SIMPLY_BLOCK_VERSION = get_config_var("SIMPLY_BLOCK_VERSION", "1")
+SIMPLY_BLOCK_VERSION = __version__
 
 GELF_PORT = 12202
 
