@@ -1066,7 +1066,7 @@ def set_node_unreachable(node):
                            StorageNode.STATUS_RESTARTING]:
         try:
             storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_UNREACHABLE)
-            update_cluster_status(cluster_id)
+            update_cluster_status(node.cluster_id)
         except Exception as e:
             logger.debug("Setting node to UNREACHABLE state failed")
             logger.error(e)
@@ -1268,7 +1268,7 @@ def set_node_schedulable(node):
                 if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY,
                                   NVMeDevice.STATUS_CANNOT_ALLOCATE]:
                     device_controller.device_set_unavailable(dev.get_id())
-            update_cluster_status(cluster_id)
+            update_cluster_status(node.cluster_id)
         except Exception as e:
             logger.debug("Setting node to SCHEDULABLE state failed")
             logger.error(e)
@@ -1278,7 +1278,7 @@ def set_node_down(node):
     node = db.get_storage_node_by_id(node.get_id())
     if node.status not in [StorageNode.STATUS_DOWN, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_IN_SHUTDOWN]:
         storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_DOWN)
-        update_cluster_status(cluster_id)
+        update_cluster_status(node.cluster_id)
 
 
 def node_rpc_timeout_check_and_report(node):
