@@ -5,6 +5,8 @@ import time
 import uuid
 from typing import Iterable, List, Optional
 
+from pydantic import ValidationError
+
 from simplyblock_core import constants
 from simplyblock_core.controllers import backup_events, tasks_controller
 from simplyblock_core.controllers.backup import manifest as backup_manifest
@@ -261,8 +263,9 @@ def _resolve_crypto_key(backup: Backup, cluster):
     Returns None for an unencrypted backup.
 
     Raises:
-        PreconditionError: The backup records nothing about its key, so no amount
-            of reachable infrastructure can decrypt it.
+        PreconditionError: The backup records nothing about its key, or too
+            little of it to reach the KMS, so no amount of reachable
+            infrastructure can decrypt it.
         RuntimeError: The recorded KMS could not be reached. Raised before the
             volume is created, so a restore that cannot decrypt fails without
             leaving a half-built volume behind -- and, more importantly, without
@@ -271,18 +274,28 @@ def _resolve_crypto_key(backup: Backup, cluster):
     if not backup.encrypted:
         return None
 
-    encryption = backup_manifest.Encryption.model_validate(
-        {**(backup.encryption or {}), "encrypted": backup.encrypted})
-
-    descriptor = encryption.descriptor
-    if descriptor is None:
+    # The descriptor is read on its own rather than through `Encryption`, whose
+    # encrypted-implies-descriptor validator would raise ValidationError for the
+    # very case this function is documented to refuse with PreconditionError.
+    descriptor_record = (backup.encryption or {}).get("descriptor")
+    if not descriptor_record:
         raise PreconditionError(
             f"Backup {backup.uuid} is encrypted but records nothing about its "
             "key; it predates self-describing backups and cannot be restored")
 
     try:
+        descriptor = backup_manifest.KeyDescriptor.model_validate(descriptor_record)
+    except ValidationError as e:
+        raise PreconditionError(
+            f"Backup {backup.uuid} is encrypted but records nothing about its "
+            f"key that a KMS can be reached with: {e}") from e
+
+    try:
         with create_kms_connection(cluster) as kms:
-            return kms.get_data_encryption_keys(descriptor.dek_path, descriptor.kek_name)
+            # LocalKMS has no KEK and ignores the name; a Vault descriptor is
+            # validated to carry one.
+            return kms.get_data_encryption_keys(
+                descriptor.dek_path, descriptor.kek_name or "")
     except KMSException as e:
         raise RuntimeError(
             f"Cannot reach the key for backup {backup.uuid} at "
@@ -396,7 +409,6 @@ def _build_encryption(cluster, backup: Backup) -> backup_manifest.Encryption:
         backup_manifest.KeyDescriptor(
             kms="local",
             dek_path=dek_path,
-            kek_name=kek_name,
         )
     )
 
