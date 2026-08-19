@@ -1015,8 +1015,36 @@ class RPCClient:
             params["reconnect_delay_sec"] = int(reconnect_delay_sec)
         if fast_io_fail_timeout_sec is not None:
             params["fast_io_fail_timeout_sec"] = int(fast_io_fail_timeout_sec)
-        return self._request("bdev_nvme_attach_controller", params,
-                             request_timeout=request_timeout)
+        # Two SPDK success shapes are falsy, and callers gate on truthiness:
+        #
+        #  * adding a path to an EXISTING multipath controller creates no new
+        #    bdev, so the RPC succeeds and returns an empty name list;
+        #  * re-adding a path that is already present fails with -EALREADY
+        #    ("A controller named X already exists with the specified network
+        #    path", bdev_nvme_rpc.c) — which means the path is there, i.e. the
+        #    strongest possible success signal.
+        #
+        # Returning those as falsy made hublvol reconcile report "no path
+        # attached" for a controller whose paths were both enabled, so
+        # recreate_lvstore failed and the node oscillated offline <-> in_restart
+        # indefinitely (multipath soak 2026-08-19 iteration 4). Report success
+        # as True and keep the name list when SPDK actually created bdevs.
+        result, error = self._request2("bdev_nvme_attach_controller", params,
+                                       request_timeout=request_timeout)
+        if error:
+            code = error.get("code") if isinstance(error, dict) else None
+            message = str(error.get("message", "")) if isinstance(error, dict) else str(error)
+            if code == -errno.EALREADY or "already exists with the specified network path" in message:
+                logger.info(
+                    "bdev_nvme_attach_controller: %s already has path %s:%s — "
+                    "treating as attached", name, traddr, trsvcid)
+                return True
+            logger.error(
+                "bdev_nvme_attach_controller failed for %s %s:%s: %s",
+                name, traddr, trsvcid, error)
+            return None
+        # Empty list == path added to an existing controller (no new bdev).
+        return result if result else True
 
     def bdev_split(self, base_bdev, split_count):
         params = {

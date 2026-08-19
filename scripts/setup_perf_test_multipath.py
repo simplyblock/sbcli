@@ -104,6 +104,22 @@ ec2_client   = boto3.client("ec2", region_name="us-east-1")
 
 # ──────────────────── SSH helpers ────────────────────────────────────────────
 
+def _keepalive(client, interval=30):
+    """Keep long silent SSH channels alive.
+
+    Several deploy steps (cluster create, sn deploy, cluster activate) run for
+    minutes without writing a byte. With no keepalive the TCP connection is
+    idle for that whole window and gets reaped somewhere on the path; paramiko
+    then blocks in channel.recv() until its own timeout and the deploy dies
+    with a bare socket.timeout even though the remote command SUCCEEDED
+    (2026-08-19 14:21: cluster create completed, all CP services 1/1, deploy
+    reported rc=1). The soak's RemoteHost has always done this.
+    """
+    transport = client.get_transport()
+    if transport is not None:
+        transport.set_keepalive(interval)
+
+
 def _ssh_connect(ip, jump_ip=None, timeout=None, banner_timeout=None):
     """Open a paramiko SSHClient to ``ip``. When ``jump_ip`` is given,
     tunnel through it via ``direct-tcpip`` (ProxyJump): the jump host
@@ -124,6 +140,7 @@ def _ssh_connect(ip, jump_ip=None, timeout=None, banner_timeout=None):
         if banner_timeout is not None:
             kwargs["banner_timeout"] = banner_timeout
         ssh.connect(ip, **kwargs)
+        _keepalive(ssh)
         return ssh
     jump = paramiko.SSHClient()
     jump.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -148,6 +165,8 @@ def _ssh_connect(ip, jump_ip=None, timeout=None, banner_timeout=None):
     if banner_timeout is not None:
         target_kwargs["banner_timeout"] = banner_timeout
     ssh.connect(ip, **target_kwargs)
+    _keepalive(jump)
+    _keepalive(ssh)
     # Stash the jump client on the target client so we can close both.
     ssh._jump_client = jump
     return ssh
