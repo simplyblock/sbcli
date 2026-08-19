@@ -696,9 +696,9 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
     for p in tgt_paths:
         _flip_all(p['rpc'], p['ips'], p['port'], p['trtype'],
                   "inaccessible", f"TGT-{p['node_id'][:8]}(pre-freeze)")
-    logger.info(f"Group {group.uuid[:8]}: sleeping 10s after all-paths-inaccessible "
+    logger.info(f"Group {group.uuid[:8]}: sleeping 2s after all-paths-inaccessible "
                f"before batch_final_step (diagnostic)")
-    time.sleep(10)
+    time.sleep(2)
 
     logger.info(
         f"Group {group.uuid[:8]}: batch_final_step "
