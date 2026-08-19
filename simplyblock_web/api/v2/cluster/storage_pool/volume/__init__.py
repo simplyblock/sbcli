@@ -56,7 +56,7 @@ class _CreateParams(BaseModel):
     pvc_name: str | None = None
     ndcs: util.Unsigned = 0
     npcs: util.Unsigned = 0
-    allowed_hosts: builtins.list[str] | None = None
+    allowed_hosts: builtins.list[util.NQN] | None = None
     fabric: str = "tcp"
     # None → resolved by add_lvol_ha: a shareable default for namespaced
     # volumes, 1 otherwise.
@@ -224,7 +224,7 @@ def delete(cluster: Cluster, pool: StoragePool, volume: Volume) -> Response:
 
 
 class _AddHostParams(BaseModel):
-    host_nqn: str
+    host_nqn: util.NQN
 
 
 @instance_api.post('/hosts', name='clusters:storage-pools:volumes:add-host', status_code=201)

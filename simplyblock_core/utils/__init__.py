@@ -13,10 +13,10 @@ import sys
 import uuid
 import time
 from datetime import datetime, UTC
-from typing import Any
+from typing import Annotated, Any
 from collections.abc import Iterable
 
-from pydantic import SecretStr
+from pydantic import Field, SecretStr
 from docker import DockerClient
 from kubernetes import client, config
 from kubernetes.client import ApiException, V1Deployment, V1DeploymentSpec, V1ObjectMeta, \
@@ -67,6 +67,14 @@ SCRIPTS_FOLDER = "simplyblock_core/scripts/"
 # Provisioning files for the cluster event log alerts (`cluster event-alerts`).
 EVENT_ALERT_RULES_FILE = "event_alert_rules.yaml"
 EVENT_ALERT_DATASOURCE_FILE = "datasource-events.yml"
+
+
+#: An NVMe Qualified Name, as a type. Declaring a field with this rather than
+#: ``str`` is what makes the format part of the model instead of a check each
+#: caller has to remember; ``NQN_PATTERN`` stays for the paths that validate
+#: imperatively.
+NQN = Annotated[str, Field(pattern=NQN_PATTERN)]
+
 
 def get_env_var(name, default=None, is_required=False):
     if not name:

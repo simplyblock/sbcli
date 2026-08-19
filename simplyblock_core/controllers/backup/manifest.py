@@ -29,14 +29,18 @@ for where the two genuinely differ and where they should be collapsed.
 """
 import json
 import logging
-from typing import Iterable, List, Literal, Optional
+from typing import (
+    Annotated, Any, Iterable, List, Literal, Optional, Tuple, Union)
 
 import boto3
 from botocore.config import Config as BotoConfig
 from botocore.exceptions import BotoCoreError, ClientError
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import (
+    BaseModel, ConfigDict, Field, HttpUrl, SecretStr, TypeAdapter, model_validator)
 
+from simplyblock_core.kms import KMS
 from simplyblock_core.models.backup_config import BackupConfig, BackupLocation
+from simplyblock_core.utils import NQN
 from simplyblock_core.utils.secrets import unwrap_secret
 
 
@@ -91,11 +95,23 @@ class Volume(BaseModel):
     snapshot_id: str
     snapshot_name: str
     size: int
-    allowed_hosts: List[dict] = []
+
+    #: The NQNs allowed to attach, so a restore recreates the volume's
+    #: allow-list rather than an open subsystem. NQNs alone: the control plane's
+    #: own host entries also carry that host's DHCHAP keys and PSK, which no
+    #: reader of a manifest needs -- restore passes the NQNs to add_lvol_ha,
+    #: which mints fresh keys from the target pool -- and which a manifest must
+    #: not carry any more than it carries bucket credentials.
+    allowed_hosts: List[NQN] = []
 
     pool_name: Optional[str] = None
-    ha_type: Optional[str] = None
-    fabric: Optional[str] = None
+
+    #: "default" is not among these: it is the request-time way of saying "the
+    #: cluster's", which the volume no longer has once it exists. A volume whose
+    #: record does not say is recorded as absent rather than as a guess.
+    ha_type: Optional[Literal["single", "ha"]] = None
+
+    fabric: Optional[Literal["tcp", "rdma", "tcp,rdma"]] = None
     lvol_priority_class: Optional[int] = None
     max_size: Optional[int] = None
     rw_ios_per_sec: Optional[int] = None
@@ -103,56 +119,111 @@ class Volume(BaseModel):
     r_mbytes_per_sec: Optional[int] = None
     w_mbytes_per_sec: Optional[int] = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def _hosts_to_nqns(cls, data: Any) -> Any:
+        """Take the NQN out of a host entry that carries more than one.
 
-class KeyDescriptor(BaseModel):
+        Two inputs arrive this way: the control plane's own ``allowed_hosts``
+        dicts, which is where the key material would otherwise come from, and a
+        manifest written before this field was narrowed. Both are read for the
+        NQNs they hold rather than refused, and the rest is dropped here -- so
+        the next write of that manifest no longer republishes it.
+        """
+        if isinstance(data, dict) and isinstance(data.get("allowed_hosts"), list):
+            data = dict(data)
+            data["allowed_hosts"] = [
+                host["nqn"] if isinstance(host, dict) else host
+                for host in data["allowed_hosts"]
+            ]
+
+        return data
+
+
+class _KeyDescriptor(BaseModel):
     """Where this backup's data encryption key lives. Never the key itself.
 
-    Restoring an encrypted backup means reaching the KMS named here. The working
-    assumption is that a KMS is recoverable independently of the cluster that
-    used it -- a Vault deployment outlives one cluster, and the FoundationDB
+    Restoring an encrypted backup means reaching the KMS described here. The
+    working assumption is that a KMS is recoverable independently of the cluster
+    that used it -- a Vault deployment outlives one cluster, and the FoundationDB
     behind LocalKMS is itself backed up -- so recording the dependency is enough,
     and no key material has to travel with the ciphertext.
 
-    Recording it as a document rather than as loose fields is also what leaves
-    room to change that assumption: a scheme that wraps the keys under an
-    operator-held secret adds a sibling field here and a branch in
-    _resolve_crypto_key, and touches nothing else.
+    One subclass per backend, discriminated on ``type``, because which fields
+    mean anything depends entirely on which backend holds the key: a Vault
+    descriptor needs the transit key that unwraps its DEK, and the local one has
+    no such key to name. A reader years later gets the fields its backend
+    defines and no others, rather than a flat record whose optional halves it has
+    to know how to interpret.
+
+    A future scheme -- keys wrapped under an operator-held secret, say -- is a
+    third subclass and a third ``read_keys``, and touches nothing else.
     """
     model_config = ConfigDict(extra="forbid")
 
-    #: Which backend holds the key. Named rather than free text, because a reader
-    #: years later has to know which of the fields below mean anything.
-    kms: Literal["hashicorp_vault", "local"]
-
+    #: Where the keys themselves are: the FoundationDB key under the local
+    #: backend, the KV path under Vault. Every backend addresses its keys
+    #: somehow, so this is the one field they share.
     dek_path: str
+
+    def read_keys(self, kms: KMS) -> Tuple[SecretStr, SecretStr]:
+        """Read this backup's data encryption keys out of an open KMS.
+
+        Here rather than at the call site because how a backend is addressed is
+        exactly what distinguishes these types.
+
+        Raises:
+            KMSException: The KMS could not be reached, or holds no such key.
+        """
+        raise NotImplementedError
+
+
+class FDBKeyDescriptor(_KeyDescriptor):
+    """Keys held in the cluster's own FoundationDB, by ``LocalKMS``."""
+
+    type: Literal["fdb"] = "fdb"
+
+    def read_keys(self, kms: KMS) -> Tuple[SecretStr, SecretStr]:
+        # LocalKMS has no key-encryption key at all: it stores DEKs as they are,
+        # its KEK operations are no-ops, and it ignores the name it is passed.
+        return kms.get_data_encryption_keys(self.dek_path, "")
+
+
+class HCPKeyDescriptor(_KeyDescriptor):
+    """Keys held in HashiCorp Vault, wrapped under a named transit key."""
+
+    type: Literal["hcp"] = "hcp"
+
+    #: The transit key the DEKs are wrapped under. Required, because unwrapping
+    #: them is not possible without naming it.
     kek_name: str
 
-    #: Vault only; absent for the local backend.
-    vault_base_url: Optional[str] = None
+    #: Absent where the originating cluster's Vault settings did not record
+    #: them; a reader then falls back on its own configuration.
+    vault_base_url: Optional[HttpUrl] = None
     transit_mount: Optional[str] = None
     kv_mount: Optional[str] = None
 
+    def read_keys(self, kms: KMS) -> Tuple[SecretStr, SecretStr]:
+        return kms.get_data_encryption_keys(self.dek_path, self.kek_name)
 
-class Encryption(BaseModel):
-    """Whether this backup is ciphertext, and if so how to reach its key."""
-    model_config = ConfigDict(extra="forbid")
 
-    encrypted: bool
+#: Tagged on ``type``, so a stored descriptor is read back as the backend that
+#: wrote it rather than matched against each shape in turn.
+KeyDescriptor = Annotated[
+    Union[FDBKeyDescriptor, HCPKeyDescriptor], Field(discriminator="type")]
 
-    #: Where the key lives. Required for an encrypted backup and meaningless
-    #: otherwise, so the two cannot disagree.
-    descriptor: Optional[KeyDescriptor] = None
+_key_descriptor_adapter: TypeAdapter = TypeAdapter(KeyDescriptor)
 
-    @model_validator(mode="after")
-    def _descriptor_matches_encrypted(self) -> "Encryption":
-        if self.encrypted and self.descriptor is None:
-            raise ValueError(
-                "An encrypted backup must record where its key lives; without "
-                "that, nothing can decrypt it and nothing can say why")
-        if not self.encrypted and self.descriptor is not None:
-            raise ValueError(
-                "An unencrypted backup has no key to describe")
-        return self
+
+def parse_key_descriptor(record: dict) -> KeyDescriptor:
+    """Read a stored key descriptor, whichever backend wrote it.
+
+    Raises:
+        ValidationError: The record names no known backend, or is missing what
+            that backend needs to find its keys.
+    """
+    return _key_descriptor_adapter.validate_python(record)
 
 
 class DataPlane(BaseModel):
@@ -191,7 +262,13 @@ class BackupManifest(BaseModel):
     prev_backup_id: Optional[str] = None
 
     location: BackupLocation
-    encryption: Encryption
+
+    #: Where this backup's key lives, or absent for a backup that is not
+    #: encrypted at all. One optional document rather than a flag beside it: two
+    #: fields for one fact can contradict each other, and a manifest is read
+    #: exactly when nobody is left who could say which one was right.
+    encryption: Optional[KeyDescriptor] = None
+
     source: Source
     volume: Volume
     dataplane: DataPlane
