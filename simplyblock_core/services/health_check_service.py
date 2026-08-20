@@ -232,8 +232,12 @@ def check_node(snode):
             # shutdown, ...) the connection is expected to be gone — skip it.
             if org_dev.status == NVMeDevice.STATUS_ONLINE and health_controller._peer_connections_relevant(org_node):
                 if health_controller.check_bdev(remote_device.remote_bdev, rpc_client=rpc_client):
-                    # Bdev exists but multipath may be degraded — repair missing paths
-                    if org_dev.nvmf_multipath:
+                    # Bdev exists but multipath may be degraded — repair missing
+                    # paths, but only while the owner can actually answer a
+                    # connect. _peer_connections_relevant also admits
+                    # UNREACHABLE, which is fine for judging whether a missing
+                    # connection is a fault and wrong for deciding to dial out.
+                    if org_dev.nvmf_multipath and health_controller.repairs_allowed(org_node):
                         ctrl_name = f"remote_{org_dev.alceml_bdev}" if org_dev.alceml_bdev else None
                         if ctrl_name:
                             try:
@@ -245,6 +249,15 @@ def check_node(snode):
 
                 if not org_dev.alceml_bdev:
                     logger.error(f"device alceml bdev not found!, {org_dev.get_id()}")
+                    continue
+
+                if not health_controller.repairs_allowed(org_node):
+                    # Judged a fault above (that uses the wider relevance
+                    # test), but dialling out to a node that cannot answer is
+                    # pointless; the next cycle retries once it is ONLINE/DOWN.
+                    logger.info(
+                        "Device connect skipped for %s: owner %s is %s",
+                        org_dev.get_id(), remote_device.node_id, org_node.status)
                     continue
 
                 try:
@@ -283,7 +296,12 @@ def check_node(snode):
                             try:
                                 src_node = db.get_storage_node_by_id(remote_device.node_id)
                                 src_jm = src_node.jm_device if src_node else None
-                                if src_jm and getattr(src_jm, 'nvmf_ip', None):
+                                if not health_controller.repairs_allowed(src_node):
+                                    logger.info(
+                                        "Multipath repair skipped for JM %s: owner %s is %s",
+                                        ctrl_name, remote_device.node_id,
+                                        getattr(src_node, "status", "unknown"))
+                                elif src_jm and getattr(src_jm, 'nvmf_ip', None):
                                     storage_node_ops.repair_multipath_controller(ctrl_name, src_jm, snode)
                                 else:
                                     logger.warning(
@@ -370,8 +388,13 @@ def check_node(snode):
                     if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
                         lvstore_check &= health_controller._check_node_lvstore(
                             lvstore_stack, sec_node, auto_fix=True, stack_src_node=snode)
+                        # repair_paths=True on the first pass: a hublvol
+                        # missing one of its two paths passes the existence
+                        # check below, so nesting path repair inside the
+                        # failure branch meant it never ran.
                         sec_node_check = health_controller._check_sec_node_hublvol(
-                            sec_node, primary_node_id=snode.get_id())
+                            sec_node, primary_node_id=snode.get_id(),
+                            repair_paths=True)
                         if not sec_node_check:
                             if snode.status == StorageNode.STATUS_ONLINE:
                                 ret = sec_node.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
