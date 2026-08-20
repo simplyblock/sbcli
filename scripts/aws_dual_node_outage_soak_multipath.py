@@ -279,6 +279,16 @@ def parse_args():
                         help="Remote device bdevs per node to sample for multipath "
                              "policy. Hublvol bdevs are always all checked. Keep small: "
                              "unfiltered bdev dumps have wedged app threads before.")
+    verify.add_argument("--start-iteration", type=int, default=1,
+                        help="Number the first outage pair with this instead of "
+                             "1. Pair distance rotation and NIC-phase "
+                             "scheduling both key off the iteration number, so "
+                             "resuming an interrupted run at the iteration it "
+                             "died on continues the same sequence rather than "
+                             "repeating the pairs already covered. The loop "
+                             "still ends at --iterations, so "
+                             "--start-iteration 21 --iterations 75 runs 55 "
+                             "pairs.")
     verify.add_argument("--iterations", type=int, default=75,
                         help="Number of outage pairs to run (default 75). 0 = run "
                              "until fio's runtime expires. --runtime must outlast the "
@@ -1975,9 +1985,11 @@ class SoakRunner:
                         if args.nic_phase_every else 0)
             pair_cost = ((args.pair_delay_min + args.pair_delay_max) / 2
                          + args.outage_hold + 240 + args.iteration_settle + 60)
-            estimate = args.iterations * (nic_cost + pair_cost)
+            remaining = max(0, args.iterations - max(1, args.start_iteration) + 1)
+            estimate = remaining * (nic_cost + pair_cost)
             self.logger.log(
-                f"loop: {args.iterations} outage pairs, rough estimate "
+                f"loop: {remaining} outage pairs "
+                f"({max(1, args.start_iteration)}..{args.iterations}), rough estimate "
                 f"{estimate / 3600:.1f}h ({(nic_cost + pair_cost) / 60:.1f} min/pair)")
             if estimate > args.runtime:
                 self.logger.log(
@@ -2000,7 +2012,11 @@ class SoakRunner:
         self.start_fio(volumes)
         self.refresh_topology()
 
-        iteration = 0
+        iteration = max(1, args.start_iteration) - 1
+        if iteration:
+            self.logger.log(
+                f"resuming the outage loop at iteration {iteration + 1} "
+                f"(pair rotation and NIC-phase schedule continue from there)")
         while True:
             iteration += 1
             if args.iterations and iteration > args.iterations:
