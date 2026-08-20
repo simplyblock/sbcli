@@ -126,7 +126,10 @@ def test_failback_direction_counts_as_replicated(patch_db):
 def test_backlog_age_is_reported(patch_db):
     snaps = [_Snap("S_OLD", 900), _Snap("S_NEW", 20)]
     info = patch_db(snaps, [_Task("S_OLD"), _Task("S_NEW")])
-    assert info["oldest_outstanding_seconds"] == pytest.approx(900, abs=5)
+    # NOW is stamped at import, the controller reads the clock when called, so
+    # the gap grows with however long the rest of the suite takes to get here.
+    # Only the age ORDER matters: the oldest outstanding one, not the newest.
+    assert 900 <= info["oldest_outstanding_seconds"] < 900 + 3600
     assert info["oldest_outstanding"]
     assert info["cadence_target_seconds"] == 60
 
