@@ -86,6 +86,7 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             self.init_storage_node__lvs_dump_tree(subparser)
         self.init_storage_node__get_bdevs(subparser)
+        self.init_storage_node__unload(subparser)
 
 
     def init_storage_node__deploy(self, subparser):
@@ -354,6 +355,11 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'get-bdevs', 'Runs bdev_get_bdevs on a storage node and prints the result.')
         subcommand.add_argument('node_id', help='The storage node id.', type=str).completer = self._completer_get_sn_list
         argument = subcommand.add_argument('--name', help='Only return the bdev with this name.', type=str, dest='name')
+
+    def init_storage_node__unload(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'unload', 'Unloads an lvstore on a storage node (bdev_lvol_apply_lvstore).')
+        subcommand.add_argument('node_id', help='The storage node id.', type=str).completer = self._completer_get_sn_list
+        subcommand.add_argument('lvs_name', help='The lvstore name.', type=str)
 
 
     def init_cluster(self):
@@ -1251,6 +1257,8 @@ class CLIWrapper(CLIWrapperBase):
                         ret = self.storage_node__lvs_dump_tree(sub_command, args)
                 elif sub_command in ['get-bdevs']:
                     ret = self.storage_node__get_bdevs(sub_command, args)
+                elif sub_command in ['unload']:
+                    ret = self.storage_node__unload(sub_command, args)
                 else:
                     self.parser.print_help()
 

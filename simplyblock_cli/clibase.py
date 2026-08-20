@@ -388,6 +388,9 @@ class CLIWrapperBase:
     def storage_node__get_bdevs(self, sub_command, args):
         return storage_ops.get_node_bdevs(args.node_id, args.name)
 
+    def storage_node__unload(self, sub_command, args):
+        return storage_ops.unload_lvstore(args.node_id, args.lvs_name)
+
     def storage_node__set(self, sub_command, args):
         return storage_ops.set_value(args.node_id, args.attr_name, args.attr_value)
 

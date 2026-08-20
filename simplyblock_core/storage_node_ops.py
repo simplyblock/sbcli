@@ -7281,3 +7281,43 @@ def get_node_bdevs(node_id, name=None):
         return False
 
     return json.dumps(ret, indent=2)
+
+
+def unload_lvstore(node_id, lvs_name):
+    """Run bdev_lvol_apply_lvstore for ``lvs_name`` on the given storage node.
+
+    The RPC ("Apply the lvstore on the secondary node") resolves its target
+    with vbdev_get_lvol_store_by_uuid_xor_name(), so it takes either a uuid or
+    a name. The name is used here: it is what an operator has at hand, whereas
+    the uuid would need a lookup from a node that may not be in a state to
+    answer one.
+
+    Like get-bdevs, this deliberately does not require the node to be ONLINE in
+    the database. The SPDK process normally still answers while the record says
+    offline or in_restart, which is exactly when this is wanted.
+    """
+    db_controller = DBController()
+    try:
+        snode = db_controller.get_storage_node_by_id(node_id)
+    except KeyError:
+        logger.error("Can not find storage node")
+        return False
+
+    if snode.lvstore and snode.lvstore != lvs_name:
+        # Not fatal: the record can be stale in precisely the situations this
+        # command is used in, so the operator's argument wins.
+        logger.warning(
+            f"Node {node_id} records lvstore {snode.lvstore!r}, applying "
+            f"{lvs_name!r} as requested")
+
+    # No retry: re-applying behind the operator's back is not appropriate for
+    # a manual recovery command, and the timeout is generous because the call
+    # reaches down into the lvstore rather than just reading state.
+    rpc_client = snode.rpc_client(timeout=600, retry=1)
+    ret = rpc_client.bdev_lvol_apply_lvstore(lvs_name=lvs_name)
+    if not ret:
+        logger.error(f"Failed to apply lvstore {lvs_name} on node {node_id}")
+        return False
+
+    logger.info(f"Applied lvstore {lvs_name} on node {node_id}")
+    return True

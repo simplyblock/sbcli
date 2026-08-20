@@ -826,6 +826,18 @@ commands:
             help: "Only return the bdev with this name."
             dest: name
             type: str
+      - name: unload
+        help: "Unloads an lvstore on a storage node (bdev_lvol_apply_lvstore)."
+        arguments:
+          - name: "node_id"
+            help: "The storage node id."
+            dest: node_id
+            type: str
+            completer: _completer_get_sn_list
+          - name: "lvs_name"
+            help: "The lvstore name."
+            dest: lvs_name
+            type: str
   - name: "cluster"
     help: "Cluster Commands"
     weight: 200

@@ -1507,6 +1507,16 @@ class RPCClient:
         }
         return self._request("bdev_lvs_dump_tree", params)
 
+    def bdev_lvol_apply_lvstore(self, lvs_name=None, uuid=None):
+        """Apply (unload) an lvstore, addressed by name or by uuid.
+
+        The RPC resolves its target with
+        vbdev_get_lvol_store_by_uuid_xor_name(), so exactly one of the two may
+        be sent -- passing both is an error on the SPDK side.
+        """
+        params = {"uuid": uuid} if uuid else {"lvs_name": lvs_name}
+        return self._request("bdev_lvol_apply_lvstore", params)
+
     # -----------------------------------------------------------------------
     # Live volume migration RPCs
     # -----------------------------------------------------------------------
