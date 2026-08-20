@@ -98,9 +98,15 @@ def mount_services(mgmt):
             name = Path(local).name
             mounts.append(f"--mount-add type=bind,source={HOTFIX_DIR}/{name},"
                           f"target={CONTAINER_SP}/{rel}")
-        log(f"mounting {len(mounts)} files into {service}")
-        ssh(mgmt, f"sudo docker service update --quiet {' '.join(mounts)} {service}",
-            timeout=900)
+        # --force matters: a --mount-add whose target is ALREADY mounted is a
+        # no-op and does NOT recreate the task, so the service keeps running
+        # the module it imported at startup. On 2026-08-20 the chaining fix sat
+        # mounted and unused for an hour while the verification passed, because
+        # an import-based probe reads the file from DISK, not from the running
+        # process's memory. Always recreate, then verify.
+        log(f"mounting {len(mounts)} files into {service} (forcing a restart)")
+        ssh(mgmt, f"sudo docker service update --quiet {' '.join(mounts)} "
+                  f"--force {service}", timeout=900)
 
 
 def patch_host(mgmt):
@@ -155,7 +161,7 @@ def main():
         stage(mgmt)
         mount_services(mgmt)
         patch_host(mgmt)
-        time.sleep(20)          # let the restarted tasks come up
+        time.sleep(60)          # let the recreated tasks come up
     verify(mgmt)
 
 
