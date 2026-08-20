@@ -172,12 +172,32 @@ def ssh_exec(ip, cmds, get_output=False, check=False, timeout=LONG_CMD_TIMEOUT):
         out_parts, err_parts = [], []
         deadline = time.time() + timeout
 
+        # Stream as it arrives. Every command already runs with `sbctl -d`, but
+        # buffering the output until the command returned meant a hang showed
+        # NOTHING -- the 2026-08-20 `cluster create` stall was a blank screen
+        # for ten minutes with the debug log sitting unread in the channel.
+        # Printing each line as it lands is what makes a hang locatable.
+        pending = {"out": "", "err": ""}
+
+        def _emit(stream, text):
+            pending[stream] += text
+            while "\n" in pending[stream]:
+                line, pending[stream] = pending[stream].split("\n", 1)
+                if line.strip():
+                    print(f"    [{ip}] {line.rstrip()}", flush=True)
+
         def _drain():
             while chan.recv_ready():
-                out_parts.append(chan.recv(65536).decode("utf-8", "replace"))
+                chunk = chan.recv(65536).decode("utf-8", "replace")
+                out_parts.append(chunk)
+                _emit("out", chunk)
             while chan.recv_stderr_ready():
-                err_parts.append(chan.recv_stderr(65536).decode("utf-8", "replace"))
+                chunk = chan.recv_stderr(65536).decode("utf-8", "replace")
+                err_parts.append(chunk)
+                _emit("err", chunk)
 
+        started = time.time()
+        last_beat = started
         while True:
             _drain()
             if chan.exit_status_ready():
@@ -188,6 +208,14 @@ def ssh_exec(ip, cmds, get_output=False, check=False, timeout=LONG_CMD_TIMEOUT):
                     f"Command exceeded {timeout}s on {ip}: {cmd}\n"
                     f"It may still be running remotely — verify the outcome "
                     f"before retrying, do not assume it failed.")
+            # Say how long it has been quiet. A command that prints nothing is
+            # indistinguishable from a dead one otherwise, which is how a slow
+            # `cluster create` read as a hang.
+            if time.time() - last_beat >= 60:
+                last_beat = time.time()
+                print(f"  [{ip}] still running after "
+                      f"{int(time.time() - started)}s: {cmd.split()[-4:]}",
+                      flush=True)
             time.sleep(2)
         _drain()
         out = "".join(out_parts)
