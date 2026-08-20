@@ -230,6 +230,35 @@ _OBJECT_LOCK_PREFIX = "__obj__"
 _PEER_ALIVE_STATUSES = (StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED)
 
 
+def delete_bdev_absent_ok(node, bdev_name, sync=False, special_delete=False):
+    """``delete_lvol`` that treats "already gone" as done. Returns True on success.
+
+    A delete is a statement about the desired end state, and ``-19 / No such
+    device`` says that state already holds — the bdev is not there. Reading it
+    as a failure makes the delete non-idempotent, and every caller that retries
+    then retries for ever: the record stays ``in_deletion``, the monitor picks
+    it up again next cycle, and nothing ever converges.
+
+    Lab 2026-08-20: ~10,300 "Failed to delete snap from node" in 2.5 hours,
+    every one of them a ``-19`` for a bdev the async phase had already removed
+    (the poll one line earlier had returned status 0, "deleted successfully").
+    ``sync_delete_on_peer`` already tolerated this on the peer path; the
+    leader/primary paths did not, so the two halves of the same delete
+    disagreed about what had happened.
+    """
+    try:
+        ret, err = node.rpc_client().delete_lvol(
+            bdev_name, sync=sync, special_delete=special_delete)
+    except Exception as e:
+        ret, err = False, {"message": str(e)}
+    if ret:
+        return True
+    if isinstance(err, dict) and err.get("code") == -19:
+        logger.info(f"Delete of {bdev_name} on {node.get_id()[:8]}: already absent")
+        return True
+    return False
+
+
 def sync_delete_on_peer(peer_node, bdev_name, primary_node_id, special_delete=False):
     """Phase-2 sync delete on one peer. Returns True when nothing is owed.
 
@@ -1033,7 +1062,7 @@ def _delete_locked(snap, snapshot_uuid, force_delete=False, lock=True):
 
             with lvstore_op_lock(snap.cluster_id, snap.lvol.lvs_name,
                                  node_id=snode.get_id(), enabled=lock and not force_delete):
-                ret, _ = rpc_client.delete_lvol(snap.snap_bdev)
+                ret = delete_bdev_absent_ok(snode, snap.snap_bdev)
             if not ret:
                 logger.error(f"Failed to delete snap from node: {snode.get_id()}")
                 if not force_delete:
@@ -1102,7 +1131,8 @@ def _delete_locked(snap, snapshot_uuid, force_delete=False, lock=True):
 
         with lvstore_op_lock(snap.cluster_id, snap.lvol.lvs_name,
                              node_id=primary_node.get_id(), enabled=lock and not force_delete):
-            ret, _ = rpc_client.delete_lvol(snap.snap_bdev, sync=False, special_delete=special_delete)
+            ret = delete_bdev_absent_ok(primary_node, snap.snap_bdev, sync=False,
+                                        special_delete=special_delete)
         if not ret:
             logger.error(f"Failed to delete snap from node: {snode.get_id()}")
             if not force_delete:

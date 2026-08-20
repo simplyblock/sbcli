@@ -251,8 +251,8 @@ def wait_data_replicated(mgmt_ip, key_path, lvol_uuids, after_ts,
                          timeout=REPL_WAIT_TIMEOUT):
     """Wait until every volume has a REPLICATED snapshot newer than *after_ts*.
 
-    A bounded lag is not enough to fail over onto. `replication-start` takes its
-    first internal snapshot immediately, before mkfs and before the baseline is
+    A bounded lag is not enough to fail over onto. Attaching the replication
+    policy takes the first internal snapshot immediately, before mkfs and before the baseline is
     written, so `lag_seconds` and `replicated_count > 0` are both satisfied by an
     EMPTY (used_size=0) point-in-time. Lab 2026-08-18 did exactly that: the gate
     passed at worst_lag=77s while `outstanding=4`, fail-over cloned the empty
@@ -660,21 +660,110 @@ def restore_cluster(mgmt_ip, key_path, cluster_meta, label=""):
         sn_bring_back(mgmt_ip, key_path, node_id)
 
 
-def set_cluster_replication(mgmt_ip, key_path, from_cluster, to_cluster, to_pool_uuid):
-    """Point `from_cluster`'s replication at `to_cluster`/`to_pool_uuid`.
+def _replication_list(mgmt_ip, key_path, what, cluster_id):
+    """Rows of `cluster replication-<what>-list --json` for one cluster."""
+    raw = run(mgmt_ip, key_path,
+              f"{SBCTL} cluster replication-{what}-list --cluster-id {cluster_id} --json",
+              check=False, quiet=True)
+    try:
+        return json.loads(raw)
+    except (ValueError, TypeError):
+        return []
 
-    Required before a fail-back commit: replication_commit takes the destination
-    NODE from lvol.replication_node_id (which replication_failback sets) but the
-    destination POOL from source_cluster.snapshot_replication_target_pool -- the
-    cluster-level config of whichever cluster currently hosts the volume. A
-    cluster holds only one target, so fail-back to a different destination means
-    repointing this first.
+
+def ensure_replication_target(mgmt_ip, key_path, from_cluster, to_cluster,
+                              to_pool_uuid, name=None):
+    """Register (idempotently) a named replication destination on `from_cluster`."""
+    name = name or f"tgt_{to_cluster[:8]}"
+    for row in _replication_list(mgmt_ip, key_path, "target", from_cluster):
+        if row.get("Name") == name:
+            return name
+    run(mgmt_ip, key_path,
+        f"{SBCTL} -d cluster replication-target-add {from_cluster} {name} {to_cluster}"
+        f" --target-pool {to_pool_uuid} --timeout 3600")
+    return name
+
+
+def ensure_replication_policy(mgmt_ip, key_path, from_cluster, target_name, mode,
+                              interval_min=REPL_INTERVAL_MIN, keep=2, name=None):
+    """Register (idempotently) a cadence policy on an existing target."""
+    name = name or f"pol_{mode}_{target_name}"
+    for row in _replication_list(mgmt_ip, key_path, "policy", from_cluster):
+        if row.get("Name") == name:
+            return name
+    run(mgmt_ip, key_path,
+        f"{SBCTL} -d cluster replication-policy-add {from_cluster} {name}"
+        f" --target {target_name} --interval-min {interval_min} --mode {mode}"
+        f" --keep {keep}")
+    return name
+
+
+def set_cluster_replication(mgmt_ip, key_path, from_cluster, to_cluster, to_pool_uuid,
+                            mode="migration"):
+    """Create the target + policy that let `from_cluster` replicate to `to_cluster`.
+
+    Replication is NEVER started per volume any more: `volume replication-start`
+    is refused for a volume that follows a policy, and a policy is how a volume
+    is meant to be replicated. Attaching the policy (at `volume add` time, or
+    with `volume replication-policy-set`) is what starts it.
+
+    `cluster add-replication` is still issued afterwards, but only as a bridge:
+    see the PRODUCT GAP note below.
     """
-    print(f"Pointing cluster {from_cluster[:8]} replication -> {to_cluster[:8]} "
-          f"(pool {to_pool_uuid[:8]})")
+    print(f"Replication config: cluster {from_cluster[:8]} -> {to_cluster[:8]} "
+          f"(pool {to_pool_uuid[:8]}, mode {mode})")
+    target = ensure_replication_target(mgmt_ip, key_path, from_cluster, to_cluster,
+                                       to_pool_uuid)
+    policy = ensure_replication_policy(mgmt_ip, key_path, from_cluster, target, mode)
+
+    # PRODUCT GAP (bridge, delete once the readers consult the policy):
+    # replicate_lvol_on_target_cluster() and tasks_runner_replication_final still
+    # resolve the destination from the SOURCE cluster's
+    # snapshot_replication_target_cluster / _target_pool. add_target()/add_policy()
+    # never write those fields, so a purely policy-driven volume cannot fail over
+    # or commit a cutover at all.
     run(mgmt_ip, key_path,
         f"{SBCTL} -d cluster add-replication {from_cluster} {to_cluster}"
         f" --target-pool {to_pool_uuid} --timeout 3600", check=True)
+
+    # PRODUCT BUG (mitigation): snapshot_replication._target_pool() places an
+    # INCOMING copy using the DESTINATION cluster's own OUTGOING config
+    # (snapshot_replication_target_pool). That field means "the pool I replicate
+    # into on my target", so whenever the destination is itself a source, the
+    # incoming copy is placed in a pool belonging to a different cluster. That is
+    # how the 2026-08-19 fail-back created REP_* volumes on a src node in
+    # pool_tgt and left 13 of them stuck in_deletion. Clear a stale outgoing pool
+    # on the destination so the resolver falls back to the destination's own.
+    clear_stale_target_pool(mgmt_ip, key_path, to_cluster)
+    return policy
+
+
+def clear_stale_target_pool(mgmt_ip, key_path, cluster_id):
+    """Blank cluster.snapshot_replication_target_pool when it names a foreign pool."""
+    out = mgmt_py(mgmt_ip, key_path, f"""
+import json
+from simplyblock_core.db_controller import DBController
+db = DBController()
+c = db.get_cluster_by_id({cluster_id!r})
+pool = c.snapshot_replication_target_pool
+cleared = False
+if pool:
+    mine = [p.get_id() for p in db.get_pools({cluster_id!r})]
+    if pool not in mine:
+        c.snapshot_replication_target_pool = ""
+        c.write_to_db(db.kv_store)
+        cleared = True
+print(json.dumps({{"was": pool, "cleared": cleared}}))
+""")
+    if out.get("cleared"):
+        print(f"  cleared stale outgoing target pool {out['was'][:8]} on "
+              f"{cluster_id[:8]} (it is not a pool of that cluster)")
+    return out
+
+
+def attach_replication_policy(mgmt_ip, key_path, lvol, policy):
+    """Put an existing volume under a policy — this is what starts replication."""
+    run(mgmt_ip, key_path, f"{SBCTL} -d volume replication-policy-set {lvol} {policy}")
 
 
 def pool_uuid_of(mgmt_ip, key_path, pool_name):
@@ -806,17 +895,26 @@ def delete_test_volumes(mgmt_ip, key_path, pools):
     raise RuntimeError("Timed out waiting for leftover volumes to delete")
 
 
-def create_volumes(mgmt_ip, key_path, pool, tgt_uuid, mode, count=NUM_VOLUMES):
+def create_volumes(mgmt_ip, key_path, src_uuid, pool, tgt_uuid, tgt_pool, mode,
+                   count=NUM_VOLUMES):
+    """Create the test volumes already following a replication policy.
+
+    The policy IS the start: `volume add --replication-policy` attaches it, and
+    attaching runs the same start path the removed `volume replication-start`
+    call used to drive directly.
+    """
+    policy = set_cluster_replication(mgmt_ip, key_path, src_uuid, tgt_uuid,
+                                     pool_uuid_of(mgmt_ip, key_path, tgt_pool),
+                                     mode=mode)
     lvols = []
     for i in range(count):
         name = f"replvol{i}"
-        run(mgmt_ip, key_path, f"{SBCTL} -d volume add {name} {VOL_SIZE} {pool}")
-        lv = resolve_lvol(mgmt_ip, key_path, name)
         run(mgmt_ip, key_path,
-            f"{SBCTL} volume replication-start {lv['uuid']}"
-            f" --replication-cluster-id {tgt_uuid} --mode {mode} --interval-min {REPL_INTERVAL_MIN}")
+            f"{SBCTL} -d volume add {name} {VOL_SIZE} {pool}"
+            f" --replication-policy {policy}")
+        lv = resolve_lvol(mgmt_ip, key_path, name)
         lvols.append(lv["uuid"])
-        print(f"  created {name} = {lv['uuid']} (replicating, mode={mode})")
+        print(f"  created {name} = {lv['uuid']} (policy {policy}, mode={mode})")
     return lvols
 
 
@@ -832,7 +930,8 @@ def test_case_1(meta):
     delete_test_volumes(mgmt_ip, key_path, [src["pool"], tgt["pool"]])
 
     # 1. create + replicate (migration mode, 1-min auto snapshots)
-    lvols = create_volumes(mgmt_ip, key_path, src["pool"], tgt_uuid, mode="migration")
+    lvols = create_volumes(mgmt_ip, key_path, src_uuid, src["pool"], tgt_uuid,
+                           tgt["pool"], mode="migration")
 
     # 2. connect/format/mount, write a baseline that fio NEVER touches, then fio.
     #    The baseline is the only data that lives exclusively in the replicated
@@ -975,7 +1074,8 @@ def test_case_2(meta):
     delete_test_volumes(mgmt_ip, key_path, [src["pool"], tgt["pool"]])
 
     # create + replicate (failover mode, 1-min auto snapshots)
-    lvols = create_volumes(mgmt_ip, key_path, src["pool"], tgt_uuid, mode="failover")
+    lvols = create_volumes(mgmt_ip, key_path, src_uuid, src["pool"], tgt_uuid,
+                           tgt["pool"], mode="failover")
     mounts = connect_and_mount(client_ip, key_path, mgmt_ip, lvols, fmt=True)
 
     # Write a known file on each volume and record its checksum (this data will
@@ -1068,7 +1168,8 @@ def _setup_failed_over_volumes(meta, tag):
     delete_test_volumes(mgmt_ip, key_path, [src["pool"], tgt["pool"]])
 
     print(f"[{tag}] creating + replicating 5 volumes (failover mode)...")
-    lvols = create_volumes(mgmt_ip, key_path, src["pool"], tgt_uuid, mode="failover")
+    lvols = create_volumes(mgmt_ip, key_path, src_uuid, src["pool"], tgt_uuid,
+                           tgt["pool"], mode="failover")
     mounts = connect_and_mount(client_ip, key_path, mgmt_ip, lvols, fmt=True)
     baseline = write_baseline(client_ip, key_path, mounts)
     baseline_done_ts = time.time()
@@ -1217,15 +1318,15 @@ def test_case_4(meta):
     print("Clearing the collapsed primary's volumes (the fresh site starts empty)...")
     delete_test_volumes(mgmt_ip, key_path, [src["pool"]])
 
-    set_cluster_replication(mgmt_ip, key_path, tgt_uuid, fresh_uuid,
-                            pool_uuid_of(mgmt_ip, key_path, fresh["pool"]))
+    policy = set_cluster_replication(mgmt_ip, key_path, tgt_uuid, fresh_uuid,
+                                     pool_uuid_of(mgmt_ip, key_path, fresh["pool"]),
+                                     mode="migration")
 
-    # Forward replication in migration mode, exactly as case 1 does it.
+    # Forward replication in migration mode, exactly as case 1 does it: the
+    # volumes already exist, so the policy is attached instead of being given
+    # at create time. Attaching is what starts replication.
     for lv in tgt_lvols:
-        run(mgmt_ip, key_path,
-            f"{SBCTL} volume replication-start {lv}"
-            f" --replication-cluster-id {fresh_uuid} --mode migration"
-            f" --interval-min {REPL_INTERVAL_MIN}")
+        attach_replication_policy(mgmt_ip, key_path, lv, policy)
     replication_started_ts = time.time()
     wait_replication_caught_up(mgmt_ip, key_path, tgt_lvols)
     # The volumes already hold the data, so any snapshot taken from here on
@@ -1306,7 +1407,8 @@ def test_case_5(meta):
 
     prepare_mount_points(client_ip, key_path)
     delete_test_volumes(mgmt_ip, key_path, [src["pool"], tgt["pool"]])
-    lvols = create_volumes(mgmt_ip, key_path, src["pool"], tgt_uuid, mode="failover")
+    lvols = create_volumes(mgmt_ip, key_path, src_uuid, src["pool"], tgt_uuid,
+                           tgt["pool"], mode="failover")
     mounts = connect_and_mount(client_ip, key_path, mgmt_ip, lvols, fmt=True)
     jobfile = write_fio_jobfile(client_ip, key_path, mounts)
     start_fio(client_ip, key_path, jobfile)
@@ -1353,7 +1455,8 @@ def test_case_6(meta):
 
     prepare_mount_points(client_ip, key_path)
     delete_test_volumes(mgmt_ip, key_path, [src["pool"], tgt["pool"]])
-    lvols = create_volumes(mgmt_ip, key_path, src["pool"], tgt_uuid, mode="failover")
+    lvols = create_volumes(mgmt_ip, key_path, src_uuid, src["pool"], tgt_uuid,
+                           tgt["pool"], mode="failover")
     mounts = connect_and_mount(client_ip, key_path, mgmt_ip, lvols, fmt=True)
     jobfile = write_fio_jobfile(client_ip, key_path, mounts)
     start_fio(client_ip, key_path, jobfile)
@@ -1412,12 +1515,18 @@ GROUPS = {
     "failback": ["case3", "case4"],
     "errors": ["case5", "case6"],
     "all": ["case1", "case2", "case3", "case4", "case5", "case6"],
+    # Case 3 last: it is the only case that needs the killed primary restored
+    # and recovered, so a failure there cannot cost the other five cases.
+    "all_c3_last": ["case1", "case2", "case4", "case5", "case6", "case3"],
 }
 
 
 def main():
+    # A comma-separated list runs exactly those cases, in the order given —
+    # case order matters (case 3 needs a recovered primary, so it is normally
+    # run last).
     arg = sys.argv[1] if len(sys.argv) > 1 else "both"
-    selected = GROUPS.get(arg, [arg])
+    selected = GROUPS.get(arg) or [c.strip() for c in arg.split(",") if c.strip()]
     unknown = [c for c in selected if c not in CASES]
     if unknown:
         print(f"Unknown case(s): {unknown}\n"

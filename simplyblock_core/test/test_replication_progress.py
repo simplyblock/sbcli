@@ -96,7 +96,10 @@ def test_progress_lag_and_outstanding(monkeypatch):
     assert info["outstanding_bytes"] == 8 * 1024 ** 3
     # Lag is measured against the newest replicated snapshot (s_recent, 100s ago).
     assert 95 <= info["lag_seconds"] <= 130
-    assert info["replicated_count"] == 4
+    # Only s_old and s_recent reached the target. This asserted 4 — the total
+    # number of snapshots carrying a task — which is how a volume with nothing
+    # on the target could still report a healthy replicated count.
+    assert info["replicated_count"] == 2
 
 
 def test_progress_no_replicated_yet(monkeypatch):

@@ -856,7 +856,7 @@ class DBController(metaclass=Singleton):
     def _claim_lvol_ns_slot_tx(self, tr, lvol, host_node, namespaced,
                                standalone_nqn, standalone_namespace,
                                standalone_max_ns, standalone_allowed_hosts,
-                               exclude_nqns):
+                               exclude_nqns, internal=False):
         from simplyblock_core.controllers import lvol_controller
 
         # Read-then-write of the per-node allocator key gives every claim on
@@ -887,7 +887,14 @@ class DBController(metaclass=Singleton):
                 lvol.allowed_hosts = []
         else:
             node_max = lvol_controller.max_subsystems_for_node(host_node)
-            if lvol_controller.count_lvol_subsystems(host_node, minis) >= node_max:
+            # The cap is an admission limit on what a USER may place on a node.
+            # Internally created volumes (the REP_* receiving copies a
+            # replication transfer lands in) are not user placements: refusing
+            # them does not protect the node, it just stops replication and
+            # leaves the volumes that are already there to pile up. They are
+            # still counted, so user creates continue to see true occupancy.
+            if (not internal
+                    and lvol_controller.count_lvol_subsystems(host_node, minis) >= node_max):
                 raise SubsystemCapacityError(
                     f"Too many subsystems on node: {host_node.get_id()}, "
                     f"max subsystems reached: {node_max}")
@@ -906,7 +913,7 @@ class DBController(metaclass=Singleton):
 
     def claim_lvol_ns_slot(self, lvol, host_node, namespaced, standalone_nqn,
                            standalone_namespace="", standalone_allowed_hosts=None,
-                           exclude_nqns=None):
+                           exclude_nqns=None, internal=False):
         """Pick the namespace slot for ``lvol`` AND persist its record
         (STATUS_IN_CREATION) in ONE FDB transaction.
 
@@ -921,7 +928,9 @@ class DBController(metaclass=Singleton):
         Returns True when the lvol joined an existing namespaced subsystem,
         False when it owns a new standalone subsystem. Raises
         SubsystemCapacityError when a new subsystem would exceed the node's
-        ``max_lvol`` cap (nothing is written in that case).
+        ``max_lvol`` cap (nothing is written in that case) -- unless
+        ``internal`` is set, which exempts system-created volumes such as the
+        REP_* replication receiving copies from the admission cap.
 
         ``exclude_nqns`` skips subsystems the DB believes have room but SPDK
         has rejected (-32602 re-claim in ``add_lvol_on_node``). The per-pool
@@ -935,13 +944,13 @@ class DBController(metaclass=Singleton):
             return transactional(self, kv, lvol, host_node, namespaced,
                                  standalone_nqn, standalone_namespace,
                                  standalone_max_ns, standalone_allowed_hosts,
-                                 exclude_nqns)
+                                 exclude_nqns, internal)
         # Transactionless store (unit-tier fdb stub / fake stores in tests):
         # same logic, not atomic.
         return self._claim_lvol_ns_slot_tx(
             _NoTxnStore(kv), lvol, host_node, namespaced, standalone_nqn,
             standalone_namespace, standalone_max_ns, standalone_allowed_hosts,
-            exclude_nqns)
+            exclude_nqns, internal)
 
     def _release_lvol_ns_slot_tx(self, tr, lvol):
         lvol.remove(tr)

@@ -16,17 +16,47 @@ utils.init_sentry_sdk(__name__)
 db = db_controller.DBController()
 
 
-def _destination_pool_uuid(remote_node):
+def _policy_target_pool(lvol, destination_cluster_id):
+    """The pool the volume's replication target names on *destination_cluster_id*."""
+    policy = db.get_replication_policy_for_lvol(lvol)
+    if policy is None:
+        return None
+    try:
+        target = db.get_replication_target_by_id(policy.target_id)
+    except KeyError:
+        return None
+    if target.target_cluster_id != destination_cluster_id:
+        return None
+    return target.target_pool_uuid or None
+
+
+def _destination_pool_uuid(remote_node, lvol=None, source_cluster_id=None):
     """The pool a replicated copy should be created in on *remote_node*.
 
-    The cluster's configured replication pool wins; otherwise the first ACTIVE
-    pool on that cluster. Shared by both directions so a fail-back into a
-    freshly installed cluster resolves a pool the same way a forward
-    replication does.
+    Most specific wins:
+
+      1. the pool named by the replication TARGET the volume's policy points at,
+         when that target IS this destination — it was chosen for this pair;
+      2. the SOURCE cluster's snapshot_replication_target_pool, but only when
+         that cluster's configured destination is this one;
+      3. the first ACTIVE pool on the destination cluster.
+
+    Step 2 used to be unconditional and was read off the DESTINATION cluster.
+    That field is outgoing config -- "the pool I replicate into on my target" --
+    so any cluster that is itself a source handed out a pool belonging to a
+    third cluster as soon as data came back the other way. Lab 2026-08-19: a
+    fail-back into the src cluster placed its REP_* volumes in the tgt cluster's
+    pool, and 13 of them ended up stuck in_deletion.
     """
-    cluster = db.get_cluster_by_id(remote_node.cluster_id)
-    if cluster.snapshot_replication_target_pool:
-        return cluster.snapshot_replication_target_pool
+    if lvol is not None:
+        pool_uuid = _policy_target_pool(lvol, remote_node.cluster_id)
+        if pool_uuid:
+            return pool_uuid
+    if source_cluster_id:
+        source_cluster = db.get_cluster_by_id(source_cluster_id)
+        if (source_cluster.snapshot_replication_target_cluster == remote_node.cluster_id
+                and source_cluster.snapshot_replication_target_pool):
+            return source_cluster.snapshot_replication_target_pool
     for pool in db.get_pools(remote_node.cluster_id):
         if pool.status == Pool.STATUS_ACTIVE:
             return pool.uuid
@@ -73,7 +103,9 @@ def process_snap_replicate_start(task, snapshot):
                         "destination pool from the cluster instead",
                         snapshot.source_replicated_snap_uuid, snapshot.get_id())
             if not remote_pool_uuid:
-                remote_pool_uuid = _destination_pool_uuid(remote_node_uuid)
+                remote_pool_uuid = _destination_pool_uuid(
+                    remote_node_uuid, lvol=snapshot.lvol,
+                    source_cluster_id=snode.cluster_id)
             if not remote_pool_uuid:
                 logger.error("Unable to find pool on remote cluster: %s",
                              remote_node_uuid.cluster_id)
@@ -92,14 +124,20 @@ def process_snap_replicate_start(task, snapshot):
                 task.write_to_db()
                 return
             remote_node_uuid = db.get_storage_node_by_id(snapshot.lvol.replication_node_id)
-            remote_pool_uuid = _destination_pool_uuid(remote_node_uuid)
+            remote_pool_uuid = _destination_pool_uuid(
+                remote_node_uuid, lvol=snapshot.lvol, source_cluster_id=snode.cluster_id)
             if not remote_pool_uuid:
                 logger.error(f"Unable to find pool on remote cluster: {remote_node_uuid.cluster_id}")
                 return
 
+        # internal=True: this REP_* volume is the landing copy for a transfer,
+        # created by the system and never handed to a client. The per-node
+        # subsystem cap is a user-admission limit; enforcing it here only stops
+        # replication on a node that is already full, which is precisely when
+        # the transfers that would let retention free those slots are needed.
         lv_id, err = lvol_controller.add_lvol_ha(
             f"REP_{snapshot.snap_name}", snapshot.size, remote_node_uuid.get_id(), snapshot.lvol.ha_type,
-            remote_pool_uuid)
+            remote_pool_uuid, internal=True)
         if lv_id:
             task.function_params["remote_lvol_id"] = lv_id
             task.write_to_db()

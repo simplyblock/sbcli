@@ -101,6 +101,14 @@ class _FakeDB:
     def get_snapshot_by_id(self, sid):
         return self._snaps[sid]
 
+    # These volumes predate replication policies: the destination is resolved
+    # from the target node's cluster and the source cluster's configured pool.
+    def get_replication_policy_for_lvol(self, lvol):
+        return None
+
+    def get_pools(self, cluster_id=None):
+        return []
+
 
 @pytest.fixture
 def patched(monkeypatch):

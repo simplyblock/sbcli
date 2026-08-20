@@ -857,6 +857,11 @@ class CLIWrapperBase:
              "Time Lag": info["lag"] or "-",
              "Outstanding": info["outstanding"],
              "Outstanding Count": info["outstanding_count"],
+             # The backlog: how long the oldest queued snapshot has been
+             # waiting, against the interval that was asked for. The interval
+             # is a target, so "behind" is a fact to show, not an error.
+             "Backlog Age": info.get("oldest_outstanding") or "-",
+             "Cadence": ("on target" if info.get("cadence_met", True) else "behind"),
              "Retrying": info.get("failing_count", 0),
              "Last Error": (info.get("last_error") or "-")[:60]},
         ])
