@@ -75,6 +75,11 @@ def test_undeliverable_forward_task_is_ended_not_retried(monkeypatch):
 
     monkeypatch.setattr(sr.db, "get_storage_node_by_id", _boom)
     monkeypatch.setattr(sr, "_source_leader_node", lambda s: object())
+    # The chain-completeness gate has its own suite
+    # (test_replication_chain_completeness); this test is about the
+    # destination guard behind it.
+    monkeypatch.setattr(sr, "_unreplicated_local_ancestor",
+                        lambda snode, snapshot, to_source: ("ok", None, ""))
 
     sr.process_snap_replicate_start(task, snap)
 
@@ -95,6 +100,8 @@ def test_volume_with_a_destination_is_still_processed(monkeypatch):
 
     monkeypatch.setattr(sr.db, "get_storage_node_by_id", _node)
     monkeypatch.setattr(sr, "_source_leader_node", lambda s: object())
+    monkeypatch.setattr(sr, "_unreplicated_local_ancestor",
+                        lambda snode, snapshot, to_source: ("ok", None, ""))
     try:
         sr.process_snap_replicate_start(task, snap)
     except RuntimeError:

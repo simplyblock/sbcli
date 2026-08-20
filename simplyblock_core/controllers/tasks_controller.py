@@ -1151,15 +1151,25 @@ def _check_snap_instance_on_node(snapshot_id: str , node_id: str):
               send_to_cluster_log=False)
 
 
-def add_snapshot_replication_task(cluster_id, node_id, snapshot_id, replicate_to_source=False):
+def add_snapshot_replication_task(cluster_id, node_id, snapshot_id, replicate_to_source=False,
+                                  dest_lvol_id=None):
+    """``dest_lvol_id`` carries the replication destination for a snapshot
+    whose own lvol has none: a chain-ancestor transfer (a fail-over base, a
+    user snapshot from before the policy) resolves its target node and pool
+    from the policy-managed DESCENDANT volume it is being replicated for.
+    The param is propagated when that task enqueues ITS ancestor, so a whole
+    base chain replicates bottom-up against one destination."""
     if not replicate_to_source:
         snapshot = db.get_snapshot_by_id(snapshot_id)
         if snapshot.snap_ref_id:
             prev_snap = db.get_snapshot_by_id(snapshot.snap_ref_id)
             _check_snap_instance_on_node(prev_snap.get_id(), node_id)
 
+    function_params = {"snapshot_id": snapshot_id, "replicate_to_source": replicate_to_source}
+    if dest_lvol_id:
+        function_params["dest_lvol_id"] = dest_lvol_id
     return _add_task(JobSchedule.FN_SNAPSHOT_REPLICATION, cluster_id, node_id, "",
-                     function_params={"snapshot_id": snapshot_id, "replicate_to_source": replicate_to_source},
+                     function_params=function_params,
                      send_to_cluster_log=False)
 
 
