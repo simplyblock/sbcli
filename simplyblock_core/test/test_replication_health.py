@@ -29,6 +29,9 @@ class _Snap:
         self.lvol = lvol
         self.created_at = created_at
         self.target_replicated_snap_uuid = target_repl
+        # Set by the to-source (fail-back) direction; these cases all replicate
+        # to the target, so it stays empty.
+        self.source_replicated_snap_uuid = ""
         self.used_size = used
 
     def get_id(self):
