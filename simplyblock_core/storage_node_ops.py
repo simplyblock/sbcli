@@ -2415,6 +2415,94 @@ def restart_storage_node(
     return result
 
 
+def _check_lvols_against_list(snode):
+    db_controller = DBController()
+
+    _LVOLS_LIST=[
+        "7c9c9a70-dee1-4f46-b8be-fdd3a8920727",
+        "29fcb9f5-7c00-4734-917c-057096ba923a",
+        "4f17ea06-0c6f-464e-a7c4-ab4229f8e53f",
+        "6e667b97-d6c8-4433-bc4e-9ae6e17f3f0a",
+        "251adbb4-1ed5-4c4c-b28a-aec7f4a01153",
+        "eabf54cc-cb79-4d7d-9f1b-49b17d235f35",
+        "bfc197f5-602e-4cd9-8211-cf5fd35a2e11",
+        "832b4940-e1a0-415e-97de-ea8aeaa59a45",
+        "54cdca79-0846-41b9-a5f0-6ab68895f5b7",
+        "169cbe6c-41ae-4d19-95fb-b4c3b7d04d64",
+        "32629c7e-6f9f-449b-b69a-c381c8657cb9",
+        "a31da8f4-7ae8-4fb0-8ed7-e0dadeab8b62",
+        "b56038bd-2203-4c2b-82d6-f15279d3e552",
+        "a170bef6-0282-4a8a-80b1-d9cb458311a5",
+        "7f6d9208-4e34-4e2b-a9f1-4b14b9692a93",
+        "37193a32-96bf-4693-8d15-691c3294c88e",
+        "f4a47230-bb39-4fda-b67f-ec6d6d1bcd1d",
+        "71a46e2f-82e0-422e-bce4-969b051b5391",
+        "1b1370ce-075f-4528-89bf-bfb3b1bc2a74",
+        "d0d54034-cdcc-4394-a12a-af4d3a1b4850",
+        "6308875d-90b1-414e-bdc1-b5e0fa92d599",
+        "a48a0188-3afe-400f-8575-6ae145515d49",
+        "4e6b45c3-6a51-4405-8bc2-6fa6b2eed144",
+        "86ae0a92-a1ca-4830-9245-d3f350802731",
+        "357208ea-10e5-4cc7-9daa-17bbee431936",
+        "e7b15163-8534-43b1-8fb7-84ba4cc5af3c",
+        "9b4b51be-c883-4ad5-93cc-f11c04313237",
+        "10e433da-421e-4bcf-90cf-70bc88be451c",
+        "88b3781d-9938-427b-b6e6-f8ddc2a8b31a",
+        "97949deb-3274-4b0f-95b1-cb445ff44010",
+        "14590628-7600-43b5-8701-adceddb69fb2",
+        "b53a8706-631a-4f33-a057-ff0732425347",
+        "04159ed8-4c11-469d-8527-0e3cbdd606cf",
+        "980f9241-9a58-4739-85d8-48f104463b48",
+        "6298a2ab-7969-412c-a2b6-224b55fddd6b",
+        "e49cedce-5dbf-4d1d-9d32-5d7f38b6d1e6",
+        "76ea2f20-d893-4442-8a1f-f530941d4df6",
+        "6f986ca7-5d29-4946-af70-d56cf72a7a51",
+        "e4657f32-09a9-484b-acb7-a9468f356210",
+        "8548548a-ebb2-4097-b946-884ddb6c1814",
+        "a757cf2c-412d-4564-a76c-701d146e87df",
+        "4faf6581-c2ba-47e3-b5b6-e8230023e59a",
+        "6edf9373-9fab-45f8-981d-1cb6d4f9eb6b",
+        "d66c4f80-43de-41d9-8a3e-6211af649367",
+        "04f9828a-8a30-4bd8-851e-28d6d061b73b",
+        "a0bcad19-37f9-4d97-a91a-80478d95f059",
+        "5c14aba2-85a1-429d-acfc-478d3a4f5d1b",
+        "a4dc4a4f-c275-4ba9-8420-0f61ed359914",
+        "2cae4a60-5c96-4686-afd1-b175b82b5fee",
+        "0dd78db7-02b6-4523-9d2c-d247b6106d22",
+        "acc29007-70a8-46ab-9933-986a4a484f6c",
+        "5afd6884-94f9-4260-9f13-b311414d43fc",
+        "b08ab9b0-a564-4fb3-9933-7dc3866cbec9",
+        "4eb502f6-9fea-4bed-890d-5e926008d718",
+        "f9d0f380-4c3d-4d17-9158-a1d6eb368340",
+        "d78302f5-f99c-435a-900e-3678bda32148",
+        "25ec620d-382f-4deb-a9aa-db90403cc815",
+        "fe4fe82d-4c11-4161-abe0-6d13cfd8ac9d",
+        "cdb610d0-98f5-4dab-a280-6885c9fe7a83",
+        "27542d77-e1b9-49b5-a63a-c4eef6c7245d",
+        "b82d7038-97be-494c-8f71-4fb094eaaef9",
+        "0fd6bfbc-7ea9-475e-8067-51169d7e360c",
+        "3f44b68f-a4e2-4d0e-a480-087348c90b36",
+        "de771b5d-a674-4606-8875-ca15f1e42639",
+        "0d74f526-8cde-4871-9e5c-28e5a7961675",
+        "54c63b0d-8679-4759-ae02-c9a0c2db8436",
+        "7f3d97fd-9784-4cb3-9f93-0cbfd6658c98",
+        "db822d0c-daca-4922-8b09-621f3d173dcf",
+        "1e306ff8-986d-48cc-ae3e-2bd6bee88645",
+        "ccae5140-08a7-4c11-be02-73bc2a3b71f7",
+        "6523318d-e61c-43f8-a0a8-c5ccb2f8ca3c",
+        "a1d4cc1b-fae0-47a1-a84c-0c290f099980",
+        "aa164eca-d572-4a38-8d4a-c4b888863dea",
+        "28d5d301-45a4-49e0-9995-e140de393a3b",
+        "b2eb7133-5743-436f-b8f4-d0d13cf70cae",
+        "16ff1580-43f5-485d-bacc-2e48db0e1254",
+        "06768771-c3d1-4f4b-aa37-86c2437376d3",
+    ]
+
+    for lvol in db_controller.get_lvols_by_node_id(snode.get_id()):
+        if lvol.get_id() not in _LVOLS_LIST:
+            raise Exception(f"LVol found not in hardcoded list: {lvol.get_id()}")
+
+
 def _restart_storage_node_impl(
         node_id, max_lvol=0, max_snap=0, max_prov=0,
         spdk_image=None, set_spdk_debug=None,
@@ -2445,6 +2533,8 @@ def _restart_storage_node_impl(
     if cluster.status == Cluster.STATUS_IN_ACTIVATION:
         logger.error("Cluster is in activation status, can not restart node")
         return False
+
+    _check_lvols_against_list(snode)
 
     # Guard: atomically check no peer is restarting/shutting down and set RESTARTING.
     # Uses a single FDB transaction to prevent TOCTOU race conditions.
