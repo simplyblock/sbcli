@@ -41,6 +41,14 @@ SHARED = {
     "simplyblock_core/controllers/lvol_controller.py": "controllers/lvol_controller.py",
     "simplyblock_core/controllers/snapshot_controller.py": "controllers/snapshot_controller.py",
     "simplyblock_core/db_controller.py": "db_controller.py",
+    # Modules the mounted files IMPORT but the deployed image predates. main
+    # moves while a lab stays pinned to the release it was built from, so a
+    # hotfixed file can reference something that simply is not there: on
+    # 2026-08-20 lvol_controller pulled in ops_gate and every service — and
+    # the mgmt host, which the harness queries — died with
+    # "ImportError: cannot import name 'ops_gate'", mid-run. Ship the
+    # dependency alongside the file that needs it.
+    "simplyblock_core/controllers/ops_gate.py": "controllers/ops_gate.py",
 }
 #: service -> its own module (mounted on top of the shared set)
 SERVICES = {
