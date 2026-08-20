@@ -1,8 +1,8 @@
 # coding=utf-8
 """Release-specific upgrade step: hold JC compression across the upgrade.
 
-Shipped with release R26.3RC1. DELETE this module — and the
-``resume_is_held`` guards it exports — in the next release. Guarded call sites (grep for ``resume_is_held``):
+Shipped with release RC26.3 (first tag: RC26.3-RC1). DELETE this module —
+and the ``resume_is_held`` guards it exports — in the next release. Guarded call sites (grep for ``resume_is_held``):
   * storage_node_ops._recreate_lvstore_on_non_leader_impl (restart resume)
   * storage_node_ops.create_lvstore (initial resume on the secondary)
   * services/tasks_runner_jc_comp.py (FN_JC_COMP_RESUME runner)
@@ -66,7 +66,8 @@ def _lvs_group_members(db, cluster_id):
 
 class JCCompressionUpgrade(UpgradePlugin):
     name = "jc-compression-hold"
-    to_release = "R26.3RC1"
+    # Covers every build of the release: RC26.3-RC1, -RC2, ..., final.
+    to_release = "RC26.3"
     from_release = ""
     STATE_KEY = STATE_KEY
 

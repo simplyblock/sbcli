@@ -12,8 +12,9 @@ one-line guards it placed in general code paths.
 Contract per plugin:
   * ``to_release`` (mandatory): the release the plugin ships with, matched
     against the running software's SIMPLY_BLOCK_VERSION. The plugin's
-    ``pre_update`` only runs when it matches (exact, or dotted-part prefix
-    so ``"R26.3RC1"`` also covers an ``R26.3RC1.x`` build).
+    ``pre_update`` only runs when it matches. Versions are compared as
+    ``.``/``-``-separated parts with prefix semantics, so ``"RC26.3"``
+    covers ``RC26.3-RC1``, ``RC26.3-RC2`` and the final ``RC26.3`` build.
   * ``from_release`` (optional): restrict to upgrades coming from a given
     release, matched against ``cluster.installed_release``. A cluster with
     no stamp (pre-dating this framework) always matches.
@@ -40,7 +41,7 @@ class ReleaseUpgradeError(Exception):
 
 class UpgradePlugin:
     name: str = ""
-    to_release: str = ""    # mandatory, e.g. "R26.3RC1"
+    to_release: str = ""    # mandatory, e.g. "RC26.3" (covers RC26.3-RC1, -RC2, ...)
     from_release: str = ""  # optional, e.g. "R26.2"
     STATE_KEY: str = ""     # key owned by the plugin in cluster.release_upgrade_state
 
@@ -60,8 +61,10 @@ class UpgradePlugin:
 
 
 def _release_matches(running: str, wanted: str) -> bool:
-    running_parts = str(running).split(".")
-    wanted_parts = str(wanted).split(".")
+    def parts(version):
+        return str(version).replace("-", ".").split(".")
+    running_parts = parts(running)
+    wanted_parts = parts(wanted)
     return running_parts[:len(wanted_parts)] == wanted_parts
 
 
