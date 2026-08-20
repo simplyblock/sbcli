@@ -10,9 +10,10 @@ DELETED again in the release after the one it serves — together with any
 one-line guards it placed in general code paths.
 
 Contract per plugin:
-  * ``to_release`` (mandatory): the release the plugin ships with. The
-    plugin's ``pre_update`` only runs when the running software matches it
-    (prefix match, so ``"19.3"`` covers every ``19.3.x`` build).
+  * ``to_release`` (mandatory): the release the plugin ships with, matched
+    against the running software's SIMPLY_BLOCK_VERSION. The plugin's
+    ``pre_update`` only runs when it matches (exact, or dotted-part prefix
+    so ``"R26.3RC1"`` also covers an ``R26.3RC1.x`` build).
   * ``from_release`` (optional): restrict to upgrades coming from a given
     release, matched against ``cluster.installed_release``. A cluster with
     no stamp (pre-dating this framework) always matches.
@@ -39,8 +40,8 @@ class ReleaseUpgradeError(Exception):
 
 class UpgradePlugin:
     name: str = ""
-    to_release: str = ""    # mandatory, e.g. "19.3"
-    from_release: str = ""  # optional, e.g. "19.2"
+    to_release: str = ""    # mandatory, e.g. "R26.3RC1"
+    from_release: str = ""  # optional, e.g. "R26.2"
     STATE_KEY: str = ""     # key owned by the plugin in cluster.release_upgrade_state
 
     def applies(self, cluster) -> bool:
@@ -79,6 +80,14 @@ def run_pre_update(cluster) -> None:
             logger.info(f"Running release-upgrade pre-update step: {plugin.name} "
                         f"(to_release={plugin.to_release})")
             plugin.pre_update(cluster)
+        else:
+            # Loud on purpose: a to_release/SIMPLY_BLOCK_VERSION mismatch must
+            # not silently skip a mandatory upgrade step.
+            logger.warning(f"Skipping release-upgrade step {plugin.name}: "
+                           f"to_release={plugin.to_release}, "
+                           f"from_release={plugin.from_release or 'any'}, "
+                           f"running={constants.SIMPLY_BLOCK_VERSION}, "
+                           f"cluster installed_release={cluster.installed_release or 'unset'}")
 
 
 def run_upgrade_complete(cluster) -> list:
