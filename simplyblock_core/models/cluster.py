@@ -85,6 +85,11 @@ class Cluster(BaseModel):
     # storage_node_monitor watchdog to detect and revert a wedged activation
     # (incident 2026-06-25). Empty string means "not currently activating".
     in_activation_since: str = ""
+    #: Node ids incorporated by the last successful activation (or expansion).
+    #: Empty means the cluster has never been activated. Once set, activation
+    #: refuses to run with nodes present that are not in this list: growth goes
+    #: through the expansion flow, never through re-activation.
+    activated_node_ids: List[str] = []
     # ISO-8601 UTC timestamp refreshed every ~60s by the heartbeat thread that
     # cluster_activate runs for its whole duration. Lets the watchdog tell a
     # LIVE long activation (heartbeat fresh — leave it alone, up to the

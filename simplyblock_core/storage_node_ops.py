@@ -2454,6 +2454,23 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             logger.error(msg)
             return False
 
+    # An activated cluster only grows through the expansion flow: a plain add
+    # leaves the node outside the role rotation and the rebalance. This also
+    # closes the loophole of activate -> suspend -> add-node -> activate, which
+    # re-activation used to accept because a suspended cluster is not ACTIVE.
+    try:
+        _cluster = db_controller.get_cluster_by_id(cluster_id)
+    except KeyError:
+        logger.error("Cluster not found: %s", cluster_id)
+        return False
+    if not expansion and (_cluster.status == Cluster.STATUS_ACTIVE
+                          or _cluster.activated_node_ids):
+        logger.error(
+            "Cluster %s has already been activated; add nodes with --expansion "
+            "while the cluster is ACTIVE so roles are rotated and data is "
+            "rebalanced", cluster_id)
+        return False
+
     snode_api.set_hugepages()
     for node_config in nodes:
         logger.debug(node_config)
