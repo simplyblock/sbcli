@@ -369,11 +369,17 @@ def main():
     tgt_uuid = cluster_uuids[REPLICATION["target"]]
     tgt_pool = next(c["pool"] for c in CLUSTERS if c["name"] == REPLICATION["target"])
     tgt_pool_uuid = get_pool_uuid(mgmt_ip, tgt_pool)
+    # Register the destination and a cadence policy. NOT `cluster
+    # add-replication`: that deprecated verb writes
+    # cluster.snapshot_replication_target_pool, and the replication service
+    # reads that field off the DESTINATION cluster -- so a cluster configured
+    # as a source hands out its target's pool when something later replicates
+    # INTO it (fail-back). Targets and policies keep the pool where it belongs.
     print(f"Configuring replication {REPLICATION['source']} -> {REPLICATION['target']}"
           f" (target pool {tgt_pool} = {tgt_pool_uuid})...")
     ssh_exec(mgmt_ip, [
-        f"{SBCTL} -d cluster add-replication {src_uuid} {tgt_uuid}"
-        f" --target-pool {tgt_pool_uuid} --timeout {REPLICATION['timeout']}"
+        f"{SBCTL} -d cluster replication-target-add {src_uuid} tgt_{tgt_uuid[:8]}"
+        f" {tgt_uuid} --target-pool {tgt_pool_uuid} --timeout {REPLICATION['timeout']}"
     ], check=True)
 
     # --- Phase 6: prep clients ---
