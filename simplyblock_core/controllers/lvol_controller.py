@@ -333,7 +333,8 @@ def validate_aes_xts_keys(key1: str, key2: str) -> Tuple[bool, str]:
     return True, ""
 
 
-def _resolve_lvol_subsystem(lvol, host_node, cl, namespaced, all_lvols):
+def _resolve_lvol_subsystem(lvol, host_node, cl, namespaced, all_lvols,
+                            internal=False):
     """ADVISORY pre-check of the subsystem pick for a new lvol — fails the
     create early (before KMS keys etc.) when the node has no room at all.
 
@@ -360,8 +361,11 @@ def _resolve_lvol_subsystem(lvol, host_node, cl, namespaced, all_lvols):
             lvol.max_namespace_per_subsys = result.max_namespace_per_subsys
             return True, ""
 
+    # ``internal`` volumes (the REP_* copies a replication transfer lands in)
+    # are created by the system, not admitted on a user's behalf, so the cap
+    # does not refuse them. See claim_lvol_ns_slot for the authoritative check.
     subsys_count = count_lvol_subsystems(host_node, all_lvols)
-    if subsys_count >= max_subsystems_for_node(host_node):
+    if not internal and subsys_count >= max_subsystems_for_node(host_node):
         return False, (f"Too many subsystems on node: {host_node.get_id()}, "
                        f"max subsystems reached: {max_subsystems_for_node(host_node)}")
     return True, ""
@@ -409,7 +413,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
                 with_snapshot=False, max_size=0, lvol_priority_class=0,
                 uid=None, pvc_name=None, namespaced=None, max_namespace_per_subsys=None, fabric="tcp", ndcs=0, npcs=0,
                 allowed_hosts=None, do_replicate=False, replication_cluster_id=None, crypto_key=None,
-                replication_policy=None):
+                replication_policy=None, internal=False):
     db_controller = DBController()
     logger.info(f"Adding LVol: {name}")
     if max_namespace_per_subsys is None:
@@ -615,7 +619,8 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     # Create a new subsystem by default unless namespaced is set and an
     # existing subsystem on the host node has a free namespace slot.
     lvol.max_namespace_per_subsys = max_namespace_per_subsys
-    ret, error = _resolve_lvol_subsystem(lvol, host_node, cl, namespaced, all_lvols)
+    ret, error = _resolve_lvol_subsystem(lvol, host_node, cl, namespaced, all_lvols,
+                                         internal=internal)
     if not ret:
         logger.error(error)
         return False, error
@@ -740,7 +745,8 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         db_controller.claim_lvol_ns_slot(
             lvol, host_node, bool(namespaced),
             standalone_nqn=cl.nqn + ":lvol:" + lvol.uuid,
-            standalone_allowed_hosts=standalone_allowed_hosts)
+            standalone_allowed_hosts=standalone_allowed_hosts,
+            internal=internal)
     except SubsystemCapacityError as e:
         logger.error(str(e))
         return False, str(e)
@@ -2275,6 +2281,15 @@ def get_replication_info(lvol_id_or_name):
         "outstanding_count": 0,         # snapshots queued but not yet replicated
         "outstanding_bytes": 0,         # bytes still to transfer
         "outstanding": "0B",            # human-readable outstanding bytes
+        # Backlog. The configured interval is a TARGET, not a guarantee: a full
+        # initial sync, a slow link or a large delta can all take longer than
+        # one interval, and that is not by itself a fault. What matters
+        # operationally is whether the backlog is being worked off, so the age
+        # of the oldest thing still waiting is reported next to the target.
+        "oldest_outstanding_seconds": None,   # age of the oldest unreplicated snapshot
+        "oldest_outstanding": "",             # human-readable
+        "cadence_target_seconds": 0,          # the configured interval
+        "cadence_met": True,                  # backlog within one interval
         # Health verdict — replication errors live in per-task strings, which
         # nobody reads until a fail-over returns stale data. These summarise it.
         "state": "not_replicating",      # in_sync|replicating|lagging|degraded|error
@@ -2308,19 +2323,39 @@ def get_replication_info(lvol_id_or_name):
         snaps = sorted(snaps, key=lambda x: x.created_at)
         out["snaps"] = [s.to_dict() for s in snaps]
         out["tasks"] = [t.to_dict() for t in tasks]
-        out["replicated_count"] = len(snaps)
-
-        # A snapshot is replicated once its task is done or it has a target copy.
+        # A snapshot is replicated once its task is done or a counterpart exists
+        # on the other side. BOTH directions count: fail-back records the copy
+        # in source_replicated_snap_uuid and never sets the target one, so a
+        # target-only test reported every failing-back volume as 0 replicated
+        # and left lag_seconds None for ever — no gate on lag could ever pass.
         def _is_replicated(task, snap):
-            return task.status == JobSchedule.STATUS_DONE or bool(snap.target_replicated_snap_uuid)
+            return (task.status == JobSchedule.STATUS_DONE
+                    or bool(snap.target_replicated_snap_uuid)
+                    or bool(snap.source_replicated_snap_uuid))
 
         replicated = [s for (t, s) in items if _is_replicated(t, s)]
         outstanding = [s for (t, s) in items if not _is_replicated(t, s)]
+
+        # Count what actually replicated, not every snapshot that has a task —
+        # the latter reported healthy replication for volumes where nothing had
+        # reached the target at all.
+        out["replicated_count"] = len(replicated)
 
         outstanding_bytes = sum(s.used_size for s in outstanding)
         out["outstanding_count"] = len(outstanding)
         out["outstanding_bytes"] = outstanding_bytes
         out["outstanding"] = utils.humanbytes(outstanding_bytes)
+
+        interval_sec = max(1, lvol.replication_interval_min or 1) * 60
+        out["cadence_target_seconds"] = interval_sec
+        if outstanding:
+            oldest_outstanding = max(0, now - min(s.created_at for s in outstanding))
+            out["oldest_outstanding_seconds"] = oldest_outstanding
+            out["oldest_outstanding"] = utils.strfdelta_seconds(oldest_outstanding)
+            # The interval is a target: one snapshot still in flight within its
+            # own interval is the pipeline keeping up. Anything older than that
+            # means the backlog is not being worked off at the requested rate.
+            out["cadence_met"] = oldest_outstanding <= interval_sec
 
         # Time lag = age of the most recent point-in-time that exists on the
         # target (the newest successfully-replicated snapshot).
@@ -2362,14 +2397,21 @@ def get_replication_info(lvol_id_or_name):
 
         # Lag budget: three snapshot intervals (one missed cycle is not an
         # incident), floor 5 min so a tiny interval does not flap the verdict.
-        interval_sec = max(1, lvol.replication_interval_min or 1) * 60
         lag_budget = max(3 * interval_sec, 300)
         lag = out["lag_seconds"]
+        oldest_outstanding = out["oldest_outstanding_seconds"]
         if gave_up:
             out["state"] = "error"
         elif failing:
             out["state"] = "degraded"
         elif lag is not None and lag > lag_budget:
+            out["state"] = "lagging"
+        elif oldest_outstanding is not None and oldest_outstanding > lag_budget:
+            # A backlog older than the budget is lagging even when lag_seconds
+            # says nothing — which is exactly the case that mattered: an initial
+            # sync that never completes has NO replicated snapshot, so lag stays
+            # None and the volume reported "replicating"/healthy indefinitely
+            # while its transfers were stuck (lab 2026-08-20, case 4).
             out["state"] = "lagging"
         elif out["outstanding_count"] > 0:
             out["state"] = "replicating"
@@ -3439,6 +3481,43 @@ def _clone_from_last_replicated(db_controller, lvol_id, lvol, target_node, pool_
     return None, None, "No stable replicated snapshot to clone from"
 
 
+def resolve_replication_destination(db_controller, lvol, target_node, source_node):
+    """Where a fail-over or cutover copy of *lvol* belongs: (cluster, pool uuid).
+
+    The destination CLUSTER is the one hosting the node the volume replicates
+    to. Reading it from source_cluster.snapshot_replication_target_cluster
+    instead only ever worked in the forward direction: a policy never writes
+    that field, and on a fail-back the volume's source cluster is the one that
+    was the target, whose field points somewhere else entirely (or nowhere).
+
+    The POOL comes from the replication target the volume's policy names, when
+    that target is this destination; otherwise from the source cluster's
+    configured pool if that config is about this destination; otherwise the
+    destination's own first ACTIVE pool.
+    """
+    target_cluster = db_controller.get_cluster_by_id(target_node.cluster_id)
+
+    policy = db_controller.get_replication_policy_for_lvol(lvol)
+    if policy is not None:
+        try:
+            target = db_controller.get_replication_target_by_id(policy.target_id)
+        except KeyError:
+            target = None
+        if (target is not None and target.target_pool_uuid
+                and target.target_cluster_id == target_node.cluster_id):
+            return target_cluster, target.target_pool_uuid
+
+    source_cluster = db_controller.get_cluster_by_id(source_node.cluster_id)
+    if (source_cluster.snapshot_replication_target_cluster == target_node.cluster_id
+            and source_cluster.snapshot_replication_target_pool):
+        return target_cluster, source_cluster.snapshot_replication_target_pool
+
+    for pool in db_controller.get_pools(target_node.cluster_id):
+        if pool.status == Pool.STATUS_ACTIVE:
+            return target_cluster, pool.get_id()
+    return target_cluster, ""
+
+
 def replicate_lvol_on_target_cluster(lvol_id):
     db_controller = DBController()
     try:
@@ -3461,17 +3540,17 @@ def replicate_lvol_on_target_cluster(lvol_id):
         return False
 
     source_node = db_controller.get_storage_node_by_id(lvol.node_id)
-    source_cluster = db_controller.get_cluster_by_id(source_node.cluster_id)
-    target_cluster = db_controller.get_cluster_by_id(source_cluster.snapshot_replication_target_cluster)
+    target_cluster, target_pool_uuid = resolve_replication_destination(
+        db_controller, lvol, target_node, source_node)
 
-    for lv in db_controller.get_lvols(source_cluster.snapshot_replication_target_cluster):
+    for lv in db_controller.get_lvols(target_cluster.get_id()):
         if lv.nqn == lvol.nqn:
             logger.info(f"LVol with same nqn already exists on target cluster: {lv.get_id()}")
             return lv.get_id()
 
     new_lvol, _snapshot, error = _clone_from_last_replicated(
         db_controller, lvol_id, lvol, target_node,
-        source_cluster.snapshot_replication_target_pool, source_node.cluster_id)
+        target_pool_uuid, source_node.cluster_id)
     if error:
         logger.error(f"Fail-over clone failed for lvol {lvol_id}: {error}")
         return False, error
@@ -3508,7 +3587,7 @@ def replicate_lvol_on_target_cluster(lvol_id):
     lvol_replication.create_dt = str(datetime.now())
     lvol_replication.source_lvol = lvol
     lvol_replication.target_lvol = new_lvol
-    lvol_replication.source_cluster_id = source_cluster.get_id()
+    lvol_replication.source_cluster_id = source_node.cluster_id
     lvol_replication.target_cluster_id = target_cluster.get_id()
     lvol_replication.mode = lvol.replication_mode
     lvol_replication.state = LVolReplication.STATE_FAILED_OVER

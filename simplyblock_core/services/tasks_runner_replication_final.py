@@ -183,12 +183,16 @@ def _prepare_cutover(task, lvol, src_node, tgt_node):
     guaranteed to be the freshly replicated shrink snapshot."""
     from simplyblock_core.controllers import lvol_controller
 
-    source_cluster = db.get_cluster_by_id(src_node.cluster_id)
-    target_cluster = db.get_cluster_by_id(tgt_node.cluster_id)
+    # Same resolution as fail-over: the destination is the cluster the volume
+    # replicates INTO, and the pool comes from its policy's target. The source
+    # cluster's outgoing config is only a fallback -- on a fail-back cutover it
+    # describes the wrong direction, or is not set at all for a policy-driven
+    # volume.
+    target_cluster, target_pool_uuid = lvol_controller.resolve_replication_destination(
+        db, lvol, tgt_node, src_node)
 
     new_lvol, snapshot, error = lvol_controller._clone_from_last_replicated(
-        db, lvol.get_id(), lvol, tgt_node,
-        source_cluster.snapshot_replication_target_pool, src_node.cluster_id)
+        db, lvol.get_id(), lvol, tgt_node, target_pool_uuid, src_node.cluster_id)
     if error:
         return f"cutover clone failed: {error}"
 
@@ -208,7 +212,7 @@ def _prepare_cutover(task, lvol, src_node, tgt_node):
     rep.create_dt = str(datetime.now())
     rep.source_lvol = lvol
     rep.target_lvol = new_lvol
-    rep.source_cluster_id = source_cluster.get_id()
+    rep.source_cluster_id = src_node.cluster_id
     rep.target_cluster_id = target_cluster.get_id()
     rep.mode = lvol.replication_mode
     rep.state = LVolReplication.STATE_CUTOVER_PENDING
