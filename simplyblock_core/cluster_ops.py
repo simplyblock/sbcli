@@ -865,6 +865,25 @@ def _wait_for_full_device_connectivity(cl_id, timeout_sec=300, poll_sec=10):
         time.sleep(poll_sec)
 
 
+def _record_activated_nodes(cl_id) -> None:
+    """Freeze the node set that is now part of the activated cluster.
+
+    Written on the success path of both activation and expansion, so a later
+    re-activation can tell "the same cluster" from "the same cluster plus nodes
+    someone added while it was suspended".
+    """
+    try:
+        cluster = db_controller.get_cluster_by_id(cl_id)
+        node_ids = sorted(
+            n.get_id() for n in db_controller.get_storage_nodes_by_cluster_id(cl_id))
+        db_controller.atomic_update(
+            cluster, lambda c, v=node_ids: setattr(c, "activated_node_ids", v))
+    except Exception as e:
+        # Never fail an otherwise-successful activation over bookkeeping; the
+        # next activation or expansion rewrites it.
+        logger.warning(f"Could not record the activated node set: {e}")
+
+
 def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     """Wrapper around the activation body that keeps ``activation_heartbeat``
     fresh for its whole duration. The storage_node_monitor watchdog uses a
@@ -927,6 +946,29 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
         logger.warning("Cluster is ACTIVE")
         if not force:
             raise ValueError("Failed to activate cluster, Cluster is in an ACTIVE state, use --force to reactivate")
+
+    # Growth by re-activation is not a supported path. Once a cluster has been
+    # activated its node set is fixed; nodes added afterwards are integrated by
+    # the expansion flow ("sn add-node --expansion" on an ACTIVE cluster), which
+    # rotates roles and rebalances data. Re-activating with extra nodes present
+    # would pull them in with none of that.
+    #
+    # The ACTIVE check above does not catch it: suspend -> add-node -> activate
+    # walks straight past, because a suspended cluster is not ACTIVE. There is
+    # deliberately no --force escape here -- forcing it produces a cluster whose
+    # roles and failure domains were never rotated for the new nodes, which is
+    # not a state an operator can ask for meaningfully.
+    current_node_ids = {
+        n.get_id() for n in db_controller.get_storage_nodes_by_cluster_id(cl_id)}
+    if cluster.activated_node_ids:
+        added = sorted(current_node_ids - set(cluster.activated_node_ids))
+        if added:
+            raise ValueError(
+                f"Cluster {cl_id} has already been activated and {len(added)} "
+                f"node(s) were added since: {', '.join(n[:8] for n in added)}. "
+                f"Re-activation must not grow a cluster. Remove those nodes, or "
+                f"grow the cluster with 'sn add-node --expansion' while it is "
+                f"ACTIVE.")
 
     ols_status = cluster.status
     if ols_status == Cluster.STATUS_IN_ACTIVATION:
@@ -1561,6 +1603,7 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     # want headroom for an unplanned failure concurrent with a rollout.)
     utils.set_storage_mcp_max_unavailable(cl_id, cluster.max_fault_tolerance)
 
+    _record_activated_nodes(cl_id)
     set_cluster_status(cl_id, Cluster.STATUS_ACTIVE)
     logger.info("Cluster activated successfully")
 
@@ -1638,6 +1681,7 @@ def cluster_expand(cl_id) -> None:
             set_cluster_status(cl_id, ols_status)
             raise ValueError("Failed to expand cluster")
 
+    _record_activated_nodes(cl_id)
     set_cluster_status(cl_id, Cluster.STATUS_ACTIVE)
     logger.info("Cluster expanded successfully")
 
