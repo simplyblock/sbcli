@@ -33,7 +33,18 @@ SSH_OPTS = ["-o", "StrictHostKeyChecking=no", "-o", "LogLevel=ERROR",
             "-o", "ConnectTimeout=30", "-i", KEY]
 
 HOTFIX_DIR = "/opt/sb-hotfix"
-CONTAINER_SP = "/usr/local/lib/python3.12/site-packages/simplyblock_core"
+#: Both copies matter, for different reasons:
+#:  * /app -- the service is started as `python3
+#:    simplyblock_core/services/<svc>.py` from /app, so ITS OWN module is
+#:    executed from here as __main__;
+#:  * site-packages -- sys.path[0] is then the SCRIPT directory, so every
+#:    `import simplyblock_core...` resolves there instead.
+#: Mounting only one of them patches half the process. On 2026-08-20 the
+#: chaining fix was mounted over site-packages while the entry-point script
+#: ran the image's original from /app, and the bug's signature kept
+#: appearing (49 in 6 minutes) on a lab that had just been "verified".
+CONTAINER_PATHS = ("/app/simplyblock_core",
+                   "/usr/local/lib/python3.12/site-packages/simplyblock_core")
 HOST_SP = "/usr/local/lib/python3.9/site-packages"
 
 #: local path -> path under simplyblock_core
@@ -96,8 +107,10 @@ def mount_services(mgmt):
         mounts = []
         for local, rel in {**SHARED, **own}.items():
             name = Path(local).name
-            mounts.append(f"--mount-add type=bind,source={HOTFIX_DIR}/{name},"
-                          f"target={CONTAINER_SP}/{rel}")
+            for base in CONTAINER_PATHS:
+                mounts.append(
+                    f"--mount-add type=bind,source={HOTFIX_DIR}/{name},"
+                    f"target={base}/{rel}")
         # --force matters: a --mount-add whose target is ALREADY mounted is a
         # no-op and does NOT recreate the task, so the service keeps running
         # the module it imported at startup. On 2026-08-20 the chaining fix sat
