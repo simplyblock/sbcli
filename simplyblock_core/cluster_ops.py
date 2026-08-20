@@ -278,6 +278,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    hashicorp_vault_settings : t.Optional[HashicorpVaultSettings] = None,
                    enable_failure_domain=False,
                    enable_hang_device=False,
+                   max_subsys=0, hugepages_mem=0, spdk_vcpu_count=0,
 ) -> str:
     if (distr_ndcs, distr_npcs) not in SUPPORTED_ERASURE_CODING_SCHEMES:
         raise ValueError("Unsupported erasure coding scheme")
@@ -410,6 +411,10 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.inflight_io_threshold = inflight_io_threshold
     cluster.strict_node_anti_affinity = strict_node_anti_affinity
     cluster.enable_failure_domain = enable_failure_domain
+    validate_spdk_sizing(max_subsys, hugepages_mem, spdk_vcpu_count)
+    cluster.max_subsys = max_subsys or 0
+    cluster.hugepages_mem = hugepages_mem or 0
+    cluster.spdk_vcpu_count = spdk_vcpu_count or 0
     cluster.contact_point = contact_point
     cluster.disable_monitoring = disable_monitoring
     cluster.mode = mode
@@ -511,6 +516,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
                 distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity, qpair_count,
                 max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name, cr_name=None,
                 cr_namespace=None, cr_plural=None, fabric="tcp",
+                max_subsys=0, hugepages_mem=0, spdk_vcpu_count=0,
                 client_data_nic="", max_fault_tolerance=1, backup_config=None,
                 nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001,
                 hashicorp_vault_settings : t.Optional[HashicorpVaultSettings] = None,
@@ -661,6 +667,10 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
     cluster.qpair_count = qpair_count or constants.QPAIR_COUNT
     cluster.max_queue_size = max_queue_size
     cluster.inflight_io_threshold = inflight_io_threshold
+    validate_spdk_sizing(max_subsys, hugepages_mem, spdk_vcpu_count)
+    cluster.max_subsys = max_subsys or 0
+    cluster.hugepages_mem = hugepages_mem or 0
+    cluster.spdk_vcpu_count = spdk_vcpu_count or 0
     cluster.cr_name = cr_name
     cluster.cr_namespace = cr_namespace
     cluster.cr_plural = cr_plural
@@ -897,6 +907,53 @@ def set_object_ops(cl_id, stopped) -> bool:
         # The switch is already persisted; failing to journal it must not
         # report the operation as failed.
         logger.warning(f"Could not log the object-ops change event: {ev_err}")
+    return True
+
+
+def validate_spdk_sizing(max_subsys=None, hugepages_mem=None, spdk_vcpu_count=None):
+    """Check the cluster-wide SPDK sizing values, raising ValueError if unusable.
+
+    These are cluster-level on purpose: set per node they let a cluster drift
+    into nodes with different subsystem ceilings and different core budgets.
+    """
+    if max_subsys is not None and max_subsys:
+        if max_subsys < 0 or max_subsys > constants.MAX_SUBSYSTEMS_PER_NODE:
+            raise ValueError(
+                f"max_subsys must be between 1 and "
+                f"{constants.MAX_SUBSYSTEMS_PER_NODE} (0 = product default)")
+    if hugepages_mem is not None and hugepages_mem < 0:
+        raise ValueError("hugepages_mem cannot be negative (0 = computed)")
+    if spdk_vcpu_count is not None and spdk_vcpu_count < 0:
+        raise ValueError("spdk_vcpu_count cannot be negative (0 = heuristic)")
+
+
+def set_spdk_sizing(cluster_id, max_subsys=None, hugepages_mem=None) -> bool:
+    """Change the cluster-wide SPDK sizing that may be changed after creation.
+
+    A node adopts these when it is added and on every restart, so the change
+    lands node by node as they restart rather than immediately. spdk_vcpu_count
+    is not settable here: changing a running cluster's core budget rewrites
+    every node's core mask, which belongs to a deliberate re-deploy.
+    """
+    validate_spdk_sizing(max_subsys=max_subsys, hugepages_mem=hugepages_mem)
+    cluster = db_controller.get_cluster_by_id(cluster_id)
+    changes = {}
+    if max_subsys is not None:
+        changes["max_subsys"] = int(max_subsys)
+    if hugepages_mem is not None:
+        changes["hugepages_mem"] = int(hugepages_mem)
+    if not changes:
+        return True
+
+    def _apply(c, values=changes):
+        for key, value in values.items():
+            setattr(c, key, value)
+
+    db_controller.atomic_update(cluster, _apply)
+    logger.info(
+        f"Cluster {cluster_id} SPDK sizing updated: "
+        + ", ".join(f"{k}={v}" for k, v in changes.items())
+        + ". Nodes pick this up on their next restart.")
     return True
 
 
@@ -2358,8 +2415,20 @@ def get_cluster(cl_id) -> dict:
     return db_controller.get_cluster_by_id(cl_id).get_clean_dict()
 
 
-def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, mgmt_image=None, **kwargs) -> None:
+def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, mgmt_image=None,
+                   max_subsys=None, hugepages_mem=None, **kwargs) -> None:
     cluster = db_controller.get_cluster_by_id(cluster_id)  # ensure exists
+
+    # Cluster-wide SPDK sizing is a settings write, not an upgrade. Handled
+    # first, and when no image or control-plane flag was given this returns
+    # before the rollout: changing a number must not drag a whole cluster
+    # through an image update. Nodes adopt the new values on their next
+    # restart, so nothing here restarts anything.
+    if max_subsys is not None or hugepages_mem is not None:
+        set_spdk_sizing(cluster_id, max_subsys=max_subsys,
+                        hugepages_mem=hugepages_mem)
+        if not (spdk_image or mgmt_image or mgmt_only):
+            return
 
     # Release-specific pre-upgrade steps (simplyblock_core/release_upgrades/).
     # Must be the very first thing the upgrade does; raises to abort the

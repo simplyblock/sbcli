@@ -98,11 +98,8 @@ class CLIWrapper(CLIWrapperBase):
 
     def init_storage_node__configure(self, subparser):
         subcommand = self.add_sub_command(subparser, 'configure', 'Prepare a configuration file to be used when adding the storage node.')
-        subcommand.add_argument('--max-subsys', help='The max number of subsystems per storage node. Must not exceed 75.', type=int, dest='max_lvol', required=True)
-        subcommand.add_argument('--max-size', help='The maximum amount of Huge Pages to be set on the node.', type=str, dest='max_prov', required=False)
         subcommand.add_argument('--nodes-per-socket', help='The number of each node to be added per each socket. Default: `1`.', type=int, default=1, dest='nodes_per_socket')
         subcommand.add_argument('--sockets-to-use', help='The system socket to use when adding the storage nodes. Default: `0`.', type=str, default='0', dest='sockets_to_use')
-        subcommand.add_argument('--cores-percentage', help='The percentage of cores to be used for spdk (0-99). Default: `0`.', type=range_type(0, 99), default=0, dest='cores_percentage')
         subcommand.add_argument('--pci-allowed', help='Comma separated list of PCI addresses of Nvme devices to use for storage devices.', type=str, default='', dest='pci_allowed', required=False)
         subcommand.add_argument('--pci-blocked', help='Comma separated list of PCI addresses of Nvme devices to not use for storage devices.', type=str, default='', dest='pci_blocked', required=False)
         subcommand.add_argument('--device-model', help='NVMe SSD model string, example: --model PM1628. Can be used alone to filter by model, or combined with --size-range to further filter by size.', type=str, default='', dest='device_model', required=False)
@@ -182,11 +179,8 @@ class CLIWrapper(CLIWrapperBase):
     def init_storage_node__restart(self, subparser):
         subcommand = self.add_sub_command(subparser, 'restart', 'Restarts a storage node.')
         subcommand.add_argument('node_id', help='Storage node id', type=str).completer = self._completer_get_sn_list
-        subcommand.add_argument('--max-subsys', help='The max number of subsystems per storage node. Must not exceed 75. Default: `0`.', type=int, default=0, dest='max_lvol')
         if self.developer_mode:
             subcommand.add_argument('--max-snap', help='The max snapshot per storage node. Default: `5000`.', type=int, default=5000, dest='max_snap')
-        if self.developer_mode:
-            subcommand.add_argument('--max-size', help='The maximum amount of GB to be utilized on this storage node. Default: `0`.', type=str, default='0', dest='max_prov')
         subcommand.add_argument('--node-addr', '--node-ip', help='Restart Node on new node.', type=str, dest='node_ip')
         if self.developer_mode:
             subcommand.add_argument('--spdk-image', help='The SPDK image URI.', type=str, dest='spdk_image')
@@ -456,6 +450,10 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--snode-api-port', help='The SNodeAPI/firewall port (one per host IP). Default: `50001`.', type=int, default=50001, dest='snode_api_port')
         subcommand.add_argument('--hashicorp-vault-url', help='Hashicorp vault URL for storing encryption keys for this cluster', type=str, dest='hashicorp_vault_url')
 
+        subcommand.add_argument('--max-subsys', help='Max number of nvmf subsystems per storage node. Cluster-wide; a node adopts it on its next restart.', dest='max_subsys', type=int, default=0)
+        subcommand.add_argument('--hugepages-mem', help='Huge-page memory floor per storage node, e.g. 4G. Cluster-wide; a node adopts it on its next restart.', dest='hugepages_mem', type=str, default='')
+        subcommand.add_argument('--vcpu-count', help='Absolute number of vCPUs SPDK gets on each storage node. A node with fewer than this + 1 cores is refused.', dest='vcpu_count', type=int, default=0)
+
     def init_cluster__add(self, subparser):
         subcommand = self.add_sub_command(subparser, 'add', 'Adds a new cluster.')
         if self.developer_mode:
@@ -489,6 +487,10 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--rpc-base-port', help='The base port for SPDK JSON-RPC. Default: `8080`.', type=int, default=8080, dest='rpc_base_port')
         subcommand.add_argument('--snode-api-port', help='The SNodeAPI/firewall port (one per host IP). Default: `50001`.', type=int, default=50001, dest='snode_api_port')
         subcommand.add_argument('--hashicorp-vault-url', help='Hashicorp vault URL for storing encryption keys for this cluster', type=str, dest='hashicorp_vault_url')
+
+        subcommand.add_argument('--max-subsys', help='Max number of nvmf subsystems per storage node. Cluster-wide; a node adopts it on its next restart.', dest='max_subsys', type=int, default=0)
+        subcommand.add_argument('--hugepages-mem', help='Huge-page memory floor per storage node, e.g. 4G. Cluster-wide; a node adopts it on its next restart.', dest='hugepages_mem', type=str, default='')
+        subcommand.add_argument('--vcpu-count', help='Absolute number of vCPUs SPDK gets on each storage node. A node with fewer than this + 1 cores is refused.', dest='vcpu_count', type=int, default=0)
 
     def init_cluster__activate(self, subparser):
         subcommand = self.add_sub_command(subparser, 'activate', 'Activates a cluster.')
@@ -570,6 +572,8 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--cp-only', help='Update the control plane only. Default: `false`.', type=bool, default=False, dest='mgmt_only')
         subcommand.add_argument('--spdk-image', help='Restart the storage nodes using the provided image.', type=str, dest='spdk_image')
         subcommand.add_argument('--mgmt-image', help='Restart the management services using the provided image.', type=str, dest='mgmt_image')
+        subcommand.add_argument('--max-subsys', help='Change the cluster-wide max nvmf subsystems per storage node. Applied by each node on its next restart. Given alone, no image update runs.', dest='max_subsys', type=int, default=None)
+        subcommand.add_argument('--hugepages-mem', help='Change the cluster-wide huge-page memory floor per storage node, e.g. 4G. Applied by each node on its next restart. Given alone, no image update runs.', dest='hugepages_mem', type=str, default=None)
 
     def init_cluster__upgrade_complete(self, subparser):
         subcommand = self.add_sub_command(subparser, 'upgrade-complete', 'Completes a cluster upgrade.')
@@ -1283,7 +1287,6 @@ class CLIWrapper(CLIWrapperBase):
                 elif sub_command in ['restart']:
                     if not self.developer_mode:
                         args.max_snap = 5000
-                        args.max_prov = '0'
                         args.spdk_image = None
                         args.reattach_volume = None
                         args.spdk_debug = None

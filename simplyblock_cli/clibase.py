@@ -103,13 +103,15 @@ class CLIWrapperBase:
         storage_ops.upgrade_automated_deployment_config()
 
     def storage_node__configure(self, sub_command, args):
-        if not args.max_lvol:
-            self.parser.error(f"Mandatory argument '--max-subsys' not provided for {sub_command}")
-        if args.max_lvol > constants.MAX_SUBSYSTEMS_PER_NODE:
-            self.parser.error(
-                f"--max-subsys {args.max_lvol} exceeds the maximum of "
-                f"{constants.MAX_SUBSYSTEMS_PER_NODE} subsystems per storage node")
-        max_size = getattr(args, "max_prov") or 0
+        # max-subsys, the huge-page floor and the vCPU count are cluster-level
+        # settings now, and this command runs on the host before it belongs to
+        # any cluster, so it cannot read them. It therefore sizes the host for
+        # the product ceiling (MAX_SUBSYSTEMS_PER_NODE): any cluster value then
+        # fits, and add-node/restart push the cluster's actual numbers into the
+        # host config. Sizing for a smaller default instead would leave a node
+        # unable to honour a larger cluster setting.
+        max_lvol = constants.MAX_SUBSYSTEMS_PER_NODE
+        max_size = 0
         number_of_devices = getattr(args, "number_of_devices") or 0
         sockets_to_use = [0]
         if args.sockets_to_use:
@@ -123,7 +125,7 @@ class CLIWrapperBase:
             self.parser.error(f"nodes_per_socket {args.nodes_per_socket}must be either 1 or 2")
         if args.pci_allowed and args.pci_blocked:
             self.parser.error("pci-allowed and pci-blocked cannot be both specified")
-        max_prov = utils.parse_size(max_size, assume_unit='G')
+        max_prov = utils.parse_size(max_size, assume_unit='G') if max_size else 0
         pci_allowed = []
         pci_blocked = []
         nvme_names = []
@@ -142,7 +144,10 @@ class CLIWrapperBase:
                 "--device-model/--size-range (--device-model and --size-range may be combined "
                 "with each other, but not with --pci-allowed or --pci-blocked)."
             )
-        cores_percentage = int(args.cores_percentage)
+        # The core split is decided by the cluster's vcpu-count when the node
+        # is added or restarted; here the default heuristic lays out a usable
+        # baseline for a host that does not belong to a cluster yet.
+        vcpu_count = 0
         if args.calculate_hp_only:
             if not args.number_of_devices:
                 self.parser.error("For calculating huge pages memory, you must provide the --number-of-devices")
@@ -150,9 +155,9 @@ class CLIWrapperBase:
                 number_of_devices = args.number_of_devices
 
         return storage_ops.generate_automated_deployment_config(
-            args.max_lvol, max_prov, sockets_to_use,args.nodes_per_socket,
+            max_lvol, max_prov, sockets_to_use, args.nodes_per_socket,
             pci_allowed, pci_blocked, force=args.force, device_model=args.device_model,
-            size_range=args.size_range, cores_percentage=cores_percentage, nvme_names=nvme_names,
+            size_range=args.size_range, vcpu_count=vcpu_count, nvme_names=nvme_names,
             calculate_hp_only=args.calculate_hp_only, number_of_devices=number_of_devices)
 
     def storage_node__deploy_cleaner(self, sub_command, args):
@@ -279,13 +284,12 @@ class CLIWrapperBase:
         spdk_debug = args.spdk_debug
         reattach_volume = args.reattach_volume
 
-        max_lvol = args.max_lvol
-        if max_lvol > constants.MAX_SUBSYSTEMS_PER_NODE:
-            self.parser.error(
-                f"--max-subsys {max_lvol} exceeds the maximum of "
-                f"{constants.MAX_SUBSYSTEMS_PER_NODE} subsystems per storage node")
+        # max-subsys and the huge-page floor are cluster-level settings; the
+        # restart reads them from the cluster itself. Zero here means "take the
+        # cluster's value", which is what restart_storage_node does with it.
+        max_lvol = 0
         max_snap = args.max_snap
-        max_prov = utils.parse_size(args.max_prov)
+        max_prov = 0
 
         small_bufsize = args.small_bufsize
         large_bufsize = args.large_bufsize
@@ -1383,6 +1387,9 @@ class CLIWrapperBase:
             hashicorp_vault_settings=HashicorpVaultSettings({"base_url": args.hashicorp_vault_url}) if args.hashicorp_vault_url else None,
             enable_failure_domain=enable_failure_domain,
             enable_hang_device=enable_hang_device,
+            max_subsys=args.max_subsys or 0,
+            hugepages_mem=utils.parse_size(args.hugepages_mem) if args.hugepages_mem else 0,
+            spdk_vcpu_count=args.vcpu_count or 0,
         )
 
     def query_yes_no(self, question, default="yes"):
