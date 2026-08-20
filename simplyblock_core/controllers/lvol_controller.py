@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Tuple, Optional
 
 from simplyblock_core import utils, constants
+from simplyblock_core.controllers import ops_gate
 from simplyblock_core.controllers import snapshot_controller, pool_controller, lvol_events, tasks_controller, \
     snapshot_events
 from simplyblock_core.db_controller import DBController, SubsystemCapacityError
@@ -446,6 +447,8 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
             break
     if not pool:
         return False, f"Pool not found: {pool_id_or_name}"
+
+    ops_gate.assert_object_ops_allowed("volume create", cluster_id=pool.cluster_id)
 
     cl = db_controller.get_cluster_by_id(pool.cluster_id)
 
@@ -1915,6 +1918,7 @@ def _delete_lvol_from_all_nodes(lvol, snode, force_delete, lock=True) -> None:
 
 def delete_lvol(lvol: LVol, *, force_delete: bool = False, lock: bool = True) -> None:
     db_controller = DBController()
+    ops_gate.assert_object_ops_allowed("volume delete", pool_uuid=lvol.pool_uuid)
 
     # Block during restart Phase 5
     snode = None
@@ -2091,6 +2095,8 @@ def set_lvol(uuid, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, name=
     except KeyError as e:
         logger.error(e)
         return False
+    ops_gate.assert_object_ops_allowed("volume parameter change",
+                                       pool_uuid=lvol.pool_uuid)
     pool = db_controller.get_pool_by_id(lvol.pool_uuid)
     if pool.status == Pool.STATUS_INACTIVE:
         logger.error("Pool is disabled")
@@ -2664,6 +2670,7 @@ def _resize_lvol_on_all_nodes(lvol, snode, size_in_mib, lock=True) -> None:
 def resize_lvol(id, new_size, lock=True) -> None:
     db_controller = DBController()
     lvol = db_controller.get_lvol_by_id(id)
+    ops_gate.assert_object_ops_allowed("volume resize", pool_uuid=lvol.pool_uuid)
 
     # Block during restart Phase 5
     try:

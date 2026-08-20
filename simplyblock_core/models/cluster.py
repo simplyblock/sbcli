@@ -90,6 +90,10 @@ class Cluster(BaseModel):
     #: refuses to run with nodes present that are not in this list: growth goes
     #: through the expansion flow, never through re-activation.
     activated_node_ids: List[str] = []
+    #: Set by "cluster op-stop": the cluster refuses creation, deletion and
+    #: modification of lvols, snapshots, clones and pools while this is true.
+    #: Read paths and the cluster's own maintenance are unaffected.
+    object_ops_stopped: bool = False
     # ISO-8601 UTC timestamp refreshed every ~60s by the heartbeat thread that
     # cluster_activate runs for its whole duration. Lets the watchdog tell a
     # LIVE long activation (heartbeat fresh — leave it alone, up to the

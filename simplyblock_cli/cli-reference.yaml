@@ -1238,6 +1238,22 @@ commands:
             help: "Hashicorp vault URL for storing encryption keys for this cluster"
             dest: hashicorp_vault_url
             type: str
+      - name: op-stop
+        help: "Stops the cluster accepting object lifecycle operations: creation, deletion and modification of volumes, snapshots, clones and pools. Read paths and the cluster's own maintenance are unaffected."
+        arguments:
+          - name: "cluster_id"
+            help: "The cluster id."
+            dest: cluster_id
+            type: str
+            completer: _completer_get_cluster_list
+      - name: op-start
+        help: "Resumes object lifecycle operations on the cluster."
+        arguments:
+          - name: "cluster_id"
+            help: "The cluster id."
+            dest: cluster_id
+            type: str
+            completer: _completer_get_cluster_list
       - name: activate
         help: >
           Activates a cluster.

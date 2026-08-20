@@ -469,6 +469,12 @@ class CLIWrapperBase:
             return False
         return True
 
+    def cluster__op_stop(self, sub_command, args):
+        return cluster_ops.set_object_ops(args.cluster_id, True)
+
+    def cluster__op_start(self, sub_command, args):
+        return cluster_ops.set_object_ops(args.cluster_id, False)
+
     def cluster__list(self, sub_command, args):
         data = cluster_ops.list()
 
