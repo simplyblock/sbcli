@@ -1658,15 +1658,40 @@ class SoakRunner:
             self.logger.log(f"host_reboot {node_id[:12]}: SSH terminated as expected: {exc}")
         self._drop_node_host(node_id)
 
+    #: Refusals meaning "another node in this cluster is mid-transition". The CP
+    #: allows one graceful transition at a time (see
+    #: check_node_shutdown_preconditions), with --force as its documented escape
+    #: hatch. This case exists to overlap two outages deliberately, so such a
+    #: refusal is escalated to --force rather than waited out: waiting lets the
+    #: partner finish recovering and removes the overlap that is the whole point.
+    #: Iteration 21 of the 2026-08-20 run died on exactly this -- a container_kill
+    #: partner entered restart 8s before the shutdown was issued. "is restart" is
+    #: how "is restarting in this cluster" reaches us after truncation.
+    PEER_TRANSITION_MARKERS = (
+        "is restarting in this cluster",
+        "is already shutting down in this cluster",
+        "is restart",
+    )
+
     def _shutdown(self, node_id, force, host, deadline):
         """sbctl sn shutdown, retrying while migration/tasks block it."""
         flag = " --force" if force else ""
+        escalated = bool(force)
         while True:
             rc, stdout_text, stderr_text = self.sbctl_allow_failure(
                 f"sn shutdown {node_id}{flag}", timeout=300, host=host)
             if rc == 0:
                 return
             output = f"{stdout_text}\n{stderr_text}".lower()
+            if not escalated and any(
+                    m in output for m in self.PEER_TRANSITION_MARKERS):
+                self.logger.log(
+                    f"Shutdown of {node_id[:12]} refused because a peer is "
+                    f"mid-transition; escalating to --force (the overlap is "
+                    f"the point of this case)")
+                flag = " --force"
+                escalated = True
+                continue
             blocked = any(marker in output for marker in (
                 "migration", "migrat", "rebalanc", "active task", "running task",
                 "in_progress", "in progress"))
