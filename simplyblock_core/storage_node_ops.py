@@ -7184,8 +7184,10 @@ def check_non_leader_for_operation(node_id, lvs_name, operation_type="create",
                  StorageNode.RESTART_PHASE_POST_UNBLOCK):
         return "queue"
 
-    # 3. Fabric is connected — check RPC responsiveness
-    if _is_node_rpc_responsive(node, lvs_name):
+    # 3. Fabric is connected — check the SPDK process
+    nodeapi = SNodeClient(node)
+    is_up, _ = nodeapi.spdk_process_is_up(node.rpc_port, node.cluster_id)
+    if is_up:
         return "proceed"
 
     # 4. RPC failing but fabric connected
