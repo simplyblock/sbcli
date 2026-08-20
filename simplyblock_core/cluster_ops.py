@@ -866,6 +866,40 @@ def _wait_for_full_device_connectivity(cl_id, timeout_sec=300, poll_sec=10):
         time.sleep(poll_sec)
 
 
+def set_object_ops(cl_id, stopped) -> bool:
+    """Stop or resume object lifecycle operations on one cluster.
+
+    While stopped, creation, deletion and modification of lvols, snapshots,
+    clones and pools are refused -- including parameter changes such as QoS
+    limits and resizes. Read paths stay open, and the cluster keeps maintaining
+    itself (restarts, migrations, rebalancing) so a stopped cluster still
+    recovers from faults on its own.
+
+    Enforcement lives in the controllers (see controllers/ops_gate.py), which
+    is what both the CLI and the v2 API funnel through.
+    """
+    cluster = db_controller.get_cluster_by_id(cl_id)
+    stopped = bool(stopped)
+    if bool(getattr(cluster, "object_ops_stopped", False)) == stopped:
+        logger.info(
+            f"Object operations are already "
+            f"{'stopped' if stopped else 'started'} on cluster {cl_id}")
+        return True
+
+    db_controller.atomic_update(
+        cluster, lambda c, v=stopped: setattr(c, "object_ops_stopped", v))
+    logger.info(
+        f"Object operations {'stopped' if stopped else 'started'} on cluster {cl_id}")
+    try:
+        cluster_events.cluster_object_ops_change(
+            db_controller.get_cluster_by_id(cl_id), stopped)
+    except Exception as ev_err:
+        # The switch is already persisted; failing to journal it must not
+        # report the operation as failed.
+        logger.warning(f"Could not log the object-ops change event: {ev_err}")
+    return True
+
+
 def _record_activated_nodes(cl_id) -> None:
     """Freeze the node set that is now part of the activated cluster.
 

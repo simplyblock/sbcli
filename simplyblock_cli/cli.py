@@ -366,6 +366,8 @@ class CLIWrapper(CLIWrapperBase):
         self.init_cluster__create(subparser)
         self.init_cluster__add(subparser)
         self.init_cluster__activate(subparser)
+        self.init_cluster__op_stop(subparser)
+        self.init_cluster__op_start(subparser)
         self.init_cluster__list(subparser)
         self.init_cluster__status(subparser)
         self.init_cluster__complete_expand(subparser)
@@ -493,6 +495,14 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
         subcommand.add_argument('--force', help='Force recreate distr and lv stores.', dest='force', action='store_true')
         subcommand.add_argument('--force-lvstore-create', help='Force recreate lv stores.', dest='force_lvstore_create', action='store_true').completer = self._completer_get_cluster_list
+
+    def init_cluster__op_stop(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'op-stop', 'Stops the cluster accepting object lifecycle operations (create/delete/change of volumes, snapshots, clones, pools).')
+        subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
+
+    def init_cluster__op_start(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'op-start', 'Resumes object lifecycle operations on the cluster.')
+        subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
 
     def init_cluster__list(self, subparser):
         subcommand = self.add_sub_command(subparser, 'list', 'Shows the cluster list.')
@@ -1409,6 +1419,10 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.cluster__add(sub_command, args)
                 elif sub_command in ['activate']:
                     ret = self.cluster__activate(sub_command, args)
+                elif sub_command in ['op-stop']:
+                    ret = self.cluster__op_stop(sub_command, args)
+                elif sub_command in ['op-start']:
+                    ret = self.cluster__op_start(sub_command, args)
                 elif sub_command in ['list']:
                     ret = self.cluster__list(sub_command, args)
                 elif sub_command in ['status']:

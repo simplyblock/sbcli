@@ -10,6 +10,7 @@ import time
 import uuid
 from datetime import datetime
 
+from simplyblock_core.controllers import ops_gate
 from simplyblock_core.controllers import lvol_controller, snapshot_events, pool_controller, tasks_controller, \
     migration_controller
 
@@ -495,6 +496,8 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
         logger.exception("Volume lookup failed for snapshot request: %s", lvol_id)
         return False, "Volume not found"
 
+    ops_gate.assert_object_ops_allowed("snapshot create", pool_uuid=lvol.pool_uuid)
+
     # Reject snapshot creation on an lvol that is being deleted. SPDK's
     # blobstore reuses the lvol's metadata for the snapshot's parent
     # pointer; if the lvol is mid-delete (async or sync), creating a
@@ -923,6 +926,9 @@ def delete(snapshot_uuid, force_delete=False, lock=True):
         logger.error(f"Snapshot not found {snapshot_uuid}")
         return False
 
+    ops_gate.assert_object_ops_allowed("snapshot delete",
+                                       cluster_id=snap.cluster_id)
+
     # OUTER per-object lock: make the clone-count check and the data-plane
     # delete atomic against a concurrent clone-create of this same snapshot
     # (which holds the same lock for its whole sequence). Without it a clone
@@ -1166,6 +1172,8 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     except KeyError:
         logger.exception("Snapshot lookup failed for clone request: %s", snapshot_id)
         return False, "Snapshot not found"
+
+    ops_gate.assert_object_ops_allowed("clone create", cluster_id=snap.cluster_id)
 
     # Reject cloning a snapshot that is in pending deletion. If a prior
     # clone-create failed (e.g. an SPDK duplicate-name collision on the
