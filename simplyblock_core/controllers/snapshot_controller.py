@@ -231,6 +231,27 @@ _OBJECT_LOCK_PREFIX = "__obj__"
 _PEER_ALIVE_STATUSES = (StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED)
 
 
+def _successor_mid_replication(snap):
+    """Whether *snap*'s chain successor is being replicated right now.
+
+    Deleting a snapshot swap-merges its segments into the SUCCESSOR, i.e. it
+    mutates the successor's cluster map. While the successor is replicating,
+    bdev_lvol_transfer is iterating exactly that map, so the merge would tear
+    the copy mid-flight — silently: the transfer completes and the remote image
+    is simply missing the merged clusters. Callers run under the chain-root
+    lock (delete holds object_mutation_lock; the transfer path flips the
+    successor to IN_REPLICATION under the same lock), so there is no window
+    between this check and the merge.
+    """
+    if not snap.next_snap_uuid:
+        return False
+    try:
+        successor = db_controller.get_snapshot_by_id(snap.next_snap_uuid)
+    except KeyError:
+        return False
+    return successor.status == SnapShot.STATUS_IN_REPLICATION
+
+
 def delete_bdev_absent_ok(node, bdev_name, sync=False, special_delete=False):
     """``delete_lvol`` that treats "already gone" as done. Returns True on success.
 
@@ -999,6 +1020,14 @@ def _delete_locked(snap, snapshot_uuid, force_delete=False, lock=True):
 
     if snap.status == SnapShot.STATUS_IN_REPLICATION:
         logger.error("Snapshot is in replication")
+        return False
+
+    if not force_delete and _successor_mid_replication(snap):
+        logger.error(
+            f"Cannot delete snapshot {snapshot_uuid}: its successor "
+            f"{snap.next_snap_uuid} is replicating right now, and the "
+            f"delete's swap-merge would change the cluster map that "
+            f"transfer is reading. Retry after the transfer finishes.")
         return False
 
     try:

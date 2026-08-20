@@ -63,6 +63,70 @@ def _destination_pool_uuid(remote_node, lvol=None, source_cluster_id=None):
     return None
 
 
+def _unreplicated_local_ancestor(snode, snapshot, replicate_to_source):
+    """The deepest chain ancestor of *snapshot* that must replicate FIRST.
+
+    bdev_lvol_transfer sends a blob's OWN cluster map and nothing else
+    (prepare_s3_clusters copies blob->active.clusters; inherited clusters are 0
+    there and are skipped). The remote image is therefore complete only if
+    every blob between the remote chain base and this snapshot is transferred
+    too, bottom-up. Two things put such blobs in the chain:
+
+      * a fail-over volume is a CLONE — its whole pre-fail-over history lives
+        in base snapshots (lab 2026-08-20 case 4: XFS AG3, written once at
+        mkfs, was zeros on the fresh cluster; everything fio rewrote after the
+        fail-over arrived fine);
+      * a USER snapshot between two internal cadence snapshots absorbs the
+        writes made before it — the next internal snapshot's own map no longer
+        contains them.
+
+    Returns ``(verdict, record, why)``: ``("ok", None, "")`` when the chain
+    base below is already replicated (or the snapshot is a self-contained
+    root); ``("pending", rec, "")`` naming the DEEPEST unreplicated ancestor —
+    replicate that one first and re-check (bottom-up order falls out of
+    retrying); ``("blocked", rec_or_None, why)`` when the chain cannot be made
+    complete (an ancestor is mid-deletion, or a blob has no snapshot record).
+
+    Races: the walk is repeated on every attempt, so a concurrent user delete
+    of an ancestor is harmless — its segments swap-merge into the successor,
+    and the next walk sees the new chain. Deleting an ancestor of a snapshot
+    that is TRANSFERRING is refused in snapshot_controller.delete (the merge
+    would mutate the map mid-transfer).
+    """
+    attr = ("source_replicated_snap_uuid" if replicate_to_source
+            else "target_replicated_snap_uuid")
+    lvs = snapshot.snap_bdev.split("/")[0]
+    by_bdev = {}
+    for s in db.get_snapshots_by_node_id(snapshot.lvol.node_id):
+        by_bdev[s.snap_bdev] = s
+    rpc = snode.rpc_client()
+    cur = snapshot.snap_bdev
+    deepest = None
+    for _ in range(64):
+        ret = rpc.get_bdevs(cur)
+        if not ret:
+            return ("blocked", None,
+                    f"chain bdev {cur} not readable on {snode.get_id()}")
+        base = ((ret[0].get("driver_specific") or {}).get("lvol") or {}).get("base_snapshot")
+        if not base:
+            # Chain root: a self-contained blob, transferable in full.
+            return ("pending", deepest, "") if deepest else ("ok", None, "")
+        cur = f"{lvs}/{base}"
+        rec = by_bdev.get(cur)
+        if rec is None:
+            return ("blocked", None,
+                    f"chain blob {cur} has no snapshot record; its data cannot "
+                    f"be replicated and the copy would have holes")
+        if getattr(rec, attr, ""):
+            # Everything below this point already exists on the remote side.
+            return ("pending", deepest, "") if deepest else ("ok", None, "")
+        if rec.status == SnapShot.STATUS_IN_DELETION:
+            return ("blocked", rec,
+                    f"chain ancestor {rec.get_id()} is mid-deletion")
+        deepest = rec
+    return ("blocked", None, "chain deeper than 64 blobs")
+
+
 def process_snap_replicate_start(task, snapshot):
     # 1 create lvol on remote node
     logger.info("Starting snapshot replication task")
@@ -71,6 +135,54 @@ def process_snap_replicate_start(task, snapshot):
     # primary must not stop replication (see _source_leader_node).
     snode = _source_leader_node(snapshot) or db.get_storage_node_by_id(snapshot.lvol.node_id)
     replicate_to_source = task.function_params["replicate_to_source"]
+
+    # Once ONLY: snapshots form a TREE through clones, so several descendants
+    # share ancestors, and each of their gates enqueues the shared ancestor.
+    # _add_task dedupes the ACTIVE task; this guard covers the rest — a task
+    # for a snapshot that already has its copy on the remote side (a second
+    # enqueue that raced the first one's completion, a stale queue entry) must
+    # recognize the copy as existent, not build a second one.
+    already = getattr(snapshot,
+                      "source_replicated_snap_uuid" if replicate_to_source
+                      else "target_replicated_snap_uuid", "")
+    if already:
+        msg = (f"Snapshot {snapshot.get_id()} is already replicated "
+               f"(remote copy {already}); nothing to transfer")
+        logger.info(msg)
+        task.function_result = msg
+        task.status = JobSchedule.STATUS_DONE
+        task.write_to_db()
+        return
+
+    # The chain below this snapshot must be on the remote side FIRST, or the
+    # copy has holes (see _unreplicated_local_ancestor). Checked on every
+    # attempt so chain changes (user deletes swap-merging blobs) re-resolve.
+    verdict, ancestor, why = _unreplicated_local_ancestor(
+        snode, snapshot, replicate_to_source)
+    if verdict == "pending":
+        from simplyblock_core.controllers import tasks_controller
+        dest_lvol_id = (task.function_params.get("dest_lvol_id")
+                        or snapshot.lvol.get_id())
+        tasks_controller.add_snapshot_replication_task(
+            snapshot.cluster_id, task.node_id, ancestor.get_id(),
+            replicate_to_source=replicate_to_source, dest_lvol_id=dest_lvol_id)
+        msg = (f"waiting for chain ancestor {ancestor.get_id()} to replicate "
+               f"first (a copy without it would have holes)")
+        logger.info(msg)
+        task.function_result = msg
+        task.status = JobSchedule.STATUS_SUSPENDED
+        task.retry += 1
+        task.write_to_db()
+        return
+    if verdict == "blocked":
+        msg = f"replication chain of {snapshot.get_id()} is incomplete: {why}; retrying"
+        logger.error(msg)
+        task.function_result = msg
+        task.status = JobSchedule.STATUS_SUSPENDED
+        task.retry += 1
+        task.write_to_db()
+        return
+
     if "remote_lvol_id" not in task.function_params or not task.function_params["remote_lvol_id"]:
         if replicate_to_source:
             try:
@@ -115,7 +227,17 @@ def process_snap_replicate_start(task, snapshot):
             # for a volume that never had a destination, e.g. a REP_* receiving
             # volume). Retrying it for ever burns the runner's cycles and blocks
             # every delete waiting behind its snapshot, so end it here.
-            if not snapshot.lvol.replication_node_id:
+            # A chain-ancestor task replicates a snapshot whose own lvol may be
+            # long gone or never configured (a fail-over base chain): the
+            # destination then comes from the policy-managed DESCENDANT volume,
+            # carried on the task as dest_lvol_id by the ancestor gate.
+            dest_lvol = snapshot.lvol
+            if not dest_lvol.replication_node_id and task.function_params.get("dest_lvol_id"):
+                try:
+                    dest_lvol = db.get_lvol_by_id(task.function_params["dest_lvol_id"])
+                except KeyError:
+                    pass
+            if not dest_lvol.replication_node_id:
                 msg = (f"LVol {snapshot.lvol.get_id()} has no replication destination; "
                        f"dropping replication task for snapshot {snapshot.get_id()}")
                 logger.error(msg)
@@ -123,9 +245,9 @@ def process_snap_replicate_start(task, snapshot):
                 task.status = JobSchedule.STATUS_DONE
                 task.write_to_db()
                 return
-            remote_node_uuid = db.get_storage_node_by_id(snapshot.lvol.replication_node_id)
+            remote_node_uuid = db.get_storage_node_by_id(dest_lvol.replication_node_id)
             remote_pool_uuid = _destination_pool_uuid(
-                remote_node_uuid, lvol=snapshot.lvol, source_cluster_id=snode.cluster_id)
+                remote_node_uuid, lvol=dest_lvol, source_cluster_id=snode.cluster_id)
             if not remote_pool_uuid:
                 logger.error(f"Unable to find pool on remote cluster: {remote_node_uuid.cluster_id}")
                 return
@@ -208,6 +330,34 @@ def process_snap_replicate_start(task, snapshot):
     offset = 0
     if "offset" in task.function_params and task.function_params["offset"]:
         offset = task.function_params["offset"]
+
+    # Flip to IN_REPLICATION under the CHAIN lock, BEFORE the transfer starts.
+    # The delete path refuses to delete a snapshot in this state AND refuses to
+    # delete its predecessor (whose swap-merge would mutate the cluster map the
+    # transfer is reading) under the same chain-root-keyed lock — setting the
+    # status after starting the transfer left a window in which a delete could
+    # slip between the check and the merge.
+    with snapshot_controller.object_mutation_lock(snapshot.cluster_id, snapshot.get_id()):
+        try:
+            fresh = db.get_snapshot_by_id(snapshot.get_id())
+        except KeyError:
+            msg = f"Snapshot {snapshot.get_id()} vanished before transfer start"
+            logger.error(msg)
+            task.function_result = msg
+            task.status = JobSchedule.STATUS_DONE
+            task.write_to_db()
+            return
+        if fresh.status == SnapShot.STATUS_IN_DELETION:
+            msg = f"Snapshot {snapshot.get_id()} is being deleted; not starting a transfer"
+            logger.error(msg)
+            task.function_result = msg
+            task.status = JobSchedule.STATUS_DONE
+            task.write_to_db()
+            return
+        if fresh.status != SnapShot.STATUS_IN_REPLICATION:
+            fresh.status = SnapShot.STATUS_IN_REPLICATION
+            fresh.write_to_db()
+
     # 3 start replication
     snode.rpc_client().bdev_lvol_transfer(
         name=snapshot.snap_bdev,
@@ -220,10 +370,6 @@ def process_snap_replicate_start(task, snapshot):
     task.status = JobSchedule.STATUS_RUNNING
     task.function_params["start_time"] = int(time.time())
     task.write_to_db()
-
-    if snapshot.status != SnapShot.STATUS_IN_REPLICATION:
-        snapshot.status = SnapShot.STATUS_IN_REPLICATION
-        snapshot.write_to_db()
 
 
 def _receiving_leader_node(remote_lv):
