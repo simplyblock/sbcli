@@ -3323,22 +3323,34 @@ def _handle_group_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
     return True, False, None
 
 
-def _handle_group_intermediate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
+def _handle_group_intermediate(migration, src_node, tgt_node, src_rpc, tgt_rpc, target_round=0):
     """
     INTERMEDIATE phase for a group worker.
 
-    Takes exactly one intermediate ("shrink") snapshot and transfers it to the
-    target, skipping add_clone/convert (same as snap_copy).  After this the
-    worker signals intermediates_done to the group and waits for batch_result.
+    Takes one intermediate ("shrink") snapshot per round and transfers it to
+    the target, skipping add_clone/convert (same as snap_copy). After this
+    the worker signals intermediates_done to the group and waits for either
+    another round or batch_result.
+
+    ``target_round`` is the group's current intermediate_round. If this
+    worker has already completed that round (migration.intermediate_snap_rounds
+    > target_round), it's done for now. Otherwise -- including when it was
+    previously done for an earlier round but the group has since asked for
+    another synchronized round -- it resets and takes a fresh snapshot.
 
     Returns (done: bool, suspend: bool, error: str|None).
     """
     trtype, _ = _get_migration_nic(tgt_node)
     ctx = migration.transfer_context or {}
 
-    # If we already took and transferred the intermediate snap, we're done.
+    # If we already took and transferred the intermediate snap for the round
+    # the group is currently on, we're done. Otherwise the group has asked
+    # for another round since we last finished -- fall through and redo.
     if ctx.get('stage') == 'intermediate_done':
-        return True, False, None
+        if migration.intermediate_snap_rounds > target_round:
+            return True, False, None
+        ctx = {}
+        migration.transfer_context = {}
 
     # Take the intermediate snapshot if not already in flight.
     if ctx.get('stage') != 'intermediate_transfer':
@@ -3503,9 +3515,10 @@ def _group_worker_phase_dispatch(task, migration, phase, src_node, tgt_node, src
     Manages the group worker state machine:
       SNAP_COPY   → transfer owned snaps (no add_clone/convert)
                   → signal snap_copy_done to group → wait for INTERMEDIATE
-      LVOL_MIGRATE (repurposed as the single-intermediate phase for workers)
-                  → take + transfer 1 intermediate snap
-                  → signal intermediates_done → wait for batch_result
+      LVOL_MIGRATE (repurposed as the intermediate phase for workers)
+                  → take + transfer 1 intermediate snap for the current round
+                  → signal intermediates_done → wait for either another
+                    synchronized round or batch_result
       CLEANUP_SOURCE → normal source cleanup + signal cleanup_source_done
       CLEANUP_TARGET → normal target rollback
 
@@ -3569,7 +3582,7 @@ def _group_worker_phase_dispatch(task, migration, phase, src_node, tgt_node, src
         task.write_to_db(db.kv_store)
         return False
 
-    # --- LVOL_MIGRATE (group worker: take 1 intermediate + wait for batch_result) ---
+    # --- LVOL_MIGRATE (group worker: take intermediate round(s) + wait for batch_result) ---
     if phase == LVolMigration.PHASE_LVOL_MIGRATE:
         if migration_id not in group.intermediates_done:
             # A sibling may have already failed and told the group to roll
@@ -3585,7 +3598,8 @@ def _group_worker_phase_dispatch(task, migration, phase, src_node, tgt_node, src
 
             try:
                 done, suspend, error = _handle_group_intermediate(
-                    migration, src_node, tgt_node, src_rpc, tgt_rpc)
+                    migration, src_node, tgt_node, src_rpc, tgt_rpc,
+                    target_round=group.intermediate_round)
             except RPCException as exc:
                 # Charge this worker's own retry budget and report failure to
                 # the group -- never decide/roll back unilaterally (see
@@ -3598,11 +3612,33 @@ def _group_worker_phase_dispatch(task, migration, phase, src_node, tgt_node, src
             if done:
                 group = db.get_migration_group_by_id(group_id)
                 if migration_id not in group.intermediates_done:
+                    # Below the round cap, check whether this worker's dirty
+                    # delta is still too large to freeze quickly at cutover --
+                    # if so, flag it so the orchestrator starts another
+                    # synchronized round for every member (see
+                    # LVolMigrationGroup's INTERMEDIATE docstring).
+                    needs_more = False
+                    if group.intermediate_round + 1 < constants.LVOL_MIG_MAX_INTERMEDIATE_SNAPS:
+                        try:
+                            lvol = db.get_lvol_by_id(migration.lvol_id)
+                            src_composite = f"{src_node.lvstore}/{lvol.lvol_bdev}"
+                            delta = _get_lvol_delta_bytes(src_rpc, src_composite)
+                            needs_more = (
+                                delta is None
+                                or delta > constants.LVOL_MIG_INTERMEDIATE_SNAP_THRESHOLD_BYTES)
+                        except Exception as e:
+                            logger.warning(
+                                f"Group worker {migration_id[:8]}: delta check failed "
+                                f"(assuming another round is needed): {e}")
+                            needs_more = True
+                    if needs_more and migration_id not in group.intermediate_more_needed:
+                        group.intermediate_more_needed.append(migration_id)
                     group.intermediates_done.append(migration_id)
                     group.write_to_db(db.kv_store)
                     logger.info(
                         f"Group worker {migration_id[:8]}: signalled intermediates_done "
-                        f"({len(group.intermediates_done)}/{group.member_count()})")
+                        f"({len(group.intermediates_done)}/{group.member_count()})"
+                        + (" [delta still high, requesting another round]" if needs_more else ""))
             migration.write_to_db(db.kv_store)
             task.write_to_db(db.kv_store)
             return False
