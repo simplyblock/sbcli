@@ -24,9 +24,23 @@ HERE = Path(__file__).parent
 KEY = "C:/Users/Michael/.ssh/mtes01.pem"
 SSH_OPTS = ["-o", "StrictHostKeyChecking=no", "-o", "LogLevel=ERROR",
             "-o", "ConnectTimeout=20", "-i", KEY]
-#: The binary that must be running. See the SPDK_IMAGE pin in
-#: setup_perf_test_multipath.py for why this is checked rather than assumed.
-EXPECT_MTIME = "2026-08-17 09:15:25"
+#: The build that must be running. Identity is checked by commit rather than
+#: mtime: the ultra Dockerfile bakes `git log` of the spdk repo into
+#: /root/spdk/git_log.txt, which pins the image to a commit. See the SPDK_IMAGE
+#: pin in setup_perf_test_multipath.py for why this is checked, not assumed.
+EXPECT_SPDK_COMMIT = "a311a6852"
+#: Lines probe_bin.sh must print, with what their absence would mean. These
+#: distinguish upstream d528e1a67 (zeroes retry state at the submission entry
+#: point) from the superseded local attempt that zeroed it at completion and so
+#: missed any bdev_io whose previous occupant was a different bdev module.
+REQUIRED_FIX_LINES = (
+    ("[1] bdev_nvme_submit_request_initial",
+     "retry state is not initialised at submit (spdk/spdk#3686 unfixed)"),
+    ("[1] fn_table .submit_request wired to it",
+     "the initialising entry point is not wired into nvmelib_fn_table"),
+    ("[0] bio->retry_count zeroed at completion",
+     "the superseded completion-side reset is still in this build"),
+)
 REQUIRED_MARKERS = ("fault tolerance degraded", "anti-affinity dropped")
 
 
@@ -96,11 +110,15 @@ def gate(mgmt, sn):
                     f"-i ~/.ssh/mtes01.pem ec2-user@{sn} "
                     f"'bash /tmp/verify_spdk_image.sh'")
     log(out.strip())
-    if EXPECT_MTIME not in out:
+    if EXPECT_SPDK_COMMIT not in out:
         raise RuntimeError(
-            f"GATE FAILED: running binary is not the expected build "
-            f"(no mtime {EXPECT_MTIME}). The node is on a stale image — check "
-            f"the SPDK_IMAGE pin.")
+            f"GATE FAILED: image was not built from spdk {EXPECT_SPDK_COMMIT} "
+            f"— /root/spdk/git_log.txt names a different commit, so the node is "
+            f"on a stale image. Check the SPDK_IMAGE pin and that the "
+            f"spdk-core R26.3 tags finished rebuilding (amd64 included).")
+    for fragment, why in REQUIRED_FIX_LINES:
+        if fragment not in out:
+            raise RuntimeError(f"GATE FAILED: {why} ({fragment!r} absent)")
     for marker in REQUIRED_MARKERS:
         # probe_bin.sh prints "  [N] <marker>"; N==0 means absent.
         if f"[0] {marker}" in out or marker not in out:
