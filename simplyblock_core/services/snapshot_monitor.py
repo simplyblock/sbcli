@@ -9,6 +9,7 @@ from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.controllers import (
     snapshot_events, snapshot_controller)
+from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
@@ -523,7 +524,50 @@ def _outstanding_internal_snapshot(lvol, all_snaps):
     # target copy, fail-back records the source copy.
     if full.target_replicated_snap_uuid or full.source_replicated_snap_uuid:
         return None
+    # Hold back only while the transfer is still LIVE. "Never start the next
+    # one until this one finishes" is right for a transfer in progress, but
+    # conditioning it on a marker that may never arrive turns one stuck
+    # transfer into a permanent stop: the volume takes no further snapshots,
+    # nothing is queued, nothing is in flight, and no error is raised.
+    #
+    # That is what a chaining bug did on 2026-08-20 -- transfers refused to
+    # finalize, so the marker never came and the cadence froze silently for the
+    # rest of the run (case 4: outstanding=0 and not one new snapshot in 20
+    # minutes). The chaining bug is fixed, but the guard must not be able to
+    # convert ANY future terminal failure into a silent halt.
+    if not _replication_task_is_live(full):
+        logger.error(
+            "Internal snapshot %s of lvol %s never replicated and has no live "
+            "replication task; resuming the cadence. Replication for this "
+            "volume is NOT making progress -- investigate the transfer.",
+            full.get_id(), lvol.get_id())
+        return None
     return full
+
+
+def _replication_task_is_live(snapshot):
+    """Whether a replication task for *snapshot* can still make progress.
+
+    A task that is DONE (successfully or having given up) or cancelled will
+    never set the replicated marker, so waiting on it is waiting for ever.
+    When the tasks cannot be read at all, assume live: back-pressure staying on
+    is the conservative side of that guess.
+    """
+    try:
+        node = db.get_storage_node_by_id(snapshot.lvol.node_id)
+        tasks = db.get_job_tasks(node.cluster_id)
+    except Exception as e:
+        logger.warning("Cannot read replication tasks for %s (%s); keeping "
+                       "back-pressure on", snapshot.get_id(), e)
+        return True
+    for task in tasks:
+        if task.function_name != JobSchedule.FN_SNAPSHOT_REPLICATION:
+            continue
+        if task.function_params.get("snapshot_id") != snapshot.get_id():
+            continue
+        if task.status != JobSchedule.STATUS_DONE and not task.canceled:
+            return True
+    return False
 
 
 def take_due_internal_snapshots(cluster_id, now_ts):
