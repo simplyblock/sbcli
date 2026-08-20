@@ -357,7 +357,7 @@ class CLIWrapper(CLIWrapperBase):
         argument = subcommand.add_argument('--name', help='Only return the bdev with this name.', type=str, dest='name')
 
     def init_storage_node__unload(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'unload', 'Unloads an lvstore on a storage node (bdev_lvol_apply_lvstore).')
+        subcommand = self.add_sub_command(subparser, 'unload', 'Unloads an lvstore on a storage node (bdev_lvol_apply_lvstore). Aborts unless the node is the lvstore leader.')
         subcommand.add_argument('node_id', help='The storage node id.', type=str).completer = self._completer_get_sn_list
         subcommand.add_argument('lvs_name', help='The lvstore name.', type=str)
 

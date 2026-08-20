@@ -827,7 +827,7 @@ commands:
             dest: name
             type: str
       - name: unload
-        help: "Unloads an lvstore on a storage node (bdev_lvol_apply_lvstore)."
+        help: "Unloads an lvstore on a storage node (bdev_lvol_apply_lvstore). Aborts unless the node is the lvstore leader."
         arguments:
           - name: "node_id"
             help: "The storage node id."

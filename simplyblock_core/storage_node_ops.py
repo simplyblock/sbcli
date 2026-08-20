@@ -7295,6 +7295,11 @@ def unload_lvstore(node_id, lvs_name):
     Like get-bdevs, this deliberately does not require the node to be ONLINE in
     the database. The SPDK process normally still answers while the record says
     offline or in_restart, which is exactly when this is wanted.
+
+    It does, however, refuse to run unless the node is the LEADER of that
+    lvstore. Leadership is read from the node itself rather than from the
+    database, because it moves on failover and the record lags behind in
+    exactly the situations this command is used in.
     """
     db_controller = DBController()
     try:
@@ -7314,6 +7319,38 @@ def unload_lvstore(node_id, lvs_name):
     # a manual recovery command, and the timeout is generous because the call
     # reaches down into the lvstore rather than just reading state.
     rpc_client = snode.rpc_client(timeout=600, retry=1)
+
+    stores = rpc_client.bdev_lvol_get_lvstores(lvs_name)
+    if not stores:
+        logger.error(
+            f"lvstore {lvs_name} not found on node {node_id}; nothing to apply")
+        return False
+
+    store = next((s for s in stores if s.get("name") == lvs_name), None)
+    if store is None:
+        logger.error(
+            f"Node {node_id} did not report an lvstore named {lvs_name}, got "
+            f"{[s.get('name') for s in stores]}")
+        return False
+
+    role = ("primary" if store.get("lvs_primary")
+            else "secondary" if store.get("lvs_secondary")
+            else "tertiary" if store.get("lvs_tertiary")
+            else "unknown")
+
+    # SPDK spells this key with a space -- "lvs leadership", written from
+    # lvs->leader in rpc_dump_lvol_store_info(). Same on R26.2-PRE and R26.3.
+    if store.get("lvs leadership") is not True:
+        logger.error(
+            f"Refusing to apply lvstore {lvs_name} on node {node_id}: this node "
+            f"is NOT its leader (role={role}, "
+            f"leadership={store.get('lvs leadership')!r}). Applying a copy the "
+            f"node does not lead would act on follower state; run this against "
+            f"the leader instead.")
+        return False
+
+    logger.info(
+        f"Node {node_id} is leader of {lvs_name} (role={role}), applying")
     ret = rpc_client.bdev_lvol_apply_lvstore(lvs_name=lvs_name)
     if not ret:
         logger.error(f"Failed to apply lvstore {lvs_name} on node {node_id}")
