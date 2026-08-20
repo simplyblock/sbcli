@@ -123,6 +123,18 @@ def process_snap_delete_finish(snap, completed_node):
     primary_node.lvol_del_sync_lock_reset()
 
     if snap.instances:
+        # Hand the delete on to the next copy. The instance is a DIFFERENT
+        # record (its own uuid, node and bdev) and it inherits the rest of the
+        # chain, so once it is written this record has nothing left to do and
+        # must be retired -- exactly like the no-instances case below.
+        #
+        # Leaving it behind made the delete non-terminating: the record stayed
+        # in_deletion with its instances list intact, so every monitor cycle
+        # re-ran phase-2 for it, logged "Snapshot deleted successfully", and
+        # rewrote the instance record to in_deletion again -- resurrecting a
+        # copy that had already been deleted. Lab 2026-08-20: 104 snapshots
+        # frozen for 40+ minutes with no errors at all, 869 "Snapshot has
+        # instances" per 2 minutes; the 104 WITHOUT instances drained fine.
         logger.info("Snapshot has instances, processing them...")
         new_main_instance = SnapShot(snap.instances[0])
         if len(snap.instances) > 1:
@@ -133,6 +145,12 @@ def process_snap_delete_finish(snap, completed_node):
         new_main_instance.status = SnapShot.STATUS_IN_DELETION
         new_main_instance.deletion_status = ""
         new_main_instance.write_to_db()
+        # Retire this record only after the successor is durable, so a crash in
+        # between loses nothing: worst case the hand-off is repeated. No delete
+        # event here -- the snapshot is not gone until its last copy is, which
+        # is the branch below.
+        db.unindex_snapshot(snap)
+        snap.remove(db.kv_store)
         snode = db.get_storage_node_by_id(new_main_instance.lvol.node_id)
         logger.info(f"Process Snapshot delete on node {snode.get_id()}")
         process_snap_delete(new_main_instance, snode)
