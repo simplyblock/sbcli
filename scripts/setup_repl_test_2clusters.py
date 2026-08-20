@@ -125,7 +125,17 @@ def wait_for_ssh(ip, timeout=900):
     raise RuntimeError(f"Timed out waiting for SSH on {ip}")
 
 
-def ssh_exec(ip, cmds, get_output=False, check=False):
+#: Overall budget for one remote command. `cluster create` brings up
+#: FoundationDB and the whole CP service stack and prints NOTHING while it does
+#: so; the old exec_command(timeout=600) was a per-read socket timeout, so ten
+#: silent minutes killed the client while the command was still succeeding
+#: (deploy 2026-08-20 17:06: the cluster was created, the deployer aborted with
+#: a paramiko socket.timeout and left the lab 20% built). Silence is not
+#: failure, so progress is judged by the channel's exit status, not by output.
+LONG_CMD_TIMEOUT = 5400
+
+
+def ssh_exec(ip, cmds, get_output=False, check=False, timeout=LONG_CMD_TIMEOUT):
     ssh = None
     results = []
     for cmd in cmds:
@@ -141,7 +151,7 @@ def ssh_exec(ip, cmds, get_output=False, check=False):
                     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
                     ssh.connect(ip, username=USER, key_filename=KEY_PATH,
                                 allow_agent=False, look_for_keys=False)
-                stdin, stdout, stderr = ssh.exec_command(cmd, timeout=600)
+                stdin, stdout, stderr = ssh.exec_command(cmd)
                 break
             except (paramiko.SSHException, OSError, EOFError) as exc:
                 try:
@@ -153,9 +163,36 @@ def ssh_exec(ip, cmds, get_output=False, check=False):
                     raise
                 print(f"  [{ip}] transport failure ({exc}); reconnecting in {10*(attempt+1)}s")
                 time.sleep(10 * (attempt + 1))
-        out = stdout.read().decode("utf-8")
-        err = stderr.read().decode("utf-8")
-        rc = stdout.channel.recv_exit_status()
+        # Drain as output arrives and wait on the EXIT STATUS, not on the next
+        # byte: a long silent command must not look like a dead one. Nothing
+        # here blocks longer than `poll`, so the deadline is honoured even when
+        # the command never writes a thing.
+        chan = stdout.channel
+        chan.settimeout(5)
+        out_parts, err_parts = [], []
+        deadline = time.time() + timeout
+
+        def _drain():
+            while chan.recv_ready():
+                out_parts.append(chan.recv(65536).decode("utf-8", "replace"))
+            while chan.recv_stderr_ready():
+                err_parts.append(chan.recv_stderr(65536).decode("utf-8", "replace"))
+
+        while True:
+            _drain()
+            if chan.exit_status_ready():
+                break
+            if time.time() > deadline:
+                ssh.close()
+                raise RuntimeError(
+                    f"Command exceeded {timeout}s on {ip}: {cmd}\n"
+                    f"It may still be running remotely — verify the outcome "
+                    f"before retrying, do not assume it failed.")
+            time.sleep(2)
+        _drain()
+        out = "".join(out_parts)
+        err = "".join(err_parts)
+        rc = chan.recv_exit_status()
         if get_output:
             results.append(out)
         if rc != 0:
