@@ -545,7 +545,19 @@ class CLIWrapperBase:
         return health_controller.check_cluster(cluster_id)
 
     def cluster__update(self, sub_command, args):
-        cluster_ops.update_cluster(**args.__dict__)
+        try:
+            cluster_ops.update_cluster(**args.__dict__)
+        except Exception as e:
+            print(f"Error updating cluster: {e}")
+            return False
+        return True
+
+    def cluster__upgrade_complete(self, sub_command, args):
+        try:
+            cluster_ops.upgrade_complete(args.cluster_id)
+        except Exception as e:
+            print(f"Error completing cluster upgrade: {e}")
+            return False
         return True
 
     def cluster__graceful_shutdown(self, sub_command, args):

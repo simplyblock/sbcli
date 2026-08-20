@@ -36,6 +36,7 @@ from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice, RemoteDevice, RemoteJMDevice
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.release_upgrades import jc_compression_upgrade
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.prom_client import PromClient
 from simplyblock_core.rpc_client import RPCClient, RPCErrorCode, RPCRemoteError, RPCException, namespace_matches  # noqa: F401  (RPCClient kept as a patch target for tests)
@@ -7601,12 +7602,18 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
             logger.error("Error establishing hublvol: %s", e)
             # return False
 
-    # Resume JC compression for this LVS group on the restarting node
-    ret, err = snode.rpc_client().jc_suspend_compression(jm_vuid=primary_node.jm_vuid, suspend=False)
-    if not ret:
-        logger.info("Failed to resume JC compression adding task...")
-        tasks_controller.add_jc_comp_resume_task(
-            snode.cluster_id, snode.get_id(), jm_vuid=primary_node.jm_vuid)
+    # Resume JC compression for this LVS group on the restarting node —
+    # unless a release upgrade holds all resumes until `cluster
+    # upgrade-complete` (release-upgrade guard, remove with the
+    # jc_compression_upgrade plugin).
+    if jc_compression_upgrade.resume_is_held(DBController().get_cluster_by_id(snode.cluster_id)):
+        logger.info("JC compression resume held: cluster upgrade in progress")
+    else:
+        ret, err = snode.rpc_client().jc_suspend_compression(jm_vuid=primary_node.jm_vuid, suspend=False)
+        if not ret:
+            logger.info("Failed to resume JC compression adding task...")
+            tasks_controller.add_jc_comp_resume_task(
+                snode.cluster_id, snode.get_id(), jm_vuid=primary_node.jm_vuid)
 
     ### 2- create lvols nvmf subsystems (idempotent: skip existing)
     is_tertiary = (primary_node.tertiary_node_id == snode.get_id())
@@ -10171,10 +10178,15 @@ def create_lvstore(snode: StorageNode, ndcs, npcs, distr_bs, distr_chunk_bs, pag
             return False
 
         # sending to the other node (sec_node) with the primary group jm_vuid (snode.jm_vuid)
-        ret, err = sec_node.rpc_client().jc_suspend_compression(jm_vuid=snode.jm_vuid, suspend=False)
-        if not ret:
-            logger.info("Failed to resume JC compression adding task...")
-            tasks_controller.add_jc_comp_resume_task(sec_node.cluster_id, sec_node.get_id(), jm_vuid=snode.jm_vuid)
+        # (release-upgrade guard: held until `cluster upgrade-complete`,
+        # remove with the jc_compression_upgrade plugin)
+        if jc_compression_upgrade.resume_is_held(DBController().get_cluster_by_id(sec_node.cluster_id)):
+            logger.info("JC compression resume held: cluster upgrade in progress")
+        else:
+            ret, err = sec_node.rpc_client().jc_suspend_compression(jm_vuid=snode.jm_vuid, suspend=False)
+            if not ret:
+                logger.info("Failed to resume JC compression adding task...")
+                tasks_controller.add_jc_comp_resume_task(sec_node.cluster_id, sec_node.get_id(), jm_vuid=snode.jm_vuid)
 
         sec_rpc_client = sec_node.rpc_client()
         sec_rpc_client.bdev_examine(snode.raid)

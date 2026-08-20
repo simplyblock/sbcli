@@ -208,6 +208,16 @@ class Cluster(BaseModel):
     # ``simplyblock_core.controllers.cluster_expansion.planner``. See the feature plan
     # ``single_node_expansion_plan.md`` for the schema.
     expand_state: dict = {}
+    # State owned by release-specific upgrade plug-ins (see
+    # simplyblock_core/release_upgrades/). Keys are plugin STATE_KEYs; a key
+    # is set by the plugin's pre_update step (first thing `cluster update`
+    # does) and cleared by its upgrade_complete step (`cluster
+    # upgrade-complete`). Empty dict = no release upgrade in flight.
+    release_upgrade_state: dict = {}
+    # Release stamped by the last completed `cluster upgrade-complete`.
+    # Consumed by release_upgrades plugins with a from_release restriction.
+    # Empty on clusters that never completed an upgrade under this framework.
+    installed_release: str = ""
     backup_local_path: str = constants.KVD_DB_BACKUP_PATH
     backup_frequency_seconds: int = 3*60*60
     backup_s3_bucket: str = ""

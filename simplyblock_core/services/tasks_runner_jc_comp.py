@@ -7,6 +7,7 @@ from simplyblock_core.controllers import tasks_controller
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.release_upgrades import jc_compression_upgrade
 
 logger = utils.get_logger(__name__)
 
@@ -43,6 +44,17 @@ def main():
                             if task.canceled:
                                 task.function_result = "canceled"
                                 task.status = JobSchedule.STATUS_DONE
+                                task.write_to_db(db.kv_store)
+                                continue
+
+                            # Release-upgrade guard (remove with the
+                            # jc_compression_upgrade plugin): resumes are
+                            # held until `cluster upgrade-complete`.
+                            if jc_compression_upgrade.resume_is_held(cl):
+                                msg = "JC compression resume held: cluster upgrade in progress"
+                                logger.info(msg)
+                                task.function_result = msg
+                                task.status = JobSchedule.STATUS_SUSPENDED
                                 task.write_to_db(db.kv_store)
                                 continue
 

@@ -1431,6 +1431,18 @@ commands:
             help: "Restart the management services using the provided image."
             dest: mgmt_image
             type: str
+      - name: upgrade-complete
+        help: "Completes a cluster upgrade."
+        usage: >
+          Runs the completion step of a cluster upgrade started with `cluster update`: resumes JC compression on
+          all storage nodes (deferred to a resume task on nodes with running data migrations) and stamps the
+          installed release. All storage nodes must be online.
+        arguments:
+          - name: "cluster_id"
+            help: "The cluster id."
+            dest: cluster_id
+            type: str
+            completer: _completer_get_cluster_list
       - name: graceful-shutdown
         help: "Initiates a graceful shutdown of a cluster's storage nodes."
         arguments:
