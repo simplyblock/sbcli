@@ -845,6 +845,16 @@ print(json.dumps(out))
 """)
 
 
+def _all_test_pools(meta):
+    """Every pool the suite can leave volumes in -- including the FRESH
+    cluster's. A case-4 attempt leaves its cut-over copies named replvol0..4
+    there, and the global (unscoped) get_lvol_by_name sees two records per
+    name the moment a prologue re-creates them on src: "Multiple values
+    present" before the case proper even starts (run 20260820_222257)."""
+    pools = [c["pool"] for c in meta["clusters"].values()]
+    return list(dict.fromkeys(pools))
+
+
 def _src_target(meta):
     src_uuid = meta["replication"]["source_cluster"]
     tgt_uuid = meta["replication"]["target_cluster"]
@@ -927,7 +937,7 @@ def test_case_1(meta):
 
     # 0. clear anything an aborted run left behind, so names are free
     prepare_mount_points(client_ip, key_path)
-    delete_test_volumes(mgmt_ip, key_path, [src["pool"], tgt["pool"]])
+    delete_test_volumes(mgmt_ip, key_path, _all_test_pools(meta))
 
     # 1. create + replicate (migration mode, 1-min auto snapshots)
     lvols = create_volumes(mgmt_ip, key_path, src_uuid, src["pool"], tgt_uuid,
@@ -1071,7 +1081,7 @@ def test_case_2(meta):
 
     # clean up whatever case 1 (or an aborted run) left behind
     prepare_mount_points(client_ip, key_path)
-    delete_test_volumes(mgmt_ip, key_path, [src["pool"], tgt["pool"]])
+    delete_test_volumes(mgmt_ip, key_path, _all_test_pools(meta))
 
     # create + replicate (failover mode, 1-min auto snapshots)
     lvols = create_volumes(mgmt_ip, key_path, src_uuid, src["pool"], tgt_uuid,
@@ -1165,7 +1175,7 @@ def _setup_failed_over_volumes(meta, tag):
     src_uuid, src, tgt_uuid, tgt = _src_target(meta)
 
     prepare_mount_points(client_ip, key_path)
-    delete_test_volumes(mgmt_ip, key_path, [src["pool"], tgt["pool"]])
+    delete_test_volumes(mgmt_ip, key_path, _all_test_pools(meta))
 
     print(f"[{tag}] creating + replicating 5 volumes (failover mode)...")
     lvols = create_volumes(mgmt_ip, key_path, src_uuid, src["pool"], tgt_uuid,
@@ -1406,7 +1416,7 @@ def test_case_5(meta):
     src_uuid, src, tgt_uuid, tgt = _src_target(meta)
 
     prepare_mount_points(client_ip, key_path)
-    delete_test_volumes(mgmt_ip, key_path, [src["pool"], tgt["pool"]])
+    delete_test_volumes(mgmt_ip, key_path, _all_test_pools(meta))
     lvols = create_volumes(mgmt_ip, key_path, src_uuid, src["pool"], tgt_uuid,
                            tgt["pool"], mode="failover")
     mounts = connect_and_mount(client_ip, key_path, mgmt_ip, lvols, fmt=True)
@@ -1454,7 +1464,7 @@ def test_case_6(meta):
     src_uuid, src, tgt_uuid, tgt = _src_target(meta)
 
     prepare_mount_points(client_ip, key_path)
-    delete_test_volumes(mgmt_ip, key_path, [src["pool"], tgt["pool"]])
+    delete_test_volumes(mgmt_ip, key_path, _all_test_pools(meta))
     lvols = create_volumes(mgmt_ip, key_path, src_uuid, src["pool"], tgt_uuid,
                            tgt["pool"], mode="failover")
     mounts = connect_and_mount(client_ip, key_path, mgmt_ip, lvols, fmt=True)
