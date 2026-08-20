@@ -77,17 +77,35 @@ def main():
                                 task.status = JobSchedule.STATUS_SUSPENDED
                                 task.write_to_db(db.kv_store)
                             else:
-                                logger.info("no task found on same node, resuming compression")
                                 node = db.get_storage_node_by_id(task.node_id)
+                                storage_nodes_versions = set()
+                                all_nodes_online = True
                                 for n in db.get_storage_nodes_by_cluster_id(node.cluster_id):
-                                    if n.status != StorageNode.STATUS_ONLINE:
-                                        msg = "Not all nodes are online, can not resume JC compression"
-                                        logger.info(msg)
-                                        task.function_result = msg
-                                        task.status = JobSchedule.STATUS_SUSPENDED
-                                        task.write_to_db(db.kv_store)
+                                    if n.status == StorageNode.STATUS_REMOVED:
                                         continue
+                                    if n.status != StorageNode.STATUS_ONLINE:
+                                        all_nodes_online = False
+                                        break
+                                    storage_nodes_versions.add(n.spdk_version)
 
+                                if not all_nodes_online:
+                                    msg = "Not all nodes are online, can not resume JC compression"
+                                    logger.info(msg)
+                                    task.function_result = msg
+                                    task.status = JobSchedule.STATUS_SUSPENDED
+                                    task.write_to_db(db.kv_store)
+                                    continue
+
+                                if len(storage_nodes_versions) > 1:
+                                    logger.error(f"Found multiple versions of storage nodes: {storage_nodes_versions}")
+                                    msg = "Not all nodes are updated yet, can not resume JC compression"
+                                    logger.info(msg)
+                                    task.function_result = msg
+                                    task.status = JobSchedule.STATUS_SUSPENDED
+                                    task.write_to_db(db.kv_store)
+                                    continue
+
+                                logger.info("Resuming compression")
                                 rpc_client = node.rpc_client(timeout=5, retry=2)
                                 jm_vuid = node.jm_vuid
                                 if "jm_vuid" in task.function_params:

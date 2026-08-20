@@ -7576,12 +7576,10 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
             logger.error("Error establishing hublvol: %s", e)
             # return False
 
-    # Resume JC compression for this LVS group on the restarting node
-    ret, err = snode.rpc_client().jc_suspend_compression(jm_vuid=primary_node.jm_vuid, suspend=False)
-    if not ret:
-        logger.info("Failed to resume JC compression adding task...")
-        tasks_controller.add_jc_comp_resume_task(
-            snode.cluster_id, snode.get_id(), jm_vuid=primary_node.jm_vuid)
+    # Add resume JC compression for this LVS group on the restarting node
+    logger.info("Adding JC compression resume task...")
+    tasks_controller.add_jc_comp_resume_task(
+        snode.cluster_id, snode.get_id(), jm_vuid=primary_node.jm_vuid)
 
     ### 2- create lvols nvmf subsystems (idempotent: skip existing)
     is_tertiary = (primary_node.tertiary_node_id == snode.get_id())
