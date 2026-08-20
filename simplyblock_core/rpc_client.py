@@ -151,6 +151,13 @@ class RPCRemoteError(RPCException):
 _response_validator = jsonschema.validators.validator_for(_response_schema)(_response_schema)  # type: ignore[call-arg]
 
 
+#: JSON-RPC's "method not found". Used to tell "this build is older than the
+#: RPC" apart from "the call failed", which callers must treat differently.
+RPC_METHOD_NOT_FOUND = -32601
+#: Returned instead of a result when the target does not implement the method.
+RPC_UNSUPPORTED = "__rpc_unsupported__"
+
+
 class RPCClient:
 
     # ref: https://spdk.io/doc/jsonrpc.html
@@ -1726,6 +1733,31 @@ class RPCClient:
             "qos_weights": qos_weights,
         }
         return self._request("bdev_distrib_set_qos_weights", params)
+
+    def jm_get_events(self):
+        """Fetch every event the JM currently holds.
+
+        Each entry looks like::
+
+            {"timestamp": "2026-08-19T18:59:59.010000Z",
+             "event_type": "jm_compression", "jm_vuid": "1",
+             "status": "compression_started", "error_code": 0}
+
+        ``status`` is one of compression_started / compression_finished /
+        compression_failed, and a non-zero ``error_code`` means failure.
+
+        Returns the list ([] when the JM holds nothing), ``RPC_UNSUPPORTED``
+        when the target build has no such RPC, or None when the call failed.
+        The sentinel matters: without it, a cluster running an SPDK build from
+        before this RPC existed would log a JSON-RPC error every poll forever.
+        """
+        result, error = self._request2("jm_get_events")
+        if error:
+            if error.get("code") == RPC_METHOD_NOT_FOUND:
+                return RPC_UNSUPPORTED
+            logger.error(f"jm_get_events failed: {error}")
+            return None
+        return result or []
 
     def jc_compression_get_status(self, jm_vuid):
         """
