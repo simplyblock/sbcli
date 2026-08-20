@@ -576,12 +576,8 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
         lvol_names, lvol_ids, snapshot_names = _build_batch_final_args(
             group, member_migrations, src_node, tgt_node, tgt_rpc)
     except (ValueError, KeyError) as e:
-        try:
-            src_rpc.bdev_nvme_detach_controller(ctrl_name)
-        except Exception as detach_exc:
-            logger.warning(
-                f"Group {group.uuid[:8]}: hub controller detach after build-args "
-                f"failure (non-fatal): {detach_exc}")
+        # Hub controller left attached — hub_manager owns its lifecycle
+        # entirely via its own idle timeout.
         return None, str(e)
 
     # Pre-freeze: take SRC/TGT paths out of the read/write path before the
@@ -702,11 +698,10 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
 
         _flip_ana_to_optimized(group, member_migrations, src_node, src_rpc, tgt_node, tgt_rpc)
 
-    try:
-        src_rpc.bdev_nvme_detach_controller(ctrl_name)
-    except Exception as e:
-        logger.warning(f"Group {group.uuid[:8]}: hub detach (non-fatal): {e}")
-
+    # Hub controller left attached on both success and failure — hub_manager
+    # owns its lifecycle entirely via its own idle timeout. Detaching it here
+    # unconditionally, on every group's final step, defeated the whole point
+    # of keeping it warm for the next group to reuse.
     return batch_ok, batch_err
 
 
