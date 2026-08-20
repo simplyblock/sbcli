@@ -195,6 +195,24 @@ def ssh_exec(ip, cmds, get_output=False, check=False, timeout=LONG_CMD_TIMEOUT):
         rc = chan.recv_exit_status()
         if get_output:
             results.append(out)
+        if rc == -1:
+            # No exit status: the channel closed under us. `sn deploy
+            # --isolate-cores` reconfigures the host and drops the session
+            # while completing normally -- deploy 2026-08-20 18:07 aborted on
+            # exactly this for two nodes whose SNodeAPI was up and healthy 26
+            # minutes later. A lost channel says nothing about the outcome, so
+            # do not call it a failure; the next phase (which needs SNodeAPI)
+            # is the real verification and fails loudly if it truly did not run.
+            print(f"  [{ip}] channel closed with no exit status: {cmd}")
+            print(f"  [{ip}] the command may have completed; continuing, the "
+                  f"next step verifies it")
+            try:
+                ssh.close()
+            except Exception:
+                pass
+            ssh = None
+            wait_for_ssh(ip, timeout=300)
+            continue
         if rc != 0:
             print(f"  [{ip}] FAILED (rc={rc}): {cmd}")
             for line in (out + err).rstrip().split("\n")[-10:]:
