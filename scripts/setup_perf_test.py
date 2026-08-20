@@ -329,7 +329,7 @@ def main():
     # Step 5a: Create cluster on mgmt (sequential, must complete first)
     print("Phase 2a: Creating cluster on management node...")
     ssh_exec(mgmt_ip, [
-        "sudo /usr/local/bin/sbctl -d cluster create --enable-node-affinity"
+        f"sudo /usr/local/bin/sbctl -d cluster create --enable-node-affinity --max-subsys {MAX_LVOL}"
         " --data-chunks-per-stripe 2 --parity-chunks-per-stripe 2"
     ], check=True)
     print("Phase 2a: DONE - cluster created.")
@@ -338,7 +338,7 @@ def main():
     print("Phase 2b: Configuring storage nodes...")
     with ThreadPoolExecutor(max_workers=len(sn_ips)) as executor:
         tasks = [executor.submit(ssh_exec, ip, [
-            f"sudo /usr/local/bin/sbctl -d sn configure --max-subsys {MAX_LVOL}"
+            f"sudo /usr/local/bin/sbctl -d sn configure"
         ], check=True) for ip in sn_ips]
         for t in tasks:
             t.result()

@@ -94,6 +94,22 @@ class Cluster(BaseModel):
     #: modification of lvols, snapshots, clones and pools while this is true.
     #: Read paths and the cluster's own maintenance are unaffected.
     object_ops_stopped: bool = False
+    #: SPDK sizing, cluster-wide. These used to be set per storage node, which
+    #: let nodes drift apart; a cluster is meant to be uniform. A node adopts
+    #: the current values when it is added and on every restart, so changing
+    #: them here takes effect node by node as they restart.
+    #:
+    #: max_subsys  -- nvmf subsystems per node (0 = product default)
+    #: hugepages_mem -- huge-page memory floor per node in bytes (0 = computed
+    #:                from the node's own iobuf/pool sizing)
+    #: spdk_vcpu_count -- absolute number of vCPUs SPDK gets on a node
+    #:                (0 = the previous heuristic). Replaces the old
+    #:                cores-percentage: a count is what an operator can reason
+    #:                about, a percentage silently means different things on
+    #:                different hardware.
+    max_subsys: int = 0
+    hugepages_mem: int = 0
+    spdk_vcpu_count: int = 0
     # ISO-8601 UTC timestamp refreshed every ~60s by the heartbeat thread that
     # cluster_activate runs for its whole duration. Lets the watchdog tell a
     # LIVE long activation (heartbeat fresh — leave it alone, up to the

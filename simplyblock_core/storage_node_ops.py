@@ -2485,6 +2485,28 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
 
         ha_jm_count = resolve_ha_jm_count(cluster, ha_jm_count)
 
+        # Cluster-level SPDK sizing. These live on the cluster so every node is
+        # sized alike; a node adopts them when it is added and on each restart.
+        cluster_max_subsys = int(getattr(cluster, "max_subsys", 0) or 0)
+        cluster_hp_mem = int(getattr(cluster, "hugepages_mem", 0) or 0)
+        cluster_vcpu_count = int(getattr(cluster, "spdk_vcpu_count", 0) or 0)
+
+        if cluster_vcpu_count:
+            total_cores = int(node_info.get("cpu_count") or 0)
+            # Refuse rather than quietly running SPDK on fewer cores than the
+            # cluster asks for. The rule (one core beyond the SPDK budget) lives
+            # in utils.vcpu_requirement_met so add and restart cannot drift.
+            if not utils.vcpu_requirement_met(total_cores, cluster_vcpu_count):
+                logger.error(
+                    "Node reports %d vCPU(s); this cluster requires %d for SPDK "
+                    "plus at least one for the system (%d total). Refusing the "
+                    "node -- lower the cluster vcpu-count or use a larger host.",
+                    total_cores, cluster_vcpu_count, cluster_vcpu_count + 1)
+                return False
+
+        if cluster_max_subsys:
+            node_config["max_lvol"] = cluster_max_subsys
+
         # Failure-domain id is mandatory exactly when the cluster has the
         # feature enabled (deploy-time only — clusters cannot be upgraded into
         # it, so the flag is fixed for the cluster's lifetime). 32-bit int,
@@ -2572,12 +2594,14 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 f"ERROR: The provided cpu mask {req_cpu_count} has values greater than 63, which is not allowed")
             return False
 
-        # Calculate pool count
-        max_prov = 0
-        if node_config.get("max_size"):
+        # Calculate pool count. The huge-page floor is the cluster's
+        # hugepages_mem; a max_size left in an older host config is still
+        # honoured so a node configured before this change keeps working.
+        max_prov = cluster_hp_mem
+        if not max_prov and node_config.get("max_size"):
             max_prov = int(utils.parse_size(node_config.get("max_size")))
         if max_prov < 0:
-            logger.error(f"Incorrect max-prov value {max_prov}")
+            logger.error(f"Incorrect huge-page floor value {max_prov}")
             return False
 
         minimum_hp_memory = node_config.get("huge_page_memory")
@@ -4442,6 +4466,26 @@ def _restart_storage_node_impl(
 
     logger.info("Restarting SPDK")
 
+    # Cluster-level SPDK sizing is adopted here: a restart is exactly when a
+    # node is meant to pick up a changed cluster setting. An explicit argument
+    # (internal callers only -- the CLI no longer offers one) still wins.
+    cluster_max_subsys = int(getattr(cluster, "max_subsys", 0) or 0)
+    cluster_hp_mem = int(getattr(cluster, "hugepages_mem", 0) or 0)
+    cluster_vcpu_count = int(getattr(cluster, "spdk_vcpu_count", 0) or 0)
+    if not max_lvol and cluster_max_subsys:
+        max_lvol = cluster_max_subsys
+    if not max_prov and cluster_hp_mem:
+        max_prov = cluster_hp_mem
+
+    if not utils.vcpu_requirement_met(snode.cpu, cluster_vcpu_count):
+        # Same rule as add-node: refuse rather than run SPDK on fewer cores
+        # than the cluster asks for, and keep one core for the system.
+        logger.error(
+            "Node %s has %s vCPU(s); this cluster requires %d for SPDK plus at "
+            "least one for the system. Refusing the restart.",
+            node_id, snode.cpu, cluster_vcpu_count)
+        return False
+
     lvol_changed = bool(max_lvol) and max_lvol != snode.max_lvol
     if lvol_changed:
         snode.max_lvol = max_lvol
@@ -6122,7 +6166,7 @@ def upgrade_automated_deployment_config():
 
 
 def generate_automated_deployment_config(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_allowed, pci_blocked,
-                                         cores_percentage=0, force=False, device_model="", size_range="", nvme_names=None, k8s=False,
+                                         vcpu_count=0, force=False, device_model="", size_range="", nvme_names=None, k8s=False,
                                          calculate_hp_only=False, number_of_devices=0):
     # Reject an over-cap max_lvol here rather than only in the CLI: this is the
     # single entry point shared by `sn configure` and the k8s node-configure
@@ -6135,7 +6179,7 @@ def generate_automated_deployment_config(max_lvol, max_prov, sockets_to_use, nod
                      f"{constants.MAX_SUBSYSTEMS_PER_NODE} subsystems per storage node")
         return False
     if calculate_hp_only:
-        minimum_hp_memory = utils.calculate_hp_only(max_lvol, number_of_devices, sockets_to_use, nodes_per_socket, cores_percentage)
+        minimum_hp_memory = utils.calculate_hp_only(max_lvol, number_of_devices, sockets_to_use, nodes_per_socket, vcpu_count)
         hp_number = math.ceil(minimum_hp_memory / 2)
         logger.info(f"The required number of huge pages on this host is: {hp_number} ({minimum_hp_memory} MB)")
         return True
@@ -6150,7 +6194,7 @@ def generate_automated_deployment_config(max_lvol, max_prov, sockets_to_use, nod
         utils.load_kernel_module("uio_pci_generic")
 
         nodes_config, system_info = utils.generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket,
-                                                           pci_allowed, pci_blocked, cores_percentage, force=force,
+                                                           pci_allowed, pci_blocked, vcpu_count, force=force,
                                                            device_model=device_model, size_range=size_range, nvme_names=nvme_names)
         if not nodes_config or not nodes_config.get("nodes"):
             return False

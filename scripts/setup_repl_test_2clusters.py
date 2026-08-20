@@ -312,7 +312,7 @@ def create_or_add_cluster(mgmt_ip, cfg):
     before = set() if cfg["bootstrap"] else list_cluster_uuids(mgmt_ip)
     verb = "create" if cfg["bootstrap"] else "add"
     ssh_exec(mgmt_ip, [
-        f"{SBCTL} -d cluster {verb} --enable-node-affinity"
+        f"{SBCTL} -d cluster {verb} --enable-node-affinity --max-subsys {MAX_LVOL}"
         f" --data-chunks-per-stripe {cfg['ndcs']} --parity-chunks-per-stripe {cfg['npcs']}"
     ], check=True)
     after = list_cluster_uuids(mgmt_ip)
@@ -403,7 +403,7 @@ def main():
     # --- Phase 3: configure + deploy ALL storage nodes ---
     print("Phase 3a: configuring storage nodes...")
     with ThreadPoolExecutor(max_workers=len(sn_pub_ips)) as ex:
-        for t in [ex.submit(ssh_exec, ip, [f"{SBCTL} -d sn configure --max-subsys {MAX_LVOL}"], check=True)
+        for t in [ex.submit(ssh_exec, ip, [f"{SBCTL} -d sn configure"], check=True)
                   for ip in sn_pub_ips]:
             t.result()
 

@@ -424,7 +424,7 @@ def main():
     print("Phase 2a: Creating cluster on management node...")
     ssh_exec(mgmt_ip, [
         # --dev enables developer-mode-only (private) args like --enable-hang-device.
-        "sudo /usr/local/bin/sbctl -d --dev cluster create --enable-node-affinity"
+        f"sudo /usr/local/bin/sbctl -d --dev cluster create --enable-node-affinity --max-subsys {MAX_LVOL}"
         " --enable-hang-device"
         " --data-chunks-per-stripe 2 --parity-chunks-per-stripe 2"
         # Swarm stack deploy inside cluster create pulls the full CP image set;
@@ -437,7 +437,7 @@ def main():
     print("Phase 2b: Configuring storage nodes...")
     with ThreadPoolExecutor(max_workers=len(sn_ips)) as executor:
         tasks = [executor.submit(ssh_exec, ip, [
-            f"sudo /usr/local/bin/sbctl -d sn configure --max-subsys {MAX_LVOL}"
+            f"sudo /usr/local/bin/sbctl -d sn configure"
         ], check=True) for ip in sn_ips]
         for t in tasks:
             t.result()
