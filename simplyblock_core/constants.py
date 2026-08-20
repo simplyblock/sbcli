@@ -331,8 +331,11 @@ MAX_SNAP_COUNT = 100
 # and journal, not the host. Replaces the earlier per-core cap
 # (cores x 2000); object-count overload precedent: run 20260712-231123,
 # ~68k objects on one 12-core instance drove swap thrash and a JC-quartet
-# abort.
-MAX_OBJECTS_PER_LVSTORE = 6000
+# abort -- which is an order of magnitude above this cap, so the headroom
+# below it is real.
+#
+# Raised 6000 -> 12000 on 2026-08-20.
+MAX_OBJECTS_PER_LVSTORE = 12000
 
 # Hard cap on namespaces (lvols) sharing one nvmf subsystem. The DEFAULT for
 # namespaced creates stays LVO_MAX_NAMESPACES_PER_SUBSYS; this is the ceiling
