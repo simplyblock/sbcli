@@ -18,7 +18,7 @@ import requests
 from docker.errors import DockerException
 from pydantic import SecretStr
 
-from simplyblock_core import utils, scripts, constants, mgmt_node_ops, storage_node_ops
+from simplyblock_core import utils, scripts, constants, mgmt_node_ops, release_upgrades, storage_node_ops
 from simplyblock_core.utils import port_block
 from simplyblock_core.controllers import backup_controller, cluster_events, device_controller, qos_controller, tasks_controller, tcp_ports_events
 from simplyblock_core.db_controller import DBController
@@ -31,6 +31,7 @@ from simplyblock_core.models.stats import LVolStatObject, ClusterStatObject, Nod
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.prom_client import PromClient
+from simplyblock_core.release_upgrades import jc_compression_upgrade
 from simplyblock_core.utils import pull_docker_image_with_retry
 from simplyblock_core.settings import Settings
 
@@ -1526,7 +1527,9 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                     logger.error(f"Failed to set Alcemls QOS on node: {node.get_id()}")
 
     # Start JC compression on each node
-    if ols_status == Cluster.STATUS_UNREADY:
+    # (release-upgrade guard: held until `cluster upgrade-complete`, remove
+    # with the jc_compression_upgrade plugin)
+    if ols_status == Cluster.STATUS_UNREADY and not jc_compression_upgrade.resume_is_held(cluster):
         for node in db_controller.get_storage_nodes_by_cluster_id(cl_id):
             if node.status == StorageNode.STATUS_ONLINE:
                 ret, err = node.rpc_client().jc_suspend_compression(jm_vuid=node.jm_vuid, suspend=False)
@@ -2324,6 +2327,12 @@ def get_cluster(cl_id) -> dict:
 def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, mgmt_image=None, **kwargs) -> None:
     cluster = db_controller.get_cluster_by_id(cluster_id)  # ensure exists
 
+    # Release-specific pre-upgrade steps (simplyblock_core/release_upgrades/).
+    # Must be the very first thing the upgrade does; raises to abort the
+    # upgrade before anything was changed. Completed later by
+    # `cluster upgrade-complete` (upgrade_complete below).
+    release_upgrades.run_pre_update(cluster)
+
     logger.info("Updating mgmt cluster")
     if cluster.mode == "docker":
         cluster_docker = utils.get_docker_client(cluster_id)
@@ -2492,6 +2501,17 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
         logger.info("Armed shared_placement migration for cluster %s post-upgrade", cluster_id)
 
     logger.info("Done")
+
+
+def upgrade_complete(cluster_id) -> bool:
+    """Completes a cluster upgrade started by update_cluster: runs the
+    completion step of every release-upgrade plugin that left state on the
+    cluster (e.g. resuming JC compression) and stamps the installed release.
+    Safe to re-run: with no pending plugin state it only re-stamps."""
+    cluster = db_controller.get_cluster_by_id(cluster_id)
+    for message in release_upgrades.run_upgrade_complete(cluster):
+        logger.info(message)
+    return True
 
 
 def cluster_grace_startup(cl_id, clear_data=False, spdk_image=None) -> None:

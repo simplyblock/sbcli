@@ -381,6 +381,7 @@ class CLIWrapper(CLIWrapperBase):
         self.init_cluster__update_fabric(subparser)
         self.init_cluster__check(subparser)
         self.init_cluster__update(subparser)
+        self.init_cluster__upgrade_complete(subparser)
         self.init_cluster__graceful_shutdown(subparser)
         self.init_cluster__restart(subparser)
         self.init_cluster__graceful_startup(subparser)
@@ -559,6 +560,10 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--cp-only', help='Update the control plane only. Default: `false`.', type=bool, default=False, dest='mgmt_only')
         subcommand.add_argument('--spdk-image', help='Restart the storage nodes using the provided image.', type=str, dest='spdk_image')
         subcommand.add_argument('--mgmt-image', help='Restart the management services using the provided image.', type=str, dest='mgmt_image')
+
+    def init_cluster__upgrade_complete(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'upgrade-complete', 'Completes a cluster upgrade.')
+        subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
 
     def init_cluster__graceful_shutdown(self, subparser):
         subcommand = self.add_sub_command(subparser, 'graceful-shutdown', 'Initiates a graceful shutdown of a cluster\'s storage nodes.')
@@ -1436,6 +1441,8 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.cluster__check(sub_command, args)
                 elif sub_command in ['update']:
                     ret = self.cluster__update(sub_command, args)
+                elif sub_command in ['upgrade-complete']:
+                    ret = self.cluster__upgrade_complete(sub_command, args)
                 elif sub_command in ['graceful-shutdown']:
                     ret = self.cluster__graceful_shutdown(sub_command, args)
                 elif sub_command in ['restart']:
