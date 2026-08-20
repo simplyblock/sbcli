@@ -493,14 +493,31 @@ def _previous_replicated_snapshot(snapshot, replicate_to_source):
     ``snap_ref_id`` wins when populated, but internal replication snapshots
     are created without it, so fall back to age ordering. Returns None only
     when the snapshot genuinely has no replicated predecessor (first snapshot
-    of the volume)."""
-    if snapshot.snap_ref_id:
-        try:
-            return db.get_snapshot_by_id(snapshot.snap_ref_id)
-        except KeyError as e:
-            logger.error("snap_ref_id %s unresolvable: %s", snapshot.snap_ref_id, e)
+    of the volume).
+
+    REPLICATED is the whole precondition, and it applies to the snap_ref_id
+    shortcut too. Returning a referenced predecessor that had never been
+    replicated handed _resolve_chain_target a BLANK remote-copy id, which it
+    read as "there is a remote copy, but I cannot resolve it" and refused to
+    finalize on. The transfer then retried for ever and the volume's snapshot
+    never got its replicated marker (lab 2026-08-20: 299 "Predecessor snapshot
+    ... has remote copy  but it cannot be resolved ('Snapshot lookup with a
+    blank id')" in 75 minutes, and case 4 never produced a post-baseline
+    replicated point)."""
     attr = ("source_replicated_snap_uuid" if replicate_to_source
             else "target_replicated_snap_uuid")
+    if snapshot.snap_ref_id:
+        try:
+            referenced = db.get_snapshot_by_id(snapshot.snap_ref_id)
+        except KeyError as e:
+            logger.error("snap_ref_id %s unresolvable: %s", snapshot.snap_ref_id, e)
+        else:
+            if getattr(referenced, attr, ""):
+                return referenced
+            logger.info(
+                "Referenced predecessor %s of %s has no copy on the remote side "
+                "yet; looking for an older replicated sibling instead",
+                referenced.get_id(), snapshot.get_id())
     prev = None
     for s in db.get_snapshots_by_node_id(snapshot.lvol.node_id):
         if (s.lvol.get_id() == snapshot.lvol.get_id()
@@ -555,6 +572,15 @@ def _resolve_chain_target(snapshot, replicate_to_source, remote_snode):
     remote_copy_uuid = (prev_snap.source_replicated_snap_uuid
                         if replicate_to_source
                         else prev_snap.target_replicated_snap_uuid)
+    if not remote_copy_uuid:
+        # A blank id is not an unresolvable copy, it is NO copy: this
+        # predecessor was never replicated, so there is nothing on the remote
+        # side to chain onto and this snapshot starts the chain. Treating the
+        # blank as a broken reference made the task refuse to finalize and
+        # retry for ever (see _previous_replicated_snapshot).
+        logger.info("Predecessor %s has no copy on the remote side; the new "
+                    "snapshot starts the chain", prev_snap.get_id())
+        return None, None, True
     try:
         _snap_obj = db.get_snapshot_by_id(remote_copy_uuid)
     except KeyError as e:

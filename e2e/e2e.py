@@ -685,7 +685,7 @@ def _docker_cluster_reset(args, new_nodes, logger):
         logger.info(f"[reset]   Installing sbcli + configuring {node}...")
         _ssh_exec(ssh_obj, node, install_cmd, logger, ignore_errors=False)
         time.sleep(5)
-        configure_cmd = f"{sbcli_cmd} --dev -d sn configure --max-subsys {args.max_subsys}"
+        configure_cmd = f"{sbcli_cmd} --dev -d sn configure"
         _ssh_exec(ssh_obj, node, configure_cmd, logger, ignore_errors=False)
         deploy_cmd = f"{sbcli_cmd} sn deploy --ifname {args.ifname}"
         _ssh_exec(ssh_obj, node, deploy_cmd, logger, ignore_errors=False)
@@ -699,6 +699,7 @@ def _docker_cluster_reset(args, new_nodes, logger):
     create_cmd = (
         f"{sbcli_cmd} sn deploy-cleaner ; "
         f"{sbcli_cmd} --dev -d cluster create"
+        f" --max-subsys {args.max_subsys}"
         f" --ha-type {args.ha_type}"
         f" --data-chunks-per-stripe {args.ndcs}"
         f" --parity-chunks-per-stripe {args.npcs}"

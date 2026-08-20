@@ -18,6 +18,7 @@ DOMAIN_CLUSTER = "cluster"
 DOMAIN_MANAGEMENT = "management"
 DOMAIN_STORAGE = "storage"
 DOMAIN_DISTR = "distr"
+DOMAIN_JM = "jm"
 
 CAUSED_BY_CLI = "cli"
 CAUSED_BY_API = "api"
@@ -49,6 +50,51 @@ def log_distr_event(cluster_id, node_id, event_dict):
 
     log_event_based_on_level(cluster_id, event_dict['event_type'], DOMAIN_DISTR,
                          event_dict['status'], CAUSED_BY_MONITOR, EventObj.LEVEL_ERROR)
+
+    db_controller = DBController()
+    ds.write_to_db(db_controller.kv_store)
+    return ds
+
+
+def log_jm_event(cluster_id, node_id, event_dict):
+    """Record one JM event (jm_compression today) in the cluster event log.
+
+    Level is derived rather than fixed: a started/finished compression is
+    informational, while compression_failed or any non-zero error_code is an
+    error. log_distr_event hardcodes ERROR, which is right for the distrib
+    events it handles (they are all faults) and wrong for these.
+    """
+    status = str(event_dict.get("status", ""))
+    try:
+        error_code = int(event_dict.get("error_code", 0) or 0)
+    except (TypeError, ValueError):
+        error_code = 0
+    failed = error_code != 0 or status == "compression_failed"
+
+    ds = EventObj()
+    ds.uuid = str(uuid.uuid4())
+    ds.cluster_uuid = cluster_id
+    ds.node_id = node_id
+    ds.date = round(time.time() * 1000)
+    ds.domain = DOMAIN_JM
+    ds.event_level = EventObj.LEVEL_ERROR if failed else EventObj.LEVEL_INFO
+    ds.caused_by = CAUSED_BY_MONITOR
+    ds.status = "new"
+
+    ds.event = str(event_dict.get("event_type", "jm_event"))
+    ds.message = f"{status} (error_code={error_code})" if failed else status
+
+    # jm_vuid arrives as a string ("1"); EventObj.vuid is an int with -1 for
+    # "not applicable".
+    try:
+        ds.vuid = int(event_dict.get("jm_vuid"))
+    except (TypeError, ValueError):
+        ds.vuid = -1
+
+    ds.object_dict = event_dict
+
+    log_event_based_on_level(cluster_id, ds.event, DOMAIN_JM, ds.message,
+                             CAUSED_BY_MONITOR, ds.event_level)
 
     db_controller = DBController()
     ds.write_to_db(db_controller.kv_store)

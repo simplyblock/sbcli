@@ -33,7 +33,18 @@ SSH_OPTS = ["-o", "StrictHostKeyChecking=no", "-o", "LogLevel=ERROR",
             "-o", "ConnectTimeout=30", "-i", KEY]
 
 HOTFIX_DIR = "/opt/sb-hotfix"
-CONTAINER_SP = "/usr/local/lib/python3.12/site-packages/simplyblock_core"
+#: Both copies matter, for different reasons:
+#:  * /app -- the service is started as `python3
+#:    simplyblock_core/services/<svc>.py` from /app, so ITS OWN module is
+#:    executed from here as __main__;
+#:  * site-packages -- sys.path[0] is then the SCRIPT directory, so every
+#:    `import simplyblock_core...` resolves there instead.
+#: Mounting only one of them patches half the process. On 2026-08-20 the
+#: chaining fix was mounted over site-packages while the entry-point script
+#: ran the image's original from /app, and the bug's signature kept
+#: appearing (49 in 6 minutes) on a lab that had just been "verified".
+CONTAINER_PATHS = ("/app/simplyblock_core",
+                   "/usr/local/lib/python3.12/site-packages/simplyblock_core")
 HOST_SP = "/usr/local/lib/python3.9/site-packages"
 
 #: local path -> path under simplyblock_core
@@ -41,6 +52,14 @@ SHARED = {
     "simplyblock_core/controllers/lvol_controller.py": "controllers/lvol_controller.py",
     "simplyblock_core/controllers/snapshot_controller.py": "controllers/snapshot_controller.py",
     "simplyblock_core/db_controller.py": "db_controller.py",
+    # Modules the mounted files IMPORT but the deployed image predates. main
+    # moves while a lab stays pinned to the release it was built from, so a
+    # hotfixed file can reference something that simply is not there: on
+    # 2026-08-20 lvol_controller pulled in ops_gate and every service — and
+    # the mgmt host, which the harness queries — died with
+    # "ImportError: cannot import name 'ops_gate'", mid-run. Ship the
+    # dependency alongside the file that needs it.
+    "simplyblock_core/controllers/ops_gate.py": "controllers/ops_gate.py",
 }
 #: service -> its own module (mounted on top of the shared set)
 SERVICES = {
@@ -88,11 +107,19 @@ def mount_services(mgmt):
         mounts = []
         for local, rel in {**SHARED, **own}.items():
             name = Path(local).name
-            mounts.append(f"--mount-add type=bind,source={HOTFIX_DIR}/{name},"
-                          f"target={CONTAINER_SP}/{rel}")
-        log(f"mounting {len(mounts)} files into {service}")
-        ssh(mgmt, f"sudo docker service update --quiet {' '.join(mounts)} {service}",
-            timeout=900)
+            for base in CONTAINER_PATHS:
+                mounts.append(
+                    f"--mount-add type=bind,source={HOTFIX_DIR}/{name},"
+                    f"target={base}/{rel}")
+        # --force matters: a --mount-add whose target is ALREADY mounted is a
+        # no-op and does NOT recreate the task, so the service keeps running
+        # the module it imported at startup. On 2026-08-20 the chaining fix sat
+        # mounted and unused for an hour while the verification passed, because
+        # an import-based probe reads the file from DISK, not from the running
+        # process's memory. Always recreate, then verify.
+        log(f"mounting {len(mounts)} files into {service} (forcing a restart)")
+        ssh(mgmt, f"sudo docker service update --quiet {' '.join(mounts)} "
+                  f"--force {service}", timeout=900)
 
 
 def patch_host(mgmt):
@@ -147,7 +174,7 @@ def main():
         stage(mgmt)
         mount_services(mgmt)
         patch_host(mgmt)
-        time.sleep(20)          # let the restarted tasks come up
+        time.sleep(60)          # let the recreated tasks come up
     verify(mgmt)
 
 

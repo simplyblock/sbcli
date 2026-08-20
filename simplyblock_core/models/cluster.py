@@ -85,6 +85,31 @@ class Cluster(BaseModel):
     # storage_node_monitor watchdog to detect and revert a wedged activation
     # (incident 2026-06-25). Empty string means "not currently activating".
     in_activation_since: str = ""
+    #: Node ids incorporated by the last successful activation (or expansion).
+    #: Empty means the cluster has never been activated. Once set, activation
+    #: refuses to run with nodes present that are not in this list: growth goes
+    #: through the expansion flow, never through re-activation.
+    activated_node_ids: List[str] = []
+    #: Set by "cluster op-stop": the cluster refuses creation, deletion and
+    #: modification of lvols, snapshots, clones and pools while this is true.
+    #: Read paths and the cluster's own maintenance are unaffected.
+    object_ops_stopped: bool = False
+    #: SPDK sizing, cluster-wide. These used to be set per storage node, which
+    #: let nodes drift apart; a cluster is meant to be uniform. A node adopts
+    #: the current values when it is added and on every restart, so changing
+    #: them here takes effect node by node as they restart.
+    #:
+    #: max_subsys  -- nvmf subsystems per node (0 = product default)
+    #: hugepages_mem -- huge-page memory floor per node in bytes (0 = computed
+    #:                from the node's own iobuf/pool sizing)
+    #: spdk_vcpu_count -- absolute number of vCPUs SPDK gets on a node
+    #:                (0 = the previous heuristic). Replaces the old
+    #:                cores-percentage: a count is what an operator can reason
+    #:                about, a percentage silently means different things on
+    #:                different hardware.
+    max_subsys: int = 0
+    hugepages_mem: int = 0
+    spdk_vcpu_count: int = 0
     # ISO-8601 UTC timestamp refreshed every ~60s by the heartbeat thread that
     # cluster_activate runs for its whole duration. Lets the watchdog tell a
     # LIVE long activation (heartbeat fresh — leave it alone, up to the
@@ -203,6 +228,16 @@ class Cluster(BaseModel):
     # ``simplyblock_core.controllers.cluster_expansion.planner``. See the feature plan
     # ``single_node_expansion_plan.md`` for the schema.
     expand_state: dict = {}
+    # State owned by release-specific upgrade plug-ins (see
+    # simplyblock_core/release_upgrades/). Keys are plugin STATE_KEYs; a key
+    # is set by the plugin's pre_update step (first thing `cluster update`
+    # does) and cleared by its upgrade_complete step (`cluster
+    # upgrade-complete`). Empty dict = no release upgrade in flight.
+    release_upgrade_state: dict = {}
+    # Release stamped by the last completed `cluster upgrade-complete`.
+    # Consumed by release_upgrades plugins with a from_release restriction.
+    # Empty on clusters that never completed an upgrade under this framework.
+    installed_release: str = ""
     backup_local_path: str = constants.KVD_DB_BACKUP_PATH
     backup_frequency_seconds: int = 3*60*60
     backup_s3_bucket: str = ""

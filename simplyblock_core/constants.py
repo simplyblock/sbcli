@@ -65,6 +65,13 @@ PROT_STAT_COLLECTOR_INTERVAL_SEC = 10
 SPDK_STAT_COLLECTOR_INTERVAL_SEC = 30
 DISTR_EVENT_COLLECTOR_INTERVAL_SEC = 5
 DISTR_EVENT_COLLECTOR_NUM_OF_EVENTS = 10
+#: JM events are polled on their own cadence. Unlike the distrib source there
+#: is no discard counterpart -- jm_get_events returns every event it holds on
+#: every call -- so the collector filters what it has already logged and the
+#: poll can afford to be less frequent than the distrib one.
+JM_EVENT_COLLECTOR_INTERVAL_SEC = 10
+#: How many recently-logged JM event keys to remember per node for that filter.
+JM_EVENT_DEDUPE_MAX = 10000
 CAP_MONITOR_INTERVAL_SEC = 30
 SSD_VENDOR_WHITE_LIST = ["1d0f:cd01", "1d0f:cd00"]
 CACHED_LVOL_STAT_COLLECTOR_INTERVAL_SEC = 15
@@ -324,8 +331,11 @@ MAX_SNAP_COUNT = 100
 # and journal, not the host. Replaces the earlier per-core cap
 # (cores x 2000); object-count overload precedent: run 20260712-231123,
 # ~68k objects on one 12-core instance drove swap thrash and a JC-quartet
-# abort.
-MAX_OBJECTS_PER_LVSTORE = 6000
+# abort -- which is an order of magnitude above this cap, so the headroom
+# below it is real.
+#
+# Raised 6000 -> 12000 on 2026-08-20.
+MAX_OBJECTS_PER_LVSTORE = 12000
 
 # Hard cap on namespaces (lvols) sharing one nvmf subsystem. The DEFAULT for
 # namespaced creates stays LVO_MAX_NAMESPACES_PER_SUBSYS; this is the ceiling
