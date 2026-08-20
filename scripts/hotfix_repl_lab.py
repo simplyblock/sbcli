@@ -60,6 +60,7 @@ SHARED = {
     # "ImportError: cannot import name 'ops_gate'", mid-run. Ship the
     # dependency alongside the file that needs it.
     "simplyblock_core/controllers/ops_gate.py": "controllers/ops_gate.py",
+    "simplyblock_core/controllers/tasks_controller.py": "controllers/tasks_controller.py",
 }
 #: service -> its own module (mounted on top of the shared set)
 SERVICES = {
