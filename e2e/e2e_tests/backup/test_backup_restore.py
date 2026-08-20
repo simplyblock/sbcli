@@ -1057,10 +1057,10 @@ class BackupTestBase(TestClusterBase):
         details = self.sbcli_utils.get_lvol_details(lvol_id=lvol_id)
         assert details, f"{label}: get_lvol_details returned empty for {lvol_id}"
         d = details[0] if isinstance(details, list) else details
-        crypto_val = d.get("crypto") or d.get("encryption") or d.get("Crypto")
-        self.logger.info(f"{label}: lvol {lvol_id} crypto={crypto_val}")
+        crypto_val = d.get("crypto_bdev") or d.get("crypto") or d.get("encryption")
+        self.logger.info(f"{label}: lvol {lvol_id} crypto_bdev={crypto_val}")
         assert crypto_val, (
-            f"{label}: restored lvol {lvol_id} expected crypto=True, "
+            f"{label}: restored lvol {lvol_id} expected crypto_bdev to be set, "
             f"got {crypto_val!r}. Full details: {d}")
         return d
 
