@@ -53,9 +53,15 @@ def main():
                             if jc_compression_upgrade.resume_is_held(cl):
                                 msg = "JC compression resume held: cluster upgrade in progress"
                                 logger.info(msg)
-                                task.function_result = msg
-                                task.status = JobSchedule.STATUS_SUSPENDED
-                                task.write_to_db(db.kv_store)
+                                # Only write when something actually changes. The
+                                # hold lasts until `cluster upgrade-complete` runs,
+                                # so an unconditional write here costs one DB write
+                                # per held task per poll for the whole upgrade.
+                                if (task.status != JobSchedule.STATUS_SUSPENDED
+                                        or task.function_result != msg):
+                                    task.function_result = msg
+                                    task.status = JobSchedule.STATUS_SUSPENDED
+                                    task.write_to_db(db.kv_store)
                                 continue
 
                             if task.retry >= task.max_retry:
