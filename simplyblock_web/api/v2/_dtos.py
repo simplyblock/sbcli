@@ -641,7 +641,7 @@ class FailoverResultDTO(BaseModel):
     status: FailoverStatus
     detail: Optional[str] = None
     target_lvol_id: util.OptionalUUID = None
-    connection_strings: List[str] = []
+    connection_strings: List[NvmeConnectEntry] = []
 
 
 class MigrationDTO(BaseModel):
