@@ -796,9 +796,17 @@ def repair_multipath_controller(name: str, device, node: StorageNode):
         name, len(attached_ips), len(expected_ips), missing_ips)
     for ip in missing_ips:
         try:
-            rpc_client.bdev_nvme_attach_controller(
-                name, device.nvmf_nqn, ip, device.nvmf_port,
-                tr_type, multipath="multipath")
+            # The return value matters: a fabric connect that cannot reach the
+            # address answers with an error result rather than raising, so
+            # discarding it made every such failure silent apart from the
+            # "still missing" line below. 478 of these went unattributed during
+            # the 2026-08-20 soak, all of them "-5 Input/output error".
+            if not rpc_client.bdev_nvme_attach_controller(
+                    name, device.nvmf_nqn, ip, device.nvmf_port,
+                    tr_type, multipath="multipath"):
+                logger.warning(
+                    "Re-attach of path %s on controller %s was rejected by the "
+                    "target", ip, name)
         except Exception as e:
             logger.error("Failed to re-attach path %s on controller %s: %s", ip, name, e)
 
