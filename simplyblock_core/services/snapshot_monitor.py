@@ -97,7 +97,8 @@ def process_snap_delete_finish(snap, completed_node):
         # in that order.
         with snapshot_controller.lvstore_op_lock(
                 snap.cluster_id, snap.lvol.lvs_name, node_id=primary_node.get_id()):
-            ret, _ = primary_node.rpc_client().delete_lvol(snap.snap_bdev, sync=True, special_delete=special_delete)
+            ret = snapshot_controller.delete_bdev_absent_ok(
+                primary_node, snap.snap_bdev, sync=True, special_delete=special_delete)
         if not ret:
             logger.error(f"Failed to delete snap from node: {snode.get_id()}")
 
@@ -304,7 +305,8 @@ def process_snap_delete(snap, snode, all_mini_lvols=None, leader_cache=None):
         # See note above: special_delete only for a snapshot copied to another
         # node by lvol migration (snap.instances non-empty), never for a local
         # clone or a stranded blob open_ref.
-        ret, _ = leader_node.rpc_client().delete_lvol(snap.snap_bdev, sync=False, special_delete=special_delete)
+        ret = snapshot_controller.delete_bdev_absent_ok(
+            leader_node, snap.snap_bdev, sync=False, special_delete=special_delete)
         if not ret:
             logger.error(f"Failed to delete snap from node: {snode.get_id()}")
             return False
@@ -340,7 +342,8 @@ def process_snap_delete(snap, snode, all_mini_lvols=None, leader_cache=None):
                 f"Phase-1 of {snap.snap_bdev} lost on recorded node "
                 f"{snap.deletion_status[:8]} (status {st}) — re-issuing on "
                 f"current leader {leader_node.get_id()[:8]}")
-            ret, _ = leader_node.rpc_client().delete_lvol(snap.snap_bdev, sync=False, special_delete=special_delete)
+            ret = snapshot_controller.delete_bdev_absent_ok(
+                leader_node, snap.snap_bdev, sync=False, special_delete=special_delete)
             if not ret:
                 logger.error(f"Failed to delete snap from node: {leader_node.get_id()}")
                 return False
@@ -463,6 +466,48 @@ def _due_for_internal_snapshot(lvol, all_snaps, now_ts):
     return (now_ts - last_ts) >= interval_sec
 
 
+def _outstanding_internal_snapshot(lvol, all_snaps):
+    """The newest internal snapshot of *lvol* that has NOT reached the remote
+    side yet, or None when the last one completed.
+
+    A transfer that has not finished must not be followed by another. The
+    interval is a cadence for a pipeline that keeps up, not a licence to queue
+    work without bound: whenever transfers stall — a full initial sync into a
+    second destination, a slow link, a wedged gateway — a purely time-driven
+    cadence mints another snapshot, and with it another REP_* landing volume on
+    the receiving node, every interval.
+
+    Lab 2026-08-20 (case 4): 5 volumes at a 1-minute cadence put 75 REP_*
+    volumes on one receiving node in 20 minutes and pinned it at its subsystem
+    cap. Retention could not reclaim any of them, because it only prunes
+    snapshots that DID replicate (they carry target_replicated_snap_uuid), so
+    the pile-up was self-sustaining: the more it grew, the less chance any
+    single transfer had of finishing.
+
+    The mini table does not carry the replicated-counterpart uuids, so the full
+    record is read — but only for a volume that is already due, i.e. at most
+    once per volume per interval, never per monitor cycle.
+    """
+    newest = None
+    for s in all_snaps:
+        if (s.lvol.get_id() == lvol.get_id()
+                and s.snap_type == SnapShot.TYPE_INTERNAL
+                and s.status != SnapShot.STATUS_IN_DELETION
+                and (newest is None or s.created_at > newest.created_at)):
+            newest = s
+    if newest is None:
+        return None                       # first internal snapshot of this volume
+    try:
+        full = db.get_snapshot_by_id(newest.get_id())
+    except KeyError:
+        return None                       # vanished under us: nothing outstanding
+    # Either direction counts as delivered: to-target replication records the
+    # target copy, fail-back records the source copy.
+    if full.target_replicated_snap_uuid or full.source_replicated_snap_uuid:
+        return None
+    return full
+
+
 def take_due_internal_snapshots(cluster_id, now_ts):
     """Create an internal snapshot for every replicated volume whose interval
     has elapsed. The snapshot's creation auto-enqueues a replication task.
@@ -481,6 +526,14 @@ def take_due_internal_snapshots(cluster_id, now_ts):
     for lvol in repl_lvols:
         try:
             if not _due_for_internal_snapshot(lvol, all_snaps, now_ts):
+                continue
+            outstanding = _outstanding_internal_snapshot(lvol, all_snaps)
+            if outstanding is not None:
+                logger.warning(
+                    "Skipping internal replication snapshot for lvol %s: the "
+                    "previous one (%s, taken %ss ago) has not replicated yet",
+                    lvol.get_id(), outstanding.get_id(),
+                    max(0, now_ts - outstanding.created_at))
                 continue
             name = f"repl_internal_{lvol.get_id()[:8]}_{now_ts}"
             logger.info(f"Taking internal replication snapshot for lvol {lvol.get_id()}: {name}")
