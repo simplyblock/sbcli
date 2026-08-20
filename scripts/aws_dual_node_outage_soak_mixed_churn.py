@@ -40,15 +40,19 @@ NQN_RE = re.compile(r"(?:--nqn[=\s]+|-n\s+)(\S+)")
 # NOTE: "device_hang" is temporarily DISABLED (removed from rotation for now).
 # The dormant _device_hang machinery below is kept so it can be re-enabled by
 # adding "device_hang" back to these two tuples.
+# 2026-08-05 campaign change: a single >=65s network outage replaces the
+# short/long (20s/50s) split — 65s guarantees the outage outlives every
+# CP detection/KA/exclusion budget, so each network scenario exercises the
+# full failover instead of racing the timers.
 OUTAGE_METHODS = (
     "graceful", "forced", "container_kill", "host_reboot",
-    "network_outage_20", "network_outage_50",
+    "network_outage_65",
 )
 # Methods that leave the node in a state where it recovers on its own
 # (no sbctl restart required from the soak driver).
 AUTO_RECOVER_METHODS = (
     "container_kill", "host_reboot",
-    "network_outage_20", "network_outage_50",
+    "network_outage_65",
 )
 
 # device_hang stalls a single device on the target node for a random duration
@@ -2459,19 +2463,13 @@ class SoakRunner:
         Same-method method pairs are NOT included — ordered distinct pairs
         only, per itertools.permutations(methods, 2).
 
-        NOTE: pairs without a network outage are temporarily DISABLED —
-        only pairs where at least one method is network_outage_* are kept.
-        Drop the startswith filter below to restore the full enumeration.
+        Full enumeration (2026-08-05: the temporary network-outage-mandatory
+        filter is removed again — non-network pairs are back in rotation).
         """
         _ = nodes  # unused: pair picking happens at iteration time
         scenarios = []
-        skipped = 0
         for category in ROLE_CATEGORIES:
             for m_a, m_b in itertools.permutations(self.methods, 2):
-                if not (m_a.startswith("network_outage_")
-                        or m_b.startswith("network_outage_")):
-                    skipped += 1
-                    continue
                 scenarios.append({
                     "method_a": m_a,
                     "method_b": m_b,
@@ -2481,8 +2479,7 @@ class SoakRunner:
         self.logger.log(
             f"Built {len(scenarios)} scenarios: "
             f"{len(ROLE_CATEGORIES)} role categories × "
-            f"P({len(self.methods)},2)={method_pair_count} ordered method pairs, "
-            f"{skipped} without a network_outage_* method disabled "
+            f"P({len(self.methods)},2)={method_pair_count} ordered method pairs "
             f"(node pair rolled randomly per scenario)"
         )
         return scenarios

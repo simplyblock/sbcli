@@ -67,20 +67,27 @@ BRANCH       = "main"
 #: SPDK/ultra image for the storage nodes. Empty string = let sbcli use its
 #: default (``ultra:main-latest``).
 #:
-#: PINNED BY DIGEST 2026-08-17. The ``main-latest`` manifest list is broken for
-#: amd64: its arm64 entry points at the current build (main-e4eea249-arm64,
-#: pushed 11:10) but its amd64 entry still points at the PREVIOUS commit's image
-#: (main-b1b0d3e2-amd64, pushed Aug 13 01:54), so every x86 node silently ran
-#: five-day-old code. The correctly built amd64 image exists and is tagged
-#: main-latest-amd64 / main-e4eea249-amd64 — this digest — and was byte-verified
-#: to contain the new "anti-affinity dropped" / "fault tolerance degraded"
-#: instrumentation with a binary linked 2026-08-17 09:15:25 UTC.
-#: Cause is in build_image_spdk_ultra_amd.yml: the workflow re-resolves the
-#: floating ``$TAG-latest-amd64`` tag 14 s after pushing it and embeds the
-#: pre-push digest in ``docker manifest create``. Drop this pin once the
-#: workflow uses the digest it just pushed.
-SPDK_IMAGE   = ("public.ecr.aws/simply-block/ultra@sha256:"
-                "428dfbf1b4cb6d85097cba6405479813ce50ca4163d71a88a8b70b9460466339")
+#: PINNED BY PER-COMMIT ARCH TAG. Never point this at ``main-latest``: that is
+#: a manifest list, and on 2026-08-17 its amd64 entry still referenced the
+#: PREVIOUS commit's image (main-b1b0d3e2-amd64, pushed Aug 13) while arm64 had
+#: moved on, so every x86 node silently ran five-day-old code for three runs.
+#:
+#: Two separate races feed that. (1) build_image_spdk_ultra_amd.yml re-resolves
+#: the floating ``$TAG-latest-amd64`` tag seconds after pushing it and can embed
+#: a pre-push digest in ``docker manifest create``. (2) The amd job is chained
+#: off the arm job by ``workflow_run`` and checks out ``head_branch`` — the
+#: branch head when *it* starts, not the SHA that triggered the arm run — so a
+#: push landing between the two builds yields a manifest whose halves were
+#: compiled from different commits (observed 2026-08-20: core amd64 refreshed at
+#: 12:45 while its arm64 partner still dated from 12:37, one commit earlier).
+#:
+#: A ``$TAG-$SHORT_SHA-amd64`` tag names one image built from one commit for the
+#: arch these nodes actually run, so it sidesteps both. Update it per build; the
+#: gate in deploy_gate_and_soak.py then verifies the commit from the image
+#: itself, so a stale pin fails loudly instead of running old code quietly.
+#: 8d2e5215 = ultra main "Build main on the R26.3 spdk-core base", built on
+#: spdk-core R26.3 a311a6852 which carries upstream d528e1a67 (spdk/spdk#3686).
+SPDK_IMAGE   = "public.ecr.aws/simply-block/ultra:main-8d2e5215-amd64"
 USER         = "ec2-user"
 MGMT_IFACE   = "eth0"
 DATA_NICS    = ["eth1", "eth2"]          # Names the OS assigns to ENI index 1, 2
