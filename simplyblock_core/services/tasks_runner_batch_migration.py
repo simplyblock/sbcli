@@ -17,8 +17,11 @@ PHASE_SNAP_COPY (orchestrator: wait)
     Advance group to PHASE_INTERMEDIATE.
 
 PHASE_INTERMEDIATE (orchestrator: wait + batch-final)
-    Wait for all workers to signal intermediates_done.
-    Build the batch-final-step argument lists (one entry per member, ordered
+    Wait for all workers to signal intermediates_done for the current round.
+    If any worker's dirty delta is still above the threshold, start another
+    synchronized round (every member retakes a snapshot together) up to
+    LVOL_MIG_MAX_INTERMEDIATE_SNAPS rounds. Once no more rounds are needed,
+    build the batch-final-step argument lists (one entry per member, ordered
     by ns_id), acquire a shared hub connection via hub_manager, and call
     bdev_lvol_batch_final_step on the source node.
     Set group.batch_result = True/False.
@@ -561,6 +564,22 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
         waiting = expected - done_set
         logger.debug(f"intermediates barrier: waiting for {len(waiting)} workers")
         return None, None  # None = still waiting
+
+    # Every member finished this round. If any of them still has too much
+    # dirty delta to freeze quickly at cutover, start another synchronized
+    # round -- every member retakes a snapshot together, even ones whose own
+    # delta was already low -- up to the round cap.
+    if (group.intermediate_more_needed
+            and group.intermediate_round + 1 < constants.LVOL_MIG_MAX_INTERMEDIATE_SNAPS):
+        group.intermediate_round += 1
+        group.intermediates_done = []
+        group.intermediate_more_needed = []
+        group.write_to_db(db.kv_store)
+        logger.info(
+            f"Group {group.uuid[:8]}: dirty delta still high after round "
+            f"{group.intermediate_round}/{constants.LVOL_MIG_MAX_INTERMEDIATE_SNAPS}; "
+            f"starting another synchronized intermediate round")
+        return None, None  # None = still waiting -- workers will redo this round
 
     logger.info(
         f"Group {group.uuid[:8]}: all workers reached intermediates_done; "
