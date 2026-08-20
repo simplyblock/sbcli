@@ -3576,7 +3576,7 @@ def replicate_lvol_on_target_cluster(lvol_id):
     # A failed-over volume no longer lives on the source, so there is nothing
     # left to replicate from it; any further source delta is by definition past
     # the RPO the fail-over accepted.
-    replication_stop(lvol_id)
+    replication_stop(lvol_id, from_policy=True)
 
     lvol = db_controller.get_lvol_by_id(lvol_id)
     lvol.from_source = False
