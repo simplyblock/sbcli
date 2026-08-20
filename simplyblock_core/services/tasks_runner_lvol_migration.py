@@ -865,12 +865,12 @@ def _cleanup_final_migration(src_rpc, ctx, tgt_rpc=None, rollback_target=False,
                              tgt_all_nodes=None, tgt_lvs_name=None):
     """Clean up after a final lvol migration attempt.
 
-    On the success path (rollback_target=False) the hub controller is kept
-    attached on source — detaching it would drop the migration path before
-    clients have switched to the new target path.
+    The hub controller is never touched here on either path — it is owned
+    and lifecycle-managed entirely by hub_manager's own activity-based idle
+    timeout, not by this function.
 
-    On the rollback path (rollback_target=True) the hub controller IS detached
-    and the target lvol/subsystem are torn down so a retry starts clean.
+    On the rollback path (rollback_target=True) the target lvol/subsystem
+    are torn down so a retry starts clean.
 
     ``nqn``/``lvol_uuid``/``subsystem_created_on_target`` must come from the
     caller (the lvol record and migration.target_subsystem_node_ids) —
@@ -878,13 +878,12 @@ def _cleanup_final_migration(src_rpc, ctx, tgt_rpc=None, rollback_target=False,
     stage, so reading them from ``ctx`` here silently no-ops the subsystem
     cleanup entirely.
     """
-    ctrl_name = ctx.get('ctrl_name')
-    if ctrl_name and rollback_target:
-        try:
-            src_rpc.bdev_nvme_detach_controller(ctrl_name)
-        except Exception as e:
-            logger.warning(f"detach hub ctrl {ctrl_name}: {e}")
-
+    # The hub controller is intentionally left attached here, even on
+    # rollback: it's managed entirely by hub_manager's own activity-based
+    # idle timeout (IDLE_TIMEOUT with no acquire()s). A retry of this same
+    # migration will just reuse it via acquire() instead of paying the
+    # reattach + DETACH_COOLDOWN cost, and a sibling migration to the same
+    # target isn't disrupted.
     if rollback_target and tgt_rpc:
         tgt_composite = ctx.get('tgt_lvol_composite')
         _nqn = ctx.get('nqn') or nqn
@@ -1953,7 +1952,8 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
             try:
                 last_snap = db.get_snapshot_by_id(last_snap_uuid)
             except KeyError:
-                src_rpc.bdev_nvme_detach_controller(ctrl_name)
+                # Hub controller left attached — hub_manager owns its
+                # lifecycle entirely via its own idle timeout.
                 try:
                     _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc,
                                           secondary_rpc=tgt_sec_rpc, tertiary_rpc=tgt_ter_rpc,
@@ -1979,7 +1979,7 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
                             tgt_snap_composite = snap_bdev
                         break
             if not tgt_snap_composite:
-                src_rpc.bdev_nvme_detach_controller(ctrl_name)
+                # Hub controller left attached — see comment above.
                 try:
                     _delete_bdev_blocking(tgt_lvol_composite, tgt_rpc,
                                           secondary_rpc=tgt_sec_rpc, tertiary_rpc=tgt_ter_rpc,
@@ -2041,7 +2041,8 @@ def _handle_lvol_migrate(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         if not ret:
             if state not in ('Done', 'No process'):
                 _revert_src_replicas("final migration failed")
-                src_rpc.bdev_nvme_detach_controller(ctrl_name)
+                # Hub controller left attached — see comment above; this is a
+                # retryable suspend, not an abandoned migration.
                 # Do NOT delete the target bdev on transfer failure — the bdev is
                 # still valid and retaining it keeps the map_id stable across retries.
                 # Deleting it would force a recreate at a higher map_id (due to
@@ -2650,9 +2651,9 @@ def _handle_cleanup_target(migration, tgt_node, tgt_rpc, src_rpc=None, src_node=
     Returns (done: bool, suspend: bool, error: str|None).
     """
 
-    # Immediately detach the hub controller on failure/cancel — don't leave it
-    # connected to a target whose snapshots we're about to roll back.
-    hub_manager.detach_now(migration.source_node_id, tgt_node.get_id(), src_rpc=src_rpc)
+    # Hub controller left attached here too — hub_manager owns its lifecycle
+    # entirely via its own idle timeout now; nothing in the migration runners
+    # calls detach_now() any more.
 
     ctx = migration.transfer_context or {}
     tgt_sec, _ = _get_target_secondary_node(tgt_node, migration.source_node_id)
