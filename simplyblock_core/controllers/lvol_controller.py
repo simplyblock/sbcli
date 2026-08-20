@@ -2989,7 +2989,11 @@ def replication_start(lvol_id, replication_cluster_id=None, mode=None, interval_
         logger.error(e)
         return False
 
-    if not from_policy and (getattr(lvol, 'replication_policy_id', None) is not None):
+    if not from_policy and lvol.replication_policy_id:
+        # Truthiness, NOT `is not None`: the field defaults to the empty
+        # string, so an `is not None` test treats EVERY volume as
+        # policy-managed and refuses all replication starts (commit
+        # 95a35804a did exactly that and broke all six lab cases).
         logger.error("LVol %s follows replication policy %s; change the policy "
                      "instead of starting replication directly",
                      lvol_id, lvol.replication_policy_id)
@@ -3044,6 +3048,21 @@ def replication_start(lvol_id, replication_cluster_id=None, mode=None, interval_
                     matched = True
                     break
             if not matched:
+                # Only snapshots of a volume that HAS a replication destination
+                # can be replicated forward. replication_backlog walks the clone
+                # ancestry across volumes, and on a failed-over volume that
+                # ancestry runs into the target-side REP_* receiving volumes,
+                # which exist only to receive a transfer and therefore carry
+                # replication_node_id="" / do_replicate=False. Queueing them
+                # produced tasks that could never resolve a destination node
+                # (330 x "StorageNode lookup with a blank id" in lab 2026-08-19,
+                # the same bug that used to surface as "Multiple values
+                # present"), and their endless retries starved the replication
+                # runner and wedged every volume delete behind them.
+                if not snap.lvol.replication_node_id:
+                    logger.debug("Skipping backlog snapshot %s: its volume %s has no "
+                                 "replication destination", snap.get_id(), snap.lvol.get_id())
+                    continue
                 task = tasks_controller.add_snapshot_replication_task(snap.cluster_id, snap.lvol.node_id, snap.get_id())
                 # task may be None if the scheduler is at capacity; the next poll cycle will retry
                 if task:
@@ -3212,7 +3231,11 @@ def replication_stop(lvol_id, delete=False, from_policy=False):
         logger.error(e)
         return False
 
-    if not from_policy and (getattr(lvol, 'replication_policy_id', None) is not None):
+    if not from_policy and lvol.replication_policy_id:
+        # Truthiness, NOT `is not None`: the field defaults to the empty
+        # string, so an `is not None` test treats EVERY volume as
+        # policy-managed and refuses all replication starts (commit
+        # 95a35804a did exactly that and broke all six lab cases).
         logger.error("LVol %s follows replication policy %s; detach the policy "
                      "instead of stopping replication directly",
                      lvol_id, lvol.replication_policy_id)

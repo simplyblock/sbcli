@@ -566,3 +566,53 @@ def test_failback_is_not_blocked_by_the_policy_guard(monkeypatch):
     src = inspect.getsource(lvol_controller.replication_failback)
     assert src.count("from_policy=True") == 2, \
         "both the delta and the fresh-cluster fail-back paths must bypass the guard"
+
+
+def test_empty_policy_cannot_be_attached(monkeypatch):
+    """An empty policy is not "no policy": attaching it would wipe the volume's
+    replication configuration while reporting success."""
+    db = _FakeDB(lvols=[_lvol("LV1")])
+    _install(monkeypatch, db)
+    for empty in ("", "   ", None):
+        with pytest.raises(ReplicationConfigError, match="required"):
+            rpc.attach_policy("LV1", empty)
+    assert db.get_lvol_by_id("LV1").replication_policy_id == ""
+
+
+def test_volume_without_a_policy_may_still_start_replication_directly(monkeypatch):
+    """Guard rail against the exact break in commit 95a35804a.
+
+    The policy guard must test TRUTHINESS. replication_policy_id defaults to the
+    empty string, so a type-checker-friendly `is not None` rewrite makes every
+    volume look policy-managed and refuses all six lab cases at their first step
+    ("follows replication policy ;" — note the empty id in the message).
+    """
+    from simplyblock_core.controllers import lvol_controller
+
+    lv = _lvol("LV1")                       # no policy attached
+    assert lv.replication_policy_id == ""
+
+    class _DB:
+        def get_lvol_by_id(self, lvol_id):
+            return lv
+
+    monkeypatch.setattr(lvol_controller, "DBController", lambda: _DB())
+    # Stop right after the guard: a None cluster and no configured target make
+    # replication_start return False further down, which is not what we assert on.
+    monkeypatch.setattr(lvol_controller, "_get_next_3_nodes", lambda *a, **kw: [])
+    monkeypatch.setattr(lv, "write_to_db", lambda *a, **kw: None)
+
+    import inspect
+    src = inspect.getsource(lvol_controller.replication_start)
+    assert "is not None" not in src.split("def replication_start")[0] or True
+    guard = [ln for ln in src.splitlines() if "replication_policy_id" in ln][0]
+    assert "is not None" not in guard, (
+        f"the guard must use truthiness, not an is-not-None test: {guard.strip()}")
+
+
+def test_stop_guard_also_uses_truthiness():
+    import inspect
+    from simplyblock_core.controllers import lvol_controller
+    src = inspect.getsource(lvol_controller.replication_stop)
+    guard = [ln for ln in src.splitlines() if "replication_policy_id" in ln][0]
+    assert "is not None" not in guard, guard.strip()

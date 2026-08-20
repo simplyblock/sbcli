@@ -439,6 +439,20 @@ commands:
             dest: spdk_proxy_image
             type: str
             private: true
+      - name: suspend
+        help: Exclude node from lvol allocation.
+        arguments:
+          - name: "node_id"
+            help: "Storage node id"
+            dest: node_id
+            type: str
+            completer: _completer_get_sn_list
+          - name: "--force"
+            help: "Force suspend"
+            dest: force
+            type: bool
+            default: false
+            action: store_true
       - name: shutdown
         help: "Initiates a storage node shutdown."
         usage: Once the command is issued, the node will stop accepting IO,but IO, which was previously received, will still be processed. In a high-availability setup, this will not impact operations.
@@ -453,23 +467,6 @@ commands:
             dest: force
             type: bool
             action: store_true
-      - name: suspend
-        help: "Exclude node from lvol allocation."
-        usage: The node will be excluded from lvol allocation. It will not be able to create new logical volumes on this node.
-        arguments:
-          - name: node_id
-            help: Storage node id
-            dest: node_id
-            completer: _completer_get_sn_list
-            type: str
-      - name: resume
-        help: "Include node in lvol allocation."
-        arguments:
-          - name: node_id
-            help: Storage node id
-            dest: node_id
-            completer: _completer_get_sn_list
-            type: str
       - name: get-io-stats
         help: "Gets storage node IO statistics."
         arguments:

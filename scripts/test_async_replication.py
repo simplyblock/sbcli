@@ -597,10 +597,67 @@ def sn_shutdown(mgmt_ip, key_path, node_id):
 
 
 def sn_bring_back(mgmt_ip, key_path, node_id):
+    """Restart a node and wait until it is genuinely back.
+
+    `sn resume` used to be called afterwards; it is gone. It only ever lifted a
+    SUSPENDED node (resume_storage_node refuses any other state), so on a node
+    that had just come back online it was a no-op.
+
+    "online" alone is not "back": the volume store also has to have a leader
+    again. Replication into a leaderless LVS is refused by the leader gates, and
+    LVolMonitor cannot finalise deletes without one, so a case that proceeds too
+    early sees 0 cutovers and then wedges every later case behind undeletable
+    volumes (lab 2026-08-19).
+    """
     print(f"Restarting node {node_id[:8]} ...")
     run(mgmt_ip, key_path, f"{SBCTL} -d sn restart {node_id}", check=False, timeout=1800)
     wait_node_status(mgmt_ip, key_path, node_id, "online")
-    run(mgmt_ip, key_path, f"{SBCTL} -d sn resume {node_id}", check=False)
+    wait_lvs_leader(mgmt_ip, key_path, node_id)
+
+
+def wait_lvs_leader(mgmt_ip, key_path, node_id, timeout=900):
+    """Wait until *node_id*'s lvstore reports leadership somewhere in its pair."""
+    start = time.time()
+    while time.time() - start < timeout:
+        out = mgmt_py(mgmt_ip, key_path, f"""
+import json
+from simplyblock_core.db_controller import DBController
+db = DBController()
+n = db.get_storage_node_by_id({node_id!r})
+leader = False
+for peer_id in [n.get_id(), n.secondary_node_id]:
+    if not peer_id:
+        continue
+    try:
+        p = db.get_storage_node_by_id(peer_id)
+        r = p.rpc_client(timeout=8, retry=1).bdev_lvol_get_lvstores(n.lvstore)
+        if r and r[0].get('lvs leadership'):
+            leader = True
+            break
+    except Exception:
+        pass
+print(json.dumps({{"leader": leader, "status": n.status}}))
+""", replayable=True)
+        if out.get("leader"):
+            print(f"  lvstore of {node_id[:8]} has a leader again")
+            return True
+        print(f"  waiting for an lvstore leader on {node_id[:8]} (node {out.get('status')})")
+        time.sleep(20)
+    raise RuntimeError(f"FAIL: no lvstore leader for {node_id} within {timeout}s")
+
+
+def restore_cluster(mgmt_ip, key_path, cluster_meta, label=""):
+    """Bring every node of a killed cluster back, then wait for leadership.
+
+    Restarting only the nodes that are not "online" is not enough: after a whole
+    cluster is killed its SPDK containers restart by themselves, so a node can
+    read "online" while its lvstore has no leader and its recovery never
+    completed. Restart every member, serially -- a second concurrent restart is
+    refused with "Node ... is in_restart".
+    """
+    print(f"Restoring cluster {label or cluster_meta['cluster_uuid'][:8]} ...")
+    for node_id in [n["uuid"] for n in cluster_meta["topology"]["nodes"]]:
+        sn_bring_back(mgmt_ip, key_path, node_id)
 
 
 def set_cluster_replication(mgmt_ip, key_path, from_cluster, to_cluster, to_pool_uuid):
@@ -988,6 +1045,13 @@ def test_case_2(meta):
         raise RuntimeError("FAIL: replicated data not intact after fail-over")
     print("CASE 2 PASSED: data readable and intact on target after fail-over.")
 
+    # Restore what this case killed. Leaving the source cluster dead made every
+    # later case start from a damaged cluster -- and because its lvstore had no
+    # leader, deletes could not be finalised, so the next case timed out in its
+    # own prologue waiting for leftover volumes to disappear. A case cleans up
+    # its own outage.
+    restore_cluster(mgmt_ip, key_path, src, label="src (after fail-over test)")
+
 
 def _setup_failed_over_volumes(meta, tag):
     """Shared prologue for the fail-back cases: get 5 volumes failed over to tgt.
@@ -1021,6 +1085,9 @@ def _setup_failed_over_volumes(meta, tag):
     cleanup_client(client_ip, key_path, mounts)
 
     print(f"[{tag}] failing over...")
+    # NOTE the source stays down on purpose here: the fail-over must happen while
+    # it is dead. Each case restores it explicitly when its scenario requires the
+    # primary site back (case 3), or leaves the fresh site to take over (case 4).
     tgt_lvols = []
     for lv in lvols:
         fo = do_failover(mgmt_ip, key_path, lv)
@@ -1049,11 +1116,14 @@ def test_case_3(meta):
     jobfile = write_fio_jobfile(client_ip, key_path, mounts)
     start_fio(client_ip, key_path, jobfile)
 
-    print("Restoring service on the primary site...")
-    for node_id in [n["uuid"] for n in src["topology"]["nodes"]]:
-        st = node_status(mgmt_ip, key_path, node_id)
-        if st != "online":
-            sn_bring_back(mgmt_ip, key_path, node_id)
+    # Restart EVERY member and wait for an lvstore leader. Restarting only the
+    # nodes that are not "online" was not enough: after the whole cluster is
+    # killed its SPDK containers come back by themselves, so a node reads
+    # "online" while its recovery never completed and its lvstore has no leader.
+    # Failing back into that cluster is then refused by the leader gates (0/5
+    # cutovers) and LVolMonitor cannot finalise deletes, which wedges every
+    # later case behind undeletable volumes (lab 2026-08-19).
+    restore_cluster(mgmt_ip, key_path, src, label="src (primary site)")
     print("  primary site online again.")
 
     # Fail-back needs the CURRENT host cluster (tgt) pointed back at src.
@@ -1215,6 +1285,10 @@ def test_case_4(meta):
     if not ok:
         raise RuntimeError("FAIL: data not intact after full fail-back to a fresh cluster")
     print("CASE 4 PASSED: full fail-back to a fresh cluster, data intact.")
+
+    # The shared prologue killed the source site to fail over; hand it back so the
+    # error cases do not inherit a dead cluster.
+    restore_cluster(mgmt_ip, key_path, src, label="src (after fresh fail-back)")
 
 
 def _replication_progress(mgmt_ip, key_path, lvols):

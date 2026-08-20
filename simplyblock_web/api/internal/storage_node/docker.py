@@ -342,7 +342,7 @@ def _spdk_unix_socket_alive(rpc_port, timeout=1.0):
     if not os.path.exists(sock_path):
         return False
     try:
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:  # type: ignore[attr-defined]  # AF_UNIX: Linux-only, absent on Windows
             s.settimeout(timeout)
             s.connect(sock_path)
             return True
