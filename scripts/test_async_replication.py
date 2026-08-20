@@ -1338,7 +1338,12 @@ def test_case_4(meta):
     for lv in tgt_lvols:
         attach_replication_policy(mgmt_ip, key_path, lv, policy)
     replication_started_ts = time.time()
-    wait_replication_caught_up(mgmt_ip, key_path, tgt_lvols)
+    # A fail-over clone's first sync moves the whole volume PLUS its base
+    # chain (ancestors replicate first), not a delta: run 20260820_230606 was
+    # converging -- lag peaked at 444s and was falling, min_replicated still
+    # climbing -- when the default 1200s budget fired. Give the full sync an
+    # hour; the gate still fails fast if progress stops (lag only grows).
+    wait_replication_caught_up(mgmt_ip, key_path, tgt_lvols, timeout=3600)
     # The volumes already hold the data, so any snapshot taken from here on
     # carries it: require one such snapshot to be ON the fresh cluster before
     # cutting over (lag alone would accept a point-in-time that predates it).
