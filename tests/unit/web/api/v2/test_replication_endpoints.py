@@ -2,6 +2,7 @@
 """Unit tests for /api/v2/clusters/{id}/replication endpoints."""
 
 from simplyblock_core.controllers.replication_policy_controller import ReplicationConfigError
+from simplyblock_core.utils.nvme import NvmeConnectEntry
 
 from tests.unit.web.api.v2._factories import (
     CLUSTER_ID,
@@ -144,9 +145,15 @@ class TestTargetInstance:
 
     def test_failover_reports_per_volume_results(self, client, db, cluster, replication_target,
                                                  replication_policy_controller):
+        entry = NvmeConnectEntry(
+            transport='tcp', ip='10.0.0.9', port=4420, nqn=f'nqn.orig:lvol:{VOLUME_ID}',
+            reconnect_delay=2, ctrl_loss_tmo=60, fast_io_fail_tmo=15, nr_io_queues=8,
+            keep_alive_tmo=5, connect='sudo nvme connect …', ns_id=7,
+            target_lvol_id=VOLUME_ID,
+        ).model_dump(by_alias=True)
         replication_policy_controller.failover_target.return_value = [
             {'lvol_id': VOLUME_ID, 'status': 'failed_over',
-             'target_lvol_id': VOLUME_ID, 'connection_strings': ['nvme connect …']},
+             'target_lvol_id': VOLUME_ID, 'connection_strings': [entry]},
             {'lvol_id': VOLUME_ID, 'status': 'skipped',
              'detail': 'already failed_over', 'target_lvol_id': ''},
         ]
@@ -156,7 +163,8 @@ class TestTargetInstance:
         assert response.status_code == 200
         done, skipped = response.json()
         assert done['status'] == 'failed_over'
-        assert done['connection_strings'] == ['nvme connect …']
+        assert done['connection_strings'] == [entry]
+        assert done['connection_strings'][0]['target-lvol-id'] == VOLUME_ID
         assert skipped['status'] == 'skipped'
         assert skipped['target_lvol_id'] is None
 

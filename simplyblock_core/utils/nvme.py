@@ -34,6 +34,9 @@ class NvmeConnectEntry(BaseModel):
     # Present only for lvol connect (not migration pre-connect)
     ns_id: Optional[int] = None
     allowed_hosts: list[str] = []
+    # Set when the volume has been failed over; the CSI driver uses this UUID
+    # for device lookup instead of the original source lvol UUID.
+    target_lvol_id: Optional[str] = None
 
 
 class HostConnectAuth(BaseModel):

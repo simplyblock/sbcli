@@ -2472,8 +2472,13 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
 
     out = []
     for path_lvol in _connect_path_volumes(db_controller, lvol):
-        out.extend(_connect_entries_for_volume(
-            db_controller, path_lvol, ctrl_loss_tmo, host_entry, host_nqn))
+        entries = _connect_entries_for_volume(
+            db_controller, path_lvol, ctrl_loss_tmo, host_entry, host_nqn)
+        clone_id = path_lvol.get_id()
+        if clone_id != uuid:
+            for entry in entries:
+                entry.target_lvol_id = clone_id
+        out.extend(entries)
     return out, None
 
 
