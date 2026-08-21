@@ -2475,14 +2475,14 @@ def apply_cluster_vcpu_count(snode_api, node_info, nodes, vcpu_count):
     # across the sockets in use, remainder to the earlier ones.
     base, remainder = divmod(vcpu_count, len(sockets_to_use))
     per_socket_budget = {
-        socket: base + (1 if index < remainder else 0)
-        for index, socket in enumerate(sockets_to_use)
+        numa_socket: base + (1 if index < remainder else 0)
+        for index, numa_socket in enumerate(sockets_to_use)
     }
 
     changed_sockets = [
-        socket for socket in sockets_to_use
-        if sum(len(n.get("isolated") or []) for n in nodes if n["socket"] == socket)
-           != per_socket_budget[socket]
+        numa_socket for numa_socket in sockets_to_use
+        if sum(len(n.get("isolated") or []) for n in nodes if n["socket"] == numa_socket)
+           != per_socket_budget[numa_socket]
     ]
     if not changed_sockets:
         return True
@@ -2499,22 +2499,22 @@ def apply_cluster_vcpu_count(snode_api, node_info, nodes, vcpu_count):
     # nodes_per_socket is not passed in from anywhere -- it is however many
     # slots already share the busiest socket in this host's persisted config.
     nodes_per_socket = max(
-        sum(1 for n in nodes if n["socket"] == socket)
-        for socket in sockets_to_use
+        sum(1 for n in nodes if n["socket"] == numa_socket)
+        for numa_socket in sockets_to_use
     )
 
     new_layout = utils.generate_core_allocation(
         cores_by_numa, sockets_to_use, nodes_per_socket, vcpu_count)
 
-    for socket in changed_sockets:
-        entries = [n for n in nodes if n["socket"] == socket]
-        replacements = new_layout.get(socket, [])
+    for numa_socket in changed_sockets:
+        entries = [n for n in nodes if n["socket"] == numa_socket]
+        replacements = new_layout.get(numa_socket, [])
         if len(replacements) != len(entries):
             logger.error(
                 "Cannot resize storage node CPUs on socket %s: expected %d "
                 "node slot(s) there, computed %d for a vcpu-count of %d -- "
                 "leaving its current CPU layout in place.",
-                socket, len(entries), len(replacements), vcpu_count)
+                numa_socket, len(entries), len(replacements), vcpu_count)
             return False
         # Both lists follow the same order convention (generate_configs walks
         # sockets_to_use, then each socket's slots in generate_core_allocation
@@ -2527,7 +2527,7 @@ def apply_cluster_vcpu_count(snode_api, node_info, nodes, vcpu_count):
                 replacement["distribution"], replacement["core_to_index"])
             entry["core_to_index"] = replacement["core_to_index"]
             ok, err = snode_api.persist_node_config(
-                max_lvol=None, huge_page_memory=None, numa_node=socket,
+                max_lvol=None, huge_page_memory=None, numa_node=numa_socket,
                 ssd_list=entry.get("ssd_pcis"),
                 cpu_mask=entry["cpu_mask"], isolated=entry["isolated"],
                 l_cores=entry["l-cores"], distribution=entry["distribution"],
@@ -2535,7 +2535,7 @@ def apply_cluster_vcpu_count(snode_api, node_info, nodes, vcpu_count):
             if not ok:
                 logger.error(
                     "Failed to persist the resized CPU layout for socket %s: %s",
-                    socket, err)
+                    numa_socket, err)
                 return False
     return True
 
