@@ -550,6 +550,65 @@ def _jm_event_key(event_dict):
 jm_unsupported_nodes: set[str] = set()
 
 
+def check_jm_compression_backlog(client, snode, alerted):
+    """Alert once when an lvs journal accumulates too many records for compression.
+
+    ``alerted`` is the per-node latch: alert on the upward crossing of
+    JM_COMPRESSION_BACKLOG_ALERT_RECORDS, then stay quiet until the backlog
+    falls back below the re-arm fraction, so a count oscillating around the
+    threshold cannot flap events every poll. Returns the new latch state.
+
+    Non-fatal by design: this rides the JM event collector thread, and a node
+    that cannot answer bdev_jm_get_status must not take event collection down
+    with it.
+    """
+    if not snode.jm_vuid:
+        return alerted
+    try:
+        status = client.bdev_jm_get_status(snode.jm_vuid)
+        if not status or not isinstance(status, dict):
+            return alerted
+        total_records = int(status.get("total_records") or 0)
+    except Exception as e:
+        logger.debug(f"bdev_jm_get_status failed on {snode.get_id()}: {e}")
+        return alerted
+
+    threshold = constants.JM_COMPRESSION_BACKLOG_ALERT_RECORDS
+    rearm_below = threshold * constants.JM_COMPRESSION_BACKLOG_REARM_FRACTION
+
+    if alerted:
+        if total_records < rearm_below:
+            logger.info(
+                f"JM compression backlog on {snode.get_id()} (lvs "
+                f"{snode.lvstore}, jm_vuid={snode.jm_vuid}) back under "
+                f"{rearm_below:.0f} records ({total_records}); alert re-armed")
+            return False
+        return True
+
+    if total_records > threshold:
+        try:
+            events_controller.log_event_cluster(
+                cluster_id=snode.cluster_id,
+                domain=events_controller.DOMAIN_STORAGE,
+                event="JM_COMPRESSION_BACKLOG",
+                db_object=snode,
+                caused_by=events_controller.CAUSED_BY_MONITOR,
+                message=(f"LVS {snode.lvstore} (jm_vuid={snode.jm_vuid}) on "
+                         f"node {snode.get_id()} has accumulated "
+                         f"{total_records} journal records for compression "
+                         f"(threshold {threshold}). Compression is not keeping "
+                         f"up; journal replay on the next restart or failover "
+                         f"grows with every record."),
+                node_id=snode.get_id(),
+                event_level="Error")
+        except Exception as event_error:
+            logger.warning(
+                f"Could not log JM compression backlog event: {event_error}")
+            return False
+        return True
+    return alerted
+
+
 def start_jm_event_collector_on_node(node_id):
     """Poll jm_get_events on one node and mirror every event to the cluster log.
 
@@ -574,9 +633,17 @@ def start_jm_event_collector_on_node(node_id):
     seen = set()
     seen_order: collections.deque[tuple[str, ...]] = collections.deque()
 
+    backlog_alerted = False
     try:
         while True:
             try:
+                try:
+                    snode = db.get_storage_node_by_id(node_id)
+                except KeyError:
+                    logger.info(f"Node {node_id} removed; stopping JM collector")
+                    return
+                backlog_alerted = check_jm_compression_backlog(
+                    client, snode, backlog_alerted)
                 events = client.jm_get_events()
 
                 if events == rpc_client.RPC_UNSUPPORTED:

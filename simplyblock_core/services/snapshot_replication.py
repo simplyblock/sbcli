@@ -362,7 +362,12 @@ def process_snap_replicate_start(task, snapshot):
     snode.rpc_client().bdev_lvol_transfer(
         name=snapshot.snap_bdev,
         offset=offset,
-        batch_size=16,
+        # 64 in-flight clusters (128 MiB window). 16 left the transfer ~12x
+        # slower than the fio writer dirtying the same volume (2026-08-21
+        # analysis: 29 MiB/s vs 345 MiB/s per volume) -- the replication lag
+        # equilibrium sits wherever transfer throughput meets the dirty rate,
+        # so the window is the first lever.
+        batch_size=64,
         bdev_name=hub_bdev,
         operation="replicate",
         lvol_id=remote_map_id

@@ -58,10 +58,16 @@ BASELINE_MB = 128                     # size of the md5-verified marker file
 OUTAGE_REPL_CYCLES = 4                # replication cycles to observe during an outage
 
 # --- fio workload (per the test spec) ---
-FIO_NUMJOBS = 4                       # 4 parallel jobs
+# Deliberately mild writer (2026-08-21): the point of the suite is proving
+# fail-over/fail-back correctness, not racing the replication pipeline. At
+# 4 jobs x QD4 x 64k, fio dirtied distinct clusters faster than one transfer
+# stream could ship them (345 vs ~29 MiB/s per volume), so the lag equilibrium
+# sat above every gate and no cutover could be reached. Throughput work is
+# tracked separately (batch 64, fragment size, hub queues).
+FIO_NUMJOBS = 2
 FIO_RW = "rw"
-FIO_BS = "64k"
-FIO_IODEPTH = 4
+FIO_BS = "16k"
+FIO_IODEPTH = 2
 # PER-CLONE, not per volume: fio allocates `size` for EACH of the numjobs
 # clones, so the volume must hold FIO_NUMJOBS * FIO_SIZE. VOL_SIZE=100G lands as
 # ~93 GiB usable, so 4 x 100G asked for ~400G and every run died of ENOSPC

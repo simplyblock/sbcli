@@ -2472,8 +2472,13 @@ def connect_lvol(uuid, ctrl_loss_tmo=constants.LVOL_NVME_CONNECT_CTRL_LOSS_TMO, 
 
     out = []
     for path_lvol in _connect_path_volumes(db_controller, lvol):
-        out.extend(_connect_entries_for_volume(
-            db_controller, path_lvol, ctrl_loss_tmo, host_entry, host_nqn))
+        entries = _connect_entries_for_volume(
+            db_controller, path_lvol, ctrl_loss_tmo, host_entry, host_nqn)
+        clone_id = path_lvol.get_id()
+        if clone_id != uuid:
+            for entry in entries:
+                entry.target_lvol_id = clone_id
+        out.extend(entries)
     return out, None
 
 
@@ -3583,7 +3588,7 @@ def replicate_lvol_on_target_cluster(lvol_id):
     # A failed-over volume no longer lives on the source, so there is nothing
     # left to replicate from it; any further source delta is by definition past
     # the RPO the fail-over accepted.
-    replication_stop(lvol_id)
+    replication_stop(lvol_id, from_policy=True)
 
     lvol = db_controller.get_lvol_by_id(lvol_id)
     lvol.from_source = False
@@ -3633,7 +3638,7 @@ def _resolve_target_map_id(target_node, lvol_bdev):
     return None
 
 
-def replication_commit(lvol_id):
+def replication_commit(lvol_id, delete_source=False):
     """Planned cutover for migration mode (and the final step of fail-back).
 
     Enqueues the FN_REPLICATION_FINAL task, which performs an iterative
@@ -3688,6 +3693,9 @@ def replication_commit(lvol_id):
             "shrink_round": 1,
             "shrink_snap_id": snap_uuid,
             "shrink_deadline": int(time.time()) + constants.REPL_CUTOVER_SHRINK_TIMEOUT_SEC,
+            # Migration semantics on request: retire the source volume once
+            # the cutover state is durable (see _finalize in the final runner).
+            "delete_source": bool(delete_source),
         })
     if not task:
         logger.error("Failed to enqueue replication-final task")
