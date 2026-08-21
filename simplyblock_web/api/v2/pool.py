@@ -5,8 +5,9 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
 
 from simplyblock_core.db_controller import DBController
-from simplyblock_core.controllers import pool_controller, lvol_controller
+from simplyblock_core.controllers import pool_controller
 from simplyblock_core import utils as core_utils
+from simplyblock_core.utils.helpers import single_or_none
 from simplyblock_core.models.pool import Pool as PoolModel
 
 from . import util as util
@@ -23,7 +24,7 @@ def list(cluster: Cluster) -> List[StoragePoolDTO]:
     data = []
     for pool in db.get_pools():
         if pool.cluster_id == cluster.get_id():
-            stat_obj = None
+            stat_obj = single_or_none(db.get_pool_stats(pool, limit=1))
             data.append(StoragePoolDTO.from_model(pool, stat_obj))
     return data
 
@@ -80,7 +81,7 @@ StoragePool = Annotated[PoolModel, Depends(_lookup_storage_pool)]
 
 @instance_api.get('/', name='clusters:storage-pools:detail')
 def get(cluster: Cluster, pool: StoragePool) -> StoragePoolDTO:
-    stat_obj = None
+    stat_obj = single_or_none(db.get_pool_stats(pool, limit=1))
     return StoragePoolDTO.from_model(pool, stat_obj)
 
 
