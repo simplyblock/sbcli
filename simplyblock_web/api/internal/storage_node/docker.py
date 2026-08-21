@@ -761,6 +761,20 @@ def persist_node_config(body: PersistNodeConfigParams):
     if not matched:
         return utils.get_response(False, "No matching node found for given numa_node and ssd_list")
 
+    # isolated_cores/host_cpu_mask are the union of every node's "isolated"
+    # list, computed once at configure time (generate_configs/regenerate_
+    # config) -- nothing reads them back today (the one consumer,
+    # validate_config, always recomputes the union fresh from the nodes
+    # themselves), but leaving them silently stale after a per-node isolated
+    # list changes here is exactly the kind of drift that bites whoever
+    # trusts them next. Recompute unconditionally; cheap, and correct
+    # regardless of which field this call actually changed.
+    all_isolated_cores = set()
+    for n in node_info["nodes"]:
+        all_isolated_cores.update(n.get("isolated") or [])
+    node_info["isolated_cores"] = sorted(all_isolated_cores)
+    node_info["host_cpu_mask"] = core_utils.generate_mask(all_isolated_cores)
+
     # get_nodes_config() refuses (both here and on k8s) whenever the live file
     # differs from its "_read_only" sibling -- that is the drift check meant
     # to catch a hand-edited config. This write is sanctioned, not drift, so
