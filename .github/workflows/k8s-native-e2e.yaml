@@ -44,8 +44,8 @@ on:
         description: 'Network interfaces (mgmt_ifc:data_nics)'
         required: false
         default: 'br-ex:enp2s0f0'
-      max_lvol:
-        description: 'Max logical volume count per storage node'
+      max_subsys:
+        description: 'Max subsystem count (cluster-level)'
         required: false
         default: '30'
       ssh_user:
@@ -826,7 +826,7 @@ jobs:
           IFC_NAMES="${{ github.event.inputs.ifc_names || 'br-ex:enp2s0f0' }}"
           MGMT_IFC="${IFC_NAMES%%:*}"
           DATA_NICS="${IFC_NAMES#*:}"
-          MAX_LVOL="${{ github.event.inputs.max_lvol || '30' }}"
+          MAX_SUBSYS="${{ github.event.inputs.max_subsys || '30' }}"
           SB_REPO="${{ github.event.inputs.simplyblock_repository || 'public.ecr.aws/simply-block/simplyblock' }}"
           SB_TAG="${{ github.event.inputs.simplyblock_image }}"
           SPDK_IMAGE="${{ github.event.inputs.spdk_image }}"
@@ -837,6 +837,31 @@ jobs:
           SKIP_KUBELET_CONFIG="${{ (github.event.inputs.cluster_environment == 'aws-openshift' || github.event.inputs.cluster_environment == 'openshift-local' || github.event.inputs.cluster_environment == 'openshift-baremetal') && 'false' || 'true' }}"
           FORCE_FORMAT_4K="${{ (github.event.inputs.cluster_environment == 'aws-openshift' || github.event.inputs.cluster_environment == 'openshift-local' || github.event.inputs.cluster_environment == 'openshift-baremetal') && 'true' || 'false' }}"
           DRIVE_SIZE_RANGE="${{ github.event.inputs.cluster_environment == 'openshift-baremetal' && '1500G-2000G' || '1.7T-2T' }}"
+
+          # Convert partitions to enableJournalDevice (inverted: 0→true, 1→false)
+          if [ "${PARTITIONS}" = "0" ]; then
+            ENABLE_JOURNAL_DEVICE="true"
+          else
+            ENABLE_JOURNAL_DEVICE="false"
+          fi
+
+          # Calculate vcpuCount from CORE_PERCENTAGE by querying actual CPU count on a worker node
+          FIRST_WORKER="${{ github.event.inputs.worker_nodes }}"
+          FIRST_WORKER="${FIRST_WORKER%%,*}"
+          if [ "$OPENSHIFT_CLUSTER" = "true" ]; then
+            TOTAL_CPUS=$(oc debug node/"${FIRST_WORKER}" -- chroot /host nproc 2>/dev/null || echo "0")
+          else
+            TOTAL_CPUS=$(kubectl get node "${FIRST_WORKER}" -o jsonpath='{.status.capacity.cpu}' 2>/dev/null || echo "0")
+          fi
+          TOTAL_CPUS=$(echo "${TOTAL_CPUS}" | tr -d '[:space:]')
+          if [ "${TOTAL_CPUS}" -gt 0 ] 2>/dev/null; then
+            VCPU_COUNT=$(( TOTAL_CPUS * CORE_PERCENTAGE / 100 ))
+            [ "${VCPU_COUNT}" -lt 1 ] && VCPU_COUNT=1
+          else
+            echo "WARNING: Could not determine CPU count, defaulting vcpuCount to 4"
+            VCPU_COUNT=4
+          fi
+          echo "Calculated vcpuCount=${VCPU_COUNT} (${TOTAL_CPUS} CPUs * ${CORE_PERCENTAGE}%)"
 
           RESERVED_CPU_YAML=""
           if [ "${{ github.event.inputs.cluster_environment }}" = "openshift-baremetal" ]; then
@@ -912,6 +937,8 @@ jobs:
               provisionedCapacity: 98
           ${BACKUP_SPEC}
           ${VAULT_SETTINGS}
+            maxSubsystemCount: ${MAX_SUBSYS}
+            vcpuCount: ${VCPU_COUNT}
           ---
           apiVersion: storage.simplyblock.io/v1alpha1
           kind: StoragePool
@@ -937,10 +964,8 @@ jobs:
             mgmtIfname: ${MGMT_IFC}
             dataIfname:
               - ${DATA_NICS}
-            maxSubsystemCount: ${MAX_LVOL}
           ${RESERVED_CPU_YAML}
-            partitions: ${PARTITIONS}
-            corePercentage: ${CORE_PERCENTAGE}
+            enableJournalDevice: ${ENABLE_JOURNAL_DEVICE}
             journalManager:
               count: ${JM_COUNT}
               percentPerDevice: 3
@@ -976,6 +1001,8 @@ jobs:
               provisionedCapacity: 98
           ${BACKUP_SPEC}
           ${VAULT_SETTINGS}
+            maxSubsystemCount: ${MAX_SUBSYS}
+            vcpuCount: ${VCPU_COUNT}
           ---
           apiVersion: storage.simplyblock.io/v1alpha1
           kind: StoragePool
@@ -1001,10 +1028,8 @@ jobs:
             mgmtIfname: ${MGMT_IFC}
             dataIfname:
               - ${DATA_NICS}
-            maxSubsystemCount: ${MAX_LVOL}
           ${RESERVED_CPU_YAML}
-            partitions: ${PARTITIONS}
-            corePercentage: ${CORE_PERCENTAGE}
+            enableJournalDevice: ${ENABLE_JOURNAL_DEVICE}
             journalManager:
               count: ${JM_COUNT}
               percentPerDevice: 3
