@@ -27,3 +27,8 @@ scrape_configs:
     static_configs:
       - targets: [ 'FDBExporter:9444' ]
 
+  - job_name: 'fastapi-app'
+    metrics_path: '/fastapi-metrics'
+    static_configs:
+      - targets: ['HAProxy:80']
+    scrape_interval: 30s

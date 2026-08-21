@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 import uvicorn
 from uvicorn.config import Config
+from prometheus_fastapi_instrumentator import Instrumentator
 
 from simplyblock_web.api import v1, v2
 from simplyblock_web.settings import Settings as WebSettings
@@ -75,7 +76,7 @@ class AccessLogMiddleware(BaseHTTPMiddleware):
 
 
 app: FastAPI = FastAPI()
-
+Instrumentator().instrument(app).expose(app, endpoint="/fastapi-metrics")
 
 @app.exception_handler(PreconditionError)
 async def precondition_handler(request: Request, exc: PreconditionError):

@@ -29,3 +29,4 @@ paramiko
 pydantic-settings
 botocore
 tenacity
+prometheus_fastapi_instrumentator
