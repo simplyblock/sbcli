@@ -225,7 +225,7 @@ class StoragePoolDTO(BaseModel):
     max_rw_mbytes: util.Unsigned
     max_r_mbytes: util.Unsigned
     max_w_mbytes: util.Unsigned
-    capacity: CapacityStatDTO
+    capacity: Optional[CapacityStatDTO]
     dhchap: bool = False
     allowed_hosts: List[str] = []
 
@@ -244,9 +244,7 @@ class StoragePoolDTO(BaseModel):
             max_w_mbytes=model.max_w_mbytes_per_sec,
             dhchap=getattr(model, 'dhchap', False),
             allowed_hosts=list(getattr(model, 'allowed_hosts', [])),
-            capacity=CapacityStatDTO.from_model(
-                stat_obj if stat_obj else StatsObject()
-            ),
+            capacity=CapacityStatDTO.from_model(stat_obj) if stat_obj else None,
         )
 
 
