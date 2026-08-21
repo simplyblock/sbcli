@@ -173,6 +173,20 @@ def _run_finalize(monkeypatch, delete_source, delete_raises=False):
     events = []
     rep = _rep(LVolReplication.STATE_CUTOVER_PENDING)
 
+    class _SrcLvol(_LvolRef):
+        def __init__(self, uuid):
+            super().__init__(uuid)
+            self.do_replicate = True
+            self.replication_interval_min = 1
+            self.replication_policy_id = "POL1"
+
+        def write_to_db(self, kv=None):
+            events.append(("src_config", self.do_replicate,
+                           self.replication_interval_min,
+                           self.replication_policy_id))
+
+    src_state = {"lvol": _SrcLvol("SRC1")}
+
     class _DB2:
         kv_store = "KV"
 
@@ -181,7 +195,7 @@ def _run_finalize(monkeypatch, delete_source, delete_raises=False):
 
         def get_lvol_by_id(self, uuid):
             events.append(("lookup", uuid))
-            return _LvolRef(uuid)
+            return src_state["lvol"]
 
     monkeypatch.setattr(trf, "db", _DB2())
     rep.write_to_db = lambda kv=None: events.append(("state", rep.state))
@@ -197,6 +211,14 @@ def _run_finalize(monkeypatch, delete_source, delete_raises=False):
     task = _Task(delete_source)
     ok = trf._finalize(task, True, "")
     return ok, task, events
+
+
+def test_cutover_stops_replication_on_the_source(monkeypatch):
+    """Observed 2026-08-21: after "cutover done" the source kept taking and
+    replicating cadence snapshots. The hand-off must stop the source."""
+    ok, _task, events = _run_finalize(monkeypatch, delete_source=False)
+    assert ok is True
+    assert ("src_config", False, 0, "") in events,         "the source's replication config must be cleared at cutover"
 
 
 def test_source_deleted_only_after_cutover_state_is_durable(monkeypatch):

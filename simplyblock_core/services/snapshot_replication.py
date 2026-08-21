@@ -873,10 +873,21 @@ def process_snap_replicate_finish(task, snapshot):
 
     snapshot.write_to_db()
 
-    # delete lvol object
+    # Tear down the landing volume's plumbing (subsystem/namespace); its BLOB
+    # deliberately lives on -- it was just converted into the chained snapshot.
+    # The record removal must not depend on the teardown succeeding: delete_lvol
+    # can raise (SPDK refuses to delete a bdev that is now a cloned snapshot),
+    # and a record left in_deletion never converges -- the monitor re-issues
+    # its delete forever (297 warnings/10min, run 20260821_205111) and every
+    # later cleanup that waits for lvols to drain times out on it.
     remote_lv.bdev_stack = []
     remote_lv.write_to_db()
-    lvol_controller.delete_lvol(remote_lv, force_delete=True)
+    try:
+        lvol_controller.delete_lvol(remote_lv, force_delete=True)
+    except Exception as e:
+        logger.error(f"Landing volume {remote_lv.get_id()} teardown raised: {e}; "
+                     f"retiring its record anyway (its bdev lives on as the "
+                     f"converted snapshot)")
     remote_lv.remove(db.kv_store)
     snapshot_events.replication_task_finished(snapshot)
     _prune_internal_snapshots(snapshot.lvol)

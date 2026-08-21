@@ -53,6 +53,29 @@ def _finalize(task, ok, err):
         task.function_params["end_time"] = int(time.time())
         task.write_to_db(db.kv_store)
 
+        # The hand-off is complete: the target serves the data from here on,
+        # so the SOURCE must stop replicating. Nothing else clears its cadence
+        # config, and a retired source otherwise keeps taking internal
+        # snapshots and shipping them to the very target it handed off to
+        # (observed 2026-08-21: replication_final done "cutover done" while
+        # the source volumes kept replicating). In-flight transfers drain
+        # naturally; this stops NEW cadence snapshots at the gate the monitor
+        # reads (do_replicate / replication_interval_min).
+        try:
+            src_lvol = db.get_lvol_by_id(task.function_params.get("lvol_id"))
+            if src_lvol.do_replicate:
+                src_lvol.do_replicate = False
+                src_lvol.replication_interval_min = 0
+                src_lvol.replication_policy_id = ""
+                src_lvol.write_to_db()
+                logger.info(f"Cutover done: stopped replication on source "
+                            f"volume {src_lvol.get_id()}")
+        except KeyError:
+            pass          # source already gone (e.g. deleted out of band)
+        except Exception as e:
+            logger.error(f"Could not stop replication on the source after "
+                         f"cutover: {e}")
+
         # Optional migration semantics: the source volume has served its
         # purpose once the client runs on the target, so `replication-commit
         # --delete-source` retires it here — strictly AFTER the cutover state
