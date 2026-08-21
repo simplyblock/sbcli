@@ -5,7 +5,7 @@ import os
 import subprocess
 import time
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import List, Optional, Set, Union
 
 import docker
 import psutil
@@ -769,7 +769,7 @@ def persist_node_config(body: PersistNodeConfigParams):
     # list changes here is exactly the kind of drift that bites whoever
     # trusts them next. Recompute unconditionally; cheap, and correct
     # regardless of which field this call actually changed.
-    all_isolated_cores = set()
+    all_isolated_cores: Set[int] = set()
     for n in node_info["nodes"]:
         all_isolated_cores.update(n.get("isolated") or [])
     node_info["isolated_cores"] = sorted(all_isolated_cores)
