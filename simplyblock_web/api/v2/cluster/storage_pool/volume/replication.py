@@ -159,6 +159,21 @@ def failback(cluster: Cluster, pool: StoragePool, volume: Volume, body: Failback
     return Response(status_code=204)
 
 
+@api.post('/cutover-proceed', name='clusters:storage-pools:volumes:replication:cutover-proceed',
+          status_code=204, responses={204: {"content": None}})
+def cutover_proceed(cluster: Cluster, pool: StoragePool, volume: Volume) -> Response:
+    """Signal that target NVMe paths are connected and cutover may proceed.
+
+    Called by the operator after its preconnect Job succeeds. The task runner
+    is suspended waiting for this signal; once set, it advances to the ANA flip.
+    """
+    try:
+        replication_policy_controller.set_cutover_proceed(volume.get_id())
+    except KeyError as exc:
+        raise HTTPException(404, str(exc))
+    return Response(status_code=204)
+
+
 @api.get('/tasks', name='clusters:storage-pools:volumes:replication:tasks')
 def list_tasks(cluster: Cluster, pool: StoragePool, volume: Volume) -> List[TaskDTO]:
     return [TaskDTO.from_model(task) for task in lvol_controller.list_replication_tasks(volume.get_id())]

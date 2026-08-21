@@ -369,6 +369,10 @@ MAX_SUBSYSTEMS_PER_NODE = 75
 # (snapshot -> wait replicated -> snapshot -> wait) before the final freeze.
 # Two rounds normally complete within 2 replication intervals + transfer time.
 REPL_CUTOVER_SHRINK_TIMEOUT_SEC = 900
+# Safety timeout for the operator preconnect signal. The task suspends indefinitely
+# waiting for POST .../replication/cutover-proceed; this is the fallback deadline
+# if the operator is unavailable. Cutover proceeds regardless after this many seconds.
+REPL_CUTOVER_PROCEED_TIMEOUT_SEC = 120
 
 SPDK_PROXY_MULTI_THREADING_ENABLED=True
 SPDK_PROXY_TIMEOUT=60*5
