@@ -699,9 +699,7 @@ jobs:
             namespace: ${NS_C1}
           spec:
             fabricType: tcp
-            isSingleNode: false
             enableNodeAffinity: true
-            strictNodeAntiAffinity: false
             stripe:
               dataChunks: ${NDCS}
               parityChunks: ${NPCS}
@@ -818,9 +816,7 @@ jobs:
             namespace: ${NS_C2}
           spec:
             fabricType: tcp
-            isSingleNode: false
             enableNodeAffinity: true
-            strictNodeAntiAffinity: false
             stripe:
               dataChunks: ${NDCS}
               parityChunks: ${NPCS}
