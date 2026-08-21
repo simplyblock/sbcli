@@ -39,6 +39,7 @@ PHASE_CLEANUP_TARGET (orchestrator: wait + target teardown)
     NVMe-oF subsystem and marks group FAILED/CANCELLED.
 """
 
+import threading
 import time
 from typing import Optional
 
@@ -50,6 +51,7 @@ from simplyblock_core.models.lvol_migration_group import LVolMigrationGroup
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCErrorCode, RPCRemoteError, RPCException
 from simplyblock_core.services.hub_controller_manager import HubControllerManager
+from simplyblock_core.utils import port_block
 from simplyblock_core.services.tasks_runner_lvol_migration import (
     _make_rpc,
     _snap_tgt_short_name,
@@ -651,6 +653,36 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
     logger.info(f"Group {group.uuid[:8]}: sleeping 2s after all-paths-inaccessible "
                f"before batch_final_step (diagnostic)")
     time.sleep(2)
+
+    # TEMPORARILY ADDED for a diagnostic test: block the target's transfer-hub
+    # NVMe-oF listener port right as batch_final_step is about to be called,
+    # then unblock it 5s later from a background thread while the call is
+    # in flight -- reproduces on demand the "final_step legitimately takes
+    # ~5-6s and races its own client-side timeout" race this session has
+    # been chasing, instead of waiting for it to happen naturally. Remove
+    # once this test is done.
+    _hub_port = getattr(tgt_node.transfer_hublvol, 'nvmf_port', None) if tgt_node.transfer_hublvol else None
+    if _hub_port:
+        logger.info(f"Group {group.uuid[:8]}: blocking hub port {_hub_port} on "
+                   f"target {tgt_node.get_id()[:8]} for 5s (diagnostic)")
+        try:
+            port_block.set_port(tgt_node, _hub_port, block=True)
+        except Exception as e:
+            logger.warning(f"Group {group.uuid[:8]}: hub port block failed (non-fatal): {e}")
+
+        def _unblock_hub_port_later():
+            time.sleep(5)
+            try:
+                port_block.set_port(tgt_node, _hub_port, block=False)
+                logger.info(f"Group {group.uuid[:8]}: unblocked hub port {_hub_port} "
+                           f"on target {tgt_node.get_id()[:8]} (diagnostic)")
+            except Exception as e:
+                logger.warning(f"Group {group.uuid[:8]}: hub port unblock failed: {e}")
+
+        threading.Thread(target=_unblock_hub_port_later, daemon=True).start()
+    else:
+        logger.warning(f"Group {group.uuid[:8]}: no transfer_hublvol port found on "
+                       f"target -- skipping diagnostic port block")
 
     logger.info(
         f"Group {group.uuid[:8]}: batch_final_step "
