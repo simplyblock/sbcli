@@ -72,7 +72,7 @@ on:
       # Bootstrap params
       # =========================
       BOOTSTRAP_MAX_LVOL:
-        description: "bootstrap: --max-lvol"
+        description: "bootstrap: --max-subsys (cluster-wide max subsystems per node)"
         required: true
         default: "75"
       BOOTSTRAP_DATA_CHUNKS:
@@ -546,7 +546,7 @@ jobs:
           set +e
           ./bootstrap-cluster.sh \
             --sbcli-cmd "${SBCLI_CMD}" \
-            --max-lvol "${BOOTSTRAP_MAX_LVOL}" \
+            --max-subsys "${BOOTSTRAP_MAX_LVOL}" \
             --data-chunks-per-stripe "${BOOTSTRAP_DATA_CHUNKS}" \
             --parity-chunks-per-stripe "${BOOTSTRAP_PARITY_CHUNKS}" \
             --journal-partition "${BOOTSTRAP_JOURNAL_PARTITION}" \
