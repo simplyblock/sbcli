@@ -24,8 +24,11 @@ scrape_configs:
       port: 9100
 
   - job_name: 'foundationdb'
-    static_configs:
-      - targets: [ 'FDBExporter:9444' ]
+    dns_sd_configs:
+    - names:
+      - 'tasks.FDBExporter'
+      type: 'A'
+      port: 9444
 
   - job_name: 'fastapi-app'
     metrics_path: '/fastapi-metrics'

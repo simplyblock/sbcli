@@ -644,6 +644,7 @@ services:
     environment:
       FDB_CLUSTER_FILE: /etc/foundationdb/fdb.cluster
     deploy:
+      endpoint_mode: dnsrr
       placement:
         constraints: [node.role == manager]
     volumes:
@@ -651,7 +652,7 @@ services:
     depends_on:
       - fdb-server
     networks:
-      - hostnet
+      - monitoring-net
 
 networks:
   monitoring-net:
