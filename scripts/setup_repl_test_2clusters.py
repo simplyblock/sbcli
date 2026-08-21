@@ -184,7 +184,15 @@ def ssh_exec(ip, cmds, get_output=False, check=False, timeout=LONG_CMD_TIMEOUT):
             while "\n" in pending[stream]:
                 line, pending[stream] = pending[stream].split("\n", 1)
                 if line.strip():
-                    print(f"    [{ip}] {line.rstrip()}", flush=True)
+                    # Remote output is arbitrary UTF-8; a Windows console is often
+                    # cp1252, and ONE unencodable character (a unicode arrow in an
+                    # sbctl log line) killed a whole deployment (run 20260821_1932).
+                    # Streaming must never be the thing that fails the run.
+                    out = f"    [{ip}] {line.rstrip()}"
+                    try:
+                        print(out, flush=True)
+                    except UnicodeEncodeError:
+                        print(out.encode("ascii", "replace").decode("ascii"), flush=True)
 
         def _drain():
             while chan.recv_ready():
