@@ -19,6 +19,8 @@ from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.backup import Backup, BackupPolicy
+from simplyblock_core.controllers.backup.manifest import BackupManifest
+from simplyblock_core.models.backup_config import BackupConfig
 from simplyblock_core.models.stats import StatsObject
 from simplyblock_core.models.lvol_migration import LVolMigration
 from simplyblock_core.models.lvol_migration_group import LVolMigrationGroup
@@ -227,7 +229,7 @@ class StoragePoolDTO(BaseModel):
     max_w_mbytes: util.Unsigned
     capacity: CapacityStatDTO
     dhchap: bool = False
-    allowed_hosts: List[str] = []
+    allowed_hosts: List[util.NQN] = []
 
     @staticmethod
     def from_model(model: Pool, stat_obj: Optional[StatsObject] = None):
@@ -424,7 +426,7 @@ class VolumeDTO(BaseModel):
     max_rw_mbytes: util.Unsigned
     max_r_mbytes: util.Unsigned
     max_w_mbytes: util.Unsigned
-    allowed_hosts: List[str]
+    allowed_hosts: List[util.NQN]
     policy: str
     capacity: CapacityStatDTO
     rep_info: Optional[dict] = None
@@ -502,6 +504,25 @@ class VolumeDTO(BaseModel):
         )
 
 
+#: A cluster's backup configuration as the API exchanges it, in both
+#: directions: the request body of the PUT and the response body of the GET.
+#:
+#: An alias rather than a hand-copied duplicate, because the two shapes are
+#: identical today and a copy would only drift. It is still a name of its own, so
+#: the wire format can diverge from ``BackupConfig`` later by turning this into a
+#: real class, without touching a single route signature.
+BackupConfigDTO = BackupConfig
+
+#: A backup's manifest as the API exchanges it: the response body of
+#: export/discover and the entries of an inline import.
+#:
+#: An alias for the same reason ``BackupConfigDTO`` is one -- except that here the
+#: shapes have a reason to stay locked together, since the wire form of a manifest
+#: is also its form in the bucket. Naming it separately still lets the API grow a
+#: field the stored document does not have.
+BackupManifestDTO = BackupManifest
+
+
 class BackupDTO(BaseModel):
     id: UUID
     s3_id: int
@@ -513,10 +534,16 @@ class BackupDTO(BaseModel):
     status: str
     prev_backup_id: str
     size: int
-    allowed_hosts: List[dict]
+
+    #: The NQNs allowed to attach. The record's host entries also carry that
+    #: host's DHCHAP keys and PSK, which listing backups has no business handing
+    #: out; ``LVolDTO`` already exposes the same field this way, and a volume's
+    #: per-host keys are read through the endpoint authorised for exactly that.
+    allowed_hosts: List[util.NQN]
+
     created_at: int
     completed_at: int
-    source_cluster_id: str
+    encrypted: bool
 
     @staticmethod
     def from_model(model: Backup):
@@ -531,10 +558,10 @@ class BackupDTO(BaseModel):
             status=model.status,
             prev_backup_id=model.prev_backup_id,
             size=model.size,
-            allowed_hosts=model.allowed_hosts or [],
+            allowed_hosts=[host["nqn"] for host in (model.allowed_hosts or [])],
             created_at=model.created_at,
             completed_at=model.completed_at,
-            source_cluster_id=model.source_cluster_id or "",
+            encrypted=model.encrypted,
         )
 
 

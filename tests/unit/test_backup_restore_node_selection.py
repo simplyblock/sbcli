@@ -13,6 +13,7 @@ import pytest
 
 from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.models.backup import Backup
+from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.storage_node import StorageNode
 
 
@@ -20,15 +21,18 @@ TARGET_CLUSTER = "00000000-0000-0000-0000-00000000000c"
 SOURCE_CLUSTER = "00000000-0000-0000-0000-00000000000f"
 
 
-def _backup(node_id, cluster_id=TARGET_CLUSTER, source_cluster_id=""):
+LOCATION = {"bucket_name": "backups", "region": "eu-central-1"}
+
+
+def _backup(node_id, cluster_id=TARGET_CLUSTER):
     backup = Backup()
     backup.uuid = "backup-1"
     backup.s3_id = 5
     backup.node_id = node_id
     backup.cluster_id = cluster_id
-    backup.source_cluster_id = source_cluster_id
     backup.size = 1024
     backup.status = Backup.STATUS_COMPLETED
+    backup.location = dict(LOCATION)
     return backup
 
 
@@ -43,15 +47,21 @@ def _node(uuid, cluster_id, status=StorageNode.STATUS_ONLINE, lvstore="lvs_test"
 
 @pytest.fixture
 def db():
-    with patch("simplyblock_core.controllers.backup_controller.db_controller") as db:
+    with patch("simplyblock_core.controllers.backup.controller.db_controller") as db:
         pool = MagicMock()
         pool.cluster_id = TARGET_CLUSTER
         db.get_pool_by_id_or_name.return_value = pool
 
-        cluster = MagicMock()
+        # A real Cluster, not a mock: restore compares the backup's recorded
+        # location against the cluster's own configuration, and a mock compares
+        # unequal to everything.
+        cluster = Cluster()
         cluster.uuid = TARGET_CLUSTER
-        cluster.backup_source = ""
+        cluster.backup_config = dict(LOCATION)
         db.get_cluster_by_id.return_value = cluster
+
+        node = _node("target-node", TARGET_CLUSTER)
+        db.get_storage_node_by_id.return_value = node
 
         lvol = MagicMock()
         lvol.node_id = "target-node"
@@ -70,13 +80,13 @@ def add_lvol_ha():
 
 @pytest.fixture
 def tasks():
-    with patch("simplyblock_core.controllers.backup_controller.tasks_controller") as tasks:
+    with patch("simplyblock_core.controllers.backup.controller.tasks_controller") as tasks:
         tasks.add_backup_restore_task.return_value = True
         yield tasks
 
 
 def _restore(**kwargs):
-    from simplyblock_core.controllers.backup_controller import restore_backup
+    from simplyblock_core.controllers.backup.controller import restore_backup
     return restore_backup("backup-1", "restored_lvol", "pool-1", **kwargs)
 
 
@@ -84,29 +94,26 @@ class TestImplicitNode:
 
     def test_backup_node_is_not_used_for_placement(self, db, add_lvol_ha, tasks):
         """An imported backup's node_id points into the source cluster."""
-        backup = _backup(node_id="source-cluster-node", source_cluster_id=SOURCE_CLUSTER)
+        backup = _backup(node_id="source-cluster-node")
         db.get_backup_by_id.return_value = backup
         db.get_backup_chain.return_value = [backup]
-        db.get_cluster_by_id.return_value.backup_source = SOURCE_CLUSTER
 
         assert _restore() == "lvol-new"
         assert not add_lvol_ha.call_args.kwargs["host_id_or_name"]
 
     def test_no_node_lookup_without_explicit_target(self, db, add_lvol_ha, tasks):
-        backup = _backup(node_id="source-cluster-node", source_cluster_id=SOURCE_CLUSTER)
+        backup = _backup(node_id="source-cluster-node")
         db.get_backup_by_id.return_value = backup
         db.get_backup_chain.return_value = [backup]
-        db.get_cluster_by_id.return_value.backup_source = SOURCE_CLUSTER
 
         _restore()
 
         db.get_storage_node_by_id.assert_not_called()
 
     def test_restore_task_targets_the_node_the_volume_landed_on(self, db, add_lvol_ha, tasks):
-        backup = _backup(node_id="source-cluster-node", source_cluster_id=SOURCE_CLUSTER)
+        backup = _backup(node_id="source-cluster-node")
         db.get_backup_by_id.return_value = backup
         db.get_backup_chain.return_value = [backup]
-        db.get_cluster_by_id.return_value.backup_source = SOURCE_CLUSTER
 
         _restore()
 
@@ -171,13 +178,14 @@ class TestFailures:
         db.get_backup_by_id.return_value = backup
         db.get_backup_chain.return_value = [backup]
 
-    def test_source_mismatch_is_a_precondition(self, db, add_lvol_ha):
-        db.get_cluster_by_id.return_value.backup_source = SOURCE_CLUSTER
+    def test_a_backup_from_another_cluster_needs_no_switch(self, db, add_lvol_ha, tasks):
+        """It used to be refused unless the whole cluster had been re-pointed at
+        that cluster's bucket. Same bucket, so nothing to re-point."""
+        backup = _backup(node_id="source-cluster-node")
+        db.get_backup_by_id.return_value = backup
+        db.get_backup_chain.return_value = [backup]
 
-        with pytest.raises(PreconditionError, match="source-switch"):
-            _restore()
-
-        add_lvol_ha.assert_not_called()
+        assert _restore() == "lvol-new"
 
     def test_incomplete_chain_is_rejected_before_creating_a_volume(self, db, add_lvol_ha):
         db.get_backup_chain.return_value = [_backup(node_id="target-node")]

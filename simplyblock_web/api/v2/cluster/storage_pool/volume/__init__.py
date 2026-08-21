@@ -6,7 +6,8 @@ from pydantic import BaseModel, Field, RootModel
 
 from simplyblock_core.db_controller import DBController
 from simplyblock_core import utils as core_utils
-from simplyblock_core.controllers import backup_controller, lvol_controller, snapshot_controller, replication_policy_controller
+from simplyblock_core.controllers import lvol_controller, snapshot_controller, replication_policy_controller
+from simplyblock_core.controllers.backup import controller as backup_controller
 from simplyblock_core.models.lvol_model import LVol
 
 from ...._dependencies import Cluster, StoragePool, Volume
@@ -41,7 +42,7 @@ class _CreateParams(BaseModel):
     pvc_name: Optional[str] = None
     ndcs: util.Unsigned = 0
     npcs: util.Unsigned = 0
-    allowed_hosts: Optional[List[str]] = None
+    allowed_hosts: Optional[List[util.NQN]] = None
     fabric: str = "tcp"
     # None → resolved by add_lvol_ha: a shareable default for namespaced
     # volumes, 1 otherwise.
@@ -187,7 +188,7 @@ def delete(cluster: Cluster, pool: StoragePool, volume: Volume) -> Response:
 
 
 class _AddHostParams(BaseModel):
-    host_nqn: str
+    host_nqn: util.NQN
 
 
 @instance_api.post('/hosts', name='clusters:storage-pools:volumes:add-host', status_code=201)

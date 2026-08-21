@@ -20,8 +20,10 @@ from pydantic import SecretStr
 
 from simplyblock_core import utils, scripts, constants, mgmt_node_ops, release_upgrades, storage_node_ops
 from simplyblock_core.utils import port_block
-from simplyblock_core.controllers import backup_controller, cluster_events, device_controller, qos_controller, tasks_controller, tcp_ports_events
+from simplyblock_core.controllers import cluster_events, device_controller, qos_controller, tasks_controller, tcp_ports_events
+from simplyblock_core.controllers.backup import device as backup_device
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.models.backup_config import BackupConfig
 from simplyblock_core.models.cluster import Cluster, HashicorpVaultSettings, DeployConfig
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
@@ -296,6 +298,11 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         if not dns_name:
             raise ValueError("--dns-name is required when --ingress-host-source is dns or loadbalancer")
 
+    if backup_config:
+        # Validate the backup config before doing real work, standing in for the
+        # bucket name Cluster.set_backup_config defaults below.
+        BackupConfig.model_validate({"bucket_name": "dummy", **backup_config})
+
     if name and db_controller.kv_store is not None:
         existing_clusters = db_controller.get_clusters()
         for existing in existing_clusters:
@@ -433,7 +440,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
         cluster.tls_config = nvmeof_tls_config
 
     if backup_config:
-        cluster.backup_config = backup_config
+        cluster.set_backup_config(backup_config)
 
     if not disable_monitoring:
         utils.render_and_deploy_alerting_configs(contact_point, cluster.grafana_endpoint, cluster.uuid, cluster.secret.get_secret_value())
@@ -695,7 +702,7 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
     cluster.snode_api_port = snode_api_port
     cluster.hashicorp_vault_settings = hashicorp_vault_settings
     if backup_config:
-        cluster.backup_config = backup_config
+        cluster.set_backup_config(backup_config)
 
     cluster.backup_local_path = os.path.join(constants.KVD_DB_BACKUP_PATH, cluster.uuid)
     cluster.status = Cluster.STATUS_UNREADY
@@ -704,6 +711,23 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
     cluster_events.cluster_create(cluster)
 
     return cluster.get_id()
+
+
+def set_backup_config(cl_id, config: BackupConfig) -> None:
+    """Replace a cluster's volume-backup configuration.
+
+    Uses ``atomic_update`` rather than a read-modify-write: this runs while
+    monitors are concurrently mutating cluster status, and a full write here
+    would clobber them.
+
+    Note this does not reconfigure S3 bdevs on already-running nodes -- they
+    pick the new config up on their next restart or cluster activate. Changing
+    the bucket or the object format also breaks the chain of any existing
+    backups, which is refused at backup time rather than here.
+    """
+    db_controller.atomic_update(
+        db_controller.get_cluster_by_id(cl_id),
+        lambda c, v=config.model_dump(exclude_none=True): c.set_backup_config(v))
 
 
 def set_name(cl_id, name) -> Cluster:
@@ -1302,7 +1326,7 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
             # Create S3 bdev for backup support (only if backup is configured)
             if cluster.backup_config:
                 snode = db_controller.get_storage_node_by_id(node_id)
-                backup_controller.create_s3_bdev(snode, cluster.backup_config)
+                backup_device.create_s3_bdev(snode, cluster.get_backup_config())
 
         else:
             _set_lvstore_status(node_id, "failed")

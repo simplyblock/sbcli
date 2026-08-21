@@ -853,7 +853,7 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
                 pass
 
     if backup:
-        from simplyblock_core.controllers import backup_controller
+        from simplyblock_core.controllers.backup import controller as backup_controller
         backup_id, backup_err = backup_controller.backup_snapshot(snap.uuid)
         if backup_err:
             logger.warning(f"Snapshot created but backup failed: {backup_err}")

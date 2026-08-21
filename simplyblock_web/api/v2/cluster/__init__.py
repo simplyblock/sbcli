@@ -3,7 +3,7 @@ from typing import Annotated, List, Literal, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, Response
-from pydantic import BaseModel, Field, SecretStr, computed_field, model_validator
+from pydantic import BaseModel, Field, computed_field, model_validator
 from pydantic.networks import AnyUrl, UrlConstraints
 
 from simplyblock_core.db_controller import DBController
@@ -18,7 +18,7 @@ from .storage_pool import api as pool_api
 from .storage_node import api as storage_node_api
 from .subsystem import api as subsystem_api
 from .task import api as task_api
-from .._dtos import ClusterDTO
+from .._dtos import BackupConfigDTO, ClusterDTO
 from .. import util as util
 
 
@@ -35,18 +35,6 @@ class _UpdateParams(BaseModel):
     management_image: Optional[str]
     spdk_image: Optional[str]
     restart: bool = Field(False)
-
-
-class BackupConfigParams(BaseModel):
-    access_key_id: Optional[SecretStr] = None
-    secret_access_key: Optional[SecretStr] = None
-    local_endpoint: Optional[str] = None
-    bucket_name: Optional[str] = None
-    snapshot_backups: Optional[bool] = None
-    with_compression: Optional[bool] = None
-    secondary_target: Optional[int] = Field(default=None, ge=0)
-    local_testing: Optional[bool] = None
-    s3_thread_pool_size: Optional[int] = Field(default=None, ge=0)
 
 
 class HashicorpVaultSettings(BaseModel):
@@ -83,7 +71,7 @@ class ClusterParams(BaseModel):
     nvmf_base_port: int = 4420
     rpc_base_port: int = 8080
     snode_api_port: int = 50001
-    backup_config: Optional[BackupConfigParams] = None
+    backup_config: Optional[BackupConfigDTO] = None
     hashicorp_vault_settings: Optional[HashicorpVaultSettings] = None
     enable_failure_domain: bool = False
     max_subsys: util.Unsigned
@@ -119,6 +107,8 @@ def add(request: Request, parameters: ClusterParams, response_format: util.Creat
         params = parameters.model_dump(exclude_none=True)
         if "hashicorp_vault_settings" in params:
             params["hashicorp_vault_settings"] = ModelVaultSettings(params["hashicorp_vault_settings"])
+        if parameters.backup_config is not None:
+            params["backup_config"] = parameters.backup_config.model_dump(exclude_none=True)
         cluster_id_or_false = cluster_ops.add_cluster(**params)
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
@@ -157,6 +147,36 @@ def update(cluster: Cluster, parameters: UpdatableClusterParameters):
     if parameters.name is not None:
         cluster_ops.set_name(cluster.get_id(), parameters.name)
 
+    return Response(status_code=204)
+
+
+@instance_api.get('/backup-config', name='clusters:backup-config:get')
+def get_backup_config(cluster: Cluster) -> BackupConfigDTO:
+    """The cluster's backup configuration, with credentials masked.
+
+    The credentials are ``SecretStr``, which FastAPI's JSON serialization
+    renders as ``**********``.
+    """
+    try:
+        return cluster.get_backup_config()
+    except ValueError as e:
+        raise HTTPException(404, str(e)) from e
+
+
+@instance_api.put('/backup-config', name='clusters:backup-config:set',
+                  status_code=204, responses={204: {"content": None}})
+def set_backup_config(cluster: Cluster, parameters: BackupConfigDTO) -> Response:
+    """Replace the cluster's backup configuration.
+
+    Backup configuration used to be settable only at cluster-create time, which
+    left no way to correct or complete it -- notably no way to record a region
+    on a cluster created before it was mandatory.
+
+    A full replacement rather than a patch: the fields interact (an endpoint
+    implies addressing style and TLS expectations), so merging half a config
+    into an existing one produces combinations nobody chose.
+    """
+    cluster_ops.set_backup_config(cluster.get_id(), parameters)
     return Response(status_code=204)
 
 

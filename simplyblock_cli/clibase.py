@@ -9,14 +9,28 @@ import time
 import argcomplete
 
 from simplyblock_core import cluster_ops, utils, db_controller, constants
+from simplyblock_core.controllers.backup import controller as backup_controller
+from simplyblock_core.controllers.backup import manifest as backup_manifest
+from simplyblock_core.controllers.backup import policy as backup_policy
+from simplyblock_core.controllers.backup.manifest import (
+    BackupManifest, ManifestError)
 from simplyblock_core.exceptions import MigrationConflictError, PreconditionError
 from simplyblock_core import storage_node_ops as storage_ops
 from simplyblock_core import mgmt_node_ops as mgmt_ops
-from simplyblock_core.controllers import pool_controller, lvol_controller, snapshot_controller, device_controller, \
-    tasks_controller, qos_controller, migration_controller, backup_controller, fdb_backup_controller, \
-    replication_policy_controller
+from simplyblock_core.controllers import (
+    pool_controller,
+    lvol_controller,
+    snapshot_controller,
+    device_controller,
+    tasks_controller,
+    qos_controller,
+    migration_controller,
+    fdb_backup_controller,
+    replication_policy_controller,
+)
 from simplyblock_core.controllers import health_controller
 from simplyblock_core.models.pool import Pool
+from simplyblock_core.models.backup_config import BackupConfig, S3Credentials
 from simplyblock_core.models.cluster import Cluster, HashicorpVaultSettings
 
 
@@ -71,6 +85,44 @@ def _format_json(data, *, sort_keys: bool = False) -> str:
 
 def _format_result(data, *, json: bool) -> str:
     return _format_json(data) if json else utils.print_table(data, unwrap_secrets=True)
+
+
+def _format_timestamp(seconds) -> str:
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(seconds)) if seconds else ""
+
+
+def _s3_credentials(args):
+    """The bucket credentials given on the command line, if any.
+
+    Returns None when neither key is supplied, which means "use the node's
+    instance role" rather than "use empty credentials".
+    """
+    access_key_id = getattr(args, 'access_key_id', None)
+    secret_access_key = getattr(args, 'secret_access_key', None)
+    if not access_key_id and not secret_access_key:
+        return None
+    if not (access_key_id and secret_access_key):
+        raise ValueError(
+            "give both --access-key-id and --secret-access-key, or neither")
+    return S3Credentials(access_key_id=access_key_id,
+                         secret_access_key=secret_access_key)
+
+
+def _bucket_config(args) -> BackupConfig:
+    """A backup configuration assembled from bucket arguments.
+
+    Used by the commands that read a bucket directly rather than through a
+    cluster -- which is the point of them, since after a disaster there may be no
+    cluster left to ask.
+    """
+    return BackupConfig(
+        bucket_name=args.bucket,
+        region=getattr(args, 'region', None) or None,
+        endpoint=getattr(args, 'endpoint', None) or None,
+        verify_tls=not getattr(args, 'no_verify_tls', False),
+        use_path_style=getattr(args, 'path_style', False),
+        credentials=_s3_credentials(args),
+    )
 
 
 class CLIWrapperBase:
@@ -741,6 +793,14 @@ class CLIWrapperBase:
             if not isinstance(allowed_hosts, list):
                 print("Error: --allowed-hosts JSON must be a list of host NQN strings")
                 return False
+            # The API validates its own request body, so this file is the one
+            # way an unchecked NQN reaches a volume's allow-list -- and from
+            # there every DTO and backup manifest that carries it.
+            invalid = [nqn for nqn in allowed_hosts
+                       if not isinstance(nqn, str) or utils.NQN_PATTERN.match(nqn) is None]
+            if invalid:
+                print("Error: not host NQNs: " + ", ".join(repr(nqn) for nqn in invalid))
+                return False
 
         results, error = lvol_controller.add_lvol_ha(
             name, size, host_id, ha_type, pool, comp, crypto,
@@ -1153,46 +1213,92 @@ class CLIWrapperBase:
         try:
             lvol_id = backup_controller.restore_backup(
                 args.backup_id, args.lvol_name, args.pool,
-                target_node_id=getattr(args, 'node', None))
-        except (PreconditionError, RuntimeError) as e:
+                target_node_id=getattr(args, 'node', None),
+                s3_credentials=_s3_credentials(args))
+        except (PreconditionError, RuntimeError, ValueError) as e:
             print(f"Error: {e}")
             return False
         print(f"Restoring backup {args.backup_id} into new volume {lvol_id}")
         return True
 
+    def backup__discover(self, sub_command, args):
+        try:
+            manifests = backup_controller.discover_backups(_bucket_config(args))
+        except (ManifestError, ValueError) as e:
+            print(f"Error: {e}")
+            return False
+        if not manifests:
+            print(f"No backups found in {args.bucket}")
+            return False
+        # Each manifest names only its predecessor, so the chain is walked over
+        # the set. A bucket holding a manifest whose ancestor is missing is worth
+        # showing rather than refusing: that IS the finding.
+        def chain_length(manifest):
+            try:
+                return str(len(backup_manifest.chain_of(manifest, manifests)))
+            except ManifestError:
+                return "incomplete"
+
+        return [{
+            "ID": m.backup_id,
+            "Volume": m.volume.lvol_name,
+            "Snapshot": m.volume.snapshot_name,
+            "Size": m.size,
+            "Chain": chain_length(m),
+            "Encrypted": "yes" if m.encryption.encrypted else "no",
+            "Needs KMS": (
+                m.encryption.descriptor.kms if m.encryption.descriptor else "-"),
+            "Created": _format_timestamp(m.created_at),
+        } for m in manifests]
+
     def backup__export(self, sub_command, args):
-        data = backup_controller.export_backups(
+        manifests = backup_controller.export_backups(
             cluster_id=getattr(args, 'cluster_id', None),
             lvol_name=getattr(args, 'lvol_name', None))
-        if not data:
+        if not manifests:
             print("No completed backups found")
             return False
-        output = _format_json(data)
+        output = _format_json([m.model_dump(mode="json") for m in manifests])
         output_file = getattr(args, 'output', None)
         if output_file:
             with open(output_file, 'w') as f:
                 f.write(output)
-            print(f"Exported {len(data)} backup(s) to {output_file}")
+            print(f"Exported {len(manifests)} backup(s) to {output_file}")
         else:
             print(output)
         return True
 
     def backup__import(self, sub_command, args):
-        try:
-            with open(args.metadata_file, 'r') as f:
-                metadata_list = json.load(f)
-        except Exception as e:
-            print(f"Error reading metadata file: {e}")
+        from_file = getattr(args, 'from_file', None)
+        bucket = getattr(args, 'bucket', None)
+
+        if bool(from_file) == bool(bucket):
+            print("Error: give exactly one of --from-file or --bucket")
             return False
-        if not isinstance(metadata_list, list):
-            metadata_list = [metadata_list]
-        count = backup_controller.import_backups(
-            metadata_list, cluster_id=getattr(args, 'cluster_id', None))
+
+        cluster_id = getattr(args, 'cluster_id', None)
+        try:
+            if bucket:
+                count = backup_controller.import_from_bucket(
+                    _bucket_config(args), cluster_id=cluster_id)
+            else:
+                with open(str(from_file), 'r') as f:
+                    entries = json.load(f)
+                if not isinstance(entries, list):
+                    entries = [entries]
+                # Parsed here rather than in the controller so a malformed file
+                # is reported as a problem with the file, naming it.
+                manifests = [BackupManifest.model_validate(e) for e in entries]
+                count = backup_controller.import_backups(manifests, cluster_id=cluster_id)
+        except (ManifestError, PreconditionError, ValueError, OSError) as e:
+            print(f"Error: {e}")
+            return False
+
         print(f"Imported {count} backup(s)")
         return True
 
     def backup__policy_add(self, sub_command, args):
-        policy_id, error = backup_controller.add_policy(
+        policy_id, error = backup_policy.add_policy(
             args.cluster_id, args.name,
             max_versions=args.versions or 0,
             max_age=args.age or "",
@@ -1204,7 +1310,7 @@ class CLIWrapperBase:
         return True
 
     def backup__policy_remove(self, sub_command, args):
-        success, error = backup_controller.remove_policy(args.policy_id)
+        success, error = backup_policy.remove_policy(args.policy_id)
         if error:
             print(f"Error: {error}")
             return False
@@ -1213,13 +1319,13 @@ class CLIWrapperBase:
 
     def backup__policy_list(self, sub_command, args):
         cluster_id = getattr(args, 'cluster_id', None)
-        data = backup_controller.list_policies(cluster_id)
+        data = backup_policy.list_policies(cluster_id)
         if data:
             return utils.print_table(data)
         return "No policies found"
 
     def backup__policy_attach(self, sub_command, args):
-        att_id, error = backup_controller.attach_policy(
+        att_id, error = backup_policy.attach_policy(
             args.policy_id, args.target_type, args.target_id)
         if error:
             print(f"Error: {error}")
@@ -1228,37 +1334,12 @@ class CLIWrapperBase:
         return True
 
     def backup__policy_detach(self, sub_command, args):
-        success, error = backup_controller.detach_policy(
+        success, error = backup_policy.detach_policy(
             args.policy_id, args.target_type, args.target_id)
         if error:
             print(f"Error: {error}")
             return False
         print("Policy detached")
-        return True
-
-    def backup__source_list(self, sub_command, args):
-        cluster_id = args.cluster_id
-        if not cluster_id:
-            db = db_controller.DBController()
-            clusters = db.get_clusters()
-            if clusters:
-                cluster_id = clusters[0].get_id()
-        sources = backup_controller.get_backup_sources(cluster_id)
-        return sources
-
-    def backup__source_switch(self, sub_command, args):
-        cluster_id = args.cluster_id
-        if not cluster_id:
-            db = db_controller.DBController()
-            clusters = db.get_clusters()
-            if clusters:
-                cluster_id = clusters[0].get_id()
-        backup_controller.switch_backup_source(cluster_id, args.source_cluster_id)
-        target = args.source_cluster_id
-        if target == cluster_id or target == "local":
-            print("Switched to local backup source")
-        else:
-            print(f"Switched to external backup source: {target}")
         return True
 
     def db_backup__create(self, sub_command, args):

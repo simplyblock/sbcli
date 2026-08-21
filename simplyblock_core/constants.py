@@ -615,6 +615,26 @@ NODE_HUBLVOL_PORT_START = NVMF_BASE_PORT
 BACKUP_POLL_INTERVAL_SEC = 5
 BACKUP_MAX_RETRIES = 10
 BACKUP_MERGE_SERVICE_INTERVAL_SEC = 60
-BACKUP_S3_METADATA_BUCKET = "simplyblock-backup-metadata"
+
+#: Longest backup chain the control plane will accept.
+#:
+#: This used to be a memory-safety bound: bdev_lvol_s3_backup and
+#: bdev_lvol_s3_recovery copied the decoded arrays into fixed 40-element stack
+#: buffers, so a longer chain corrupted the storage node's stack. Those buffers
+#: are now sized to the decoder's own bound (RPC_MAX_LVOL_VBDEV, 255), so the
+#: data plane rejects rather than overruns and this number is the control plane's
+#: own policy.
+#:
+#: It stays at 40 because a restore reads every backup in the chain in one
+#: operation: the chain length is a multiplier on restore time and on the objects
+#: a recovery has to fetch, and 40 tiered backups is already a long retention
+#: history. Raising it is safe up to 255 and needs no data-plane change.
+BACKUP_MAX_CHAIN_LENGTH = 40
+
+#: Upper bound on a backup's s3_id. The data plane packs it into bits 33..62 of
+#: the synthetic bdev offset (S3_ID_BITS in spdk_internal/lvolstore.h) and masks
+#: rather than validates, so a larger value silently aliases onto another
+#: backup's object keys.
+BACKUP_MAX_S3_ID = (1 << 30) - 1
 
 TASKS_RETENTION_PERIOD_SEC = 60*60*24*30 # 30 days
