@@ -229,7 +229,8 @@ class SNodeClient:
 
     def persist_node_config(self, max_lvol, huge_page_memory, numa_node, ssd_list,
                             cpu_mask=None, isolated=None, l_cores=None,
-                            distribution=None, core_to_index=None):
+                            distribution=None, core_to_index=None,
+                            small_pool_count=None, large_pool_count=None):
         payload = {
             "max_lvol": max_lvol,
             "huge_page_memory": huge_page_memory,
@@ -246,6 +247,10 @@ class SNodeClient:
             payload["distribution"] = distribution
         if core_to_index is not None:
             payload["core_to_index"] = core_to_index
+        if small_pool_count is not None:
+            payload["small_pool_count"] = small_pool_count
+        if large_pool_count is not None:
+            payload["large_pool_count"] = large_pool_count
         return self._request("POST", "persist_node_config", payload)
 
     def ifc_is_roce(self, nic):

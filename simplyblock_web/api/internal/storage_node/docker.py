@@ -701,6 +701,12 @@ def bind_device_to_spdk(body: utils.DeviceParams):
 class PersistNodeConfigParams(BaseModel):
     max_lvol: Optional[int] = Field(None, ge=0, le=constants.MAX_SUBSYSTEMS_PER_NODE)
     huge_page_memory: Optional[int] = Field(None, ge=0)
+    # small/large_pool_count are written alongside huge_page_memory whenever
+    # add_node recalculates it against the cluster's real max_lvol/core count
+    # -- they are what that memory figure was derived from (calculate_pool_count
+    # -> calculate_minimum_hp_memory), so they must never drift from it.
+    small_pool_count: Optional[int] = Field(None, ge=0)
+    large_pool_count: Optional[int] = Field(None, ge=0)
     numa_node: Optional[int] = Field(None, ge=0)
     ssd_list: Optional[List[str]] = Field(None)
     # CPU layout, resized to the cluster's spdk_vcpu_count at add time (see
@@ -735,6 +741,10 @@ def persist_node_config(body: PersistNodeConfigParams):
             node_config["max_lvol"] = body.max_lvol
         if body.huge_page_memory is not None:
             node_config["huge_page_memory"] = body.huge_page_memory
+        if body.small_pool_count is not None:
+            node_config["small_pool_count"] = body.small_pool_count
+        if body.large_pool_count is not None:
+            node_config["large_pool_count"] = body.large_pool_count
         if body.cpu_mask is not None:
             node_config["cpu_mask"] = body.cpu_mask
         if body.isolated is not None:

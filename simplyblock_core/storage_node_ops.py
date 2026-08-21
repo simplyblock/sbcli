@@ -2521,6 +2521,58 @@ def apply_cluster_vcpu_count(snode_api, node_info, nodes, vcpu_count):
     return True
 
 
+def apply_cluster_hugepages(snode_api, node_config, req_cpu_count, max_prov):
+    """Recalculate this node_config entry's huge-page memory -- and the
+    small/large pool counts it is derived from -- against the real numbers
+    now known, and persist the change, the same way the CPU layout resize
+    in apply_cluster_vcpu_count does.
+
+    sn configure priced this entry for the worst case: max_lvol capped at
+    the product ceiling and its own default core-count heuristic, since it
+    ran before the node belonged to any cluster. By the time this runs,
+    node_config["max_lvol"] is already the cluster's real max_subsys (set
+    above in add_node) and req_cpu_count is already the cluster's real
+    vcpu_count (via apply_cluster_vcpu_count, before the per-entry loop) --
+    so recomputing here against the same formula sn configure used, just fed
+    the real numbers, is the accurate figure. A no-op when it already
+    matches what's on file: in particular when the cluster set neither
+    max_subsys nor vcpu_count, nothing about this entry's sizing has
+    actually changed since configure time.
+
+    Returns the correct huge_page_memory (already floored to max_prov) on
+    success, or None if persisting a change failed.
+    """
+    max_lvol = int(node_config.get("max_lvol") or 0)
+    number_of_alcemls = int(node_config.get("number_of_alcemls") or 0)
+    number_of_distribs = int(node_config.get("number_of_distribs") or 0)
+    poller_cores = (node_config.get("distribution") or {}).get("poller_cpu_cores") or []
+    poller_count = len(poller_cores) or req_cpu_count
+
+    small_pool_count, large_pool_count = utils.calculate_pool_count(
+        number_of_alcemls, 2 * number_of_distribs, req_cpu_count, poller_count, max_lvol)
+    huge_page_memory = max(
+        utils.calculate_minimum_hp_memory(
+            small_pool_count, large_pool_count, max_lvol, max_prov, req_cpu_count),
+        max_prov)
+
+    if (huge_page_memory == node_config.get("huge_page_memory")
+            and small_pool_count == node_config.get("small_pool_count")
+            and large_pool_count == node_config.get("large_pool_count")):
+        return huge_page_memory
+
+    node_config["huge_page_memory"] = huge_page_memory
+    node_config["small_pool_count"] = small_pool_count
+    node_config["large_pool_count"] = large_pool_count
+    ok, err = snode_api.persist_node_config(
+        max_lvol=None, huge_page_memory=huge_page_memory, numa_node=node_config.get("socket"),
+        ssd_list=node_config.get("ssd_pcis"),
+        small_pool_count=small_pool_count, large_pool_count=large_pool_count)
+    if not ok:
+        logger.error("Failed to persist the recalculated huge-page sizing: %s", err)
+        return None
+    return huge_page_memory
+
+
 def add_node(cluster_id, node_addr, iface_name, data_nics_list,
              max_snap, spdk_image=None, spdk_debug=False,
              small_bufsize=0, large_bufsize=0,
@@ -2706,9 +2758,13 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             logger.error(f"Incorrect huge-page floor value {max_prov}")
             return False
 
-        minimum_hp_memory = node_config.get("huge_page_memory")
-
-        minimum_hp_memory = max(minimum_hp_memory, max_prov)
+        # sn configure sized huge_page_memory for the worst case (product-
+        # ceiling max_lvol, its own default core-count heuristic); recompute
+        # it against the real max_lvol/req_cpu_count now that both reflect
+        # the cluster, and persist only if that actually changes anything.
+        minimum_hp_memory = apply_cluster_hugepages(snode_api, node_config, req_cpu_count, max_prov)
+        if minimum_hp_memory is None:
+            return False
 
         # check for memory
         if "memory_details" in node_info and node_info['memory_details']:

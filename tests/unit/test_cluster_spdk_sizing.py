@@ -235,5 +235,87 @@ class TestApplyClusterVcpuCount(unittest.TestCase):
         self.assertFalse(ok)
 
 
+class TestApplyClusterHugepages(unittest.TestCase):
+    """add_node's recalculation of huge_page_memory (and the pool counts it
+    is derived from) against the cluster's real max_subsys/vcpu_count -- sn
+    configure priced it for the worst case since it ran before the node
+    belonged to any cluster, and add_node must not just carry that forward."""
+
+    @staticmethod
+    def _node_config(max_lvol, isolated_len, number_of_alcemls=4, number_of_distribs=2,
+                     poller_cores=None):
+        poller_cores = list(range(isolated_len)) if poller_cores is None else poller_cores
+        small, large = utils.calculate_pool_count(
+            number_of_alcemls, 2 * number_of_distribs, isolated_len,
+            len(poller_cores) or isolated_len, max_lvol)
+        return {
+            "max_lvol": max_lvol,
+            "number_of_alcemls": number_of_alcemls,
+            "number_of_distribs": number_of_distribs,
+            "distribution": {"poller_cpu_cores": poller_cores},
+            "socket": 0,
+            "ssd_pcis": ["0000:00:01.0"],
+            "small_pool_count": small,
+            "large_pool_count": large,
+            "huge_page_memory": utils.calculate_minimum_hp_memory(
+                small, large, max_lvol, 0, isolated_len),
+        }
+
+    def test_shrinking_max_lvol_and_cores_lowers_the_figure_and_persists(self):
+        snode_api = MagicMock()
+        snode_api.persist_node_config.return_value = (True, None)
+        # sn configure priced this for the product ceiling and its own
+        # default (larger) core count.
+        node_config = self._node_config(max_lvol=constants.MAX_SUBSYSTEMS_PER_NODE,
+                                        isolated_len=28)
+        configured_hp_memory = node_config["huge_page_memory"]
+        node_config["max_lvol"] = 10  # the cluster's real max_subsys, already applied above
+
+        result = storage_node_ops.apply_cluster_hugepages(
+            snode_api, node_config, req_cpu_count=8, max_prov=0)
+
+        self.assertLess(result, configured_hp_memory)
+        self.assertEqual(node_config["huge_page_memory"], result)
+        snode_api.persist_node_config.assert_called_once()
+
+    def test_matching_figures_are_a_noop(self):
+        """Neither max_subsys nor vcpu_count set on the cluster -- nothing
+        about this entry's sizing has actually changed since configure time."""
+        snode_api = MagicMock()
+        node_config = self._node_config(max_lvol=10, isolated_len=8,
+                                        poller_cores=list(range(8)))
+
+        result = storage_node_ops.apply_cluster_hugepages(
+            snode_api, node_config, req_cpu_count=8, max_prov=0)
+
+        self.assertEqual(result, node_config["huge_page_memory"])
+        snode_api.persist_node_config.assert_not_called()
+
+    def test_cluster_hugepages_floor_wins_over_the_computed_figure(self):
+        snode_api = MagicMock()
+        snode_api.persist_node_config.return_value = (True, None)
+        node_config = self._node_config(max_lvol=10, isolated_len=8,
+                                        poller_cores=list(range(8)))
+        floor = node_config["huge_page_memory"] + 10 ** 9
+
+        result = storage_node_ops.apply_cluster_hugepages(
+            snode_api, node_config, req_cpu_count=8, max_prov=floor)
+
+        self.assertEqual(result, floor)
+        snode_api.persist_node_config.assert_called_once()
+
+    def test_failed_persist_returns_none(self):
+        snode_api = MagicMock()
+        snode_api.persist_node_config.return_value = (False, "disk full")
+        node_config = self._node_config(max_lvol=constants.MAX_SUBSYSTEMS_PER_NODE,
+                                        isolated_len=28)
+        node_config["max_lvol"] = 10
+
+        result = storage_node_ops.apply_cluster_hugepages(
+            snode_api, node_config, req_cpu_count=8, max_prov=0)
+
+        self.assertIsNone(result)
+
+
 if __name__ == "__main__":
     unittest.main()
