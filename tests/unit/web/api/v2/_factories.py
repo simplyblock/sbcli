@@ -16,6 +16,7 @@ from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.mgmt_node import MgmtNode
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.pool import Pool
+from simplyblock_core.models.replication import ReplicationPolicy, ReplicationTarget
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 
@@ -31,6 +32,10 @@ MANAGEMENT_NODE_ID = '88888888-8888-8888-8888-888888888888'
 BACKUP_ID = '99999999-9999-9999-9999-999999999999'
 POLICY_ID = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
 MIGRATION_ID = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'
+REPLICATION_TARGET_ID = 'cccccccc-cccc-cccc-cccc-cccccccccccc'
+REPLICATION_POLICY_ID = 'dddddddd-dddd-dddd-dddd-dddddddddddd'
+TARGET_CLUSTER_ID = 'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee'
+TARGET_POOL_ID = 'ffffffff-ffff-ffff-ffff-ffffffffffff'
 VOLUME_NQN = 'nqn.2023-02.io.simplyblock:volume-1'
 
 
@@ -181,3 +186,28 @@ def make_migration(**attrs) -> LVolMigration:
     migration.phase = LVolMigration.PHASE_SNAP_COPY
     migration.status = LVolMigration.STATUS_RUNNING
     return _apply(migration, attrs)
+
+
+def make_replication_target(**attrs) -> ReplicationTarget:
+    target = ReplicationTarget()
+    target.uuid = REPLICATION_TARGET_ID
+    target.cluster_id = CLUSTER_ID
+    target.target_name = 'site-b'
+    target.target_cluster_id = TARGET_CLUSTER_ID
+    target.target_pool_uuid = TARGET_POOL_ID
+    target.timeout_sec = 600
+    target.status = ReplicationTarget.STATUS_ACTIVE
+    return _apply(target, attrs)
+
+
+def make_replication_policy(**attrs) -> ReplicationPolicy:
+    policy = ReplicationPolicy()
+    policy.uuid = REPLICATION_POLICY_ID
+    policy.cluster_id = CLUSTER_ID
+    policy.policy_name = 'nightly'
+    policy.target_id = f'{CLUSTER_ID}/{REPLICATION_TARGET_ID}'
+    policy.interval_min = 5
+    policy.mode = ReplicationPolicy.MODE_FAILOVER
+    policy.keep_replicated = 3
+    policy.status = ReplicationPolicy.STATUS_ACTIVE
+    return _apply(policy, attrs)
