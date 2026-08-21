@@ -1917,7 +1917,7 @@ class SshUtils:
 
         time.sleep(10)
 
-        configure_cmd = f"{self.base_cmd} -d sn configure --max-subsys {max_lvol} --nodes-per-socket {nodes_per_socket}"
+        configure_cmd = f"{self.base_cmd} -d sn configure --nodes-per-socket {nodes_per_socket}"
         deploy_cmd = f"{self.base_cmd} sn deploy --ifname {ifname}"
         
         self.logger.info(f"Deploying storage node: {node}")
