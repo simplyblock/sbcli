@@ -121,6 +121,21 @@ def task_runner(task: JobSchedule):
                 return _finalize(task, False, err)
             params = task.function_params
 
+        # Hold in cutover_pending so the operator can pre-connect target NVMe paths
+        # before the ANA flip. Each volume has its own deadline so this never blocks
+        # other volumes' cutover tasks.
+        if "preconnect_deadline" not in params:
+            params["preconnect_deadline"] = int(time.time()) + constants.REPL_CUTOVER_PRECONNECT_WAIT_SEC
+            task.function_result = "cutover_pending: waiting for preconnect"
+            task.status = JobSchedule.STATUS_SUSPENDED
+            task.write_to_db(db.kv_store)
+            return False
+        if int(time.time()) < params["preconnect_deadline"]:
+            task.function_result = "cutover_pending: waiting for preconnect"
+            task.status = JobSchedule.STATUS_SUSPENDED
+            task.write_to_db(db.kv_store)
+            return False
+
         try:
             ok, err = replication_final_step.run_cutover(
                 src_node, tgt_node, lvol,
