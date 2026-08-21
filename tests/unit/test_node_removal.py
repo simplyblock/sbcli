@@ -23,7 +23,7 @@ from simplyblock_core import storage_node_ops
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice, RemoteJMDevice
 from simplyblock_core.models.cluster import Cluster
-from simplyblock_core.rpc_client import RPCConnectionError, RPCException
+from simplyblock_core.rpc_client import RPCConnectionError, RPCException, RPCRemoteError
 
 
 # ---------------------------------------------------------------------------
@@ -86,16 +86,6 @@ def _node(node_id, status=StorageNode.STATUS_ONLINE, lvstore="",
         jm.uuid = f"jm-{node_id}"
         jm.node_id = node_id
         jm.status = JMDevice.STATUS_ONLINE
-        # BaseModel.from_dict() binds a bare JMDevice()'s dict-typed
-        # defaults to the CLASS-level object itself (setattr(self, attr,
-        # getattr(self, attr)) when the attr is absent from data) -- every
-        # JMDevice() built this way shares ONE override_name_on_node dict
-        # until something reassigns it. Production is unaffected (every DB
-        # read round-trips through from_dict(data) with the key present,
-        # which always constructs a fresh dict), but bare-constructed test
-        # fixtures aren't -- give each one its own so an in-place mutation
-        # in one test can't bleed into another via the shared class default.
-        jm.override_name_on_node = {}
         n.jm_device = jm
     else:
         n.jm_device = None
@@ -1282,15 +1272,68 @@ class TestDecommissionDevices(unittest.TestCase):
         connect_mock.assert_not_called()
         peer.write_to_db.assert_not_called()
 
-    def test_picks_replacement_and_records_override_with_no_prior_chain(self):
-        # Baseline (no prior chain): removed node was never itself an
-        # override stand-in, so the new replacement inherits removed_node's
-        # OWN natural jm_bdev, same as always.
+    def test_picks_replacement_connects_it_and_calls_jc_replace_jm(self):
+        # Baseline: the replacement is connected under its OWN natural name
+        # (no override), and jc_replace_jm is told to swap consumer's live
+        # JC member from whatever it currently is (name_old, taken from
+        # consumer's own remote_jm_devices record) to that new name.
         cl = _cluster()
         removed = _node("n1", n_devices=0, with_jm=True)
         removed.jm_ids = []
         consumer = _node("consumer", n_devices=0, with_jm=True)
         consumer.jm_ids = [removed.jm_device.get_id()]
+        live_old = RemoteJMDevice()
+        live_old.uuid = removed.jm_device.get_id()
+        live_old.remote_bdev = "remote_jm_n1n1"
+        consumer.remote_jm_devices = [live_old]
+        replacement = _node("replacement", n_devices=0, with_jm=True)
+        replacement.jm_ids = []
+        replacement.jm_device.jm_bdev = "jm_replacement"
+        db = FakeDB(cl, [removed, consumer, replacement])
+        db.get_jm_device_by_id = MagicMock(side_effect=lambda jid: {
+            removed.jm_device.get_id(): removed.jm_device,
+            replacement.jm_device.get_id(): replacement.jm_device,
+        }[jid])
+        dc = MagicMock()
+        connected_new = RemoteJMDevice()
+        connected_new.uuid = replacement.jm_device.get_id()
+        connected_new.remote_bdev = "remote_jm_replacementn1"
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "device_controller", dc), \
+             patch.object(storage_node_ops, "get_sorted_ha_jms",
+                          return_value=[replacement.jm_device.get_id()]), \
+             patch.object(storage_node_ops, "_connect_to_remote_jm_devs",
+                          return_value=[connected_new]) as connect_mock:
+            ret = storage_node_ops._decommission_node_devices(removed)
+
+        self.assertTrue(ret)
+        connect_mock.assert_called_once_with(
+            consumer, jm_ids=[replacement.jm_device.get_id()],
+            only_node_id=replacement.get_id())
+        consumer.rpc_client().jc_replace_jm.assert_called_once_with(
+            name_old="remote_jm_n1n1", name_new="remote_jm_replacementn1")
+        self.assertIn(replacement.jm_device.get_id(), consumer.jm_ids)
+        self.assertNotIn(removed.jm_device.get_id(), consumer.jm_ids)
+        self.assertEqual(consumer.remote_jm_devices, [connected_new])
+        consumer.write_to_db.assert_called()
+
+    def test_name_old_is_whatever_the_consumer_currently_has_live_not_removeds_own_name(self):
+        # A prior replacement (back when this used the retired
+        # override_name_on_node trick, or simply a longer chain of
+        # replacements) can leave consumer's live JC member named something
+        # that has nothing to do with removed_node's own jm_bdev. name_old
+        # must reflect reality (consumer's own remote_jm_devices record),
+        # never removed_node.jm_device.jm_bdev blindly.
+        cl = _cluster()
+        removed = _node("n1", n_devices=0, with_jm=True)
+        removed.jm_ids = []
+        removed.jm_device.jm_bdev = "jm_n1"  # consumer's JC never actually used this name
+        consumer = _node("consumer", n_devices=0, with_jm=True)
+        consumer.jm_ids = [removed.jm_device.get_id()]
+        live_old = RemoteJMDevice()
+        live_old.uuid = removed.jm_device.get_id()
+        live_old.remote_bdev = "jm_A"  # the name actually live in consumer's JC
+        consumer.remote_jm_devices = [live_old]
         replacement = _node("replacement", n_devices=0, with_jm=True)
         replacement.jm_ids = []
         db = FakeDB(cl, [removed, consumer, replacement])
@@ -1299,65 +1342,30 @@ class TestDecommissionDevices(unittest.TestCase):
             replacement.jm_device.get_id(): replacement.jm_device,
         }[jid])
         dc = MagicMock()
+        connected_new = RemoteJMDevice()
+        connected_new.uuid = replacement.jm_device.get_id()
+        connected_new.remote_bdev = "remote_jm_replacementn1"
         with patch.object(storage_node_ops, "DBController", return_value=db), \
              patch.object(storage_node_ops, "device_controller", dc), \
              patch.object(storage_node_ops, "get_sorted_ha_jms",
                           return_value=[replacement.jm_device.get_id()]), \
-             patch.object(storage_node_ops, "_connect_to_remote_jm_devs", return_value=[]):
+             patch.object(storage_node_ops, "_connect_to_remote_jm_devs",
+                          return_value=[connected_new]):
             ret = storage_node_ops._decommission_node_devices(removed)
 
         self.assertTrue(ret)
-        self.assertEqual(
-            replacement.jm_device.override_name_on_node.get("consumer"),
-            removed.jm_device.jm_bdev)
-        replacement.write_to_db.assert_called()
-
-    def test_removed_node_was_itself_an_override_stand_in_chains_the_original_name(self):
-        # Two-hop chain, no restart in between: A removed, "removed" (here
-        # playing C) was picked as consumer's replacement JM under the
-        # override name "jm_A" -- consumer's still-unrebuilt raid construct
-        # references THAT name, never "removed"'s own. "removed" is now
-        # itself removed before consumer (or "removed") ever restarted --
-        # the next replacement must inherit "jm_A", not removed's own
-        # natural name, which consumer's construct never referenced.
-        cl = _cluster()
-        removed = _node("n1", n_devices=0, with_jm=True)
-        removed.jm_ids = []
-        removed.jm_device.override_name_on_node = {"consumer": "jm_A"}
-        consumer = _node("consumer", n_devices=0, with_jm=True)
-        consumer.jm_ids = [removed.jm_device.get_id()]
-        replacement = _node("replacement", n_devices=0, with_jm=True)
-        replacement.jm_ids = []
-        db = FakeDB(cl, [removed, consumer, replacement])
-        db.get_jm_device_by_id = MagicMock(side_effect=lambda jid: {
-            removed.jm_device.get_id(): removed.jm_device,
-            replacement.jm_device.get_id(): replacement.jm_device,
-        }[jid])
-        dc = MagicMock()
-        with patch.object(storage_node_ops, "DBController", return_value=db), \
-             patch.object(storage_node_ops, "device_controller", dc), \
-             patch.object(storage_node_ops, "get_sorted_ha_jms",
-                          return_value=[replacement.jm_device.get_id()]), \
-             patch.object(storage_node_ops, "_connect_to_remote_jm_devs", return_value=[]):
-            ret = storage_node_ops._decommission_node_devices(removed)
-
-        self.assertTrue(ret)
-        # Inherits "jm_A" -- NOT removed.jm_device.jm_bdev ("jm_n1").
-        self.assertEqual(
-            replacement.jm_device.override_name_on_node.get("consumer"), "jm_A")
-        replacement.write_to_db.assert_called()
+        consumer.rpc_client().jc_replace_jm.assert_called_once_with(
+            name_old="jm_A", name_new="remote_jm_replacementn1")
 
     def test_skips_a_candidate_the_consumer_already_reaches_via_another_path(self):
         # SPDK won't attach a second, distinctly-named local controller to a
         # target the consumer already has a live connection to under
-        # another name (found live 2026-08-19: "Bdev name not returned from
-        # controller attach", the JM group excluded from further operation
-        # on an ongoing SPDK retry loop, while the DB metadata claimed the
-        # override connected fine). "colliding" is already in
-        # consumer.remote_jm_devices (e.g. reached via hosting some OTHER
-        # primary's secondary copy) even though it was never in
-        # consumer.jm_ids -- it must be skipped in favor of "clean", the
-        # next candidate that isn't already reachable by any path.
+        # another name, and jc_replace_jm itself rejects a name_new already
+        # used by JC (-14) -- so "colliding" (already in
+        # consumer.remote_jm_devices, e.g. reached via hosting some OTHER
+        # primary's secondary copy, even though it was never in
+        # consumer.jm_ids) must be skipped in favor of "clean", the next
+        # candidate that isn't already reachable by any path.
         cl = _cluster()
         removed = _node("n1", n_devices=0, with_jm=True)
         removed.jm_ids = []
@@ -1368,7 +1376,10 @@ class TestDecommissionDevices(unittest.TestCase):
         already_connected = RemoteJMDevice()
         already_connected.uuid = colliding.jm_device.get_id()
         already_connected.remote_bdev = "remote_jm_colliding-own-namen1"
-        consumer.remote_jm_devices = [already_connected]
+        live_old = RemoteJMDevice()
+        live_old.uuid = removed.jm_device.get_id()
+        live_old.remote_bdev = "remote_jm_n1n1"
+        consumer.remote_jm_devices = [already_connected, live_old]
         clean = _node("clean", n_devices=0, with_jm=True)
         clean.jm_ids = []
         db = FakeDB(cl, [removed, consumer, colliding, clean])
@@ -1378,28 +1389,32 @@ class TestDecommissionDevices(unittest.TestCase):
             clean.jm_device.get_id(): clean.jm_device,
         }[jid])
         dc = MagicMock()
+        connected_new = RemoteJMDevice()
+        connected_new.uuid = clean.jm_device.get_id()
+        connected_new.remote_bdev = "remote_jm_cleann1"
         with patch.object(storage_node_ops, "DBController", return_value=db), \
              patch.object(storage_node_ops, "device_controller", dc), \
              patch.object(storage_node_ops, "get_sorted_ha_jms",
                           return_value=[colliding.jm_device.get_id(), clean.jm_device.get_id()]), \
-             patch.object(storage_node_ops, "_connect_to_remote_jm_devs", return_value=[]):
+             patch.object(storage_node_ops, "_connect_to_remote_jm_devs",
+                          return_value=[connected_new]) as connect_mock:
             ret = storage_node_ops._decommission_node_devices(removed)
 
         self.assertTrue(ret)
-        self.assertEqual(colliding.jm_device.override_name_on_node, {})
-        self.assertEqual(
-            clean.jm_device.override_name_on_node.get("consumer"),
-            removed.jm_device.jm_bdev)
-        clean.write_to_db.assert_called()
-        colliding.write_to_db.assert_not_called()
+        connect_mock.assert_called_once_with(
+            consumer, jm_ids=[clean.jm_device.get_id()], only_node_id=clean.get_id())
+        consumer.rpc_client().jc_replace_jm.assert_called_once_with(
+            name_old="remote_jm_n1n1", name_new="remote_jm_cleann1")
+        self.assertIn(clean.jm_device.get_id(), consumer.jm_ids)
+        self.assertNotIn(colliding.jm_device.get_id(), consumer.jm_ids)
 
-    def test_falls_back_to_a_colliding_candidate_when_no_clean_one_exists(self):
-        # No collision-free candidate anywhere -- rather than leave the
-        # slot permanently and silently short, accept the colliding one.
-        # It won't actually connect until consumer's own next restart (that
-        # restart's drop_stale_overrides=True refresh cleans this exact
-        # entry up and reconnects correctly), but a visible, self-healing
-        # degraded state beats an invisible, permanent gap.
+    def test_no_collision_free_candidate_leaves_slot_honestly_short(self):
+        # No collision-free candidate anywhere -- unlike the retired
+        # override mechanism (which used to fake-accept a colliding
+        # candidate and rely on a later restart to self-heal it),
+        # jc_replace_jm would just reject a colliding name_new outright
+        # (-14), so there's no point even attempting it. Leave the
+        # redundancy slot honestly short instead.
         cl = _cluster()
         removed = _node("n1", n_devices=0, with_jm=True)
         removed.jm_ids = []
@@ -1421,16 +1436,98 @@ class TestDecommissionDevices(unittest.TestCase):
              patch.object(storage_node_ops, "device_controller", dc), \
              patch.object(storage_node_ops, "get_sorted_ha_jms",
                           return_value=[colliding.jm_device.get_id()]), \
-             patch.object(storage_node_ops, "_connect_to_remote_jm_devs", return_value=[]):
+             patch.object(storage_node_ops, "_connect_to_remote_jm_devs") as connect_mock:
             ret = storage_node_ops._decommission_node_devices(removed)
 
         self.assertTrue(ret)
-        self.assertEqual(
-            colliding.jm_device.override_name_on_node.get("consumer"),
-            removed.jm_device.jm_bdev)
-        self.assertIn(colliding.jm_device.get_id(), consumer.jm_ids)
-        colliding.write_to_db.assert_called()
+        connect_mock.assert_not_called()
+        self.assertNotIn(colliding.jm_device.get_id(), consumer.jm_ids)
+        self.assertNotIn(removed.jm_device.get_id(), consumer.jm_ids)
+        colliding.write_to_db.assert_not_called()
         consumer.write_to_db.assert_called()
+
+    def test_jc_replace_jm_failure_leaves_slot_short_and_detaches_unused_connection(self):
+        # The candidate connects fine but the swap itself is rejected (e.g.
+        # a timeout connecting to the new JM bdev, code -6) -- don't claim
+        # the replacement, and don't leave the now-unused connection
+        # dangling: best-effort detach it.
+        cl = _cluster()
+        removed = _node("n1", n_devices=0, with_jm=True)
+        removed.jm_ids = []
+        consumer = _node("consumer", n_devices=0, with_jm=True)
+        consumer.jm_ids = [removed.jm_device.get_id()]
+        live_old = RemoteJMDevice()
+        live_old.uuid = removed.jm_device.get_id()
+        live_old.remote_bdev = "remote_jm_n1n1"
+        consumer.remote_jm_devices = [live_old]
+        replacement = _node("replacement", n_devices=0, with_jm=True)
+        replacement.jm_ids = []
+        replacement.jm_device.jm_bdev = "jm_replacement"
+        db = FakeDB(cl, [removed, consumer, replacement])
+        db.get_jm_device_by_id = MagicMock(side_effect=lambda jid: {
+            removed.jm_device.get_id(): removed.jm_device,
+            replacement.jm_device.get_id(): replacement.jm_device,
+        }[jid])
+        dc = MagicMock()
+        connected_new = RemoteJMDevice()
+        connected_new.uuid = replacement.jm_device.get_id()
+        connected_new.remote_bdev = "remote_jm_replacementn1"
+        consumer.rpc_client.return_value.jc_replace_jm.side_effect = RPCRemoteError(
+            "timed out connecting to the new JM bdev", code=-6)
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "device_controller", dc), \
+             patch.object(storage_node_ops, "get_sorted_ha_jms",
+                          return_value=[replacement.jm_device.get_id()]), \
+             patch.object(storage_node_ops, "_connect_to_remote_jm_devs",
+                          return_value=[connected_new]):
+            ret = storage_node_ops._decommission_node_devices(removed)
+
+        self.assertTrue(ret)
+        self.assertNotIn(replacement.jm_device.get_id(), consumer.jm_ids)
+        self.assertNotIn(removed.jm_device.get_id(), consumer.jm_ids)
+        self.assertEqual(consumer.remote_jm_devices, [live_old])
+        consumer.rpc_client.return_value.bdev_nvme_detach_controller.assert_called_once_with(
+            "remote_jm_replacement")
+        consumer.write_to_db.assert_called()
+
+    def test_jc_replace_jm_dash14_skips_the_detach_cleanup(self):
+        # -14 (name_new already used by JC) means the bdev is legitimately
+        # claimed by JC already -- detaching it would tear down something
+        # in active use, so the cleanup must be skipped for this one code.
+        cl = _cluster()
+        removed = _node("n1", n_devices=0, with_jm=True)
+        removed.jm_ids = []
+        consumer = _node("consumer", n_devices=0, with_jm=True)
+        consumer.jm_ids = [removed.jm_device.get_id()]
+        live_old = RemoteJMDevice()
+        live_old.uuid = removed.jm_device.get_id()
+        live_old.remote_bdev = "remote_jm_n1n1"
+        consumer.remote_jm_devices = [live_old]
+        replacement = _node("replacement", n_devices=0, with_jm=True)
+        replacement.jm_ids = []
+        replacement.jm_device.jm_bdev = "jm_replacement"
+        db = FakeDB(cl, [removed, consumer, replacement])
+        db.get_jm_device_by_id = MagicMock(side_effect=lambda jid: {
+            removed.jm_device.get_id(): removed.jm_device,
+            replacement.jm_device.get_id(): replacement.jm_device,
+        }[jid])
+        dc = MagicMock()
+        connected_new = RemoteJMDevice()
+        connected_new.uuid = replacement.jm_device.get_id()
+        connected_new.remote_bdev = "remote_jm_replacementn1"
+        consumer.rpc_client.return_value.jc_replace_jm.side_effect = RPCRemoteError(
+            "name_new is already used by JC", code=-14)
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "device_controller", dc), \
+             patch.object(storage_node_ops, "get_sorted_ha_jms",
+                          return_value=[replacement.jm_device.get_id()]), \
+             patch.object(storage_node_ops, "_connect_to_remote_jm_devs",
+                          return_value=[connected_new]):
+            ret = storage_node_ops._decommission_node_devices(removed)
+
+        self.assertTrue(ret)
+        self.assertNotIn(replacement.jm_device.get_id(), consumer.jm_ids)
+        consumer.rpc_client.return_value.bdev_nvme_detach_controller.assert_not_called()
 
     def test_no_candidate_at_all_still_persists_the_removed_jm_id(self):
         # Regression guard for a real bug found while explaining this
@@ -1681,27 +1778,32 @@ class TestConnectToRemoteJmDevsDegradesOnRpcException(unittest.TestCase):
 
 # ---------------------------------------------------------------------------
 # _connect_to_remote_jm_devs — remote_device.jm_bdev must record the name
-# THIS NODE actually connects under, override included
+# THIS NODE actually connects under
 #
-# override_name_on_node lets a replacement JM connect under a removed peer's
-# old bdev name so the consumer's own already-built JM raid doesn't need
-# touching (see _decommission_node_devices). remote_device.jm_bdev must
-# record that SAME resolved name, not org_dev's own natural name, or
+# Used to matter most when an override applied (a replacement JM connecting
+# under a removed peer's old bdev name, per the now-retired
+# override_name_on_node -- see _decommission_node_devices for why
+# jc_replace_jm replaced that trick): remote_device.jm_bdev had to record
+# the resolved (override) name, not org_dev's own natural name, or
 # health_controller's diagnostic controller lookup
-# (f'remote_{remote_device.jm_bdev}') queries the wrong, never-connected name
-# every cycle. Found live 2026-08-19: a replacement JM host serving two
-# overridden consumers logged a spurious SPDK "ctrlr ... does not exist"
-# error on every health-check pass.
+# (f'remote_{remote_device.jm_bdev}') queried the wrong, never-connected
+# name every cycle. Now there's only ever one name to record -- the owner's
+# own -- but the field still has to be right for the same diagnostic lookup.
 # ---------------------------------------------------------------------------
 
 class TestConnectToRemoteJmDevsRecordsResolvedName(unittest.TestCase):
+    # override_name_on_node (and the drop_stale_overrides parameter that
+    # existed only to retire a stale entry) is gone now that SPDK's
+    # jc_replace_jm RPC swaps a live JC member by name directly --
+    # _connect_to_remote_jm_devs always connects under the owner's own
+    # current name. This class is now just a baseline regression guard for
+    # that natural-name path.
 
-    def _owner_setup(self, this_node_id="this-node", override=None):
+    def _owner_setup(self, this_node_id="this-node"):
         jm_dev = JMDevice()
         jm_dev.uuid = "jm-owner"
         jm_dev.jm_bdev = "jm_owner_bdev"
         jm_dev.status = NVMeDevice.STATUS_ONLINE
-        jm_dev.override_name_on_node = override or {}
 
         owner_node = MagicMock(spec=StorageNode)
         owner_node.get_id = MagicMock(return_value="owner-node")
@@ -1723,7 +1825,7 @@ class TestConnectToRemoteJmDevsRecordsResolvedName(unittest.TestCase):
 
         return this_node, rpc_client, db
 
-    def test_no_override_uses_owners_own_natural_name(self):
+    def test_connects_under_owners_own_natural_name(self):
         this_node, rpc_client, db = self._owner_setup()
         rpc_client.get_bdevs.return_value = {"name": "remote_jm_owner_bdevn1"}
 
@@ -1735,164 +1837,8 @@ class TestConnectToRemoteJmDevsRecordsResolvedName(unittest.TestCase):
 
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0].jm_bdev, "jm_owner_bdev")
+        self.assertEqual(result[0].remote_bdev, "remote_jm_owner_bdevn1")
         self.assertEqual(connect_mock.call_args[0][0], "remote_jm_owner_bdev")
-
-    def test_override_present_records_the_override_name_not_owners_own(self):
-        this_node, rpc_client, db = self._owner_setup(
-            this_node_id="this-node",
-            override={"this-node": "jm_removed_peer_bdev"})
-        rpc_client.get_bdevs.return_value = {"name": "remote_jm_removed_peer_bdevn1"}
-
-        with patch.object(storage_node_ops, "DBController", return_value=db), \
-             patch.object(storage_node_ops, "connect_device",
-                          return_value="remote_jm_removed_peer_bdevn1") as connect_mock:
-            result = storage_node_ops._connect_to_remote_jm_devs(
-                this_node, jm_ids=["jm-owner"])
-
-        self.assertEqual(len(result), 1)
-        # jm_bdev must match the name actually connected under (the
-        # override), not org_dev's own "jm_owner_bdev" -- this is the exact
-        # field health_controller reads back to build its diagnostic lookup.
-        self.assertEqual(result[0].jm_bdev, "jm_removed_peer_bdev")
-        self.assertEqual(result[0].remote_bdev, "remote_jm_removed_peer_bdevn1")
-        self.assertEqual(connect_mock.call_args[0][0], "remote_jm_removed_peer_bdev")
-
-    def test_override_keyed_to_a_different_node_does_not_apply(self):
-        # The override only applies to the specific consumer it was recorded
-        # for -- a DIFFERENT this_node connecting to the same owner must
-        # still get the owner's own natural name.
-        this_node, rpc_client, db = self._owner_setup(
-            this_node_id="this-node",
-            override={"some-other-node": "jm_removed_peer_bdev"})
-        rpc_client.get_bdevs.return_value = {"name": "remote_jm_owner_bdevn1"}
-
-        with patch.object(storage_node_ops, "DBController", return_value=db), \
-             patch.object(storage_node_ops, "connect_device",
-                          return_value="remote_jm_owner_bdevn1"):
-            result = storage_node_ops._connect_to_remote_jm_devs(
-                this_node, jm_ids=["jm-owner"])
-
-        self.assertEqual(len(result), 1)
-        self.assertEqual(result[0].jm_bdev, "jm_owner_bdev")
-
-
-# ---------------------------------------------------------------------------
-# _connect_to_remote_jm_devs — drop_stale_overrides retires the legacy-name
-# crutch once this_node itself rebuilds its own JM-consuming construct
-#
-# override_name_on_node exists only to keep an ALREADY-BUILT distrib/JM-raid
-# on this_node pointed at a stable name across a JM replacement elsewhere.
-# Once this_node is about to (re)build that construct from scratch --
-# restart, LVS recreate, or a brand-new create_lvstore, all of which call
-# with drop_stale_overrides=True immediately ahead of the rebuild -- there
-# is nothing left for the override to protect, so it must be dropped rather
-# than baked into the fresh build. A DELTA reconnect (drop_stale_overrides
-# left False, e.g. a peer reconnecting to a node that just restarted) must
-# keep honoring it: this_node's own construct did not change.
-# ---------------------------------------------------------------------------
-
-class TestConnectToRemoteJmDevsDropsStaleOverrideOnRebuild(unittest.TestCase):
-
-    def _owner_setup(self, this_node_id="this-node", override=None):
-        jm_dev = JMDevice()
-        jm_dev.uuid = "jm-owner"
-        jm_dev.jm_bdev = "jm_owner_bdev"
-        jm_dev.status = NVMeDevice.STATUS_ONLINE
-        jm_dev.override_name_on_node = override or {}
-
-        owner_node = MagicMock(spec=StorageNode)
-        owner_node.get_id = MagicMock(return_value="owner-node")
-        owner_node.status = StorageNode.STATUS_ONLINE
-        owner_node.jm_device = jm_dev
-
-        this_node = MagicMock(spec=StorageNode)
-        this_node.get_id = MagicMock(return_value=this_node_id)
-        this_node.jm_ids = []
-        this_node.lvstore_stack_secondary = ""
-        this_node.lvstore_stack_tertiary = ""
-        this_node.remote_jm_devices = []
-        rpc_client = MagicMock()
-        this_node.rpc_client = MagicMock(return_value=rpc_client)
-
-        db = MagicMock()
-        db.get_jm_device_by_id.return_value = jm_dev
-        db.get_storage_nodes.return_value = [owner_node]
-
-        return this_node, rpc_client, db, owner_node
-
-    def test_rebuild_ignores_the_override_and_uses_the_owners_current_name(self):
-        this_node, rpc_client, db, owner_node = self._owner_setup(
-            override={"this-node": "jm_removed_peer_bdev"})
-        rpc_client.get_bdevs.return_value = {"name": "remote_jm_owner_bdevn1"}
-
-        with patch.object(storage_node_ops, "DBController", return_value=db), \
-             patch.object(storage_node_ops, "connect_device",
-                          return_value="remote_jm_owner_bdevn1") as connect_mock:
-            result = storage_node_ops._connect_to_remote_jm_devs(
-                this_node, jm_ids=["jm-owner"], drop_stale_overrides=True)
-
-        self.assertEqual(len(result), 1)
-        # Uses the owner's own current name, NOT the stale override --
-        # this_node is rebuilding its own construct right now, so there is
-        # nothing left for the legacy name to protect.
-        self.assertEqual(result[0].jm_bdev, "jm_owner_bdev")
-        self.assertEqual(connect_mock.call_args[0][0], "remote_jm_owner_bdev")
-
-    def test_rebuild_clears_the_override_entry_via_atomic_update(self):
-        this_node, rpc_client, db, owner_node = self._owner_setup(
-            override={"this-node": "jm_removed_peer_bdev", "other-node": "jm_something_else"})
-        rpc_client.get_bdevs.return_value = {"name": "remote_jm_owner_bdevn1"}
-
-        with patch.object(storage_node_ops, "DBController", return_value=db), \
-             patch.object(storage_node_ops, "connect_device",
-                          return_value="remote_jm_owner_bdevn1"):
-            storage_node_ops._connect_to_remote_jm_devs(
-                this_node, jm_ids=["jm-owner"], drop_stale_overrides=True)
-
-        db.atomic_update.assert_called_once()
-        target, mutate_fn = db.atomic_update.call_args.args[:2]
-        self.assertIs(target, owner_node)
-
-        # The mutate_fn only removes THIS consumer's entry from a fresh copy
-        # -- it must not clear another consumer's still-live override.
-        fresh_jm_dev = JMDevice()
-        fresh_jm_dev.override_name_on_node = {
-            "this-node": "jm_removed_peer_bdev", "other-node": "jm_something_else"}
-        fresh_owner = MagicMock(spec=StorageNode)
-        fresh_owner.jm_device = fresh_jm_dev
-        mutate_fn(fresh_owner)
-        self.assertEqual(fresh_jm_dev.override_name_on_node, {"other-node": "jm_something_else"})
-
-    def test_delta_reconnect_leaves_the_override_untouched(self):
-        # only_node_id set (a peer reconnecting after ITS restart) with
-        # drop_stale_overrides left at its default False: this_node's own
-        # construct hasn't changed, so the override must still be honored
-        # and nothing should be cleared.
-        this_node, rpc_client, db, owner_node = self._owner_setup(
-            override={"this-node": "jm_removed_peer_bdev"})
-        rpc_client.get_bdevs.return_value = {"name": "remote_jm_removed_peer_bdevn1"}
-
-        with patch.object(storage_node_ops, "DBController", return_value=db), \
-             patch.object(storage_node_ops, "connect_device",
-                          return_value="remote_jm_removed_peer_bdevn1"):
-            result = storage_node_ops._connect_to_remote_jm_devs(
-                this_node, jm_ids=["jm-owner"], only_node_id="owner-node")
-
-        self.assertEqual(len(result), 1)
-        self.assertEqual(result[0].jm_bdev, "jm_removed_peer_bdev")
-        db.atomic_update.assert_not_called()
-
-    def test_no_override_present_never_calls_atomic_update(self):
-        this_node, rpc_client, db, owner_node = self._owner_setup()
-        rpc_client.get_bdevs.return_value = {"name": "remote_jm_owner_bdevn1"}
-
-        with patch.object(storage_node_ops, "DBController", return_value=db), \
-             patch.object(storage_node_ops, "connect_device",
-                          return_value="remote_jm_owner_bdevn1"):
-            storage_node_ops._connect_to_remote_jm_devs(
-                this_node, jm_ids=["jm-owner"], drop_stale_overrides=True)
-
-        db.atomic_update.assert_not_called()
 
 
 class TestShrinkStatusDoesNotDeadlockRemoval(unittest.TestCase):
