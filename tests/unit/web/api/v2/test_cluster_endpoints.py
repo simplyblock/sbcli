@@ -30,7 +30,7 @@ class TestCreateCluster:
     def test_calls_add_cluster_with_parameters(self, client, db, cluster, cluster_ops):
         cluster_ops.add_cluster.return_value = CLUSTER_ID
 
-        response = client.post('/api/v2/clusters/', json={'name': 'cluster-1', 'distr_ndcs': 1, 'distr_npcs': 2})
+        response = client.post('/api/v2/clusters/', json={'name': 'cluster-1', 'distr_ndcs': 1, 'distr_npcs': 2, 'max_subsys': 10, 'hugepages_mem': '2G', 'spdk_vcpu_count': 4})
         response.raise_for_status()
         assert response.status_code == 201
 
@@ -47,7 +47,7 @@ class TestCreateCluster:
     def test_conflict_maps_to_409(self, client, db, cluster_ops):
         cluster_ops.add_cluster.side_effect = ValueError('cluster exists')
 
-        response = client.post('/api/v2/clusters/', json={'name': 'cluster-1', 'distr_ndcs': 1, 'distr_npcs': 2})
+        response = client.post('/api/v2/clusters/', json={'name': 'cluster-1', 'distr_ndcs': 1, 'distr_npcs': 2, 'max_subsys': 10, 'hugepages_mem': '2G', 'spdk_vcpu_count': 4})
 
         assert response.status_code == 409
 
@@ -58,6 +58,29 @@ class TestCreateCluster:
         assert response.status_code == 422
         response = client.post('/api/v2/clusters/', json={'name': 'cluster-1', 'distr_ndcs': -1, 'distr_npcs': 2})
         assert response.status_code == 422
+
+    def test_passes_inline_checksum_and_atomic_4k(self, client, db, cluster, cluster_ops):
+        cluster_ops.add_cluster.return_value = CLUSTER_ID
+
+        response = client.post('/api/v2/clusters/', json={
+            'name': 'cluster-1', 'distr_ndcs': 1, 'distr_npcs': 2, 'max_subsys': 10, 'hugepages_mem': '2G', 'spdk_vcpu_count': 4,
+            'inline_checksum': True, 'atomic_4k': True,
+        })
+        response.raise_for_status()
+
+        kwargs = cluster_ops.add_cluster.call_args.kwargs
+        assert kwargs['inline_checksum'] is True
+        assert kwargs['atomic_4k'] is True
+
+    def test_inline_checksum_and_atomic_4k_default_false(self, client, db, cluster, cluster_ops):
+        cluster_ops.add_cluster.return_value = CLUSTER_ID
+
+        response = client.post('/api/v2/clusters/', json={'name': 'cluster-1', 'distr_ndcs': 1, 'distr_npcs': 2, 'max_subsys': 10, 'hugepages_mem': '2G', 'spdk_vcpu_count': 4})
+        response.raise_for_status()
+
+        kwargs = cluster_ops.add_cluster.call_args.kwargs
+        assert kwargs['inline_checksum'] is False
+        assert kwargs['atomic_4k'] is False
 
 
 class TestGetCluster:
