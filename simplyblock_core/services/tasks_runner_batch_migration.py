@@ -658,8 +658,12 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
     batch_ok = False
     batch_err = None
     try:
-        ret = src_rpc.bdev_lvol_batch_transfer_final_step(
-            lvol_names, lvol_ids, snapshot_names, 2, hub_bdev, "migrate")
+        # This call moves real data and can legitimately run longer than the
+        # 5s blanket timeout _make_rpc()/src_rpc uses for every other RPC in
+        # this file -- use a dedicated, longer-timeout client just for it.
+        final_step_rpc = src_node.rpc_client(timeout=15, retry=2)
+        ret = final_step_rpc.bdev_lvol_batch_transfer_final_step(
+            lvol_names, lvol_ids, snapshot_names, 16, hub_bdev, "migrate")
         logger.info(f"Group {group.uuid[:8]}: bdev_lvol_batch_transfer_final_step returned {ret!r}")
         batch_ok = True
     except RPCRemoteError as e:
@@ -674,6 +678,56 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
 
     if not batch_ok:
         _revert_src_replicas("batch_final_step failed")
+        # The revert above reopened SRC to live client I/O. Retrying with the
+        # snapshots taken before this reopen would silently miss whatever the
+        # client writes in the meantime -- force every member through one
+        # more synchronized intermediate round first, same mechanism as the
+        # dirty-delta trigger above, so the retry's snapshots actually cover
+        # the reopen window. Falls through to the normal suspend/retry-budget
+        # path once the round cap is hit, so a persistently failing group
+        # still eventually resolves instead of looping forever.
+        if group.intermediate_round + 1 < constants.LVOL_MIG_MAX_INTERMEDIATE_SNAPS:
+            group.intermediate_round += 1
+            group.intermediates_done = []
+            group.intermediate_more_needed = []
+            group.write_to_db(db.kv_store)
+
+            # bdev_lvol_set_migration_flag drives the distrib-level special_io
+            # machinery for the target bdev (see snapshot_replication.py's
+            # comment on the same flag); it's only ever set once, at initial
+            # target-bdev creation (migration_controller.create_migration).
+            # A failed/aborted final_step attempt may clear it on the target,
+            # so re-assert it on every member's target bdev before retrying —
+            # otherwise the retry's cutover could run without the target
+            # being treated as migration-aware.
+            tgt_sec_node, _ = _get_target_secondary_node(tgt_node, src_node.get_id())
+            tgt_ter_node, _ = _get_target_tertiary_node(tgt_node, src_node.get_id())
+            tgt_sec_rpc_reflag = _make_rpc(tgt_sec_node) if tgt_sec_node else None
+            tgt_ter_rpc_reflag = _make_rpc(tgt_ter_node) if tgt_ter_node else None
+            for m in member_migrations:
+                try:
+                    m_lvol = db.get_lvol_by_id(m.lvol_id)
+                    m_tgt_composite = f"{tgt_node.lvstore}/{_lvol_tgt_bdev_name(m_lvol.lvol_bdev)}"
+                except KeyError:
+                    continue
+                if not tgt_rpc.bdev_lvol_set_migration_flag(m_tgt_composite):
+                    logger.warning(
+                        f"Group {group.uuid[:8]}: re-assert migration flag on primary "
+                        f"failed for {m_tgt_composite} (may already be flagged)")
+                for _extra_rpc in (tgt_sec_rpc_reflag, tgt_ter_rpc_reflag):
+                    if _extra_rpc:
+                        try:
+                            _extra_rpc.bdev_lvol_set_migration_flag(m_tgt_composite)
+                        except Exception as e:
+                            logger.warning(
+                                f"Group {group.uuid[:8]}: re-assert migration flag on "
+                                f"replica failed for {m_tgt_composite} (non-fatal): {e}")
+
+            logger.warning(
+                f"Group {group.uuid[:8]}: batch_final_step failed; forcing another "
+                f"synchronized intermediate round {group.intermediate_round}/"
+                f"{constants.LVOL_MIG_MAX_INTERMEDIATE_SNAPS} before retrying")
+            return None, None  # None = still waiting -- workers will redo this round
     # else: left as-is — all SRC/TGT paths were already driven inaccessible
     # before final_step (diagnostic, see above); only TGT primary needs to
     # come back optimized on success, handled below.
