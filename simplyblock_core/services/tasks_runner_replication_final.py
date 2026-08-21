@@ -121,20 +121,30 @@ def task_runner(task: JobSchedule):
                 return _finalize(task, False, err)
             params = task.function_params
 
-        # Hold in cutover_pending so the operator can pre-connect target NVMe paths
-        # before the ANA flip. Each volume has its own deadline so this never blocks
-        # other volumes' cutover tasks.
-        if "preconnect_deadline" not in params:
-            params["preconnect_deadline"] = int(time.time()) + constants.REPL_CUTOVER_PRECONNECT_WAIT_SEC
-            task.function_result = "cutover_pending: waiting for preconnect"
-            task.status = JobSchedule.STATUS_SUSPENDED
-            task.write_to_db(db.kv_store)
-            return False
-        if int(time.time()) < params["preconnect_deadline"]:
-            task.function_result = "cutover_pending: waiting for preconnect"
-            task.status = JobSchedule.STATUS_SUSPENDED
-            task.write_to_db(db.kv_store)
-            return False
+        # Wait for the operator to signal that target NVMe paths are connected
+        # (operator calls POST .../replication/cutover-proceed after its preconnect
+        # Job succeeds). REPL_CUTOVER_PROCEED_TIMEOUT_SEC is the safety fallback
+        # so cutover proceeds even if the operator is unavailable.
+        replication_id = params.get("replication_id")
+        if replication_id:
+            try:
+                rep = db.get_lvol_replication_by_id(replication_id)
+                if not rep.cutover_proceed:
+                    if "cutover_proceed_timeout" not in params:
+                        params["cutover_proceed_timeout"] = (
+                            int(time.time()) + constants.REPL_CUTOVER_PROCEED_TIMEOUT_SEC)
+                        task.write_to_db(db.kv_store)
+                    if int(time.time()) < params["cutover_proceed_timeout"]:
+                        task.function_result = "cutover_pending: waiting for preconnect signal"
+                        task.status = JobSchedule.STATUS_SUSPENDED
+                        task.write_to_db(db.kv_store)
+                        return False
+                    logger.warning(
+                        "cutover proceed timeout for replication %s; proceeding without signal",
+                        replication_id)
+            except KeyError:
+                logger.warning(
+                    "replication record %s not found; proceeding with cutover", replication_id)
 
         try:
             ok, err = replication_final_step.run_cutover(

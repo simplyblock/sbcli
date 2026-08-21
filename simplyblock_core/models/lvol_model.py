@@ -144,6 +144,10 @@ class LVolReplication(BaseModel):
     # client keeps the same NQN/namespace across fail-over and migration.
     target_nqn: str = ""
     target_ns_id: int = 0
+    # Set to True by POST .../replication/cutover-proceed once the operator has
+    # connected the target NVMe paths. The task runner waits for this before
+    # calling run_cutover(); REPL_CUTOVER_PROCEED_TIMEOUT_SEC is the safety fallback.
+    cutover_proceed: bool = False
 
 class LVolMini(BaseModel):
     lvol_uuid: str = ""
