@@ -86,9 +86,9 @@ class ClusterParams(BaseModel):
     backup_config: Optional[BackupConfigParams] = None
     hashicorp_vault_settings: Optional[HashicorpVaultSettings] = None
     enable_failure_domain: bool = False
-    max_subsys: util.Unsigned
-    hugepages_mem: util.Size
-    spdk_vcpu_count: util.Unsigned
+    max_subsys: util.Unsigned = 0
+    hugepages_mem: util.Size = 0
+    spdk_vcpu_count: util.Unsigned = 0
 
     @model_validator(mode="after")
     def validate_erasure_coding_scheme(self):
