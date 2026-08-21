@@ -1689,6 +1689,19 @@ class RPCClient:
         return self._request("bdev_nvme_set_multipath_policy", params,
                              request_timeout=request_timeout)
 
+    def bdev_jm_get_status(self, jm_vuid):
+        """Journal status for one JM group.
+
+        Returns (on res > 0) a dict with jm_vuid, generation_id,
+        total_records, total_bytes, uncompressed_bytes, compression_threshold
+        and compression_status -- total_records is the record count the
+        compression-backlog alert keys on.
+        """
+        params = {
+            "jm_vuid": jm_vuid,
+        }
+        return self._request("bdev_jm_get_status", params)
+
     def jc_get_jm_status(self, jm_vuid):
         """
         Returns :-
