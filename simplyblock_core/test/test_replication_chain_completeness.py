@@ -16,9 +16,7 @@ So ancestors replicate FIRST, bottom-up. And because clones make the chain a
 TREE, a shared ancestor must be transferred exactly ONCE and recognized as
 already existent on the target by every other descendant.
 """
-import pytest
 
-from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.services import snapshot_replication as sr
 

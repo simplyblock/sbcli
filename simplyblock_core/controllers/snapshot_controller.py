@@ -1093,8 +1093,6 @@ def _delete_locked(snap, snapshot_uuid, force_delete=False, lock=True):
 
     if snap.lvol.ha_type == "single":
         if snode.status == StorageNode.STATUS_ONLINE:
-            rpc_client = snode.rpc_client()
-
             with lvstore_op_lock(snap.cluster_id, snap.lvol.lvs_name,
                                  node_id=snode.get_id(), enabled=lock and not force_delete):
                 ret = delete_bdev_absent_ok(snode, snap.snap_bdev)
@@ -1150,8 +1148,6 @@ def _delete_locked(snap, snapshot_uuid, force_delete=False, lock=True):
             snap.deletion_status = ""
             snap.write_to_db(db_controller.kv_store)
             return True
-
-        rpc_client = primary_node.rpc_client()
 
         # special_delete (SPDK migration_flag) must be set ONLY when the SAME
         # snapshot exists on more than one node — i.e. lvol migration placed a

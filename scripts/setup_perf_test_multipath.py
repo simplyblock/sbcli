@@ -629,7 +629,7 @@ def main():
     print("\n--- Phase 5: Configure + deploy storage nodes ---")
     with ThreadPoolExecutor(max_workers=len(sn_priv_ips)) as pool:
         futures = [pool.submit(ssh_exec, ip, [
-            f"sudo /usr/local/bin/sbctl -d sn configure"
+            "sudo /usr/local/bin/sbctl -d sn configure"
         ], check=True, jump_ip=mgmt_ip) for ip in sn_priv_ips]
         for f in futures:
             f.result()

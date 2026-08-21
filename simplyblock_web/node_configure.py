@@ -14,7 +14,6 @@ from simplyblock_core.storage_node_ops import (
     generate_automated_deployment_config,
     upgrade_automated_deployment_config,
 )
-from simplyblock_cli.clibase import range_type
 from simplyblock_web import node_utils_k8s
 
 logger = logging.getLogger(__name__)
