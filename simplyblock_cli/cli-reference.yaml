@@ -2132,6 +2132,11 @@ commands:
             help: "Logical volume id"
             dest: lvol_id
             type: str
+          - name: "--delete-source"
+            help: "Delete the source volume once the cutover has completed (migration semantics)"
+            dest: delete_source
+            type: bool
+            action: store_true
       - name: replication-failback
         help: "Configure fail-back of a failed-over volume to a source cluster (recovered = delta only; fresh = full). Cut over with replication-commit."
         arguments:

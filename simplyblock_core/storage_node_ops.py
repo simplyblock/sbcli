@@ -2432,6 +2432,166 @@ def _classify_existing_endpoint_record(db_controller, cluster_id, node_addr, ssd
     return None, None
 
 
+def _resolve_core_distribution(distribution, core_to_index):
+    """utils.calculate_core_allocations returns a positional 9-tuple of core
+    lists, not the {"app_thread_core": [...], ...} dict every consumer
+    (add_node, persist_node_config's schema) actually reads -- regenerate_config
+    resolves it this exact way (get_core_indexes against core_to_index) before
+    it ever reaches a node_config; do the same here.
+    """
+    keys = (
+        "app_thread_core", "jm_cpu_core", "poller_cpu_cores", "alceml_cpu_cores",
+        "alceml_worker_cpu_cores", "distrib_cpu_cores", "jc_singleton_core",
+        "lvol_poller_core", "compression_core",
+    )
+    return {
+        key: utils.get_core_indexes(core_to_index, group)
+        for key, group in zip(keys, distribution)
+    }
+
+
+def apply_cluster_vcpu_count(snode_api, node_info, nodes, vcpu_count):
+    """Resize this host's isolated-core layout to the cluster's vcpu_count, in
+    place on ``nodes`` and persisted to the host's on-disk config, exactly the
+    way huge-page memory is persisted via persist_node_config.
+
+    A node's CPU layout is decided once, here, at add time; nothing else ever
+    touches it afterwards -- restart_storage_node only ever re-adopts
+    max_subsys/hugepages_mem. add_node itself can be retried though (a prior
+    attempt may have already resized and persisted this host's layout), so
+    this must be a no-op when it has: skip re-fetching topology and rewriting
+    the file whenever the host's current isolated-core totals, summed per
+    socket, already match what vcpu_count implies for that socket.
+
+    Returns True on success (including the no-op case) and False if the
+    layout could not be resized -- add_node must then refuse the add rather
+    than run SPDK on a stale, cluster-mismatched core count.
+    """
+    sockets_to_use = sorted({node["socket"] for node in nodes})
+    if not sockets_to_use:
+        return True
+
+    # Same split as generate_core_allocation: the budget divides evenly
+    # across the sockets in use, remainder to the earlier ones.
+    base, remainder = divmod(vcpu_count, len(sockets_to_use))
+    per_socket_budget = {
+        numa_socket: base + (1 if index < remainder else 0)
+        for index, numa_socket in enumerate(sockets_to_use)
+    }
+
+    changed_sockets = [
+        numa_socket for numa_socket in sockets_to_use
+        if sum(len(n.get("isolated") or []) for n in nodes if n["socket"] == numa_socket)
+           != per_socket_budget[numa_socket]
+    ]
+    if not changed_sockets:
+        return True
+
+    cpu_topology = node_info.get("cpu_topology")
+    if not cpu_topology:
+        logger.error(
+            "This cluster requires %d SPDK vCPU(s) per host, but the node did "
+            "not report its CPU topology (upgrade the node agent, or re-run "
+            "'sbcli sn configure'); cannot resize its core layout.", vcpu_count)
+        return False
+    cores_by_numa = {int(numa): cores for numa, cores in cpu_topology.items()}
+
+    # nodes_per_socket is not passed in from anywhere -- it is however many
+    # slots already share the busiest socket in this host's persisted config.
+    nodes_per_socket = max(
+        sum(1 for n in nodes if n["socket"] == numa_socket)
+        for numa_socket in sockets_to_use
+    )
+
+    new_layout = utils.generate_core_allocation(
+        cores_by_numa, sockets_to_use, nodes_per_socket, vcpu_count)
+
+    for numa_socket in changed_sockets:
+        entries = [n for n in nodes if n["socket"] == numa_socket]
+        replacements = new_layout.get(numa_socket, [])
+        if len(replacements) != len(entries):
+            logger.error(
+                "Cannot resize storage node CPUs on socket %s: expected %d "
+                "node slot(s) there, computed %d for a vcpu-count of %d -- "
+                "leaving its current CPU layout in place.",
+                numa_socket, len(entries), len(replacements), vcpu_count)
+            return False
+        # Both lists follow the same order convention (generate_configs walks
+        # sockets_to_use, then each socket's slots in generate_core_allocation
+        # order) so position-by-position pairing is the entries' identity.
+        for entry, replacement in zip(entries, replacements):
+            entry["cpu_mask"] = replacement["cpu_mask"]
+            entry["isolated"] = replacement["isolated"]
+            entry["l-cores"] = replacement["l-cores"]
+            entry["distribution"] = _resolve_core_distribution(
+                replacement["distribution"], replacement["core_to_index"])
+            entry["core_to_index"] = replacement["core_to_index"]
+            ok, err = snode_api.persist_node_config(
+                max_lvol=None, huge_page_memory=None, numa_node=numa_socket,
+                ssd_list=entry.get("ssd_pcis"),
+                cpu_mask=entry["cpu_mask"], isolated=entry["isolated"],
+                l_cores=entry["l-cores"], distribution=entry["distribution"],
+                core_to_index={str(k): v for k, v in entry["core_to_index"].items()})
+            if not ok:
+                logger.error(
+                    "Failed to persist the resized CPU layout for socket %s: %s",
+                    numa_socket, err)
+                return False
+    return True
+
+
+def apply_cluster_hugepages(snode_api, node_config, req_cpu_count, max_prov):
+    """Recalculate this node_config entry's huge-page memory -- and the
+    small/large pool counts it is derived from -- against the real numbers
+    now known, and persist the change, the same way the CPU layout resize
+    in apply_cluster_vcpu_count does.
+
+    sn configure priced this entry for the worst case: max_lvol capped at
+    the product ceiling and its own default core-count heuristic, since it
+    ran before the node belonged to any cluster. By the time this runs,
+    node_config["max_lvol"] is already the cluster's real max_subsys (set
+    above in add_node) and req_cpu_count is already the cluster's real
+    vcpu_count (via apply_cluster_vcpu_count, before the per-entry loop) --
+    so recomputing here against the same formula sn configure used, just fed
+    the real numbers, is the accurate figure. A no-op when it already
+    matches what's on file: in particular when the cluster set neither
+    max_subsys nor vcpu_count, nothing about this entry's sizing has
+    actually changed since configure time.
+
+    Returns the correct huge_page_memory (already floored to max_prov) on
+    success, or None if persisting a change failed.
+    """
+    max_lvol = int(node_config.get("max_lvol") or 0)
+    number_of_alcemls = int(node_config.get("number_of_alcemls") or 0)
+    number_of_distribs = int(node_config.get("number_of_distribs") or 0)
+    poller_cores = (node_config.get("distribution") or {}).get("poller_cpu_cores") or []
+    poller_count = len(poller_cores) or req_cpu_count
+
+    small_pool_count, large_pool_count = utils.calculate_pool_count(
+        number_of_alcemls, 2 * number_of_distribs, req_cpu_count, poller_count, max_lvol)
+    huge_page_memory = max(
+        utils.calculate_minimum_hp_memory(
+            small_pool_count, large_pool_count, max_lvol, max_prov, req_cpu_count),
+        max_prov)
+
+    if (huge_page_memory == node_config.get("huge_page_memory")
+            and small_pool_count == node_config.get("small_pool_count")
+            and large_pool_count == node_config.get("large_pool_count")):
+        return huge_page_memory
+
+    node_config["huge_page_memory"] = huge_page_memory
+    node_config["small_pool_count"] = small_pool_count
+    node_config["large_pool_count"] = large_pool_count
+    ok, err = snode_api.persist_node_config(
+        max_lvol=None, huge_page_memory=huge_page_memory, numa_node=node_config.get("socket"),
+        ssd_list=node_config.get("ssd_pcis"),
+        small_pool_count=small_pool_count, large_pool_count=large_pool_count)
+    if not ok:
+        logger.error("Failed to persist the recalculated huge-page sizing: %s", err)
+        return None
+    return huge_page_memory
+
+
 def add_node(cluster_id, node_addr, iface_name, data_nics_list,
              max_snap, spdk_image=None, spdk_debug=False,
              small_bufsize=0, large_bufsize=0,
@@ -2473,6 +2633,19 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         return False
 
     snode_api.set_hugepages()
+
+    # Resize this host's core layout to the cluster's vcpu_count once, before
+    # any node_config entry is consumed below, so every entry in the loop
+    # already reflects it. A no-op when the host's layout already matches
+    # (see apply_cluster_vcpu_count) -- in particular on a retried add_node,
+    # where a prior attempt already resized and persisted it.
+    cluster_vcpu_count = int(getattr(_cluster, "spdk_vcpu_count", 0) or 0)
+    if cluster_vcpu_count and not apply_cluster_vcpu_count(
+            snode_api, node_info, nodes, cluster_vcpu_count):
+        logger.error("Refusing the add -- could not resize node %s's CPU "
+                     "layout to the cluster's vcpu-count", node_addr)
+        return False
+
     for node_config in nodes:
         logger.debug(node_config)
         kv_store = db_controller.kv_store
@@ -2604,9 +2777,13 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             logger.error(f"Incorrect huge-page floor value {max_prov}")
             return False
 
-        minimum_hp_memory = node_config.get("huge_page_memory")
-
-        minimum_hp_memory = max(minimum_hp_memory, max_prov)
+        # sn configure sized huge_page_memory for the worst case (product-
+        # ceiling max_lvol, its own default core-count heuristic); recompute
+        # it against the real max_lvol/req_cpu_count now that both reflect
+        # the cluster, and persist only if that actually changes anything.
+        minimum_hp_memory = apply_cluster_hugepages(snode_api, node_config, req_cpu_count, max_prov)
+        if minimum_hp_memory is None:
+            return False
 
         # check for memory
         if "memory_details" in node_info and node_info['memory_details']:
@@ -2637,6 +2814,24 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 f"{constants.MAX_SUBSYSTEMS_PER_NODE} subsystems per storage node; "
                 f"using {constants.MAX_SUBSYSTEMS_PER_NODE}")
             max_lvol = constants.MAX_SUBSYSTEMS_PER_NODE
+
+        # minimum_hp_memory is the real, cluster-aware figure now (via
+        # apply_cluster_hugepages above), not sn configure's worst-case
+        # estimate -- so unlike that estimate, a shortfall against it is a
+        # genuine one and belongs here, not a warning.
+        satisfied, _ = utils.calculate_spdk_memory(
+            minimum_hp_memory, minimum_sys_memory,
+            memory_details['free'], memory_details['huge_total'])
+        if not satisfied:
+            logger.error(
+                "Not enough memory on %s for max_lvol=%s, %s SPDK vCPU(s): need %s "
+                "huge-page + %s system memory, have %s free + %s huge-page. Lower "
+                "the cluster's max-subsys/vcpu-count or use a host with more memory.",
+                node_addr, max_lvol, req_cpu_count,
+                utils.humanbytes(minimum_hp_memory), utils.humanbytes(minimum_sys_memory),
+                utils.humanbytes(memory_details['free']), utils.humanbytes(memory_details['huge_total']))
+            return False
+
         ssd_pcie = node_config.get("ssd_pcis")
 
         if ssd_pcie:

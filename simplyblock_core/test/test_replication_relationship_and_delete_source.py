@@ -30,8 +30,8 @@ class _LvolRef:
 def _rep(state, src="SRC1", tgt="TGT1"):
     rep = LVolReplication()
     rep.uuid = "REP1"
-    rep.source_lvol = _LvolRef(src)      # embedded copies: survive deletion
-    rep.target_lvol = _LvolRef(tgt)
+    rep.source_lvol = _LvolRef(src)      # type: ignore[assignment]  # embedded copies: survive deletion
+    rep.target_lvol = _LvolRef(tgt)      # type: ignore[assignment]
     rep.source_cluster_id = "CL_SRC"
     rep.target_cluster_id = "CL_TGT"
     rep.mode = "migration"
