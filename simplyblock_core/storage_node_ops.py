@@ -2073,8 +2073,7 @@ def _peer_reachable_via_jm_quorum(target_node_id, this_node: StorageNode, peer_p
     return not probed
 
 
-def _connect_to_remote_jm_devs(this_node: StorageNode, jm_ids=None, only_node_id=None,
-                                drop_stale_overrides=False):
+def _connect_to_remote_jm_devs(this_node: StorageNode, jm_ids=None, only_node_id=None):
     """Connect ``this_node`` to remote JM devices and return the refreshed
     remote-JM records.
 
@@ -2083,22 +2082,17 @@ def _connect_to_remote_jm_devs(this_node: StorageNode, jm_ids=None, only_node_id
     over from ``this_node.remote_jm_devices`` untouched (same rationale and
     measurement as _connect_to_remote_devs delta mode).
 
-    ``drop_stale_overrides``: a JM device standing in as a replacement for a
-    removed peer's JM (see _decommission_node_devices) is reachable, for
-    this_node specifically, under the OLD peer's name via
-    ``JMDevice.override_name_on_node`` -- kept stable so this_node's
-    ALREADY-BUILT distrib/JM-raid (which has that name baked in as a member)
-    doesn't need touching. That crutch must not outlive its purpose: once
-    this_node itself is about to (re)build that construct from scratch --
-    restart, LVS recreate, or a brand-new create_lvstore -- there is nothing
-    left for the override to protect, and continuing to honor it would just
-    bake the stale name into the fresh build. Callers immediately ahead of
-    such a rebuild pass True to ignore any override for this_node and use
-    the JM owner's current name, clearing the stale entry as they go. Every
-    other caller (decommission-time reconnect, where the override is being
-    freshly established, or a DELTA reconnect where this_node's own
-    construct is unchanged) must leave the default False so the override is
-    honored.
+    Always connects under the JM owner's own natural name. A replacement JM
+    picked for a removed peer (see _decommission_node_devices) used to be
+    forced to answer under the removed peer's OLD name here, via
+    JMDevice.override_name_on_node, so this_node's already-built distrib/
+    JM-raid construct (which has that name baked in as a member) wouldn't
+    need touching. That naming trick is retired now that SPDK's
+    jc_replace_jm RPC can swap a live JC member by name directly:
+    _decommission_node_devices connects the replacement under its own name
+    and calls jc_replace_jm to update the construct in place, so nothing
+    downstream needs to keep pretending the new device is named after the
+    old one.
     """
     db_controller = DBController()
 
@@ -2176,38 +2170,9 @@ def _connect_to_remote_jm_devs(this_node: StorageNode, jm_ids=None, only_node_id
         # member of the new jm_vuid. Runtime re-attach paths (rejoin,
         # restart-task) carry their own reachability gating.
 
-        # Resolve the name this_node actually connects under. remote_device.
-        # jm_bdev must record this resolved name, not org_dev.jm_bdev
-        # unconditionally -- health_controller's diagnostic controller lookup
-        # (f'remote_{remote_device.jm_bdev}') reads this field back and was
-        # querying org_dev's natural (unconnected) name every cycle whenever
-        # an override applied, producing a spurious "ctrlr does not exist"
-        # SPDK error on every health-check pass (found live 2026-08-19 on a
-        # replacement JM host serving two overridden consumers at once).
-        override_applies = bool(
-            org_dev.override_name_on_node
-            and this_node.get_id() in org_dev.override_name_on_node)
+        # Always connect under org_dev's own current name -- see the
+        # docstring for why no override resolution happens here anymore.
         resolved_name = org_dev.jm_bdev
-        if override_applies and not drop_stale_overrides:
-            resolved_name = org_dev.override_name_on_node[this_node.get_id()]
-        elif override_applies and drop_stale_overrides and org_dev_node is not None:
-            # this_node is about to (re)build the very construct the
-            # override was protecting -- nothing left to protect, so drop it
-            # and settle on org_dev's own current name (resolved_name above)
-            # going forward. See the docstring for why this is scoped to
-            # callers that pass drop_stale_overrides=True.
-            consumer_id = this_node.get_id()
-
-            def _drop_stale_override(n, consumer_id=consumer_id):
-                if n.jm_device and consumer_id in (n.jm_device.override_name_on_node or {}):
-                    del n.jm_device.override_name_on_node[consumer_id]
-
-            try:
-                db_controller.atomic_update(org_dev_node, _drop_stale_override)
-            except Exception as e:
-                logger.warning(
-                    f"Failed to drop stale JM name override for "
-                    f"{consumer_id} on {org_dev_node.get_id()}: {e}")
 
         remote_device = RemoteJMDevice()
         remote_device.uuid = org_dev.uuid
@@ -3614,7 +3579,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
 
             if snode.enable_ha_jm:
                 logger.info("Connecting to remote JMs")
-                snode.remote_jm_devices = _connect_to_remote_jm_devs(snode, drop_stale_overrides=True)
+                snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
 
             snode.write_to_db(kv_store)
 
@@ -4609,85 +4574,100 @@ def _decommission_node_devices(removed_node: StorageNode):
             if node.status == StorageNode.STATUS_REMOVED:
                 continue
             if node.jm_ids and removed_node.jm_device.get_id() in node.jm_ids:
-                node.jm_ids.remove(removed_node.jm_device.get_id())
+                removed_jm_id = removed_node.jm_device.get_id()
+                # Capture the exact bdev name node's JC currently has live
+                # for this slot BEFORE any bookkeeping changes below -- this
+                # is jc_replace_jm's ``name_old``. It's already the resolved
+                # name whatever it is (this node's own natural connect, or a
+                # leftover override name from before this RPC existed), so
+                # there's no need to separately consult the removed device's
+                # own naming the way the old override-chaining logic did.
+                old_remote_dev = next(
+                    (rd for rd in (node.remote_jm_devices or []) if rd.uuid == removed_jm_id), None)
+                name_old = old_remote_dev.remote_bdev if old_remote_dev else None
+
+                node.jm_ids.remove(removed_jm_id)
                 jm_ids = get_sorted_ha_jms(node)
                 logger.debug(f"online_jms: {str(jm_ids)}")
                 # A candidate node already reaches via some path OTHER than
                 # its own jm_ids -- most commonly the hosted-primary route:
                 # node hosts some OTHER primary's secondary/tertiary copy,
                 # and that primary's own jm_ids already includes this
-                # candidate -- can't serve as an override stand-in here.
-                # SPDK won't attach a second, distinctly-named local
-                # controller to a target it already has a live connection
-                # to under another name, so the override name would never
-                # actually connect: the attach RPC returns without a bdev
-                # name, _connect_to_remote_jm_devs' fallback silently reuses
-                # the OTHER (pre-existing) connection's name for remote_bdev,
-                # and the DB ends up claiming a healthy override that was
-                # never live (found live 2026-08-19: "Bdev name not returned
-                # from controller attach", the JM group "excluded from
-                # further operation" on an ongoing SPDK retry loop, while
-                # the DB metadata reported success). Skip any candidate
-                # node already reaches, however it reaches it, so a fresh
-                # pick never collides this way.
+                # candidate. SPDK won't attach a second, distinctly-named
+                # local controller to a target it already has a live
+                # connection to under another name (the attach RPC returns
+                # without a bdev name), and jc_replace_jm itself rejects a
+                # name_new already in use by JC (-14) -- so a candidate node
+                # already reaches, however it reaches it, can never actually
+                # serve as the replacement. Skip it so a fresh pick never
+                # collides this way (found live 2026-08-19: "Bdev name not
+                # returned from controller attach", the JM group "excluded
+                # from further operation" on an ongoing SPDK retry loop,
+                # while the DB metadata reported success -- back when a
+                # collision here was silently accepted anyway).
                 already_reachable = {rd.uuid for rd in (node.remote_jm_devices or [])}
                 new_jm_dev = ""
-                fallback_jm_dev = ""
                 for jm_id in jm_ids:
-                    if jm_id in node.jm_ids:
+                    if jm_id in node.jm_ids or jm_id in already_reachable:
                         continue
-                    if jm_id not in already_reachable:
-                        new_jm_dev = jm_id
-                        break
-                    elif not fallback_jm_dev:
-                        fallback_jm_dev = jm_id
-                if not new_jm_dev and fallback_jm_dev:
-                    # No collision-free candidate at all -- rather than
-                    # leave this redundancy slot permanently and silently
-                    # short (the alternative: log an error and walk away,
-                    # which never gets revisited by anything), accept the
-                    # colliding one. It won't actually connect until node
-                    # itself next restarts -- that restart's own full
-                    # refresh (drop_stale_overrides=True) drops this exact
-                    # override and reconnects under the name that's already
-                    # live, self-healing cleanly -- but until then this is a
-                    # visible, ongoing SPDK JC retry/exclude loop rather than
-                    # an invisible, permanent gap. Visible-and-self-healing
-                    # beats invisible-and-permanent.
-                    logger.warning(
-                        f"No collision-free JM candidate for {node.get_id()}; "
-                        f"falling back to {fallback_jm_dev}, which node "
-                        f"already reaches via another path. This override "
-                        f"will not actually connect until node's own next "
-                        f"restart clears it and reconnects under the correct "
-                        f"name.")
-                    new_jm_dev = fallback_jm_dev
-                if new_jm_dev:
+                    new_jm_dev = jm_id
+                    break
+
+                replaced = False
+                if new_jm_dev and name_old:
                     d = db_controller.get_jm_device_by_id(new_jm_dev)
-                    jm_node = db_controller.get_storage_node_by_id(d.node_id)
-                    # Chain the name node actually needs, not removed_node's
-                    # own natural name: removed_node may itself have been
-                    # standing in as an override for node (a second removal,
-                    # no restart in between -- e.g. A removed, C picked as
-                    # node's replacement JM under the name "jm_A", then C
-                    # itself removed before anyone restarted). In that case
-                    # node's still-unrebuilt construct references THAT
-                    # older name, never removed_node's own -- propagate it
-                    # forward instead of jumping to a name node never used.
-                    inherited_name = (removed_node.jm_device.override_name_on_node or {}).get(
-                        node.get_id())
-                    jm_node.jm_device.override_name_on_node[node.get_id()] = (
-                        inherited_name or removed_node.jm_device.jm_bdev)
-                    jm_node.write_to_db()
-                    node.jm_ids.append(new_jm_dev)
-                    node.remote_jm_devices = _connect_to_remote_jm_devs(node, node.jm_ids)
-                else:
-                    # Truly nothing available (not even a colliding
-                    # candidate) -- still persist the .remove() above rather
-                    # than silently dropping it: an explicitly short jm_ids
-                    # is a strictly more honest state than one that still
-                    # references a JM device that no longer exists.
-                    logger.error(f"no jm_id found for {node.get_id()}")
+                    controller_name = f"remote_{d.jm_bdev}"
+                    try:
+                        # Connect the replacement under its own name first --
+                        # jc_replace_jm hands off to an already-live bdev, it
+                        # doesn't create the connection itself.
+                        connected = _connect_to_remote_jm_devs(
+                            node, jm_ids=[new_jm_dev], only_node_id=d.node_id)
+                        new_remote_dev = next(
+                            (rd for rd in connected if rd.uuid == new_jm_dev), None)
+                        if not new_remote_dev or not new_remote_dev.remote_bdev:
+                            raise RPCException(
+                                f"failed to connect replacement JM device {new_jm_dev}")
+                        name_new = new_remote_dev.remote_bdev
+                        node.rpc_client(timeout=30, retry=2).jc_replace_jm(
+                            name_old=name_old, name_new=name_new)
+                        logger.info(
+                            f"[REMOVAL] {node.get_id()}: jc_replace_jm {name_old} -> "
+                            f"{name_new} ({new_jm_dev}) replacing removed JM {removed_jm_id}")
+                        node.jm_ids.append(new_jm_dev)
+                        node.remote_jm_devices = connected
+                        replaced = True
+                    except Exception as e:
+                        logger.error(
+                            f"[REMOVAL] {node.get_id()}: jc_replace_jm failed replacing "
+                            f"{name_old} with candidate {new_jm_dev} ({controller_name}): {e}")
+                        # Best-effort: don't leave an attached-but-unused
+                        # connection sitting around. -14 (name_new already
+                        # used by JC) is the one failure where the bdev is
+                        # legitimately claimed by JC already -- detaching it
+                        # would tear down something in active use, so skip
+                        # the cleanup in that specific case.
+                        if getattr(e, "code", None) != -14:
+                            try:
+                                node.rpc_client().bdev_nvme_detach_controller(controller_name)
+                            except Exception as de:
+                                logger.warning(
+                                    f"Failed to detach unused controller "
+                                    f"{controller_name} on {node.get_id()}: {de}")
+                if not replaced:
+                    # No collision-free candidate, or the replace RPC itself
+                    # failed -- leave the redundancy slot honestly short
+                    # (jm_ids already has the dead id removed above) rather
+                    # than claim a replacement that isn't actually live in
+                    # JC. Nothing currently revisits this automatically; it
+                    # stays a visible gap until a future removal/reconnect
+                    # cycle retries it.
+                    if not new_jm_dev:
+                        logger.error(f"no jm_id found for {node.get_id()}")
+                    elif not name_old:
+                        logger.error(
+                            f"[REMOVAL] {node.get_id()}: no recorded bdev name for removed "
+                            f"JM {removed_jm_id}; cannot call jc_replace_jm")
                 node.write_to_db()
             elif any(d.uuid == removed_node.jm_device.get_id() for d in (node.remote_jm_devices or [])):
                 # node.jm_ids is this node's OWN redundancy set for its OWN JM
@@ -5663,7 +5643,7 @@ def _restart_storage_node_impl(
 
         def _jm_reconcile():
             try:
-                jm_result["devices"] = _connect_to_remote_jm_devs(snode, drop_stale_overrides=True)
+                jm_result["devices"] = _connect_to_remote_jm_devs(snode)
             except Exception as e:
                 jm_result["error"] = e
 
@@ -8432,7 +8412,7 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
             logger.warning("Soft reconnect of remote devices failed on %s: %s",
                            snode.get_id(), e)
         try:
-            fresh_remote_jms = _connect_to_remote_jm_devs(snode, drop_stale_overrides=True)
+            fresh_remote_jms = _connect_to_remote_jm_devs(snode)
             snode = db_controller.get_storage_node_by_id(snode.get_id())
             snode.remote_jm_devices = fresh_remote_jms or snode.remote_jm_devices
             snode.write_to_db()
@@ -9467,7 +9447,7 @@ def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, ac
 
     if not is_takeover:
         snode = db_controller.get_storage_node_by_id(snode.get_id())
-        snode.remote_jm_devices = _connect_to_remote_jm_devs(snode, drop_stale_overrides=True)
+        snode.remote_jm_devices = _connect_to_remote_jm_devs(snode)
         snode.write_to_db()
 
     # Gather peer nodes for this LVS, EXCLUDING snode itself
@@ -10797,10 +10777,7 @@ def get_node_jm_names(current_node: StorageNode, remote_node=None):
                     continue
 
             jm_dev = DBController().get_jm_device_by_id(jm_id)
-            if jm_dev.override_name_on_node and current_node.get_id() in jm_dev.override_name_on_node:
-                jm_list.append(f"remote_{jm_dev.override_name_on_node[current_node.get_id()]}n1")
-            else:
-                jm_list.append(f"remote_{jm_dev.jm_bdev}n1")
+            jm_list.append(f"remote_{jm_dev.jm_bdev}n1")
 
     return jm_list[:current_node.ha_jm_count]
 
@@ -11151,7 +11128,7 @@ def create_lvstore(snode: StorageNode, ndcs, npcs, distr_bs, distr_chunk_bs, pag
         jm_vuid = utils.get_random_vuid()
         jm_ids = get_sorted_ha_jms(snode)
         logger.debug(f"online_jms: {str(jm_ids)}")
-        snode.remote_jm_devices = _connect_to_remote_jm_devs(snode, jm_ids, drop_stale_overrides=True)
+        snode.remote_jm_devices = _connect_to_remote_jm_devs(snode, jm_ids)
         snode.jm_ids = jm_ids
         snode.jm_vuid = jm_vuid
         snode.write_to_db()
@@ -11286,7 +11263,7 @@ def create_lvstore(snode: StorageNode, ndcs, npcs, distr_bs, distr_chunk_bs, pag
         sec_node.lvstore_ports[lvs_name] = snode.lvstore_ports[lvs_name].copy()
 
         # creating lvstore on secondary
-        sec_node.remote_jm_devices = _connect_to_remote_jm_devs(sec_node, drop_stale_overrides=True)
+        sec_node.remote_jm_devices = _connect_to_remote_jm_devs(sec_node)
         sec_node.write_to_db()
         ret, err = _create_bdev_stack(sec_node, lvstore_stack, primary_node=snode)
         if err:
