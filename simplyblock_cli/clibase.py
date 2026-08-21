@@ -715,6 +715,10 @@ class CLIWrapperBase:
             "State": rel["state"],
             "Direction": rel["direction"],
             "Mode": rel["mode"],
+            # Which side serves the client right now; resolvable by the SOURCE
+            # uuid even after the source volume was deleted.
+            "Active": rel.get("active", ""),
+            "Active Volume": rel.get("active_lvol_id", ""),
         }])
 
     def volume__add(self, sub_command, args):
@@ -853,7 +857,8 @@ class CLIWrapperBase:
             mode=getattr(args, 'mode', None), interval_min=getattr(args, 'interval_min', None))
 
     def volume__replication_commit(self, sub_command, args):
-        return lvol_controller.replication_commit(args.lvol_id)
+        return lvol_controller.replication_commit(
+            args.lvol_id, delete_source=getattr(args, "delete_source", False))
 
     def volume__replication_failback(self, sub_command, args):
         return lvol_controller.replication_failback(

@@ -371,6 +371,16 @@ def get_relationship(lvol_id):
         target_id = rep.target_lvol.get_id() if rep.target_lvol else ""
         if lvol_id not in (source_id, target_id):
             continue
+        # Which side serves the client RIGHT NOW. Until the cutover completes
+        # (or a fail-over happens) the source is live; from then on the target
+        # is. This look-up works by SOURCE uuid even after the source volume
+        # has been deleted (e.g. replication-commit --delete-source): the
+        # relationship record embeds both volumes and is never removed with
+        # them, so the mapping source->target and the active side stay
+        # resolvable for as long as the relationship exists.
+        active = ("target" if rep.state in (LVolReplication.STATE_CUTOVER_DONE,
+                                            LVolReplication.STATE_FAILED_OVER)
+                  else "source")
         return {
             "replication_id": rep.get_id(),
             "source_lvol_id": source_id,
@@ -383,5 +393,7 @@ def get_relationship(lvol_id):
             "target_nqn": rep.target_nqn,
             "target_ns_id": rep.target_ns_id,
             "is_source": lvol_id == source_id,
+            "active": active,
+            "active_lvol_id": target_id if active == "target" else source_id,
         }
     return None

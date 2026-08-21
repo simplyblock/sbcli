@@ -52,6 +52,28 @@ def _finalize(task, ok, err):
         task.status = JobSchedule.STATUS_DONE
         task.function_params["end_time"] = int(time.time())
         task.write_to_db(db.kv_store)
+
+        # Optional migration semantics: the source volume has served its
+        # purpose once the client runs on the target, so `replication-commit
+        # --delete-source` retires it here — strictly AFTER the cutover state
+        # is durable, so a crash in between leaves a completed cutover with
+        # the source still present (retryable by hand), never a deleted
+        # source with an uncommitted cutover. The relationship record is what
+        # later look-ups (target-by-source, active side) resolve through, and
+        # it survives the volume's deletion.
+        if task.function_params.get("delete_source"):
+            src_lvol_id = task.function_params.get("lvol_id")
+            try:
+                from simplyblock_core.controllers import lvol_controller
+                src_lvol = db.get_lvol_by_id(src_lvol_id)
+                logger.info(f"Cutover committed with --delete-source: deleting "
+                            f"source volume {src_lvol_id}")
+                lvol_controller.delete_lvol(src_lvol)
+            except Exception as e:
+                # The cutover itself succeeded; a failed source delete is
+                # reported loudly but does not un-succeed the task.
+                logger.error(f"Source volume {src_lvol_id} could not be "
+                             f"deleted after the cutover: {e}")
         return True
 
     task.function_result = err or "cutover failed, retrying"

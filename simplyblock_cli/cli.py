@@ -845,6 +845,7 @@ class CLIWrapper(CLIWrapperBase):
     def init_volume__replication_commit(self, subparser):
         subcommand = self.add_sub_command(subparser, 'replication-commit', 'Commit a migration/fail-back cutover: minimize delta then fail the client over to the target')
         subcommand.add_argument('lvol_id', help='Logical volume id', type=str)
+        subcommand.add_argument('--delete-source', help='Delete the source volume once the cutover has completed (migration semantics)', dest='delete_source', action='store_true')
 
     def init_volume__replication_failback(self, subparser):
         subcommand = self.add_sub_command(subparser, 'replication-failback', 'Configure fail-back of a failed-over volume to a source cluster (recovered = delta only; fresh = full). Cut over with replication-commit.')

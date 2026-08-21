@@ -3638,7 +3638,7 @@ def _resolve_target_map_id(target_node, lvol_bdev):
     return None
 
 
-def replication_commit(lvol_id):
+def replication_commit(lvol_id, delete_source=False):
     """Planned cutover for migration mode (and the final step of fail-back).
 
     Enqueues the FN_REPLICATION_FINAL task, which performs an iterative
@@ -3693,6 +3693,9 @@ def replication_commit(lvol_id):
             "shrink_round": 1,
             "shrink_snap_id": snap_uuid,
             "shrink_deadline": int(time.time()) + constants.REPL_CUTOVER_SHRINK_TIMEOUT_SEC,
+            # Migration semantics on request: retire the source volume once
+            # the cutover state is durable (see _finalize in the final runner).
+            "delete_source": bool(delete_source),
         })
     if not task:
         logger.error("Failed to enqueue replication-final task")
