@@ -1249,7 +1249,13 @@ def test_case_3(meta):
 
     for lv in tgt_lvols:
         failback(mgmt_ip, key_path, lv)          # delta: no --source-cluster-id
-    wait_replication_caught_up(mgmt_ip, key_path, tgt_lvols)
+    # Full-sync budget, same reasoning as case 4: the fail-back chain
+    # gate ships every unreplicated tgt-side ancestor to the recovered
+    # source bottom-up (sequential per volume), and on a shared lab
+    # those chains carry earlier cases' cadence history. Run
+    # 20260821_235158: 3/5 volumes were still mid-chain at the default
+    # 1200s while the other two were already landing fail-back copies.
+    wait_replication_caught_up(mgmt_ip, key_path, tgt_lvols, timeout=3600)
 
     print("Committing the fail-back cutover while fio runs...")
     for lv in tgt_lvols:
