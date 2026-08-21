@@ -246,3 +246,20 @@ def test_delete_guard_tolerates_a_vanished_successor(monkeypatch):
 
     monkeypatch.setattr(sc, "db_controller", _DB3())
     assert sc._successor_mid_replication(victim) is False
+
+
+# --- to-source auto-enqueue must yield to a forward policy ------------------
+
+
+def test_no_backward_task_for_a_policy_managed_clone():
+    """A fail-over clone under a FORWARD policy must not also ship its
+    snapshots back to the original cluster: both directions then race on the
+    same snapshots and the cutover's target-side gate starves (2026-08-21,
+    two of five case-4 cutovers dead on max retry)."""
+    import inspect
+    from simplyblock_core.controllers import snapshot_controller as sc
+    src = inspect.getsource(sc.add)
+    gate = 'if lvol.cloned_from_snap and not getattr(lvol, "replication_policy_id", "")'
+    assert gate in src, "the to-source enqueue must be gated on no forward policy"
+    assert src.index(gate) < src.index("replicate_to_source=True"), \
+        "the gate must guard the to-source enqueue"
