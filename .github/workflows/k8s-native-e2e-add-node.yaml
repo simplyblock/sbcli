@@ -1016,9 +1016,7 @@ jobs:
             namespace: ${NAMESPACE}
           spec:
             fabricType: tcp
-            isSingleNode: false
             enableNodeAffinity: true
-            strictNodeAntiAffinity: false
             stripe:
               dataChunks: ${NDCS}
               parityChunks: ${NPCS}
