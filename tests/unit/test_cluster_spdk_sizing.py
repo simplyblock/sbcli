@@ -16,7 +16,7 @@ rather than quietly running SPDK on fewer cores than asked for.
 import unittest
 from unittest.mock import MagicMock, patch
 
-from simplyblock_core import cluster_ops, constants, utils
+from simplyblock_core import cluster_ops, constants, storage_node_ops, utils
 from simplyblock_core.models.cluster import Cluster
 
 
@@ -137,6 +137,102 @@ class TestClusterFields(unittest.TestCase):
         import inspect
         self.assertNotIn("spdk_vcpu_count",
                          inspect.signature(cluster_ops.set_spdk_sizing).parameters)
+
+
+class TestApplyClusterVcpuCount(unittest.TestCase):
+    """add_node's one-time resize of a host's core layout to the cluster's
+    vcpu_count -- the piece that actually makes spdk_vcpu_count take effect,
+    as opposed to only gating admission via vcpu_requirement_met."""
+
+    def setUp(self):
+        siblings = patch.object(utils, "parse_thread_siblings", return_value={})
+        siblings.start()
+        self.addCleanup(siblings.stop)
+
+    @staticmethod
+    def _node_config(socket, isolated_len, ssd="0000:00:01.0"):
+        return {
+            "socket": socket,
+            "isolated": list(range(isolated_len)),
+            "cpu_mask": "0x0",
+            "l-cores": "",
+            "distribution": {},
+            "core_to_index": {},
+            "ssd_pcis": [ssd],
+        }
+
+    @staticmethod
+    def _node_info(cores_by_numa):
+        return {"cpu_topology": {str(k): v for k, v in cores_by_numa.items()}}
+
+    def test_resizes_to_the_cluster_budget_and_persists_once(self):
+        snode_api = MagicMock()
+        snode_api.persist_node_config.return_value = (True, None)
+        node_info = self._node_info({0: list(range(32))})
+        nodes = [self._node_config(0, isolated_len=28)]  # old default heuristic
+
+        ok = storage_node_ops.apply_cluster_vcpu_count(snode_api, node_info, nodes, 8)
+
+        self.assertTrue(ok)
+        self.assertEqual(len(nodes[0]["isolated"]), 8)
+        snode_api.persist_node_config.assert_called_once()
+
+    def test_already_correct_is_a_no_op(self):
+        """A retried add_node re-fetches the file its own earlier attempt
+        already resized; it must not refetch topology or rewrite it again."""
+        snode_api = MagicMock()
+        node_info = self._node_info({0: list(range(32))})
+        nodes = [self._node_config(0, isolated_len=8)]
+
+        ok = storage_node_ops.apply_cluster_vcpu_count(snode_api, node_info, nodes, 8)
+
+        self.assertTrue(ok)
+        snode_api.persist_node_config.assert_not_called()
+
+    def test_budget_is_split_across_sockets(self):
+        snode_api = MagicMock()
+        snode_api.persist_node_config.return_value = (True, None)
+        node_info = self._node_info({0: list(range(16)), 1: list(range(16, 32))})
+        nodes = [self._node_config(0, isolated_len=14, ssd="0000:00:01.0"),
+                self._node_config(1, isolated_len=14, ssd="0000:01:01.0")]
+
+        ok = storage_node_ops.apply_cluster_vcpu_count(snode_api, node_info, nodes, 10)
+
+        self.assertTrue(ok)
+        self.assertEqual(sorted(len(n["isolated"]) for n in nodes), [5, 5])
+
+    def test_nodes_per_socket_two_shares_the_socket_budget(self):
+        """Two SPDK instances on one socket split that socket's share between
+        them; the aggregate across both still equals the budget."""
+        snode_api = MagicMock()
+        snode_api.persist_node_config.return_value = (True, None)
+        node_info = self._node_info({0: list(range(32))})
+        nodes = [self._node_config(0, isolated_len=14, ssd="0000:00:01.0"),
+                self._node_config(0, isolated_len=14, ssd="0000:00:02.0")]
+
+        ok = storage_node_ops.apply_cluster_vcpu_count(snode_api, node_info, nodes, 10)
+
+        self.assertTrue(ok)
+        self.assertEqual(sum(len(n["isolated"]) for n in nodes), 10)
+
+    def test_missing_topology_refuses_cleanly(self):
+        snode_api = MagicMock()
+        nodes = [self._node_config(0, isolated_len=28)]
+
+        ok = storage_node_ops.apply_cluster_vcpu_count(snode_api, {}, nodes, 8)
+
+        self.assertFalse(ok)
+        snode_api.persist_node_config.assert_not_called()
+
+    def test_failed_persist_fails_the_whole_call(self):
+        snode_api = MagicMock()
+        snode_api.persist_node_config.return_value = (False, "disk full")
+        node_info = self._node_info({0: list(range(32))})
+        nodes = [self._node_config(0, isolated_len=28)]
+
+        ok = storage_node_ops.apply_cluster_vcpu_count(snode_api, node_info, nodes, 8)
+
+        self.assertFalse(ok)
 
 
 if __name__ == "__main__":

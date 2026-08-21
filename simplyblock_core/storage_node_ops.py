@@ -2432,6 +2432,95 @@ def _classify_existing_endpoint_record(db_controller, cluster_id, node_addr, ssd
     return None, None
 
 
+def apply_cluster_vcpu_count(snode_api, node_info, nodes, vcpu_count):
+    """Resize this host's isolated-core layout to the cluster's vcpu_count, in
+    place on ``nodes`` and persisted to the host's on-disk config, exactly the
+    way huge-page memory is persisted via persist_node_config.
+
+    A node's CPU layout is decided once, here, at add time; nothing else ever
+    touches it afterwards -- restart_storage_node only ever re-adopts
+    max_subsys/hugepages_mem. add_node itself can be retried though (a prior
+    attempt may have already resized and persisted this host's layout), so
+    this must be a no-op when it has: skip re-fetching topology and rewriting
+    the file whenever the host's current isolated-core totals, summed per
+    socket, already match what vcpu_count implies for that socket.
+
+    Returns True on success (including the no-op case) and False if the
+    layout could not be resized -- add_node must then refuse the add rather
+    than run SPDK on a stale, cluster-mismatched core count.
+    """
+    sockets_to_use = sorted({node["socket"] for node in nodes})
+    if not sockets_to_use:
+        return True
+
+    # Same split as generate_core_allocation: the budget divides evenly
+    # across the sockets in use, remainder to the earlier ones.
+    base, remainder = divmod(vcpu_count, len(sockets_to_use))
+    per_socket_budget = {
+        socket: base + (1 if index < remainder else 0)
+        for index, socket in enumerate(sockets_to_use)
+    }
+
+    changed_sockets = [
+        socket for socket in sockets_to_use
+        if sum(len(n.get("isolated") or []) for n in nodes if n["socket"] == socket)
+           != per_socket_budget[socket]
+    ]
+    if not changed_sockets:
+        return True
+
+    cpu_topology = node_info.get("cpu_topology")
+    if not cpu_topology:
+        logger.error(
+            "This cluster requires %d SPDK vCPU(s) per host, but the node did "
+            "not report its CPU topology (upgrade the node agent, or re-run "
+            "'sbcli sn configure'); cannot resize its core layout.", vcpu_count)
+        return False
+    cores_by_numa = {int(numa): cores for numa, cores in cpu_topology.items()}
+
+    # nodes_per_socket is not passed in from anywhere -- it is however many
+    # slots already share the busiest socket in this host's persisted config.
+    nodes_per_socket = max(
+        sum(1 for n in nodes if n["socket"] == socket)
+        for socket in sockets_to_use
+    )
+
+    new_layout = utils.generate_core_allocation(
+        cores_by_numa, sockets_to_use, nodes_per_socket, vcpu_count)
+
+    for socket in changed_sockets:
+        entries = [n for n in nodes if n["socket"] == socket]
+        replacements = new_layout.get(socket, [])
+        if len(replacements) != len(entries):
+            logger.error(
+                "Cannot resize storage node CPUs on socket %s: expected %d "
+                "node slot(s) there, computed %d for a vcpu-count of %d -- "
+                "leaving its current CPU layout in place.",
+                socket, len(entries), len(replacements), vcpu_count)
+            return False
+        # Both lists follow the same order convention (generate_configs walks
+        # sockets_to_use, then each socket's slots in generate_core_allocation
+        # order) so position-by-position pairing is the entries' identity.
+        for entry, replacement in zip(entries, replacements):
+            entry["cpu_mask"] = replacement["cpu_mask"]
+            entry["isolated"] = replacement["isolated"]
+            entry["l-cores"] = replacement["l-cores"]
+            entry["distribution"] = replacement["distribution"]
+            entry["core_to_index"] = replacement["core_to_index"]
+            ok, err = snode_api.persist_node_config(
+                max_lvol=None, huge_page_memory=None, numa_node=socket,
+                ssd_list=entry.get("ssd_pcis"),
+                cpu_mask=entry["cpu_mask"], isolated=entry["isolated"],
+                l_cores=entry["l-cores"], distribution=entry["distribution"],
+                core_to_index={str(k): v for k, v in entry["core_to_index"].items()})
+            if not ok:
+                logger.error(
+                    "Failed to persist the resized CPU layout for socket %s: %s",
+                    socket, err)
+                return False
+    return True
+
+
 def add_node(cluster_id, node_addr, iface_name, data_nics_list,
              max_snap, spdk_image=None, spdk_debug=False,
              small_bufsize=0, large_bufsize=0,
@@ -2473,6 +2562,19 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         return False
 
     snode_api.set_hugepages()
+
+    # Resize this host's core layout to the cluster's vcpu_count once, before
+    # any node_config entry is consumed below, so every entry in the loop
+    # already reflects it. A no-op when the host's layout already matches
+    # (see apply_cluster_vcpu_count) -- in particular on a retried add_node,
+    # where a prior attempt already resized and persisted it.
+    cluster_vcpu_count = int(getattr(_cluster, "spdk_vcpu_count", 0) or 0)
+    if cluster_vcpu_count and not apply_cluster_vcpu_count(
+            snode_api, node_info, nodes, cluster_vcpu_count):
+        logger.error("Refusing the add -- could not resize node %s's CPU "
+                     "layout to the cluster's vcpu-count", node_addr)
+        return False
+
     for node_config in nodes:
         logger.debug(node_config)
         kv_store = db_controller.kv_store

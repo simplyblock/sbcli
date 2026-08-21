@@ -518,6 +518,11 @@ def get_info():
 
         "cpu_count": node_info["cpu_info"]['count'],
         "cpu_hz": node_info["cpu_info"]['hz_advertised'][0] if 'hz_advertised' in node_info["cpu_info"] else 1,
+        # Per-NUMA-node core ids, keyed by socket id as a string (JSON has no
+        # int keys). Read-only topology -- add_node uses it to resize a
+        # node's isolated-core set to the cluster's spdk_vcpu_count; nothing
+        # here is persisted.
+        "cpu_topology": {str(k): v for k, v in init_utils.get_numa_cores().items()},
 
         "memory": node_utils.get_memory(),
         "hugepages": node_utils.get_huge_memory(),
@@ -698,6 +703,15 @@ class PersistNodeConfigParams(BaseModel):
     huge_page_memory: Optional[int] = Field(None, ge=0)
     numa_node: Optional[int] = Field(None, ge=0)
     ssd_list: Optional[List[str]] = Field(None)
+    # CPU layout, resized to the cluster's spdk_vcpu_count at add time (see
+    # storage_node_ops.apply_cluster_vcpu_count). Written together, once, by
+    # the same caller -- never partially, so the file never holds a mask from
+    # one layout next to a distribution from another.
+    cpu_mask: Optional[str] = None
+    isolated: Optional[List[int]] = None
+    l_cores: Optional[str] = None
+    distribution: Optional[dict] = None
+    core_to_index: Optional[dict] = None
 
 
 @api.post('/persist_node_config', responses={
@@ -721,13 +735,29 @@ def persist_node_config(body: PersistNodeConfigParams):
             node_config["max_lvol"] = body.max_lvol
         if body.huge_page_memory is not None:
             node_config["huge_page_memory"] = body.huge_page_memory
+        if body.cpu_mask is not None:
+            node_config["cpu_mask"] = body.cpu_mask
+        if body.isolated is not None:
+            node_config["isolated"] = body.isolated
+        if body.l_cores is not None:
+            node_config["l-cores"] = body.l_cores
+        if body.distribution is not None:
+            node_config["distribution"] = body.distribution
+        if body.core_to_index is not None:
+            node_config["core_to_index"] = body.core_to_index
         matched = True
         break
 
     if not matched:
         return utils.get_response(False, "No matching node found for given numa_node and ssd_list")
 
-    core_utils.store_config_file(node_info, constants.NODES_CONFIG_FILE)
+    # get_nodes_config() refuses (both here and on k8s) whenever the live file
+    # differs from its "_read_only" sibling -- that is the drift check meant
+    # to catch a hand-edited config. This write is sanctioned, not drift, so
+    # it must refresh the read-only baseline too, or the very next /info call
+    # (this same add_node's own idempotent retry included) sees a mismatch
+    # and refuses with "run sbcli sn configure-upgrade".
+    core_utils.store_config_file(node_info, constants.NODES_CONFIG_FILE, create_read_only_file=True)
     return utils.get_response(True)
 
 

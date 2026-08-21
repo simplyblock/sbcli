@@ -227,13 +227,25 @@ class SNodeClient:
     def set_hugepages(self):
         return self._request("POST", "set_hugepages")
 
-    def persist_node_config(self, max_lvol, huge_page_memory, numa_node, ssd_list):
+    def persist_node_config(self, max_lvol, huge_page_memory, numa_node, ssd_list,
+                            cpu_mask=None, isolated=None, l_cores=None,
+                            distribution=None, core_to_index=None):
         payload = {
             "max_lvol": max_lvol,
             "huge_page_memory": huge_page_memory,
             "numa_node": numa_node,
             "ssd_list": ssd_list,
         }
+        if cpu_mask is not None:
+            payload["cpu_mask"] = cpu_mask
+        if isolated is not None:
+            payload["isolated"] = isolated
+        if l_cores is not None:
+            payload["l_cores"] = l_cores
+        if distribution is not None:
+            payload["distribution"] = distribution
+        if core_to_index is not None:
+            payload["core_to_index"] = core_to_index
         return self._request("POST", "persist_node_config", payload)
 
     def ifc_is_roce(self, nic):
