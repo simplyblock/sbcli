@@ -3,9 +3,11 @@ import collections
 import threading
 import time
 from datetime import datetime
+from typing import Any
 
 from simplyblock_core import constants, db_controller, rpc_client, utils, distr_controller
 from simplyblock_core.controllers import events_controller, device_controller
+from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 
@@ -452,7 +454,7 @@ def start_event_collector_on_node(node_id):
     try:
         while True:
             page = 1
-            events_groups = {}
+            events_groups: dict[Any, dict[Any, dict[Any, EventObj]]] = {}
             events_list = []
             while True:
                 try:
@@ -570,7 +572,7 @@ def start_jm_event_collector_on_node(node_id):
     client = snode.rpc_client(timeout=5, retry=1)
 
     seen = set()
-    seen_order = collections.deque()
+    seen_order: collections.deque[tuple[str, ...]] = collections.deque()
 
     try:
         while True:

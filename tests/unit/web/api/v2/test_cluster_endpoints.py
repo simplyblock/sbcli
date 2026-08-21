@@ -6,6 +6,11 @@ import pytest
 from tests.unit.web.api.v2._factories import CLUSTER_ID
 
 
+# SPDK sizing is part of the create contract -- max_subsys, hugepages_mem and
+# spdk_vcpu_count carry no defaults, so every create body has to state them.
+SIZING = {'max_subsys': 40, 'hugepages_mem': '4Gi', 'spdk_vcpu_count': 4}
+
+
 class TestListClusters:
 
     def test_returns_clusters_from_db(self, client, db, cluster):
@@ -30,7 +35,9 @@ class TestCreateCluster:
     def test_calls_add_cluster_with_parameters(self, client, db, cluster, cluster_ops):
         cluster_ops.add_cluster.return_value = CLUSTER_ID
 
-        response = client.post('/api/v2/clusters/', json={'name': 'cluster-1', 'distr_ndcs': 1, 'distr_npcs': 2})
+        response = client.post(
+            '/api/v2/clusters/',
+            json={'name': 'cluster-1', 'distr_ndcs': 1, 'distr_npcs': 2, **SIZING})
         response.raise_for_status()
         assert response.status_code == 201
 
@@ -40,6 +47,9 @@ class TestCreateCluster:
         assert kwargs['distr_npcs'] == 2
         assert kwargs['blk_size'] == 512
         assert kwargs['ha_type'] == 'ha'
+        assert kwargs['max_subsys'] == 40
+        assert kwargs['hugepages_mem'] == 4 * 1024 ** 3
+        assert kwargs['spdk_vcpu_count'] == 4
         assert response.json()['id'] == CLUSTER_ID
         assert response.headers['Location'].endswith(f'/clusters/{CLUSTER_ID}/')
         db.get_cluster_by_id.assert_called_once_with(CLUSTER_ID)
@@ -47,17 +57,28 @@ class TestCreateCluster:
     def test_conflict_maps_to_409(self, client, db, cluster_ops):
         cluster_ops.add_cluster.side_effect = ValueError('cluster exists')
 
-        response = client.post('/api/v2/clusters/', json={'name': 'cluster-1', 'distr_ndcs': 1, 'distr_npcs': 2})
+        response = client.post(
+            '/api/v2/clusters/',
+            json={'name': 'cluster-1', 'distr_ndcs': 1, 'distr_npcs': 2, **SIZING})
 
         assert response.status_code == 409
 
-    def test_invalid_erasure_coding_scheme_caught(self, client, db, cluster_ops):
-        response = client.post('/api/v2/clusters/', json={'name': 'cluster-1', 'distr_ndcs': 3, 'distr_npcs': 2})
+    @pytest.mark.parametrize('ndcs,npcs', [(3, 2), (1, 5), (-1, 2)])
+    def test_invalid_erasure_coding_scheme_caught(self, client, db, cluster_ops, ndcs, npcs):
+        response = client.post(
+            '/api/v2/clusters/',
+            json={'name': 'cluster-1', 'distr_ndcs': ndcs, 'distr_npcs': npcs, **SIZING})
         assert response.status_code == 422
-        response = client.post('/api/v2/clusters/', json={'name': 'cluster-1', 'distr_ndcs': 1, 'distr_npcs': 5})
+
+    @pytest.mark.parametrize('field', ['max_subsys', 'hugepages_mem', 'spdk_vcpu_count'])
+    def test_sizing_is_required(self, client, db, cluster_ops, field):
+        body = {'name': 'cluster-1', 'distr_ndcs': 1, 'distr_npcs': 2, **SIZING}
+        del body[field]
+
+        response = client.post('/api/v2/clusters/', json=body)
+
         assert response.status_code == 422
-        response = client.post('/api/v2/clusters/', json={'name': 'cluster-1', 'distr_ndcs': -1, 'distr_npcs': 2})
-        assert response.status_code == 422
+        cluster_ops.add_cluster.assert_not_called()
 
 
 class TestGetCluster:

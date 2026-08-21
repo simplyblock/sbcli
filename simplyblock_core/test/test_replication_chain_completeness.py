@@ -17,6 +17,8 @@ TREE, a shared ancestor must be transferred exactly ONCE and recognized as
 already existent on the target by every other descendant.
 """
 
+from typing import Optional
+
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.services import snapshot_replication as sr
 
@@ -44,6 +46,7 @@ class _Snap:
         self.source_replicated_snap_uuid = source
         self.status = status
         self.snap_ref_id = ""
+        self.next_snap_uuid = ""
         self.lvol = lvol or _LvolRef()
 
     def get_id(self):
@@ -148,7 +151,7 @@ def test_shared_ancestor_is_found_by_every_descendant(monkeypatch):
     walk names the SAME record, so task dedupe collapses them to one transfer."""
     shared = _Snap(f"{LVS}/SNAP_BASE")
     tops = [_Snap(f"{LVS}/SNAP_C{i}") for i in (1, 2, 3)]
-    bases = {f"{LVS}/SNAP_C{i}": "SNAP_BASE" for i in (1, 2, 3)}
+    bases: dict[str, Optional[str]] = {f"{LVS}/SNAP_C{i}": "SNAP_BASE" for i in (1, 2, 3)}
     bases[f"{LVS}/SNAP_BASE"] = None
     picked = set()
     for top in tops:
