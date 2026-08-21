@@ -2795,6 +2795,24 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 f"{constants.MAX_SUBSYSTEMS_PER_NODE} subsystems per storage node; "
                 f"using {constants.MAX_SUBSYSTEMS_PER_NODE}")
             max_lvol = constants.MAX_SUBSYSTEMS_PER_NODE
+
+        # minimum_hp_memory is the real, cluster-aware figure now (via
+        # apply_cluster_hugepages above), not sn configure's worst-case
+        # estimate -- so unlike that estimate, a shortfall against it is a
+        # genuine one and belongs here, not a warning.
+        satisfied, _ = utils.calculate_spdk_memory(
+            minimum_hp_memory, minimum_sys_memory,
+            memory_details['free'], memory_details['huge_total'])
+        if not satisfied:
+            logger.error(
+                "Not enough memory on %s for max_lvol=%s, %s SPDK vCPU(s): need %s "
+                "huge-page + %s system memory, have %s free + %s huge-page. Lower "
+                "the cluster's max-subsys/vcpu-count or use a host with more memory.",
+                node_addr, max_lvol, req_cpu_count,
+                utils.humanbytes(minimum_hp_memory), utils.humanbytes(minimum_sys_memory),
+                utils.humanbytes(memory_details['free']), utils.humanbytes(memory_details['huge_total']))
+            return False
+
         ssd_pcie = node_config.get("ssd_pcis")
 
         if ssd_pcie:
