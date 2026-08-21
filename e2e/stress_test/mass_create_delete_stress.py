@@ -5145,8 +5145,8 @@ class MassCreateRapidRestart_6k_3Snap_Docker(_MassCreateDeleteDocker):
     30 rapid container stop/restart cycles per phase."""
     PERSISTENT_RETRY = True
     MAX_ENTITY_COUNT = 12000
-    NUM_SUBSYSTEMS = 40
-    NS_PER_SUBSYSTEM = 75
+    NUM_SUBSYSTEMS = 60
+    NS_PER_SUBSYSTEM = 50
     SNAPSHOTS_PER_LVOL = 3
     RAPID_RESTART_ITERATIONS = 30
     RAPID_RESTART_COOLDOWN = 60
@@ -5171,8 +5171,8 @@ class MassCreateRapidRestart_6k_3Snap_K8s(_MassCreateDeleteK8s):
     30 rapid pod delete/restart cycles per phase."""
     PERSISTENT_RETRY = True
     MAX_ENTITY_COUNT = 12000
-    NUM_SUBSYSTEMS = 40
-    NS_PER_SUBSYSTEM = 75
+    NUM_SUBSYSTEMS = 60
+    NS_PER_SUBSYSTEM = 50
     SNAPSHOTS_PER_LVOL = 3
     RAPID_RESTART_ITERATIONS = 30
     RAPID_RESTART_COOLDOWN = 60
