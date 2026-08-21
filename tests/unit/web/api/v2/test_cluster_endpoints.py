@@ -6,8 +6,12 @@ import pytest
 from tests.unit.web.api.v2._factories import CLUSTER_ID
 
 
-# SPDK sizing is part of the create contract -- max_subsys, hugepages_mem and
-# spdk_vcpu_count carry no defaults, so every create body has to state them.
+# max_subsys, hugepages_mem and spdk_vcpu_count all default to 0 -- "compute
+# it" (product default / core-count heuristic / calculate_minimum_hp_memory's
+# own figure), same as the CLI's --max-subsys/--hugepages-mem/--vcpu-count.
+# A nonzero value is a floor add_node applies on top of that computed figure,
+# not a replacement for it, so a caller only needs to state these when
+# actually overriding something.
 SIZING = {'max_subsys': 40, 'hugepages_mem': '4Gi', 'spdk_vcpu_count': 4}
 
 
@@ -71,14 +75,18 @@ class TestCreateCluster:
         assert response.status_code == 422
 
     @pytest.mark.parametrize('field', ['max_subsys', 'hugepages_mem', 'spdk_vcpu_count'])
-    def test_sizing_is_required(self, client, db, cluster_ops, field):
+    def test_omitted_sizing_defaults_to_computed(self, client, db, cluster, cluster_ops, field):
+        """A caller that only wants to override one sizing field (or none at
+        all) must not be forced to restate the others -- 0 means "compute
+        it", not "invalid"."""
+        cluster_ops.add_cluster.return_value = CLUSTER_ID
         body = {'name': 'cluster-1', 'distr_ndcs': 1, 'distr_npcs': 2, **SIZING}
         del body[field]
 
         response = client.post('/api/v2/clusters/', json=body)
 
-        assert response.status_code == 422
-        cluster_ops.add_cluster.assert_not_called()
+        assert response.status_code == 201
+        assert cluster_ops.add_cluster.call_args.kwargs[field] == 0
 
 
 class TestGetCluster:

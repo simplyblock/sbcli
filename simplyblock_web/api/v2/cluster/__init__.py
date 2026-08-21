@@ -86,9 +86,17 @@ class ClusterParams(BaseModel):
     backup_config: Optional[BackupConfigParams] = None
     hashicorp_vault_settings: Optional[HashicorpVaultSettings] = None
     enable_failure_domain: bool = False
-    max_subsys: util.Unsigned
-    hugepages_mem: util.Size
-    spdk_vcpu_count: util.Unsigned
+    # 0 is a real value here, not a placeholder for "unset": it means "compute
+    # it" (product default for max_subsys, the core-count heuristic for
+    # spdk_vcpu_count, calculate_minimum_hp_memory's own figure for
+    # hugepages_mem, per validate_spdk_sizing/cluster_ops). Any nonzero value
+    # is a floor add_node applies on top of that computed figure, not a
+    # replacement for it -- so there is no reason to force every caller to
+    # restate them, any more than the CLI does (--max-subsys/--hugepages-mem/
+    # --vcpu-count all default to 0 there too).
+    max_subsys: util.Unsigned = 0
+    hugepages_mem: util.Size = 0
+    spdk_vcpu_count: util.Unsigned = 0
 
     @model_validator(mode="after")
     def validate_erasure_coding_scheme(self):
