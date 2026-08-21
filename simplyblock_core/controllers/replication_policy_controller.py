@@ -394,6 +394,42 @@ def get_relationship(lvol_id):
             "target_ns_id": rep.target_ns_id,
             "is_source": lvol_id == source_id,
             "active": active,
-            "active_lvol_id": target_id if active == "target" else source_id,
+            # Chain-resolved: a volume can migrate onward (the target of one
+            # relationship becomes the source of the next), so the volume
+            # actually serving the data may be several hops away. Resolved
+            # transitively; the per-relationship side stays in "active".
+            "active_lvol_id": _resolve_active_lvol(
+                target_id if active == "target" else source_id),
         }
     return None
+
+
+def _resolve_active_lvol(lvol_id):
+    """Follow completed handoffs to the volume actually serving the data.
+
+    A completed cutover/fail-over hands the active role from its source to its
+    target; a volume can hand it on again (chained migration) or hand it BACK
+    (fail-back), so recency is GLOBAL: each hop must be strictly newer than
+    the hop that led here, otherwise a stale earlier hand-off would be
+    replayed for ever (S->T fail-over, then the newer T->S fail-back: from S
+    the walk must not follow the old S->T again). Records come ordered oldest
+    to newest; the index is the clock. Monotonic time also terminates cycles.
+    """
+    reps = db.get_lvol_replication_objects()    # sorted oldest -> newest
+    current = lvol_id
+    after = -1
+    for _ in range(64):                          # defensive hop bound
+        hop = None
+        for i in range(len(reps) - 1, after, -1):
+            rep = reps[i]
+            src = rep.source_lvol.get_id() if rep.source_lvol else ""
+            if src != current:
+                continue
+            if rep.state in (LVolReplication.STATE_CUTOVER_DONE,
+                             LVolReplication.STATE_FAILED_OVER):
+                hop = (i, rep.target_lvol.get_id() if rep.target_lvol else "")
+            break                                # newest eligible decides
+        if hop is None or not hop[1]:
+            return current
+        after, current = hop[0], hop[1]
+    return current

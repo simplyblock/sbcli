@@ -95,6 +95,52 @@ def test_lookup_by_target_uuid_still_works(monkeypatch):
     assert rel["is_source"] is False
 
 
+def _rep2(state, src, tgt):
+    rep = _rep(state, src=src, tgt=tgt)
+    rep.uuid = f"REP_{src}_{tgt}"
+    return rep
+
+
+def test_chained_migration_resolves_to_the_final_volume(monkeypatch):
+    """T1 (target of A) later migrated on to T2: a caller holding only S1
+    must learn that the data is served by T2, not stop one hop short."""
+    a = _rep2(LVolReplication.STATE_CUTOVER_DONE, "S1", "T1")
+    b = _rep2(LVolReplication.STATE_CUTOVER_DONE, "T1", "T2")
+    monkeypatch.setattr(rpc, "db", _DB([a, b]))
+    rel = rpc.get_relationship("S1")
+    assert rel["target_lvol_id"] == "T1", "the direct relationship is A"
+    assert rel["active_lvol_id"] == "T2", "the ACTIVE volume is chain-resolved"
+
+
+def test_target_uuid_drives_the_next_forward_path(monkeypatch):
+    """The target of one replication can be the source of the next."""
+    a = _rep2(LVolReplication.STATE_CUTOVER_DONE, "S1", "T1")
+    b = _rep2(LVolReplication.STATE_REPLICATING, "T1", "T2")
+    monkeypatch.setattr(rpc, "db", _DB([a, b]))
+    rel = rpc.get_relationship("T1")
+    assert rel["is_source"] is True and rel["target_lvol_id"] == "T2"
+    assert rel["active"] == "source", "B has not cut over: T1 still serves"
+    assert rel["active_lvol_id"] == "T1"
+
+
+def test_incomplete_next_hop_does_not_advance_the_chain(monkeypatch):
+    a = _rep2(LVolReplication.STATE_CUTOVER_DONE, "S1", "T1")
+    b = _rep2(LVolReplication.STATE_REPLICATING, "T1", "T2")
+    monkeypatch.setattr(rpc, "db", _DB([a, b]))
+    assert rpc.get_relationship("S1")["active_lvol_id"] == "T1"
+
+
+def test_failback_cycle_terminates(monkeypatch):
+    """S1 -> T1 (failed over), then T1 -> S1 (failed back): the walk must not
+    loop, and the active volume is where the LAST completed hop landed."""
+    a = _rep2(LVolReplication.STATE_FAILED_OVER, "S1", "T1")
+    b = _rep2(LVolReplication.STATE_CUTOVER_DONE, "T1", "S1")
+    monkeypatch.setattr(rpc, "db", _DB([a, b]))
+    rel = rpc.get_relationship("S1")
+    # newest record containing S1 is B (scan is newest-first)
+    assert rel["active_lvol_id"] in ("S1",), "cycle must terminate, not loop"
+
+
 def test_newest_relationship_wins(monkeypatch):
     """A volume that migrated twice resolves to its latest relationship."""
     older = _rep(LVolReplication.STATE_CUTOVER_DONE, tgt="TGT_OLD")
