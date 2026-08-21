@@ -4,7 +4,7 @@ import time
 from typing import Optional
 
 from simplyblock_core import db_controller, utils
-from simplyblock_core.controllers import snapshot_controller, tasks_controller
+from simplyblock_core.controllers import events_controller, snapshot_controller, tasks_controller
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.storage_node import StorageNode
@@ -33,6 +33,34 @@ def get_primary_node(task) -> Optional[StorageNode]:
 # drained from in_deletion. Exit after this many consecutive failures so the
 # orchestrator restarts us with a clean FDB connection (~3 min at the 3s tick).
 _DB_FAILURE_RESTART_THRESHOLD = 60
+
+
+def _log_sync_delete_failure(task, node, lvol_bdev_name, msg):
+    """Record a failed sync delete in the cluster event log.
+
+    This is the case an operator cannot see from the volume list alone: the
+    async delete already SUCCEEDED, so the data is going away, but a node still
+    holds its replica bdev and the volume is pinned in_deletion until this
+    task drains. Emitted only when the failure message CHANGES (first failure,
+    or a different error), not on every 3s retry -- a node that stays down
+    would otherwise write thousands of identical events.
+    """
+    if task.function_result == msg:
+        return
+    try:
+        events_controller.log_event_cluster(
+            cluster_id=node.cluster_id,
+            domain=events_controller.DOMAIN_STORAGE,
+            event="SYNC_DELETE_FAILED",
+            db_object=task,
+            caused_by=events_controller.CAUSED_BY_MONITOR,
+            message=(f"Sync delete of {lvol_bdev_name} failed on node "
+                     f"{node.get_id()} after a successful async delete; the "
+                     f"volume stays in_deletion until this drains. {msg}"),
+            node_id=node.get_id(),
+            event_level="Error")
+    except Exception as event_error:
+        logger.warning(f"Could not log sync-delete failure event: {event_error}")
 
 
 def main():
@@ -148,6 +176,7 @@ def main():
                                 msg = (f"Sync delete of {lvol_bdev_name} on {node.get_id()} "
                                        f"failed: {e}; will retry")
                                 logger.error(msg)
+                                _log_sync_delete_failure(task, node, lvol_bdev_name, msg)
                                 task.function_result = msg
                                 task.status = JobSchedule.STATUS_SUSPENDED
                                 task.write_to_db(db.kv_store)
@@ -158,6 +187,7 @@ def main():
                                 else:
                                     msg =  f"Failed to sync delete bdev: {lvol_bdev_name} from node: {node.get_id()}"
                                     logger.error(msg)
+                                    _log_sync_delete_failure(task, node, lvol_bdev_name, msg)
                                     task.function_result = msg
                                     task.status = JobSchedule.STATUS_SUSPENDED
                                     task.write_to_db(db.kv_store)

@@ -72,6 +72,15 @@ DISTR_EVENT_COLLECTOR_NUM_OF_EVENTS = 10
 JM_EVENT_COLLECTOR_INTERVAL_SEC = 10
 #: How many recently-logged JM event keys to remember per node for that filter.
 JM_EVENT_DEDUPE_MAX = 10000
+
+#: Journal records accumulated for compression above which an lvs is flagged in
+#: the cluster event log. A backlog this size means compression is not keeping
+#: up with the write rate (or is stuck/suspended), and the journal replay
+#: needed by the next restart or failover grows with every record.
+JM_COMPRESSION_BACKLOG_ALERT_RECORDS = 500_000_000
+#: Re-arm the alert only after the backlog falls below this fraction of the
+#: threshold, so a count oscillating around the line does not flap events.
+JM_COMPRESSION_BACKLOG_REARM_FRACTION = 0.9
 CAP_MONITOR_INTERVAL_SEC = 30
 SSD_VENDOR_WHITE_LIST = ["1d0f:cd01", "1d0f:cd00"]
 CACHED_LVOL_STAT_COLLECTOR_INTERVAL_SEC = 15
