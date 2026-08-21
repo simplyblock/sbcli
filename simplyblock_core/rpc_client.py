@@ -1469,6 +1469,31 @@ class RPCClient:
         }
         return self._request("jc_explicit_synchronization", params)
 
+    def jc_replace_jm(self, name_old: str, name_new: str):
+        """Swap the JM bdev backing a live JC member from ``name_old`` to
+        ``name_new`` in place -- JC re-syncs the new JM's journal in the
+        background and, from then on, treats it as the member for this slot.
+        Replaces the old override_name_on_node naming trick (which faked the
+        replacement under the removed peer's old name so JC wouldn't need
+        touching): this RPC updates JC's live state directly, so the caller
+        can connect the replacement under its own natural name.
+
+        ``name_new`` must already exist as a bdev (the caller connects it
+        first) and must not already be in use by JC. Raises RPCRemoteError
+        with one of the documented codes on rejection/failure:
+            -10 JC is closing
+            -11 invalid JM names (empty, or name_old == name_new)
+            -12 another JM replacement is already in progress
+            -13 name_old is not currently used by JC
+            -14 name_new is already used by JC
+            -15 the JM of name_old is being removed
+            -3  JC started closing during the operation
+            -4  the JM context disappeared during the operation
+            -5  failed to re-key the JM lists (OOM) -- affected vuids stopped
+            -6  timed out connecting to the new JM bdev
+        """
+        return self._request3("jc_replace_jm", name_old=name_old, name_new=name_new)
+
     def listeners_del(self, nqn, trtype, traddr, trsvcid):
         """"
             nqn: Subsystem NQN.
