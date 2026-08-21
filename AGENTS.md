@@ -4,18 +4,40 @@ This file provides guidance to AI coding agents when working with code in this r
 
 ## Project Overview
 
-Simplyblock Control Plane and CLI (`sbctl`) — a Kubernetes-native distributed block storage solution. Python 3.13+, FoundationDB backend.
+Simplyblock Control Plane and CLI (`sbctl`) — a Kubernetes-native distributed block storage solution. FoundationDB backend.
+
+Packaging is PEP 621 (`pyproject.toml`, setuptools backend) and dependencies are locked in
+`uv.lock`. `requires-python` is `>=3.9` because the published `sbctl` wheel is installed on
+management nodes with whatever system python they have; **the container image runs free-threaded
+3.14 (`3.14t`)**, so the supported range spans both and CI tests both ends.
+
+The version lives in `simplyblock_core/env_var` (`SIMPLY_BLOCK_VERSION`), which `release.yml`
+rewrites and `constants.py` reads at runtime for `sbctl --version`. `simplyblock_core/_version.py`
+is the single reader and is what `[tool.setuptools.dynamic]` imports at build time — keep it free
+of third-party imports or the build breaks.
 
 ## Build & Install
 
 ```bash
-pip install -e .                    # Editable install
-pip install -r requirements.txt     # Install dependencies
+uv sync                             # create .venv from uv.lock, project installed editable
+uv build                            # sdist + wheel into dist/
+uv lock                             # re-resolve after editing [project.dependencies]
+uv lock --check                     # CI: fail if uv.lock is stale
 ```
+
+Dependency groups (PEP 735) replace the old `*-requirements.txt` files: `test`, `types`,
+`generate`. Install one with `uv sync --group test`. `e2e/requirements.txt` is separate and
+unaffected.
 
 ## Testing
 
 Two tiers via tox: `tox run -e unit` (fast, no infra) and `tox run -e integration` (Docker + `libfdb_c` required). See `tests/AGENTS.md` for tier criteria, the testcontainers FDB fixture, and how to reuse an existing dev-compose FDB instance.
+
+Both tiers have a `py314t-` twin (`tox run -e py314t-unit`) running the image's free-threaded
+interpreter. The un-prefixed envs use python3.9, the floor the published wheel must keep working
+on. tox-uv fetches both interpreters, so neither needs to be installed on the host. **A change
+that touches runtime behaviour must be green on both** — the GIL-off build is where a
+previously-masked data race surfaces.
 
 ## Linting & Type Checking
 
@@ -128,6 +150,24 @@ sudo docker compose -f docker-compose-dev.yml up --build -d
 
 Requires FoundationDB 7.3.3 client library installed on the host for the Python bindings.
 
+## Container Image
+
+`docker/Dockerfile` is a single multi-stage build (`base` -> `builder` -> `runtime`) producing the
+control-plane image: UBI 10 plus the OS tooling the runtime shells out to, and `/opt/venv` built by
+`uv` from a managed **free-threaded 3.14** interpreter, so the application's Python version is
+independent of the platform's.
+
+```bash
+docker buildx build -f docker/Dockerfile -t simplyblock:dev --load .   # local
+./build_image.sh                                                       # both arches, pushed
+```
+
+See **`docker/AGENTS.md`** before editing the Dockerfile. It covers the stage layout and cache
+policy (`CACHE_KEY`), and the constraints that are not obvious from reading the file — the sudoers
+`secure_path` line the `sudo -E python3` entry points depend on, why the source tree stays at
+`/app` with an editable install and what the exit from that looks like, and why there is no
+compiler toolchain or `pip` in the image.
+
 ## Agent Instructions Layout
 
 `AGENTS.md` is the source of truth at every level. Tool-specific files are symlinks:
@@ -145,6 +185,8 @@ simplyblock_web/AGENTS.md         ← Web API-specific instructions
 simplyblock_web/CLAUDE.md → AGENTS.md
 tests/AGENTS.md                   ← Test-suite layout, tiers, fixtures
 tests/CLAUDE.md → AGENTS.md
+docker/AGENTS.md                  ← Container image: stages, cache policy, Dockerfile constraints
+docker/CLAUDE.md → AGENTS.md
 
 .agents/skills/                    ← shared skills (source of truth)
   tox-verify.md                    ← tox verification workflow
