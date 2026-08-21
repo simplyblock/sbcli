@@ -86,17 +86,18 @@ class ClusterParams(BaseModel):
     backup_config: Optional[BackupConfigParams] = None
     hashicorp_vault_settings: Optional[HashicorpVaultSettings] = None
     enable_failure_domain: bool = False
-    # 0 is a real value here, not a placeholder for "unset": it means "compute
-    # it" (product default for max_subsys, the core-count heuristic for
-    # spdk_vcpu_count, calculate_minimum_hp_memory's own figure for
-    # hugepages_mem, per validate_spdk_sizing/cluster_ops). Any nonzero value
-    # is a floor add_node applies on top of that computed figure, not a
-    # replacement for it -- so there is no reason to force every caller to
-    # restate them, any more than the CLI does (--max-subsys/--hugepages-mem/
-    # --vcpu-count all default to 0 there too).
-    max_subsys: util.Unsigned = 0
+    # max_subsys and spdk_vcpu_count are capacity decisions with real
+    # consequences if silently defaulted (max_subsys=0 means the product
+    # ceiling; spdk_vcpu_count=0 means no cluster-wide core requirement at
+    # all) -- callers must state them explicitly. hugepages_mem=0 is safe to
+    # default: it is only ever a floor add_node applies on top of the figure
+    # calculate_minimum_hp_memory computes from max_subsys/spdk_vcpu_count
+    # themselves, per validate_spdk_sizing/cluster_ops ("0 = computed") --
+    # never a replacement for that computation, so there is nothing to
+    # silently under-specify by leaving it unstated.
+    max_subsys: util.Unsigned
     hugepages_mem: util.Size = 0
-    spdk_vcpu_count: util.Unsigned = 0
+    spdk_vcpu_count: util.Unsigned
 
     @model_validator(mode="after")
     def validate_erasure_coding_scheme(self):

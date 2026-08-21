@@ -6,12 +6,13 @@ import pytest
 from tests.unit.web.api.v2._factories import CLUSTER_ID
 
 
-# max_subsys, hugepages_mem and spdk_vcpu_count all default to 0 -- "compute
-# it" (product default / core-count heuristic / calculate_minimum_hp_memory's
-# own figure), same as the CLI's --max-subsys/--hugepages-mem/--vcpu-count.
-# A nonzero value is a floor add_node applies on top of that computed figure,
-# not a replacement for it, so a caller only needs to state these when
-# actually overriding something.
+# max_subsys and spdk_vcpu_count are capacity decisions with real
+# consequences if silently defaulted, so every create body has to state
+# them. hugepages_mem defaults to 0 -- "compute it" (calculate_minimum_hp_
+# memory's own figure, from max_subsys/spdk_vcpu_count themselves); a
+# nonzero value is only ever a floor add_node applies on top of that, never
+# a replacement for it, so there's nothing to silently under-specify by
+# leaving it unstated.
 SIZING = {'max_subsys': 40, 'hugepages_mem': '4Gi', 'spdk_vcpu_count': 4}
 
 
@@ -74,19 +75,30 @@ class TestCreateCluster:
             json={'name': 'cluster-1', 'distr_ndcs': ndcs, 'distr_npcs': npcs, **SIZING})
         assert response.status_code == 422
 
-    @pytest.mark.parametrize('field', ['max_subsys', 'hugepages_mem', 'spdk_vcpu_count'])
-    def test_omitted_sizing_defaults_to_computed(self, client, db, cluster, cluster_ops, field):
-        """A caller that only wants to override one sizing field (or none at
-        all) must not be forced to restate the others -- 0 means "compute
-        it", not "invalid"."""
-        cluster_ops.add_cluster.return_value = CLUSTER_ID
+    @pytest.mark.parametrize('field', ['max_subsys', 'spdk_vcpu_count'])
+    def test_capacity_sizing_is_required(self, client, db, cluster_ops, field):
+        """max_subsys/spdk_vcpu_count have real consequences if silently
+        defaulted, so omitting either must be rejected outright."""
         body = {'name': 'cluster-1', 'distr_ndcs': 1, 'distr_npcs': 2, **SIZING}
         del body[field]
 
         response = client.post('/api/v2/clusters/', json=body)
 
+        assert response.status_code == 422
+        cluster_ops.add_cluster.assert_not_called()
+
+    def test_omitted_hugepages_mem_defaults_to_computed(self, client, db, cluster, cluster_ops):
+        """Unlike max_subsys/spdk_vcpu_count, hugepages_mem is only ever a
+        floor on top of a figure computed from the other two -- 0 means
+        "compute it", not "invalid"."""
+        cluster_ops.add_cluster.return_value = CLUSTER_ID
+        body = {'name': 'cluster-1', 'distr_ndcs': 1, 'distr_npcs': 2, **SIZING}
+        del body['hugepages_mem']
+
+        response = client.post('/api/v2/clusters/', json=body)
+
         assert response.status_code == 201
-        assert cluster_ops.add_cluster.call_args.kwargs[field] == 0
+        assert cluster_ops.add_cluster.call_args.kwargs['hugepages_mem'] == 0
 
 
 class TestGetCluster:
