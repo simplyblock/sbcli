@@ -785,6 +785,7 @@ jobs:
           ${VAULT_SETTINGS}
             maxSubsystemCount: ${MAX_SUBSYS}
             vcpuCount: ${VCPU_COUNT}
+            maxHugePagesSize: "17G"
           ---
           apiVersion: storage.simplyblock.io/v1alpha1
           kind: StoragePool
@@ -846,6 +847,7 @@ jobs:
           ${VAULT_SETTINGS}
             maxSubsystemCount: ${MAX_SUBSYS}
             vcpuCount: ${VCPU_COUNT}
+            maxHugePagesSize: "17G"
           ---
           apiVersion: storage.simplyblock.io/v1alpha1
           kind: StoragePool
