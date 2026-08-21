@@ -177,6 +177,20 @@ class TestApplyClusterVcpuCount(unittest.TestCase):
         self.assertEqual(len(nodes[0]["isolated"]), 8)
         snode_api.persist_node_config.assert_called_once()
 
+        # distribution must be the resolved {"app_thread_core": [...], ...}
+        # dict every consumer (add_node, persist_node_config's schema) reads
+        # -- utils.calculate_core_allocations itself returns a positional
+        # tuple, not this dict; storing that raw tuple 422s persist_node_config
+        # (caught 2026-08-21 testing this against a live cluster).
+        distribution = nodes[0]["distribution"]
+        self.assertIsInstance(distribution, dict)
+        for key in ("app_thread_core", "jm_cpu_core", "poller_cpu_cores",
+                    "alceml_cpu_cores", "distrib_cpu_cores", "jc_singleton_core",
+                    "lvol_poller_core"):
+            self.assertIn(key, distribution)
+        persisted_kwargs = snode_api.persist_node_config.call_args.kwargs
+        self.assertIsInstance(persisted_kwargs["distribution"], dict)
+
     def test_already_correct_is_a_no_op(self):
         """A retried add_node re-fetches the file its own earlier attempt
         already resized; it must not refetch topology or rewrite it again."""

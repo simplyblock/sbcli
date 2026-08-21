@@ -2432,6 +2432,24 @@ def _classify_existing_endpoint_record(db_controller, cluster_id, node_addr, ssd
     return None, None
 
 
+def _resolve_core_distribution(distribution, core_to_index):
+    """utils.calculate_core_allocations returns a positional 9-tuple of core
+    lists, not the {"app_thread_core": [...], ...} dict every consumer
+    (add_node, persist_node_config's schema) actually reads -- regenerate_config
+    resolves it this exact way (get_core_indexes against core_to_index) before
+    it ever reaches a node_config; do the same here.
+    """
+    keys = (
+        "app_thread_core", "jm_cpu_core", "poller_cpu_cores", "alceml_cpu_cores",
+        "alceml_worker_cpu_cores", "distrib_cpu_cores", "jc_singleton_core",
+        "lvol_poller_core", "compression_core",
+    )
+    return {
+        key: utils.get_core_indexes(core_to_index, group)
+        for key, group in zip(keys, distribution)
+    }
+
+
 def apply_cluster_vcpu_count(snode_api, node_info, nodes, vcpu_count):
     """Resize this host's isolated-core layout to the cluster's vcpu_count, in
     place on ``nodes`` and persisted to the host's on-disk config, exactly the
@@ -2505,7 +2523,8 @@ def apply_cluster_vcpu_count(snode_api, node_info, nodes, vcpu_count):
             entry["cpu_mask"] = replacement["cpu_mask"]
             entry["isolated"] = replacement["isolated"]
             entry["l-cores"] = replacement["l-cores"]
-            entry["distribution"] = replacement["distribution"]
+            entry["distribution"] = _resolve_core_distribution(
+                replacement["distribution"], replacement["core_to_index"])
             entry["core_to_index"] = replacement["core_to_index"]
             ok, err = snode_api.persist_node_config(
                 max_lvol=None, huge_page_memory=None, numa_node=socket,
