@@ -1,6 +1,6 @@
 # coding=utf-8
 """
-tasks_runner_backup_merge.py - periodic service that evaluates backup policies
+backup_merge_service.py - periodic service that evaluates backup policies
 and triggers merges when retention limits are exceeded.
 """
 import time
@@ -16,12 +16,6 @@ db = db_controller.DBController()
 def main():
     logger.info("Starting backup merge service...")
     while True:
-        try:
-            db.get_clusters()
-        except Exception as e:
-            logger.error(f"Failed to get clusters: {e}")
-            time.sleep(3)
-            continue
         clusters = db.get_clusters()
         for cl in clusters:
             if cl.status == Cluster.STATUS_IN_ACTIVATION:

@@ -63,6 +63,7 @@ from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.lvol_model import LVol
+from simplyblock_core.services.task_runner_base import TaskAbort, TaskDefer
 
 
 def _make_lvol(uuid, status=None):
@@ -327,7 +328,6 @@ class TestDeviceRefreshBeforeUnblock(_BasePortAllowTest):
     def test_full_cluster_map_push_is_gone(self):
         self._run()
         self.cluster_map_push.assert_not_called()
-        self.assertEqual(self.task.status, JobSchedule.STATUS_DONE)
 
     def test_readmit_uses_node_recovery_cause_and_precedes_unblock(self):
         self._run()
@@ -387,9 +387,8 @@ class TestDeviceRefreshBeforeUnblock(_BasePortAllowTest):
             "simplyblock_core.services.tasks_runner_port_allow."
             "device_controller.device_set_online",
             return_value=False,
-        ):
+        ), self.assertRaises(TaskDefer):
             exec_port_allow_task(self.task)
-        self.assertEqual(self.task.status, JobSchedule.STATUS_SUSPENDED)
         self.assertEqual(self._node_allows(), [],
                          "no firewall allow when the pre-unblock re-admit "
                          "was refused")
@@ -403,9 +402,8 @@ class TestDeviceRefreshBeforeUnblock(_BasePortAllowTest):
             "simplyblock_core.services.tasks_runner_port_allow."
             "distr_controller.send_dev_status_event",
             side_effect=Exception("distrib send failed"),
-        ):
+        ), self.assertRaises(TaskDefer):
             exec_port_allow_task(self.task)
-        self.assertEqual(self.task.status, JobSchedule.STATUS_SUSPENDED)
         self.assertEqual(self._node_allows(), [],
                          "no firewall allow when the device-status refresh "
                          "failed")
@@ -443,21 +441,20 @@ class TestDataNicGate(_BasePortAllowTest):
         ]
 
     def test_data_nic_down_suspends(self):
-        self._run_with_data_ping(False)
-        self.assertEqual(self.task.status, JobSchedule.STATUS_SUSPENDED)
+        with self.assertRaises(TaskDefer):
+            self._run_with_data_ping(False)
         self.assertEqual(self._node_allows(), [],
                          "the port must not open while the node's data NIC is down")
 
     def test_data_nic_inconclusive_suspends(self):
-        self._run_with_data_ping(None)
-        self.assertEqual(self.task.status, JobSchedule.STATUS_SUSPENDED)
+        with self.assertRaises(TaskDefer):
+            self._run_with_data_ping(None)
         self.assertEqual(self._node_allows(), [],
                          "an inconclusive data-NIC ping must not allow the port — "
                          "recovery requires positive confirmation")
 
     def test_data_nic_up_proceeds(self):
         self._run_with_data_ping(True)
-        self.assertEqual(self.task.status, JobSchedule.STATUS_DONE)
         self.assertEqual(len(self._node_allows()), 1)
 
 
@@ -560,7 +557,6 @@ class TestLeadershipFailback(_BasePortAllowTest):
         jc_calls = [c for c in self.calls if c[0] == "jc_disable_replication"]
         self.assertEqual(jc_calls, [], "no quiesce without an acting leader")
         self.assertEqual(len(self._node_allows()), 1)
-        self.assertEqual(self.task.status, JobSchedule.STATUS_DONE)
 
     def test_zero_leader_left_alone(self):
         # Nobody holds leadership (no-abort outage aftermath): the runner
@@ -576,7 +572,6 @@ class TestLeadershipFailback(_BasePortAllowTest):
                          "a zero-leader LVS is left for the primary's "
                          "promotion-on-first-IO — no CP-side healing")
         self.assertEqual(len(self._node_allows()), 1)
-        self.assertEqual(self.task.status, JobSchedule.STATUS_DONE)
 
     def test_quiesce_loop_retries_locally_then_succeeds(self):
         # jc_disable_replication False = active replication -> re-quiesce
@@ -597,7 +592,6 @@ class TestLeadershipFailback(_BasePortAllowTest):
         demotes = [c for c in self.calls
                    if c[0] == "bdev_lvol_set_leader" and c[1] == "sec"]
         self.assertEqual(len(demotes), 1)
-        self.assertEqual(self.task.status, JobSchedule.STATUS_DONE)
 
     def test_quiesce_loop_exhaustion_suspends(self):
         from simplyblock_core.services.tasks_runner_port_allow import (
@@ -609,11 +603,11 @@ class TestLeadershipFailback(_BasePortAllowTest):
             return False
         self.sec_rpc.jc_disable_replication.side_effect = _jc
 
-        self._run()
+        with self.assertRaises(TaskDefer):
+            self._run()
         jc_calls = [c for c in self.calls if c[0] == "jc_disable_replication"]
         self.assertEqual(len(jc_calls), _REPL_SUSPEND_MAX_ATTEMPTS,
                          "the quiesce+disable loop is bounded locally")
-        self.assertEqual(self.task.status, JobSchedule.STATUS_SUSPENDED)
         demotes = [c for c in self.calls if c[0] == "bdev_lvol_set_leader"]
         self.assertEqual(demotes, [],
                          "no demote against active journal replication")
@@ -622,8 +616,8 @@ class TestLeadershipFailback(_BasePortAllowTest):
 
     def test_jc_disable_raise_suspends(self):
         self.sec_rpc.jc_disable_replication.side_effect = Exception("jc rpc timeout")
-        self._run()
-        self.assertEqual(self.task.status, JobSchedule.STATUS_SUSPENDED)
+        with self.assertRaises(TaskDefer):
+            self._run()
         demotes = [c for c in self.calls if c[0] == "bdev_lvol_set_leader"]
         self.assertEqual(demotes, [])
         self.assertEqual(self._node_allows(), [])
@@ -638,9 +632,8 @@ class TestLeadershipFailback(_BasePortAllowTest):
             "simplyblock_core.services.tasks_runner_port_allow."
             "_verify_or_reconnect_peer_hublvol",
             return_value=False,
-        ):
+        ), self.assertRaises(TaskDefer):
             self._run()
-        self.assertEqual(self.task.status, JobSchedule.STATUS_SUSPENDED)
         demotes = [c for c in self.calls if c[0] == "bdev_lvol_set_leader"]
         self.assertEqual(demotes, [],
                          "no demote while the acting leader's hublvol to the "
@@ -722,7 +715,6 @@ class TestLeadershipFailbackTertiaryActingLeader(_BasePortAllowTest):
                   if c[0] == "bdev_distrib_force_to_non_leader"]
         self.assertEqual(forces, [],
                          "no force_to_non_leader in the minimal failback")
-        self.assertEqual(self.task.status, JobSchedule.STATUS_DONE)
 
     def test_quiesce_verify_demote_order_with_tertiary_leader(self):
         self._run()
@@ -1021,7 +1013,7 @@ class TestStrictHublvolGate(_StrictGateBase):
         ) as reconnect_mock, patch(
             "simplyblock_core.services.tasks_runner_port_allow._abort_recovering_node",
             side_effect=lambda n, r: self.calls.append(("abort_recovering_node", n.uuid, r)),
-        ) as abort_mock:
+        ) as abort_mock, self.assertRaises(TaskAbort):
             exec_port_allow_task(self.task)
 
         abort_mock.assert_called_once()
@@ -1037,8 +1029,8 @@ class TestStrictHublvolGate(_StrictGateBase):
                        if c[0] == "firewall_set_port" and c[3] == "allow"]
         self.assertEqual(allow_calls, [])
 
-        # Task ended in DONE (not SUSPENDED — the retries already ran).
-        self.assertEqual(self.task.status, JobSchedule.STATUS_DONE)
+        # TaskAbort, not TaskDefer: the retries already ran, so the driver
+        # must finish the task rather than schedule another attempt.
 
         # 5 reconnect attempts were issued (one per retry iteration).
         self.assertEqual(reconnect_mock.call_count, 5)
@@ -1141,22 +1133,23 @@ class TestSourceShapeStrictGate(unittest.TestCase):
         self.assertIn("_abort_recovering_node(node, reason)", self.src)
 
     def test_no_port_allowed_after_abort(self):
-        # Source-level invariant: when the abort path runs the task returns
-        # without falling through to firewall_set_port/port_allowed.
-        # We assert that abort sets task status DONE and the function
-        # returns before the firewall/port_allowed lines.
+        # Source-level invariant: when the abort path runs, the handler
+        # leaves via TaskAbort without falling through to
+        # firewall_set_port/port_allowed. The raise is what makes the
+        # fall-through impossible — it replaced an explicit STATUS_DONE +
+        # return when the runner moved onto the task runner base.
         i_abort = self.src.find("_abort_recovering_node(node, reason)")
-        i_done = self.src.find("STATUS_DONE", i_abort)
-        i_return = self.src.find("return", i_done)
+        i_raise = self.src.find("raise TaskAbort", i_abort)
         # The invariant is about the port_allowed occurrence in
-        # exec_port_allow_task AFTER the abort path's return.
+        # exec_port_allow_task AFTER the abort path's raise.
         i_allow_event = self.src.find("tcp_ports_events.port_allowed", i_abort)
         self.assertGreater(i_abort, 0)
-        self.assertGreater(i_done, i_abort)
-        self.assertGreater(i_return, i_done)
-        self.assertGreater(i_allow_event, i_return,
+        self.assertGreater(i_raise, i_abort,
+                           "the abort path must terminate the handler with "
+                           "TaskAbort, not fall through")
+        self.assertGreater(i_allow_event, i_raise,
                            "tcp_ports_events.port_allowed must appear after "
-                           "the abort path's return so it cannot fire on the "
+                           "the abort path's raise so it cannot fire on the "
                            "abort code path")
 
 
@@ -1257,9 +1250,8 @@ class TestDeviceReadmitOnPortAllow(_BasePortAllowTest):
             "simplyblock_core.services.tasks_runner_port_allow."
             "device_controller.device_set_online",
             return_value=False,
-        ):
+        ), self.assertRaises(TaskDefer):
             self._run()
-        self.assertEqual(self.task.status, JobSchedule.STATUS_SUSPENDED)
         node_allows = [
             c for c in self.calls
             if c[0] == "firewall_set_port" and c[1] == self.node.uuid
@@ -1291,7 +1283,6 @@ class TestDeviceReadmitOnPortAllow(_BasePortAllowTest):
         self.assertTrue(
             any("refused" in line for line in logs.output),
             "a refused re-admit must be logged, never silent")
-        self.assertEqual(self.task.status, JobSchedule.STATUS_DONE)
 
 
 class _SecRoleReconnectBase(_BasePortAllowTest):
@@ -1405,21 +1396,21 @@ class TestOwnSecTertHublvolReconnect(_SecRoleReconnectBase):
         self.node_rpc.subsystem_list.return_value = [{"nqn": "nqn-p-hub"}]
         self.node_rpc.subsystem_get.return_value = {"nqn": "nqn-p-hub"}
         self.tert.add_hublvol_failover_path = MagicMock(return_value=False)
-        self._run_with_verify(lambda *a: True)
+        with self.assertRaises(TaskDefer):
+            self._run_with_verify(lambda *a: True)
         node_allows = [
             c for c in self.calls
             if c[0] == "firewall_set_port" and c[1] == self.node.uuid and c[3] == "allow"
         ]
         self.assertEqual(node_allows, [],
                          "the port must not open with a broken tertiary redirect")
-        self.assertEqual(self.task.status, JobSchedule.STATUS_SUSPENDED)
 
     def test_outbound_failure_suspends_task(self):
         def _fail_only_own(peer, primary):
             # Fail the node->prim direction; pass the peer-gate direction.
             return not (peer is self.node and primary is self.prim)
-        self._run_with_verify(_fail_only_own)
-        self.assertEqual(self.task.status, JobSchedule.STATUS_SUSPENDED)
+        with self.assertRaises(TaskDefer):
+            self._run_with_verify(_fail_only_own)
         node_allows = [
             c for c in self.calls
             if c[0] == "firewall_set_port" and c[1] == self.node.uuid and c[3] == "allow"
@@ -1439,7 +1430,6 @@ class TestOwnSecTertHublvolReconnect(_SecRoleReconnectBase):
         self.assertEqual(own_calls, [],
                          "no OUTBOUND reconnect toward a non-ONLINE primary — "
                          "its own recovery path re-drives that leg")
-        self.assertEqual(self.task.status, JobSchedule.STATUS_DONE)
 
     def test_follower_recovery_is_hublvol_wiring_only(self):
         # Scenario (iv): the recovering node is a plain follower of an
@@ -1462,7 +1452,6 @@ class TestOwnSecTertHublvolReconnect(_SecRoleReconnectBase):
                          "triggers no leadership action at all")
         ana_mock.assert_not_called()
         self.assertEqual(len(self._node_allows()), 1)
-        self.assertEqual(self.task.status, JobSchedule.STATUS_DONE)
 
     def test_no_ana_promotion_when_primary_online(self):
         # The deferred post-unblock ANA promotion is gated on the primary
@@ -1478,7 +1467,6 @@ class TestOwnSecTertHublvolReconnect(_SecRoleReconnectBase):
         ) as ana_mock:
             self._run_with_verify(lambda *a: True)
         ana_mock.assert_not_called()
-        self.assertEqual(self.task.status, JobSchedule.STATUS_DONE)
 
 
 class TestStaleLeaderConvergence(_SecRoleReconnectBase):
@@ -1538,7 +1526,6 @@ class TestStaleLeaderConvergence(_SecRoleReconnectBase):
                   if c[0] == "bdev_distrib_force_to_non_leader" and c[1] == "node"]
         self.assertEqual(forces, [])
         self.assertEqual(len(self._node_allows()), 1)
-        self.assertEqual(self.task.status, JobSchedule.STATUS_DONE)
 
     def test_no_demote_when_primary_not_leading(self):
         # The node is then the legitimate acting leader; demoting it would
@@ -1547,13 +1534,11 @@ class TestStaleLeaderConvergence(_SecRoleReconnectBase):
         self.prim_rpc.bdev_lvol_get_lvstores.return_value = [{"lvs leadership": False}]
         self._run()
         self.assertEqual(self._node_demotes(), [])
-        self.assertEqual(self.task.status, JobSchedule.STATUS_DONE)
 
     def test_no_action_without_stale_claim(self):
         self.lvs_leadership_on_node["LVS_P"] = False
         self._run()
         self.assertEqual(self._node_demotes(), [])
-        self.assertEqual(self.task.status, JobSchedule.STATUS_DONE)
 
 
 class TestNoFollowerPortFencing(_SecRoleReconnectBase):
@@ -1583,13 +1568,12 @@ class TestNoFollowerPortFencing(_SecRoleReconnectBase):
             "at first contact — the fencing was removed on 2026-07-07")
         self.assertNotIn("fenced_ports", self.task.function_params,
                          "no fence record is ever written into the task")
-        self.assertEqual(self.task.status, JobSchedule.STATUS_DONE)
 
     def test_suspension_leaves_no_block_behind(self):
         def _fail_own(peer, primary):
             return not (peer is self.node and primary is self.prim)
-        self._run_with_verify(_fail_own)
-        self.assertEqual(self.task.status, JobSchedule.STATUS_SUSPENDED)
+        with self.assertRaises(TaskDefer):
+            self._run_with_verify(_fail_own)
         self.assertEqual(
             self._blocks(), [],
             "a suspended recovery must not leave any port blocked — the "
@@ -1637,12 +1621,11 @@ class TestOfflinePrimaryTertiaryGate(_SecRoleReconnectBase):
                         "the tertiary->secondary hublvol must be connected "
                         "BEFORE the port opens — the tertiary is the acting "
                         "leader and must be able to redirect here")
-        self.assertEqual(self.task.status, JobSchedule.STATUS_DONE)
 
     def test_tertiary_path_failure_suspends(self):
         self.tert.add_hublvol_failover_path = MagicMock(return_value=False)
-        self._run_with_verify(lambda *a: True)
-        self.assertEqual(self.task.status, JobSchedule.STATUS_SUSPENDED)
+        with self.assertRaises(TaskDefer):
+            self._run_with_verify(lambda *a: True)
         node_allows = [
             c for c in self.calls
             if c[0] == "firewall_set_port" and c[1] == self.node.uuid and c[3] == "allow"
@@ -1659,7 +1642,6 @@ class TestOfflinePrimaryTertiaryGate(_SecRoleReconnectBase):
         self._run_with_verify(lambda *a: True)
         tert_paths = [c for c in self.calls if c[0] == "tert_path"]
         self.assertEqual(len(tert_paths), 1)
-        self.assertEqual(self.task.status, JobSchedule.STATUS_DONE)
 
     # --- deferred post-unblock ANA promotion (primary OFFLINE) ----------
 
@@ -1705,7 +1687,6 @@ class TestOfflinePrimaryTertiaryGate(_SecRoleReconnectBase):
                         "must never gate the recovery")
         self.assertLess(i_event, i_ana,
                         "the promotion runs after the port_allowed event")
-        self.assertEqual(self.task.status, JobSchedule.STATUS_DONE)
 
     def test_ana_promotion_failure_is_best_effort(self):
         # A failing per-lvol promotion must not fail the (already
@@ -1717,7 +1698,6 @@ class TestOfflinePrimaryTertiaryGate(_SecRoleReconnectBase):
             raise Exception("listener set-ana rpc failed")
         self._run_with_ana(ana_side=_boom)
         self.assertEqual(len(self._node_allows()), 1)
-        self.assertEqual(self.task.status, JobSchedule.STATUS_DONE)
 
 
 @unittest.skip("pending design call 2026-07: deferred ANA DEMOTE (a "
@@ -1779,12 +1759,11 @@ class TestTertiaryFollowsActingLeader(_BasePortAllowTest):
         self.assertIs(call.args[0], self.sec1)
         self.assertEqual(call.kwargs.get("role"), "tertiary")
         self.assertIs(call.kwargs.get("lvs_node"), self.prim2)
-        self.assertEqual(self.task.status, JobSchedule.STATUS_DONE)
 
     def test_failure_suspends_before_port_opens(self):
         self.node.connect_to_hublvol = MagicMock(return_value=False)
-        self._run()
-        self.assertEqual(self.task.status, JobSchedule.STATUS_SUSPENDED)
+        with self.assertRaises(TaskDefer):
+            self._run()
         node_allows = [
             c for c in self.calls
             if c[0] == "firewall_set_port" and c[1] == self.node.uuid and c[3] == "allow"

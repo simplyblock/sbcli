@@ -6,74 +6,79 @@ Handles three task types:
   - FN_BACKUP: perform an S3 backup from a snapshot
   - FN_BACKUP_RESTORE: restore a backup chain into a new lvol
   - FN_BACKUP_MERGE: merge two backups to shorten the chain
+
+All three are multi-cycle: a task issues its RPC, defers, and polls the data
+plane's transfer state on later cycles until it reaches a terminal state.
 """
 import time
 
-from simplyblock_core import constants, db_controller, utils
+from simplyblock_core import db_controller, utils
 from simplyblock_core.controllers import backup_events
 from simplyblock_core.models.backup import Backup
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
+from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.rpc_client import RPCException
+from simplyblock_core.services.task_runner_base import (
+    RunnerSpec,
+    TaskAbort,
+    TaskDefer,
+    TaskRetry,
+    serve,
+)
 
 logger = utils.get_logger(__name__)
 
 db = db_controller.DBController()
 
+# Time-based backstop for a task that is stuck but not erroring.
+_DEFAULT_BACKUP_TIMEOUT_SEC = 14400
 
-def _fail_backup(backup, task, message):
-    backup.status = Backup.STATUS_FAILED
-    backup.error_message = message
-    backup.write_to_db()
-    backup_events.backup_failed(backup.cluster_id, backup.node_id, backup)
-    task.function_result = message
-    task.status = JobSchedule.STATUS_DONE
-    task.write_to_db(db.kv_store)
+
+def _online_node(node_id):
+    """The node the task's RPCs go to, or a signal to stop/wait."""
+    try:
+        snode = db.get_storage_node_by_id(node_id)
+    except KeyError:
+        raise TaskAbort(f"Node {node_id} not found")
+
+    if snode.status != StorageNode.STATUS_ONLINE:
+        raise TaskRetry(f"Node {snode.status}, retrying")
+    return snode
+
+
+def _transfer_state(rpc_client, bdev_name):
+    try:
+        stat = rpc_client.bdev_lvol_transfer_stat(bdev_name)
+    except RPCException:
+        raise TaskRetry("transfer stat RPC failed, retrying")
+
+    if not stat or not isinstance(stat, dict):
+        raise TaskRetry("unexpected transfer stat response, retrying")
+    return stat.get("transfer_state", "")
 
 
 def _run_backup(task):
     backup_id = task.function_params.get("backup_id")
     if not backup_id:
-        task.function_result = "Missing backup_id"
-        task.status = JobSchedule.STATUS_DONE
-        task.write_to_db(db.kv_store)
-        return
+        raise TaskAbort("Missing backup_id")
 
     try:
         backup = db.get_backup_by_id(backup_id)
     except KeyError:
-        task.function_result = f"Backup {backup_id} not found"
-        task.status = JobSchedule.STATUS_DONE
-        task.write_to_db(db.kv_store)
-        return
+        raise TaskAbort(f"Backup {backup_id} not found")
 
     if backup.status not in (Backup.STATUS_PENDING, Backup.STATUS_IN_PROGRESS):
-        task.status = JobSchedule.STATUS_DONE
-        task.write_to_db(db.kv_store)
-        return
+        raise TaskAbort(f"Backup is already {backup.status}")
 
-    try:
-        snode = db.get_storage_node_by_id(backup.node_id)
-    except KeyError:
-        _fail_backup(backup, task, f"Node {backup.node_id} not found")
-        return
-
-    if snode.status != StorageNode.STATUS_ONLINE:
-        task.retry += 1
-        task.function_result = f"Node {snode.status}, retrying"
-        task.status = JobSchedule.STATUS_SUSPENDED
-        task.write_to_db(db.kv_store)
-        return
-
+    snode = _online_node(backup.node_id)
     rpc_client = snode.rpc_client(timeout=30)
 
-    # Resolve snapshot bdev name (needed for both kick-off and polling)
     try:
         snapshot = db.get_snapshot_by_id(backup.snapshot_id)
     except KeyError:
-        _fail_backup(backup, task, f"Snapshot {backup.snapshot_id} not found")
-        return
+        raise TaskAbort(f"Snapshot {backup.snapshot_id} not found")
 
     snap_bdev_name = snapshot.snap_bdev
     if not snap_bdev_name:
@@ -82,69 +87,43 @@ def _run_backup(task):
     if backup.status == Backup.STATUS_PENDING:
         try:
             ret = rpc_client.bdev_lvol_s3_backup(backup.s3_id, [snap_bdev_name], cluster_batch=16)
-            if not ret:
-                _fail_backup(backup, task, "bdev_lvol_s3_backup RPC failed")
-                return
         except RPCException as e:
-            _fail_backup(backup, task, f"RPC error: {e}")
-            return
+            raise TaskAbort(f"RPC error: {e}")
+        if not ret:
+            raise TaskAbort("bdev_lvol_s3_backup RPC failed")
 
         backup.status = Backup.STATUS_IN_PROGRESS
         backup.write_to_db()
         # Give the data plane time to start the transfer before polling
-        task.status = JobSchedule.STATUS_SUSPENDED
-        task.function_result = "Backup in progress"
-        task.write_to_db(db.kv_store)
+        raise TaskDefer("Backup in progress")
+
+    state = _transfer_state(rpc_client, snap_bdev_name)
+    if state == "Done":
+        backup.status = Backup.STATUS_COMPLETED
+        backup.completed_at = int(time.time())
+        backup.write_to_db()
+        backup_events.backup_completed(backup.cluster_id, backup.node_id, backup)
+        task.function_result = "Backup completed"
         return
 
-    # Poll via bdev_lvol_transfer_stat on the snapshot bdev
-    try:
-        stat = rpc_client.bdev_lvol_transfer_stat(snap_bdev_name)
-    except RPCException:
-        task.retry += 1
-        task.status = JobSchedule.STATUS_SUSPENDED
-        task.write_to_db(db.kv_store)
-        return
+    if state == "Failed":
+        raise TaskAbort("Backup transfer failed on data plane")
 
-    if stat and isinstance(stat, dict):
-        state = stat.get("transfer_state", "")
-        if state == "Done":
-            backup.status = Backup.STATUS_COMPLETED
-            backup.completed_at = int(time.time())
-            backup.write_to_db()
-            backup_events.backup_completed(backup.cluster_id, backup.node_id, backup)
-            task.function_result = "Backup completed"
-            task.status = JobSchedule.STATUS_DONE
-            task.write_to_db(db.kv_store)
-        elif state == "Failed":
-            _fail_backup(backup, task, "Backup transfer failed on data plane")
-        elif state == "No process" and backup.status == Backup.STATUS_IN_PROGRESS:
-            # "No process" means no transfer is running for this bdev — the
-            # backup died (e.g. an SPDK crash wiped the in-flight transfer).
-            # Re-issue by resetting to PENDING, but COUNT it as a retry so the
-            # max_retry ceiling in process_task() can stop a backup that keeps
-            # failing. Without the increment this branch loops forever, and
-            # re-issuing an RPC that crashes the data plane just re-crashes it.
-            # NOTE: this treats "No process" as a failure. It relies on a
-            # healthy in-progress backup NOT sitting in "No process"; if the
-            # data plane ever reports "No process" for a running backup, this
-            # would fail it prematurely and completion needs another signal.
-            task.retry += 1
-            backup.status = Backup.STATUS_PENDING
-            backup.write_to_db()
-            task.function_result = "No process, retrying backup start"
-            task.status = JobSchedule.STATUS_SUSPENDED
-            task.write_to_db(db.kv_store)
-        else:
-            # "In progress" — still running, retry later
-            task.status = JobSchedule.STATUS_SUSPENDED
-            task.function_result = "Backup in progress"
-            task.write_to_db(db.kv_store)
-    else:
-        # Unexpected response — retry
-        task.retry += 1
-        task.status = JobSchedule.STATUS_SUSPENDED
-        task.write_to_db(db.kv_store)
+    if state == "No process" and backup.status == Backup.STATUS_IN_PROGRESS:
+        # "No process" means no transfer is running for this bdev — the backup
+        # died (e.g. an SPDK crash wiped the in-flight transfer). Re-issue by
+        # resetting to PENDING, but COUNT it as a retry so the max_retry ceiling
+        # can stop a backup that keeps failing. Without that, re-issuing an RPC
+        # that crashes the data plane just re-crashes it, forever.
+        # NOTE: this treats "No process" as a failure. It relies on a healthy
+        # in-progress backup NOT sitting in "No process"; if the data plane ever
+        # reports "No process" for a running backup, this would fail it
+        # prematurely and completion needs another signal.
+        backup.status = Backup.STATUS_PENDING
+        backup.write_to_db()
+        raise TaskRetry("No process, retrying backup start")
+
+    raise TaskDefer("Backup in progress")
 
 
 def _set_lvol_online(task):
@@ -153,7 +132,6 @@ def _set_lvol_online(task):
     if not lvol_id:
         return
     try:
-        from simplyblock_core.models.lvol_model import LVol
         lvol = db.get_lvol_by_id(lvol_id)
         if lvol.status == LVol.STATUS_RESTORING:
             lvol.status = LVol.STATUS_ONLINE
@@ -169,7 +147,6 @@ def _set_lvol_restore_failed(task, reason):
     if not lvol_id:
         return
     try:
-        from simplyblock_core.models.lvol_model import LVol
         lvol = db.get_lvol_by_id(lvol_id)
         if lvol.status == LVol.STATUS_RESTORING:
             lvol.status = LVol.STATUS_RESTORE_FAILED
@@ -184,171 +161,96 @@ def _run_restore(task):
     lvol_name = task.function_params.get("lvol_name")
     chain_ids = task.function_params.get("chain_ids", [])
     node_id = task.node_id
-    recovery_started = task.function_params.get("recovery_started", False)
 
-    try:
-        snode = db.get_storage_node_by_id(node_id)
-    except KeyError:
-        task.function_result = f"Node {node_id} not found"
-        task.status = JobSchedule.STATUS_DONE
-        task.write_to_db(db.kv_store)
-        return
-
-    if snode.status != StorageNode.STATUS_ONLINE:
-        task.retry += 1
-        task.status = JobSchedule.STATUS_SUSPENDED
-        task.write_to_db(db.kv_store)
-        return
-
+    snode = _online_node(node_id)
     rpc_client = snode.rpc_client(timeout=30)
 
     # Check that the target lvol still exists in DB before doing any RPC work
     lvol_id = task.function_params.get("lvol_id")
     if lvol_id:
         try:
-            from simplyblock_core.models.lvol_model import LVol
-            lvol = db.get_lvol_by_id(lvol_id)
-            if lvol.status == LVol.STATUS_IN_DELETION:
-                task.function_result = f"Restore target {lvol_id} has been deleted"
-                task.status = JobSchedule.STATUS_DONE
-                task.write_to_db(db.kv_store)
-                return
+            if db.get_lvol_by_id(lvol_id).status == LVol.STATUS_IN_DELETION:
+                raise TaskAbort(f"Restore target {lvol_id} has been deleted")
         except KeyError:
-            task.function_result = f"Restore target {lvol_id} no longer exists"
-            task.status = JobSchedule.STATUS_DONE
-            task.write_to_db(db.kv_store)
-            return
+            raise TaskAbort(f"Restore target {lvol_id} no longer exists")
 
-    if not recovery_started:
+    if not task.function_params.get("recovery_started", False):
         try:
             ret = rpc_client.bdev_lvol_s3_recovery(lvol_name, chain_ids, cluster_batch=16)
-            if not ret:
-                task.function_result = "bdev_lvol_s3_recovery RPC failed"
-                task.retry += 1
-                task.status = JobSchedule.STATUS_SUSPENDED
-                task.write_to_db(db.kv_store)
-                return
         except RPCException as e:
-            task.function_result = f"RPC error: {e}"
-            task.retry += 1
-            task.status = JobSchedule.STATUS_SUSPENDED
-            task.write_to_db(db.kv_store)
-            return
+            raise TaskRetry(f"RPC error: {e}")
+        if not ret:
+            raise TaskRetry("bdev_lvol_s3_recovery RPC failed")
 
-        # Mark recovery as started so we don't re-issue the RPC on subsequent polls
+        # Don't re-issue the RPC on subsequent polls, and give the data plane
+        # time to start the transfer before the first one.
         task.function_params["recovery_started"] = True
-        # Give the data plane time to start the transfer before polling
-        task.status = JobSchedule.STATUS_SUSPENDED
-        task.write_to_db(db.kv_store)
+        raise TaskDefer("Restore started")
+
+    state = _transfer_state(rpc_client, lvol_name)
+    if state == "Done":
+        _set_lvol_online(task)
+        try:
+            backup = db.get_backup_by_id(backup_id)
+            backup_events.backup_restore_completed(
+                task.cluster_id, node_id, backup, lvol_name)
+        except KeyError:
+            logger.warning(
+                f"Backup {backup_id} no longer exists, "
+                f"skipping restore-completed event for {lvol_name}")
+        task.function_result = f"Restore completed: {lvol_name}"
         return
 
-    # Poll via bdev_lvol_transfer_stat on the target lvol
-    try:
-        stat = rpc_client.bdev_lvol_transfer_stat(lvol_name)
-    except RPCException:
-        task.retry += 1
-        task.status = JobSchedule.STATUS_SUSPENDED
-        task.write_to_db(db.kv_store)
-        return
+    if state == "Failed":
+        fail_count = task.function_params.get("fail_count", 0) + 1
+        task.function_params["fail_count"] = fail_count
+        reason = f"S3 transfer failed on data plane (attempt {fail_count})"
+        if fail_count < 3:
+            raise TaskRetry(reason)
 
-    if stat and isinstance(stat, dict):
-        state = stat.get("transfer_state", "")
-        if state == "Done":
-            _set_lvol_online(task)
-            try:
-                backup = db.get_backup_by_id(backup_id)
-                backup_events.backup_restore_completed(
-                    task.cluster_id, node_id, backup, lvol_name)
-            except KeyError:
-                pass
-            task.function_result = f"Restore completed: {lvol_name}"
-            task.status = JobSchedule.STATUS_DONE
-            task.write_to_db(db.kv_store)
-        elif state == "Failed":
-            fail_count = task.function_params.get("fail_count", 0) + 1
-            task.function_params["fail_count"] = fail_count
-            reason = f"S3 transfer failed on data plane (attempt {fail_count})"
-            task.function_result = reason
-            if fail_count >= 3:
-                _set_lvol_restore_failed(task, reason)
-                try:
-                    backup = db.get_backup_by_id(backup_id)
-                    backup_events.backup_restore_failed(
-                        task.cluster_id, node_id, backup, lvol_name, reason)
-                except KeyError:
-                    logger.warning(
-                        "Backup %s not found in DB; restore-failed event skipped for lvol %s",
-                        backup_id, lvol_name)
-                task.status = JobSchedule.STATUS_DONE
-            else:
-                task.retry += 1
-                task.status = JobSchedule.STATUS_SUSPENDED
-            task.write_to_db(db.kv_store)
-        elif state == "No process":
-            task.function_params["recovery_started"] = False
-            task.status = JobSchedule.STATUS_SUSPENDED
-            task.write_to_db(db.kv_store)
-        else:
-            # "In progress" — still running, retry later
-            task.status = JobSchedule.STATUS_SUSPENDED
-            task.write_to_db(db.kv_store)
-    else:
-        # Unexpected response — retry
-        task.retry += 1
-        task.status = JobSchedule.STATUS_SUSPENDED
-        task.write_to_db(db.kv_store)
+        _set_lvol_restore_failed(task, reason)
+        try:
+            backup = db.get_backup_by_id(backup_id)
+            backup_events.backup_restore_failed(
+                task.cluster_id, node_id, backup, lvol_name, reason)
+        except KeyError:
+            logger.warning(
+                "Backup %s not found in DB; restore-failed event skipped for lvol %s",
+                backup_id, lvol_name)
+        raise TaskAbort(reason)
+
+    if state == "No process":
+        task.function_params["recovery_started"] = False
+        raise TaskDefer("No process, restarting recovery")
+
+    raise TaskDefer("Restore in progress")
 
 
 def _run_merge(task):
     keep_backup_id = task.function_params.get("keep_backup_id")
     old_backup_id = task.function_params.get("old_backup_id")
-    merge_started = task.function_params.get("merge_started", False)
 
     try:
         keep_backup = db.get_backup_by_id(keep_backup_id)
         old_backup = db.get_backup_by_id(old_backup_id)
     except KeyError as e:
-        task.function_result = str(e)
-        task.status = JobSchedule.STATUS_DONE
-        task.write_to_db(db.kv_store)
-        return
+        raise TaskAbort(str(e))
 
-    try:
-        snode = db.get_storage_node_by_id(keep_backup.node_id)
-    except KeyError:
-        task.function_result = f"Node {keep_backup.node_id} not found"
-        task.status = JobSchedule.STATUS_DONE
-        task.write_to_db(db.kv_store)
-        return
-
-    if snode.status != StorageNode.STATUS_ONLINE:
-        task.retry += 1
-        task.status = JobSchedule.STATUS_SUSPENDED
-        task.write_to_db(db.kv_store)
-        return
-
+    snode = _online_node(keep_backup.node_id)
     rpc_client = snode.rpc_client(timeout=30)
 
-    if not merge_started:
+    if not task.function_params.get("merge_started", False):
         try:
-            ret = rpc_client.bdev_lvol_s3_merge(keep_backup.s3_id, old_backup.s3_id, cluster_batch=16, lvs_name=snode.lvstore)
-            if not ret:
-                task.function_result = "bdev_lvol_s3_merge RPC failed"
-                task.retry += 1
-                task.status = JobSchedule.STATUS_SUSPENDED
-                task.write_to_db(db.kv_store)
-                return
+            ret = rpc_client.bdev_lvol_s3_merge(
+                keep_backup.s3_id, old_backup.s3_id, cluster_batch=16, lvs_name=snode.lvstore)
         except RPCException as e:
-            task.function_result = f"RPC error: {e}"
-            task.retry += 1
-            task.status = JobSchedule.STATUS_SUSPENDED
-            task.write_to_db(db.kv_store)
-            return
+            raise TaskRetry(f"RPC error: {e}")
+        if not ret:
+            raise TaskRetry("bdev_lvol_s3_merge RPC failed")
 
         task.function_params["merge_started"] = True
-        task.write_to_db(db.kv_store)
         # Give the data plane time to complete the merge before finalizing
-        return
+        raise TaskDefer("Merge started")
 
     # The merge RPC is synchronous on the data plane — once it returned
     # successfully, the S3 data has been merged.  Finalize: update the
@@ -361,112 +263,79 @@ def _run_merge(task):
     old_backup.write_to_db()
 
     task.function_result = "Merge completed"
-    task.status = JobSchedule.STATUS_DONE
-    task.write_to_db(db.kv_store)
     logger.info(f"Merge completed: {old_backup_id} merged into {keep_backup_id}")
 
 
-def _terminate_task(task, reason):
-    """Terminate a backup/restore/merge task and finalize its resource.
-
-    Shared by the time-based timeout and the max_retry ceiling so both stop
-    the task the same way instead of leaving it to loop.
-    """
-    if task.function_name == JobSchedule.FN_BACKUP:
-        bid = task.function_params.get("backup_id")
-        if bid:
-            try:
-                b = db.get_backup_by_id(bid)
-                if b.status in (Backup.STATUS_PENDING, Backup.STATUS_IN_PROGRESS):
-                    _fail_backup(b, task, reason)
-                    return
-            except KeyError:
-                pass
-    elif task.function_name == JobSchedule.FN_BACKUP_RESTORE:
-        _set_lvol_restore_failed(task, reason)
-    elif task.function_name == JobSchedule.FN_BACKUP_MERGE:
-        old_bid = task.function_params.get("old_backup_id")
-        if old_bid:
-            try:
-                ob = db.get_backup_by_id(old_bid)
-                if ob.status == Backup.STATUS_MERGING:
-                    # Merge did not finish; leave the old backup intact.
-                    ob.status = Backup.STATUS_COMPLETED
-                    ob.write_to_db()
-            except KeyError:
-                pass
-
-    task.function_result = reason
-    task.status = JobSchedule.STATUS_DONE
-    task.write_to_db(db.kv_store)
+_HANDLERS = {
+    JobSchedule.FN_BACKUP: _run_backup,
+    JobSchedule.FN_BACKUP_RESTORE: _run_restore,
+    JobSchedule.FN_BACKUP_MERGE: _run_merge,
+}
 
 
-def process_task(task, cl):
-    """Advance a single backup task by one step, or terminate it.
-
-    Terminates on cancellation, on the time-based timeout, or once the
-    max_retry ceiling is reached — the last is what stops a backup that keeps
-    crashing the data plane from re-issuing its RPC forever.
-    """
-    if task.canceled:
-        task.function_result = "canceled"
-        task.status = JobSchedule.STATUS_DONE
-        task.write_to_db(db.kv_store)
-        return
-
-    # Time-based backstop for a task that is stuck but not erroring (default 4h).
-    backup_timeout_sec = getattr(cl, 'backup_timeout_seconds', 0) or 14400
+def process_task(task):
+    cluster = db.get_cluster_by_id(task.cluster_id)
+    backup_timeout_sec = getattr(cluster, 'backup_timeout_seconds', 0) or _DEFAULT_BACKUP_TIMEOUT_SEC
     elapsed = int(time.time()) - task.date if task.date else 0
     if elapsed > backup_timeout_sec:
-        _terminate_task(task, f"timeout after {elapsed}s")
-        return
+        raise TaskAbort(f"timeout after {elapsed}s")
 
-    # Retry ceiling: every other task runner enforces this. Without it a task
-    # whose step keeps failing (e.g. an RPC that crashes SPDK) loops until the
-    # timeout, re-triggering the failure each cycle. max_retry <= 0 means the
-    # task is intentionally unbounded and only the timeout applies.
-    if task.max_retry > 0 and task.retry >= task.max_retry:
-        _terminate_task(task, f"max retry reached ({task.retry}/{task.max_retry})")
-        return
+    _HANDLERS[task.function_name](task)
 
-    try:
-        if task.function_name == JobSchedule.FN_BACKUP:
-            _run_backup(task)
-        elif task.function_name == JobSchedule.FN_BACKUP_RESTORE:
-            _run_restore(task)
-        elif task.function_name == JobSchedule.FN_BACKUP_MERGE:
-            _run_merge(task)
-    except Exception as e:
-        logger.error(f"Error running backup task {task.uuid}: {e}")
-        # Increment retry so the task eventually reaches max_retry
-        # instead of looping forever on non-RPCException errors
-        task.retry += 1
-        task.function_result = f"Unhandled error: {e}"
-        task.status = JobSchedule.STATUS_SUSPENDED
-        task.write_to_db(db.kv_store)
+
+def finalize_resource(task):
+    """Release the backup/restore/merge the task was driving, once it is over.
+
+    Reached on every terminal path, so it is written to be a no-op when the
+    handler completed the resource itself and to only act when the task ended
+    with the resource still in flight — a timeout, the retry ceiling, an abort
+    or a cancellation, none of which the handler sees.
+    """
+    reason = task.function_result
+
+    if task.function_name == JobSchedule.FN_BACKUP:
+        backup_id = task.function_params.get("backup_id")
+        if not backup_id:
+            return
+        try:
+            backup = db.get_backup_by_id(backup_id)
+        except KeyError:
+            return
+        if backup.status in (Backup.STATUS_PENDING, Backup.STATUS_IN_PROGRESS):
+            backup.status = Backup.STATUS_FAILED
+            backup.error_message = reason
+            backup.write_to_db()
+            backup_events.backup_failed(backup.cluster_id, backup.node_id, backup)
+
+    elif task.function_name == JobSchedule.FN_BACKUP_RESTORE:
+        _set_lvol_restore_failed(task, reason)
+
+    elif task.function_name == JobSchedule.FN_BACKUP_MERGE:
+        old_backup_id = task.function_params.get("old_backup_id")
+        if not old_backup_id:
+            return
+        try:
+            old_backup = db.get_backup_by_id(old_backup_id)
+        except KeyError:
+            return
+        if old_backup.status == Backup.STATUS_MERGING:
+            # Merge did not finish; leave the old backup intact.
+            old_backup.status = Backup.STATUS_COMPLETED
+            old_backup.write_to_db()
+
+
+SPEC = RunnerSpec(
+    name="tasks-runner-backup",
+    function_names=list(_HANDLERS),
+    handler=process_task,
+    on_finish=finalize_resource,
+    is_eligible=lambda task, cluster: cluster.status != Cluster.STATUS_IN_ACTIVATION,
+)
+
+
+def main():
+    serve(SPEC)
 
 
 if __name__ == "__main__":
-    logger.info("Starting backup tasks runner...")
-    while True:
-        try:
-            db.get_clusters()
-        except Exception as e:
-            logger.error(f"Failed to get clusters: {e}")
-            time.sleep(3)
-            continue
-        clusters = db.get_clusters()
-        for cl in clusters:
-            if cl.status == Cluster.STATUS_IN_ACTIVATION:
-                continue
-
-            tasks = db.get_job_tasks(cl.get_id(), reverse=False)
-            for task in tasks:
-                if task.status == JobSchedule.STATUS_DONE or task.canceled:
-                    continue
-
-                # Re-fetch task for freshness
-                task = db.get_task_by_id(task.uuid)
-                process_task(task, cl)
-
-        time.sleep(constants.TASK_EXEC_INTERVAL_SEC)
+    main()

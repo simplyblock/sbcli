@@ -4,6 +4,10 @@
 No FDB / SPDK: ``integrate_new_node_into_cluster`` and the DB handle are
 mocked, so these run in milliseconds. This is the "fast tier" that lets
 expansion logic be developed without the multi-hour real-FDB simulation.
+
+Scope is the handler only. Cancellation, max-retry, status transitions and
+the retry counter belong to the task runner driver and are tested once for
+every runner in ``tests/unit/tasks/test_task_runner_base.py``.
 """
 
 import unittest
@@ -16,6 +20,7 @@ from simplyblock_core.controllers.cluster_expansion.planner import (
     EXPAND_PHASE_COMPLETED,
     EXPAND_PHASE_IN_PROGRESS,
 )
+from simplyblock_core.services.task_runner_base import TaskAbort, TaskRetry
 import simplyblock_core.services.tasks_runner_cluster_expand as runner
 
 
@@ -65,27 +70,10 @@ class TestProcessTask(unittest.TestCase):
 
         self.tc = patch.object(runner, "tasks_controller").start()
 
-    def test_canceled_marks_done(self):
-        task = _task(canceled=True)
-        res = runner.process_task(task)
-        self.assertFalse(res)
-        self.assertEqual(task.status, JobSchedule.STATUS_DONE)
-        self.assertEqual(task.function_result, "canceled")
-        self.integrate.assert_not_called()
-
-    def test_max_retry_marks_done(self):
-        task = _task(retry=3, max_retry=3)
-        res = runner.process_task(task)
-        self.assertTrue(res)
-        self.assertEqual(task.status, JobSchedule.STATUS_DONE)
-        self.assertEqual(task.function_result, "max retry reached")
-        self.integrate.assert_not_called()
-
-    def test_missing_new_node_id_marks_done(self):
+    def test_missing_new_node_id_aborts(self):
         task = _task(new_node_id=None)
-        res = runner.process_task(task)
-        self.assertTrue(res)
-        self.assertEqual(task.status, JobSchedule.STATUS_DONE)
+        with self.assertRaises(TaskAbort):
+            runner.process_task(task)
         self.integrate.assert_not_called()
 
     def test_happy_path_completes_and_queues_dev_mig(self):
@@ -101,26 +89,34 @@ class TestProcessTask(unittest.TestCase):
         self.integrate.side_effect = _integrate
 
         task = _task()
-        res = runner.process_task(task)
+        runner.process_task(task)
 
-        self.assertTrue(res)
-        self.assertEqual(task.status, JobSchedule.STATUS_DONE)
         self.integrate.assert_called_once()
+        self.assertIn("expansion complete", task.function_result)
         # Only the two ONLINE devices get a migration task.
         self.assertEqual(self.tc.add_new_device_mig_task.call_count, 2)
 
-    def test_failure_suspends_and_increments_retry(self):
+    def test_failure_propagates_for_the_driver_to_retry(self):
         self.db.get_cluster_by_id.return_value = _cluster()
         self.db.get_storage_node_by_id.return_value = _node_with_devices()
         self.integrate.side_effect = RuntimeError("boom")
 
         task = _task(retry=0)
-        res = runner.process_task(task)
+        # Suspending and counting the retry is the driver's half of the
+        # contract; the handler only has to not swallow the failure.
+        with self.assertRaises(RuntimeError):
+            runner.process_task(task)
 
-        self.assertFalse(res)
-        self.assertEqual(task.status, JobSchedule.STATUS_SUSPENDED)
-        self.assertEqual(task.retry, 1)
-        self.assertIn("boom", task.function_result)
+        self.tc.add_new_device_mig_task.assert_not_called()
+
+    def test_unexpected_phase_after_run_is_retried(self):
+        self.db.get_cluster_by_id.return_value = _cluster()
+        self.db.get_storage_node_by_id.return_value = _node_with_devices()
+        self.integrate.side_effect = lambda c, snode, **kw: None
+
+        with self.assertRaises(TaskRetry):
+            runner.process_task(_task())
+
         self.tc.add_new_device_mig_task.assert_not_called()
 
     def test_aborted_state_is_rearmed_before_resume(self):
