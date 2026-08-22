@@ -5,7 +5,7 @@ cluster event log.
 1. A sync delete failing after the async delete already succeeded. The data is
    going away, but a node still holds its replica bdev and the volume is pinned
    in_deletion until the deferred task drains -- invisible from the volume list
-   alone. The runner retries every 3 seconds, so the event fires only when the
+   alone. The runner declares the alert; the task runner fires it only when the
    failure message CHANGES, not per retry.
 
 2. An lvs journal accumulating more than JM_COMPRESSION_BACKLOG_ALERT_RECORDS
@@ -18,6 +18,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from simplyblock_core import constants
+from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.services import main_distr_event_collector as collector
 from simplyblock_core.services import tasks_runner_sync_lvol_del as sync_del
 
@@ -27,54 +28,41 @@ REARM = THRESHOLD * constants.JM_COMPRESSION_BACKLOG_REARM_FRACTION
 
 
 class TestSyncDeleteFailureEvent(unittest.TestCase):
+    """The runner's alert hook, which the task runner calls on a failed attempt.
+    That it fires once per DISTINCT failure rather than once per retry, and that
+    a broken event log cannot take the runner down, are the driver's contracts —
+    see tests/unit/tasks/test_task_runner_base.py."""
 
-    def _task(self, previous_result=""):
+    def _task(self, function_name=JobSchedule.FN_LVOL_SYNC_DEL,
+              bdev="LVS_1/LVOL_5"):
         task = MagicMock()
         task.uuid = "task-1"
-        # The task runner clears function_result before every attempt, so the
-        # "same failure again" check reads the runner's own last-message map.
-        sync_del._last_sync_del_failure.clear()
-        if previous_result:
-            sync_del._last_sync_del_failure[task.uuid] = previous_result
+        task.cluster_id = "cl-1"
+        task.node_id = "node-1"
+        task.function_name = function_name
+        task.function_params = {"lvol_bdev_name": bdev}
         return task
 
-    def _node(self):
-        node = MagicMock()
-        node.cluster_id = "cl-1"
-        node.get_id.return_value = "node-1"
-        return node
-
-    def test_first_failure_is_logged_as_an_error(self):
+    def test_a_failure_is_reported_as_an_error(self):
         with patch.object(sync_del.events_controller, "log_event_cluster") as log:
-            sync_del._log_sync_delete_failure(
-                self._task(), self._node(), "LVS_1/LVOL_5", "connection refused")
+            sync_del.alert_sync_delete_failure(self._task(), "connection refused")
         log.assert_called_once()
         kwargs = log.call_args.kwargs
         self.assertEqual(kwargs["event_level"], "Error")
         self.assertEqual(kwargs["event"], "SYNC_DELETE_FAILED")
         self.assertEqual(kwargs["node_id"], "node-1")
+        self.assertEqual(kwargs["cluster_id"], "cl-1")
         self.assertIn("in_deletion", kwargs["message"])
         self.assertIn("LVS_1/LVOL_5", kwargs["message"])
+        self.assertIn("connection refused", kwargs["message"])
 
-    def test_a_repeat_of_the_same_failure_is_not_logged_again(self):
-        """The runner retries every 3s; identical failures must not flood."""
-        task = self._task(previous_result="boom")
+    def test_a_sync_op_failure_is_not_a_sync_delete_alert(self):
+        """Both task families share this runner, but only a delete leaves a
+        volume pinned in_deletion."""
         with patch.object(sync_del.events_controller, "log_event_cluster") as log:
-            sync_del._log_sync_delete_failure(task, self._node(), "b", "boom")
+            sync_del.alert_sync_delete_failure(
+                self._task(function_name=JobSchedule.FN_LVOL_SYNC_OP), "boom")
         log.assert_not_called()
-
-    def test_a_different_failure_is_logged(self):
-        task = self._task(previous_result="connection refused")
-        with patch.object(sync_del.events_controller, "log_event_cluster") as log:
-            sync_del._log_sync_delete_failure(task, self._node(), "b", "timeout")
-        log.assert_called_once()
-
-    def test_event_log_trouble_does_not_break_the_runner(self):
-        with patch.object(sync_del.events_controller, "log_event_cluster",
-                          side_effect=RuntimeError("db gone")), \
-                patch.object(sync_del, "logger"):
-            sync_del._log_sync_delete_failure(
-                self._task(), self._node(), "b", "boom")   # must not raise
 
 
 class TestCompressionBacklogEvent(unittest.TestCase):

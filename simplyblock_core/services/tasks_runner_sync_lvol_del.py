@@ -57,11 +57,13 @@ def _is_already_gone(err):
     return "-19" in str(err)
 
 
-# Last message reported per task, one map per event below. The driver clears
+# Last threshold-alert message reported per task. The driver clears
 # ``function_result`` before every attempt, so the previous attempt's message
-# cannot be read off the task; without these a node that stays broken would
-# write one identical event per poll.
-_last_sync_del_failure: dict = {}
+# cannot be read off the task; without this a node that stays broken would
+# write one identical event per poll. Unlike the SYNC_DELETE_FAILED event,
+# which dedupes through the driver's on_failure, this alert must also fire
+# once on crossing the threshold with an UNCHANGED message, so it keeps its
+# own memo.
 _last_alerted_failure: dict = {}
 
 
@@ -168,37 +170,31 @@ def _run_sync_op(task):
         raise TaskAbort(f"unknown op {op!r}")
 
 
-def _log_sync_delete_failure(task, node, lvol_bdev_name, msg):
-    """Record a failed sync delete in the cluster event log.
+def alert_sync_delete_failure(task, reason):
+    """Report a failed sync delete in the cluster event log.
 
     This is the case an operator cannot see from the volume list alone: the
     async delete already SUCCEEDED, so the data is going away, but a node still
-    holds its replica bdev and the volume is pinned in_deletion until this
-    task drains.
+    holds its replica bdev and the volume is pinned in_deletion until this task
+    drains.
     """
-    if _last_sync_del_failure.get(task.uuid) == msg:
+    if task.function_name != JobSchedule.FN_LVOL_SYNC_DEL:
         return
-    _last_sync_del_failure[task.uuid] = msg
 
-    try:
-        events_controller.log_event_cluster(
-            cluster_id=node.cluster_id,
-            domain=events_controller.DOMAIN_STORAGE,
-            event="SYNC_DELETE_FAILED",
-            db_object=task,
-            caused_by=events_controller.CAUSED_BY_MONITOR,
-            message=(f"Sync delete of {lvol_bdev_name} failed on node "
-                     f"{node.get_id()} after a successful async delete; the "
-                     f"volume stays in_deletion until this drains. {msg}"),
-            node_id=node.get_id(),
-            event_level="Error")
-    except Exception as event_error:
-        logger.warning(f"Could not log sync-delete failure event: {event_error}")
+    events_controller.log_event_cluster(
+        cluster_id=task.cluster_id,
+        domain=events_controller.DOMAIN_STORAGE,
+        event="SYNC_DELETE_FAILED",
+        db_object=task,
+        caused_by=events_controller.CAUSED_BY_MONITOR,
+        message=(f"Sync delete of {task.function_params['lvol_bdev_name']} failed on "
+                 f"node {task.node_id} after a successful async delete; the volume "
+                 f"stays in_deletion until this drains. {reason}"),
+        node_id=task.node_id,
+        event_level="Error")
 
 
 def _fail_sync_del(task, node, lvol_bdev_name, msg) -> NoReturn:
-    logger.error(msg)
-    _log_sync_delete_failure(task, node, lvol_bdev_name, msg)
     _alert_repeated_failure(
         task, node.get_id(), f"Sync delete of {lvol_bdev_name}", msg)
     raise TaskRetry(msg)
@@ -265,7 +261,6 @@ def process_task(task):
 def release_del_sync_lock(task):
     """Free the primary's del-sync lock once the delete task is over, however
     it ended — the lock is keyed on there being no active task left."""
-    _last_sync_del_failure.pop(task.uuid, None)
     _last_alerted_failure.pop(task.uuid, None)
 
     if task.function_name != JobSchedule.FN_LVOL_SYNC_DEL:
@@ -281,6 +276,7 @@ SPEC = RunnerSpec(
     function_names=[JobSchedule.FN_LVOL_SYNC_OP, JobSchedule.FN_LVOL_SYNC_DEL],
     handler=process_task,
     on_finish=release_del_sync_lock,
+    on_failure=alert_sync_delete_failure,
     is_eligible=lambda task, cluster: cluster.status != Cluster.STATUS_IN_ACTIVATION,
     interval=3,
 )

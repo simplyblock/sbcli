@@ -255,6 +255,87 @@ def test_failing_on_finish_does_not_break_the_task(monkeypatch):
     assert store.row().status == JobSchedule.STATUS_DONE
 
 
+# -- on_failure alerts ------------------------------------------------------
+
+def test_on_failure_reports_a_failed_attempt(monkeypatch):
+    task = _task()
+    store = _wire(monkeypatch, task)
+    on_failure = MagicMock()
+
+    _runner(MagicMock(side_effect=trb.TaskRetry("boom")),
+            on_failure=on_failure)._process(task, MagicMock())
+
+    reported_task, reason = on_failure.call_args[0]
+    assert reported_task.uuid == "task-1"
+    assert reason == "boom"
+    assert store.row().status == JobSchedule.STATUS_SUSPENDED
+
+
+def test_on_failure_is_not_repeated_for_the_same_message(monkeypatch):
+    """A cause that persists for hours must write ONE alert, not one per
+    attempt. The handler cannot tell — it is handed a cleared function_result —
+    so the driver compares against the message the row still carries."""
+    task = _task(status=JobSchedule.STATUS_SUSPENDED)
+    task.function_result = "boom"
+    store = _wire(monkeypatch, task)
+    on_failure = MagicMock()
+
+    _runner(MagicMock(side_effect=trb.TaskRetry("boom")),
+            on_failure=on_failure)._process(task, MagicMock())
+
+    on_failure.assert_not_called()
+    assert store.row().retry == 1
+
+
+def test_on_failure_reports_a_changed_message(monkeypatch):
+    task = _task(status=JobSchedule.STATUS_SUSPENDED)
+    task.function_result = "connection refused"
+    _wire(monkeypatch, task)
+    on_failure = MagicMock()
+
+    _runner(MagicMock(side_effect=trb.TaskRetry("timeout")),
+            on_failure=on_failure)._process(task, MagicMock())
+
+    assert on_failure.call_args[0][1] == "timeout"
+
+
+def test_on_failure_does_not_run_for_a_deferred_task(monkeypatch):
+    task = _task()
+    _wire(monkeypatch, task)
+    on_failure = MagicMock()
+
+    _runner(MagicMock(side_effect=trb.TaskDefer("waiting")),
+            on_failure=on_failure)._process(task, MagicMock())
+
+    on_failure.assert_not_called()
+
+
+def test_on_failure_does_not_run_when_another_actor_owns_the_outcome(monkeypatch):
+    task = _task()
+    store = _wire(monkeypatch, task)
+    on_failure = MagicMock()
+
+    def _handler(t):
+        store.concurrently(canceled=True)
+        raise trb.TaskRetry("boom")
+
+    _runner(_handler, on_failure=on_failure)._process(task, MagicMock())
+
+    on_failure.assert_not_called()
+
+
+def test_failing_on_failure_does_not_break_the_task(monkeypatch):
+    task = _task()
+    store = _wire(monkeypatch, task)
+
+    runner = _runner(MagicMock(side_effect=trb.TaskRetry("boom")),
+                     on_failure=MagicMock(side_effect=RuntimeError("alert boom")))
+    runner._process(task, MagicMock())  # must not raise
+
+    assert store.row().status == JobSchedule.STATUS_SUSPENDED
+    assert store.row().retry == 1
+
+
 # -- pre-run skip-gates -----------------------------------------------------
 
 def test_ineligible_skips_without_claim_or_write(monkeypatch):
