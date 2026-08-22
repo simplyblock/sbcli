@@ -24,12 +24,25 @@ from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 
 
-CLUSTER_ID = "cluster-1"
+# Every id a manifest carries is a UUID, so the objects these tests build are
+# given real ones rather than readable stand-ins.
+CLUSTER_ID = "c1000000-0000-4000-8000-000000000001"
+POOL_ID = "b0010000-0000-4000-8000-000000000001"
+NODE_ID = "d0de0000-0000-4000-8000-000000000001"
+LVOL_ID = "10101000-0000-4000-8000-000000000001"
+
+
+def _backup_id(index: int) -> str:
+    return f"0ac00000-0000-4000-8000-{index:012d}"
+
+
+def _snapshot_id(index: int) -> str:
+    return f"50a50000-0000-4000-8000-{index:012d}"
 
 
 def _config(**overrides):
     return BackupConfig.model_validate({
-        "bucket_name": "simplyblock-backup-cluster-1",
+        "bucket_name": "simplyblock-backup-primary",
         "region": "eu-central-1",
         **overrides,
     })
@@ -52,7 +65,7 @@ def cluster(db):
 @pytest.fixture
 def pool(db):
     p = Pool()
-    p.uuid = "pool-1"
+    p.uuid = POOL_ID
     p.pool_name = "pool-1"  # resolved by name: "pool-1" is not a UUID
     p.cluster_id = CLUSTER_ID
     p.write_to_db(db.kv_store)
@@ -62,7 +75,7 @@ def pool(db):
 @pytest.fixture
 def node(db):
     n = StorageNode()
-    n.uuid = "node-1"
+    n.uuid = NODE_ID
     n.cluster_id = CLUSTER_ID
     n.status = StorageNode.STATUS_ONLINE
     n.lvstore = "lvs_test"
@@ -72,23 +85,23 @@ def node(db):
     return n
 
 
-def _snapshot(db, uuid="snap-1", crypto=False):
+def _snapshot(db, index=1, crypto=False):
     volume = LVol()
-    volume.uuid = "lvol-1"
+    volume.uuid = LVOL_ID
     volume.lvol_name = "vol"
-    volume.node_id = "node-1"
+    volume.node_id = NODE_ID
     volume.lvs_name = "lvs_test"
-    volume.pool_uuid = "pool-1"
+    volume.pool_uuid = POOL_ID
     volume.size = 4096
     if crypto:
-        volume.crypto_bdev = "crypto_lvol-1"
+        volume.crypto_bdev = f"crypto_{LVOL_ID}"
     volume.write_to_db(db.kv_store)
 
     s = SnapShot()
-    s.uuid = uuid
-    s.snap_uuid = uuid
-    s.snap_name = uuid
-    s.snap_bdev = f"lvs_test/{uuid}"
+    s.uuid = _snapshot_id(index)
+    s.snap_uuid = _snapshot_id(index)
+    s.snap_name = f"snap-{index}"
+    s.snap_bdev = f"lvs_test/snap-{index}"
     s.size = 4096
     s.status = SnapShot.STATUS_ONLINE
     s.lvol = volume
@@ -96,15 +109,20 @@ def _snapshot(db, uuid="snap-1", crypto=False):
     return s
 
 
-def _backup(db, uuid, s3_id, snapshot_id, prev="", location=None, encrypted=False):
+def _backup(db, index, snapshot_index=None, prev=None, location=None, encrypted=False):
+    """A completed backup, addressed by index rather than by uuid.
+
+    The index feeds the uuid, the s3_id and the snapshot id together, so a chain
+    reads as `_backup(db, 2, prev=1)` instead of three parallel UUID literals.
+    """
     b = Backup()
-    b.uuid = uuid
-    b.s3_id = s3_id
+    b.uuid = _backup_id(index)
+    b.s3_id = index
     b.cluster_id = CLUSTER_ID
-    b.lvol_id = "lvol-1"
+    b.lvol_id = LVOL_ID
     b.lvol_name = "vol"
-    b.snapshot_id = snapshot_id
-    b.prev_backup_id = prev
+    b.snapshot_id = _snapshot_id(index if snapshot_index is None else snapshot_index)
+    b.prev_backup_id = _backup_id(prev) if prev is not None else ""
     b.size = 4096
     b.status = Backup.STATUS_COMPLETED
     b.location = (location or _config().location()).model_dump(exclude_none=True)
@@ -125,7 +143,7 @@ class TestBackupCreationPreconditions:
         cluster.write_to_db(db.kv_store)
         _snapshot(db)
 
-        backup_id, error = backup_controller.backup_snapshot("snap-1")
+        backup_id, error = backup_controller.backup_snapshot(_snapshot_id(1))
 
         assert backup_id is None
         assert "backup configuration" in error
@@ -137,7 +155,7 @@ class TestBackupCreationPreconditions:
         cluster.write_to_db(db.kv_store)
         _snapshot(db)
 
-        backup_id, error = backup_controller.backup_snapshot("snap-1")
+        backup_id, error = backup_controller.backup_snapshot(_snapshot_id(1))
 
         assert backup_id is None
         assert "snapshot_backups disabled" in error
@@ -149,7 +167,7 @@ class TestBackupCreationPreconditions:
         too_long = [snap] * (constants.BACKUP_MAX_CHAIN_LENGTH + 1)
 
         with patch.object(backup_controller, "_get_snapshot_chain", return_value=too_long):
-            backup_id, error = backup_controller.backup_snapshot("snap-1")
+            backup_id, error = backup_controller.backup_snapshot(_snapshot_id(1))
 
         assert backup_id is None
         assert "data plane accepts at most" in error
@@ -158,24 +176,24 @@ class TestBackupCreationPreconditions:
     def test_chain_in_another_bucket_is_refused(self, db, cluster, node):
         """The cluster's bucket changed since the ancestors were written."""
         snap = _snapshot(db)
-        _backup(db, "b-old", 1, snapshot_id="snap-0",
+        _backup(db, 1, snapshot_index=0,
                 location=_config(bucket_name="the-old-bucket").location())
 
         with patch.object(backup_controller, "_get_snapshot_chain",
-                          return_value=[_named(snap, "snap-0"), snap]):
-            backup_id, error = backup_controller.backup_snapshot("snap-1")
+                          return_value=[_named(snap, _snapshot_id(0)), snap]):
+            backup_id, error = backup_controller.backup_snapshot(_snapshot_id(1))
 
         assert backup_id is None
         assert "cannot span buckets" in error
-        assert db.get_backups() == [db.get_backup_by_id("b-old")]
+        assert db.get_backups() == [db.get_backup_by_id(_backup_id(1))]
 
     def test_encrypted_volume_over_a_plain_chain_is_refused(self, db, cluster, node):
         snap = _snapshot(db, crypto=True)
-        _backup(db, "b-plain", 1, snapshot_id="snap-0", encrypted=False)
+        _backup(db, 1, snapshot_index=0, encrypted=False)
 
         with patch.object(backup_controller, "_get_snapshot_chain",
-                          return_value=[_named(snap, "snap-0"), snap]):
-            backup_id, error = backup_controller.backup_snapshot("snap-1")
+                          return_value=[_named(snap, _snapshot_id(0)), snap]):
+            backup_id, error = backup_controller.backup_snapshot(_snapshot_id(1))
 
         assert backup_id is None
         assert "cannot mix encrypted and unencrypted" in error
@@ -186,9 +204,9 @@ class TestBackupCreationPreconditions:
         cluster.write_to_db(db.kv_store)
         _snapshot(db)
 
-        backup_controller.backup_snapshot("snap-1")
+        backup_controller.backup_snapshot(_snapshot_id(1))
 
-        assert db.get_backup_chain_lock("snap-1") is None
+        assert db.get_backup_chain_lock(_snapshot_id(1)) is None
 
 
 def _named(snapshot, uuid):
@@ -203,71 +221,69 @@ def _named(snapshot, uuid):
 class TestRestorePreconditions:
 
     def test_chain_spanning_buckets_is_refused(self, db, cluster, node, pool):
-        _backup(db, "b-1", 1, snapshot_id="snap-1",
-                location=_config(bucket_name="elsewhere").location())
-        _backup(db, "b-2", 2, snapshot_id="snap-2", prev="b-1")
+        _backup(db, 1, location=_config(bucket_name="elsewhere").location())
+        _backup(db, 2, prev=1)
 
         with pytest.raises(PreconditionError, match="cannot span buckets"):
-            backup_controller.restore_backup("b-2", "restored", "pool-1")
+            backup_controller.restore_backup(_backup_id(2), "restored", "pool-1")
 
     def test_chain_mixing_encryption_is_refused(self, db, cluster, node, pool):
-        _backup(db, "b-1", 1, snapshot_id="snap-1", encrypted=True)
-        _backup(db, "b-2", 2, snapshot_id="snap-2", prev="b-1", encrypted=False)
+        _backup(db, 1, encrypted=True)
+        _backup(db, 2, prev=1, encrypted=False)
 
         with pytest.raises(PreconditionError, match="mix encrypted and unencrypted"):
-            backup_controller.restore_backup("b-2", "restored", "pool-1")
+            backup_controller.restore_backup(_backup_id(2), "restored", "pool-1")
 
     def test_overlong_chain_is_refused(self, db, cluster, node, pool):
-        previous = ""
-        for index in range(constants.BACKUP_MAX_CHAIN_LENGTH + 1):
-            previous = _backup(db, f"b-{index}", index + 1,
-                               snapshot_id=f"snap-{index}", prev=previous).uuid
+        previous = None
+        for index in range(1, constants.BACKUP_MAX_CHAIN_LENGTH + 2):
+            _backup(db, index, prev=previous)
+            previous = index
 
         with pytest.raises(PreconditionError, match="data plane accepts at most"):
-            backup_controller.restore_backup(previous, "restored", "pool-1")
+            backup_controller.restore_backup(_backup_id(previous), "restored", "pool-1")
 
     def test_no_volume_is_created_when_a_precondition_fails(self, db, cluster, node, pool):
-        _backup(db, "b-1", 1, snapshot_id="snap-1", encrypted=True)
-        _backup(db, "b-2", 2, snapshot_id="snap-2", prev="b-1", encrypted=False)
+        _backup(db, 1, encrypted=True)
+        _backup(db, 2, prev=1, encrypted=False)
 
         with pytest.raises(PreconditionError):
-            backup_controller.restore_backup("b-2", "restored", "pool-1")
+            backup_controller.restore_backup(_backup_id(2), "restored", "pool-1")
 
         assert db.get_lvols() == []
 
 
 class TestImportPreconditions:
 
-    def _manifest(self, backup_id, prev=None, s3_id=1, with_compression=False):
+    def _manifest(self, index, prev=None, s3_id=None, with_compression=False):
         return BackupManifest.model_validate({
             "schema_version": 1,
-            "backup_id": backup_id,
-            "s3_id": s3_id,
+            "backup_id": _backup_id(index),
+            "s3_id": index if s3_id is None else s3_id,
             "created_at": 100,
             "completed_at": 200,
             "size": 4096,
-            "prev_backup_id": prev,
-            "source": {"cluster_id": CLUSTER_ID, "node_id": "node-1"},
-            "volume": {"lvol_id": "lvol-1", "lvol_name": "vol",
-                       "snapshot_id": f"snap-{backup_id}", "snapshot_name": "s",
+            "prev_backup_id": _backup_id(prev) if prev is not None else None,
+            "source": {"cluster_id": CLUSTER_ID, "node_id": NODE_ID},
+            "volume": {"lvol_id": LVOL_ID, "lvol_name": "vol",
+                       "snapshot_id": _snapshot_id(index), "snapshot_name": "s",
                        "size": 4096},
             "dataplane": {"with_compression": with_compression},
         })
 
     def _line(self, length, **overrides):
         """A chain of `length` manifests, oldest first."""
-        line, prev = [], None
-        for index in range(length):
-            line.append(self._manifest(f"b-{index}", prev=prev, s3_id=index + 1,
-                                       **overrides))
-            prev = line[-1].backup_id
-        return line
+        return [
+            self._manifest(index, prev=index - 1 if index else None,
+                           s3_id=index + 1, **overrides)
+            for index in range(length)
+        ]
 
     def test_incomplete_chain_is_refused(self, db, cluster):
         """A delta whose ancestors are missing looks restorable until it is tried."""
         with pytest.raises(PreconditionError, match="neither in this import nor already known"):
             backup_controller.import_backups(
-                [self._manifest("b-2", prev="b-1")], _config().location(),
+                [self._manifest(2, prev=1)], _config().location(),
                 cluster_id=CLUSTER_ID)
 
         assert db.get_backups() == []
@@ -279,10 +295,10 @@ class TestImportPreconditions:
         assert count == 2
 
     def test_chain_satisfied_by_existing_records_is_accepted(self, db, cluster):
-        _backup(db, "b-1", 1, snapshot_id="snap-1")
+        _backup(db, 1)
 
         count = backup_controller.import_backups(
-            [self._manifest("b-2", prev="b-1")], _config().location(),
+            [self._manifest(2, prev=1)], _config().location(),
             cluster_id=CLUSTER_ID)
 
         assert count == 1
@@ -292,23 +308,22 @@ class TestImportPreconditions:
         in the encoding -- which each manifest states for itself."""
         with pytest.raises(PreconditionError, match="different bucket or encoding"):
             backup_controller.import_backups(
-                [self._manifest("b-1", with_compression=True),
-                 self._manifest("b-2", prev="b-1")],
+                [self._manifest(1, with_compression=True),
+                 self._manifest(2, prev=1)],
                 _config().location(), cluster_id=CLUSTER_ID)
 
         assert db.get_backups() == []
 
     def test_chain_reaching_into_another_bucket_is_refused(self, db, cluster):
         """The ancestor is already stored, and stored records do name a bucket."""
-        _backup(db, "b-1", 1, snapshot_id="snap-1",
-                location=_config(bucket_name="elsewhere").location())
+        _backup(db, 1, location=_config(bucket_name="elsewhere").location())
 
         with pytest.raises(PreconditionError, match="different bucket or encoding"):
             backup_controller.import_backups(
-                [self._manifest("b-2", prev="b-1")], _config().location(),
+                [self._manifest(2, prev=1)], _config().location(),
                 cluster_id=CLUSTER_ID)
 
-        assert [b.uuid for b in db.get_backups()] == ["b-1"]
+        assert [b.uuid for b in db.get_backups()] == [_backup_id(1)]
 
     def test_overlong_chain_is_refused(self, db, cluster):
         with pytest.raises(PreconditionError, match="data plane accepts at most"):
@@ -321,20 +336,20 @@ class TestImportPreconditions:
     def test_a_chain_lengthened_past_the_limit_by_existing_records_is_refused(
             self, db, cluster):
         """The ancestry already in the database counts towards the limit."""
-        previous = ""
-        for index in range(constants.BACKUP_MAX_CHAIN_LENGTH):
-            previous = _backup(db, f"old-{index}", index + 1,
-                               snapshot_id=f"snap-old-{index}", prev=previous).uuid
+        previous = None
+        for index in range(1, constants.BACKUP_MAX_CHAIN_LENGTH + 1):
+            _backup(db, index, prev=previous)
+            previous = index
 
         with pytest.raises(PreconditionError, match="data plane accepts at most"):
             backup_controller.import_backups(
-                [self._manifest("b-new", prev=previous, s3_id=999)],
+                [self._manifest(999, prev=previous, s3_id=999)],
                 _config().location(), cluster_id=CLUSTER_ID)
 
     def test_a_cyclic_chain_is_refused_rather_than_looping(self, db, cluster):
         with pytest.raises(PreconditionError, match="cyclic"):
             backup_controller.import_backups(
-                [self._manifest("b-1", prev="b-2"), self._manifest("b-2", prev="b-1")],
+                [self._manifest(1, prev=2), self._manifest(2, prev=1)],
                 _config().location(), cluster_id=CLUSTER_ID)
 
 
@@ -354,7 +369,7 @@ class TestPredicates:
         assert validation.chain_is_coherent([], _config().location())
 
     def test_coherence_covers_a_backup_that_does_not_exist_yet(self, db, cluster):
-        chain = [_backup(db, "b-1", 1, snapshot_id="snap-1", encrypted=False)]
+        chain = [_backup(db, 1, encrypted=False)]
 
         assert validation.chain_is_coherent(chain, _config().location())
         assert validation.chain_is_coherent(

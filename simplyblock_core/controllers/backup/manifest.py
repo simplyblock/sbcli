@@ -38,6 +38,7 @@ import json
 import logging
 from typing import (
     Annotated, Any, Iterable, List, Literal, Optional, Tuple, Union)
+from uuid import UUID
 
 import boto3
 from botocore.config import Config as BotoConfig
@@ -61,7 +62,7 @@ MANIFEST_PREFIX = "manifests/"
 MANIFEST_SCHEMA_VERSION = 1
 
 
-def manifest_key(backup_id: str) -> str:
+def manifest_key(backup_id: UUID) -> str:
     return f"{MANIFEST_PREFIX}{backup_id}.json"
 
 
@@ -73,8 +74,8 @@ class Source(BaseModel):
     """
     model_config = ConfigDict(extra="forbid")
 
-    cluster_id: str
-    node_id: str
+    cluster_id: UUID
+    node_id: UUID
 
     #: Absent when the cluster's own record of its name was no longer readable
     #: at the time the manifest was written.
@@ -97,9 +98,9 @@ class Volume(BaseModel):
     """
     model_config = ConfigDict(extra="forbid")
 
-    lvol_id: str
+    lvol_id: UUID
     lvol_name: str
-    snapshot_id: str
+    snapshot_id: UUID
     snapshot_name: str
     size: int
 
@@ -261,7 +262,7 @@ class BackupManifest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: int = MANIFEST_SCHEMA_VERSION
-    backup_id: str
+    backup_id: UUID
     s3_id: int
     created_at: int
     completed_at: int
@@ -276,7 +277,7 @@ class BackupManifest(BaseModel):
     #: backup -- so the write amplification of a merge would be the length of the
     #: chain, and a partial failure would leave the bucket advertising object keys
     #: the data plane had already unmapped.
-    prev_backup_id: Optional[str] = None
+    prev_backup_id: Optional[UUID] = None
 
     #: Where this backup's key lives, or absent for a backup that is not
     #: encrypted at all. One optional document rather than a flag beside it: two
@@ -337,7 +338,7 @@ def write(config: BackupConfig, manifest: BackupManifest) -> None:
                 manifest.backup_id, config.bucket_name)
 
 
-def read(config: BackupConfig, backup_id: str) -> BackupManifest:
+def read(config: BackupConfig, backup_id: UUID) -> BackupManifest:
     """Load one manifest by backup id.
 
     Raises:
@@ -387,7 +388,7 @@ def list_all(config: BackupConfig) -> List[BackupManifest]:
     return manifests
 
 
-def delete(config: BackupConfig, backup_id: str) -> None:
+def delete(config: BackupConfig, backup_id: UUID) -> None:
     """Remove a manifest.
 
     Only for a backup whose data is genuinely gone -- a merge folding it into

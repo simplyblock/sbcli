@@ -3,6 +3,8 @@
 Pure logic -- the S3 plumbing around it is exercised in the integration tier.
 """
 import json
+import zlib
+from uuid import UUID
 
 import pytest
 
@@ -19,16 +21,29 @@ from simplyblock_core.controllers.backup.manifest import (
 )
 
 
+#: Ids are UUIDs in the manifest, so the readable short names the tests talk in
+#: are mapped onto stable ones rather than spelled out at every call site.
+def _id(name: str) -> UUID:
+    return UUID(f"{zlib.crc32(name.encode()):08x}-0000-4000-8000-000000000000")
+
+
+CLUSTER_ID = _id("cluster")
+NODE_ID = _id("node")
+VOLUME_ID = _id("volume")
+SNAPSHOT_ID = _id("snapshot")
+
+
 def _manifest(**overrides):
     fields = {
-        "backup_id": "b-1",
+        "backup_id": _id("b-1"),
         "s3_id": 7,
         "created_at": 100,
         "completed_at": 200,
         "size": 4096,
-        "source": Source(cluster_id="c-1", node_id="n-1"),
-        "volume": Volume(lvol_id="l-1", lvol_name="vol", snapshot_id="s-1",
-                         snapshot_name="snap", size=4096),
+        "source": Source(cluster_id=CLUSTER_ID, node_id=NODE_ID),
+        "volume": Volume(lvol_id=VOLUME_ID, lvol_name="vol",
+                         snapshot_id=SNAPSHOT_ID, snapshot_name="snap",
+                         size=4096),
         "dataplane": DataPlane(),
     }
     fields.update(overrides)
@@ -38,14 +53,14 @@ def _manifest(**overrides):
 class TestManifestKey:
     def test_key_cannot_collide_with_the_data_plane_keyspace(self):
         """Data objects are {s3_id}/{mid}/{extent}, all decimal segments."""
-        key = backup_manifest.manifest_key("b-1")
+        key = backup_manifest.manifest_key(_id("b-1"))
         assert key.startswith("manifests/")
         assert not key.split("/")[0].isdigit()
 
 
 class TestSchema:
     def test_round_trip(self):
-        original = _manifest(prev_backup_id="b-0",
+        original = _manifest(prev_backup_id=_id("b-0"),
                              encryption=FDBKeyDescriptor(dek_path="p"))
 
         restored = backup_manifest._parse(original.model_dump_json().encode(), "k")
@@ -68,7 +83,8 @@ class TestSchema:
     def test_serializes_to_plain_json(self):
         data = json.loads(_manifest().model_dump_json())
         assert data["schema_version"] == MANIFEST_SCHEMA_VERSION
-        assert data["backup_id"] == "b-1"
+        # A plain string on the wire, in the canonical UUID spelling.
+        assert data["backup_id"] == str(_id("b-1"))
 
     def test_carries_no_credential_field(self):
         """A manifest sits next to the ciphertext; it must not carry keys."""
@@ -91,6 +107,15 @@ class TestSchema:
         manifest = _manifest(dataplane=DataPlane(with_compression=True))
         restored = backup_manifest._parse(manifest.model_dump_json().encode(), "k")
         assert restored.dataplane.with_compression is True
+
+    def test_an_id_that_is_not_a_uuid_is_rejected(self):
+        """Every id in here names a control-plane object, all of which are
+        UUIDs. Typing them as such is what stops a manifest from advertising an
+        id nothing can be looked up by -- discovered during a recovery, which is
+        the one moment there is nobody left to ask."""
+        with pytest.raises(ValueError):
+            BackupManifest.model_validate({
+                **json.loads(_manifest().model_dump_json()), "backup_id": "b-1"})
 
     def test_unknown_field_is_rejected(self):
         with pytest.raises(ValueError):
@@ -116,15 +141,19 @@ class TestSchema:
 class TestChainOf:
     def _line(self):
         return [
-            _manifest(backup_id="b-0", s3_id=1),
-            _manifest(backup_id="b-1", s3_id=2, prev_backup_id="b-0"),
-            _manifest(backup_id="b-2", s3_id=3, prev_backup_id="b-1"),
+            _manifest(backup_id=_id("b-0"), s3_id=1),
+            _manifest(backup_id=_id("b-1"), s3_id=2, prev_backup_id=_id("b-0")),
+            _manifest(backup_id=_id("b-2"), s3_id=3, prev_backup_id=_id("b-1")),
         ]
+
+    @staticmethod
+    def _ids():
+        return [_id("b-0"), _id("b-1"), _id("b-2")]
 
     def test_walks_to_the_root_oldest_first(self):
         line = self._line()
         chain = backup_manifest.chain_of(line[-1], line)
-        assert [m.backup_id for m in chain] == ["b-0", "b-1", "b-2"]
+        assert [m.backup_id for m in chain] == self._ids()
 
     def test_a_full_backup_is_its_own_chain(self):
         line = self._line()
@@ -133,23 +162,23 @@ class TestChainOf:
     def test_order_does_not_matter(self):
         line = self._line()
         chain = backup_manifest.chain_of(line[-1], list(reversed(line)))
-        assert [m.backup_id for m in chain] == ["b-0", "b-1", "b-2"]
+        assert [m.backup_id for m in chain] == self._ids()
 
     def test_ignores_manifests_outside_the_chain(self):
         line = self._line()
-        unrelated = _manifest(backup_id="other", s3_id=9)
+        unrelated = _manifest(backup_id=_id("other"), s3_id=9)
         chain = backup_manifest.chain_of(line[-1], line + [unrelated])
-        assert [m.backup_id for m in chain] == ["b-0", "b-1", "b-2"]
+        assert [m.backup_id for m in chain] == self._ids()
 
     def test_a_missing_ancestor_is_reported_not_truncated(self):
         """Truncating would restore a volume with holes in it."""
         line = self._line()
-        with pytest.raises(ManifestError, match="b-0"):
+        with pytest.raises(ManifestError, match=str(_id("b-0"))):
             backup_manifest.chain_of(line[-1], line[1:])
 
     def test_a_cycle_is_reported_rather_than_looping(self):
-        a = _manifest(backup_id="b-a", prev_backup_id="b-b")
-        b = _manifest(backup_id="b-b", prev_backup_id="b-a")
+        a = _manifest(backup_id=_id("b-a"), prev_backup_id=_id("b-b"))
+        b = _manifest(backup_id=_id("b-b"), prev_backup_id=_id("b-a"))
         with pytest.raises(ManifestError, match="cyclic"):
             backup_manifest.chain_of(a, [a, b])
 

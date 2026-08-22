@@ -2,8 +2,8 @@
 """Creating, restoring, importing, exporting and discovering backups."""
 import logging
 import time
-import uuid
-from typing import Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Tuple
+from uuid import UUID, uuid4
 
 from pydantic import ValidationError
 
@@ -29,7 +29,7 @@ db_controller = DBController()
 
 
 def _generate_backup_id():
-    return str(uuid.uuid4())
+    return str(uuid4())
 
 
 def get_latest_backup_for_lvol(lvol_id):
@@ -99,8 +99,12 @@ def build_manifest(backup: Backup) -> backup_manifest.BackupManifest:
     change.
 
     Raises:
-        ValueError: The backup has no recorded location, or is encrypted without
-            recording where its key is -- neither is describable.
+        ValueError: The backup has no recorded location, is encrypted without
+            recording where its key is, or carries an id that is not a UUID --
+            none of the three is describable. The record types its ids as plain
+            strings and so can hold an empty or malformed one; the manifest
+            cannot, and this is the seam where that is discovered, while the
+            backup is being written rather than during a recovery.
     """
     # Only for the encoding the manifest records. Where the bucket is does not
     # travel with the manifest -- but a record that cannot say how its objects
@@ -167,18 +171,18 @@ def build_manifest(backup: Backup) -> backup_manifest.BackupManifest:
         cluster_size = cluster.page_size_in_blocks * constants.LVOL_CLUSTER_RATIO
 
     return backup_manifest.BackupManifest(
-        backup_id=backup.uuid,
+        backup_id=UUID(backup.uuid),
         s3_id=backup.s3_id,
         created_at=backup.created_at,
         completed_at=backup.completed_at,
         size=backup.size,
-        prev_backup_id=backup.prev_backup_id or None,
+        prev_backup_id=UUID(backup.prev_backup_id) if backup.prev_backup_id else None,
         encryption=(backup_manifest.parse_key_descriptor(backup.encryption)
                     if backup.encryption else None),
         source=backup_manifest.Source(
-            cluster_id=backup.cluster_id,
+            cluster_id=UUID(backup.cluster_id),
             cluster_name=cluster_name,
-            node_id=backup.node_id,
+            node_id=UUID(backup.node_id),
         ),
         volume=volume,
         dataplane=backup_manifest.DataPlane(
@@ -351,7 +355,7 @@ def write_manifest(backup: Backup) -> None:
 
 
 def delete_manifest(backup: Backup) -> None:
-    backup_manifest.delete(_config_for(backup), backup.uuid)
+    backup_manifest.delete(_config_for(backup), UUID(backup.uuid))
 
 
 def _get_snapshot_chain(snapshot):
@@ -798,7 +802,8 @@ def discover_backups(config: BackupConfig) -> List[backup_manifest.BackupManifes
     return backup_manifest.list_all(config)
 
 
-def _require_importable(pending: dict, location: BackupLocation) -> None:
+def _require_importable(pending: Dict[UUID, backup_manifest.BackupManifest],
+                        location: BackupLocation) -> None:
     """Refuse a batch of manifests that would not form something restorable.
 
     An import that lands a backup whose ancestors are missing produces a record
@@ -826,7 +831,8 @@ def _require_importable(pending: dict, location: BackupLocation) -> None:
         # thing -- manifests being imported and Backup records already stored,
         # which name their id and their location differently. Reduced to the two
         # facts the rules below need, the two become comparable.
-        chain = [(backup_id, _location_of(manifest, location))]
+        chain: List[Tuple[UUID, BackupLocation]] = [
+            (backup_id, _location_of(manifest, location))]
         seen = {backup_id}
         current = manifest
 
@@ -849,8 +855,8 @@ def _require_importable(pending: dict, location: BackupLocation) -> None:
 
             # Already imported, and checked then. Its own ancestry still counts
             # towards the length the data plane has to accept.
-            chain.extend((stored.uuid, stored.get_location())
-                         for stored in db_controller.get_backup_chain(previous))
+            chain.extend((UUID(stored.uuid), stored.get_location())
+                         for stored in db_controller.get_backup_chain(str(previous)))
             break
 
         # Locations are values, so coherence over the chain is a plain
@@ -894,9 +900,9 @@ def _location_of(manifest: backup_manifest.BackupManifest,
     })
 
 
-def _backup_exists(backup_id: str) -> bool:
+def _backup_exists(backup_id: UUID) -> bool:
     try:
-        db_controller.get_backup_by_id(backup_id)
+        db_controller.get_backup_by_id(str(backup_id))
     except KeyError:
         return False
     return True
@@ -932,7 +938,7 @@ def import_backups(manifests: Iterable[backup_manifest.BackupManifest],
             than half of itself.
         ValueError: The same backup is listed twice.
     """
-    pending: dict = {}
+    pending: Dict[UUID, backup_manifest.BackupManifest] = {}
     for manifest in manifests:
         backup_id = manifest.backup_id
 
@@ -940,7 +946,7 @@ def import_backups(manifests: Iterable[backup_manifest.BackupManifest],
             raise ValueError(f"Backup {backup_id} is listed more than once")
 
         try:
-            existing = db_controller.get_backup_by_id(backup_id)
+            existing = db_controller.get_backup_by_id(str(backup_id))
         except KeyError:
             pending[backup_id] = manifest
         else:
@@ -948,17 +954,20 @@ def import_backups(manifests: Iterable[backup_manifest.BackupManifest],
 
     _require_importable(pending, location)
 
+    # Back to strings on the way into the record: `Backup` is a hand-rolled
+    # model whose fields are plain `str`, and `db_controller` looks its ids up
+    # by `==` against them.
     for backup_id, manifest in pending.items():
         backup = Backup()
-        backup.uuid = backup_id
+        backup.uuid = str(backup_id)
         backup.s3_id = manifest.s3_id
-        backup.cluster_id = cluster_id or manifest.source.cluster_id
-        backup.lvol_id = manifest.volume.lvol_id
+        backup.cluster_id = cluster_id or str(manifest.source.cluster_id)
+        backup.lvol_id = str(manifest.volume.lvol_id)
         backup.lvol_name = manifest.volume.lvol_name
-        backup.snapshot_id = manifest.volume.snapshot_id
+        backup.snapshot_id = str(manifest.volume.snapshot_id)
         backup.snapshot_name = manifest.volume.snapshot_name
-        backup.node_id = manifest.source.node_id
-        backup.prev_backup_id = manifest.prev_backup_id or ""
+        backup.node_id = str(manifest.source.node_id)
+        backup.prev_backup_id = str(manifest.prev_backup_id) if manifest.prev_backup_id else ""
         backup.size = manifest.size
         backup.allowed_hosts = [{"nqn": nqn} for nqn in manifest.volume.allowed_hosts]
         backup.created_at = manifest.created_at
