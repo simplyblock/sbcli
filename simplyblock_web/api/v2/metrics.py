@@ -20,6 +20,7 @@ from fastapi import APIRouter
 from fastapi.responses import Response
 from prometheus_client import CONTENT_TYPE_LATEST, CollectorRegistry, generate_latest
 from prometheus_client.core import CounterMetricFamily, GaugeMetricFamily, Metric
+from prometheus_client.registry import Collector
 
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.stats import CpuStats, ReactorStats, ThreadStats
@@ -257,7 +258,7 @@ def _cpu_families(entries: Iterable[tuple[list[str], CpuStats]]) -> Iterator[Met
         yield family
 
 
-class SimplyblockCollector:
+class SimplyblockCollector(Collector):
     """Builds the full metric set from FoundationDB on every scrape."""
 
     def collect(self) -> Iterator[Metric]:

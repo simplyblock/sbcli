@@ -1353,7 +1353,14 @@ def test_case_4(meta):
     # The volumes already hold the data, so any snapshot taken from here on
     # carries it: require one such snapshot to be ON the fresh cluster before
     # cutting over (lag alone would accept a point-in-time that predates it).
-    wait_data_replicated(mgmt_ip, key_path, tgt_lvols, replication_started_ts)
+    # Same budget as the steady gate: the post-baseline snapshot only
+    # completes after the volume's WHOLE base chain (the fail-over
+    # prologue's cadence history, ~9 ancestors x 4-5 GiB here) has
+    # replicated bottom-up, which is sequential per volume by design.
+    # Run 20260821_202231: 2/5 volumes were mid-chain and progressing
+    # when the default 1200s expired.
+    wait_data_replicated(mgmt_ip, key_path, tgt_lvols, replication_started_ts,
+                         timeout=3600)
 
     print("Committing the cutover onto the fresh cluster while fio runs...")
     for lv in tgt_lvols:

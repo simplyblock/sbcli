@@ -1916,8 +1916,16 @@ def regenerate_config(new_config, old_config, force=False):
         node_cores_set = set(node["isolated"])
         all_isolated_cores.update(node_cores_set)
     if total_free_memory < total_required_memory:
-        logger.error(f"The Free memory {total_free_memory} is less than required memory {total_required_memory}")
-        return False
+        # Same call as generate_configs' own check (this is generate_configs'
+        # own tail call, when invoked from sn configure -- before the node
+        # belongs to any cluster, so max_lvol/cpu_count here are still the
+        # worst case, not what the cluster will actually ask for). Warn
+        # rather than refuse for the same reason: add_node recalculates this
+        # against the real numbers and is where a genuine shortfall belongs.
+        logger.warning(
+            f"Free memory {total_free_memory} is less than the worst-case required "
+            f"memory {total_required_memory}; this is provisional and will be "
+            f"recalculated against the cluster's real settings when the node is added")
     old_config["isolated_cores"] = list(all_isolated_cores)
     old_config["host_cpu_mask"] = generate_mask(all_isolated_cores)
     return old_config
@@ -2076,8 +2084,18 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
         node_cores_set = set(node["isolated"])
         all_isolated_cores.update(node_cores_set)
     if total_free_memory < total_required_memory:
-        logger.error(f"The Free memory {total_free_memory} is less than required memory {total_required_memory}")
-        return False, False
+        # This runs before the node belongs to any cluster, so huge_page_memory
+        # above was sized for the worst case -- max_lvol=MAX_SUBSYSTEMS_PER_NODE
+        # and the default core-count heuristic, not whatever this cluster will
+        # actually ask for. Failing sn configure on that worst-case number would
+        # reject hosts that are perfectly fine for the cluster's real
+        # max_subsys/vcpu-count. add_node recomputes this against the real
+        # numbers and is where a genuine shortfall belongs; warn here instead.
+        logger.warning(
+            f"Free memory {total_free_memory} is less than the worst-case required "
+            f"memory {total_required_memory} (sized for the product's max subsystem "
+            f"count); this is provisional and will be recalculated against the "
+            f"cluster's real settings when the node is added")
     nodes_config["nodes"] = all_nodes
     nodes_config["isolated_cores"] = list(all_isolated_cores)
     nodes_config["host_cpu_mask"] = generate_mask(all_isolated_cores)
