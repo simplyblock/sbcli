@@ -1174,7 +1174,8 @@ def create_migration(lvol_id, target_node_id,
                         f"create_migration: listener on overlap {_node_id[:8]} "
                         f"(non-fatal): {_e}")
         else:
-            if not _rpc.subsystem_get(nqn):
+            _existing_subsys = _rpc.subsystem_get(nqn)
+            if not _existing_subsys:
                 if _min_cntlid in subsys_min_cntlid_used:
                     _min_cntlid = _min_cntlid + 10000
                 _rpc.subsystem_create(
@@ -1190,22 +1191,51 @@ def create_migration(lvol_id, target_node_id,
                         f"create_migration: allowed_hosts reapply on "
                         f"{_node_id[:8]} (non-fatal): {_e}")
 
+            # For a shared-namespace batch group, create_migration() runs once
+            # per member against the SAME nqn/listener -- guard against
+            # re-adding a listener that a prior member's precreate already
+            # established (listeners_create had no existence check and its
+            # result was never inspected, so a real failure on a later
+            # member's redundant add would previously have been silent).
+            _existing_listeners = {
+                (_l.get('trtype', '').lower(), _l.get('traddr'), str(_l.get('trsvcid')))
+                for _l in ((_existing_subsys or {}).get('listen_addresses') or [])
+            }
             for nic in _node.data_nics:
                 if not nic.ip4_address or nic.trtype.lower() != lvol.fabric:
                     continue
+                _listener_key = (nic.trtype.lower(), nic.ip4_address, str(_port))
+                if _listener_key in _existing_listeners:
+                    continue
                 try:
-                    _rpc.listeners_create(nqn, nic.trtype.lower(), nic.ip4_address,
-                                          _port, ana_state="inaccessible")
+                    _ret_listener = _rpc.listeners_create(
+                        nqn, nic.trtype.lower(), nic.ip4_address,
+                        _port, ana_state="inaccessible")
+                    if not _ret_listener:
+                        logger.warning(
+                            f"create_migration: listener add for {_node_id[:8]} "
+                            f"{nic.ip4_address}:{_port} returned falsy")
                 except Exception as _e:
                     logger.warning(
                         f"create_migration: listener on {_node_id[:8]} "
                         f"(non-fatal): {_e}")
 
-            _ns = _rpc.nvmf_subsystem_add_ns(nqn, _ns_bdev, lvol.uuid, lvol.guid)
+            # Pin the target namespace to the SAME nsid the source already
+            # uses, rather than letting SPDK auto-assign on the target
+            # subsystem. Auto-assignment just happens to reproduce the
+            # source's numbering when adds land in the same order on an
+            # empty subsystem -- it isn't enforced, and any stale/leftover
+            # namespace occupying a low nsid on the target (or add_ns calls
+            # racing/reordering across nodes) would silently diverge the
+            # source and target nsid maps for this lvol.
+            _ns = _rpc.nvmf_subsystem_add_ns(
+                nqn, _ns_bdev, lvol.uuid, lvol.guid,
+                nsid=lvol.ns_id if lvol.ns_id else None)
             if _ns:
                 logger.info(
                     f"create_migration: namespace {_ns_bdev} added on "
-                    f"{_tgt_label} {_node_id[:8]} nsid={_ns}")
+                    f"{_tgt_label} {_node_id[:8]} nsid={_ns} "
+                    f"(source nsid={lvol.ns_id})")
             else:
                 logger.warning(
                     f"create_migration: nvmf_subsystem_add_ns failed on "
