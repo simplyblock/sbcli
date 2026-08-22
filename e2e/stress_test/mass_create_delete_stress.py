@@ -1055,6 +1055,7 @@ class _MassCreateDeleteMixin:
         )
 
         results = []
+        failures = 0
         for i in range(1, iterations + 1):
             self.logger.info(
                 f"[{label}] --- Iteration {i}/{iterations} ---"
@@ -1075,14 +1076,17 @@ class _MassCreateDeleteMixin:
             )
 
             # Wait for node to go offline then back online
+            offline_ok = True
             try:
                 self.sbcli_utils.wait_for_storage_node_status(
                     node_uuid, ["offline", "unreachable"], timeout=600,
                 )
             except Exception as exc:
+                offline_ok = False
+                failures += 1
                 self.logger.warning(
                     f"[{label}][{i}] Timed out waiting for "
-                    f"offline/unreachable: {exc}"
+                    f"offline/unreachable ({failures}/{i} failed): {exc}"
                 )
 
             self.sbcli_utils.wait_for_storage_node_status(
@@ -1102,6 +1106,7 @@ class _MassCreateDeleteMixin:
                 "online_time_iso": online_ts.isoformat(),
                 "stop_to_online_sec": stop_to_online,
                 "cooldown_sec": cooldown,
+                "offline_detected": offline_ok,
             })
 
             # Cooldown — no waiting for migration, just a short pause
@@ -1109,8 +1114,23 @@ class _MassCreateDeleteMixin:
 
         total_dur = sum(r["stop_to_online_sec"] for r in results)
         self._phase_durations[label] = round(total_dur, 1)
+
+        # Require >70% of iterations to successfully detect node offline
+        successful = sum(
+            1 for r in results if r.get("offline_detected", True)
+        )
+        min_required = math.ceil(iterations * 0.7)
+        if successful < min_required:
+            raise RuntimeError(
+                f"[{label}] Only {successful}/{iterations} iterations "
+                f"detected node going offline (required {min_required}). "
+                f"{failures} iterations timed out — "
+                f"kill/restart mechanism is broken"
+            )
+
         self.logger.info(
-            f"[{label}] Completed {iterations} restart cycles, "
+            f"[{label}] Completed {iterations} restart cycles "
+            f"({successful}/{iterations} detected offline), "
             f"cumulative stop-to-online: {total_dur}s"
         )
         return results
@@ -3003,7 +3023,7 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
 
     def _wait_lvols_deleted(
         self, names: list, label: str, timeout: int = 1800,
-        stall_timeout: int = 1800,
+        stall_timeout: int = 600,
     ):
         """Wait for lvols/clones to disappear from the API.
 
@@ -3158,7 +3178,7 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
 
     # Maximum wall-clock time for the entire cleanup phase.
     # Prevents stuck in_deletion lvols from blocking the test indefinitely.
-    CLEANUP_TIMEOUT = 1800  # 30 minutes
+    CLEANUP_TIMEOUT = 600  # 10 minutes — cleanup should not delay failure reporting
 
     def _phase_cleanup(self):
         timeout = self.CLEANUP_TIMEOUT
@@ -3166,10 +3186,20 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
 
         def _run_cleanup():
             deadline = time.time() + timeout
+            # Per-step stall timeout: give up quickly if cluster is
+            # unresponsive (e.g. SUSPENDED / in_activation).
+            stall = min(120, timeout // 4)
+
             steps = [
-                ("delete_all_clones", self.sbcli_utils.delete_all_clones),
+                ("delete_all_clones", lambda: self.sbcli_utils.delete_all_clones(
+                    timeout=max(60, int(deadline - time.time())),
+                    stall_timeout=stall,
+                )),
                 ("delete_all_snapshots", self.sbcli_utils.delete_all_snapshots),
-                ("delete_all_lvols", self.sbcli_utils.delete_all_lvols),
+                ("delete_all_lvols", lambda: self.sbcli_utils.delete_all_lvols(
+                    timeout=max(60, int(deadline - time.time())),
+                    stall_timeout=stall,
+                )),
                 ("delete_all_storage_pools", self.sbcli_utils.delete_all_storage_pools),
             ]
             for label, fn in steps:
