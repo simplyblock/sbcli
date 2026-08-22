@@ -544,13 +544,18 @@ BackupManifestDTO = BackupManifest
 class BackupDTO(BaseModel):
     id: UUID
     s3_id: int
-    lvol_id: str
+    lvol_id: UUID
     lvol_name: str
-    snapshot_id: str
+    snapshot_id: UUID
     snapshot_name: str
-    node_id: str
+    node_id: UUID
     status: str
-    prev_backup_id: str
+
+    #: Absent for a full backup, which is the root of its chain. The record
+    #: spells that "", as it does every unset id; the wire says null, the way
+    #: ``DeviceDTO`` and ``LVolDTO`` already do for theirs.
+    prev_backup_id: Optional[UUID] = None
+
     size: int
 
     #: The NQNs allowed to attach. The record's host entries also carry that
@@ -568,13 +573,13 @@ class BackupDTO(BaseModel):
         return BackupDTO(
             id=UUID(model.uuid),
             s3_id=model.s3_id,
-            lvol_id=model.lvol_id,
+            lvol_id=UUID(model.lvol_id),
             lvol_name=model.lvol_name,
-            snapshot_id=model.snapshot_id,
+            snapshot_id=UUID(model.snapshot_id),
             snapshot_name=model.snapshot_name,
-            node_id=model.node_id,
+            node_id=UUID(model.node_id),
             status=model.status,
-            prev_backup_id=model.prev_backup_id,
+            prev_backup_id=UUID(model.prev_backup_id) if model.prev_backup_id else None,
             size=model.size,
             allowed_hosts=[host["nqn"] for host in (model.allowed_hosts or [])],
             created_at=model.created_at,

@@ -7,6 +7,7 @@ from tests.unit.web.api.v2._factories import (
     CLUSTER_ID,
     POLICY_ID,
     SNAPSHOT_ID,
+    STORAGE_NODE_ID,
     VOLUME_ID,
 )
 
@@ -130,7 +131,7 @@ class TestImportBackups:
         'created_at': 100,
         'completed_at': 200,
         'size': 4096,
-        'source': {'cluster_id': CLUSTER_ID, 'node_id': 'node-1'},
+        'source': {'cluster_id': CLUSTER_ID, 'node_id': STORAGE_NODE_ID},
         'volume': {'lvol_id': VOLUME_ID, 'lvol_name': 'vol',
                    'snapshot_id': SNAPSHOT_ID, 'snapshot_name': 'snap',
                    'size': 4096},
@@ -151,7 +152,7 @@ class TestImportBackups:
         assert response.status_code == 200
         assert response.json() == {'imported': 1}
         (manifests, location), kwargs = backup_controller.import_backups.call_args
-        assert [m.backup_id for m in manifests] == [BACKUP_ID]
+        assert [str(m.backup_id) for m in manifests] == [BACKUP_ID]
         assert location.bucket_name == 'backups'
 
     def test_inline_manifests_must_name_their_bucket(

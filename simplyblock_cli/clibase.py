@@ -1244,8 +1244,10 @@ class CLIWrapperBase:
             except ManifestError:
                 return "incomplete"
 
+        # str, not UUID: this row goes through `utils.dump_json` for --json
+        # output, and json.dumps has no encoder for a UUID.
         return [{
-            "ID": m.backup_id,
+            "ID": str(m.backup_id),
             "Volume": m.volume.lvol_name,
             "Snapshot": m.volume.snapshot_name,
             "Size": m.size,

@@ -19,13 +19,20 @@ from simplyblock_core.models.backup_config import BackupConfig
 from simplyblock_core.models.cluster import Cluster, HashicorpVaultSettings
 
 
-CLUSTER_ID = "cluster-1"
+# Every id a manifest carries is a UUID, so the objects these tests build are
+# given real ones rather than readable stand-ins.
+CLUSTER_ID = "c1000000-0000-4000-8000-000000000001"
+BACKUP_ID = "0ac00000-0000-4000-8000-000000000001"
+LVOL_ID = "10101000-0000-4000-8000-000000000001"
+SNAPSHOT_ID = "50a50000-0000-4000-8000-000000000001"
+NODE_ID = "d0de0000-0000-4000-8000-000000000001"
+
 KEYS = ("a" * 64, "b" * 64)
 
 
 def _config(**overrides):
     return BackupConfig.model_validate({
-        "bucket_name": "simplyblock-backup-cluster-1",
+        "bucket_name": "simplyblock-backup-primary",
         "region": "eu-central-1",
         **overrides,
     })
@@ -47,7 +54,7 @@ def _cluster(db, **config_overrides):
 def _descriptor(**overrides):
     return {
         "type": "fdb",
-        "dek_path": backup_dek_path(CLUSTER_ID, "b-1"),
+        "dek_path": backup_dek_path(CLUSTER_ID, BACKUP_ID),
         **overrides,
     }
 
@@ -61,13 +68,16 @@ def _vault_cluster(db):
     return cluster
 
 
-def _backup(db, uuid="b-1", encrypted=True, encryption=None):
+def _backup(db, uuid=BACKUP_ID, encrypted=True, encryption=None):
     b = Backup()
     b.uuid = uuid
     b.s3_id = 1
     b.cluster_id = CLUSTER_ID
-    b.lvol_id = "lvol-1"
+    b.lvol_id = LVOL_ID
     b.lvol_name = "vol"
+    b.snapshot_id = SNAPSHOT_ID
+    b.snapshot_name = "snap"
+    b.node_id = NODE_ID
     b.size = 4096
     b.status = Backup.STATUS_COMPLETED
     b.location = _config().location().model_dump(exclude_none=True)
@@ -99,7 +109,7 @@ class TestKeyDescriptor:
         descriptor = backup_controller._build_key_descriptor(
             _vault_cluster(db), _backup(db))
 
-        assert descriptor.kek_name == backup_kek_name("b-1")
+        assert descriptor.kek_name == backup_kek_name(BACKUP_ID)
 
     def test_the_local_backend_has_no_key_encryption_key_to_name(self, db):
         """LocalKMS stores its DEKs as they are; its KEK operations are no-ops.
@@ -125,14 +135,14 @@ class TestKeyDescriptor:
         descriptor = backup_controller._build_key_descriptor(
             _cluster(db), _backup(db))
 
-        assert descriptor.dek_path == backup_dek_path(CLUSTER_ID, "b-1")
+        assert descriptor.dek_path == backup_dek_path(CLUSTER_ID, BACKUP_ID)
 
     def test_descriptor_carries_no_key_material(self, db):
         cluster = _cluster(db)
         backup = _backup(db)
         with LocalKMS(cluster) as kms:
             kms.import_data_encryption_keys(
-                backup_dek_path(CLUSTER_ID, "b-1"), backup_kek_name("b-1"), KEYS)
+                backup_dek_path(CLUSTER_ID, BACKUP_ID), backup_kek_name(BACKUP_ID), KEYS)
 
         descriptor = backup_controller._build_key_descriptor(cluster, backup)
 
@@ -195,7 +205,7 @@ class TestManifestEncryption:
         parsed = backup_manifest.BackupManifest.model_validate(
             backup_controller.build_manifest(backup).model_dump(mode="json"))
 
-        assert parsed.encryption.dek_path == backup_dek_path(CLUSTER_ID, "b-1")
+        assert parsed.encryption.dek_path == backup_dek_path(CLUSTER_ID, BACKUP_ID)
 
     def test_a_vault_backup_survives_a_manifest_round_trip(self, db):
         cluster = _vault_cluster(db)
@@ -208,7 +218,7 @@ class TestManifestEncryption:
             backup_controller.build_manifest(backup).model_dump(mode="json"))
 
         assert isinstance(parsed.encryption, backup_manifest.HCPKeyDescriptor)
-        assert parsed.encryption.kek_name == backup_kek_name("b-1")
+        assert parsed.encryption.kek_name == backup_kek_name(BACKUP_ID)
 
 
 class TestKeyResolutionOnRestore:
@@ -223,7 +233,7 @@ class TestKeyResolutionOnRestore:
         backup = _backup(db, encryption=_descriptor())
         with LocalKMS(cluster) as kms:
             kms.import_data_encryption_keys(
-                backup_dek_path(CLUSTER_ID, "b-1"), backup_kek_name("b-1"), KEYS)
+                backup_dek_path(CLUSTER_ID, BACKUP_ID), backup_kek_name(BACKUP_ID), KEYS)
 
         assert backup_controller._resolve_crypto_key(backup, cluster) == KEYS
 
