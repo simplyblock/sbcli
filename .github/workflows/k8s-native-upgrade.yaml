@@ -74,9 +74,9 @@ on:
         required: false
         default: 'br-ex:enp2s0f0'
       cluster_params:
-        description: 'Cluster config: ndcs=1,npcs=1,bs=4096,chunk_bs=4096,partitions=0,jm_count=3,max_lvol=30'
+        description: 'Cluster config: ndcs=1,npcs=1,bs=4096,chunk_bs=4096,partitions=0,jm_count=3,max_subsys=30'
         required: false
-        default: 'ndcs=1,npcs=1,bs=4096,chunk_bs=4096,partitions=0,jm_count=3,max_lvol=30'
+        default: 'ndcs=1,npcs=1,bs=4096,chunk_bs=4096,partitions=0,jm_count=3,max_subsys=30'
       cluster_environment:
         description: 'Target cluster environment'
         required: true
@@ -239,7 +239,7 @@ jobs:
       # ── Parse cluster params ──
       - name: Parse cluster parameters
         run: |
-          PARAMS="${{ github.event.inputs.cluster_params || 'ndcs=1,npcs=1,bs=4096,chunk_bs=4096,partitions=0,jm_count=3,max_lvol=30' }}"
+          PARAMS="${{ github.event.inputs.cluster_params || 'ndcs=1,npcs=1,bs=4096,chunk_bs=4096,partitions=0,jm_count=3,max_subsys=30' }}"
           for kv in $(echo "$PARAMS" | tr ',' '\n'); do
             key=$(echo "$kv" | cut -d= -f1 | tr '[:lower:]' '[:upper:]')
             val=$(echo "$kv" | cut -d= -f2)
@@ -505,7 +505,7 @@ jobs:
           SB_REPO="${{ github.event.inputs.simplyblock_repository || 'public.ecr.aws/simply-block/simplyblock' }}"
           SB_TAG="${{ github.event.inputs.base_simplyblock_image }}"
           SPDK_IMAGE="${{ github.event.inputs.base_spdk_image }}"
-          MAX_LVOL="${MAX_LVOL:-30}"
+          MAX_SUBSYS="${MAX_SUBSYS:-30}"
 
           # Build worker YAML
           IFS=',' read -ra NODES <<< "${{ github.event.inputs.worker_nodes }}"
@@ -541,6 +541,31 @@ jobs:
             PCIE_MODEL_YAML='  pcieModel: "SAMSUNG MZQLB1T9HAJR-00007"'
           fi
 
+          # Convert partitions to enableJournalDevice (inverted: 0→true, 1→false)
+          if [ "${PARTITIONS}" = "0" ]; then
+            ENABLE_JOURNAL_DEVICE="true"
+          else
+            ENABLE_JOURNAL_DEVICE="false"
+          fi
+
+          # Calculate vcpuCount from CORE_PERCENTAGE by querying actual CPU count on a worker node
+          FIRST_WORKER="${{ github.event.inputs.worker_nodes }}"
+          FIRST_WORKER="${FIRST_WORKER%%,*}"
+          if [ "$OPENSHIFT_CLUSTER" = "true" ]; then
+            TOTAL_CPUS=$(oc debug node/"${FIRST_WORKER}" -- chroot /host nproc 2>/dev/null || echo "0")
+          else
+            TOTAL_CPUS=$(kubectl get node "${FIRST_WORKER}" -o jsonpath='{.status.capacity.cpu}' 2>/dev/null || echo "0")
+          fi
+          TOTAL_CPUS=$(echo "${TOTAL_CPUS}" | tr -d '[:space:]')
+          if [ "${TOTAL_CPUS}" -gt 0 ] 2>/dev/null; then
+            VCPU_COUNT=$(( TOTAL_CPUS * CORE_PERCENTAGE / 100 ))
+            [ "${VCPU_COUNT}" -lt 1 ] && VCPU_COUNT=1
+          else
+            echo "WARNING: Could not determine CPU count, defaulting vcpuCount to 4"
+            VCPU_COUNT=4
+          fi
+          echo "Calculated vcpuCount=${VCPU_COUNT} (${TOTAL_CPUS} CPUs * ${CORE_PERCENTAGE}%)"
+
           # Build vault settings (conditional on TLS)
           VAULT_SETTINGS=""
           if [ "${{ github.event.inputs.tls_enabled }}" = "true" ]; then
@@ -557,9 +582,7 @@ jobs:
             namespace: ${NAMESPACE}
           spec:
             fabricType: tcp
-            isSingleNode: false
             enableNodeAffinity: true
-            strictNodeAntiAffinity: false
             stripe:
               dataChunks: ${NDCS}
               parityChunks: ${NPCS}
@@ -570,6 +593,9 @@ jobs:
               capacity: 96
               provisionedCapacity: 98
           ${VAULT_SETTINGS}
+            maxSubsystemCount: ${MAX_SUBSYS}
+            vcpuCount: ${VCPU_COUNT}
+            maxHugePagesSize: "17G"
           ---
           apiVersion: storage.simplyblock.io/v1alpha1
           kind: StoragePool
@@ -594,10 +620,8 @@ jobs:
             mgmtIfname: ${MGMT_IFC}
             dataIfname:
               - ${DATA_NICS}
-            maxSubsystemCount: ${MAX_LVOL}
           ${RESERVED_CPU_YAML}
-            partitions: ${PARTITIONS}
-            corePercentage: ${CORE_PERCENTAGE}
+            enableJournalDevice: ${ENABLE_JOURNAL_DEVICE}
             journalManager:
               count: ${JM_COUNT}
               percentPerDevice: 3
