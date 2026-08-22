@@ -13,8 +13,15 @@ cannot collide with the data plane's decimal keyspace. Given a bucket and
 credentials for it, every backup in it can be enumerated, understood and
 restored with no other input.
 
-Credentials are deliberately absent: a manifest says *where* the objects are and
-*how* to read them, never how to authenticate. The reader supplies that.
+How to reach the bucket is deliberately absent -- not just the credentials, but
+the bucket name, region and endpoint too. A reader holds all of that already, or
+it could not have fetched the manifest, and a stored copy can only disagree with
+where the manifest was actually found: replicate a bucket and every manifest in
+the copy still names the original. So a manifest describes the objects, and the
+reader supplies the connection.
+
+What survives is what reading the bucket cannot tell you: the key layout and
+whether the bodies are compressed, both on ``dataplane``.
 
 Each manifest describes exactly one backup and names only its immediate
 predecessor. Chains are walked at read time by :func:`chain_of`, not stored: a
@@ -39,7 +46,7 @@ from pydantic import (
     BaseModel, ConfigDict, Field, HttpUrl, TypeAdapter, model_validator)
 
 from simplyblock_core.kms import KMS
-from simplyblock_core.models.backup_config import BackupConfig, BackupLocation
+from simplyblock_core.models.backup_config import BackupConfig
 from simplyblock_core.utils import NQN
 from simplyblock_core.utils.secrets import unwrap_secret
 
@@ -227,7 +234,12 @@ def parse_key_descriptor(record: dict) -> KeyDescriptor:
 
 
 class DataPlane(BaseModel):
-    """How the objects are laid out, so a later format change is detectable."""
+    """How the objects are encoded, so a later format change is detectable.
+
+    Everything here has to be recorded because reading the bucket cannot
+    recover it -- unlike the bucket's name, region and endpoint, which the
+    reader necessarily supplied to get this far.
+    """
     model_config = ConfigDict(extra="forbid")
 
     #: Object key template. ``mid=1`` is metadata (``/1/0`` is the data plane's
@@ -238,6 +250,11 @@ class DataPlane(BaseModel):
     #: writing cluster's record was unreadable -- a reader then has to fall back
     #: on the data plane's own default, which is why it is not silently 0.
     cluster_size: Optional[int] = None
+
+    #: Whether the object bodies are ISA-L compressed. Not detectable by
+    #: inspecting them, and reading them under the wrong answer yields garbage
+    #: rather than an error, so it travels with the backup.
+    with_compression: bool = False
 
 
 class BackupManifest(BaseModel):
@@ -260,8 +277,6 @@ class BackupManifest(BaseModel):
     #: chain, and a partial failure would leave the bucket advertising object keys
     #: the data plane had already unmapped.
     prev_backup_id: Optional[str] = None
-
-    location: BackupLocation
 
     #: Where this backup's key lives, or absent for a backup that is not
     #: encrypted at all. One optional document rather than a flag beside it: two
