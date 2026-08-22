@@ -125,6 +125,11 @@ def test_backup_dto_lists_host_nqns_without_their_keys():
 
     backup = Backup()
     backup.uuid = str(uuid4())
+    # The DTO types these as UUIDs, as every other v2 DTO does; a record always
+    # carries them, even though `Backup` itself types them as plain strings.
+    backup.lvol_id = str(uuid4())
+    backup.snapshot_id = str(uuid4())
+    backup.node_id = str(uuid4())
     backup.allowed_hosts = [{
         "nqn": "nqn.2024-01.io.test:host",
         "dhchap_key": "DHHC-1:00:secret-dhchap:",
