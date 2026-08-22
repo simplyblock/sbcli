@@ -238,8 +238,7 @@ class TestRestorePreconditions:
 
 class TestImportPreconditions:
 
-    def _manifest(self, backup_id, prev=None, s3_id=1,
-                  bucket="simplyblock-backup-cluster-1"):
+    def _manifest(self, backup_id, prev=None, s3_id=1, with_compression=False):
         return BackupManifest.model_validate({
             "schema_version": 1,
             "backup_id": backup_id,
@@ -248,12 +247,11 @@ class TestImportPreconditions:
             "completed_at": 200,
             "size": 4096,
             "prev_backup_id": prev,
-            "location": _config(bucket_name=bucket).location().model_dump(mode="json"),
             "source": {"cluster_id": CLUSTER_ID, "node_id": "node-1"},
             "volume": {"lvol_id": "lvol-1", "lvol_name": "vol",
                        "snapshot_id": f"snap-{backup_id}", "snapshot_name": "s",
                        "size": 4096},
-            "dataplane": {},
+            "dataplane": {"with_compression": with_compression},
         })
 
     def _line(self, length, **overrides):
@@ -269,12 +267,14 @@ class TestImportPreconditions:
         """A delta whose ancestors are missing looks restorable until it is tried."""
         with pytest.raises(PreconditionError, match="neither in this import nor already known"):
             backup_controller.import_backups(
-                [self._manifest("b-2", prev="b-1")], cluster_id=CLUSTER_ID)
+                [self._manifest("b-2", prev="b-1")], _config().location(),
+                cluster_id=CLUSTER_ID)
 
         assert db.get_backups() == []
 
     def test_chain_satisfied_within_the_batch_is_accepted(self, db, cluster):
-        count = backup_controller.import_backups(self._line(2), cluster_id=CLUSTER_ID)
+        count = backup_controller.import_backups(
+            self._line(2), _config().location(), cluster_id=CLUSTER_ID)
 
         assert count == 2
 
@@ -282,24 +282,39 @@ class TestImportPreconditions:
         _backup(db, "b-1", 1, snapshot_id="snap-1")
 
         count = backup_controller.import_backups(
-            [self._manifest("b-2", prev="b-1")], cluster_id=CLUSTER_ID)
+            [self._manifest("b-2", prev="b-1")], _config().location(),
+            cluster_id=CLUSTER_ID)
 
         assert count == 1
 
-    def test_chain_spanning_buckets_is_refused(self, db, cluster):
+    def test_chain_mixing_encodings_is_refused(self, db, cluster):
+        """A batch comes from one bucket, so the divergence it can still carry is
+        in the encoding -- which each manifest states for itself."""
         with pytest.raises(PreconditionError, match="different bucket or encoding"):
             backup_controller.import_backups(
-                [self._manifest("b-1", bucket="elsewhere"),
+                [self._manifest("b-1", with_compression=True),
                  self._manifest("b-2", prev="b-1")],
-                cluster_id=CLUSTER_ID)
+                _config().location(), cluster_id=CLUSTER_ID)
 
         assert db.get_backups() == []
+
+    def test_chain_reaching_into_another_bucket_is_refused(self, db, cluster):
+        """The ancestor is already stored, and stored records do name a bucket."""
+        _backup(db, "b-1", 1, snapshot_id="snap-1",
+                location=_config(bucket_name="elsewhere").location())
+
+        with pytest.raises(PreconditionError, match="different bucket or encoding"):
+            backup_controller.import_backups(
+                [self._manifest("b-2", prev="b-1")], _config().location(),
+                cluster_id=CLUSTER_ID)
+
+        assert [b.uuid for b in db.get_backups()] == ["b-1"]
 
     def test_overlong_chain_is_refused(self, db, cluster):
         with pytest.raises(PreconditionError, match="data plane accepts at most"):
             backup_controller.import_backups(
                 self._line(constants.BACKUP_MAX_CHAIN_LENGTH + 1),
-                cluster_id=CLUSTER_ID)
+                _config().location(), cluster_id=CLUSTER_ID)
 
         assert db.get_backups() == []
 
@@ -314,13 +329,13 @@ class TestImportPreconditions:
         with pytest.raises(PreconditionError, match="data plane accepts at most"):
             backup_controller.import_backups(
                 [self._manifest("b-new", prev=previous, s3_id=999)],
-                cluster_id=CLUSTER_ID)
+                _config().location(), cluster_id=CLUSTER_ID)
 
     def test_a_cyclic_chain_is_refused_rather_than_looping(self, db, cluster):
         with pytest.raises(PreconditionError, match="cyclic"):
             backup_controller.import_backups(
                 [self._manifest("b-1", prev="b-2"), self._manifest("b-2", prev="b-1")],
-                cluster_id=CLUSTER_ID)
+                _config().location(), cluster_id=CLUSTER_ID)
 
 
 class TestPredicates:

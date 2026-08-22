@@ -104,11 +104,15 @@ def _backup(db, uuid, s3_id, prev="", **overrides):
 
 class TestBuildManifest:
 
-    def test_records_the_backup_location(self, db, cluster, lvol):
+    def test_says_nothing_about_where_the_bucket_is(self, db, cluster, lvol):
+        """Whoever reads a manifest supplied the bucket to read it, and a stored
+        copy could only go stale -- a replicated bucket would hand out manifests
+        naming the original."""
         manifest = backup_controller.build_manifest(_backup(db, "b-1", 1))
 
-        assert manifest.location.bucket_name == "simplyblock-backup-cluster-1"
-        assert manifest.location.region == "eu-central-1"
+        rendered = manifest.model_dump_json()
+        assert "simplyblock-backup-cluster-1" not in rendered
+        assert "eu-central-1" not in rendered
 
     def test_records_only_the_immediate_predecessor(self, db, cluster, lvol):
         """Not the whole chain: storing that would make a merge rewrite the
@@ -192,6 +196,14 @@ class TestBuildManifest:
         assert manifest.dataplane.key_format == "{s3_id}/{mid}/{extent}"
         assert manifest.dataplane.cluster_size == cluster.page_size_in_blocks
 
+    def test_records_whether_the_objects_are_compressed(self, db, cluster, lvol):
+        """The one part of the encoding that varies and that reading the bucket
+        cannot reveal."""
+        backup = _backup(db, "b-1", 1)
+        backup.location = _config(with_compression=True).location().model_dump(mode="json")
+
+        assert backup_controller.build_manifest(backup).dataplane.with_compression is True
+
     def test_backup_without_a_location_is_refused(self, db, cluster, lvol):
         backup = _backup(db, "b-1", 1)
         backup.location = {}
@@ -213,7 +225,8 @@ class TestExportImportRoundTrip:
             backup.remove(db.kv_store)
         assert db.get_backups() == []
 
-        count = backup_controller.import_backups(exported, cluster_id="cluster-2")
+        count = backup_controller.import_backups(
+            exported, _config().location(), cluster_id="cluster-2")
 
         assert count == 2
         restored = db.get_backup_by_id("b-2")
@@ -230,7 +243,8 @@ class TestExportImportRoundTrip:
         exported = backup_controller.export_backups(cluster_id=CLUSTER_ID)
         db.get_backup_by_id("b-1").remove(db.kv_store)
 
-        backup_controller.import_backups(exported, cluster_id="cluster-2")
+        backup_controller.import_backups(
+            exported, _config().location(), cluster_id="cluster-2")
 
         assert db.get_backup_by_id("b-1").encrypted is True
 
@@ -263,7 +277,8 @@ class TestExportImportRoundTrip:
         exported = backup_controller.export_backups(cluster_id=CLUSTER_ID)
 
         with pytest.raises(PreconditionError, match="already exists"):
-            backup_controller.import_backups(exported, cluster_id="cluster-2")
+            backup_controller.import_backups(
+                exported, _config().location(), cluster_id="cluster-2")
 
     def test_same_id_listed_twice_rejects_the_whole_batch(self, db, cluster, lvol):
         """Backup lookups are not cluster-scoped, so a reused uuid unaddresses both."""
@@ -272,12 +287,43 @@ class TestExportImportRoundTrip:
         db.get_backup_by_id("b-1").remove(db.kv_store)
 
         with pytest.raises(ValueError, match="listed more than once"):
-            backup_controller.import_backups(exported + exported, cluster_id="cluster-2")
+            backup_controller.import_backups(
+                exported + exported, _config().location(), cluster_id="cluster-2")
 
         assert db.get_backups() == []
 
+    def test_import_records_the_bucket_it_was_read_from(self, db, cluster, lvol):
+        """Replicate a bucket and its manifests are unchanged -- they describe
+        objects, not a location. So the copy imports as itself, rather than as
+        the original it would then try and fail to restore from."""
+        _backup(db, "b-1", 1)
+        exported = backup_controller.export_backups(cluster_id=CLUSTER_ID)
+        db.get_backup_by_id("b-1").remove(db.kv_store)
+
+        backup_controller.import_backups(
+            exported, _config(bucket_name="dr-copy", region="us-east-1").location(),
+            cluster_id="cluster-2")
+
+        location = db.get_backup_by_id("b-1").get_location()
+        assert location.bucket_name == "dr-copy"
+        assert location.region == "us-east-1"
+
+    def test_import_keeps_the_encoding_the_manifest_states(self, db, cluster, lvol):
+        """The bucket says where; the manifest says how the bodies are encoded."""
+        backup = _backup(db, "b-1", 1)
+        backup.location = _config(with_compression=True).location().model_dump(mode="json")
+        backup.write_to_db(db.kv_store)
+        exported = backup_controller.export_backups(cluster_id=CLUSTER_ID)
+        db.get_backup_by_id("b-1").remove(db.kv_store)
+
+        backup_controller.import_backups(
+            exported, _config(bucket_name="dr-copy").location(), cluster_id="cluster-2")
+
+        assert db.get_backup_by_id("b-1").get_location().with_compression is True
+
     def test_nothing_to_import_is_not_an_error(self, db, cluster, lvol):
-        assert backup_controller.import_backups([], cluster_id="cluster-2") == 0
+        assert backup_controller.import_backups(
+            [], _config().location(), cluster_id="cluster-2") == 0
 
 
 class TestBucketDiscovery:

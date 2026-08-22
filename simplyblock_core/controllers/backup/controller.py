@@ -102,6 +102,11 @@ def build_manifest(backup: Backup) -> backup_manifest.BackupManifest:
         ValueError: The backup has no recorded location, or is encrypted without
             recording where its key is -- neither is describable.
     """
+    # Only for the encoding the manifest records. Where the bucket is does not
+    # travel with the manifest -- but a record that cannot say how its objects
+    # are encoded cannot be described either, so this still has to resolve.
+    location = backup.get_location()
+
     # A record that predates self-describing backups carries `encrypted` without
     # a descriptor. No manifest says that: an absent descriptor means plaintext,
     # so writing one here would advertise ciphertext as readable and a restore
@@ -170,14 +175,16 @@ def build_manifest(backup: Backup) -> backup_manifest.BackupManifest:
         prev_backup_id=backup.prev_backup_id or None,
         encryption=(backup_manifest.parse_key_descriptor(backup.encryption)
                     if backup.encryption else None),
-        location=backup.get_location(),
         source=backup_manifest.Source(
             cluster_id=backup.cluster_id,
             cluster_name=cluster_name,
             node_id=backup.node_id,
         ),
         volume=volume,
-        dataplane=backup_manifest.DataPlane(cluster_size=cluster_size),
+        dataplane=backup_manifest.DataPlane(
+            cluster_size=cluster_size,
+            with_compression=location.with_compression,
+        ),
     )
 
 
@@ -791,7 +798,7 @@ def discover_backups(config: BackupConfig) -> List[backup_manifest.BackupManifes
     return backup_manifest.list_all(config)
 
 
-def _require_importable(pending: dict) -> None:
+def _require_importable(pending: dict, location: BackupLocation) -> None:
     """Refuse a batch of manifests that would not form something restorable.
 
     An import that lands a backup whose ancestors are missing produces a record
@@ -804,6 +811,12 @@ def _require_importable(pending: dict) -> None:
     the database is a question only the importer can ask. The rules that ARE about
     the chain are deferred to it.
 
+    Args:
+        location: Where this batch is being imported from, which is where every
+            backup in it will be recorded as living. Only ancestors already in
+            the database can contradict it -- the batch itself comes from one
+            bucket by construction.
+
     Raises:
         PreconditionError: A chain is incomplete, cyclic, too long for the data
             plane, or spans buckets.
@@ -813,7 +826,7 @@ def _require_importable(pending: dict) -> None:
         # thing -- manifests being imported and Backup records already stored,
         # which name their id and their location differently. Reduced to the two
         # facts the rules below need, the two become comparable.
-        chain = [(backup_id, manifest.location)]
+        chain = [(backup_id, _location_of(manifest, location))]
         seen = {backup_id}
         current = manifest
 
@@ -825,7 +838,7 @@ def _require_importable(pending: dict) -> None:
 
             if previous in pending:
                 current = pending[previous]
-                chain.append((previous, current.location))
+                chain.append((previous, _location_of(current, location)))
                 continue
 
             if not _backup_exists(previous):
@@ -843,8 +856,9 @@ def _require_importable(pending: dict) -> None:
         # Locations are values, so coherence over the chain is a plain
         # comparison; require_restorable wants Backup records, and the manifests
         # in this batch are not in the database yet.
+        own = _location_of(manifest, location)
         divergent = next(
-            (other for other, location in chain if location != manifest.location),
+            (other for other, other_location in chain if other_location != own),
             None)
         if divergent is not None:
             raise PreconditionError(
@@ -858,6 +872,28 @@ def _require_importable(pending: dict) -> None:
                 f"{constants.BACKUP_MAX_CHAIN_LENGTH}.")
 
 
+def _location_of(manifest: backup_manifest.BackupManifest,
+                 location: BackupLocation) -> BackupLocation:
+    """Where an imported backup lives: the bucket it was found in, its own encoding.
+
+    A manifest describes its objects but not how to reach them, so the bucket,
+    region and endpoint come from whoever read it -- which is what makes a
+    replicated bucket importable at all, rather than importable and then
+    unrestorable because every record points back at the original.
+
+    Only the encoding is the manifest's to state, and only ``with_compression``
+    is still variable; the key layout it also records has one value that holds
+    backups, which ``location_holds_backups`` already requires of the bucket.
+
+    Narrowed rather than copied, so a ``BackupConfig`` passed in as the location
+    it also is cannot carry its credentials into a stored record.
+    """
+    return BackupLocation.model_validate({
+        **location.model_dump(include=set(BackupLocation.model_fields)),
+        "with_compression": manifest.dataplane.with_compression,
+    })
+
+
 def _backup_exists(backup_id: str) -> bool:
     try:
         db_controller.get_backup_by_id(backup_id)
@@ -867,7 +903,7 @@ def _backup_exists(backup_id: str) -> bool:
 
 
 def import_backups(manifests: Iterable[backup_manifest.BackupManifest],
-                   cluster_id=None) -> int:
+                   location: BackupLocation, cluster_id=None) -> int:
     """Register backups described by manifests into this cluster's database.
 
     The backups keep their original ids -- both their uuid and their s3_id,
@@ -879,6 +915,12 @@ def import_backups(manifests: Iterable[backup_manifest.BackupManifest],
             rather than dicts means "is this a manifest at all" is answered by
             whoever read the bytes -- the API by its request body's type, the CLI
             when it parses the file -- and reported where the input came from.
+        location: The bucket these manifests describe backups in. Required
+            because a manifest does not say: it is read out of a bucket the
+            reader already named, and an export file is just those manifests in
+            another envelope, so the bucket has to be named again there. That is
+            what lets a replicated bucket be imported as itself rather than as
+            the original it was copied from.
         cluster_id: Target cluster to import into, so the backups are visible in
             its namespace.
 
@@ -904,7 +946,7 @@ def import_backups(manifests: Iterable[backup_manifest.BackupManifest],
         else:
             raise PreconditionError(f"Backup {backup_id} already exists in cluster {existing.cluster_id}")
 
-    _require_importable(pending)
+    _require_importable(pending, location)
 
     for backup_id, manifest in pending.items():
         backup = Backup()
@@ -922,7 +964,7 @@ def import_backups(manifests: Iterable[backup_manifest.BackupManifest],
         backup.created_at = manifest.created_at
         backup.completed_at = manifest.completed_at
         backup.status = Backup.STATUS_COMPLETED
-        backup.location = manifest.location.model_dump(mode="json")
+        backup.location = _location_of(manifest, location).model_dump(mode="json")
         # Import used to drop this, so an imported encrypted backup restored as
         # use_crypto=False -- a plaintext volume over ciphertext, silently.
         backup.encrypted = manifest.encryption is not None
@@ -941,4 +983,5 @@ def import_from_bucket(config: BackupConfig, cluster_id=None) -> int:
         ManifestError: the bucket could not be read.
         PreconditionError: the manifests it holds cannot be imported as a batch.
     """
-    return import_backups(discover_backups(config), cluster_id=cluster_id)
+    return import_backups(
+        discover_backups(config), config.location(), cluster_id=cluster_id)

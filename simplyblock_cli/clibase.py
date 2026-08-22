@@ -1274,17 +1274,21 @@ class CLIWrapperBase:
 
     def backup__import(self, sub_command, args):
         from_file = getattr(args, 'from_file', None)
-        bucket = getattr(args, 'bucket', None)
 
-        if bool(from_file) == bool(bucket):
-            print("Error: give exactly one of --from-file or --bucket")
+        # The bucket is needed either way. A manifest describes its objects but
+        # not where they are, so an export file is a filter over a bucket that
+        # still has to be named -- and naming it is what lets a file be imported
+        # against a copy of the bucket instead of only against the original.
+        if not getattr(args, 'bucket', None):
+            print("Error: --bucket is required")
             return False
 
+        config = _bucket_config(args)
         cluster_id = getattr(args, 'cluster_id', None)
         try:
-            if bucket:
+            if not from_file:
                 count = backup_controller.import_from_bucket(
-                    _bucket_config(args), cluster_id=cluster_id)
+                    config, cluster_id=cluster_id)
             else:
                 with open(str(from_file), 'r') as f:
                     entries = json.load(f)
@@ -1293,7 +1297,8 @@ class CLIWrapperBase:
                 # Parsed here rather than in the controller so a malformed file
                 # is reported as a problem with the file, naming it.
                 manifests = [BackupManifest.model_validate(e) for e in entries]
-                count = backup_controller.import_backups(manifests, cluster_id=cluster_id)
+                count = backup_controller.import_backups(
+                    manifests, config.location(), cluster_id=cluster_id)
         except (ManifestError, PreconditionError, ValueError, OSError) as e:
             print(f"Error: {e}")
             return False

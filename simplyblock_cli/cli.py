@@ -1140,10 +1140,10 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--path-style', help='Use path-style addressing, as MinIO and most S3-compatible stores need.', dest='path_style', action='store_true')
 
     def init_backup__import(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'import', 'Register backups into this cluster, from a bucket or from an exported file.')
+        subcommand = self.add_sub_command(subparser, 'import', 'Register the backups held in a bucket into this cluster.')
         subcommand.add_argument('--cluster-id', help='The target cluster to import into (required for cross-cluster restore).', type=str, dest='cluster_id')
-        subcommand.add_argument('--from-file', help='Path to a JSON file produced by \'backup export\'. Mutually exclusive with --bucket.', type=str, dest='from_file')
-        subcommand.add_argument('--bucket', help='Read manifests straight from this bucket. Mutually exclusive with --from-file.', type=str, dest='bucket')
+        subcommand.add_argument('--bucket', help='The bucket the backups live in. Required: a manifest describes its objects, not where they are.', type=str, dest='bucket')
+        subcommand.add_argument('--from-file', help='Import only the manifests in this JSON file, from \'backup export\', instead of every manifest in the bucket.', type=str, dest='from_file')
         subcommand.add_argument('--region', help='The bucket\'s region. Omit to let the AWS SDK resolve it.', type=str, dest='region')
         subcommand.add_argument('--endpoint', help='Endpoint of an S3-compatible store, e.g. http://minio:9000. Omit for AWS.', type=str, dest='endpoint')
         subcommand.add_argument('--access-key-id', help='Access key for the bucket. Omit to use the node\'s instance role.', type=SecretStr, dest='access_key_id')

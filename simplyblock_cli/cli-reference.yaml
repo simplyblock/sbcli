@@ -2768,19 +2768,19 @@ commands:
             type: bool
             action: store_true
       - name: import
-        help: "Register backups into this cluster, from a bucket or from an exported file."
+        help: "Register the backups held in a bucket into this cluster."
         arguments:
           - name: "--cluster-id"
             help: "The target cluster to import into (required for cross-cluster restore)."
             dest: cluster_id
             type: str
-          - name: "--from-file"
-            help: "Path to a JSON file produced by 'backup export'. Mutually exclusive with --bucket."
-            dest: from_file
-            type: str
           - name: "--bucket"
-            help: "Read manifests straight from this bucket. Mutually exclusive with --from-file."
+            help: "The bucket the backups live in. Required: a manifest describes its objects, not where they are."
             dest: bucket
+            type: str
+          - name: "--from-file"
+            help: "Import only the manifests in this JSON file, from 'backup export', instead of every manifest in the bucket."
+            dest: from_file
             type: str
           - name: "--region"
             help: "The bucket's region. Omit to let the AWS SDK resolve it."
