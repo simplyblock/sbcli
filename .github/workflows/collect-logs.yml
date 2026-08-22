@@ -690,7 +690,8 @@ jobs:
 
           TIMESTAMP=$(date -u "+%Y%m%d-%H%M%S")
           NFS_DEST="${NFS_BASE}/graylog_collected-${TIMESTAMP}"
-          mkdir -p "${NFS_DEST}"
+          sudo mkdir -p "${NFS_DEST}"
+          sudo chown "$(id -u):$(id -g)" "${NFS_DEST}"
 
           echo "=== Copying collected logs to NFS ==="
           echo "  Source: ${OUTPUT_DIR}"
