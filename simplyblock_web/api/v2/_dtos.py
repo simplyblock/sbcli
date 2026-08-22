@@ -21,7 +21,7 @@ from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.backup import Backup, BackupPolicy
 from simplyblock_core.controllers.backup.manifest import BackupManifest
-from simplyblock_core.models.backup_config import BackupConfig
+from simplyblock_core.models.backup_config import BackupConfig, BackupLocation
 from simplyblock_core.models.stats import StatsObject
 from simplyblock_core.models.lvol_migration import LVolMigration
 from simplyblock_core.models.lvol_migration_group import LVolMigrationGroup
@@ -525,6 +525,11 @@ class VolumeDTO(BaseModel):
 #: the wire format can diverge from ``BackupConfig`` later by turning this into a
 #: real class, without touching a single route signature.
 BackupConfigDTO = BackupConfig
+
+#: Where a set of backups lives, without the credentials to reach it. What an
+#: inline import has to name, because the manifests it carries do not: they
+#: describe objects, and a reader has always had to say which bucket they are in.
+BackupLocationDTO = BackupLocation
 
 #: A backup's manifest as the API exchanges it: the response body of
 #: export/discover and the entries of an inline import.

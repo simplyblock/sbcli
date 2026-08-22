@@ -17,10 +17,6 @@ from simplyblock_core.controllers.backup.manifest import (
     Source,
     Volume,
 )
-from simplyblock_core.models.backup_config import BackupLocation
-
-
-LOCATION = {"bucket_name": "backups", "region": "eu-central-1"}
 
 
 def _manifest(**overrides):
@@ -30,7 +26,6 @@ def _manifest(**overrides):
         "created_at": 100,
         "completed_at": 200,
         "size": 4096,
-        "location": BackupLocation.model_validate(LOCATION),
         "source": Source(cluster_id="c-1", node_id="n-1"),
         "volume": Volume(lvol_id="l-1", lvol_name="vol", snapshot_id="s-1",
                          snapshot_name="snap", size=4096),
@@ -73,13 +68,29 @@ class TestSchema:
     def test_serializes_to_plain_json(self):
         data = json.loads(_manifest().model_dump_json())
         assert data["schema_version"] == MANIFEST_SCHEMA_VERSION
-        assert data["location"]["bucket_name"] == "backups"
+        assert data["backup_id"] == "b-1"
 
     def test_carries_no_credential_field(self):
         """A manifest sits next to the ciphertext; it must not carry keys."""
-        data = json.loads(_manifest().model_dump_json())
-        assert "credentials" not in data["location"]
-        assert "access_key_id" not in json.dumps(data)
+        assert "access_key_id" not in json.dumps(
+            json.loads(_manifest().model_dump_json()))
+
+    def test_says_nothing_about_how_to_reach_the_bucket(self):
+        """The reader named the bucket to fetch this at all, and a stored copy
+        could only go stale: replicate a bucket and every manifest in the copy
+        still names the original."""
+        data = json.dumps(json.loads(_manifest().model_dump_json()))
+        assert "location" not in data
+        assert "bucket_name" not in data
+        assert "endpoint" not in data
+        assert "region" not in data
+
+    def test_records_the_encoding_the_bucket_cannot_reveal(self):
+        """Compression is not detectable from the objects, and reading them
+        under the wrong answer yields garbage rather than an error."""
+        manifest = _manifest(dataplane=DataPlane(with_compression=True))
+        restored = backup_manifest._parse(manifest.model_dump_json().encode(), "k")
+        assert restored.dataplane.with_compression is True
 
     def test_unknown_field_is_rejected(self):
         with pytest.raises(ValueError):
