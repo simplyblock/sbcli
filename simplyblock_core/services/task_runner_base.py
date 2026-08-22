@@ -25,7 +25,8 @@ flow:
   mutual exclusion on a RUNNING sibling depend on that.
 - **raise** :class:`TaskRetry` (or any other, unexpected ``Exception``) — a
   retryable failure. Suspend, **consume a retry**, and back off before the next
-  attempt.
+  attempt. A failure whose message differs from the previous attempt's also
+  fires the spec's ``on_failure`` alert.
 - **raise** :class:`TaskAbort` — a permanent, non-retryable stop (missing param,
   object gone, "not needed"). Finish the task (``STATUS_DONE``) with the reason.
 
@@ -189,6 +190,13 @@ class RunnerSpec:
     # otherwise leak on the terminal paths the handler never sees. Runs only
     # for the caller that won the terminal transition.
     on_finish: Optional[Callable[[JobSchedule], None]] = None
+    # Optional alert, called with (task, reason) when a task fails with a
+    # message DIFFERENT from the one its previous attempt recorded. For a
+    # failure an operator must see in the cluster event log rather than only in
+    # `sbctl task list` — a repeat of the same message is not re-reported, so a
+    # cause that persists for hours writes one event, not one per attempt.
+    # Never called for a TaskDefer: waiting on external state is not failing.
+    on_failure: Optional[Callable[[JobSchedule, str], None]] = None
     # Optional per-task, per-cycle "must this one run to completion before the
     # loop moves on?". Defaults to serializing exactly when the pool has a
     # single worker. A runner whose mode depends on live cluster state (node
@@ -346,6 +354,9 @@ class TaskRunner:
         # Drop the previous attempt's result so a task that fails and later
         # succeeds does not finish carrying the stale failure message. Handlers
         # that set a success message overwrite this; the rest get "completed".
+        # Kept first: the handler cannot see what the last attempt reported, so
+        # recognizing a repeated failure is the driver's job (see _fail).
+        previous_result = task.function_result
         task.function_result = ""
 
         try:
@@ -362,11 +373,11 @@ class TaskRunner:
         except TaskAbort as e:
             self._finish(task, str(e) or "aborted")
         except TaskRetry as e:
-            self._fail(task, str(e) or "retry")
+            self._fail(task, str(e) or "retry", previous_result)
         except Exception as e:  # noqa: BLE001 - unexpected == retryable failure
             logger.error(f"{self.spec.name}: task {uuid} handler raised: {e}")
             logger.exception(e)
-            self._fail(task, f"unhandled error: {e}")
+            self._fail(task, f"unhandled error: {e}", previous_result)
         else:
             self._succeed(task)
 
@@ -420,6 +431,17 @@ class TaskRunner:
             return
         self._clear_backoff(task.uuid)
 
+    def _alert(self, task: JobSchedule, reason: str) -> None:
+        if self.spec.on_failure is None:
+            return
+        # As on_finish: a hook that cannot record its alert must not turn a
+        # retryable task failure into a dead runner.
+        try:
+            self.spec.on_failure(task, reason)
+        except Exception as e:  # noqa: BLE001 - alerting failure is not fatal
+            logger.error(f"{self.spec.name}: task {task.uuid} on_failure failed: {e}")
+            logger.exception(e)
+
     def _defer(self, task: JobSchedule, reason: str) -> None:
         if reason:
             task.function_result = reason
@@ -428,7 +450,8 @@ class TaskRunner:
             return
         self._clear_backoff(task.uuid)
 
-    def _fail(self, task: JobSchedule, reason: str) -> None:
+    def _fail(self, task: JobSchedule, reason: str, previous_result: str = "") -> None:
+        logger.error(f"{self.spec.name}: task {task.uuid} failed: {reason}")
         task.function_result = reason
 
         def _apply(fresh: JobSchedule) -> None:
@@ -439,6 +462,11 @@ class TaskRunner:
         if committed is None:
             self._forget(task.uuid)
             return
+        # As on_finish: alert only for the caller that recorded the outcome, and
+        # only once per distinct message — a cause that persists for hours must
+        # not write one event per attempt.
+        if reason != previous_result:
+            self._alert(committed, reason)
         # Back off on the committed retry count, not the stale local one.
         with self._lock:
             self._next_attempt[task.uuid] = time.time() + self._backoff_delay(committed.retry)
