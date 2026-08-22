@@ -1,19 +1,36 @@
-from typing import List, Optional
+from typing import Callable, List, Optional, Union
 
 from fastapi import APIRouter, Response
+from sse_starlette import EventSourceResponse
 
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.controllers import device_controller
+from simplyblock_core.models.nvme_device import NVMeDevice
 
 from ..._dependencies import Cluster, StorageNode, Device
 from ..._dtos import DeviceDTO, DeviceHealthInfoDTO
+from ..._sse import WATCH_RESPONSES, WatchParam, sse_response
+
 
 api = APIRouter()
 db = DBController()
 
 
-@api.get('/', name='clusters:storage_nodes:devices:list')
-def list(cluster: Cluster, storage_node: StorageNode) -> List[DeviceDTO]:
+def _make_device_dto(storage_node_id: str) -> Callable[[NVMeDevice], DeviceDTO]:
+    def build(device: NVMeDevice) -> DeviceDTO:
+        ret = db.get_device_stats(device, 1)
+        return DeviceDTO.from_model(device, storage_node_id, ret[0] if ret else None)
+    return build
+
+
+@api.get('/', name='clusters:storage_nodes:devices:list', response_model=List[DeviceDTO], responses=WATCH_RESPONSES)
+def list(cluster: Cluster, storage_node: StorageNode, watch: WatchParam = False) -> Union[List[DeviceDTO], EventSourceResponse]:
+    if watch:
+        node_id = storage_node.get_id()
+        return sse_response(
+            device_controller.watch_devices(cluster.get_id(), node_id),
+            _make_device_dto(node_id),
+        )
     data = []
     for device in storage_node.nvme_devices:
         stat_obj = None
@@ -27,8 +44,15 @@ def list(cluster: Cluster, storage_node: StorageNode) -> List[DeviceDTO]:
 instance_api = APIRouter(prefix='/{device_id}')
 
 
-@instance_api.get('/', name='clusters:storage_nodes:devices:detail')
-def get(cluster: Cluster, storage_node: StorageNode, device: Device) -> DeviceDTO:
+@instance_api.get('/', name='clusters:storage_nodes:devices:detail', response_model=DeviceDTO, responses=WATCH_RESPONSES)
+def get(cluster: Cluster, storage_node: StorageNode, device: Device, watch: WatchParam = False) -> Union[DeviceDTO, EventSourceResponse]:
+    if watch:
+        node_id = storage_node.get_id()
+        return sse_response(
+            device_controller.watch_device(cluster.get_id(), node_id, device.get_id()),
+            _make_device_dto(node_id),
+            single=True,
+        )
     stat_obj = None
     ret = db.get_device_stats(device, 1)
     if ret:

@@ -7,6 +7,8 @@ from simplyblock_core.models.base_model import BaseModel
 
 class LVol(BaseModel):
 
+    _WATCHED = True
+
     STATUS_IN_CREATION = 'in_creation'
     STATUS_ONLINE = 'online'
     STATUS_OFFLINE = 'offline'
@@ -98,6 +100,9 @@ class LVol(BaseModel):
     # replication service keeps reading exactly what it reads today; attaching a
     # policy derives them from policy + target.
     replication_policy_id: str = ""
+
+    def watch_scope(self):
+        return (self.pool_uuid,)
 
     def has_qos(self):
         return (self.rw_ios_per_sec > 0 or self.rw_mbytes_per_sec > 0 or self.r_mbytes_per_sec > 0 or self.w_mbytes_per_sec > 0)

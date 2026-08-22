@@ -3,12 +3,13 @@ import datetime
 import json
 import logging
 import os.path
+import struct
 import time
 
 import fdb
 from typing import Any, List, Optional
 
-from simplyblock_core import constants, utils
+from simplyblock_core import constants, utils, watches
 from simplyblock_core.models.cluster import Cluster, ClusterAddNodeLock, ClusterCreateLock, PortReservation, DeployConfig
 from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.job_schedule import JobSchedule
@@ -97,8 +98,8 @@ class _NoTxnFuture:
 
 class _NoTxnStore:
     """Duck-types the small Transaction surface the namespace-slot claim and
-    release use (``get``/``set``/``clear``/``snapshot``) over a plain kv
-    store. Used only when the store has no transactions (the unit-tier fdb
+    release use (``get``/``set``/``clear``/``add``/``snapshot``) over a plain
+    kv store. Used only when the store has no transactions (the unit-tier fdb
     stub and the fake stores in tests) — NOT atomic; production stores always
     go through ``fdb.transactional``."""
 
@@ -120,6 +121,10 @@ class _NoTxnStore:
     def clear(self, key):
         self._kv.clear(key)
 
+    def add(self, key, param):
+        current = watches.unpack_counter(self._kv.get(key)) if hasattr(self._kv, 'get') else 0
+        self._kv.set(key, struct.pack('<q', current + watches.unpack_counter(param)))
+
     @property
     def snapshot(self):
         return self._kv
@@ -140,13 +145,23 @@ class DBController(metaclass=Singleton):
         except Exception:
             logger.exception("FDB initialization failed")
 
+    def watch(self, model_cls, *, scope=(), entity_id=None, select=None, ancestors=()):
+        """Async stream of watch.ChangeEvent batches for a watched scope.
+
+        Thin pass-through to :func:`simplyblock_core.watch.watch` so controllers
+        reach the watch primitive the same way they reach every other DB op.
+        """
+        from simplyblock_core import watch as _watch
+        return _watch.watch(
+            model_cls, scope=scope, entity_id=entity_id, select=select, ancestors=ancestors)
+
     def get_storage_nodes(self) -> List[StorageNode]:
         ret = StorageNode().read_from_db(self.kv_store)
         ret = sorted(ret, key=lambda x: x.create_dt)
         return ret
 
-    def get_storage_nodes_by_cluster_id(self, cluster_id: str) -> List[StorageNode]:
-        ret = StorageNode().read_from_db(self.kv_store)
+    def get_storage_nodes_by_cluster_id(self, cluster_id: str, *, source=None) -> List[StorageNode]:
+        ret = source if source is not None else StorageNode().read_from_db(self.kv_store)
         nodes = []
         for n in ret:
             if n.cluster_id == cluster_id:
@@ -187,15 +202,11 @@ class DBController(metaclass=Singleton):
         return device
 
 
-    def get_pools(self, cluster_id: Optional[str] = None) -> List[Pool]:
-        pools = []
+    def get_pools(self, cluster_id: Optional[str] = None, *, source=None) -> List[Pool]:
+        all_pools = source if source is not None else Pool().read_from_db(self.kv_store)
         if cluster_id:
-            for pool in Pool().read_from_db(self.kv_store):
-                if pool.cluster_id == cluster_id:
-                    pools.append(pool)
-        else:
-            pools = Pool().read_from_db(self.kv_store)
-        return pools
+            return [pool for pool in all_pools if pool.cluster_id == cluster_id]
+        return all_pools
 
     def get_pool_by_id(self, id: str) -> Pool:
         if not id:
@@ -224,8 +235,8 @@ class DBController(metaclass=Singleton):
             else self.get_pool_by_name(id_or_name)
         )
 
-    def get_lvols(self, cluster_id: Optional[str] = None) -> List[LVol]:
-        lvols = self.get_all_lvols()
+    def get_lvols(self, cluster_id: Optional[str] = None, *, source=None) -> List[LVol]:
+        lvols = source if source is not None else self.get_all_lvols()
         lvols = [lvol for lvol in lvols if lvol.status != LVol.STATUS_DELETED]
         if not cluster_id:
             return lvols
@@ -256,9 +267,9 @@ class DBController(metaclass=Singleton):
                 lvols.append(lvol)
         return sorted(lvols, key=lambda x: x.create_dt)
 
-    def get_lvols_by_pool_id(self, pool_id: str) -> List[LVol]:
+    def get_lvols_by_pool_id(self, pool_id: str, *, source=None) -> List[LVol]:
         lvols = []
-        for lvol in self.get_lvols():
+        for lvol in self.get_lvols(source=source):
             if lvol.pool_uuid == pool_id:
                 lvols.append(lvol)
         return sorted(lvols, key=lambda x: x.create_dt)
@@ -271,9 +282,9 @@ class DBController(metaclass=Singleton):
                 hostnames.append(lv.hostname)
         return hostnames
 
-    def get_snapshots(self, cluster_id: Optional[str] = None) -> List[SnapShot]:
+    def get_snapshots(self, cluster_id: Optional[str] = None, *, source=None) -> List[SnapShot]:
         start_time = time.time()
-        snaps = SnapShot().read_from_db(self.kv_store)
+        snaps = source if source is not None else SnapShot().read_from_db(self.kv_store)
         if cluster_id:
             snaps = [n for n in snaps if n.cluster_id == cluster_id]
         ret = sorted(snaps, key=lambda x: x.created_at)
@@ -390,7 +401,9 @@ class DBController(metaclass=Singleton):
             self.kv_store, id="%s/%s" % (device.cluster_id, device.get_id()), limit=limit, reverse=True)
         return stats
 
-    def get_clusters(self) -> List[Cluster]:
+    def get_clusters(self, *, source=None) -> List[Cluster]:
+        if source is not None:
+            return source
         return Cluster().read_from_db(self.kv_store)
 
     def get_deploy_config(self) -> DeployConfig:
@@ -414,8 +427,11 @@ class DBController(metaclass=Singleton):
     def get_events(self, event_id: str = " ", limit: int = 0, reverse: bool = False) -> List[EventObj]:
         return EventObj().read_from_db(self.kv_store, id=event_id, limit=limit, reverse=reverse)
 
-    def get_job_tasks(self, cluster_id: str, reverse: bool = True, limit: int = 0) -> List[JobSchedule]:
-        ret = JobSchedule().read_from_db(self.kv_store, id=cluster_id, reverse=reverse, limit=limit)
+    def get_job_tasks(self, cluster_id: str, reverse: bool = True, limit: int = 0, *, source=None) -> List[JobSchedule]:
+        if source is not None:
+            ret = [t for t in source if t.cluster_id == cluster_id]
+        else:
+            ret = JobSchedule().read_from_db(self.kv_store, id=cluster_id, reverse=reverse, limit=limit)
         return sorted(ret, key=lambda x: x.date)
 
 
@@ -441,9 +457,9 @@ class DBController(metaclass=Singleton):
                 ret.append(snap)
         return sorted(ret, key=lambda x: x.create_dt)
 
-    def get_snapshots_by_pool_id(self, pool_id: str) -> List[SnapShot]:
+    def get_snapshots_by_pool_id(self, pool_id: str, *, source=None) -> List[SnapShot]:
         ret = []
-        snaps = self.get_snapshots()
+        snaps = self.get_snapshots(source=source)
         for snap in snaps:
             if snap.pool_uuid == pool_id:
                 ret.append(snap)
@@ -976,6 +992,10 @@ class DBController(metaclass=Singleton):
         if mutate_fn(obj) is False:
             return obj
         tr[key] = json.dumps(obj.to_dict(unwrap_secrets=True)).encode()
+        if getattr(model_cls, '_WATCHED', False):
+            scope = obj.watch_scope()
+            tr.add(watches.watch_index_rollup_key(model_cls, scope), watches.ONE_LE64)
+            tr.add(watches.watch_index_version_key(model_cls, scope, obj.get_id()), watches.ONE_LE64)
         return obj
 
     def atomic_update(self, obj, mutate_fn):
@@ -1242,6 +1262,9 @@ class DBController(metaclass=Singleton):
             prefix = target.get_db_id()
             data = json.dumps(target.get_clean_dict(unwrap_secrets=True))
             tr[prefix.encode()] = data.encode()
+            scope = target.watch_scope()
+            tr.add(watches.watch_index_rollup_key(StorageNode, scope), watches.ONE_LE64)
+            tr.add(watches.watch_index_version_key(StorageNode, scope, target.get_id()), watches.ONE_LE64)
 
         return True, None
 
