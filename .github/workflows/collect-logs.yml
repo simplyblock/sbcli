@@ -726,7 +726,6 @@ jobs:
           gl_ip="${GRAYLOG_IP:-$MGMT_IP}"
           file_count="$(find "${OUTPUT_DIR}" -type f \( -name '*.log' -o -name '*.tar.gz' \) 2>/dev/null | wc -l || echo 0)"
           total_size="$(du -sh "${OUTPUT_DIR}" 2>/dev/null | awk '{print $1}' || echo 'unknown')"
-          total_lines="$(find "${OUTPUT_DIR}" -name '*.log' -exec cat {} + 2>/dev/null | wc -l || echo 0)"
 
           {
             echo "## Log Collection Summary"
@@ -747,11 +746,20 @@ jobs:
             fi
             echo "| **Log Files** | ${file_count} |"
             echo "| **Total Size** | ${total_size} |"
-            echo "| **Total Lines** | ${total_lines} |"
             echo ""
-            echo "### Files Collected"
+            echo "### Chunks"
             echo '```'
-            find "${OUTPUT_DIR}" -type f \( -name '*.log' -o -name '*.tar.gz' \) -printf '%P  (%s bytes)\n' 2>/dev/null | sort || echo "(none)"
+            for d in "${OUTPUT_DIR}"/chunk_*; do
+              [ -d "$d" ] || continue
+              chunk_name=$(basename "$d")
+              chunk_files=$(find "$d" -name '*.log' -size +0 2>/dev/null | wc -l)
+              chunk_size=$(du -sh "$d" 2>/dev/null | awk '{print $1}')
+              echo "${chunk_name}  ${chunk_files} files  ${chunk_size}"
+            done
+            # Fallback if no chunk dirs (flat layout)
+            if ! ls -d "${OUTPUT_DIR}"/chunk_* >/dev/null 2>&1; then
+              echo "${file_count} files  ${total_size}"
+            fi
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -774,14 +782,6 @@ jobs:
             --secret_key "${MINIO_SECRET_KEY}" \
             --source_dir "${OUTPUT_DIR}" \
             --run_id "collected-logs-$(date +%Y%m%d_%H%M%S)" || true
-
-      - name: Upload as GitHub artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: collected-logs-${{ inputs.DEPLOY_MODE }}-${{ inputs.DEPLOY_MODE == 'k8s-native' && inputs.cluster_environment || inputs.MGMT_IP }}-${{ github.run_id }}
-          path: ${{ inputs.OUTPUT_DIR }}/**
-          if-no-files-found: warn
 
       # ============================================================
       # K8s-native: Cleanup kubeconfig
