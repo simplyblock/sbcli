@@ -47,7 +47,7 @@ Usage:
 
 import os
 import sys
-import math
+import time
 from datetime import datetime, timezone, timedelta
 
 try:
@@ -298,6 +298,31 @@ def os_discover_containers():
     return []
 
 
+MAX_RETRIES = 3
+RETRY_BACKOFF = [10, 30, 60]  # seconds between retries on 429
+
+
+def _os_request_with_retry(session, method, url, retries=MAX_RETRIES, **kwargs):
+    """Make an HTTP request with retry on 429 (circuit breaker) errors."""
+    for attempt in range(retries + 1):
+        try:
+            r = session.request(method, url, **kwargs)
+            if r.status_code == 429 and attempt < retries:
+                wait = RETRY_BACKOFF[min(attempt, len(RETRY_BACKOFF) - 1)]
+                print(f"    429 circuit breaker hit, waiting {wait}s "
+                      f"(attempt {attempt + 1}/{retries}) ...", file=sys.stderr)
+                time.sleep(wait)
+                continue
+            return r
+        except requests.RequestException:
+            if attempt < retries:
+                wait = RETRY_BACKOFF[min(attempt, len(RETRY_BACKOFF) - 1)]
+                time.sleep(wait)
+                continue
+            raise
+    return r  # unreachable but keeps linters happy
+
+
 def os_fetch_container_logs(container_name, source, out_path,
                             chunk_from_ms, chunk_to_ms,
                             probe_cache=None):
@@ -343,11 +368,12 @@ def os_fetch_container_logs(container_name, source, out_path,
         text = str(src.get("message", "")).replace("\n", "\\n")
         return f"{ts}  src={s}  ctr={cname}  lvl={lvl}  {text}"
 
-    init_url = f"{OPENSEARCH_BASE}/{index}/_search?scroll=5m"
+    init_url = f"{OPENSEARCH_BASE}/{index}/_search?scroll=2m"
     written = 0
 
     try:
-        r = os_session.post(init_url, json=body, timeout=60)
+        r = _os_request_with_retry(
+            os_session, "POST", init_url, json=body, timeout=60)
         if not r.ok:
             print(f"    WARN: OpenSearch scroll failed for {container_name}: "
                   f"HTTP {r.status_code} {r.text[:300]}", file=sys.stderr)
@@ -378,12 +404,17 @@ def os_fetch_container_logs(container_name, source, out_path,
             if len(hits) < PAGE_SIZE or not scroll_id:
                 break
             try:
-                sc_r = os_session.post(
+                sc_r = _os_request_with_retry(
+                    os_session, "POST",
                     f"{OPENSEARCH_BASE}/_search/scroll",
-                    json={"scroll": "5m", "scroll_id": scroll_id},
+                    json={"scroll": "2m", "scroll_id": scroll_id},
                     timeout=60,
                 )
-                sc_r.raise_for_status()
+                if not sc_r.ok:
+                    print(f"    WARN: scroll continuation failed for "
+                          f"{container_name}: HTTP {sc_r.status_code}",
+                          file=sys.stderr)
+                    break
                 sc_data = sc_r.json()
                 scroll_id = sc_data.get("_scroll_id", scroll_id)
                 hits = sc_data.get("hits", {}).get("hits", [])
@@ -624,11 +655,14 @@ def _build_chunks(start, end, chunk_minutes=CHUNK_MINUTES):
 
 
 def _fetch_chunk(pairs, chunk_start, chunk_end, chunk_dir, os_ok,
-                 os_probe_cache, chunk_label):
-    """Fetch all container logs for a single time chunk. Returns total lines."""
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-    import threading
+                 graylog_ok, os_probe_cache, chunk_label):
+    """Fetch all container logs for a single time chunk.
 
+    Containers are fetched SEQUENTIALLY (one scroll context at a time)
+    to avoid OpenSearch circuit breaker / heap pressure.
+    On OpenSearch failure, falls back to Graylog for that container.
+    Returns total lines.
+    """
     c_from_ms = int(chunk_start.timestamp() * 1000)
     c_to_ms = int(chunk_end.timestamp() * 1000)
     c_from_iso = chunk_start.strftime("%Y-%m-%dT%H:%M:%S.000Z")
@@ -636,11 +670,9 @@ def _fetch_chunk(pairs, chunk_start, chunk_end, chunk_dir, os_ok,
 
     os.makedirs(chunk_dir, exist_ok=True)
 
-    max_workers = min(8, len(pairs))
     total_lines = 0
-    lock = threading.Lock()
 
-    def _fetch_one(container_name, source):
+    for i, (container_name, source) in enumerate(sorted(pairs), 1):
         safe_cname = _safe(container_name)
         if source:
             safe_source = _safe(source)
@@ -650,35 +682,32 @@ def _fetch_chunk(pairs, chunk_start, chunk_end, chunk_dir, os_ok,
         out_path = os.path.join(chunk_dir, fname)
         label = f"{container_name}@{source}" if source else container_name
 
-        if os_ok:
-            n = os_fetch_container_logs(
-                container_name, source, out_path,
-                chunk_from_ms=c_from_ms, chunk_to_ms=c_to_ms,
-                probe_cache=os_probe_cache,
-            )
-        else:
-            n = gl_fetch_container_logs(
-                container_name, source, out_path,
-                chunk_from_iso=c_from_iso, chunk_to_iso=c_to_iso,
-            )
-        return label, n
+        n = 0
+        try:
+            if os_ok:
+                n = os_fetch_container_logs(
+                    container_name, source, out_path,
+                    chunk_from_ms=c_from_ms, chunk_to_ms=c_to_ms,
+                    probe_cache=os_probe_cache,
+                )
+                # Fallback to Graylog if OpenSearch returned 0 lines
+                if n == 0 and graylog_ok:
+                    n = gl_fetch_container_logs(
+                        container_name, source, out_path,
+                        chunk_from_iso=c_from_iso, chunk_to_iso=c_to_iso,
+                    )
+            else:
+                n = gl_fetch_container_logs(
+                    container_name, source, out_path,
+                    chunk_from_iso=c_from_iso, chunk_to_iso=c_to_iso,
+                )
+        except Exception as exc:
+            print(f"    [{i}/{len(pairs)}] {label:<50} FAILED: {exc}")
+            continue
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {
-            executor.submit(_fetch_one, cname, src): (cname, src)
-            for cname, src in sorted(pairs)
-        }
-        for future in as_completed(futures):
-            cname, src = futures[future]
-            label = f"{cname}@{src}" if src else cname
-            try:
-                label, n = future.result()
-                with lock:
-                    total_lines += n
-                if n > 0:
-                    print(f"    {label:<55} {n:>8,} lines")
-            except Exception as exc:
-                print(f"    {label:<55} FAILED: {exc}")
+        total_lines += n
+        if n > 0:
+            print(f"    [{i}/{len(pairs)}] {label:<50} {n:>8,} lines")
 
     return total_lines
 
@@ -770,7 +799,7 @@ def main():
 
         chunk_lines = _fetch_chunk(
             pairs, c_start, c_end, chunk_dir, os_ok,
-            os_probe_cache, chunk_dir_name,
+            graylog_ok, os_probe_cache, chunk_dir_name,
         )
         grand_total += chunk_lines
 
