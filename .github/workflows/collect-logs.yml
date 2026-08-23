@@ -104,6 +104,15 @@ on:
       # =========================
       # Upload
       # =========================
+      RUNNER:
+        description: "Runner to use (must have NFS mount at /mnt/nfs_share)"
+        required: false
+        default: "vm22"
+        type: choice
+        options:
+          - vm22
+          - vm-runner-43
+
       UPLOAD_TO_MINIO:
         description: "Upload collected logs to MinIO"
         required: false
@@ -117,7 +126,7 @@ concurrency:
 jobs:
   collect-logs:
     name: "Collect logs (${{ inputs.DEPLOY_MODE }}${{ inputs.DEPLOY_MODE == 'k8s-native' && format(' / {0}', inputs.cluster_environment) || '' }})"
-    runs-on: ${{ inputs.DEPLOY_MODE == 'k8s-native' && inputs.cluster_environment == 'aws-openshift' && 'vm-runner-43' || 'self-hosted' }}
+    runs-on: ${{ inputs.RUNNER || 'vm22' }}
     timeout-minutes: 720
 
     env:
@@ -717,7 +726,7 @@ jobs:
           gl_ip="${GRAYLOG_IP:-$MGMT_IP}"
           file_count="$(find "${OUTPUT_DIR}" -type f \( -name '*.log' -o -name '*.tar.gz' \) 2>/dev/null | wc -l || echo 0)"
           total_size="$(du -sh "${OUTPUT_DIR}" 2>/dev/null | awk '{print $1}' || echo 'unknown')"
-          total_lines="$(cat "${OUTPUT_DIR}"/*.log 2>/dev/null | wc -l || echo 0)"
+          total_lines="$(find "${OUTPUT_DIR}" -name '*.log' -exec cat {} + 2>/dev/null | wc -l || echo 0)"
 
           {
             echo "## Log Collection Summary"
