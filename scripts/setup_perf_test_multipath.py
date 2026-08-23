@@ -519,11 +519,20 @@ def verify_multipath(mgmt_ip, expected_nics=2):
 # ──────────────────── Main deployment ────────────────────────────────────────
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="AWS multipath cluster deployment")
+    parser.add_argument(
+        "--mgmt-boot-gb", type=int, default=80,
+        help="Boot disk size of the mgmt node in GB (default 80). Pass 100 "
+             "for runs that accumulate placement dumps / long soak logs on "
+             "the mgmt node.")
+    cli_args = parser.parse_args()
+
     print("=" * 60)
     print("AWS Multipath Cluster Deployment")
     print(f"  Storage nodes: {SN_COUNT}× {SN_TYPE}")
     print(f"  NICs per host: 1 mgmt ({MGMT_IFACE}) + {len(DATA_NICS)} data ({', '.join(DATA_NICS)})")
-    print(f"  FT={MAX_FT}, branch={BRANCH}")
+    print(f"  FT={MAX_FT}, branch={BRANCH}, mgmt boot disk={cli_args.mgmt_boot_gb}G")
     print("=" * 60)
 
     # ── Phase 1: Launch instances ────────────────────────────────────────
@@ -532,7 +541,7 @@ def main():
     # paramiko ProxyJump through mgmt (jump_ip=mgmt_ip on every SSH).
     print("\n--- Phase 1: Launch instances ---")
     mgmt_instances = launch_instances(1, MGMT_TYPE, num_nics=1, tag_name="SB-Mgmt-MP",
-                                      root_gb=80, public_ip=True)
+                                      root_gb=cli_args.mgmt_boot_gb, public_ip=True)
     sn_instances   = launch_instances(SN_COUNT, SN_TYPE, num_nics=3, tag_name="SB-SN-MP",
                                       public_ip=False)
     client_instances = launch_instances(CLIENT_COUNT, CLIENT_TYPE, num_nics=3,
