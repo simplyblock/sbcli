@@ -497,8 +497,7 @@ def _requeue_stuck_auto_restarts(cluster_id):
         if tasks_controller.is_auto_restart_paused(cluster):
             return
         for node in db.get_storage_nodes_by_cluster_id(cluster_id):
-            if node.status not in (StorageNode.STATUS_OFFLINE,
-                                   StorageNode.STATUS_SCHEDULABLE):
+            if node.status != StorageNode.STATUS_OFFLINE:
                 continue
             # Nodes stopped on purpose (`sn shutdown`) land in OFFLINE just
             # like a failure-detected node, but must NOT be auto-restarted.
@@ -1282,7 +1281,7 @@ def set_node_schedulable(node):
             storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_SCHEDULABLE)
             # initiate shutdown
             # initiate restart
-            tasks_controller.add_node_to_auto_restart(node)
+            # tasks_controller.add_node_to_auto_restart(node)
             for dev in node.nvme_devices:
                 if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY,
                                   NVMeDevice.STATUS_CANNOT_ALLOCATE]:
