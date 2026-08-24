@@ -349,23 +349,7 @@ def task_runner_node(task):
             logger.error(f"Failed to re-queue auto-restart for {task.node_id}: {exc}")
         return True
 
-    # SCHEDULABLE used to short-circuit here too, alongside REMOVED. That was
-    # a livelock: SCHEDULABLE means "SPDK RPC double-timed-out — SPDK is
-    # sick" (see add_node_to_auto_restart's _AUTO_RESTART_OK), so
-    # set_node_schedulable() queues exactly this task expecting it to
-    # actually restart the node — but this short-circuit made every such
-    # task finish as a same-tick no-op instead. With no active task left,
-    # storage_node_monitor's _requeue_stuck_auto_restarts (which scans every
-    # monitor tick for OFFLINE/SCHEDULABLE nodes lacking one) queued another
-    # immediately, which hit this same no-op — a fresh FN_NODE_RESTART task
-    # every ~10s forever, the node never actually restarted or shut down
-    # (found live 2026-08-24: dozens of tasks/minute against one node, whose
-    # SPDK was perfectly healthy the whole time). REMOVED has no such
-    # feedback loop — nothing queues a restart for a REMOVED node — so it
-    # keeps short-circuiting here; SCHEDULABLE now falls through to the same
-    # shutdown+restart path DOWN already uses (shutdown_needed below is
-    # gated on status != OFFLINE, so it fires for SCHEDULABLE too).
-    if node.status == StorageNode.STATUS_REMOVED:
+    if node.status in [StorageNode.STATUS_REMOVED, StorageNode.STATUS_SCHEDULABLE]:
         logger.info(f"Node is {node.status}, stopping task")
         _task_finish(task, f"Node is {node.status}, stopping")
         return True
