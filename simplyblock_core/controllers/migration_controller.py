@@ -896,9 +896,9 @@ def create_migration(lvol_id, target_node_id,
       1. Create migration bdev  <lvol_bdev>m  in the target lvstore.
          Idempotent: skipped if the bdev already exists.
       2. Create NVMe-oF subsystem with the same NQN as the source lvol.
-      3. Add inaccessible listeners on every data NIC.
-         No namespace is added — the task runner wires it up when migration
-         actually begins (PHASE_LVOL_MIGRATE).
+      3. Add inaccessible listeners on every data NIC, then add the namespace
+         itself, pinned to the source's nsid (lvol.ns_id) rather than letting
+         SPDK auto-assign — see the nvmf_subsystem_add_ns call below for why.
       4. Create an LVolMigration record in PHASE_PRE_CREATED so that
          cancel_migration can tear everything down on request.
 
