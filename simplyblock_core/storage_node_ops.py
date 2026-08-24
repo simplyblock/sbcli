@@ -4546,6 +4546,18 @@ def _clear_replica_backref(removed_node: StorageNode, backref):
         removed_node.write_to_db()
 
 
+# TEMPORARY: how many ranked JM candidates the phase-5 replace-JM retry loop
+# below is allowed to see from get_sorted_ha_jms, rather than the function's
+# normal-sized redundancy-set target (ha_jm_count - 1). Needed because that
+# retry loop is replacing one already-selected member, not building the set
+# from scratch, so a candidate the node already holds wastes one of the
+# normal-sized slots -- verified live 2026-08-24 (only 2 of ~5 available
+# candidates were ever offered). Remove this constant and its one call site
+# below once SPDK's group-id-aware jc_replace_jm ships (see get_sorted_ha_jms
+# docstring for the matching note).
+_JC_REPLACE_CANDIDATE_POOL_LIMIT = 20
+
+
 def _decommission_node_devices(removed_node: StorageNode):
     """Remove, fail and migrate every data device on ``removed_node``.
 
@@ -4587,7 +4599,7 @@ def _decommission_node_devices(removed_node: StorageNode):
                 name_old = old_remote_dev.remote_bdev if old_remote_dev else None
 
                 node.jm_ids.remove(removed_jm_id)
-                jm_ids = get_sorted_ha_jms(node)
+                jm_ids = get_sorted_ha_jms(node, limit=_JC_REPLACE_CANDIDATE_POOL_LIMIT)
                 removed_fd = removed_node.failure_domain
                 if removed_fd >= 0 and jm_ids:
                     # Prefer a replacement from the SAME failure domain the
@@ -10670,12 +10682,23 @@ def repair_lvol_registration_on_non_leader(lvol, sec_node: StorageNode, secondar
     return add_lvol_thread(lvol, sec_node, lvol_ana_state="non_optimized")
 
 
-def get_sorted_ha_jms(current_node: StorageNode):
+def get_sorted_ha_jms(current_node: StorageNode, limit=None):
     """Select the remote HA journal members for ``current_node``.
 
     The full HA journal set is ``ha_jm_count`` members: the node's own local JM
     plus ``ha_jm_count - 1`` remote JMs returned here. Selection honors these
     dimensions, in priority order:
+
+    ``limit``, when given, overrides how many candidates are returned (the
+    default is ``ha_jm_count - 1``). This is a TEMPORARY escape hatch for
+    callers such as ``_decommission_node_devices`` that need to see the full
+    ranked candidate pool — not just enough to fill the redundancy set from
+    scratch — because they are replacing one already-selected member rather
+    than building the set fresh, and today's ``jc_replace_jm`` RPC has no
+    concept of "this candidate is a duplicate of a slot already filled" for
+    this function to exclude on their behalf. Remove ``limit`` and this note
+    once SPDK's group-id-aware ``jc_replace_jm`` ships and the removal code
+    path no longer needs to iterate past the normal-sized candidate set.
 
       0. Locality (best-effort) — reserve ONE remote copy in the current
          node's OWN failure domain, when the FD-balance cap (below) allows a
@@ -10728,7 +10751,10 @@ def get_sorted_ha_jms(current_node: StorageNode):
     # Least-used JMs first (load balancing); ties broken in the greedy pick.
     jm_count = dict(sorted(jm_count.items(), key=lambda x: x[1]))
     total_jms = current_node.ha_jm_count
-    target = total_jms - 1
+    # `per_fd_cap` below must stay derived from the real redundancy-set size
+    # (`total_jms`), not from `limit` — an expanded candidate pool must not
+    # relax the domain-quorum safety ceiling.
+    target = limit if limit is not None else total_jms - 1
     fd_enabled = cluster.enable_failure_domain
 
     # Per-domain cap so that losing any single domain keeps >= 2 journals.
@@ -10817,12 +10843,19 @@ def get_sorted_ha_jms(current_node: StorageNode):
         _pick_same_fd_as_local(enforce_label=False)
         _pick(enforce_fd_cap=True, enforce_label=True)
         _pick(enforce_fd_cap=True, enforce_label=False)   # relax label, keep domain cap
-        if len(selected) < target:
+        # The warning below is about the TRUE redundancy-set size
+        # (ha_jm_count - 1), never about an inflated `limit` -- a caller
+        # asking for a bigger pool than the cluster can quorum-safely
+        # satisfy isn't a placement anomaly, it's the whole point of
+        # `limit`. Falling short of the real target still is.
+        real_target = total_jms - 1
+        if len(selected) < real_target:
             logger.warning(
                 "Could only place %d/%d HA journal copies within the failure-"
                 "domain quorum cap for node %s; relaxing to host-disjoint "
-                "placement for the remaining copies.", len(selected), target,
+                "placement for the remaining copies.", len(selected), real_target,
                 current_node.get_id())
+        if len(selected) < target:
             _pick(enforce_fd_cap=False, enforce_label=False)  # last resort
     else:
         _pick(enforce_fd_cap=False, enforce_label=True)       # still honor labels
