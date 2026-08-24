@@ -172,23 +172,6 @@ def get_backup_config(cluster: Cluster) -> BackupConfigDTO:
         raise HTTPException(404, str(e)) from e
 
 
-@instance_api.put('/backup-config', name='clusters:backup-config:set',
-                  status_code=204, responses={204: {"content": None}})
-def set_backup_config(cluster: Cluster, parameters: BackupConfigDTO) -> Response:
-    """Replace the cluster's backup configuration.
-
-    Backup configuration used to be settable only at cluster-create time, which
-    left no way to correct or complete it -- notably no way to record a region
-    on a cluster created before it was mandatory.
-
-    A full replacement rather than a patch: the fields interact (an endpoint
-    implies addressing style and TLS expectations), so merging half a config
-    into an existing one produces combinations nobody chose.
-    """
-    cluster_ops.set_backup_config(cluster.get_id(), parameters)
-    return Response(status_code=204)
-
-
 @instance_api.delete('/', name='clusters:delete', status_code=204, responses={204: {"content": None}})
 def delete(cluster: Cluster) -> Response:
     try:
