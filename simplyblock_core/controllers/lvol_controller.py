@@ -1132,7 +1132,8 @@ def _lvol_secondary_index(lvol, node):
     return max(_lvol_path_index(lvol, node) - 1, 0)
 
 
-def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0, min_cntlid=None, ns_uuid=None):
+def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0, min_cntlid=None, ns_uuid=None,
+                     primary_nsid=None):
     rpc_client = snode.rpc_client()
 
     # Refuse to attach a new namespace to a shared subsystem while any
@@ -1276,7 +1277,13 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0, min_cntlid
     # nsid (ns_id == 0, e.g. a drain-queued registration firing early)
     # must fail loudly instead of guessing.
     if is_primary:
-        requested_nsid = None
+        # primary_nsid is set by migration/failover callers to preserve the
+        # source cluster's nsid assignment. The client connects to both source
+        # and target under the same NQN during preconnect; if nsid positions
+        # differ, the kernel rejects the target namespaces as mismatched
+        # ("IDs don't match for shared namespace N"). Regular creates pass
+        # primary_nsid=None (auto-assign, the previous behaviour).
+        requested_nsid = primary_nsid
     else:
         if not lvol.ns_id:
             return _fail_after_bdev(
@@ -1287,8 +1294,19 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0, min_cntlid
         requested_nsid = lvol.ns_id
     ret, err = rpc_client.nvmf_subsystem_add_ns2(
         lvol.nqn, lvol.top_bdev, ns_uuid or lvol.uuid, lvol.guid, nsid=requested_nsid)
-    if  err:
-        if err and err["code"] == -32602 and lvol.namespace and lvol.node_id == snode.get_id():
+    if err:
+        if err["code"] == -32602 and lvol.namespace and lvol.node_id == snode.get_id():
+            if primary_nsid is not None:
+                # Caller pinned a specific nsid (migration/failover preserve-nsid
+                # path). Re-claiming to a different subsystem would lose the shared
+                # NQN, making the target invisible to the client. Fail hard so the
+                # caller can diagnose rather than silently migrating into the wrong
+                # subsystem. _evict_stale_namespace should have cleared any occupant
+                # before this call; if we still got -32602 the state is unexpected.
+                return _fail_after_bdev(
+                    lvol, rpc_client,
+                    f"Failed to add bdev to subsystem at requested nsid={primary_nsid}: "
+                    f"nsid already occupied and eviction did not clear it")
             logger.info("Error adding namespace to subsystem, finding new subsystem for namespaced lvol")
             # Re-claim transactionally, excluding the subsystem SPDK just
             # rejected (the DB count said it had room — SPDK is the authority
@@ -3385,8 +3403,17 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
     # new_lvol.uuid is a fresh DB key and must NOT be used as the namespace UUID.
     _src_ns_uuid = lvol.uuid
 
+    # For migration/failover, preserve the source nsid so the kernel can
+    # match target paths to source paths under the same NQN. new_lvol is a
+    # deepcopy of the source lvol, so new_lvol.ns_id is already the source
+    # nsid. Passing it explicitly prevents auto-assignment from choosing a
+    # different position on the target (concurrent migration tasks for
+    # sibling namespaces would arrive in arbitrary order, diverging the nsid
+    # map from the source and triggering "IDs don't match for shared
+    # namespace N" in the client kernel during preconnect).
     lvol_bdev, error = add_lvol_on_node(new_lvol, target_node,
-                                         min_cntlid=_tgt_cntlids[0], ns_uuid=_src_ns_uuid)
+                                         min_cntlid=_tgt_cntlids[0], ns_uuid=_src_ns_uuid,
+                                         primary_nsid=new_lvol.ns_id)
     if error:
         logger.error(error)
         db_controller.release_lvol_ns_slot(new_lvol)
