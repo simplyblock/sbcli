@@ -3384,6 +3384,13 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
             continue
         if peer_node.status != StorageNode.STATUS_ONLINE:
             continue
+        # The preserved-NQN subsystem exists on EVERY node of the recovered
+        # HA set, each still holding the original volume's namespace at the
+        # preserved nsid. Evicting only on the primary made its add_ns
+        # succeed while the peer's failed with the same -32602, and the
+        # peer failure rolled the whole cutover back (run 20260824_113711:
+        # primary add_ns result:1, peer -32602, 0/5 cutovers).
+        _evict_stale_namespace(new_lvol, peer_node)
         lvol_bdev, error = add_lvol_on_node(new_lvol, peer_node, is_primary=False)
         if error:
             logger.error(error)

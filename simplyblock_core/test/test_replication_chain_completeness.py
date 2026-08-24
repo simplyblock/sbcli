@@ -364,3 +364,58 @@ def test_failback_eviction_matches_by_uuid_too(monkeypatch):
         uuid = "LV_UUID"
     lc._evict_stale_namespace(_C(), _EvictNode(rpc))
     assert rpc.removed == [("nqn.test:lvol:ORIG", 3)]
+
+
+def test_failback_evicts_on_every_ha_node_not_just_the_primary(monkeypatch):
+    """Run 20260824_113711: eviction on the primary made ITS add_ns succeed
+    (result: 1) while the HA peer's failed with the same -32602 -- the
+    preserved-NQN subsystem exists on EVERY node of the recovered set, each
+    still holding the original namespace. The peer failure rolled the whole
+    cutover back: 0/5. The clone path must evict per node."""
+    import copy
+    from simplyblock_core.controllers import lvol_controller as lc
+
+    evicted, added = [], []
+    monkeypatch.setattr(lc, "_evict_stale_namespace",
+                        lambda lvol, node: evicted.append(node.get_id()))
+    monkeypatch.setattr(lc, "add_lvol_on_node",
+                        lambda lvol, node, is_primary=True: (
+                            added.append((node.get_id(), is_primary)),
+                            ({"uuid": "U", "driver_specific": {"lvol": {"blobid": 9}}}, None))[-1])
+
+    class _N:
+        def __init__(self, nid, secondary="", tertiary=""):
+            self._id, self.secondary_node_id, self.tertiary_node_id = nid, secondary, tertiary
+            self.lvstore = "LVS_1"
+            self.status = lc.StorageNode.STATUS_ONLINE
+        def get_id(self):
+            return self._id
+
+    primary = _N("P", secondary="S")
+    peer = _N("S")
+
+    class _DB:
+        kv_store = None
+        def get_storage_node_by_id(self, nid):
+            return {"P": primary, "S": peer}[nid]
+        def release_lvol_ns_slot(self, lvol):
+            pass
+
+    class _Lvol:
+        uuid = "ORIG"; nqn = "nqn.test:lvol:ORIG"; ns_id = 7
+        lvol_bdev = "LVOL_C"; crypto_bdev = ""
+        def __deepcopy__(self, memo):
+            c = _Lvol(); c.__dict__.update(self.__dict__); return c
+        def write_to_db(self, kv=None):
+            pass
+
+    class _Snap:
+        cluster_id = "C1"; snap_bdev = "LVS_1/SNAP_1"
+        def get_id(self):
+            return "SNAP1"
+
+    new_lvol, error = lc._create_target_lvol_clone(_DB(), _Lvol(), primary, "POOL", _Snap())
+    assert error is None
+    assert evicted == ["P", "S"], \
+        "stale-namespace eviction must run on the primary AND every online HA peer"
+    assert ("S", False) in added
