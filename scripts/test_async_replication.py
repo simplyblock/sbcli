@@ -1986,6 +1986,7 @@ def test_case_9(meta):
     targets = ([("src", ip) for ip in src["storage_public_ips"]]
                + [("tgt", ip) for ip in tgt["storage_public_ips"]])
     kills = []
+    fio_deaths = []
     for ev in range(1, CHAOS_EVENTS + 1):
         time.sleep(rng.randint(CHAOS_SLEEP_MIN, CHAOS_SLEEP_MAX))
         side, victim = rng.choice(targets)
@@ -1993,7 +1994,16 @@ def test_case_9(meta):
         print(f"  [{ev}/{CHAOS_EVENTS}] killing SPDK on {side} node {victim} "
               f"(active phases: {phases})")
         kill_spdk(victim, key_path)
-        kills.append({"event": ev, "side": side, "node": victim, "phases": phases})
+        # fio survival across a kill is the promotion-window signal: before the
+        # ANA-transition fix (spdk R26.3) a killed primary handed hard EIO to
+        # the client within seconds and XFS shut the filesystem down.
+        time.sleep(20)
+        alive = fio_alive(client_ip, key_path)
+        kills.append({"event": ev, "side": side, "node": victim,
+                      "phases": phases, "fio_alive": alive})
+        if not alive:
+            fio_deaths.append(ev)
+            print(f"    fio NOT alive after event {ev} (deaths so far: {len(fio_deaths)})")
 
         # Wait for the auto-restart to bring everything back before the next hit.
         deadline = time.time() + NODE_STATE_TIMEOUT
@@ -2034,6 +2044,8 @@ def test_case_9(meta):
     cleanup_client(client_ip, key_path, fo_mounts)
     restore_cluster(mgmt_ip, key_path, src, label="src (after chaos)")
 
+    print(f"  fio survived {CHAOS_EVENTS - len(fio_deaths)}/{CHAOS_EVENTS} kills"
+          + (f" (died after events {fio_deaths})" if fio_deaths else ""))
     print("  kill log:", json.dumps(kills))
     if not ok:
         raise RuntimeError("FAIL: data not intact after chaos (seed "

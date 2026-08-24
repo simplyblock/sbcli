@@ -56,9 +56,14 @@ def remote_metadata(meta):
 
 def main():
     cases = sys.argv[1] if len(sys.argv) > 1 else "all_c3_last"
+    # Any further NAME=VALUE arguments are exported for the remote driver, so
+    # a run can be tuned (CHAOS_EVENTS, PRESSURE_CYCLES, ...) without editing
+    # the script on the box.
+    env_args = [a for a in sys.argv[2:] if "=" in a]
+    env_prefix = "".join(f"{a} " for a in env_args)
     meta = json.loads((HERE / "cluster_metadata_repl.json").read_text())
     mgmt = meta["mgmt"]["public_ip"]
-    log(f"mgmt={mgmt} cases={cases}")
+    log(f"mgmt={mgmt} cases={cases}" + (f" env={env_args}" if env_args else ""))
 
     remote_meta = HERE / "cluster_metadata_repl_remote.json"
     remote_meta.write_text(json.dumps(remote_metadata(meta), indent=4))
@@ -78,7 +83,7 @@ def main():
     # going away; without -f, ssh sat on the channel until it timed out (twice:
     # 2026-08-19 with nohup, 2026-08-20 with setsid) while the driver ran fine.
     run(["ssh", "-f", *SSH_OPTS, f"ec2-user@{mgmt}",
-         f"cd ~ && setsid python3 -u test_async_replication.py {cases} "
+         f"cd ~ && setsid env {env_prefix}python3 -u test_async_replication.py {cases} "
          f"> {remote_log} 2>&1 < /dev/null & echo $! > ~/repl_pid; "
          f"echo ~/repl_cases_{ts}.log > ~/repl_log"], timeout=60)
     time.sleep(45)
