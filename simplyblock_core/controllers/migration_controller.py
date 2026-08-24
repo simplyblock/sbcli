@@ -45,6 +45,7 @@ from datetime import datetime
 
 from simplyblock_core import constants
 from simplyblock_core.controllers import migration_events, tasks_controller
+from simplyblock_core.controllers.migration_bdev_ops import delete_bdev_blocking as _delete_bdev_blocking
 from simplyblock_core.exceptions import MigrationConflictError, PreconditionError
 from simplyblock_core.controllers.host_auth import _reapply_allowed_hosts
 from simplyblock_core.kms import create_kms_connection, lvol_dek_path, pool_kek_name
@@ -260,11 +261,27 @@ def _cleanup_created(migration):
     tgt_rpc = tgt_node.rpc_client()
     tgt_port = tgt_node.get_lvol_subsys_port(tgt_node.lvstore)
 
-    # Secondary cleanup
+    # Resolved once, up front, so the final migration-bdev delete below can
+    # reuse them regardless of whether the listener/subsystem cleanup above
+    # hit an exception partway through.
+    sec_node = sec_rpc = None
     if tgt_node.secondary_node_id:
         try:
             sec_node = db.get_storage_node_by_id(tgt_node.secondary_node_id)
-            sec_rpc  = sec_node.rpc_client()
+            sec_rpc = sec_node.rpc_client()
+        except Exception as e:
+            logger.warning(f"_cleanup_created: could not reach TGT-sec: {e}")
+    ter_node = ter_rpc = None
+    if tgt_node.tertiary_node_id:
+        try:
+            ter_node = db.get_storage_node_by_id(tgt_node.tertiary_node_id)
+            ter_rpc = ter_node.rpc_client()
+        except Exception as e:
+            logger.warning(f"_cleanup_created: could not reach TGT-ter: {e}")
+
+    # Secondary cleanup
+    if sec_node is not None and sec_rpc is not None:
+        try:
             sec_port = sec_node.get_lvol_subsys_port(tgt_node.lvstore)
             if sec_node.get_id() in overlap_ids:
                 for nic in sec_node.data_nics:
@@ -306,9 +323,25 @@ def _cleanup_created(migration):
         except Exception as e:
             logger.warning(f"_cleanup_created: could not clean TGT-prim subsystem: {e}")
 
-    # Migration bdev (always delete — we always created it)
+    # Migration bdev (always delete — we always created it).
+    #
+    # This used to be a single tgt_rpc.delete_lvol(composite) call -- sync=False,
+    # special_delete=False by that method's own defaults, i.e. exactly the
+    # async-only half of the two-phase delete protocol, with no completion
+    # poll, no sync finalize, and no secondary/tertiary cleanup at all (despite
+    # this function's own docstring claiming "deleted ... on the target
+    # primary and secondary"). That leaked the bdev's blob metadata on every
+    # replica whenever a PRE_CREATED migration got cancelled -- observed run
+    # 2026-08-24: LVS_5/LVOL_37m async-deleted with zero follow-up anywhere in
+    # the SPDK logs, then reused unconditioned 11 minutes later by the next
+    # migration attempt targeting the same lvstore. _delete_bdev_blocking is
+    # the established two-phase (async + poll + sync-on-every-replica)
+    # primitive used everywhere else in the migration code for exactly this.
     try:
-        tgt_rpc.delete_lvol(composite)
+        _delete_bdev_blocking(
+            composite, tgt_rpc, secondary_rpc=sec_rpc, tertiary_rpc=ter_rpc,
+            all_nodes=[n for n in [tgt_node, sec_node, ter_node] if n],
+            lvs_name=tgt_node.lvstore)
         logger.info(f"_cleanup_created: deleted migration bdev {composite} on {tgt_node.get_id()}")
     except Exception as e:
         logger.warning(f"_cleanup_created: could not clean migration bdev: {e}")
@@ -680,21 +713,17 @@ def cleanup_migration_target(migration_id):
     skipped = []
     errors = []
 
-    def _try_delete_bdev(rpc, bdev_path, tag):
-        try:
-            if rpc.get_bdevs(bdev_path):
-                rpc.bdev_lvol_delete(bdev_path)
-                deleted.append({**tag, "bdev": bdev_path})
-            else:
-                not_found.append({**tag, "bdev": bdev_path})
-        except Exception:
-            logger.exception("cleanup_migration_target: failed to delete bdev %s", bdev_path)
-            errors.append({**tag, "bdev": bdev_path, "error": "Internal error during cleanup operation"})
-
-    # Build RPC clients for primary + HA peers.
-    rpc_clients = []
+    # Delete via the same leader-aware, replica-syncing primitive the
+    # migration runner itself uses (async delete + poll + sync=True on every
+    # replica). The previous version of this function did an independent
+    # sync=True delete_lvol per replica, called directly against whichever
+    # node happened to hold that replica -- that skips leader routing
+    # entirely, so a sync delete issued straight at a non-leader replica
+    # while the lvstore leader has failed over elsewhere is exactly the kind
+    # of case _delete_bdev_blocking exists to handle correctly.
+    primary_rpc = None
     try:
-        rpc_clients.append((tgt_node.get_id(), tgt_node.rpc_client(), "primary"))
+        primary_rpc = tgt_node.rpc_client()
     except Exception:
         logger.exception(
             "cleanup_migration_target: failed to create RPC client for node %s",
@@ -702,22 +731,44 @@ def cleanup_migration_target(migration_id):
         errors.append({"type": "rpc_connect", "node": migration.target_node_id[:8],
                        "error": "Internal error during cleanup operation"})
 
-    for attr, label in [("secondary_node_id", "secondary"),
-                         ("tertiary_node_id",  "tertiary")]:
-        peer_id = getattr(tgt_node, attr, None)
-        if not peer_id:
-            continue
+    sec_node = sec_rpc = None
+    if tgt_node.secondary_node_id:
         try:
-            peer = db.get_storage_node_by_id(peer_id)
-            rpc_clients.append((peer.get_id(), peer.rpc_client(), label))
+            sec_node = db.get_storage_node_by_id(tgt_node.secondary_node_id)
+            sec_rpc = sec_node.rpc_client()
         except Exception:
             pass  # peer unreachable — skip gracefully
 
+    ter_node = ter_rpc = None
+    if tgt_node.tertiary_node_id:
+        try:
+            ter_node = db.get_storage_node_by_id(tgt_node.tertiary_node_id)
+            ter_rpc = ter_node.rpc_client()
+        except Exception:
+            pass  # peer unreachable — skip gracefully
+
+    all_nodes = [n for n in [tgt_node, sec_node, ter_node] if n]
+
+    def _try_delete_bdev(bdev_path, tag):
+        if primary_rpc is None:
+            errors.append({**tag, "bdev": bdev_path, "error": "Internal error during cleanup operation"})
+            return
+        try:
+            if not primary_rpc.get_bdevs(bdev_path):
+                not_found.append({**tag, "bdev": bdev_path})
+                return
+            lvs_name = bdev_path.split('/', 1)[0]
+            _delete_bdev_blocking(bdev_path, primary_rpc,
+                                  secondary_rpc=sec_rpc, tertiary_rpc=ter_rpc,
+                                  all_nodes=all_nodes, lvs_name=lvs_name)
+            deleted.append({**tag, "bdev": bdev_path})
+        except Exception:
+            logger.exception("cleanup_migration_target: failed to delete bdev %s", bdev_path)
+            errors.append({**tag, "bdev": bdev_path, "error": "Internal error during cleanup operation"})
+
     # ── 1. Migration lvol bdev ────────────────────────────────────────────────
     if migration.target_lvol_bdev:
-        for _, rpc, label in rpc_clients:
-            _try_delete_bdev(rpc, migration.target_lvol_bdev,
-                             {"type": "lvol_bdev", "node": label})
+        _try_delete_bdev(migration.target_lvol_bdev, {"type": "lvol_bdev"})
 
     # ── 2. Snapshot bdevs (reverse order: children before parents) ────────────
     # target_snap_bdevs stores the exact path at creation time ("LVS_TGT/SNAP_xxx_m").
@@ -754,20 +805,20 @@ def cleanup_migration_target(migration_id):
                             "reason": "referenced by another lvol on target"})
             continue
 
-        for _, rpc, label in rpc_clients:
-            bdev_name = next(
-                (f"{lvstore}/{n}"
-                 for n in (short_m, short_base, short_base + _DONE_SUFFIX)
-                 if rpc.get_bdevs(f"{lvstore}/{n}")),
-                None,
-            )
-            if bdev_name:
-                _try_delete_bdev(rpc, bdev_name,
-                                 {"type": "snap_bdev", "stored_path": stored_path,
-                                  "node": label})
-            else:
-                not_found.append({"type": "snap_bdev", "stored_path": stored_path,
-                                   "node": label})
+        if primary_rpc is None:
+            errors.append({"type": "snap_bdev", "stored_path": stored_path,
+                           "error": "Internal error during cleanup operation"})
+            continue
+        bdev_name = next(
+            (f"{lvstore}/{n}"
+             for n in (short_m, short_base, short_base + _DONE_SUFFIX)
+             if primary_rpc.get_bdevs(f"{lvstore}/{n}")),
+            None,
+        )
+        if bdev_name:
+            _try_delete_bdev(bdev_name, {"type": "snap_bdev", "stored_path": stored_path})
+        else:
+            not_found.append({"type": "snap_bdev", "stored_path": stored_path})
 
     # ── 3. Subsystems — only on nodes where we called subsystem_create ─────────
     # Delegates the delete-vs-detach-namespace decision to cleanup_subsystem_or_ns
@@ -970,7 +1021,8 @@ def create_migration(lvol_id, target_node_id,
     tgt_port = tgt_node.get_lvol_subsys_port(tgt_node.lvstore)
 
     # ── 1. Bdev ──────────────────────────────────────────────────────────────
-    if not tgt_rpc.get_bdevs(composite):
+    _bdev_info = tgt_rpc.get_bdevs(composite)
+    if not _bdev_info:
         ok, err = _ensure_lvstore_primary_leader(tgt_rpc, tgt_node.lvstore, target_node_id)
         if not ok:
             raise PreconditionError(f"Cannot create target lvol {composite}: {err}")
@@ -981,11 +1033,11 @@ def create_migration(lvol_id, target_node_id,
         if not ret:
             raise ValueError(f"bdev_lvol_create failed for {composite} on {target_node_id}")
         logger.info(f"create_migration: created bdev {composite}")
+        _bdev_info = tgt_rpc.get_bdevs(composite)
     else:
         logger.info(f"create_migration: bdev {composite} already exists — skipping create")
 
     # ── 1b. Get bdev info for secondary registration ──────────────────────────
-    _bdev_info = tgt_rpc.get_bdevs(composite)
     _tgt_blobid = None
     _tgt_uuid   = None
     if _bdev_info and isinstance(_bdev_info[0], dict):
