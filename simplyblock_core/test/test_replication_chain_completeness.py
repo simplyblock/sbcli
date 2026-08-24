@@ -269,15 +269,23 @@ def test_no_backward_task_for_a_policy_managed_clone():
 
 
 class _EvictRPC:
-    def __init__(self, namespaces):
+    def __init__(self, namespaces, linger_polls=0):
         self.removed = []
-        self._ns = namespaces
+        self._ns = list(namespaces)
+        self._linger = linger_polls   # polls before a removed ns disappears
 
     def subsystem_get(self, nqn):
         # the real client returns ONE dict (single_or_none), never a list
-        return {"nqn": nqn, "namespaces": self._ns}
+        if self._linger > 0:
+            self._linger -= 1
+            return {"nqn": nqn, "namespaces": self._ns}
+        live = [n for n in self._ns
+                if (nqn, n.get("nsid")) not in self.removed]
+        return {"nqn": nqn, "namespaces": live}
 
     def nvmf_subsystem_remove_ns(self, nqn, nsid):
+        # acknowledges immediately; disappearance is governed by linger_polls,
+        # modelling the fork's async remove_ns false-success
         self.removed.append((nqn, nsid))
         return True
 
@@ -332,3 +340,27 @@ def test_failback_eviction_tolerates_a_missing_subsystem():
     rpc = _NoSubsysRPC([])
     lc._evict_stale_namespace(_CloneLvol(), _EvictNode(rpc))   # must not raise
     assert rpc.removed == []
+
+
+def test_failback_eviction_waits_out_the_async_removal(monkeypatch):
+    """remove_ns acknowledges before it completes (the PVC-expand
+    false-success); the eviction must confirm the namespace is GONE before
+    add_ns runs, or the add races the removal and loses (run 20260824_110959:
+    40 evictions immediately followed by 40 add_ns -32602)."""
+    from simplyblock_core.controllers import lvol_controller as lc
+    monkeypatch.setattr(lc.time, "sleep", lambda s: None)
+    rpc = _EvictRPC([{"nsid": 7, "bdev_name": "LVS_1/LVOL_ORIG"}], linger_polls=3)
+    lc._evict_stale_namespace(_CloneLvol(), _EvictNode(rpc))
+    assert rpc.removed == [("nqn.test:lvol:ORIG", 7)]
+    # after the helper returns, the namespace must actually be gone
+    assert rpc.subsystem_get("nqn.test:lvol:ORIG")["namespaces"] == []
+
+
+def test_failback_eviction_matches_by_uuid_too(monkeypatch):
+    from simplyblock_core.controllers import lvol_controller as lc
+    monkeypatch.setattr(lc.time, "sleep", lambda s: None)
+    rpc = _EvictRPC([{"nsid": 3, "uuid": "LV_UUID", "bdev_name": "LVS_1/LVOL_ORIG"}])
+    class _C(_CloneLvol):
+        uuid = "LV_UUID"
+    lc._evict_stale_namespace(_C(), _EvictNode(rpc))
+    assert rpc.removed == [("nqn.test:lvol:ORIG", 3)]

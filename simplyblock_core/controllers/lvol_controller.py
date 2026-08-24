@@ -3469,17 +3469,38 @@ def _evict_stale_namespace(new_lvol, target_node):
         subsystem = rpc.subsystem_get(new_lvol.nqn)
         if not subsystem:
             return
-        for ns in (subsystem.get("namespaces") or []):
-            if ns.get("nsid") != new_lvol.ns_id:
-                continue
-            if ns.get("bdev_name") == new_lvol.top_bdev:
-                return                         # already ours (re-run)
+        # Match by nsid OR by uuid: the stale namespace carries the volume's
+        # preserved identity on both axes, and either collides with add_ns.
+        stale = [ns for ns in (subsystem.get("namespaces") or [])
+                 if (ns.get("nsid") == new_lvol.ns_id
+                     or ns.get("uuid") == new_lvol.uuid)
+                 and ns.get("bdev_name") != new_lvol.top_bdev]
+        if not stale:
+            return
+        for ns in stale:
             logger.info(
                 f"Fail-back cutover: evicting stale namespace nsid={ns.get('nsid')} "
                 f"(bdev {ns.get('bdev_name')}) from {new_lvol.nqn} on "
                 f"{target_node.get_id()} -- superseded by the failed-over data")
             rpc.nvmf_subsystem_remove_ns(new_lvol.nqn, ns.get("nsid"))
-            return
+        # remove_ns ACKNOWLEDGES before it completes (the same async
+        # false-success that dropped a shared subsystem in the PVC-expand
+        # incident; its fix polls for confirmation, eb127eed). Without this
+        # poll the follow-up add_ns raced the removal and lost on all 8
+        # retries (run 20260824_110959: 40 evictions logged, 40 add_ns
+        # -32602 right behind them).
+        stale_ids = {ns.get("nsid") for ns in stale}
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            current = rpc.subsystem_get(new_lvol.nqn) or {}
+            if not any(ns.get("nsid") in stale_ids
+                       for ns in (current.get("namespaces") or [])):
+                return
+            time.sleep(1)
+        logger.error(
+            f"Stale namespace(s) {sorted(stale_ids)} on {new_lvol.nqn} did not "
+            f"disappear within 20s of removal on {target_node.get_id()}; the "
+            f"cutover's add_ns will fail and retry")
     except Exception as e:
         # Best effort: if the subsystem is not there, add_lvol_on_node creates
         # it; if the eviction genuinely failed, add_ns will say so loudly.
