@@ -1132,7 +1132,7 @@ def _lvol_secondary_index(lvol, node):
     return max(_lvol_path_index(lvol, node) - 1, 0)
 
 
-def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
+def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0, min_cntlid=None):
     rpc_client = snode.rpc_client()
 
     # Refuse to attach a new namespace to a shared subsystem while any
@@ -1165,7 +1165,8 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
         return _fail_after_bdev(lvol, rpc_client, str(e))
 
     if resolve_subsys:
-        min_cntlid = lvol_min_cntlid(0 if is_primary else secondary_index + 1)
+        if min_cntlid is None:
+            min_cntlid = lvol_min_cntlid(0 if is_primary else secondary_index + 1)
         allow_any = not bool(lvol.allowed_hosts)
         logger.info("creating subsystem %s (allow_any_host=%s)", lvol.nqn, allow_any)
         ret = rpc_client.subsystem_create(lvol.nqn, lvol.ha_type, lvol.uuid, min_cntlid,
@@ -3368,7 +3369,18 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
 
     _evict_stale_namespace(new_lvol, target_node)
 
-    lvol_bdev, error = add_lvol_on_node(new_lvol, target_node)
+    # The target clone shares the source NQN.  During preconnect the host has
+    # live paths to the source (cntlids 1, 1000, 2000) AND tries to add paths
+    # to the inaccessible target simultaneously.  If target uses the same
+    # min_cntlid the kernel rejects it as a duplicate cntlid.  Use windows
+    # above 4000 so source (1/1000/2000) and target never collide.
+    _tgt_cntlids = [
+        random.randint(4001, 4500),  # primary
+        random.randint(5001, 5500),  # secondary
+        random.randint(6001, 6500),  # tertiary
+    ]
+
+    lvol_bdev, error = add_lvol_on_node(new_lvol, target_node, min_cntlid=_tgt_cntlids[0])
     if error:
         logger.error(error)
         db_controller.release_lvol_ns_slot(new_lvol)
@@ -3379,16 +3391,22 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
 
     # Expose the volume on the secondary and tertiary target nodes too (HA),
     # so connect_lvol returns all client paths.
+    _tgt_cntlid_iter = iter(_tgt_cntlids[1:])
     for peer_id in [target_node.secondary_node_id, target_node.tertiary_node_id]:
         if not peer_id:
+            next(_tgt_cntlid_iter, None)
             continue
         try:
             peer_node = db_controller.get_storage_node_by_id(peer_id)
         except KeyError:
+            next(_tgt_cntlid_iter, None)
             continue
         if peer_node.status != StorageNode.STATUS_ONLINE:
+            next(_tgt_cntlid_iter, None)
             continue
-        lvol_bdev, error = add_lvol_on_node(new_lvol, peer_node, is_primary=False)
+        _peer_cntlid = next(_tgt_cntlid_iter, None)
+        lvol_bdev, error = add_lvol_on_node(new_lvol, peer_node, is_primary=False,
+                                             min_cntlid=_peer_cntlid)
         if error:
             logger.error(error)
             # remove lvol from primary
