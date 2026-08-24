@@ -787,6 +787,58 @@ class TestJmDomainBalance(unittest.TestCase):
         assert fd_tally == {0: 2, 1: 2}, fd_tally
 
     @patch("simplyblock_core.storage_node_ops.DBController")
+    def test_local_domain_reservation_is_deterministic_not_tie_broken(self, MockDBCtrl):
+        # 3 domains, ha_jm_count=4 (target=3). Local's own domain (0) has
+        # only ONE other candidate; domains 1 and 2 each have TWO. Without a
+        # deliberate reservation, the plain greedy "always take the emptiest
+        # domain first" pass would prefer domains 1/2 on every early pick
+        # (they start emptier than domain 0, which already holds the local
+        # JM) and could fill its target from them alone, landing on domain
+        # 0's sole candidate only by luck of the tie-break -- even though
+        # per_fd_cap (2 here) allows a second copy in domain 0. The
+        # reservation pass makes that pick unconditional instead of
+        # incidental.
+        import simplyblock_core.storage_node_ops as ops
+        current = _node("current", "10.0.0.1", failure_domain=0, ha_jm_count=4)
+        nodes = [current,
+                 _node("x0", "10.0.0.2", failure_domain=0, jm_device=_jm("jx0")),
+                 _node("a1", "10.0.0.3", failure_domain=1, jm_device=_jm("ja1")),
+                 _node("b1", "10.0.0.4", failure_domain=1, jm_device=_jm("jb1")),
+                 _node("a2", "10.0.0.5", failure_domain=2, jm_device=_jm("ja2")),
+                 _node("b2", "10.0.0.6", failure_domain=2, jm_device=_jm("jb2"))]
+        MockDBCtrl.return_value = self._mock_db(_cluster(True), nodes)
+        result = ops.get_sorted_ha_jms(current)
+        fd_of = self._fd_of(nodes)
+        fd_tally = {0: 1}  # local
+        for jm in result:
+            fd_tally[fd_of[jm]] = fd_tally.get(fd_of[jm], 0) + 1
+        assert "jx0" in result, result
+        assert fd_tally == {0: 2, 1: 1, 2: 1}, fd_tally
+
+    @patch("simplyblock_core.storage_node_ops.DBController")
+    def test_local_domain_reservation_skipped_when_cap_is_one_per_domain(self, MockDBCtrl):
+        # Same shape as test_four_domains_one_per_domain (4 domains, 4 total
+        # JMs) but pinning specifically that the reservation pass itself
+        # does not fire when per_fd_cap == 1 -- there is no room for a
+        # second copy in the local domain, so even-spread must win outright
+        # rather than the reservation forcing an over-cap placement.
+        import simplyblock_core.storage_node_ops as ops
+        current = _node("current", "10.0.0.1", failure_domain=0, ha_jm_count=4)
+        nodes = [current,
+                 _node("x0", "10.0.0.2", failure_domain=0, jm_device=_jm("jx0")),
+                 _node("a", "10.0.0.3", failure_domain=1, jm_device=_jm("ja")),
+                 _node("b", "10.0.0.4", failure_domain=2, jm_device=_jm("jb")),
+                 _node("c", "10.0.0.5", failure_domain=3, jm_device=_jm("jc"))]
+        MockDBCtrl.return_value = self._mock_db(_cluster(True), nodes)
+        result = ops.get_sorted_ha_jms(current)
+        fd_of = self._fd_of(nodes)
+        fd_tally = {0: 1}  # local
+        for jm in result:
+            fd_tally[fd_of[jm]] = fd_tally.get(fd_of[jm], 0) + 1
+        assert max(fd_tally.values()) == 1, fd_tally
+        assert "jx0" not in result, result
+
+    @patch("simplyblock_core.storage_node_ops.DBController")
     def test_four_domains_one_per_domain(self, MockDBCtrl):
         import simplyblock_core.storage_node_ops as ops
         current = _node("current", "10.0.0.1", failure_domain=0, ha_jm_count=4)
