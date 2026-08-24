@@ -2418,6 +2418,54 @@ class K8sNativeMajorUpgrade(TestClusterBase):
         self.k8s_utils.get_admin_pod(refresh=True)
         self.logger.info("Operator chart installed")
 
+    def _get_vcpu_count(self):
+        """Compute vcpuCount for StorageCluster CR.
+
+        Reads VCPU_COUNT env var if set; otherwise queries the first
+        worker node's CPU count and applies CORE_PERCENTAGE (50% for
+        OpenShift, 30% otherwise).  Falls back to 4 if detection fails.
+        """
+        vcpu_env = os.environ.get("VCPU_COUNT", "").strip()
+        if vcpu_env:
+            self.logger.info(f"Using VCPU_COUNT from env: {vcpu_env}")
+            return int(vcpu_env)
+
+        core_pct = 50 if self.k8s_utils.detect_openshift() else 30
+        try:
+            worker_nodes_env = os.environ.get("WORKER_NODES", "")
+            if worker_nodes_env:
+                first_worker = worker_nodes_env.split(",")[0].strip()
+            else:
+                out, _ = self.k8s_utils._exec_kubectl(
+                    "kubectl get nodes -l node-role.kubernetes.io/worker "
+                    "-o jsonpath='{.items[0].metadata.name}' 2>/dev/null"
+                )
+                first_worker = (out or "").replace("'", "").strip()
+
+            if first_worker:
+                if self.k8s_utils.detect_openshift():
+                    out, _ = self.k8s_utils._exec_kubectl(
+                        f"oc debug node/{first_worker} "
+                        f"-- chroot /host nproc 2>/dev/null"
+                    )
+                else:
+                    out, _ = self.k8s_utils._exec_kubectl(
+                        f"kubectl get node {first_worker} "
+                        f"-o jsonpath='{{.status.capacity.cpu}}'"
+                    )
+                total_cpus = int((out or "").replace("'", "").strip())
+                vcpu = max(1, total_cpus * core_pct // 100)
+                self.logger.info(
+                    f"Computed vcpuCount={vcpu} "
+                    f"({total_cpus} CPUs * {core_pct}%)"
+                )
+                return vcpu
+        except Exception as e:
+            self.logger.warning(f"Failed to detect CPU count: {e}")
+
+        self.logger.warning("Could not determine CPU count, defaulting vcpuCount to 4")
+        return 4
+
     def _apply_custom_resources(self, storage_node_list: list[dict]):
         """Step 7: Apply StorageCluster, Pool, StorageNode CRs."""
         self.logger.info("Migration Step 7: Applying custom resources")
@@ -2464,6 +2512,7 @@ class K8sNativeMajorUpgrade(TestClusterBase):
         mgmt_ifc = os.environ.get("MGMT_IFC", "ens18")
         data_nics = os.environ.get("DATA_NICS", "enp1s0")
         max_lvol = os.environ.get("MAX_LVOL", "30")
+        vcpu_count = self._get_vcpu_count()
 
         cr_yaml = f"""
 apiVersion: storage.simplyblock.io/v1alpha1
@@ -2484,6 +2533,7 @@ spec:
     capacity: 96
     provisionedCapacity: 98
   maxSubsystemCount: {max_lvol}
+  vcpuCount: {vcpu_count}
 ---
 apiVersion: storage.simplyblock.io/v1alpha1
 kind: StoragePool
@@ -2519,6 +2569,7 @@ spec:
             if any(kw in err_stripped for kw in (
                 "BadRequest", "strict decoding error", "NotFound",
                 "could not find the requested resource",
+                "is invalid", "Required value",
             )):
                 raise RuntimeError(
                     f"CRs rejected by API server: {err_stripped}"
@@ -3044,6 +3095,7 @@ class K8sNativeMajorUpgradeDualNode(K8sNativeMajorUpgrade):
         mgmt_ifc = os.environ.get("MGMT_IFC", "ens18")
         data_nics = os.environ.get("DATA_NICS", "enp1s0")
         max_lvol = os.environ.get("MAX_LVOL", "30")
+        vcpu_count = self._get_vcpu_count()
 
         cr_yaml = f"""
 apiVersion: storage.simplyblock.io/v1alpha1
@@ -3064,6 +3116,7 @@ spec:
     capacity: 96
     provisionedCapacity: 98
   maxSubsystemCount: {max_lvol}
+  vcpuCount: {vcpu_count}
 ---
 apiVersion: storage.simplyblock.io/v1alpha1
 kind: StoragePool
@@ -3099,6 +3152,7 @@ spec:
             if any(kw in err_stripped for kw in (
                 "BadRequest", "strict decoding error", "NotFound",
                 "could not find the requested resource",
+                "is invalid", "Required value",
             )):
                 raise RuntimeError(
                     f"CRs rejected by API server: {err_stripped}"
