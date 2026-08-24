@@ -2,7 +2,7 @@
 """Creating, restoring, importing, exporting and discovering backups."""
 import logging
 import time
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional
 from uuid import UUID, uuid4
 
 from pydantic import ValidationError
@@ -10,8 +10,7 @@ from pydantic import ValidationError
 from simplyblock_core import constants
 from simplyblock_core.controllers import backup_events, tasks_controller
 from simplyblock_core.controllers.backup import manifest as backup_manifest
-from simplyblock_core.controllers.backup.validation import (
-    chain_fits, require_restorable)
+from simplyblock_core.controllers.backup.chain import BackupChain, location_of
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.backup import Backup
 from simplyblock_core.models.backup_config import (
@@ -511,13 +510,12 @@ def backup_snapshot(snapshot_id, cluster_id=None):
     # any task is enqueued. A backup either is restorable or was never created.
     try:
         location = db_controller.get_cluster_by_id(cluster_id).get_backup_config().location()
-        require_restorable(
-            location,
-            backups=_existing_chain_backups(snap_chain),
+        BackupChain.assemble(
+            location, bool(lvol.crypto_bdev), _existing_chain_backups(snap_chain),
+        ).require_restorable(
             # Every snapshot in the chain gets a backup below, including the ones
             # that have none yet, so the eventual length is the chain's.
-            chain_length=len(snap_chain),
-            encrypted=bool(lvol.crypto_bdev),
+            length=len(snap_chain),
             what="This snapshot chain")
     except (KeyError, ValueError, PreconditionError) as e:
         return None, str(e)
@@ -593,20 +591,15 @@ def restore_backup(backup_id: str, lvol_name: str, pool_id_or_name: str,
         pool = db_controller.get_pool_by_id_or_name(pool_id_or_name)
         cluster = db_controller.get_cluster_by_id(pool.cluster_id)
         target_node = db_controller.get_storage_node_by_id(target_node_id) if target_node_id is not None else None
-        chain = db_controller.get_backup_chain(backup_id)
-        if (incomplete := [
-            backup for backup in chain
-            if backup.status != Backup.STATUS_COMPLETED
-        ]):
-            raise PreconditionError("Incomplete backups in chain: " + ", ".join(backup.uuid for backup in incomplete))
-    except KeyError as e:
+        chain = BackupChain.of_backups(UUID(backup_id), db_controller.get_backups())
+    except (KeyError, ValueError) as e:
         raise PreconditionError(str(e)) from e
 
-    # The chain has to be restorable as a unit, and short enough for the data
-    # plane. Checked before the volume is created so a doomed restore leaves
-    # nothing behind.
-    require_restorable(backup.get_location(), backups=chain,
-                       what=f"The chain ending at backup {backup_id}")
+    # The chain has to be restorable as a unit, finished, and short enough for
+    # the data plane. Checked before the volume is created so a doomed restore
+    # leaves nothing behind.
+    chain.require_restorable(completed=True,
+                             what=f"The chain ending at backup {backup_id}")
 
     size = backup.size
     if size <= 0:
@@ -668,12 +661,9 @@ def restore_backup(backup_id: str, lvol_name: str, pool_id_or_name: str,
     # The bdev name the data plane expects (e.g. LVS_7744/LVOL_12345)
     bdev_name = f"{lvol.lvs_name}/{lvol.lvol_bdev}"
 
-    # Data plane processes s3_ids in array order: the first entry's clusters
-    # take priority (skip-if-populated).  Newest-first means the latest
-    # incremental data wins, with older backups filling any remaining gaps.
     if not tasks_controller.add_backup_restore_task(
             pool.cluster_id, lvol.node_id, backup_id, bdev_name,
-            [b.s3_id for b in reversed(chain)], lvol_id=lvol_id,
+            chain.s3_ids_newest_first(), lvol_id=lvol_id,
             s3_config=s3_config.model_dump(exclude_none=True) if s3_config is not None else None):
         raise RuntimeError("Failed to create restore task")
 
@@ -770,16 +760,37 @@ def list_backups(cluster_id=None):
     return data
 
 
-def export_backups(cluster_id=None, lvol_name=None) -> List[backup_manifest.BackupManifest]:
+def export_backups(cluster_id=None, lvol_name=None,
+                   backup_id=None) -> List[backup_manifest.BackupManifest]:
     """Export completed backups as manifests, for import into another cluster.
 
     Emits the same shape that lives in the bucket, so a hand-carried file and a
     bucket read are interchangeable. Previously this produced a third, narrower
     format of its own -- which is how it came to omit `encrypted`.
 
+    Args:
+        backup_id: Export the chain ending at this backup, and nothing else --
+            which is the unit an import wants, and the unit a restore needs. This
+            used to be answered with "every backup of the same volume", which is
+            both wider (a volume can hold several chains) and narrower (a chain
+            can outlive the volume's name).
+        lvol_name: Export every completed backup of a volume, chains and all.
+
     Returns the manifests themselves; whoever is writing them out decides how
     they are rendered.
+
+    Raises:
+        PreconditionError: `backup_id` names a backup whose chain is broken or
+            not there.
     """
+    if backup_id is not None:
+        try:
+            chain = BackupChain.of_backups(
+                UUID(str(backup_id)), db_controller.get_backups(cluster_id))
+        except ValueError as e:
+            raise PreconditionError(str(e)) from e
+        return [build_manifest(b) for b in chain.records()]
+
     backups = db_controller.get_backups(cluster_id)
     completed = [b for b in backups if b.status == Backup.STATUS_COMPLETED]
     if lvol_name:
@@ -800,112 +811,6 @@ def discover_backups(config: BackupConfig) -> List[backup_manifest.BackupManifes
             could not be parsed.
     """
     return backup_manifest.list_all(config)
-
-
-def _require_importable(pending: Dict[UUID, backup_manifest.BackupManifest],
-                        location: BackupLocation) -> None:
-    """Refuse a batch of manifests that would not form something restorable.
-
-    An import that lands a backup whose ancestors are missing produces a record
-    that looks restorable in ``backup list`` and fails only when someone tries it
-    -- typically during the recovery it was meant to serve. Each manifest names
-    its predecessor, so this is answerable up front by walking the batch.
-
-    Separate from ``require_restorable`` because the rule is about the batch, not
-    about a chain: whether every ancestor is either in this import or already in
-    the database is a question only the importer can ask. The rules that ARE about
-    the chain are deferred to it.
-
-    Args:
-        location: Where this batch is being imported from, which is where every
-            backup in it will be recorded as living. Only ancestors already in
-            the database can contradict it -- the batch itself comes from one
-            bucket by construction.
-
-    Raises:
-        PreconditionError: A chain is incomplete, cyclic, too long for the data
-            plane, or spans buckets.
-    """
-    for backup_id, manifest in pending.items():
-        # A chain reaching back before this batch spans both shapes of the same
-        # thing -- manifests being imported and Backup records already stored,
-        # which name their id and their location differently. Reduced to the two
-        # facts the rules below need, the two become comparable.
-        chain: List[Tuple[UUID, BackupLocation]] = [
-            (backup_id, _location_of(manifest, location))]
-        seen = {backup_id}
-        current = manifest
-
-        while (previous := current.prev_backup_id) is not None:
-            if previous in seen:
-                raise PreconditionError(
-                    f"Backup {backup_id} has a cyclic chain at {previous}")
-            seen.add(previous)
-
-            if previous in pending:
-                current = pending[previous]
-                chain.append((previous, _location_of(current, location)))
-                continue
-
-            if not _backup_exists(previous):
-                raise PreconditionError(
-                    f"Backup {backup_id} is a delta against {previous}, which is "
-                    "neither in this import nor already known. A backup cannot "
-                    "be restored without its chain.")
-
-            # Already imported, and checked then. Its own ancestry still counts
-            # towards the length the data plane has to accept.
-            chain.extend((UUID(stored.uuid), stored.get_location())
-                         for stored in db_controller.get_backup_chain(str(previous)))
-            break
-
-        # Locations are values, so coherence over the chain is a plain
-        # comparison; require_restorable wants Backup records, and the manifests
-        # in this batch are not in the database yet.
-        own = _location_of(manifest, location)
-        divergent = next(
-            (other for other, other_location in chain if other_location != own),
-            None)
-        if divergent is not None:
-            raise PreconditionError(
-                f"Backup {backup_id} shares a chain with {divergent}, "
-                "which is in a different bucket or encoding")
-
-        if not chain_fits(len(chain)):
-            raise PreconditionError(
-                f"The chain of backup {backup_id} is {len(chain)} backups long; "
-                f"the data plane accepts at most "
-                f"{constants.BACKUP_MAX_CHAIN_LENGTH}.")
-
-
-def _location_of(manifest: backup_manifest.BackupManifest,
-                 location: BackupLocation) -> BackupLocation:
-    """Where an imported backup lives: the bucket it was found in, its own encoding.
-
-    A manifest describes its objects but not how to reach them, so the bucket,
-    region and endpoint come from whoever read it -- which is what makes a
-    replicated bucket importable at all, rather than importable and then
-    unrestorable because every record points back at the original.
-
-    Only the encoding is the manifest's to state, and only ``with_compression``
-    is still variable; the key layout it also records has one value that holds
-    backups, which ``location_holds_backups`` already requires of the bucket.
-
-    Narrowed rather than copied, so a ``BackupConfig`` passed in as the location
-    it also is cannot carry its credentials into a stored record.
-    """
-    return BackupLocation.model_validate({
-        **location.model_dump(include=set(BackupLocation.model_fields)),
-        "with_compression": manifest.dataplane.with_compression,
-    })
-
-
-def _backup_exists(backup_id: UUID) -> bool:
-    try:
-        db_controller.get_backup_by_id(str(backup_id))
-    except KeyError:
-        return False
-    return True
 
 
 def import_backups(manifests: Iterable[backup_manifest.BackupManifest],
@@ -952,7 +857,16 @@ def import_backups(manifests: Iterable[backup_manifest.BackupManifest],
         else:
             raise PreconditionError(f"Backup {backup_id} already exists in cluster {existing.cluster_id}")
 
-    _require_importable(pending, location)
+    # Each manifest's own chain has to be restorable once landed. An import that
+    # lands a backup whose ancestors are missing produces a record that looks
+    # restorable in `backup list` and fails only when someone tries it --
+    # typically during the recovery it was meant to serve. A chain may reach back
+    # out of the batch into records already stored, so both are given to it.
+    stored = db_controller.get_backups()
+    for manifest in pending.values():
+        BackupChain.importing(
+            manifest, pending, stored, location).require_restorable(
+                what=f"The chain of backup {manifest.backup_id}")
 
     # Back to strings on the way into the record: `Backup` is a hand-rolled
     # model whose fields are plain `str`, and `db_controller` looks its ids up
@@ -973,7 +887,7 @@ def import_backups(manifests: Iterable[backup_manifest.BackupManifest],
         backup.created_at = manifest.created_at
         backup.completed_at = manifest.completed_at
         backup.status = Backup.STATUS_COMPLETED
-        backup.location = _location_of(manifest, location).model_dump(mode="json")
+        backup.location = location_of(manifest, location).model_dump(mode="json")
         # Import used to drop this, so an imported encrypted backup restored as
         # use_crypto=False -- a plaintext volume over ciphertext, silently.
         backup.encrypted = manifest.encryption is not None
