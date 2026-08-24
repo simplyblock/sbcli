@@ -1980,12 +1980,25 @@ print(json.dumps(dict(c)))
 
 
 def _all_nodes_online(mgmt_ip, key_path):
+    """Truly recovered: every node online AND healthy, every cluster ACTIVE.
+
+    Status alone is not recovery. After a chaos kill a node reports
+    "online" again while health_check is still False and its lvstore port
+    is down, and the cluster can sit in SUSPENDED/IN_ACTIVATION behind it.
+    Gating on status only, the soak kept firing kills into a half-recovered
+    2-node cluster and drove it to SUSPENDED by event 3 (run
+    20260824_224909) -- damage the test caused, not damage it found.
+    """
     return mgmt_py(mgmt_ip, key_path, """
 import json
 from simplyblock_core.db_controller import DBController
 db = DBController()
-bad = [n.get_id()[:8] for n in db.get_storage_nodes() if n.status != "online"]
-print(json.dumps({"all_online": not bad, "offline": bad}))
+bad = [n.get_id()[:8] for n in db.get_storage_nodes()
+       if n.status != "online" or not n.health_check]
+busy = [c.get_id()[:8] for c in db.get_clusters()
+        if c.status not in ("active", "degraded")]
+print(json.dumps({"all_online": not bad and not busy,
+                  "offline": bad, "clusters": busy}))
 """, replayable=True)
 
 
@@ -2047,8 +2060,24 @@ def test_case_9(meta):
             time.sleep(20)
         else:
             raise RuntimeError(
-                f"FAIL: nodes {state['offline']} not back online "
-                f"{NODE_STATE_TIMEOUT}s after chaos kill {ev} on {victim}")
+                f"FAIL: not recovered {NODE_STATE_TIMEOUT}s after chaos kill "
+                f"{ev} on {victim}: unhealthy nodes={state['offline']} "
+                f"clusters not active={state['clusters']}")
+
+        # Chaos without IO is not chaos. A kill that takes fio down (the
+        # promotion-window EIO) otherwise leaves every later event running
+        # against an idle client -- run 20260824_224909 lost its workload at
+        # event 3 and would have coasted through the remaining 97.
+        if not fio_alive(client_ip, key_path):
+            print("    restarting the client workload after the outage")
+            try:
+                cleanup_client(client_ip, key_path, mounts)
+                mounts = connect_and_mount(client_ip, key_path, mgmt_ip, lvols,
+                                           fmt=False)
+                start_fio(client_ip, key_path,
+                          write_fio_jobfile(client_ip, key_path, mounts))
+            except Exception as exc:            # noqa: BLE001 - keep the soak going
+                print(f"    could not restart the workload: {exc}")
 
     print("Chaos done; requiring full catch-up + integrity...")
     wait_replication_caught_up(mgmt_ip, key_path, lvols, timeout=3600)
