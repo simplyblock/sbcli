@@ -3341,6 +3341,10 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
     new_lvol.top_bdev = f"{new_lvol.lvs_name}/{new_lvol.lvol_bdev}"
     new_lvol.snapshot_name = snapshot.snap_bdev
     new_lvol.status = LVol.STATUS_IN_CREATION
+    # The source subsys_port is inherited from the deep copy but the target
+    # node may use a different per-lvstore port. Update it now so that
+    # suspend_lvol (and any future ANA flip) addresses the right listener.
+    new_lvol.subsys_port = target_node.get_lvol_subsys_port(target_node.lvstore)
     # Preserve the ORIGINAL subsystem NQN and namespace id: the client must
     # reconnect to the SAME NQN/NS on the target cluster — only the IP/port
     # differ. new_lvol is a deep copy of lvol, so nqn/ns_id are already
