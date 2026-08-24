@@ -183,11 +183,36 @@ class TestShortCircuitDoesNotApplyToNonOnlineStatuses(unittest.TestCase):
             _ = mod.task_runner_node(task)
         self.assertNotEqual(task.status, JobSchedule.STATUS_DONE)
 
+    def test_schedulable_does_not_short_circuit(self):
+        """Regression for the 2026-08-24 livelock: SCHEDULABLE used to hit
+        the same dead-end early-return as REMOVED, finishing the task as a
+        same-tick no-op. Since add_node_to_auto_restart's _AUTO_RESTART_OK
+        and storage_node_monitor's _requeue_stuck_auto_restarts both treat
+        SCHEDULABLE as "needs an active restart task", that no-op made the
+        requeue scan immediately queue another — a fresh FN_NODE_RESTART
+        task every monitor tick, forever, with the node never actually
+        restarted or shut down. SCHEDULABLE must fall through to the same
+        shutdown+restart path DOWN already uses."""
+        mod = _load_runner_module()
+        task = _mk_task()
+        node = _mk_node(status=StorageNode.STATUS_SCHEDULABLE, health_check=True)
+        with patch.object(mod, "db") as mock_db, \
+             patch.object(mod, "health_controller") as mock_health:
+            mock_db.get_storage_node_by_id.return_value = node
+            mock_health._check_node_ping.return_value = False
+            mock_health._check_node_api.return_value = False
+            mock_health._check_ping_from_node.return_value = False
+            _ = mod.task_runner_node(task)
+        self.assertNotEqual(task.status, JobSchedule.STATUS_DONE)
+
 
 class TestTerminalStatusesStillDoneImmediately(unittest.TestCase):
-    """REMOVED and SCHEDULABLE have dedicated early-returns at the top of
-    task_runner_node. Pin REMOVED so a refactor doesn't accidentally drop
-    it.
+    """REMOVED has a dedicated early-return at the top of task_runner_node
+    (nothing ever queues a restart for a REMOVED node, so there is no
+    feedback loop the way there was for SCHEDULABLE — see
+    TestShortCircuitDoesNotApplyToNonOnlineStatuses.test_schedulable_does_not_short_circuit
+    for why SCHEDULABLE no longer joins it here). Pin REMOVED so a refactor
+    doesn't accidentally drop it.
 
     Note: DOWN does NOT short-circuit here today — it falls through to the
     shutdown+restart path. Per the rationale of commit 2d69bab3
