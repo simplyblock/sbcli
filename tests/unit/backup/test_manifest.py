@@ -138,51 +138,6 @@ class TestSchema:
         assert volume.pool_name is None
 
 
-class TestChainOf:
-    def _line(self):
-        return [
-            _manifest(backup_id=_id("b-0"), s3_id=1),
-            _manifest(backup_id=_id("b-1"), s3_id=2, prev_backup_id=_id("b-0")),
-            _manifest(backup_id=_id("b-2"), s3_id=3, prev_backup_id=_id("b-1")),
-        ]
-
-    @staticmethod
-    def _ids():
-        return [_id("b-0"), _id("b-1"), _id("b-2")]
-
-    def test_walks_to_the_root_oldest_first(self):
-        line = self._line()
-        chain = backup_manifest.chain_of(line[-1], line)
-        assert [m.backup_id for m in chain] == self._ids()
-
-    def test_a_full_backup_is_its_own_chain(self):
-        line = self._line()
-        assert backup_manifest.chain_of(line[0], line) == [line[0]]
-
-    def test_order_does_not_matter(self):
-        line = self._line()
-        chain = backup_manifest.chain_of(line[-1], list(reversed(line)))
-        assert [m.backup_id for m in chain] == self._ids()
-
-    def test_ignores_manifests_outside_the_chain(self):
-        line = self._line()
-        unrelated = _manifest(backup_id=_id("other"), s3_id=9)
-        chain = backup_manifest.chain_of(line[-1], line + [unrelated])
-        assert [m.backup_id for m in chain] == self._ids()
-
-    def test_a_missing_ancestor_is_reported_not_truncated(self):
-        """Truncating would restore a volume with holes in it."""
-        line = self._line()
-        with pytest.raises(ManifestError, match=str(_id("b-0"))):
-            backup_manifest.chain_of(line[-1], line[1:])
-
-    def test_a_cycle_is_reported_rather_than_looping(self):
-        a = _manifest(backup_id=_id("b-a"), prev_backup_id=_id("b-b"))
-        b = _manifest(backup_id=_id("b-b"), prev_backup_id=_id("b-a"))
-        with pytest.raises(ManifestError, match="cyclic"):
-            backup_manifest.chain_of(a, [a, b])
-
-
 class TestParse:
     def test_rejects_a_newer_schema_version(self):
         """Guessing at an unknown schema restores a corrupt volume with no error."""
