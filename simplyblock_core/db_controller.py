@@ -27,7 +27,7 @@ from simplyblock_core.models.stats import DeviceStatObject, NodeStatObject, Clus
     PoolStatObject, CachedLVolStatObject
 from simplyblock_core.models.storage_node import StorageNode, NodeLVolDelLock
 from simplyblock_core.models.lvstore_lock import LVStoreMutationLock
-from simplyblock_core.utils.helpers import single, single_or_none
+from simplyblock_core.utils.helpers import single_or_none
 
 logger = logging.getLogger(__name__)
 
@@ -1445,22 +1445,6 @@ class DBController(metaclass=Singleton):
 
     def get_backups_by_snapshot_id(self, snapshot_id: str) -> List[Backup]:
         return [b for b in self.get_backups() if b.snapshot_id == snapshot_id]
-
-    def get_backup_chain(self, backup_id: str) -> List[Backup]:
-        """Return the full backup chain ending at backup_id, oldest first."""
-        backups = self.get_backups()  # Avoid retrieving all backups multiple times
-
-        def find_backup(id_):
-            return single(backup for backup in backups if backup.uuid == id_)
-
-        next_id = backup_id
-        chain = []
-        while next_id:
-            chain.append(find_backup(next_id))
-            next_id = chain[-1].prev_backup_id
-
-        chain.reverse()
-        return chain
 
     def get_replication_targets(self, cluster_id: Optional[str] = None) -> List[ReplicationTarget]:
         prefix = cluster_id if cluster_id else " "

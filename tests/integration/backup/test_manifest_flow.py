@@ -12,6 +12,7 @@ import pytest
 
 from simplyblock_core.controllers.backup import controller as backup_controller
 from simplyblock_core.controllers.backup import manifest as backup_manifest
+from simplyblock_core.controllers.backup.chain import BackupChain
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.models.backup import Backup
@@ -158,9 +159,9 @@ class TestBuildManifest:
         manifests = [backup_controller.build_manifest(b) for b in db.get_backups()]
         last = next(m for m in manifests if str(m.backup_id) == _backup_id(3))
 
-        chain = backup_manifest.chain_of(last, manifests)
+        chain = BackupChain.of_manifests(last, manifests, _config().location())
 
-        assert [(str(m.backup_id), m.s3_id) for m in chain] == [
+        assert [(str(m.backup_id), m.s3_id) for m in chain.links] == [
             (_backup_id(1), 1), (_backup_id(2), 2), (_backup_id(3), 3)]
 
     def test_records_the_volume_shape(self, db, cluster, lvol):
@@ -246,7 +247,10 @@ class TestExportImportRoundTrip:
     """Export, wipe the database, import -- the disaster-recovery shape."""
 
     def test_backups_survive_losing_the_database(self, db, cluster, lvol):
-        _backup(db, 1)
+        # Encrypted throughout: one key decrypts the whole chain, so a line whose
+        # root is plaintext and whose child is not could never be restored, and
+        # is refused rather than round-tripped.
+        _backup(db, 1, encrypted=True, encryption=_encryption(_backup_id(1)))
         _backup(db, 2, prev=1, encrypted=True,
                 encryption=_encryption(_backup_id(2)))
 

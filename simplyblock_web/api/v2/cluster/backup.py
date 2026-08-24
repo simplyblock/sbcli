@@ -141,18 +141,19 @@ def discover_backups(parameters: BackupConfigDTO) -> List[BackupManifestDTO]:
 @api.get('/export', name='clusters:backups:export')
 def export_backups(
     cluster: Cluster,
-    backup_id: Optional[str] = Query(None, description="Export only the chain containing this backup UUID"),
+    backup_id: Optional[str] = Query(None, description="Export only the chain ending at this backup UUID"),
     lvol_name: Optional[str] = Query(None, description="Export all completed backups for this lvol name"),
 ) -> List[BackupManifestDTO]:
-    lvol_name_filter = lvol_name
-    if backup_id and not lvol_name_filter:
+    if backup_id and not lvol_name:
         try:
-            backup = db.get_backup_by_id(backup_id)
-            lvol_name_filter = backup.lvol_name
+            db.get_backup_by_id(backup_id)
         except KeyError:
             raise HTTPException(404, f"Backup {backup_id} not found")
+        return backup_controller.export_backups(
+            cluster_id=cluster.get_id(), backup_id=backup_id)
+
     return backup_controller.export_backups(
-        cluster_id=cluster.get_id(), lvol_name=lvol_name_filter)
+        cluster_id=cluster.get_id(), lvol_name=lvol_name)
 
 
 def _lookup_lvol_in_cluster(volume_id: str, cluster: ClusterModel) -> LVol:

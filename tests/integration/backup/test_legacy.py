@@ -1,6 +1,10 @@
 # coding=utf-8
 """
-test_backup.py – unit tests for the S3 backup feature.
+Broad coverage of the backup feature, from before it was split up.
+
+Named for what it is: the one file here still carrying the stubbed-DB
+pattern the integration tier has otherwise moved off. Do not copy it --
+the other modules in this package are the pattern. See tests/AGENTS.md.
 
 Tests cover:
   - Backup model fields and defaults
@@ -654,6 +658,12 @@ class TestRestoreBackup(unittest.TestCase):
 
     CLUSTER_ID = "00000000-0000-0000-0000-000000000001"
 
+    # Real UUIDs, unlike the readable stand-ins the rest of this module uses:
+    # restore walks the chain by parsed id, so a backup that cannot be one is
+    # refused before anything else happens.
+    BACKUP_ID = "00000000-0000-0000-0000-0000000000b1"
+    OLDER_BACKUP_ID = "00000000-0000-0000-0000-0000000000b0"
+
     def setUp(self):
         from simplyblock_core.models.pool import Pool
         self.db = DBController()
@@ -668,6 +678,7 @@ class TestRestoreBackup(unittest.TestCase):
         pool.write_to_db(self.db.kv_store)
 
     def _backup(self, **overrides):
+        overrides.setdefault("uuid", self.BACKUP_ID)
         backup = _backup(cluster_id=self.CLUSTER_ID, **overrides)
         backup.location = _backup_config().location().model_dump(mode="json")
         backup.write_to_db(self.db.kv_store)
@@ -689,7 +700,7 @@ class TestRestoreBackup(unittest.TestCase):
         with patch("simplyblock_core.controllers.lvol_controller.add_lvol_ha",
                    return_value=("lvol-new", None)):
             from simplyblock_core.controllers.backup.controller import restore_backup
-            result = restore_backup("backup-1", "restored_lvol", "pool-1")
+            result = restore_backup(self.BACKUP_ID, "restored_lvol", "pool-1")
 
         self.assertEqual(result, "lvol-new")
         # s3_id integers reach the data plane, not backup UUIDs.
@@ -708,15 +719,16 @@ class TestRestoreBackup(unittest.TestCase):
                    return_value=(None, "Pool not found")):
             from simplyblock_core.controllers.backup.controller import restore_backup
             with self.assertRaisesRegex(RuntimeError, "Failed to create restore volume"):
-                restore_backup("backup-1", "lvol", "pool-1")
+                restore_backup(self.BACKUP_ID, "lvol", "pool-1")
 
     def test_incomplete_chain_is_refused(self):
-        self._backup(uuid="b-old", s3_id=1, status=Backup.STATUS_IN_PROGRESS)
-        self._backup(uuid="backup-1", s3_id=2, prev_backup_id="b-old")
+        self._backup(uuid=self.OLDER_BACKUP_ID, s3_id=1,
+                     status=Backup.STATUS_IN_PROGRESS)
+        self._backup(s3_id=2, prev_backup_id=self.OLDER_BACKUP_ID)
 
         from simplyblock_core.controllers.backup.controller import restore_backup
         with self.assertRaisesRegex(PreconditionError, "Incomplete backups in chain"):
-            restore_backup("backup-1", "lvol", "pool-1")
+            restore_backup(self.BACKUP_ID, "lvol", "pool-1")
 
         self.assertEqual(self.db.get_lvols(), [])
 

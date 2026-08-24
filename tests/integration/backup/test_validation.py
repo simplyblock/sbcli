@@ -11,7 +11,7 @@ import pytest
 
 from simplyblock_core import constants
 from simplyblock_core.controllers.backup import controller as backup_controller
-from simplyblock_core.controllers.backup import validation
+from simplyblock_core.controllers.backup import policy as backup_policy
 from simplyblock_core.controllers.backup.manifest import BackupManifest
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.exceptions import PreconditionError
@@ -306,7 +306,7 @@ class TestImportPreconditions:
     def test_chain_mixing_encodings_is_refused(self, db, cluster):
         """A batch comes from one bucket, so the divergence it can still carry is
         in the encoding -- which each manifest states for itself."""
-        with pytest.raises(PreconditionError, match="different bucket or encoding"):
+        with pytest.raises(PreconditionError, match="cannot span buckets or encodings"):
             backup_controller.import_backups(
                 [self._manifest(1, with_compression=True),
                  self._manifest(2, prev=1)],
@@ -318,7 +318,7 @@ class TestImportPreconditions:
         """The ancestor is already stored, and stored records do name a bucket."""
         _backup(db, 1, location=_config(bucket_name="elsewhere").location())
 
-        with pytest.raises(PreconditionError, match="different bucket or encoding"):
+        with pytest.raises(PreconditionError, match="cannot span buckets or encodings"):
             backup_controller.import_backups(
                 [self._manifest(2, prev=1)], _config().location(),
                 cluster_id=CLUSTER_ID)
@@ -352,27 +352,110 @@ class TestImportPreconditions:
                 [self._manifest(1, prev=2), self._manifest(2, prev=1)],
                 _config().location(), cluster_id=CLUSTER_ID)
 
+    def test_chain_mixing_encryption_is_refused(self, db, cluster):
+        """Import used to check buckets, encodings and length but not encryption,
+        so such a batch landed cleanly and failed at restore -- during the
+        recovery it was meant to serve."""
+        _backup(db, 1, encrypted=True)
 
-class TestPredicates:
-    """The rules answer a yes/no question as well as blocking an operation."""
+        with pytest.raises(PreconditionError, match="cannot mix encrypted and unencrypted"):
+            backup_controller.import_backups(
+                [self._manifest(2, prev=1)], _config().location(),
+                cluster_id=CLUSTER_ID)
 
-    def test_chain_fits_at_the_limit(self):
-        assert validation.chain_fits(constants.BACKUP_MAX_CHAIN_LENGTH)
-        assert not validation.chain_fits(constants.BACKUP_MAX_CHAIN_LENGTH + 1)
+        assert [b.uuid for b in db.get_backups()] == [_backup_id(1)]
 
-    def test_a_tiering_bucket_holds_no_backups(self):
-        assert validation.location_holds_backups(_config().location())
-        assert not validation.location_holds_backups(
-            _config(snapshot_backups=False).location())
 
-    def test_an_empty_chain_is_coherent(self):
-        assert validation.chain_is_coherent([], _config().location())
+class TestScheduledBackupPreconditions:
+    """A schedule is the one thing that adds to a chain indefinitely.
 
-    def test_coherence_covers_a_backup_that_does_not_exist_yet(self, db, cluster):
-        chain = [_backup(db, 1, encrypted=False)]
+    It used to call `create_single_backup` directly, checking nothing -- so the
+    rules every hand-taken backup is held to were absent from the path that
+    creates most of them. It is also the path that must refuse BEFORE taking its
+    snapshot, or every scheduler tick leaves another orphan `auto_*` behind.
+    """
 
-        assert validation.chain_is_coherent(chain, _config().location())
-        assert validation.chain_is_coherent(
-            chain, _config().location(), encrypted=False)
-        assert not validation.chain_is_coherent(
-            chain, _config().location(), encrypted=True)
+    @pytest.fixture
+    def volume(self, db):
+        return _snapshot(db).lvol
+
+    @pytest.fixture
+    def snapshot_add(self):
+        with patch("simplyblock_core.controllers.snapshot_controller.add") as add:
+            yield add
+
+    def _chain(self, db, length, **overrides):
+        for index in range(1, length + 1):
+            backup = _backup(db, index, prev=index - 1 if index > 1 else None,
+                             **overrides)
+            backup.node_id = NODE_ID
+            backup.created_at = index
+            backup.write_to_db(db.kv_store)
+
+    def test_a_chain_at_the_limit_is_not_extended(
+            self, db, cluster, node, volume, snapshot_add):
+        self._chain(db, constants.BACKUP_MAX_CHAIN_LENGTH)
+
+        backup_policy._auto_backup_lvol(volume)
+
+        snapshot_add.assert_not_called()
+        assert len(db.get_backups()) == constants.BACKUP_MAX_CHAIN_LENGTH
+        assert db.get_job_tasks(CLUSTER_ID) == []
+
+    def test_a_chain_in_another_bucket_is_not_extended(
+            self, db, cluster, node, volume, snapshot_add):
+        """The cluster's backup configuration was repointed since the last one."""
+        self._chain(db, 1, location=_config(bucket_name="the-old-bucket").location())
+
+        backup_policy._auto_backup_lvol(volume)
+
+        snapshot_add.assert_not_called()
+        assert len(db.get_backups()) == 1
+
+    def test_an_encrypted_volume_over_a_plain_chain_is_not_extended(
+            self, db, cluster, node, snapshot_add):
+        volume = _snapshot(db, crypto=True).lvol
+        self._chain(db, 1, encrypted=False)
+
+        backup_policy._auto_backup_lvol(volume)
+
+        snapshot_add.assert_not_called()
+        assert len(db.get_backups()) == 1
+
+    def test_a_healthy_chain_is_extended(
+            self, db, cluster, node, volume, snapshot_add):
+        """The refusals above must not be the only outcome this path has."""
+        self._chain(db, 1)
+        snapshot_add.return_value = (None, "stopped before the RPC")
+
+        backup_policy._auto_backup_lvol(volume)
+
+        snapshot_add.assert_called_once()
+
+
+class TestExportSelection:
+
+    def test_export_by_backup_id_yields_exactly_that_chain(self, db, cluster, node):
+        """A volume can hold more than one chain -- after a bucket repoint, or an
+        import. Exporting "everything with the same volume name" therefore hands
+        an import backups that belong to a different restorable unit."""
+        for index, prev in ((1, None), (2, 1), (3, None), (4, 3)):
+            backup = _backup(db, index, prev=prev)
+            backup.node_id = NODE_ID
+            backup.write_to_db(db.kv_store)
+
+        manifests = backup_controller.export_backups(
+            cluster_id=CLUSTER_ID, backup_id=_backup_id(2))
+
+        assert [str(m.backup_id) for m in manifests] == [_backup_id(1), _backup_id(2)]
+
+    def test_export_by_volume_name_still_yields_everything(self, db, cluster, node):
+        for index, prev in ((1, None), (2, 1), (3, None)):
+            backup = _backup(db, index, prev=prev)
+            backup.node_id = NODE_ID
+            backup.write_to_db(db.kv_store)
+
+        manifests = backup_controller.export_backups(
+            cluster_id=CLUSTER_ID, lvol_name="vol")
+
+        assert len(manifests) == 3
