@@ -604,19 +604,57 @@ def wait_node_status(mgmt_ip, key_path, node_id, wanted, timeout=NODE_STATE_TIME
         f"Node {node_id} did not reach {wanted!r} within {timeout}s (last={seen!r})")
 
 
-def sn_shutdown(mgmt_ip, key_path, node_id):
+def wait_cluster_settled(mgmt_ip, key_path, cluster_id, timeout=1800):
+    """Wait until *cluster_id* has no open migration/balancing work.
+
+    A restore leaves the cluster ACTIVE - REBALANCING (device_migration +
+    balancing_on_restart tasks), and `sn shutdown` REFUSES a node while that
+    work is open — silently, from the driver's point of view, because the
+    refusal goes to stderr (run 20260824_153107: case 6's shutdown printed
+    nothing and the node stayed 'online' for the full 900s budget, while
+    case 5's identical call later worked, after the rebalance had drained).
+    """
+    print(f"Waiting for cluster {cluster_id[:8]} to settle (no rebalance/migration)...")
+    start = time.time()
+    while time.time() - start < timeout:
+        state = mgmt_py(mgmt_ip, key_path, f"""
+import json
+from simplyblock_core.db_controller import DBController
+from simplyblock_core.models.job_schedule import JobSchedule
+db = DBController()
+open_tasks = [t.function_name for t in db.get_job_tasks({cluster_id!r})
+              if t.status != JobSchedule.STATUS_DONE and not t.canceled
+              and t.function_name in ("device_migration", "balancing_on_restart",
+                                      "new_device_migration", "failed_device_migration")]
+print(json.dumps({{"status": db.get_cluster_by_id({cluster_id!r}).status,
+                   "open": open_tasks}}))
+""", replayable=True)
+        if not state["open"]:
+            print(f"  cluster settled (status {state['status']}).")
+            return
+        print(f"  status={state['status']} open={state['open']}")
+        time.sleep(20)
+    raise RuntimeError(f"Cluster {cluster_id[:8]} did not settle within {timeout}s")
+
+
+def sn_shutdown(mgmt_ip, key_path, node_id, cluster_id=None):
     """Take a node offline the supported way.
 
     Deliberately NOT `docker kill` on the SPDK container: the control plane
     auto-restarts that within minutes (case 2 saw the "suspended" source cluster
     heal itself mid-test), which silently invalidates an outage scenario.
     """
+    if cluster_id:
+        wait_cluster_settled(mgmt_ip, key_path, cluster_id)
     print(f"Shutting down node {node_id[:8]} ...")
     # Straight to shutdown: suspending first buys nothing and actively hurts —
     # a suspended node makes its own queued work defer ("node is not online,
     # retrying"), and that backlog then blocks the shutdown itself (run 15
     # case 6: the node never left `suspended`).
-    run(mgmt_ip, key_path, f"{SBCTL} -d sn shutdown {node_id}", check=False)
+    # 2>&1: sbctl reports a REFUSED shutdown on stderr, which the channel
+    # otherwise drops — the driver then stares at an online node for 900s
+    # with no clue why (run 20260824_153107).
+    run(mgmt_ip, key_path, f"{SBCTL} -d sn shutdown {node_id} 2>&1", check=False)
     wait_node_status(mgmt_ip, key_path, node_id, "offline")
 
 
@@ -1470,7 +1508,7 @@ def test_case_5(meta):
     victim = node_of_lvol(mgmt_ip, key_path, lvols[0])["replication_node_id"]
     print(f"Taking the REPLICATION TARGET node {victim[:8]} offline...")
     before = _replication_progress(mgmt_ip, key_path, lvols)
-    sn_shutdown(mgmt_ip, key_path, victim)
+    sn_shutdown(mgmt_ip, key_path, victim, cluster_id=tgt_uuid)
 
     print(f"Observing {OUTAGE_REPL_CYCLES} replication cycles with the target down...")
     time.sleep(OUTAGE_REPL_CYCLES * REPL_INTERVAL_MIN * 60)
@@ -1522,7 +1560,7 @@ def test_case_6(meta):
     print(f"Taking the SOURCE PRIMARY {primary[:8]} offline "
           f"(secondary {secondary[:8]} must carry on)...")
     before = _replication_progress(mgmt_ip, key_path, lvols)
-    sn_shutdown(mgmt_ip, key_path, primary)
+    sn_shutdown(mgmt_ip, key_path, primary, cluster_id=src_uuid)
 
     print(f"Observing {OUTAGE_REPL_CYCLES} replication cycles on the secondary...")
     time.sleep(OUTAGE_REPL_CYCLES * REPL_INTERVAL_MIN * 60)
