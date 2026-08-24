@@ -83,12 +83,9 @@ the 3-second service-loop gap between phases.
 """
 
 import datetime
-import logging
 import random
 import time
 from typing import Optional
-
-from tenacity import RetryError, Retrying, before_sleep_log, stop_after_attempt, wait_fixed
 
 from simplyblock_core import db_controller as db_mod, utils, constants
 from simplyblock_core.utils import convert_size
@@ -104,7 +101,7 @@ from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.rpc_client import RPCErrorCode, RPCRemoteError, RPCException, RPCClient
 from simplyblock_core.services.hub_controller_manager import HubControllerManager
-from simplyblock_core.storage_node_ops import execute_on_leader_with_failover
+from simplyblock_core.controllers.migration_bdev_ops import delete_bdev_blocking as _delete_bdev_blocking
 
 logger = utils.get_logger(__name__)
 db = db_mod.DBController()
@@ -423,20 +420,32 @@ def _bytes_to_mib(nbytes):
     return max(1, utils.convert_size(nbytes, 'MiB', round_up=False))
 
 
-def _log_spdk_bdev_size(rpc, composite_name, label):
+# Sentinel distinguishing "caller has no answer, query fresh" from a
+# caller-supplied get_bdevs() result -- including an explicit [] (confirmed
+# absent). Used by _log_spdk_bdev_size and _setup_snap_transfer to avoid
+# repeating an RPC round-trip the caller already paid for.
+_BDEV_INFO_UNSET = object()
+
+
+def _log_spdk_bdev_size(rpc, composite_name, label, bdev_info=_BDEV_INFO_UNSET):
     """Query SPDK for *composite_name* and emit a [BDEV SIZE] log line.
 
     Reports num_blocks × block_size → actual_mib and sectors@512 (the sector
     count the client sees via the NVMe namespace).  Never raises.
+
+    ``bdev_info``: pass an already-fetched get_bdevs() result to log against
+    it instead of paying for a second identical RPC round-trip -- callers
+    that are about to query (or just queried) the same composite for their
+    own purposes should pass that result through here.
     """
     _MIB = 1048576
     try:
-        info = rpc.get_bdevs(composite_name)
+        info = rpc.get_bdevs(composite_name) if bdev_info is _BDEV_INFO_UNSET else bdev_info
         if not info:
             logger.warning(
                 f"[BDEV SIZE] {label}: {composite_name} — bdev not found in SPDK")
             return None
-        b = info[0]
+        b = info[0]  # type: ignore[index]
         num_blocks   = b.get('num_blocks', 0)
         block_size   = b.get('block_size', 512)
         actual_bytes = num_blocks * block_size
@@ -455,64 +464,8 @@ def _log_spdk_bdev_size(rpc, composite_name, label):
         return None
 
 
-def _delete_bdev_blocking(bdev_name, primary_rpc, secondary_rpc=None, tertiary_rpc=None,
-                          timeout_s=120, coalescing=False, all_nodes=None, lvs_name=None):
-    """
-    Two-phase blocking bdev delete.
-
-    Phase 1 — leader node, sync=False: initiates the async delete.  When
-      all_nodes + lvs_name are supplied, the actual LVS leader is resolved via
-      execute_on_leader_with_failover so the delete goes to the secondary or
-      tertiary if the primary is down.  Without them the call falls back to
-      primary_rpc directly (original behaviour).  By default (coalescing=False)
-      special_delete=True tells SPDK to free the bdev's own clusters without
-      merging them into any child — correct for source cleanup, rollback, and
-      any path where no child needs to inherit data.  Pass coalescing=True when
-      the bdev's child must inherit its clusters (e.g. deleting a migration
-      intermediate snapshot).
-    Wait   — poll bdev_lvol_get_lvol_delete_status on the leader until done.
-    Phase 2 — all nodes (primary + secondary + tertiary), sync=True
-      (sync=True, special_delete=False): finalises the deletion on every replica.
-    """
-    if all_nodes and lvs_name:
-        def _async_delete(leader):
-            ret, _ = leader.rpc_client().delete_lvol(
-                bdev_name, sync=False, special_delete=not coalescing)
-            return ret or False
-        ok, leader_node, _ = execute_on_leader_with_failover(all_nodes, lvs_name, _async_delete)
-        if not ok or leader_node is None:
-            raise RuntimeError(f"delete bdev {bdev_name}: initiation failed")
-        leader_rpc = leader_node.rpc_client()
-    else:
-        ret, _ = primary_rpc.delete_lvol(bdev_name, sync=False, special_delete=not coalescing)
-        if not ret:
-            raise RuntimeError(f"delete bdev {bdev_name}: initiation failed")
-        leader_rpc = primary_rpc
-
-    deadline = time.monotonic() + timeout_s
-    while leader_rpc.bdev_lvol_get_lvol_delete_status(bdev_name) == 1:
-        if time.monotonic() > deadline:
-            if not leader_rpc.get_bdevs(bdev_name):
-                logger.warning(
-                    f"delete bdev {bdev_name}: poll timed out after {timeout_s}s "
-                    f"but bdev is gone — treating as success")
-                break
-            raise RuntimeError(
-                f"delete bdev {bdev_name}: timed out after {timeout_s}s, bdev still present")
-        time.sleep(0.2)
-
-    for rpc in filter(None, [primary_rpc, secondary_rpc, tertiary_rpc]):
-        try:
-            Retrying(
-                stop=stop_after_attempt(3),
-                wait=wait_fixed(1),
-                before_sleep=before_sleep_log(logger, logging.WARNING),
-            )(rpc.delete_lvol, bdev_name, sync=True, special_delete=False)
-        except RetryError:
-            logger.exception(
-                f"delete bdev {bdev_name} sync finalize STILL failing after 3 attempts "
-                f"(non-fatal, blob metadata may not be cleared on this replica)"
-            )
+# _delete_bdev_blocking lives in controllers/migration_bdev_ops.py (imported
+# above as delete_bdev_blocking) -- see that module's docstring for why.
 
 
 # ---------------------------------------------------------------------------
@@ -972,7 +925,8 @@ def _setup_snap_transfer(snap, snap_index, src_node, tgt_node,
     if _bdev_info:
         logger.info(
             f"[REUSE] snap={snap_uuid[:8]} reusing owned writable bdev {tgt_composite}")
-        _log_spdk_bdev_size(tgt_rpc, tgt_composite, f"TGT snap[{snap_uuid[:8]}] reuse")
+        _log_spdk_bdev_size(tgt_rpc, tgt_composite, f"TGT snap[{snap_uuid[:8]}] reuse",
+                           bdev_info=_bdev_info)
         if migration is not None and tgt_composite not in migration.target_snap_bdevs:
             migration.target_snap_bdevs.append(tgt_composite)
             migration.write_to_db(db.kv_store)
@@ -984,11 +938,12 @@ def _setup_snap_transfer(snap, snap_index, src_node, tgt_node,
         ret = tgt_rpc.create_lvol(snap_short, size_in_mib, tgt_node.lvstore, ndcs=_ndcs, npcs=_npcs)
         if not ret:
             return None, f"Failed to create target lvol for snap {snap_uuid}"
-        _log_spdk_bdev_size(tgt_rpc, tgt_composite, f"TGT snap[{snap_uuid[:8]}] post-create")
+        _bdev_info = tgt_rpc.get_bdevs(tgt_composite)
+        _log_spdk_bdev_size(tgt_rpc, tgt_composite, f"TGT snap[{snap_uuid[:8]}] post-create",
+                           bdev_info=_bdev_info)
         if migration is not None and tgt_composite not in migration.target_snap_bdevs:
             migration.target_snap_bdevs.append(tgt_composite)
             migration.write_to_db(db.kv_store)
-        _bdev_info = tgt_rpc.get_bdevs(tgt_composite)
 
     # Step 2: register on secondary/tertiary if not already there.
     # On a normal first pass the secondary has no knowledge of this bdev yet;
