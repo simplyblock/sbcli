@@ -1295,37 +1295,60 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0, min_cntlid
     ret, err = rpc_client.nvmf_subsystem_add_ns2(
         lvol.nqn, lvol.top_bdev, ns_uuid or lvol.uuid, lvol.guid, nsid=requested_nsid)
     if err:
-        if err["code"] == -32602 and lvol.namespace and lvol.node_id == snode.get_id():
-            if primary_nsid is not None:
-                # Caller pinned a specific nsid (migration/failover preserve-nsid
-                # path). Re-claiming to a different subsystem would lose the shared
-                # NQN, making the target invisible to the client. Fail hard so the
-                # caller can diagnose rather than silently migrating into the wrong
-                # subsystem. _evict_stale_namespace should have cleared any occupant
-                # before this call; if we still got -32602 the state is unexpected.
-                return _fail_after_bdev(
-                    lvol, rpc_client,
-                    f"Failed to add bdev to subsystem at requested nsid={primary_nsid}: "
-                    f"nsid already occupied and eviction did not clear it")
-            logger.info("Error adding namespace to subsystem, finding new subsystem for namespaced lvol")
-            # Re-claim transactionally, excluding the subsystem SPDK just
-            # rejected (the DB count said it had room — SPDK is the authority
-            # on its own namespace table). The lvol's record is rewritten in
-            # the same transaction, so its slot moves atomically from the
-            # rejected subsystem to the new one (or to a standalone one).
-            cluster = DBController().get_cluster_by_id(snode.cluster_id)
-            try:
-                DBController().claim_lvol_ns_slot(
-                    lvol, snode, True,
-                    standalone_nqn=cluster.nqn + ":lvol:" + lvol.uuid,
-                    exclude_nqns={lvol.nqn})
-            except SubsystemCapacityError as e:
-                logger.error(str(e))
-                return _fail_after_bdev(lvol, rpc_client, str(e))
-            return add_lvol_on_node(lvol, snode, is_primary=is_primary, secondary_index=secondary_index)
-        else:
-            return _fail_after_bdev(
-                lvol, rpc_client, "Failed to add bdev to subsystem")
+        if err["code"] == -32602 and lvol.namespace:
+            # -32602 from nvmf_subsystem_add_ns has two distinct causes:
+            #   A) subsystem exists on this node but the nsid slot is occupied
+            #   B) subsystem does not exist on this node at all (cross-LVS:
+            #      the shared subsystem's LVS has no nodes in common with this
+            #      lvol's LVS — e.g. a failover clone on LVS_6 whose shared
+            #      subsystem lives on LVS_1)
+            # nvmf_subsystem_add_ns2 already ran the idempotency probe and
+            # returned the original error, so subsystem_get here distinguishes A/B.
+            subsys_here = rpc_client.subsystem_get(lvol.nqn)
+            if subsys_here is None:
+                # Case B — cross-LVS: subsystem not on this node.
+                # Primary: the namespace cannot be registered from this LVS;
+                #   log a warning so the operator can investigate placement.
+                # Secondary: the primary already registered it on the subsystem's
+                #   nodes; nothing more for this secondary to do.
+                # Either way, skip rather than deleting the bdev and retrying forever.
+                logger.warning(
+                    "%s node %s: subsystem %s not present on this node "
+                    "(cross-LVS namespaced lvol %s); skipping namespace add.",
+                    "Primary" if is_primary else "Secondary",
+                    snode.get_id(), lvol.nqn, lvol.get_id())
+                return {'uuid': lvol.lvol_uuid,
+                        'driver_specific': {'lvol': {'blobid': lvol.blobid}}}, None
+
+            # Case A — subsystem IS on this node; the nsid slot is occupied.
+            if lvol.node_id == snode.get_id():
+                if primary_nsid is not None:
+                    # Migration/failover: re-claiming to a different subsystem
+                    # would lose the shared NQN. _evict_stale_namespace should
+                    # have cleared the occupant; a persistent -32602 here means
+                    # genuine unexpected state — fail hard.
+                    return _fail_after_bdev(
+                        lvol, rpc_client,
+                        f"Failed to add bdev to subsystem at requested nsid={primary_nsid}: "
+                        f"nsid occupied and eviction did not clear it")
+                logger.info("Error adding namespace to subsystem, finding new subsystem for namespaced lvol")
+                # Re-claim transactionally, excluding the subsystem SPDK just
+                # rejected (the DB count said it had room — SPDK is the authority
+                # on its own namespace table). The lvol's record is rewritten in
+                # the same transaction, so its slot moves atomically from the
+                # rejected subsystem to the new one (or to a standalone one).
+                cluster = DBController().get_cluster_by_id(snode.cluster_id)
+                try:
+                    DBController().claim_lvol_ns_slot(
+                        lvol, snode, True,
+                        standalone_nqn=cluster.nqn + ":lvol:" + lvol.uuid,
+                        exclude_nqns={lvol.nqn})
+                except SubsystemCapacityError as e:
+                    logger.error(str(e))
+                    return _fail_after_bdev(lvol, rpc_client, str(e))
+                return add_lvol_on_node(lvol, snode, is_primary=is_primary, secondary_index=secondary_index)
+        return _fail_after_bdev(
+            lvol, rpc_client, "Failed to add bdev to subsystem")
 
     if is_primary:
         # Persist the target-assigned nsid; replicas re-add with exactly
@@ -3520,7 +3543,7 @@ def _evict_stale_namespace(new_lvol, target_node):
         subsystems = rpc.subsystem_get(new_lvol.nqn)
         if not subsystems:
             return
-        for ns in (subsystems[0].get("namespaces") or []):
+        for ns in (subsystems.get("namespaces") or []):
             if ns.get("nsid") != new_lvol.ns_id:
                 continue
             if ns.get("bdev_name") == new_lvol.top_bdev:
