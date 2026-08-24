@@ -7,9 +7,10 @@ Five modules, in dependency order -- each one may use the ones above it:
     The self-describing record written into the bucket next to a backup's data,
     and the only thing that can interpret those objects once the cluster that
     wrote them is gone. Owns the control plane's S3 access.
-``validation``
-    Whether a chain can be restored. Predicates, plus the one function that
-    refuses.
+``chain``
+    The restorable unit -- a backup and every backup it is a delta against.
+    Constructed from records, from manifests, or from both; coherent by
+    construction, and the one place a chain is refused.
 ``device``
     The S3 devices a node reads and writes through. One bucket each.
 ``controller``

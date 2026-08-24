@@ -24,11 +24,11 @@ What survives is what reading the bucket cannot tell you: the key layout and
 whether the bodies are compressed, both on ``dataplane``.
 
 Each manifest describes exactly one backup and names only its immediate
-predecessor. Chains are walked at read time by :func:`chain_of`, not stored: a
-stored chain would have to be rewritten in every descendant's manifest each time
-a merge folded a backup away, so a single merge would cost a write per descendant
-and could half-fail, leaving the bucket advertising keys the data plane had
-already unmapped.
+predecessor. Chains are walked at read time, by ``chain.BackupChain``, not
+stored: a stored chain would have to be rewritten in every descendant's manifest
+each time a merge folded a backup away, so a single merge would cost a write per
+descendant and could half-fail, leaving the bucket advertising keys the data
+plane had already unmapped.
 
 This document overlaps the ``Backup`` record in FoundationDB by design, and
 substantially -- see the note on ``controller.build_manifest``
@@ -36,8 +36,7 @@ for where the two genuinely differ and where they should be collapsed.
 """
 import json
 import logging
-from typing import (
-    Annotated, Any, Iterable, List, Literal, Optional, Tuple, Union)
+from typing import Annotated, Any, List, Literal, Optional, Tuple, Union
 from uuid import UUID
 
 import boto3
@@ -421,34 +420,3 @@ def _parse(body: bytes, key: str) -> BackupManifest:
         return BackupManifest.model_validate(data)
     except ValueError as e:
         raise ManifestError(f"Manifest {key} is malformed: {e}") from e
-
-
-def chain_of(manifest: BackupManifest,
-             manifests: Iterable[BackupManifest]) -> List[BackupManifest]:
-    """The chain ending at ``manifest``, oldest first and including itself.
-
-    Derived by following ``prev_backup_id`` through the manifests supplied,
-    rather than read from a list stored in each one. That keeps a merge a
-    two-object write -- republish the survivor, delete the merged-away one --
-    instead of a rewrite of every descendant's manifest.
-
-    Raises:
-        ManifestError: A link points at a backup that is not among the manifests
-            supplied, so the chain cannot be completed from them. Reported rather
-            than truncated: a short chain restores a volume with holes in it.
-    """
-    by_id = {m.backup_id: m for m in manifests}
-
-    chain = [manifest]
-    while (previous := chain[-1].prev_backup_id) is not None:
-        if previous not in by_id:
-            raise ManifestError(
-                f"Backup {chain[-1].backup_id} is a delta against {previous}, "
-                "which is not among the manifests given")
-        if previous in {m.backup_id for m in chain}:
-            raise ManifestError(
-                f"Backup {manifest.backup_id} has a cyclic chain at {previous}")
-        chain.append(by_id[previous])
-
-    chain.reverse()
-    return chain

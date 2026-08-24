@@ -10,8 +10,8 @@ import argcomplete
 
 from simplyblock_core import cluster_ops, utils, db_controller, constants
 from simplyblock_core.controllers.backup import controller as backup_controller
-from simplyblock_core.controllers.backup import manifest as backup_manifest
 from simplyblock_core.controllers.backup import policy as backup_policy
+from simplyblock_core.controllers.backup.chain import BackupChain
 from simplyblock_core.controllers.backup.manifest import (
     BackupManifest, ManifestError)
 from simplyblock_core.exceptions import MigrationConflictError, PreconditionError
@@ -1227,8 +1227,9 @@ class CLIWrapperBase:
         return True
 
     def backup__discover(self, sub_command, args):
+        config = _bucket_config(args)
         try:
-            manifests = backup_controller.discover_backups(_bucket_config(args))
+            manifests = backup_controller.discover_backups(config)
         except (ManifestError, ValueError) as e:
             print(f"Error: {e}")
             return False
@@ -1236,13 +1237,16 @@ class CLIWrapperBase:
             print(f"No backups found in {args.bucket}")
             return False
         # Each manifest names only its predecessor, so the chain is walked over
-        # the set. A bucket holding a manifest whose ancestor is missing is worth
-        # showing rather than refusing: that IS the finding.
+        # the set. A bucket holding a chain that could not be restored -- an
+        # ancestor missing, or a line that disagrees with itself about its
+        # encoding or its encryption -- is worth showing rather than refusing:
+        # that IS the finding a discover is for.
         def chain_length(manifest):
             try:
-                return str(len(backup_manifest.chain_of(manifest, manifests)))
-            except ManifestError:
-                return "incomplete"
+                return str(len(BackupChain.of_manifests(
+                    manifest, manifests, config.location()).links))
+            except PreconditionError:
+                return "broken"
 
         # str, not UUID: this row goes through `utils.dump_json` for --json
         # output, and json.dumps has no encoder for a UUID.

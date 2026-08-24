@@ -11,10 +11,12 @@ tests/
 ├── conftest_proxy.py    # `import_proxy_module()` helper that neutralizes spdk_http_proxy_server's module-level run_server side-effect; used by both proxy unit + e2e tests.
 ├── unit/                # Pure-logic tests; single module under test, no model state, no flows.
 │   ├── conftest.py      # Stubs the native `fdb` module so unit tests run without libfdb_c / a live cluster.
+│   ├── backup/          # The backup subsystem's pure logic (chain, manifest schema, config model, CLI args).
 │   ├── models/          # Every `BaseModel` test: field defaults, secrets, chunked reads, serialization.
 │   └── web/             # Unit tests for simplyblock_web (settings, v2 auth).
 ├── integration/         # Flow/controller tests — ALL run against real FDB.
 │   ├── conftest.py      # `pytest_configure` provisions FDB (testcontainers) before collection; autouse per-test keyspace wipe.
+│   ├── backup/          # Backup flows: creation/restore/import preconditions, manifests, encryption, s3_id allocation.
 │   ├── ftt2/            # FTT=2 restart scenarios.
 │   ├── migration/       # Live volume migration.
 │   └── expansion_sim/   # Cluster-expansion simulator (rebinds the real fdb client, routes RPC to simulators).
@@ -45,7 +47,7 @@ Controller-flow tests, **all of which run against a real FoundationDB**. `tests/
 
 Build real model objects and persist them with `write_to_db(db.kv_store)`; read them back through `DBController()`. The `ftt2/` and `migration/` conftests show the canonical pattern (real `Cluster`/`StorageNode`/`LVol` written to FDB, torn down after).
 
-> **Migration in progress.** Several top-level files still carry the old stubbed-DB pattern (`test_cluster_duplicate_name.py`, `test_dual_fault_tolerance.py`, `test_backup.py`, …). These are the broken tests being sorted onto real FDB — do not copy them, and convert them when you touch them. As a transition guard, `integration/conftest.py`'s `pytest_configure` imports the real `fdb` before collection so a stray `setdefault("fdb", MagicMock())` becomes a no-op instead of poisoning the session.
+> **Migration in progress.** Several top-level files still carry the old stubbed-DB pattern (`test_cluster_duplicate_name.py`, `test_dual_fault_tolerance.py`, `backup/test_legacy.py`, …). These are the broken tests being sorted onto real FDB — do not copy them, and convert them when you touch them. As a transition guard, `integration/conftest.py`'s `pytest_configure` imports the real `fdb` before collection so a stray `setdefault("fdb", MagicMock())` becomes a no-op instead of poisoning the session.
 
 What you *may* still mock: everything **above** the database. Storage nodes are always mocked (in-process `RPCClient`/`SNodeClient` mock servers — see the per-suite `mock_rpc_server` fixtures), and external side-effects (firewall API, `ping_host`, k8s lookups, `time.sleep`, distrib-map sends) are patched. The integration tier never starts SPDK. The line is: real DB, mocked nodes.
 
