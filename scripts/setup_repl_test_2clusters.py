@@ -45,7 +45,10 @@ BRANCH = "main"
 SN_TYPE = "i3en.2xlarge"
 MGMT_TYPE = "m6i.2xlarge"
 CLIENT_TYPE = "m6in.8xlarge"
-CLIENT_COUNT = 1                            # client(s) used by the test process
+CLIENT_COUNT = 2                            # client(s) used by the test process
+#: 2, not 1: case 7 spreads 20 namespaced volumes across at least two
+#: clients, and growing an existing lab with `add_client` after the fact
+#: is an extra manual step before every namespaced run.
 
 USER = "ec2-user"
 IFACE = "eth0"
@@ -101,9 +104,12 @@ REPLICATION = {"source": "src", "target": "tgt", "timeout": 3600}
 # parallel reads, spdk R26.3 bdd97c1d8/ce876a169) exist only from the
 # 2026-08-22 build onward, and ultra:main-latest's manifest list has a live
 # race that leaves its amd64 entry pointing at the PREVIOUS build (observed
-# 2026-08-17, -21 and -22). This digest = main-d89a595c-amd64, 2026-08-22.
+# 2026-08-17, -21 and -22). This digest = main-2a03661a-amd64, 2026-08-24 --
+# the first build carrying the promotion-window ANA-transition fix
+# (spdk R26.3 554c80f11), verified built FROM spdk-core:R26.3-latest
+# whose manifest was created 18:41:57, before this ultra build started.
 SPDK_IMAGE = ("public.ecr.aws/simply-block/ultra@"
-              "sha256:8a007dca5bf6a1fa89cc96945f43164539cac65f0cdafa56d5ee44961e9902af")
+              "sha256:961410aefddaa615d4d1dfe1b8cc7ce27922d9a06ff924296f669c953e742bef")
 
 SN_COUNT = sum(c["nodes"] for c in CLUSTERS)
 SBCTL = "sudo /usr/local/bin/sbctl"

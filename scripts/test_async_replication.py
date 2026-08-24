@@ -292,11 +292,32 @@ def wait_data_replicated(mgmt_ip, key_path, lvol_uuids, after_ts,
 
 
 def do_failover(mgmt_ip, key_path, lvol_uuid):
+    """Fail a volume over, capturing WHY when it does not work.
+
+    replicate_lvol_on_target_cluster returns a dict on success but False or
+    (False, error) on failure, and the controller reports the reason through
+    its logger -- which went to the snippet's stderr and was dropped. A bare
+    "returned no connection strings" then costs a whole lab run to diagnose
+    (case 7, runs 20260824_174611 and _202949). Capture both.
+    """
     return mgmt_py(mgmt_ip, key_path, f"""
-import json
+import io, json, logging, contextlib
 from simplyblock_core.controllers import lvol_controller
-res = lvol_controller.replicate_lvol_on_target_cluster({lvol_uuid!r})
-print(json.dumps(res if isinstance(res, dict) else {{"result": res}}))
+buf = io.StringIO()
+handler = logging.StreamHandler(buf)
+handler.setLevel(logging.WARNING)
+logging.getLogger().addHandler(handler)
+err = ""
+try:
+    with contextlib.redirect_stderr(buf):
+        res = lvol_controller.replicate_lvol_on_target_cluster({lvol_uuid!r})
+except Exception as exc:                      # noqa: BLE001 - report, don't hide
+    res, err = False, f"{{type(exc).__name__}}: {{exc}}"
+out = res if isinstance(res, dict) else {{"result": res}}
+if not (isinstance(res, dict) and res.get("connection_strings")):
+    out["error"] = err
+    out["log"] = buf.getvalue()[-1500:]
+print(json.dumps(out))
 """)
 
 
@@ -1197,7 +1218,9 @@ def test_case_2(meta):
         fo = do_failover(mgmt_ip, key_path, lv)
         print(f"  failover {lv}: {json.dumps(fo)}")
         if not isinstance(fo, dict) or not fo.get("connection_strings"):
-            raise RuntimeError(f"FAIL: fail-over returned no connection strings for {lv}")
+            raise RuntimeError(
+                f"FAIL: fail-over returned no connection strings for {lv}: "
+                f"{fo.get('error') or ''} {fo.get('log') or ''}".strip())
         if fo.get("nqn"):
             assert fo["nqn"], "missing NQN"
         failed_over.append({"src_lvol": lv, "fo": fo})
@@ -1272,7 +1295,9 @@ def _setup_failed_over_volumes(meta, tag):
     for lv in lvols:
         fo = do_failover(mgmt_ip, key_path, lv)
         if not isinstance(fo, dict) or not fo.get("connection_strings"):
-            raise RuntimeError(f"FAIL: fail-over returned no connection strings for {lv}")
+            raise RuntimeError(
+                f"FAIL: fail-over returned no connection strings for {lv}: "
+                f"{fo.get('error') or ''} {fo.get('log') or ''}".strip())
         tgt_lvols.append(fo["lvol_id"])
 
     # Re-key the baseline by TARGET lvol id and mount the failed-over copies.
@@ -1770,7 +1795,9 @@ def test_case_7(meta):
     for lv in lvols:
         fo = do_failover(mgmt_ip, key_path, lv)
         if not isinstance(fo, dict) or not fo.get("connection_strings"):
-            raise RuntimeError(f"FAIL: fail-over returned no connection strings for {lv}")
+            raise RuntimeError(
+                f"FAIL: fail-over returned no connection strings for {lv}: "
+                f"{fo.get('error') or ''} {fo.get('log') or ''}".strip())
         tgt_lvols.append(fo["lvol_id"])
     src_to_tgt = dict(zip(lvols, tgt_lvols))
 
@@ -2035,7 +2062,9 @@ def test_case_9(meta):
     for lv in lvols:
         fo = do_failover(mgmt_ip, key_path, lv)
         if not isinstance(fo, dict) or not fo.get("connection_strings"):
-            raise RuntimeError(f"FAIL: post-chaos fail-over failed for {lv}")
+            raise RuntimeError(
+                f"FAIL: post-chaos fail-over failed for {lv}: "
+                f"{fo.get('error') or ''} {fo.get('log') or ''}".strip())
         tgt_lvols.append(fo["lvol_id"])
     tgt_baseline = {t: baseline[s] for s, t in zip(lvols, tgt_lvols)}
     fo_mounts = connect_and_mount(client_ip, key_path, mgmt_ip, tgt_lvols,
