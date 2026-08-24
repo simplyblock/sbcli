@@ -4588,6 +4588,21 @@ def _decommission_node_devices(removed_node: StorageNode):
 
                 node.jm_ids.remove(removed_jm_id)
                 jm_ids = get_sorted_ha_jms(node)
+                removed_fd = removed_node.failure_domain
+                if removed_fd >= 0 and jm_ids:
+                    # Prefer a replacement from the SAME failure domain the
+                    # removed node was in -- keeps this consumer's domain
+                    # distribution identical to what it was before the
+                    # removal (the least-disruptive choice) instead of
+                    # reshuffling it. Stable sort: within the "matches" and
+                    # "doesn't match" groups, get_sorted_ha_jms' own ranking
+                    # (host-disjoint / FD-balance / label) is preserved.
+                    def _owner_fd(jid):
+                        owner_jm = db_controller.get_jm_device_by_id(jid)
+                        owner = (db_controller.get_storage_node_by_id(owner_jm.node_id)
+                                 if owner_jm else None)
+                        return owner.failure_domain if owner else -1
+                    jm_ids = sorted(jm_ids, key=lambda jid: _owner_fd(jid) != removed_fd)
                 logger.debug(f"online_jms: {str(jm_ids)}")
                 # get_sorted_ha_jms already ranks candidates by host-disjoint
                 # (hard) + failure-domain balance (best-effort) -- no extra
@@ -10659,16 +10674,25 @@ def get_sorted_ha_jms(current_node: StorageNode):
     """Select the remote HA journal members for ``current_node``.
 
     The full HA journal set is ``ha_jm_count`` members: the node's own local JM
-    plus ``ha_jm_count - 1`` remote JMs returned here. Selection honors three
-    anti-affinity dimensions, in priority order:
+    plus ``ha_jm_count - 1`` remote JMs returned here. Selection honors these
+    dimensions, in priority order:
 
+      0. Locality (best-effort) — reserve ONE remote copy in the current
+         node's OWN failure domain, when the FD-balance cap (below) allows a
+         domain to hold 2 members (local + this one). A same-domain copy is
+         cheap to reach — lower round-trip than any cross-domain member —
+         which matters for whatever in the write path benefits from a fast
+         quorum member. Skipped outright when the cap only allows 1 per
+         domain (many domains relative to ha_jm_count): even-spread already
+         wins in that regime, nothing to reserve.
       1. Host-disjoint (hard) — never two journal copies on one physical host.
-      2. Failure-domain balance (best-effort) — spread copies across as many
-         domains as possible and never let one domain hold more than a
-         quorum-safe cap, so losing a whole domain still leaves >= 2 journals
-         (the JC quorum). With 2 domains and 4 journals the result is 2-2; with
-         N>=4 domains it is one per domain. The local JM counts toward its own
-         domain's tally.
+      2. Failure-domain balance (best-effort) — spread the REMAINING copies
+         across as many domains as possible and never let one domain hold
+         more than a quorum-safe cap, so losing a whole domain still leaves
+         >= 2 journals (the JC quorum). With 2 domains and 4 journals the
+         result is 2-2; with N>=4 domains it is one per domain (plus the
+         local-domain reservation from step 0). The local JM counts toward
+         its own domain's tally.
       3. Physical-label distinct (best-effort) — prefer journals on distinct
          physical labels (a coarser grouping than host).
 
@@ -10727,6 +10751,37 @@ def get_sorted_ha_jms(current_node: StorageNode):
     if current_node.failure_domain >= 0:
         fd_count[current_node.failure_domain] = 1  # the local JM occupies its domain
 
+    def _pick_same_fd_as_local(enforce_label):
+        # One-shot reservation (not a loop): take the least-used JM in the
+        # local node's own domain, if the cap leaves room for a second
+        # member there and nothing has claimed that reservation yet.
+        if (current_node.failure_domain < 0 or per_fd_cap < 2
+                or len(selected) >= target
+                or fd_count.get(current_node.failure_domain, 0) >= 2):
+            return
+        best = None
+        for jm_id, cnt in jm_count.items():
+            if not jm_id or jm_id in selected:
+                continue
+            ip = jm_dev_to_mgmt_ip[jm_id]
+            if ip in used_ips:                            # host-disjoint (hard)
+                continue
+            if jm_dev_to_fd.get(jm_id, -1) != current_node.failure_domain:
+                continue
+            label = jm_dev_to_label.get(jm_id, 0)
+            if enforce_label and label > 0 and label in used_labels:
+                continue
+            if best is None or cnt < best[0]:
+                best = (cnt, jm_id, ip, label)
+        if best is None:
+            return
+        _, jm_id, ip, label = best
+        selected.append(jm_id)
+        used_ips.add(ip)
+        fd_count[current_node.failure_domain] = fd_count.get(current_node.failure_domain, 0) + 1
+        if label > 0:
+            used_labels.add(label)
+
     def _pick(enforce_fd_cap, enforce_label):
         # Greedy: repeatedly take the eligible JM that lands in the currently
         # emptiest domain (maximizes spread), breaking ties by least usage.
@@ -10758,6 +10813,8 @@ def get_sorted_ha_jms(current_node: StorageNode):
                 used_labels.add(label)
 
     if fd_enabled:
+        _pick_same_fd_as_local(enforce_label=True)
+        _pick_same_fd_as_local(enforce_label=False)
         _pick(enforce_fd_cap=True, enforce_label=True)
         _pick(enforce_fd_cap=True, enforce_label=False)   # relax label, keep domain cap
         if len(selected) < target:

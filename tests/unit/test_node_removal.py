@@ -1357,6 +1357,56 @@ class TestDecommissionDevices(unittest.TestCase):
         consumer.rpc_client().jc_replace_jm.assert_called_once_with(
             name_old="jm_A", name_new="remote_jm_replacementn1")
 
+    def test_prefers_a_replacement_from_the_removed_nodes_own_failure_domain(self):
+        # get_sorted_ha_jms ranks candidates by the CONSUMER's own domain
+        # balance -- it has no notion of "a node is being removed". Without
+        # re-ranking, a removal could swap a same-domain member for a
+        # cross-domain one purely because of insertion-order tie-breaks
+        # inside get_sorted_ha_jms, reshuffling this consumer's domain
+        # distribution for no reason. Re-ranking so a same-FD-as-removed
+        # candidate goes first keeps the distribution identical to what it
+        # was before the removal -- the least-disruptive choice. Here
+        # get_sorted_ha_jms is mocked to rank the DIFFERENT-domain candidate
+        # first; the removal path must still try "same-fd" ahead of it.
+        cl = _cluster()
+        removed = _node("n1", n_devices=0, with_jm=True, failure_domain=2)
+        removed.jm_ids = []
+        consumer = _node("consumer", n_devices=0, with_jm=True)
+        consumer.jm_ids = [removed.jm_device.get_id()]
+        live_old = RemoteJMDevice()
+        live_old.uuid = removed.jm_device.get_id()
+        live_old.remote_bdev = "remote_jm_n1n1"
+        consumer.remote_jm_devices = [live_old]
+        other_fd = _node("other-fd", n_devices=0, with_jm=True, failure_domain=1)
+        other_fd.jm_ids = []
+        other_fd.jm_device.jm_bdev = "jm_other_fd"
+        same_fd = _node("same-fd", n_devices=0, with_jm=True, failure_domain=2)
+        same_fd.jm_ids = []
+        same_fd.jm_device.jm_bdev = "jm_same_fd"
+        db = FakeDB(cl, [removed, consumer, other_fd, same_fd])
+        db.get_jm_device_by_id = MagicMock(side_effect=lambda jid: {
+            removed.jm_device.get_id(): removed.jm_device,
+            other_fd.jm_device.get_id(): other_fd.jm_device,
+            same_fd.jm_device.get_id(): same_fd.jm_device,
+        }[jid])
+        dc = MagicMock()
+        connected_same_fd = RemoteJMDevice()
+        connected_same_fd.uuid = same_fd.jm_device.get_id()
+        connected_same_fd.remote_bdev = "remote_jm_same_fdn1"
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "device_controller", dc), \
+             patch.object(storage_node_ops, "get_sorted_ha_jms",
+                          return_value=[other_fd.jm_device.get_id(), same_fd.jm_device.get_id()]), \
+             patch.object(storage_node_ops, "_connect_to_remote_jm_devs",
+                          return_value=[connected_same_fd]) as connect_mock:
+            ret = storage_node_ops._decommission_node_devices(removed)
+
+        self.assertTrue(ret)
+        connect_mock.assert_called_once_with(
+            consumer, jm_ids=[same_fd.jm_device.get_id()], only_node_id=same_fd.get_id())
+        self.assertIn(same_fd.jm_device.get_id(), consumer.jm_ids)
+        self.assertNotIn(other_fd.jm_device.get_id(), consumer.jm_ids)
+
     def test_retries_the_next_candidate_after_a_jc_collision(self):
         # No more pre-filtering by a DB snapshot: get_sorted_ha_jms already
         # ranks by host-disjoint + FD-balance, and connect_device's own
