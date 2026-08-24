@@ -6,7 +6,7 @@ A read-error retry of a POST silently re-applies the mutation, so POST must be
 excluded from the urllib3 retry's allowed_methods. Connection-error retries are
 governed separately (the `connect` count) and are safe, so they must remain.
 """
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from pydantic import SecretStr
 
@@ -43,3 +43,24 @@ def test_connect_retries_preserved():
         # Connection-level retries (request never reached the node) stay enabled
         # even though POST read-retries are off.
         assert retries.connect == 3
+
+
+def test_same_retry_value_shares_one_mounted_adapter_set():
+    with patch("requests.session"):
+        c1 = RPCClient("127.0.0.1", 8081, "user", SecretStr("pass"), timeout=1, retry=3)
+        c2 = RPCClient("127.0.0.1", 8081, "user", SecretStr("pass"), timeout=1, retry=3)
+    assert c1.session is c2.session
+    assert c1.session.mount.call_count == 2  # http:// + https://, mounted once
+
+
+def test_different_retry_value_gets_independently_mounted_adapter():
+    with patch("requests.session", side_effect=MagicMock):
+        c1 = RPCClient("127.0.0.1", 8081, "user", SecretStr("pass"), timeout=1, retry=2)
+        c2 = RPCClient("127.0.0.1", 8081, "user", SecretStr("pass"), timeout=1, retry=5)
+    assert c1.session is not c2.session
+    retries_c1 = {ad.max_retries.total for ad in
+                 [call.args[1] for call in c1.session.mount.call_args_list]}
+    retries_c2 = {ad.max_retries.total for ad in
+                 [call.args[1] for call in c2.session.mount.call_args_list]}
+    assert retries_c1 == {2}
+    assert retries_c2 == {5}

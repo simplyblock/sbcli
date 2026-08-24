@@ -69,6 +69,21 @@ def _clear_singleton_cache():
 
 
 @pytest.fixture(autouse=True)
+def _clear_rpc_session_pool():
+    """Clear RPCClient's pooled-Session cache before and after each test.
+
+    Fixtures across the suite build clients against the same identity
+    (host/port/user) with the default retry, so without this a test can
+    silently reuse a mocked Session built by an *earlier* test instead of
+    the one it just requested.
+    """
+    from simplyblock_core.rpc_client import _session_pool
+    _session_pool.clear()
+    yield
+    _session_pool.clear()
+
+
+@pytest.fixture(autouse=True)
 def _no_leaked_port_block_window():
     """Fail (and un-wedge) a test that leaves the port-block window gate held.
 

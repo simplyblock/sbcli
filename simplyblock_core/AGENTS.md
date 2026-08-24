@@ -8,7 +8,7 @@ Core business logic, data models, and background services for the Simplyblock co
 - `models/` — Data models inheriting from `BaseModel` (see below).
 - `services/` — Background services for monitoring and async task execution (health checks, snapshot/lvol/storage-node monitors, task runners for backup, migration, restart, etc.).
 - `db_controller.py` — Singleton `DBController` wrapping FoundationDB. All data access goes through this class.
-- `rpc_client.py` — JSON-RPC client with caching for communicating with storage node SPDK processes.
+- `rpc_client.py` — JSON-RPC client for communicating with storage node SPDK processes. `Session` construction is pooled by `RPCSessionPool` (keyed on identity + retry; `timeout` stays per-call). `services/spdk_http_proxy_server.py`, the receiving end, supports HTTP/1.1 keep-alive so those pooled connections are actually reused end-to-end.
 - `kms/` — Key management abstraction: HashiCorp Vault (`_hcp.py`) and FDB-based (`_fdb.py`) backends.
 
 ## Data Model Pattern
