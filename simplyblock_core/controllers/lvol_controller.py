@@ -3462,10 +3462,14 @@ def _evict_stale_namespace(new_lvol, target_node):
     """
     try:
         rpc = target_node.rpc_client()
-        subsystems = rpc.subsystem_get(new_lvol.nqn)
-        if not subsystems:
+        # subsystem_get returns ONE subsystem dict (single_or_none), not a
+        # list -- indexing it with [0] raised KeyError(0), the best-effort
+        # except swallowed it, and the eviction silently never ran (run
+        # 20260824_104449: same 40x add_ns -32602 with the fix "in place").
+        subsystem = rpc.subsystem_get(new_lvol.nqn)
+        if not subsystem:
             return
-        for ns in (subsystems[0].get("namespaces") or []):
+        for ns in (subsystem.get("namespaces") or []):
             if ns.get("nsid") != new_lvol.ns_id:
                 continue
             if ns.get("bdev_name") == new_lvol.top_bdev:

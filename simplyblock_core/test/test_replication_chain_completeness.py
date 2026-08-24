@@ -274,7 +274,8 @@ class _EvictRPC:
         self._ns = namespaces
 
     def subsystem_get(self, nqn):
-        return [{"nqn": nqn, "namespaces": self._ns}]
+        # the real client returns ONE dict (single_or_none), never a list
+        return {"nqn": nqn, "namespaces": self._ns}
 
     def nvmf_subsystem_remove_ns(self, nqn, nsid):
         self.removed.append((nqn, nsid))
