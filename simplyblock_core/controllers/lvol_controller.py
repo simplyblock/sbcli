@@ -1132,7 +1132,7 @@ def _lvol_secondary_index(lvol, node):
     return max(_lvol_path_index(lvol, node) - 1, 0)
 
 
-def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0, min_cntlid=None):
+def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0, min_cntlid=None, ns_uuid=None):
     rpc_client = snode.rpc_client()
 
     # Refuse to attach a new namespace to a shared subsystem while any
@@ -1286,7 +1286,7 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0, min_cntlid
                 f"maps across the shared subsystem's paths)")
         requested_nsid = lvol.ns_id
     ret, err = rpc_client.nvmf_subsystem_add_ns2(
-        lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid, nsid=requested_nsid)
+        lvol.nqn, lvol.top_bdev, ns_uuid or lvol.uuid, lvol.guid, nsid=requested_nsid)
     if  err:
         if err and err["code"] == -32602 and lvol.namespace and lvol.node_id == snode.get_id():
             logger.info("Error adding namespace to subsystem, finding new subsystem for namespaced lvol")
@@ -3380,7 +3380,13 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
         random.randint(6001, 6500),  # tertiary
     ]
 
-    lvol_bdev, error = add_lvol_on_node(new_lvol, target_node, min_cntlid=_tgt_cntlids[0])
+    # Preserve the source lvol's UUID as the NVMe namespace UUID so the kernel
+    # can recognise target paths as belonging to the same multipath namespace.
+    # new_lvol.uuid is a fresh DB key and must NOT be used as the namespace UUID.
+    _src_ns_uuid = lvol.uuid
+
+    lvol_bdev, error = add_lvol_on_node(new_lvol, target_node,
+                                         min_cntlid=_tgt_cntlids[0], ns_uuid=_src_ns_uuid)
     if error:
         logger.error(error)
         db_controller.release_lvol_ns_slot(new_lvol)
@@ -3406,7 +3412,7 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
             continue
         _peer_cntlid = next(_tgt_cntlid_iter, None)
         lvol_bdev, error = add_lvol_on_node(new_lvol, peer_node, is_primary=False,
-                                             min_cntlid=_peer_cntlid)
+                                             min_cntlid=_peer_cntlid, ns_uuid=_src_ns_uuid)
         if error:
             logger.error(error)
             # remove lvol from primary
