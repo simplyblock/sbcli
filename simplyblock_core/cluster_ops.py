@@ -713,23 +713,6 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
     return cluster.get_id()
 
 
-def set_backup_config(cl_id, config: BackupConfig) -> None:
-    """Replace a cluster's volume-backup configuration.
-
-    Uses ``atomic_update`` rather than a read-modify-write: this runs while
-    monitors are concurrently mutating cluster status, and a full write here
-    would clobber them.
-
-    Note this does not reconfigure S3 bdevs on already-running nodes -- they
-    pick the new config up on their next restart or cluster activate. Changing
-    the bucket or the object format also breaks the chain of any existing
-    backups, which is refused at backup time rather than here.
-    """
-    db_controller.atomic_update(
-        db_controller.get_cluster_by_id(cl_id),
-        lambda c, v=config.model_dump(exclude_none=True): c.set_backup_config(v))
-
-
 def set_name(cl_id, name) -> Cluster:
     cluster = db_controller.get_cluster_by_id(cl_id)
     if name:
