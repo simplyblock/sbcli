@@ -95,6 +95,15 @@ CLUSTERS = [
 # Snapshot replication direction (source cluster -> target cluster).
 REPLICATION = {"source": "src", "target": "tgt", "timeout": 3600}
 
+# SPDK image, pinned BY DIGEST. Two reasons this is a digest and not a tag:
+# the replication-transfer pipeline fixes (dispatch window fill + fragmented
+# parallel reads, spdk R26.3 bdd97c1d8/ce876a169) exist only from the
+# 2026-08-22 build onward, and ultra:main-latest's manifest list has a live
+# race that leaves its amd64 entry pointing at the PREVIOUS build (observed
+# 2026-08-17, -21 and -22). This digest = main-d89a595c-amd64, 2026-08-22.
+SPDK_IMAGE = ("public.ecr.aws/simply-block/ultra@"
+              "sha256:8a007dca5bf6a1fa89cc96945f43164539cac65f0cdafa56d5ee44961e9902af")
+
 SN_COUNT = sum(c["nodes"] for c in CLUSTERS)
 SBCTL = "sudo /usr/local/bin/sbctl"
 
@@ -339,8 +348,10 @@ def add_nodes_to_cluster(mgmt_ip, cluster_uuid, priv_ips, ha_jm_count):
         for attempt in range(5):
             try:
                 ssh_exec(mgmt_ip, [
-                    f"{SBCTL} -d sn add-node {cluster_uuid} {priv_ip}:5000 {IFACE}"
-                    f"{jm_flag}"
+                    # --dev unlocks --spdk-image (developer_mode, cli.py); the
+                    # plain -d is only debug logging and does NOT.
+                    f"{SBCTL} --dev -d sn add-node {cluster_uuid} {priv_ip}:5000 {IFACE}"
+                    f"{jm_flag} --spdk-image {SPDK_IMAGE}"
                 ], check=True)
                 return
             except RuntimeError:
