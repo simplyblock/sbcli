@@ -839,7 +839,15 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
         task = tasks_controller.add_snapshot_replication_task(snap.cluster_id, snap.lvol.node_id, snap.get_id())
         if task:
             snapshot_events.replication_task_created(snap)
-    if lvol.cloned_from_snap:
+    # Keep-the-recovered-source-in-sync: a FAIL-OVER clone's snapshots are
+    # shipped back to the original cluster so a later fail-back is a delta.
+    # ONLY when nothing else owns the volume's replication: once a forward
+    # policy is attached (migration onward, case-4 style), this to-source task
+    # runs CONCURRENTLY with the policy's forward transfers on the same
+    # snapshots — 2026-08-21: two volumes' shrink snapshots kept landing on
+    # the (emptied!) original cluster, the target-side copies the cutover was
+    # gated on never appeared, and both cutovers died on max retry.
+    if lvol.cloned_from_snap and not getattr(lvol, "replication_policy_id", ""):
         lvol_snap = _parent_snap  # reuse fetch from above — same ID, no second DB read
         if lvol_snap and lvol_snap.source_replicated_snap_uuid:
             try:

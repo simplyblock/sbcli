@@ -41,6 +41,7 @@ from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.prom_client import PromClient
 from simplyblock_core.rpc_client import RPCClient, RPCErrorCode, RPCRemoteError, RPCException, namespace_matches  # noqa: F401  (RPCClient kept as a patch target for tests)
 from simplyblock_core.snode_client import SNodeClient, SNodeClientException
+from simplyblock_core.utils import dial_backoff
 from simplyblock_web import node_utils
 from simplyblock_core.utils import addNvmeDevices
 from simplyblock_core.utils import pull_docker_image_with_retry
@@ -666,13 +667,24 @@ def _connect_device_attach(name, device, node: StorageNode, rpc_client, attach_r
         # Controller is fully gone — do a full multi-path attach.
         bdev_name = ""
         for ip in (expected_ips or [device.nvmf_ip]):
+            # Circuit breaker per target address: dialling a peer that has
+            # refused the last N connects burns this node's app-thread time
+            # on connect polling for nothing -- see utils/dial_backoff.
+            if not dial_backoff.allowed(ip):
+                logger.debug(f"Attach to {ip} for {name} held by dial backoff")
+                continue
             try:
                 resp = attach_rpc_client.bdev_nvme_attach_controller(
                     name, device.nvmf_nqn, ip, device.nvmf_port, tr_type,
                     multipath=attach_mode)
+                if resp:
+                    dial_backoff.record_success(ip)
+                else:
+                    dial_backoff.record_failure(ip)
                 if not bdev_name and resp and isinstance(resp, list):
                     bdev_name = resp[0]
             except Exception as e:
+                dial_backoff.record_failure(ip)
                 logger.warning(f"Failed to attach controller {name} via {ip}: {e}")
 
             if device.nvmf_multipath and bdev_name:
@@ -712,11 +724,19 @@ def _connect_device_attach(name, device, node: StorageNode, rpc_client, attach_r
                 "Controller %s has %d/%d paths attached, attaching missing: %s",
                 name, len(attached_ips), len(expected_ips), missing_ips)
             for ip in missing_ips:
+                if not dial_backoff.allowed(ip):
+                    logger.debug(
+                        f"Re-attach of {ip} on {name} held by dial backoff")
+                    continue
                 try:
-                    attach_rpc_client.bdev_nvme_attach_controller(
-                        name, device.nvmf_nqn, ip, device.nvmf_port, tr_type,
-                        multipath=attach_mode)
+                    if attach_rpc_client.bdev_nvme_attach_controller(
+                            name, device.nvmf_nqn, ip, device.nvmf_port, tr_type,
+                            multipath=attach_mode):
+                        dial_backoff.record_success(ip)
+                    else:
+                        dial_backoff.record_failure(ip)
                 except Exception as e:
+                    dial_backoff.record_failure(ip)
                     logger.warning(
                         "Failed to re-attach path %s on controller %s: %s",
                         ip, name, e)
@@ -796,6 +816,14 @@ def repair_multipath_controller(name: str, device, node: StorageNode):
         "Controller %s has %d/%d paths attached, re-attaching missing: %s",
         name, len(attached_ips), len(expected_ips), missing_ips)
     for ip in missing_ips:
+        # Circuit breaker per target address: repeated refusals earn the
+        # address a hold (utils/dial_backoff). Status gates cannot cover a
+        # peer whose DB record is wrong (SPDK dead, record ONLINE -- run
+        # mass_create_delete_docker-20260821), and hammering a refusing
+        # address wedged a healthy node's app thread there.
+        if not dial_backoff.allowed(ip):
+            logger.debug("Repair of path %s on %s held by dial backoff", ip, name)
+            continue
         try:
             # The return value matters: a fabric connect that cannot reach the
             # address answers with an error result rather than raising, so
@@ -805,10 +833,14 @@ def repair_multipath_controller(name: str, device, node: StorageNode):
             if not rpc_client.bdev_nvme_attach_controller(
                     name, device.nvmf_nqn, ip, device.nvmf_port,
                     tr_type, multipath="multipath"):
+                dial_backoff.record_failure(ip)
                 logger.warning(
                     "Re-attach of path %s on controller %s was rejected by the "
                     "target", ip, name)
+            else:
+                dial_backoff.record_success(ip)
         except Exception as e:
+            dial_backoff.record_failure(ip)
             logger.error("Failed to re-attach path %s on controller %s: %s", ip, name, e)
 
     # Re-read and recognize partial success: a 1/2 outcome is still

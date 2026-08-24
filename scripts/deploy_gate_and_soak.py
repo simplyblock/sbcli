@@ -10,7 +10,11 @@ earlier runs looked instrumented and were not (ultra:main-latest's manifest list
 points amd64 at a five-day-old image), so a quiet soak log proves nothing unless
 the binary was checked first.
 
-Usage:  python deploy_gate_and_soak.py [--skip-deploy]
+Usage:  python deploy_gate_and_soak.py [--skip-deploy] [--mgmt-boot-100]
+                                       [--placement-dumps]
+
+--mgmt-boot-100 gives the mgmt node a 100GB boot disk (default 80).
+--placement-dumps turns on per-outage placement-map dumps in the soak.
         --skip-deploy reuses the existing cluster_metadata_mp.json (gate + soak
         only), for when a cluster is already up.
 """
@@ -77,7 +81,10 @@ def deploy():
     dlog = HERE / f"mp_deploy_{time.strftime('%Y%m%d_%H%M%S')}.log"
     log(f"deployer output -> {dlog.name}")
     with open(dlog, "w", encoding="utf-8") as fh:
-        proc = subprocess.run([sys.executable, "setup_perf_test_multipath.py"],
+        deploy_cmd = [sys.executable, "setup_perf_test_multipath.py"]
+        if "--mgmt-boot-100" in sys.argv:
+            deploy_cmd += ["--mgmt-boot-gb", "100"]
+        proc = subprocess.run(deploy_cmd,
                               cwd=str(HERE), stdout=fh,
                               stderr=subprocess.STDOUT, timeout=5400)
     tail = "\n".join(
@@ -130,7 +137,8 @@ def gate(mgmt, sn):
 
 def start_soak(mgmt):
     log("=== starting soak ===")
-    out = ssh(mgmt, "bash ~/start_soak_mp.sh")
+    env_prefix = "PLACEMENT_DUMPS=1 " if "--placement-dumps" in sys.argv else ""
+    out = ssh(mgmt, f"{env_prefix}bash ~/start_soak_mp.sh")
     log(out.strip())
     time.sleep(120)
     status = ssh(mgmt, "TS=$(cat ~/soak_ts); P=$(cat ~/soak_pid); "

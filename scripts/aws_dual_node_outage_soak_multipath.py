@@ -279,6 +279,15 @@ def parse_args():
                         help="Remote device bdevs per node to sample for multipath "
                              "policy. Hublvol bdevs are always all checked. Keep small: "
                              "unfiltered bdev dumps have wedged app threads before.")
+    verify.add_argument("--placement-dumps", action="store_true",
+                        help="Take a placement-map dump (RPC "
+                             "distr_debug_placement_map_dump) from every "
+                             "distrib on every reachable node IMMEDIATELY "
+                             "before and after each outage, gzip it, and store "
+                             "it on the node under ~/placement_dumps/<run>/. "
+                             "Off by default: a dump pair per outage phase "
+                             "adds RPC load and disk, so it is opt-in for "
+                             "placement investigations.")
     verify.add_argument("--start-iteration", type=int, default=1,
                         help="Number the first outage pair with this instead of "
                              "1. Pair distance rotation and NIC-phase "
@@ -1753,6 +1762,101 @@ class SoakRunner:
 
     # ----- phase 1: all-node single-NIC outage -------------------------------
 
+    #: In-container helper for the placement dump. rpc.py has no subcommand
+    #: for the custom distr_* RPCs, so this goes through the generic
+    #: JSONRPCClient: list bdevs, keep the distribs, ask each to dump its
+    #: in-memory placement map (the RPC writes a file in the container and
+    #: returns its path).
+    _PLACEMENT_DUMP_PY = """
+import json, sys
+sys.path.insert(0, '/root/spdk/python')
+from spdk.rpc.client import JSONRPCClient
+client = JSONRPCClient('/mnt/ramdisk/{container}/spdk.sock', timeout=60.0)
+out = {{}}
+for bdev in client.call('bdev_get_bdevs'):
+    name = bdev.get('name', '')
+    product = str(bdev.get('product_name', '')).lower()
+    if 'distrib' not in product and not name.startswith('distrib'):
+        continue
+    try:
+        out[name] = client.call('distr_debug_placement_map_dump', {{'name': name}})
+    except Exception as exc:
+        out[name] = 'ERROR: %s' % exc
+print(json.dumps(out))
+"""
+
+    def take_placement_dumps(self, tag, node_uuids=None):
+        """Dump every distrib's in-memory placement map on every reachable
+        node, gzip the dump files, and stash them on the node.
+
+        Non-fatal by design: this brackets outages, so some nodes are expected
+        to be dead for the post-outage dump -- they are logged and skipped,
+        never failed on. Files land on each storage node under
+        ~/placement_dumps/<run_id>/<tag>_<node>_<bdev>.txt.gz so the run's
+        dumps can be fetched with one scp -r per node afterwards.
+        """
+        if not self.args.placement_dumps:
+            return
+        uuids = list(node_uuids) if node_uuids else list(self.node_ip_map)
+        results = {}
+        results_lock = threading.Lock()
+
+        def _dump_one(uuid):
+            short = uuid[:12]
+            host = self._node_host(uuid)
+            _, containers, _ = host.run(
+                "sudo docker ps --format '{{.Names}}' | grep -E '^spdk_[0-9]+$' || true",
+                timeout=30, check=False, label=f"pd find container {short}")
+            names = [n for n in containers.strip().splitlines() if n.strip()]
+            if not names:
+                raise TestRunError("no SPDK container")
+            container = names[0]
+            script = self._PLACEMENT_DUMP_PY.format(container=container)
+            _, out, err = host.run(
+                f"sudo docker exec -u root {container} python3 -c {shlex.quote(script)}",
+                timeout=120, check=False, label=f"pd dump {short}")
+            try:
+                dumped = json.loads((out or "").strip())
+            except (ValueError, TypeError):
+                raise TestRunError(f"dump RPC returned no JSON ({(err or '')[:150]})")
+            dest = f"/home/{self.user}/placement_dumps/{self.run_id}"
+            host.run(f"mkdir -p {dest}", timeout=30, check=False,
+                     label=f"pd mkdir {short}")
+            saved = 0
+            for bdev, path in dumped.items():
+                if not isinstance(path, str) or path.startswith("ERROR"):
+                    self.logger.log(
+                        f"placement dump {tag} {short}/{bdev}: {path}")
+                    continue
+                path = path.strip().strip('"')
+                target = f"{dest}/{tag}_{short}_{bdev}.txt.gz"
+                # gzip in-container, copy out via docker cp, drop the original
+                # so repeated dumps cannot fill the container tmpfs.
+                rc, _, gerr = host.run(
+                    f"sudo docker exec -u root {container} gzip -f {shlex.quote(path)} && "
+                    f"sudo docker cp {container}:{shlex.quote(path)}.gz {shlex.quote(target)} && "
+                    f"sudo docker exec -u root {container} rm -f {shlex.quote(path)}.gz",
+                    timeout=120, check=False, label=f"pd save {short}/{bdev}")
+                if rc == 0:
+                    saved += 1
+                else:
+                    self.logger.log(
+                        f"placement dump {tag} {short}/{bdev}: save failed "
+                        f"({(gerr or '')[:120]})")
+            with results_lock:
+                results[short] = saved
+
+        errors = self._fan_out(_dump_one, uuids, f"placement-dump {tag}",
+                               join_timeout=240)
+        for uuid, exc in errors:
+            self.logger.log(
+                f"placement dump {tag}: {uuid[:12]} skipped ({exc})")
+        if results:
+            self.logger.log(
+                f"placement dumps [{tag}]: "
+                + ", ".join(f"{k}={v}" for k, v in sorted(results.items()))
+                + f" file(s) -> ~/placement_dumps/{self.run_id}/ on each node")
+
     def run_nic_phase(self, iteration, nic, node_uuids):
         hold = self.args.nic_phase_hold
         settle = self.args.nic_phase_settle
@@ -1762,6 +1866,7 @@ class SoakRunner:
             f"{hold}s (fio must not be interrupted) ===")
 
         self.prewarm_node_hosts(node_uuids)
+        self.take_placement_dumps(f"iter{iteration}_p1_pre", node_uuids)
         started = time.time()
         errors = self._fan_out(
             lambda uuid: self._nic_outage(uuid, [nic], hold, "nic_phase"),
@@ -1783,7 +1888,11 @@ class SoakRunner:
         self.check_fio(strict_latency=True, context=f"{label} mid-outage")
 
         remaining = max(0, hold - (time.time() - started))
-        time.sleep(remaining + settle)
+        time.sleep(remaining)
+        # The host timers have restored the NIC at this point: dump the
+        # placement maps IMMEDIATELY after the outage, before the settle.
+        self.take_placement_dumps(f"iter{iteration}_p1_post", node_uuids)
+        time.sleep(settle)
         self.logger.log(f"{label}: {nic} restored + {settle}s settle elapsed")
 
         self.verify_spdk_state(label, strict=True)
@@ -1875,6 +1984,7 @@ class SoakRunner:
             OutageRecord(node_a, method_a, 0.0),
             OutageRecord(node_b, method_b, float(delay)),
         ]
+        self.take_placement_dumps(f"iter{iteration}_p2_pre")
         deadline = time.time() + self.args.restart_timeout
         threads = [
             threading.Thread(target=self._outage_worker, args=(record, hold, deadline),
@@ -1912,6 +2022,11 @@ class SoakRunner:
         self.logger.log(
             f"{label}: outages issued in {time.time() - t0:.0f}s; waiting up to "
             f"{wait_timeout}s for both nodes online")
+        # IMMEDIATELY after the outage windows: the two target nodes are
+        # typically still down/rebooting here -- the dump helper logs and
+        # skips unreachable nodes, capturing the survivors' view of
+        # placement as the outage ends.
+        self.take_placement_dumps(f"iter{iteration}_p2_post")
 
         self.wait_for_all_online(target_nodes={node_a, node_b}, timeout=wait_timeout)
         done = self.check_fio(strict_latency=False, context=f"{label} post-pair")
