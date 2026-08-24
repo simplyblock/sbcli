@@ -657,8 +657,32 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
                 return False, f"Replication cluster not found: {replication_cluster_id}"
         else:
             replication_cluster_id = cl.snapshot_replication_target_cluster
-        random_nodes = _get_next_3_nodes(replication_cluster_id, lvol.size, all_lvols)
-        lvol.replication_node_id = random_nodes[0].get_id()
+        # Namespaced siblings MUST replicate to the same target node.
+        # A fail-over copy preserves the volume's NQN and nsid, so all
+        # volumes sharing a subsystem land in the SAME subsystem on the
+        # target. Picking the destination purely by capacity scattered
+        # siblings across the target cluster's nodes, which splits one
+        # shared subsystem across unrelated primaries: each advertises the
+        # same NQN with only its own subset of namespaces, and the copies
+        # collide when a sibling's nsid is already taken there (soak case 7,
+        # run 20260824_215758: 14 of 20 namespaces failed over, the 15th
+        # died in add_ns).
+        sibling_node_id = ""
+        if getattr(lvol, "namespaced", False) or lvol.max_namespace_per_subsys > 1:
+            for lv in (all_lvols or db_controller.get_lvols(cl.get_id())):
+                if (lv.nqn == lvol.nqn and lv.get_id() != lvol.get_id()
+                        and getattr(lv, "replication_node_id", "")):
+                    sibling_node_id = lv.replication_node_id
+                    break
+        if sibling_node_id:
+            logger.info(
+                f"LVol {lvol.lvol_name} shares subsystem {lvol.nqn} with an "
+                f"already-replicating sibling; using its replication node "
+                f"{sibling_node_id} so the shared subsystem is not split")
+            lvol.replication_node_id = sibling_node_id
+        else:
+            random_nodes = _get_next_3_nodes(replication_cluster_id, lvol.size, all_lvols)
+            lvol.replication_node_id = random_nodes[0].get_id()
 
     lvol_dict: dict = {
         "type": "bdev_lvol",

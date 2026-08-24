@@ -454,3 +454,20 @@ def test_failover_guard_matches_nqn_and_nsid_not_nqn_alone():
     src = inspect.getsource(lc.replicate_lvol_on_target_cluster)
     assert "lv.nqn == lvol.nqn and lv.ns_id == lvol.ns_id" in src, \
         "the fail-over existing-copy guard must match nqn AND nsid"
+
+
+def test_namespaced_siblings_replicate_to_the_same_target_node():
+    """Soak case 7 (run 20260824_215758): the replication destination was
+    picked per volume by capacity, so volumes SHARING a subsystem were
+    scattered across the target cluster's nodes. A fail-over copy preserves
+    the NQN, so that splits one shared subsystem across unrelated primaries
+    -- each advertising the same NQN with only part of the namespaces.
+    Siblings must inherit the node their subsystem already replicates to."""
+    import inspect
+    from simplyblock_core.controllers import lvol_controller as lc
+    src = inspect.getsource(lc.add_lvol_ha)
+    assert "sibling_node_id" in src, "namespaced siblings must share a replication node"
+    pick = src.index("_get_next_3_nodes(replication_cluster_id")
+    check = src.index("sibling_node_id")
+    assert check < pick, "the sibling lookup must precede the capacity-based pick"
+    assert "lv.nqn == lvol.nqn" in src, "siblings are identified by shared NQN"

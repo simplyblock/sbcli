@@ -305,8 +305,14 @@ import io, json, logging, contextlib
 from simplyblock_core.controllers import lvol_controller
 buf = io.StringIO()
 handler = logging.StreamHandler(buf)
-handler.setLevel(logging.WARNING)
-logging.getLogger().addHandler(handler)
+# DEBUG, not WARNING: the RPC layer logs the actual SPDK response
+# ("Invalid parameters", nsid in use, ...) at DEBUG, and the controller
+# only re-reports its own generic "Failed to add bdev to subsystem".
+# Only the last 1500 chars are kept, which is exactly the failure tail.
+handler.setLevel(logging.DEBUG)
+root = logging.getLogger()
+root.addHandler(handler)
+root.setLevel(logging.DEBUG)
 err = ""
 try:
     with contextlib.redirect_stderr(buf):
@@ -316,7 +322,7 @@ except Exception as exc:                      # noqa: BLE001 - report, don't hid
 out = res if isinstance(res, dict) else {{"result": res}}
 if not (isinstance(res, dict) and res.get("connection_strings")):
     out["error"] = err
-    out["log"] = buf.getvalue()[-1500:]
+    out["log"] = buf.getvalue()[-2500:]
 print(json.dumps(out))
 """)
 
