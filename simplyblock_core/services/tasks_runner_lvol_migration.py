@@ -1509,7 +1509,12 @@ def _handle_snap_copy(migration, src_node, tgt_node, src_rpc, tgt_rpc):
         _src_composite = f"{src_node.lvstore}/{_lvol.lvol_bdev}"
         _delta = _get_lvol_delta_bytes(src_rpc, _src_composite)
         _threshold = constants.LVOL_MIG_INTERMEDIATE_SNAP_THRESHOLD_BYTES
-        if migration.intermediate_snap_rounds > 0 and _delta is not None and _delta <= _threshold:
+        # TEMPORARY (test-only, revert after use): force round 1 unconditionally
+        # like round 0, so every solo migration takes at least two intermediate
+        # snapshots regardless of dirty delta -- exercises the multi-round
+        # add_clone chain-linking path on demand instead of waiting for a
+        # naturally heavy workload to trigger it.
+        if migration.intermediate_snap_rounds > 1 and _delta is not None and _delta <= _threshold:
             logger.info(
                 f"Intermediate snapshot skipped: delta {convert_size(_delta, 'MiB')} MiB "
                 f"<= {convert_size(_threshold, 'MiB')} MiB threshold "
@@ -3673,18 +3678,26 @@ def _group_worker_phase_dispatch(task, migration, phase, src_node, tgt_node, src
                     # LVolMigrationGroup's INTERMEDIATE docstring).
                     needs_more = False
                     if group.intermediate_round + 1 < constants.LVOL_MIG_MAX_INTERMEDIATE_SNAPS:
-                        try:
-                            lvol = db.get_lvol_by_id(migration.lvol_id)
-                            src_composite = f"{src_node.lvstore}/{lvol.lvol_bdev}"
-                            delta = _get_lvol_delta_bytes(src_rpc, src_composite)
-                            needs_more = (
-                                delta is None
-                                or delta > constants.LVOL_MIG_INTERMEDIATE_SNAP_THRESHOLD_BYTES)
-                        except Exception as e:
-                            logger.warning(
-                                f"Group worker {migration_id[:8]}: delta check failed "
-                                f"(assuming another round is needed): {e}")
+                        if group.intermediate_round == 0:
+                            # TEMPORARY (test-only, revert after use): force a
+                            # second synchronized round unconditionally, so
+                            # every batch group takes at least two intermediate
+                            # rounds regardless of dirty delta -- exercises the
+                            # multi-round add_clone chain-linking path on demand.
                             needs_more = True
+                        else:
+                            try:
+                                lvol = db.get_lvol_by_id(migration.lvol_id)
+                                src_composite = f"{src_node.lvstore}/{lvol.lvol_bdev}"
+                                delta = _get_lvol_delta_bytes(src_rpc, src_composite)
+                                needs_more = (
+                                    delta is None
+                                    or delta > constants.LVOL_MIG_INTERMEDIATE_SNAP_THRESHOLD_BYTES)
+                            except Exception as e:
+                                logger.warning(
+                                    f"Group worker {migration_id[:8]}: delta check failed "
+                                    f"(assuming another round is needed): {e}")
+                                needs_more = True
                     if needs_more and migration_id not in group.intermediate_more_needed:
                         group.intermediate_more_needed.append(migration_id)
                     group.intermediates_done.append(migration_id)
