@@ -1280,12 +1280,8 @@ def set_node_schedulable(node):
     if node.status not in [StorageNode.STATUS_SCHEDULABLE, StorageNode.STATUS_IN_SHUTDOWN]:
         try:
             storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_SCHEDULABLE)
-            # This is the actual shutdown+restart trigger: the queued
-            # FN_NODE_RESTART task (task_runner_node in
-            # tasks_runner_restart.py) is what shuts the sick SPDK down and
-            # rebuilds it. It only does that now that SCHEDULABLE no longer
-            # short-circuits there as a same-tick no-op (see that file for
-            # the livelock this used to cause).
+            # initiate shutdown
+            # initiate restart
             tasks_controller.add_node_to_auto_restart(node)
             for dev in node.nvme_devices:
                 if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY,
