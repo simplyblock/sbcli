@@ -372,16 +372,17 @@ def test_failback_evicts_on_every_ha_node_not_just_the_primary(monkeypatch):
     preserved-NQN subsystem exists on EVERY node of the recovered set, each
     still holding the original namespace. The peer failure rolled the whole
     cutover back: 0/5. The clone path must evict per node."""
-    import copy
     from simplyblock_core.controllers import lvol_controller as lc
 
     evicted, added = [], []
     monkeypatch.setattr(lc, "_evict_stale_namespace",
                         lambda lvol, node: evicted.append(node.get_id()))
-    monkeypatch.setattr(lc, "add_lvol_on_node",
-                        lambda lvol, node, is_primary=True: (
-                            added.append((node.get_id(), is_primary)),
-                            ({"uuid": "U", "driver_specific": {"lvol": {"blobid": 9}}}, None))[-1])
+
+    def _fake_add_lvol_on_node(lvol, node, is_primary=True):
+        added.append((node.get_id(), is_primary))
+        return {"uuid": "U", "driver_specific": {"lvol": {"blobid": 9}}}, None
+
+    monkeypatch.setattr(lc, "add_lvol_on_node", _fake_add_lvol_on_node)
 
     class _N:
         def __init__(self, nid, secondary="", tertiary=""):
