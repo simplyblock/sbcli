@@ -3625,9 +3625,16 @@ def replicate_lvol_on_target_cluster(lvol_id):
     target_cluster, target_pool_uuid = resolve_replication_destination(
         db_controller, lvol, target_node, source_node)
 
+    # Match the preserved identity in FULL: nqn AND nsid. A namespaced volume
+    # SHARES its subsystem with up to max-namespace-per-subsys siblings, so an
+    # nqn-only test made this idempotency guard fire for every namespace after
+    # the first: namespace 1's fail-over copy already carried the nqn, so
+    # namespaces 2..N returned ITS id and were never failed over at all —
+    # silent loss of 9 of 10 volumes in a DR event, reported as success
+    # (soak case 7, run 20260824_174611).
     for lv in db_controller.get_lvols(target_cluster.get_id()):
-        if lv.nqn == lvol.nqn:
-            logger.info(f"LVol with same nqn already exists on target cluster: {lv.get_id()}")
+        if lv.nqn == lvol.nqn and lv.ns_id == lvol.ns_id:
+            logger.info(f"LVol with same nqn+nsid already exists on target cluster: {lv.get_id()}")
             return lv.get_id()
 
     new_lvol, _snapshot, error = _clone_from_last_replicated(

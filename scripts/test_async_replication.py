@@ -951,7 +951,11 @@ def delete_test_volumes(mgmt_ip, key_path, pools):
         run(mgmt_ip, key_path, f"{SBCTL} volume delete {uuid} --force", check=False, quiet=True)
 
     # Deletion is asynchronous; wait for the records to drain so the name is free.
-    for _ in range(30):
+    # Budget scales with the pile: case 7 leaves 20 namespaced volumes plus
+    # their REP_* landing copies, and 37 volumes did not drain inside the flat
+    # 300s, failing case 8 in its prologue (run 20260824_174611).
+    drain_polls = max(30, len(victims) * 3)
+    for _ in range(drain_polls):
         time.sleep(10)
         left = 0
         for pool in pools:
@@ -964,7 +968,9 @@ def delete_test_volumes(mgmt_ip, key_path, pools):
         if left == 0:
             print("  cleanup drained.")
             return
-    raise RuntimeError("Timed out waiting for leftover volumes to delete")
+    raise RuntimeError(
+        f"Timed out waiting for {len(victims)} leftover volumes to delete "
+        f"after {drain_polls * 10}s")
 
 
 def create_volumes(mgmt_ip, key_path, src_uuid, pool, tgt_uuid, tgt_pool, mode,

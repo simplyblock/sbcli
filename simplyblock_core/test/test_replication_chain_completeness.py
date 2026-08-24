@@ -439,3 +439,17 @@ def test_interrupted_landing_volume_is_adopted_or_cleared():
     for handled in ("STATUS_ONLINE", "STATUS_IN_DELETION", "force_delete=True"):
         assert src.index(handled, probe) < create, \
             f"collision handling must cover {handled} before creating"
+
+
+def test_failover_guard_matches_nqn_and_nsid_not_nqn_alone():
+    """Soak case 7 (run 20260824_174611): namespaced volumes SHARE a subsystem,
+    so the fail-over idempotency guard's nqn-only match fired for every
+    namespace after the first — namespaces 2..N returned namespace 1's target
+    lvol id and were never failed over, losing 9 of 10 volumes in a DR event
+    while reporting success. The guard must compare the FULL preserved
+    identity: nqn AND ns_id."""
+    import inspect
+    from simplyblock_core.controllers import lvol_controller as lc
+    src = inspect.getsource(lc.replicate_lvol_on_target_cluster)
+    assert "lv.nqn == lvol.nqn and lv.ns_id == lvol.ns_id" in src, \
+        "the fail-over existing-copy guard must match nqn AND nsid"
