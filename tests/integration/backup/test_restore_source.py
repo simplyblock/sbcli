@@ -22,6 +22,7 @@ from simplyblock_core.models.backup_config import BackupConfig, S3Credentials
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.rpc_client import RPCException
 from simplyblock_core.services import tasks_runner_backup
 
 
@@ -256,6 +257,32 @@ class TestRunnerOwnsTheDevice:
         node.rpc_client.return_value.bdev_s3_delete.side_effect = RuntimeError("gone")
 
         backup_device.delete_restore_s3_bdev(node, "s3_restore_b-1")
+
+    def test_a_device_an_earlier_attempt_left_behind_is_adopted(self, db, cluster, node):
+        """Every retry that runs without a node restart in between finds the
+        device still there, and the data plane refuses a duplicate name."""
+        node.rpc_client = MagicMock()
+        rpc = node.rpc_client.return_value
+        rpc.get_bdevs.return_value = [{"name": "s3_restore_b-1"}]
+        rpc.bdev_s3_create.side_effect = RPCException("Bdev already exists")
+
+        backup_device.create_restore_s3_bdev(
+            node, _config(FOREIGN_BUCKET), "s3_restore_b-1")
+
+        rpc.bdev_s3_create.assert_not_called()
+        rpc.bdev_lvol_s3_bdev.assert_called_once_with(node.lvstore, "s3_restore_b-1")
+
+    def test_a_device_the_node_lost_is_created_again(self, db, cluster, node):
+        """A node restart mid-restore takes the device with it."""
+        node.rpc_client = MagicMock()
+        rpc = node.rpc_client.return_value
+        rpc.get_bdevs.return_value = None
+
+        backup_device.create_restore_s3_bdev(
+            node, _config(FOREIGN_BUCKET), "s3_restore_b-1")
+
+        assert rpc.bdev_s3_create.call_args.kwargs["bucket_name"] == FOREIGN_BUCKET
+        rpc.bdev_lvol_s3_bdev.assert_called_once_with(node.lvstore, "s3_restore_b-1")
 
     def test_recovery_names_the_device_it_reads_from(self, db, cluster, node):
         task = _restore_task(db, s3_config=_config(FOREIGN_BUCKET).model_dump(exclude_none=True))
