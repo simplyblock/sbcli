@@ -3362,6 +3362,8 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
 
     new_lvol.write_to_db(db_controller.kv_store)
 
+    _evict_stale_namespace(new_lvol, target_node)
+
     lvol_bdev, error = add_lvol_on_node(new_lvol, target_node)
     if error:
         logger.error(error)
@@ -3443,6 +3445,42 @@ def _last_replicated_target_snapshot(db_controller, lvol_id, cluster_id):
             continue
         return target_snap
     return None
+
+
+def _evict_stale_namespace(new_lvol, target_node):
+    """Make room for the preserved identity on a RECOVERED fail-back target.
+
+    The cutover clone keeps the ORIGINAL volume's NQN and nsid so the client
+    reconnects to the same identity. Failing back to a recovered source means
+    that subsystem usually still exists there WITH the original volume's
+    namespace at exactly that nsid -- and its data is outdated by definition
+    (the other cluster served every write since the fail-over). add_ns then
+    fails with -32602 for every retry, and the whole cutover dies on max
+    retry: 2026-08-24, 5/5 fail-back cutovers, 40x "Failed to add bdev to
+    subsystem". Evict a namespace occupying the clone's nsid unless it is
+    already the clone's own bdev (idempotent re-run).
+    """
+    try:
+        rpc = target_node.rpc_client()
+        subsystems = rpc.subsystem_get(new_lvol.nqn)
+        if not subsystems:
+            return
+        for ns in (subsystems[0].get("namespaces") or []):
+            if ns.get("nsid") != new_lvol.ns_id:
+                continue
+            if ns.get("bdev_name") == new_lvol.top_bdev:
+                return                         # already ours (re-run)
+            logger.info(
+                f"Fail-back cutover: evicting stale namespace nsid={ns.get('nsid')} "
+                f"(bdev {ns.get('bdev_name')}) from {new_lvol.nqn} on "
+                f"{target_node.get_id()} -- superseded by the failed-over data")
+            rpc.nvmf_subsystem_remove_ns(new_lvol.nqn, ns.get("nsid"))
+            return
+    except Exception as e:
+        # Best effort: if the subsystem is not there, add_lvol_on_node creates
+        # it; if the eviction genuinely failed, add_ns will say so loudly.
+        logger.warning(f"Stale-namespace check on {target_node.get_id()} for "
+                       f"{new_lvol.nqn} raised: {e}")
 
 
 def _clone_from_last_replicated(db_controller, lvol_id, lvol, target_node, pool_uuid,
