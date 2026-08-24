@@ -65,28 +65,39 @@ def create_restore_s3_bdev(node: StorageNode, config: BackupConfig, name: str) -
     create another device -- which the lvstore supports, its transfer devices
     being a list.
 
+    Idempotent, because a restore re-enters it on every attempt: a device left
+    over from an earlier attempt is the device this one wants, its name deriving
+    from the backup and so naming the same bucket. Adopting it is not just an
+    optimisation -- the data plane refuses a duplicate name, which would strand
+    every retry that happens without a node restart in between. The lvstore
+    attach still runs, since an earlier attempt may have failed between the two
+    calls; the data plane hands back the transfer device it already has.
+
     The caller owns the result and must delete it when the restore ends.
     """
     rpc_client = node.rpc_client()
     bdb_lcpu_mask, s3_lcpu_mask = _compute_s3_cpu_masks(node)
 
     try:
-        rpc_client.bdev_s3_create(
-            name=name,
-            bucket_name=config.bucket_name,
-            secondary_target=config.secondary_target,
-            with_compression=config.with_compression,
-            snapshot_backups=config.snapshot_backups,
-            endpoint=config.endpoint_url,
-            region=config.region,
-            verify_tls=config.verify_tls,
-            use_path_style=config.use_path_style,
-            access_key_id=config.credentials.access_key_id if config.credentials else None,
-            secret_access_key=config.credentials.secret_access_key if config.credentials else None,
-            bdb_lcpu_mask=bdb_lcpu_mask,
-            s3_lcpu_mask=s3_lcpu_mask,
-            s3_thread_pool_size=config.s3_thread_pool_size,
-        )
+        if rpc_client.get_bdevs(name):
+            logger.info("Reusing restore S3 device %s on node %s", name, node.get_id())
+        else:
+            rpc_client.bdev_s3_create(
+                name=name,
+                bucket_name=config.bucket_name,
+                secondary_target=config.secondary_target,
+                with_compression=config.with_compression,
+                snapshot_backups=config.snapshot_backups,
+                endpoint=config.endpoint_url,
+                region=config.region,
+                verify_tls=config.verify_tls,
+                use_path_style=config.use_path_style,
+                access_key_id=config.credentials.access_key_id if config.credentials else None,
+                secret_access_key=config.credentials.secret_access_key if config.credentials else None,
+                bdb_lcpu_mask=bdb_lcpu_mask,
+                s3_lcpu_mask=s3_lcpu_mask,
+                s3_thread_pool_size=config.s3_thread_pool_size,
+            )
         rpc_client.bdev_lvol_s3_bdev(node.lvstore, name)
     except RPCException as e:
         raise RuntimeError(
