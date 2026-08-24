@@ -252,6 +252,47 @@ def process_snap_replicate_start(task, snapshot):
                 logger.error(f"Unable to find pool on remote cluster: {remote_node_uuid.cluster_id}")
                 return
 
+        # An earlier attempt of THIS task may have created the landing volume
+        # and died before storing its id (a node outage mid-create): add_lvol_ha
+        # then fails "LVol name must be unique" on EVERY retry and the task
+        # loops forever, stalling the volume's whole chain behind it (case 6,
+        # run 20260824_144226: three volumes stuck on their first cadence
+        # snapshot, retrying every ~31s for the rest of the run). The name is
+        # derived from the snapshot, so a record wearing it IS this transfer's
+        # landing volume: adopt it when it is usable, clear it when it is not.
+        rep_name = f"REP_{snapshot.snap_name}"
+        existing = None
+        try:
+            existing = db.get_lvol_by_name(rep_name)
+        except KeyError:
+            pass
+        if existing is not None:
+            if existing.status == LVol.STATUS_ONLINE:
+                logger.info(f"Adopting landing volume {existing.get_id()} "
+                            f"({rep_name}) left by an interrupted attempt")
+                task.function_params["remote_lvol_id"] = existing.get_id()
+                task.write_to_db()
+            elif existing.status == LVol.STATUS_IN_DELETION:
+                task.function_result = f"stale landing volume {rep_name} still deleting, retrying"
+                task.status = JobSchedule.STATUS_SUSPENDED
+                task.retry += 1
+                task.write_to_db()
+                return
+            else:
+                logger.warning(f"Deleting half-created landing volume "
+                               f"{existing.get_id()} ({rep_name}, status "
+                               f"{existing.status}) from an interrupted attempt")
+                try:
+                    lvol_controller.delete_lvol(existing, force_delete=True)
+                except Exception as e:
+                    logger.error(f"Failed to clear stale landing volume {rep_name}: {e}")
+                task.function_result = "cleared stale landing volume, retrying"
+                task.status = JobSchedule.STATUS_SUSPENDED
+                task.retry += 1
+                task.write_to_db()
+                return
+
+    if "remote_lvol_id" not in task.function_params or not task.function_params["remote_lvol_id"]:
         # internal=True: this REP_* volume is the landing copy for a transfer,
         # created by the system and never handed to a client. The per-node
         # subsystem cap is a user-admission limit; enforcing it here only stops

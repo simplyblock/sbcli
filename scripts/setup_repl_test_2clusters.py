@@ -19,6 +19,7 @@ IMPORTANT (deploying the async-replication code under test):
 """
 import os
 import json
+import sys
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -368,7 +369,38 @@ def add_nodes_to_cluster(mgmt_ip, cluster_uuid, priv_ips, ha_jm_count):
 
 
 # --------------------------------------------------------------------------- #
+CLIENT_PREP_CMDS = [
+    "sudo dnf install nvme-cli fio -y",
+    "sudo modprobe nvme-tcp",
+    "echo 'nvme-tcp' | sudo tee /etc/modules-load.d/nvme-tcp.conf",
+]
+
+
+def add_client():
+    """Add one client instance to an EXISTING deployment (case 7 needs >= 2
+    clients; redeploying a healthy two-cluster lab for that is wasteful)."""
+    with open("cluster_metadata_repl.json") as f:
+        metadata = json.load(f)
+    print("Launching 1 additional client...")
+    clients = launch_instances("SB-Repl-Client", CLIENT_TYPE, 1)
+    for inst in clients:
+        inst.wait_until_running()
+        inst.reload()
+    ip = clients[0].public_ip_address
+    wait_for_ssh(ip)
+    print(f"Prepping client {ip}...")
+    ssh_exec(ip, CLIENT_PREP_CMDS, check=True)
+    metadata.setdefault("clients", []).append(
+        {"public_ip": ip, "private_ip": clients[0].private_ip_address})
+    with open("cluster_metadata_repl.json", "w") as f:
+        json.dump(metadata, f, indent=4)
+    print(f"Client added: {ip} ({len(metadata['clients'])} clients in metadata).")
+
+
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "add_client":
+        add_client()
+        return
     print(f"Launching control plane + {SN_COUNT} storage nodes + {CLIENT_COUNT} client(s)...")
     mgmt = launch_instances("SB-Repl-Mgmt", MGMT_TYPE, 1, with_net=False)
     sns = launch_instances("SB-Repl-Storage", SN_TYPE, SN_COUNT)
@@ -487,11 +519,7 @@ def main():
     # --- Phase 6: prep clients ---
     if client_pub_ips:
         print("Prepping clients...")
-        client_cmds = [
-            "sudo dnf install nvme-cli fio -y",
-            "sudo modprobe nvme-tcp",
-            "echo 'nvme-tcp' | sudo tee /etc/modules-load.d/nvme-tcp.conf",
-        ]
+        client_cmds = CLIENT_PREP_CMDS
         for ip in client_pub_ips:
             wait_for_ssh(ip)
         with ThreadPoolExecutor(max_workers=max(1, len(client_pub_ips))) as ex:

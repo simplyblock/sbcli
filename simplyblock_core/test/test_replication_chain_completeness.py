@@ -419,3 +419,23 @@ def test_failback_evicts_on_every_ha_node_not_just_the_primary(monkeypatch):
     assert evicted == ["P", "S"], \
         "stale-namespace eviction must run on the primary AND every online HA peer"
     assert ("S", False) in added
+
+
+def test_interrupted_landing_volume_is_adopted_or_cleared():
+    """Case 6, run 20260824_144226: a node outage mid-create left a REP_*
+    landing volume whose id was never stored on the task; every retry then
+    died on "LVol name must be unique" and three volumes' chains stalled for
+    the rest of the run. Before creating the landing volume, the runner must
+    look for a record already wearing the derived name and adopt it (online),
+    wait for it (in_deletion), or clear it (half-created)."""
+    import inspect
+    from simplyblock_core.services import snapshot_replication as sr
+    src = inspect.getsource(sr)
+    probe = src.index('rep_name = f"REP_{snapshot.snap_name}"')
+    create = src.index("lvol_controller.add_lvol_ha")
+    assert probe < create, "the adopt/clear probe must run before the create"
+    adopt = src.index("Adopting landing volume")
+    assert probe < adopt < create
+    for handled in ("STATUS_ONLINE", "STATUS_IN_DELETION", "force_delete=True"):
+        assert src.index(handled, probe) < create, \
+            f"collision handling must cover {handled} before creating"
