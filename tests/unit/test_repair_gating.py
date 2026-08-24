@@ -107,6 +107,52 @@ class TestHublvolPathRepairReachable(unittest.TestCase):
     def test_complete_controller_is_left_alone(self):
         self.assertFalse(self._call(self.BOTH_PATHS, repair_paths=True))
 
+    def test_tertiary_missing_a_secondary_path_is_repaired(self):
+        """A tertiary connects to primary AND secondary. Three paths (primary
+        complete, secondary half-attached) must count as a missing path — on
+        the 2026-08-24 deploy both tertiaries sat at 3/4 forever because
+        expected_ips was built from the primary alone."""
+        from simplyblock_core.controllers import health_controller as hc
+        from unittest.mock import MagicMock, patch
+
+        def nic(ip):
+            iface = MagicMock(); iface.trtype = "TCP"; iface.ip4_address = ip
+            return iface
+
+        primary = MagicMock()
+        primary.status = StorageNode.STATUS_ONLINE
+        primary.lvstore_status = "ready"
+        primary.active_rdma = False; primary.active_tcp = True
+        primary.data_nics = [nic("10.0.0.1"), nic("10.0.1.1")]
+        primary.hublvol.bdev_name = "LVS_1/hublvol"
+        primary.get_id.return_value = "primary-1"
+        primary.secondary_node_id = "sec-1"
+
+        secondary = MagicMock()
+        secondary.status = StorageNode.STATUS_ONLINE
+        secondary.active_rdma = False; secondary.active_tcp = True
+        secondary.data_nics = [nic("10.0.0.2"), nic("10.0.1.2")]
+
+        node = MagicMock()
+        node.status = StorageNode.STATUS_ONLINE
+        node.get_id.return_value = "tert-1"
+        # tertiary: primary's both paths + only ONE of the secondary's
+        node.rpc_client.return_value.bdev_nvme_controller_list.return_value = [
+            {"ctrlrs": [
+                {"state": "enabled", "trid": {"traddr": "10.0.0.1"}},
+                {"state": "enabled", "trid": {"traddr": "10.0.1.1"}},
+                {"state": "enabled", "trid": {"traddr": "10.0.0.2"}}]}]
+        node.lvstore_stack_tertiary = "primary-1"    # makes is_sec2 True
+
+        coordinator_cls = MagicMock()
+        with patch.object(hc, "DBController") as db,                 patch.object(hc, "_restart_owns_lvs", return_value=False),                 patch("simplyblock_core.utils.hublvol_reconnect."
+                      "HublvolReconnectCoordinator", coordinator_cls):
+            db.return_value.get_storage_node_by_id.side_effect =                 lambda i: {"primary-1": primary, "sec-1": secondary}[i]
+            hc._check_sec_node_hublvol(node, primary_node_id="primary-1",
+                                       repair_paths=True)
+        self.assertTrue(coordinator_cls.return_value.reconcile.called,
+                        "the missing secondary path was not reconciled")
+
     def test_refused_when_the_primary_cannot_answer(self):
         self.assertFalse(self._call(
             self.ONE_PATH, primary_status=StorageNode.STATUS_UNREACHABLE,
