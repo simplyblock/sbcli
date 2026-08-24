@@ -1,5 +1,8 @@
 import errno
+import hashlib
 import json
+import threading
+from collections import OrderedDict
 from enum import IntEnum
 from json import JSONDecodeError
 from typing import Any, Optional
@@ -158,6 +161,97 @@ RPC_METHOD_NOT_FOUND = -32601
 RPC_UNSUPPORTED = "__rpc_unsupported__"
 
 
+def _build_session(host, port, username, password: SecretStr, retry: int,
+                   settings: Settings) -> requests.Session:
+    """Build one fully-configured ``requests.Session``. Split out of
+    ``RPCClient.__init__`` so ``RPCSessionPool`` can memoize it."""
+    session = requests.session()
+    if settings.tls_connect != "disabled":
+        session.verify = str(settings.tls_certificate_authority)
+    session.auth = (username, password.get_secret_value())
+    retries = Retry(total=retry, backoff_factor=1, connect=retry, read=retry,
+                    allowed_methods=RPCClient.DEFAULT_ALLOWED_METHODS)
+    session.mount("http://", HTTPAdapter(max_retries=retries))
+    session.mount("https://", HTTPAdapter(max_retries=retries))
+    if settings.tls_connect == "authenticated":
+        session.cert = (str(settings.tls_certificate), str(settings.tls_key))
+    return session
+
+
+class RPCSessionPool:
+    """Process-local cache of configured ``requests.Session`` objects,
+    shared across ``RPCClient`` instances instead of building a fresh one
+    (TCP+TLS+auth setup) per instance.
+
+    Key is ``(host, port, username, password, tls_connect, retry)`` —
+    ``retry`` is included because it's baked into the mounted ``Retry`` at
+    ``Session``-construction time; ``timeout`` is deliberately excluded
+    because it's already applied per-call (``effective_timeout`` in
+    ``_request2``/``_request3``) and never touches the ``Session`` itself.
+
+    Bounded LRU rather than unbounded, in case a node's identity churns
+    (IP failover, credential rotation) faster than ``evict()`` is called.
+    """
+
+    _MAX_ENTRIES = 256
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._sessions: "OrderedDict[tuple, requests.Session]" = OrderedDict()
+
+    @staticmethod
+    def _fingerprint(password: SecretStr) -> str:
+        # Hashed rather than stored raw so the key tuple never carries the
+        # plaintext secret (e.g. into a repr() in a stack trace). Not a
+        # security comparison, so a plain hash is fine here.
+        return hashlib.sha256(password.get_secret_value().encode()).hexdigest()
+
+    def get(self, host, port, username, password: SecretStr, retry: int,
+            settings: Settings) -> requests.Session:
+        key = (host, port, username, self._fingerprint(password),
+               settings.tls_connect, retry)
+        with self._lock:
+            session = self._sessions.get(key)
+            if session is not None:
+                self._sessions.move_to_end(key)
+                return session
+        # Built outside the lock — no sockets are opened here, so a race
+        # costs at most a duplicate build, never a lock held during I/O.
+        session = _build_session(host, port, username, password, retry, settings)
+        with self._lock:
+            existing = self._sessions.get(key)
+            if existing is not None:
+                self._sessions.move_to_end(key)
+                return existing
+            self._sessions[key] = session
+            if len(self._sessions) > self._MAX_ENTRIES:
+                self._sessions.popitem(last=False)
+        return session
+
+    def evict(self, host, port) -> None:
+        """Drop every cached session for ``(host, port)`` (all retry
+        buckets/credentials). Call wherever a node's ``mgmt_ip`` or RPC
+        credentials change, so a stale session isn't reused afterward."""
+        with self._lock:
+            for key in [k for k in self._sessions if k[0] == host and k[1] == port]:
+                del self._sessions[key]
+
+    def clear(self) -> None:
+        """Drop every cached session. Test-only, for pool-reset fixtures."""
+        with self._lock:
+            self._sessions.clear()
+
+
+#: One pool per process, shared by every RPCClient constructed in it.
+_session_pool = RPCSessionPool()
+
+
+def evict_cached_session(host, port) -> None:
+    """Public wrapper around ``_session_pool.evict()`` for callers outside
+    this module (e.g. ``storage_node_ops`` on node restart/failover)."""
+    _session_pool.evict(host, port)
+
+
 class RPCClient:
 
     # ref: https://spdk.io/doc/jsonrpc.html
@@ -182,16 +276,8 @@ class RPCClient:
         self.username = username
         self.password = password
         self.timeout = timeout
-        self.session = requests.session()
-        if settings.tls_connect != "disabled":
-            self.session.verify = str(settings.tls_certificate_authority)
-        self.session.auth = (self.username, self.password.get_secret_value())
-        retries = Retry(total=retry, backoff_factor=1, connect=retry, read=retry,
-                        allowed_methods=self.DEFAULT_ALLOWED_METHODS)
-        self.session.mount("http://", HTTPAdapter(max_retries=retries))
-        self.session.mount("https://", HTTPAdapter(max_retries=retries))
-        if settings.tls_connect == "authenticated":
-            self.session.cert = (str(settings.tls_certificate), str(settings.tls_key))
+        self.retry = retry
+        self.session = _session_pool.get(host, port, username, password, retry, settings)
 
     def _request(self, method, params=None, request_timeout=None):
         ret, _ = self._request2(method, params, request_timeout=request_timeout)

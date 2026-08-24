@@ -18,6 +18,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 
 import requests
 
@@ -262,6 +263,53 @@ class TestProxyE2E(unittest.TestCase):
             self._post("spdk_get_version")
         time.sleep(0.2)
         self.assertEqual(len(self._mod.ServerHandler.server_session), 0)
+
+    def test_keep_alive_reuses_one_connection_for_several_requests(self):
+        """A client session issuing several requests should open ONE TCP
+        connection, not one per request."""
+        connection_count = {"n": 0}
+        original_setup = self._mod.ServerHandler.setup
+
+        def counting_setup(handler_self):
+            connection_count["n"] += 1
+            original_setup(handler_self)
+
+        with patch.object(self._mod.ServerHandler, "setup", counting_setup):
+            with requests.Session() as session:
+                for _ in range(5):
+                    r = session.post(
+                        f"http://127.0.0.1:{self._http_port}/",
+                        data=json.dumps({"id": 1, "method": "spdk_get_version"}),
+                        auth=("test", "test"),
+                        timeout=5,
+                    )
+                    self.assertEqual(r.status_code, 200)
+
+        self.assertEqual(
+            connection_count["n"], 1,
+            "expected all 5 requests on one requests.Session to reuse a "
+            "single kept-alive TCP connection to the proxy")
+
+    def test_unauthorized_request_does_not_corrupt_the_connection(self):
+        """Regression test: an undrained body on a 401 used to leak into the
+        next request on the same kept-alive connection ('Bad request version')."""
+        with requests.Session() as session:
+            r1 = session.post(
+                f"http://127.0.0.1:{self._http_port}/",
+                data=json.dumps({"id": 1, "method": "spdk_get_version"}),
+                auth=("wrong", "creds"),
+                timeout=5,
+            )
+            self.assertEqual(r1.status_code, 401)
+
+            r2 = session.post(
+                f"http://127.0.0.1:{self._http_port}/",
+                data=json.dumps({"id": 1, "method": "spdk_get_version"}),
+                auth=("test", "test"),
+                timeout=5,
+            )
+            self.assertEqual(r2.status_code, 200)
+            self.assertEqual(r2.json()["result"]["version"], "24.01")
 
 
 class TestProxyReadinessGate(unittest.TestCase):

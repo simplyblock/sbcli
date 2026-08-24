@@ -6,6 +6,7 @@ import socket
 import sys
 import threading
 import time
+from typing import ClassVar, Optional
 
 from http.server import HTTPServer
 from http.server import ThreadingHTTPServer
@@ -205,25 +206,43 @@ def _rpc_call_inner(req, req_data, req_time, sock_timeout):
 class ServerHandler(BaseHTTPRequestHandler):
     server_session: list[int] = []
     key = ""
-    def do_HEAD(self):
+
+    # The base class defaults to "HTTP/1.0", under which parse_request()
+    # forces close_connection=True unconditionally regardless of what the
+    # client sends — i.e. keep-alive never actually engages without this.
+    # Every response below sends an explicit Content-Length because HTTP/1.1
+    # framing requires it (no more relying on connection-close as EOF).
+    protocol_version = "HTTP/1.1"
+
+    # Idle-connection reclaim timeout — NOT the same thing as the server's
+    # own `httpd.timeout` (set in run_server(), only bounds serve_forever()'s
+    # accept loop). Assigned in run_server() once KEEPALIVE_TIMEOUT exists,
+    # same as `key` below.
+    timeout: ClassVar[Optional[float]] = None
+
+    def do_HEAD(self, content_length=0):
         self.send_response(200)
         self.send_header('Content-type', 'text/html')
+        self.send_header('Content-Length', str(content_length))
         self.end_headers()
 
     def do_HEAD_no_content(self):
         self.send_response(204)
         self.send_header('Content-type', 'text/html')
+        self.send_header('Content-Length', '0')
         self.end_headers()
 
     def do_AUTHHEAD(self):
         self.send_response(401)
         self.send_header('WWW-Authenticate', 'text/html')
         self.send_header('Content-type', 'text/html')
+        self.send_header('Content-Length', '0')
         self.end_headers()
 
     def do_INTERNALERROR(self):
         self.send_response(500)
         self.send_header('Content-type', 'text/html')
+        self.send_header('Content-Length', '0')
         self.end_headers()
 
     def do_POST(self):
@@ -231,38 +250,46 @@ class ServerHandler(BaseHTTPRequestHandler):
         self.server_session.append(req_time)
         logger.info(f"incoming request at: {req_time}")
         logger.info(f"active server session: {len(self.server_session)}")
+        # Body must be drained before branching on auth, not only on the
+        # success path: on a kept-alive connection, an unread body from a
+        # rejected (401) request gets read as the START of the next request,
+        # which then fails to parse ("Bad request version").
+        read_line_time_start = time.time_ns()
+        if "Content-Length" in self.headers:
+            data_string = self.rfile.read(int(self.headers['Content-Length']))
+        elif "chunked" in self.headers.get("Transfer-Encoding", ""):
+            data_string = b''
+            while True:
+                line = self.rfile.readline().strip()
+                chunk_length = int(line, 16)
+
+                if chunk_length != 0:
+                    chunk = self.rfile.read(chunk_length)
+                    data_string += chunk
+
+                # Each chunk is followed by an additional empty newline
+                # that we have to consume.
+                self.rfile.readline()
+
+                # Finally, a chunk size of 0 is an end indication
+                if chunk_length == 0:
+                    break
+        else:
+            data_string = b''
+        read_line_time_end = time.time_ns()
+        time_diff = read_line_time_end - read_line_time_start
+        logger.info(f"read_line_time_diff: {time_diff}")
+        read_line_time_diff[read_line_time_start] = time_diff
+
         if self.headers['Authorization'] != 'Basic ' + self.key:
             self.do_AUTHHEAD()
         else:
-            read_line_time_start = time.time_ns()
-            if "Content-Length" in self.headers:
-                data_string = self.rfile.read(int(self.headers['Content-Length']))
-            elif "chunked" in self.headers.get("Transfer-Encoding", ""):
-                data_string = b''
-                while True:
-                    line = self.rfile.readline().strip()
-                    chunk_length = int(line, 16)
-
-                    if chunk_length != 0:
-                        chunk = self.rfile.read(chunk_length)
-                        data_string += chunk
-
-                    # Each chunk is followed by an additional empty newline
-                    # that we have to consume.
-                    self.rfile.readline()
-
-                    # Finally, a chunk size of 0 is an end indication
-                    if chunk_length == 0:
-                        break
-            read_line_time_end = time.time_ns()
-            time_diff = read_line_time_end - read_line_time_start
-            logger.info(f"read_line_time_diff: {time_diff}")
-            read_line_time_diff[read_line_time_start] = time_diff
             try:
                 response = rpc_call(data_string, self.headers.get('X-RPC-Timeout'))
                 if response is not None:
-                    self.do_HEAD()
-                    self.wfile.write(bytes(response.encode(encoding='ascii')))
+                    body = response.encode(encoding='ascii')
+                    self.do_HEAD(len(body))
+                    self.wfile.write(body)
                 else:
                     self.do_HEAD_no_content()
 
@@ -273,6 +300,39 @@ class ServerHandler(BaseHTTPRequestHandler):
         self.server_session.remove(req_time)
 
 
+def _bound_connection_concurrency(httpd, max_connections):
+    """Cap concurrent connections on a ThreadingHTTPServer instance.
+
+    ThreadingMixIn spawns one thread per accepted connection with no limit.
+    Under keep-alive a connection's thread can now sit alive for the whole
+    idle window between requests rather than exiting after one request, so
+    this bounds it — same pattern as the existing ``spdk_semaphore``.
+
+    Implemented as an instance-level monkeypatch, not a ThreadingHTTPServer
+    subclass: tests/conftest_proxy.py patches ``http.server.ThreadingHTTPServer``
+    to a MagicMock before importing this module, and a subclass statement at
+    module scope would evaluate against that mock and fail on import.
+    """
+    semaphore = threading.Semaphore(max_connections)
+    base_process_request = httpd.process_request
+    base_process_request_thread = httpd.process_request_thread
+
+    def process_request(request, client_address):
+        # Acquire before spawning the thread (not inside it), so the accept
+        # loop itself blocks at the cap instead of spawning unboundedly.
+        semaphore.acquire()
+        base_process_request(request, client_address)
+
+    def process_request_thread(request, client_address):
+        try:
+            base_process_request_thread(request, client_address)
+        finally:
+            semaphore.release()
+
+    httpd.process_request = process_request
+    httpd.process_request_thread = process_request_thread
+
+
 def run_server(host, port, user, password, is_threading_enabled=False):
     # encoding user and password
     key = base64.b64encode((user+':'+password).encode(encoding='ascii')).decode('ascii')
@@ -281,7 +341,13 @@ def run_server(host, port, user, password, is_threading_enabled=False):
     wait_for_spdk_ready()
     try:
         ServerHandler.key = key
-        httpd = (ThreadingHTTPServer if is_threading_enabled else HTTPServer)((host, port), ServerHandler)
+        ServerHandler.timeout = KEEPALIVE_TIMEOUT
+        httpd: HTTPServer
+        if is_threading_enabled:
+            httpd = ThreadingHTTPServer((host, port), ServerHandler)
+            _bound_connection_concurrency(httpd, MAX_CONCURRENT_CONNECTIONS)
+        else:
+            httpd = HTTPServer((host, port), ServerHandler)
         settings = Settings()
         context = settings.make_server_ssl_context()
         if context is not None:
@@ -302,6 +368,12 @@ MAX_CONCURRENT_SPDK = int(get_env_var("MAX_CONCURRENT_SPDK", is_required=False, 
 # instead of being aborted; small enough that abandoned/stuck RPCs free their
 # slot quickly. See _resolve_sock_timeout.
 SPDK_TIMEOUT_MARGIN = float(get_env_var("SPDK_TIMEOUT_MARGIN", is_required=False, default=2))
+# Idle-connection reclaim timeout; 60s comfortably spans the 3-30s polling
+# cadences of the background services that are this proxy's main callers.
+KEEPALIVE_TIMEOUT = int(get_env_var("KEEPALIVE_TIMEOUT", is_required=False, default=60))
+# Cap on concurrent HTTP connections/threads. Above MAX_CONCURRENT_SPDK since
+# a kept-alive connection can sit idle, not doing SPDK work, most of the time.
+MAX_CONCURRENT_CONNECTIONS = int(get_env_var("MAX_CONCURRENT_CONNECTIONS", is_required=False, default=64))
 is_threading_enabled = get_env_var("MULTI_THREADING_ENABLED", is_required=False, default=False)
 server_ip = get_env_var("SERVER_IP", is_required=True, default="")
 rpc_port = get_env_var("RPC_PORT", is_required=True)

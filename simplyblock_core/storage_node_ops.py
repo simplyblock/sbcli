@@ -39,7 +39,7 @@ from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.release_upgrades import jc_compression_upgrade
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.prom_client import PromClient
-from simplyblock_core.rpc_client import RPCClient, RPCErrorCode, RPCRemoteError, RPCException, namespace_matches  # noqa: F401  (RPCClient kept as a patch target for tests)
+from simplyblock_core.rpc_client import RPCErrorCode, RPCRemoteError, RPCException, namespace_matches, evict_cached_session
 from simplyblock_core.snode_client import SNodeClient, SNodeClientException
 from simplyblock_core.utils import dial_backoff
 from simplyblock_web import node_utils
@@ -4661,6 +4661,12 @@ def _restart_storage_node_impl(
         if not node_info:
             logger.error("Failed to get node info!")
             return False
+        # rpc_client() resolves the pool's host from mgmt_ip OR (under TLS)
+        # a k8s DNS name derived from hostname, not always mgmt_ip directly
+        # — so the value to evict has to come from rpc_client() itself,
+        # captured before mgmt_ip/hostname are overwritten below.
+        _old_rpc_client = snode.rpc_client()
+        old_rpc_host, old_rpc_port = _old_rpc_client.host, _old_rpc_client.port
         snode.api_endpoint = node_address
         snode.mgmt_ip = utils.resolve_address(node_address)
         data_nics = []
@@ -4676,6 +4682,7 @@ def _restart_storage_node_impl(
                     'net_type': device['net_type']}))
         snode.data_nics = data_nics
         snode.hostname = node_info['hostname']
+        evict_cached_session(old_rpc_host, old_rpc_port)
 
         if snode.num_partitions_per_dev == 0 and reattach_volume:
             new_cloud_instance_id = node_info['cloud_instance']['id']
