@@ -481,6 +481,52 @@ class TestGetSortedHaJms(unittest.TestCase):
         result = ops.get_sorted_ha_jms(current)
         assert len(result) == 1
 
+    @patch("simplyblock_core.storage_node_ops.DBController")
+    def test_limit_overrides_the_default_target_size(self, MockDBCtrl):
+        # TEMPORARY: `limit` lets a caller (the phase-5 replace-JM retry loop)
+        # see more ranked candidates than the normal redundancy-set size
+        # (ha_jm_count - 1 = 2 here) without changing placement quality --
+        # every extra slot is still chosen by the same host-disjoint +
+        # FD-balance + label rules, just not cut off early.
+        import simplyblock_core.storage_node_ops as ops
+        current = _node("current", "10.0.0.1", failure_domain=0, ha_jm_count=3)
+        b = _node("b", "10.0.0.2", failure_domain=1, jm_device=_jm("jb"))
+        c = _node("c", "10.0.0.3", failure_domain=2, jm_device=_jm("jc"))
+        d = _node("d", "10.0.0.4", failure_domain=1, jm_device=_jm("jd"))
+        MockDBCtrl.return_value = self._mock_db(_cluster(True), [current, b, c, d])
+
+        assert ops.get_sorted_ha_jms(current) == ["jb", "jc"]
+        assert ops.get_sorted_ha_jms(current, limit=10) == ["jb", "jc", "jd"]
+
+    @patch("simplyblock_core.storage_node_ops.DBController")
+    def test_limit_does_not_relax_the_domain_quorum_cap(self, MockDBCtrl):
+        # per_fd_cap must stay derived from ha_jm_count, not from `limit`.
+        # 3 domains (current's own 0, plus 1 and 2), ha_jm_count=3 ->
+        # per_fd_cap = 1. Domain 1 has 4 eligible JMs but only 1 may ever
+        # count toward the quorum-safe redundancy set; domain 2 has 1.
+        # Without `limit` those two cap-respecting picks already fill the
+        # real target (2) -- no relaxation, no warning. `limit=10` must
+        # still rank those same two first, then append the domain-1
+        # overflow candidates AFTER them as bonus options for the retry
+        # loop, without ever claiming (via a warning) that quorum-safe
+        # placement fell short -- it didn't.
+        import simplyblock_core.storage_node_ops as ops
+        current = _node("current", "10.0.0.1", failure_domain=0, ha_jm_count=3)
+        e = _node("e", "10.0.0.2", failure_domain=1, jm_device=_jm("je"))
+        f = _node("f", "10.0.0.3", failure_domain=1, jm_device=_jm("jf"))
+        g = _node("g", "10.0.0.4", failure_domain=1, jm_device=_jm("jg"))
+        h = _node("h", "10.0.0.5", failure_domain=1, jm_device=_jm("jh"))
+        i = _node("i", "10.0.0.6", failure_domain=2, jm_device=_jm("ji"))
+        MockDBCtrl.return_value = self._mock_db(_cluster(True), [current, e, f, g, h, i])
+
+        assert ops.get_sorted_ha_jms(current) == ["je", "ji"]
+
+        with patch.object(ops, "logger") as mock_logger:
+            result = ops.get_sorted_ha_jms(current, limit=10)
+        mock_logger.warning.assert_not_called()
+        assert result[:2] == ["je", "ji"]
+        assert set(result) == {"je", "jf", "jg", "jh", "ji"}
+
 
 # ===========================================================================
 # 5. get_distr_cluster_map

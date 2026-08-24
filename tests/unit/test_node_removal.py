@@ -1317,6 +1317,46 @@ class TestDecommissionDevices(unittest.TestCase):
         self.assertEqual(consumer.remote_jm_devices, [connected_new])
         consumer.write_to_db.assert_called()
 
+    def test_requests_the_expanded_candidate_pool_from_get_sorted_ha_jms(self):
+        # TEMPORARY (see _JC_REPLACE_CANDIDATE_POOL_LIMIT): this retry loop is
+        # replacing one already-selected member, not building the redundancy
+        # set from scratch, so it must ask get_sorted_ha_jms for more than
+        # the normal-sized target -- otherwise a candidate the node already
+        # holds wastes one of the few slots get_sorted_ha_jms would otherwise
+        # return, starving the retry loop of real alternatives (found live
+        # 2026-08-24: only 2 of ~5 available candidates were ever offered).
+        cl = _cluster()
+        removed = _node("n1", n_devices=0, with_jm=True)
+        removed.jm_ids = []
+        consumer = _node("consumer", n_devices=0, with_jm=True)
+        consumer.jm_ids = [removed.jm_device.get_id()]
+        live_old = RemoteJMDevice()
+        live_old.uuid = removed.jm_device.get_id()
+        live_old.remote_bdev = "remote_jm_n1n1"
+        consumer.remote_jm_devices = [live_old]
+        replacement = _node("replacement", n_devices=0, with_jm=True)
+        replacement.jm_ids = []
+        replacement.jm_device.jm_bdev = "jm_replacement"
+        db = FakeDB(cl, [removed, consumer, replacement])
+        db.get_jm_device_by_id = MagicMock(side_effect=lambda jid: {
+            removed.jm_device.get_id(): removed.jm_device,
+            replacement.jm_device.get_id(): replacement.jm_device,
+        }[jid])
+        dc = MagicMock()
+        connected_new = RemoteJMDevice()
+        connected_new.uuid = replacement.jm_device.get_id()
+        connected_new.remote_bdev = "remote_jm_replacementn1"
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "device_controller", dc), \
+             patch.object(storage_node_ops, "get_sorted_ha_jms",
+                          return_value=[replacement.jm_device.get_id()]) as sorted_jms_mock, \
+             patch.object(storage_node_ops, "_connect_to_remote_jm_devs",
+                          return_value=[connected_new]):
+            storage_node_ops._decommission_node_devices(removed)
+
+        sorted_jms_mock.assert_called_once_with(
+            consumer, limit=storage_node_ops._JC_REPLACE_CANDIDATE_POOL_LIMIT)
+
     def test_name_old_is_whatever_the_consumer_currently_has_live_not_removeds_own_name(self):
         # A prior replacement (back when this used the retired
         # override_name_on_node trick, or simply a longer chain of
