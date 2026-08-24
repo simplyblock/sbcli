@@ -4589,85 +4589,102 @@ def _decommission_node_devices(removed_node: StorageNode):
                 node.jm_ids.remove(removed_jm_id)
                 jm_ids = get_sorted_ha_jms(node)
                 logger.debug(f"online_jms: {str(jm_ids)}")
-                # A candidate node already reaches via some path OTHER than
-                # its own jm_ids -- most commonly the hosted-primary route:
-                # node hosts some OTHER primary's secondary/tertiary copy,
-                # and that primary's own jm_ids already includes this
-                # candidate. SPDK won't attach a second, distinctly-named
-                # local controller to a target it already has a live
-                # connection to under another name (the attach RPC returns
-                # without a bdev name), and jc_replace_jm itself rejects a
-                # name_new already in use by JC (-14) -- so a candidate node
-                # already reaches, however it reaches it, can never actually
-                # serve as the replacement. Skip it so a fresh pick never
-                # collides this way (found live 2026-08-19: "Bdev name not
-                # returned from controller attach", the JM group "excluded
-                # from further operation" on an ongoing SPDK retry loop,
-                # while the DB metadata reported success -- back when a
-                # collision here was silently accepted anyway).
-                already_reachable = {rd.uuid for rd in (node.remote_jm_devices or [])}
-                new_jm_dev = ""
-                for jm_id in jm_ids:
-                    if jm_id in node.jm_ids or jm_id in already_reachable:
-                        continue
-                    new_jm_dev = jm_id
-                    break
-
+                # get_sorted_ha_jms already ranks candidates by host-disjoint
+                # (hard) + failure-domain balance (best-effort) -- no extra
+                # filtering needed here for placement quality.
+                #
+                # No proactive "is node already connected to this candidate"
+                # skip either. That used to matter because the retired
+                # override_name_on_node trick could make the SAME target
+                # live under TWO different local names, which SPDK's attach
+                # can't do -- but every connect now always uses the owner's
+                # own natural name (get_node_jm_names' hosted-primary path
+                # and _connect_to_remote_jm_devs agree on it), so a candidate
+                # node already reaches via hosting some OTHER primary's
+                # secondary/tertiary copy resolves to the exact same bdev
+                # name either way. connect_device's fast path (get_bdevs
+                # before attaching) already returns that existing bdev
+                # as-is instead of re-attaching -- "if connected, use it;
+                # if not, connect and use it" comes for free.
+                #
+                # The one thing that snapshot-based skip could never see
+                # reliably: whether that bdev is already a member of a
+                # DIFFERENT JC instance (e.g. the hosted replica's own
+                # journal-consistency group, wired in directly by
+                # _create_bdev_stack's jm_names -- never recorded in
+                # remote_jm_devices at all, so no DB snapshot could catch
+                # it -- found live 2026-08-24). jc_replace_jm itself is the
+                # one authoritative, live answer to that (-14, "name_new is
+                # already used by JC"), so try each ranked candidate in turn
+                # and let jc_replace_jm's own verdict decide, instead of
+                # trying to predict it.
                 replaced = False
-                if new_jm_dev and name_old:
-                    d = db_controller.get_jm_device_by_id(new_jm_dev)
-                    controller_name = f"remote_{d.jm_bdev}"
-                    try:
-                        # Connect the replacement under its own name first --
-                        # jc_replace_jm hands off to an already-live bdev, it
-                        # doesn't create the connection itself.
-                        connected = _connect_to_remote_jm_devs(
-                            node, jm_ids=[new_jm_dev], only_node_id=d.node_id)
-                        new_remote_dev = next(
-                            (rd for rd in connected if rd.uuid == new_jm_dev), None)
-                        if not new_remote_dev or not new_remote_dev.remote_bdev:
-                            raise RPCException(
-                                f"failed to connect replacement JM device {new_jm_dev}")
-                        name_new = new_remote_dev.remote_bdev
-                        node.rpc_client(timeout=30, retry=2).jc_replace_jm(
-                            name_old=name_old, name_new=name_new)
-                        logger.info(
-                            f"[REMOVAL] {node.get_id()}: jc_replace_jm {name_old} -> "
-                            f"{name_new} ({new_jm_dev}) replacing removed JM {removed_jm_id}")
-                        node.jm_ids.append(new_jm_dev)
-                        node.remote_jm_devices = connected
-                        replaced = True
-                    except Exception as e:
-                        logger.error(
-                            f"[REMOVAL] {node.get_id()}: jc_replace_jm failed replacing "
-                            f"{name_old} with candidate {new_jm_dev} ({controller_name}): {e}")
-                        # Best-effort: don't leave an attached-but-unused
-                        # connection sitting around. -14 (name_new already
-                        # used by JC) is the one failure where the bdev is
-                        # legitimately claimed by JC already -- detaching it
-                        # would tear down something in active use, so skip
-                        # the cleanup in that specific case.
-                        if getattr(e, "code", None) != -14:
-                            try:
-                                node.rpc_client().bdev_nvme_detach_controller(controller_name)
-                            except Exception as de:
-                                logger.warning(
-                                    f"Failed to detach unused controller "
-                                    f"{controller_name} on {node.get_id()}: {de}")
+                any_attempted = False
+                if name_old:
+                    for jm_id in jm_ids:
+                        if jm_id in node.jm_ids:
+                            continue
+                        any_attempted = True
+                        d = db_controller.get_jm_device_by_id(jm_id)
+                        controller_name = f"remote_{d.jm_bdev}"
+                        expected_bdev = f"{controller_name}n1"
+                        # Recorded BEFORE our own connect call below, so a
+                        # failure's cleanup only ever detaches a connection
+                        # THIS call made -- never one already serving some
+                        # other legitimate purpose (e.g. that hosted-replica
+                        # JC membership above).
+                        try:
+                            pre_existing = bool(node.rpc_client().get_bdevs(expected_bdev))
+                        except Exception:
+                            pre_existing = False
+                        try:
+                            # Connect the candidate under its own name first --
+                            # jc_replace_jm hands off to an already-live bdev,
+                            # it doesn't create the connection itself.
+                            connected = _connect_to_remote_jm_devs(
+                                node, jm_ids=[jm_id], only_node_id=d.node_id)
+                            new_remote_dev = next(
+                                (rd for rd in connected if rd.uuid == jm_id), None)
+                            if not new_remote_dev or not new_remote_dev.remote_bdev:
+                                raise RPCException(
+                                    f"failed to connect replacement JM device {jm_id}")
+                            name_new = new_remote_dev.remote_bdev
+                            node.rpc_client(timeout=30, retry=2).jc_replace_jm(
+                                name_old=name_old, name_new=name_new)
+                            logger.info(
+                                f"[REMOVAL] {node.get_id()}: jc_replace_jm {name_old} -> "
+                                f"{name_new} ({jm_id}) replacing removed JM {removed_jm_id}")
+                            node.jm_ids.append(jm_id)
+                            node.remote_jm_devices = connected
+                            replaced = True
+                            break
+                        except Exception as e:
+                            logger.error(
+                                f"[REMOVAL] {node.get_id()}: jc_replace_jm failed replacing "
+                                f"{name_old} with candidate {jm_id} ({controller_name}): "
+                                f"{e}; trying next candidate")
+                            if not pre_existing:
+                                try:
+                                    node.rpc_client().bdev_nvme_detach_controller(controller_name)
+                                except Exception as de:
+                                    logger.warning(
+                                        f"Failed to detach unused controller "
+                                        f"{controller_name} on {node.get_id()}: {de}")
                 if not replaced:
-                    # No collision-free candidate, or the replace RPC itself
-                    # failed -- leave the redundancy slot honestly short
-                    # (jm_ids already has the dead id removed above) rather
-                    # than claim a replacement that isn't actually live in
-                    # JC. Nothing currently revisits this automatically; it
+                    # Every candidate either collided at the JC level or
+                    # failed outright, or there was no candidate at all --
+                    # leave the redundancy slot honestly short (jm_ids
+                    # already has the dead id removed above) rather than
+                    # claim a replacement that isn't actually live in JC.
+                    # Nothing currently revisits this automatically; it
                     # stays a visible gap until a future removal/reconnect
                     # cycle retries it.
-                    if not new_jm_dev:
-                        logger.error(f"no jm_id found for {node.get_id()}")
-                    elif not name_old:
+                    if not name_old:
                         logger.error(
                             f"[REMOVAL] {node.get_id()}: no recorded bdev name for removed "
                             f"JM {removed_jm_id}; cannot call jc_replace_jm")
+                    elif not any_attempted:
+                        logger.error(f"no jm_id found for {node.get_id()}")
                 node.write_to_db()
             elif any(d.uuid == removed_node.jm_device.get_id() for d in (node.remote_jm_devices or [])):
                 # node.jm_ids is this node's OWN redundancy set for its OWN JM
