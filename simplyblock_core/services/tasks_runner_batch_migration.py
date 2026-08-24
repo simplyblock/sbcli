@@ -349,6 +349,121 @@ def _build_batch_final_args(group, member_migrations, src_node, tgt_node, tgt_rp
     return lvol_names, lvol_ids, snapshot_names
 
 
+def _commit_intermediate_snapshot_chain(group, member_migrations, tgt_node, tgt_rpc):
+    """
+    Link each member's intermediate ("shrink") snapshots into the target
+    ancestry chain and freeze them immutable, before bdev_lvol_batch_final_step
+    runs.
+
+    _handle_group_intermediate transfers each round's data to the target (and
+    registers it on secondary/tertiary via _setup_snap_transfer) but
+    deliberately skips add_clone/convert -- same as the snap_copy phase --
+    deferring tree-building to the orchestrator. _reconstruct_snap_tree is the
+    orchestrator step that normally does that linking, but it only covers the
+    snap_copy chain (via snaps_transferred_group) and only runs once, at the
+    SNAP_COPY -> INTERMEDIATE transition, before any intermediate round
+    exists -- it can never reach forward to link them. _build_batch_final_args
+    then picks only the LAST intermediate snapshot (snaps_migrated[-1]) as the
+    one boundary snapshot, and the post-final_step code below links only that
+    single snapshot to the live bdev. Nothing anywhere ever linked the
+    intermediate snapshots to each other, or round 0 to the snap_copy chain's
+    last snapshot.
+
+    With exactly one intermediate round this was invisible: the only link
+    needed (live bdev -> round 0) was the one link that existed. With two or
+    more rounds, every earlier round's target blob was left parentless --
+    reads falling outside what that specific round itself captured returned
+    zeros instead of falling through to the real predecessor data (observed
+    as fio's "bad magic header 0" checksum failures).
+
+    Called once per group, before batch_final_step, so the whole chain is
+    committed immutable ahead of the live cutover -- mirrors
+    _reconstruct_snap_tree's own add_clone-on-all-replicas-then-convert
+    ordering. Returns None on success, or an error string.
+    """
+    tgt_sec_node, _ = _get_target_secondary_node(tgt_node, "")
+    sec_rpc = _make_rpc(tgt_sec_node) if tgt_sec_node else None
+    tgt_ter_node, _ = _get_target_tertiary_node(tgt_node, "")
+    ter_rpc = _make_rpc(tgt_ter_node) if tgt_ter_node else None
+    from simplyblock_core.controllers import lvol_controller as _lc
+
+    for m in member_migrations:
+        intermediate_snaps = m.intermediate_snaps or []
+        if not intermediate_snaps:
+            continue
+
+        # Predecessor for round 0: the last snap_copy-chain snapshot already
+        # committed on target -- mirrors _reconstruct_snap_tree's own
+        # preexisting-vs-freshly-transferred predecessor lookup.
+        pred_composite = None
+        pred_uuid = (m.snaps_transferred_group or m.snaps_preexisting_on_target or [None])[-1]
+        if pred_uuid:
+            try:
+                pred_snap = db.get_snapshot_by_id(pred_uuid)
+                if pred_uuid in (m.snaps_preexisting_on_target or []):
+                    _lvstore_prefix = tgt_node.lvstore + '/'
+                    pred_short = None
+                    if pred_snap.snap_bdev and pred_snap.snap_bdev.startswith(_lvstore_prefix):
+                        pred_short = pred_snap.snap_bdev.split('/', 1)[1]
+                    else:
+                        for _inst in pred_snap.instances or []:
+                            _inst_bdev = _inst.get('snap_bdev', '')
+                            if _inst_bdev.startswith(_lvstore_prefix):
+                                pred_short = _inst_bdev.split('/', 1)[1]
+                                break
+                    pred_short = pred_short or _snap_tgt_short_name(pred_snap)
+                else:
+                    pred_short = _snap_tgt_short_name(pred_snap)
+                pred_composite = f"{tgt_node.lvstore}/{pred_short}"
+            except KeyError:
+                logger.warning(
+                    f"Group {group.uuid[:8]}: intermediate-chain predecessor "
+                    f"{pred_uuid} not found for member {m.uuid[:8]}; linking round 0 "
+                    f"without a parent")
+
+        for snap_uuid in intermediate_snaps:
+            try:
+                snap = db.get_snapshot_by_id(snap_uuid)
+            except KeyError:
+                return f"Intermediate snapshot {snap_uuid} not found while committing chain"
+            tgt_composite = f"{tgt_node.lvstore}/{_snap_tgt_short_name(snap)}"
+
+            # Same known SPDK behavior _reconstruct_snap_tree already guards
+            # against: converting an already-immutable bdev is rejected, so a
+            # retry that reaches an earlier round already committed here would
+            # otherwise fail every time. bdev_lvol_get_bdevs reports
+            # is_snapshot on the primary; treat that as "already done" and
+            # just advance the predecessor pointer.
+            _existing = tgt_rpc.get_bdevs(tgt_composite)
+            if _existing and _existing[0].get('driver_specific', {}).get('lvol', {}).get('is_snapshot'):
+                pred_composite = tgt_composite
+                continue
+
+            if pred_composite:
+                if not tgt_rpc.bdev_lvol_add_clone(tgt_composite, pred_composite):
+                    return f"bdev_lvol_add_clone failed for intermediate snap {snap_uuid}"
+                if sec_rpc and not sec_rpc.bdev_lvol_add_clone(tgt_composite, pred_composite):
+                    return f"bdev_lvol_add_clone on secondary failed for intermediate snap {snap_uuid}"
+                if ter_rpc and not ter_rpc.bdev_lvol_add_clone(tgt_composite, pred_composite):
+                    return f"bdev_lvol_add_clone on tertiary failed for intermediate snap {snap_uuid}"
+
+            if not _lc.is_node_leader(tgt_node, tgt_composite.split("/")[0]):
+                return f"target node not LVS leader for convert of intermediate snap {snap_uuid}, retrying"
+            if not tgt_rpc.bdev_lvol_convert(tgt_composite):
+                return f"bdev_lvol_convert failed for intermediate snap {snap_uuid}"
+            if sec_rpc and not sec_rpc.bdev_lvol_convert(tgt_composite):
+                return f"bdev_lvol_convert on secondary failed for intermediate snap {snap_uuid}"
+            if ter_rpc and not ter_rpc.bdev_lvol_convert(tgt_composite):
+                return f"bdev_lvol_convert on tertiary failed for intermediate snap {snap_uuid}"
+
+            logger.info(
+                f"Group {group.uuid[:8]}: committed intermediate snap {snap_uuid[:8]} "
+                f"({tgt_composite}) parent={pred_composite}")
+            pred_composite = tgt_composite
+
+    return None
+
+
 def _flip_ana_to_optimized(group, member_migrations, src_node, src_rpc, tgt_node, tgt_rpc):
     """
     After a successful bdev_lvol_batch_final_step, drive clients to the new target.
@@ -479,7 +594,7 @@ def _flip_ana_to_optimized(group, member_migrations, src_node, src_rpc, tgt_node
             # events visible to initiators — each one triggering a reconnect. Batching
             # the removes into one pass and the adds into a second pass collapses this
             # into a single collective disruption, which initiators handle cleanly.
-            ns_adds = []  # (tgt_ns_bdev, uuid, guid) — collected during remove pass
+            ns_adds = []  # (tgt_ns_bdev, uuid, guid, nsid) — collected during remove pass
             for m in member_migrations:
                 try:
                     lvol = db.get_lvol_by_id(m.lvol_id)
@@ -503,15 +618,21 @@ def _flip_ana_to_optimized(group, member_migrations, src_node, src_rpc, tgt_node
                         logger.warning(
                             f"Group {group.uuid[:8]}: no namespace for uuid={lvol.uuid[:8]} "
                             f"on {tgt['node_id'][:8]}; skipping remove")
-                    ns_adds.append((tgt_ns_bdev, lvol.uuid, lvol.guid))
+                    # Re-add under the SAME nsid it just had here, instead of letting
+                    # SPDK auto-assign the next free one. Client-side identity across
+                    # the swap is carried by uuid/nguid regardless (Linux NVMe
+                    # multipath groups paths by NGUID, not nsid), so this isn't a
+                    # correctness fix -- it just keeps the namespace's nsid stable on
+                    # this node across the swap instead of drifting to a new value.
+                    ns_adds.append((tgt_ns_bdev, lvol.uuid, lvol.guid, nsid))
                 except Exception as e:
                     logger.warning(
                         f"Group {group.uuid[:8]}: namespace swap member {m.uuid[:8]} "
                         f"on {tgt['node_id'][:8]} (non-fatal): {e}")
 
-            for tgt_ns_bdev, uuid, guid in ns_adds:
+            for tgt_ns_bdev, uuid, guid, nsid in ns_adds:
                 try:
-                    ret = tgt['rpc'].nvmf_subsystem_add_ns(nqn, tgt_ns_bdev, uuid, guid)
+                    ret = tgt['rpc'].nvmf_subsystem_add_ns(nqn, tgt_ns_bdev, uuid, guid, nsid=nsid)
                     if not ret:
                         logger.error(
                             f"Group {group.uuid[:8]}: add ns {tgt_ns_bdev} failed "
@@ -599,6 +720,11 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
         # entirely via its own idle timeout.
         return None, str(e)
 
+    chain_err = _commit_intermediate_snapshot_chain(group, member_migrations, tgt_node, tgt_rpc)
+    if chain_err:
+        # Hub controller left attached — see comment above.
+        return None, chain_err
+
     # Pre-freeze: take SRC/TGT paths out of the read/write path before the
     # synchronous final-step transfer below (see the diagnostic block further
     # down for the current, temporarily-widened version of this).
@@ -665,7 +791,21 @@ def _handle_intermediate_barrier(group, member_migrations, src_node, tgt_node, s
         ret = final_step_rpc.bdev_lvol_batch_transfer_final_step(
             lvol_names, lvol_ids, snapshot_names, 16, hub_bdev, "migrate")
         logger.info(f"Group {group.uuid[:8]}: bdev_lvol_batch_transfer_final_step returned {ret!r}")
-        batch_ok = True
+        # The RPC can return normally (no exception) while still reporting the
+        # transfer itself failed -- transfer_state is one of "No process" |
+        # "In progress" | "Failed" | "Done" (see bdev_lvol_transfer_stat).
+        # Treating any non-exception response as success let a "Failed"
+        # transfer proceed straight to the ANA flip and source cleanup as if
+        # the data had actually moved (observed run 2026-08-22, group
+        # 911aa7af/mig-108: 'Failed' logged then treated as success, target
+        # listeners never came up, checksum corruption followed).
+        transfer_state = ret.get("transfer_state") if isinstance(ret, dict) else None
+        if transfer_state == "Done":
+            batch_ok = True
+        else:
+            batch_err = f"transfer_state={transfer_state!r} (expected 'Done'): {ret!r}"
+            logger.error(f"Group {group.uuid[:8]}: bdev_lvol_batch_transfer_final_step "
+                        f"did not report success: {batch_err}")
     except RPCRemoteError as e:
         logger.error(f"Group {group.uuid[:8]}: bdev_lvol_batch_transfer_final_step RPC error code={e.code}: {e}")
         batch_err = str(e)
