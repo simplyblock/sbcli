@@ -2473,9 +2473,7 @@ metadata:
   namespace: {_NAMESPACE}
 spec:
   fabricType: tcp
-  isSingleNode: false
   enableNodeAffinity: true
-  strictNodeAntiAffinity: false
   stripe:
     dataChunks: {self.ndcs}
     parityChunks: {self.npcs}
@@ -2485,6 +2483,7 @@ spec:
   criticalThreshold:
     capacity: 96
     provisionedCapacity: 98
+  maxSubsystemCount: {max_lvol}
 ---
 apiVersion: storage.simplyblock.io/v1alpha1
 kind: StoragePool
@@ -2507,7 +2506,6 @@ spec:
   mgmtIfname: {mgmt_ifc}
   dataIfname:
     - {data_nics}
-  maxSubsystemCount: {max_lvol}
   enableCpuTopology: true
   workerNodes:
 {worker_yaml}"""
@@ -2516,20 +2514,33 @@ spec:
         out, err = self.k8s_utils._exec_kubectl(apply_cmd)
         self.logger.info(f"CRs applied (stdout): {out}")
         if err and err.strip():
-            self.logger.warning(f"CRs apply stderr: {err.strip()}")
+            # Fail fast if critical CRs were rejected by the API server
+            err_stripped = err.strip()
+            if any(kw in err_stripped for kw in (
+                "BadRequest", "strict decoding error", "NotFound",
+                "could not find the requested resource",
+            )):
+                raise RuntimeError(
+                    f"CRs rejected by API server: {err_stripped}"
+                )
+            self.logger.warning(f"CRs apply stderr: {err_stripped}")
         # Verify critical CRs were actually created — fail early instead
         # of discovering a missing CR much later during node restart.
         for cr_kind, cr_name in [
             ("storagecluster", self.cluster_cr_name),
+            ("storagepool", self.pool_cr_name),
             ("storagenodeset", self.node_cr_name),
         ]:
-            chk_out, _ = self.k8s_utils._exec_kubectl(
+            chk_out, chk_err = self.k8s_utils._exec_kubectl(
                 f"kubectl get {cr_kind} {cr_name} -n {_NAMESPACE} "
-                f"-o jsonpath='{{.metadata.name}}' 2>&1"
+                f"-o jsonpath='{{.metadata.name}}'"
             )
-            if cr_name not in (chk_out or ""):
+            not_found = "not found" in (chk_err or "").lower()
+            no_resource = "could not find the requested resource" in (chk_err or "").lower()
+            if not_found or no_resource or cr_name not in (chk_out or ""):
                 raise RuntimeError(
                     f"Critical CR {cr_kind}/{cr_name} was not created. "
+                    f"kubectl get stderr: {chk_err}, "
                     f"kubectl apply stderr: {err}"
                 )
             self.logger.info(f"  Verified {cr_kind}/{cr_name} exists")
@@ -3042,9 +3053,7 @@ metadata:
   namespace: {_NAMESPACE}
 spec:
   fabricType: tcp
-  isSingleNode: false
   enableNodeAffinity: true
-  strictNodeAntiAffinity: false
   stripe:
     dataChunks: {self.ndcs}
     parityChunks: {self.npcs}
@@ -3054,6 +3063,7 @@ spec:
   criticalThreshold:
     capacity: 96
     provisionedCapacity: 98
+  maxSubsystemCount: {max_lvol}
 ---
 apiVersion: storage.simplyblock.io/v1alpha1
 kind: StoragePool
@@ -3076,7 +3086,6 @@ spec:
   mgmtIfname: {mgmt_ifc}
   dataIfname:
     - {data_nics}
-  maxSubsystemCount: {max_lvol}
   enableCpuTopology: true
   nodesPerSocket: {self.nodes_per_socket}
   workerNodes:
@@ -3086,18 +3095,30 @@ spec:
         out, err = self.k8s_utils._exec_kubectl(apply_cmd)
         self.logger.info(f"CRs applied (stdout): {out}")
         if err and err.strip():
-            self.logger.warning(f"CRs apply stderr: {err.strip()}")
+            err_stripped = err.strip()
+            if any(kw in err_stripped for kw in (
+                "BadRequest", "strict decoding error", "NotFound",
+                "could not find the requested resource",
+            )):
+                raise RuntimeError(
+                    f"CRs rejected by API server: {err_stripped}"
+                )
+            self.logger.warning(f"CRs apply stderr: {err_stripped}")
         for cr_kind, cr_name in [
             ("storagecluster", self.cluster_cr_name),
+            ("storagepool", self.pool_cr_name),
             ("storagenodeset", self.node_cr_name),
         ]:
-            chk_out, _ = self.k8s_utils._exec_kubectl(
+            chk_out, chk_err = self.k8s_utils._exec_kubectl(
                 f"kubectl get {cr_kind} {cr_name} -n {_NAMESPACE} "
-                f"-o jsonpath='{{.metadata.name}}' 2>&1"
+                f"-o jsonpath='{{.metadata.name}}'"
             )
-            if cr_name not in (chk_out or ""):
+            not_found = "not found" in (chk_err or "").lower()
+            no_resource = "could not find the requested resource" in (chk_err or "").lower()
+            if not_found or no_resource or cr_name not in (chk_out or ""):
                 raise RuntimeError(
                     f"Critical CR {cr_kind}/{cr_name} was not created. "
+                    f"kubectl get stderr: {chk_err}, "
                     f"kubectl apply stderr: {err}"
                 )
             self.logger.info(f"  Verified {cr_kind}/{cr_name} exists")
