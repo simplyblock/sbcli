@@ -431,8 +431,8 @@ jobs:
 
       # ── Set namespace PodSecurity to privileged (required for CSI, fluent-bit, node-exporter) ──
 
-      - name: Label simplyblock namespace as privileged
-        if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
+      - name: Label simplyblock namespace as privileged (Talos only)
+        if: ${{ github.event.inputs.use_existing_cluster != 'true' && github.event.inputs.cluster_environment == 'local' }}
         run: |
           set -euxo pipefail
           kubectl create namespace simplyblock 2>/dev/null || true
