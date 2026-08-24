@@ -1,6 +1,9 @@
 name: Docker Image Builder (docker.io, ecr.aws, quay.io)
 
 on:
+  release:
+    types: [created]
+
   workflow_dispatch:
     inputs:
       push_to_docker:
@@ -16,7 +19,7 @@ on:
       push_to_quay:
         description: "Push to quay.io"
         required: false
-        default: false
+        default: true
         type: boolean
 
 jobs:
@@ -31,7 +34,9 @@ jobs:
     - name: Set docker image tag
       id: get_info
       run: |
-        if [[ "${{github.ref}}" == refs/pull/* ]]; then
+        if [[ -n "${{github.event.release.tag_name}}" ]]; then
+          echo "TAG=${{github.event.release.tag_name}}" >> $GITHUB_ENV
+        elif [[ "${{github.ref}}" == refs/pull/* ]]; then
           tag=${GITHUB_REF/\/merge/}
           echo "TAG=$(echo pr-${tag:10})" >> $GITHUB_ENV
         else
