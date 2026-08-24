@@ -416,34 +416,11 @@ def _check_sec_node_hublvol(node: StorageNode, auto_fix=False, primary_node_id=N
             # _collect_attached_ips holds the same rule for device controllers,
             # including the older single-entry/alternate_trids shape.
             attached_ips = storage_node_ops._collect_attached_ips(ret)
-
-            def _data_ips(peer):
-                ips = set()
-                for iface in peer.data_nics:
-                    if (peer.active_rdma and iface.trtype == "RDMA") or                        (not peer.active_rdma and peer.active_tcp
-                            and iface.trtype == "TCP"):
-                        ips.add(iface.ip4_address)
-                return ips
-
-            # Expected paths depend on the ROLE of this node, not just on the
-            # primary. A secondary connects to the primary (2 paths); a
-            # tertiary connects to the primary AND the secondary (4 paths).
-            # Built from the primary alone, a tertiary that came up with only
-            # one of the secondary's two paths looked complete here — the
-            # primary's paths were all present, missing_ips was empty, and the
-            # 3-path controller sat unrepaired forever (both tertiaries on the
-            # fresh 2026-08-24 deploy, always missing the secondary's second
-            # NIC; the len(ctrlrs) < 2 branch above cannot see it either).
-            expected_ips = _data_ips(primary_node)
-            if is_sec2 and primary_node.secondary_node_id:
-                try:
-                    _sec1 = db_controller.get_storage_node_by_id(
-                        primary_node.secondary_node_id)
-                    if _sec1.status in (StorageNode.STATUS_ONLINE,
-                                        StorageNode.STATUS_DOWN):
-                        expected_ips |= _data_ips(_sec1)
-                except KeyError:
-                    pass
+            expected_ips = set()
+            for iface in primary_node.data_nics:
+                if (primary_node.active_rdma and iface.trtype == "RDMA") or                    (not primary_node.active_rdma and primary_node.active_tcp
+                        and iface.trtype == "TCP"):
+                    expected_ips.add(iface.ip4_address)
             missing_ips = expected_ips - attached_ips
             if missing_ips:
                 logger.info(
