@@ -595,7 +595,7 @@ jobs:
           ${VAULT_SETTINGS}
             maxSubsystemCount: ${MAX_SUBSYS}
             vcpuCount: ${VCPU_COUNT}
-            maxHugePagesSize: "17G"
+
           ---
           apiVersion: storage.simplyblock.io/v1alpha1
           kind: StoragePool
@@ -730,6 +730,11 @@ jobs:
           set -euxo pipefail
           echo "=== Installing R25 sbcli control plane chart ==="
           cd $GITHUB_WORKSPACE/sbcli-r25/simplyblock_core/scripts/charts/
+
+          # Disable Grafana plugin download (fails on Talos due to DNS restrictions)
+          sed -i 's/value: "grafana-opensearch-datasource"/value: ""/' \
+            templates/monitoring_k8s.yaml 2>/dev/null || true
+
           helm dependency build .
           helm upgrade --install sbcli \
             --namespace simplyblock \

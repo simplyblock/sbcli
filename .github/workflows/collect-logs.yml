@@ -370,6 +370,8 @@ jobs:
           set -euxo pipefail
           NAMESPACE="${{ inputs.NAMESPACE || 'simplyblock' }}"
           LOCAL_OUTPUT_DIR="${OUTPUT_DIR}"
+          # Clean any leftover files from previous runs to avoid mixing
+          rm -rf "${LOCAL_OUTPUT_DIR}"
           mkdir -p "${LOCAL_OUTPUT_DIR}"
 
           echo "=== Collecting logs via admin pods (reverse, chunked, parallel) ==="
@@ -674,6 +676,8 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
+          # Clean any leftover files from previous runs to avoid mixing
+          rm -rf "${OUTPUT_DIR}"
           mkdir -p "${OUTPUT_DIR}"
           python3 sbcli/e2e/utils/test_graylog_export.py
 
