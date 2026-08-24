@@ -429,6 +429,19 @@ jobs:
           kubectl wait --for=condition=Ready pods --all -n cert-manager --timeout=120s
           echo "cert-manager is ready."
 
+      # ── Set namespace PodSecurity to privileged (required for CSI, fluent-bit, node-exporter) ──
+
+      - name: Label simplyblock namespace as privileged
+        if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
+        run: |
+          set -euxo pipefail
+          kubectl create namespace simplyblock 2>/dev/null || true
+          kubectl label namespace simplyblock \
+            pod-security.kubernetes.io/enforce=privileged \
+            pod-security.kubernetes.io/warn=privileged \
+            --overwrite
+          echo "Namespace simplyblock labeled as privileged for PodSecurity"
+
       # ── Operator-based bootstrap (rolling upgrade, R26+ base) ──
 
       - name: Install Helm Chart for simplyblock-operator (BASE version)
