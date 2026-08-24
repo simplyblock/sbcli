@@ -11,9 +11,11 @@ import time
 import uuid
 
 from simplyblock_core.controllers import tasks_controller
+from simplyblock_core.controllers.backup.chain import BackupChain
 from simplyblock_core.controllers.backup.controller import (
     create_single_backup, get_latest_backup_for_lvol)
 from simplyblock_core.db_controller import DBController
+from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.models.backup import Backup, BackupPolicy, BackupPolicyAttachment
 
 logger = logging.getLogger()
@@ -299,11 +301,32 @@ def _auto_backup_lvol(lvol):
     # cluster was unusable, leaving an orphaned auto_* snapshot behind on every
     # scheduler tick.
     node_id = lvol.node_id
+    prev_backup = get_latest_backup_for_lvol(lvol.get_id())
     try:
         snode = db_controller.get_storage_node_by_id(node_id)
         cluster_id = snode.cluster_id
         location = db_controller.get_cluster_by_id(cluster_id).get_backup_config().location()
-    except (KeyError, ValueError) as e:
+
+        # The chain this backup would join has to stay restorable, exactly as it
+        # does for a backup taken by hand. A schedule is the one thing that adds
+        # to a chain indefinitely, so it is where a chain would otherwise grow
+        # past what the data plane accepts, or quietly split across two buckets
+        # after the cluster's backup configuration was repointed.
+        #
+        # The location and encryption declared here are the ones this backup
+        # WOULD be written with; holding the existing chain to them is what
+        # catches the disagreement, rather than inheriting whatever the chain
+        # already said.
+        existing = (
+            BackupChain.of_backups(
+                uuid.UUID(prev_backup.uuid), db_controller.get_backups(cluster_id)).records()
+            if prev_backup is not None else [])
+        BackupChain.assemble(
+            location, bool(lvol.crypto_bdev), existing,
+        ).require_restorable(
+            length=len(existing) + 1,
+            what=f"The backup chain of volume {lvol.lvol_name}")
+    except (KeyError, ValueError, PreconditionError) as e:
         logger.warning(f"Auto-backup skipped for lvol {lvol.get_id()}: {e}")
         return
 
@@ -319,7 +342,6 @@ def _auto_backup_lvol(lvol):
         logger.warning(f"Auto-backup: snapshot {snap_id} not found after creation")
         return
 
-    prev_backup = get_latest_backup_for_lvol(lvol.get_id())
     create_single_backup(snapshot, lvol, node_id, cluster_id, prev_backup, location)
 
 

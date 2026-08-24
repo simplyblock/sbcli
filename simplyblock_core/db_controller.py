@@ -31,7 +31,7 @@ from simplyblock_core.models.stats import DeviceStatObject, NodeStatObject, Clus
     PoolStatObject, CachedLVolStatObject
 from simplyblock_core.models.storage_node import StorageNode, NodeLVolDelLock
 from simplyblock_core.models.lvstore_lock import LVStoreMutationLock
-from simplyblock_core.utils.helpers import single, single_or_none
+from simplyblock_core.utils.helpers import single_or_none
 
 logger = logging.getLogger(__name__)
 
@@ -1638,29 +1638,6 @@ class DBController(metaclass=Singleton):
 
     def get_backups_by_snapshot_id(self, snapshot_id: str) -> list[Backup]:
         return self.query(Backup, 'snapshot_id', snapshot_id)
-
-    def get_backup_chain(self, backup_id: str) -> list[Backup]:
-        """Return the full backup chain ending at backup_id, oldest first."""
-        # One point read per link once the index is ready. Until then each link
-        # would fall back to its own full scan, so read the table once and walk
-        # the chain against that — what this did before the index existed.
-        source = (None if self.index_state(Backup, 'uuid') == indices.STATE_READY
-                  else self.get_backups())
-
-        def find_backup(id_):
-            wanted = id_.split('/')[-1]
-            return single(
-                [backup for backup in source if backup.uuid == wanted] if source is not None
-                else self.query(Backup, 'uuid', wanted))
-
-        next_id = backup_id
-        chain = []
-        while next_id:
-            chain.append(find_backup(next_id))
-            next_id = chain[-1].prev_backup_id
-
-        chain.reverse()
-        return chain
 
     def get_replication_targets(self, cluster_id: str | None = None) -> list[ReplicationTarget]:
         prefix = cluster_id if cluster_id else " "
