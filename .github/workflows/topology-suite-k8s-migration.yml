@@ -1,5 +1,5 @@
 name: K8s Topology Suite - Node Migration (Per-Test Bootstrap)
-run-name: "K8s Topology Migration | ${{ inputs.cluster_environment || 'local' }} | ${{ inputs.TEST_CLASSES }} | ${{ inputs.cluster_params }}"
+run-name: "K8s Topology Migration | ${{ inputs.cluster_environment || 'openshift-baremetal' }} | ${{ inputs.TEST_CLASSES }} | ${{ inputs.cluster_params }}"
 
 on:
   workflow_dispatch:
@@ -36,11 +36,13 @@ on:
         required: false
         default: 'main'
       csi_repository:
-        description: 'CSI driver image repository (leave empty for chart default)'
+        description: 'CSI driver image repository'
         required: false
+        default: 'simplyblock/spdkcsi'
       csi_tag:
-        description: 'CSI driver image tag (leave empty for chart default)'
+        description: 'CSI driver image tag'
         required: false
+        default: 'latest'
       spdk_image:
         description: 'SPDK container image'
         required: true
@@ -71,7 +73,7 @@ on:
       ifc_names:
         description: 'Network interfaces (mgmt_ifc:data_nics)'
         required: false
-        default: 'ens18:enp1s0'
+        default: 'br-ex:enp2s0f0'
       max_lvol:
         description: 'Max logical volume count per storage node'
         required: false
@@ -83,7 +85,7 @@ on:
       cluster_environment:
         description: 'Target cluster environment'
         required: true
-        default: 'local'
+        default: 'openshift-baremetal'
         type: choice
         options:
           - local
@@ -141,9 +143,13 @@ on:
         description: 'NFS mountpoint on client nodes'
         required: false
         default: '/mnt/nfs_share/'
+      # cluster_security removed from workflow_dispatch (25 input limit).
+      # Backup is auto-enabled when testname contains "Backup".
+      # Use workflow_call (via topology suite parent) to pass cluster_security explicitly.
+      # preserve_resources_on_failure also omitted (25 input limit); defaults to true in child.
 
 concurrency:
-  group: k8s-topology-migration-${{ inputs.cluster_environment || 'local' }}
+  group: k8s-topology-migration-${{ inputs.cluster_environment || 'openshift-baremetal' }}
   cancel-in-progress: false
 
 # ============================================================================
@@ -200,25 +206,27 @@ jobs:
       simplyblock_repository: ${{ inputs.simplyblock_repository || 'public.ecr.aws/simply-block/simplyblock' }}
       operator_repository: ${{ inputs.operator_repository || 'simplyblock/simplyblock-operator' }}
       operator_tag: ${{ inputs.operator_tag || 'main' }}
-      csi_repository: ${{ inputs.csi_repository || '' }}
-      csi_tag: ${{ inputs.csi_tag || '' }}
+      csi_repository: ${{ inputs.csi_repository || 'simplyblock/spdkcsi' }}
+      csi_tag: ${{ inputs.csi_tag || 'latest' }}
       spdk_image: ${{ inputs.spdk_image }}
       worker_nodes: ${{ inputs.worker_nodes }}
       migrate_to_worker: ${{ inputs.migrate_to_worker }}
       new_ssd_pcie: ${{ inputs.new_ssd_pcie || '' }}
       reattach_volume: ${{ inputs.reattach_volume }}
-      ifc_names: ${{ inputs.ifc_names || 'ens18:enp1s0' }}
+      ifc_names: ${{ inputs.ifc_names || 'br-ex:enp2s0f0' }}
       max_lvol: ${{ inputs.max_lvol || '30' }}
       ssh_user: ${{ inputs.ssh_user || 'root' }}
       key_path: ${{ inputs.key_path }}
-      send_slack_notification: ${{ inputs.send_slack_notification }}
+      send_slack_notification: false
       cluster_params: ${{ inputs.cluster_params || 'ndcs=2,npcs=2,bs=4096,chunk_bs=4096,partitions=1,jm_count=4' }}
-      cluster_environment: ${{ inputs.cluster_environment || 'local' }}
+      cluster_environment: ${{ inputs.cluster_environment || 'openshift-baremetal' }}
       skip_nfs: ${{ inputs.skip_nfs || 'false' }}
       use_existing_cluster: ${{ inputs.use_existing_cluster || 'false' }}
       tls_enabled: ${{ inputs.tls_enabled }}
       client_ips: ${{ inputs.client_ips || '' }}
       nfs_mountpoint: ${{ inputs.nfs_mountpoint || '/mnt/nfs_share/' }}
+      preserve_resources_on_failure: true
+      # cluster_security defaults to 'none' in child; backup auto-enabled when testname contains "Backup"
     secrets: inherit
 
   # ─────────────────────────────────────────────────────────────────────────
@@ -244,6 +252,37 @@ jobs:
             echo ""
             echo "**Tests:** ${{ needs.setup-matrix.outputs.test_count }} | **Overall:** ${{ needs.run-tests.result }}"
             echo ""
+
+            # Extract and display consolidated log directories
+            echo "## Log Directories"
+            echo ""
+            log_found=0
+            for dir in summaries/test-summary-*/; do
+              [[ -d "$dir" ]] || continue
+              [[ -f "${dir}test-summary.md" ]] || continue
+              content="$(cat "${dir}test-summary.md")"
+              tname="$(echo "$content" | grep -oP 'Summary\s*[—-]\s*\K\S+' | head -1)"
+              [[ -z "$tname" ]] && tname="$(basename "$dir")"
+              test_log="$(echo "$content" | grep -oP '\*\*Test logs:\*\*\s*`\K[^`]+' | head -1)"
+              run_dir="$(echo "$content" | grep -oP '\*\*(RUN_BASE_DIR|Run dir):\*\*\s*`\K[^`]+' | head -1)"
+              if [[ -n "$test_log" || -n "$run_dir" ]]; then
+                log_found=$((log_found + 1))
+                echo "**${tname}**"
+                [[ -n "$test_log" ]] && echo "- Test logs: \`${test_log}\`"
+                if [[ -n "$run_dir" ]]; then
+                  run_dir="${run_dir%/}"
+                  echo "- E2E run dir: \`${run_dir}/\`"
+                  echo "- Graylog: \`${run_dir}/graylog_collected/\`"
+                fi
+                echo ""
+              fi
+            done
+            if [[ "$log_found" -eq 0 ]]; then
+              echo "> No log directories detected."
+              echo ""
+            fi
+
+            # Append individual test summaries
             found=0
             for dir in summaries/test-summary-*/; do
               [[ -d "$dir" ]] || continue
@@ -259,3 +298,135 @@ jobs:
               echo "> No individual test summaries were found."
             fi
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Send Combined Slack Notification
+        if: always() && (inputs.send_slack_notification || true) == true
+        shell: bash
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
+          OVERALL_STATUS: ${{ needs.run-tests.result }}
+          SLACK_RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          TEST_COUNT: ${{ needs.setup-matrix.outputs.test_count }}
+          TEST_CLASSES: ${{ inputs.TEST_CLASSES }}
+          CLUSTER_ENV: ${{ inputs.cluster_environment || 'openshift-baremetal' }}
+        run: |
+          python3 - <<'PYEOF'
+          import json, os, re, sys, urllib.request
+
+          bot_token = os.environ.get("SLACK_BOT_TOKEN", "")
+          channel   = os.environ.get("SLACK_CHANNEL_ID", "")
+          webhook   = os.environ.get("SLACK_WEBHOOK_URL", "")
+          if not bot_token and not webhook:
+              print("No SLACK_BOT_TOKEN or SLACK_WEBHOOK_URL set, skipping.")
+              sys.exit(0)
+
+          overall  = os.environ.get("OVERALL_STATUS", "unknown")
+          run_url  = os.environ.get("SLACK_RUN_URL", "")
+          branch   = os.environ.get("GITHUB_REF_NAME", "?")
+          count    = os.environ.get("TEST_COUNT", "?")
+          classes  = os.environ.get("TEST_CLASSES", "")
+          env_name = os.environ.get("CLUSTER_ENV", "?")
+
+          ok     = overall == "success"
+          icon   = ":white_check_mark:" if ok else ":x:"
+          status = "SUCCESS" if ok else "FAILURE"
+          mention = "" if ok else " <!channel>"
+
+          # Parse per-test results from downloaded summary artifacts
+          test_lines = []
+          summary_dir = "summaries"
+          if os.path.isdir(summary_dir):
+              for d in sorted(os.listdir(summary_dir)):
+                  md_path = os.path.join(summary_dir, d, "test-summary.md")
+                  if not os.path.isfile(md_path):
+                      continue
+                  content = open(md_path).read()
+                  # Extract test name — try "Summary — <Name>" first,
+                  # fall back to "Test class: `<Name>`" (e2e-bootstrap format)
+                  name_m = re.search(r'Summary\s*[-—]\s*(\S+)', content)
+                  if not name_m:
+                      name_m = re.search(r'\*\*Test class:\*\*\s*`([^`]+)`', content)
+                  tname = name_m.group(1) if name_m else d
+                  # Extract result — handle both "SUCCESS"/"FAILED" and emoji prefixed "✅ SUCCESS"
+                  res_m = re.search(r'\*\*Result:\*\*\s*(.+?)(?:\s*[&<\n]|$)', content)
+                  result = res_m.group(1).strip() if res_m else "?"
+                  r_icon = ":white_check_mark:" if "success" in result.lower() else ":x:"
+                  # Extract counts — handle both inline "**Total:** N" and
+                  # table format "| ✅ Passed | N |" from e2e-bootstrap
+                  total_m  = re.search(r'\*\*Total[:\*]*\*?\*?\s*\|?\s*\*?\*?(\d+)', content)
+                  passed_m = re.search(r'(?:\*\*Passed:\*\*|[✅] Passed)\s*\|?\s*(\d+)', content)
+                  failed_m = re.search(r'(?:\*\*Failed:\*\*|[❌] Failed)\s*\|?\s*(\d+)', content)
+                  total  = total_m.group(1) if total_m else "?"
+                  passed = passed_m.group(1) if passed_m else "?"
+                  failed = failed_m.group(1) if failed_m else "?"
+                  # Extract test logs path (from e2e framework)
+                  test_log_m = re.search(r'\*\*Test logs:\*\*\s*`([^`]+)`', content)
+                  test_log_path = test_log_m.group(1) if test_log_m else None
+                  # Extract RUN_BASE_DIR / Run dir path (workflow run directory)
+                  log_m = re.search(r'\*\*(?:RUN_BASE_DIR|Run dir):\*\*\s*`([^`]+)`', content)
+                  run_dir_path = log_m.group(1).rstrip('/') if log_m else None
+                  line = f"  {r_icon} `{tname}` — {passed}/{total} passed, {failed} failed"
+                  if test_log_path:
+                      line += f"\n        :open_file_folder: `{test_log_path}`"
+                  if run_dir_path:
+                      line += f"\n        :file_folder: `{run_dir_path}/`"
+                      line += f"\n        :scroll: `{run_dir_path}/graylog_collected/`"
+                  test_lines.append(line)
+
+          lines = [
+              f"{icon} *SimplyBlock K8s Migration Topology Suite*{mention}",
+              f"*Status:* {status}  |  *Environment:* `{env_name}`",
+              f"*Branch:* `{branch}`  |  *Tests:* {count}",
+              "",
+          ]
+          if test_lines:
+              lines.append("*Per-test results:*")
+              lines.extend(test_lines)
+          else:
+              lines.append("_(no per-test summaries found)_")
+          lines += [
+              "",
+              f":link: *Run:* <{run_url}|View on GitHub>",
+          ]
+          # --- Send ---
+          gh_env = os.environ.get("GITHUB_ENV", "")
+          text   = "\n".join(lines)
+
+          if bot_token and channel:
+              api_payload = json.dumps({"channel": channel, "text": text}).encode()
+              req = urllib.request.Request(
+                  "https://slack.com/api/chat.postMessage",
+                  data=api_payload,
+                  headers={
+                      "Content-Type": "application/json; charset=utf-8",
+                      "Authorization": f"Bearer {bot_token}",
+                  },
+              )
+              try:
+                  resp = urllib.request.urlopen(req, timeout=15)
+                  body = json.loads(resp.read().decode())
+                  if body.get("ok"):
+                      ts = body.get("ts", "")
+                      print(f"Slack notification sent via Bot API (ts={ts}).")
+                      if gh_env and ts:
+                          with open(gh_env, "a") as f:
+                              f.write(f"SLACK_MSG_TS={ts}\n")
+                  else:
+                      print(f"WARN: Slack API error: {body.get('error')}", file=sys.stderr)
+              except Exception as exc:
+                  print(f"WARN: Slack Bot API failed: {exc}", file=sys.stderr)
+          elif webhook:
+              req = urllib.request.Request(
+                  webhook,
+                  data=json.dumps({"text": text}).encode(),
+                  headers={"Content-Type": "application/json"},
+              )
+              try:
+                  urllib.request.urlopen(req, timeout=15)
+                  print("Slack notification sent via webhook (no thread support).")
+          except Exception as exc:
+              print(f"WARN: Slack notification failed: {exc}", file=sys.stderr)
+          PYEOF

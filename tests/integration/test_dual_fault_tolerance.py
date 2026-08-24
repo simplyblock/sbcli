@@ -168,7 +168,7 @@ class TestCreateClusterValidation(unittest.TestCase):
     def test_max_ft_1_no_validation_error(self, mock_db):
         """max_fault_tolerance=1 should not hit the new validation even with single ha_type."""
         import simplyblock_core.cluster_ops as ops
-        # Will fail later (e.g. distr_ndcs/npcs both 0), but not on max_ft validation
+        # Will fail later (e.g. on the erasure coding scheme), but not on max_ft validation
         with self.assertRaises(ValueError) as ctx:
             ops.create_cluster(
                 4096, 2097152, "pass", 89, 99, 250, 500,
@@ -178,8 +178,8 @@ class TestCreateClusterValidation(unittest.TestCase):
                 None, "hostip", "", "tcp", False, "",
                 max_fault_tolerance=1,
             )
-        # Should fail on ndcs/npcs both 0, not on max_ft
-        assert "distr_ndcs" in str(ctx.exception)
+        # Should fail on the unsupported (0, 0) scheme, not on max_ft
+        assert "erasure coding scheme" in str(ctx.exception)
 
 
 # ===========================================================================
@@ -192,6 +192,11 @@ class TestAddClusterValidation(unittest.TestCase):
     def test_max_ft_2_requires_ha(self, mock_db):
         import simplyblock_core.cluster_ops as ops
         mock_db.get_clusters.return_value = [_cluster()]
+        # add_cluster takes the named-cluster path, which unpacks
+        # acquire_cluster_create_lock's (acquired, holder). An unconfigured
+        # MagicMock iterates empty, so the call died there instead of reaching
+        # the validation under test.
+        mock_db.acquire_cluster_create_lock.return_value = (True, None)
         with self.assertRaises(ValueError) as ctx:
             ops.add_cluster(
                 4096, 2097152, 89, 99, 250, 500,
@@ -205,6 +210,7 @@ class TestAddClusterValidation(unittest.TestCase):
     def test_max_ft_2_requires_npcs(self, mock_db):
         import simplyblock_core.cluster_ops as ops
         mock_db.get_clusters.return_value = [_cluster()]
+        mock_db.acquire_cluster_create_lock.return_value = (True, None)
         with self.assertRaises(ValueError) as ctx:
             ops.add_cluster(
                 4096, 2097152, 89, 99, 250, 500,
@@ -422,15 +428,25 @@ class TestApplyMigrationToDbDualSecondary(unittest.TestCase):
 # 8. _get_target_secondary_nodes helper
 # ===========================================================================
 
-class TestGetTargetSecondaryNodes(unittest.TestCase):
+class TestGetTargetSecondaryAndTertiaryNodes(unittest.TestCase):
+    """Non-leader resolution for a migration target.
+
+    ``a13a1b21b`` split the single plural helper into one resolver per role
+    (``_get_target_secondary_node`` / ``_get_target_tertiary_node``) so the
+    tertiary is registered on the target too; ``_build_paths`` calls both. These
+    cases are the pre-split scenarios expressed over the pair, so FTT=2 coverage
+    is unchanged: both roles resolved, one skipped, a bad state blocking, and a
+    role missing from the DB.
+    """
+
+    SRC = "src-node"
 
     @patch("simplyblock_core.services.tasks_runner_lvol_migration.db")
-    def test_no_secondaries_returns_empty(self, mock_db):
+    def test_no_secondaries_returns_none(self, mock_db):
         import simplyblock_core.services.tasks_runner_lvol_migration as runner
         tgt = _node("tgt")
-        result, err = runner._get_target_secondary_nodes(tgt)
-        assert result == []
-        assert err is None
+        assert runner._get_target_secondary_node(tgt, self.SRC) == (None, None)
+        assert runner._get_target_tertiary_node(tgt, self.SRC) == (None, None)
 
     @patch("simplyblock_core.services.tasks_runner_lvol_migration.db")
     def test_both_secondaries_online(self, mock_db):
@@ -442,12 +458,13 @@ class TestGetTargetSecondaryNodes(unittest.TestCase):
         }[id]
 
         tgt = _node("tgt", secondary_node_id="sec-1", tertiary_node_id="sec-2")
-        result, err = runner._get_target_secondary_nodes(tgt)
 
-        assert err is None
-        assert len(result) == 2
-        assert result[0].uuid == "sec-1"
-        assert result[1].uuid == "sec-2"
+        sec, sec_err = runner._get_target_secondary_node(tgt, self.SRC)
+        ter, ter_err = runner._get_target_tertiary_node(tgt, self.SRC)
+
+        assert (sec_err, ter_err) == (None, None)
+        assert sec.uuid == "sec-1"
+        assert ter.uuid == "sec-2"
 
     @patch("simplyblock_core.services.tasks_runner_lvol_migration.db")
     def test_one_online_one_offline(self, mock_db):
@@ -459,11 +476,12 @@ class TestGetTargetSecondaryNodes(unittest.TestCase):
         }[id]
 
         tgt = _node("tgt", secondary_node_id="sec-1", tertiary_node_id="sec-2")
-        result, err = runner._get_target_secondary_nodes(tgt)
 
-        assert err is None
-        assert len(result) == 1
-        assert result[0].uuid == "sec-1"
+        sec, sec_err = runner._get_target_secondary_node(tgt, self.SRC)
+        assert sec_err is None
+        assert sec.uuid == "sec-1"
+        # OFFLINE is administratively down: skipped silently, not an error.
+        assert runner._get_target_tertiary_node(tgt, self.SRC) == (None, None)
 
     @patch("simplyblock_core.services.tasks_runner_lvol_migration.db")
     def test_bad_state_blocks(self, mock_db):
@@ -475,21 +493,19 @@ class TestGetTargetSecondaryNodes(unittest.TestCase):
         }[id]
 
         tgt = _node("tgt", secondary_node_id="sec-1", tertiary_node_id="sec-2")
-        result, err = runner._get_target_secondary_nodes(tgt)
 
-        assert result == []
-        assert err is not None
-        assert "sec-2" in err
+        # SUSPENDED and NOT the migration source, so this is not the
+        # overlap-drain case — it must block rather than silently skip.
+        ter, ter_err = runner._get_target_tertiary_node(tgt, self.SRC)
+        assert ter is None
+        assert ter_err is not None
+        assert "sec-2" in ter_err
 
     @patch("simplyblock_core.services.tasks_runner_lvol_migration.db")
-    def test_missing_secondary_in_db_skipped(self, mock_db):
+    def test_missing_role_node_in_db_skipped(self, mock_db):
         import simplyblock_core.services.tasks_runner_lvol_migration as runner
         sec1 = _node("sec-1", status=StorageNode.STATUS_ONLINE)
-        mock_db.get_storage_node_by_id.side_effect = lambda id: {
-            "sec-1": sec1
-        }.get(id) or (_ for _ in ()).throw(KeyError(id))
 
-        # Proper side_effect that raises KeyError for unknown IDs
         def _get(id):
             if id == "sec-1":
                 return sec1
@@ -497,11 +513,11 @@ class TestGetTargetSecondaryNodes(unittest.TestCase):
         mock_db.get_storage_node_by_id.side_effect = _get
 
         tgt = _node("tgt", secondary_node_id="sec-1", tertiary_node_id="sec-missing")
-        result, err = runner._get_target_secondary_nodes(tgt)
 
-        assert err is None
-        assert len(result) == 1
-        assert result[0].uuid == "sec-1"
+        sec, sec_err = runner._get_target_secondary_node(tgt, self.SRC)
+        assert sec_err is None
+        assert sec.uuid == "sec-1"
+        assert runner._get_target_tertiary_node(tgt, self.SRC) == (None, None)
 
 
 # ===========================================================================
@@ -514,7 +530,7 @@ class TestGetTargetSecondaryNodeOriginal(unittest.TestCase):
     def test_no_secondary(self, mock_db):
         import simplyblock_core.services.tasks_runner_lvol_migration as runner
         tgt = _node("tgt")
-        sec, err = runner._get_target_secondary_node(tgt)
+        sec, err = runner._get_target_secondary_node(tgt, "src-node")
         assert sec is None
         assert err is None
 
@@ -525,7 +541,7 @@ class TestGetTargetSecondaryNodeOriginal(unittest.TestCase):
         mock_db.get_storage_node_by_id.return_value = sec1
 
         tgt = _node("tgt", secondary_node_id="sec-1")
-        sec, err = runner._get_target_secondary_node(tgt)
+        sec, err = runner._get_target_secondary_node(tgt, "src-node")
         assert sec is not None
         assert sec.uuid == "sec-1"
         assert err is None

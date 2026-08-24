@@ -27,9 +27,11 @@ on:
       csi_repository:
         description: 'CSI driver image repository (leave empty for chart default)'
         required: false
+        default: 'simplyblock/spdkcsi'
       csi_tag:
         description: 'CSI driver image tag (leave empty for chart default)'
         required: false
+        default: 'latest'
       spdk_image:
         description: 'SPDK container image'
         required: true
@@ -37,10 +39,11 @@ on:
       worker_nodes:
         description: 'Comma-separated K8s worker node names'
         required: true
+        default: 'worker-0.ocp.simplyblock.ai,worker-1.ocp.simplyblock.ai,worker-2.ocp.simplyblock.ai,worker-3.ocp.simplyblock.ai,worker-4.ocp.simplyblock.ai,worker-5.ocp.simplyblock.ai'
       ifc_names:
         description: 'Network interfaces (mgmt_ifc:data_nics)'
         required: false
-        default: 'ens18:enp1s0'
+        default: 'br-ex:enp2s0f0'
       max_lvol:
         description: 'Max logical volume count per storage node'
         required: false
@@ -86,7 +89,7 @@ on:
       cluster_environment:
         description: 'Target cluster environment'
         required: true
-        default: 'local'
+        default: 'openshift-baremetal'
         type: choice
         options:
           - local
@@ -118,7 +121,7 @@ on:
       preserve_resources_on_failure:
         description: 'Preserve PVCs, FIO pods, snapshots on test failure for debugging'
         required: false
-        default: false
+        default: true
         type: boolean
       run_ha_test:
         description: 'Run HA test variants (TestHASingleNodeFailure, etc.)'
@@ -340,6 +343,11 @@ jobs:
           set +e
           NAMESPACE=simplyblock
 
+          # Run the operator's own cleanup script first (thorough helm + CR cleanup)
+          if [ -x "$GITHUB_WORKSPACE/simplyblock-operator/helm-charts/scripts/cleanup-simplyblock.sh" ]; then
+            bash $GITHUB_WORKSPACE/simplyblock-operator/helm-charts/scripts/cleanup-simplyblock.sh -f $NAMESPACE || true
+          fi
+
           # Run the shared cleanup script (handles etcd overload with
           # --request-timeout, bulk deletes, and parallel finalizer patching)
           bash $GITHUB_WORKSPACE/e2e/scripts/cleanup_k8s.sh $NAMESPACE
@@ -372,15 +380,15 @@ jobs:
           CLUSTER_ENV="${{ github.event.inputs.cluster_environment || 'local' }}"
           IFS=',' read -ra NODES <<< "${{ github.event.inputs.worker_nodes }}"
           for NODE in "${NODES[@]}"; do
-            echo "Resetting hugepages to 0 on $NODE..."
+            echo "Disconnecting stale NVMe-oF and resetting hugepages on $NODE..."
             if [[ "$CLUSTER_ENV" == *"openshift"* ]]; then
               oc debug node/"$NODE" -- chroot /host bash -c \
-                "echo 0 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages" 2>/dev/null || true
+                "nvme disconnect-all 2>/dev/null; echo 0 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages" 2>/dev/null || true
               echo "Restarting kubelet on $NODE..."
               oc debug node/"$NODE" -- chroot /host systemctl restart kubelet 2>/dev/null || true
             else
               kubectl debug node/"$NODE" -q --image=busybox:latest -- chroot /host sh -c \
-                "echo 0 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages" 2>/dev/null || true
+                "nvme disconnect-all 2>/dev/null; echo 0 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages" 2>/dev/null || true
               echo "Restarting kubelet on $NODE..."
               kubectl debug node/"$NODE" -q --image=busybox:latest -- chroot /host sh -c \
                 "systemctl restart kubelet" 2>/dev/null || true
@@ -422,6 +430,19 @@ jobs:
           echo "Waiting for vault namespace to be deleted..."
           kubectl wait --for=delete namespace/vault --timeout=120s 2>/dev/null || true
           echo "=== KMS cleanup complete ==="
+
+      # ── Remove stale labels from previous runs ──────────────────────────────
+
+      - name: Remove stale storagenodeset labels from all worker nodes
+        if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
+        run: |
+          echo "Removing stale io.simplyblock.storagenodeset label from all worker nodes..."
+          IFS=',' read -ra NODES <<< "${{ github.event.inputs.worker_nodes }}"
+          for NODE in "${NODES[@]}"; do
+            echo "Removing storagenodeset label from $NODE"
+            kubectl label node "$NODE" io.simplyblock.storagenodeset- 2>/dev/null || true
+          done
+          echo "Stale label cleanup complete."
 
       # ── Label nodes (after cluster is active) ───────────────────────────────
 
@@ -555,6 +576,38 @@ jobs:
 
           echo "=== MinIO and backup credentials setup complete ==="
 
+      - name: Start MinIO trace logging
+        if: >-
+          ${{
+            github.event.inputs.use_existing_cluster != 'true' &&
+            (github.event.inputs.cluster_security == 'backup' ||
+             github.event.inputs.testname == 'backup' ||
+             github.event.inputs.testname == 'backup-stress')
+          }}
+        run: |
+          set -euxo pipefail
+
+          # 1. Install mc (MinIO Client)
+          curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o /tmp/mc
+          chmod +x /tmp/mc
+          export PATH="/tmp:$PATH"
+
+          # 2. Port-forward MinIO service to localhost
+          kubectl -n minio port-forward svc/minio 9000:9000 &
+          echo "MC_PORT_FWD_PID=$!" >> "$GITHUB_ENV"
+          sleep 3
+
+          # 3. Configure mc alias
+          mc alias set myminio http://localhost:9000 minioadmin minioadmin123
+
+          # 4. Start admin trace in background
+          MINIO_TRACE_LOG="/tmp/minio-trace-${GITHUB_RUN_ID}.log"
+          echo "MINIO_TRACE_LOG=${MINIO_TRACE_LOG}" >> "$GITHUB_ENV"
+          nohup mc admin trace -v --all myminio > "${MINIO_TRACE_LOG}" 2>&1 &
+          echo "MC_TRACE_PID=$!" >> "$GITHUB_ENV"
+
+          echo "=== MinIO trace logging started (PID=$!, log=${MINIO_TRACE_LOG}) ==="
+
       - name: Wait before helm install
         if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
         run: sleep 30
@@ -577,6 +630,7 @@ jobs:
       - name: Install Helm Chart for simplyblock-operator
         if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
         run: |
+          set -euxo pipefail
           cd $GITHUB_WORKSPACE/simplyblock-operator/helm-charts/charts/simplyblock-operator/
 
           TLS_FLAGS=""
@@ -769,7 +823,7 @@ jobs:
         if: ${{ github.event.inputs.use_existing_cluster != 'true' }}
         run: |
           NAMESPACE=simplyblock
-          IFC_NAMES="${{ github.event.inputs.ifc_names || 'ens18:enp1s0' }}"
+          IFC_NAMES="${{ github.event.inputs.ifc_names || 'br-ex:enp2s0f0' }}"
           MGMT_IFC="${IFC_NAMES%%:*}"
           DATA_NICS="${IFC_NAMES#*:}"
           MAX_LVOL="${{ github.event.inputs.max_lvol || '30' }}"
@@ -786,7 +840,13 @@ jobs:
 
           RESERVED_CPU_YAML=""
           if [ "${{ github.event.inputs.cluster_environment }}" = "openshift-baremetal" ]; then
-            RESERVED_CPU_YAML='            reservedSystemCPU: "0,1,10,11,16,17,26,27"'
+            RESERVED_CPU_YAML='  reservedSystemCPU: "0,1,10,11,16,17,26,27"'
+          fi
+
+          PCIE_MODEL_YAML=""
+          CLUSTER_ENV="${{ github.event.inputs.cluster_environment }}"
+          if [ "$CLUSTER_ENV" != "openshift-baremetal" ] && [ "$CLUSTER_ENV" != "openshift-local" ]; then
+            PCIE_MODEL_YAML='  pcieModel: "SAMSUNG MZQLB1T9HAJR-00007"'
           fi
 
           # Build workerNodes YAML list from comma-separated input
@@ -819,7 +879,7 @@ jobs:
               baseURL: \"https://openbao.vault:8200\""
             ENCRYPTION_POOL_YAML="---
           apiVersion: storage.simplyblock.io/v1alpha1
-          kind: Pool
+          kind: StoragePool
           metadata:
             name: encryption-pool
             namespace: ${NAMESPACE}
@@ -854,7 +914,7 @@ jobs:
           ${VAULT_SETTINGS}
           ---
           apiVersion: storage.simplyblock.io/v1alpha1
-          kind: Pool
+          kind: StoragePool
           metadata:
             name: simplyblock-pool
             namespace: ${NAMESPACE}
@@ -872,12 +932,12 @@ jobs:
             clusterImage: "${SB_REPO}:${SB_TAG}"
             spdkImage: "${SPDK_IMAGE}"
             spdkProxyImage: "${SB_REPO}:${SB_TAG}"
-            pcieModel: "SAMSUNG MZQLB1T9HAJR-00007"
+          ${PCIE_MODEL_YAML}
             driveSizeRange: "${DRIVE_SIZE_RANGE}"
             mgmtIfname: ${MGMT_IFC}
             dataIfname:
               - ${DATA_NICS}
-            maxLogicalVolumeCount: ${MAX_LVOL}
+            maxSubsystemCount: ${MAX_LVOL}
           ${RESERVED_CPU_YAML}
             partitions: ${PARTITIONS}
             corePercentage: ${CORE_PERCENTAGE}
@@ -918,7 +978,7 @@ jobs:
           ${VAULT_SETTINGS}
           ---
           apiVersion: storage.simplyblock.io/v1alpha1
-          kind: Pool
+          kind: StoragePool
           metadata:
             name: simplyblock-pool
             namespace: ${NAMESPACE}
@@ -936,12 +996,12 @@ jobs:
             clusterImage: "${SB_REPO}:${SB_TAG}"
             spdkImage: "${SPDK_IMAGE}"
             spdkProxyImage: "${SB_REPO}:${SB_TAG}"
-            pcieModel: "SAMSUNG MZQLB1T9HAJR-00007"
+          ${PCIE_MODEL_YAML}
             driveSizeRange: "${DRIVE_SIZE_RANGE}"
             mgmtIfname: ${MGMT_IFC}
             dataIfname:
               - ${DATA_NICS}
-            maxLogicalVolumeCount: ${MAX_LVOL}
+            maxSubsystemCount: ${MAX_LVOL}
           ${RESERVED_CPU_YAML}
             partitions: ${PARTITIONS}
             corePercentage: ${CORE_PERCENTAGE}
@@ -1488,6 +1548,13 @@ jobs:
             fi
             echo ""
             echo "### NFS Log Locations"
+            # Show all test log paths
+            for _tname in "${!test_log_paths[@]}"; do
+              echo "- **Test logs:** \`${test_log_paths[$_tname]}\`"
+            done
+            if [[ ${#test_log_paths[@]} -eq 0 ]]; then
+              echo "- **Test logs:** \`not detected\`"
+            fi
             echo "- **RUN_BASE_DIR:** \`${RUN_BASE_DIR:-not detected}\`"
             echo "- Graylog logs: \`${RUN_BASE_DIR:-<run_dir>}/graylog_collected/\`"
             if [[ -n "${RUN_BASE_DIR:-}" && -d "${RUN_BASE_DIR}" ]]; then
@@ -1519,6 +1586,8 @@ jobs:
         shell: bash
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
           JOB_STATUS: ${{ job.status }}
           SLACK_RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           GITHUB_REF_NAME: ${{ github.ref_name }}
@@ -1532,9 +1601,11 @@ jobs:
         run: |
           python3 - <<'PYEOF'
           import json, os, re, sys, urllib.request, urllib.error
-          webhook = os.environ.get("SLACK_WEBHOOK_URL", "")
-          if not webhook:
-              print("No SLACK_WEBHOOK_URL set, skipping.")
+          bot_token = os.environ.get("SLACK_BOT_TOKEN", "")
+          channel   = os.environ.get("SLACK_CHANNEL_ID", "")
+          webhook   = os.environ.get("SLACK_WEBHOOK_URL", "")
+          if not bot_token and not webhook:
+              print("No SLACK_BOT_TOKEN or SLACK_WEBHOOK_URL set, skipping.")
               sys.exit(0)
           out_log = os.path.join(os.environ.get("GITHUB_WORKSPACE", "."), "e2e", "output.log")
           total = passed = failed = skipped = 0
@@ -1601,23 +1672,67 @@ jobs:
                   for st, nm in test_results:
                       lines.append(f"{icons.get(st, ':grey_question:')} `{nm}`")
 
+          # Extract test log paths from output.log
+          test_log_paths = []
+          if os.path.isfile(out_log):
+              ansi_re = re.compile(r'\x1b\[[0-9;]*m')
+              for raw_line in content.splitlines():
+                  cl = ansi_re.sub('', raw_line)
+                  if 'Logs Path:' in cl:
+                      p = cl.split('Logs Path:')[-1].strip()
+                      if p:
+                          test_log_paths.append(p)
+
+          lines += [""]
+          if test_log_paths:
+              for tlp in test_log_paths:
+                  lines.append(f":open_file_folder: *Test Logs:* `{tlp}`")
           lines += [
-              "",
+              f":file_folder: *E2E Run Dir:* `{log_dir}`",
+              f":scroll: *Graylog:* `{log_dir}/graylog_collected/`",
               f":link: *Run:* <{run_url}|View on GitHub>",
-              f":file_folder: *Final Logs:* `{log_dir}`",
               f":hourglass_flowing_sand: _Logs are being collected and will be available shortly._",
           ]
-          payload = {"text": "\n".join(lines)}
-          req = urllib.request.Request(
-              webhook,
-              data=json.dumps(payload).encode(),
-              headers={"Content-Type": "application/json"},
-          )
-          try:
-              urllib.request.urlopen(req, timeout=15)
-              print("Slack notification sent.")
-          except Exception as exc:
-              print(f"WARN: Slack notification failed: {exc}", file=sys.stderr)
+          # --- Send ---
+          gh_env = os.environ.get("GITHUB_ENV", "")
+          text   = "\n".join(lines)
+
+          if bot_token and channel:
+              api_payload = json.dumps({"channel": channel, "text": text}).encode()
+              req = urllib.request.Request(
+                  "https://slack.com/api/chat.postMessage",
+                  data=api_payload,
+                  headers={
+                      "Content-Type": "application/json; charset=utf-8",
+                      "Authorization": f"Bearer {bot_token}",
+                  },
+              )
+              try:
+                  resp = urllib.request.urlopen(req, timeout=15)
+                  body = json.loads(resp.read().decode())
+                  if body.get("ok"):
+                      ts = body.get("ts", "")
+                      print(f"Slack notification sent via Bot API (ts={ts}).")
+                      if gh_env and ts:
+                          with open(gh_env, "a") as f:
+                              f.write(f"SLACK_MSG_TS={ts}\n")
+                  else:
+                      print(f"WARN: Slack API error: {body.get('error')}", file=sys.stderr)
+              except Exception as exc:
+                  print(f"WARN: Slack Bot API failed: {exc}", file=sys.stderr)
+          elif webhook:
+              req = urllib.request.Request(
+                  webhook,
+                  data=json.dumps({"text": text}).encode(),
+                  headers={"Content-Type": "application/json"},
+              )
+              try:
+                  urllib.request.urlopen(req, timeout=15)
+                  print("Slack notification sent via webhook (no thread support).")
+              except Exception as exc:
+                  print(f"WARN: Slack webhook failed: {exc}", file=sys.stderr)
+          else:
+              print("No SLACK_BOT_TOKEN or SLACK_WEBHOOK_URL set, skipping.")
           PYEOF
 
 
@@ -1889,6 +2004,31 @@ jobs:
         env:
           CLUSTER_ID: ${{ env.CLUSTER_ID }}
           MON_SECRET: ${{ secrets.MON_SECRET }}
+
+      - name: Notify Slack log collection complete
+        if: always() && (github.event.inputs.send_slack_notification || 'true') == 'true'
+        shell: bash
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
+          SLACK_MSG_TS: ${{ env.SLACK_MSG_TS }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          SLACK_WF_NAME: "K8s Native E2E"
+          RUN_BASE_DIR: ${{ env.RUN_BASE_DIR }}
+        run: |
+          MSG=":white_check_mark: *Log collection complete* for *SimplyBlock ${SLACK_WF_NAME}*\n:file_folder: \`${RUN_BASE_DIR:-N/A}/graylog_collected/\`\n:link: <${SLACK_RUN_URL}|View Run>"
+          if [ -n "${SLACK_BOT_TOKEN:-}" ] && [ -n "${SLACK_CHANNEL_ID:-}" ] && [ -n "${SLACK_MSG_TS:-}" ]; then
+            curl -s -X POST "https://slack.com/api/chat.postMessage" \
+              -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" \
+              -H "Content-Type: application/json; charset=utf-8" \
+              -d "{\"channel\":\"${SLACK_CHANNEL_ID}\",\"thread_ts\":\"${SLACK_MSG_TS}\",\"text\":\"${MSG}\"}" || true
+          elif [ -n "${SLACK_WEBHOOK_URL:-}" ]; then
+            curl -s -X POST "${SLACK_WEBHOOK_URL}" \
+              -H "Content-Type: application/json" \
+              -d "{\"text\":\"${MSG}\"}" || true
+          fi
+
       - name: Upload logs (always)
         if: always()
         uses: actions/upload-artifact@v4
@@ -1897,6 +2037,39 @@ jobs:
           path: |
             e2e/output.log
           if-no-files-found: warn
+
+      - name: Stop MinIO trace logging and save
+        if: always()
+        run: |
+          set +e
+          if [ -n "${MC_TRACE_PID:-}" ]; then
+            echo "Stopping MinIO trace (PID=${MC_TRACE_PID})..."
+            kill "${MC_TRACE_PID}" 2>/dev/null || true
+            wait "${MC_TRACE_PID}" 2>/dev/null || true
+          fi
+          if [ -n "${MC_PORT_FWD_PID:-}" ]; then
+            kill "${MC_PORT_FWD_PID}" 2>/dev/null || true
+          fi
+          if [ -f "${MINIO_TRACE_LOG:-}" ]; then
+            LINES=$(wc -l < "${MINIO_TRACE_LOG}")
+            SIZE=$(du -h "${MINIO_TRACE_LOG}" | cut -f1)
+            echo "=== MinIO trace log: ${LINES} lines, ${SIZE} ==="
+            # Copy to e2e/ so it gets picked up by artifact upload
+            cp "${MINIO_TRACE_LOG}" e2e/minio-trace.log 2>/dev/null || true
+          else
+            echo "No MinIO trace log found (backup tests may not have run)"
+          fi
+          # Cleanup: delete trace logs and kill any orphaned mc trace processes
+          rm -f /tmp/minio-trace-*.log 2>/dev/null || true
+          pkill -f "mc admin trace" 2>/dev/null || true
+
+      - name: Upload MinIO trace log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minio-trace-${{ github.run_id }}
+          path: e2e/minio-trace.log
+          if-no-files-found: ignore
 
       - name: Cleanup MinIO namespace (if deployed)
         if: always()

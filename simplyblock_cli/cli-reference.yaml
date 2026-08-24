@@ -32,18 +32,6 @@ commands:
           Runs locally on to-be storage node hosts. Reads system information (CPUs topology, NVME devices) and prepares
           yaml config to be used when adding the storage node.
         arguments:
-          - name: "--max-subsys"
-            help: "The max number of subsystems per storage node."
-            dest: max_lvol
-            type: int
-            required: true
-          - name: "--max-size"
-            help: "The maximum amount of Huge Pages to be set on the node."
-            description: >
-              Maximum amount of Huge Pages to be set on the node, it will override the auto-calculated value.
-            dest: max_prov
-            type: str
-            required: false
           - name: "--nodes-per-socket"
             help: "The number of each node to be added per each socket. Default: `1`."
             dest: nodes_per_socket
@@ -56,16 +44,6 @@ commands:
             dest: sockets_to_use
             type: str
             default: "0"
-          - name: "--cores-percentage"
-            help: "The percentage of cores to be used for spdk (0-99). Default: `0`."
-            description: >
-              The percentage of cores to be used for spdk (0-99)
-            dest: cores_percentage
-            type:
-              range:
-                min: 0
-                max: 99
-            default: 0
           - name: "--pci-allowed"
             help: "Comma separated list of PCI addresses of Nvme devices to use for storage devices."
             description: >
@@ -112,7 +90,7 @@ commands:
             type: bool
             action: store_true
           - name: "--calculate-hp-only"
-            help: "Calculate the minimum required huge pages, it depends on the following params: --cores-percentage, --sockets-to-use, --max-subsys, --nodes-per-socket, --number-of-devices."
+            help: "Calculate the minimum required huge pages, it depends on the following params: --sockets-to-use, --nodes-per-socket, --number-of-devices. Subsystem count and the vCPU budget are cluster-level settings."
             dest: calculate_hp_only
             type: bool
             action: store_true
@@ -345,28 +323,11 @@ commands:
             dest: node_id
             completer: _completer_get_sn_list
             type: str
-          - name: "--max-subsys"
-            help: "The max number of subsystems per storage node. Default: `0`."
-            dest: max_lvol
-            type: int
-            default: 0
           - name: "--max-snap"
             help: "The max snapshot per storage node. Default: `5000`."
             dest: max_snap
             type: int
             default: 5000
-            private: true
-          - name: "--max-size"
-            help: "The maximum amount of GB to be utilized on this storage node. Default: `0`."
-            description: >
-              Maximum amount of GB to be utilized on this storage node. This cannot be larger than the total effective
-              cluster capacity. A safe value is `1/n * 2.0` of effective cluster capacity. Meaning, if you have three
-              storage nodes, each with 100 TiB of raw capacity and a cluster with erasure coding scheme 1+1
-              (two replicas), the effective cluster capacity is _100 TiB * 3 / 2 = 150 TiB_. Setting this parameter to
-              _150 TiB / 3 * 2 = 100TiB_ would be a safe choice.
-            dest: max_prov
-            type: str
-            default: "0"
             private: true
           - name: "--node-addr"
             aliases:
@@ -431,6 +392,20 @@ commands:
             dest: spdk_proxy_image
             type: str
             private: true
+      - name: suspend
+        help: Exclude node from lvol allocation.
+        arguments:
+          - name: "node_id"
+            help: "Storage node id"
+            dest: node_id
+            type: str
+            completer: _completer_get_sn_list
+          - name: "--force"
+            help: "Force suspend"
+            dest: force
+            type: bool
+            default: false
+            action: store_true
       - name: shutdown
         help: "Initiates a storage node shutdown."
         usage: Once the command is issued, the node will stop accepting IO,but IO, which was previously received, will still be processed. In a high-availability setup, this will not impact operations.
@@ -445,23 +420,6 @@ commands:
             dest: force
             type: bool
             action: store_true
-      - name: suspend
-        help: "Exclude node from lvol allocation."
-        usage: The node will be excluded from lvol allocation. It will not be able to create new logical volumes on this node.
-        arguments:
-          - name: node_id
-            help: Storage node id
-            dest: node_id
-            completer: _completer_get_sn_list
-            type: str
-      - name: resume
-        help: "Include node in lvol allocation."
-        arguments:
-          - name: node_id
-            help: Storage node id
-            dest: node_id
-            completer: _completer_get_sn_list
-            type: str
       - name: get-io-stats
         help: "Gets storage node IO statistics."
         arguments:
@@ -1069,6 +1027,30 @@ commands:
             dest: snode_api_port
             type: int
             default: 50001
+          - name: "--max-subsys"
+            help: "Max number of nvmf subsystems per storage node. Cluster-wide; a node adopts it on its next restart."
+            description: >
+              Cluster-wide ceiling on nvmf subsystems per storage node. 75 is a hard product
+              limit and larger values are rejected. Set here rather than per node so every node
+              in the cluster is sized alike; a node adopts a change on its next restart.
+            dest: max_subsys
+            type: int
+            default: 0
+          - name: "--hugepages-mem"
+            help: "Huge-page memory floor per storage node, e.g. 4G. Cluster-wide; a node adopts it on its next restart."
+            dest: hugepages_mem
+            type: str
+            default: ""
+          - name: "--vcpu-count"
+            help: "Absolute number of vCPUs SPDK gets on each storage node. A node with fewer than this + 1 cores is refused."
+            description: >
+              Absolute core budget for SPDK on every storage node, replacing the old
+              cores-percentage: a percentage meant different things on different hardware,
+              a count does not. One core beyond this is required for the system, so a node
+              with fewer than count+1 vCPUs is refused rather than silently under-provisioned.
+            dest: vcpu_count
+            type: int
+            default: 0
           - name: "--hashicorp-vault-url"
             help: "Hashicorp vault URL for storing encryption keys for this cluster"
             dest: hashicorp_vault_url
@@ -1229,10 +1211,50 @@ commands:
             dest: snode_api_port
             type: int
             default: 50001
+          - name: "--max-subsys"
+            help: "Max number of nvmf subsystems per storage node. Cluster-wide; a node adopts it on its next restart."
+            description: >
+              Cluster-wide ceiling on nvmf subsystems per storage node. 75 is a hard product
+              limit and larger values are rejected. Set here rather than per node so every node
+              in the cluster is sized alike; a node adopts a change on its next restart.
+            dest: max_subsys
+            type: int
+            default: 0
+          - name: "--hugepages-mem"
+            help: "Huge-page memory floor per storage node, e.g. 4G. Cluster-wide; a node adopts it on its next restart."
+            dest: hugepages_mem
+            type: str
+            default: ""
+          - name: "--vcpu-count"
+            help: "Absolute number of vCPUs SPDK gets on each storage node. A node with fewer than this + 1 cores is refused."
+            description: >
+              Absolute core budget for SPDK on every storage node, replacing the old
+              cores-percentage: a percentage meant different things on different hardware,
+              a count does not. One core beyond this is required for the system, so a node
+              with fewer than count+1 vCPUs is refused rather than silently under-provisioned.
+            dest: vcpu_count
+            type: int
+            default: 0
           - name: "--hashicorp-vault-url"
             help: "Hashicorp vault URL for storing encryption keys for this cluster"
             dest: hashicorp_vault_url
             type: str
+      - name: op-stop
+        help: "Stops the cluster accepting object lifecycle operations: creation, deletion and modification of volumes, snapshots, clones and pools. Read paths and the cluster's own maintenance are unaffected."
+        arguments:
+          - name: "cluster_id"
+            help: "The cluster id."
+            dest: cluster_id
+            type: str
+            completer: _completer_get_cluster_list
+      - name: op-start
+        help: "Resumes object lifecycle operations on the cluster."
+        arguments:
+          - name: "cluster_id"
+            help: "The cluster id."
+            dest: cluster_id
+            type: str
+            completer: _completer_get_cluster_list
       - name: activate
         help: >
           Activates a cluster.
@@ -1426,6 +1448,26 @@ commands:
             help: "Restart the management services using the provided image."
             dest: mgmt_image
             type: str
+          - name: "--max-subsys"
+            help: "Change the cluster-wide max nvmf subsystems per storage node. Applied by each node on its next restart. Given alone, no image update runs."
+            dest: max_subsys
+            type: int
+          - name: "--hugepages-mem"
+            help: "Change the cluster-wide huge-page memory floor per storage node, e.g. 4G. Applied by each node on its next restart. Given alone, no image update runs."
+            dest: hugepages_mem
+            type: str
+      - name: upgrade-complete
+        help: "Completes a cluster upgrade."
+        usage: >
+          Runs the completion step of a cluster upgrade started with `cluster update`: resumes JC compression on
+          all storage nodes (deferred to a resume task on nodes with running data migrations) and stamps the
+          installed release. All storage nodes must be online.
+        arguments:
+          - name: "cluster_id"
+            help: "The cluster id."
+            dest: cluster_id
+            type: str
+            completer: _completer_get_cluster_list
       - name: graceful-shutdown
         help: "Initiates a graceful shutdown of a cluster's storage nodes."
         arguments:
@@ -1543,7 +1585,7 @@ commands:
             dest: name
             type: str
       - name: add-replication
-        help: Assigns the snapshot replication target cluster
+        help: "DEPRECATED: use replication-target-add and replication-policy-add. Assigns the single snapshot replication target cluster."
         arguments:
           - name: "cluster_id"
             help: "Cluster id"
@@ -1564,6 +1606,127 @@ commands:
             help: "Target cluster pool ID or name"
             dest: target_pool
             type: str
+      - name: replication-target-add
+        help: Adds a named replication destination to a cluster (several are allowed)
+        arguments:
+          - name: "cluster_id"
+            help: "Source cluster id"
+            dest: cluster_id
+            type: str
+            completer: _completer_get_cluster_list
+          - name: "name"
+            help: "Name of the replication target, unique per source cluster"
+            dest: target_name
+            type: str
+          - name: "target_cluster_id"
+            help: "Destination cluster id"
+            dest: target_cluster_id
+            type: str
+            completer: _completer_get_cluster_list
+          - name: "--target-pool"
+            help: "Pool on the destination cluster (ID or name). Stored as a UUID."
+            dest: target_pool
+            type: str
+          - name: "--timeout"
+            help: "Replication network timeout in seconds. Default: `600`."
+            dest: timeout
+            type: int
+      - name: replication-target-list
+        help: Lists the replication targets of a cluster
+        arguments:
+          - name: "--cluster-id"
+            help: "Source cluster id"
+            dest: cluster_id
+            type: str
+            completer: _completer_get_cluster_list
+          - name: "--json"
+            help: "Print outputs in json format."
+            dest: json
+            type: bool
+            action: store_true
+      - name: replication-target-remove
+        help: Removes a replication target. Refused while a policy still uses it.
+        arguments:
+          - name: "target_id"
+            help: "Replication target id"
+            dest: target_id
+            type: str
+      - name: replication-target-failover
+        help: Fails over EVERY volume replicating to this target (site loss)
+        arguments:
+          - name: "target_id"
+            help: "Replication target id"
+            dest: target_id
+            type: str
+          - name: "--json"
+            help: "Print outputs in json format."
+            dest: json
+            type: bool
+            action: store_true
+      - name: replication-policy-add
+        help: Adds a replication policy on a target, defining the replication cadence
+        arguments:
+          - name: "cluster_id"
+            help: "Source cluster id"
+            dest: cluster_id
+            type: str
+            completer: _completer_get_cluster_list
+          - name: "name"
+            help: "Name of the policy, unique per source cluster"
+            dest: policy_name
+            type: str
+          - name: "--target"
+            help: "Replication target id or name"
+            dest: target
+            type: str
+            required: true
+          - name: "--interval-min"
+            help: "Cadence: minutes between internal replication snapshots. 0 replicates user snapshots only. Default: `1`."
+            dest: interval_min
+            type: int
+          - name: "--mode"
+            help: "Replication mode. Default: `failover`."
+            dest: mode
+            type: str
+            choices:
+              - failover
+              - migration
+          - name: "--keep"
+            help: "Replicated internal snapshots to retain on each side. Minimum (and default): `2`."
+            dest: keep_replicated
+            type: int
+      - name: replication-policy-list
+        help: Lists the replication policies of a cluster
+        arguments:
+          - name: "--cluster-id"
+            help: "Source cluster id"
+            dest: cluster_id
+            type: str
+            completer: _completer_get_cluster_list
+          - name: "--json"
+            help: "Print outputs in json format."
+            dest: json
+            type: bool
+            action: store_true
+      - name: replication-policy-remove
+        help: Removes a replication policy. Refused while a volume still follows it.
+        arguments:
+          - name: "policy_id"
+            help: "Replication policy id"
+            dest: policy_id
+            type: str
+      - name: replication-policy-failover
+        help: Fails over EVERY volume following this policy
+        arguments:
+          - name: "policy_id"
+            help: "Replication policy id"
+            dest: policy_id
+            type: str
+          - name: "--json"
+            help: "Print outputs in json format."
+            dest: json
+            type: bool
+            action: store_true
   - name: "volume"
     help: "Logical Volume Commands"
     aliases:
@@ -1700,6 +1863,10 @@ commands:
             dest: npcs
             type: int
             default: 0
+          - name: "--replication-policy"
+            help: "Replication policy (id or name) to assign at create time. Configures replication for this volume."
+            dest: replication_policy
+            type: str
           - name: "--replicate"
             help: "Replicate LVol snapshot"
             dest: replicate
@@ -1905,6 +2072,39 @@ commands:
             help: "The logical volume id."
             dest: volume_id
             type: str
+      - name: replication-policy-set
+        help: Puts a volume under a replication policy, or changes it (a change re-replicates in full)
+        arguments:
+          - name: "volume_id"
+            help: "Logical volume id"
+            dest: volume_id
+            type: str
+
+          - name: "policy"
+            help: "Replication policy id or name"
+            dest: policy
+            type: str
+      - name: replication-policy-clear
+        help: Takes a volume out of its replication policy, stopping replication and deleting the internal replication snapshots on both sides
+        arguments:
+          - name: "volume_id"
+            help: "Logical volume id"
+            dest: volume_id
+            type: str
+
+      - name: replication-relationship
+        help: Shows the volume's counterpart on the other cluster (source to target volume id, and the reverse)
+        arguments:
+          - name: "volume_id"
+            help: "Logical volume id"
+            dest: volume_id
+            type: str
+
+          - name: "--json"
+            help: "Print outputs in json format."
+            dest: json
+            type: bool
+            action: store_true
       - name: replication-start
         help: "Start snapshot replication taken from lvol"
         arguments:
@@ -1932,6 +2132,11 @@ commands:
             help: "Logical volume id"
             dest: lvol_id
             type: str
+          - name: "--delete-source"
+            help: "Delete the source volume once the cutover has completed (migration semantics)"
+            dest: delete_source
+            type: bool
+            action: store_true
       - name: replication-failback
         help: "Configure fail-back of a failed-over volume to a source cluster (recovered = delta only; fresh = full). Cut over with replication-commit."
         arguments:
@@ -2503,11 +2708,6 @@ commands:
             help: "The target storage node id."
             dest: node
             type: str
-          - name: "--cluster-id"
-            help: "The target cluster id."
-            dest: cluster_id
-            type: str
-            required: true
       - name: export
         help: "Export backup metadata to a JSON file for cross-cluster restore."
         arguments:

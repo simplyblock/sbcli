@@ -47,9 +47,8 @@ class CLIWrapper(CLIWrapperBase):
         self.init_storage_node__list(subparser)
         self.init_storage_node__get(subparser)
         self.init_storage_node__restart(subparser)
-        self.init_storage_node__shutdown(subparser)
         self.init_storage_node__suspend(subparser)
-        self.init_storage_node__resume(subparser)
+        self.init_storage_node__shutdown(subparser)
         self.init_storage_node__get_io_stats(subparser)
         self.init_storage_node__get_capacity(subparser)
         self.init_storage_node__list_devices(subparser)
@@ -99,18 +98,15 @@ class CLIWrapper(CLIWrapperBase):
 
     def init_storage_node__configure(self, subparser):
         subcommand = self.add_sub_command(subparser, 'configure', 'Prepare a configuration file to be used when adding the storage node.')
-        subcommand.add_argument('--max-subsys', help='The max number of subsystems per storage node.', type=int, dest='max_lvol', required=True)
-        subcommand.add_argument('--max-size', help='The maximum amount of Huge Pages to be set on the node.', type=str, dest='max_prov', required=False)
         subcommand.add_argument('--nodes-per-socket', help='The number of each node to be added per each socket. Default: `1`.', type=int, default=1, dest='nodes_per_socket')
         subcommand.add_argument('--sockets-to-use', help='The system socket to use when adding the storage nodes. Default: `0`.', type=str, default='0', dest='sockets_to_use')
-        subcommand.add_argument('--cores-percentage', help='The percentage of cores to be used for spdk (0-99). Default: `0`.', type=range_type(0, 99), default=0, dest='cores_percentage')
         subcommand.add_argument('--pci-allowed', help='Comma separated list of PCI addresses of Nvme devices to use for storage devices.', type=str, default='', dest='pci_allowed', required=False)
         subcommand.add_argument('--pci-blocked', help='Comma separated list of PCI addresses of Nvme devices to not use for storage devices.', type=str, default='', dest='pci_blocked', required=False)
         subcommand.add_argument('--device-model', help='NVMe SSD model string, example: --model PM1628. Can be used alone to filter by model, or combined with --size-range to further filter by size.', type=str, default='', dest='device_model', required=False)
         subcommand.add_argument('--size-range', help='NVMe SSD device size range separated by -, can be X(m,g,t) or bytes as integer, example: --size-range 50G-1T or --size-range 1232345-67823987. Can be used alone to filter by size, or combined with --device-model to further filter by model.', type=str, default='', dest='size_range', required=False)
         subcommand.add_argument('--nvme-names', help='Comma separated list of nvme namespace names like nvme0n1,nvme1n1.', type=str, default='', dest='nvme_names', required=False)
         subcommand.add_argument('--force', help='Force format detected or passed nvme pci address to 4K and clean partitions.', dest='force', action='store_true')
-        subcommand.add_argument('--calculate-hp-only', help='Calculate the minimum required huge pages, it depends on the following params: --cores-percentage, --sockets-to-use, --max-subsys, --nodes-per-socket, --number-of-devices.', dest='calculate_hp_only', action='store_true')
+        subcommand.add_argument('--calculate-hp-only', help='Calculate the minimum required huge pages, it depends on the following params: --sockets-to-use, --nodes-per-socket, --number-of-devices. Subsystem count and the vCPU budget are cluster-level settings.', dest='calculate_hp_only', action='store_true')
         subcommand.add_argument('--number-of-devices', help='Number of devices that will be used on this host. For calculating huge pages memory only.', type=int, dest='number_of_devices')
 
     def init_storage_node__configure_upgrade(self, subparser):
@@ -183,11 +179,8 @@ class CLIWrapper(CLIWrapperBase):
     def init_storage_node__restart(self, subparser):
         subcommand = self.add_sub_command(subparser, 'restart', 'Restarts a storage node.')
         subcommand.add_argument('node_id', help='Storage node id', type=str).completer = self._completer_get_sn_list
-        subcommand.add_argument('--max-subsys', help='The max number of subsystems per storage node. Default: `0`.', type=int, default=0, dest='max_lvol')
         if self.developer_mode:
             subcommand.add_argument('--max-snap', help='The max snapshot per storage node. Default: `5000`.', type=int, default=5000, dest='max_snap')
-        if self.developer_mode:
-            subcommand.add_argument('--max-size', help='The maximum amount of GB to be utilized on this storage node. Default: `0`.', type=str, default='0', dest='max_prov')
         subcommand.add_argument('--node-addr', '--node-ip', help='Restart Node on new node.', type=str, dest='node_ip')
         if self.developer_mode:
             subcommand.add_argument('--spdk-image', help='The SPDK image URI.', type=str, dest='spdk_image')
@@ -205,18 +198,15 @@ class CLIWrapper(CLIWrapperBase):
         if self.developer_mode:
             subcommand.add_argument('--spdk-proxy-image', help='The SPDK proxy image URI.', type=str, dest='spdk_proxy_image')
 
+    def init_storage_node__suspend(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'suspend', 'Exclude node from lvol allocation.')
+        subcommand.add_argument('node_id', help='Storage node id', type=str).completer = self._completer_get_sn_list
+        subcommand.add_argument('--force', help='Force suspend', default=False, dest='force', action='store_true')
+
     def init_storage_node__shutdown(self, subparser):
         subcommand = self.add_sub_command(subparser, 'shutdown', 'Initiates a storage node shutdown.')
         subcommand.add_argument('node_id', help='Storage node id', type=str).completer = self._completer_get_sn_list
         subcommand.add_argument('--force', help='Force node shutdown.', dest='force', action='store_true')
-
-    def init_storage_node__suspend(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'suspend', 'Exclude node from lvol allocation.')
-        subcommand.add_argument('node_id', help='Storage node id', type=str).completer = self._completer_get_sn_list
-
-    def init_storage_node__resume(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'resume', 'Include node in lvol allocation.')
-        subcommand.add_argument('node_id', help='Storage node id', type=str).completer = self._completer_get_sn_list
 
     def init_storage_node__get_io_stats(self, subparser):
         subcommand = self.add_sub_command(subparser, 'get-io-stats', 'Gets storage node IO statistics.')
@@ -369,6 +359,8 @@ class CLIWrapper(CLIWrapperBase):
         subparser = self.add_command('cluster', 'Cluster Commands')
         self.init_cluster__create(subparser)
         self.init_cluster__add(subparser)
+        self.init_cluster__op_stop(subparser)
+        self.init_cluster__op_start(subparser)
         self.init_cluster__activate(subparser)
         self.init_cluster__list(subparser)
         self.init_cluster__status(subparser)
@@ -385,6 +377,7 @@ class CLIWrapper(CLIWrapperBase):
         self.init_cluster__update_fabric(subparser)
         self.init_cluster__check(subparser)
         self.init_cluster__update(subparser)
+        self.init_cluster__upgrade_complete(subparser)
         self.init_cluster__graceful_shutdown(subparser)
         self.init_cluster__restart(subparser)
         self.init_cluster__graceful_startup(subparser)
@@ -397,6 +390,14 @@ class CLIWrapper(CLIWrapperBase):
         self.init_cluster__set_shared_placement(subparser)
         self.init_cluster__change_name(subparser)
         self.init_cluster__add_replication(subparser)
+        self.init_cluster__replication_target_add(subparser)
+        self.init_cluster__replication_target_list(subparser)
+        self.init_cluster__replication_target_remove(subparser)
+        self.init_cluster__replication_target_failover(subparser)
+        self.init_cluster__replication_policy_add(subparser)
+        self.init_cluster__replication_policy_list(subparser)
+        self.init_cluster__replication_policy_remove(subparser)
+        self.init_cluster__replication_policy_failover(subparser)
 
 
     def init_cluster__create(self, subparser):
@@ -447,6 +448,9 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--nvmf-base-port', help='Base port for all NVMe-oF listeners (lvol, hublvol, device). Default: `4420`.', type=int, default=4420, dest='nvmf_base_port')
         subcommand.add_argument('--rpc-base-port', help='The base port for SPDK JSON-RPC. Default: `8080`.', type=int, default=8080, dest='rpc_base_port')
         subcommand.add_argument('--snode-api-port', help='The SNodeAPI/firewall port (one per host IP). Default: `50001`.', type=int, default=50001, dest='snode_api_port')
+        subcommand.add_argument('--max-subsys', help='Max number of nvmf subsystems per storage node. Cluster-wide; a node adopts it on its next restart.', type=int, default=0, dest='max_subsys')
+        subcommand.add_argument('--hugepages-mem', help='Huge-page memory floor per storage node, e.g. 4G. Cluster-wide; a node adopts it on its next restart.', type=str, default='', dest='hugepages_mem')
+        subcommand.add_argument('--vcpu-count', help='Absolute number of vCPUs SPDK gets on each storage node. A node with fewer than this + 1 cores is refused.', type=int, default=0, dest='vcpu_count')
         subcommand.add_argument('--hashicorp-vault-url', help='Hashicorp vault URL for storing encryption keys for this cluster', type=str, dest='hashicorp_vault_url')
 
     def init_cluster__add(self, subparser):
@@ -481,7 +485,18 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--nvmf-base-port', help='Base port for all NVMe-oF listeners (lvol, hublvol, device). Default: `4420`.', type=int, default=4420, dest='nvmf_base_port')
         subcommand.add_argument('--rpc-base-port', help='The base port for SPDK JSON-RPC. Default: `8080`.', type=int, default=8080, dest='rpc_base_port')
         subcommand.add_argument('--snode-api-port', help='The SNodeAPI/firewall port (one per host IP). Default: `50001`.', type=int, default=50001, dest='snode_api_port')
+        subcommand.add_argument('--max-subsys', help='Max number of nvmf subsystems per storage node. Cluster-wide; a node adopts it on its next restart.', type=int, default=0, dest='max_subsys')
+        subcommand.add_argument('--hugepages-mem', help='Huge-page memory floor per storage node, e.g. 4G. Cluster-wide; a node adopts it on its next restart.', type=str, default='', dest='hugepages_mem')
+        subcommand.add_argument('--vcpu-count', help='Absolute number of vCPUs SPDK gets on each storage node. A node with fewer than this + 1 cores is refused.', type=int, default=0, dest='vcpu_count')
         subcommand.add_argument('--hashicorp-vault-url', help='Hashicorp vault URL for storing encryption keys for this cluster', type=str, dest='hashicorp_vault_url')
+
+    def init_cluster__op_stop(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'op-stop', 'Stops the cluster accepting object lifecycle operations: creation, deletion and modification of volumes, snapshots, clones and pools. Read paths and the cluster\'s own maintenance are unaffected.')
+        subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
+
+    def init_cluster__op_start(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'op-start', 'Resumes object lifecycle operations on the cluster.')
+        subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
 
     def init_cluster__activate(self, subparser):
         subcommand = self.add_sub_command(subparser, 'activate', 'Activates a cluster.')
@@ -555,6 +570,12 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--cp-only', help='Update the control plane only. Default: `false`.', type=bool, default=False, dest='mgmt_only')
         subcommand.add_argument('--spdk-image', help='Restart the storage nodes using the provided image.', type=str, dest='spdk_image')
         subcommand.add_argument('--mgmt-image', help='Restart the management services using the provided image.', type=str, dest='mgmt_image')
+        subcommand.add_argument('--max-subsys', help='Change the cluster-wide max nvmf subsystems per storage node. Applied by each node on its next restart. Given alone, no image update runs.', type=int, dest='max_subsys')
+        subcommand.add_argument('--hugepages-mem', help='Change the cluster-wide huge-page memory floor per storage node, e.g. 4G. Applied by each node on its next restart. Given alone, no image update runs.', type=str, dest='hugepages_mem')
+
+    def init_cluster__upgrade_complete(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'upgrade-complete', 'Completes a cluster upgrade.')
+        subcommand.add_argument('cluster_id', help='The cluster id.', type=str).completer = self._completer_get_cluster_list
 
     def init_cluster__graceful_shutdown(self, subparser):
         subcommand = self.add_sub_command(subparser, 'graceful-shutdown', 'Initiates a graceful shutdown of a cluster\'s storage nodes.')
@@ -605,11 +626,56 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('name', help='The new cluster name.', type=str)
 
     def init_cluster__add_replication(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'add-replication', 'Assigns the snapshot replication target cluster')
+        subcommand = self.add_sub_command(subparser, 'add-replication', 'DEPRECATED: use replication-target-add and replication-policy-add. Assigns the single snapshot replication target cluster.')
         subcommand.add_argument('cluster_id', help='Cluster id', type=str).completer = self._completer_get_cluster_list
         subcommand.add_argument('target_cluster_id', help='Target Cluster id', type=str).completer = self._completer_get_cluster_list
         subcommand.add_argument('--timeout', help='Snapshot replication network timeout', type=int, default=3600, dest='timeout')
         subcommand.add_argument('--target-pool', help='Target cluster pool ID or name', type=str, dest='target_pool')
+
+    def init_cluster__replication_target_add(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'replication-target-add', 'Adds a named replication destination to a cluster (several are allowed)')
+        subcommand.add_argument('cluster_id', help='Source cluster id', type=str).completer = self._completer_get_cluster_list
+        subcommand.add_argument('name', help='Name of the replication target, unique per source cluster', type=str)
+        subcommand.add_argument('target_cluster_id', help='Destination cluster id', type=str).completer = self._completer_get_cluster_list
+        subcommand.add_argument('--target-pool', help='Pool on the destination cluster (ID or name). Stored as a UUID.', type=str, dest='target_pool')
+        subcommand.add_argument('--timeout', help='Replication network timeout in seconds. Default: `600`.', type=int, dest='timeout')
+
+    def init_cluster__replication_target_list(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'replication-target-list', 'Lists the replication targets of a cluster')
+        subcommand.add_argument('--cluster-id', help='Source cluster id', type=str, dest='cluster_id').completer = self._completer_get_cluster_list
+        subcommand.add_argument('--json', help='Print outputs in json format.', dest='json', action='store_true')
+
+    def init_cluster__replication_target_remove(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'replication-target-remove', 'Removes a replication target. Refused while a policy still uses it.')
+        subcommand.add_argument('target_id', help='Replication target id', type=str)
+
+    def init_cluster__replication_target_failover(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'replication-target-failover', 'Fails over EVERY volume replicating to this target (site loss)')
+        subcommand.add_argument('target_id', help='Replication target id', type=str)
+        subcommand.add_argument('--json', help='Print outputs in json format.', dest='json', action='store_true')
+
+    def init_cluster__replication_policy_add(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'replication-policy-add', 'Adds a replication policy on a target, defining the replication cadence')
+        subcommand.add_argument('cluster_id', help='Source cluster id', type=str).completer = self._completer_get_cluster_list
+        subcommand.add_argument('name', help='Name of the policy, unique per source cluster', type=str)
+        subcommand.add_argument('--target', help='Replication target id or name', type=str, dest='target', required=True)
+        subcommand.add_argument('--interval-min', help='Cadence: minutes between internal replication snapshots. 0 replicates user snapshots only. Default: `1`.', type=int, dest='interval_min')
+        subcommand.add_argument('--mode', help='Replication mode. Default: `failover`.', type=str, dest='mode', choices=['failover','migration',])
+        subcommand.add_argument('--keep', help='Replicated internal snapshots to retain on each side. Minimum (and default): `2`.', type=int, dest='keep_replicated')
+
+    def init_cluster__replication_policy_list(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'replication-policy-list', 'Lists the replication policies of a cluster')
+        subcommand.add_argument('--cluster-id', help='Source cluster id', type=str, dest='cluster_id').completer = self._completer_get_cluster_list
+        subcommand.add_argument('--json', help='Print outputs in json format.', dest='json', action='store_true')
+
+    def init_cluster__replication_policy_remove(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'replication-policy-remove', 'Removes a replication policy. Refused while a volume still follows it.')
+        subcommand.add_argument('policy_id', help='Replication policy id', type=str)
+
+    def init_cluster__replication_policy_failover(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'replication-policy-failover', 'Fails over EVERY volume following this policy')
+        subcommand.add_argument('policy_id', help='Replication policy id', type=str)
+        subcommand.add_argument('--json', help='Print outputs in json format.', dest='json', action='store_true')
 
 
     def init_volume(self):
@@ -629,6 +695,9 @@ class CLIWrapper(CLIWrapperBase):
         self.init_volume__get_io_stats(subparser)
         self.init_volume__check(subparser)
         self.init_volume__inflate(subparser)
+        self.init_volume__replication_policy_set(subparser)
+        self.init_volume__replication_policy_clear(subparser)
+        self.init_volume__replication_relationship(subparser)
         self.init_volume__replication_start(subparser)
         self.init_volume__replication_commit(subparser)
         self.init_volume__replication_failback(subparser)
@@ -675,6 +744,7 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--pvc-name', '--pvc_name', help='Set logical volume PVC name for k8s clients', type=str, dest='pvc_name')
         subcommand.add_argument('--data-chunks-per-stripe', help='The erasure coding schema parameter k (distributed raid). Default: `0`.', type=int, default=0, dest='ndcs')
         subcommand.add_argument('--parity-chunks-per-stripe', help='The erasure coding schema parameter n (distributed raid). Default: `0`.', type=int, default=0, dest='npcs')
+        subcommand.add_argument('--replication-policy', help='Replication policy (id or name) to assign at create time. Configures replication for this volume.', type=str, dest='replication_policy')
         subcommand.add_argument('--replicate', help='Replicate LVol snapshot', dest='replicate', action='store_true')
 
     def init_volume__qos_set(self, subparser):
@@ -751,6 +821,20 @@ class CLIWrapper(CLIWrapperBase):
         subcommand = self.add_sub_command(subparser, 'inflate', 'Inflate a logical volume.')
         subcommand.add_argument('volume_id', help='The logical volume id.', type=str)
 
+    def init_volume__replication_policy_set(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'replication-policy-set', 'Puts a volume under a replication policy, or changes it (a change re-replicates in full)')
+        subcommand.add_argument('volume_id', help='Logical volume id', type=str)
+        subcommand.add_argument('policy', help='Replication policy id or name', type=str)
+
+    def init_volume__replication_policy_clear(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'replication-policy-clear', 'Takes a volume out of its replication policy, stopping replication and deleting the internal replication snapshots on both sides')
+        subcommand.add_argument('volume_id', help='Logical volume id', type=str)
+
+    def init_volume__replication_relationship(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'replication-relationship', 'Shows the volume\'s counterpart on the other cluster (source to target volume id, and the reverse)')
+        subcommand.add_argument('volume_id', help='Logical volume id', type=str)
+        subcommand.add_argument('--json', help='Print outputs in json format.', dest='json', action='store_true')
+
     def init_volume__replication_start(self, subparser):
         subcommand = self.add_sub_command(subparser, 'replication-start', 'Start snapshot replication taken from lvol')
         subcommand.add_argument('lvol_id', help='Logical volume id', type=str)
@@ -761,6 +845,7 @@ class CLIWrapper(CLIWrapperBase):
     def init_volume__replication_commit(self, subparser):
         subcommand = self.add_sub_command(subparser, 'replication-commit', 'Commit a migration/fail-back cutover: minimize delta then fail the client over to the target')
         subcommand.add_argument('lvol_id', help='Logical volume id', type=str)
+        subcommand.add_argument('--delete-source', help='Delete the source volume once the cutover has completed (migration semantics)', dest='delete_source', action='store_true')
 
     def init_volume__replication_failback(self, subparser):
         subcommand = self.add_sub_command(subparser, 'replication-failback', 'Configure fail-back of a failed-over volume to a source cluster (recovered = delta only; fresh = full). Cut over with replication-commit.')
@@ -1036,7 +1121,6 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--lvol', help='The new logical volume name.', type=str, dest='lvol_name', required=True)
         subcommand.add_argument('--pool', help='The target pool name or id.', type=str, dest='pool', required=True)
         subcommand.add_argument('--node', help='The target storage node id.', type=str, dest='node')
-        subcommand.add_argument('--cluster-id', help='The target cluster id.', type=str, dest='cluster_id', required=True)
 
     def init_backup__export(self, subparser):
         subcommand = self.add_sub_command(subparser, 'export', 'Export backup metadata to a JSON file for cross-cluster restore.')
@@ -1202,7 +1286,6 @@ class CLIWrapper(CLIWrapperBase):
                 elif sub_command in ['restart']:
                     if not self.developer_mode:
                         args.max_snap = 5000
-                        args.max_prov = '0'
                         args.spdk_image = None
                         args.reattach_volume = None
                         args.spdk_debug = None
@@ -1210,12 +1293,10 @@ class CLIWrapper(CLIWrapperBase):
                         args.large_bufsize = 0
                         args.spdk_proxy_image = None
                     ret = self.storage_node__restart(sub_command, args)
-                elif sub_command in ['shutdown']:
-                    ret = self.storage_node__shutdown(sub_command, args)
                 elif sub_command in ['suspend']:
                     ret = self.storage_node__suspend(sub_command, args)
-                elif sub_command in ['resume']:
-                    ret = self.storage_node__resume(sub_command, args)
+                elif sub_command in ['shutdown']:
+                    ret = self.storage_node__shutdown(sub_command, args)
                 elif sub_command in ['get-io-stats']:
                     ret = self.storage_node__get_io_stats(sub_command, args)
                 elif sub_command in ['get-capacity']:
@@ -1338,6 +1419,10 @@ class CLIWrapper(CLIWrapperBase):
                         args.max_queue_size = 128
                         args.inflight_io_threshold = 4
                     ret = self.cluster__add(sub_command, args)
+                elif sub_command in ['op-stop']:
+                    ret = self.cluster__op_stop(sub_command, args)
+                elif sub_command in ['op-start']:
+                    ret = self.cluster__op_start(sub_command, args)
                 elif sub_command in ['activate']:
                     ret = self.cluster__activate(sub_command, args)
                 elif sub_command in ['list']:
@@ -1372,6 +1457,8 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.cluster__check(sub_command, args)
                 elif sub_command in ['update']:
                     ret = self.cluster__update(sub_command, args)
+                elif sub_command in ['upgrade-complete']:
+                    ret = self.cluster__upgrade_complete(sub_command, args)
                 elif sub_command in ['graceful-shutdown']:
                     ret = self.cluster__graceful_shutdown(sub_command, args)
                 elif sub_command in ['restart']:
@@ -1398,6 +1485,24 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.cluster__change_name(sub_command, args)
                 elif sub_command in ['add-replication']:
                     ret = self.cluster__add_replication(sub_command, args)
+                elif sub_command in ['replication-target-add']:
+                    args.target_name = args.name
+                    ret = self.cluster__replication_target_add(sub_command, args)
+                elif sub_command in ['replication-target-list']:
+                    ret = self.cluster__replication_target_list(sub_command, args)
+                elif sub_command in ['replication-target-remove']:
+                    ret = self.cluster__replication_target_remove(sub_command, args)
+                elif sub_command in ['replication-target-failover']:
+                    ret = self.cluster__replication_target_failover(sub_command, args)
+                elif sub_command in ['replication-policy-add']:
+                    args.policy_name = args.name
+                    ret = self.cluster__replication_policy_add(sub_command, args)
+                elif sub_command in ['replication-policy-list']:
+                    ret = self.cluster__replication_policy_list(sub_command, args)
+                elif sub_command in ['replication-policy-remove']:
+                    ret = self.cluster__replication_policy_remove(sub_command, args)
+                elif sub_command in ['replication-policy-failover']:
+                    ret = self.cluster__replication_policy_failover(sub_command, args)
                 else:
                     self.parser.print_help()
 
@@ -1442,6 +1547,12 @@ class CLIWrapper(CLIWrapperBase):
                     ret = self.volume__check(sub_command, args)
                 elif sub_command in ['inflate']:
                     ret = self.volume__inflate(sub_command, args)
+                elif sub_command in ['replication-policy-set']:
+                    ret = self.volume__replication_policy_set(sub_command, args)
+                elif sub_command in ['replication-policy-clear']:
+                    ret = self.volume__replication_policy_clear(sub_command, args)
+                elif sub_command in ['replication-relationship']:
+                    ret = self.volume__replication_relationship(sub_command, args)
                 elif sub_command in ['replication-start']:
                     ret = self.volume__replication_start(sub_command, args)
                 elif sub_command in ['replication-commit']:

@@ -25,6 +25,12 @@ class Cluster(BaseModel):
     STATUS_UNREADY = "unready"
     STATUS_IN_ACTIVATION = "in_activation"
     STATUS_IN_EXPANSION = "in_expansion"
+    #: Node removal in flight (the add/remove counterpart of IN_EXPANSION).
+    #: Held only for one attempt of node_removal_orchestrate, and honoured as a
+    #: restart-phase owner: the replica relocation it performs sets a phase on
+    #: an ONLINE target, which get_restart_phase would otherwise judge stale and
+    #: clear out from under a live rebuild.
+    STATUS_IN_SHRINK = "in_shrink"
 
     STATUS_CODE_MAP = {
         STATUS_ACTIVE: 1,
@@ -36,8 +42,40 @@ class Cluster(BaseModel):
         STATUS_UNREADY: 12,
         STATUS_IN_ACTIVATION: 13,
         STATUS_IN_EXPANSION: 14,
+        STATUS_IN_SHRINK: 15,
 
     }
+
+    #: Client-visible MUTATIONS may proceed (lvol/snapshot create, resize).
+    #: READONLY is excluded by definition — that is what read-only means.
+    MUTABLE_STATUSES = frozenset({
+        STATUS_ACTIVE, STATUS_DEGRADED, STATUS_IN_SHRINK})
+
+    #: Background/maintenance work may proceed (health checks, monitors,
+    #: device and lvol migration). Superset of MUTABLE_STATUSES: READONLY
+    #: blocks client writes, not upkeep — and upkeep is often what gets a
+    #: read-only cluster back to ACTIVE.
+    OPERABLE_STATUSES = frozenset(MUTABLE_STATUSES | {STATUS_READONLY})
+
+    #: A lifecycle flow owns the layout and restores the status itself; other
+    #: flows must stand off rather than drive transitions or reclaim state.
+    #: This is the set that decides whether a restart phase has an owner (see
+    #: storage_node_ops.get_restart_phase).
+    TOPOLOGY_OWNED_STATUSES = frozenset({
+        STATUS_IN_ACTIVATION, STATUS_IN_EXPANSION, STATUS_IN_SHRINK})
+
+    def allows_mutation(self) -> bool:
+        """True if client-visible mutations may proceed on this cluster."""
+        return self.status in self.MUTABLE_STATUSES
+
+    def allows_operation(self) -> bool:
+        """True if background/maintenance work may proceed on this cluster."""
+        return self.status in self.OPERABLE_STATUSES
+
+    def is_topology_owned(self) -> bool:
+        """True while a lifecycle flow (activation/expansion/shrink) owns the
+        cluster layout."""
+        return self.status in self.TOPOLOGY_OWNED_STATUSES
 
     auth_hosts_only: bool = False
     blk_size: int = 0
@@ -47,6 +85,31 @@ class Cluster(BaseModel):
     # storage_node_monitor watchdog to detect and revert a wedged activation
     # (incident 2026-06-25). Empty string means "not currently activating".
     in_activation_since: str = ""
+    #: Node ids incorporated by the last successful activation (or expansion).
+    #: Empty means the cluster has never been activated. Once set, activation
+    #: refuses to run with nodes present that are not in this list: growth goes
+    #: through the expansion flow, never through re-activation.
+    activated_node_ids: List[str] = []
+    #: Set by "cluster op-stop": the cluster refuses creation, deletion and
+    #: modification of lvols, snapshots, clones and pools while this is true.
+    #: Read paths and the cluster's own maintenance are unaffected.
+    object_ops_stopped: bool = False
+    #: SPDK sizing, cluster-wide. These used to be set per storage node, which
+    #: let nodes drift apart; a cluster is meant to be uniform. A node adopts
+    #: the current values when it is added and on every restart, so changing
+    #: them here takes effect node by node as they restart.
+    #:
+    #: max_subsys  -- nvmf subsystems per node (0 = product default)
+    #: hugepages_mem -- huge-page memory floor per node in bytes (0 = computed
+    #:                from the node's own iobuf/pool sizing)
+    #: spdk_vcpu_count -- absolute number of vCPUs SPDK gets on a node
+    #:                (0 = the previous heuristic). Replaces the old
+    #:                cores-percentage: a count is what an operator can reason
+    #:                about, a percentage silently means different things on
+    #:                different hardware.
+    max_subsys: int = 0
+    hugepages_mem: int = 0
+    spdk_vcpu_count: int = 0
     # ISO-8601 UTC timestamp refreshed every ~60s by the heartbeat thread that
     # cluster_activate runs for its whole duration. Lets the watchdog tell a
     # LIVE long activation (heartbeat fresh — leave it alone, up to the
@@ -165,6 +228,16 @@ class Cluster(BaseModel):
     # ``simplyblock_core.controllers.cluster_expansion.planner``. See the feature plan
     # ``single_node_expansion_plan.md`` for the schema.
     expand_state: dict = {}
+    # State owned by release-specific upgrade plug-ins (see
+    # simplyblock_core/release_upgrades/). Keys are plugin STATE_KEYs; a key
+    # is set by the plugin's pre_update step (first thing `cluster update`
+    # does) and cleared by its upgrade_complete step (`cluster
+    # upgrade-complete`). Empty dict = no release upgrade in flight.
+    release_upgrade_state: dict = {}
+    # Release stamped by the last completed `cluster upgrade-complete`.
+    # Consumed by release_upgrades plugins with a from_release restriction.
+    # Empty on clusters that never completed an upgrade under this framework.
+    installed_release: str = ""
     backup_local_path: str = constants.KVD_DB_BACKUP_PATH
     backup_frequency_seconds: int = 3*60*60
     backup_s3_bucket: str = ""

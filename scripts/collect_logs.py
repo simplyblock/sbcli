@@ -42,6 +42,8 @@ Examples
 
 import argparse
 import json
+import os
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -104,6 +106,12 @@ CONTROL_PLANE_SERVICES_DOCKER = [
     "TasksRunnerLVolSyncDelete",
     "TasksRunnerBackup",
     "TasksRunnerBackupMerge",
+    # Async cross-cluster replication: these run on the CP but were missing from
+    # this list, so a replication incident collected no replication logs at all.
+    "SnapshotReplication",
+    "TasksRunnerReplicationFinal",
+    "TasksRunnerBatchMigration",
+    "TasksNodeRemovalRunner",
     "HAProxy",
 ]
 
@@ -132,11 +140,70 @@ CONTROL_PLANE_SERVICES_KUBERNETES = [
     "tasks-runner-backup",
     "tasks-runner-backup-merge",
     "tasks-runner-snapshot-replication",
+    "tasks-runner-replication-final",
+    "tasks-runner-batch-migration",
 ]
 
 # ---------------------------------------------------------------------------
 # sbctl helpers
 # ---------------------------------------------------------------------------
+
+
+def _sbctl_bin():
+    """Absolute path to the sbctl binary.
+
+    The script is normally run under sudo, whose secure_path does not include
+    /usr/local/bin, so a bare "sbctl" raises FileNotFoundError and the collector
+    exits before gathering anything.
+    """
+    found = shutil.which("sbctl")
+    if found:
+        return found
+    for candidate in ("/usr/local/bin/sbctl", "/usr/bin/sbctl"):
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return "sbctl"
+
+
+SBCTL_BIN = _sbctl_bin()
+
+
+def _collect_docker_service_logs(cp_dir, tail=40000):
+    """Fallback: pull control-plane logs straight from Docker Swarm.
+
+    Used when Graylog/OpenSearch returns nothing. `docker service logs`
+    aggregates ALL tasks of a service, including ones that were replaced during
+    the window — `docker logs <container>` only has the currently running task,
+    so a service recreated mid-incident loses its earlier output entirely.
+
+    Best-effort: this only works on a docker-mode management node, and any
+    failure is reported rather than raised so the rest of the bundle survives.
+    """
+    print("  -> falling back to `docker service logs` on this node")
+    r = _run(["docker", "service", "ls", "--format", "{{.Name}}"], timeout=60)
+    if r is None or r.returncode != 0:
+        print("  !! cannot list docker services; no control-plane logs in this bundle")
+        return
+    services = [s.strip() for s in r.stdout.splitlines() if s.strip()]
+    if not services:
+        print("  !! no docker services found")
+        return
+
+    out_dir = cp_dir / "docker_service_logs"
+    out_dir.mkdir(exist_ok=True)
+    total = 0
+    for svc in services:
+        r = _run(["docker", "service", "logs", "--timestamps", "--no-task-ids",
+                  "--tail", str(tail), svc], timeout=600)
+        if r is None:
+            print(f"    {svc:<42} {'timed out':>8}")
+            continue
+        body = (r.stdout or "") + (r.stderr or "")
+        (out_dir / f"{svc}.log").write_text(body, encoding="utf-8", errors="replace")
+        lines = body.count("\n")
+        total += lines
+        print(f"    {svc:<42} {lines:>8,} lines")
+    print(f"  {'Docker service logs total':<42} {total:>8,} lines")
 
 
 def _run(cmd, timeout=30):
@@ -156,7 +223,7 @@ def sbctl_json(*args):
     Run ``sbctl <args> --json`` and return the parsed JSON (list or dict).
     Returns None and prints an error on failure.
     """
-    cmd = ["sbctl"] + list(args) + ["--json"]
+    cmd = [SBCTL_BIN] + list(args) + ["--json"]
     r = _run(cmd)
     if r is None or r.returncode != 0:
         if r:
@@ -178,7 +245,7 @@ def sbctl_raw(*args):
     Run ``sbctl <args>`` (no --json) and return stripped stdout text.
     Returns None on failure.
     """
-    r = _run(["sbctl"] + list(args))
+    r = _run([SBCTL_BIN] + list(args))
     if r is None or r.returncode != 0:
         if r:
             print(
@@ -1161,6 +1228,19 @@ def main():
             print(f"  {svc:<42} {status}")
 
         print(f"  {'Control-plane total':<42} {total_cp_lines:>8,} lines")
+
+        # Every control-plane source empty means the log pipeline is not
+        # delivering, not that nothing happened. Say so loudly and fall back to
+        # the Docker service logs, otherwise the run ends with "Done!" and a
+        # tarball full of 0-byte files (2026-08-10: an entire fail-over
+        # investigation had no service logs because of exactly this).
+        if total_cp_lines == 0:
+            print("\n  !! WARNING: 0 control-plane log lines retrieved.")
+            print("  !! Graylog/OpenSearch is not returning data for this window.")
+            if args.mode == "docker":
+                _collect_docker_service_logs(cp_dir)
+            else:
+                print("  !! Check the log pipeline before trusting this bundle.")
 
         # ── 8. Storage-node logs ─────────────────────────────────────────────
         # Docker mode: collect SPDK/SNodeAPI logs from Graylog/OpenSearch.

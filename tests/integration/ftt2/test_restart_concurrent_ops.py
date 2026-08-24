@@ -131,7 +131,7 @@ class StressRunner:
                 "thread": threading.current_thread().name,
             })
 
-    def _worker(self, worker_id):
+    def _worker(self, worker_id, rng):
         """Worker thread that fires random operations.
         NOTE: patches must be started by the caller BEFORE spawning threads."""
         from simplyblock_core.db_controller import DBController
@@ -140,7 +140,7 @@ class StressRunner:
         created_lvols = []
 
         while not self._stop.is_set():
-            op = random.choice(["create", "delete", "resize", "create", "delete"])
+            op = rng.choice(["create", "delete", "resize", "create", "delete"])
             t0 = time.time()
 
             try:
@@ -152,13 +152,13 @@ class StressRunner:
 
                 elif op == "delete" and created_lvols:
                     from simplyblock_core.controllers import lvol_controller
-                    lvol = created_lvols.pop(random.randrange(len(created_lvols)))
+                    lvol = created_lvols.pop(rng.randrange(len(created_lvols)))
                     lvol_controller.delete_lvol(lvol, force_delete=True)
                     self._record("delete", True, t0, time.time(), lvol.uuid)
 
                 elif op == "resize" and created_lvols:
                     from simplyblock_core.controllers import lvol_controller
-                    lvol = random.choice(created_lvols)
+                    lvol = rng.choice(created_lvols)
                     new_size = lvol.size + 1_073_741_824
                     lvol_controller.resize_lvol(lvol.uuid, new_size)
                     self._record("resize", True, t0, time.time(), lvol.uuid)
@@ -166,12 +166,18 @@ class StressRunner:
             except Exception as e:
                 self._record(op, False, t0, time.time(), str(e))
 
-            time.sleep(self.interval + random.uniform(0, self.interval))
+            time.sleep(self.interval + rng.uniform(0, self.interval))
 
     def start(self):
         self._stop.clear()
         for i in range(self.num_threads):
-            t = threading.Thread(target=self._worker, args=(i,),
+            # Seed drawn here, in the spawning thread: this loop runs in a fixed
+            # order, so each worker replays the same op sequence for a given
+            # session seed. Drawing inside _worker would race and defeat replay.
+            # Thread interleaving stays nondeterministic either way, so the
+            # assertions below are invariants, not exact outcomes.
+            worker_rng = random.Random(random.getrandbits(64))
+            t = threading.Thread(target=self._worker, args=(i, worker_rng),
                                  name=f"stress-{i}", daemon=True)
             t.start()
             self._threads.append(t)

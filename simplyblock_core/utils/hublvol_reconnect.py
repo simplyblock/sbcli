@@ -107,6 +107,99 @@ HUBLVOL_CTRLR_LOSS_TIMEOUT_SEC = 3
 HUBLVOL_RECONNECT_DELAY_SEC = 1
 HUBLVOL_FAST_IO_FAIL_TIMEOUT_SEC = 1
 
+#: Multipath policy asserted on every hublvol remote bdev.
+#:
+#: A hublvol controller's path set spans two axes at once: the LVS leader's
+#: data NICs (ANA ``optimized``, storage_node.py:399) and the failover
+#: node's (ANA ``non_optimized``, storage_node.py:518). The two axes want
+#: opposite policies — round-robin across the leader's NICs, strict standby
+#: for the failover node — and ``active_active`` delivers exactly that,
+#: because SPDK load-balances only WITHIN an ANA state:
+#: ``_bdev_nvme_find_io_path`` (bdev_nvme.c:1150) returns the first
+#: available ``optimized`` path in its round-robin scan and reaches
+#: ``non_optimized`` only when no optimized path exists at all. So the
+#: leader/failover preference stays expressed purely in ANA and is not
+#: weakened by this setting.
+#:
+#: Without this call the bdev keeps SPDK's creation default
+#: ACTIVE_PASSIVE (bdev_nvme.c:4690): one NIC of the leader carries every
+#: hub IO and the second path is discovered only at failover time, which is
+#: how a tertiary ends up effectively single-pathed to its hub (the
+#: 2026-08-03 six-node cascade turned on exactly that).
+HUBLVOL_MP_POLICY = "active_active"
+
+#: Selector for :data:`HUBLVOL_MP_POLICY`. ``None`` leaves SPDK's
+#: ``active_active`` default (``round_robin`` with ``rr_min_io`` coerced to
+#: 1, bdev_nvme.c:5626), matching the remote-device/JM path in
+#: ``storage_node_ops._connect_device``. ``"queue_depth"`` is the
+#: alternative if per-IO alternation proves worse for mixed IO sizes.
+HUBLVOL_MP_SELECTOR = None
+
+#: Bounded wait for the namespace bdev to surface before asserting the
+#: policy. A controller attach can report ``enabled`` a few ms before the
+#: AER-driven ``n1`` bdev appears — ``connect_to_hublvol`` carries its own
+#: poll for the same reason.
+HUBLVOL_MP_POLICY_WAIT_TRIES = 10
+HUBLVOL_MP_POLICY_WAIT_SLEEP = 0.1
+
+
+def ensure_hublvol_active_active(rpc, ctrl_name, node_id="?", role="?",
+                                 wait=True, request_timeout=None):
+    """Assert :data:`HUBLVOL_MP_POLICY` on the hublvol bdev of ``ctrl_name``.
+
+    Idempotent, and deliberately non-fatal: callers gate their restart /
+    failback flow on the *attach* succeeding, not on the policy, and every
+    reconcile re-asserts it. A failure here degrades the hub to SPDK's
+    ACTIVE_PASSIVE default (one NIC carries hub IO) — worth a warning, not
+    worth failing a rejoin over.
+
+    ``wait=False`` skips the bdev-surfaced poll, for callers running inside
+    the LVS-rejoin freeze / client-port-block window where the sub-second
+    budget must not absorb a retry loop.
+
+    Returns True iff the policy was committed.
+    """
+    bdev_name = f"{ctrl_name}n1"
+    tries = HUBLVOL_MP_POLICY_WAIT_TRIES if wait else 1
+    for attempt in range(tries):
+        try:
+            if rpc.get_bdevs(bdev_name):
+                break
+        except Exception as e:
+            logger.warning(
+                "hublvol %s on %s (%s): get_bdevs(%s) raised %s; leaving "
+                "multipath policy at SPDK default",
+                ctrl_name, node_id, role, bdev_name, e)
+            return False
+        if attempt + 1 < tries:
+            time.sleep(HUBLVOL_MP_POLICY_WAIT_SLEEP)
+    else:
+        logger.warning(
+            "hublvol %s on %s (%s): %s not surfaced yet; leaving multipath "
+            "policy at SPDK default (next reconcile re-asserts)",
+            ctrl_name, node_id, role, bdev_name)
+        return False
+
+    try:
+        ret = rpc.bdev_nvme_set_multipath_policy(
+            bdev_name, HUBLVOL_MP_POLICY, selector=HUBLVOL_MP_SELECTOR,
+            request_timeout=request_timeout)
+    except Exception as e:
+        logger.warning(
+            "hublvol %s on %s (%s): set_multipath_policy(%s) raised %s",
+            ctrl_name, node_id, role, HUBLVOL_MP_POLICY, e)
+        return False
+    if not ret:
+        logger.warning(
+            "hublvol %s on %s (%s): set_multipath_policy(%s) returned falsy",
+            ctrl_name, node_id, role, HUBLVOL_MP_POLICY)
+        return False
+
+    logger.info(
+        "hublvol %s on %s (%s): multipath policy %s asserted on %s",
+        ctrl_name, node_id, role, HUBLVOL_MP_POLICY, bdev_name)
+    return True
+
 
 class HublvolReconnectError(Exception):
     """Raised when the coordinator gives up on a reconcile."""
@@ -551,6 +644,15 @@ class HublvolReconnectCoordinator:
                     node, role, rpc_timeout=rpc_timeout)
 
             if ok:
+                # Round-robin the leader's data NICs; the failover node's
+                # paths stay passive via ANA. Skip the bdev-surfaced poll
+                # when we're inside the freeze window (rpc_timeout set) —
+                # the deferred redundant-path worker re-asserts off the
+                # critical path, as does the next reconcile.
+                ensure_hublvol_active_active(
+                    rpc, ctrl_name, node.get_id(), role,
+                    wait=(rpc_timeout is None),
+                    request_timeout=rpc_timeout)
                 if getattr(lock, "externally_managed", False):
                     # Deferred: the owning restart flow stamps at its release
                     # point AFTER the port unblock (one FDB txn out of the
@@ -694,6 +796,29 @@ class HublvolReconnectCoordinator:
         logger.error(
             "hublvol %s on %s: no path attached (expected=%s)",
             ctrl_name, node.get_id(), [p[0] for p in paths_list])
+
+        # Believe the controller, not the attach return values. A path that is
+        # already present makes its attach fail with -EALREADY, and a path
+        # added to an existing controller returns no bdev name at all; either
+        # can make every attempt in the loop above look like a failure while
+        # the controller is in fact enabled with the paths we wanted. Declaring
+        # failure then is fatal out of all proportion: the caller aborts
+        # recreate_lvstore and the node oscillates offline <-> in_restart for
+        # ever (multipath soak 2026-08-19 iteration 4, where LVS_1/hublvol had
+        # BOTH paths enabled while reconcile insisted none were attached).
+        # rpc_client.bdev_nvme_attach_controller now reports those shapes as
+        # success; this is the belt-and-braces check for anything else that
+        # returns falsy on an attach that actually landed.
+        ctrlrs = _ctrlrs_from_list(rpc, ctrl_name)
+        if ctrlrs and any(c.get("state") == "enabled" for c in ctrlrs):
+            attached = _attached_ips(ctrlrs)
+            landed = [ip for ip, _ in paths_list if ip in attached]
+            if landed:
+                logger.warning(
+                    "hublvol %s on %s: attach calls reported failure but the "
+                    "controller is enabled with %s — treating as attached",
+                    ctrl_name, node.get_id(), landed)
+                return True
         return False
 
     def _defer_remaining_attaches(self, rpc, ctrl_name, nqn, port,
@@ -766,6 +891,16 @@ class HublvolReconnectCoordinator:
                     logger.warning(
                         "hublvol %s on %s (%s) bg: attach path %s raised: %s",
                         ctrl_name, node_id, role, ip, e)
+
+            # Re-assert the multipath policy now that the redundant paths
+            # are in. This is the off-critical-path assertion: the
+            # foreground call in _reconcile_under_lock runs with wait=False
+            # inside the freeze window and may have found the bdev not yet
+            # surfaced, and a policy set before the second NIC landed still
+            # needs to hold for it (mp_policy lives on the nvme_bdev and is
+            # copied into each new channel, bdev_nvme.c:949 — adding a path
+            # never resets it, so this is belt-and-braces, not a fixup).
+            ensure_hublvol_active_active(rpc, ctrl_name, node_id, role)
 
         threading.Thread(
             target=_worker,

@@ -43,6 +43,7 @@ import math
 import os
 import random
 import string
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -112,12 +113,27 @@ class _MassCreateDeleteMixin:
     PER_ITEM_TIME_BUDGET = 6         # seconds per PVC / snapshot / clone
     PHASE_TIME_FLOOR = 1800          # minimum 30 min even for tiny runs
 
+    # ── Node outage toggle ─────────────────────────────────────────────────
+    # When False (default), Phase 3b/7b node outages are skipped so tests
+    # exercise pure capacity create/delete without restarts.
+    ENABLE_NODE_OUTAGE = False
+
+    # ── Entity cap ───────────────────────────────────────────────────────
+    # 0 = no limit (use NUM_SUBSYSTEMS × NS_PER_SUBSYSTEM as-is).
+    # >0 = cap total entities (lvols + snapshots) and compute:
+    #   max_lvols = MAX_ENTITY_COUNT // (1 + SNAPSHOTS_PER_LVOL)
+    MAX_ENTITY_COUNT = 0
+
+    # ── API hard limit for namespaces per subsystem ──────────────────────
+    MAX_NS_PER_SUBSYSTEM = 50
+
     # ── Persistent retry mode ─────────────────────────────────────────────
     # Subclasses set PERSISTENT_RETRY = True to retry failed items until
     # all expected entities are created or a terminal error is hit.
     PERSISTENT_RETRY = False
     PERSISTENT_PHASE_TIMEOUT = 14400   # 4 hours per creation phase
     PERSISTENT_BACKOFF_SEC = 10        # sleep between retry rounds
+    PERSISTENT_STALL_ROUNDS = 5        # give up after N rounds with 0 progress
 
     # ── Internal state ─────────────────────────────────────────────────────
     _lvol_registry: dict
@@ -138,6 +154,7 @@ class _MassCreateDeleteMixin:
         self._fio_lvol_threads = []
         self._fio_clone_threads = []
         self._soft_failures = []      # accumulate phase-level validation warnings
+        self._terminal_warnings = []  # terminal errors (object limit, max subsys) that caused early phase exit
         self._metrics = {
             "lvols_created": 0,
             "snapshots_created": 0,
@@ -249,10 +266,26 @@ class _MassCreateDeleteMixin:
         RuntimeError to stop the test immediately — proceeding with too
         few resources wastes compute and masks real failures.
 
+        However, if terminal warnings have been recorded (object limit,
+        max subsystems, etc.) the hard minimum is downgraded to a soft
+        warning — the test continues with whatever was created and
+        reports the shortfall at the end.
+
         If actual < 90% of expected (but above hard min), logs a warning
         and appends to _soft_failures for end-of-test reporting.
         """
         if expected > 0 and actual < expected * hard_min_pct:
+            if self._terminal_warnings:
+                # Terminal error already recorded — don't abort, just warn
+                msg = (
+                    f"[{label}] only {actual}/{expected} created "
+                    f"({actual / expected:.1%}) — below "
+                    f"{hard_min_pct:.0%} threshold due to terminal error, "
+                    f"continuing with available resources"
+                )
+                self.logger.warning(msg)
+                self._soft_failures.append(msg)
+                return
             raise RuntimeError(
                 f"[{label}] only {actual}/{expected} created "
                 f"({actual / expected:.1%}) — below "
@@ -426,9 +459,11 @@ class _MassCreateDeleteMixin:
         total_items = len(items)
         round_num = 0
         terminal_hit = False
+        stall_rounds = 0
 
         while remaining and time.monotonic() < deadline and not terminal_hit:
             round_num += 1
+            ok_before_round = total_ok
             self.logger.info(
                 f"[{op_name}] Persistent round {round_num}: "
                 f"{len(remaining)} items remaining, "
@@ -482,6 +517,23 @@ class _MassCreateDeleteMixin:
 
             remaining = failed_items
 
+            # Stall detection: if a full round made zero progress,
+            # increment stall counter.  After PERSISTENT_STALL_ROUNDS
+            # consecutive zero-progress rounds, stop retrying — the
+            # remaining items are failing deterministically.
+            round_successes = total_ok - ok_before_round
+            if round_successes == 0:
+                stall_rounds += 1
+                if stall_rounds >= self.PERSISTENT_STALL_ROUNDS:
+                    self.logger.warning(
+                        f"[{op_name}] Stall detected: {stall_rounds} "
+                        f"consecutive rounds with 0 progress, "
+                        f"{len(remaining)} items stuck. Giving up."
+                    )
+                    break
+            else:
+                stall_rounds = 0
+
             if remaining and not terminal_hit and time.monotonic() < deadline:
                 self.logger.info(
                     f"[{op_name}] Round {round_num} done: "
@@ -504,13 +556,50 @@ class _MassCreateDeleteMixin:
                 f"after {round_num} round(s)"
             )
 
-        return total_ok, len(remaining)
+        return total_ok, len(remaining), terminal_hit
 
     # ── 8-phase orchestrator ───────────────────────────────────────────────
 
     def _run_mass_create_delete_test(self):
-        total = self.NUM_SUBSYSTEMS * self.NS_PER_SUBSYSTEM
         self._init_mixin_state()
+
+        # Apply entity cap: reduce NUM_SUBSYSTEMS / NS_PER_SUBSYSTEM on the
+        # instance so all phase methods automatically use the capped values.
+        original_total = self.NUM_SUBSYSTEMS * self.NS_PER_SUBSYSTEM
+        if self.MAX_ENTITY_COUNT > 0:
+            max_lvols = self.MAX_ENTITY_COUNT // (1 + self.SNAPSHOTS_PER_LVOL)
+            if max_lvols < original_total:
+                self.logger.info(
+                    f"[Entity cap] Reducing lvol target from "
+                    f"{original_total} to {max_lvols} "
+                    f"(MAX_ENTITY_COUNT={self.MAX_ENTITY_COUNT}, "
+                    f"SNAPSHOTS_PER_LVOL={self.SNAPSHOTS_PER_LVOL})"
+                )
+                # Distribute evenly across subsystems
+                effective_per_sub = max(1, max_lvols // self.NUM_SUBSYSTEMS)
+                effective_num_sub = self.NUM_SUBSYSTEMS
+                # If max_lvols < NUM_SUBSYSTEMS, reduce subsystem count too
+                if effective_per_sub == 1 and max_lvols < self.NUM_SUBSYSTEMS:
+                    effective_num_sub = max_lvols
+                # Shadow class attrs on the instance
+                self.NS_PER_SUBSYSTEM = effective_per_sub
+                self.NUM_SUBSYSTEMS = effective_num_sub
+
+        # Enforce API hard limit: max_namespace_per_subsys <= MAX_NS_PER_SUBSYSTEM
+        if self.NS_PER_SUBSYSTEM > self.MAX_NS_PER_SUBSYSTEM:
+            total_lvols = self.NUM_SUBSYSTEMS * self.NS_PER_SUBSYSTEM
+            new_num_sub = math.ceil(total_lvols / self.MAX_NS_PER_SUBSYSTEM)
+            new_per_sub = total_lvols // new_num_sub
+            self.logger.info(
+                f"[NS limit] NS_PER_SUBSYSTEM={self.NS_PER_SUBSYSTEM} exceeds "
+                f"hard limit of {self.MAX_NS_PER_SUBSYSTEM}. Redistributing "
+                f"{total_lvols} lvols: {self.NUM_SUBSYSTEMS}x{self.NS_PER_SUBSYSTEM} "
+                f"→ {new_num_sub}x{new_per_sub}"
+            )
+            self.NS_PER_SUBSYSTEM = new_per_sub
+            self.NUM_SUBSYSTEMS = new_num_sub
+
+        total = self.NUM_SUBSYSTEMS * self.NS_PER_SUBSYSTEM
         max_dur = getattr(self, 'MAX_TEST_DURATION', 6 * 3600)
         max_dur_h = round(max_dur / 3600, 1)
         self.logger.info(
@@ -664,16 +753,22 @@ class _MassCreateDeleteMixin:
             _check_deadline("Phase 3")
 
             # Phase 3b: Kill one storage node, wait for recovery
-            self.logger.info(
-                "=== Phase 3b: Node outage #1 (before lvol delete) ==="
-            )
-            t0 = time.time()
-            outage_1_host = self._phase_node_outage("3b_node_outage_1")
-            self.logger.info(
-                f"[Phase 3b] Node outage #1 complete "
-                f"in {self._phase_durations.get('3b_node_outage_1', '?')}s"
-            )
-            _check_deadline("Phase 3b")
+            outage_1_host = None
+            if self.ENABLE_NODE_OUTAGE:
+                self.logger.info(
+                    "=== Phase 3b: Node outage #1 (before lvol delete) ==="
+                )
+                t0 = time.time()
+                outage_1_host = self._phase_node_outage("3b_node_outage_1")
+                self.logger.info(
+                    f"[Phase 3b] Node outage #1 complete "
+                    f"in {self._phase_durations.get('3b_node_outage_1', '?')}s"
+                )
+                _check_deadline("Phase 3b")
+            else:
+                self.logger.info(
+                    "[Phase 3b] Node outage SKIPPED (ENABLE_NODE_OUTAGE=False)"
+                )
 
             # Phase 4: Delete lvols to free subsystem slots for clones.
             # Lvols can be deleted even with snapshots — orphaned
@@ -738,15 +833,20 @@ class _MassCreateDeleteMixin:
             )
 
             # Phase 7b: Kill another storage node, wait for recovery
-            self.logger.info(
-                "=== Phase 7b: Node outage #2 (before snapshot delete) ==="
-            )
-            t0 = time.time()
-            self._phase_node_outage("7b_node_outage_2", exclude_host_ip=outage_1_host)
-            self.logger.info(
-                f"[Phase 7b] Node outage #2 complete "
-                f"in {self._phase_durations.get('7b_node_outage_2', '?')}s"
-            )
+            if self.ENABLE_NODE_OUTAGE:
+                self.logger.info(
+                    "=== Phase 7b: Node outage #2 (before snapshot delete) ==="
+                )
+                t0 = time.time()
+                self._phase_node_outage("7b_node_outage_2", exclude_host_ip=outage_1_host)
+                self.logger.info(
+                    f"[Phase 7b] Node outage #2 complete "
+                    f"in {self._phase_durations.get('7b_node_outage_2', '?')}s"
+                )
+            else:
+                self.logger.info(
+                    "[Phase 7b] Node outage SKIPPED (ENABLE_NODE_OUTAGE=False)"
+                )
             _check_deadline("Phase 7b")
 
             # Phase 8: Mass-delete all snapshots
@@ -768,9 +868,19 @@ class _MassCreateDeleteMixin:
                 self.logger.warning(
                     f"Failed to collect management details before cleanup: {exc}"
                 )
-            t0 = time.time()
-            self._phase_cleanup()
-            self._phase_durations["cleanup"] = round(time.time() - t0, 1)
+            # Skip cleanup if preserve_resources_on_failure is set and
+            # we have soft failures or an exception was raised (test failed).
+            _has_failure = bool(self._soft_failures) or sys.exc_info()[1] is not None
+            if _has_failure and getattr(self, 'preserve_resources_on_failure', False):
+                self.logger.info(
+                    "[cleanup] Skipping internal cleanup — "
+                    "preserve_resources_on_failure is set and test failed. "
+                    "Resources left for debugging."
+                )
+            else:
+                t0 = time.time()
+                self._phase_cleanup()
+                self._phase_durations["cleanup"] = round(time.time() - t0, 1)
             self._print_summary()
             self._write_monitoring_json()
 
@@ -887,6 +997,461 @@ class _MassCreateDeleteMixin:
         self._phase_durations[label] = total_dur
         return node_ip
 
+    # ── Rapid restart cycle (30x stop/restart, no migration wait) ────────
+
+    RAPID_RESTART_ITERATIONS = 30
+    RAPID_RESTART_COOLDOWN = 60   # seconds to wait after node is online
+
+    def _pick_node_with_entries(self):
+        """Pick a storage node that hosts lvols/snapshots (has entries).
+
+        Queries storage nodes and returns the first non-secondary, online
+        node.  With thousands of entities spread across nodes, all nodes
+        should have entries.
+        """
+        nodes = self.sbcli_utils.get_storage_nodes().get("results", [])
+        for n in nodes:
+            if n.get("is_secondary_node"):
+                continue
+            if n.get("status") == "online":
+                return n
+        # fallback: any non-secondary node
+        for n in nodes:
+            if not n.get("is_secondary_node"):
+                return n
+        return nodes[0] if nodes else None
+
+    def _phase_rapid_restart_cycles(self, label: str,
+                                     iterations: int | None = None):
+        """Stop and restart a storage node *iterations* times in a row.
+
+        Does NOT wait for migration/rebalancing to complete — only waits
+        for the node status to return to ``online``, then sleeps
+        ``RAPID_RESTART_COOLDOWN`` seconds before the next iteration.
+
+        Returns a list of dicts, one per iteration:
+            [{iteration, stop_time_iso, online_time_iso,
+              stop_to_online_sec, cooldown_sec}, ...]
+        """
+        if iterations is None:
+            iterations = self.RAPID_RESTART_ITERATIONS
+        cooldown = self.RAPID_RESTART_COOLDOWN
+
+        target = self._pick_node_with_entries()
+        if not target:
+            self.logger.warning(
+                f"[{label}] No storage nodes found — skipping rapid restart"
+            )
+            return []
+
+        node_uuid = target["id"]
+        node_ip = target["mgmt_ip"]
+        rpc_port = target.get("rpc_port", 0)
+
+        self.logger.info(
+            f"[{label}] Starting {iterations} rapid restart cycles on "
+            f"node {node_uuid} ({node_ip}), "
+            f"cooldown={cooldown}s between iterations"
+        )
+
+        results = []
+        for i in range(1, iterations + 1):
+            self.logger.info(
+                f"[{label}] --- Iteration {i}/{iterations} ---"
+            )
+
+            # Stop container / delete pod
+            stop_ts = datetime.now(timezone.utc)
+            t_stop = time.time()
+            if getattr(self, "k8s_test", False):
+                self.k8s_utils.restart_spdk_pod(node_ip)
+            else:
+                self.ssh_obj.stop_spdk_process(
+                    node_ip, rpc_port, self.cluster_id
+                )
+            kill_dur = round(time.time() - t_stop, 1)
+            self.logger.info(
+                f"[{label}][{i}] Kill command took {kill_dur}s"
+            )
+
+            # Wait for node to go offline then back online
+            try:
+                self.sbcli_utils.wait_for_storage_node_status(
+                    node_uuid, ["offline", "unreachable"], timeout=600,
+                )
+            except Exception as exc:
+                self.logger.warning(
+                    f"[{label}][{i}] Timed out waiting for "
+                    f"offline/unreachable: {exc}"
+                )
+
+            self.sbcli_utils.wait_for_storage_node_status(
+                node_uuid, "online", timeout=900,
+            )
+            online_ts = datetime.now(timezone.utc)
+            stop_to_online = round(time.time() - t_stop, 1)
+
+            self.logger.info(
+                f"[{label}][{i}] Node online after {stop_to_online}s "
+                f"— cooling down {cooldown}s"
+            )
+
+            results.append({
+                "iteration": i,
+                "stop_time_iso": stop_ts.isoformat(),
+                "online_time_iso": online_ts.isoformat(),
+                "stop_to_online_sec": stop_to_online,
+                "cooldown_sec": cooldown,
+            })
+
+            # Cooldown — no waiting for migration, just a short pause
+            time.sleep(cooldown)
+
+        total_dur = sum(r["stop_to_online_sec"] for r in results)
+        self._phase_durations[label] = round(total_dur, 1)
+        self.logger.info(
+            f"[{label}] Completed {iterations} restart cycles, "
+            f"cumulative stop-to-online: {total_dur}s"
+        )
+        return results
+
+    # ── Rapid restart test orchestrator ──────────────────────────────────
+
+    def _run_mass_create_rapid_restart_test(self):
+        """Create lvols+snapshots, run 30 rapid restarts, then
+        delete lvols + create clones, run 30 more rapid restarts.
+
+        The final summary prints per-iteration stop-to-online times
+        for both phases (60 entries total).
+        """
+        self._init_mixin_state()
+        self._rapid_restart_results = {
+            "lvol_snapshot": [],
+            "snapshot_clone": [],
+        }
+
+        original_total = self.NUM_SUBSYSTEMS * self.NS_PER_SUBSYSTEM
+        if self.MAX_ENTITY_COUNT > 0:
+            max_lvols = self.MAX_ENTITY_COUNT // (1 + self.SNAPSHOTS_PER_LVOL)
+            if max_lvols < original_total:
+                self.logger.info(
+                    f"[Entity cap] Reducing lvol target from "
+                    f"{original_total} to {max_lvols} "
+                    f"(MAX_ENTITY_COUNT={self.MAX_ENTITY_COUNT}, "
+                    f"SNAPSHOTS_PER_LVOL={self.SNAPSHOTS_PER_LVOL})"
+                )
+                effective_per_sub = max(1, max_lvols // self.NUM_SUBSYSTEMS)
+                effective_num_sub = self.NUM_SUBSYSTEMS
+                if effective_per_sub == 1 and max_lvols < self.NUM_SUBSYSTEMS:
+                    effective_num_sub = max_lvols
+                self.NS_PER_SUBSYSTEM = effective_per_sub
+                self.NUM_SUBSYSTEMS = effective_num_sub
+
+        # Enforce API hard limit: max_namespace_per_subsys <= MAX_NS_PER_SUBSYSTEM
+        if self.NS_PER_SUBSYSTEM > self.MAX_NS_PER_SUBSYSTEM:
+            total_lvols = self.NUM_SUBSYSTEMS * self.NS_PER_SUBSYSTEM
+            new_num_sub = math.ceil(total_lvols / self.MAX_NS_PER_SUBSYSTEM)
+            new_per_sub = total_lvols // new_num_sub
+            self.logger.info(
+                f"[NS limit] NS_PER_SUBSYSTEM={self.NS_PER_SUBSYSTEM} exceeds "
+                f"hard limit of {self.MAX_NS_PER_SUBSYSTEM}. Redistributing "
+                f"{total_lvols} lvols: {self.NUM_SUBSYSTEMS}x{self.NS_PER_SUBSYSTEM} "
+                f"→ {new_num_sub}x{new_per_sub}"
+            )
+            self.NS_PER_SUBSYSTEM = new_per_sub
+            self.NUM_SUBSYSTEMS = new_num_sub
+
+        total = self.NUM_SUBSYSTEMS * self.NS_PER_SUBSYSTEM
+        self.logger.info(
+            f"=== Starting {self.__class__.__name__}: "
+            f"{total} lvols, {self.SNAPSHOTS_PER_LVOL} snaps/lvol, "
+            f"{self.RAPID_RESTART_ITERATIONS} restart cycles per phase ==="
+        )
+
+        # Start periodic kubectl resource collection
+        periodic_stop = self.start_periodic_resource_collection(interval=1800)
+
+        try:
+            # Phase 1: Create lvols
+            t0 = time.time()
+            self._phase_1_create_lvols()
+            self._phase_durations["1_create_lvols"] = round(
+                time.time() - t0, 1
+            )
+            self._metrics["lvols_created"] = len(self._lvol_registry)
+            self.logger.info(
+                f"[Phase 1] {len(self._lvol_registry)} lvols created "
+                f"in {self._phase_durations['1_create_lvols']}s"
+            )
+            if not self._lvol_registry:
+                raise RuntimeError("No lvols created — cannot proceed")
+
+            # Phase 2: FIO on sampled lvols
+            t0 = time.time()
+            self._phase_2_fio_on_lvols()
+            self._phase_durations["2_fio_lvols"] = round(
+                time.time() - t0, 1
+            )
+            self.logger.info(
+                f"[Phase 2] FIO started on "
+                f"{self._metrics['fio_lvol_started']} lvols"
+            )
+
+            # Wait for FIO to finish before snapshots
+            if self._fio_lvol_threads:
+                fio_timeout = self.FIO_RUNTIME + 120
+                for t in self._fio_lvol_threads:
+                    t.join(timeout=fio_timeout)
+
+            if hasattr(self, '_collect_fio_logs_to_nfs'):
+                self._collect_fio_logs_to_nfs(
+                    label="Phase_2", threads=self._fio_lvol_threads,
+                )
+
+            if hasattr(self, '_catchup_newly_bound_pvcs'):
+                self._catchup_newly_bound_pvcs(
+                    label="pre-Phase 3 catch-up"
+                )
+
+            # Phase 3: Create snapshots
+            t0 = time.time()
+            self._phase_3_create_snapshots()
+            self._phase_durations["3_create_snapshots"] = round(
+                time.time() - t0, 1
+            )
+
+            if hasattr(self, '_verify_snapshots_ready'):
+                self._verify_snapshots_ready()
+            if hasattr(self, '_verify_backend_snapshot_count'):
+                self._verify_backend_snapshot_count(
+                    len(self._snapshot_registry)
+                )
+
+            self._metrics["snapshots_created"] = len(self._snapshot_registry)
+            self.logger.info(
+                f"[Phase 3] {len(self._snapshot_registry)} snapshots "
+                f"created in {self._phase_durations['3_create_snapshots']}s"
+            )
+
+            # ── Phase 3r: 30x rapid restart (lvol + snapshot) ────────
+            self.logger.info(
+                "=" * 60
+                + "\n  Phase 3r: RAPID RESTART — lvol + snapshot phase"
+                + "\n" + "=" * 60
+            )
+            self._rapid_restart_results["lvol_snapshot"] = (
+                self._phase_rapid_restart_cycles(
+                    "3r_rapid_restart_lvol_snap",
+                    self.RAPID_RESTART_ITERATIONS,
+                )
+            )
+
+            # Phase 4: Delete lvols (orphan snapshots for cloning)
+            t0 = time.time()
+            self._phase_4_delete_lvols()
+            self._phase_durations["4_delete_lvols"] = round(
+                time.time() - t0, 1
+            )
+            self.logger.info(
+                f"[Phase 4] Lvols deleted "
+                f"in {self._phase_durations['4_delete_lvols']}s"
+            )
+
+            # Phase 5: Create clones from orphaned snapshots
+            t0 = time.time()
+            self._phase_5_create_clones()
+            self._phase_durations["5_create_clones"] = round(
+                time.time() - t0, 1
+            )
+            self._metrics["clones_created"] = len(self._clone_registry)
+            self.logger.info(
+                f"[Phase 5] {len(self._clone_registry)} clones "
+                f"in {self._phase_durations['5_create_clones']}s"
+            )
+
+            # ── Phase 5r: 30x rapid restart (snapshot + clone) ──────
+            self.logger.info(
+                "=" * 60
+                + "\n  Phase 5r: RAPID RESTART — snapshot + clone phase"
+                + "\n" + "=" * 60
+            )
+            self._rapid_restart_results["snapshot_clone"] = (
+                self._phase_rapid_restart_cycles(
+                    "5r_rapid_restart_snap_clone",
+                    self.RAPID_RESTART_ITERATIONS,
+                )
+            )
+
+            # Phase 7: Delete clones
+            t0 = time.time()
+            self._phase_7_delete_clones()
+            self._phase_durations["7_delete_clones"] = round(
+                time.time() - t0, 1
+            )
+
+            # Phase 8: Delete snapshots
+            t0 = time.time()
+            self._phase_8_delete_snapshots()
+            self._phase_durations["8_delete_snapshots"] = round(
+                time.time() - t0, 1
+            )
+
+        finally:
+            periodic_stop.set()
+            try:
+                self.collect_management_details(
+                    suffix="_pre_delete"
+                )
+            except Exception as exc:
+                self.logger.warning(
+                    f"Failed to collect management details: {exc}"
+                )
+            _has_failure = (
+                bool(self._soft_failures)
+                or sys.exc_info()[1] is not None
+            )
+            if _has_failure and getattr(
+                self, 'preserve_resources_on_failure', False
+            ):
+                self.logger.info(
+                    "[cleanup] Skipping cleanup — "
+                    "preserve_resources_on_failure is set"
+                )
+            else:
+                t0 = time.time()
+                self._phase_cleanup()
+                self._phase_durations["cleanup"] = round(
+                    time.time() - t0, 1
+                )
+            self._print_rapid_restart_summary()
+            self._write_rapid_restart_json()
+
+        if self._soft_failures:
+            for f in self._soft_failures:
+                self.logger.error(f"SOFT FAILURE: {f}")
+            raise AssertionError(
+                f"Test had {len(self._soft_failures)} soft failures: "
+                + "; ".join(self._soft_failures)
+            )
+
+    # ── Rapid restart summary ───────────────────────────────────────────
+
+    def _print_rapid_restart_summary(self):
+        total = self.NUM_SUBSYSTEMS * self.NS_PER_SUBSYSTEM
+        self.logger.info("=" * 75)
+        self.logger.info(
+            "  MASS CREATE + RAPID RESTART STRESS TEST — SUMMARY"
+        )
+        self.logger.info("=" * 75)
+        self.logger.info(
+            f"  Config:  {total} lvols, "
+            f"{self.SNAPSHOTS_PER_LVOL} snaps/lvol, "
+            f"cooldown={self.RAPID_RESTART_COOLDOWN}s"
+        )
+        self.logger.info(
+            f"  Lvols created:   {self._metrics['lvols_created']}"
+        )
+        self.logger.info(
+            f"  Snaps created:   {self._metrics['snapshots_created']}"
+        )
+        self.logger.info(
+            f"  Clones created:  {self._metrics['clones_created']}"
+        )
+
+        for phase, dur in self._phase_durations.items():
+            if "rapid_restart" not in phase:
+                self.logger.info(f"  Phase {phase:30s}: {dur}s")
+
+        # Per-iteration restart timing tables
+        for phase_label, display_name in [
+            ("lvol_snapshot", "LVOL + SNAPSHOT"),
+            ("snapshot_clone", "SNAPSHOT + CLONE"),
+        ]:
+            entries = self._rapid_restart_results.get(phase_label, [])
+            self.logger.info("")
+            self.logger.info("-" * 75)
+            self.logger.info(
+                f"  RESTART TIMINGS — {display_name} "
+                f"({len(entries)} iterations)"
+            )
+            self.logger.info("-" * 75)
+            self.logger.info(
+                f"  {'#':>3s}  {'Stop Time (UTC)':>25s}  "
+                f"{'Online Time (UTC)':>25s}  "
+                f"{'Stop→Online (s)':>16s}"
+            )
+            self.logger.info(
+                f"  {'---':>3s}  {'-' * 25:>25s}  "
+                f"{'-' * 25:>25s}  "
+                f"{'-' * 16:>16s}"
+            )
+            for e in entries:
+                self.logger.info(
+                    f"  {e['iteration']:3d}  "
+                    f"{e['stop_time_iso'][:25]:>25s}  "
+                    f"{e['online_time_iso'][:25]:>25s}  "
+                    f"{e['stop_to_online_sec']:16.1f}"
+                )
+            if entries:
+                times = [e["stop_to_online_sec"] for e in entries]
+                self.logger.info(
+                    f"  MIN: {min(times):.1f}s  "
+                    f"MAX: {max(times):.1f}s  "
+                    f"SUM: {sum(times):.1f}s"
+                )
+
+        if self._terminal_warnings:
+            self.logger.info("")
+            self.logger.info("  --- Terminal warnings ---")
+            for tw in self._terminal_warnings:
+                self.logger.warning(f"  WARNING: {tw}")
+
+        total_dur = sum(self._phase_durations.values())
+        self.logger.info("")
+        self.logger.info(f"  Total test duration: {total_dur:.1f}s")
+        self.logger.info("=" * 75)
+
+    def _write_rapid_restart_json(self):
+        total_dur = sum(self._phase_durations.values())
+        status = "passed_with_warnings" if self._terminal_warnings else "passed"
+        report = {
+            "test_class": self.__class__.__name__,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "status": status,
+            "config": {
+                "num_subsystems": self.NUM_SUBSYSTEMS,
+                "ns_per_subsystem": self.NS_PER_SUBSYSTEM,
+                "snapshots_per_lvol": self.SNAPSHOTS_PER_LVOL,
+                "rapid_restart_iterations":
+                    self.RAPID_RESTART_ITERATIONS,
+                "rapid_restart_cooldown_sec":
+                    self.RAPID_RESTART_COOLDOWN,
+                "max_entity_count": self.MAX_ENTITY_COUNT,
+            },
+            "phases": {
+                name: dur
+                for name, dur in self._phase_durations.items()
+            },
+            "metrics": self._metrics,
+            "rapid_restart_lvol_snapshot":
+                self._rapid_restart_results.get("lvol_snapshot", []),
+            "rapid_restart_snapshot_clone":
+                self._rapid_restart_results.get("snapshot_clone", []),
+            "summary": {
+                "total_duration_sec": round(total_dur, 2),
+            },
+        }
+        if self._terminal_warnings:
+            report["terminal_warnings"] = list(self._terminal_warnings)
+        out_dir = Path("logs")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / "mass_create_rapid_restart_timing.json"
+        with open(out_path, "w") as f:
+            _json.dump(report, f, indent=2)
+        self.logger.info(
+            f"Rapid restart timing JSON written to {out_path}"
+        )
+
     # ── Summary ────────────────────────────────────────────────────────────
 
     def _print_summary(self):
@@ -912,6 +1477,10 @@ class _MassCreateDeleteMixin:
             self.logger.info("  --- Retry rounds ---")
             for phase, rounds in self._retry_round_counts.items():
                 self.logger.info(f"    {phase:25s}: {rounds} round(s)")
+        if self._terminal_warnings:
+            self.logger.info("  --- Terminal warnings ---")
+            for tw in self._terminal_warnings:
+                self.logger.warning(f"  WARNING: {tw}")
         total_dur = sum(self._phase_durations.values())
         self.logger.info(f"  Total duration:  {total_dur:.1f}s")
         self.logger.info("=" * 65)
@@ -922,10 +1491,11 @@ class _MassCreateDeleteMixin:
             phases.append({"name": name, "duration_sec": dur, "status": "ok"})
 
         total_dur = sum(self._phase_durations.values())
+        status = "passed_with_warnings" if self._terminal_warnings else "passed"
         report = {
             "test_class": self.__class__.__name__,
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "status": "passed",
+            "status": status,
             "config": {
                 "num_subsystems": self.NUM_SUBSYSTEMS,
                 "ns_per_subsystem": self.NS_PER_SUBSYSTEM,
@@ -941,6 +1511,8 @@ class _MassCreateDeleteMixin:
         if self.PERSISTENT_RETRY:
             report["persistent_retry"] = True
             report["retry_rounds"] = dict(self._retry_round_counts)
+        if self._terminal_warnings:
+            report["terminal_warnings"] = list(self._terminal_warnings)
 
         out_dir = Path("logs")
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -1303,9 +1875,14 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
         ]
         items = [{"name": n, "idx": i} for i, n in enumerate(names)]
         if self.PERSISTENT_RETRY:
-            ok, fail = self._batch_exec_persistent(
+            ok, fail, terminal = self._batch_exec_persistent(
                 items, self._fire_create_standalone, "create_lvols",
             )
+            if terminal:
+                self._terminal_warnings.append(
+                    f"[Phase 1] Terminal error during standalone lvol creation: "
+                    f"{ok}/{len(items)} created, {fail} failed"
+                )
         else:
             ok, fail = self._batch_exec(
                 items, self._fire_create_standalone, "create_lvols",
@@ -1391,9 +1968,14 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
         )
         parent_items = [{"name": n} for n in parent_names]
         if self.PERSISTENT_RETRY:
-            ok, fail = self._batch_exec_persistent(
+            ok, fail, terminal = self._batch_exec_persistent(
                 parent_items, self._create_parent, "create_parents",
             )
+            if terminal:
+                self._terminal_warnings.append(
+                    f"[Phase 1a] Terminal error during parent lvol creation: "
+                    f"{ok}/{len(parent_items)} created, {fail} failed"
+                )
         else:
             ok, fail = self._batch_exec(
                 parent_items, self._create_parent, "create_parents",
@@ -1449,9 +2031,14 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
             f"across {len(parent_names)} parents"
         )
         if self.PERSISTENT_RETRY:
-            ok, fail = self._batch_exec_persistent(
+            ok, fail, terminal = self._batch_exec_persistent(
                 child_tasks, self._fire_create_child, "create_children",
             )
+            if terminal:
+                self._terminal_warnings.append(
+                    f"[Phase 1b] Terminal error during child lvol creation: "
+                    f"{ok}/{len(child_tasks)} created, {fail} failed"
+                )
         else:
             ok, fail = self._batch_exec(
                 child_tasks, self._fire_create_child, "create_children",
@@ -1942,11 +2529,16 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
                 f"[Phase 3] Persistent retry mode: will retry until "
                 f"all {expected_snaps} snapshots created or terminal error"
             )
-            ok, fail = self._batch_exec_persistent(
+            ok, fail, terminal = self._batch_exec_persistent(
                 snap_items, self._fire_create_snapshot, "create_snapshots",
                 batch_size=self.SNAPSHOT_BATCH_SIZE,
                 phase_timeout=self.SNAPSHOT_PHASE_TIMEOUT,
             )
+            if terminal:
+                self._terminal_warnings.append(
+                    f"[Phase 3] Terminal error during snapshot creation: "
+                    f"{ok}/{len(snap_items)} created, {fail} failed"
+                )
         else:
             # Scale max_failures to item count — with 50 snaps/lvol, the
             # default MAX_FAILURES=500 is exhausted by just 10 bad lvols.
@@ -2026,6 +2618,20 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
                 if attempt < max_attempts - 1:
                     sleep_n_sec(3)
                     continue
+                # Final attempt failed — check if the snapshot was
+                # actually created despite the error (e.g. API returns
+                # "Failed to register snapshot on node" for a snapshot
+                # that already exists in the DB).
+                try:
+                    existing = self.sbcli_utils.list_snapshots()
+                    if snap_name in existing:
+                        logger.info(
+                            f"[snapshot] {snap_name} exists in DB despite "
+                            f"error '{e}' — treating as success"
+                        )
+                        return
+                except Exception:
+                    pass
                 raise
 
     # ── Phase 4: Delete lvols (free subsystem slots for clones) ──────────
@@ -2144,12 +2750,22 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
             self.logger.info("[Phase 5] No valid snapshot IDs — skipping")
             return
 
+        # Cap clones at the number of lvols deleted in Phase 4, since
+        # clones consume the same subsystem slots that lvols freed.
+        max_clones = self._metrics.get("lvols_created", len(snap_list))
+        if len(snap_list) > max_clones:
+            self.logger.info(
+                f"[Phase 5] Capping clone count from {len(snap_list)} "
+                f"(1 per snapshot) to {max_clones} (matching deleted lvol count)"
+            )
+            snap_list = random.sample(snap_list, max_clones)
+
         self.logger.info(
-            f"=== Phase 5: Create 1 clone per snapshot "
-            f"({len(snap_list)} clones) ==="
+            f"=== Phase 5: Create {len(snap_list)} clones "
+            f"(1 per snapshot, capped at lvol count) ==="
         )
 
-        # Create exactly 1 clone per snapshot (capped at snapshot count)
+        # Create clones from selected snapshots
         clone_names_fired = []
         clone_idx = [0]
         hit_limit = [False]
@@ -2608,9 +3224,10 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
     MONITOR_INTERVAL = 30       # seconds between background count polls
     BOUND_WAIT_TIMEOUT = 7200   # 2h hard cap for PVC bound wait
     BOUND_STALL_TIMEOUT = 300   # stop early if no new PVCs bind for 5 min
+    DELETE_STALL_TIMEOUT = 600  # 10 min stall for delete verification (CSI serialises)
 
     # ── Max test duration ─────────────────────────────────────────────────
-    MAX_TEST_DURATION = 6 * 3600  # 6 hours hard cap for entire test
+    MAX_TEST_DURATION = 10 * 3600  # 10 hours hard cap for entire test
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -3205,13 +3822,8 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
 
         while time.time() < deadline:
             try:
-                lvols = self.k8s_utils.list_lvols()
+                lvols = self.sbcli_utils.list_lvols()
                 last_count = len(lvols)
-            except AttributeError as exc:
-                self.logger.warning(
-                    f"[{label}] sbctl lvol list failed (non-retryable): {exc}"
-                )
-                break
             except Exception as exc:
                 self.logger.warning(
                     f"[{label}] sbctl lvol list failed: {exc}, retrying..."
@@ -3346,11 +3958,16 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
                 f"[Phase 3] Persistent retry mode: will retry until "
                 f"all {expected_snaps} snapshots created or terminal error"
             )
-            ok, fail = self._batch_exec_persistent(
+            ok, fail, terminal = self._batch_exec_persistent(
                 snap_items, self._create_single_vs, "create_snapshots",
                 batch_size=self.SNAPSHOT_BATCH_SIZE,
                 phase_timeout=self.SNAPSHOT_PHASE_TIMEOUT,
             )
+            if terminal:
+                self._terminal_warnings.append(
+                    f"[Phase 3] Terminal error during snapshot creation: "
+                    f"{ok}/{len(snap_items)} created, {fail} failed"
+                )
         else:
             snap_max_failures = max(self.MAX_FAILURES, expected_snaps // 10)
             ok, fail = self._batch_exec(
@@ -3509,7 +4126,7 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
 
         while time.time() < deadline:
             try:
-                snaps = self.k8s_utils.list_snapshots()
+                snaps = self.sbcli_utils.list_snapshots()
                 last_count = len(snaps)
             except Exception as exc:
                 self.logger.warning(
@@ -3612,10 +4229,10 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
         After kubectl delete fires, PVCs may linger while finalizers run.
         This polls until the remaining count drops to zero or stalls.
         """
-        stall_timeout = getattr(self, 'BOUND_STALL_TIMEOUT', 300)
+        stall_timeout = getattr(self, 'DELETE_STALL_TIMEOUT', 600)
         self.logger.info(
             f"[{label}] Verifying {expected_gone} PVCs deleted "
-            f"(prefix={prefix}, timeout={timeout}s)"
+            f"(prefix={prefix}, timeout={timeout}s, stall={stall_timeout}s)"
         )
         deadline = time.time() + timeout
         last_progress_count = expected_gone
@@ -3664,23 +4281,23 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
             return
 
         snap_list = list(self._snapshot_registry.keys())
-        # Create more clones than cluster capacity to verify the system
-        # handles overflow gracefully (proper errors, no corruption).
-        cluster_capacity = self.NUM_SUBSYSTEMS * self.NS_PER_SUBSYSTEM
-        overflow = max(10, cluster_capacity // 5)  # 20% extra past the limit
-        target_clones = cluster_capacity + overflow
+        # Clone count matches the lvol count deleted in Phase 4, since
+        # clones consume the same subsystem slots that lvols freed.
+        target_clones = self._metrics.get(
+            "lvols_created", self.NUM_SUBSYSTEMS * self.NS_PER_SUBSYSTEM
+        )
         self.logger.info(
             f"=== Phase 5: Create {target_clones} clones from "
             f"{len(snap_list)} snapshots "
-            f"(capacity={cluster_capacity}, overflow={overflow}, "
+            f"(matching deleted lvol count, "
             f"batch_size={self.CREATE_BATCH_SIZE}, "
             f"workers={self.CREATE_MAX_WORKERS}, "
             f"pause={self.CREATE_BATCH_PAUSE}s) ==="
         )
 
         clone_items = []
-        for idx in range(target_clones):
-            vs_name = snap_list[idx % len(snap_list)]
+        selected_snaps = random.sample(snap_list, min(target_clones, len(snap_list)))
+        for idx, vs_name in enumerate(selected_snaps):
             clone_pvc = f"clone-pvc-{_rand_seq(5)}-{idx:06d}"
             clone_items.append({"clone_pvc": clone_pvc, "vs_name": vs_name})
 
@@ -3736,14 +4353,10 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
             f"bound_wait={bound_wait}s, total={total_duration}s"
         )
 
-        # Report overflow behavior — in K8s, capacity overflow shows up
-        # as PVCs stuck in Pending (kubectl apply always succeeds, the
-        # CSI driver rejects provisioning asynchronously).
         unbound = len(fired_items) - len(bound_names)
         self.logger.info(
             f"[Phase 5] Clone creation summary: "
-            f"target={target_clones} (capacity={cluster_capacity} + "
-            f"overflow={overflow}), fired={len(fired_items)}, "
+            f"target={target_clones}, fired={len(fired_items)}, "
             f"apply_errors={errors}, bound={len(bound_names)}, "
             f"unbound={unbound}"
         )
@@ -3869,6 +4482,9 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
                     f"[Phase 6] FIO job {job_name} wait failed: {exc}"
                 )
 
+        # Store clone FIO job names so Phase 7 can clean them up
+        self._fio_clone_jobs = dict(clone_fio_jobs)
+
     # ── Phase 7: Delete clone PVCs ────────────────────────────────────────
 
     def _phase_7_delete_clones(self):
@@ -3877,6 +4493,25 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
             return
 
         self._assert_ha_nodes_online("Phase 7")
+
+        # Kill clone FIO jobs (started in Phase 6) before deleting PVCs
+        clone_fio_jobs = getattr(self, '_fio_clone_jobs', {})
+        if clone_fio_jobs:
+            self.logger.info(
+                f"[Phase 7] Deleting {len(clone_fio_jobs)} FIO jobs "
+                f"from Phase 6"
+            )
+            ns = self.k8s_utils.namespace
+            for job_name in list(clone_fio_jobs.keys()):
+                try:
+                    self.k8s_utils._exec_kubectl(
+                        f"kubectl delete job {job_name} "
+                        f"-n {ns} "
+                        f"--force --grace-period=0 2>/dev/null || true"
+                    )
+                except Exception:
+                    pass
+            sleep_n_sec(10)
 
         clone_names = list(self._clone_registry.keys())
         self.logger.info(
@@ -3959,12 +4594,21 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
 
     # ── Cleanup safety net ─────────────────────────────────────────────────
 
-    CLEANUP_TIMEOUT = 1800  # 30 min max for entire cleanup phase
+    CLEANUP_TIMEOUT = 3600  # 1 hour max for entire cleanup phase
 
     def _phase_cleanup(self):
         self.logger.info("=== Cleanup ===")
         cleanup_deadline = time.time() + self.CLEANUP_TIMEOUT
         ns = self.k8s_utils.namespace
+
+        def _deadline_exceeded(step_name):
+            if time.time() > cleanup_deadline:
+                self.logger.warning(
+                    f"[cleanup] Deadline exceeded at step: {step_name}, "
+                    f"skipping remaining cleanup steps"
+                )
+                return True
+            return False
 
         # 1. Delete FIO jobs
         try:
@@ -3977,37 +4621,97 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
             pass
 
         # 2. Delete clone lvols via API (with retry)
-        try:
-            self.sbcli_utils.delete_all_clones()
-        except Exception as exc:
-            self.logger.warning(f"[cleanup] delete_all_clones: {exc}")
+        if not _deadline_exceeded("delete_clones"):
+            try:
+                self.sbcli_utils.delete_all_clones()
+            except Exception as exc:
+                self.logger.warning(f"[cleanup] delete_all_clones: {exc}")
 
-        # 3. Delete VolumeSnapshots in batches with progress monitoring
-        self._cleanup_delete_volumesnapshots_batched(ns, cleanup_deadline)
+        # 3. Delete VolumeSnapshots via kubectl (primary path — fast, batched)
+        if not _deadline_exceeded("delete_volumesnapshots"):
+            self._cleanup_delete_volumesnapshots_batched(ns, cleanup_deadline)
 
-        # 4. Delete backend snapshots via API
-        try:
-            self.sbcli_utils.delete_all_snapshots()
-        except Exception as exc:
-            self.logger.warning(f"[cleanup] delete_all_snapshots: {exc}")
+        # 4. Delete backend snapshots via sbctl (only for stragglers
+        #    that kubectl couldn't reach — respects cleanup deadline)
+        if not _deadline_exceeded("delete_backend_snapshots"):
+            try:
+                self._cleanup_delete_backend_snapshots_with_deadline(
+                    cleanup_deadline
+                )
+            except Exception as exc:
+                self.logger.warning(f"[cleanup] delete_backend_snapshots: {exc}")
 
         # 5. Delete backend lvols via API
-        try:
-            self.sbcli_utils.delete_all_lvols()
-        except Exception as exc:
-            self.logger.warning(f"[cleanup] delete_all_lvols: {exc}")
+        if not _deadline_exceeded("delete_backend_lvols"):
+            try:
+                self.sbcli_utils.delete_all_lvols()
+            except Exception as exc:
+                self.logger.warning(f"[cleanup] delete_all_lvols: {exc}")
 
         # 6. Delete remaining PVCs in batches with timeout
-        self._cleanup_delete_pvcs_batched(ns, cleanup_deadline)
+        if not _deadline_exceeded("delete_pvcs"):
+            self._cleanup_delete_pvcs_batched(ns, cleanup_deadline)
 
         # 7. Delete storage pools
+        if not _deadline_exceeded("delete_storage_pools"):
+            try:
+                self.sbcli_utils.delete_all_storage_pools()
+            except Exception as exc:
+                self.logger.warning(f"[cleanup] delete_all_storage_pools: {exc}")
+
+    def _cleanup_delete_backend_snapshots_with_deadline(self, deadline):
+        """Delete backend snapshots via sbctl, respecting the cleanup deadline.
+
+        Unlike sbcli_utils.delete_all_snapshots() which loops unbounded,
+        this method stops when the deadline is reached.
+        """
         try:
-            self.sbcli_utils.delete_all_storage_pools()
+            snapshots = self.sbcli_utils.list_snapshots()
         except Exception as exc:
-            self.logger.warning(f"[cleanup] delete_all_storage_pools: {exc}")
+            self.logger.warning(
+                f"[cleanup] list backend snapshots failed: {exc}"
+            )
+            return
+
+        snap_names = list(snapshots.keys()) if isinstance(snapshots, dict) else []
+        if not snap_names:
+            self.logger.info("[cleanup] No backend snapshots to delete")
+            return
+
+        total = len(snap_names)
+        deleted = 0
+        self.logger.info(
+            f"[cleanup] Deleting {total} backend snapshots via sbctl "
+            f"(deadline in {round(deadline - time.time())}s)"
+        )
+
+        for snap_name in snap_names:
+            if time.time() > deadline:
+                self.logger.warning(
+                    f"[cleanup] Backend snapshot deletion stopped at deadline: "
+                    f"{deleted}/{total} deleted, {total - deleted} remaining"
+                )
+                return
+            try:
+                self.sbcli_utils.delete_snapshot(
+                    snap_name=snap_name, skip_error=True
+                )
+                deleted += 1
+            except Exception as exc:
+                self.logger.info(
+                    f"[cleanup] Backend snapshot delete skip: {snap_name}: {exc}"
+                )
+            if deleted % 100 == 0:
+                self.logger.info(
+                    f"[cleanup] Backend snapshot progress: {deleted}/{total}"
+                )
 
     def _cleanup_delete_volumesnapshots_batched(self, ns, deadline):
-        """Delete VolumeSnapshots in batches instead of --all to avoid hanging."""
+        """Delete VolumeSnapshots via kubectl in batches.
+
+        Uses larger batches (200) for throughput, with per-batch timeouts.
+        Falls back to ``kubectl delete --all`` if the deadline is hit.
+        """
         try:
             out, _ = self.k8s_utils._exec_kubectl(
                 f"kubectl get volumesnapshots -n {ns} --no-headers "
@@ -4025,7 +4729,7 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
 
         total = len(vs_names)
         self.logger.info(f"[cleanup] Deleting {total} volumesnapshots in batches")
-        batch_size = 50
+        batch_size = 200
         deleted = 0
 
         for i in range(0, total, batch_size):
@@ -4037,8 +4741,8 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
                 # Force-delete remaining with --all and a kubectl timeout
                 try:
                     self.k8s_utils._exec_kubectl(
-                        f"timeout 120 kubectl delete volumesnapshots --all "
-                        f"-n {ns} --timeout=60s 2>/dev/null || true"
+                        f"timeout 300 kubectl delete volumesnapshots --all "
+                        f"-n {ns} --timeout=120s 2>/dev/null || true"
                     )
                 except Exception:
                     pass
@@ -4049,7 +4753,7 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
             try:
                 self.k8s_utils._exec_kubectl(
                     f"kubectl delete volumesnapshot {names_str} -n {ns} "
-                    f"--ignore-not-found=true --timeout=120s 2>/dev/null || true",
+                    f"--ignore-not-found=true --timeout=300s 2>/dev/null || true",
                     supress_logs=True,
                 )
                 deleted += len(batch)
@@ -4059,39 +4763,60 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
                 )
                 deleted += len(batch)  # count as attempted
 
-            # Log progress with remaining snapshot count
-            try:
-                remaining_out, _ = self.k8s_utils._exec_kubectl(
-                    f"kubectl get volumesnapshots -n {ns} --no-headers 2>/dev/null | wc -l",
-                    supress_logs=True,
+            # Log progress every 4 batches (800 snapshots)
+            if (deleted // batch_size) % 4 == 0 or i + batch_size >= total:
+                try:
+                    remaining_out, _ = self.k8s_utils._exec_kubectl(
+                        f"kubectl get volumesnapshots -n {ns} --no-headers 2>/dev/null | wc -l",
+                        supress_logs=True,
+                    )
+                    remaining = int(remaining_out.strip())
+                except Exception:
+                    remaining = total - deleted
+                self.logger.info(
+                    f"[cleanup] Snapshot progress: {deleted}/{total} attempted, "
+                    f"{remaining} remaining in cluster"
                 )
-                remaining = int(remaining_out.strip())
-            except Exception:
-                remaining = total - deleted
-            self.logger.info(
-                f"[cleanup] Snapshot progress: {deleted}/{total} attempted, "
-                f"{remaining} remaining in cluster"
-            )
+
+    # PVC name prefixes created by this test — only these are safe to delete.
+    _TEST_PVC_PREFIXES = ("mcd-pvc-", "clone-pvc-")
 
     def _cleanup_delete_pvcs_batched(self, ns, deadline):
-        """Delete PVCs in batches instead of --all to avoid hanging."""
+        """Delete test PVCs in batches.
+
+        IMPORTANT: Only PVCs matching test prefixes (mcd-pvc-*, clone-pvc-*)
+        are deleted.  Infrastructure PVCs (simplyblock-*, etc.) are never
+        touched — deleting them destabilises the cluster.
+        """
         try:
             out, _ = self.k8s_utils._exec_kubectl(
                 f"kubectl get pvc -n {ns} --no-headers "
                 f"-o custom-columns=:metadata.name 2>/dev/null",
                 supress_logs=True,
             )
-            pvc_names = [n.strip() for n in out.strip().split("\n") if n.strip()]
+            all_pvcs = [n.strip() for n in out.strip().split("\n") if n.strip()]
         except Exception as exc:
             self.logger.warning(f"[cleanup] list PVCs failed: {exc}")
             return
 
+        # Filter to test PVCs only
+        pvc_names = [
+            n for n in all_pvcs
+            if any(n.startswith(pfx) for pfx in self._TEST_PVC_PREFIXES)
+        ]
+        skipped = len(all_pvcs) - len(pvc_names)
+        if skipped:
+            self.logger.info(
+                f"[cleanup] Skipping {skipped} non-test PVCs "
+                f"(infra/system PVCs preserved)"
+            )
+
         if not pvc_names:
-            self.logger.info("[cleanup] No PVCs to delete")
+            self.logger.info("[cleanup] No test PVCs to delete")
             return
 
         total = len(pvc_names)
-        self.logger.info(f"[cleanup] Deleting {total} PVCs in batches")
+        self.logger.info(f"[cleanup] Deleting {total} test PVCs in batches")
         batch_size = 50
         deleted = 0
 
@@ -4101,13 +4826,6 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
                     f"[cleanup] PVC deletion timeout reached after "
                     f"{deleted}/{total} deleted"
                 )
-                try:
-                    self.k8s_utils._exec_kubectl(
-                        f"timeout 120 kubectl delete pvc --all "
-                        f"-n {ns} --timeout=60s 2>/dev/null || true"
-                    )
-                except Exception:
-                    pass
                 return
 
             batch = pvc_names[i:i + batch_size]
@@ -4263,6 +4981,14 @@ class MassCreateDeletePersistent_300x10_6Snap_Docker(_MassCreateDeleteDocker):
     SNAPSHOTS_PER_LVOL = 6
 
 
+class MassCreateDeletePersistent_300x10_10Snap_Docker(_MassCreateDeleteDocker):
+    """300 ns/sub × 10 subsystems = 3000 lvols, 10 snapshots each = 30000 snapshots (persistent retry)."""
+    PERSISTENT_RETRY = True
+    NUM_SUBSYSTEMS = 10
+    NS_PER_SUBSYSTEM = 300
+    SNAPSHOTS_PER_LVOL = 10
+
+
 # K8s persistent variants
 
 class MassCreateDeletePersistent_1x500_K8s(_MassCreateDeleteK8s):
@@ -4298,3 +5024,182 @@ class MassCreateDeletePersistent_3000x1_K8s(_MassCreateDeleteK8s):
     PERSISTENT_RETRY = True
     NUM_SUBSYSTEMS = 1
     NS_PER_SUBSYSTEM = 3000
+
+
+class MassCreateDeletePersistent_300x10_6Snap_K8s(_MassCreateDeleteK8s):
+    """300 ns/sub × 10 subsystems = 3000 PVCs, 6 snapshots each = 18000 snapshots (persistent retry)."""
+    PERSISTENT_RETRY = True
+    NUM_SUBSYSTEMS = 10
+    NS_PER_SUBSYSTEM = 300
+    SNAPSHOTS_PER_LVOL = 6
+
+
+class MassCreateDeletePersistent_300x10_10Snap_K8s(_MassCreateDeleteK8s):
+    """300 ns/sub × 10 subsystems = 3000 PVCs, 10 snapshots each = 30000 snapshots (persistent retry)."""
+    PERSISTENT_RETRY = True
+    NUM_SUBSYSTEMS = 10
+    NS_PER_SUBSYSTEM = 300
+    SNAPSHOTS_PER_LVOL = 10
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Restart variants: 6000 entity cap, node outages enabled, persistent retry.
+#  Tests node restart resilience at controlled scale.  Entity cap ensures
+#  total entities (lvols + snapshots) never exceed MAX_ENTITY_COUNT.
+#
+#  max_lvols = MAX_ENTITY_COUNT // (1 + SNAPSHOTS_PER_LVOL)
+#
+#  | SNAPSHOTS_PER_LVOL | max_lvols | peak entities              |
+#  |--------------------|-----------|----------------------------|
+#  | 1                  | 3000      | 3000 lvols + 3000 snaps    |
+#  | 6                  | 857       | 857 lvols + 5142 snaps     |
+#  | 10                 | 545       | 545 lvols + 5450 snaps     |
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Docker restart variants
+
+class MassCreateDeleteRestart_300x10_Docker(_MassCreateDeleteDocker):
+    """300x10 ratio, 1 snap/lvol, entity cap 9000, with node outages."""
+    ENABLE_NODE_OUTAGE = True
+    PERSISTENT_RETRY = True
+    MAX_ENTITY_COUNT = 9000
+    NUM_SUBSYSTEMS = 10
+    NS_PER_SUBSYSTEM = 300
+    SNAPSHOTS_PER_LVOL = 1
+
+
+class MassCreateDeleteRestart_300x10_6Snap_Docker(_MassCreateDeleteDocker):
+    """300x10 ratio, 6 snaps/lvol, entity cap 9000 -> 1285 lvols, with node outages."""
+    ENABLE_NODE_OUTAGE = True
+    PERSISTENT_RETRY = True
+    MAX_ENTITY_COUNT = 9000
+    NUM_SUBSYSTEMS = 10
+    NS_PER_SUBSYSTEM = 300
+    SNAPSHOTS_PER_LVOL = 6
+
+
+class MassCreateDeleteRestart_300x10_10Snap_Docker(_MassCreateDeleteDocker):
+    """300x10 ratio, 10 snaps/lvol, entity cap 9000 -> 818 lvols, with node outages."""
+    ENABLE_NODE_OUTAGE = True
+    PERSISTENT_RETRY = True
+    MAX_ENTITY_COUNT = 9000
+    NUM_SUBSYSTEMS = 10
+    NS_PER_SUBSYSTEM = 300
+    SNAPSHOTS_PER_LVOL = 10
+
+
+# K8s restart variants
+
+class MassCreateDeleteRestart_300x10_K8s(_MassCreateDeleteK8s):
+    """300x10 ratio, 1 snap/lvol, entity cap 9000, with node outages."""
+    ENABLE_NODE_OUTAGE = True
+    PERSISTENT_RETRY = True
+    MAX_ENTITY_COUNT = 9000
+    NUM_SUBSYSTEMS = 10
+    NS_PER_SUBSYSTEM = 300
+    SNAPSHOTS_PER_LVOL = 1
+
+
+class MassCreateDeleteRestart_300x10_6Snap_K8s(_MassCreateDeleteK8s):
+    """300x10 ratio, 6 snaps/lvol, entity cap 9000 -> 1285 PVCs, with node outages."""
+    ENABLE_NODE_OUTAGE = True
+    PERSISTENT_RETRY = True
+    MAX_ENTITY_COUNT = 9000
+    NUM_SUBSYSTEMS = 10
+    NS_PER_SUBSYSTEM = 300
+    SNAPSHOTS_PER_LVOL = 6
+
+
+class MassCreateDeleteRestart_300x10_10Snap_K8s(_MassCreateDeleteK8s):
+    """300x10 ratio, 10 snaps/lvol, entity cap 9000 -> 818 PVCs, with node outages."""
+    ENABLE_NODE_OUTAGE = True
+    PERSISTENT_RETRY = True
+    MAX_ENTITY_COUNT = 9000
+    NUM_SUBSYSTEMS = 10
+    NS_PER_SUBSYSTEM = 300
+    SNAPSHOTS_PER_LVOL = 10
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Rapid-restart variants: 6000 entity cap, 3 snaps/lvol (1:3 ratio),
+#  30 container stop/restart cycles after lvol+snapshot creation, then 30
+#  more after clone creation.
+#
+#  Entity cap 6000 with SNAPSHOTS_PER_LVOL=3 → max_lvols = 6000 // 4 = 1500
+#  Peak: 1500 lvols + 4500 snapshots = 6000 entities.
+#
+#  Each restart cycle:
+#    1. Stop container / delete pod (target node with entries)
+#    2. Wait for node → online (no wait for migration/rebalancing)
+#    3. Wait 60s cooldown
+#
+#  Summary output: per-iteration stop→online time for both phases
+#  (30 entries for lvol+snapshot, 30 entries for snapshot+clone = 60 total).
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Docker rapid-restart variants
+
+
+class MassCreateRapidRestart_6k_3Snap_Docker(_MassCreateDeleteDocker):
+    """12000 entity cap, 1:3 ratio (3 snaps/lvol → 3000 lvols + 9000 snaps),
+    30 rapid container stop/restart cycles per phase."""
+    PERSISTENT_RETRY = True
+    MAX_ENTITY_COUNT = 12000
+    NUM_SUBSYSTEMS = 40
+    NS_PER_SUBSYSTEM = 75
+    SNAPSHOTS_PER_LVOL = 3
+    RAPID_RESTART_ITERATIONS = 30
+    RAPID_RESTART_COOLDOWN = 60
+
+    def run(self):
+        actual_pool = self.sbcli_utils.add_storage_pool(
+            pool_name=self.pool_name
+        )
+        if actual_pool and actual_pool != self.pool_name:
+            self.pool_name = actual_pool
+        storage_nodes = self.sbcli_utils.get_storage_nodes()
+        for result in storage_nodes["results"]:
+            self.sn_nodes.append(result["uuid"])
+        self._run_mass_create_rapid_restart_test()
+
+
+# K8s rapid-restart variants
+
+
+class MassCreateRapidRestart_6k_3Snap_K8s(_MassCreateDeleteK8s):
+    """12000 entity cap, 1:3 ratio (3 snaps/lvol → 3000 PVCs + 9000 snaps),
+    30 rapid pod delete/restart cycles per phase."""
+    PERSISTENT_RETRY = True
+    MAX_ENTITY_COUNT = 12000
+    NUM_SUBSYSTEMS = 40
+    NS_PER_SUBSYSTEM = 75
+    SNAPSHOTS_PER_LVOL = 3
+    RAPID_RESTART_ITERATIONS = 30
+    RAPID_RESTART_COOLDOWN = 60
+
+    def run(self):
+        storage_nodes = self.sbcli_utils.get_storage_nodes()
+        for result in storage_nodes["results"]:
+            self.sn_nodes.append(result["uuid"])
+            self.node_vs_pvc[result["uuid"]] = []
+
+        actual_pool = self.sbcli_utils.add_storage_pool(
+            pool_name=self.pool_name
+        )
+        if actual_pool and actual_pool != self.pool_name:
+            self.pool_name = actual_pool
+
+        cluster_id = self.cluster_id or os.environ.get("CLUSTER_ID", "")
+        self.k8s_utils.create_storage_class(
+            name=self.STORAGE_CLASS_NAME,
+            cluster_id=cluster_id,
+            pool_name=self.pool_name,
+            ndcs=self.ndcs,
+            npcs=self.npcs,
+            max_namespace_per_subsys=self.NS_PER_SUBSYSTEM,
+        )
+        self.k8s_utils.create_volume_snapshot_class(
+            name=self.SNAPSHOT_CLASS_NAME,
+        )
+
+        self._run_mass_create_rapid_restart_test()

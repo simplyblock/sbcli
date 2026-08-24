@@ -35,6 +35,7 @@ import pytest
 from simplyblock_core.models.backup import Backup
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
+from simplyblock_core.models.lvol_migration_group import LVolMigrationGroup
 from simplyblock_core.models.storage_node import StorageNode
 
 
@@ -239,6 +240,14 @@ def _base_db(task):
     cluster.status = Cluster.STATUS_ACTIVE
     cluster.suspend_drain_complete = False
     cluster.expand_state = {}
+    # Dict-ish cluster state must be stubbed explicitly: an unstubbed MagicMock
+    # attribute auto-creates, so `cluster.<field>.get(key)` returns a truthy
+    # mock and any guard reading it silently flips on. That is what happened
+    # when the JC-compression upgrade hold landed -- resume_is_held() saw a
+    # phantom in-progress upgrade, the runner suspended the task every cycle
+    # and never reached its retry ceiling. These clusters are deliberately
+    # "not mid-upgrade", which is the state the ceiling contract is about.
+    cluster.release_upgrade_state = {}
 
     node = db.get_storage_node_by_id.return_value
     node.status = StorageNode.STATUS_ONLINE
@@ -250,6 +259,10 @@ def _base_db(task):
     db.get_task_by_id.return_value = task
     db.get_cluster_by_id.return_value = cluster
     db.get_storage_nodes_by_cluster_id.return_value = [node]
+    # Mirror DBController.atomic_update's contract: apply the mutator to the
+    # (fresh) object and return it. The restart runner's task writes go
+    # through this instead of write_to_db (stale-copy lost-update fix).
+    db.atomic_update.side_effect = lambda obj, fn: (fn(obj), obj)[1]
     return db, cluster, node
 
 
@@ -357,6 +370,56 @@ def _spec_restart(runner, monkeypatch):
     return task
 
 
+def _spec_batch_migration(runner, monkeypatch):
+    task = _make_task(JobSchedule.FN_LVOL_BATCH_MIG, group_id="grp-1")
+    db, _cluster, _ = _wire_base(runner, monkeypatch, task)
+
+    group = MagicMock()
+    group.phase = LVolMigrationGroup.PHASE_SNAP_COPY
+    group.source_node_id = "src-1"
+    group.target_node_id = "tgt-1"
+    group.cluster_id = "cl-1"
+    group.members = [{"migration_id": "mig-1"}]
+    db.get_migration_group_by_id.return_value = group
+    # The main loop calls get_active_batch_migration_tasks, not get_job_tasks.
+    db.get_active_batch_migration_tasks.return_value = [task]
+
+    # Worker migrations appear terminal so CLEANUP_TARGET can complete.
+    worker_mig = MagicMock()
+    worker_mig.is_active.return_value = False
+    db.get_migration_by_id.return_value = worker_mig
+
+    # Source is offline (retry path); target is online (not the fast-fail path).
+    src_node = MagicMock()
+    src_node.status = StorageNode.STATUS_OFFLINE
+    src_node.get_id.return_value = "src-1"
+    tgt_node = MagicMock()
+    tgt_node.status = StorageNode.STATUS_ONLINE
+    tgt_node.get_id.return_value = "tgt-1"
+
+    def _get_node(node_id):
+        if node_id == "src-1":
+            return src_node
+        return tgt_node
+
+    db.get_storage_node_by_id.side_effect = _get_node
+    # _make_rpc is imported into the runner module; stub it so no real connections.
+    monkeypatch.setattr(runner, "_make_rpc", MagicMock())
+    # Stub collaborators that hit real infrastructure (DB, events, network).
+    monkeypatch.setattr(runner.tasks_controller, "get_active_cluster_expand_task",
+                        lambda *a, **k: False)
+    # main() lease-gates each task via claim_task before running it (so two
+    # runner replicas can't both drive the same group); without this the real
+    # claim_task hits the module's own uninitialized DBController, "loses" the
+    # claim every time, and main() skips task_runner forever.
+    monkeypatch.setattr(runner.tasks_controller, "claim_task",
+                        lambda *a, **k: True)
+    monkeypatch.setattr(runner, "_delete_target_subsystem", MagicMock())
+    monkeypatch.setattr(runner, "migration_events", MagicMock())
+    monkeypatch.setattr(runner, "tasks_events", MagicMock())
+    return task
+
+
 # name -> spec for the runners driven through their real main() loop.
 _MAIN_DRIVEN_SPECS = {
     "tasks_runner_cluster_expand.py": _spec_cluster_expand,
@@ -364,6 +427,7 @@ _MAIN_DRIVEN_SPECS = {
     "tasks_runner_replication_final.py": _spec_replication_final,
     "tasks_runner_jc_comp.py": _spec_jc_comp,
     "tasks_runner_restart.py": _spec_restart,
+    "tasks_runner_batch_migration.py": _spec_batch_migration,
 }
 
 # Retry-driven runners covered by a dedicated test elsewhere rather than the

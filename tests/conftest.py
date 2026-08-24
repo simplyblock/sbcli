@@ -37,23 +37,26 @@ def pytest_configure(config):
 
 @pytest.fixture(autouse=True)
 def _clear_ttl_caches():
-    """Clear the create-path TTL caches (leader / quorum-verdict /
-    capacity-scan) around every test. They are module-level and keyed by ids
-    tests reuse across cases ('node-1', 'LVS_1', ...), so a verdict cached in
-    one test would leak into the next (e.g. a cached quorum verdict makes
-    _check_peer_disconnected skip the probe a later test asserts on)."""
+    """Clear every TTL cache around each test.
+
+    They are module-level and keyed by ids tests reuse across cases ('node-1',
+    'LVS_1', ...), so a verdict cached in one test leaks into the next (e.g. a
+    cached quorum verdict makes _check_peer_disconnected skip the probe a later
+    test asserts on).
+
+    ``invalidate_all()`` rather than a list of caches: the list drifted twice
+    and left ``no_leader_cache`` and ``storage_node_monitor._status_probe_cache``
+    uncleared, which failed 11 of 12 tests in a class that all passed
+    individually. Importing the caches' own modules is not required — the
+    registry finds any cache that has been constructed."""
     try:
         from simplyblock_core.utils import ttl_cache
     except Exception:
         yield
         return
-    caches = (ttl_cache.capacity_scan_cache, ttl_cache.leader_cache,
-              ttl_cache.quorum_verdict_cache)
-    for c in caches:
-        c.invalidate()
+    ttl_cache.invalidate_all()
     yield
-    for c in caches:
-        c.invalidate()
+    ttl_cache.invalidate_all()
 
 
 @pytest.fixture(autouse=True)
@@ -63,5 +66,42 @@ def _clear_singleton_cache():
     Singleton._instances.clear()
     yield
     Singleton._instances.clear()
+
+
+@pytest.fixture(autouse=True)
+def _no_leaked_port_block_window():
+    """Fail (and un-wedge) a test that leaves the port-block window gate held.
+
+    ``storage_node_ops._port_block_window_gate`` is a module-level mutex over
+    the client-port-block span, acquired with no timeout. A test that leaves it
+    held poisons the rest of the session: every later test entering a window
+    blocks on the acquire until pytest-timeout kills it, so one leak surfaces as
+    a scattering of unrelated 30s timeouts (observed: 9 of them, in files that
+    pass in under a second on their own).
+
+    Release it so the next test starts clean, and fail loudly rather than
+    paper over it: a leak means a code path between ``_open_port_block_window``
+    and ``_close_port_block_window`` raised without releasing, which is a
+    PRODUCTION defect, not a test one. The gate releases are plain statements
+    rather than a ``finally``, so any raise inside the window escapes holding
+    it — and in a long-lived service process that wedges every later restart
+    or recreate forever, since the acquire has no timeout.
+    """
+    yield
+    try:
+        from simplyblock_core import storage_node_ops
+    except Exception:
+        return
+    gate = storage_node_ops._port_block_window_gate
+    if gate.locked():
+        gate.release()
+        storage_node_ops._window_clear.set()
+        pytest.fail(
+            "storage_node_ops._port_block_window_gate was still held after this "
+            "test — the code path it exercised opened a port-block window and "
+            "raised without closing it. This is a production lock leak: the "
+            "gate is process-global and acquired with no timeout, so in a live "
+            "service every subsequent restart/recreate would block forever. "
+            "The gate has been released so later tests are unaffected.")
 
 

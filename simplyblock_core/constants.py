@@ -39,6 +39,19 @@ DEVICE_MONITOR_INTERVAL_SEC = 5
 STAT_COLLECTOR_INTERVAL_SEC = 60*5  # 5 minutes
 LVOL_STAT_COLLECTOR_INTERVAL_SEC = 30
 LVOL_MONITOR_INTERVAL_SEC = 30
+# Short cadence used by lvol/snapshot monitors while in-deletion objects
+# exist: delete chains advance at most one hop per cycle (clone -> snapshot
+# -> parent snapshot), so the idle 30s interval alone added minutes per
+# chain (run 20260730).
+LVOL_MONITOR_DELETION_INTERVAL_SEC = 2
+# How long a monitor waits for an async delete to finish while holding the
+# chain lock, so async + the following sync deletes stay one atomic sequence.
+SNAP_DELETE_COMPLETION_WAIT_SEC = 15
+# Chains deleted concurrently by a monitor. Members of one chain always run on
+# one worker (and the chain lock enforces it across processes).
+CHAIN_DELETE_WORKERS = 16
+# Storage nodes swept concurrently by the lvol monitor.
+LVOL_MONITOR_NODE_WORKERS = 16
 DEV_MONITOR_INTERVAL_SEC = 10
 # Collector cadence (#5, 2026-07-21): the idle-cluster baseline measured
 # 4,290 RPCs/min cluster-wide (get_iostat 16k / alceml_get_pages_usage 15k /
@@ -52,6 +65,22 @@ PROT_STAT_COLLECTOR_INTERVAL_SEC = 10
 SPDK_STAT_COLLECTOR_INTERVAL_SEC = 30
 DISTR_EVENT_COLLECTOR_INTERVAL_SEC = 5
 DISTR_EVENT_COLLECTOR_NUM_OF_EVENTS = 10
+#: JM events are polled on their own cadence. Unlike the distrib source there
+#: is no discard counterpart -- jm_get_events returns every event it holds on
+#: every call -- so the collector filters what it has already logged and the
+#: poll can afford to be less frequent than the distrib one.
+JM_EVENT_COLLECTOR_INTERVAL_SEC = 10
+#: How many recently-logged JM event keys to remember per node for that filter.
+JM_EVENT_DEDUPE_MAX = 10000
+
+#: Journal records accumulated for compression above which an lvs is flagged in
+#: the cluster event log. A backlog this size means compression is not keeping
+#: up with the write rate (or is stuck/suspended), and the journal replay
+#: needed by the next restart or failover grows with every record.
+JM_COMPRESSION_BACKLOG_ALERT_RECORDS = 500_000_000
+#: Re-arm the alert only after the backlog falls below this fraction of the
+#: threshold, so a count oscillating around the line does not flap events.
+JM_COMPRESSION_BACKLOG_REARM_FRACTION = 0.9
 CAP_MONITOR_INTERVAL_SEC = 30
 SSD_VENDOR_WHITE_LIST = ["1d0f:cd01", "1d0f:cd00"]
 CACHED_LVOL_STAT_COLLECTOR_INTERVAL_SEC = 15
@@ -98,13 +127,31 @@ GRAYLOG_CHECK_INTERVAL_SEC = 60
 FDB_CLEANUP_INTERVAL_SEC = 60 * 60
 
 # Continuous per-lvol NVMf subsystem verification + auto-repair in the lvol
-# monitor. Off by default: it exists only to compensate for a lost deferred
-# non-leader registration (lossy in-memory drain queue), and at scale it costs
-# 2 RPCs per lvol per 30s cycle while its repair path has re-added namespaces
-# of in-deletion lvols mid-delete (incidents 2026-07-14 / 2026-07-16). Set
-# LVOL_MONITOR_SUBSYS_CHECK=1 to re-enable on clusters that need the sweep.
+# monitor. ON by default since 2026-08-10.
+#
+# It was previously off for two reasons, both now addressed:
+#  - cost (2 RPCs per lvol per 30s cycle): the sweep is now rate-limited to
+#    LVOL_MONITOR_SUBSYS_CHECK_INTERVAL_SEC instead of running every cycle;
+#  - its repair re-added namespaces of in-deletion lvols mid-delete
+#    (2026-07-14 / 2026-07-16): both check_node and add_lvol_thread now
+#    re-read the record and refuse to register anything not ONLINE/OFFLINE.
+#
+# Leaving it off costs far more than it saves: this sweep is the ONLY thing
+# that detects a replica whose subsystem exists but carries no namespace, and
+# such a replica is invisible everywhere else — the client connects fine and
+# simply has one path fewer than it believes. In the 2026-08-09 run that state
+# persisted for 36 hours across many volumes (78726d0e 608 degraded reports,
+# 64467bfa 437, 638be965 308) and cost one volume all of its I/O when an
+# outage took the two paths it had left. Set LVOL_MONITOR_SUBSYS_CHECK=0 to
+# disable.
 LVOL_MONITOR_SUBSYS_CHECK = str(
-    os.getenv("LVOL_MONITOR_SUBSYS_CHECK", "")).lower() in ("1", "true", "yes")
+    os.getenv("LVOL_MONITOR_SUBSYS_CHECK", "1")).lower() in ("1", "true", "yes")
+
+# How often the per-lvol subsystem verification sweep above actually runs.
+# The monitor's own cycle stays at LVOL_MONITOR_INTERVAL_SEC (deletions must
+# drain promptly); only the verification sweep is throttled to this period.
+LVOL_MONITOR_SUBSYS_CHECK_INTERVAL_SEC = int(
+    os.getenv("LVOL_MONITOR_SUBSYS_CHECK_INTERVAL_SEC", "300"))
 
 TASK_EXEC_INTERVAL_SEC = 10
 TASK_EXEC_RETRY_COUNT = 8
@@ -140,6 +187,24 @@ RESTART_TASK_EXEC_INTERVAL_MAX_SEC = 3600
 # regardless of this value (owner id is the hostname).
 TASK_LEASE_HEARTBEAT_SEC = 30
 TASK_LEASE_TTL_SEC = 180
+
+# Per-node restart claim: cross-ACTOR mutual exclusion for a single node's
+# restart. The task lease above serializes runner HOSTS on one task, but a
+# manual CLI restart and the restart task runner are DIFFERENT actors sharing
+# the same NODE_RESTART task (ensure_node_restart_task dedups to one per
+# node) and — on the mgmt host — potentially the same lease owner id
+# (hostname), so the lease cannot tell them apart. The claim is an
+# (owner-token, timestamp) pair on the StorageNode row, acquired atomically
+# inside try_set_node_restarting's FDB tx, heartbeated by the
+# restart_storage_node wrapper while the restart runs, and released on exit.
+# A claim older than the TTL means its driver died mid-restart and may be
+# taken over (this is what keeps the transferable-ownership resume path
+# alive). force does NOT bypass a fresh claim: mutual exclusion is not an
+# operator-overridable safety check (2026-08-06 soak iter-50: a manual CLI
+# restart and the task runner drove the same node concurrently, their
+# spdk_process_start calls replacing each other's container mid-restart).
+RESTART_CLAIM_HEARTBEAT_SEC = TASK_LEASE_HEARTBEAT_SEC
+RESTART_CLAIM_TTL_SEC = TASK_LEASE_TTL_SEC
 
 # Node-add concurrency: the cross-node mesh section of add_node is serialized
 # per cluster behind a ClusterAddNodeLock. The holder refreshes the lock every
@@ -267,13 +332,43 @@ INSTANCE_STORAGE_DATA = {
 
 MAX_SNAP_COUNT = 100
 
-# Per-SPDK-instance object cap: each vCPU in the instance's core mask serves
-# at most this many objects (lvols + clones + snapshots), counted against
-# their primary node. 8 cores (the minimum) -> 16k objects, 32 cores -> 64k.
-# Guards the data plane against object-count overload (run 20260712-231123:
+# Hard per-lvstore object cap: an lvstore serves at most this many objects
+# (lvols + clones + snapshots), counted against the lvstore's owning node.
+# Enforced on every create path (lvol create, snapshot create, clone). A node
+# that temporarily serves a second LVS (takeover / acting leader) gets an
+# independent budget per LVS — the limit protects each lvstore's blobstore
+# and journal, not the host. Replaces the earlier per-core cap
+# (cores x 2000); object-count overload precedent: run 20260712-231123,
 # ~68k objects on one 12-core instance drove swap thrash and a JC-quartet
-# abort).
-MAX_OBJECTS_PER_CORE = 2000
+# abort -- which is an order of magnitude above this cap, so the headroom
+# below it is real.
+#
+# Raised 6000 -> 12000 on 2026-08-20.
+MAX_OBJECTS_PER_LVSTORE = 12000
+
+# Hard cap on namespaces (lvols) sharing one nvmf subsystem. The DEFAULT for
+# namespaced creates stays LVO_MAX_NAMESPACES_PER_SUBSYS; this is the ceiling
+# a caller-supplied max_namespace_per_subsys may not exceed, and it also
+# bounds joins into legacy subsystems recorded with a larger max.
+MAX_NAMESPACES_PER_SUBSYSTEM = 50
+
+# Hard cap on lvol subsystems per node (primary subsystems; namespaced
+# volumes share one). Applied as a ceiling over the node's configured
+# max_lvol: effective limit = min(max_lvol, this).
+#
+# It is also the admission ceiling for the user-supplied max_lvol itself
+# (`sn configure --max-subsys`, `sn restart --max-subsys`, the k8s
+# node-configure entrypoint and persist_node_config). A larger value was
+# accepted before and then silently clamped at placement time, so the node
+# reserved huge pages for subsystems it could never serve and operators
+# believed a limit that did not hold. Ingress now rejects anything above
+# this; internal readers of an already-stored config clamp with a warning.
+MAX_SUBSYSTEMS_PER_NODE = 75
+
+# Cross-cluster cutover: upper bound for the iterative delta-shrink phase
+# (snapshot -> wait replicated -> snapshot -> wait) before the final freeze.
+# Two rounds normally complete within 2 replication intervals + transfer time.
+REPL_CUTOVER_SHRINK_TIMEOUT_SEC = 900
 
 SPDK_PROXY_MULTI_THREADING_ENABLED=True
 SPDK_PROXY_TIMEOUT=60*5
@@ -395,12 +490,6 @@ FAST_FAIL_TO=0
 RECONNECT_DELAY_CLUSTER=1
 LVOL_CLUSTER_RATIO=1
 
-# Per-branch feature gate for the SPDK compression-thread JM layout (see
-# calculate_core_allocations and device_controller.bdev_jm_create). OFF on
-# main: when False the CPU allocation and JM-create RPC are byte-for-byte
-# unchanged from the pre-compression-thread behaviour.
-JM_COMPRESSION_THREAD_ENABLED = False
-
 # Fixed size (in bytes) each distrib bdev reports up to the raid0/lvstore
 # layer, independent of cluster raw capacity or number_of_distribs. 250 TiB.
 #
@@ -500,7 +589,7 @@ MIG_PARALLEL_JOBS = 64
 MIG_JOB_SIZE = 64
 
 # Live volume migration constants
-LVOL_MIG_MAX_RETRIES = 5          # max retry attempts before aborting
+LVOL_MIG_MAX_RETRIES = 5          # max retries before entering cleanup_target
 LVOL_MIG_DEADLINE_SEC = 3600  # 1-hour deadline (0 = no deadline)
 LVOL_MIG_MAX_INTERMEDIATE_SNAPS = 3        # max recursive "shrink" snapshot rounds
 LVOL_MIG_INTERMEDIATE_SNAP_THRESHOLD_BYTES = 500 * 1024 * 1024  # 500 MiB — skip if delta is smaller

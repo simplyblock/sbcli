@@ -633,6 +633,31 @@ def _watchdog_stuck_activation(cluster):
 
 # Node statuses that mean a node is NOT yet drained for suspend recovery:
 # either still up/serving or mid-transition. The drain is complete only once
+def _watchdog_stuck_shrink(cluster):
+    """Release a cluster wedged in IN_SHRINK with no removal task driving it.
+
+    ``node_removal_orchestrate`` holds IN_SHRINK for one attempt and restores
+    the previous status in a ``finally``. If the process driving it dies, that
+    restore never runs: the status sticks, every later tick early-returns, the
+    topology gates keep refusing, and ``get_restart_phase`` stops reclaiming
+    genuinely leaked phases — none of which clears on its own.
+
+    The removal task is the liveness signal. It is created with max_retry=-1 and
+    only reaches DONE when the removal completes, so "IN_SHRINK held but no open
+    FN_NODE_REMOVAL task" means the flow is gone, not slow. No time budget is
+    needed (contrast ``_watchdog_stuck_activation``, whose driver is a thread
+    with no task row of its own).
+    """
+    if tasks_controller.get_active_node_removal_task_for_cluster(cluster.get_id()):
+        return
+    next_status = get_next_cluster_status(cluster.get_id())
+    logger.error(
+        "Cluster %s is IN_SHRINK but no node-removal task is open: the removal "
+        "driver is gone. Reverting to %s so topology gates and stale-phase "
+        "reclamation resume.", cluster.get_id(), next_status)
+    cluster_ops.set_cluster_status(cluster.get_id(), next_status)
+
+
 # every (non operator-stopped) node has left all of these for OFFLINE/REMOVED.
 _DRAIN_PENDING_STATUSES = (
     StorageNode.STATUS_ONLINE,
@@ -745,7 +770,20 @@ def update_cluster_status(cluster_id):
             return
         _ucs_running[cluster_id] = True
     try:
-        while True:
+        # AT MOST two passes -- what the comment above always promised, now
+        # enforced. The unbounded re-run turned into permanent capture the
+        # moment one pass grew slower than the callers' re-arm period: the
+        # main loop marks the cluster dirty every NODE_MONITOR_INTERVAL_SEC
+        # (3s), and in run mass_create_delete_docker-20260821 a pass took
+        # ~4.3s at 12k entities, so `pending` was ALWAYS set again before a
+        # pass ended. The per-node thread that happened to be computing
+        # (sn-1's) looped cluster passes for 10.6 HOURS while its node's
+        # SPDK was killed 30 times undetected -- the node sat "online" in
+        # the DB with no SPDK process, and every delete returned "No leader
+        # available". Exiting after the second pass is safe: a dropped
+        # pending flag only means the next caller (at most 3s away) becomes
+        # the computing thread and recomputes.
+        for _ in range(2):
             _update_cluster_status_impl(cluster_id)
             with _ucs_state_lock:
                 if not _ucs_pending.pop(cluster_id, False):
@@ -753,6 +791,7 @@ def update_cluster_status(cluster_id):
     finally:
         with _ucs_state_lock:
             _ucs_running[cluster_id] = False
+            _ucs_pending.pop(cluster_id, None)
 
 
 def _delete_old_tasks(tasks: list[JobSchedule]):
@@ -815,8 +854,13 @@ def _update_cluster_status_impl(cluster_id):
     current_cluster_status = cluster.status
     logger.info("cluster_status: %s", current_cluster_status)
 
-    _delete_old_tasks(cluster_tasks)
-    _delete_old_logs(db.get_events(), cluster_id)
+    # Retention housekeeping happens in _run_periodic_housekeeping (main
+    # loop, every few minutes), NOT here. It used to run on every pass: the
+    # event sweep is an unbounded full read of the events table, and at 12k
+    # entities it alone pushed a pass past the callers' 3s re-arm period --
+    # the capture described in update_cluster_status. On an hours-old
+    # cluster with 30-day retention it also deleted precisely nothing for
+    # that cost.
 
     # Suspend recovery: while the cluster is SUSPENDED, first drain every node
     # to OFFLINE (auto-restart is paused until then), so recovery restarts from
@@ -883,7 +927,15 @@ def _update_cluster_status_impl(cluster_id):
         _watchdog_stuck_activation(cluster)
         return
 
-    if current_cluster_status in [Cluster.STATUS_UNREADY, Cluster.STATUS_IN_EXPANSION]:
+    # IN_SHRINK, like IN_EXPANSION, is owned by a topology flow that restores
+    # the previous status itself; driving transitions under it would clobber
+    # that ownership. _watchdog_stuck_shrink below covers a flow that dies
+    # holding it.
+    if current_cluster_status in [Cluster.STATUS_UNREADY,
+                                  Cluster.STATUS_IN_EXPANSION,
+                                  Cluster.STATUS_IN_SHRINK]:
+        if current_cluster_status == Cluster.STATUS_IN_SHRINK:
+            _watchdog_stuck_shrink(cluster)
         return
 
     if current_cluster_status == Cluster.STATUS_DEGRADED and next_current_status == Cluster.STATUS_ACTIVE:
@@ -929,6 +981,38 @@ def _update_cluster_status_impl(cluster_id):
 # DOWN is NOT routed through auto-restart: SPDK is still alive and
 # cluster-internal traffic works -- only the client-facing port is
 # blocked. Recovery is port-unblock, not a destructive restart.
+
+
+#: Node ids whose ANA failover has already been applied for the CURRENT
+#: offline episode. Without this, the OFFLINE branch of check_node re-ran
+#: trigger_ana_failover_for_node on EVERY monitor cycle for as long as the
+#: node stayed offline: incident 2026-08-09 iteration 28 produced 2789
+#: nvmf_subsystem_listener_set_ana_state RPCs in 16 minutes (170/min, one
+#: per subsystem per cycle) against a single peer. Each of those is a real
+#: spdk_nvmf_subsystem_pause of a live subsystem (see _set_lvol_ana_on_node),
+#: so the churn lands on client-facing volumes exactly while the cluster is
+#: least able to absorb it. The promotion is idempotent in effect, so it only
+#: needs to run once per offline transition; the entry is dropped as soon as
+#: the node is observed in any non-OFFLINE state, so a later offline episode
+#: re-arms it.
+_ana_failover_applied: set = set()
+
+
+def _ana_failover_once(node) -> bool:
+    """Run ANA failover for ``node`` at most once per offline episode.
+
+    Returns True when the failover was actually invoked this call."""
+    node_id = node.get_id()
+    if node_id in _ana_failover_applied:
+        return False
+    storage_node_ops.trigger_ana_failover_for_node(node)
+    _ana_failover_applied.add(node_id)
+    return True
+
+
+def _ana_failover_rearm(node_id) -> None:
+    """Forget the one-shot marker so the next offline episode re-triggers."""
+    _ana_failover_applied.discard(node_id)
 
 
 def set_node_offline(node):
@@ -981,7 +1065,7 @@ def set_node_offline(node):
 
         try:
             logger.info(f"Triggering ANA failover for node {node.get_id()}")
-            storage_node_ops.trigger_ana_failover_for_node(node)
+            _ana_failover_once(node)
         except Exception as ana_e:
             logger.error("ANA failover for node %s failed: %s", node.get_id(), ana_e)
 
@@ -1001,7 +1085,7 @@ def set_node_unreachable(node):
                            StorageNode.STATUS_RESTARTING]:
         try:
             storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_UNREACHABLE)
-            update_cluster_status(cluster_id)
+            update_cluster_status(node.cluster_id)
         except Exception as e:
             logger.debug("Setting node to UNREACHABLE state failed")
             logger.error(e)
@@ -1203,7 +1287,7 @@ def set_node_schedulable(node):
                 if dev.status in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_READONLY,
                                   NVMeDevice.STATUS_CANNOT_ALLOCATE]:
                     device_controller.device_set_unavailable(dev.get_id())
-            update_cluster_status(cluster_id)
+            update_cluster_status(node.cluster_id)
         except Exception as e:
             logger.debug("Setting node to SCHEDULABLE state failed")
             logger.error(e)
@@ -1213,7 +1297,7 @@ def set_node_down(node):
     node = db.get_storage_node_by_id(node.get_id())
     if node.status not in [StorageNode.STATUS_DOWN, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_IN_SHUTDOWN]:
         storage_node_ops.set_node_status(node.get_id(), StorageNode.STATUS_DOWN)
-        update_cluster_status(cluster_id)
+        update_cluster_status(node.cluster_id)
 
 
 def node_rpc_timeout_check_and_report(node):
@@ -1353,8 +1437,27 @@ def _spdk_is_dead(snode):
 # again.
 LVSTORE_IN_CREATION_STALE_SEC = 600
 
+#: How long the monitor will keep deferring to an "active" restart task before
+#: it stops trusting it and resumes its own liveness handling.
+#:
+#: The deferral below assumed a restart task always terminates (max_retry +
+#: transient-reset). Incident 2026-08-17 22:03 broke that assumption: a restart
+#: wedged *inside a single execution* — an unbounded JM-replication wait against
+#: a peer that had just been rebooted — so it never completed an attempt, never
+#: consumed a retry and never finished. The peer's own restart was in turn
+#: deferred by the one-restart-at-a-time rule, and this monitor stood down for
+#: 50 minutes, so the peer's SPDK was never brought back: a three-way deadlock.
+#: Comfortably longer than a healthy restart (measured 2-6 min on a 6-node
+#: multipath cluster) so a legitimate restart is never fought (the 2026-06-24
+#: monitor-vs-restart churn), but bounded so a wedged one cannot freeze
+#: recovery for good.
+RESTART_TASK_DEFER_MAX_SEC = 1200
+
 # node_id -> monotonic-ish first time this monitor saw the marker set.
 _lvstore_in_creation_first_seen: dict = {}
+
+# node_id -> first time we deferred to that node's active restart task.
+_restart_task_defer_first_seen: dict = {}
 
 
 def check_node(snode):
@@ -1432,13 +1535,29 @@ def check_node(snode):
     # OFFLINE and queue a SECOND restart that fights the one already in flight
     # (incident 2026-06-24: device-25 JC abort, then ~90s of monitor-vs-restart
     # kill/restart churn). Defer until the task reaches DONE/canceled; the
-    # restart runner owns recovery and has its own max_retry + transient-reset,
-    # so this cannot defer forever.
+    # restart runner owns recovery and has its own max_retry + transient-reset.
+    #
+    # That is true only for a task that keeps making attempts. A task wedged
+    # inside one execution never consumes a retry, so the deferral is bounded
+    # by RESTART_TASK_DEFER_MAX_SEC — see that constant for the 2026-08-17
+    # deadlock this guards against.
     if tasks_controller.get_active_node_restart_task(snode.cluster_id, snode.get_id()):
-        logger.info(
-            "Node %s has an active restart task; monitor deferring liveness "
-            "checks until it completes", snode.get_id())
-        return True
+        deferred_since = _restart_task_defer_first_seen.setdefault(
+            snode.get_id(), time.time())
+        deferred_for = time.time() - deferred_since
+        if deferred_for < RESTART_TASK_DEFER_MAX_SEC:
+            logger.info(
+                "Node %s has an active restart task; monitor deferring liveness "
+                "checks until it completes (%.0fs so far)",
+                snode.get_id(), deferred_for)
+            return True
+        logger.error(
+            "Node %s has had an active restart task for %.0fs (> %ds) — the "
+            "task is not progressing. Resuming monitor liveness handling so a "
+            "wedged restart cannot block this node's recovery indefinitely.",
+            snode.get_id(), deferred_for, RESTART_TASK_DEFER_MAX_SEC)
+    else:
+        _restart_task_defer_first_seen.pop(snode.get_id(), None)
 
     logger.info(f"Checking node {snode.hostname}")
 
@@ -1448,11 +1567,22 @@ def check_node(snode):
     # intentionally shut down via sbctl.  Auto-restart is only added by
     # set_node_offline() when the monitor itself detects a failure.
     if snode.status == StorageNode.STATUS_OFFLINE:
+        # One-shot per offline episode. This branch exists because another
+        # service may have set the node offline without triggering the
+        # failover, so it must stay — but re-issuing it on every cycle turns
+        # a one-time promotion into a sustained pause storm on the peer
+        # (incident 2026-08-09: 2789 set_ana_state calls over 16 minutes).
         try:
-            storage_node_ops.trigger_ana_failover_for_node(snode)
+            if _ana_failover_once(snode):
+                logger.info("ANA failover applied for offline node %s "
+                            "(not previously triggered)", snode.get_id())
         except Exception as e:
             logger.error("ANA failover for offline node %s failed: %s", snode.get_id(), e)
         return True
+
+    # Any non-OFFLINE observation ends the episode: re-arm so a future
+    # offline transition triggers the promotion again.
+    _ana_failover_rearm(snode.get_id())
 
     # 1- check node ping
     ping_check = health_controller._check_node_ping(snode.mgmt_ip)
@@ -1612,6 +1742,30 @@ def readmit_devices_after_node_online(node_id):
         logger.error(f"Device re-admit after node clear to ONLINE failed: {e}")
 
 
+#: Retention housekeeping cadence. The scans are unbounded full-table reads
+#: (events especially), so they run from the MAIN loop on a period, never
+#: inside the per-status-change recompute path.
+HOUSEKEEPING_INTERVAL_SEC = 300
+_housekeeping_last_run: dict = {}
+
+
+def _run_periodic_housekeeping(cluster_id):
+    """Delete expired tasks and events for one cluster, at most once per
+    HOUSEKEEPING_INTERVAL_SEC. Runs in the main loop thread; a slow sweep
+    here delays only the next main-loop tick, never a node's liveness
+    monitoring."""
+    now = time.time()
+    last = _housekeeping_last_run.get(cluster_id, 0)
+    if now - last < HOUSEKEEPING_INTERVAL_SEC:
+        return
+    _housekeeping_last_run[cluster_id] = now
+    try:
+        _delete_old_tasks(db.get_job_tasks(cluster_id))
+        _delete_old_logs(db.get_events(), cluster_id)
+    except Exception as e:
+        logger.error(f"Retention housekeeping failed for {cluster_id}: {e}")
+
+
 def loop_for_node(snode):
     # global logger
     # logger = logging.getLogger()
@@ -1657,4 +1811,5 @@ if __name__ == "__main__":
                 logger.debug("Iteration has been finished...")
             except Exception:
                 logger.error("Error while updating cluster status")
+            _run_periodic_housekeeping(cluster_id)
         time.sleep(constants.NODE_MONITOR_INTERVAL_SEC)

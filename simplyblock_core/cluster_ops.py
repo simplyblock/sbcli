@@ -7,8 +7,9 @@ import threading
 import time
 import uuid
 import typing as t
-from datetime import datetime, timezone
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 
 import docker
 from kubernetes import client as k8s_client
@@ -17,7 +18,7 @@ import requests
 from docker.errors import DockerException
 from pydantic import SecretStr
 
-from simplyblock_core import utils, scripts, constants, mgmt_node_ops, storage_node_ops
+from simplyblock_core import utils, scripts, constants, mgmt_node_ops, release_upgrades, storage_node_ops
 from simplyblock_core.utils import port_block
 from simplyblock_core.controllers import backup_controller, cluster_events, device_controller, qos_controller, tasks_controller, tcp_ports_events
 from simplyblock_core.db_controller import DBController
@@ -30,12 +31,23 @@ from simplyblock_core.models.stats import LVolStatObject, ClusterStatObject, Nod
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.prom_client import PromClient
+from simplyblock_core.release_upgrades import jc_compression_upgrade
 from simplyblock_core.utils import pull_docker_image_with_retry
 from simplyblock_core.settings import Settings
 
 logger = utils.get_logger(__name__)
 
 db_controller = DBController()
+
+SUPPORTED_ERASURE_CODING_SCHEMES = {
+    (1, 0),
+    (1, 1),
+    (2, 1),
+    (4, 1),
+    (1, 2),
+    (2, 2),
+    (4, 2),
+}
 
 def _create_update_user(cluster_id, grafana_url, grafana_secret: SecretStr, user_secret: SecretStr, update_secret=False):
     session = requests.session()
@@ -255,6 +267,7 @@ def parse_protocols(input_str: str):
         "rdma": "rdma" in parts,
     }
 
+
 def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    cap_warn, cap_crit, prov_cap_warn, prov_cap_crit, ifname, mgmt_ip, log_del_interval, metrics_retention_period,
                    contact_point, grafana_endpoint, distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, mode,
@@ -265,10 +278,10 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
                    hashicorp_vault_settings : t.Optional[HashicorpVaultSettings] = None,
                    enable_failure_domain=False,
                    enable_hang_device=False,
+                   max_subsys=0, hugepages_mem=0, spdk_vcpu_count=0,
 ) -> str:
-
-    if distr_ndcs == 0 and distr_npcs == 0:
-        raise ValueError("both distr_ndcs and distr_npcs cannot be 0")
+    if (distr_ndcs, distr_npcs) not in SUPPORTED_ERASURE_CODING_SCHEMES:
+        raise ValueError("Unsupported erasure coding scheme")
 
     if max_fault_tolerance > 1:
         if ha_type != "ha":
@@ -398,6 +411,10 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.inflight_io_threshold = inflight_io_threshold
     cluster.strict_node_anti_affinity = strict_node_anti_affinity
     cluster.enable_failure_domain = enable_failure_domain
+    validate_spdk_sizing(max_subsys, hugepages_mem, spdk_vcpu_count)
+    cluster.max_subsys = max_subsys or 0
+    cluster.hugepages_mem = hugepages_mem or 0
+    cluster.spdk_vcpu_count = spdk_vcpu_count or 0
     cluster.contact_point = contact_point
     cluster.disable_monitoring = disable_monitoring
     cluster.mode = mode
@@ -499,6 +516,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
                 distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity, qpair_count,
                 max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name, cr_name=None,
                 cr_namespace=None, cr_plural=None, fabric="tcp",
+                max_subsys=0, hugepages_mem=0, spdk_vcpu_count=0,
                 client_data_nic="", max_fault_tolerance=1, backup_config=None,
                 nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001,
                 hashicorp_vault_settings : t.Optional[HashicorpVaultSettings] = None,
@@ -524,6 +542,7 @@ def add_cluster(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_cap_warn
         distr_bs=distr_bs, distr_chunk_bs=distr_chunk_bs, ha_type=ha_type, enable_node_affinity=enable_node_affinity,
         qpair_count=qpair_count, max_queue_size=max_queue_size, inflight_io_threshold=inflight_io_threshold,
         strict_node_anti_affinity=strict_node_anti_affinity, is_single_node=is_single_node, name=name,
+        max_subsys=max_subsys, hugepages_mem=hugepages_mem, spdk_vcpu_count=spdk_vcpu_count,
         cr_name=cr_name, cr_namespace=cr_namespace, cr_plural=cr_plural, fabric=fabric,
         client_data_nic=client_data_nic, max_fault_tolerance=max_fault_tolerance, backup_config=backup_config,
         nvmf_base_port=nvmf_base_port, rpc_base_port=rpc_base_port, snode_api_port=snode_api_port,
@@ -547,6 +566,7 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
                 distr_ndcs, distr_npcs, distr_bs, distr_chunk_bs, ha_type, enable_node_affinity, qpair_count,
                 max_queue_size, inflight_io_threshold, strict_node_anti_affinity, is_single_node, name, cr_name=None,
                 cr_namespace=None, cr_plural=None, fabric="tcp",
+                max_subsys=0, hugepages_mem=0, spdk_vcpu_count=0,
                 client_data_nic="", max_fault_tolerance=1, backup_config=None,
                 nvmf_base_port=4420, rpc_base_port=8080, snode_api_port=50001,
                 hashicorp_vault_settings : t.Optional[HashicorpVaultSettings] = None,
@@ -559,8 +579,8 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
             if existing.cluster_name and existing.cluster_name == name:
                 raise ValueError(f"A cluster with the name '{name}' already exists")
 
-    if distr_ndcs == 0 and distr_npcs == 0:
-        raise ValueError("both distr_ndcs and distr_npcs cannot be 0")
+    if (distr_ndcs, distr_npcs) not in SUPPORTED_ERASURE_CODING_SCHEMES:
+        raise ValueError("Unsupported erasure coding scheme")
 
     if max_fault_tolerance > 1:
         if ha_type != "ha":
@@ -649,6 +669,10 @@ def _add_cluster_impl(blk_size, page_size_in_blocks, cap_warn, cap_crit, prov_ca
     cluster.qpair_count = qpair_count or constants.QPAIR_COUNT
     cluster.max_queue_size = max_queue_size
     cluster.inflight_io_threshold = inflight_io_threshold
+    validate_spdk_sizing(max_subsys, hugepages_mem, spdk_vcpu_count)
+    cluster.max_subsys = max_subsys or 0
+    cluster.hugepages_mem = hugepages_mem or 0
+    cluster.spdk_vcpu_count = spdk_vcpu_count or 0
     cluster.cr_name = cr_name
     cluster.cr_namespace = cr_namespace
     cluster.cr_plural = cr_plural
@@ -713,6 +737,15 @@ def _wait_for_full_device_connectivity(cl_id, timeout_sec=300, poll_sec=10):
     """
     deadline = time.time() + timeout_sec
     prev_missing = None
+    # A stalled repair is bounded by round count as well as by the wall-clock
+    # deadline. The two express the same budget when the ``time.sleep`` below is
+    # real, but only the round count holds when it is not: the integration
+    # fixtures patch this module's ``time.sleep`` to a no-op, which turns the
+    # wait into thousands of full-mesh repair passes burning CPU for the whole
+    # timeout_sec. Rounds that make progress reset the counter, so a genuinely
+    # long repair keeps the same unbounded-while-shrinking behavior as before.
+    max_stalled_rounds = max(1, int(timeout_sec / poll_sec))
+    stalled_rounds = 0
     while True:
         snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
         online = [n for n in snodes
@@ -733,7 +766,7 @@ def _wait_for_full_device_connectivity(cl_id, timeout_sec=300, poll_sec=10):
             logger.info("Pre-activation connectivity check passed: %d nodes fully meshed "
                         "over %d devices", len(online), len(expected))
             return
-        if time.time() >= deadline:
+        if time.time() >= deadline or stalled_rounds >= max_stalled_rounds:
             sample = ", ".join(f"{n[:8]}->{o[:8]}/dev {d[:8]}" for n, o, d in missing[:8])
             raise ValueError(
                 f"Failed to activate cluster: {len(missing)} cross-node device "
@@ -838,8 +871,111 @@ def _wait_for_full_device_connectivity(cl_id, timeout_sec=300, poll_sec=10):
         # across a full round) still runs the clock out.
         if prev_missing is None or len(missing) < prev_missing:
             deadline = max(deadline, time.time() + timeout_sec / 2)
+            stalled_rounds = 0
+        else:
+            stalled_rounds += 1
         prev_missing = len(missing)
         time.sleep(poll_sec)
+
+
+def set_object_ops(cl_id, stopped) -> bool:
+    """Stop or resume object lifecycle operations on one cluster.
+
+    While stopped, creation, deletion and modification of lvols, snapshots,
+    clones and pools are refused -- including parameter changes such as QoS
+    limits and resizes. Read paths stay open, and the cluster keeps maintaining
+    itself (restarts, migrations, rebalancing) so a stopped cluster still
+    recovers from faults on its own.
+
+    Enforcement lives in the controllers (see controllers/ops_gate.py), which
+    is what both the CLI and the v2 API funnel through.
+    """
+    cluster = db_controller.get_cluster_by_id(cl_id)
+    stopped = bool(stopped)
+    if bool(getattr(cluster, "object_ops_stopped", False)) == stopped:
+        logger.info(
+            f"Object operations are already "
+            f"{'stopped' if stopped else 'started'} on cluster {cl_id}")
+        return True
+
+    db_controller.atomic_update(
+        cluster, lambda c, v=stopped: setattr(c, "object_ops_stopped", v))
+    logger.info(
+        f"Object operations {'stopped' if stopped else 'started'} on cluster {cl_id}")
+    try:
+        cluster_events.cluster_object_ops_change(
+            db_controller.get_cluster_by_id(cl_id), stopped)
+    except Exception as ev_err:
+        # The switch is already persisted; failing to journal it must not
+        # report the operation as failed.
+        logger.warning(f"Could not log the object-ops change event: {ev_err}")
+    return True
+
+
+def validate_spdk_sizing(max_subsys=None, hugepages_mem=None, spdk_vcpu_count=None):
+    """Check the cluster-wide SPDK sizing values, raising ValueError if unusable.
+
+    These are cluster-level on purpose: set per node they let a cluster drift
+    into nodes with different subsystem ceilings and different core budgets.
+    """
+    if max_subsys is not None and max_subsys:
+        if max_subsys < 0 or max_subsys > constants.MAX_SUBSYSTEMS_PER_NODE:
+            raise ValueError(
+                f"max_subsys must be between 1 and "
+                f"{constants.MAX_SUBSYSTEMS_PER_NODE} (0 = product default)")
+    if hugepages_mem is not None and hugepages_mem < 0:
+        raise ValueError("hugepages_mem cannot be negative (0 = computed)")
+    if spdk_vcpu_count is not None and spdk_vcpu_count < 0:
+        raise ValueError("spdk_vcpu_count cannot be negative (0 = heuristic)")
+
+
+def set_spdk_sizing(cluster_id, max_subsys=None, hugepages_mem=None) -> bool:
+    """Change the cluster-wide SPDK sizing that may be changed after creation.
+
+    A node adopts these when it is added and on every restart, so the change
+    lands node by node as they restart rather than immediately. spdk_vcpu_count
+    is not settable here: changing a running cluster's core budget rewrites
+    every node's core mask, which belongs to a deliberate re-deploy.
+    """
+    validate_spdk_sizing(max_subsys=max_subsys, hugepages_mem=hugepages_mem)
+    cluster = db_controller.get_cluster_by_id(cluster_id)
+    changes = {}
+    if max_subsys is not None:
+        changes["max_subsys"] = int(max_subsys)
+    if hugepages_mem is not None:
+        changes["hugepages_mem"] = int(hugepages_mem)
+    if not changes:
+        return True
+
+    def _apply(c, values=changes):
+        for key, value in values.items():
+            setattr(c, key, value)
+
+    db_controller.atomic_update(cluster, _apply)
+    logger.info(
+        f"Cluster {cluster_id} SPDK sizing updated: "
+        + ", ".join(f"{k}={v}" for k, v in changes.items())
+        + ". Nodes pick this up on their next restart.")
+    return True
+
+
+def _record_activated_nodes(cl_id) -> None:
+    """Freeze the node set that is now part of the activated cluster.
+
+    Written on the success path of both activation and expansion, so a later
+    re-activation can tell "the same cluster" from "the same cluster plus nodes
+    someone added while it was suspended".
+    """
+    try:
+        cluster = db_controller.get_cluster_by_id(cl_id)
+        node_ids = sorted(
+            n.get_id() for n in db_controller.get_storage_nodes_by_cluster_id(cl_id))
+        db_controller.atomic_update(
+            cluster, lambda c, v=node_ids: setattr(c, "activated_node_ids", v))
+    except Exception as e:
+        # Never fail an otherwise-successful activation over bookkeeping; the
+        # next activation or expansion rewrites it.
+        logger.warning(f"Could not record the activated node set: {e}")
 
 
 def cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
@@ -905,6 +1041,29 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
         if not force:
             raise ValueError("Failed to activate cluster, Cluster is in an ACTIVE state, use --force to reactivate")
 
+    # Growth by re-activation is not a supported path. Once a cluster has been
+    # activated its node set is fixed; nodes added afterwards are integrated by
+    # the expansion flow ("sn add-node --expansion" on an ACTIVE cluster), which
+    # rotates roles and rebalances data. Re-activating with extra nodes present
+    # would pull them in with none of that.
+    #
+    # The ACTIVE check above does not catch it: suspend -> add-node -> activate
+    # walks straight past, because a suspended cluster is not ACTIVE. There is
+    # deliberately no --force escape here -- forcing it produces a cluster whose
+    # roles and failure domains were never rotated for the new nodes, which is
+    # not a state an operator can ask for meaningfully.
+    current_node_ids = {
+        n.get_id() for n in db_controller.get_storage_nodes_by_cluster_id(cl_id)}
+    if cluster.activated_node_ids:
+        added = sorted(current_node_ids - set(cluster.activated_node_ids))
+        if added:
+            raise ValueError(
+                f"Cluster {cl_id} has already been activated and {len(added)} "
+                f"node(s) were added since: {', '.join(n[:8] for n in added)}. "
+                f"Re-activation must not grow a cluster. Remove those nodes, or "
+                f"grow the cluster with 'sn add-node --expansion' while it is "
+                f"ACTIVE.")
+
     ols_status = cluster.status
     if ols_status == Cluster.STATUS_IN_ACTIVATION:
         ols_status = Cluster.STATUS_UNREADY
@@ -957,6 +1116,7 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     # survive losing a whole failure domain we need at least npcs+1 distinct
     # domains; with fewer, placement falls back to host-disjoint and a domain
     # outage may exceed the cluster's fault tolerance.
+    fd_desired_layout: t.Dict[str, t.Tuple[str, str]] = {}
     if cluster.enable_failure_domain:
         distinct_domains = {node.failure_domain for node in online_nodes if node.failure_domain >= 0}
         min_domains = cluster.distr_npcs + 1
@@ -967,6 +1127,63 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                 "tolerate a full domain outage. Activating anyway with "
                 "best-effort placement.",
                 len(distinct_domains), sorted(distinct_domains) or "none", min_domains)
+
+        # Fresh activation is the only point where the whole HA layout is
+        # created at once, so the topology policy is enforced HARD here:
+        # every domain must hold the same number of hosts (the +/-1 rule of
+        # later expand/remove keeps oscillating around this balance), each
+        # host must sit entirely in one domain, and the host topology must
+        # be uniform. Roles are then assigned by an FD-interleaved rotation
+        # (secondary always lands cross-domain; the planner's rotation
+        # assumption becomes true by construction, which single-node
+        # expansion relies on). Re-activation (recovery of an existing
+        # layout) is deliberately NOT blocked: refusing to reactivate a
+        # drifted cluster would turn a policy violation into an outage.
+        if is_fresh_activation:
+            from simplyblock_core.controllers.cluster_expansion import planner as fd_planner
+
+            def _fd_fail(msg: str) -> None:
+                set_cluster_status(cl_id, ols_status)
+                raise ValueError(f"Failed to activate cluster: {msg}")
+
+            hosts: t.Dict[str, t.List] = {}
+            host_fd: t.Dict[str, int] = {}
+            for node in online_nodes:
+                if node.failure_domain < 0:
+                    _fd_fail(f"node {node.get_id()} has no failure-domain id; "
+                             f"all nodes need one on this cluster")
+                hosts.setdefault(node.mgmt_ip, []).append(node)
+                if host_fd.setdefault(node.mgmt_ip, node.failure_domain) != node.failure_domain:
+                    _fd_fail(f"host {node.mgmt_ip} spans failure domains "
+                             f"{host_fd[node.mgmt_ip]} and {node.failure_domain}; "
+                             f"a host must sit entirely in one domain")
+
+            fd_host_counts = Counter(host_fd.values())
+            if len(fd_host_counts) < 2:
+                _fd_fail("failure domains are enabled but all hosts are in a "
+                         "single domain; at least two domains are required")
+            if len(set(fd_host_counts.values())) != 1:
+                _fd_fail(
+                    f"failure domains must hold an EQUAL number of hosts at "
+                    f"activation; current split: "
+                    f"{ {fd: fd_host_counts[fd] for fd in sorted(fd_host_counts)} }. "
+                    f"Add or remove hosts to balance the domains, then activate.")
+            if cluster.ha_type == "ha":
+                host_order = fd_planner.fd_interleaved_host_order(
+                    [(ip, host_fd[ip]) for ip in hosts])
+                topology = [[n.get_id() for n in hosts[ip]] for ip in host_order]
+                try:
+                    fd_desired_layout = fd_planner.rotation_layout(
+                        topology, cluster.max_fault_tolerance)
+                except ValueError as e:
+                    _fd_fail(f"cannot build the failure-domain rotation: {e}")
+                violations = fd_planner.compute_fd_layout_violations(
+                    topology, cluster.max_fault_tolerance,
+                    {n.get_id(): n.failure_domain for n in online_nodes},
+                    layout=fd_desired_layout)
+                if violations:
+                    _fd_fail("failure-domain layout invariant violated: "
+                             + "; ".join(violations))
 
     for node in online_nodes:
         if cluster.is_single_node or len(online_nodes) <= 2:
@@ -983,6 +1200,9 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     snodes = db_controller.get_storage_nodes_by_cluster_id(cl_id)
     if cluster.ha_type == "ha":
         for snode in snodes:
+            # Do not assign secondary to removed node
+            if snode.status == StorageNode.STATUS_REMOVED:
+                continue
             if snode.is_secondary_node:  # pass
                 continue
             if snode.secondary_node_id:
@@ -991,7 +1211,12 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                 sec_node.write_to_db()
                 used_nodes_as_sec.append(snode.secondary_node_id)
             else:
-                secondary_nodes = storage_node_ops.get_secondary_nodes(snode)
+                if snode.get_id() in fd_desired_layout:
+                    # FD-interleaved rotation (fresh FD activation): the
+                    # secondary is cross-domain by construction.
+                    secondary_nodes = [fd_desired_layout[snode.get_id()][0]]
+                else:
+                    secondary_nodes = storage_node_ops.get_secondary_nodes(snode)
                 if not secondary_nodes:
                     set_cluster_status(cl_id, ols_status)
                     raise ValueError("Failed to activate cluster, No enough secondary nodes")
@@ -1008,13 +1233,18 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
             if cluster.max_fault_tolerance >= 2 and not snode.tertiary_node_id:
                 snode = db_controller.get_storage_node_by_id(snode.get_id())
                 sec_node = db_controller.get_storage_node_by_id(snode.secondary_node_id)
-                secondary_nodes_2 = storage_node_ops.get_secondary_nodes_2(
-                    snode,
-                    exclude_ids=[snode.secondary_node_id] + used_nodes_as_tertiary,
-                    exclude_mgmt_ips=[sec_node.mgmt_ip],
-                    exclude_failure_domains=[sec_node.failure_domain],
-                    exclude_physical_labels=[sec_node.physical_label],
-                )
+                if fd_desired_layout.get(snode.get_id(), ("", ""))[1]:
+                    # FD-interleaved rotation: tertiary from the same
+                    # deterministic layout as the secondary above.
+                    secondary_nodes_2 = [fd_desired_layout[snode.get_id()][1]]
+                else:
+                    secondary_nodes_2 = storage_node_ops.get_secondary_nodes_2(
+                        snode,
+                        exclude_ids=[snode.secondary_node_id] + used_nodes_as_tertiary,
+                        exclude_mgmt_ips=[sec_node.mgmt_ip],
+                        exclude_failure_domains=[sec_node.failure_domain],
+                        exclude_physical_labels=[sec_node.physical_label],
+                    )
                 if not secondary_nodes_2:
                     set_cluster_status(cl_id, ols_status)
                     raise ValueError("Failed to activate cluster, not enough nodes for dual fault tolerance")
@@ -1390,7 +1620,9 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
                     logger.error(f"Failed to set Alcemls QOS on node: {node.get_id()}")
 
     # Start JC compression on each node
-    if ols_status == Cluster.STATUS_UNREADY:
+    # (release-upgrade guard: held until `cluster upgrade-complete`, remove
+    # with the jc_compression_upgrade plugin)
+    if ols_status == Cluster.STATUS_UNREADY and not jc_compression_upgrade.resume_is_held(cluster):
         for node in db_controller.get_storage_nodes_by_cluster_id(cl_id):
             if node.status == StorageNode.STATUS_ONLINE:
                 ret, err = node.rpc_client().jc_suspend_compression(jm_vuid=node.jm_vuid, suspend=False)
@@ -1467,6 +1699,7 @@ def _cluster_activate(cl_id, force=False, force_lvstore_create=False) -> None:
     # want headroom for an unplanned failure concurrent with a rollout.)
     utils.set_storage_mcp_max_unavailable(cl_id, cluster.max_fault_tolerance)
 
+    _record_activated_nodes(cl_id)
     set_cluster_status(cl_id, Cluster.STATUS_ACTIVE)
     logger.info("Cluster activated successfully")
 
@@ -1544,6 +1777,7 @@ def cluster_expand(cl_id) -> None:
             set_cluster_status(cl_id, ols_status)
             raise ValueError("Failed to expand cluster")
 
+    _record_activated_nodes(cl_id)
     set_cluster_status(cl_id, Cluster.STATUS_ACTIVE)
     logger.info("Cluster expanded successfully")
 
@@ -1762,16 +1996,8 @@ def set_shared_placement(cl_id, enable=True, force=False) -> bool:
 
     # Step 3: persist the flag in every stored distrib stack entry on
     # every node, so restarts re-create with the new mode without needing
-    # to consult the cluster row.
-    #
-    # NB: only `lvstore_stack` is a List[dict] of bdev stack entries.
-    # Despite the model's type annotation, `lvstore_stack_secondary` and
-    # `_tertiary` hold a single UUID string — the id of the upstream
-    # primary whose LVS this node serves as a peer for. The peer's bdev
-    # params come from that primary's lvstore_stack at recreate time
-    # (see storage_node_ops._create_bdev_stack callers in step-2 /
-    # step-3 of full_node_recreate_lvstore), so updating the primary's
-    # stack here covers the peers automatically.
+    # to consult the cluster row. Peers recreate their bdevs from the
+    # primary's lvstore_stack, so updating primaries covers them too.
     for node in nodes:
         # Atomic compare-and-set: mutate only lvstore_stack on the freshly-read
         # node so the long per-node loop above can't clobber a concurrent
@@ -2191,8 +2417,26 @@ def get_cluster(cl_id) -> dict:
     return db_controller.get_cluster_by_id(cl_id).get_clean_dict()
 
 
-def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, mgmt_image=None, **kwargs) -> None:
+def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, mgmt_image=None,
+                   max_subsys=None, hugepages_mem=None, **kwargs) -> None:
     cluster = db_controller.get_cluster_by_id(cluster_id)  # ensure exists
+
+    # Cluster-wide SPDK sizing is a settings write, not an upgrade. Handled
+    # first, and when no image or control-plane flag was given this returns
+    # before the rollout: changing a number must not drag a whole cluster
+    # through an image update. Nodes adopt the new values on their next
+    # restart, so nothing here restarts anything.
+    if max_subsys is not None or hugepages_mem is not None:
+        set_spdk_sizing(cluster_id, max_subsys=max_subsys,
+                        hugepages_mem=hugepages_mem)
+        if not (spdk_image or mgmt_image or mgmt_only):
+            return
+
+    # Release-specific pre-upgrade steps (simplyblock_core/release_upgrades/).
+    # Must be the very first thing the upgrade does; raises to abort the
+    # upgrade before anything was changed. Completed later by
+    # `cluster upgrade-complete` (upgrade_complete below).
+    release_upgrades.run_pre_update(cluster)
 
     logger.info("Updating mgmt cluster")
     if cluster.mode == "docker":
@@ -2205,9 +2449,9 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
         service_names = []
         image_parts = ["simplyblock-io/simplyblock:", "simplyblock/simplyblock:", "simply-block/simplyblock:"]
         for service in cluster_docker.services.list():
-            service_image=service.attrs['Spec']['Labels']['com.docker.stack.image']
+            container_image=service.attrs['Spec']['Labels']['com.docker.stack.image']
             for part in image_parts:
-                if part in service_image:
+                if part in container_image:
                     if service.name in ["app_CachingNodeMonitor", "app_CachedLVolStatsCollector"]:
                         logger.info(f"Removing service {service.name}")
                         service.remove()
@@ -2221,21 +2465,28 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
             utils.create_docker_service(
                 cluster_docker=cluster_docker,
                 service_name="app_SnapshotMonitor",
-                service_file="python simplyblock_core/services/snapshot_monitor.py",
+                service_file="python3 simplyblock_core/services/snapshot_monitor.py",
                 service_image=service_image)
 
         if "app_TasksRunnerLVolSyncDelete" not in service_names:
             utils.create_docker_service(
                 cluster_docker=cluster_docker,
                 service_name="app_TasksRunnerLVolSyncDelete",
-                service_file="python simplyblock_core/services/tasks_runner_sync_lvol_del.py",
+                service_file="python3 simplyblock_core/services/tasks_runner_sync_lvol_del.py",
                 service_image=service_image)
 
         if "app_TasksRunnerJCCompResume" not in service_names:
             utils.create_docker_service(
                 cluster_docker=cluster_docker,
                 service_name="app_TasksRunnerJCCompResume",
-                service_file="python simplyblock_core/services/tasks_runner_jc_comp.py",
+                service_file="python3 simplyblock_core/services/tasks_runner_jc_comp.py",
+                service_image=service_image)
+
+        if "app_BackupService" not in service_names:
+            utils.create_docker_service(
+                cluster_docker=cluster_docker,
+                service_name="app_BackupService",
+                service_file="python3 simplyblock_core/services/tasks_runner_fdb_backup.py",
                 service_image=service_image)
 
         logger.info("Done updating mgmt cluster")
@@ -2357,6 +2608,17 @@ def update_cluster(cluster_id, mgmt_only=False, restart=False, spdk_image=None, 
     logger.info("Done")
 
 
+def upgrade_complete(cluster_id) -> bool:
+    """Completes a cluster upgrade started by update_cluster: runs the
+    completion step of every release-upgrade plugin that left state on the
+    cluster (e.g. resuming JC compression) and stamps the installed release.
+    Safe to re-run: with no pending plugin state it only re-stamps."""
+    cluster = db_controller.get_cluster_by_id(cluster_id)
+    for message in release_upgrades.run_upgrade_complete(cluster):
+        logger.info(message)
+    return True
+
+
 def cluster_grace_startup(cl_id, clear_data=False, spdk_image=None) -> None:
     get_cluster = db_controller.get_cluster_by_id(cl_id)  # ensure exists
 
@@ -2461,7 +2723,7 @@ def delete_cluster(cl_id) -> None:
     cluster.remove(db_controller.kv_store)
     logger.info("Done")
 
-def set(cl_id, attr, value) -> bool:
+def set_(cl_id, attr, value) -> bool:
     cluster = db_controller.get_cluster_by_id(cl_id)
     key_splits = attr.split(".")
     key = key_splits[0]
@@ -2487,23 +2749,30 @@ def set(cl_id, attr, value) -> bool:
 
 def add_replication(source_cl_id, target_cl_id, timeout=0, target_pool=None) -> bool:
     db_controller = DBController()
-    cluster = db_controller.get_cluster_by_id(source_cl_id)
-    if not cluster:
+    # The get_*_by_id() helpers raise KeyError rather than returning None, so
+    # translate here; a bare KeyError traceback used to reach the operator.
+    try:
+        db_controller.get_cluster_by_id(source_cl_id)
+    except KeyError:
         raise ValueError(f"Cluster not found: {source_cl_id}")
 
-    target_cluster = db_controller.get_cluster_by_id(target_cl_id)
-    if not target_cluster:
+    try:
+        db_controller.get_cluster_by_id(target_cl_id)
+    except KeyError:
         raise ValueError(f"Target cluster not found: {target_cl_id}")
 
     logger.info("Updating Cluster replication target")
     new_pool = None
     if target_pool:
-        pool = db_controller.get_pool_by_id(target_pool)
-        if not pool:
+        # --target-pool is documented as "ID or name".
+        try:
+            pool = db_controller.get_pool_by_id_or_name(target_pool)
+        except KeyError:
             raise ValueError(f"Pool not found: {target_pool}")
         if pool.status != Pool.STATUS_ACTIVE:
             raise ValueError(f"Pool not active: {target_pool}")
-        new_pool = target_pool
+        # Store the UUID: the name is mutable, the reference must not be.
+        new_pool = pool.get_id()
     new_timeout = timeout if (timeout and timeout > 0) else None
 
     # Atomic: mutate only the replication fields on the freshly-read cluster so

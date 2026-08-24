@@ -235,6 +235,28 @@ class RpcServerSim:
             model_number=model_number, min_cntlid=min_cntlid)
         return True
 
+    def subsystem_get(self, nqn, **_):
+        """Return the subsystem in nvmf_get_subsystems shape, or None.
+
+        Callers use ``None`` to mean "not present, create it" and otherwise
+        read ``listen_addresses`` / ``namespaces`` off the result. Without this
+        the generic passthrough answered with a bare ``True``, which those
+        callers then tried to ``.get()``.
+        """
+        sub = self.subsystems.get(nqn)
+        if sub is None:
+            return None
+        return {
+            "nqn": sub.nqn,
+            "serial_number": sub.serial_number,
+            "model_number": sub.model_number,
+            "listen_addresses": [
+                {"trtype": "TCP", "traddr": traddr, "trsvcid": str(trsvcid)}
+                for traddr, trsvcid, _ana in sub.listeners
+            ],
+            "namespaces": [{"uuid": ns} for ns in sub.namespaces],
+        }
+
     def subsystem_delete(self, nqn, **_):
         self.subsystems.pop(nqn, None)
         return True

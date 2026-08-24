@@ -28,6 +28,7 @@ from simplyblock_core.constants import LINUX_DRV_MASS_STORAGE_NVME_TYPE_ID, LINU
 from simplyblock_core.controllers import lvol_controller, storage_events, snapshot_controller, device_events, \
     device_controller, tasks_controller, health_controller, tcp_ports_events, qos_controller
 from simplyblock_core.controllers.host_auth import _reapply_allowed_hosts
+from simplyblock_core import db_controller as db_module
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.iface import IFace
 from simplyblock_core.models.job_schedule import JobSchedule
@@ -35,10 +36,12 @@ from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice, RemoteDevice, RemoteJMDevice
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.release_upgrades import jc_compression_upgrade
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.prom_client import PromClient
-from simplyblock_core.rpc_client import RPCClient, RPCException  # noqa: F401  (RPCClient kept as a patch target for tests)
+from simplyblock_core.rpc_client import RPCClient, RPCErrorCode, RPCRemoteError, RPCException, namespace_matches  # noqa: F401  (RPCClient kept as a patch target for tests)
 from simplyblock_core.snode_client import SNodeClient, SNodeClientException
+from simplyblock_core.utils import dial_backoff
 from simplyblock_web import node_utils
 from simplyblock_core.utils import addNvmeDevices
 from simplyblock_core.utils import pull_docker_image_with_retry
@@ -68,21 +71,44 @@ class LVSRestartRequiredError(Exception):
         super().__init__(msg)
 
 
-def _rpc_subsystem_has_ns(rpc_client, nqn, nsid=None, bdev_name=None):
-    """True iff the subsystem has a namespace matching nsid and/or bdev_name."""
+def _rpc_subsystem_has_ns(rpc_client, nqn, nsid=None, bdev_name=None, uuid=None):
+    """True iff the subsystem has the namespace identified by nsid/bdev_name/uuid.
+
+    Matching is delegated to :func:`rpc_client.namespace_matches`, which
+    accepts the namespace UUID as well as the bdev name — SPDK reports an
+    lvol's namespace under its raw UUID rather than the ``<lvs>/<lvol>``
+    alias, and a bdev_name-only comparison therefore misses it. Always pass
+    ``uuid`` when the caller knows it.
+    """
     try:
         subsystem = rpc_client.subsystem_get(nqn)
         if subsystem is None:
             return False
-        for ns in subsystem.get('namespaces', []) or []:
-            if nsid is not None and ns.get('nsid') != nsid:
-                continue
-            if bdev_name is not None and ns.get('bdev_name') != bdev_name:
-                continue
-            return True
-        return False
+        return any(
+            namespace_matches(ns, dev_name=bdev_name, nsid=nsid, uuid=uuid)
+            for ns in subsystem.get('namespaces', []) or []
+        )
     except Exception:
         return False
+
+
+def _rpc_wait_subsystem_has_ns(rpc_client, nqn, nsid=None, bdev_name=None,
+                               uuid=None, tries=10, delay=0.2):
+    """:func:`_rpc_subsystem_has_ns` with a bounded poll.
+
+    ``nvmf_subsystem_add_ns`` can report success a moment before the namespace
+    is observable on the subsystem, so a single read is not enough to conclude
+    "empty subsystem" and permanently skip listener creation. Polling briefly
+    keeps the post-condition strict without turning a propagation delay into
+    a volume that has silently lost a path.
+    """
+    for attempt in range(max(1, tries)):
+        if _rpc_subsystem_has_ns(rpc_client, nqn, nsid=nsid,
+                                 bdev_name=bdev_name, uuid=uuid):
+            return True
+        if attempt + 1 < tries:
+            time.sleep(delay)
+    return False
 
 
 def _rpc_subsystem_has_listener(rpc_client, nqn, trtype, traddr, trsvcid):
@@ -119,7 +145,7 @@ def _rpc_lvstore_exists(rpc_client, lvs_name):
         return False
 
 
-def _kill_spdk_until_dead(snode, max_attempts=3, poll_per_attempt_sec=5,
+def _kill_spdk_until_dead(snode: StorageNode, max_attempts=3, poll_per_attempt_sec=5,
                            poll_interval=0.25):
     """Kill SPDK on `snode` and return only after it is verifiably gone.
 
@@ -137,6 +163,14 @@ def _kill_spdk_until_dead(snode, max_attempts=3, poll_per_attempt_sec=5,
     OFFLINE so it stops being treated as in_restart).
     """
     snode_api = snode.client(timeout=5, retry=5)
+    # Each attempt is bounded BOTH ways, and needs both. The wall-clock deadline
+    # is what keeps the documented ``max_attempts * poll_per_attempt_sec`` cap
+    # when a single spdk_process_is_up blocks (unreachable node: TCP connect
+    # timeout x retries). The round count is what keeps the cap when sleeping is
+    # free — the integration fixtures patch this module's ``time.sleep`` to a
+    # no-op, which turns a bare deadline loop into a hot spin burning the whole
+    # poll_per_attempt_sec of CPU per attempt.
+    rounds_per_attempt = max(1, int(poll_per_attempt_sec / poll_interval))
     for attempt in range(1, max_attempts + 1):
         try:
             snode_api.spdk_process_kill(snode.rpc_port, snode.cluster_id)
@@ -147,7 +181,9 @@ def _kill_spdk_until_dead(snode, max_attempts=3, poll_per_attempt_sec=5,
             )
 
         deadline = time.time() + poll_per_attempt_sec
-        while time.time() < deadline:
+        for _ in range(rounds_per_attempt):
+            if time.time() >= deadline:
+                break
             try:
                 # spdk_process_is_up returns a (result, error) tuple; unpack it.
                 # Treating the raw tuple as a bool is always truthy, so the
@@ -180,22 +216,27 @@ def _kill_spdk_until_dead(snode, max_attempts=3, poll_per_attempt_sec=5,
 
 
 
-def _set_lvol_ana_on_node(lvol, node, ana_state):
+def _set_lvol_ana_on_node(lvol: LVol, node: StorageNode, ana_state):
     """Set ANA state for a single lvol's listeners on a given node."""
     rpc_client = node.rpc_client(timeout=10, retry=2)
     listener_port = node.get_lvol_subsys_port(lvol.lvs_name)
     for iface in node.data_nics:
         if iface.ip4_address and (lvol.fabric == iface.trtype.lower() or (lvol.fabric == "tcp" and node.active_tcp)):
             trtype = iface.trtype if lvol.fabric == iface.trtype.lower() else "TCP"
+            # Scope the flip to this volume's ANA group (group id == namespace
+            # id): a subsystem can carry several namespaces whose volumes are
+            # migrated, suspended or failed over independently.
             ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
-                lvol.nqn, iface.ip4_address, listener_port, trtype=trtype, ana=ana_state)
+                lvol.nqn, iface.ip4_address, listener_port, trtype=trtype, ana=ana_state,
+                anagrpid=lvol.ns_id)
             if not ret:
                 logger.warning("Failed to set ANA state %s for %s on %s", ana_state, lvol.nqn, node.get_id())
             else:
-                logger.info("ANA: %s on %s (%s) → %s", lvol.nqn, node.get_id(), iface.ip4_address, ana_state)
+                logger.info("ANA: %s ns %s on %s (%s) → %s", lvol.nqn, lvol.ns_id,
+                            node.get_id(), iface.ip4_address, ana_state)
 
 
-def _failover_primary_ana(primary_node):
+def _failover_primary_ana(primary_node: StorageNode):
     """Primary failed: promote first_sec→optimized.
 
     The second_sec stays at non_optimized (its permanent state).
@@ -208,20 +249,22 @@ def _failover_primary_ana(primary_node):
     if primary_node.secondary_node_id:
         first_sec = db_ctrl.get_storage_node_by_id(primary_node.secondary_node_id)
 
-    # Namespaces share subsystems (one NQN hosts many lvols) and the listener
-    # RPC is per-subsystem — repeating it per lvol multiplies the ANA calls
-    # (and, for stale records whose subsystem is gone, the error spam) by the
-    # namespace count. One call per (nqn, lvs) covers every lvol in it.
-    seen_subsystems = set()
+    # Dedupe per NAMESPACE, not per subsystem. The old per-(nqn, lvs) dedupe was
+    # correct only while the flip was subsystem-wide: now that each volume's
+    # state is confined to its own ANA group, skipping the other namespaces of a
+    # shared subsystem would leave every volume but the first one unpromoted.
+    # Records that share (nqn, lvs, ns_id) are genuine duplicates and still cost
+    # only one call.
+    seen_namespaces = set()
     for lvol in lvol_list:
-        if (lvol.nqn, lvol.lvs_name) in seen_subsystems:
+        if (lvol.nqn, lvol.lvs_name, lvol.ns_id) in seen_namespaces:
             continue
-        seen_subsystems.add((lvol.nqn, lvol.lvs_name))
+        seen_namespaces.add((lvol.nqn, lvol.lvs_name, lvol.ns_id))
         if first_sec and first_sec.status == StorageNode.STATUS_ONLINE:
             _set_lvol_ana_on_node(lvol, first_sec, "optimized")
 
 
-def _failback_primary_ana(primary_node):
+def _failback_primary_ana(primary_node: StorageNode):
     """Primary restarting: demote first_sec→non_optimized.
 
     The second_sec is already non_optimized and never changes.
@@ -234,17 +277,17 @@ def _failback_primary_ana(primary_node):
     if primary_node.secondary_node_id:
         first_sec = db_ctrl.get_storage_node_by_id(primary_node.secondary_node_id)
 
-    # Same per-subsystem dedupe as _failover_primary_ana.
-    seen_subsystems = set()
+    # Same per-namespace dedupe as _failover_primary_ana.
+    seen_namespaces = set()
     for lvol in lvol_list:
-        if (lvol.nqn, lvol.lvs_name) in seen_subsystems:
+        if (lvol.nqn, lvol.lvs_name, lvol.ns_id) in seen_namespaces:
             continue
-        seen_subsystems.add((lvol.nqn, lvol.lvs_name))
+        seen_namespaces.add((lvol.nqn, lvol.lvs_name, lvol.ns_id))
         if first_sec and first_sec.status == StorageNode.STATUS_ONLINE:
             _set_lvol_ana_on_node(lvol, first_sec, "non_optimized")
 
 
-def trigger_ana_failover_for_node(offline_node):
+def trigger_ana_failover_for_node(offline_node: StorageNode):
     """Trigger ANA failover when a node goes offline.
 
     Only action needed: if the offline node is a primary, promote its
@@ -261,7 +304,7 @@ def trigger_ana_failover_for_node(offline_node):
             logger.error("ANA failover for primary role of %s failed: %s", node_id, e)
 
 
-def trigger_ana_failback_for_node(restarting_node):
+def trigger_ana_failback_for_node(restarting_node: StorageNode):
     """Trigger ANA failback when a primary comes back online.
 
     Demote first_sec from optimized back to non_optimized.
@@ -379,6 +422,9 @@ def _recreate_lvstore_lock(lvs_name):
 #: blast radius to ONE port at risk at any moment. Lock order: per-LVS
 #: recreate lock -> hublvol advisory locks -> THIS gate (innermost); the
 #: gated span acquires no other module lock, so no cycle is possible.
+#: Released in a ``finally`` by both recreate impls: the acquire has no
+#: timeout, so an exception escaping while it is held wedges every later
+#: restart/recreate in this process.
 _port_block_window_gate = threading.Lock()
 
 #: Window-priority drain: BEFORE a client-port-block window opens, new
@@ -554,7 +600,7 @@ def connect_device(name: str, device: NVMeDevice, node: StorageNode, attach_time
             expected_ips, is_multipath)
 
 
-def _connect_device_attach(name, device, node, rpc_client, attach_rpc_client,
+def _connect_device_attach(name, device, node: StorageNode, rpc_client, attach_rpc_client,
                            expected_ips, is_multipath):
     """Controller inspect + attach path of connect_device.
 
@@ -621,13 +667,24 @@ def _connect_device_attach(name, device, node, rpc_client, attach_rpc_client,
         # Controller is fully gone — do a full multi-path attach.
         bdev_name = ""
         for ip in (expected_ips or [device.nvmf_ip]):
+            # Circuit breaker per target address: dialling a peer that has
+            # refused the last N connects burns this node's app-thread time
+            # on connect polling for nothing -- see utils/dial_backoff.
+            if not dial_backoff.allowed(ip):
+                logger.debug(f"Attach to {ip} for {name} held by dial backoff")
+                continue
             try:
                 resp = attach_rpc_client.bdev_nvme_attach_controller(
                     name, device.nvmf_nqn, ip, device.nvmf_port, tr_type,
                     multipath=attach_mode)
+                if resp:
+                    dial_backoff.record_success(ip)
+                else:
+                    dial_backoff.record_failure(ip)
                 if not bdev_name and resp and isinstance(resp, list):
                     bdev_name = resp[0]
             except Exception as e:
+                dial_backoff.record_failure(ip)
                 logger.warning(f"Failed to attach controller {name} via {ip}: {e}")
 
             if device.nvmf_multipath and bdev_name:
@@ -667,11 +724,19 @@ def _connect_device_attach(name, device, node, rpc_client, attach_rpc_client,
                 "Controller %s has %d/%d paths attached, attaching missing: %s",
                 name, len(attached_ips), len(expected_ips), missing_ips)
             for ip in missing_ips:
+                if not dial_backoff.allowed(ip):
+                    logger.debug(
+                        f"Re-attach of {ip} on {name} held by dial backoff")
+                    continue
                 try:
-                    attach_rpc_client.bdev_nvme_attach_controller(
-                        name, device.nvmf_nqn, ip, device.nvmf_port, tr_type,
-                        multipath=attach_mode)
+                    if attach_rpc_client.bdev_nvme_attach_controller(
+                            name, device.nvmf_nqn, ip, device.nvmf_port, tr_type,
+                            multipath=attach_mode):
+                        dial_backoff.record_success(ip)
+                    else:
+                        dial_backoff.record_failure(ip)
                 except Exception as e:
+                    dial_backoff.record_failure(ip)
                     logger.warning(
                         "Failed to re-attach path %s on controller %s: %s",
                         ip, name, e)
@@ -751,11 +816,31 @@ def repair_multipath_controller(name: str, device, node: StorageNode):
         "Controller %s has %d/%d paths attached, re-attaching missing: %s",
         name, len(attached_ips), len(expected_ips), missing_ips)
     for ip in missing_ips:
+        # Circuit breaker per target address: repeated refusals earn the
+        # address a hold (utils/dial_backoff). Status gates cannot cover a
+        # peer whose DB record is wrong (SPDK dead, record ONLINE -- run
+        # mass_create_delete_docker-20260821), and hammering a refusing
+        # address wedged a healthy node's app thread there.
+        if not dial_backoff.allowed(ip):
+            logger.debug("Repair of path %s on %s held by dial backoff", ip, name)
+            continue
         try:
-            rpc_client.bdev_nvme_attach_controller(
-                name, device.nvmf_nqn, ip, device.nvmf_port,
-                tr_type, multipath="multipath")
+            # The return value matters: a fabric connect that cannot reach the
+            # address answers with an error result rather than raising, so
+            # discarding it made every such failure silent apart from the
+            # "still missing" line below. 478 of these went unattributed during
+            # the 2026-08-20 soak, all of them "-5 Input/output error".
+            if not rpc_client.bdev_nvme_attach_controller(
+                    name, device.nvmf_nqn, ip, device.nvmf_port,
+                    tr_type, multipath="multipath"):
+                dial_backoff.record_failure(ip)
+                logger.warning(
+                    "Re-attach of path %s on controller %s was rejected by the "
+                    "target", ip, name)
+            else:
+                dial_backoff.record_success(ip)
         except Exception as e:
+            dial_backoff.record_failure(ip)
             logger.error("Failed to re-attach path %s on controller %s: %s", ip, name, e)
 
     # Re-read and recognize partial success: a 1/2 outcome is still
@@ -825,7 +910,7 @@ def _search_for_partitions(rpc_client, nvme_device):
     return partitioned_devices
 
 
-def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
+def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode: StorageNode, after_restart):
     # RAID 0+1 journal layout (see simplyblock_core/jm_raid.py):
     #   1 device   -> no raid (bare device)
     #   2 devices  -> raid1 over two single-device legs  (a 2-way mirror)
@@ -875,7 +960,7 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
     jm_bdev = f"jm_{snode.get_id()}"
     ret = rpc_client.bdev_jm_create(jm_bdev, alceml_name, jm_cpu_mask=snode.jm_cpu_mask,
                                     shared_placement=cluster.shared_placement,
-                                    compression_thread=constants.JM_COMPRESSION_THREAD_ENABLED,
+                                    compression_thread=False,
                                     compression_cpu_mask=snode.compression_cpu_mask)
     if not ret:
         logger.error(f"Failed to create {jm_bdev}")
@@ -939,7 +1024,7 @@ def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode, after_restart):
     })
 
 
-def _create_jm_stack_on_device(rpc_client, nvme, snode, after_restart):
+def _create_jm_stack_on_device(rpc_client, nvme, snode: StorageNode, after_restart):
     alceml_id = nvme.get_id()
     alceml_name = device_controller.get_alceml_name(alceml_id)
     db_controller = DBController()
@@ -968,7 +1053,7 @@ def _create_jm_stack_on_device(rpc_client, nvme, snode, after_restart):
     jm_bdev = f"jm_{snode.get_id()}"
     ret = rpc_client.bdev_jm_create(jm_bdev, alceml_name, jm_cpu_mask=snode.jm_cpu_mask,
                                     shared_placement=cluster.shared_placement,
-                                    compression_thread=constants.JM_COMPRESSION_THREAD_ENABLED,
+                                    compression_thread=False,
                                     compression_cpu_mask=snode.compression_cpu_mask)
     if not ret:
         logger.error(f"Failed to create {jm_bdev}")
@@ -1030,7 +1115,7 @@ def _create_jm_stack_on_device(rpc_client, nvme, snode, after_restart):
     })
 
 
-def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
+def _create_storage_device_stack(rpc_client, nvme, snode: StorageNode, after_restart):
     db_controller = DBController()
     nvme_bdev = nvme.nvme_bdev
     if snode.enable_test_device:
@@ -1103,7 +1188,7 @@ def _create_storage_device_stack(rpc_client, nvme, snode, after_restart):
     return nvme
 
 
-def _create_device_partitions(rpc_client, nvme, snode, num_partitions_per_dev, jm_percent, partition_size, nbd_index):
+def _create_device_partitions(rpc_client, nvme, snode: StorageNode, num_partitions_per_dev, jm_percent, partition_size, nbd_index):
     nbd_device = rpc_client.nbd_start_disk(nvme.nvme_bdev, f"/dev/nbd{nbd_index}")
     time.sleep(3)
     if not nbd_device:
@@ -1141,7 +1226,7 @@ def _create_device_partitions(rpc_client, nvme, snode, num_partitions_per_dev, j
     return True
 
 
-def _prepare_cluster_devices_partitions(snode, devices):
+def _prepare_cluster_devices_partitions(snode: StorageNode, devices):
     db_controller = DBController()
     new_devices = []
     devices_to_partition = []
@@ -1231,7 +1316,7 @@ def _prepare_cluster_devices_partitions(snode, devices):
     return True
 
 
-def _prepare_cluster_devices_jm_on_dev(snode, devices):
+def _prepare_cluster_devices_jm_on_dev(snode: StorageNode, devices):
     db_controller = DBController()
     if not devices:
         return True
@@ -1270,7 +1355,7 @@ def _prepare_cluster_devices_jm_on_dev(snode, devices):
     return True
 
 
-def _prepare_cluster_devices_on_restart(snode, clear_data=False):
+def _prepare_cluster_devices_on_restart(snode: StorageNode, clear_data=False):
     db_controller = DBController()
 
     new_devices = []
@@ -1373,7 +1458,7 @@ def _prepare_cluster_devices_on_restart(snode, clear_data=False):
         jm_bdev = f"jm_{snode.get_id()}"
         ret = rpc_client.bdev_jm_create(jm_bdev, jm_device.alceml_bdev, jm_cpu_mask=snode.jm_cpu_mask,
                                         shared_placement=cluster.shared_placement,
-                                        compression_thread=constants.JM_COMPRESSION_THREAD_ENABLED,
+                                        compression_thread=False,
                                         compression_cpu_mask=snode.compression_cpu_mask)
         if not ret:
             logger.error(f"Failed to create {jm_bdev}")
@@ -1951,7 +2036,7 @@ def reconnect_dropped_remote_devs(this_node: StorageNode):
     return changed, all_ok
 
 
-def _peer_reachable_via_jm_quorum(target_node_id, this_node, peer_probe_timeout=1):
+def _peer_reachable_via_jm_quorum(target_node_id, this_node: StorageNode, peer_probe_timeout=1):
     """Check whether ``target_node`` is reachable on the data plane by asking
     other online peers about their JM quorum state.
 
@@ -1986,7 +2071,7 @@ def _peer_reachable_via_jm_quorum(target_node_id, this_node, peer_probe_timeout=
     return not probed
 
 
-def _connect_to_remote_jm_devs(this_node, jm_ids=None, only_node_id=None):
+def _connect_to_remote_jm_devs(this_node: StorageNode, jm_ids=None, only_node_id=None):
     """Connect ``this_node`` to remote JM devices and return the refreshed
     remote-JM records.
 
@@ -2352,18 +2437,191 @@ def _classify_existing_endpoint_record(db_controller, cluster_id, node_addr, ssd
       kill its SPDK and delete the record, then re-add.
     - ("conflict", node): record in any other status — refuse; the operator
       must delete or restart that node explicitly.
+
+    More than one record can match at once: a pod restart mid-onboarding
+    (e.g. a transient node NotReady blip restarting the DaemonSet pod before
+    the backend's own online-match safeguard applies) can leave a stale
+    in_creation record behind even after a LATER add attempt for the same
+    host has gone fully online (2026-08-06, gr5kf incident) — that stale
+    record is never revisited by any other code path, so it must win the
+    classification here regardless of which match iteration happens to find
+    first: a cleanup is always needed when one exists, independent of
+    whether another match is already online.
     """
-    for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
-        if node.api_endpoint != node_addr:
-            continue
-        if not any(ssd in node.ssd_pcie for ssd in ssd_pcie):
-            continue
-        if node.status == StorageNode.STATUS_ONLINE:
-            return "already_added", node
+    matches = [
+        node
+        for node in db_controller.get_storage_nodes_by_cluster_id(cluster_id)
+        if node.api_endpoint == node_addr and any(ssd in node.ssd_pcie for ssd in ssd_pcie)
+    ]
+    for node in matches:
         if node.status == StorageNode.STATUS_IN_CREATION:
             return "cleanup", node
-        return "conflict", node
+    for node in matches:
+        if node.status == StorageNode.STATUS_ONLINE:
+            return "already_added", node
+    if matches:
+        return "conflict", matches[0]
     return None, None
+
+
+def _resolve_core_distribution(distribution, core_to_index):
+    """utils.calculate_core_allocations returns a positional 9-tuple of core
+    lists, not the {"app_thread_core": [...], ...} dict every consumer
+    (add_node, persist_node_config's schema) actually reads -- regenerate_config
+    resolves it this exact way (get_core_indexes against core_to_index) before
+    it ever reaches a node_config; do the same here.
+    """
+    keys = (
+        "app_thread_core", "jm_cpu_core", "poller_cpu_cores", "alceml_cpu_cores",
+        "alceml_worker_cpu_cores", "distrib_cpu_cores", "jc_singleton_core",
+        "lvol_poller_core", "compression_core",
+    )
+    return {
+        key: utils.get_core_indexes(core_to_index, group)
+        for key, group in zip(keys, distribution)
+    }
+
+
+def apply_cluster_vcpu_count(snode_api, node_info, nodes, vcpu_count):
+    """Resize this host's isolated-core layout to the cluster's vcpu_count, in
+    place on ``nodes`` and persisted to the host's on-disk config, exactly the
+    way huge-page memory is persisted via persist_node_config.
+
+    A node's CPU layout is decided once, here, at add time; nothing else ever
+    touches it afterwards -- restart_storage_node only ever re-adopts
+    max_subsys/hugepages_mem. add_node itself can be retried though (a prior
+    attempt may have already resized and persisted this host's layout), so
+    this must be a no-op when it has: skip re-fetching topology and rewriting
+    the file whenever the host's current isolated-core totals, summed per
+    socket, already match what vcpu_count implies for that socket.
+
+    Returns True on success (including the no-op case) and False if the
+    layout could not be resized -- add_node must then refuse the add rather
+    than run SPDK on a stale, cluster-mismatched core count.
+    """
+    sockets_to_use = sorted({node["socket"] for node in nodes})
+    if not sockets_to_use:
+        return True
+
+    # Same split as generate_core_allocation: the budget divides evenly
+    # across the sockets in use, remainder to the earlier ones.
+    base, remainder = divmod(vcpu_count, len(sockets_to_use))
+    per_socket_budget = {
+        numa_socket: base + (1 if index < remainder else 0)
+        for index, numa_socket in enumerate(sockets_to_use)
+    }
+
+    changed_sockets = [
+        numa_socket for numa_socket in sockets_to_use
+        if sum(len(n.get("isolated") or []) for n in nodes if n["socket"] == numa_socket)
+           != per_socket_budget[numa_socket]
+    ]
+    if not changed_sockets:
+        return True
+
+    cpu_topology = node_info.get("cpu_topology")
+    if not cpu_topology:
+        logger.error(
+            "This cluster requires %d SPDK vCPU(s) per host, but the node did "
+            "not report its CPU topology (upgrade the node agent, or re-run "
+            "'sbcli sn configure'); cannot resize its core layout.", vcpu_count)
+        return False
+    cores_by_numa = {int(numa): cores for numa, cores in cpu_topology.items()}
+
+    # nodes_per_socket is not passed in from anywhere -- it is however many
+    # slots already share the busiest socket in this host's persisted config.
+    nodes_per_socket = max(
+        sum(1 for n in nodes if n["socket"] == numa_socket)
+        for numa_socket in sockets_to_use
+    )
+
+    new_layout = utils.generate_core_allocation(
+        cores_by_numa, sockets_to_use, nodes_per_socket, vcpu_count)
+
+    for numa_socket in changed_sockets:
+        entries = [n for n in nodes if n["socket"] == numa_socket]
+        replacements = new_layout.get(numa_socket, [])
+        if len(replacements) != len(entries):
+            logger.error(
+                "Cannot resize storage node CPUs on socket %s: expected %d "
+                "node slot(s) there, computed %d for a vcpu-count of %d -- "
+                "leaving its current CPU layout in place.",
+                numa_socket, len(entries), len(replacements), vcpu_count)
+            return False
+        # Both lists follow the same order convention (generate_configs walks
+        # sockets_to_use, then each socket's slots in generate_core_allocation
+        # order) so position-by-position pairing is the entries' identity.
+        for entry, replacement in zip(entries, replacements):
+            entry["cpu_mask"] = replacement["cpu_mask"]
+            entry["isolated"] = replacement["isolated"]
+            entry["l-cores"] = replacement["l-cores"]
+            entry["distribution"] = _resolve_core_distribution(
+                replacement["distribution"], replacement["core_to_index"])
+            entry["core_to_index"] = replacement["core_to_index"]
+            ok, err = snode_api.persist_node_config(
+                max_lvol=None, huge_page_memory=None, numa_node=numa_socket,
+                ssd_list=entry.get("ssd_pcis"),
+                cpu_mask=entry["cpu_mask"], isolated=entry["isolated"],
+                l_cores=entry["l-cores"], distribution=entry["distribution"],
+                core_to_index={str(k): v for k, v in entry["core_to_index"].items()})
+            if not ok:
+                logger.error(
+                    "Failed to persist the resized CPU layout for socket %s: %s",
+                    numa_socket, err)
+                return False
+    return True
+
+
+def apply_cluster_hugepages(snode_api, node_config, req_cpu_count, max_prov):
+    """Recalculate this node_config entry's huge-page memory -- and the
+    small/large pool counts it is derived from -- against the real numbers
+    now known, and persist the change, the same way the CPU layout resize
+    in apply_cluster_vcpu_count does.
+
+    sn configure priced this entry for the worst case: max_lvol capped at
+    the product ceiling and its own default core-count heuristic, since it
+    ran before the node belonged to any cluster. By the time this runs,
+    node_config["max_lvol"] is already the cluster's real max_subsys (set
+    above in add_node) and req_cpu_count is already the cluster's real
+    vcpu_count (via apply_cluster_vcpu_count, before the per-entry loop) --
+    so recomputing here against the same formula sn configure used, just fed
+    the real numbers, is the accurate figure. A no-op when it already
+    matches what's on file: in particular when the cluster set neither
+    max_subsys nor vcpu_count, nothing about this entry's sizing has
+    actually changed since configure time.
+
+    Returns the correct huge_page_memory (already floored to max_prov) on
+    success, or None if persisting a change failed.
+    """
+    max_lvol = int(node_config.get("max_lvol") or 0)
+    number_of_alcemls = int(node_config.get("number_of_alcemls") or 0)
+    number_of_distribs = int(node_config.get("number_of_distribs") or 0)
+    poller_cores = (node_config.get("distribution") or {}).get("poller_cpu_cores") or []
+    poller_count = len(poller_cores) or req_cpu_count
+
+    small_pool_count, large_pool_count = utils.calculate_pool_count(
+        number_of_alcemls, 2 * number_of_distribs, req_cpu_count, poller_count, max_lvol)
+    huge_page_memory = max(
+        utils.calculate_minimum_hp_memory(
+            small_pool_count, large_pool_count, max_lvol, max_prov, req_cpu_count),
+        max_prov)
+
+    if (huge_page_memory == node_config.get("huge_page_memory")
+            and small_pool_count == node_config.get("small_pool_count")
+            and large_pool_count == node_config.get("large_pool_count")):
+        return huge_page_memory
+
+    node_config["huge_page_memory"] = huge_page_memory
+    node_config["small_pool_count"] = small_pool_count
+    node_config["large_pool_count"] = large_pool_count
+    ok, err = snode_api.persist_node_config(
+        max_lvol=None, huge_page_memory=huge_page_memory, numa_node=node_config.get("socket"),
+        ssd_list=node_config.get("ssd_pcis"),
+        small_pool_count=small_pool_count, large_pool_count=large_pool_count)
+    if not ok:
+        logger.error("Failed to persist the recalculated huge-page sizing: %s", err)
+        return None
+    return huge_page_memory
 
 
 def add_node(cluster_id, node_addr, iface_name, data_nics_list,
@@ -2389,7 +2647,37 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             logger.error(msg)
             return False
 
+    # An activated cluster only grows through the expansion flow: a plain add
+    # leaves the node outside the role rotation and the rebalance. This also
+    # closes the loophole of activate -> suspend -> add-node -> activate, which
+    # re-activation used to accept because a suspended cluster is not ACTIVE.
+    try:
+        _cluster = db_controller.get_cluster_by_id(cluster_id)
+    except KeyError:
+        logger.error("Cluster not found: %s", cluster_id)
+        return False
+    if not expansion and (_cluster.status == Cluster.STATUS_ACTIVE
+                          or _cluster.activated_node_ids):
+        logger.error(
+            "Cluster %s has already been activated; add nodes with --expansion "
+            "while the cluster is ACTIVE so roles are rotated and data is "
+            "rebalanced", cluster_id)
+        return False
+
     snode_api.set_hugepages()
+
+    # Resize this host's core layout to the cluster's vcpu_count once, before
+    # any node_config entry is consumed below, so every entry in the loop
+    # already reflects it. A no-op when the host's layout already matches
+    # (see apply_cluster_vcpu_count) -- in particular on a retried add_node,
+    # where a prior attempt already resized and persisted it.
+    cluster_vcpu_count = int(getattr(_cluster, "spdk_vcpu_count", 0) or 0)
+    if cluster_vcpu_count and not apply_cluster_vcpu_count(
+            snode_api, node_info, nodes, cluster_vcpu_count):
+        logger.error("Refusing the add -- could not resize node %s's CPU "
+                     "layout to the cluster's vcpu-count", node_addr)
+        return False
+
     for node_config in nodes:
         logger.debug(node_config)
         kv_store = db_controller.kv_store
@@ -2401,6 +2689,28 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             return False
 
         ha_jm_count = resolve_ha_jm_count(cluster, ha_jm_count)
+
+        # Cluster-level SPDK sizing. These live on the cluster so every node is
+        # sized alike; a node adopts them when it is added and on each restart.
+        cluster_max_subsys = int(getattr(cluster, "max_subsys", 0) or 0)
+        cluster_hp_mem = int(getattr(cluster, "hugepages_mem", 0) or 0)
+        cluster_vcpu_count = int(getattr(cluster, "spdk_vcpu_count", 0) or 0)
+
+        if cluster_vcpu_count:
+            total_cores = int(node_info.get("cpu_count") or 0)
+            # Refuse rather than quietly running SPDK on fewer cores than the
+            # cluster asks for. The rule (one core beyond the SPDK budget) lives
+            # in utils.vcpu_requirement_met so add and restart cannot drift.
+            if not utils.vcpu_requirement_met(total_cores, cluster_vcpu_count):
+                logger.error(
+                    "Node reports %d vCPU(s); this cluster requires %d for SPDK "
+                    "plus at least one for the system (%d total). Refusing the "
+                    "node -- lower the cluster vcpu-count or use a larger host.",
+                    total_cores, cluster_vcpu_count, cluster_vcpu_count + 1)
+                return False
+
+        if cluster_max_subsys:
+            node_config["max_lvol"] = cluster_max_subsys
 
         # Failure-domain id is mandatory exactly when the cluster has the
         # feature enabled (deploy-time only — clusters cannot be upgraded into
@@ -2433,6 +2743,25 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         #         return False
         ip_iface = utils.get_mgmt_ip(node_info, iface_name)
         mgmt_ip = ip_iface[0] if ip_iface else None
+
+        # A host's failure domain is immutable for the lifetime of its node
+        # records: re-adding / adding another slot with a different domain id
+        # would be an in-place FD migration, which is not supported (remove
+        # the node, restore balance, then re-add it in the target domain).
+        if cluster.enable_failure_domain and mgmt_ip:
+            for _n in db_controller.get_storage_nodes_by_cluster_id(cluster_id):
+                if (_n.status != StorageNode.STATUS_REMOVED
+                        and _n.mgmt_ip == mgmt_ip
+                        and _n.failure_domain >= 0
+                        and _n.failure_domain != failure_domain_id):
+                    logger.error(
+                        f"Host {mgmt_ip} already belongs to failure domain "
+                        f"{_n.failure_domain} (node {_n.get_id()}); adding it "
+                        f"with --failure-domain {failure_domain_id} would "
+                        f"migrate it between domains, which is not supported. "
+                        f"Remove the node first, restore balance, then re-add "
+                        f"it in the target domain.")
+                    return False
 
         cloud_instance = node_info['cloud_instance']
         if not cloud_instance:
@@ -2470,17 +2799,23 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 f"ERROR: The provided cpu mask {req_cpu_count} has values greater than 63, which is not allowed")
             return False
 
-        # Calculate pool count
-        max_prov = 0
-        if node_config.get("max_size"):
+        # Calculate pool count. The huge-page floor is the cluster's
+        # hugepages_mem; a max_size left in an older host config is still
+        # honoured so a node configured before this change keeps working.
+        max_prov = cluster_hp_mem
+        if not max_prov and node_config.get("max_size"):
             max_prov = int(utils.parse_size(node_config.get("max_size")))
         if max_prov < 0:
-            logger.error(f"Incorrect max-prov value {max_prov}")
+            logger.error(f"Incorrect huge-page floor value {max_prov}")
             return False
 
-        minimum_hp_memory = node_config.get("huge_page_memory")
-
-        minimum_hp_memory = max(minimum_hp_memory, max_prov)
+        # sn configure sized huge_page_memory for the worst case (product-
+        # ceiling max_lvol, its own default core-count heuristic); recompute
+        # it against the real max_lvol/req_cpu_count now that both reflect
+        # the cluster, and persist only if that actually changes anything.
+        minimum_hp_memory = apply_cluster_hugepages(snode_api, node_config, req_cpu_count, max_prov)
+        if minimum_hp_memory is None:
+            return False
 
         # check for memory
         if "memory_details" in node_info and node_info['memory_details']:
@@ -2501,6 +2836,34 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         else:
             minimum_sys_memory = node_config.get("sys_memory")
         max_lvol = node_config.get("max_lvol")
+        # Clamp rather than fail: a config file generated before the cap was
+        # enforced (or hand-edited) can carry a larger value, and refusing the
+        # add would strand hosts that are otherwise fine. The node record then
+        # states the limit that actually applies at placement time.
+        if max_lvol and int(max_lvol) > constants.MAX_SUBSYSTEMS_PER_NODE:
+            logger.warning(
+                f"max_lvol {max_lvol} from the node config exceeds the maximum of "
+                f"{constants.MAX_SUBSYSTEMS_PER_NODE} subsystems per storage node; "
+                f"using {constants.MAX_SUBSYSTEMS_PER_NODE}")
+            max_lvol = constants.MAX_SUBSYSTEMS_PER_NODE
+
+        # minimum_hp_memory is the real, cluster-aware figure now (via
+        # apply_cluster_hugepages above), not sn configure's worst-case
+        # estimate -- so unlike that estimate, a shortfall against it is a
+        # genuine one and belongs here, not a warning.
+        satisfied, _ = utils.calculate_spdk_memory(
+            minimum_hp_memory, minimum_sys_memory,
+            memory_details['free'], memory_details['huge_total'])
+        if not satisfied:
+            logger.error(
+                "Not enough memory on %s for max_lvol=%s, %s SPDK vCPU(s): need %s "
+                "huge-page + %s system memory, have %s free + %s huge-page. Lower "
+                "the cluster's max-subsys/vcpu-count or use a host with more memory.",
+                node_addr, max_lvol, req_cpu_count,
+                utils.humanbytes(minimum_hp_memory), utils.humanbytes(minimum_sys_memory),
+                utils.humanbytes(memory_details['free']), utils.humanbytes(memory_details['huge_total']))
+            return False
+
         ssd_pcie = node_config.get("ssd_pcis")
 
         if ssd_pcie:
@@ -2564,8 +2927,17 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         # permanently block its own retry (2026-07-17, node f6308adb).
         if expansion:
             from simplyblock_core.controllers.cluster_expansion.preconditions import (
-                check_expansion_preconditions)
+                check_expansion_preconditions, check_fd_admission_for_add)
             ok, reason = check_expansion_preconditions(cluster, db_controller)
+            if not ok:
+                logger.error(f"Cannot start expansion node-add: {reason}")
+                return False
+            # Failure-domain admission (+/-1 rule): the post-add per-domain
+            # host split must stay balanced within one host. Re-checked with
+            # the newcomer in the DB by integrate_new_node_into_cluster.
+            ok, reason = check_fd_admission_for_add(
+                cluster, db_controller, failure_domain_id,
+                new_mgmt_ip=mgmt_ip)
             if not ok:
                 logger.error(f"Cannot start expansion node-add: {reason}")
                 return False
@@ -2851,6 +3223,7 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         snode.active_tcp = active_tcp
         snode.active_rdma = active_rdma
         snode.spdk_proxy_image = spdk_proxy_image
+        snode.spdk_version = spdk_proxy_image.split(":")[1]
 
         if 'cpu_count' in node_info:
             snode.cpu = node_info['cpu_count']
@@ -2985,11 +3358,22 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
         # restart path has the same call). Nothing else may call
         # bdev_lvol_create_poller_group later — a second call with a different
         # mask (the old create_s3_bdev path did this with app_thread_mask)
-        # either fails or lands the pollers on the wrong core. It must run on
-        # the same thread/core as the JC singleton, so the JC mask wins;
-        # lvol_poller_mask is the fallback for configs without a dedicated JC
-        # core.
-        poller_group_mask = snode.jc_singleton_mask or snode.lvol_poller_mask
+        # either fails or lands the pollers on the wrong core.
+        #
+        # lvol_poller_mask is the single source of truth for which core this
+        # runs on: calculate_core_allocations() already colocates
+        # lvol_poller_core with jc_singleton_core unless the config gives it
+        # its own dedicated core (>=32 vCPU, compression-thread layout), so
+        # using it directly honors both cases correctly. Do NOT override it
+        # with jc_singleton_mask unconditionally here — that was tried
+        # (e3e8fd08) before lvol_poller_core was aligned with jc_singleton_core
+        # at the source, and it silently clobbered the dedicated-core case,
+        # forcing the poller group onto JC's core even when the config
+        # deliberately gave it a separate one. jc_singleton_mask is only a
+        # last-resort fallback for the pathological case where
+        # lvol_poller_core's own reservation came up empty (cores exhausted)
+        # while a JC core still exists — this RPC must still run on some core.
+        poller_group_mask = snode.lvol_poller_mask or snode.jc_singleton_mask
         if poller_group_mask:
             try:
                 rpc_client.bdev_lvol_create_poller_group(poller_group_mask)
@@ -3401,6 +3785,17 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
         for task in tasks:
             tasks_controller.cancel_task(task.uuid)
 
+    # Failure-domain admission: the post-removal per-domain host split must
+    # stay within the +/-1 balance rule and keep >=2 hosts per domain.
+    # Enforced only once the cluster has an HA layout to protect.
+    from simplyblock_core.controllers.cluster_expansion.preconditions import (
+        check_fd_admission_for_remove)
+    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+    ok, reason = check_fd_admission_for_remove(cluster, db_controller, snode)
+    if not ok:
+        logger.error(f"Can not remove node {node_id}: {reason}")
+        return False
+
     # Case-B feasibility: every replica this node hosts for another primary must
     # have somewhere host-disjoint to go. Catches e.g. 2-node clusters where the
     # tertiary cannot be re-placed without violating anti-affinity.
@@ -3418,7 +3813,7 @@ def remove_storage_node(node_id, force_remove=False, force_migrate=False):
     return task_id
 
 
-def _check_replica_relocation_feasible(removed_node, db_controller):
+def _check_replica_relocation_feasible(removed_node: StorageNode, db_controller):
     """Pre-flight Case-B check: a secondary/tertiary replica hosted on
     ``removed_node`` for some OTHER primary must have a valid relocation target.
     Returns (feasible: bool, reason: str)."""
@@ -3440,16 +3835,26 @@ def _check_replica_relocation_feasible(removed_node, db_controller):
     return True, ""
 
 
-def _pick_replica_relocation_node(primary, removed_node, role, db_controller):
+def _pick_replica_relocation_node(primary, removed_node: StorageNode, role, db_controller):
     """Choose a node to re-host ``primary``'s ``role`` (secondary|tertiary)
     replica, currently on ``removed_node``. Returns a node id or None.
-    Reuses the existing anti-affinity-aware placement helpers."""
+    Reuses the existing anti-affinity-aware placement helpers.
+
+    With failure domains enabled, the >=1-cross-domain-role invariant is
+    enforced HARD here (not best-effort): if the primary's OTHER non-leader
+    role does not already live in a different domain than the primary, the
+    replacement must — otherwise a full-domain outage would leave the LVS
+    with zero surviving paths. Returning None makes
+    ``_check_replica_relocation_feasible`` refuse the removal up front.
+    """
     exclude_ids = [removed_node.get_id()]
     if role == "secondary":
+        other_id = primary.tertiary_node_id
         if primary.tertiary_node_id and primary.tertiary_node_id != removed_node.get_id():
             exclude_ids.append(primary.tertiary_node_id)
         cands = get_secondary_nodes(primary, exclude_ids=exclude_ids, removed_node=removed_node)
     else:
+        other_id = primary.secondary_node_id
         exclude_mgmt_ips = []
         if primary.secondary_node_id and primary.secondary_node_id != removed_node.get_id():
             exclude_ids.append(primary.secondary_node_id)
@@ -3460,7 +3865,33 @@ def _pick_replica_relocation_node(primary, removed_node, role, db_controller):
                 pass
         cands = get_secondary_nodes_2(
             primary, exclude_ids=exclude_ids, exclude_mgmt_ips=exclude_mgmt_ips)
-    return cands[0] if cands else None
+    if not cands:
+        return None
+
+    cluster = db_controller.get_cluster_by_id(primary.cluster_id)
+    if (getattr(cluster, "enable_failure_domain", False)
+            and primary.failure_domain >= 0):
+        other_cross = False
+        if other_id and other_id != removed_node.get_id():
+            try:
+                other = db_controller.get_storage_node_by_id(other_id)
+                other_cross = (other.failure_domain >= 0
+                               and other.failure_domain != primary.failure_domain)
+            except KeyError:
+                pass
+        if not other_cross:
+            # The replacement is the primary's only cross-domain role —
+            # same-domain candidates are not acceptable.
+            for cand_id in cands:
+                try:
+                    cand = db_controller.get_storage_node_by_id(cand_id)
+                except KeyError:
+                    continue
+                if (cand.failure_domain >= 0
+                        and cand.failure_domain != primary.failure_domain):
+                    return cand_id
+            return None
+    return cands[0]
 
 
 def node_removal_orchestrate(node_id, force_remove=False):
@@ -3483,49 +3914,62 @@ def node_removal_orchestrate(node_id, force_remove=False):
     if snode.status == StorageNode.STATUS_REMOVED:
         return True
 
-    # Phase 1 — shut the node down (graceful). Skipped on re-entry.
-    if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:
-        logger.info(f"[REMOVAL] {node_id}: phase 1 — shutdown")
-        ret = shutdown_storage_node(node_id, force=force_remove)
-        if isinstance(ret, tuple):
-            ret, reason = ret
-            if not ret:
-                logger.error(f"[REMOVAL] {node_id}: shutdown failed: {reason}")
+    # Node removal is a recognised restart-phase owner: phase 3b relocates
+    # replicas onto an ONLINE target and sets a restart phase there, which
+    # get_restart_phase would otherwise judge stale and clear out from under
+    # the live rebuild. Held for ONE attempt only — this returns False and is
+    # retried, and a phase cannot outlive the attempt that set it.
+    # Restore the CAPTURED status, not ACTIVE: the cluster is usually DEGRADED
+    # here, since the node being removed has just been shut down.
+    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+    prev_cluster_status = cluster.status
+    cluster_ops.set_cluster_status(cluster.get_id(), Cluster.STATUS_IN_SHRINK)
+    try:
+        # Phase 1 — shut the node down (graceful). Skipped on re-entry.
+        if snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED]:
+            logger.info(f"[REMOVAL] {node_id}: phase 1 — shutdown")
+            ret = shutdown_storage_node(node_id, force=force_remove)
+            if isinstance(ret, tuple):
+                ret, reason = ret
+                if not ret:
+                    logger.error(f"[REMOVAL] {node_id}: shutdown failed: {reason}")
+                    return False
+            elif not ret:
+                logger.error(f"[REMOVAL] {node_id}: shutdown failed")
                 return False
-        elif not ret:
-            logger.error(f"[REMOVAL] {node_id}: shutdown failed")
+            snode = db_controller.get_storage_node_by_id(node_id)
+
+        # Phase 3a — tear down the (empty) secondary/tertiary replicas of THIS
+        # node's own primary LVS, on the peers that host them (Case A).
+        logger.info(f"[REMOVAL] {node_id}: phase 3a — tear down own replicas")
+        if not _teardown_replicas_of_primary(snode):
             return False
+
+        # Phase 3b — relocate replicas this node hosts for OTHER primaries (Case B).
+        logger.info(f"[REMOVAL] {node_id}: phase 3b — relocate hosted replicas")
+        if not _relocate_replicas_hosted_on(snode):
+            return False
+
+        # Phase 5 — finalize (swarm leave, gpt cleanup) and flip to removed.
+        logger.info(f"[REMOVAL] {node_id}: phase 4 — finalize")
+        _finalize_node_removal(snode)
+        set_node_status(node_id, StorageNode.STATUS_REMOVED, caused_by="remove")
         snode = db_controller.get_storage_node_by_id(node_id)
+        # storage_events.snode_status_change(
+        #     snode, StorageNode.STATUS_REMOVED, StorageNode.STATUS_IN_REMOVAL, caused_by="remove")
 
-    # Phase 3a — tear down the (empty) secondary/tertiary replicas of THIS
-    # node's own primary LVS, on the peers that host them (Case A).
-    logger.info(f"[REMOVAL] {node_id}: phase 3a — tear down own replicas")
-    if not _teardown_replicas_of_primary(snode):
-        return False
+        # Phase 4 — remove + fail devices, then wait for failure-migration to finish.
+        logger.info(f"[REMOVAL] {node_id}: phase 5 — devices remove/fail/migrate")
+        if not _decommission_node_devices(snode):
+            return False
 
-    # Phase 3b — relocate replicas this node hosts for OTHER primaries (Case B).
-    logger.info(f"[REMOVAL] {node_id}: phase 3b — relocate hosted replicas")
-    if not _relocate_replicas_hosted_on(snode):
-        return False
-
-    # Phase 5 — finalize (swarm leave, gpt cleanup) and flip to removed.
-    logger.info(f"[REMOVAL] {node_id}: phase 4 — finalize")
-    _finalize_node_removal(snode)
-    set_node_status(node_id, StorageNode.STATUS_REMOVED, caused_by="remove")
-    snode = db_controller.get_storage_node_by_id(node_id)
-    # storage_events.snode_status_change(
-    #     snode, StorageNode.STATUS_REMOVED, StorageNode.STATUS_IN_REMOVAL, caused_by="remove")
-
-    # Phase 4 — remove + fail devices, then wait for failure-migration to finish.
-    logger.info(f"[REMOVAL] {node_id}: phase 5 — devices remove/fail/migrate")
-    if not _decommission_node_devices(snode):
-        return False
-
-    logger.info(f"[REMOVAL] {node_id}: done")
-    return True
+        logger.info(f"[REMOVAL] {node_id}: done")
+        return True
+    finally:
+        cluster_ops.set_cluster_status(cluster.get_id(), prev_cluster_status)
 
 
-def _teardown_replicas_of_primary(removed_node):
+def _teardown_replicas_of_primary(removed_node: StorageNode):
     """Case A: the primary LVS lives on ``removed_node`` (now shut down).
     Delete its secondary/tertiary replicas from the peers that host them and
     clear the cross-reference bookkeeping. The node has no LVols (enforced at
@@ -3574,23 +4018,23 @@ def _delete_replica_on_peer(peer, primary, cluster):
         return
     try:
         nqn = peer.hublvol_nqn_for_lvstore(cluster.nqn, lvstore)
-        if rpc_client.subsystem_list(nqn):
+        if rpc_client.subsystem_get(nqn):
             rpc_client.subsystem_delete(nqn)
-    except Exception as e:
+    except RPCException as e:
         logger.warning(f"hublvol subsystem teardown for {lvstore} on {peer.get_id()} failed: {e}")
     try:
         rpc_client.bdev_lvol_delete_hublvol(lvstore)
-    except Exception as e:
+    except RPCException as e:
         logger.warning(f"hublvol bdev teardown for {lvstore} on {peer.get_id()} failed: {e}")
     try:
         # deepcopy: _remove_bdev_stack stamps bdev['status']; don't mutate the
         # primary's stored stack definition.
         _remove_bdev_stack(copy.deepcopy(primary.lvstore_stack), rpc_client)
-    except Exception as e:
+    except RPCException as e:
         logger.warning(f"replica bdev-stack teardown for {lvstore} on {peer.get_id()} failed: {e}")
 
 
-def _relocate_replicas_hosted_on(removed_node):
+def _relocate_replicas_hosted_on(removed_node: StorageNode):
     """Case B: ``removed_node`` holds a secondary and/or tertiary replica for
     other primaries. Re-host each on a fresh, anti-affinity-valid node so the
     owning primary keeps its fault tolerance after this node leaves."""
@@ -3609,7 +4053,7 @@ def _relocate_replicas_hosted_on(removed_node):
     return True
 
 
-def _relocate_one_replica(removed_node, primary_id, role):
+def _relocate_one_replica(removed_node: StorageNode, primary_id, role):
     """Re-host ``primary_id``'s ``role`` replica off ``removed_node``.
 
     Idempotent: the back-reference on ``removed_node`` is cleared only AFTER the
@@ -3659,7 +4103,7 @@ def _relocate_one_replica(removed_node, primary_id, role):
     return True
 
 
-def _clear_replica_backref(removed_node, backref):
+def _clear_replica_backref(removed_node: StorageNode, backref):
     db_controller = DBController()
     removed_node = db_controller.get_storage_node_by_id(removed_node.get_id())
     if getattr(removed_node, backref):
@@ -3667,7 +4111,7 @@ def _clear_replica_backref(removed_node, backref):
         removed_node.write_to_db()
 
 
-def _decommission_node_devices(removed_node):
+def _decommission_node_devices(removed_node: StorageNode):
     """Remove, fail and migrate every data device on ``removed_node``.
 
     Drives each device ONLINE/UNAVAILABLE -> REMOVED -> FAILED (which queues the
@@ -3729,7 +4173,7 @@ def _decommission_node_devices(removed_node):
     return True
 
 
-def _finalize_node_removal(removed_node):
+def _finalize_node_removal(removed_node: StorageNode):
     """Best-effort host cleanup before the node is flipped to REMOVED: leave the
     docker swarm and wipe GPT partitions. Mirrors the tail of the legacy
     offline-removal path."""
@@ -3792,6 +4236,14 @@ def restart_storage_node(
     the only way post-call status can be RESTARTING is that THIS call's
     `try_set_node_restarting` acquired the lock and a subsequent step
     failed — that's the case the cleanup is for."""
+    # Refuse an over-cap max_lvol before touching node status: a restart is
+    # the one path that can raise an existing node's limit, and the impl
+    # applies it (snode.max_lvol = max_lvol) without any ceiling of its own.
+    if max_lvol and max_lvol > constants.MAX_SUBSYSTEMS_PER_NODE:
+        logger.error(f"max_lvol {max_lvol} exceeds the maximum of "
+                     f"{constants.MAX_SUBSYSTEMS_PER_NODE} subsystems per storage node")
+        return False
+
     db_ctrl = DBController()
     pre_status = None
     _snode_pre = None
@@ -3818,6 +4270,23 @@ def restart_storage_node(
     # task when it drives this restart and passes it in via
     # current_restart_task_id — creating a second one here would be
     # redundant and would fight the runner's own task for the lease.
+    # Per-node restart claim token: identifies THIS driver (CLI process or
+    # task-runner thread) for the cross-actor mutual exclusion enforced in
+    # try_set_node_restarting's FDB tx. The heartbeat below keeps the claim
+    # fresh while the (potentially minutes-long) restart runs; it lands only
+    # once the impl has actually acquired the claim (owner-matched CAS is a
+    # no-op before that). Released in the finally block on every exit path.
+    _claim_token = _new_restart_claim_token()
+    _claim_hb_stop = threading.Event()
+
+    def _claim_heartbeat():
+        while not _claim_hb_stop.wait(constants.RESTART_CLAIM_HEARTBEAT_SEC):
+            try:
+                db_ctrl.refresh_node_restart_claim(node_id, _claim_token)
+            except Exception as hb_e:
+                logger.debug(f"Restart claim heartbeat failed for {node_id}: {hb_e}")
+    threading.Thread(target=_claim_heartbeat, daemon=True).start()
+
     _hb_stop = threading.Event()
     _owned_task_id = None
     if current_restart_task_id is None and pre_status not in (
@@ -3864,7 +4333,8 @@ def restart_storage_node(
             force=force, node_address=node_address, reattach_volume=reattach_volume,
             clear_data=clear_data, new_ssd_pcie=new_ssd_pcie,
             force_lvol_recreate=force_lvol_recreate, spdk_proxy_image=spdk_proxy_image,
-            current_restart_task_id=current_restart_task_id or _owned_task_id)
+            current_restart_task_id=current_restart_task_id or _owned_task_id,
+            restart_claim_token=_claim_token)
     except Exception:
         # exc_info so the traceback is captured: without it a failing restart
         # only logs this one line, leaving the actual raise point (e.g. a
@@ -3887,15 +4357,23 @@ def restart_storage_node(
                     f"trusting the DB and treating as success."
                 )
                 result = True
-            elif not result and pre_status not in (StorageNode.STATUS_RESTARTING,
+            elif (not result and pre_status not in (StorageNode.STATUS_RESTARTING,
                                                     StorageNode.STATUS_IN_SHUTDOWN,
-                                                    None):
-                # We owned the lock (pre_status was OFFLINE / DOWN / etc.),
-                # the impl failed before reaching the ONLINE flip. Reset to
-                # OFFLINE regardless of current status — a failed restart
-                # can leave RESTARTING, but it can also leave intermediate
-                # states; OFFLINE is the only safe wedge-free landing for
-                # the next retry.
+                                                    None)
+                    and post_node.restart_claim_owner == _claim_token):
+                # We owned the lock — proven by the claim token, not inferred
+                # from pre_status: "pre_status was OFFLINE" also holds when
+                # the impl was REFUSED before acquisition (peer gate, claim
+                # gate, entry checks). Running this cleanup then killed the
+                # SPDK container of whichever OTHER actor was legitimately
+                # mid-restart (2026-08-06 soak iter-50: a refused CLI
+                # attempt's cleanup destroyed the task runner's 14-second-old
+                # container). With the claim check, cleanup runs only when
+                # THIS call's try_set_node_restarting acquisition committed
+                # and the impl failed after it. Reset to OFFLINE regardless
+                # of current status — a failed restart can leave RESTARTING,
+                # but it can also leave intermediate states; OFFLINE is the
+                # only safe wedge-free landing for the next retry.
                 logger.warning(
                     f"Restart of {node_id} failed (post-status={post_node.status}); "
                     f"resetting to OFFLINE to unblock future attempts"
@@ -3964,12 +4442,29 @@ def restart_storage_node(
                         f"Restart cleanup: re-promoting secondary (ANA failover) "
                         f"for {node_id} raised: {ana_exc}"
                     )
+            elif not result:
+                # Failed WITHOUT holding the claim: this call was refused
+                # before acquisition (peer gate, claim held by another live
+                # driver, entry checks). Nothing here is ours to clean —
+                # killing SPDK or flipping OFFLINE would sabotage whichever
+                # actor legitimately owns the node's transition.
+                logger.info(
+                    f"Restart of {node_id} failed without acquiring the "
+                    f"restart claim (holder: "
+                    f"{post_node.restart_claim_owner or 'none'}); skipping "
+                    f"SPDK/status cleanup — not this call's transition")
         except Exception as cleanup_exc:
             logger.error(f"Failed to reset node {node_id} after failed restart: {cleanup_exc}")
+        finally:
+            _claim_hb_stop.set()
+            try:
+                db_ctrl.release_node_restart_claim(node_id, _claim_token)
+            except Exception as rel_exc:
+                logger.debug(f"Restart claim release for {node_id} failed: {rel_exc}")
     return result
 
 
-def fd_dead_recovery_allowed(db_controller, snode) -> bool:
+def fd_dead_recovery_allowed(db_controller, snode: StorageNode) -> bool:
     """Same-failure-domain parallel restart carve-out, reinstated with a hard gate.
 
     Concurrent node restarts outside a drained SUSPENDED cluster are sanctioned
@@ -4021,14 +4516,29 @@ def fd_dead_recovery_allowed(db_controller, snode) -> bool:
         return False
 
 
+def _new_restart_claim_token():
+    """Unique per-driver token for the per-node restart claim. Hostname+pid
+    identify the driving process; the uuid suffix disambiguates threads and
+    pid reuse. Distinct tokens for the CLI and the task-runner service even
+    when both run on the mgmt host — which is exactly the case the
+    hostname-keyed task lease cannot distinguish."""
+    return f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
+
+
 def _restart_storage_node_impl(
         node_id, max_lvol=0, max_snap=0, max_prov=0,
         spdk_image=None, set_spdk_debug=None,
         small_bufsize=0, large_bufsize=0,
         force=False, node_address=None, reattach_volume=False, clear_data=False, new_ssd_pcie=[],
-        force_lvol_recreate=False, spdk_proxy_image=None, current_restart_task_id=None):
+        force_lvol_recreate=False, spdk_proxy_image=None, current_restart_task_id=None,
+        restart_claim_token=""):
     db_controller = DBController()
     logger.info("Restarting storage node")
+    if not restart_claim_token:
+        # Direct callers (tests, legacy paths) that bypass the wrapper still
+        # get a claim; without the wrapper there is no heartbeat, so a hung
+        # direct call becomes takeover-able after RESTART_CLAIM_TTL_SEC.
+        restart_claim_token = _new_restart_claim_token()
     try:
         snode = db_controller.get_storage_node_by_id(node_id)
     except KeyError:
@@ -4091,7 +4601,8 @@ def _restart_storage_node_impl(
     if not allow_concurrent_peers:
         allow_concurrent_peers = fd_dead_recovery_allowed(db_controller, snode)
     acquired, reason = db_controller.try_set_node_restarting(
-        snode.cluster_id, node_id, allow_concurrent_peers=allow_concurrent_peers)
+        snode.cluster_id, node_id, allow_concurrent_peers=allow_concurrent_peers,
+        claim_owner=restart_claim_token)
     if not acquired:
         logger.error(f"Cannot restart {node_id}: {reason}")
         return False
@@ -4182,6 +4693,26 @@ def _restart_storage_node_impl(
 
     logger.info("Restarting SPDK")
 
+    # Cluster-level SPDK sizing is adopted here: a restart is exactly when a
+    # node is meant to pick up a changed cluster setting. An explicit argument
+    # (internal callers only -- the CLI no longer offers one) still wins.
+    cluster_max_subsys = int(getattr(cluster, "max_subsys", 0) or 0)
+    cluster_hp_mem = int(getattr(cluster, "hugepages_mem", 0) or 0)
+    cluster_vcpu_count = int(getattr(cluster, "spdk_vcpu_count", 0) or 0)
+    if not max_lvol and cluster_max_subsys:
+        max_lvol = cluster_max_subsys
+    if not max_prov and cluster_hp_mem:
+        max_prov = cluster_hp_mem
+
+    if not utils.vcpu_requirement_met(snode.cpu, cluster_vcpu_count):
+        # Same rule as add-node: refuse rather than run SPDK on fewer cores
+        # than the cluster asks for, and keep one core for the system.
+        logger.error(
+            "Node %s has %s vCPU(s); this cluster requires %d for SPDK plus at "
+            "least one for the system. Refusing the restart.",
+            node_id, snode.cpu, cluster_vcpu_count)
+        return False
+
     lvol_changed = bool(max_lvol) and max_lvol != snode.max_lvol
     if lvol_changed:
         snode.max_lvol = max_lvol
@@ -4266,6 +4797,8 @@ def _restart_storage_node_impl(
 
     if spdk_proxy_image:
         snode.spdk_proxy_image = spdk_proxy_image
+        snode.spdk_version = spdk_proxy_image.split(":")[1]
+
     if not snode.spdk_proxy_image:
         snode.spdk_proxy_image = cluster.container_image_prefix + constants.SIMPLY_BLOCK_DOCKER_IMAGE
 
@@ -4379,9 +4912,13 @@ def _restart_storage_node_impl(
 
     rpc_client.log_set_print_level("DEBUG")
 
-    # ONCE per SPDK process lifetime, on the JC singleton's thread/core —
-    # see the add-node twin of this call for the full rationale.
-    poller_group_mask = snode.jc_singleton_mask or snode.lvol_poller_mask
+    # ONCE per SPDK process lifetime. lvol_poller_mask is the single source
+    # of truth for which core this runs on (already colocated with
+    # jc_singleton_core unless the config gave it its own dedicated core);
+    # jc_singleton_mask is only a last-resort fallback if that reservation
+    # came up empty. See the add-node twin of this call for the full
+    # rationale.
+    poller_group_mask = snode.lvol_poller_mask or snode.jc_singleton_mask
     if poller_group_mask:
         try:
             rpc_client.bdev_lvol_create_poller_group(poller_group_mask)
@@ -4818,7 +5355,7 @@ def _restart_storage_node_impl(
         return True
 
 
-def _format_lvstore_ports(node):
+def _format_lvstore_ports(node: StorageNode):
     """Format per-lvstore ports for display."""
     if not node.lvstore_ports:
         return "-"
@@ -5124,7 +5661,7 @@ def _check_ftt_allows_node_removal(node_id, db_controller):
     return True, ""
 
 
-def _allow_shutdown_with_migration_tasks(snode, db_controller):
+def _allow_shutdown_with_migration_tasks(snode: StorageNode, db_controller):
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     return (
         cluster.ha_type == "ha"
@@ -5144,7 +5681,7 @@ _PEER_RECONNECT_ELIGIBLE_STATUSES = (
 )
 
 
-def _target_is_reconnect_eligible(target_node):
+def _target_is_reconnect_eligible(target_node: StorageNode):
     """True iff a remote ctrlr attach toward ``target_node`` should proceed.
 
     Any service that calls bdev_nvme_attach_controller toward a peer must
@@ -5158,7 +5695,7 @@ def _target_is_reconnect_eligible(target_node):
     return target_node.status in _PEER_RECONNECT_ELIGIBLE_STATUSES
 
 
-def _detach_remote_controllers_from_peers(snode, db_controller):
+def _detach_remote_controllers_from_peers(snode: StorageNode, db_controller):
     """Loop 2 of graceful shutdown.
 
     For every peer in {online, down, in_restart}, detach the remote
@@ -5240,9 +5777,14 @@ def _detach_remote_controllers_from_peers(snode, db_controller):
     return detached[0]
 
 
-def check_node_shutdown_preconditions(node_id, force=False):
+def check_node_shutdown_preconditions(node_id, force=False, current_restart_task_id=None):
     """Read-only validation of everything that can refuse a graceful node
     shutdown. Returns (allowed, reason).
+
+    current_restart_task_id: bare task uuid (NOT JobSchedule.get_id()'s
+    composite key) of the caller's own NODE_RESTART task, when the caller IS
+    that task's cleanup shutdown. Exempts the task from the restart-task
+    guard below — it is this shutdown's driver, not a competing restart.
 
     Exists so API endpoints can evaluate the guards SYNCHRONOUSLY and return
     an actionable error (409) to the caller. Previously these checks only ran
@@ -5260,6 +5802,25 @@ def check_node_shutdown_preconditions(node_id, force=False):
         snode = db_controller.get_storage_node_by_id(node_id)
     except KeyError:
         return False, f"Storage node not found: {node_id}"
+
+    # Per-node restart claim: a FRESH claim on the target itself means a
+    # live driver is mid-transition on this very node RIGHT NOW. Shutting it
+    # down would yank the SPDK container out from under that driver
+    # (2026-08-06 soak iter-50: the restart task runner's cleanup shutdown
+    # destroyed a manual CLI restart's container seconds before it finished).
+    # Deliberately NOT overridable with force and NOT exempted by
+    # current_restart_task_id: both actors share the one NODE_RESTART task,
+    # so the task id cannot discriminate them — the claim token is the only
+    # identity that can. A dead driver's claim expires within
+    # RESTART_CLAIM_TTL_SEC; waiting that out is the sanctioned takeover.
+    if snode.status in (StorageNode.STATUS_RESTARTING, StorageNode.STATUS_IN_SHUTDOWN):
+        _claim_holder = db_module.restart_claim_active(snode)
+        if _claim_holder:
+            reason = (f"Node {node_id} is {snode.status} under a live restart "
+                      f"claim ({_claim_holder}); shutdown refused until the "
+                      f"claim is released or expires")
+            logger.error(reason)
+            return False, reason
 
     # Guard: no concurrent shutdown + restart (design: mutual exclusion)
     for peer in db_controller.get_storage_nodes_by_cluster_id(snode.cluster_id):
@@ -5279,27 +5840,45 @@ def check_node_shutdown_preconditions(node_id, force=False):
             logger.warning("%s — proceeding with force", reason)
 
     task_id = tasks_controller.get_active_node_restart_task(snode.cluster_id, snode.get_id())
-    if task_id:
+    if task_id and task_id != current_restart_task_id:
         reason = f"Restart task found: {task_id}, can not shutdown storage node"
         if force is False:
             logger.error(reason)
             return False, reason
         logger.warning("%s — proceeding with force", reason)
 
-    tasks = tasks_controller.get_active_node_tasks(snode.cluster_id, snode.get_id())
+    # Only DATA-MOVEMENT tasks may block a shutdown, which is what this check
+    # has always claimed to be about. get_active_node_tasks returns every
+    # non-done task on the node, so any durable, re-drivable work counted too:
+    # a replicating cluster has a snapshot_replication task in flight almost
+    # every minute, which made graceful shutdown impossible (lab run 18 —
+    # "Migration task found: 2" was one running replication task). Replication
+    # and sync-delete work survives the outage and resumes on return; a
+    # migration in progress does not.
+    migration_fns = {
+        JobSchedule.FN_DEV_MIG,
+        JobSchedule.FN_FAILED_DEV_MIG,
+        JobSchedule.FN_NEW_DEV_MIG,
+        JobSchedule.FN_LVOL_MIG,
+        JobSchedule.FN_LVOL_BATCH_MIG,
+    }
+    tasks = [t for t in tasks_controller.get_active_node_tasks(
+        snode.cluster_id, snode.get_id()) if t.function_name in migration_fns]
     if tasks:
+        blocking = ", ".join(sorted({t.function_name for t in tasks}))
         if not force and _allow_shutdown_with_migration_tasks(snode, db_controller):
             logger.warning(
-                "Migration task found: %s, proceeding with shutdown because FTT=2 allows node outage",
-                len(tasks),
+                "Migration task found: %s (%s), proceeding with shutdown because FTT=2 allows node outage",
+                len(tasks), blocking,
             )
         elif force:
             logger.warning(
-                "Migration task found: %s, proceeding with forced shutdown",
-                len(tasks),
+                "Migration task found: %s (%s), proceeding with forced shutdown",
+                len(tasks), blocking,
             )
         else:
-            reason = f"Migration task found: {len(tasks)}, can not shutdown storage node or use --force"
+            reason = (f"Migration task found: {len(tasks)} ({blocking}), "
+                      f"can not shutdown storage node or use --force")
             logger.error(reason)
             return False, reason
 
@@ -5320,8 +5899,13 @@ def check_node_shutdown_preconditions(node_id, force=False):
     return True, ""
 
 
-def shutdown_storage_node(node_id, force=False, keep_auto_restart=False):
+def shutdown_storage_node(node_id, force=False, keep_auto_restart=False,
+                          current_restart_task_id=None):
     """Gracefully terminate a storage node.
+
+    current_restart_task_id: bare uuid of the caller's own NODE_RESTART task
+    when this shutdown is that task's cleanup step (see
+    check_node_shutdown_preconditions).
 
     keep_auto_restart=True is used by the suspend-recovery auto-shutdown
     (storage_node_monitor): it brings the node down WITHOUT marking it
@@ -5401,7 +5985,8 @@ def shutdown_storage_node(node_id, force=False, keep_auto_restart=False):
     # this for its own non-force shutdown endpoint, where the policy
     # decision belongs.
 
-    allowed, _reason = check_node_shutdown_preconditions(node_id, force=force)
+    allowed, _reason = check_node_shutdown_preconditions(
+        node_id, force=force, current_restart_task_id=current_restart_task_id)
     if not allowed:
         return False
 
@@ -5516,7 +6101,18 @@ def shutdown_storage_node(node_id, force=False, keep_auto_restart=False):
 
     # Step 6: status → offline + ANA failover bookkeeping.
     logger.info("Setting node status to offline")
-    set_node_status(node_id, StorageNode.STATUS_OFFLINE)
+    if not set_node_status(node_id, StorageNode.STATUS_OFFLINE):
+        # The FSM refused the flip — typically the record reads RESTARTING,
+        # i.e. a restart transition owns this node. SPDK is already killed at
+        # this point, but the shutdown has NOT fully committed; reporting
+        # success anyway let a restart proceed on top of a half-committed
+        # shutdown (2026-07-29 double restart). Fail the shutdown and let the
+        # caller retry once the conflicting transition ends (or
+        # _reset_if_transient / the orphan watchdog reconciles the record).
+        logger.error(
+            "Node shutdown incomplete for %s: OFFLINE transition was refused",
+            node_id)
+        return False
 
     snode = db_controller.get_storage_node_by_id(node_id)
     try:
@@ -5797,10 +6393,20 @@ def upgrade_automated_deployment_config():
 
 
 def generate_automated_deployment_config(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_allowed, pci_blocked,
-                                         cores_percentage=0, force=False, device_model="", size_range="", nvme_names=None, k8s=False,
+                                         vcpu_count=0, force=False, device_model="", size_range="", nvme_names=None, k8s=False,
                                          calculate_hp_only=False, number_of_devices=0):
+    # Reject an over-cap max_lvol here rather than only in the CLI: this is the
+    # single entry point shared by `sn configure` and the k8s node-configure
+    # job, and the value it writes into NODES_CONFIG_FILE becomes the node's
+    # max_lvol at add time. Above the cap it also sizes huge pages for
+    # subsystems the node can never serve (placement caps at
+    # MAX_SUBSYSTEMS_PER_NODE).
+    if int(max_lvol or 0) > constants.MAX_SUBSYSTEMS_PER_NODE:
+        logger.error(f"max_lvol {max_lvol} exceeds the maximum of "
+                     f"{constants.MAX_SUBSYSTEMS_PER_NODE} subsystems per storage node")
+        return False
     if calculate_hp_only:
-        minimum_hp_memory = utils.calculate_hp_only(max_lvol, number_of_devices, sockets_to_use, nodes_per_socket, cores_percentage)
+        minimum_hp_memory = utils.calculate_hp_only(max_lvol, number_of_devices, sockets_to_use, nodes_per_socket, vcpu_count)
         hp_number = math.ceil(minimum_hp_memory / 2)
         logger.info(f"The required number of huge pages on this host is: {hp_number} ({minimum_hp_memory} MB)")
         return True
@@ -5815,7 +6421,7 @@ def generate_automated_deployment_config(max_lvol, max_prov, sockets_to_use, nod
         utils.load_kernel_module("uio_pci_generic")
 
         nodes_config, system_info = utils.generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket,
-                                                           pci_allowed, pci_blocked, cores_percentage, force=force,
+                                                           pci_allowed, pci_blocked, vcpu_count, force=force,
                                                            device_model=device_model, size_range=size_range, nvme_names=nvme_names)
         if not nodes_config or not nodes_config.get("nodes"):
             return False
@@ -6165,7 +6771,7 @@ def set_node_status(node_id, status, caused_by="monitor"):
     return True
 
 
-def _set_restart_phase(snode, lvs_name, phase, db_controller):
+def _set_restart_phase(snode: StorageNode, lvs_name, phase, db_controller):
     """Persist the restart phase for a given LVS to FDB.
 
     Other services check this to gate sync deletes and create/clone/
@@ -6280,8 +6886,7 @@ def get_restart_phase(node_id, lvs_name):
             return phase
         try:
             cluster = db_controller.get_cluster_by_id(node.cluster_id)
-            if cluster.status in (Cluster.STATUS_IN_ACTIVATION,
-                                  Cluster.STATUS_IN_EXPANSION):
+            if cluster.status in Cluster.TOPOLOGY_OWNED_STATUSES:
                 return phase
         except KeyError:
             pass
@@ -6292,8 +6897,8 @@ def get_restart_phase(node_id, lvs_name):
         # after a create that actually succeeded (2026-07-10 20:22 run).
         logger.warning(
             "Stale restart phase %r for %s on %s: node is %s, no restart/"
-            "activation/expansion owns this LVS — clearing it so operations "
-            "proceed instead of queueing into a dead drain queue",
+            "activation/expansion/shrink owns this LVS — clearing it so "
+            "operations proceed instead of queueing into a dead drain queue",
             phase, lvs_name, node_id[:8], node.status)
 
         def _clear(fresh):
@@ -6400,7 +7005,7 @@ def drain_restart_queue(node_id, lvs_name):
             logger.error("Queued operation failed (%s): %s", description, e)
 
 
-def _is_node_rpc_responsive(node, lvs_name, timeout=5, retry=2):
+def _is_node_rpc_responsive(node: StorageNode, lvs_name, timeout=5, retry=2):
     """Check if a node's RPC interface is responsive.
 
     Returns True if RPC succeeds, False if it fails/times out.
@@ -6415,7 +7020,7 @@ def _is_node_rpc_responsive(node, lvs_name, timeout=5, retry=2):
         return False
 
 
-def _is_fabric_connected(node, lvs_peer_ids=None):
+def _is_fabric_connected(node: StorageNode, lvs_peer_ids=None):
     """Check if a node's fabric is connected (JM quorum says NOT disconnected)."""
     return not _check_peer_disconnected(node, lvs_peer_ids=lvs_peer_ids)
 
@@ -6432,12 +7037,14 @@ def _count_fabric_disconnected_nodes(all_nodes, lvs_peer_ids=None):
 def _leadership_moving_tasks_active(cluster_id, node_ids):
     """True when a port-allow or restart task is active on any LVS member.
 
-    Those flows own leadership movement (the port-allow failback demotes the
-    acting leader and lets the primary self-promote on the first redirected
-    IO); a concurrent recovery grant fights them — run 20260725 21:18-21:22:
-    take-leadership grants on the primary vs port-allow demotes on the acting
-    leader, flapping LVS_1 leadership for minutes. When the task state cannot
-    be read, err on NOT granting."""
+    Those flows own leadership movement (the restart flow's fenced
+    demote->grant handoff; the port-allow failback demotes the acting leader
+    and lets the primary self-promote); a concurrent recovery grant fights
+    them — run 20260725 21:18-21:22: take-leadership grants on the primary
+    vs port-allow demotes on the acting leader, flapping LVS_1 leadership
+    for minutes; 2026-07-30 LVS_9: a recovery grant seated the secondary as
+    writer moments before the primary's restart handoff. When the task
+    state cannot be read, err on NOT granting."""
     try:
         db = DBController()
         for task in db.get_job_tasks(cluster_id):
@@ -6480,17 +7087,14 @@ def _taker_jm_quorum_ok(taker):
 
 
 def _recover_leaderless_lvs(cluster_id, all_nodes, lvs_name, preferred_taker):
-    """Recovery for a leaderless-but-healthy LVS — WITHOUT the control plane
-    forcing leadership except as a guarded last resort.
+    """Recovery for a leaderless-but-healthy LVS.
 
-    Design constraint (see tasks_runner_port_allow._failback_leadership_to_primary,
-    incident 2026-07-06 LVS_13): a management-forced ``leader=True`` skips the
-    primary's LVS update (blob-md reload) and can serve stale blob metadata —
-    extent-metadata corruption. The sanctioned mechanism is: verified-open
-    hublvols from the followers to the primary, then the primary promotes
-    ITSELF on the first redirected IO. Run 20260725 additionally showed the
-    unguarded per-call grant firing from every API worker at once (7 grants/s
-    from 5 WebAppAPI containers) while port-allow demoted the acting leader.
+    Leadership placement is otherwise the restart/creation/activation flows'
+    job; this recovery runs only when an object operation needs a leader and
+    none exists. It never flips the leadership flag blind: the 2026-07-06
+    LVS_13 incident showed a bare ``set_leader(True)`` skips the primary's
+    blob-md reload and can serve stale metadata, and run 20260725 showed
+    unguarded grants flapping against the port-allow handoff.
 
     Sequence, single-flight cluster-wide:
       0. FDB test-and-set lock keyed ``takeleader/<lvs>``; deliberately never
@@ -6498,9 +7102,13 @@ def _recover_leaderless_lvs(cluster_id, all_nodes, lvs_name, preferred_taker):
          the recovery cooldown across all processes.
       1. Verify/repair follower->primary hublvols (redirect path); bounded
          wait for the primary's self-promotion via redirected IO.
-      2. Last-resort grant ONLY if still leaderless AND no port-allow/restart
-         task is active on any LVS member AND the taker's JM quorum is intact;
-         then verify the grant took.
+      2. Still leaderless (control-plane-only workloads never generate the
+         redirected IO that triggers self-promotion), and only if no
+         port-allow/restart task owns leadership movement on any member and
+         the taker's JM quorum is intact: ``bdev_lvol_update_lvstore`` on the
+         taker — an explicit blob-md reload from disk, the same update the
+         IO-driven promotion performs — and, only after the reload succeeded,
+         ``set_leader(True)``; then verify the grant took.
 
     Returns the confirmed leader node or None (callers fail fast; the
     no-leader negative cache bounds re-entry)."""
@@ -6546,8 +7154,9 @@ def _recover_leaderless_lvs(cluster_id, all_nodes, lvs_name, preferred_taker):
                 continue
         time.sleep(1)
 
-    # 2- last-resort grant, heavily guarded (control-plane-only workloads
-    # never generate the redirected IO that triggers self-promotion).
+    # 2- reload-then-grant, guarded. The explicit bdev_lvol_update_lvstore
+    # replays the same blob-md reload the IO-driven promotion does, so the
+    # subsequent set_leader cannot serve stale metadata.
     if _leadership_moving_tasks_active(cluster_id, member_ids):
         logger.warning("leaderless recovery for %s: port-allow/restart task "
                        "active on an LVS member — leaving leadership movement "
@@ -6557,8 +7166,20 @@ def _recover_leaderless_lvs(cluster_id, all_nodes, lvs_name, preferred_taker):
         return None
     logger.warning(
         "LVS %s still leaderless after hublvol repair and no handoff task is "
-        "active — last-resort: instructing %s to take leadership",
+        "active — reloading lvstore metadata on %s before granting leadership",
         lvs_name, taker.get_id())
+    try:
+        if not taker.rpc_client(timeout=10, retry=1).bdev_lvol_update_lvstore(
+                lvs_name):
+            logger.error("bdev_lvol_update_lvstore on %s for %s returned "
+                         "False — refusing to grant leadership on top of "
+                         "un-reloaded metadata", taker.get_id(), lvs_name)
+            return None
+    except Exception as e:
+        logger.error("bdev_lvol_update_lvstore on %s for %s failed: %s — "
+                     "refusing to grant leadership", taker.get_id(),
+                     lvs_name, e)
+        return None
     try:
         taker.rpc_client(timeout=5, retry=2).bdev_lvol_set_leader(
             lvs_name, leader=True)
@@ -6569,8 +7190,8 @@ def _recover_leaderless_lvs(cluster_id, all_nodes, lvs_name, preferred_taker):
     for _ in range(5):
         try:
             if is_node_leader(taker, lvs_name):
-                logger.info("Leadership for %s restored on %s",
-                            lvs_name, taker.get_id())
+                logger.info("Leadership for %s restored on %s (metadata "
+                            "reloaded first)", lvs_name, taker.get_id())
                 return taker
         except Exception:
             pass
@@ -6715,11 +7336,14 @@ def _find_leader_with_failover_impl(all_nodes, lvs_name):
     # healthy). The forced-handoff below cannot repair it: the signal only
     # asks a leader to DROP leadership, nobody holds it, and the JC never
     # elects while the primary is alive. Recovery is delegated to
-    # _recover_leaderless_lvs: hublvol repair + self-promotion first, a
-    # heavily-guarded single-flight grant only as last resort — the previous
-    # unguarded per-call set_leader(True) here fired from every API worker at
-    # once and fought the port-allow handoff (run 20260725), and a CP-forced
-    # grant risks stale blob metadata (incident 2026-07-06 LVS_13).
+    # _recover_leaderless_lvs: hublvol repair + bounded self-promotion wait,
+    # then a guarded reload-then-grant (bdev_lvol_update_lvstore before
+    # set_leader, so the grant never serves stale blob metadata — incident
+    # 2026-07-06 LVS_13). The previous unguarded per-call set_leader(True)
+    # here fired from every API worker at once and fought the port-allow
+    # handoff (run 20260725), and a bare grant raced the restart handoff
+    # into a writer conflict (2026-07-30 LVS_9) — hence the single-flight
+    # lock, the moving-task guard, and the mandatory metadata reload.
     if _is_node_rpc_responsive(leader, lvs_name):
         # Last-moment sweep: abort the recovery if anyone became leader meanwhile.
         for node in all_nodes:
@@ -6958,7 +7582,7 @@ def execute_on_leader_with_failover(all_nodes, lvs_name, operation_fn,
         return False, new_leader, f"Operation failed on new leader: {e}"
 
 
-def _check_peer_disconnected(peer_node, lvs_peer_ids=None):
+def _check_peer_disconnected(peer_node: StorageNode, lvs_peer_ids=None):
     """Check if a peer node should be treated as disconnected for the purpose
     of routing (takeover vs. non-leader path) and peer-port-block decisions.
 
@@ -7031,7 +7655,7 @@ def _check_peer_disconnected(peer_node, lvs_peer_ids=None):
     return False
 
 
-def _check_hublvol_connected(snode, peer_node):
+def _check_hublvol_connected(snode: StorageNode, peer_node):
     """Method 2: Check if the hublvol to peer_node is still connected from snode.
 
     Per design: used as fallback when RPCs fail/timeout after the quorum check
@@ -7058,7 +7682,7 @@ def _check_hublvol_connected(snode, peer_node):
         return False
 
 
-def _handle_rpc_failure_on_peer(snode, peer_node, lvs_jm_vuid, lvs_name=None):
+def _handle_rpc_failure_on_peer(snode: StorageNode, peer_node, lvs_jm_vuid, lvs_name=None):
     """Handle RPC failure to a peer during restart, per design decision tree.
 
     Called when RPCs to a previously-connected peer fail/timeout.
@@ -7119,7 +7743,7 @@ def recreate_lvstore_on_non_leader(snode, leader_node, primary_node, activation_
             snode, leader_node, primary_node, activation_mode=False, force=force)
 
 
-def _recreate_lvstore_on_non_leader_impl(snode, leader_node, primary_node, activation_mode=False, force=False):
+def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primary_node, activation_mode=False, force=False):
     """Recreate a non-leader LVS on snode.
 
     Per design: runs for secondary when primary is online, or for tertiary always.
@@ -7249,12 +7873,18 @@ def _recreate_lvstore_on_non_leader_impl(snode, leader_node, primary_node, activ
             logger.error("Error establishing hublvol: %s", e)
             # return False
 
-    # Resume JC compression for this LVS group on the restarting node
-    ret, err = snode.rpc_client().jc_suspend_compression(jm_vuid=primary_node.jm_vuid, suspend=False)
-    if not ret:
-        logger.info("Failed to resume JC compression adding task...")
-        tasks_controller.add_jc_comp_resume_task(
-            snode.cluster_id, snode.get_id(), jm_vuid=primary_node.jm_vuid)
+    # Resume JC compression for this LVS group on the restarting node —
+    # unless a release upgrade holds all resumes until `cluster
+    # upgrade-complete` (release-upgrade guard, remove with the
+    # jc_compression_upgrade plugin).
+    if jc_compression_upgrade.resume_is_held(DBController().get_cluster_by_id(snode.cluster_id)):
+        logger.info("JC compression resume held: cluster upgrade in progress")
+    else:
+        ret, err = snode.rpc_client().jc_suspend_compression(jm_vuid=primary_node.jm_vuid, suspend=False)
+        if not ret:
+            logger.info("Failed to resume JC compression adding task...")
+            tasks_controller.add_jc_comp_resume_task(
+                snode.cluster_id, snode.get_id(), jm_vuid=primary_node.jm_vuid)
 
     ### 2- create lvols nvmf subsystems (idempotent: skip existing)
     is_tertiary = (primary_node.tertiary_node_id == snode.get_id())
@@ -7458,468 +8088,472 @@ def _recreate_lvstore_on_non_leader_impl(snode, leader_node, primary_node, activ
     raid_already = _rpc_bdev_exists(snode_rpc_client, primary_node.raid)
     lvstore_already = _rpc_lvstore_exists(snode_rpc_client, primary_node.lvstore)
 
-    if not activation_mode:
-        # Serialize the client-port outage span across all concurrent
-        # recreates (covers the initial block, the attach-retry re-blocks,
-        # and the final unblock below).
-        _acquire_block_gate()
+    try:
+        if not activation_mode:
+            # Serialize the client-port outage span across all concurrent
+            # recreates (covers the initial block, the attach-retry re-blocks,
+            # and the final unblock below).
+            _acquire_block_gate()
 
-    if not activation_mode and leader_has_quorum:
-        ### 3- block leader port ONLY (no siblings)
-        # Blocking the leader's LVS port is what quiesces its IO so this
-        # restarting node can safely examine its raid0 without a write
-        # racing into a half-reconstructed lvstore. Silently skipping the
-        # block (as we used to do on ConnectionRefused) lets the leader
-        # keep serving reads/writes while we examine — which has produced
-        # CRC mismatches and lvol drops on the restarting peer. So retry,
-        # and if it still can't land, abort the restart unless force=True.
-        #
-        # Budget: 3 attempts × rpc_client(timeout=3, retry=1) × 1s sleep
-        # between attempts → worst-case ~15s abort. Previously 5× ×
-        # (timeout=5, retry=5) × 2s = ~140s, which made every iteration
-        # against a dead-mgmt leader stall the restart task for minutes.
-        # The FDB-status short-circuit in _check_peer_disconnected should
-        # already route such peers to the takeover path before we reach
-        # here; keeping a short local budget protects against stragglers.
-        last_err = None
-        attempts = 3
-        for attempt in range(1, attempts + 1):
-            try:
-                port_block.set_port(leader_node, leader_lvs_port, block=True, timeout=3, retry=1)
-                _deferred_port_events.append(("deny", leader_node, leader_lvs_port))
-                leader_port_blocked = True
-                _mark_leader_blocked()
-                last_err = None
-                break
-            except Exception as e:
-                last_err = e
-                logger.warning(
-                    "Port-block attempt %d/%d failed for leader %s on %s: %s",
-                    attempt, attempts, leader_node.get_id(), primary_node.lvstore, e)
-                if attempt < attempts:
-                    time.sleep(1)
-        if not leader_port_blocked:
-            msg = (f"Failed to block leader {leader_node.get_id()} port "
-                   f"{leader_lvs_port} after {attempts} attempts for "
-                   f"{primary_node.lvstore}: {last_err}")
-            if force:
-                logger.warning(
-                    "%s — force=True: proceeding without leader port block; "
-                    "this allows leader-vs-restarter writes to race during "
-                    "examine and can corrupt the rebuilt lvstore", msg)
-            else:
-                _abort_and_unblock(msg)
-
-    if not activation_mode and leader_port_blocked:
-        # Fixed quiesce window instead of draining distrib-inflight — see
-        # constants.NON_LEADER_BLOCK_QUIESCE_SEC for the full rationale
-        # (the inflight counter is polluted by migration mover IO on this
-        # node class, so a drain loop never settles; client IO admitted
-        # before the block settles in ms). Migration IO does not touch
-        # lvstore metadata, so a brief fixed wait is sufficient for the
-        # secondary's examine to see a consistent superblock.
-        time.sleep(constants.NON_LEADER_BLOCK_QUIESCE_SEC)
-
-    elif not activation_mode and not leader_has_quorum:
-        logger.info("Leader %s has no quorum for %s, skipping port block",
-                    leader_node.get_id(), primary_node.lvstore)
-
-    ### 4- examine (idempotent: skip only when raid AND lvstore already surfaced)
-    # #4: probes were computed pre-block (see above the block section) —
-    # nothing touches snode's fresh SPDK between there and here, and each
-    # in-window RPC costs a full CP round-trip.
-    if raid_already and lvstore_already:
-        logger.info(
-            "Raid %s and lvstore %s already present on %s; skipping examine",
-            primary_node.raid, primary_node.lvstore, snode.get_id())
-    else:
-        if raid_already and not lvstore_already and raid_preexisted:
-            # Convergence trap (activation retry only): the raid was created
-            # AND examined on a prior pass and the lvstore module did not
-            # surface it. SPDK rejects re-examine of an already-examined
-            # bdev with "Duplicate bdev name for manual examine", so a
-            # plain bdev_examine here is a silent no-op that loops the
-            # activation retry forever. Drop the raid and re-create via
-            # _create_bdev_stack (idempotent) so the next examine is
-            # against a freshly-registered raid.
-            logger.info(
-                "Raid %s present but lvstore %s did not surface on %s; "
-                "dropping raid for clean re-examine",
-                primary_node.raid, primary_node.lvstore, snode.get_id())
-            try:
-                snode_rpc_client.bdev_raid_delete(primary_node.raid)
-            except Exception as e:
-                logger.warning(
-                    "bdev_raid_delete(%s) raised: %s — proceeding to "
-                    "_create_bdev_stack which is idempotent",
-                    primary_node.raid, e)
-            ret, err = _create_bdev_stack(snode, primary_node.lvstore_stack,
-                                          primary_node=primary_node)
-            if not ret:
-                logger.error(
-                    "Failed to rebuild bdev stack on %s after raid drop: %s",
-                    snode.get_id(), err)
-        elif raid_already and not lvstore_already:
-            # Normal restart: the raid was freshly built this pass in step 1
-            # and has never been examined, so the first-time bdev_examine below
-            # surfaces the lvstore. Dropping+recreating it here would be pure
-            # churn inside the (minimized) port-block window — the duplicate
-            # bdev_raid_create observed 2026-06-12 (LVS_5199).
-            logger.info(
-                "Raid %s freshly built this pass on %s; examining without drop",
-                primary_node.raid, snode.get_id())
-
-        # Examine is required whenever the lvstore isn't surfaced — whether
-        # the raid was freshly created by _create_bdev_stack (normal restart
-        # path) or pre-existing with stale state (activation retry).
-        snode_rpc_client.bdev_examine(primary_node.raid)
-
-        ### 5- wait for examine
-        ret = snode_rpc_client.bdev_wait_for_examine()
-        if not ret:
-            logger.warning("Failed to examine bdevs on non-leader node")
-
-        # After examine, the lvstore MUST be present. If it isn't, SPDK
-        # failed to rediscover the lvstore from its persisted metadata
-        # (e.g. partial stack components left over, corrupt on-disk state).
-        # During activation we can't safely recover — signal the caller
-        # to reject the activation and ask for a restart of this node.
-        if activation_mode and not _rpc_lvstore_exists(snode_rpc_client, primary_node.lvstore):
-            raise LVSRestartRequiredError(
-                snode.get_id(), primary_node.lvstore,
-                detail=f"raid={primary_node.raid} present but lvstore did not recover"
-                if raid_already else "examine did not produce lvstore")
-
-    # Verify that examine actually rediscovered the lvstore and every lvol
-    # the FDB expects to be present on this node. Mirrors the check in
-    # recreate_lvstore() for the primary path. If an lvol blob did not
-    # become durable on this peer's shard of raid0 before it was torn down
-    # (e.g. the blob was committed on the primary/tertiary quorum but this
-    # node missed the write window due to a simultaneous force-shutdown),
-    # the examine won't surface it. Continuing would leave the lvol
-    # subsystem bound without a namespace on this node — present on
-    # primary/tertiary, missing here — and the divergence would never be
-    # reconciled because there is no FDB↔SPDK lvol-set reconcile loop.
-    if not activation_mode:
-        if not snode_rpc_client.bdev_lvol_get_lvstores(primary_node.lvstore):
-            logger.error(
-                "Failed to recover lvstore %s on %s after examine",
-                primary_node.lvstore, snode.get_id())
-            if not force:
-                _abort_and_unblock(
-                    f"lvstore {primary_node.lvstore} did not recover after examine "
-                    f"on non-leader {snode.get_id()}")
-
-    # Per-lvol recovery verification — DEFERRED to after the port unblock
-    # (2026-07-22, user decision): the probes cost 60-230ms of blocked-window
-    # time and feed only the abort decision; a post-unblock abort kills SPDK
-    # (crash-equivalent, handled by failover) instead of a clean in-window
-    # abort. Runs before ### 9 so no subsystem binds a missing blob.
-    # Per-lvol name-filtered probes, NOT one unfiltered dump (the dump costs
-    # seconds of SPDK app-thread time on large clusters).
-    def _deferred_lvol_verify():
-        if activation_mode:
-            return
-
-        def _lvol_bdev_registered(lv):
-            for candidate in (lv.lvol_uuid, f"{lv.lvs_name}/{lv.lvol_bdev}"):
-                try:
-                    if snode_rpc_client.get_bdevs(candidate):
-                        return True
-                except Exception:
-                    pass
-            return False
-
-        missing_lvols = []
-        for lv in lvol_list:
-            if _lvol_bdev_registered(lv):
-                continue
-            missing_lvols.append(lv)
-
-        if missing_lvols:
-            missing_repr = ", ".join(
-                f"{lv.lvs_name}/{lv.lvol_bdev}(uuid={lv.lvol_uuid[:8]})"
-                for lv in missing_lvols)
-            logger.error(
-                "Expected lvol bdevs missing on %s for %s after examine: %s",
-                snode.get_id(), primary_node.lvstore, missing_repr)
-            if not force:
-                _abort_and_unblock(
-                    f"Expected lvols not registered on {snode.get_id()} after "
-                    f"examine of {primary_node.raid}: {missing_repr}. "
-                    f"Re-run restart with force=True to proceed anyway "
-                    f"(this peer will not serve these lvols).")
-            else:
-                logger.warning(
-                    "force=True: proceeding with %d missing lvol(s) on %s for %s; "
-                    "these lvols will not be served by this peer",
-                    len(missing_lvols), snode.get_id(), primary_node.lvstore)
-
-    # bdev_examine brings the LVS back with its metadata-persisted role
-    # (primary). Leaving it as primary makes SPDK reject a later
-    # bdev_lvol_connect_hublvol with "-22 nonsecondary node".
-    sec_role = "tertiary" if is_tertiary else "secondary"
-    if not snode_rpc_client.bdev_lvol_set_lvs_opts(
-            primary_node.lvstore,
-            groupid=primary_node.jm_vuid,
-            subsystem_port=primary_node.get_lvol_subsys_port(primary_node.lvstore),
-            hublvol_port=primary_node.get_hublvol_port(primary_node.lvstore),
-            role=sec_role,
-    ):
-        logger.error("bdev_lvol_set_lvs_opts(%s) failed for %s on %s",
-                     sec_role, primary_node.lvstore, snode.get_id())
-
-    # Track the deferred failover-path attach so we can run it AFTER the
-    # leader port is unblocked. The in-freeze attach below uses a single
-    # path only; the second path (if any) is reconciled out-of-band so the
-    # 3 s INTER_ATTACH_SLEEP_SEC inside the coordinator never sits inside
-    # the IO-impact window.
-    deferred_failover_target = None
-    deferred_failover_via = None
-
-    if not activation_mode:
-        ### 6- create hublvol on secondary (non-leader) for multipath failover
-        # Secondary creates its own hublvol so the tertiary can use it as a failover path.
-        if not is_tertiary:
-            try:
-                cluster = db_controller.get_cluster_by_id(snode.cluster_id)
-                snode.create_secondary_hublvol(leader_node, cluster.nqn)
-                logger.info("Created secondary hublvol on restarting node %s for %s",
-                            snode.get_id(), primary_node.lvstore)
-            except Exception as e:
-                logger.error("Error creating secondary hublvol on restarting node: %s", e)
-
-        ### 7- single-path hublvol attach inside the freeze
-        # Pre-flight reachability up front: the second path must NEVER be
-        # attempted inside the leader-port-block window, and the single
-        # attached path must target a known-alive peer. If the original
-        # leader is offline (no quorum) we attach directly to the secondary
-        # — the dead leader's IP is not even tried.
-        attach_target = None
-        try:
-            if is_tertiary:
-                secondary_alive = (secondary_node and not _check_peer_disconnected(
-                    secondary_node, lvs_peer_ids=lvs_peer_ids_excl_snode))
-                # leader_has_quorum was computed earlier (line ~4722). When
-                # the leader has lost quorum, attaching to it would burn up
-                # to fast_io_fail_timeout_sec (5s) inside the freeze.
-                if leader_has_quorum:
-                    sync_target = leader_node
-                    if (secondary_alive and secondary_node is not None
-                            and secondary_node.get_id() != leader_node.get_id()):
-                        deferred_failover_target = secondary_node
-                        deferred_failover_via = leader_node
-                elif secondary_alive and secondary_node is not None and secondary_node.hublvol:
-                    logger.info("Leader %s offline (no quorum); tertiary %s "
-                                "connecting directly to secondary %s hublvol for %s",
-                                leader_node.get_id(), snode.get_id(),
-                                secondary_node.get_id(), primary_node.lvstore)
-                    sync_target = secondary_node
-                    # No deferred path: there is no live alternative peer
-                    # to add as a failover. Once the original leader comes
-                    # back online, its periodic hublvol reconciliation will
-                    # add it as a path.
-                else:
-                    sync_target = None
-                    logger.error(
-                        "Tertiary %s rejoin %s: no reachable hublvol target "
-                        "(leader=%s alive=%s, secondary alive=%s)",
-                        snode.get_id(), primary_node.lvstore,
-                        leader_node.get_id(), leader_has_quorum, secondary_alive)
-                attach_target = sync_target  # may be None
-            else:
-                # Secondary: connect to leader (primary) hublvol — single path,
-                # no deferred failover (secondaries don't carry one).
-                attach_target = leader_node
-        except Exception as e:
-            logger.error("Error determining hublvol attach target: %s", e)
-            attach_target = None
-
-        # Attach with retries. Each call is bounded by ``rpc_timeout=1.0``
-        # so the port-block window cannot be held open indefinitely. If
-        # the proxy is still busy when the RPC times out the controller
-        # may be partially attached in SPDK — but the CP has no proof,
-        # and unblocking the leader on that ambiguous state has been
-        # observed to produce writer-conflicts seconds later (incident
-        # 2026-05-21 18:04:01: tertiary e16a rejoining LVS_9651 with
-        # leader=00e7, 200 ms RPC timeout exhausted while SPDK was past
-        # ``set_num_queues_done`` but pre-namespace; no path attached;
-        # restart unblocked the leader anyway → writer_conflict on
-        # ``jm_vuid=9651`` at 18:04:03.520, 00e7 marked ``down``).
-        # Between attempts the leader port is unblocked for 5 s so the
-        # client side has time to reconnect its NVMe controller (which
-        # may have been disconnected during the prior block) and push
-        # IO again, then we re-block for the next attempt. The gap is
-        # not held under port-block. On exhaustion, ``_abort_and_unblock``
-        # kills snode's SPDK, marks it offline, and restores the leader
-        # port — the task runner will retry.
-        # ``lvs_node=primary_node`` is preserved so LVS metadata
-        # (lvstore name, jm_vuid, port, hublvol NQN/bdev) comes from
-        # the configured primary of the LVS being recreated, not from
-        # ``attach_target``; when the configured primary is offline
-        # and ``attach_target`` is a peer that took over leadership,
-        # that peer's own hublvol points at its OWN primary-LVS, which
-        # is the wrong LVS for our connection (incident 2026-05-02
-        # 15:53:42: tertiary worker1 via acting-leader worker5 for
-        # LVS_6207 set groupid=4729 — worker5's own primary).
-        if attach_target is not None:
-            ATTACH_MAX_ATTEMPTS = 3
-            ATTACH_RETRY_GAP_SEC = 5
-            ok = False
+        if not activation_mode and leader_has_quorum:
+            ### 3- block leader port ONLY (no siblings)
+            # Blocking the leader's LVS port is what quiesces its IO so this
+            # restarting node can safely examine its raid0 without a write
+            # racing into a half-reconstructed lvstore. Silently skipping the
+            # block (as we used to do on ConnectionRefused) lets the leader
+            # keep serving reads/writes while we examine — which has produced
+            # CRC mismatches and lvol drops on the restarting peer. So retry,
+            # and if it still can't land, abort the restart unless force=True.
+            #
+            # Budget: 3 attempts × rpc_client(timeout=3, retry=1) × 1s sleep
+            # between attempts → worst-case ~15s abort. Previously 5× ×
+            # (timeout=5, retry=5) × 2s = ~140s, which made every iteration
+            # against a dead-mgmt leader stall the restart task for minutes.
+            # The FDB-status short-circuit in _check_peer_disconnected should
+            # already route such peers to the takeover path before we reach
+            # here; keeping a short local budget protects against stragglers.
             last_err = None
-            for attempt in range(1, ATTACH_MAX_ATTEMPTS + 1):
-                try:
-                    ok = snode.connect_to_hublvol(
-                        attach_target, failover_node=None,
-                        role=sec_role, rpc_timeout=1.0,
-                        lvs_node=primary_node,
-                        coordinator_lock=_hub_lock_holder.get("lock"))
-                    last_err = None
-                except Exception as e:
-                    ok = False
-                    last_err = e
-                    logger.error(
-                        "connect_to_hublvol attempt %d/%d on %s for %s raised: %s",
-                        attempt, ATTACH_MAX_ATTEMPTS,
-                        snode.get_id(), primary_node.lvstore, e)
-                if ok or attempt >= ATTACH_MAX_ATTEMPTS:
-                    break
-                logger.warning(
-                    "connect_to_hublvol attempt %d/%d on %s for %s failed; "
-                    "unblock leader, wait %ds, re-block and retry",
-                    attempt, ATTACH_MAX_ATTEMPTS, snode.get_id(),
-                    primary_node.lvstore, ATTACH_RETRY_GAP_SEC)
-                if leader_port_blocked:
-                    try:
-                        port_block.set_port(leader_node, leader_lvs_port, block=False, timeout=3, retry=1)
-                        _deferred_port_events.append(("allow", leader_node, leader_lvs_port))
-                        leader_port_blocked = False
-                        _mark_leader_unblocked()
-                    except Exception as ue:
-                        logger.warning(
-                            "Unblock leader %s during attach-retry gap "
-                            "failed: %s", leader_node.get_id(), ue)
-                time.sleep(ATTACH_RETRY_GAP_SEC)
+            attempts = 3
+            for attempt in range(1, attempts + 1):
                 try:
                     port_block.set_port(leader_node, leader_lvs_port, block=True, timeout=3, retry=1)
                     _deferred_port_events.append(("deny", leader_node, leader_lvs_port))
                     leader_port_blocked = True
                     _mark_leader_blocked()
-                except Exception as be:
-                    _abort_and_unblock(
-                        f"Re-block leader {leader_node.get_id()} port "
-                        f"{leader_lvs_port} after retry gap failed for "
-                        f"{primary_node.lvstore}: {be}")
-            if not ok:
-                _abort_and_unblock(
-                    f"connect_to_hublvol failed for {primary_node.lvstore} "
-                    f"after {ATTACH_MAX_ATTEMPTS} attempts"
-                    + (f": {last_err}" if last_err else ""))
-
-        ### 8- unblock leader port
-        # If we blocked it, we MUST unblock — a stuck-blocked leader can't
-        # serve client IO on that LVS. Retry until it lands; schedule a
-        # port_allow task as a fallback if we still can't reach the leader
-        # after our attempts so another retry loop keeps trying.
-        if leader_port_blocked:
-            unblocked = False
-            attempts = 3
-            for attempt in range(1, attempts + 1):
-                try:
-                    port_block.set_port(leader_node, leader_lvs_port, block=False, timeout=3, retry=1)
-                    _deferred_port_events.append(("allow", leader_node, leader_lvs_port))
-                    unblocked = True
-                    _mark_leader_unblocked()
+                    last_err = None
                     break
                 except Exception as e:
+                    last_err = e
                     logger.warning(
-                        "Port-unblock attempt %d/%d failed for leader %s on %s: %s",
+                        "Port-block attempt %d/%d failed for leader %s on %s: %s",
                         attempt, attempts, leader_node.get_id(), primary_node.lvstore, e)
                     if attempt < attempts:
                         time.sleep(1)
-            if not unblocked:
-                logger.error(
-                    "Failed to unblock leader %s port %s for %s after %d attempts; "
-                    "scheduling port_allow task",
-                    leader_node.get_id(), leader_lvs_port, primary_node.lvstore, attempts)
+            if not leader_port_blocked:
+                msg = (f"Failed to block leader {leader_node.get_id()} port "
+                       f"{leader_lvs_port} after {attempts} attempts for "
+                       f"{primary_node.lvstore}: {last_err}")
+                if force:
+                    logger.warning(
+                        "%s — force=True: proceeding without leader port block; "
+                        "this allows leader-vs-restarter writes to race during "
+                        "examine and can corrupt the rebuilt lvstore", msg)
+                else:
+                    _abort_and_unblock(msg)
+
+        if not activation_mode and leader_port_blocked:
+            # Fixed quiesce window instead of draining distrib-inflight — see
+            # constants.NON_LEADER_BLOCK_QUIESCE_SEC for the full rationale
+            # (the inflight counter is polluted by migration mover IO on this
+            # node class, so a drain loop never settles; client IO admitted
+            # before the block settles in ms). Migration IO does not touch
+            # lvstore metadata, so a brief fixed wait is sufficient for the
+            # secondary's examine to see a consistent superblock.
+            time.sleep(constants.NON_LEADER_BLOCK_QUIESCE_SEC)
+
+        elif not activation_mode and not leader_has_quorum:
+            logger.info("Leader %s has no quorum for %s, skipping port block",
+                        leader_node.get_id(), primary_node.lvstore)
+
+        ### 4- examine (idempotent: skip only when raid AND lvstore already surfaced)
+        # #4: probes were computed pre-block (see above the block section) —
+        # nothing touches snode's fresh SPDK between there and here, and each
+        # in-window RPC costs a full CP round-trip.
+        if raid_already and lvstore_already:
+            logger.info(
+                "Raid %s and lvstore %s already present on %s; skipping examine",
+                primary_node.raid, primary_node.lvstore, snode.get_id())
+        else:
+            if raid_already and not lvstore_already and raid_preexisted:
+                # Convergence trap (activation retry only): the raid was created
+                # AND examined on a prior pass and the lvstore module did not
+                # surface it. SPDK rejects re-examine of an already-examined
+                # bdev with "Duplicate bdev name for manual examine", so a
+                # plain bdev_examine here is a silent no-op that loops the
+                # activation retry forever. Drop the raid and re-create via
+                # _create_bdev_stack (idempotent) so the next examine is
+                # against a freshly-registered raid.
+                logger.info(
+                    "Raid %s present but lvstore %s did not surface on %s; "
+                    "dropping raid for clean re-examine",
+                    primary_node.raid, primary_node.lvstore, snode.get_id())
                 try:
-                    tasks_controller.add_port_allow_task(
-                        leader_node.cluster_id, leader_node.get_id(), leader_lvs_port)
-                except Exception as sched_exc:
-                    logger.error("Failed to schedule port_allow fallback: %s", sched_exc)
-            leader_port_blocked = False
+                    snode_rpc_client.bdev_raid_delete(primary_node.raid)
+                except Exception as e:
+                    logger.warning(
+                        "bdev_raid_delete(%s) raised: %s — proceeding to "
+                        "_create_bdev_stack which is idempotent",
+                        primary_node.raid, e)
+                ret, err = _create_bdev_stack(snode, primary_node.lvstore_stack,
+                                              primary_node=primary_node)
+                if not ret:
+                    logger.error(
+                        "Failed to rebuild bdev stack on %s after raid drop: %s",
+                        snode.get_id(), err)
+            elif raid_already and not lvstore_already:
+                # Normal restart: the raid was freshly built this pass in step 1
+                # and has never been examined, so the first-time bdev_examine below
+                # surfaces the lvstore. Dropping+recreating it here would be pure
+                # churn inside the (minimized) port-block window — the duplicate
+                # bdev_raid_create observed 2026-06-12 (LVS_5199).
+                logger.info(
+                    "Raid %s freshly built this pass on %s; examining without drop",
+                    primary_node.raid, snode.get_id())
 
-    # Set restart phase: post_unblock — delayed sync deletes and registrations can now proceed
-    _release_block_gate()
-    _flush_port_events()
-    _release_hub_lock()
-    _deferred_lvol_verify()
-    _set_restart_phase(snode, primary_node.lvstore, StorageNode.RESTART_PHASE_POST_UNBLOCK, db_controller)
-    if _leader_block["max"]:
-        logger.info("[RESTART] Longest client-port block for %s: %.3fs "
-                    "(reject threshold 6s)",
-                    primary_node.lvstore, _leader_block["max"])
-    logger.info("[RESTART] Port-block phase for %s on %s took %.3fs "
-                "(phase span incl. post-unblock work; see per-port lines "
-                "for true outage)",
-                primary_node.lvstore, snode.get_id()[:8], time.monotonic() - _port_block_t0)
+            # Examine is required whenever the lvstore isn't surfaced — whether
+            # the raid was freshly created by _create_bdev_stack (normal restart
+            # path) or pre-existing with stale state (activation retry).
+            snode_rpc_client.bdev_examine(primary_node.raid)
 
-    ### 8b- deferred failover-path attach (tertiary only, leader was alive)
-    # The in-freeze attach above used a single path. Now that the leader
-    # port is unblocked and IO is flowing again, top up the second path on
-    # the multipath hublvol controller so a future primary loss has an
-    # immediate failover. The coordinator's INTER_ATTACH_SLEEP_SEC (3 s)
-    # cost lives here, OUTSIDE the IO-impact window — it doesn't sit inside
-    # the leader-port-block freeze any more, so client IO is unaffected.
-    if deferred_failover_target is not None and deferred_failover_via is not None:
-        try:
-            if snode.add_hublvol_failover_path(deferred_failover_via, deferred_failover_target):
-                logger.info("Added deferred hublvol failover path to %s (via %s) on %s for %s",
-                            deferred_failover_target.get_id(),
-                            deferred_failover_via.get_id(),
-                            snode.get_id(), primary_node.lvstore)
-            else:
-                logger.warning("Failed to add deferred hublvol failover path to %s on %s for %s",
-                               deferred_failover_target.get_id(),
-                               snode.get_id(), primary_node.lvstore)
-        except Exception as e:
-            logger.error("Error adding deferred hublvol failover path on %s: %s",
-                         snode.get_id(), e)
+            ### 5- wait for examine
+            ret = snode_rpc_client.bdev_wait_for_examine()
+            if not ret:
+                logger.warning("Failed to examine bdevs on non-leader node")
 
-    ### 9- add lvols to subsystems (non_optimized for non-leader; INACCESSIBLE
-    # during (re)activation so no client IO flows before hublvol redirects are
-    # connected and leadership settles — cluster_activate sets the correct ANA
-    # in a dedicated pass before flipping the cluster to ACTIVE).
-    non_leader_ana_state = "inaccessible" if activation_mode else "non_optimized"
-    executor = ThreadPoolExecutor(max_workers=50)
-    for lvol in lvol_list:
-        executor.submit(add_lvol_thread, lvol, snode, lvol_ana_state=non_leader_ana_state)
-    executor.shutdown(wait=True)
+            # After examine, the lvstore MUST be present. If it isn't, SPDK
+            # failed to rediscover the lvstore from its persisted metadata
+            # (e.g. partial stack components left over, corrupt on-disk state).
+            # During activation we can't safely recover — signal the caller
+            # to reject the activation and ask for a restart of this node.
+            if activation_mode and not _rpc_lvstore_exists(snode_rpc_client, primary_node.lvstore):
+                raise LVSRestartRequiredError(
+                    snode.get_id(), primary_node.lvstore,
+                    detail=f"raid={primary_node.raid} present but lvstore did not recover"
+                    if raid_already else "examine did not produce lvstore")
 
-    if not activation_mode:
-        ### 10- add non-optimized path on tertiary to newly-restarted secondary's hublvol
-        if not is_tertiary and primary_node.tertiary_node_id and leader_node.hublvol:
-            tert_id = primary_node.tertiary_node_id
-            if tert_id != snode.get_id() and tert_id != leader_node.get_id():
-                tert_node = db_controller.get_storage_node_by_id(tert_id)
-                if tert_node and not _check_peer_disconnected(tert_node, lvs_peer_ids=lvs_peer_ids_excl_snode):
+        # Verify that examine actually rediscovered the lvstore and every lvol
+        # the FDB expects to be present on this node. Mirrors the check in
+        # recreate_lvstore() for the primary path. If an lvol blob did not
+        # become durable on this peer's shard of raid0 before it was torn down
+        # (e.g. the blob was committed on the primary/tertiary quorum but this
+        # node missed the write window due to a simultaneous force-shutdown),
+        # the examine won't surface it. Continuing would leave the lvol
+        # subsystem bound without a namespace on this node — present on
+        # primary/tertiary, missing here — and the divergence would never be
+        # reconciled because there is no FDB↔SPDK lvol-set reconcile loop.
+        if not activation_mode:
+            if not snode_rpc_client.bdev_lvol_get_lvstores(primary_node.lvstore):
+                logger.error(
+                    "Failed to recover lvstore %s on %s after examine",
+                    primary_node.lvstore, snode.get_id())
+                if not force:
+                    _abort_and_unblock(
+                        f"lvstore {primary_node.lvstore} did not recover after examine "
+                        f"on non-leader {snode.get_id()}")
+
+        # Per-lvol recovery verification — DEFERRED to after the port unblock
+        # (2026-07-22, user decision): the probes cost 60-230ms of blocked-window
+        # time and feed only the abort decision; a post-unblock abort kills SPDK
+        # (crash-equivalent, handled by failover) instead of a clean in-window
+        # abort. Runs before ### 9 so no subsystem binds a missing blob.
+        # Per-lvol name-filtered probes, NOT one unfiltered dump (the dump costs
+        # seconds of SPDK app-thread time on large clusters).
+        def _deferred_lvol_verify():
+            if activation_mode:
+                return
+
+            def _lvol_bdev_registered(lv):
+                for candidate in (lv.lvol_uuid, f"{lv.lvs_name}/{lv.lvol_bdev}"):
                     try:
-                        if tert_node.add_hublvol_failover_path(leader_node, snode):
-                            logger.info("Added secondary %s hublvol path on tertiary %s for %s",
-                                        snode.get_id(), tert_node.get_id(), primary_node.lvstore)
-                        else:
-                            logger.warning(
-                                "Failed to add secondary %s hublvol path on tertiary %s for %s",
-                                snode.get_id(), tert_node.get_id(), primary_node.lvstore)
+                        if snode_rpc_client.get_bdevs(candidate):
+                            return True
+                    except Exception:
+                        pass
+                return False
+
+            missing_lvols = []
+            for lv in lvol_list:
+                if _lvol_bdev_registered(lv):
+                    continue
+                missing_lvols.append(lv)
+
+            if missing_lvols:
+                missing_repr = ", ".join(
+                    f"{lv.lvs_name}/{lv.lvol_bdev}(uuid={lv.lvol_uuid[:8]})"
+                    for lv in missing_lvols)
+                logger.error(
+                    "Expected lvol bdevs missing on %s for %s after examine: %s",
+                    snode.get_id(), primary_node.lvstore, missing_repr)
+                if not force:
+                    _abort_and_unblock(
+                        f"Expected lvols not registered on {snode.get_id()} after "
+                        f"examine of {primary_node.raid}: {missing_repr}. "
+                        f"Re-run restart with force=True to proceed anyway "
+                        f"(this peer will not serve these lvols).")
+                else:
+                    logger.warning(
+                        "force=True: proceeding with %d missing lvol(s) on %s for %s; "
+                        "these lvols will not be served by this peer",
+                        len(missing_lvols), snode.get_id(), primary_node.lvstore)
+
+        # bdev_examine brings the LVS back with its metadata-persisted role
+        # (primary). Leaving it as primary makes SPDK reject a later
+        # bdev_lvol_connect_hublvol with "-22 nonsecondary node".
+        sec_role = "tertiary" if is_tertiary else "secondary"
+        if not snode_rpc_client.bdev_lvol_set_lvs_opts(
+                primary_node.lvstore,
+                groupid=primary_node.jm_vuid,
+                subsystem_port=primary_node.get_lvol_subsys_port(primary_node.lvstore),
+                hublvol_port=primary_node.get_hublvol_port(primary_node.lvstore),
+                role=sec_role,
+        ):
+            logger.error("bdev_lvol_set_lvs_opts(%s) failed for %s on %s",
+                         sec_role, primary_node.lvstore, snode.get_id())
+
+        # Track the deferred failover-path attach so we can run it AFTER the
+        # leader port is unblocked. The in-freeze attach below uses a single
+        # path only; the second path (if any) is reconciled out-of-band so the
+        # 3 s INTER_ATTACH_SLEEP_SEC inside the coordinator never sits inside
+        # the IO-impact window.
+        deferred_failover_target = None
+        deferred_failover_via = None
+
+        if not activation_mode:
+            ### 6- create hublvol on secondary (non-leader) for multipath failover
+            # Secondary creates its own hublvol so the tertiary can use it as a failover path.
+            if not is_tertiary:
+                try:
+                    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+                    snode.create_secondary_hublvol(leader_node, cluster.nqn)
+                    logger.info("Created secondary hublvol on restarting node %s for %s",
+                                snode.get_id(), primary_node.lvstore)
+                except Exception as e:
+                    logger.error("Error creating secondary hublvol on restarting node: %s", e)
+
+            ### 7- single-path hublvol attach inside the freeze
+            # Pre-flight reachability up front: the second path must NEVER be
+            # attempted inside the leader-port-block window, and the single
+            # attached path must target a known-alive peer. If the original
+            # leader is offline (no quorum) we attach directly to the secondary
+            # — the dead leader's IP is not even tried.
+            attach_target = None
+            try:
+                if is_tertiary:
+                    secondary_alive = (secondary_node and not _check_peer_disconnected(
+                        secondary_node, lvs_peer_ids=lvs_peer_ids_excl_snode))
+                    # leader_has_quorum was computed earlier (line ~4722). When
+                    # the leader has lost quorum, attaching to it would burn up
+                    # to fast_io_fail_timeout_sec (5s) inside the freeze.
+                    if leader_has_quorum:
+                        sync_target = leader_node
+                        if (secondary_alive and secondary_node is not None
+                                and secondary_node.get_id() != leader_node.get_id()):
+                            deferred_failover_target = secondary_node
+                            deferred_failover_via = leader_node
+                    elif secondary_alive and secondary_node is not None and secondary_node.hublvol:
+                        logger.info("Leader %s offline (no quorum); tertiary %s "
+                                    "connecting directly to secondary %s hublvol for %s",
+                                    leader_node.get_id(), snode.get_id(),
+                                    secondary_node.get_id(), primary_node.lvstore)
+                        sync_target = secondary_node
+                        # No deferred path: there is no live alternative peer
+                        # to add as a failover. Once the original leader comes
+                        # back online, its periodic hublvol reconciliation will
+                        # add it as a path.
+                    else:
+                        sync_target = None
+                        logger.error(
+                            "Tertiary %s rejoin %s: no reachable hublvol target "
+                            "(leader=%s alive=%s, secondary alive=%s)",
+                            snode.get_id(), primary_node.lvstore,
+                            leader_node.get_id(), leader_has_quorum, secondary_alive)
+                    attach_target = sync_target  # may be None
+                else:
+                    # Secondary: connect to leader (primary) hublvol — single path,
+                    # no deferred failover (secondaries don't carry one).
+                    attach_target = leader_node
+            except Exception as e:
+                logger.error("Error determining hublvol attach target: %s", e)
+                attach_target = None
+
+            # Attach with retries. Each call is bounded by ``rpc_timeout=1.0``
+            # so the port-block window cannot be held open indefinitely. If
+            # the proxy is still busy when the RPC times out the controller
+            # may be partially attached in SPDK — but the CP has no proof,
+            # and unblocking the leader on that ambiguous state has been
+            # observed to produce writer-conflicts seconds later (incident
+            # 2026-05-21 18:04:01: tertiary e16a rejoining LVS_9651 with
+            # leader=00e7, 200 ms RPC timeout exhausted while SPDK was past
+            # ``set_num_queues_done`` but pre-namespace; no path attached;
+            # restart unblocked the leader anyway → writer_conflict on
+            # ``jm_vuid=9651`` at 18:04:03.520, 00e7 marked ``down``).
+            # Between attempts the leader port is unblocked for 5 s so the
+            # client side has time to reconnect its NVMe controller (which
+            # may have been disconnected during the prior block) and push
+            # IO again, then we re-block for the next attempt. The gap is
+            # not held under port-block. On exhaustion, ``_abort_and_unblock``
+            # kills snode's SPDK, marks it offline, and restores the leader
+            # port — the task runner will retry.
+            # ``lvs_node=primary_node`` is preserved so LVS metadata
+            # (lvstore name, jm_vuid, port, hublvol NQN/bdev) comes from
+            # the configured primary of the LVS being recreated, not from
+            # ``attach_target``; when the configured primary is offline
+            # and ``attach_target`` is a peer that took over leadership,
+            # that peer's own hublvol points at its OWN primary-LVS, which
+            # is the wrong LVS for our connection (incident 2026-05-02
+            # 15:53:42: tertiary worker1 via acting-leader worker5 for
+            # LVS_6207 set groupid=4729 — worker5's own primary).
+            if attach_target is not None:
+                ATTACH_MAX_ATTEMPTS = 3
+                ATTACH_RETRY_GAP_SEC = 5
+                ok = False
+                last_err = None
+                for attempt in range(1, ATTACH_MAX_ATTEMPTS + 1):
+                    try:
+                        ok = snode.connect_to_hublvol(
+                            attach_target, failover_node=None,
+                            role=sec_role, rpc_timeout=1.0,
+                            lvs_node=primary_node,
+                            coordinator_lock=_hub_lock_holder.get("lock"))
+                        last_err = None
                     except Exception as e:
-                        logger.error("Error adding secondary hublvol path on tertiary: %s", e)
+                        ok = False
+                        last_err = e
+                        logger.error(
+                            "connect_to_hublvol attempt %d/%d on %s for %s raised: %s",
+                            attempt, ATTACH_MAX_ATTEMPTS,
+                            snode.get_id(), primary_node.lvstore, e)
+                    if ok or attempt >= ATTACH_MAX_ATTEMPTS:
+                        break
+                    logger.warning(
+                        "connect_to_hublvol attempt %d/%d on %s for %s failed; "
+                        "unblock leader, wait %ds, re-block and retry",
+                        attempt, ATTACH_MAX_ATTEMPTS, snode.get_id(),
+                        primary_node.lvstore, ATTACH_RETRY_GAP_SEC)
+                    if leader_port_blocked:
+                        try:
+                            port_block.set_port(leader_node, leader_lvs_port, block=False, timeout=3, retry=1)
+                            _deferred_port_events.append(("allow", leader_node, leader_lvs_port))
+                            leader_port_blocked = False
+                            _mark_leader_unblocked()
+                        except Exception as ue:
+                            logger.warning(
+                                "Unblock leader %s during attach-retry gap "
+                                "failed: %s", leader_node.get_id(), ue)
+                    time.sleep(ATTACH_RETRY_GAP_SEC)
+                    try:
+                        port_block.set_port(leader_node, leader_lvs_port, block=True, timeout=3, retry=1)
+                        _deferred_port_events.append(("deny", leader_node, leader_lvs_port))
+                        leader_port_blocked = True
+                        _mark_leader_blocked()
+                    except Exception as be:
+                        _abort_and_unblock(
+                            f"Re-block leader {leader_node.get_id()} port "
+                            f"{leader_lvs_port} after retry gap failed for "
+                            f"{primary_node.lvstore}: {be}")
+                if not ok:
+                    _abort_and_unblock(
+                        f"connect_to_hublvol failed for {primary_node.lvstore} "
+                        f"after {ATTACH_MAX_ATTEMPTS} attempts"
+                        + (f": {last_err}" if last_err else ""))
 
-    # Clear restart phase for this LVS
-    _set_restart_phase(snode, primary_node.lvstore, "", db_controller)
+            ### 8- unblock leader port
+            # If we blocked it, we MUST unblock — a stuck-blocked leader can't
+            # serve client IO on that LVS. Retry until it lands; schedule a
+            # port_allow task as a fallback if we still can't reach the leader
+            # after our attempts so another retry loop keeps trying.
+            if leader_port_blocked:
+                unblocked = False
+                attempts = 3
+                for attempt in range(1, attempts + 1):
+                    try:
+                        port_block.set_port(leader_node, leader_lvs_port, block=False, timeout=3, retry=1)
+                        _deferred_port_events.append(("allow", leader_node, leader_lvs_port))
+                        unblocked = True
+                        _mark_leader_unblocked()
+                        break
+                    except Exception as e:
+                        logger.warning(
+                            "Port-unblock attempt %d/%d failed for leader %s on %s: %s",
+                            attempt, attempts, leader_node.get_id(), primary_node.lvstore, e)
+                        if attempt < attempts:
+                            time.sleep(1)
+                if not unblocked:
+                    logger.error(
+                        "Failed to unblock leader %s port %s for %s after %d attempts; "
+                        "scheduling port_allow task",
+                        leader_node.get_id(), leader_lvs_port, primary_node.lvstore, attempts)
+                    try:
+                        tasks_controller.add_port_allow_task(
+                            leader_node.cluster_id, leader_node.get_id(), leader_lvs_port)
+                    except Exception as sched_exc:
+                        logger.error("Failed to schedule port_allow fallback: %s", sched_exc)
+                leader_port_blocked = False
 
-    _set_lvstore_status_atomic(primary_node.get_id(), "ready", db_controller)
+        # Set restart phase: post_unblock — delayed sync deletes and registrations can now proceed
+        _release_block_gate()
+        _flush_port_events()
+        _release_hub_lock()
+        _deferred_lvol_verify()
+        _set_restart_phase(snode, primary_node.lvstore, StorageNode.RESTART_PHASE_POST_UNBLOCK, db_controller)
+        if _leader_block["max"]:
+            logger.info("[RESTART] Longest client-port block for %s: %.3fs "
+                        "(reject threshold 6s)",
+                        primary_node.lvstore, _leader_block["max"])
+        logger.info("[RESTART] Port-block phase for %s on %s took %.3fs "
+                    "(phase span incl. post-unblock work; see per-port lines "
+                    "for true outage)",
+                    primary_node.lvstore, snode.get_id()[:8], time.monotonic() - _port_block_t0)
 
-    return True
+        ### 8b- deferred failover-path attach (tertiary only, leader was alive)
+        # The in-freeze attach above used a single path. Now that the leader
+        # port is unblocked and IO is flowing again, top up the second path on
+        # the multipath hublvol controller so a future primary loss has an
+        # immediate failover. The coordinator's INTER_ATTACH_SLEEP_SEC (3 s)
+        # cost lives here, OUTSIDE the IO-impact window — it doesn't sit inside
+        # the leader-port-block freeze any more, so client IO is unaffected.
+        if deferred_failover_target is not None and deferred_failover_via is not None:
+            try:
+                if snode.add_hublvol_failover_path(deferred_failover_via, deferred_failover_target):
+                    logger.info("Added deferred hublvol failover path to %s (via %s) on %s for %s",
+                                deferred_failover_target.get_id(),
+                                deferred_failover_via.get_id(),
+                                snode.get_id(), primary_node.lvstore)
+                else:
+                    logger.warning("Failed to add deferred hublvol failover path to %s on %s for %s",
+                                   deferred_failover_target.get_id(),
+                                   snode.get_id(), primary_node.lvstore)
+            except Exception as e:
+                logger.error("Error adding deferred hublvol failover path on %s: %s",
+                             snode.get_id(), e)
+
+        ### 9- add lvols to subsystems (non_optimized for non-leader; INACCESSIBLE
+        # during (re)activation so no client IO flows before hublvol redirects are
+        # connected and leadership settles — cluster_activate sets the correct ANA
+        # in a dedicated pass before flipping the cluster to ACTIVE).
+        non_leader_ana_state = "inaccessible" if activation_mode else "non_optimized"
+        executor = ThreadPoolExecutor(max_workers=50)
+        for lvol in lvol_list:
+            executor.submit(add_lvol_thread, lvol, snode, lvol_ana_state=non_leader_ana_state)
+        executor.shutdown(wait=True)
+
+        if not activation_mode:
+            ### 10- add non-optimized path on tertiary to newly-restarted secondary's hublvol
+            if not is_tertiary and primary_node.tertiary_node_id and leader_node.hublvol:
+                tert_id = primary_node.tertiary_node_id
+                if tert_id != snode.get_id() and tert_id != leader_node.get_id():
+                    tert_node = db_controller.get_storage_node_by_id(tert_id)
+                    if tert_node and not _check_peer_disconnected(tert_node, lvs_peer_ids=lvs_peer_ids_excl_snode):
+                        try:
+                            if tert_node.add_hublvol_failover_path(leader_node, snode):
+                                logger.info("Added secondary %s hublvol path on tertiary %s for %s",
+                                            snode.get_id(), tert_node.get_id(), primary_node.lvstore)
+                            else:
+                                logger.warning(
+                                    "Failed to add secondary %s hublvol path on tertiary %s for %s",
+                                    snode.get_id(), tert_node.get_id(), primary_node.lvstore)
+                        except Exception as e:
+                            logger.error("Error adding secondary hublvol path on tertiary: %s", e)
+
+        # Clear restart phase for this LVS
+        _set_restart_phase(snode, primary_node.lvstore, "", db_controller)
+
+        _set_lvstore_status_atomic(primary_node.get_id(), "ready", db_controller)
+
+        return True
+    finally:
+        # Idempotent; the in-flow release above is the normal path.
+        _release_block_gate()
 
 
 def _release_lvs_subsys_port_on_peers(lvs_node, exclude_node_id, db_controller):
@@ -7982,7 +8616,7 @@ def _restore_peer_lvstore_status_ready(node_id, db_controller):
             fresh, lambda n: setattr(n, "lvstore_status", "ready"))
 
 
-def recreate_all_lvstores(snode, force=False):
+def recreate_all_lvstores(snode: StorageNode, force=False):
     """Recreate all LVS stacks on a restarting node: primary, secondary, tertiary.
 
     This is the dispatch logic extracted from restart_storage_node() so it can
@@ -8002,7 +8636,7 @@ def recreate_all_lvstores(snode, force=False):
     return _recreate_all_lvstores_serial(snode, force=force)
 
 
-def _recreate_all_lvstores_serial(snode, force=False):
+def _recreate_all_lvstores_serial(snode: StorageNode, force=False):
     db_controller = DBController()
 
     # --- Step 1: Primary LVS ---
@@ -8120,7 +8754,7 @@ def _recreate_all_lvstores_serial(snode, force=False):
     return non_leader_ok
 
 
-def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False):
+def recreate_lvstore(snode: StorageNode, force=False, lvs_primary=None, activation_mode=False):
     """Per-LVS-locked wrapper: serialize recreate of this LVS only against a
     concurrent recreate of the SAME LVS. The LVS is ``lvs_primary.lvstore``
     (secondary taking leadership) or ``snode.lvstore`` (own primary).
@@ -8134,7 +8768,7 @@ def recreate_lvstore(snode, force=False, lvs_primary=None, activation_mode=False
             snode, force=force, lvs_primary=lvs_primary, activation_mode=False)
 
 
-def _recreate_lvstore_impl(snode, force=False, lvs_primary=None, activation_mode=False):
+def _recreate_lvstore_impl(snode: StorageNode, force=False, lvs_primary=None, activation_mode=False):
     """Recreate LVStore as leader.
 
     Per design: runs for snode's own primary LVS, and also when snode
@@ -8489,649 +9123,671 @@ def _recreate_lvstore_impl(snode, force=False, lvs_primary=None, activation_mode
     raid_already = _rpc_bdev_exists(rpc_client, lvs_raid)
     lvstore_already = _rpc_lvstore_exists(rpc_client, lvs_name)
 
-    if not activation_mode:
-        try:
-            from simplyblock_core.utils.hublvol_reconnect import (
-                HublvolReconnectCoordinator,
-            )
-            _hub_coord = HublvolReconnectCoordinator(db_controller)
-            for _peer in sec_nodes:
-                if _peer.get_id() in disconnected_peers:
-                    continue
-                _hub_locks[_peer.get_id()] = _hub_coord.acquire_lock(
-                    _peer.get_id(), lvs_node.lvstore)
-        except Exception as _hl_e:
-            logger.warning(
-                "Pre-acquire of hublvol locks for %s failed — reconcile "
-                "will lock in-window: %s", lvs_name, _hl_e)
-
-        # #1 pre-stage: NVMf subsystems + listeners for the hublvols wired
-        # inside the window have no lvstore/bdev dependency — create them
-        # here so the in-window expose calls reduce to probe+add_ns. All
-        # params come from persisted hublvol metadata; every call is
-        # idempotent and failure is non-fatal (in-window expose creates as
-        # before).
-        try:
-            if lvs_node.hublvol:
-                _cluster_pre = db_controller.get_cluster_by_id(snode.cluster_id)
-                # snode's own (leader) hublvol subsystem
-                snode.prestage_hublvol_subsystem(
-                    nqn=lvs_node.hublvol.nqn,
-                    model_number=lvs_node.hublvol.model_number,
-                    port=lvs_node.hublvol.nvmf_port,
-                    ana_state="optimized",
+    try:
+        if not activation_mode:
+            try:
+                from simplyblock_core.utils.hublvol_reconnect import (
+                    HublvolReconnectCoordinator,
                 )
-                # transferhub subsystem (only when its metadata is persisted;
-                # otherwise create_transfer_hublvol mints a fresh model
-                # number in-window and must own the create)
-                if snode.transfer_hublvol and snode.transfer_hublvol.nqn:
+                _hub_coord = HublvolReconnectCoordinator(db_controller)
+                for _peer in sec_nodes:
+                    if _peer.get_id() in disconnected_peers:
+                        continue
+                    _hub_locks[_peer.get_id()] = _hub_coord.acquire_lock(
+                        _peer.get_id(), lvs_node.lvstore)
+            except Exception as _hl_e:
+                logger.warning(
+                    "Pre-acquire of hublvol locks for %s failed — reconcile "
+                    "will lock in-window: %s", lvs_name, _hl_e)
+
+            # #1 pre-stage: NVMf subsystems + listeners for the hublvols wired
+            # inside the window have no lvstore/bdev dependency — create them
+            # here so the in-window expose calls reduce to probe+add_ns. All
+            # params come from persisted hublvol metadata; every call is
+            # idempotent and failure is non-fatal (in-window expose creates as
+            # before).
+            try:
+                if lvs_node.hublvol:
+                    _cluster_pre = db_controller.get_cluster_by_id(snode.cluster_id)
+                    # snode's own (leader) hublvol subsystem
                     snode.prestage_hublvol_subsystem(
-                        nqn=snode.transfer_hublvol.nqn,
-                        model_number=snode.transfer_hublvol.model_number,
-                        port=snode.transfer_hublvol.nvmf_port,
-                        ana_state="optimized",
-                    )
-                # sec_1's shared-NQN secondary hublvol subsystem
-                _sec1_pre = next(
-                    (p for p in sec_nodes
-                     if p.get_id() == lvs_node.secondary_node_id
-                     and p.get_id() not in disconnected_peers), None)
-                if _sec1_pre is not None:
-                    _sec1_pre.prestage_hublvol_subsystem(
-                        nqn=StorageNode.hublvol_nqn_for_lvstore(
-                            _cluster_pre.nqn, lvs_node.lvstore),
+                        nqn=lvs_node.hublvol.nqn,
                         model_number=lvs_node.hublvol.model_number,
                         port=lvs_node.hublvol.nvmf_port,
-                        ana_state="non_optimized",
-                        min_cntlid=1000,
+                        ana_state="optimized",
                     )
-        except Exception as _ps_e:
-            logger.warning(
-                "Hublvol subsystem pre-stage failed for %s "
-                "(in-window expose will create it): %s", lvs_name, _ps_e)
-
-        # Pre-block controller ATTACH from every connected peer to snode's
-        # pre-staged hublvol subsystem. The subsystem is still NAMESPACE-LESS
-        # (the hublvol bdev exists only after the in-window examine): the
-        # controller attaches empty and the peer's n1 bdev surfaces via AER
-        # once the in-window add_ns runs — connect_to_hublvol's n1-wait
-        # covers that. The attach is inert until the in-window
-        # bdev_lvol_connect_hublvol registers the redirect. Non-fatal per
-        # peer: failure falls back to the in-window attach.
-        if lvs_node.hublvol:
-            for _peer in sec_nodes:
-                if _peer.get_id() in disconnected_peers:
-                    continue
-                if _peer.get_id() == lvs_node.secondary_node_id:
-                    _pre_role = "secondary"
-                elif _peer.get_id() == lvs_node.tertiary_node_id:
-                    _pre_role = "tertiary"
-                else:
-                    continue
-                try:
-                    _peer.connect_to_hublvol(
-                        snode, failover_node=None, role=_pre_role,
-                        rpc_timeout=1.0, lvs_node=lvs_node,
-                        coordinator_lock=_hub_locks.get(_peer.get_id()),
-                        attach_only=True)
-                except Exception as _pa_e:
-                    logger.warning(
-                        "Pre-block hublvol attach on %s for %s failed "
-                        "(in-window attach will retry): %s",
-                        _peer.get_id(), lvs_name, _pa_e)
-
-        # Serialize the client-port outage span across all concurrent
-        # recreates. Acquired AFTER the hublvol advisory locks (fixed lock
-        # order: per-LVS recreate lock -> hublvol locks -> window gate).
-        _acquire_block_gate()
-        ### 3- block LVS port on every connected peer (leader + non-leaders),
-        # then suspend the leader's journal replication before the flap.
-        #
-        # Per attempt against the current leader:
-        #   a. wait for any in-flight JM replication task to finish (loops
-        #      internally) so we don't block mid-replication;
-        #   b. mark the leader in_creation and block its LVS port;
-        #   c. jc_disable_replication(jm_vuid):
-        #        True  -> no active replication; it is now suspended (~12s) ->
-        #                 proceed with the drain + leadership drop below.
-        #        False -> active replication present -> unblock the leader port
-        #                 and retry the whole sequence (re-wait, re-block,
-        #                 re-disable).
-        #
-        # Without blocking the tertiary too, client IO can leak to it during the
-        # leader flap: tertiary's LVOL listener stays open and serves writes
-        # whose hublvol redirect target is mid-transition, producing
-        # writer_conflict events on the journal. Non-leader peers are blocked
-        # once, after the leader's replication is confirmed suspended. Each peer
-        # stays blocked until its connect_to_hublvol succeeds in ### 8b.
-        if current_leader and current_leader.get_id() not in disconnected_peers:
-            _REPL_SUSPEND_MAX_ATTEMPTS = 10
-            replication_suspended = False
-            for _attempt in range(_REPL_SUSPEND_MAX_ATTEMPTS):
-                # a. ensure no active replication on the leader (loops internally)
-                try:
-                    ret = current_leader.wait_for_jm_rep_tasks_to_finish(lvs_jm_vuid)
-                    if not ret:
-                        msg = f"JM replication task found on leader {current_leader.get_id()} for jm {lvs_jm_vuid}"
-                        logger.error(msg)
-                        storage_events.jm_repl_tasks_found(current_leader, lvs_jm_vuid)
-                except Exception as e:
-                    raise Exception(
-                        f"Abort restart: replication-wait on leader {current_leader.get_id()} failed: {e}")
-
-                # b. block the leader's LVS port
-                try:
-                    current_leader.lvstore_status = "in_creation"
-                    current_leader.write_to_db()
-                    port_block.set_port(current_leader, snode_lvs_port, block=True, timeout=5, retry=2)
-                    _deferred_port_events.append(("deny", current_leader, snode_lvs_port))
-                    blocked_peers.append(current_leader)
-                    _block_started[current_leader.get_id()] = time.monotonic()
-                except Exception as e:
-                    # Failing to port-block the current leader means we cannot
-                    # safely promote snode: the old leader may still be serving
-                    # IO, and a parallel leader on snode would produce a writer
-                    # conflict (observed 2026-04-25, LVS_6609 incident).
-                    # _check_hublvol_connected from snode is meaningless here —
-                    # snode hasn't reconnected to peer hublvols yet — so we
-                    # cannot use it to discriminate "peer gone" from "peer slow".
-                    # Abort the attempt; the task runner will retry.
-                    _abort_restart_and_unblock(
-                        f"Failed to port-block leader {current_leader.get_id()}: {e}")
-
-                # c. suspend journal replication while the port is blocked
-                try:
-                    repl_disabled = current_leader.rpc_client().jc_disable_replication(lvs_jm_vuid)
-                except Exception as e:
-                    _abort_restart_and_unblock(
-                        f"jc_disable_replication on leader {current_leader.get_id()} failed: {e}")
-                if repl_disabled:
-                    replication_suspended = True
-                    break
-
-                # Active replication still present: unblock the leader port and
-                # retry the full sequence from the replication wait.
+                    # transferhub subsystem (only when its metadata is persisted;
+                    # otherwise create_transfer_hublvol mints a fresh model
+                    # number in-window and must own the create)
+                    if snode.transfer_hublvol and snode.transfer_hublvol.nqn:
+                        snode.prestage_hublvol_subsystem(
+                            nqn=snode.transfer_hublvol.nqn,
+                            model_number=snode.transfer_hublvol.model_number,
+                            port=snode.transfer_hublvol.nvmf_port,
+                            ana_state="optimized",
+                        )
+                    # sec_1's shared-NQN secondary hublvol subsystem
+                    _sec1_pre = next(
+                        (p for p in sec_nodes
+                         if p.get_id() == lvs_node.secondary_node_id
+                         and p.get_id() not in disconnected_peers), None)
+                    if _sec1_pre is not None:
+                        _sec1_pre.prestage_hublvol_subsystem(
+                            nqn=StorageNode.hublvol_nqn_for_lvstore(
+                                _cluster_pre.nqn, lvs_node.lvstore),
+                            model_number=lvs_node.hublvol.model_number,
+                            port=lvs_node.hublvol.nvmf_port,
+                            ana_state="non_optimized",
+                            min_cntlid=1000,
+                        )
+            except Exception as _ps_e:
                 logger.warning(
-                    "jc_disable_replication reports active replication on leader %s "
-                    "(attempt %d/%d); unblocking and retrying",
-                    current_leader.get_id(), _attempt + 1, _REPL_SUSPEND_MAX_ATTEMPTS)
-                _unblock_peer_port(current_leader)
+                    "Hublvol subsystem pre-stage failed for %s "
+                    "(in-window expose will create it): %s", lvs_name, _ps_e)
 
-            if not replication_suspended:
-                _abort_restart_and_unblock(
-                    f"Could not suspend journal replication on leader "
-                    f"{current_leader.get_id()} after {_REPL_SUSPEND_MAX_ATTEMPTS} attempts")
+            # Pre-block controller ATTACH from every connected peer to snode's
+            # pre-staged hublvol subsystem. The subsystem is still NAMESPACE-LESS
+            # (the hublvol bdev exists only after the in-window examine): the
+            # controller attaches empty and the peer's n1 bdev surfaces via AER
+            # once the in-window add_ns runs — connect_to_hublvol's n1-wait
+            # covers that. The attach is inert until the in-window
+            # bdev_lvol_connect_hublvol registers the redirect. Non-fatal per
+            # peer: failure falls back to the in-window attach.
+            if lvs_node.hublvol:
+                for _peer in sec_nodes:
+                    if _peer.get_id() in disconnected_peers:
+                        continue
+                    if _peer.get_id() == lvs_node.secondary_node_id:
+                        _pre_role = "secondary"
+                    elif _peer.get_id() == lvs_node.tertiary_node_id:
+                        _pre_role = "tertiary"
+                    else:
+                        continue
+                    try:
+                        _peer.connect_to_hublvol(
+                            snode, failover_node=None, role=_pre_role,
+                            rpc_timeout=1.0, lvs_node=lvs_node,
+                            coordinator_lock=_hub_locks.get(_peer.get_id()),
+                            attach_only=True)
+                    except Exception as _pa_e:
+                        logger.warning(
+                            "Pre-block hublvol attach on %s for %s failed "
+                            "(in-window attach will retry): %s",
+                            _peer.get_id(), lvs_name, _pa_e)
 
-        # Also block non-leader peers (tertiary). The leader's demote+drain
-        # below is leader-specific; non-leaders just need the port shut so
-        # IO can't leak to them during the flap.
-        for sec_node in sec_nodes:
-            if sec_node is current_leader:
-                continue
-            if sec_node.get_id() in disconnected_peers:
-                continue
-            if sec_node in blocked_peers:
-                continue
-            try:
-                port_block.set_port(sec_node, snode_lvs_port, block=True, timeout=5, retry=2)
-                _deferred_port_events.append(("deny", sec_node, snode_lvs_port))
-                blocked_peers.append(sec_node)
-                _block_started[sec_node.get_id()] = time.monotonic()
-            except Exception as e:
-                # Same rationale as the leader port-block: cannot safely
-                # decide "peer gone" vs "peer slow" before snode has
-                # reconnected to peer hublvols. A non-leader peer left
-                # serving on snode_lvs_port during the leader flap can
-                # accept client IO whose hublvol redirect is mid-transition,
-                # producing a writer conflict.
-                _abort_restart_and_unblock(
-                    f"Failed to port-block non-leader peer {sec_node.get_id()}: {e}")
-
-        if current_leader and current_leader in blocked_peers:
-            # --- Inside port-blocked window: timeout=0.2s, retry=0, abort on failure ---
-            leader_rpc = current_leader.rpc_client(timeout=0.2, retry=0)
-
-            ### 4- drain in-flight IO BEFORE dropping leadership
+            # Serialize the client-port outage span across all concurrent
+            # recreates. Acquired AFTER the hublvol advisory locks (fixed lock
+            # order: per-LVS recreate lock -> hublvol locks -> window gate).
+            _acquire_block_gate()
+            ### 3- block LVS port on every connected peer (leader + non-leaders),
+            # then suspend the leader's journal replication before the flap.
             #
-            # If we drop leadership while IO is still in distrib, those
-            # in-flight IOs land on a non-leader lvstore and either get
-            # redirected via the hub bdev (which may not be open yet on
-            # the new follower) or aborted — both produce client-visible
-            # IO errors and qpair tear-downs.  Concrete example: incident
-            # 2026-05-02 (k8s_native_failover_ha-20260502-101452), worker1.
-            # 123 state-9 IOs were in flight on its distribs at the moment
-            # set_leader=False fired; the open of LVS_4729/hublvoln1
-            # returned ENODEV; nvmf_tcp_qpair_set_recv_state floods and
-            # disconnects followed ~1.6 s later.
+            # Per attempt against the current leader:
+            #   a. wait for any in-flight JM replication task to finish (loops
+            #      internally) so we don't block mid-replication;
+            #   b. mark the leader in_creation and block its LVS port;
+            #   c. jc_disable_replication(jm_vuid):
+            #        True  -> no active replication; it is now suspended (~12s) ->
+            #                 proceed with the drain + leadership drop below.
+            #        False -> active replication present -> unblock the leader port
+            #                 and retry the whole sequence (re-wait, re-block,
+            #                 re-disable).
             #
-            # The drain runs while the leader's lvol port is iptables-
-            # blocked, so we must not hold this open indefinitely.  The
-            # earlier fixed 0.5 s sleep was a workaround put in place
-            # after the original 10 s drain regression — but that
-            # regression was on the recreate_lvstore_on_non_leader path,
-            # where the blocked node is the configured primary and runs
-            # data migration (which never pauses on port block, hence the
-            # poll never settled).  *This* path blocks `current_leader`,
-            # which is a secondary or tertiary that became acting leader
-            # while the configured primary was out — and migration never
-            # runs on a secondary/tertiary, so the inflight counter
-            # genuinely drains.
-            #
-            # Bound at _DRAIN_BOUND_SEC anyway: a slow JM/distrib
-            # completion shouldn't be allowed to hold the leader's port
-            # blocked beyond client max_latency.  On timeout we proceed
-            # with the drop and accept the same residual class of error
-            # this is trying to prevent — but bounded.
-            _DRAIN_BOUND_SEC = 2.0
-            _DRAIN_POLL_SEC = 0.05
-            deadline = time.time() + _DRAIN_BOUND_SEC
-            drained = False
-            while time.time() < deadline:
-                try:
-                    still_inflight = leader_rpc.bdev_distrib_check_inflight_io(lvs_jm_vuid)
-                except Exception as e:
-                    logger.warning(
-                        "bdev_distrib_check_inflight_io poll failed for %s on %s: %s",
-                        lvs_name, current_leader.get_id(), e)
-                    break
-                if not still_inflight:
-                    drained = True
-                    break
-                time.sleep(_DRAIN_POLL_SEC)
-            if not drained:
-                # Continuing with the leadership drop while IO is still in
-                # the distrib pipeline produces exactly the failure this
-                # drain is meant to prevent (in-flight IO hitting a
-                # non-leader lvstore at the moment of transition: hub-bdev
-                # redirect failures, qpair tear-downs, client IO errors).
-                # Abort cleanly: _abort_restart_and_unblock kills the
-                # recovering node's SPDK, sets it OFFLINE, and unblocks
-                # every peer port we just blocked above. The restart task
-                # runner re-queues from there; on the next attempt the
-                # cluster may have settled enough for drain to complete
-                # within the bound.
-                _abort_restart_and_unblock(
-                    f"Inflight IO did not drain on acting-leader "
-                    f"{current_leader.get_id()} within {_DRAIN_BOUND_SEC}s; "
-                    f"refusing to drop leadership against a non-empty distrib "
-                    f"pipeline")
+            # Without blocking the tertiary too, client IO can leak to it during the
+            # leader flap: tertiary's LVOL listener stays open and serves writes
+            # whose hublvol redirect target is mid-transition, producing
+            # writer_conflict events on the journal. Non-leader peers are blocked
+            # once, after the leader's replication is confirmed suspended. Each peer
+            # stays blocked until its connect_to_hublvol succeeds in ### 8b.
+            if current_leader and current_leader.get_id() not in disconnected_peers:
+                _REPL_SUSPEND_MAX_ATTEMPTS = 10
+                replication_suspended = False
+                for _attempt in range(_REPL_SUSPEND_MAX_ATTEMPTS):
+                    # a. ensure no active replication on the leader (loops internally)
+                    try:
+                        ret = current_leader.wait_for_jm_rep_tasks_to_finish(lvs_jm_vuid)
+                        if not ret:
+                            msg = f"JM replication task found on leader {current_leader.get_id()} for jm {lvs_jm_vuid}"
+                            logger.error(msg)
+                            storage_events.jm_repl_tasks_found(current_leader, lvs_jm_vuid)
+                    except Exception as e:
+                        raise Exception(
+                            f"Abort restart: replication-wait on leader {current_leader.get_id()} failed: {e}")
 
-            ### 5- drop leadership on current leader (drain complete)
-            try:
-                leader_rpc.bdev_lvol_set_leader(lvs_name, leader=False, bs_nonleadership=True)
-                leader_rpc.bdev_distrib_force_to_non_leader(lvs_jm_vuid)
-            except Exception as e:
-                _abort_restart_and_unblock(f"Failed to demote leader {current_leader.get_id()}: {e}")
-
-        if disconnected_peers:
-            logger.info(f"Peers disconnected {disconnected_peers}, forcing journal replication on node: {snode.get_id()}")
-            rpc_client.jc_explicit_synchronization(lvs_jm_vuid)
-
-    ### 5- examine (idempotent: skip only when raid AND lvstore already surfaced)
-    # #4: raid/lvstore probes were computed pre-block (see above the block
-    # section) — they read snode's own fresh SPDK only, and
-    # force_to_non_leader does not affect bdev/lvstore presence.
-    rpc_client.bdev_distrib_force_to_non_leader(lvs_jm_vuid)
-    if raid_already and lvstore_already:
-        logger.info(
-            "Raid %s and lvstore %s already present on %s; skipping examine",
-            lvs_raid, lvs_name, snode.get_id())
-    else:
-        if raid_already and not lvstore_already and raid_preexisted:
-            # Raid pre-existed this pass and the lvstore module never surfaced
-            # it on this SPDK process (a prior activation pass examined the
-            # raid and the lvstore-side examine failed/was incomplete).
-            # SPDK rejects re-examine of an already-examined bdev with
-            # "Duplicate bdev name for manual examine: <raid>", so calling
-            # bdev_examine again is a no-op that leaves the lvstore
-            # missing forever and burns the activation retry loop.
-            #
-            # Drop the raid so the underlying distribs are reusable, then
-            # re-create it via _create_bdev_stack (which is itself
-            # idempotent — it skips bdevs already present and only creates
-            # what's missing). The fresh bdev_examine below now runs
-            # against a newly-registered raid and the lvstore module gets
-            # a real chance to surface.
-            logger.info(
-                "Raid %s present but lvstore %s did not surface on %s; "
-                "dropping raid for clean re-examine",
-                lvs_raid, lvs_name, snode.get_id())
-            try:
-                rpc_client.bdev_raid_delete(lvs_raid)
-            except Exception as e:
-                logger.warning(
-                    "bdev_raid_delete(%s) raised: %s — proceeding to "
-                    "_create_bdev_stack which is idempotent", lvs_raid, e)
-            stack = lvs_node.lvstore_stack if is_takeover else None
-            if is_takeover:
-                ret, err = _create_bdev_stack(snode, stack, primary_node=lvs_node)
-            else:
-                ret, err = _create_bdev_stack(snode, [])
-            if not ret:
-                logger.error(
-                    "Failed to rebuild bdev stack on %s after raid drop: %s",
-                    snode.get_id(), err)
-                # Fall through; bdev_examine below will surface what we have.
-        elif raid_already and not lvstore_already:
-            # Normal restart: the raid was freshly built this pass in step 1
-            # and has never been examined, so the first-time bdev_examine below
-            # surfaces the lvstore. Dropping+recreating it here would be pure
-            # churn inside the (minimized) port-block window — the duplicate
-            # bdev_raid_create observed 2026-06-12 (LVS_5199).
-            logger.info(
-                "Raid %s freshly built this pass on %s; examining without drop",
-                lvs_raid, snode.get_id())
-
-        # Examine is required whenever the lvstore isn't surfaced — whether
-        # the raid was freshly created by _create_bdev_stack (normal restart
-        # path) or pre-existing with stale state (activation retry). The
-        # previous "raid_already → skip examine" shortcut broke the normal
-        # restart path: _create_bdev_stack leaves the raid in place but does
-        # not examine it, so the lvstore never surfaces and the subsequent
-        # bdev_lvol_get_lvstores validation fails every time.
-        rpc_client.bdev_examine(lvs_raid)
-
-        ### 6- wait for examine
-        rpc_client.bdev_wait_for_examine()
-
-    # Validate lvstore recovery
-    ret = rpc_client.bdev_lvol_get_lvstores(lvs_name)
-    if not ret:
-        logger.error(f"Failed to recover lvstore: {lvs_name} on node: {snode.get_id()}")
-        if activation_mode:
-            # In activation we can't safely patch partial on-disk state.
-            # Tell the caller to restart this node before continuing.
-            raise LVSRestartRequiredError(
-                snode.get_id(), lvs_name,
-                detail=f"raid={lvs_raid} present but lvstore did not recover"
-                if raid_already else "examine did not produce lvstore")
-        if not force:
-            _abort_restart_and_unblock("Failed to recover lvstore")
-
-    # Validate all bdev recovery — DEFERRED to after the port unblock
-    # (2026-07-22, user decision): the per-lvol probes cost 60-230ms of
-    # blocked-window time and their only consumer is the abort decision. An
-    # abort after the unblock kills SPDK outright, which to the cluster is a
-    # node crash — a state the failover machinery already handles — so the
-    # rare missing-blob case trades a clean in-window abort for a
-    # crash-equivalent one, and every restart stops paying the probes inside
-    # the client-visible outage. Runs before ### 9 so no subsystem is bound
-    # to a missing blob. Per-lvol name-filtered probes, NOT one unfiltered
-    # dump (the dump costs seconds of SPDK app-thread time at scale).
-    def _deferred_lvol_verify():
-        for lv in lvol_list:
-            bdev_name = lv.lvol_uuid
-            passed = health_controller.check_bdev(bdev_name, rpc_client=rpc_client)
-            if not passed:
-                logger.error(f"Failed to recover BDev: {bdev_name} on node: {snode.get_id()}")
-                if not force:
-                    _abort_restart_and_unblock("Failed to recover lvstore")
-
-    ### 7- take leadership
-    # Derive the kernel-side role from snode's topology relative to lvs_node.
-    # On takeover snode is acting as leader, but its kernel role must still
-    # reflect topology so the peer view of the original primary stays
-    # coherent. Hardcoding role="primary" caused the LVS_9060 follow-on
-    # incident (2026-04-25 11:28:50 run): when the original primary later
-    # rejoins, peers disagree on who the primary is and a writer conflict
-    # follows.
-    if snode.get_id() == lvs_node.get_id():
-        snode_lvs_role = "primary"
-    elif snode.get_id() == lvs_node.secondary_node_id:
-        snode_lvs_role = "secondary"
-    elif snode.get_id() == lvs_node.tertiary_node_id:
-        snode_lvs_role = "tertiary"
-    else:
-        _abort_restart_and_unblock(
-            f"snode {snode.get_id()} is not a registered peer of "
-            f"lvstore {lvs_name} (lvs_node={lvs_node.get_id()})")
-    ret = rpc_client.bdev_lvol_set_lvs_opts(
-        lvs_name,
-        groupid=lvs_jm_vuid,
-        subsystem_port=lvs_node.get_lvol_subsys_port(lvs_name),
-        hublvol_port=lvs_node.get_hublvol_port(lvs_name),
-        role=snode_lvs_role,
-    )
-    ret = rpc_client.bdev_lvol_set_leader(lvs_name, leader=True)
-    leader_restored = False
-    for _ in range(10):
-        try:
-            ret = rpc_client.bdev_lvol_get_lvstores(lvs_name)
-            if ret and len(ret) > 0 and ret[0].get("lvs leadership"):
-                leader_restored = True
-                break
-        except Exception:
-            pass
-        time.sleep(0.2)
-    if not leader_restored:
-        logger.error("Failed to restore leadership for %s on node %s", lvs_name, snode.get_id())
-        if not force:
-            _abort_restart_and_unblock(f"Failed to restore leadership for {lvs_name}")
-
-    if not activation_mode:
-        ### 8- create hublvol and expose via subsystem with listeners
-        if sec_nodes:
-            if is_takeover:
-                try:
-                    cluster = db_controller.get_cluster_by_id(snode.cluster_id)
-                    snode.adopt_hublvol(lvs_node, cluster.nqn)
-                    logger.info("Adopted hublvol on new leader %s for %s", snode.get_id(), lvs_name)
-                except Exception as e:
-                    logger.error("Error adopting hublvol on new leader: %s", e)
-                    _abort_restart_and_unblock(f"adopt_hublvol on new leader failed: {e}")
-            else:
-                try:
-                    if not snode.recreate_hublvol():
+                    # b. block the leader's LVS port
+                    try:
+                        current_leader.lvstore_status = "in_creation"
+                        current_leader.write_to_db()
+                        port_block.set_port(current_leader, snode_lvs_port, block=True, timeout=5, retry=2)
+                        _deferred_port_events.append(("deny", current_leader, snode_lvs_port))
+                        blocked_peers.append(current_leader)
+                        _block_started[current_leader.get_id()] = time.monotonic()
+                    except Exception as e:
+                        # Failing to port-block the current leader means we cannot
+                        # safely promote snode: the old leader may still be serving
+                        # IO, and a parallel leader on snode would produce a writer
+                        # conflict (observed 2026-04-25, LVS_6609 incident).
+                        # _check_hublvol_connected from snode is meaningless here —
+                        # snode hasn't reconnected to peer hublvols yet — so we
+                        # cannot use it to discriminate "peer gone" from "peer slow".
+                        # Abort the attempt; the task runner will retry.
                         _abort_restart_and_unblock(
-                            f"recreate_hublvol returned False on {snode.get_id()}")
-                except RPCException as e:
-                    logger.error("Error creating hublvol: %s", e.message)
-                    _abort_restart_and_unblock(f"recreate_hublvol raised: {e.message}")
+                            f"Failed to port-block leader {current_leader.get_id()}: {e}")
+
+                    repl_disabled = False
+                    # c. suspend journal replication while the port is blocked
+                    try:
+                        repl_disabled = current_leader.rpc_client().jc_disable_replication(lvs_jm_vuid)
+                    except RPCRemoteError as e:
+                        if e.code == RPCErrorCode.method_not_found:
+                            try:
+                                logger.warning("Failed to disable replication on leader, trying other method")
+                                ret = current_leader.rpc_client().jc_get_jm_status(lvs_jm_vuid)
+                                repl_disabled = True
+                                for jm in ret:
+                                    if ret[jm] is False:  # jm is not ready (has active replication task)
+                                        repl_disabled = False
+                                        break
+                            except Exception as ex:
+                                _abort_restart_and_unblock(
+                                    f"jc_get_jm_status on leader {current_leader.get_id()} failed: {ex}")
+                        else:
+                            _abort_restart_and_unblock(
+                                f"jc_disable_replication on leader {current_leader.get_id()} failed: {e}")
+                    except RPCException as e:
+                        _abort_restart_and_unblock(
+                            f"jc_disable_replication on leader {current_leader.get_id()} failed: {e}")
+
+                    if repl_disabled:
+                        replication_suspended = True
+                        break
+
+                    # Active replication still present: unblock the leader port and
+                    # retry the full sequence from the replication wait.
+                    logger.warning(
+                        "jc_disable_replication reports active replication on leader %s "
+                        "(attempt %d/%d); unblocking and retrying",
+                        current_leader.get_id(), _attempt + 1, _REPL_SUSPEND_MAX_ATTEMPTS)
+                    _unblock_peer_port(current_leader)
+
+                if not replication_suspended:
+                    _abort_restart_and_unblock(
+                        f"Could not suspend journal replication on leader "
+                        f"{current_leader.get_id()} after {_REPL_SUSPEND_MAX_ATTEMPTS} attempts")
+
+            # Also block non-leader peers (tertiary). The leader's demote+drain
+            # below is leader-specific; non-leaders just need the port shut so
+            # IO can't leak to them during the flap.
+            for sec_node in sec_nodes:
+                if sec_node is current_leader:
+                    continue
+                if sec_node.get_id() in disconnected_peers:
+                    continue
+                if sec_node in blocked_peers:
+                    continue
                 try:
-                    # defer_db_write: the full-object node write (~150ms FDB
-                    # round-trip caught in-window by the [NODE-WRITE]
-                    # tripwire) is persisted atomically post-unblock below.
-                    snode.create_transfer_hublvol(defer_db_write=True)
-                    _deferred_node_persist["needed"] = True
-                except RPCException as e:
-                    logger.error("Error creating transfer hublvol: %s", e.message)
+                    port_block.set_port(sec_node, snode_lvs_port, block=True, timeout=5, retry=2)
+                    _deferred_port_events.append(("deny", sec_node, snode_lvs_port))
+                    blocked_peers.append(sec_node)
+                    _block_started[sec_node.get_id()] = time.monotonic()
+                except Exception as e:
+                    # Same rationale as the leader port-block: cannot safely
+                    # decide "peer gone" vs "peer slow" before snode has
+                    # reconnected to peer hublvols. A non-leader peer left
+                    # serving on snode_lvs_port during the leader flap can
+                    # accept client IO whose hublvol redirect is mid-transition,
+                    # producing a writer conflict.
+                    _abort_restart_and_unblock(
+                        f"Failed to port-block non-leader peer {sec_node.get_id()}: {e}")
 
-        ### 8b- connect peers to hublvol WITHIN port-blocked window
-        # The old leader must be set to secondary role (via set_lvs_opts + connect_hublvol)
-        # BEFORE we unblock its port.  Otherwise new IO can arrive and trigger
-        # spdk_lvs_trigger_leadership_switch, re-promoting the old leader and
-        # causing a writer conflict.
-        cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+            if current_leader and current_leader in blocked_peers:
+                # --- Inside port-blocked window: timeout=0.2s, retry=0, abort on failure ---
+                leader_rpc = current_leader.rpc_client(timeout=0.2, retry=0)
 
-        # Identify the topological secondary owner (sec_1) of this LVS by
-        # looking at lvs_node, NOT by sec_nodes ordering. The previous
-        # index-based code (sec_nodes[0]) routed sec_1 work to whichever
-        # peer happened to be first after disconnected_peers filtering —
-        # which on the LVS_9060 takeover (2026-04-25 11:28:50) wasn't even
-        # the right LVS, since create_secondary_hublvol read the lvstore
-        # name off snode.lvstore (snode's own primary, not the LVS being
-        # taken over).
-        sec1_id = lvs_node.secondary_node_id
-        sec1_node = next((s for s in sec_nodes if s.get_id() == sec1_id), None)
-        sec1_online = bool(sec1_node and sec1_node.get_id() not in disconnected_peers)
-
-        # Create the sec_1 hublvol only if sec_1 is a peer (not snode itself)
-        # and it's online. When snode IS the topological sec_1 (secondary
-        # owner taking leadership), there is no separate node to expose
-        # the secondary hublvol on — the leader's primary hublvol on snode
-        # is the only path until the original primary returns.
-        if sec1_online and sec1_node is not None:
-            try:
-                sec1_node.create_secondary_hublvol(lvs_node, cluster.nqn)
-            except Exception as e:
-                logger.error("Error creating secondary hublvol on sec_1: %s", e)
-                _abort_restart_and_unblock(
-                    f"create_secondary_hublvol on {sec1_node.get_id()} raised: {e}")
-
-        # Track tertiary→secondary failover-path attaches to run AFTER the
-        # peer port unblock — keeping the in-freeze attach single-path with
-        # a 0.2 s RPC budget and pushing the second-path INTER_ATTACH_SLEEP
-        # outside the IO-impact window. ``deferred_tertiary_paths`` holds
-        # ``(tert_node, primary_node, sec1_node)`` tuples to apply later.
-        deferred_tertiary_paths = []
-
-        for sec_node in sec_nodes:
-            if sec_node.get_id() in disconnected_peers:
-                continue
-            # Role and failover are determined by topology, not by index.
-            # An index-based assignment (sec_nodes[0] -> 'secondary',
-            # rest -> 'tertiary') breaks when the original primary is
-            # filtered out via disconnected_peers and shifts the
-            # remaining peers up one slot.
-            if sec_node.get_id() == lvs_node.secondary_node_id:
-                sec_role = "secondary"
-            elif sec_node.get_id() == lvs_node.tertiary_node_id:
-                sec_role = "tertiary"
-                # Defer the tertiary→secondary path; in-freeze attach is
-                # single-path against the (returning) primary only.
-                if sec1_online:
-                    deferred_tertiary_paths.append((sec_node, snode, sec1_node))
-            else:
-                logger.warning(
-                    "Skipping hublvol connect for %s: not a registered "
-                    "peer of %s (lvs_node=%s)",
-                    sec_node.get_id(), lvs_name, lvs_node.get_id())
-                continue
-            try:
-                # Single-path attach against ``snode`` (the leader). The
-                # secondary failover for tertiary is appended in a
-                # post-unblock pass via ``add_hublvol_failover_path``.
+                ### 4- drain in-flight IO BEFORE dropping leadership
                 #
-                # Pass lvs_node=lvs_node so LVS metadata (lvstore name,
-                # jm_vuid, port, hublvol NQN/bdev) comes from the
-                # configured primary of the LVS being taken over, *not*
-                # from snode — when this is a takeover (lvs_primary set,
-                # configured primary offline), snode.hublvol points at
-                # snode's OWN primary-LVS, which is the wrong LVS for
-                # this connection. Without it, the call sets up the
-                # wrong LVS on the peer, the LVS being taken over is
-                # never wired up, and the subsequent peer-port unblock
-                # opens the tertiary path to a still-unconfigured LVS —
-                # any client IO arriving on the still-open existing
-                # connection triggers spdk_lvs_trigger_leadership_switch
-                # on the peer and produces a dual-leader writer
-                # conflict. (incident 2026-05-21 05:38:14 k8s_native_
-                # resilient_failover-20260520-231822, LVS_270 takeover
-                # by worker-4: tertiary worker-1 was wired up as
-                # tertiary of LVS_9915 instead of LVS_270, port 4432
-                # was unblocked, worker-1 re-promoted on next client
-                # write, writer conflict on worker-4.)
-                ok = sec_node.connect_to_hublvol(snode, failover_node=None, role=sec_role,
-                                                 rpc_timeout=0.2, lvs_node=lvs_node,
-                                                 coordinator_lock=_hub_locks.get(sec_node.get_id()))
-            except Exception as e:
-                logger.error("Error establishing hublvol on %s: %s", sec_node.get_id(), e)
-                _abort_restart_and_unblock(
-                    f"connect_to_hublvol on {sec_node.get_id()} raised: {e}")
-            if not ok:
-                _abort_restart_and_unblock(
-                    f"connect_to_hublvol returned False on {sec_node.get_id()} ({sec_role})")
+                # If we drop leadership while IO is still in distrib, those
+                # in-flight IOs land on a non-leader lvstore and either get
+                # redirected via the hub bdev (which may not be open yet on
+                # the new follower) or aborted — both produce client-visible
+                # IO errors and qpair tear-downs.  Concrete example: incident
+                # 2026-05-02 (k8s_native_failover_ha-20260502-101452), worker1.
+                # 123 state-9 IOs were in flight on its distribs at the moment
+                # set_leader=False fired; the open of LVS_4729/hublvoln1
+                # returned ENODEV; nvmf_tcp_qpair_set_recv_state floods and
+                # disconnects followed ~1.6 s later.
+                #
+                # The drain runs while the leader's lvol port is iptables-
+                # blocked, so we must not hold this open indefinitely.  The
+                # earlier fixed 0.5 s sleep was a workaround put in place
+                # after the original 10 s drain regression — but that
+                # regression was on the recreate_lvstore_on_non_leader path,
+                # where the blocked node is the configured primary and runs
+                # data migration (which never pauses on port block, hence the
+                # poll never settled).  *This* path blocks `current_leader`,
+                # which is a secondary or tertiary that became acting leader
+                # while the configured primary was out — and migration never
+                # runs on a secondary/tertiary, so the inflight counter
+                # genuinely drains.
+                #
+                # Bound at _DRAIN_BOUND_SEC anyway: a slow JM/distrib
+                # completion shouldn't be allowed to hold the leader's port
+                # blocked beyond client max_latency.  On timeout we proceed
+                # with the drop and accept the same residual class of error
+                # this is trying to prevent — but bounded.
+                _DRAIN_BOUND_SEC = 2.0
+                _DRAIN_POLL_SEC = 0.05
+                deadline = time.time() + _DRAIN_BOUND_SEC
+                drained = False
+                while time.time() < deadline:
+                    try:
+                        still_inflight = leader_rpc.bdev_distrib_check_inflight_io(lvs_jm_vuid)
+                    except Exception as e:
+                        logger.warning(
+                            "bdev_distrib_check_inflight_io poll failed for %s on %s: %s",
+                            lvs_name, current_leader.get_id(), e)
+                        break
+                    if not still_inflight:
+                        drained = True
+                        break
+                    time.sleep(_DRAIN_POLL_SEC)
+                if not drained:
+                    # Continuing with the leadership drop while IO is still in
+                    # the distrib pipeline produces exactly the failure this
+                    # drain is meant to prevent (in-flight IO hitting a
+                    # non-leader lvstore at the moment of transition: hub-bdev
+                    # redirect failures, qpair tear-downs, client IO errors).
+                    # Abort cleanly: _abort_restart_and_unblock kills the
+                    # recovering node's SPDK, sets it OFFLINE, and unblocks
+                    # every peer port we just blocked above. The restart task
+                    # runner re-queues from there; on the next attempt the
+                    # cluster may have settled enough for drain to complete
+                    # within the bound.
+                    _abort_restart_and_unblock(
+                        f"Inflight IO did not drain on acting-leader "
+                        f"{current_leader.get_id()} within {_DRAIN_BOUND_SEC}s; "
+                        f"refusing to drop leadership against a non-empty distrib "
+                        f"pipeline")
 
-            ### 8c- unblock this peer's port only after its hublvol is connected
-            if sec_node in blocked_peers:
-                _unblock_peer_port(sec_node)
+                ### 5- drop leadership on current leader (drain complete)
+                try:
+                    leader_rpc.bdev_lvol_set_leader(lvs_name, leader=False, bs_nonleadership=True)
+                    leader_rpc.bdev_distrib_force_to_non_leader(lvs_jm_vuid)
+                except Exception as e:
+                    _abort_restart_and_unblock(f"Failed to demote leader {current_leader.get_id()}: {e}")
 
-        # Every peer port is unblocked — end of the client-visible outage
-        # span. Release the window gate BEFORE the lvol-attach pass below
-        # so the next recreate's block window can start while lvols attach.
+            if disconnected_peers:
+                logger.info(f"Peers disconnected {disconnected_peers}, forcing journal replication on node: {snode.get_id()}")
+                rpc_client.jc_explicit_synchronization(lvs_jm_vuid)
+
+        ### 5- examine (idempotent: skip only when raid AND lvstore already surfaced)
+        # #4: raid/lvstore probes were computed pre-block (see above the block
+        # section) — they read snode's own fresh SPDK only, and
+        # force_to_non_leader does not affect bdev/lvstore presence.
+        rpc_client.bdev_distrib_force_to_non_leader(lvs_jm_vuid)
+        if raid_already and lvstore_already:
+            logger.info(
+                "Raid %s and lvstore %s already present on %s; skipping examine",
+                lvs_raid, lvs_name, snode.get_id())
+        else:
+            if raid_already and not lvstore_already and raid_preexisted:
+                # Raid pre-existed this pass and the lvstore module never surfaced
+                # it on this SPDK process (a prior activation pass examined the
+                # raid and the lvstore-side examine failed/was incomplete).
+                # SPDK rejects re-examine of an already-examined bdev with
+                # "Duplicate bdev name for manual examine: <raid>", so calling
+                # bdev_examine again is a no-op that leaves the lvstore
+                # missing forever and burns the activation retry loop.
+                #
+                # Drop the raid so the underlying distribs are reusable, then
+                # re-create it via _create_bdev_stack (which is itself
+                # idempotent — it skips bdevs already present and only creates
+                # what's missing). The fresh bdev_examine below now runs
+                # against a newly-registered raid and the lvstore module gets
+                # a real chance to surface.
+                logger.info(
+                    "Raid %s present but lvstore %s did not surface on %s; "
+                    "dropping raid for clean re-examine",
+                    lvs_raid, lvs_name, snode.get_id())
+                try:
+                    rpc_client.bdev_raid_delete(lvs_raid)
+                except Exception as e:
+                    logger.warning(
+                        "bdev_raid_delete(%s) raised: %s — proceeding to "
+                        "_create_bdev_stack which is idempotent", lvs_raid, e)
+                stack = lvs_node.lvstore_stack if is_takeover else None
+                if is_takeover:
+                    ret, err = _create_bdev_stack(snode, stack, primary_node=lvs_node)
+                else:
+                    ret, err = _create_bdev_stack(snode, [])
+                if not ret:
+                    logger.error(
+                        "Failed to rebuild bdev stack on %s after raid drop: %s",
+                        snode.get_id(), err)
+                    # Fall through; bdev_examine below will surface what we have.
+            elif raid_already and not lvstore_already:
+                # Normal restart: the raid was freshly built this pass in step 1
+                # and has never been examined, so the first-time bdev_examine below
+                # surfaces the lvstore. Dropping+recreating it here would be pure
+                # churn inside the (minimized) port-block window — the duplicate
+                # bdev_raid_create observed 2026-06-12 (LVS_5199).
+                logger.info(
+                    "Raid %s freshly built this pass on %s; examining without drop",
+                    lvs_raid, snode.get_id())
+
+            # Examine is required whenever the lvstore isn't surfaced — whether
+            # the raid was freshly created by _create_bdev_stack (normal restart
+            # path) or pre-existing with stale state (activation retry). The
+            # previous "raid_already → skip examine" shortcut broke the normal
+            # restart path: _create_bdev_stack leaves the raid in place but does
+            # not examine it, so the lvstore never surfaces and the subsequent
+            # bdev_lvol_get_lvstores validation fails every time.
+            rpc_client.bdev_examine(lvs_raid)
+
+            ### 6- wait for examine
+            rpc_client.bdev_wait_for_examine()
+
+        # Validate lvstore recovery
+        ret = rpc_client.bdev_lvol_get_lvstores(lvs_name)
+        if not ret:
+            logger.error(f"Failed to recover lvstore: {lvs_name} on node: {snode.get_id()}")
+            if activation_mode:
+                # In activation we can't safely patch partial on-disk state.
+                # Tell the caller to restart this node before continuing.
+                raise LVSRestartRequiredError(
+                    snode.get_id(), lvs_name,
+                    detail=f"raid={lvs_raid} present but lvstore did not recover"
+                    if raid_already else "examine did not produce lvstore")
+            if not force:
+                _abort_restart_and_unblock("Failed to recover lvstore")
+
+        # Validate all bdev recovery — DEFERRED to after the port unblock
+        # (2026-07-22, user decision): the per-lvol probes cost 60-230ms of
+        # blocked-window time and their only consumer is the abort decision. An
+        # abort after the unblock kills SPDK outright, which to the cluster is a
+        # node crash — a state the failover machinery already handles — so the
+        # rare missing-blob case trades a clean in-window abort for a
+        # crash-equivalent one, and every restart stops paying the probes inside
+        # the client-visible outage. Runs before ### 9 so no subsystem is bound
+        # to a missing blob. Per-lvol name-filtered probes, NOT one unfiltered
+        # dump (the dump costs seconds of SPDK app-thread time at scale).
+        def _deferred_lvol_verify():
+            for lv in lvol_list:
+                bdev_name = lv.lvol_uuid
+                passed = health_controller.check_bdev(bdev_name, rpc_client=rpc_client)
+                if not passed:
+                    logger.error(f"Failed to recover BDev: {bdev_name} on node: {snode.get_id()}")
+                    if not force:
+                        _abort_restart_and_unblock("Failed to recover lvstore")
+
+        ### 7- take leadership
+        # Derive the kernel-side role from snode's topology relative to lvs_node.
+        # On takeover snode is acting as leader, but its kernel role must still
+        # reflect topology so the peer view of the original primary stays
+        # coherent. Hardcoding role="primary" caused the LVS_9060 follow-on
+        # incident (2026-04-25 11:28:50 run): when the original primary later
+        # rejoins, peers disagree on who the primary is and a writer conflict
+        # follows.
+        if snode.get_id() == lvs_node.get_id():
+            snode_lvs_role = "primary"
+        elif snode.get_id() == lvs_node.secondary_node_id:
+            snode_lvs_role = "secondary"
+        elif snode.get_id() == lvs_node.tertiary_node_id:
+            snode_lvs_role = "tertiary"
+        else:
+            _abort_restart_and_unblock(
+                f"snode {snode.get_id()} is not a registered peer of "
+                f"lvstore {lvs_name} (lvs_node={lvs_node.get_id()})")
+        ret = rpc_client.bdev_lvol_set_lvs_opts(
+            lvs_name,
+            groupid=lvs_jm_vuid,
+            subsystem_port=lvs_node.get_lvol_subsys_port(lvs_name),
+            hublvol_port=lvs_node.get_hublvol_port(lvs_name),
+            role=snode_lvs_role,
+        )
+        ret = rpc_client.bdev_lvol_set_leader(lvs_name, leader=True)
+        leader_restored = False
+        for _ in range(10):
+            try:
+                ret = rpc_client.bdev_lvol_get_lvstores(lvs_name)
+                if ret and len(ret) > 0 and ret[0].get("lvs leadership"):
+                    leader_restored = True
+                    break
+            except Exception:
+                pass
+            time.sleep(0.2)
+        if not leader_restored:
+            logger.error("Failed to restore leadership for %s on node %s", lvs_name, snode.get_id())
+            if not force:
+                _abort_restart_and_unblock(f"Failed to restore leadership for {lvs_name}")
+
+        if not activation_mode:
+            ### 8- create hublvol and expose via subsystem with listeners
+            if sec_nodes:
+                if is_takeover:
+                    try:
+                        cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+                        snode.adopt_hublvol(lvs_node, cluster.nqn)
+                        logger.info("Adopted hublvol on new leader %s for %s", snode.get_id(), lvs_name)
+                    except Exception as e:
+                        logger.error("Error adopting hublvol on new leader: %s", e)
+                        _abort_restart_and_unblock(f"adopt_hublvol on new leader failed: {e}")
+                else:
+                    try:
+                        if not snode.recreate_hublvol():
+                            _abort_restart_and_unblock(
+                                f"recreate_hublvol returned False on {snode.get_id()}")
+                    except RPCException as e:
+                        logger.error("Error creating hublvol: %s", e)
+                        _abort_restart_and_unblock(f"recreate_hublvol raised: {e}")
+                    try:
+                        # defer_db_write: the full-object node write (~150ms FDB
+                        # round-trip caught in-window by the [NODE-WRITE]
+                        # tripwire) is persisted atomically post-unblock below.
+                        snode.create_transfer_hublvol(defer_db_write=True)
+                        _deferred_node_persist["needed"] = True
+                    except RPCException as e:
+                        logger.error("Error creating transfer hublvol: %s", e)
+
+            ### 8b- connect peers to hublvol WITHIN port-blocked window
+            # The old leader must be set to secondary role (via set_lvs_opts + connect_hublvol)
+            # BEFORE we unblock its port.  Otherwise new IO can arrive and trigger
+            # spdk_lvs_trigger_leadership_switch, re-promoting the old leader and
+            # causing a writer conflict.
+            cluster = db_controller.get_cluster_by_id(snode.cluster_id)
+
+            # Identify the topological secondary owner (sec_1) of this LVS by
+            # looking at lvs_node, NOT by sec_nodes ordering. The previous
+            # index-based code (sec_nodes[0]) routed sec_1 work to whichever
+            # peer happened to be first after disconnected_peers filtering —
+            # which on the LVS_9060 takeover (2026-04-25 11:28:50) wasn't even
+            # the right LVS, since create_secondary_hublvol read the lvstore
+            # name off snode.lvstore (snode's own primary, not the LVS being
+            # taken over).
+            sec1_id = lvs_node.secondary_node_id
+            sec1_node = next((s for s in sec_nodes if s.get_id() == sec1_id), None)
+            sec1_online = bool(sec1_node and sec1_node.get_id() not in disconnected_peers)
+
+            # Create the sec_1 hublvol only if sec_1 is a peer (not snode itself)
+            # and it's online. When snode IS the topological sec_1 (secondary
+            # owner taking leadership), there is no separate node to expose
+            # the secondary hublvol on — the leader's primary hublvol on snode
+            # is the only path until the original primary returns.
+            if sec1_online and sec1_node is not None:
+                try:
+                    sec1_node.create_secondary_hublvol(lvs_node, cluster.nqn)
+                except Exception as e:
+                    logger.error("Error creating secondary hublvol on sec_1: %s", e)
+                    _abort_restart_and_unblock(
+                        f"create_secondary_hublvol on {sec1_node.get_id()} raised: {e}")
+
+            # Track tertiary→secondary failover-path attaches to run AFTER the
+            # peer port unblock — keeping the in-freeze attach single-path with
+            # a 0.2 s RPC budget and pushing the second-path INTER_ATTACH_SLEEP
+            # outside the IO-impact window. ``deferred_tertiary_paths`` holds
+            # ``(tert_node, primary_node, sec1_node)`` tuples to apply later.
+            deferred_tertiary_paths = []
+
+            for sec_node in sec_nodes:
+                if sec_node.get_id() in disconnected_peers:
+                    continue
+                # Role and failover are determined by topology, not by index.
+                # An index-based assignment (sec_nodes[0] -> 'secondary',
+                # rest -> 'tertiary') breaks when the original primary is
+                # filtered out via disconnected_peers and shifts the
+                # remaining peers up one slot.
+                if sec_node.get_id() == lvs_node.secondary_node_id:
+                    sec_role = "secondary"
+                elif sec_node.get_id() == lvs_node.tertiary_node_id:
+                    sec_role = "tertiary"
+                    # Defer the tertiary→secondary path; in-freeze attach is
+                    # single-path against the (returning) primary only.
+                    if sec1_online:
+                        deferred_tertiary_paths.append((sec_node, snode, sec1_node))
+                else:
+                    logger.warning(
+                        "Skipping hublvol connect for %s: not a registered "
+                        "peer of %s (lvs_node=%s)",
+                        sec_node.get_id(), lvs_name, lvs_node.get_id())
+                    continue
+                try:
+                    # Single-path attach against ``snode`` (the leader). The
+                    # secondary failover for tertiary is appended in a
+                    # post-unblock pass via ``add_hublvol_failover_path``.
+                    #
+                    # Pass lvs_node=lvs_node so LVS metadata (lvstore name,
+                    # jm_vuid, port, hublvol NQN/bdev) comes from the
+                    # configured primary of the LVS being taken over, *not*
+                    # from snode — when this is a takeover (lvs_primary set,
+                    # configured primary offline), snode.hublvol points at
+                    # snode's OWN primary-LVS, which is the wrong LVS for
+                    # this connection. Without it, the call sets up the
+                    # wrong LVS on the peer, the LVS being taken over is
+                    # never wired up, and the subsequent peer-port unblock
+                    # opens the tertiary path to a still-unconfigured LVS —
+                    # any client IO arriving on the still-open existing
+                    # connection triggers spdk_lvs_trigger_leadership_switch
+                    # on the peer and produces a dual-leader writer
+                    # conflict. (incident 2026-05-21 05:38:14 k8s_native_
+                    # resilient_failover-20260520-231822, LVS_270 takeover
+                    # by worker-4: tertiary worker-1 was wired up as
+                    # tertiary of LVS_9915 instead of LVS_270, port 4432
+                    # was unblocked, worker-1 re-promoted on next client
+                    # write, writer conflict on worker-4.)
+                    ok = sec_node.connect_to_hublvol(snode, failover_node=None, role=sec_role,
+                                                     rpc_timeout=0.2, lvs_node=lvs_node,
+                                                     coordinator_lock=_hub_locks.get(sec_node.get_id()))
+                except Exception as e:
+                    logger.error("Error establishing hublvol on %s: %s", sec_node.get_id(), e)
+                    _abort_restart_and_unblock(
+                        f"connect_to_hublvol on {sec_node.get_id()} raised: {e}")
+                if not ok:
+                    _abort_restart_and_unblock(
+                        f"connect_to_hublvol returned False on {sec_node.get_id()} ({sec_role})")
+
+                ### 8c- unblock this peer's port only after its hublvol is connected
+                if sec_node in blocked_peers:
+                    _unblock_peer_port(sec_node)
+
+            # Every peer port is unblocked — end of the client-visible outage
+            # span. Release the window gate BEFORE the lvol-attach pass below
+            # so the next recreate's block window can start while lvols attach.
+            _release_block_gate()
+            _flush_port_events()
+            _persist_deferred_node_fields()
+
+        _deferred_lvol_verify()
+
+        ### 9- add lvols to subsystems
+        executor = ThreadPoolExecutor(max_workers=50)
+        for lvol in lvol_list:
+            executor.submit(add_lvol_thread, lvol, snode, lvol_ana_state)
+        executor.shutdown(wait=True)
+
+        # Phase transition: post_unblock — delayed sync deletes and registrations can now proceed
         _release_block_gate()
         _flush_port_events()
         _persist_deferred_node_fields()
+        _release_hub_locks()
+        _set_restart_phase(snode, lvs_name, StorageNode.RESTART_PHASE_POST_UNBLOCK, db_controller)
+        if _block_longest["sec"]:
+            logger.info("[RESTART] Longest client-port block for %s: %.3fs "
+                        "(reject threshold 6s)", lvs_name, _block_longest["sec"])
+        logger.info("[RESTART] Port-block phase for %s on %s took %.3fs "
+                    "(phase span incl. post-unblock work; see per-port lines "
+                    "for true outage)",
+                    lvs_name, snode.get_id()[:8], time.monotonic() - _port_block_t0)
 
-    _deferred_lvol_verify()
+        ### 10b- deferred tertiary→secondary hublvol failover paths
+        # The in-freeze attach above used a single path (tertiary → primary).
+        # Now that every peer's port is unblocked and IO is flowing again,
+        # top up the multipath controller on each tertiary so a future primary
+        # loss has an immediate failover. The coordinator's
+        # INTER_ATTACH_SLEEP_SEC (3 s) cost lives here, OUTSIDE the IO-impact
+        # window — it doesn't sit inside the leader-port-block freeze any more.
+        if not activation_mode and deferred_tertiary_paths:
+            for tert_node, primary_node, sec1_failover in deferred_tertiary_paths:
+                if sec1_failover is None:
+                    # Only appended when ``sec1_online`` was True (meaning
+                    # ``sec1_node`` was non-None at the time), so this branch
+                    # should be unreachable in practice — guard for mypy.
+                    continue
+                try:
+                    if tert_node.add_hublvol_failover_path(primary_node, sec1_failover):
+                        logger.info("Added deferred secondary %s hublvol path on tertiary %s for %s",
+                                    sec1_failover.get_id(), tert_node.get_id(), lvs_name)
+                    else:
+                        logger.warning("Failed to add deferred secondary %s hublvol path on tertiary %s for %s",
+                                       sec1_failover.get_id(), tert_node.get_id(), lvs_name)
+                except Exception as e:
+                    logger.error("Error adding deferred hublvol failover path on tertiary %s: %s",
+                                 tert_node.get_id(), e)
 
-    ### 9- add lvols to subsystems
-    executor = ThreadPoolExecutor(max_workers=50)
-    for lvol in lvol_list:
-        executor.submit(add_lvol_thread, lvol, snode, lvol_ana_state)
-    executor.shutdown(wait=True)
+        if not activation_mode:
+            ### 11- demote old leader's subsystems to non_optimized (async)
+            # Per design: after restarting node takes leadership, the old leader must
+            # start demoting all its lvol subsystems to non_optimized.
+            for sec_node in sec_nodes:
+                if sec_node.get_id() in disconnected_peers:
+                    continue
+                try:
+                    sec_rpc = sec_node.rpc_client(timeout=10, retry=2)
+                    for lvol in lvol_list:
+                        listener_port = sec_node.get_lvol_subsys_port(lvol.lvs_name)
+                        for iface in sec_node.data_nics:
+                            if iface.ip4_address:
+                                tr_type = "RDMA" if sec_node.active_rdma and iface.trtype == "RDMA" else "TCP"
+                                sec_rpc.listeners_create(
+                                    lvol.nqn, tr_type, iface.ip4_address, listener_port,
+                                    ana_state="non_optimized")
+                    logger.info("Demoted subsystems to non_optimized on old leader %s", sec_node.get_id())
+                except Exception as e:
+                    logger.warning("Failed to demote subsystems on %s: %s", sec_node.get_id(), e)
 
-    # Phase transition: post_unblock — delayed sync deletes and registrations can now proceed
-    _release_block_gate()
-    _flush_port_events()
-    _persist_deferred_node_fields()
-    _release_hub_locks()
-    _set_restart_phase(snode, lvs_name, StorageNode.RESTART_PHASE_POST_UNBLOCK, db_controller)
-    if _block_longest["sec"]:
-        logger.info("[RESTART] Longest client-port block for %s: %.3fs "
-                    "(reject threshold 6s)", lvs_name, _block_longest["sec"])
-    logger.info("[RESTART] Port-block phase for %s on %s took %.3fs "
-                "(phase span incl. post-unblock work; see per-port lines "
-                "for true outage)",
-                lvs_name, snode.get_id()[:8], time.monotonic() - _port_block_t0)
+            ### finish
+            for sec_node in sec_nodes:
+                if sec_node.get_id() not in disconnected_peers:
+                    _set_lvstore_status_atomic(sec_node.get_id(), "ready", db_controller)
 
-    ### 10b- deferred tertiary→secondary hublvol failover paths
-    # The in-freeze attach above used a single path (tertiary → primary).
-    # Now that every peer's port is unblocked and IO is flowing again,
-    # top up the multipath controller on each tertiary so a future primary
-    # loss has an immediate failover. The coordinator's
-    # INTER_ATTACH_SLEEP_SEC (3 s) cost lives here, OUTSIDE the IO-impact
-    # window — it doesn't sit inside the leader-port-block freeze any more.
-    if not activation_mode and deferred_tertiary_paths:
-        for tert_node, primary_node, sec1_failover in deferred_tertiary_paths:
-            if sec1_failover is None:
-                # Only appended when ``sec1_online`` was True (meaning
-                # ``sec1_node`` was non-None at the time), so this branch
-                # should be unreachable in practice — guard for mypy.
-                continue
-            try:
-                if tert_node.add_hublvol_failover_path(primary_node, sec1_failover):
-                    logger.info("Added deferred secondary %s hublvol path on tertiary %s for %s",
-                                sec1_failover.get_id(), tert_node.get_id(), lvs_name)
-                else:
-                    logger.warning("Failed to add deferred secondary %s hublvol path on tertiary %s for %s",
-                                   sec1_failover.get_id(), tert_node.get_id(), lvs_name)
-            except Exception as e:
-                logger.error("Error adding deferred hublvol failover path on tertiary %s: %s",
-                             tert_node.get_id(), e)
+        # Clear restart phase for this LVS
+        _set_restart_phase(snode, lvs_name, "", db_controller)
 
-    if not activation_mode:
-        ### 11- demote old leader's subsystems to non_optimized (async)
-        # Per design: after restarting node takes leadership, the old leader must
-        # start demoting all its lvol subsystems to non_optimized.
-        for sec_node in sec_nodes:
-            if sec_node.get_id() in disconnected_peers:
-                continue
-            try:
-                sec_rpc = sec_node.rpc_client(timeout=10, retry=2)
-                for lvol in lvol_list:
-                    listener_port = sec_node.get_lvol_subsys_port(lvol.lvs_name)
-                    for iface in sec_node.data_nics:
-                        if iface.ip4_address:
-                            tr_type = "RDMA" if sec_node.active_rdma and iface.trtype == "RDMA" else "TCP"
-                            sec_rpc.listeners_create(
-                                lvol.nqn, tr_type, iface.ip4_address, listener_port,
-                                ana_state="non_optimized")
-                logger.info("Demoted subsystems to non_optimized on old leader %s", sec_node.get_id())
-            except Exception as e:
-                logger.warning("Failed to demote subsystems on %s: %s", sec_node.get_id(), e)
+        _set_lvstore_status_atomic(lvs_node.get_id(), "ready", db_controller)
 
-        ### finish
-        for sec_node in sec_nodes:
-            if sec_node.get_id() not in disconnected_peers:
-                _set_lvstore_status_atomic(sec_node.get_id(), "ready", db_controller)
+        # reset snapshot delete status (only for own primary LVS)
+        if not is_takeover:
+            for snap in db_controller.get_snapshots_by_node_id(snode.get_id()):
+                if snap.status == SnapShot.STATUS_IN_DELETION:
+                    snap.deletion_status = ''
+                    snap.write_to_db()
 
-    # Clear restart phase for this LVS
-    _set_restart_phase(snode, lvs_name, "", db_controller)
-
-    _set_lvstore_status_atomic(lvs_node.get_id(), "ready", db_controller)
-
-    # reset snapshot delete status (only for own primary LVS)
-    if not is_takeover:
-        for snap in db_controller.get_snapshots_by_node_id(snode.get_id()):
-            if snap.status == SnapShot.STATUS_IN_DELETION:
-                snap.deletion_status = ''
-                snap.write_to_db()
-
-    return True
+        return True
+    finally:
+        # Idempotent; the in-flow release above is the normal path.
+        _release_block_gate()
 
 
-def add_lvol_thread(lvol, snode, lvol_ana_state="optimized"):
+def add_lvol_thread(lvol, snode: StorageNode, lvol_ana_state="optimized"):
     db_controller = DBController()
 
     # Refuse to (re)register an lvol that is being torn down: the delete
@@ -9163,12 +9819,65 @@ def add_lvol_thread(lvol, snode, lvol_ana_state="optimized"):
             return False, msg
 
     # Add NS to subsystem (idempotent: skip if already bound with matching NSID).
-    if _rpc_subsystem_has_ns(rpc_client, lvol.nqn, nsid=lvol.ns_id, bdev_name=lvol.top_bdev):
+    if _rpc_subsystem_has_ns(rpc_client, lvol.nqn, nsid=lvol.ns_id,
+                             bdev_name=lvol.top_bdev, uuid=lvol.uuid):
         logger.info("Namespace nsid=%s already on subsystem %s, skipping add_ns",
                     lvol.ns_id, lvol.nqn)
     else:
         logger.info("Add BDev to subsystem " + f"{lvol.vuid:016X}")
-        rpc_client.nvmf_subsystem_add_ns(lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid, nsid=lvol.ns_id)
+        if not rpc_client.nvmf_subsystem_add_ns(
+                lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid, nsid=lvol.ns_id):
+            # An add_ns error is not by itself a reason to abandon the whole
+            # registration. What matters for the client is whether the
+            # namespace is on the subsystem now — it may already have been,
+            # which is exactly how SPDK answers a duplicate add: -32602
+            # "Invalid parameters" because the nsid is taken. Treating the
+            # error as terminal returns before the listener loop below and
+            # costs the volume a PATH, not just a namespace, and the repair
+            # in lvol_monitor then re-fails identically on every cycle
+            # (soak 2026-08-11: 20 such failures across two recovered nodes,
+            # the dominant cause of the namespace-without-listener state;
+            # the add_ns idempotency probe should absorb the duplicate case,
+            # so reaching here means either a real failure or a probe miss).
+            # Re-read the subsystem and only give up if the namespace is
+            # genuinely absent.
+            if _rpc_wait_subsystem_has_ns(rpc_client, lvol.nqn, nsid=lvol.ns_id,
+                                          bdev_name=lvol.top_bdev, uuid=lvol.uuid):
+                logger.warning(
+                    "add_ns for nsid=%s (%s) on %s reported failure but the "
+                    "namespace is present; continuing to listener setup",
+                    lvol.ns_id, lvol.top_bdev, lvol.nqn)
+            else:
+                msg = (f"Failed to add namespace nsid={lvol.ns_id} ({lvol.top_bdev}) "
+                       f"to {lvol.nqn} on {snode.get_id()}")
+                logger.error(msg)
+                return False, msg
+
+    # Post-condition before publishing a listener: the subsystem MUST have the
+    # namespace. A listener in front of an empty subsystem accepts connections
+    # and establishes qpairs, but its namespace never joins the client's
+    # multipath head — the path is silently absent, no controller reset ever
+    # fires, and `nvme connect` refuses to repair it ("already connected").
+    # Incident 2026-08-09: 19 such subsystems on one node, one of which cost a
+    # volume all of its I/O. Both ways of arriving here are covered — an add_ns
+    # that failed (above) and an idempotency check that wrongly reported the
+    # namespace present (the skip branch above; observed for 4 of those 19).
+    #
+    # The check must identify the namespace by UUID as well as bdev name, and
+    # must tolerate a short propagation delay. Getting either wrong inverts the
+    # incident it guards against: soak 2026-08-11 saw this post-condition read
+    # a present namespace as absent (SPDK reports it under the lvol's raw UUID,
+    # not the <lvs>/<lvol> alias) and skip listener creation on both recovered
+    # nodes, leaving namespace-without-listener on 4 of 6 volumes — a silent
+    # path loss the control plane never flagged, re-refused by the lvol-monitor
+    # repair loop on every cycle.
+    if not _rpc_wait_subsystem_has_ns(rpc_client, lvol.nqn, nsid=lvol.ns_id,
+                                      bdev_name=lvol.top_bdev, uuid=lvol.uuid):
+        msg = (f"Subsystem {lvol.nqn} on {snode.get_id()} has no namespace "
+               f"nsid={lvol.ns_id} ({lvol.top_bdev}, uuid={lvol.uuid}) after "
+               f"registration; refusing to add a listener for an empty subsystem")
+        logger.error(msg)
+        return False, msg
 
     # Use per-lvstore port for this lvol's lvstore
     listener_port = snode.get_lvol_subsys_port(lvol.lvs_name)
@@ -9224,7 +9933,7 @@ def add_lvol_thread(lvol, snode, lvol_ana_state="optimized"):
     return True, None
 
 
-def repair_lvol_registration_on_non_leader(lvol, sec_node, secondary_index):
+def repair_lvol_registration_on_non_leader(lvol, sec_node: StorageNode, secondary_index):
     """(Re)apply an lvol's fabric registration on an ONLINE non-leader
     (secondary/tertiary): create the missing nvmf subsystem if absent
     (cntlid range mirrors the restart flow: sec1 1000, sec2/tert 2000,
@@ -9261,7 +9970,7 @@ def repair_lvol_registration_on_non_leader(lvol, sec_node, secondary_index):
 
     rpc_client = sec_node.rpc_client(timeout=10, retry=2)
     if rpc_client.subsystem_get(lvol.nqn) is None:
-        min_cntlid = 1000 * (secondary_index + 1)
+        min_cntlid = lvol_controller.lvol_min_cntlid(secondary_index + 1)
         allow_any = not bool(lvol.allowed_hosts)
         logger.warning(
             "Repairing missing subsystem %s on non-leader %s (lvol %s)",
@@ -9276,7 +9985,7 @@ def repair_lvol_registration_on_non_leader(lvol, sec_node, secondary_index):
     return add_lvol_thread(lvol, sec_node, lvol_ana_state="non_optimized")
 
 
-def get_sorted_ha_jms(current_node):
+def get_sorted_ha_jms(current_node: StorageNode):
     """Select the remote HA journal members for ``current_node``.
 
     The full HA journal set is ``ha_jm_count`` members: the node's own local JM
@@ -9394,7 +10103,7 @@ def get_sorted_ha_jms(current_node):
     return selected[:target]
 
 
-def get_node_jm_names(current_node, remote_node=None):
+def get_node_jm_names(current_node: StorageNode, remote_node=None):
     jm_list = []
     if current_node.jm_device:
         if remote_node:
@@ -9423,7 +10132,7 @@ def get_node_jm_names(current_node, remote_node=None):
     return jm_list[:current_node.ha_jm_count]
 
 
-def get_secondary_nodes(current_node, exclude_ids=None, removed_node=None):
+def get_secondary_nodes(current_node: StorageNode, exclude_ids=None, removed_node=None):
     if exclude_ids is None:
         exclude_ids = []
     db_controller = DBController()
@@ -9485,7 +10194,7 @@ def get_secondary_nodes(current_node, exclude_ids=None, removed_node=None):
     return []
 
 
-def get_secondary_nodes_2(current_node, exclude_ids=None, exclude_mgmt_ips=None,
+def get_secondary_nodes_2(current_node: StorageNode, exclude_ids=None, exclude_mgmt_ips=None,
                           exclude_failure_domains=None, exclude_physical_labels=None):
     """Get candidate nodes for second secondary assignment (dual fault tolerance).
     Unlike get_secondary_nodes, this checks lvstore_stack_tertiary instead of
@@ -9575,7 +10284,7 @@ def get_secondary_nodes_2(current_node, exclude_ids=None, exclude_mgmt_ips=None,
     return []
 
 
-def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blocks, max_size):
+def create_lvstore(snode: StorageNode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blocks, max_size):
     db_controller = DBController()
     cluster = db_controller.get_cluster_by_id(snode.cluster_id)
     lvstore_stack: List[dict] = []
@@ -9740,10 +10449,15 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
             return False
 
         # sending to the other node (sec_node) with the primary group jm_vuid (snode.jm_vuid)
-        ret, err = sec_node.rpc_client().jc_suspend_compression(jm_vuid=snode.jm_vuid, suspend=False)
-        if not ret:
-            logger.info("Failed to resume JC compression adding task...")
-            tasks_controller.add_jc_comp_resume_task(sec_node.cluster_id, sec_node.get_id(), jm_vuid=snode.jm_vuid)
+        # (release-upgrade guard: held until `cluster upgrade-complete`,
+        # remove with the jc_compression_upgrade plugin)
+        if jc_compression_upgrade.resume_is_held(DBController().get_cluster_by_id(sec_node.cluster_id)):
+            logger.info("JC compression resume held: cluster upgrade in progress")
+        else:
+            ret, err = sec_node.rpc_client().jc_suspend_compression(jm_vuid=snode.jm_vuid, suspend=False)
+            if not ret:
+                logger.info("Failed to resume JC compression adding task...")
+                tasks_controller.add_jc_comp_resume_task(sec_node.cluster_id, sec_node.get_id(), jm_vuid=snode.jm_vuid)
 
         sec_rpc_client = sec_node.rpc_client()
         sec_rpc_client.bdev_examine(snode.raid)
@@ -9755,13 +10469,13 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
     try:
         snode.create_hublvol(cluster_nqn=cluster.nqn)
     except RPCException as e:
-        logger.error("Error establishing hublvol: %s", e.message)
+        logger.error("Error establishing hublvol: %s", e)
         # return False
 
     try:
         snode.create_transfer_hublvol()
     except RPCException as e:
-        logger.error("Error creating transfer hublvol: %s", e.message)
+        logger.error("Error creating transfer hublvol: %s", e)
 
     if secondary_ids:
         # Create secondary hublvol on sec_1 so tertiary can multipath.
@@ -9812,12 +10526,12 @@ def create_lvstore(snode, ndcs, npcs, distr_bs, distr_chunk_bs, page_size_in_blo
 _DISTR_RECREATE_RETRY_DELAY_SEC = 5
 
 
-def _create_bdev_stack(snode, lvstore_stack=None, primary_node=None):
+def _create_bdev_stack(snode: StorageNode, lvstore_stack=None, primary_node=None):
     # Per-distrib creation outcome, keyed by bdev name. Threads write their own
     # key (distinct keys -> GIL-safe), the main loop reads after join.
     distr_results: dict = {}
 
-    def _create_distr(snode, name, params):
+    def _create_distr(snode: StorageNode, name, params):
         # If a peer node goes offline at the exact moment a distrib is
         # (re)created, the cluster map can be briefly stale -- it still flags
         # that peer's devices as online -- and bdev_distrib_create (or the
@@ -9975,7 +10689,7 @@ def _remove_bdev_stack(bdev_stack, rpc_client, remove_distr_only=False):
         # time.sleep(1)
 
 
-def recreate_lvstore_on_sec(snode):
+def recreate_lvstore_on_sec(snode: StorageNode):
     """Build (or rebuild) the non-leader LVS stack on ``snode`` for every
     primary that currently points at it as secondary or tertiary.
 
@@ -10039,7 +10753,7 @@ def recreate_lvstore_on_sec(snode):
     return overall_ok
 
 
-def teardown_non_leader_lvstore(donor_node, primary_node, slot=None):
+def teardown_non_leader_lvstore(donor_node: StorageNode, primary_node: StorageNode, slot=None):
     """Tear down a non-leader (secondary or tertiary) LVStore stack on
     ``donor_node`` for the LVS owned by ``primary_node``, in-place.
 
@@ -10174,7 +10888,7 @@ def teardown_non_leader_lvstore(donor_node, primary_node, slot=None):
     return True
 
 
-def reattach_sibling_failover(sibling_node, primary_node,
+def reattach_sibling_failover(sibling_node: StorageNode, primary_node: StorageNode,
                               old_failover_node, new_failover_node):
     """Surgically reconfigure a sibling secondary's NVMe-oF multipath group
     so its failover path points at the new sec_1 holder instead of the old
@@ -10236,6 +10950,15 @@ def reattach_sibling_failover(sibling_node, primary_node,
             f"reattach_sibling_failover: failed to attach any new failover "
             f"path for primary {primary_node.get_id()} on sibling "
             f"{sibling_node.get_id()}")
+
+    # This is the one hublvol attach that does not flow through
+    # HublvolReconnectCoordinator, so assert the policy here too rather
+    # than waiting for the next reconcile to converge it.
+    from simplyblock_core.utils.hublvol_reconnect import (
+        ensure_hublvol_active_active,
+    )
+    ensure_hublvol_active_active(
+        rpc_client, bdev_name, sibling_node.get_id(), "sec_2")
 
     # Remove old failover path(s). Best-effort: the dead path is also
     # naturally inert once the donor's stack is torn down.

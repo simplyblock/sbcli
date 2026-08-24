@@ -35,8 +35,11 @@ SUBNET_ID = "subnet-0593459d6b931ee4c"
 STORAGE_SG_ID = "sg-02e89a1372e9f39e9"
 
 # Branch whose code (and matching Docker image) should be deployed. The async
-# replication work lives on new-failure-domain.
-BRANCH = "new-failure-domain"
+# replication work has since merged to main (snapshot_replication,
+# tasks_runner_replication_final, replication_final_step, cluster
+# add-replication), so main is what we test; the default
+# SIMPLY_BLOCK_DOCKER_IMAGE (simplyblock/simplyblock:main) matches it.
+BRANCH = "main"
 
 SN_TYPE = "i3en.2xlarge"
 MGMT_TYPE = "m6i.2xlarge"
@@ -45,7 +48,9 @@ CLIENT_COUNT = 1                            # client(s) used by the test process
 
 USER = "ec2-user"
 IFACE = "eth0"
-MAX_LVOL = "100"
+# Hard-capped by constants.MAX_SUBSYSTEMS_PER_NODE (75); `sn configure` rejects
+# anything above it at ingress, so do not raise this without raising that.
+MAX_LVOL = "75"
 
 # --- Two-cluster topology on a single control plane ---
 # The FIRST cluster (bootstrap=True) is created with `cluster create`; every
@@ -56,7 +61,10 @@ CLUSTERS = [
         "nodes": 2,
         "ndcs": 1,                # data-chunks-per-stripe
         "npcs": 1,                # parity-chunks-per-stripe (FT=1)
-        "ha_jm_count": 2,         # <= node count
+        # None => let the CP resolve the required count (3 for FT=1). An explicit
+        # 2 is now rejected by resolve_ha_jm_count(); a 2-node cluster simply
+        # ends up with the 2 host-disjoint journals it can place.
+        "ha_jm_count": None,
         "bootstrap": True,        # `cluster create`
         "pool": "pool_src",
     },
@@ -69,10 +77,32 @@ CLUSTERS = [
         "bootstrap": False,       # `cluster add`
         "pool": "pool_tgt",
     },
+    # Pristine, never-written cluster used only by the fail-back-to-a-fresh-site
+    # case (test_async_replication case4): failing back there must replicate the
+    # FULL dataset, not a delta. Drop this entry (and save 2 instances) if you
+    # only run cases 1-3/5/6.
+    {
+        "name": "fresh",
+        "nodes": 2,
+        "ndcs": 1,
+        "npcs": 1,
+        "ha_jm_count": None,
+        "bootstrap": False,
+        "pool": "pool_fresh",
+    },
 ]
 
 # Snapshot replication direction (source cluster -> target cluster).
 REPLICATION = {"source": "src", "target": "tgt", "timeout": 3600}
+
+# SPDK image, pinned BY DIGEST. Two reasons this is a digest and not a tag:
+# the replication-transfer pipeline fixes (dispatch window fill + fragmented
+# parallel reads, spdk R26.3 bdd97c1d8/ce876a169) exist only from the
+# 2026-08-22 build onward, and ultra:main-latest's manifest list has a live
+# race that leaves its amd64 entry pointing at the PREVIOUS build (observed
+# 2026-08-17, -21 and -22). This digest = main-d89a595c-amd64, 2026-08-22.
+SPDK_IMAGE = ("public.ecr.aws/simply-block/ultra@"
+              "sha256:8a007dca5bf6a1fa89cc96945f43164539cac65f0cdafa56d5ee44961e9902af")
 
 SN_COUNT = sum(c["nodes"] for c in CLUSTERS)
 SBCTL = "sudo /usr/local/bin/sbctl"
@@ -83,7 +113,10 @@ ec2 = boto3.resource("ec2", region_name="us-east-1")
 # --------------------------------------------------------------------------- #
 # SSH / AWS helpers (same patterns as setup_perf_test1.py)
 # --------------------------------------------------------------------------- #
-def wait_for_ssh(ip, timeout=300):
+def wait_for_ssh(ip, timeout=900):
+    # 300s was not enough headroom: a freshly launched instance can take
+    # longer than that to finish cloud-init, and the deploy then aborts
+    # with every instance healthy moments later (deploy 17).
     print(f"--> SSH handshake on {ip} ...")
     start = time.time()
     while time.time() - start < timeout:
@@ -101,20 +134,130 @@ def wait_for_ssh(ip, timeout=300):
     raise RuntimeError(f"Timed out waiting for SSH on {ip}")
 
 
-def ssh_exec(ip, cmds, get_output=False, check=False):
-    ssh = paramiko.SSHClient()
-    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    ssh.connect(ip, username=USER, key_filename=KEY_PATH,
-                allow_agent=False, look_for_keys=False)
+#: Overall budget for one remote command. `cluster create` brings up
+#: FoundationDB and the whole CP service stack and prints NOTHING while it does
+#: so; the old exec_command(timeout=600) was a per-read socket timeout, so ten
+#: silent minutes killed the client while the command was still succeeding
+#: (deploy 2026-08-20 17:06: the cluster was created, the deployer aborted with
+#: a paramiko socket.timeout and left the lab 20% built). Silence is not
+#: failure, so progress is judged by the channel's exit status, not by output.
+LONG_CMD_TIMEOUT = 5400
+
+
+def ssh_exec(ip, cmds, get_output=False, check=False, timeout=LONG_CMD_TIMEOUT):
+    ssh = None
     results = []
     for cmd in cmds:
         print(f"  [{ip}] $ {cmd}")
-        stdin, stdout, stderr = ssh.exec_command(cmd, timeout=600)
-        out = stdout.read().decode("utf-8")
-        err = stderr.read().decode("utf-8")
-        rc = stdout.channel.recv_exit_status()
+        # Reconnect-retry on the transport phase only: a 10054 reset mid-run has
+        # now killed two deployments at the finish line (same class as the
+        # perf-deploy fix dea07344). A reset before exec_command returns means
+        # the command never ran, so replaying is safe.
+        for attempt in range(4):
+            try:
+                if ssh is None:
+                    ssh = paramiko.SSHClient()
+                    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                    ssh.connect(ip, username=USER, key_filename=KEY_PATH,
+                                allow_agent=False, look_for_keys=False)
+                stdin, stdout, stderr = ssh.exec_command(cmd)
+                break
+            except (paramiko.SSHException, OSError, EOFError) as exc:
+                try:
+                    ssh.close()
+                except Exception:
+                    pass
+                ssh = None
+                if attempt == 3:
+                    raise
+                print(f"  [{ip}] transport failure ({exc}); reconnecting in {10*(attempt+1)}s")
+                time.sleep(10 * (attempt + 1))
+        # Drain as output arrives and wait on the EXIT STATUS, not on the next
+        # byte: a long silent command must not look like a dead one. Nothing
+        # here blocks longer than `poll`, so the deadline is honoured even when
+        # the command never writes a thing.
+        chan = stdout.channel
+        chan.settimeout(5)
+        out_parts, err_parts = [], []
+        deadline = time.time() + timeout
+
+        # Stream as it arrives. Every command already runs with `sbctl -d`, but
+        # buffering the output until the command returned meant a hang showed
+        # NOTHING -- the 2026-08-20 `cluster create` stall was a blank screen
+        # for ten minutes with the debug log sitting unread in the channel.
+        # Printing each line as it lands is what makes a hang locatable.
+        pending = {"out": "", "err": ""}
+
+        def _emit(stream, text):
+            pending[stream] += text
+            while "\n" in pending[stream]:
+                line, pending[stream] = pending[stream].split("\n", 1)
+                if line.strip():
+                    # Remote output is arbitrary UTF-8; a Windows console is often
+                    # cp1252, and ONE unencodable character (a unicode arrow in an
+                    # sbctl log line) killed a whole deployment (run 20260821_1932).
+                    # Streaming must never be the thing that fails the run.
+                    out = f"    [{ip}] {line.rstrip()}"
+                    try:
+                        print(out, flush=True)
+                    except UnicodeEncodeError:
+                        print(out.encode("ascii", "replace").decode("ascii"), flush=True)
+
+        def _drain():
+            while chan.recv_ready():
+                chunk = chan.recv(65536).decode("utf-8", "replace")
+                out_parts.append(chunk)
+                _emit("out", chunk)
+            while chan.recv_stderr_ready():
+                chunk = chan.recv_stderr(65536).decode("utf-8", "replace")
+                err_parts.append(chunk)
+                _emit("err", chunk)
+
+        started = time.time()
+        last_beat = started
+        while True:
+            _drain()
+            if chan.exit_status_ready():
+                break
+            if time.time() > deadline:
+                ssh.close()
+                raise RuntimeError(
+                    f"Command exceeded {timeout}s on {ip}: {cmd}\n"
+                    f"It may still be running remotely — verify the outcome "
+                    f"before retrying, do not assume it failed.")
+            # Say how long it has been quiet. A command that prints nothing is
+            # indistinguishable from a dead one otherwise, which is how a slow
+            # `cluster create` read as a hang.
+            if time.time() - last_beat >= 60:
+                last_beat = time.time()
+                print(f"  [{ip}] still running after "
+                      f"{int(time.time() - started)}s: {cmd.split()[-4:]}",
+                      flush=True)
+            time.sleep(2)
+        _drain()
+        out = "".join(out_parts)
+        err = "".join(err_parts)
+        rc = chan.recv_exit_status()
         if get_output:
             results.append(out)
+        if rc == -1:
+            # No exit status: the channel closed under us. `sn deploy
+            # --isolate-cores` reconfigures the host and drops the session
+            # while completing normally -- deploy 2026-08-20 18:07 aborted on
+            # exactly this for two nodes whose SNodeAPI was up and healthy 26
+            # minutes later. A lost channel says nothing about the outcome, so
+            # do not call it a failure; the next phase (which needs SNodeAPI)
+            # is the real verification and fails loudly if it truly did not run.
+            print(f"  [{ip}] channel closed with no exit status: {cmd}")
+            print(f"  [{ip}] the command may have completed; continuing, the "
+                  f"next step verifies it")
+            try:
+                ssh.close()
+            except Exception:
+                pass
+            ssh = None
+            wait_for_ssh(ip, timeout=300)
+            continue
         if rc != 0:
             print(f"  [{ip}] FAILED (rc={rc}): {cmd}")
             for line in (out + err).rstrip().split("\n")[-10:]:
@@ -127,7 +270,8 @@ def ssh_exec(ip, cmds, get_output=False, check=False):
             for line in out.strip().split("\n")[-2:]:
                 if line.strip():
                     print(f"    {line}")
-    ssh.close()
+    if ssh is not None:
+        ssh.close()
     return results
 
 
@@ -156,6 +300,21 @@ def list_cluster_uuids(mgmt_ip):
     return set(re.findall(r"[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}", raw))
 
 
+def get_pool_uuid(mgmt_ip, pool_name):
+    """Resolve a pool name to its UUID.
+
+    `cluster add-replication --target-pool` documents "ID or name" but
+    cluster_ops.add_replication only does get_pool_by_id(), so a name fails with
+    a raw KeyError. Always hand it the UUID.
+    """
+    raw = ssh_exec(mgmt_ip, [f"{SBCTL} pool list"], get_output=True)[0]
+    for line in raw.splitlines():
+        cols = [c.strip() for c in line.split("|")]
+        if len(cols) > 2 and cols[2] == pool_name:
+            return cols[1]
+    raise RuntimeError(f"Could not resolve UUID for pool {pool_name!r}")
+
+
 def fetch_cluster_topology(mgmt_ip, cluster_uuid):
     """Reuse the topology dumper from setup_perf_test1 (kept identical)."""
     from setup_perf_test1 import fetch_cluster_topology as _f
@@ -170,7 +329,7 @@ def create_or_add_cluster(mgmt_ip, cfg):
     before = set() if cfg["bootstrap"] else list_cluster_uuids(mgmt_ip)
     verb = "create" if cfg["bootstrap"] else "add"
     ssh_exec(mgmt_ip, [
-        f"{SBCTL} -d cluster {verb} --enable-node-affinity"
+        f"{SBCTL} -d cluster {verb} --enable-node-affinity --max-subsys {MAX_LVOL}"
         f" --data-chunks-per-stripe {cfg['ndcs']} --parity-chunks-per-stripe {cfg['npcs']}"
     ], check=True)
     after = list_cluster_uuids(mgmt_ip)
@@ -183,12 +342,16 @@ def create_or_add_cluster(mgmt_ip, cfg):
 
 
 def add_nodes_to_cluster(mgmt_ip, cluster_uuid, priv_ips, ha_jm_count):
+    jm_flag = f" --ha-jm-count {ha_jm_count}" if ha_jm_count else ""
+
     def add_one(priv_ip):
         for attempt in range(5):
             try:
                 ssh_exec(mgmt_ip, [
-                    f"{SBCTL} -d sn add-node {cluster_uuid} {priv_ip}:5000 {IFACE}"
-                    f" --ha-jm-count {ha_jm_count}"
+                    # --dev unlocks --spdk-image (developer_mode, cli.py); the
+                    # plain -d is only debug logging and does NOT.
+                    f"{SBCTL} --dev -d sn add-node {cluster_uuid} {priv_ip}:5000 {IFACE}"
+                    f"{jm_flag} --spdk-image {SPDK_IMAGE}"
                 ], check=True)
                 return
             except RuntimeError:
@@ -259,7 +422,7 @@ def main():
     # --- Phase 3: configure + deploy ALL storage nodes ---
     print("Phase 3a: configuring storage nodes...")
     with ThreadPoolExecutor(max_workers=len(sn_pub_ips)) as ex:
-        for t in [ex.submit(ssh_exec, ip, [f"{SBCTL} -d sn configure --max-subsys {MAX_LVOL}"], check=True)
+        for t in [ex.submit(ssh_exec, ip, [f"{SBCTL} -d sn configure"], check=True)
                   for ip in sn_pub_ips]:
             t.result()
 
@@ -307,10 +470,18 @@ def main():
     src_uuid = cluster_uuids[REPLICATION["source"]]
     tgt_uuid = cluster_uuids[REPLICATION["target"]]
     tgt_pool = next(c["pool"] for c in CLUSTERS if c["name"] == REPLICATION["target"])
-    print(f"Configuring replication {REPLICATION['source']} -> {REPLICATION['target']}...")
+    tgt_pool_uuid = get_pool_uuid(mgmt_ip, tgt_pool)
+    # Register the destination and a cadence policy. NOT `cluster
+    # add-replication`: that deprecated verb writes
+    # cluster.snapshot_replication_target_pool, and the replication service
+    # reads that field off the DESTINATION cluster -- so a cluster configured
+    # as a source hands out its target's pool when something later replicates
+    # INTO it (fail-back). Targets and policies keep the pool where it belongs.
+    print(f"Configuring replication {REPLICATION['source']} -> {REPLICATION['target']}"
+          f" (target pool {tgt_pool} = {tgt_pool_uuid})...")
     ssh_exec(mgmt_ip, [
-        f"{SBCTL} -d cluster add-replication {src_uuid} {tgt_uuid}"
-        f" --target-pool {tgt_pool} --timeout {REPLICATION['timeout']}"
+        f"{SBCTL} -d cluster replication-target-add {src_uuid} tgt_{tgt_uuid[:8]}"
+        f" {tgt_uuid} --target-pool {tgt_pool_uuid} --timeout {REPLICATION['timeout']}"
     ], check=True)
 
     # --- Phase 6: prep clients ---

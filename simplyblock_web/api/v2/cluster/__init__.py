@@ -3,18 +3,20 @@ from typing import Annotated, List, Literal, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, Response
-from pydantic import BaseModel, Field, SecretStr
+from pydantic import BaseModel, Field, SecretStr, computed_field, model_validator
 from pydantic.networks import AnyUrl, UrlConstraints
 
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.models.cluster import HashicorpVaultSettings as ModelVaultSettings
 from simplyblock_core import cluster_ops
+from simplyblock_core.cluster_ops import SUPPORTED_ERASURE_CODING_SCHEMES
 
 from .._dependencies import Cluster
 from .backup import api as backup_api
-from .migration_group import api as migration_group_api
+from .replication import api as replication_api
 from .storage_pool import api as pool_api
 from .storage_node import api as storage_node_api
+from .subsystem import api as subsystem_api
 from .task import api as task_api
 from .._dtos import ClusterDTO
 from .. import util as util
@@ -78,13 +80,34 @@ class ClusterParams(BaseModel):
     cr_namespace: str = ""
     cr_plural: str = ""
     client_data_nic: str = ""
-    max_fault_tolerance: int = 1
     nvmf_base_port: int = 4420
     rpc_base_port: int = 8080
     snode_api_port: int = 50001
     backup_config: Optional[BackupConfigParams] = None
     hashicorp_vault_settings: Optional[HashicorpVaultSettings] = None
     enable_failure_domain: bool = False
+    # max_subsys and spdk_vcpu_count are capacity decisions with real
+    # consequences if silently defaulted (max_subsys=0 means the product
+    # ceiling; spdk_vcpu_count=0 means no cluster-wide core requirement at
+    # all) -- callers must state them explicitly. hugepages_mem=0 is safe to
+    # default: it is only ever a floor add_node applies on top of the figure
+    # calculate_minimum_hp_memory computes from max_subsys/spdk_vcpu_count
+    # themselves, per validate_spdk_sizing/cluster_ops ("0 = computed") --
+    # never a replacement for that computation, so there is nothing to
+    # silently under-specify by leaving it unstated.
+    max_subsys: util.Unsigned
+    hugepages_mem: util.Size = 0
+    spdk_vcpu_count: util.Unsigned
+
+    @model_validator(mode="after")
+    def validate_erasure_coding_scheme(self):
+        if (self.distr_ndcs, self.distr_npcs) not in SUPPORTED_ERASURE_CODING_SCHEMES:
+            raise ValueError("Invalid erasure coding scheme selected")
+        return self
+
+    @computed_field
+    def max_fault_tolerance(self) -> int:
+        return self.distr_npcs
 
 
 @api.get('/', name='clusters:list')
@@ -103,8 +126,6 @@ def list() -> List[ClusterDTO]:
 def add(request: Request, parameters: ClusterParams, response_format: util.CreationResponseFormatParameter = "full"):
     try:
         params = parameters.model_dump(exclude_none=True)
-        npcs = params.get('distr_npcs', 1)
-        params['max_fault_tolerance'] = min(npcs, 2) if npcs >= 1 else 1
         if "hashicorp_vault_settings" in params:
             params["hashicorp_vault_settings"] = ModelVaultSettings(params["hashicorp_vault_settings"])
         cluster_id_or_false = cluster_ops.add_cluster(**params)
@@ -253,5 +274,6 @@ instance_api.include_router(storage_node_api, prefix='/storage-nodes')
 instance_api.include_router(task_api, prefix='/tasks')
 instance_api.include_router(pool_api, prefix='/storage-pools')
 instance_api.include_router(backup_api, prefix='/backups')
-instance_api.include_router(migration_group_api, prefix='/migration-groups')
+instance_api.include_router(subsystem_api, prefix='/subsystems')
+instance_api.include_router(replication_api, prefix='/replication')
 api.include_router(instance_api)

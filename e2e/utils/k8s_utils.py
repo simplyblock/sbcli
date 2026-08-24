@@ -140,10 +140,22 @@ class K8sUtils:
         )
         stdout, stderr = self._exec_kubectl(kubectl_cmd, supress_logs=supress_logs)
 
-        # If the admin pod was recreated (e.g. during outage), retry with fresh pod
-        if "NotFound" in (stderr or ""):
+        # If the admin pod was recreated (e.g. during upgrade), retry with
+        # a freshly-resolved pod.  kubectl may report different error strings
+        # depending on the phase of termination:
+        #   - "NotFound"                                (pod fully deleted)
+        #   - "unable to upgrade connection: pod does not exist"
+        #   - "pod … not found"
+        _err = stderr or ""
+        _pod_gone = (
+            "NotFound" in _err
+            or "pod does not exist" in _err
+            or "pod not found" in _err.lower()
+        )
+        if _pod_gone:
             self.logger.warning(
-                f"[K8sUtils] Admin pod '{admin_pod}' not found, re-resolving..."
+                f"[K8sUtils] Admin pod '{admin_pod}' gone ({_err.strip()[:80]}), "
+                "re-resolving..."
             )
             admin_pod = self.get_admin_pod(refresh=True)
             kubectl_cmd = (
@@ -171,6 +183,34 @@ class K8sUtils:
                 f"[K8sUtils] Cannot resolve K8s node name for IP {node_ip!r}"
             )
         return name
+
+    def get_all_k8s_node_names(self) -> list[str]:
+        """Return a list of ALL K8s node hostnames."""
+        out, _ = self._exec_kubectl(
+            "kubectl get nodes --no-headers -o custom-columns=':metadata.name'",
+            supress_logs=True,
+        )
+        return [n.strip() for n in out.strip().splitlines() if n.strip()]
+
+    def detect_openshift(self) -> bool:
+        """Return True if the cluster is OpenShift (``oc`` CLI available).
+
+        The result is cached after the first call.
+        """
+        if hasattr(self, "_is_openshift"):
+            return self._is_openshift
+        try:
+            out, _ = self._exec_kubectl(
+                "oc version --client 2>/dev/null && echo OC_OK || echo OC_NO",
+                supress_logs=True,
+            )
+            self._is_openshift = "OC_OK" in out
+        except Exception:
+            self._is_openshift = False
+        self.logger.info(
+            f"[K8sUtils] Platform detection: openshift={self._is_openshift}"
+        )
+        return self._is_openshift
 
     # ── SPDK pod operations ──────────────────────────────────────────────────
 
@@ -537,6 +577,590 @@ class K8sUtils:
         except Exception as e:
             self.logger.warning(f"[list_files_in_spdk_pod] node={node_ip} path={path}: {e}")
             return []
+
+    # ── Core dump collection ────────────────────────────────────────────────
+
+    def copy_core_dumps_from_spdk_pod(self, node_ip: str,
+                                       logs_path: str) -> list[str]:
+        """Copy core dump files from inside the SPDK pod to *logs_path*.
+
+        Looks for ``*.core*.zst`` and ``core.*`` files in
+        ``/etc/simplyblock/`` inside the spdk-container and copies them
+        via ``kubectl cp`` (same pattern as :meth:`dump_lvstore_k8s`).
+
+        Returns a list of local paths of copied files.
+        """
+        copied: list[str] = []
+        try:
+            pod_name = self.get_spdk_pod_name(node_ip)
+        except Exception as exc:
+            self.logger.warning(
+                f"[coredump] Cannot find SPDK pod for {node_ip}, "
+                f"skipping in-pod core dump copy: {exc}"
+            )
+            return copied
+
+        files = self.list_files_in_spdk_pod(node_ip, "/etc/simplyblock/")
+        core_files = [
+            f for f in files
+            if "core" in f.lower() and "tmp_cores" not in f
+        ]
+        if not core_files:
+            return copied
+
+        dest_dir = os.path.join(logs_path, pod_name, "core_dumps")
+        os.makedirs(dest_dir, exist_ok=True)
+        kexec = (
+            f"kubectl exec -n {self.namespace} {pod_name} -c spdk-container --"
+        )
+
+        for fname in core_files:
+            src = f"/etc/simplyblock/{fname}"
+            # kubectl cp misinterprets colons — copy to a colon-free
+            # temp path first (same workaround as dump_lvstore_k8s).
+            safe_name = fname.replace(":", "_")
+            tmp_path = f"/tmp/{safe_name}"
+            dest_path = os.path.join(dest_dir, safe_name)
+            try:
+                self._exec_kubectl(
+                    f"{kexec} cp {shlex.quote(src)} {tmp_path}",
+                    supress_logs=True,
+                )
+                self._exec_kubectl(
+                    f"kubectl cp -n {self.namespace} "
+                    f"{pod_name}:{tmp_path} -c spdk-container "
+                    f"{shlex.quote(dest_path)}",
+                    supress_logs=True,
+                    timeout=600,
+                )
+                self._exec_kubectl(
+                    f"{kexec} rm -f {tmp_path}", supress_logs=True
+                )
+                if os.path.exists(dest_path):
+                    size_mb = os.path.getsize(dest_path) / (1024 * 1024)
+                    self.logger.info(
+                        f"[coredump] Copied pod core dump {fname} from "
+                        f"{pod_name} ({size_mb:.1f} MB) -> {dest_path}"
+                    )
+                    copied.append(dest_path)
+                else:
+                    self.logger.warning(
+                        f"[coredump] kubectl cp succeeded but file not "
+                        f"found at {dest_path}"
+                    )
+            except Exception as exc:
+                self.logger.warning(
+                    f"[coredump] Failed to copy {fname} from {pod_name}: {exc}"
+                )
+        return copied
+
+    def collect_host_core_dumps(self, node_ip: str, local_dir: str,
+                                max_size_mb: int = 500) -> list[str]:
+        """Collect host-level core dumps from a K8s node.
+
+        **Primary path**: uses the already-running SPDK pod (privileged)
+        to access the host filesystem via ``/proc/1/root/``.
+
+        **Fallback**: if the SPDK pod is not running, deploys a
+        platform-aware temporary pod/debug session.
+
+        Parameters
+        ----------
+        node_ip : str
+            Storage-node management IP.
+        local_dir : str
+            Local directory to save collected data.
+        max_size_mb : int
+            Maximum core dump file size (MB) to copy. Files larger
+            than this are logged but not copied.
+
+        Returns
+        -------
+        list[str]
+            Local paths of all saved files (listings, info, dumps).
+        """
+        saved: list[str] = []
+        os.makedirs(local_dir, exist_ok=True)
+        host_coredump_dir = "/proc/1/root/var/lib/systemd/coredump"
+
+        # ── Try via running SPDK pod ──────────────────────────────────────
+        try:
+            pod_name = self.get_spdk_pod_name(node_ip)
+        except Exception:
+            pod_name = None
+
+        if pod_name:
+            try:
+                saved = self._collect_host_core_dumps_via_spdk(
+                    pod_name, node_ip, local_dir, host_coredump_dir,
+                    max_size_mb,
+                )
+                return saved
+            except Exception as exc:
+                self.logger.warning(
+                    f"[coredump] SPDK pod collection failed for "
+                    f"{node_ip}: {exc}, trying fallback"
+                )
+
+        # ── Fallback ──────────────────────────────────────────────────────
+        try:
+            node_name = self._get_k8s_node_name(node_ip)
+        except Exception as exc:
+            self.logger.warning(
+                f"[coredump] Cannot resolve K8s node name for {node_ip}, "
+                f"skipping host core dump fallback: {exc}"
+            )
+            return saved
+
+        try:
+            saved = self._collect_host_core_dumps_fallback(
+                node_name, node_ip, local_dir, max_size_mb,
+            )
+        except Exception as exc:
+            self.logger.warning(
+                f"[coredump] Fallback collection failed for "
+                f"{node_ip} ({node_name}): {exc}"
+            )
+        return saved
+
+    def _collect_host_core_dumps_via_spdk(
+        self, pod_name: str, node_ip: str, local_dir: str,
+        host_coredump_dir: str, max_size_mb: int,
+    ) -> list[str]:
+        """Collect host core dumps using the running SPDK pod.
+
+        The SPDK pod is privileged and can read the host filesystem
+        via ``/proc/1/root/``.
+        """
+        saved: list[str] = []
+        kexec = (
+            f"kubectl exec {pod_name} -c spdk-container "
+            f"-n {self.namespace} --"
+        )
+        label = node_ip.replace(".", "_")
+
+        # 1. List host core dumps
+        out, _ = self._exec_kubectl(
+            f"{kexec} bash -c "
+            f"'ls -la {host_coredump_dir}/ 2>/dev/null || echo EMPTY'",
+            supress_logs=True,
+        )
+        listing_path = os.path.join(local_dir, f"coredump_listing_{label}.txt")
+        with open(listing_path, "w") as f:
+            f.write(f"# Host core dumps on {node_ip} (via SPDK pod {pod_name})\n")
+            f.write("# Path: /var/lib/systemd/coredump/\n\n")
+            f.write(out)
+        saved.append(listing_path)
+
+        if "EMPTY" in out or not out.strip():
+            self.logger.info(
+                f"[coredump] No host-level core dumps on {node_ip}"
+            )
+            return saved
+
+        # Parse core file names from ls output
+        core_files = []
+        for line in out.strip().splitlines():
+            parts = line.split()
+            if parts and "core" in line.lower() and not line.startswith("total"):
+                fname = parts[-1]
+                core_files.append(fname)
+
+        if core_files:
+            self.logger.warning(
+                f"[coredump] HOST CORE DUMPS on {node_ip}: {core_files}"
+            )
+
+        # 2. Try coredumpctl list (best-effort)
+        try:
+            out, _ = self._exec_kubectl(
+                f"{kexec} bash -c "
+                f"'chroot /proc/1/root coredumpctl list --no-pager "
+                f"2>/dev/null || echo COREDUMPCTL_UNAVAILABLE'",
+                supress_logs=True,
+                timeout=60,
+            )
+            if "COREDUMPCTL_UNAVAILABLE" not in out and out.strip():
+                fpath = os.path.join(
+                    local_dir, f"coredumpctl_list_{label}.txt"
+                )
+                with open(fpath, "w") as f:
+                    f.write(out)
+                saved.append(fpath)
+                self.logger.info(
+                    f"[coredump] Saved coredumpctl list for {node_ip}"
+                )
+        except Exception as exc:
+            self.logger.info(
+                f"[coredump] coredumpctl list unavailable on {node_ip}: {exc}"
+            )
+
+        # 3. Try coredumpctl info (best-effort, contains stack traces)
+        if core_files:
+            try:
+                out, _ = self._exec_kubectl(
+                    f"{kexec} bash -c "
+                    f"'chroot /proc/1/root coredumpctl info --no-pager "
+                    f"2>/dev/null || true'",
+                    supress_logs=True,
+                    timeout=120,
+                )
+                if out and out.strip():
+                    fpath = os.path.join(
+                        local_dir, f"coredumpctl_info_{label}.txt"
+                    )
+                    with open(fpath, "w") as f:
+                        f.write(out)
+                    saved.append(fpath)
+                    self.logger.info(
+                        f"[coredump] Saved coredumpctl info for {node_ip}"
+                    )
+            except Exception as exc:
+                self.logger.info(
+                    f"[coredump] coredumpctl info unavailable on "
+                    f"{node_ip}: {exc}"
+                )
+
+        # 4. Copy actual core dump files under size threshold
+        for fname in core_files:
+            host_path = f"{host_coredump_dir}/{fname}"
+            try:
+                size_out, _ = self._exec_kubectl(
+                    f"{kexec} bash -c "
+                    f"'stat -c %s {shlex.quote(host_path)} 2>/dev/null "
+                    f"|| echo 0'",
+                    supress_logs=True,
+                )
+                size_bytes = int(size_out.strip() or "0")
+                size_mb = size_bytes / (1024 * 1024)
+                self.logger.info(
+                    f"[coredump] {node_ip}: {fname} = {size_mb:.1f} MB"
+                )
+                if max_size_mb > 0 and size_mb > max_size_mb:
+                    self.logger.warning(
+                        f"[coredump] Skipping copy of {fname} on {node_ip} "
+                        f"({size_mb:.1f} MB > {max_size_mb} MB limit)"
+                    )
+                    continue
+            except Exception:
+                self.logger.warning(
+                    f"[coredump] Cannot stat {fname} on {node_ip}"
+                )
+                continue
+
+            safe_name = fname.replace(":", "_")
+            local_path = os.path.join(local_dir, f"{label}_{safe_name}")
+            tmp_path = f"/tmp/coredump_{safe_name}"
+            try:
+                # Copy from host path (via /proc/1/root) to temp in container
+                self._exec_kubectl(
+                    f"{kexec} bash -c "
+                    f"'cp {shlex.quote(host_path)} {tmp_path}'",
+                    supress_logs=True,
+                    timeout=600,
+                )
+                # kubectl cp from container temp to local
+                self._exec_kubectl(
+                    f"kubectl cp -n {self.namespace} "
+                    f"{pod_name}:{tmp_path} -c spdk-container "
+                    f"{shlex.quote(local_path)}",
+                    supress_logs=True,
+                    timeout=600,
+                )
+                self._exec_kubectl(
+                    f"{kexec} rm -f {tmp_path}", supress_logs=True
+                )
+                if os.path.exists(local_path):
+                    self.logger.info(
+                        f"[coredump] Copied host core dump {fname} from "
+                        f"{node_ip} ({size_mb:.1f} MB) -> {local_path}"
+                    )
+                    saved.append(local_path)
+            except Exception as exc:
+                self.logger.warning(
+                    f"[coredump] Failed to copy {fname} from "
+                    f"{node_ip}: {exc}"
+                )
+                # Clean up temp file on failure
+                try:
+                    self._exec_kubectl(
+                        f"{kexec} rm -f {tmp_path}", supress_logs=True
+                    )
+                except Exception:
+                    pass
+
+        return saved
+
+    def _collect_host_core_dumps_fallback(
+        self, node_name: str, node_ip: str, local_dir: str,
+        max_size_mb: int,
+    ) -> list[str]:
+        """Collect host core dumps when the SPDK pod is not running.
+
+        Uses platform-aware fallback:
+        - **OpenShift**: ``oc debug node/<node> -- chroot /host``
+        - **Vanilla K8s**: ephemeral privileged pod with ``nsenter``
+        - **Talos Linux**: ephemeral privileged pod with ``hostPath``
+          volume mount (no host binaries needed)
+        """
+        if self.detect_openshift():
+            return self._fallback_via_oc_debug(
+                node_name, node_ip, local_dir, max_size_mb
+            )
+        return self._fallback_via_privileged_pod(
+            node_name, node_ip, local_dir, max_size_mb
+        )
+
+    def _fallback_via_oc_debug(
+        self, node_name: str, node_ip: str, local_dir: str,
+        max_size_mb: int,
+    ) -> list[str]:
+        """OpenShift fallback: use ``oc debug node/`` for host access."""
+        saved: list[str] = []
+        label = node_ip.replace(".", "_")
+
+        for cmd_name, host_cmd in [
+            ("coredump_listing", "ls -la /var/lib/systemd/coredump/"),
+            (
+                "coredumpctl_list",
+                "coredumpctl list --no-pager 2>/dev/null || echo UNAVAILABLE",
+            ),
+            (
+                "coredumpctl_info",
+                "coredumpctl info --no-pager 2>/dev/null || true",
+            ),
+        ]:
+            try:
+                out, _ = self._exec_kubectl(
+                    f"oc debug node/{node_name} -- chroot /host "
+                    f"bash -c {shlex.quote(host_cmd)} 2>/dev/null || true",
+                    supress_logs=True,
+                    timeout=120,
+                )
+                if out and out.strip() and "UNAVAILABLE" not in out:
+                    fpath = os.path.join(
+                        local_dir, f"{cmd_name}_{label}.txt"
+                    )
+                    with open(fpath, "w") as f:
+                        f.write(out)
+                    saved.append(fpath)
+                    self.logger.info(
+                        f"[coredump] Saved {cmd_name} for {node_ip} "
+                        f"(oc debug fallback)"
+                    )
+            except Exception as exc:
+                self.logger.warning(
+                    f"[coredump] oc debug {cmd_name} failed on "
+                    f"{node_name}: {exc}"
+                )
+        return saved
+
+    def _fallback_via_privileged_pod(
+        self, node_name: str, node_ip: str, local_dir: str,
+        max_size_mb: int,
+    ) -> list[str]:
+        """Vanilla K8s / Talos fallback: privileged pod with hostPath mount.
+
+        Uses the container's own ``ls``/``sh`` on the mounted host
+        directory, so no host binaries are required (Talos-compatible).
+        """
+        import hashlib
+
+        saved: list[str] = []
+        label = node_ip.replace(".", "_")
+        hash_suffix = hashlib.md5(
+            f"coredump-{node_name}-{time.time()}".encode()
+        ).hexdigest()[:8]
+        pod_name = f"coredump-collector-{hash_suffix}"
+        ns = self.namespace
+
+        yaml_spec = (
+            f"apiVersion: v1\n"
+            f"kind: Pod\n"
+            f"metadata:\n"
+            f"  name: {pod_name}\n"
+            f"  namespace: {ns}\n"
+            f"spec:\n"
+            f"  nodeName: {node_name}\n"
+            f"  hostPID: true\n"
+            f"  tolerations:\n"
+            f"  - operator: Exists\n"
+            f"  containers:\n"
+            f"  - name: collector\n"
+            f"    image: busybox:1.37\n"
+            f"    imagePullPolicy: IfNotPresent\n"
+            f"    command: ['sleep', '300']\n"
+            f"    securityContext:\n"
+            f"      privileged: true\n"
+            f"    volumeMounts:\n"
+            f"    - name: host-coredumps\n"
+            f"      mountPath: /host-coredumps\n"
+            f"      readOnly: true\n"
+            f"  volumes:\n"
+            f"  - name: host-coredumps\n"
+            f"    hostPath:\n"
+            f"      path: /var/lib/systemd/coredump\n"
+            f"      type: DirectoryOrCreate\n"
+            f"  restartPolicy: Never\n"
+        )
+
+        try:
+            # Deploy the collector pod
+            self._exec_kubectl(
+                f"kubectl delete pod {pod_name} -n {ns} "
+                f"--force --grace-period=0 2>/dev/null || true",
+                supress_logs=True,
+            )
+            self._exec_kubectl(
+                f"cat <<'COREDUMP_EOF' | kubectl apply -f -\n"
+                f"{yaml_spec}COREDUMP_EOF",
+                supress_logs=True,
+            )
+            self._exec_kubectl(
+                f"kubectl wait pod/{pod_name} -n {ns} "
+                f"--for=condition=Ready --timeout=120s 2>/dev/null || true",
+                supress_logs=True,
+            )
+
+            kexec = f"kubectl exec {pod_name} -n {ns} --"
+
+            # 1. List core dumps via container's own ls
+            out, _ = self._exec_kubectl(
+                f"{kexec} ls -la /host-coredumps/ 2>/dev/null || echo EMPTY",
+                supress_logs=True,
+            )
+            listing_path = os.path.join(
+                local_dir, f"coredump_listing_{label}.txt"
+            )
+            with open(listing_path, "w") as f:
+                f.write(
+                    f"# Host core dumps on {node_ip} ({node_name}) "
+                    f"[fallback pod]\n"
+                )
+                f.write("# Path: /var/lib/systemd/coredump/\n\n")
+                f.write(out)
+            saved.append(listing_path)
+
+            if "EMPTY" in out or not out.strip():
+                self.logger.info(
+                    f"[coredump] No host-level core dumps on {node_ip} "
+                    f"(fallback)"
+                )
+                return saved
+
+            # Parse core file names
+            core_files = []
+            for line in out.strip().splitlines():
+                parts = line.split()
+                if (
+                    parts
+                    and "core" in line.lower()
+                    and not line.startswith("total")
+                ):
+                    core_files.append(parts[-1])
+
+            if core_files:
+                self.logger.warning(
+                    f"[coredump] HOST CORE DUMPS on {node_ip} "
+                    f"(fallback): {core_files}"
+                )
+
+            # 2. Try coredumpctl via nsenter (best-effort, won't work on Talos)
+            for cmd_name, host_cmd in [
+                (
+                    "coredumpctl_list",
+                    "coredumpctl list --no-pager",
+                ),
+                (
+                    "coredumpctl_info",
+                    "coredumpctl info --no-pager",
+                ),
+            ]:
+                try:
+                    out, _ = self._exec_kubectl(
+                        f"{kexec} nsenter -t 1 -m -u -i -n -- "
+                        f"sh -c '{host_cmd} 2>/dev/null' "
+                        f"2>/dev/null || true",
+                        supress_logs=True,
+                        timeout=120,
+                    )
+                    if out and out.strip():
+                        fpath = os.path.join(
+                            local_dir, f"{cmd_name}_{label}.txt"
+                        )
+                        with open(fpath, "w") as f:
+                            f.write(out)
+                        saved.append(fpath)
+                        self.logger.info(
+                            f"[coredump] Saved {cmd_name} for {node_ip} "
+                            f"(fallback nsenter)"
+                        )
+                except Exception:
+                    pass  # Expected on Talos
+
+            # 3. Copy actual core dump files under size threshold
+            for fname in core_files:
+                try:
+                    size_out, _ = self._exec_kubectl(
+                        f"{kexec} stat -c '%s' "
+                        f"/host-coredumps/{shlex.quote(fname)} "
+                        f"2>/dev/null || echo 0",
+                        supress_logs=True,
+                    )
+                    size_bytes = int(
+                        size_out.strip().strip("'") or "0"
+                    )
+                    size_mb = size_bytes / (1024 * 1024)
+                    self.logger.info(
+                        f"[coredump] {node_ip}: {fname} = "
+                        f"{size_mb:.1f} MB (fallback)"
+                    )
+                    if max_size_mb > 0 and size_mb > max_size_mb:
+                        self.logger.warning(
+                            f"[coredump] Skipping copy of {fname} on "
+                            f"{node_ip} ({size_mb:.1f} MB > "
+                            f"{max_size_mb} MB limit)"
+                        )
+                        continue
+                except Exception:
+                    continue
+
+                safe_name = fname.replace(":", "_")
+                local_path = os.path.join(
+                    local_dir, f"{label}_{safe_name}"
+                )
+                try:
+                    self._exec_kubectl(
+                        f"kubectl cp -n {ns} "
+                        f"{pod_name}:/host-coredumps/{shlex.quote(fname)} "
+                        f"{shlex.quote(local_path)}",
+                        supress_logs=True,
+                        timeout=600,
+                    )
+                    if os.path.exists(local_path):
+                        self.logger.info(
+                            f"[coredump] Copied host core dump {fname} "
+                            f"from {node_ip} ({size_mb:.1f} MB) "
+                            f"-> {local_path}"
+                        )
+                        saved.append(local_path)
+                except Exception as exc:
+                    self.logger.warning(
+                        f"[coredump] Failed to copy {fname} from "
+                        f"{node_ip} (fallback): {exc}"
+                    )
+        finally:
+            # Always clean up the collector pod
+            try:
+                self._exec_kubectl(
+                    f"kubectl delete pod {pod_name} -n {ns} "
+                    f"--force --grace-period=0 2>/dev/null || true",
+                    supress_logs=True,
+                )
+            except Exception:
+                pass
+
+        return saved
 
     def wait_pod_ready(self, pod_name_prefix: str, timeout: int = 300) -> str:
         """
@@ -931,8 +1555,28 @@ class K8sUtils:
     def create_volume_snapshot(self, name: str, pvc_name: str,
                                snapshot_class: str = "simplyblock-csi-snapshotclass",
                                namespace: str = None):
-        """Create a VolumeSnapshot from a PVC."""
+        """Create a VolumeSnapshot from a PVC.
+
+        If a stale VolumeSnapshot with the same name already exists (e.g.
+        from a previous test run that did not clean up), it is deleted
+        first to avoid ``persistentVolumeClaimName is immutable`` errors
+        from ``kubectl apply``.
+        """
         ns = namespace or self.namespace
+        # Remove any stale VolumeSnapshot with the same name to avoid
+        # immutable-field collisions from a prior test.
+        existing = self.get_resource_json("volumesnapshot", name, namespace=ns)
+        if existing:
+            existing_pvc = (existing.get("spec", {})
+                           .get("source", {})
+                           .get("persistentVolumeClaimName", ""))
+            if existing_pvc != pvc_name:
+                self.logger.warning(
+                    f"[K8sUtils] Stale VolumeSnapshot '{name}' found "
+                    f"(source PVC '{existing_pvc}' != '{pvc_name}'), "
+                    f"deleting before re-creating"
+                )
+                self.delete_volume_snapshot(name, namespace=ns, wait=True)
         yaml_content = (
             f"apiVersion: snapshot.storage.k8s.io/v1\n"
             f"kind: VolumeSnapshot\n"
@@ -972,11 +1616,23 @@ class K8sUtils:
             f"[K8sUtils] VolumeSnapshot '{name}' not ready within {timeout}s"
         )
 
-    def delete_volume_snapshot(self, name: str, namespace: str = None):
-        """Delete a VolumeSnapshot."""
+    def delete_volume_snapshot(self, name: str, namespace: str = None,
+                               wait: bool = False):
+        """Delete a VolumeSnapshot.
+
+        When *wait* is True the call blocks until the VolumeSnapshot is fully
+        removed, preventing stale-object collisions in subsequent tests.
+        """
         ns = namespace or self.namespace
-        self.logger.info(f"[K8sUtils] Deleting VolumeSnapshot '{name}'")
-        self.delete_resource("volumesnapshot", name, namespace=ns)
+        self.logger.info(f"[K8sUtils] Deleting VolumeSnapshot '{name}'"
+                         f"{' (waiting)' if wait else ''}")
+        if wait:
+            self._exec_kubectl(
+                f"kubectl delete volumesnapshot {name} -n {ns} "
+                f"--ignore-not-found --wait=true --timeout=120s"
+            )
+        else:
+            self.delete_resource("volumesnapshot", name, namespace=ns)
 
     def has_client_nodes(self) -> bool:
         """Return True if any K8s node has the 'client' role label."""
@@ -1005,12 +1661,12 @@ class K8sUtils:
                 pod on (typically the primary storage node for the lvol).
                 When set, a nodeAffinity rule excludes that node so the FIO
                 pod runs on a secondary / non-primary node instead.
-            warmup_config: Optional FIO config for a write-only warmup pass.
+            warmup_config: Optional FIO config for a sequential write pass.
                 When provided, an init container runs FIO with this config
-                to pre-fill all data files with valid verify headers (same
-                randseed, filenames, size) before the main randrw test.
-                This prevents false err=84 from stale FIO headers on
-                thin-provisioned storage.
+                to pre-fill every block with valid MD5 verify headers (same
+                bs, randseed, filenames, size as the main config) before the
+                main randrw test.  This ensures a later verify_only pass can
+                verify the entire file, not just the blocks randrw touched.
         """
         ns = namespace or self.namespace
         # Indent fio_config for YAML embedding (each line indented by 8 spaces)
@@ -1288,9 +1944,9 @@ class K8sUtils:
             # Delete clone PVCs (prefixed clone-)
             f"kubectl get pvc -n {ns} --no-headers -o custom-columns=NAME:.metadata.name "
             f"2>/dev/null | grep '^clone-' | xargs -r kubectl delete pvc -n {ns} --ignore-not-found",
-            # Delete VolumeSnapshots (prefixed snap-)
+            # Delete VolumeSnapshots (prefixed snap- or snapshot-)
             f"kubectl get volumesnapshot -n {ns} --no-headers -o custom-columns=NAME:.metadata.name "
-            f"2>/dev/null | grep '^snap-' | xargs -r kubectl delete volumesnapshot -n {ns} --ignore-not-found",
+            f"2>/dev/null | grep -E '^(snap-|snapshot-)' | xargs -r kubectl delete volumesnapshot -n {ns} --ignore-not-found --wait=true",
             # Delete test PVCs (various prefixes)
             f"kubectl get pvc -n {ns} --no-headers -o custom-columns=NAME:.metadata.name "
             f"2>/dev/null | grep -E '^(pvc-|mig-pvc-|add-pvc-)' | xargs -r kubectl delete pvc -n {ns} --ignore-not-found",
@@ -1544,6 +2200,11 @@ class K8sUtils:
         new CR and handles provisioning automatically — no separate
         ``StorageCluster`` expand patch is needed.
 
+        Device configuration (``driveSizeRange``, ``pcieModel``) is
+        read from the parent StorageNodeSet and included in the
+        ``overrides`` block so the init container can find the correct
+        SSD devices on the new worker.
+
         Parameters
         ----------
         new_workers : list[str]
@@ -1555,8 +2216,31 @@ class K8sUtils:
             Override namespace (default ``self.namespace``).
         """
         ns = namespace or self.namespace
+
+        # Read device config from parent StorageNodeSet
+        sns_json = self.get_resource_json(
+            "storagenodeset.storage.simplyblock.io",
+            storage_node_set_ref,
+            namespace=ns,
+        )
+        sns_spec = sns_json.get("spec", {})
+        drive_size_range = sns_spec.get("driveSizeRange", "")
+        pcie_model = sns_spec.get("pcieModel", "")
+        if drive_size_range or pcie_model:
+            self.logger.info(
+                f"[K8sUtils] Read device config from StorageNodeSet "
+                f"'{storage_node_set_ref}': driveSizeRange={drive_size_range!r}, "
+                f"pcieModel={pcie_model!r}"
+            )
+
         for worker in new_workers:
             cr_name = f"{storage_node_set_ref}-expand-{worker}"
+            overrides = "    expand: true\n"
+            if drive_size_range:
+                overrides += f'    driveSizeRange: "{drive_size_range}"\n'
+            if pcie_model:
+                overrides += f'    pcieModel: "{pcie_model}"\n'
+
             yaml_content = (
                 "apiVersion: storage.simplyblock.io/v1alpha1\n"
                 "kind: StorageNode\n"
@@ -1568,7 +2252,7 @@ class K8sUtils:
                 f"  workerNode: {worker}\n"
                 "  socketIndex: 0\n"
                 "  overrides:\n"
-                "    expand: true\n"
+                f"{overrides}"
             )
             self.logger.info(
                 f"[K8sUtils] Creating StorageNode CR '{cr_name}' "
@@ -1804,16 +2488,14 @@ class K8sUtils:
         """
         ns = namespace or self.namespace
 
-        # Quick pre-check: if the pod is stuck in PodInitializing or similar,
-        # report that immediately instead of waiting the full timeout.
+        # Quick pre-check: fail fast on image pull errors (unrecoverable).
+        # PodInitializing and ContainerCreating are normal transient states
+        # (e.g. init container running fio-warmup) — let them proceed.
         pod_name_pre = self.get_job_pod_name(job_name, namespace=ns)
         if pod_name_pre:
             detail = self.get_pod_status_detail(pod_name_pre, namespace=ns)
             reason = detail.get("reason", "")
-            if reason in (
-                "PodInitializing", "ContainerCreating",
-                "ErrImagePull", "ImagePullBackOff",
-            ):
+            if reason in ("ErrImagePull", "ImagePullBackOff"):
                 raise RuntimeError(
                     f"FIO Job '{job_name}' pod '{pod_name_pre}' never "
                     f"started: {reason} — {detail.get('message', '')}"
@@ -2076,6 +2758,77 @@ class K8sUtils:
         self.logger.info(f"[K8sUtils] Deleting BackupRestore '{name}'")
         self.delete_resource("backuprestore", name, namespace=ns)
 
+    # ── BackupImport CRD operations ──────────────────────────────────────────
+
+    def create_backup_import(self, name: str,
+                              source_cluster_name: str,
+                              source_backup_id: str,
+                              target_cluster_name: str,
+                              namespace: str = None):
+        """Create a BackupImport CRD to import a backup from another cluster.
+
+        The operator will create a corresponding StorageBackup on the target
+        cluster and handle source-switching automatically.
+        """
+        ns = namespace or self.namespace
+        yaml_content = (
+            f"apiVersion: storage.simplyblock.io/v1alpha1\n"
+            f"kind: BackupImport\n"
+            f"metadata:\n"
+            f"  name: {name}\n"
+            f"  namespace: {ns}\n"
+            f"spec:\n"
+            f"  sourceClusterName: {source_cluster_name}\n"
+            f"  sourceBackupID: {source_backup_id}\n"
+            f"  targetClusterName: {target_cluster_name}\n"
+        )
+        self.logger.info(
+            f"[K8sUtils] Creating BackupImport '{name}' "
+            f"(source={source_cluster_name}/{source_backup_id} "
+            f"-> target={target_cluster_name})"
+        )
+        self.apply_yaml(yaml_content, namespace=ns)
+
+    def wait_backup_import_done(self, name: str, timeout: int = 300,
+                                 namespace: str = None) -> dict:
+        """Poll until BackupImport phase is ``Done``.  Returns resource JSON.
+
+        The status will contain ``storageBackupRef`` — the name of the
+        StorageBackup CRD created on the target cluster.
+        """
+        ns = namespace or self.namespace
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            res = self.get_resource_json("backupimport", name, namespace=ns)
+            phase = (res.get("status", {}).get("phase") or "").lower()
+            if phase == "done":
+                self.logger.info(f"[K8sUtils] BackupImport '{name}' is Done")
+                return res
+            if phase == "failed":
+                raise AssertionError(
+                    f"BackupImport '{name}' failed: {res.get('status')}")
+            self.logger.info(
+                f"[K8sUtils] Waiting for BackupImport '{name}' "
+                f"(phase={res.get('status', {}).get('phase', 'unknown')})"
+            )
+            time.sleep(10)
+        raise TimeoutError(
+            f"BackupImport '{name}' not Done within {timeout}s"
+        )
+
+    def get_backup_import_storage_backup_ref(self, name: str,
+                                              namespace: str = None) -> str:
+        """Return the storageBackupRef from a BackupImport's status."""
+        ns = namespace or self.namespace
+        res = self.get_resource_json("backupimport", name, namespace=ns)
+        return res.get("status", {}).get("storageBackupRef", "")
+
+    def delete_backup_import(self, name: str, namespace: str = None):
+        """Delete a BackupImport CRD."""
+        ns = namespace or self.namespace
+        self.logger.info(f"[K8sUtils] Deleting BackupImport '{name}'")
+        self.delete_resource("backupimport", name, namespace=ns)
+
     # ── BackupPolicy CRD operations ──────────────────────────────────────────
 
     def create_backup_policy(self, name: str,
@@ -2260,11 +3013,104 @@ class K8sUtils:
                 checksums[parts[1]] = parts[0]
         return checksums
 
-    def delete_pod(self, pod_name: str, namespace: str = None):
-        """Delete a pod."""
+    def delete_pod(self, pod_name: str, namespace: str = None,
+                   wait: bool = False):
+        """Delete a pod.
+
+        When *wait* is True the call blocks until the pod is fully removed,
+        preventing name-collision races when a new pod with the same name is
+        created shortly after deletion.
+        """
         ns = namespace or self.namespace
-        self.logger.info(f"[K8sUtils] Deleting pod '{pod_name}'")
-        self.delete_resource("pod", pod_name, namespace=ns)
+        self.logger.info(f"[K8sUtils] Deleting pod '{pod_name}'"
+                         f"{' (waiting)' if wait else ''}")
+        if wait:
+            self._exec_kubectl(
+                f"kubectl delete pod {pod_name} -n {ns} "
+                f"--ignore-not-found --wait=true --timeout=60s"
+            )
+        else:
+            self.delete_resource("pod", pod_name, namespace=ns)
+
+    def wait_for_per_node_config(self, worker_node: str,
+                                  configmap_name: str = "simplyblock-node-per-node-config",
+                                  namespace: str = None,
+                                  timeout: int = 120):
+        """Wait until the per-node-config ConfigMap has an entry for *worker_node*.
+
+        The operator updates this ConfigMap when it reconciles a StorageNode CR.
+        The DaemonSet pod's ``node-env-writer`` init container reads the entry
+        to set ``MAX_LVOL``, ``MAX_SIZE``, etc.  If the pod starts before the
+        entry exists it gets ``MAX_LVOL=0`` and crashes.
+
+        Args:
+            worker_node: The K8s node name (e.g. ``worker-4.ocp.simplyblock.ai``).
+            configmap_name: Name of the per-node-config ConfigMap.
+            namespace: K8s namespace (defaults to ``self.namespace``).
+            timeout: Max seconds to wait.
+        """
+        import time
+        ns = namespace or self.namespace
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            cm = self.get_resource_json("configmap", configmap_name, namespace=ns)
+            data = cm.get("data", {})
+            if worker_node in data:
+                self.logger.info(
+                    f"[K8sUtils] per-node-config has entry for '{worker_node}': "
+                    f"{data[worker_node][:120]}..."
+                )
+                return
+            self.logger.info(
+                f"[K8sUtils] Waiting for per-node-config entry for "
+                f"'{worker_node}' (keys: {list(data.keys())})..."
+            )
+            time.sleep(10)
+        self.logger.warning(
+            f"[K8sUtils] per-node-config entry for '{worker_node}' not found "
+            f"after {timeout}s — proceeding anyway (pod may still fail)"
+        )
+
+    def delete_storage_node_pods_on_worker(self, worker_node: str,
+                                           namespace: str = None):
+        """Delete storage-node DaemonSet pods running on a specific worker.
+
+        Call this after the per-node-config ConfigMap has been updated for the
+        worker (use ``wait_for_per_node_config`` first) so the DaemonSet
+        recreates the pod with the correct configuration.
+        """
+        ns = namespace or self.namespace
+        cmd = (
+            f"kubectl get pods -n {ns} "
+            f"--field-selector spec.nodeName={worker_node} "
+            f"--no-headers -o custom-columns=NAME:.metadata.name"
+        )
+        out, _ = self._exec_kubectl(cmd, supress_logs=True)
+        deleted = 0
+        for line in (out or "").strip().splitlines():
+            pod_name = line.strip()
+            if not pod_name:
+                continue
+            if "simplyblock-storage-node-ds" in pod_name:
+                self.logger.info(
+                    f"[K8sUtils] Deleting stale storage-node pod "
+                    f"'{pod_name}' on worker '{worker_node}'"
+                )
+                self._exec_kubectl(
+                    f"kubectl delete pod {pod_name} -n {ns} "
+                    f"--force --grace-period=0 --ignore-not-found"
+                )
+                deleted += 1
+        if deleted:
+            self.logger.info(
+                f"[K8sUtils] Deleted {deleted} stale storage-node pod(s) "
+                f"on worker '{worker_node}'"
+            )
+        else:
+            self.logger.info(
+                f"[K8sUtils] No stale storage-node pods found on "
+                f"worker '{worker_node}'"
+            )
 
     def verify_pvc_mount(self, pvc_name: str, namespace: str = None,
                          timeout: int = 120) -> tuple:
@@ -2525,9 +3371,6 @@ class K8sSbcliUtils:
     def suspend_node(self, node_uuid, expected_error_code=None):
         self.k8s.exec_sbcli(f"{self.sbcli_cmd} -d sn suspend {node_uuid}")
 
-    def resume_node(self, node_uuid):
-        self.k8s.exec_sbcli(f"{self.sbcli_cmd} -d sn resume {node_uuid}")
-
     def restart_node(self, node_uuid, expected_error_code=None, force=False):
         force_flag = " --force" if force else ""
         self.k8s.exec_sbcli(f"{self.sbcli_cmd} -d sn restart {node_uuid}{force_flag}")
@@ -2536,11 +3379,20 @@ class K8sSbcliUtils:
         actual_status = None
         status_list = status if isinstance(status, list) else [status]
         while timeout > 0:
-            node_details = self.get_storage_node_details(node_id)
-            actual_status = node_details[0]["status"]
-            if actual_status in status_list:
-                return node_details[0]
-            self.logger.info(f"Expected Status: {status_list} / Actual Status: {actual_status}")
+            try:
+                node_details = self.get_storage_node_details(node_id)
+                actual_status = node_details[0]["status"]
+                if actual_status in status_list:
+                    return node_details[0]
+                self.logger.info(
+                    f"Expected Status: {status_list} / Actual Status: {actual_status}"
+                )
+            except (json.JSONDecodeError, IndexError, KeyError) as exc:
+                # Transient failure — admin-control pod may be recycling.
+                self.logger.warning(
+                    f"[wait_for_storage_node_status] Transient error for "
+                    f"{node_id}: {exc!r}, retrying..."
+                )
             sleep_n_sec(1)
             timeout -= 1
         raise TimeoutError(
@@ -2600,7 +3452,7 @@ class K8sSbcliUtils:
         Returns the actual pool name to use (may differ from *pool_name* if an
         existing pool with a different name was found).
 
-        The operator creates pools from Pool CRDs. The pool name in the
+        The operator creates pools from StoragePool CRDs. The pool name in the
         backend (visible via ``sbcli pool list``) is set by the operator and
         may differ from the CRD metadata.name.  This method waits for the
         operator to reconcile the pool so that the real pool name can be
@@ -2614,10 +3466,10 @@ class K8sSbcliUtils:
             self.logger.info(f"[pool] Using existing pool '{actual}'")
             return actual
 
-        # 2. Check if Pool CRDs exist (operator may still be reconciling)
+        # 2. Check if StoragePool CRDs exist (operator may still be reconciling)
         ns = self.k8s.namespace
         out, _ = self.k8s._exec_kubectl(
-            f"kubectl get pools -n {ns} --no-headers "
+            f"kubectl get storagepools -n {ns} --no-headers "
             f"-o custom-columns=NAME:.metadata.name 2>/dev/null || true"
         )
         existing_crds = [r.strip() for r in out.strip().splitlines() if r.strip()]
@@ -2634,7 +3486,7 @@ class K8sSbcliUtils:
             )
 
             # Look up the StorageCluster CRD name from K8s to ensure
-            # the Pool CRD references the correct CRD resource name.
+            # the StoragePool CRD references the correct CRD resource name.
             sc_out, _ = self.k8s._exec_kubectl(
                 f"kubectl get storageclusters -n {ns} --no-headers "
                 f"-o custom-columns=NAME:.metadata.name 2>/dev/null || true"
@@ -2656,7 +3508,7 @@ class K8sSbcliUtils:
 
             yaml_content = (
                 f"apiVersion: storage.simplyblock.io/v1alpha1\n"
-                f"kind: Pool\n"
+                f"kind: StoragePool\n"
                 f"metadata:\n"
                 f"  name: {k8s_resource_name}\n"
                 f"  namespace: {ns}\n"
@@ -2673,11 +3525,11 @@ class K8sSbcliUtils:
             existing_crds = [k8s_resource_name]
         else:
             self.logger.info(
-                f"[pool] Found existing Pool CRD(s): {existing_crds} — "
+                f"[pool] Found existing StoragePool CRD(s): {existing_crds} — "
                 f"waiting for operator to reconcile"
             )
 
-        # 4. Wait for operator to reconcile the Pool CRD into an actual pool
+        # 4. Wait for operator to reconcile the StoragePool CRD into an actual pool
         #    visible via sbcli pool list.  Use 300s timeout to handle slow
         #    reconciliation after pool deletion/recreation cycles.
         for attempt in range(60):  # up to 300s
@@ -2692,7 +3544,7 @@ class K8sSbcliUtils:
             if attempt % 5 == 4:
                 self.logger.info(
                     f"[pool] Still waiting for operator to reconcile "
-                    f"Pool CRD(s) {existing_crds} (attempt {attempt})"
+                    f"StoragePool CRD(s) {existing_crds} (attempt {attempt})"
                 )
             sleep_n_sec(5)
 
@@ -2701,27 +3553,76 @@ class K8sSbcliUtils:
         #    pools that don't exist on the backend, leading to PVC bind failures.
         raise TimeoutError(
             f"[pool] Pool not visible in sbcli after 300s. "
-            f"Pool CRD(s): {existing_crds}. "
+            f"StoragePool CRD(s): {existing_crds}. "
             f"Operator may not have reconciled the pool."
         )
 
-    def pool_crd_exists(self, pool_name):
-        """Check if a Pool CRD exists in K8s (with or without simplyblock- prefix).
+    def add_storage_pool_direct(self, pool_name, cluster_id=None, sbcli_cmd=None):
+        """Create a pool directly via ``sbcli pool add`` (kubectl exec).
 
-        Returns True if the Pool CRD is found, False otherwise.
+        Unlike ``add_storage_pool()``, this does NOT create a StoragePool CRD —
+        it calls the CLI directly in the admin pod.  Use this for R25
+        clusters that have no operator to reconcile StoragePool CRDs.
+
+        sbcli_cmd: override the CLI binary name (e.g. "sbcli-dev" for R25).
+                   Defaults to self.sbcli_cmd.
+
+        Returns the pool name on success.
+        """
+        cli = sbcli_cmd or self.sbcli_cmd
+
+        def _list_pools():
+            items = self._run_json(f"{cli} pool list --json")
+            return {item["Name"]: item["UUID"] for item in items}
+
+        # 1. Check if sbcli already sees a pool
+        existing = _list_pools()
+        if existing:
+            actual = next(iter(existing))
+            self.logger.info(f"[pool] Using existing pool '{actual}'")
+            return actual
+
+        # 2. Create via CLI
+        cid = cluster_id or self.cluster_id
+        cmd = f"{cli} pool add {pool_name} {cid}"
+        self.logger.info(f"[pool] Creating pool directly via CLI: {cmd}")
+        out = self._run(cmd)
+        self.logger.info(f"[pool] pool add output: {out}")
+
+        # 3. Wait for pool to appear in pool list
+        for attempt in range(30):  # up to 150s
+            pools = _list_pools()
+            if pools:
+                actual = next(iter(pools))
+                self.logger.info(
+                    f"[pool] Pool '{actual}' visible after CLI create "
+                    f"(attempt {attempt})"
+                )
+                return actual
+            sleep_n_sec(5)
+
+        raise TimeoutError(
+            f"[pool] Pool '{pool_name}' not visible in sbcli after 150s "
+            f"following direct CLI creation."
+        )
+
+    def pool_crd_exists(self, pool_name):
+        """Check if a StoragePool CRD exists in K8s (with or without simplyblock- prefix).
+
+        Returns True if the StoragePool CRD is found, False otherwise.
         """
         ns = self.k8s.namespace
         # Try with simplyblock- prefix first (add_storage_pool creates these)
         k8s_name = f"simplyblock-{pool_name.lower().replace('_', '-')}"
         out, _ = self.k8s._exec_kubectl(
-            f"kubectl get pools {k8s_name} -n {ns} "
+            f"kubectl get storagepools {k8s_name} -n {ns} "
             f"-o jsonpath='{{.metadata.name}}' 2>/dev/null || true"
         )
         if out.strip():
             return True
         # Try with exact pool_name (ensure_pool_exists creates these)
         out, _ = self.k8s._exec_kubectl(
-            f"kubectl get pools {pool_name} -n {ns} "
+            f"kubectl get storagepools {pool_name} -n {ns} "
             f"-o jsonpath='{{.metadata.name}}' 2>/dev/null || true"
         )
         return bool(out.strip())
@@ -2751,7 +3652,7 @@ class K8sSbcliUtils:
         )
 
         # Look up the StorageCluster CRD name from K8s to ensure
-        # the Pool CRD references the correct CRD resource name.
+        # the StoragePool CRD references the correct CRD resource name.
         ns = self.k8s.namespace
         sc_out, _ = self.k8s._exec_kubectl(
             f"kubectl get storageclusters -n {ns} --no-headers "
@@ -2778,7 +3679,7 @@ class K8sSbcliUtils:
 
         yaml_content = (
             f"apiVersion: storage.simplyblock.io/v1alpha1\n"
-            f"kind: Pool\n"
+            f"kind: StoragePool\n"
             f"metadata:\n"
             f"  name: {pool_name}\n"
             f"  namespace: {ns}\n"
@@ -2803,7 +3704,7 @@ class K8sSbcliUtils:
             sleep_n_sec(5)
         raise RuntimeError(
             f"[pool] Pool '{pool_name}' not confirmed after kubectl apply "
-            f"— operator did not reconcile the Pool CRD within 180s"
+            f"— operator did not reconcile the StoragePool CRD within 180s"
         )
 
     def add_host_to_pool(self, pool_id, host_nqn):
@@ -2827,7 +3728,7 @@ class K8sSbcliUtils:
         self.logger.info(f"[pool] Deleting pool CRD '{pool_name}'")
         ns = self.k8s.namespace
         self.k8s._exec_kubectl(
-            f"kubectl delete pools {pool_name} -n {ns} "
+            f"kubectl delete storagepools {pool_name} -n {ns} "
             f"--timeout=60s 2>/dev/null || true"
         )
         # Wait for pool to disappear from sbcli
@@ -2842,14 +3743,14 @@ class K8sSbcliUtils:
         """Delete all storage pool CRD resources."""
         ns = self.k8s.namespace
         out, _ = self.k8s._exec_kubectl(
-            f"kubectl get pools -n {ns} --no-headers "
+            f"kubectl get storagepools -n {ns} --no-headers "
             f"-o custom-columns=NAME:.metadata.name 2>/dev/null || true"
         )
         resources = [r.strip() for r in out.strip().splitlines() if r.strip()]
         for res in resources:
             self.logger.info(f"[pool] Deleting pool CRD '{res}'")
             self.k8s._exec_kubectl(
-                f"kubectl delete pools {res} -n {ns} "
+                f"kubectl delete storagepools {res} -n {ns} "
                 f"--timeout=60s 2>/dev/null || true"
             )
 

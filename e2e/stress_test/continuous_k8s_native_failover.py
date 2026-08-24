@@ -515,24 +515,13 @@ class K8sNativeFailoverTest(TestClusterBase):
 
     def _get_all_k8s_node_names(self) -> list[str]:
         """Return a list of ALL K8s node hostnames."""
-        out, _ = self.k8s_utils._exec_kubectl(
-            "kubectl get nodes --no-headers -o custom-columns=':metadata.name'",
-            supress_logs=True,
-        )
-        return [n.strip() for n in out.strip().splitlines() if n.strip()]
+        return self.k8s_utils.get_all_k8s_node_names()
 
     def _detect_openshift(self) -> bool:
         """Return True if the cluster is OpenShift (``oc`` available)."""
         if hasattr(self, '_is_openshift'):
             return self._is_openshift
-        try:
-            out, _ = self.k8s_utils._exec_kubectl(
-                "oc version --client 2>/dev/null && echo OC_OK || echo OC_NO",
-                supress_logs=True,
-            )
-            self._is_openshift = "OC_OK" in out
-        except Exception:
-            self._is_openshift = False
+        self._is_openshift = self.k8s_utils.detect_openshift()
         self.logger.info(f"[dmesg] Platform detection: openshift={self._is_openshift}")
         return self._is_openshift
 
@@ -2984,6 +2973,37 @@ class K8sNativeFailoverTest(TestClusterBase):
                                     f"as failed (likely volume mount "
                                     f"or image pull failure)"
                                 )
+                                # Capture kubectl describe pod for
+                                # debugging why the pod is stuck
+                                try:
+                                    ns = self.namespace
+                                    desc_out, _ = self.k8s_utils._exec_kubectl(
+                                        f"kubectl describe pod {pod_name}"
+                                        f" -n {ns}",
+                                        timeout=30,
+                                    )
+                                    if desc_out:
+                                        desc_dir = os.path.join(
+                                            self.docker_logs_path,
+                                            "stuck_pod_describes",
+                                        )
+                                        os.makedirs(desc_dir, exist_ok=True)
+                                        desc_file = os.path.join(
+                                            desc_dir,
+                                            f"{pod_name}_describe.txt",
+                                        )
+                                        with open(desc_file, "w") as f:
+                                            f.write(desc_out)
+                                        self.logger.info(
+                                            f"[wait_fio] Saved describe"
+                                            f" for stuck pod {pod_name}"
+                                            f" → {desc_file}"
+                                        )
+                                except Exception as e:
+                                    self.logger.warning(
+                                        f"[wait_fio] Failed to describe"
+                                        f" stuck pod {pod_name}: {e}"
+                                    )
                                 still_running.discard(job_name)
                                 stuck_init_since.pop(job_name, None)
                                 failed_jobs.add(job_name)
@@ -3006,6 +3026,38 @@ class K8sNativeFailoverTest(TestClusterBase):
                     f"[wait_fio] {len(still_running)} jobs did not complete "
                     f"within {timeout}s: {sorted(still_running)}"
                 )
+                # Capture kubectl describe for timed-out pods
+                for job_name in still_running:
+                    try:
+                        pod_name = self.k8s_utils.get_job_pod_name(job_name)
+                        if not pod_name:
+                            continue
+                        ns = self.namespace
+                        desc_out, _ = self.k8s_utils._exec_kubectl(
+                            f"kubectl describe pod {pod_name} -n {ns}",
+                            timeout=30,
+                        )
+                        if desc_out:
+                            desc_dir = os.path.join(
+                                self.docker_logs_path,
+                                "stuck_pod_describes",
+                            )
+                            os.makedirs(desc_dir, exist_ok=True)
+                            desc_file = os.path.join(
+                                desc_dir,
+                                f"{pod_name}_describe.txt",
+                            )
+                            with open(desc_file, "w") as f:
+                                f.write(desc_out)
+                            self.logger.info(
+                                f"[wait_fio] Saved describe for "
+                                f"timed-out pod {pod_name} → {desc_file}"
+                            )
+                    except Exception as e:
+                        self.logger.warning(
+                            f"[wait_fio] Failed to describe "
+                            f"timed-out pod for {job_name}: {e}"
+                        )
                 failed_jobs.update(still_running)
             if failed_jobs:
                 self.logger.error(
@@ -6204,10 +6256,13 @@ class K8sNativeScaleBreakTest(K8sNativeFailoverTest):
             traceback.print_exc()
         finally:
             self._log_scale_break_summary(break_reason, capacity_reached)
-            # Always clean up FIO jobs, configmaps, and PVCs — even on
-            # failure — so the pipeline cleanup script doesn't have to
-            # force-delete hundreds of leftover resources.
-            self._cleanup_all_k8s_resources()
+            if test_failed and self.preserve_resources_on_failure:
+                self.logger.info(
+                    "[scale_break] Preserving K8s resources (FIO pods, PVCs, "
+                    "snapshots) for debugging (--preserve_resources_on_failure)"
+                )
+            else:
+                self._cleanup_all_k8s_resources()
 
         if test_failed:
             raise RuntimeError(

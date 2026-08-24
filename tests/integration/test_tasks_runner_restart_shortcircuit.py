@@ -88,6 +88,20 @@ def _mk_task(node_id="node-1", retry=0, max_retry=11,
     return t
 
 
+def _mk_db(node):
+    """A db double whose ``atomic_update`` actually applies the mutator.
+
+    Terminal task writes go through ``db.atomic_update(task, _mutate)`` — a
+    plain write of the runner's in-memory copy would erase a concurrent
+    cancellation. An unconfigured MagicMock swallows ``_mutate``, so the task
+    never reached DONE and the short-circuit looked broken when it was not.
+    """
+    db = MagicMock()
+    db.get_storage_node_by_id.return_value = node
+    db.atomic_update.side_effect = lambda obj, fn: (fn(obj), obj)[1]
+    return db
+
+
 def _mk_node(status=StorageNode.STATUS_ONLINE, health_check=True,
              nvme_devices=None):
     n = MagicMock(spec=StorageNode)
@@ -111,8 +125,7 @@ class TestShortCircuitSkipsRestartForOnlineNode(unittest.TestCase):
         task = _mk_task()
         node = _mk_node(status=StorageNode.STATUS_ONLINE, health_check=True,
                         nvme_devices=[])
-        with patch.object(mod, "db") as mock_db:
-            mock_db.get_storage_node_by_id.return_value = node
+        with patch.object(mod, "db", _mk_db(node)):
             ret = mod.task_runner_node(task)
         self.assertTrue(ret)
         self.assertEqual(task.status, JobSchedule.STATUS_DONE)
@@ -129,8 +142,7 @@ class TestShortCircuitSkipsRestartForOnlineNode(unittest.TestCase):
         bad_dev.get_id.return_value = "dev-1"
         node = _mk_node(status=StorageNode.STATUS_ONLINE, health_check=True,
                         nvme_devices=[bad_dev])
-        with patch.object(mod, "db") as mock_db:
-            mock_db.get_storage_node_by_id.return_value = node
+        with patch.object(mod, "db", _mk_db(node)):
             ret = mod.task_runner_node(task)
         self.assertTrue(ret)
         self.assertEqual(task.status, JobSchedule.STATUS_DONE)
@@ -145,8 +157,7 @@ class TestShortCircuitSkipsRestartForOnlineNode(unittest.TestCase):
         task = _mk_task()
         node = _mk_node(status=StorageNode.STATUS_ONLINE, health_check=False,
                         nvme_devices=[])
-        with patch.object(mod, "db") as mock_db:
-            mock_db.get_storage_node_by_id.return_value = node
+        with patch.object(mod, "db", _mk_db(node)):
             ret = mod.task_runner_node(task)
         self.assertTrue(ret)
         self.assertEqual(task.status, JobSchedule.STATUS_DONE)
@@ -189,8 +200,7 @@ class TestTerminalStatusesStillDoneImmediately(unittest.TestCase):
         mod = _load_runner_module()
         task = _mk_task()
         node = _mk_node(status=StorageNode.STATUS_REMOVED)
-        with patch.object(mod, "db") as mock_db:
-            mock_db.get_storage_node_by_id.return_value = node
+        with patch.object(mod, "db", _mk_db(node)):
             ret = mod.task_runner_node(task)
         self.assertTrue(ret)
         self.assertEqual(task.status, JobSchedule.STATUS_DONE)

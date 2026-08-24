@@ -1,8 +1,5 @@
-#!/usr/bin/env python
 # encoding: utf-8
 import logging
-
-import cpuinfo
 
 from pydantic import BaseModel, Field
 from flask_openapi3 import APIBlueprint
@@ -10,17 +7,11 @@ from flask_openapi3 import APIBlueprint
 from simplyblock_core import shell_utils, utils as core_utils
 from simplyblock_web import utils, node_utils
 
+from ._node_info import get_static_node_info
+
 logger = logging.getLogger(__name__)
 
 api = APIBlueprint("node_api_basic", __name__, url_prefix="/")
-
-cpu_info = cpuinfo.get_cpu_info()
-hostname, _, _ = shell_utils.run_command("hostname -s")
-system_id = ""
-try:
-    system_id, _, _ = shell_utils.run_command("dmidecode -s system-uuid")
-except Exception:
-    pass
 
 
 @api.get('/scan_devices',
@@ -61,12 +52,13 @@ def scan_devices():
 def get_info():
     """Retrieve information about the node's configuration and hardware
     """
+    node_info = get_static_node_info()
     out = {
-        "hostname": hostname,
-        "system_id": system_id,
+        "hostname": node_info['hostname'],
+        "system_id": node_info['system_id'],
 
-        "cpu_count": cpu_info['count'],
-        "cpu_hz": cpu_info['hz_advertised'][0],
+        "cpu_count": node_info['cpu_info']['count'],
+        "cpu_hz": node_info['cpu_info']['hz_advertised'][0],
 
         "memory": node_utils.get_memory(),
         "hugepages": node_utils.get_huge_memory(),

@@ -1,4 +1,5 @@
 name: End-to-end test docker
+run-name: "E2E Docker | ${{ github.ref_name }} | ${{ inputs.cluster || 'c141' }}${{ inputs.test_case_to_run && format(' | {0}', inputs.test_case_to_run) || '' }}"
 
 on:
   push:
@@ -240,66 +241,279 @@ jobs:
 
       - name: Write Job Summary
         if: always()
+        shell: bash
         run: |
-          {
-            echo "## E2E Docker Run Summary"
-            echo ""
-            if [[ "${{ job.status }}" == "success" ]]; then
-              echo "**Result:** SUCCESS"
-            else
-              echo "**Result:** FAILED"
-            fi
-            echo ""
-            echo "### Test Results"
-            echo "- **Total:** ${TOTAL_TESTS:-?} | **Passed:** ${PASSED_TESTS:-?} | **Failed:** ${FAILED_TESTS:-?} | **Skipped:** ${SKIPPED_TESTS:-0}"
-            echo ""
-            echo "### Run Info"
-            echo "- **Branch:** \`${{ github.ref_name }}\`"
-            echo "- **Duration:** ${TEST_TIME_HOURS:-0}h ${TEST_TIME_MINS:-0}m ${TEST_TIME_SECS:-0}s"
-            echo ""
-            echo "> **Note:** Graylog/OpenSearch logs are currently being collected and will be available in the NFS log directory shortly."
-          } >> "$GITHUB_STEP_SUMMARY"
+          set -euxo pipefail
 
-      - name: Send Slack Notification
-        if: always() && (github.event_name == 'schedule' || env.send_slack_notification == 'true')
+          dur_fmt="${TEST_TIME_HOURS:-0}h ${TEST_TIME_MINS:-0}m ${TEST_TIME_SECS:-0}s"
+
+          # --- Parse test counts ---
+          total_cases="${TOTAL_TESTS:-0}"
+          passed_cases="${PASSED_TESTS:-0}"
+          failed_cases="${FAILED_TESTS:-0}"
+          skipped_cases="${SKIPPED_TESTS:-0}"
+
+          pass_pct=0; fail_pct=0; skip_pct=0
+          if [[ "${total_cases}" =~ ^[0-9]+$ && "${total_cases}" -gt 0 ]]; then
+            pass_pct=$(( (passed_cases  * 100) / total_cases ))
+            fail_pct=$(( (failed_cases  * 100) / total_cases ))
+            skip_pct=$(( (skipped_cases * 100) / total_cases ))
+          fi
+
+          # --- Parse per-test status from log ---
+          test_details_table=""
+          log_file=""
+          for f in $GITHUB_WORKSPACE/e2e/logs/*.log; do
+            [ -s "$f" ] && log_file="$f"
+          done
+          if [[ -n "${log_file}" ]]; then
+            while IFS= read -r line; do
+              clean="$(printf '%s' "${line}" | sed 's/\x1b\[[0-9;]*m//g')"
+              test_name="$(printf '%s' "${clean}" | grep -oE 'Test[A-Za-z0-9_]+' | head -n1 || true)"
+              [[ -z "${test_name}" ]] && continue
+              if   printf '%s' "${clean}" | grep -qi 'PASSED CASE';  then icon="✅"; status="PASSED"
+              elif printf '%s' "${clean}" | grep -qi 'FAILED CASE';  then icon="❌"; status="FAILED"
+              elif printf '%s' "${clean}" | grep -qi 'SKIPPED CASE'; then icon="⏭"; status="SKIPPED"
+              else continue
+              fi
+              test_details_table+="| \`${test_name}\` | ${icon} ${status} |"$'\n'
+            done < <(grep -iE 'PASSED CASE|FAILED CASE|SKIPPED CASE' "${log_file}" 2>/dev/null || true)
+          fi
+
+          # --- Failure reason ---
+          failure_reason=""
+          if [[ -n "${log_file}" ]]; then
+            multi="$(grep 'MultipleExceptions:' "${log_file}" | sed 's/\x1b\[[0-9;]*m//g' || true)"
+            if [[ -n "${multi}" ]]; then
+              failure_reason="${multi}"
+            elif grep -Eqi 'Traceback \(most recent call last\)|Exception:|AssertionError|Input/output error' "${log_file}"; then
+              failure_reason="$(grep -Ei 'Traceback \(most recent call last\)|Exception:|AssertionError|Input/output error' "${log_file}" | tail -n 3 | sed 's/\x1b\[[0-9;]*m//g' || true)"
+            fi
+          fi
+
+          # --- Overall result ---
+          conclusion="✅ SUCCESS"
+          if [[ "${{ job.status }}" != "success" ]]; then
+            conclusion="❌ FAILED"
+          fi
+
+          {
+            echo "## SimplyBlock E2E Docker Run Summary"
+            echo ""
+            echo "**Result:** ${conclusion} &nbsp;|&nbsp; **Duration:** ${dur_fmt}"
+            echo ""
+
+            echo "### Test Results"
+            echo "| | Count | % |"
+            echo "|---|---|---|"
+            echo "| ✅ Passed  | ${passed_cases}  | ${pass_pct}% |"
+            echo "| ❌ Failed  | ${failed_cases}  | ${fail_pct}% |"
+            echo "| ⏭ Skipped | ${skipped_cases} | ${skip_pct}% |"
+            echo "| **Total**  | **${total_cases}** | |"
+            echo ""
+
+            if [[ -n "${test_details_table}" ]]; then
+              echo "### Test Case Details"
+              echo "| Test | Result |"
+              echo "|---|---|"
+              printf '%s' "${test_details_table}"
+              echo ""
+            fi
+
+            echo "### Run Info"
+            echo "- **Test class:** \`${TEST_CASE:-all}\`"
+            echo "- **Branch:** \`${{ github.ref_name }}\`"
+            echo "- **Cluster:** \`${CLUSTER:-?}\`"
+            echo "- **NDCS/NPCS:** \`${NDCS}/${NPCS}\`"
+            echo "- **BS/Chunk BS:** \`${BS}/${CHUNK_BS}\`"
+            echo ""
+
+            if [[ -n "${failure_reason}" ]]; then
+              echo "### Failure Reason"
+              echo '```'
+              printf '%s\n' "${failure_reason}"
+              echo '```'
+              echo ""
+            fi
+
+            echo "> **Note:** Graylog/OpenSearch logs are currently being collected and will be available shortly."
+          } >> "$GITHUB_STEP_SUMMARY"
         env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-          GITHUB_SERVER_URL: ${{ github.server_url }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          RUN_ID: ${{ github.run_id }}
-          PASSED_TESTS: ${{ env.PASSED_TESTS }}
-          FAILED_TESTS: ${{ env.FAILED_TESTS }}
-          TOTAL_TESTS: ${{ env.TOTAL_TESTS }}
-          PASSED_CASES: ${{ env.PASSED_CASES }}
-          FAILED_CASES: ${{ env.FAILED_CASES }}
-          SKIPPED_CASES: ${{ env.SKIPPED_CASES }}
-          PASSED_CASES_BULLETS: ${{ env.PASSED_CASES_BULLETS }}
-          FAILED_CASES_BULLETS: ${{ env.FAILED_CASES_BULLETS }}
-          SKIPPED_CASES_BULLETS: ${{ env.SKIPPED_CASES_BULLETS }}
-          BRANCH_NAME: ${{ github.ref_name }}
-          TEST_TIME_HOURS: ${{ env.TEST_TIME_HOURS }}
-          TEST_TIME_MINS: ${{ env.TEST_TIME_MINS }}
-          TEST_TIME_SECS: ${{ env.TEST_TIME_SECS }}
           NDCS: ${{ github.event.inputs.ndcs || 1 }}
           NPCS: ${{ github.event.inputs.npcs || 1 }}
           BS: ${{ github.event.inputs.bs || 4096 }}
           CHUNK_BS: ${{ github.event.inputs.chunk_bs || 4096 }}
+          TEST_CASE: ${{ inputs.test_case_to_run || '' }}
+          CLUSTER: ${{ inputs.cluster || 'c141' }}
+
+      - name: Send Slack Notification
+        if: always() && (github.event_name == 'schedule' || env.send_slack_notification == 'true')
+        shell: bash
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
+          JOB_STATUS: ${{ job.status }}
+          SLACK_RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          SLACK_WF_NAME: "E2E Docker"
+          TESTNAME: ${{ inputs.test_case_to_run || 'all' }}
+          NDCS: ${{ github.event.inputs.ndcs || 1 }}
+          NPCS: ${{ github.event.inputs.npcs || 1 }}
+          BS: ${{ github.event.inputs.bs || 4096 }}
+          CHUNK_BS: ${{ github.event.inputs.chunk_bs || 4096 }}
+          TEST_START_TIME: ${{ env.TEST_START_TIME }}
+          TEST_END_TIME: ${{ env.TEST_END_TIME }}
         run: |
-          GITHUB_RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}"
-          LOGS_URL="http://192.168.10.164:9001/browser/e2e-run-logs/${RUN_ID}%2F"
-          if [[ ${{ job.status }} == 'success' ]]; then
-            OVERALL_STATUS=":white_check_mark: Overall Status: SUCCESS"
-          else
-            OVERALL_STATUS=":x: Overall Status: FAILURE <!channel>"
-          fi
+          python3 - <<'PYEOF'
+          import json, os, re, sys, urllib.request, urllib.error
 
-          TIME_TAKEN="${TEST_TIME_HOURS}h ${TEST_TIME_MINS}m ${TEST_TIME_SECS}s"
-          COMMIT_SHA=$(git rev-parse --short HEAD)
-          COMMIT_AUTHOR=$(git log -1 --pretty=format:'%an')
+          bot_token = os.environ.get("SLACK_BOT_TOKEN", "")
+          channel   = os.environ.get("SLACK_CHANNEL_ID", "")
+          webhook   = os.environ.get("SLACK_WEBHOOK_URL", "")
+          if not bot_token and not webhook:
+              print("No SLACK_BOT_TOKEN or SLACK_WEBHOOK_URL set, skipping.")
+              sys.exit(0)
 
-          MESSAGE="Python E2E tests run triggered on branch *${BRANCH_NAME}* at ${COMMIT_SHA} by ${COMMIT_AUTHOR}. \nTotal Time Taken to run the tests: ${TIME_TAKEN}. \n\n${OVERALL_STATUS}\nGitHub Run: ${GITHUB_RUN_URL}\nAWS Logs: ${LOGS_URL}\n\n*Configuration*: *NDCS: ${NDCS}, NPCS: ${NPCS}, Block Size: ${BS}, Chunk Block Size: ${CHUNK_BS}*\n\nTotal Tests: *${TOTAL_TESTS}*, Passed Tests: *${PASSED_TESTS}*, Failed Tests: *${FAILED_TESTS}*\n\n:hourglass_flowing_sand: _Logs are being collected and will be available shortly._\n\n-- Test Cases Passed :white_check_mark:\n${PASSED_CASES_BULLETS}\n\n-- Test Cases Failed :x:\n${FAILED_CASES_BULLETS}\n\n-- Test Cases Skipped :x:\n${SKIPPED_CASES_BULLETS}"
+          # Find latest log file
+          import glob
+          log_dir = os.path.join(os.environ.get("GITHUB_WORKSPACE", "."), "e2e", "logs")
+          log_files = sorted(glob.glob(os.path.join(log_dir, "*.log")), key=os.path.getmtime, reverse=True)
+          content = ""
+          for lf in log_files:
+              if os.path.getsize(lf) > 0:
+                  content = open(lf).read()
+                  break
 
-          curl -X POST -H 'Content-type: application/json' --data "{\"text\":\"${MESSAGE}\"}" $SLACK_WEBHOOK_URL
+          # --- Counts (e2e.py format) ---
+          def px(pat):
+              m = re.search(pat, content)
+              return int(m.group(1)) if m else 0
+          total   = px(r'Number of Total Cases:\s*(\d+)')
+          passed  = px(r'Number of Passed Cases:\s*(\d+)')
+          failed  = px(r'Number of Failed Cases:\s*(\d+)')
+          skipped = px(r'Number of Skipped Cases:\s*(\d+)')
+          pass_pct = (passed * 100 // total) if total > 0 else 0
+
+          # --- Per-test results ---
+          ansi = re.compile(r'\x1b\[[0-9;]*m')
+          test_results = []
+          for line in content.splitlines():
+              clean = ansi.sub('', line)
+              if not re.search(r'(PASSED|FAILED|SKIPPED) CASE', clean):
+                  continue
+              m = re.search(r'Test[A-Za-z0-9_]+', clean)
+              if not m:
+                  continue
+              name = m.group(0)
+              if   'PASSED CASE'  in clean: test_results.append(('PASSED',  name))
+              elif 'FAILED CASE'  in clean: test_results.append(('FAILED',  name))
+              elif 'SKIPPED CASE' in clean: test_results.append(('SKIPPED', name))
+
+          # --- Failure reason ---
+          failure_reason = ""
+          multi = [ansi.sub('', l) for l in content.splitlines() if 'MultipleExceptions:' in l]
+          if multi:
+              failure_reason = multi[0][:2000]
+          elif content:
+              exc_lines = [ansi.sub('', l) for l in content.splitlines()
+                           if re.search(r'(Exception:|AssertionError|Input/output error)', l)]
+              if exc_lines:
+                  failure_reason = '\n'.join(exc_lines[-5:])[:2000]
+
+          # --- Env ---
+          s    = int(os.environ.get("TEST_START_TIME", "0") or "0")
+          e    = int(os.environ.get("TEST_END_TIME",   "0") or "0")
+          secs = max(0, e - s) if e >= s > 0 else 0
+          dur  = f"{secs//3600}h {(secs%3600)//60}m {secs%60}s"
+          run_url  = os.environ.get("SLACK_RUN_URL",   "")
+          ndcs     = os.environ.get("NDCS",            "?")
+          npcs     = os.environ.get("NPCS",            "?")
+          bs       = os.environ.get("BS",              "?")
+          chunk_bs = os.environ.get("CHUNK_BS",        "?")
+          test_cls = os.environ.get("TESTNAME",        "") or "all"
+          branch   = os.environ.get("GITHUB_REF_NAME", "?")
+          wf_name  = os.environ.get("SLACK_WF_NAME",   "Run")
+          ok       = os.environ.get("JOB_STATUS",      "") == "success"
+
+          icon    = ":white_check_mark:" if ok else ":x:"
+          status  = "SUCCESS" if ok else "FAILURE"
+          mention = "" if ok else " <!channel>"
+
+          lines = [
+              f"{icon} *SimplyBlock {wf_name}*{mention}",
+              f"*Status:* {status}  |  *Duration:* {dur}",
+              f"*Branch:* `{branch}`  |  *Test class:* `{test_cls}`",
+              f"*Config:* NDCS={ndcs} NPCS={npcs} BS={bs} ChunkBS={chunk_bs}",
+              "",
+          ]
+
+          if total > 0:
+              lines += [
+                  f":white_check_mark: *Passed:*  {passed}/{total}  ({pass_pct}%)",
+                  f":x: *Failed:*  {failed}",
+                  f":fast_forward: *Skipped:*  {skipped}",
+              ]
+          else:
+              lines.append("_(test counts not found in log)_")
+
+          if test_results:
+              lines.append("")
+              lines.append("*Test Results:*")
+              icons = {'PASSED': ':white_check_mark:', 'FAILED': ':x:', 'SKIPPED': ':fast_forward:'}
+              for st, nm in test_results:
+                  lines.append(f"{icons.get(st, ':grey_question:')} `{nm}`")
+
+          if failure_reason:
+              lines += ["", "*Failure:*", f"```{failure_reason}```"]
+
+          lines += [
+              "",
+              f":link: *Run:* <{run_url}|View on GitHub>",
+              f":hourglass_flowing_sand: _Logs are being collected and will be available shortly._",
+          ]
+
+          # --- Send ---
+          gh_env = os.environ.get("GITHUB_ENV", "")
+          text   = "\n".join(lines)
+
+          if bot_token and channel:
+              api_payload = json.dumps({"channel": channel, "text": text}).encode()
+              req = urllib.request.Request(
+                  "https://slack.com/api/chat.postMessage",
+                  data=api_payload,
+                  headers={
+                      "Content-Type": "application/json; charset=utf-8",
+                      "Authorization": f"Bearer {bot_token}",
+                  },
+              )
+              try:
+                  resp = urllib.request.urlopen(req, timeout=15)
+                  body = json.loads(resp.read().decode())
+                  if body.get("ok"):
+                      ts = body.get("ts", "")
+                      print(f"Slack notification sent via Bot API (ts={ts}).")
+                      if gh_env and ts:
+                          with open(gh_env, "a") as f:
+                              f.write(f"SLACK_MSG_TS={ts}\n")
+                  else:
+                      print(f"WARN: Slack API error: {body.get('error')}", file=sys.stderr)
+              except Exception as exc:
+                  print(f"WARN: Slack Bot API failed: {exc}", file=sys.stderr)
+          elif webhook:
+              req = urllib.request.Request(
+                  webhook,
+                  data=json.dumps({"text": text}).encode(),
+                  headers={"Content-Type": "application/json"},
+              )
+              try:
+                  urllib.request.urlopen(req, timeout=15)
+                  print("Slack notification sent via webhook (no thread support).")
+              except Exception as exc:
+                  print(f"WARN: Slack webhook failed: {exc}", file=sys.stderr)
+          else:
+              print("No SLACK_BOT_TOKEN or SLACK_WEBHOOK_URL set, skipping.")
+          PYEOF
 
 
       - name: Collect Graylog/OpenSearch logs
@@ -439,6 +653,28 @@ jobs:
             ssh "${SSH_OPTS[@]}" "root@${MGMT_IP}" "rm -rf '${REMOTE_OUTPUT_DIR}'" 2>/dev/null || true
           done
           echo "=== Log collection complete (${CHUNK} chunks, newest-first): ${OUTPUT_DIR} ==="
+
+      - name: Notify Slack log collection complete
+        if: always() && (github.event_name == 'schedule' || env.send_slack_notification == 'true')
+        shell: bash
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
+          SLACK_MSG_TS: ${{ env.SLACK_MSG_TS }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+        run: |
+          MSG=":white_check_mark: *Log collection complete* for *SimplyBlock E2E Docker*\n:link: <${SLACK_RUN_URL}|View Run>"
+          if [ -n "${SLACK_BOT_TOKEN:-}" ] && [ -n "${SLACK_CHANNEL_ID:-}" ] && [ -n "${SLACK_MSG_TS:-}" ]; then
+            curl -s -X POST "https://slack.com/api/chat.postMessage" \
+              -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" \
+              -H "Content-Type: application/json; charset=utf-8" \
+              -d "{\"channel\":\"${SLACK_CHANNEL_ID}\",\"thread_ts\":\"${SLACK_MSG_TS}\",\"text\":\"${MSG}\"}" || true
+          elif [ -n "${SLACK_WEBHOOK_URL:-}" ]; then
+            curl -s -X POST "${SLACK_WEBHOOK_URL}" \
+              -H "Content-Type: application/json" \
+              -d "{\"text\":\"${MSG}\"}" || true
+          fi
 
       - name: Upload automation and docker logs to miniio
         run: |

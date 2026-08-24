@@ -10,7 +10,7 @@ import uuid
 from pydantic import SecretStr
 
 from simplyblock_core import utils
-from simplyblock_core.controllers import pool_events, lvol_controller
+from simplyblock_core.controllers import ops_gate, pool_events, lvol_controller
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.kms import KMSException, create_kms_connection, pool_kek_name
 from simplyblock_core.models.pool import Pool
@@ -27,6 +27,7 @@ def _generate_string(length):
 def add_pool(name, pool_max, lvol_max, max_rw_iops, max_rw_mbytes, max_r_mbytes, max_w_mbytes, cluster_id,
                  cr_name=None, cr_namespace=None, cr_plural=None, qos_host=None, sec_options=None, dhchap=False):
     db_controller = DBController()
+    ops_gate.assert_object_ops_allowed("pool create", cluster_id=cluster_id)
     if not name:
         logger.error("Pool name is empty!")
         return False
@@ -212,6 +213,8 @@ def set_pool(uuid, pool_max=0, lvol_max=0, max_rw_iops=0,
     db_controller = DBController()
     try:
         pool = db_controller.get_pool_by_id(uuid)
+        ops_gate.assert_object_ops_allowed("pool parameter change",
+                                           cluster_id=pool.cluster_id)
     except KeyError:
         msg = f"Pool not found: {uuid}"
         logger.error(msg)
@@ -334,15 +337,12 @@ def set_pool(uuid, pool_max=0, lvol_max=0, max_rw_iops=0,
 def delete_pool(uuid):
     db_controller = DBController()
     try:
-        pool = (
-                db_controller.get_pool_by_id(uuid)
-                if utils.UUID_PATTERN.match(uuid) is not None
-                else db_controller.get_pool_by_name(uuid)
-        )
-        pool = db_controller.get_pool_by_id(uuid)
+        pool = db_controller.get_pool_by_id_or_name(uuid)
     except KeyError as e:
         logger.error(e)
         return False
+
+    ops_gate.assert_object_ops_allowed("pool delete", cluster_id=pool.cluster_id)
 
     if pool.status == Pool.STATUS_INACTIVE:
         logger.error("Pool is disabled")

@@ -470,51 +470,37 @@ def calculate_core_allocations(vcpu_list, alceml_count=2):
         return vcpus[:count]
 
     assigned = {}
-    # Compression-thread CPU layout (gated per-branch, off on main):
-    #  - <32 vCPU: the lvs thread (lvol_poller) co-locates with the app thread to
-    #    free a core, and the compression thread co-locates with jc-singleton.
-    #  - >=32 vCPU: the lvs thread keeps its own core and the compression thread
-    #    gets a dedicated core.
-    # When the gate is off the original layout is reproduced exactly.
-    comp_enabled = constants.JM_COMPRESSION_THREAD_ENABLED
-    colocate_lvs = comp_enabled and len(vcpu_list) < 32
-    dedicate_comp = comp_enabled and len(vcpu_list) >= 32
+    # lvol_poller co-locates with jc_singleton's core below 32 vCPU to save a
+    # core; at/above 32 vCPU it gets its own dedicated core.
+    colocate_lvs = len(vcpu_list) < 32
     if (len(vcpu_list) < 12):
         vcpu = reserve_n(4 if colocate_lvs else 5)
         assigned["app_thread_core"] = vcpu[0:1]
         assigned["jm_cpu_core"] = vcpu[1:2]
         assigned["jc_singleton_core"] = vcpu[2:3]
         assigned["alceml_cpu_cores"] = vcpu[3:4]
-        assigned["lvol_poller_core"] = vcpu[0:1] if colocate_lvs else vcpu[4:5]
+        assigned["lvol_poller_core"] = vcpu[2:3] if colocate_lvs else vcpu[4:5]
     elif (len(vcpu_list) < 22):
         vcpu = reserve_n(5 if colocate_lvs else 6)
         assigned["app_thread_core"] = vcpu[0:1]
         assigned["jm_cpu_core"] = vcpu[1:2]
         assigned["jc_singleton_core"] = vcpu[2:3]
         assigned["alceml_cpu_cores"] = vcpu[3:5]
-        assigned["lvol_poller_core"] = vcpu[0:1] if colocate_lvs else vcpu[5:6]
+        assigned["lvol_poller_core"] = vcpu[2:3] if colocate_lvs else vcpu[5:6]
     else:
-        # base threads: app, jm, jc (+ own lvol_poller unless co-located) (+ dedicated compression)
+        # base threads: app, jm, jc (+ own lvol_poller unless co-located)
         base = 3 if colocate_lvs else 4
-        if dedicate_comp:
-            base += 1
         vcpus = reserve_n(base + alceml_count)
         assigned["app_thread_core"] = vcpus[0:1]
         assigned["jm_cpu_core"] = vcpus[1:2]
         assigned["jc_singleton_core"] = vcpus[2:3]
         idx = 3
         if colocate_lvs:
-            assigned["lvol_poller_core"] = vcpus[0:1]
+            assigned["lvol_poller_core"] = vcpus[2:3]
         else:
             assigned["lvol_poller_core"] = vcpus[idx:idx + 1]
             idx += 1
-        if dedicate_comp:
-            assigned["compression_core"] = vcpus[idx:idx + 1]
-            idx += 1
         assigned["alceml_cpu_cores"] = vcpus[idx:idx + alceml_count]
-    # Compression thread co-locates with jc-singleton unless it got a dedicated core.
-    if comp_enabled and "compression_core" not in assigned:
-        assigned["compression_core"] = assigned.get("jc_singleton_core", [])
     dp = int(len(remaining) / 2)
     if 17 > dp >= 12:
         poller_n = len(remaining) - 12
@@ -548,6 +534,9 @@ def calculate_core_allocations(vcpu_list, alceml_count=2):
         assigned.get("distrib_cpu_cores", []),
         assigned.get("jc_singleton_core", []),
         assigned.get("lvol_poller_core", []),
+        # Reserved: always empty now that the compression-thread feature this
+        # slot backed is gone. Kept for shape/backport compatibility with
+        # positional consumers (e.g. distribution[8] callers) elsewhere.
         assigned.get("compression_core", []),
     )
 
@@ -688,7 +677,21 @@ def make_async_handler(target_handler):
     log_queue: "_queue.Queue" = _queue.Queue(-1)  # unbounded; enqueue never blocks a worker
     listener = _lh.QueueListener(log_queue, target_handler, respect_handler_level=False)
     listener.start()
-    atexit.register(listener.stop)
+
+    def _stop_if_running() -> None:
+        # TODO(drop-py3.9): delete this wrapper and register listener.stop
+        # directly once Python 3.9 support is dropped. On 3.9,
+        # QueueListener.stop() is not idempotent (`self._thread.join();
+        # self._thread = None` with no guard), so a second call raises
+        # AttributeError. Callers that need the listener drained
+        # deterministically (e.g. tests) may already have called `stop()`
+        # themselves before interpreter exit; only stop here if that hasn't
+        # happened yet. Fixed upstream in https://github.com/python/cpython/issues/114706
+        # (backported to 3.10+), where stop() guards on `if self._thread`.
+        if listener._thread is not None:
+            listener.stop()
+
+    atexit.register(_stop_if_running)
     qh = _lh.QueueHandler(log_queue)
     qh._listener = listener  # type: ignore[attr-defined]  # strong ref, not GC'd
     return qh
@@ -1591,12 +1594,40 @@ def get_total_capacity_of_nvme_devices(pci_lst):
     return int(total_capacity)
 
 
-def calculate_unisolated_cores(cores, cores_percentage=0):
-    # calculate the number if unused system cores (UnIsolated cores)
+def vcpu_requirement_met(total_cores, vcpu_count):
+    """Whether a node with ``total_cores`` can serve a cluster asking for
+    ``vcpu_count`` SPDK cores.
+
+    The node must have at least one core beyond the SPDK budget, so the system
+    is not left competing for the last one. A node that cannot meet this is
+    refused by add_node / restart_storage_node rather than silently running
+    SPDK on fewer cores than the cluster asked for. 0 means "no cluster
+    requirement", which every node meets.
+    """
+    if not vcpu_count:
+        return True
+    return int(total_cores or 0) >= int(vcpu_count) + 1
+
+
+def calculate_unisolated_cores(cores, vcpu_count=0):
+    """How many of ``cores`` stay with the system rather than going to SPDK.
+
+    ``vcpu_count`` is an ABSOLUTE number of SPDK cores, replacing the old
+    cores-percentage. A percentage silently meant different things on different
+    hardware -- 40% of 8 cores and 40% of 96 are not comparable budgets -- while
+    a count is what an operator can actually reason about and what the cluster
+    now stores.
+
+    One core is always kept for the system, so a caller asking for every core
+    gets total-1. Callers that must not silently under-provision check the node
+    against the cluster's count first (add_node / restart_storage_node refuse a
+    node with fewer than count+1 cores); this function only lays out what is
+    physically there.
+    """
     total = len(cores)
-    if cores_percentage:
-        n = math.ceil(total * (100 - cores_percentage) / 100)
-        return n
+    if vcpu_count:
+        spdk_cores = min(vcpu_count, max(1, total - 1))
+        return max(1, total - spdk_cores)
     if total <= 10:
         return 2
     if total <= 20:
@@ -1727,14 +1758,28 @@ def build_unisolated_stride(
 
     return out[:num_unisolated]
 
-def generate_core_allocation(cores_by_numa, sockets_to_use, nodes_per_socket, cores_percentage=0):
+def generate_core_allocation(cores_by_numa, sockets_to_use, nodes_per_socket, vcpu_count=0):
+    """Lay out isolated (SPDK) and unisolated (system) cores per NUMA node.
+
+    ``vcpu_count`` is the absolute SPDK core budget for the whole host. It is
+    split as evenly as possible across the sockets actually in use, so the
+    number an operator sets on the cluster is the number of cores SPDK gets on
+    the node, not per socket.
+    """
     node_distribution: dict = {}
+    usable_sockets = [s for s in sockets_to_use if s in cores_by_numa]
+    per_socket_budget: dict = {}
+    if vcpu_count and usable_sockets:
+        base, remainder = divmod(vcpu_count, len(usable_sockets))
+        for index, socket in enumerate(usable_sockets):
+            per_socket_budget[socket] = base + (1 if index < remainder else 0)
     # Iterate over each NUMA node
     for numa_node in sockets_to_use:
         if numa_node not in cores_by_numa:
             continue
         all_cores = sorted(cores_by_numa[numa_node])
-        num_unisolated = calculate_unisolated_cores(all_cores, cores_percentage)
+        num_unisolated = calculate_unisolated_cores(
+            all_cores, per_socket_budget.get(numa_node, 0))
         unisolated = build_unisolated_stride(all_cores, num_unisolated, constants.CLIENT_QPAIR_COUNT)
 
         available_cores = [c for c in all_cores if c not in unisolated]
@@ -1871,15 +1916,23 @@ def regenerate_config(new_config, old_config, force=False):
         node_cores_set = set(node["isolated"])
         all_isolated_cores.update(node_cores_set)
     if total_free_memory < total_required_memory:
-        logger.error(f"The Free memory {total_free_memory} is less than required memory {total_required_memory}")
-        return False
+        # Same call as generate_configs' own check (this is generate_configs'
+        # own tail call, when invoked from sn configure -- before the node
+        # belongs to any cluster, so max_lvol/cpu_count here are still the
+        # worst case, not what the cluster will actually ask for). Warn
+        # rather than refuse for the same reason: add_node recalculates this
+        # against the real numbers and is where a genuine shortfall belongs.
+        logger.warning(
+            f"Free memory {total_free_memory} is less than the worst-case required "
+            f"memory {total_required_memory}; this is provisional and will be "
+            f"recalculated against the cluster's real settings when the node is added")
     old_config["isolated_cores"] = list(all_isolated_cores)
     old_config["host_cpu_mask"] = generate_mask(all_isolated_cores)
     return old_config
 
 
 def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_allowed, pci_blocked,
-                     cores_percentage=0, force=False, device_model="", size_range="", nvme_names=None):
+                     vcpu_count=0, force=False, device_model="", size_range="", nvme_names=None):
     system_info = {}
     nodes_config: dict = {"nodes": []}
 
@@ -1953,7 +2006,7 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
     for i, nvme_name in enumerate(nvme_numa_neg1):
         all_nvmes_neg1_per_node[i % total_nodes].append(nvme_name)
 
-    node_cores = generate_core_allocation(cores_by_numa, sockets_to_use, nodes_per_socket, cores_percentage)
+    node_cores = generate_core_allocation(cores_by_numa, sockets_to_use, nodes_per_socket, vcpu_count)
 
     all_nodes = []
     node_index = 0
@@ -2031,8 +2084,18 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
         node_cores_set = set(node["isolated"])
         all_isolated_cores.update(node_cores_set)
     if total_free_memory < total_required_memory:
-        logger.error(f"The Free memory {total_free_memory} is less than required memory {total_required_memory}")
-        return False, False
+        # This runs before the node belongs to any cluster, so huge_page_memory
+        # above was sized for the worst case -- max_lvol=MAX_SUBSYSTEMS_PER_NODE
+        # and the default core-count heuristic, not whatever this cluster will
+        # actually ask for. Failing sn configure on that worst-case number would
+        # reject hosts that are perfectly fine for the cluster's real
+        # max_subsys/vcpu-count. add_node recomputes this against the real
+        # numbers and is where a genuine shortfall belongs; warn here instead.
+        logger.warning(
+            f"Free memory {total_free_memory} is less than the worst-case required "
+            f"memory {total_required_memory} (sized for the product's max subsystem "
+            f"count); this is provisional and will be recalculated against the "
+            f"cluster's real settings when the node is added")
     nodes_config["nodes"] = all_nodes
     nodes_config["isolated_cores"] = list(all_isolated_cores)
     nodes_config["host_cpu_mask"] = generate_mask(all_isolated_cores)
@@ -3064,6 +3127,11 @@ def patch_prometheus_configmap(username: str, password: str):
         try:
             prometheus_yml = re.sub(r"username:.*", f"username: '{username}'", prometheus_yml)
             prometheus_yml = re.sub(r"password:.*", f"password: '{password}'", prometheus_yml)
+            # The v2 exporter authenticates with a bearer token rather than
+            # basic auth, so the secret also has to reach `authorization:
+            # credentials:`. A no-op until the chart's ConfigMap declares the
+            # v2 job — without it that job would scrape with an empty token.
+            prometheus_yml = re.sub(r"credentials:.*", f"credentials: '{password}'", prometheus_yml)
         except re.error as e:
             logger.error(f"Regex error while patching Prometheus YAML: {e}")
             return False
@@ -3630,10 +3698,10 @@ def configure_kms_on_k8s(cluster):
         logger.error(f"Error configuring KMS on Kubernetes: {e}")
 
 
-def calculate_hp_only(max_lvol, number_of_devices, sockets_to_use, nodes_per_socket, cores_percentage):
+def calculate_hp_only(max_lvol, number_of_devices, sockets_to_use, nodes_per_socket, vcpu_count=0):
     minimum_hp_memory = 0
     cores_by_numa = get_numa_cores()
-    node_cores = generate_core_allocation(cores_by_numa, sockets_to_use, nodes_per_socket, cores_percentage)
+    node_cores = generate_core_allocation(cores_by_numa, sockets_to_use, nodes_per_socket, vcpu_count)
     node_index = 0
     number_of_alcemls = number_of_devices//(nodes_per_socket * len(sockets_to_use))
     if number_of_alcemls < 2:

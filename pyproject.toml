@@ -5,6 +5,104 @@ build-backend = 'setuptools.build_meta'
 [tool.ruff]
 extend-exclude = ['simplyblock_cli/cli.py']
 
+[tool.ruff.lint]
+extend-select = ["TID251"]
+ignore = [
+    "B006",
+    "B008",
+    "B009",
+    "B012",
+    "B017",
+    "B018",
+    "B023",
+    "BLE001",
+    "C401",
+    "C408",
+    "C414",
+    "DTZ005",
+    "DTZ006",
+    "DTZ007",
+    "FA100",
+    "FLY002",
+    "FURB122",
+    "FURB129",
+    "FURB167",
+    "FURB188",
+    "FURB192",
+    "G010",
+    "G201",
+    "I001",
+    "ISC004",
+    "LOG015",
+    "PERF101",
+    "PERF102",
+    "PERF402",
+    "PIE790",
+    "PIE807",
+    "PIE808",
+    "PIE810",
+    "PLC0206",
+    "PLR0402",
+    "PLR1704",
+    "PLR1722",
+    "PLR1730",
+    "PLW0602",
+    "PLW1508",
+    "PLW1510",
+    "RET501",
+    "RUF007",  # Remove when dropping Python 3.9 
+    "RUF010",
+    "RUF012",
+    "RUF013",
+    "RUF015",
+    "RUF019",
+    "RUF022",
+    "RUF023",
+    "RUF046",
+    "RUF059",
+    "RUF100",
+    "S110",
+    "S112",
+    "SIM101",
+    "SIM102",
+    "SIM103",
+    "SIM113",
+    "SIM114",
+    "SIM115",
+    "SIM117",
+    "SIM118",
+    "SIM210",
+    "TRY002",
+    "TRY004",
+    "TRY201",
+    "TRY203",
+    "TRY401",
+    "UP004",
+    "UP006",
+    "UP007",
+    "UP008",
+    "UP009",
+    "UP018",
+    "UP022",
+    "UP024",
+    "UP031",
+    "UP032",
+    "UP034",
+    "UP035",
+    "UP036",
+    "UP037",
+    "UP041",
+    "UP045",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# TID251 is flake8-tidy-imports.banned-api, configured below. Test code only —
+# production code may seed the global RNG.
+"!tests/**" = ["TID251"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"random.seed".msg = "Seeding the global RNG breaks seed replay for every later test — pytest-randomly seeds it per test. See tests/AGENTS.md § Randomness and seeds."
+
 [tool.mypy]
 check_untyped_defs = true
 follow_untyped_imports = true
@@ -14,14 +112,25 @@ enable_error_code = ["deprecated"]
 pythonpath = "."
 testpaths = ['simplyblock_core/test', 'tests']
 norecursedirs = ['tests/perf']
+# Order randomization stays off for now: tests/conftest.py documents inter-test
+# coupling (TTL caches, the DBController singleton, the port-block gate) that
+# shuffling would surface all at once. Enabling it is its own change.
+addopts = "-p randomly --randomly-dont-reorganize"
 markers = [
     "slow: long-running integration tests (e.g. live migration); excluded from the default integration run, opt in with -m slow",
 ]
-# Safety net against hung tests: a genuinely stuck test fails with a stack dump
-# instead of hanging until an external SIGKILL (which silently masks every other
-# failure in the run). 900s is ~3x the slowest legitimate test (the scalability
-# throughput migration, ~280s) so it never trips on normal — even unlucky — runs.
+# Per-test time BUDGET, not a safety net. The previous 900s ceiling was larger
+# than every stall it was meant to catch — a 300s hot-spin in cluster activation
+# and a 15s one in the restart-abort path both sailed under it, and the tier took
+# ~45min without a single timeout firing. A tight default makes a stall fail
+# where it happens, with a stack dump naming the line.
+#
+# A test that legitimately needs longer overrides it with @pytest.mark.timeout(N)
+# and a comment saying why; the migration tier sets its own default in
+# tests/integration/migration/conftest.py. See tests/AGENTS.md § Test timeouts.
+#
 # "signal" (SIGALRM, main thread) fails just the offending test and lets the rest
 # of the session continue; "thread" would hard-exit the whole process.
-timeout = 900
+# timeout_func_only stays at its default (false) so a stall in a fixture counts too.
+timeout = 30
 timeout_method = "signal"

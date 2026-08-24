@@ -258,7 +258,7 @@ class _BasePortAllowTest(unittest.TestCase):
                 return_value=None,
             ),
             patch(
-                "simplyblock_core.port_block.set_port",
+                "simplyblock_core.utils.port_block.set_port",
                 side_effect=_set_port_side_effect,
             ),
             patch(
@@ -1373,17 +1373,23 @@ class TestOwnSecTertHublvolReconnect(_SecRoleReconnectBase):
 
     def test_inbound_secondary_hublvol_recreated_when_missing(self):
         self.node_rpc.subsystem_list.return_value = []
+        # The exposure check probes subsystem_get, not subsystem_list;
+        # unstubbed it returns a truthy MagicMock and the hublvol looks
+        # already exposed.
+        self.node_rpc.subsystem_get.return_value = None
         self._run_with_verify(lambda *a: True)
         self.node.create_secondary_hublvol.assert_called_once()
         self.assertIs(self.node.create_secondary_hublvol.call_args.args[0], self.prim)
 
     def test_inbound_exposure_skipped_when_present(self):
         self.node_rpc.subsystem_list.return_value = [{"nqn": "nqn-p-hub"}]
+        self.node_rpc.subsystem_get.return_value = {"nqn": "nqn-p-hub"}
         self._run_with_verify(lambda *a: True)
         self.node.create_secondary_hublvol.assert_not_called()
 
     def test_tertiary_failover_path_topped_up(self):
         self.node_rpc.subsystem_list.return_value = [{"nqn": "nqn-p-hub"}]
+        self.node_rpc.subsystem_get.return_value = {"nqn": "nqn-p-hub"}
         self._run_with_verify(lambda *a: True)
         self.tert.add_hublvol_failover_path.assert_called_once()
         args = self.tert.add_hublvol_failover_path.call_args.args
@@ -1397,6 +1403,7 @@ class TestOwnSecTertHublvolReconnect(_SecRoleReconnectBase):
         # leadership sits on the tertiary. The task suspends and the port stays
         # closed (ce892407: split inbound/outbound hublvols, inbound is gating).
         self.node_rpc.subsystem_list.return_value = [{"nqn": "nqn-p-hub"}]
+        self.node_rpc.subsystem_get.return_value = {"nqn": "nqn-p-hub"}
         self.tert.add_hublvol_failover_path = MagicMock(return_value=False)
         self._run_with_verify(lambda *a: True)
         node_allows = [
@@ -1423,6 +1430,7 @@ class TestOwnSecTertHublvolReconnect(_SecRoleReconnectBase):
     def test_offline_primary_outbound_skipped(self):
         self.prim.status = StorageNode.STATUS_OFFLINE
         self.node_rpc.subsystem_list.return_value = [{"nqn": "nqn-p-hub"}]
+        self.node_rpc.subsystem_get.return_value = {"nqn": "nqn-p-hub"}
         verify_mock = self._run_with_verify(lambda *a: True)
         own_calls = [
             c for c in verify_mock.call_args_list
@@ -1438,6 +1446,7 @@ class TestOwnSecTertHublvolReconnect(_SecRoleReconnectBase):
         # ONLINE, leading primary. Its recovery is hublvol wiring only —
         # no leadership mutation anywhere, no ANA call, one final unblock.
         self.node_rpc.subsystem_list.return_value = [{"nqn": "nqn-p-hub"}]
+        self.node_rpc.subsystem_get.return_value = {"nqn": "nqn-p-hub"}
         with patch(
             "simplyblock_core.services.tasks_runner_port_allow."
             "storage_node_ops._set_lvol_ana_on_node",
@@ -1462,6 +1471,7 @@ class TestOwnSecTertHublvolReconnect(_SecRoleReconnectBase):
         self.db_mock.get_lvols_by_node_id.side_effect = (
             lambda nid: [_make_lvol("lv-on")] if nid == self.prim.uuid else [])
         self.node_rpc.subsystem_list.return_value = [{"nqn": "nqn-p-hub"}]
+        self.node_rpc.subsystem_get.return_value = {"nqn": "nqn-p-hub"}
         with patch(
             "simplyblock_core.services.tasks_runner_port_allow."
             "storage_node_ops._set_lvol_ana_on_node",
@@ -1485,6 +1495,7 @@ class TestStaleLeaderConvergence(_SecRoleReconnectBase):
     def setUp(self):
         super().setUp()
         self.node_rpc.subsystem_list.return_value = [{"nqn": "nqn-p-hub"}]
+        self.node_rpc.subsystem_get.return_value = {"nqn": "nqn-p-hub"}
         self.lvs_leadership_on_node["LVS_P"] = True  # the stale claim
 
         # The demote flips the node's claim, mirroring the data plane;
@@ -1558,6 +1569,7 @@ class TestNoFollowerPortFencing(_SecRoleReconnectBase):
         self.node.status = StorageNode.STATUS_DOWN
         self.prim.get_lvol_subsys_port = MagicMock(return_value=4444)
         self.node_rpc.subsystem_list.return_value = [{"nqn": "nqn-p-hub"}]
+        self.node_rpc.subsystem_get.return_value = {"nqn": "nqn-p-hub"}
 
     def _blocks(self):
         return [c for c in self.calls
@@ -1606,6 +1618,7 @@ class TestOfflinePrimaryTertiaryGate(_SecRoleReconnectBase):
         super().setUp()
         self.prim.status = StorageNode.STATUS_OFFLINE
         self.node_rpc.subsystem_list.return_value = [{"nqn": "nqn-p-hub"}]
+        self.node_rpc.subsystem_get.return_value = {"nqn": "nqn-p-hub"}
 
         def _tert_path(primary, failover):
             self.calls.append(("tert_path", primary.uuid, failover.uuid))

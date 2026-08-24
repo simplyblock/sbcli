@@ -29,6 +29,9 @@ class TestAPIParityAudit(TestClusterBase):
         self.test_name = "api_parity_audit"
         self.logger = setup_logger(__name__)
         self.findings = []
+        # Pool created for the duration of the audit
+        self._audit_pool_name = "parity_audit_pool"
+        self._audit_pool_id = None
 
     def setup(self):
         super().setup()
@@ -42,6 +45,19 @@ class TestAPIParityAudit(TestClusterBase):
 
     def run(self):
         self.logger.info("=== API Parity Audit: CLI / v1 / v2 ===")
+
+        # Phase 0: ensure a pool exists for the entire audit
+        try:
+            self._ensure_audit_pool()
+        except Exception:
+            self.logger.error(
+                f"[pool.setup] failed to create audit pool: "
+                f"{traceback.format_exc()}"
+            )
+            self._finding(
+                "error", "audit_crash", "pool.setup",
+                detail=traceback.format_exc(limit=3),
+            )
 
         # Phase 1: read-only audits (safe)
         audits_readonly = [
@@ -85,6 +101,9 @@ class TestAPIParityAudit(TestClusterBase):
                 self._finding("error", "audit_crash", name,
                               detail=traceback.format_exc(limit=3))
 
+        # Cleanup the audit pool
+        self._cleanup_audit_pool()
+
         # Generate report
         report_dir = self.docker_logs_path or os.path.join("logs")
         os.makedirs(report_dir, exist_ok=True)
@@ -94,11 +113,116 @@ class TestAPIParityAudit(TestClusterBase):
             extra_meta={"branch": os.environ.get("GITHUB_REF_NAME", "local")},
         )
         self.logger.info(f"HTML report written to {html_path}")
+
+        # ── Print detailed summary to log ──────────────────────────────
+        errors = [f for f in self.findings if f["severity"] == "error"]
+        warnings = [f for f in self.findings if f["severity"] == "warning"]
+        infos = [f for f in self.findings if f["severity"] == "info"]
+
+        self.logger.info("=" * 70)
+        self.logger.info("API PARITY AUDIT SUMMARY")
+        self.logger.info("=" * 70)
         self.logger.info(
-            f"Audit complete: {len(self.findings)} findings "
-            f"({sum(1 for f in self.findings if f['severity']=='error')} errors, "
-            f"{sum(1 for f in self.findings if f['severity']=='warning')} warnings)"
+            f"Total findings: {len(self.findings)}  |  "
+            f"Errors: {len(errors)}  |  "
+            f"Warnings: {len(warnings)}  |  "
+            f"Info: {len(infos)}"
         )
+
+        # Group findings by category for readable output
+        by_category = {}
+        for f in self.findings:
+            by_category.setdefault(f["category"], []).append(f)
+
+        for cat, items in sorted(by_category.items()):
+            self.logger.info(f"\n--- {cat.upper()} ({len(items)} findings) ---")
+            for f in items:
+                op = f.get("operation", "?")
+                sev = f["severity"].upper()
+                if cat == "missing_field":
+                    field = f.get("field", "?")
+                    cli = "Y" if f.get("cli") else "N"
+                    v1 = "Y" if f.get("v1") else "N"
+                    v2 = "Y" if f.get("v2") else "N"
+                    self.logger.info(
+                        f"  [{sev}] {op} field={field}  "
+                        f"CLI={cli}  v1={v1}  v2={v2}"
+                    )
+                elif cat == "value_mismatch":
+                    field = f.get("field", "?")
+                    self.logger.info(
+                        f"  [{sev}] {op} field={field}  "
+                        f"CLI={f.get('cli')}  v1={f.get('v1')}  v2={f.get('v2')}"
+                    )
+                elif cat == "count_mismatch":
+                    self.logger.info(
+                        f"  [{sev}] {op}  "
+                        f"CLI={f.get('cli')}  v1={f.get('v1')}  v2={f.get('v2')}"
+                    )
+                elif cat == "interface_error":
+                    self.logger.info(
+                        f"  [{sev}] {op} iface={f.get('interface')}  "
+                        f"detail={f.get('detail', '')}  "
+                        f"api_call={f.get('api_call', '')}  "
+                        f"http_status={f.get('http_status', '')}  "
+                        f"response={f.get('response_preview', '')}"
+                    )
+                elif cat == "audit_crash":
+                    detail = f.get("detail", "")
+                    # Show just the last line of the traceback
+                    last_line = detail.strip().splitlines()[-1] if detail.strip() else ""
+                    self.logger.info(f"  [{sev}] {op}: {last_line}")
+                else:
+                    self.logger.info(f"  [{sev}] {op}: {f.get('detail', '')}")
+
+        self.logger.info("=" * 70)
+
+        # Fail the test if there are error-level findings
+        assert len(errors) == 0, (
+            f"API parity audit found {len(errors)} error(s). "
+            f"See report: {html_path}"
+        )
+
+    # ── pool lifecycle (ensure pool exists for all audits) ─────────
+
+    def _ensure_audit_pool(self):
+        """Create the audit pool if it doesn't already exist."""
+        pools = self.sbcli_utils.list_storage_pools()
+        if pools and self._audit_pool_name in pools:
+            self._audit_pool_id = pools[self._audit_pool_name]
+            self.logger.info(
+                f"[pool.setup] Audit pool already exists: {self._audit_pool_id}"
+            )
+            return
+
+        self.logger.info(
+            f"[pool.setup] Creating audit pool '{self._audit_pool_name}'"
+        )
+        self.sbcli_utils.add_storage_pool(self._audit_pool_name)
+        sleep_n_sec(5)
+
+        pools = self.sbcli_utils.list_storage_pools()
+        if pools and self._audit_pool_name in pools:
+            self._audit_pool_id = pools[self._audit_pool_name]
+            self.logger.info(
+                f"[pool.setup] Audit pool created: {self._audit_pool_id}"
+            )
+        else:
+            self.logger.error(
+                f"[pool.setup] Audit pool '{self._audit_pool_name}' "
+                f"not found after creation"
+            )
+
+    def _cleanup_audit_pool(self):
+        """Remove the audit pool after all audits are done."""
+        try:
+            self.sbcli_utils.delete_storage_pool(self._audit_pool_name)
+            sleep_n_sec(2)
+            self.logger.info(
+                f"[pool.cleanup] Deleted audit pool '{self._audit_pool_name}'"
+            )
+        except Exception as exc:
+            self.logger.warning(f"[pool.cleanup] failed: {exc}")
 
     # ── finding helpers ───────────────────────────────────────────────
 
@@ -114,21 +238,38 @@ class TestAPIParityAudit(TestClusterBase):
     def _run_cli(self, cmd):
         """Run ``sbctl <cmd>`` on the first management node via SSH.
 
-        Returns parsed JSON on success, or ``None`` on failure.
+        Returns a dict with keys:
+        - ``data``: parsed JSON on success, or ``None`` on failure
+        - ``stdout``: raw stdout text
+        - ``stderr``: raw stderr text
+        - ``command``: the full command that was run
         """
-        if not self.mgmt_nodes:
-            return None
         full_cmd = f"{self.base_cmd} {cmd}"
+        result = {
+            "data": None,
+            "stdout": "",
+            "stderr": "",
+            "command": full_cmd,
+        }
+
+        if not self.mgmt_nodes:
+            result["stderr"] = "no management nodes available"
+            return result
+
         try:
             stdout, stderr = self.ssh_obj.exec_command(
                 self.mgmt_nodes[0], full_cmd
             )
+            result["stdout"] = stdout or ""
+            result["stderr"] = stderr or ""
+
             if stdout and stdout.strip():
                 # CLI may print non-JSON header lines; find the JSON part
                 lines = stdout.strip().splitlines()
                 # Try full output first
                 try:
-                    return json.loads(stdout.strip())
+                    result["data"] = json.loads(stdout.strip())
+                    return result
                 except json.JSONDecodeError:
                     pass
                 # Try last line
@@ -136,13 +277,15 @@ class TestAPIParityAudit(TestClusterBase):
                     line = line.strip()
                     if line.startswith(("{", "[")):
                         try:
-                            return json.loads(line)
+                            result["data"] = json.loads(line)
+                            return result
                         except json.JSONDecodeError:
                             continue
-            return None
+            return result
         except Exception as exc:
             self.logger.warning(f"CLI '{cmd}' failed: {exc}")
-            return None
+            result["stderr"] = str(exc)
+            return result
 
     # ── normalizers ───────────────────────────────────────────────────
 
@@ -175,6 +318,28 @@ class TestAPIParityAudit(TestClusterBase):
         if isinstance(data, list) and len(data) == 1:
             return data[0]
         return data
+
+    # ── helpers for recording interface errors with context ────────
+
+    def _check_interface_data(self, operation, iface, data, api_call="",
+                              http_status=None, raw_response=""):
+        """Record an error finding if *data* is None / empty, with API details."""
+        if data is None:
+            detail = "returned None"
+            if iface == "cli" and isinstance(raw_response, dict):
+                stderr = raw_response.get("stderr", "")
+                if stderr:
+                    detail = f"returned None; stderr: {stderr[:300]}"
+            self._finding(
+                "error", "interface_error", operation,
+                interface=iface,
+                detail=detail,
+                api_call=api_call,
+                http_status=http_status,
+                response_preview=str(raw_response)[:500] if raw_response else "",
+            )
+            return False
+        return True
 
     # ── comparison engine ─────────────────────────────────────────────
 
@@ -249,9 +414,23 @@ class TestAPIParityAudit(TestClusterBase):
         v2_list = _as_list(v2_data)
 
         if not (len(cli_list) == len(v1_list) == len(v2_list)):
+            # Collect sample IDs from each list for debugging
+            def _ids(lst, limit=5):
+                ids = []
+                for item in lst[:limit]:
+                    if isinstance(item, dict):
+                        ids.append(
+                            item.get(id_field, item.get("uuid",
+                                     item.get("id", "?")))
+                        )
+                return ids
+
             self._finding(
                 "error", "count_mismatch", operation,
                 cli=len(cli_list), v1=len(v1_list), v2=len(v2_list),
+                cli_ids=_ids(cli_list),
+                v1_ids=_ids(v1_list),
+                v2_ids=_ids(v2_list),
             )
 
         # Build lookup by id_field
@@ -282,9 +461,31 @@ class TestAPIParityAudit(TestClusterBase):
 
     def _audit_cluster_list(self):
         self.logger.info("[audit] cluster.list")
-        cli = self._run_cli("cluster list --json")
+        cli_result = self._run_cli("cluster list --json")
+        cli = cli_result["data"]
         v1 = self.sbcli_utils.get_request(api_url="/cluster")
         v2_status, v2_body = self.v2.list_clusters()
+
+        # Log API calls for debugging
+        self.logger.info(
+            f"  CLI: {cli_result['command']} → data={'yes' if cli else 'None'}"
+            f"{' stderr=' + cli_result['stderr'][:200] if cli_result['stderr'] else ''}"
+        )
+        self.logger.info(f"  v1: GET /cluster → {type(v1).__name__}")
+        self.logger.info(f"  v2: GET /clusters → status={v2_status}")
+
+        self._check_interface_data(
+            "cluster.list", "cli", cli,
+            api_call=cli_result["command"], raw_response=cli_result,
+        )
+        self._check_interface_data(
+            "cluster.list", "v1", self._normalize_v1(v1),
+            api_call="GET /api/v1/cluster",
+        )
+        self._check_interface_data(
+            "cluster.list", "v2", v2_body,
+            api_call="GET /api/v2/clusters", http_status=v2_status,
+        )
 
         self._compare_lists(
             "cluster.list",
@@ -296,9 +497,23 @@ class TestAPIParityAudit(TestClusterBase):
     def _audit_cluster_get(self):
         self.logger.info("[audit] cluster.get")
         cid = self.cluster_id
-        cli = self._run_cli(f"cluster get {cid} --json")
+        cli_result = self._run_cli(f"cluster get {cid} --json")
+        cli = cli_result["data"]
         v1 = self.sbcli_utils.get_request(api_url=f"/cluster/{cid}")
         v2_status, v2_body = self.v2.get_cluster(cid)
+
+        self._check_interface_data(
+            "cluster.get", "cli", cli,
+            api_call=cli_result["command"], raw_response=cli_result,
+        )
+        self._check_interface_data(
+            "cluster.get", "v1", self._normalize_v1(v1),
+            api_call=f"GET /api/v1/cluster/{cid}",
+        )
+        self._check_interface_data(
+            "cluster.get", "v2", v2_body,
+            api_call=f"GET /api/v2/clusters/{cid}", http_status=v2_status,
+        )
 
         self._compare_dicts(
             "cluster.get",
@@ -312,9 +527,24 @@ class TestAPIParityAudit(TestClusterBase):
     def _audit_cluster_capacity(self):
         self.logger.info("[audit] cluster.capacity")
         cid = self.cluster_id
-        cli = self._run_cli(f"cluster get-capacity {cid} --json")
+        cli_result = self._run_cli(f"cluster get-capacity {cid} --json")
+        cli = cli_result["data"]
         v1 = self.sbcli_utils.get_cluster_capacity()
         v2_status, v2_body = self.v2.get_cluster_capacity(cid)
+
+        self._check_interface_data(
+            "cluster.capacity", "cli", cli,
+            api_call=cli_result["command"], raw_response=cli_result,
+        )
+        self._check_interface_data(
+            "cluster.capacity", "v1", self._normalize_v1(v1),
+            api_call=f"GET /api/v1/cluster/capacity/{cid}",
+        )
+        self._check_interface_data(
+            "cluster.capacity", "v2", v2_body,
+            api_call=f"GET /api/v2/clusters/{cid}/capacity",
+            http_status=v2_status,
+        )
 
         self._compare_dicts(
             "cluster.capacity",
@@ -327,9 +557,24 @@ class TestAPIParityAudit(TestClusterBase):
     def _audit_cluster_iostats(self):
         self.logger.info("[audit] cluster.iostats")
         cid = self.cluster_id
-        cli = self._run_cli(f"cluster get-io-stats {cid} --json")
-        v1 = self.sbcli_utils.get_io_stats()
+        cli_result = self._run_cli(f"cluster get-io-stats {cid} --json")
+        cli = cli_result["data"]
+        v1 = self.sbcli_utils.get_io_stats(cid)
         v2_status, v2_body = self.v2.get_cluster_iostats(cid)
+
+        self._check_interface_data(
+            "cluster.iostats", "cli", cli,
+            api_call=cli_result["command"], raw_response=cli_result,
+        )
+        self._check_interface_data(
+            "cluster.iostats", "v1", self._normalize_v1(v1),
+            api_call=f"GET /api/v1/cluster/iostats/{cid}",
+        )
+        self._check_interface_data(
+            "cluster.iostats", "v2", v2_body,
+            api_call=f"GET /api/v2/clusters/{cid}/iostats",
+            http_status=v2_status,
+        )
 
         # IO stats are time-varying, so only compare field presence
         self._compare_dicts(
@@ -342,7 +587,8 @@ class TestAPIParityAudit(TestClusterBase):
     def _audit_cluster_logs(self):
         self.logger.info("[audit] cluster.logs")
         cid = self.cluster_id
-        cli = self._run_cli(f"cluster get-logs {cid} --json --limit 5")
+        cli_result = self._run_cli(f"cluster get-logs {cid} --json --limit 5")
+        cli = cli_result["data"]
         v1 = self.sbcli_utils.get_cluster_logs(cluster_id=cid)
         v2_status, v2_body = self.v2.get_cluster_logs(cid, limit=5)
 
@@ -350,16 +596,40 @@ class TestAPIParityAudit(TestClusterBase):
         cli_norm = self._normalize_cli(cli)
         v1_norm = self._normalize_v1(v1)
 
-        for iface, data in [("cli", cli_norm), ("v1", v1_norm), ("v2", v2_body)]:
-            if data is None:
-                self._finding("warning", "interface_error", "cluster.logs",
-                              interface=iface, detail="returned None")
+        self._check_interface_data(
+            "cluster.logs", "cli", cli_norm,
+            api_call=cli_result["command"], raw_response=cli_result,
+        )
+        self._check_interface_data(
+            "cluster.logs", "v1", v1_norm,
+            api_call=f"GET /api/v1/cluster/logs/{cid}",
+        )
+        self._check_interface_data(
+            "cluster.logs", "v2", v2_body,
+            api_call=f"GET /api/v2/clusters/{cid}/logs?limit=5",
+            http_status=v2_status,
+        )
 
     def _audit_node_list(self):
         self.logger.info("[audit] node.list")
-        cli = self._run_cli("sn list --json")
+        cli_result = self._run_cli("sn list --json")
+        cli = cli_result["data"]
         v1 = self.sbcli_utils.get_storage_nodes()
         v2_status, v2_body = self.v2.list_nodes()
+
+        self._check_interface_data(
+            "node.list", "cli", cli,
+            api_call=cli_result["command"], raw_response=cli_result,
+        )
+        self._check_interface_data(
+            "node.list", "v1", self._normalize_v1(v1),
+            api_call="GET /api/v1/storagenode",
+        )
+        self._check_interface_data(
+            "node.list", "v2", v2_body,
+            api_call=f"GET /api/v2/clusters/{self.cluster_id}/storage-nodes",
+            http_status=v2_status,
+        )
 
         self._compare_lists(
             "node.list",
@@ -371,14 +641,29 @@ class TestAPIParityAudit(TestClusterBase):
     def _audit_node_get(self):
         self.logger.info("[audit] node.get")
         if not self.sn_nodes:
-            self._finding("info", "not_tested", "node.get",
+            self._finding("error", "not_tested", "node.get",
                           detail="no storage nodes available")
             return
 
         node_id = self.sn_nodes[0]
-        cli = self._run_cli(f"sn get {node_id} --json")
+        cli_result = self._run_cli(f"sn get {node_id} --json")
+        cli = cli_result["data"]
         v1 = self.sbcli_utils.get_storage_node_details(node_id)
         v2_status, v2_body = self.v2.get_node(node_id)
+
+        self._check_interface_data(
+            "node.get", "cli", cli,
+            api_call=cli_result["command"], raw_response=cli_result,
+        )
+        self._check_interface_data(
+            "node.get", "v1", self._normalize_v1(v1),
+            api_call=f"GET /api/v1/storagenode/{node_id}",
+        )
+        self._check_interface_data(
+            "node.get", "v2", v2_body,
+            api_call=f"GET /api/v2/clusters/{self.cluster_id}/storage-nodes/{node_id}",
+            http_status=v2_status,
+        )
 
         self._compare_dicts(
             "node.get",
@@ -392,14 +677,29 @@ class TestAPIParityAudit(TestClusterBase):
     def _audit_node_capacity(self):
         self.logger.info("[audit] node.capacity")
         if not self.sn_nodes:
-            self._finding("info", "not_tested", "node.capacity",
+            self._finding("error", "not_tested", "node.capacity",
                           detail="no storage nodes available")
             return
 
         node_id = self.sn_nodes[0]
-        cli = self._run_cli(f"sn get-capacity {node_id} --json")
+        cli_result = self._run_cli(f"sn get-capacity {node_id} --json")
+        cli = cli_result["data"]
         v1 = self.sbcli_utils.get_request(api_url=f"/storagenode/capacity/{node_id}")
         v2_status, v2_body = self.v2.get_node_capacity(node_id)
+
+        self._check_interface_data(
+            "node.capacity", "cli", cli,
+            api_call=cli_result["command"], raw_response=cli_result,
+        )
+        self._check_interface_data(
+            "node.capacity", "v1", self._normalize_v1(v1),
+            api_call=f"GET /api/v1/storagenode/capacity/{node_id}",
+        )
+        self._check_interface_data(
+            "node.capacity", "v2", v2_body,
+            api_call=f"GET /api/v2/clusters/{self.cluster_id}/storage-nodes/{node_id}/capacity",
+            http_status=v2_status,
+        )
 
         self._compare_dicts(
             "node.capacity",
@@ -411,32 +711,57 @@ class TestAPIParityAudit(TestClusterBase):
     def _audit_node_ports(self):
         self.logger.info("[audit] node.ports")
         if not self.sn_nodes:
-            self._finding("info", "not_tested", "node.ports",
+            self._finding("error", "not_tested", "node.ports",
                           detail="no storage nodes available")
             return
 
         node_id = self.sn_nodes[0]
-        cli = self._run_cli(f"sn port-list {node_id} --json")
+        cli_result = self._run_cli(f"sn port-list {node_id} --json")
+        cli = cli_result["data"]
         v1 = self.sbcli_utils.get_request(api_url=f"/storagenode/port/{node_id}")
         v2_status, v2_body = self.v2.list_node_nics(node_id)
 
-        # Just check that all return data
-        for iface, data in [("cli", cli), ("v1", v1), ("v2", v2_body)]:
-            if data is None:
-                self._finding("warning", "interface_error", "node.ports",
-                              interface=iface, detail="returned None")
+        # Check that all return data
+        self._check_interface_data(
+            "node.ports", "cli", cli,
+            api_call=cli_result["command"], raw_response=cli_result,
+        )
+        self._check_interface_data(
+            "node.ports", "v1", v1,
+            api_call=f"GET /api/v1/storagenode/port/{node_id}",
+        )
+        self._check_interface_data(
+            "node.ports", "v2", v2_body,
+            api_call=f"GET /api/v2/clusters/{self.cluster_id}/storage-nodes/{node_id}/nics",
+            http_status=v2_status,
+        )
 
     def _audit_device_list(self):
         self.logger.info("[audit] device.list")
         if not self.sn_nodes:
-            self._finding("info", "not_tested", "device.list",
+            self._finding("error", "not_tested", "device.list",
                           detail="no storage nodes available")
             return
 
         node_id = self.sn_nodes[0]
-        cli = self._run_cli(f"sn list-devices {node_id} --json")
+        cli_result = self._run_cli(f"sn list-devices {node_id} --json")
+        cli = cli_result["data"]
         v1 = self.sbcli_utils.get_device_details(node_id)
         v2_status, v2_body = self.v2.list_devices(node_id)
+
+        self._check_interface_data(
+            "device.list", "cli", cli,
+            api_call=cli_result["command"], raw_response=cli_result,
+        )
+        self._check_interface_data(
+            "device.list", "v1", self._normalize_v1(v1),
+            api_call=f"GET /api/v1/device/{node_id}",
+        )
+        self._check_interface_data(
+            "device.list", "v2", v2_body,
+            api_call=f"GET /api/v2/clusters/{self.cluster_id}/storage-nodes/{node_id}/devices",
+            http_status=v2_status,
+        )
 
         self._compare_lists(
             "device.list",
@@ -448,7 +773,7 @@ class TestAPIParityAudit(TestClusterBase):
     def _audit_device_get(self):
         self.logger.info("[audit] device.get")
         if not self.sn_nodes:
-            self._finding("info", "not_tested", "device.get",
+            self._finding("error", "not_tested", "device.get",
                           detail="no storage nodes available")
             return
 
@@ -457,14 +782,29 @@ class TestAPIParityAudit(TestClusterBase):
         v1_devices = self.sbcli_utils.get_device_details(node_id)
         dev_list = self._normalize_v1(v1_devices)
         if not dev_list or not isinstance(dev_list, list) or len(dev_list) == 0:
-            self._finding("info", "not_tested", "device.get",
+            self._finding("error", "not_tested", "device.get",
                           detail="no devices on first node")
             return
 
         device_id = dev_list[0].get("uuid", dev_list[0].get("id"))
-        cli = self._run_cli(f"sn get-device {device_id} --json")
+        cli_result = self._run_cli(f"sn get-device {device_id} --json")
+        cli = cli_result["data"]
         v1 = self.sbcli_utils.get_request(api_url=f"/device/{device_id}")
         v2_status, v2_body = self.v2.get_device(node_id, device_id)
+
+        self._check_interface_data(
+            "device.get", "cli", cli,
+            api_call=cli_result["command"], raw_response=cli_result,
+        )
+        self._check_interface_data(
+            "device.get", "v1", self._normalize_v1(v1),
+            api_call=f"GET /api/v1/device/{device_id}",
+        )
+        self._check_interface_data(
+            "device.get", "v2", v2_body,
+            api_call=f"GET /api/v2/clusters/{self.cluster_id}/storage-nodes/{node_id}/devices/{device_id}",
+            http_status=v2_status,
+        )
 
         self._compare_dicts(
             "device.get",
@@ -477,9 +817,24 @@ class TestAPIParityAudit(TestClusterBase):
 
     def _audit_pool_list(self):
         self.logger.info("[audit] pool.list")
-        cli = self._run_cli("pool list --json")
+        cli_result = self._run_cli("pool list --json")
+        cli = cli_result["data"]
         v1 = self.sbcli_utils.get_request(api_url="/pool")
         v2_status, v2_body = self.v2.list_pools()
+
+        self._check_interface_data(
+            "pool.list", "cli", cli,
+            api_call=cli_result["command"], raw_response=cli_result,
+        )
+        self._check_interface_data(
+            "pool.list", "v1", self._normalize_v1(v1),
+            api_call="GET /api/v1/pool",
+        )
+        self._check_interface_data(
+            "pool.list", "v2", v2_body,
+            api_call=f"GET /api/v2/clusters/{self.cluster_id}/storage-pools",
+            http_status=v2_status,
+        )
 
         self._compare_lists(
             "pool.list",
@@ -492,16 +847,31 @@ class TestAPIParityAudit(TestClusterBase):
         self.logger.info("[audit] pool.get")
         pools = self.sbcli_utils.list_storage_pools()
         if not pools:
-            self._finding("info", "not_tested", "pool.get",
-                          detail="no pools available")
+            self._finding("error", "not_tested", "pool.get",
+                          detail="no pools available — pool creation may have failed")
             return
 
         pool_name = list(pools.keys())[0]
         pool_id = pools[pool_name]
 
-        cli = self._run_cli(f"pool get {pool_id} --json")
+        cli_result = self._run_cli(f"pool get {pool_id} --json")
+        cli = cli_result["data"]
         v1 = self.sbcli_utils.get_pool_by_id(pool_id)
         v2_status, v2_body = self.v2.get_pool(pool_id)
+
+        self._check_interface_data(
+            "pool.get", "cli", cli,
+            api_call=cli_result["command"], raw_response=cli_result,
+        )
+        self._check_interface_data(
+            "pool.get", "v1", self._normalize_v1(v1),
+            api_call=f"GET /api/v1/pool/{pool_id}",
+        )
+        self._check_interface_data(
+            "pool.get", "v2", v2_body,
+            api_call=f"GET /api/v2/clusters/{self.cluster_id}/storage-pools/{pool_id}",
+            http_status=v2_status,
+        )
 
         self._compare_dicts(
             "pool.get",
@@ -516,26 +886,51 @@ class TestAPIParityAudit(TestClusterBase):
         self.logger.info("[audit] pool.iostats")
         pools = self.sbcli_utils.list_storage_pools()
         if not pools:
-            self._finding("info", "not_tested", "pool.iostats",
-                          detail="no pools available")
+            self._finding("error", "not_tested", "pool.iostats",
+                          detail="no pools available — pool creation may have failed")
             return
 
         pool_id = list(pools.values())[0]
-        cli = self._run_cli(f"pool get-io-stats {pool_id} --json")
+        cli_result = self._run_cli(f"pool get-io-stats {pool_id} --json")
+        cli = cli_result["data"]
         v1 = self.sbcli_utils.get_request(api_url=f"/pool/iostats/{pool_id}")
         v2_status, v2_body = self.v2.get_pool_iostats(pool_id)
 
         # IO stats are time-varying; just check field presence
-        for iface, data in [("cli", cli), ("v1", v1), ("v2", v2_body)]:
-            if data is None:
-                self._finding("warning", "interface_error", "pool.iostats",
-                              interface=iface, detail="returned None")
+        self._check_interface_data(
+            "pool.iostats", "cli", cli,
+            api_call=cli_result["command"], raw_response=cli_result,
+        )
+        self._check_interface_data(
+            "pool.iostats", "v1", v1,
+            api_call=f"GET /api/v1/pool/iostats/{pool_id}",
+        )
+        self._check_interface_data(
+            "pool.iostats", "v2", v2_body,
+            api_call=f"GET /api/v2/clusters/{self.cluster_id}/storage-pools/{pool_id}/iostats",
+            http_status=v2_status,
+        )
 
     def _audit_mgmt_list(self):
         self.logger.info("[audit] mgmt.list")
-        cli = self._run_cli("cp list --json")
+        cli_result = self._run_cli("cp list --json")
+        cli = cli_result["data"]
         v1 = self.sbcli_utils.get_management_nodes()
         v2_status, v2_body = self.v2.list_management_nodes()
+
+        self._check_interface_data(
+            "mgmt.list", "cli", cli,
+            api_call=cli_result["command"], raw_response=cli_result,
+        )
+        self._check_interface_data(
+            "mgmt.list", "v1", self._normalize_v1(v1),
+            api_call="GET /api/v1/mgmtnode",
+        )
+        self._check_interface_data(
+            "mgmt.list", "v2", v2_body,
+            api_call="GET /api/v2/management-nodes",
+            http_status=v2_status,
+        )
 
         self._compare_lists(
             "mgmt.list",
@@ -548,14 +943,15 @@ class TestAPIParityAudit(TestClusterBase):
 
     def _audit_pool_crud(self):
         self.logger.info("[audit] pool.crud")
-        pool_name = "parity_audit_pool"
+        pool_name = "parity_crud_pool"
 
         # Create via v1
         self.sbcli_utils.add_storage_pool(pool_name)
-        sleep_n_sec(3)
+        sleep_n_sec(5)
 
         # List via all 3 and check pool appears
-        cli = self._run_cli("pool list --json")
+        cli_result = self._run_cli("pool list --json")
+        cli = cli_result["data"]
         v1 = self.sbcli_utils.get_request(api_url="/pool")
         v2_status, v2_body = self.v2.list_pools()
 
@@ -582,11 +978,18 @@ class TestAPIParityAudit(TestClusterBase):
                 ignore_fields={"updated_at", "created_at", "secret"},
             )
         else:
-            for iface, p in [("cli", cli_pool), ("v1", v1_pool), ("v2", v2_pool)]:
+            for iface, p, api_call in [
+                ("cli", cli_pool, cli_result["command"]),
+                ("v1", v1_pool, "GET /api/v1/pool"),
+                ("v2", v2_pool, f"GET /api/v2/clusters/{self.cluster_id}/storage-pools"),
+            ]:
                 if p is None:
-                    self._finding("error", "interface_error", "pool.crud",
-                                  interface=iface,
-                                  detail=f"pool '{pool_name}' not found after create")
+                    self._finding(
+                        "error", "interface_error", "pool.crud",
+                        interface=iface,
+                        detail=f"pool '{pool_name}' not found after create",
+                        api_call=api_call,
+                    )
 
         # Cleanup
         try:
@@ -598,11 +1001,11 @@ class TestAPIParityAudit(TestClusterBase):
     def _audit_volume_crud(self):
         self.logger.info("[audit] volume.crud")
 
-        # Ensure a pool exists
+        # Use the audit pool created at Phase 0
         pools = self.sbcli_utils.list_storage_pools()
         if not pools:
-            self._finding("info", "not_tested", "volume.crud",
-                          detail="no pools available")
+            self._finding("error", "not_tested", "volume.crud",
+                          detail="no pools available — pool creation failed")
             return
 
         pool_name = list(pools.keys())[0]
@@ -623,13 +1026,29 @@ class TestAPIParityAudit(TestClusterBase):
         if not vol_id:
             self._finding("error", "interface_error", "volume.crud",
                           interface="v1",
-                          detail=f"volume '{vol_name}' not found after create")
+                          detail=f"volume '{vol_name}' not found after create",
+                          api_call=f"POST /api/v1/lvol (name={vol_name}, pool={pool_name}, size=1G)")
             return
 
         # Get via all 3
-        cli = self._run_cli(f"lvol get {vol_id} --json")
+        cli_result = self._run_cli(f"lvol get {vol_id} --json")
+        cli = cli_result["data"]
         v1 = self.sbcli_utils.get_lvol_details(vol_id)
         v2_status, v2_body = self.v2.get_volume(pool_id, vol_id)
+
+        self._check_interface_data(
+            "volume.get", "cli", cli,
+            api_call=cli_result["command"], raw_response=cli_result,
+        )
+        self._check_interface_data(
+            "volume.get", "v1", self._normalize_v1(v1),
+            api_call=f"GET /api/v1/lvol/{vol_id}",
+        )
+        self._check_interface_data(
+            "volume.get", "v2", v2_body,
+            api_call=f"GET /api/v2/clusters/{self.cluster_id}/storage-pools/{pool_id}/volumes/{vol_id}",
+            http_status=v2_status,
+        )
 
         self._compare_dicts(
             "volume.get",
@@ -643,7 +1062,8 @@ class TestAPIParityAudit(TestClusterBase):
         # List volumes via v2 and check count
         v2_list_status, v2_list_body = self.v2.list_volumes(pool_id)
         v1_list = self.sbcli_utils.list_lvols()
-        cli_list = self._run_cli("lvol list --json")
+        cli_list_result = self._run_cli("lvol list --json")
+        cli_list = cli_list_result["data"]
 
         # Just check the volume appears in all three
         def _has_vol(data, name):
@@ -656,11 +1076,17 @@ class TestAPIParityAudit(TestClusterBase):
                 )
             return False
 
-        for iface, data in [("cli", cli_list), ("v1", v1_list), ("v2", v2_list_body)]:
+        for iface, data, api_call in [
+            ("cli", cli_list, cli_list_result["command"]),
+            ("v1", v1_list, "GET /api/v1/lvol"),
+            ("v2", v2_list_body,
+             f"GET /api/v2/clusters/{self.cluster_id}/storage-pools/{pool_id}/volumes"),
+        ]:
             if not _has_vol(data, vol_name):
-                self._finding("warning", "interface_error", "volume.list_after_create",
+                self._finding("error", "interface_error", "volume.list_after_create",
                               interface=iface,
-                              detail=f"volume '{vol_name}' not in list")
+                              detail=f"volume '{vol_name}' not in list",
+                              api_call=api_call)
 
         # Cleanup
         try:
@@ -675,8 +1101,8 @@ class TestAPIParityAudit(TestClusterBase):
         # Need a volume to snapshot
         pools = self.sbcli_utils.list_storage_pools()
         if not pools:
-            self._finding("info", "not_tested", "snapshot.crud",
-                          detail="no pools available")
+            self._finding("error", "not_tested", "snapshot.crud",
+                          detail="no pools available — pool creation failed")
             return
 
         pool_name = list(pools.keys())[0]
@@ -693,7 +1119,8 @@ class TestAPIParityAudit(TestClusterBase):
         if not vol_id:
             self._finding("error", "interface_error", "snapshot.crud",
                           interface="v1",
-                          detail=f"could not create volume '{vol_name}'")
+                          detail=f"could not create volume '{vol_name}'",
+                          api_call=f"POST /api/v1/lvol (name={vol_name}, pool={pool_name}, size=1G)")
             return
 
         # Create snapshot via v1
@@ -701,7 +1128,8 @@ class TestAPIParityAudit(TestClusterBase):
         sleep_n_sec(5)
 
         # List snapshots via all 3
-        cli = self._run_cli("snapshot list --json")
+        cli_result = self._run_cli("snapshot list --json")
+        cli = cli_result["data"]
         v1 = self.sbcli_utils.list_snapshots()
         v2_status, v2_body = self.v2.list_snapshots(pool_id)
 
@@ -716,11 +1144,17 @@ class TestAPIParityAudit(TestClusterBase):
                 )
             return False
 
-        for iface, data in [("cli", cli), ("v1", v1), ("v2", v2_body)]:
+        for iface, data, api_call in [
+            ("cli", cli, cli_result["command"]),
+            ("v1", v1, "GET /api/v1/snapshot"),
+            ("v2", v2_body,
+             f"GET /api/v2/clusters/{self.cluster_id}/storage-pools/{pool_id}/snapshots"),
+        ]:
             if not _has_snap(data, snap_name):
-                self._finding("warning", "interface_error", "snapshot.list_after_create",
+                self._finding("error", "interface_error", "snapshot.list_after_create",
                               interface=iface,
-                              detail=f"snapshot '{snap_name}' not in list")
+                              detail=f"snapshot '{snap_name}' not in list",
+                              api_call=api_call)
 
         # Cleanup
         try:

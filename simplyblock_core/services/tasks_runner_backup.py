@@ -86,7 +86,7 @@ def _run_backup(task):
                 _fail_backup(backup, task, "bdev_lvol_s3_backup RPC failed")
                 return
         except RPCException as e:
-            _fail_backup(backup, task, f"RPC error: {e.message}")
+            _fail_backup(backup, task, f"RPC error: {e}")
             return
 
         backup.status = Backup.STATUS_IN_PROGRESS
@@ -229,7 +229,7 @@ def _run_restore(task):
                 task.write_to_db(db.kv_store)
                 return
         except RPCException as e:
-            task.function_result = f"RPC error: {e.message}"
+            task.function_result = f"RPC error: {e}"
             task.retry += 1
             task.status = JobSchedule.STATUS_SUSPENDED
             task.write_to_db(db.kv_store)
@@ -339,7 +339,7 @@ def _run_merge(task):
                 task.write_to_db(db.kv_store)
                 return
         except RPCException as e:
-            task.function_result = f"RPC error: {e.message}"
+            task.function_result = f"RPC error: {e}"
             task.retry += 1
             task.status = JobSchedule.STATUS_SUSPENDED
             task.write_to_db(db.kv_store)

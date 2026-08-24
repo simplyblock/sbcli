@@ -35,7 +35,7 @@ from simplyblock_core.models.cluster import Cluster
 
 
 def _make_cluster(status=Cluster.STATUS_ACTIVE, distr_npcs=2,
-                  enable_failure_domain=False):
+                  enable_failure_domain=False, mode="docker"):
     c = MagicMock(spec=Cluster)
     c.status = status
     c.distr_npcs = distr_npcs
@@ -43,11 +43,16 @@ def _make_cluster(status=Cluster.STATUS_ACTIVE, distr_npcs=2,
     # `not cluster.enable_failure_domain`, and a bare MagicMock attribute is
     # truthy — which would silently skip the flat offline-peer-count guard.
     c.enable_failure_domain = enable_failure_domain
+    # Default "docker" (matches the model default): the k8s-CR-adoption
+    # guard only applies when mode == "kubernetes", so leaving this as the
+    # model default keeps every test that doesn't care about it unaffected.
+    c.mode = mode
     return c
 
 
 def _make_node(status, uuid="node-under-test", cluster_id="cluster-1",
-               mgmt_ip="10.0.0.1", auto_restart_disabled=False):
+               mgmt_ip="10.0.0.1", auto_restart_disabled=False,
+               cr_namespace="simplyblock"):
     n = MagicMock(spec=StorageNode)
     n.status = status
     n.cluster_id = cluster_id
@@ -55,6 +60,10 @@ def _make_node(status, uuid="node-under-test", cluster_id="cluster-1",
     # Default False: a bare MagicMock attribute is truthy, which would trip
     # the deliberate-shutdown guard and reject every node.
     n.auto_restart_disabled = auto_restart_disabled
+    # Default non-empty: only the k8s-CR-adoption tests care about this
+    # being unset, and a bare MagicMock attribute is truthy anyway, so this
+    # just makes the "CR-linked" default explicit for every other test.
+    n.cr_namespace = cr_namespace
     n.get_id = MagicMock(return_value=uuid)
     return n
 
@@ -229,6 +238,60 @@ class TestAddNodeToAutoRestartGuard(unittest.TestCase):
             result, add_task = self._call(node, cluster=cluster)
         self.assertFalse(result)
         add_task.assert_not_called()
+
+
+class TestAddNodeToAutoRestartK8sAdoptionGuard(unittest.TestCase):
+    """A k8s-managed node that hasn't been CR-linked yet (cr_namespace
+    unset) must not get an auto-restart task queued.
+
+    Background (2026-08-10 helm-to-operator upgrade test): the health
+    check's data-nic ping builds a k8s-service hostname from
+    node.cr_namespace. An empty cr_namespace (a node mid-adoption, whose
+    CR refs get patched in a later step) produces an unresolvable
+    "..svc.cluster.local" hostname, which the runner treats as
+    "unreachable, retry" forever — and the resulting task's mere
+    existence blocks any manual `sn restart`/`sn shutdown` on the node,
+    crash or no crash. Refusing to queue the task at all is what actually
+    protects the manual path.
+
+    Docker deployments must be unaffected: cr_namespace is legitimately
+    always empty there, so the guard only applies when cluster.mode is
+    "kubernetes".
+    """
+
+    def _call(self, node, cluster):
+        from simplyblock_core.controllers import tasks_controller
+        with patch.object(tasks_controller, "db") as mock_db, \
+             patch.object(tasks_controller, "_add_task") as mock_add_task:
+            mock_db.get_cluster_by_id.return_value = cluster
+            mock_db.get_storage_nodes_by_cluster_id.return_value = []
+            mock_db.get_storage_node_by_id.return_value = node
+            mock_add_task.return_value = "task-uuid"
+            result = tasks_controller.add_node_to_auto_restart(node)
+            return result, mock_add_task
+
+    def test_rejects_k8s_node_without_cr_namespace(self):
+        node = _make_node(StorageNode.STATUS_OFFLINE, cr_namespace="")
+        cluster = _make_cluster(mode="kubernetes")
+        result, add_task = self._call(node, cluster)
+        self.assertFalse(result)
+        add_task.assert_not_called()
+
+    def test_accepts_k8s_node_once_cr_linked(self):
+        node = _make_node(StorageNode.STATUS_OFFLINE, cr_namespace="simplyblock")
+        cluster = _make_cluster(mode="kubernetes")
+        result, add_task = self._call(node, cluster)
+        self.assertEqual(result, "task-uuid")
+        add_task.assert_called_once()
+
+    def test_docker_node_without_cr_namespace_still_enqueues(self):
+        # Docker deployments never populate cr_namespace at all — the guard
+        # must not mistake that for "mid-adoption" and block real auto-restart.
+        node = _make_node(StorageNode.STATUS_OFFLINE, cr_namespace="")
+        cluster = _make_cluster(mode="docker")
+        result, add_task = self._call(node, cluster)
+        self.assertEqual(result, "task-uuid")
+        add_task.assert_called_once()
 
 
 class TestSetNodeOfflinePairing(unittest.TestCase):

@@ -30,14 +30,17 @@ import simplyblock_web.api.v2._dependencies as dependencies_module
 import simplyblock_web.api.v2._dtos as dtos_module
 import simplyblock_web.api.v2.cluster as cluster_module
 import simplyblock_web.api.v2.cluster.backup as backup_module
+import simplyblock_web.api.v2.cluster.replication as replication_module
 import simplyblock_web.api.v2.cluster.storage_node as storage_node_module
 import simplyblock_web.api.v2.cluster.storage_node.device as device_module
 import simplyblock_web.api.v2.cluster.storage_pool as storage_pool_module
 import simplyblock_web.api.v2.cluster.storage_pool.snapshot as snapshot_module
 import simplyblock_web.api.v2.cluster.storage_pool.volume as volume_module
-import simplyblock_web.api.v2.cluster.storage_pool.volume.migration as migration_module
+import simplyblock_web.api.v2.cluster.storage_pool.volume.replication as volume_replication_module
+import simplyblock_web.api.v2.cluster.subsystem.migration as migration_module
 import simplyblock_web.api.v2.cluster.task as task_module
 import simplyblock_web.api.v2.management_node as management_node_module
+import simplyblock_web.api.v2.metrics as metrics_module
 
 from tests.unit.web.api.v2 import _factories as factories
 
@@ -76,6 +79,7 @@ def db(monkeypatch):
     for module in (
         cluster_module,
         backup_module,
+        replication_module,
         storage_node_module,
         device_module,
         storage_pool_module,
@@ -83,16 +87,18 @@ def db(monkeypatch):
         volume_module,
         task_module,
         management_node_module,
+        metrics_module,
     ):
         monkeypatch.setattr(module, 'db', mock)
+    monkeypatch.setattr(migration_module, '_db', mock)
     # These modules instantiate DBController() at call time
     monkeypatch.setattr(dtos_module, 'DBController', lambda: mock)
-    monkeypatch.setattr(migration_module, 'DBController', lambda: mock)
 
     mock.get_cluster_capacity.return_value = []
     mock.get_node_capacity.return_value = []
     mock.get_device_stats.return_value = []
     mock.get_policy_for_lvol.return_value = None
+    mock.get_migration_groups.return_value = []
     return mock
 
 
@@ -101,6 +107,7 @@ def app():
     app = FastAPI()
     app.include_router(v2.api, prefix='/api/v2')
     app.dependency_overrides[auth_module.verify_api_token] = lambda: None
+    app.dependency_overrides[auth_module.verify_metrics_token] = lambda: None
     return app
 
 
@@ -130,6 +137,7 @@ def lvol_controller(monkeypatch):
     mock = MagicMock()
     mock.get_replication_info.return_value = None
     monkeypatch.setattr(volume_module, 'lvol_controller', mock)
+    monkeypatch.setattr(volume_replication_module, 'lvol_controller', mock)
     return mock
 
 
@@ -146,6 +154,14 @@ def backup_controller(monkeypatch):
     mock = MagicMock()
     monkeypatch.setattr(volume_module, 'backup_controller', mock)
     monkeypatch.setattr(backup_module, 'backup_controller', mock)
+    return mock
+
+
+@pytest.fixture()
+def replication_policy_controller(monkeypatch):
+    mock = MagicMock()
+    monkeypatch.setattr(replication_module, 'replication_policy_controller', mock)
+    monkeypatch.setattr(volume_replication_module, 'replication_policy_controller', mock)
     return mock
 
 
@@ -200,6 +216,7 @@ def volume(db, pool):
     volume = factories.make_volume()
     db.get_lvols_by_pool_id.return_value = [volume]
     db.get_lvol_by_id.return_value = volume
+    db.get_lvols.return_value = [volume]
     return volume
 
 
@@ -255,6 +272,22 @@ def backup_policy(db, cluster):
     policy = factories.make_backup_policy()
     db.get_backup_policies.return_value = [policy]
     db.get_backup_policy_by_id.return_value = policy
+    return policy
+
+
+@pytest.fixture()
+def replication_target(db, cluster):
+    target = factories.make_replication_target()
+    db.get_replication_targets.return_value = [target]
+    db.get_replication_target_by_id.return_value = target
+    return target
+
+
+@pytest.fixture()
+def replication_policy(db, replication_target):
+    policy = factories.make_replication_policy()
+    db.get_replication_policies.return_value = [policy]
+    db.get_replication_policy_by_id.return_value = policy
     return policy
 
 

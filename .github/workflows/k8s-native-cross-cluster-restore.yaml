@@ -1,0 +1,1619 @@
+name: K8s Native Cross-Cluster Restore Test
+run-name: "K8s Cross-Cluster Restore | ${{ inputs.operator_repo_branch || 'main' }} | ${{ inputs.cluster_environment || 'openshift-baremetal' }} | ${{ inputs.cluster_params || 'ndcs=1,npcs=2,bs=4096,chunk_bs=4096,partitions=1,jm_count=4' }}"
+
+# ============================================================================
+# Cross-cluster restore test — deploys TWO simplyblock clusters in separate
+# K8s namespaces (simplyblock + simplyblock-c2) and runs
+# TestBackupCrossClusterRestore in K8s mode.
+#
+# Architecture:
+#   - Same K8s cluster (OpenShift / K3s)
+#   - Worker nodes split: first half → C1, second half → C2
+#   - Shared MinIO in minio namespace
+#   - Shared operator Helm chart (one install, watches both namespaces)
+#   - Backup credentials created in both namespaces
+#   - StorageCluster + Pool + StorageNodeSet CRDs in each namespace
+# ============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      operator_repo_branch:
+        description: 'Branch for simplyblock-operator repo'
+        required: true
+        default: 'main'
+      simplyblock_image:
+        description: 'Simplyblock image tag'
+        required: true
+        default: 'main'
+      simplyblock_repository:
+        description: 'Simplyblock image repository'
+        required: false
+        default: 'public.ecr.aws/simply-block/simplyblock'
+      operator_repository:
+        description: 'Operator image repository'
+        required: false
+        default: 'simplyblock/simplyblock-operator'
+      operator_tag:
+        description: 'Operator image tag'
+        required: false
+        default: 'main'
+      csi_repository:
+        description: 'CSI driver image repository (leave empty for chart default)'
+        required: false
+        default: 'simplyblock/spdkcsi'
+      csi_tag:
+        description: 'CSI driver image tag (leave empty for chart default)'
+        required: false
+        default: 'latest'
+      spdk_image:
+        description: 'SPDK container image'
+        required: true
+        default: 'simplyblock/spdk:main-latest'
+      worker_nodes:
+        description: 'Comma-separated K8s worker node names (split evenly: first half→C1, second half→C2)'
+        required: true
+        default: 'worker-0.ocp.simplyblock.ai,worker-1.ocp.simplyblock.ai,worker-2.ocp.simplyblock.ai,worker-3.ocp.simplyblock.ai,worker-4.ocp.simplyblock.ai,worker-5.ocp.simplyblock.ai'
+      ifc_names:
+        description: 'Network interfaces (mgmt_ifc:data_nics)'
+        required: false
+        default: 'br-ex:enp2s0f0'
+      max_lvol:
+        description: 'Max logical volume count per storage node'
+        required: false
+        default: '30'
+      ssh_user:
+        description: 'SSH user for client nodes'
+        required: false
+        default: 'root'
+      key_path:
+        description: "SSH private key path on runner"
+        required: true
+        default: "/home/ec2-user/.ssh/simplyblock-us-east-2.pem"
+      client_ips:
+        description: 'Space-separated client IPs for FIO'
+        required: false
+        default: ''
+      nfs_mountpoint:
+        description: 'NFS mountpoint on client nodes'
+        required: false
+        default: '/mnt/nfs_share/'
+      cluster_params:
+        description: 'Cluster config: ndcs=1,npcs=2,bs=4096,chunk_bs=4096,partitions=1,jm_count=4'
+        required: false
+        default: 'ndcs=1,npcs=2,bs=4096,chunk_bs=4096,partitions=1,jm_count=4'
+      cluster_environment:
+        description: 'Target cluster environment'
+        required: true
+        default: 'openshift-baremetal'
+        type: choice
+        options:
+          - local
+          - aws-openshift
+          - openshift-local
+          - openshift-baremetal
+          - gcp
+      skip_nfs:
+        description: 'Skip NFS mounting'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+      tls_enabled:
+        description: 'Enable TLS'
+        required: false
+        default: true
+        type: boolean
+      send_slack_notification:
+        description: 'Send Slack notification on completion'
+        required: false
+        default: true
+        type: boolean
+      sbcli_branch:
+        description: 'sbcli repo branch to clone for tests'
+        required: false
+        default: 'main'
+
+jobs:
+  cross-cluster-restore:
+    runs-on: ${{ github.event.inputs.cluster_environment == 'aws-openshift' && 'vm-runner-43' || 'self-hosted' }}
+    timeout-minutes: 4320
+    concurrency:
+      group: k8s-cross-cluster-${{ github.event.inputs.cluster_environment || 'local' }}
+      cancel-in-progress: false
+    env:
+      KEY_PATH: ${{ github.event.inputs.key_path || '/home/ec2-user/.ssh/simplyblock-us-east-2.pem' }}
+      CLIENT_IPS: ${{ github.event.inputs.client_ips || '' }}
+      NFS_MOUNTPOINT: ${{ github.event.inputs.nfs_mountpoint || '/mnt/nfs_share/' }}
+      SSH_USER: ${{ github.event.inputs.ssh_user || 'root' }}
+      SSH_PASSWORD: ${{ secrets.SSH_PASSWORD }}
+      NS_C1: simplyblock
+      NS_C2: simplyblock-c2
+
+    steps:
+      - name: Fix workspace permissions
+        run: sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE" 2>/dev/null || true
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - uses: actions/checkout@master
+        name: Checkout simplyblock-operator
+        with:
+          repository: simplyblock/simplyblock-operator
+          ref: ${{ github.event.inputs.operator_repo_branch || 'main' }}
+          path: 'simplyblock-operator'
+
+      # ── Resolve SSH key ──────────────────────────────────────────────────
+
+      - name: Resolve KEY_PATH and validate key exists
+        shell: bash
+        run: |
+          set -euxo pipefail
+          kp="${KEY_PATH}"
+          kp="${kp%\"}"; kp="${kp#\"}"
+          kp="${kp%\'}"; kp="${kp#\'}"
+          if [[ "$kp" == .ssh/* ]]; then kp="${HOME}/${kp}"; fi
+          if [[ "$kp" == ~/* ]]; then kp="${HOME}/${kp#~/}"; fi
+          echo "KEY_PATH=$kp" >> "$GITHUB_ENV"
+          test -f "$kp" || (echo "ERROR: SSH key not found at $kp" && exit 1)
+          chmod 600 "$kp" || true
+
+      - name: Export KEY_NAME from KEY_PATH
+        shell: bash
+        run: |
+          key_name="$(basename "${KEY_PATH}")"
+          echo "KEY_NAME=${key_name}" >> "$GITHUB_ENV"
+
+      # ── Validate and split worker nodes ─────────────────────────────────
+
+      - name: Validate worker node count and split between clusters
+        id: split
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PARAMS="${{ github.event.inputs.cluster_params || 'ndcs=1,npcs=2' }}"
+          _ndcs=1; _npcs=2
+          for pair in $(echo "$PARAMS" | tr ',' ' '); do
+            key=$(echo "$pair" | cut -d= -f1)
+            val=$(echo "$pair" | cut -d= -f2)
+            case "$key" in
+              ndcs) _ndcs="$val" ;;
+              npcs) _npcs="$val" ;;
+            esac
+          done
+
+          IFS=',' read -ra NODES <<< "${{ github.event.inputs.worker_nodes }}"
+          TOTAL=${#NODES[@]}
+          MIN_PER_CLUSTER=$((_ndcs + _npcs))
+          MIN_TOTAL=$((MIN_PER_CLUSTER * 2))
+
+          echo "=== Cross-Cluster Node Validation ==="
+          echo "Total worker nodes: ${TOTAL}"
+          echo "NDCS=${_ndcs}, NPCS=${_npcs}, min per cluster: ${MIN_PER_CLUSTER}"
+
+          if [[ ${TOTAL} -lt ${MIN_TOTAL} ]]; then
+            echo "ERROR: Need at least ${MIN_TOTAL} nodes for 2 clusters, got ${TOTAL}"
+            exit 1
+          fi
+
+          HALF=$((TOTAL / 2))
+          C1_CSV=""
+          C2_CSV=""
+          for i in "${!NODES[@]}"; do
+            if [[ $i -lt $HALF ]]; then
+              C1_CSV="${C1_CSV:+${C1_CSV},}${NODES[$i]}"
+            else
+              C2_CSV="${C2_CSV:+${C2_CSV},}${NODES[$i]}"
+            fi
+          done
+
+          echo ""
+          echo "Cluster-1 workers: ${C1_CSV}"
+          echo "Cluster-2 workers: ${C2_CSV}"
+
+          echo "C1_WORKERS=${C1_CSV}" >> "$GITHUB_ENV"
+          echo "C2_WORKERS=${C2_CSV}" >> "$GITHUB_ENV"
+          echo "ALL_WORKERS=${{ github.event.inputs.worker_nodes }}" >> "$GITHUB_ENV"
+
+      # ── Set parameters ──────────────────────────────────────────────────
+
+      - name: Set cluster parameters
+        run: |
+          PARAMS="${{ github.event.inputs.cluster_params || 'ndcs=1,npcs=2,bs=4096,chunk_bs=4096,partitions=1,jm_count=4' }}"
+          _ndcs="" _npcs="" _bs="" _chunk_bs="" _partitions="" _jm_count=""
+          for pair in $(echo "$PARAMS" | tr ',' ' '); do
+            key=$(echo "$pair" | cut -d= -f1)
+            val=$(echo "$pair" | cut -d= -f2)
+            case "$key" in
+              ndcs)       _ndcs="$val" ;;
+              npcs)       _npcs="$val" ;;
+              bs)         _bs="$val" ;;
+              chunk_bs)   _chunk_bs="$val" ;;
+              partitions) _partitions="$val" ;;
+              jm_count)   _jm_count="$val" ;;
+            esac
+          done
+          echo "NDCS=${_ndcs:-1}" >> $GITHUB_ENV
+          echo "NPCS=${_npcs:-2}" >> $GITHUB_ENV
+          echo "BS=${_bs:-4096}" >> $GITHUB_ENV
+          echo "CHUNK_BS=${_chunk_bs:-4096}" >> $GITHUB_ENV
+          echo "PARTITIONS=${_partitions:-1}" >> $GITHUB_ENV
+          echo "JM_COUNT=${_jm_count:-4}" >> $GITHUB_ENV
+
+      # ── Setup kubeconfig + tools ────────────────────────────────────────
+
+      - name: Setup kubeconfig
+        run: |
+          mkdir -p $HOME/.kube
+          KUBECONFIG_FILE="$HOME/.kube/config-${{ github.run_id }}"
+          echo "${KUBECONFIG_DATA}" > "$KUBECONFIG_FILE"
+          chmod 600 "$KUBECONFIG_FILE"
+          echo "KUBECONFIG=$KUBECONFIG_FILE" >> $GITHUB_ENV
+        env:
+          KUBECONFIG_DATA: ${{
+            github.event.inputs.cluster_environment == 'aws-openshift' && secrets.KUBECONFIG_AWS_OPENSHIFT ||
+            github.event.inputs.cluster_environment == 'openshift-local' && secrets.KUBECONFIG_OPENSHIFT_LOCAL ||
+            github.event.inputs.cluster_environment == 'openshift-baremetal' && secrets.KUBECONFIG_OPENSHIFT_BM ||
+            github.event.inputs.cluster_environment == 'gcp' && secrets.KUBECONFIG_GCP ||
+            secrets.KUBECONFIG_LOCAL || secrets.KUBECONFIG_CONTENT
+            }}
+
+      - name: Install Helm v3.15.4
+        run: |
+          if ! helm version 2>/dev/null | grep -q 'v3.15'; then
+            curl -L https://get.helm.sh/helm-v3.15.4-linux-amd64.tar.gz -o helm-v3.15.4-linux-amd64.tar.gz
+            tar -zxvf helm-v3.15.4-linux-amd64.tar.gz
+            sudo mv linux-amd64/helm /usr/local/bin/helm
+            rm -rf linux-amd64 helm-v3.15.4-linux-amd64.tar.gz
+          fi
+          helm version
+
+      - name: Install kubectl v1.31.0
+        run: |
+          if ! kubectl version --client 2>/dev/null | grep -q 'v1.31'; then
+            curl -LO "https://dl.k8s.io/release/v1.31.0/bin/linux/amd64/kubectl"
+            chmod +x kubectl
+            sudo mv kubectl /usr/local/bin/
+          fi
+          kubectl version --client
+
+      - name: Verify kubectl connectivity
+        run: kubectl get nodes
+
+      # ── Pre-clean clients ───────────────────────────────────────────────
+
+      - name: Pre-clean FIO/NVMe on clients
+        shell: bash
+        run: |
+          set -euxo pipefail
+          run_remote() {
+            sshpass -p "${SSH_PASSWORD}" ssh \
+              -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+              "${SSH_USER}@${1}" "bash -s" <<< "$2"
+          }
+          normalized="$(echo "${CLIENT_IPS}" | tr ',' ' ' | xargs -n1 | sort -u | xargs || true)"
+          if [ -z "${normalized}" ]; then exit 0; fi
+          for ip in ${normalized}; do
+            echo "---- ${ip}: kill fio + disconnect NVMe + umount NFS ----"
+            run_remote "${ip}" "set -euxo pipefail;
+              pkill -9 fio || true;
+              for mp in /mnt/test_location/*; do
+                [ -e \"\$mp\" ] || continue;
+                timeout 10 umount -f \"\$mp\" 2>/dev/null || umount -l \"\$mp\" 2>/dev/null || true;
+              done;
+              rm -rf /mnt/test_location/* 2>/dev/null || true;
+              for nqn in \$(nvme list-subsys -o json 2>/dev/null | jq -r '.Subsystems[]?.NQN // empty' | grep lvol || true); do
+                nvme disconnect -n \"\$nqn\" || true;
+              done;
+              mp='${NFS_MOUNTPOINT}';
+              timeout 10 umount -f \"\$mp\" 2>/dev/null || umount -l \"\$mp\" 2>/dev/null || true" || true
+          done
+
+      # ── Cleanup old deployments (BOTH namespaces) ───────────────────────
+
+      - name: Cleanup old CSI deployment (both namespaces)
+        run: |
+          set +e
+          for NAMESPACE in ${NS_C1} ${NS_C2}; do
+            echo "=== Cleaning namespace: ${NAMESPACE} ==="
+            if [ -x "$GITHUB_WORKSPACE/simplyblock-operator/helm-charts/scripts/cleanup-simplyblock.sh" ]; then
+              bash $GITHUB_WORKSPACE/simplyblock-operator/helm-charts/scripts/cleanup-simplyblock.sh -f $NAMESPACE || true
+            fi
+            bash $GITHUB_WORKSPACE/e2e/scripts/cleanup_k8s.sh $NAMESPACE
+          done
+
+          echo "=== Delete Released PVs ==="
+          for pv in $(kubectl get pv --no-headers 2>/dev/null | grep 'simplyblock/' | awk '{print $1}'); do
+            kubectl delete pv "$pv" --ignore-not-found 2>/dev/null || true
+          done
+
+          echo "=== Delete CRDs ==="
+          for crd in $(kubectl get crd -o name 2>/dev/null | grep simplyblock); do
+            crd_name="${crd#customresourcedefinition.apiextensions.k8s.io/}"
+            for cr in $(kubectl get "$crd_name" -A --no-headers -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name 2>/dev/null); do
+              IFS=' ' read -r ns name <<< "$cr"
+              kubectl patch "$crd_name" "$name" -n "$ns" --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
+            done
+            kubectl patch crd "$crd_name" --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
+          done
+          kubectl delete -f $GITHUB_WORKSPACE/simplyblock-operator/helm-charts/charts/simplyblock-operator/crds/ --ignore-not-found --timeout=60s 2>/dev/null || true
+          for crd in $(kubectl get crd -o name 2>/dev/null | grep simplyblock); do
+            crd_name="${crd#customresourcedefinition.apiextensions.k8s.io/}"
+            kubectl patch crd "$crd_name" --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
+            kubectl delete crd "$crd_name" --ignore-not-found --timeout=30s 2>/dev/null || true
+          done
+
+          echo "=== Reset hugepages on ALL worker nodes ==="
+          CLUSTER_ENV="${{ github.event.inputs.cluster_environment || 'local' }}"
+          IFS=',' read -ra NODES <<< "${ALL_WORKERS}"
+          for NODE in "${NODES[@]}"; do
+            echo "Resetting hugepages on $NODE..."
+            if [[ "$CLUSTER_ENV" == *"openshift"* ]]; then
+              oc debug node/"$NODE" -- chroot /host bash -c \
+                "nvme disconnect-all 2>/dev/null; echo 0 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages" 2>/dev/null || true
+              oc debug node/"$NODE" -- chroot /host systemctl restart kubelet 2>/dev/null || true
+            else
+              kubectl debug node/"$NODE" -q --image=busybox:latest -- chroot /host sh -c \
+                "nvme disconnect-all 2>/dev/null; echo 0 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages" 2>/dev/null || true
+              kubectl debug node/"$NODE" -q --image=busybox:latest -- chroot /host sh -c \
+                "systemctl restart kubelet" 2>/dev/null || true
+            fi
+          done
+          echo "=== Cleanup complete ==="
+
+      - name: Cleanup old cert-manager
+        run: |
+          set +e
+          helm uninstall cert-manager -n cert-manager 2>/dev/null || true
+          kubectl delete namespace cert-manager --wait=false 2>/dev/null || true
+          kubectl wait --for=delete namespace/cert-manager --timeout=120s 2>/dev/null || true
+          kubectl delete crd certificaterequests.cert-manager.io certificates.cert-manager.io \
+            challenges.acme.cert-manager.io clusterissuers.cert-manager.io \
+            issuers.cert-manager.io orders.acme.cert-manager.io --ignore-not-found 2>/dev/null || true
+
+      # ── Remove stale labels from ALL workers ────────────────────────────
+
+      - name: Remove stale storagenodeset labels
+        run: |
+          IFS=',' read -ra NODES <<< "${ALL_WORKERS}"
+          for NODE in "${NODES[@]}"; do
+            kubectl label node "$NODE" io.simplyblock.storagenodeset- 2>/dev/null || true
+          done
+
+      # ── Label worker nodes ──────────────────────────────────────────────
+
+      - name: Label all worker nodes
+        run: |
+          CLUSTER_ENV="${{ github.event.inputs.cluster_environment || 'local' }}"
+          IFS=',' read -ra NODES <<< "${ALL_WORKERS}"
+          for NODE in "${NODES[@]}"; do
+            if [ "$CLUSTER_ENV" = "local" ] || [ "$CLUSTER_ENV" = "openshift-local" ]; then
+              kubectl label node "$NODE" topology.kubernetes.io/zone=default --overwrite
+            fi
+            kubectl label node "$NODE" simplyblock.io/role=mgmt-plane --overwrite
+          done
+
+      # ── Create BOTH namespaces ──────────────────────────────────────────
+
+      - name: Create namespaces and set pod-security labels
+        run: |
+          for NS in ${NS_C1} ${NS_C2} minio; do
+            kubectl create namespace ${NS} --dry-run=client -o yaml | kubectl apply -f -
+            kubectl label namespace ${NS} \
+              pod-security.kubernetes.io/enforce=privileged \
+              pod-security.kubernetes.io/warn=privileged \
+              pod-security.kubernetes.io/audit=privileged \
+              --overwrite
+          done
+
+      - name: Create Docker registry secrets in both namespaces
+        run: |
+          for NS in ${NS_C1} ${NS_C2}; do
+            kubectl create secret docker-registry regcred \
+              --docker-server=https://index.docker.io/v1/ \
+              --docker-username=${DOCKER_USER} \
+              --docker-password=${DOCKER_PASSWORD} \
+              --docker-email=a@b.com \
+              -n ${NS} || true
+          done
+        env:
+          DOCKER_USER: ${{ secrets.DOCKER_USER }}
+          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+
+      # ── Deploy MinIO (shared) ───────────────────────────────────────────
+
+      - name: Deploy MinIO for backup tests (shared by both clusters)
+        run: |
+          set -euxo pipefail
+          echo "=== Setting up MinIO ==="
+
+          cat <<'MINIO_EOF' | kubectl apply -f -
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: minio
+            namespace: minio
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: minio
+            template:
+              metadata:
+                labels:
+                  app: minio
+              spec:
+                containers:
+                - name: minio
+                  image: minio/minio
+                  command: ["/bin/sh", "-c", "minio server /data --console-address :9001"]
+                  env:
+                  - name: MINIO_ROOT_USER
+                    value: minioadmin
+                  - name: MINIO_ROOT_PASSWORD
+                    value: minioadmin123
+                  ports:
+                  - containerPort: 9000
+                  - containerPort: 9001
+          MINIO_EOF
+
+          kubectl -n minio expose deploy/minio --port 9000 \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          echo "Waiting for MinIO pod..."
+          for i in $(seq 1 30); do
+            READY=$(kubectl -n minio get pods --no-headers 2>/dev/null | grep -c "Running" || true)
+            if [ "$READY" -ge 1 ]; then echo "MinIO is running"; break; fi
+            echo "MinIO not ready ($i/30)..."; sleep 10
+          done
+
+          # Create backup-credentials in BOTH namespaces
+          for NS in ${NS_C1} ${NS_C2}; do
+            cat <<CREDEOF | kubectl apply -f -
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: backup-credentials
+            namespace: ${NS}
+          type: Opaque
+          stringData:
+            access_key_id: minioadmin
+            secret_access_key: minioadmin123
+          CREDEOF
+          done
+          echo "=== MinIO and backup credentials ready ==="
+
+      - name: Start MinIO trace logging
+        run: |
+          set -euxo pipefail
+          curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o /tmp/mc
+          chmod +x /tmp/mc
+          export PATH="/tmp:$PATH"
+          kubectl -n minio port-forward svc/minio 9000:9000 &
+          echo "MC_PORT_FWD_PID=$!" >> "$GITHUB_ENV"
+          sleep 3
+          mc alias set myminio http://localhost:9000 minioadmin minioadmin123 2>/dev/null || true
+          MINIO_TRACE_LOG="/tmp/minio-trace-${{ github.run_id }}.log"
+          echo "MINIO_TRACE_LOG=${MINIO_TRACE_LOG}" >> "$GITHUB_ENV"
+          nohup mc admin trace -v --all myminio > "${MINIO_TRACE_LOG}" 2>&1 &
+          echo "MC_TRACE_PID=$!" >> "$GITHUB_ENV"
+
+      # ── Install cert-manager (TLS) ─────────────────────────────────────
+
+      - name: Install cert-manager
+        if: ${{ github.event.inputs.tls_enabled == 'true' }}
+        run: |
+          helm repo add jetstack https://charts.jetstack.io
+          helm repo update
+          helm upgrade --install cert-manager jetstack/cert-manager \
+            --namespace cert-manager --create-namespace \
+            --version v1.13.0 --set installCRDs=true
+          kubectl wait --for=condition=Ready pods --all -n cert-manager --timeout=120s
+
+      # ── Install Helm Chart (operator) in C1 namespace ───────────────────
+
+      - name: Install Helm Chart for simplyblock-operator (C1 namespace)
+        run: |
+          set -euxo pipefail
+          cd $GITHUB_WORKSPACE/simplyblock-operator/helm-charts/charts/simplyblock-operator/
+
+          TLS_FLAGS=""
+          if [ "${{ github.event.inputs.tls_enabled }}" = "true" ]; then
+            TLS_FLAGS="--set tls.enabled=true --set tls.mutual_enabled=true"
+          fi
+
+          CSI_FLAGS=""
+          if [ -n "${{ github.event.inputs.csi_repository }}" ]; then
+            CSI_FLAGS="$CSI_FLAGS --set image.csi.repository=${{ github.event.inputs.csi_repository }}"
+          fi
+          if [ -n "${{ github.event.inputs.csi_tag }}" ]; then
+            CSI_FLAGS="$CSI_FLAGS --set image.csi.tag=${{ github.event.inputs.csi_tag }}"
+          fi
+
+          helm upgrade --install spdk-csi ./ \
+            --namespace ${NS_C1} \
+            --create-namespace \
+            --debug \
+            --timeout 10m \
+            --set controlplane.enabled=true \
+            --set operator.enabled=true \
+            --set controlplane.csiHostpathDriver.enabled=true \
+            --set controlplane.storageclass.name=local-hostpath \
+            --set image.simplyblock.repository="${{ github.event.inputs.simplyblock_repository || 'public.ecr.aws/simply-block/simplyblock' }}" \
+            --set image.simplyblock.tag="${{ github.event.inputs.simplyblock_image }}" \
+            --set image.operator.repository="${{ github.event.inputs.operator_repository || 'simplyblock/simplyblock-operator' }}" \
+            --set image.operator.tag="${{ github.event.inputs.operator_tag || 'main' }}" \
+            --set csiConfig.simplybk.ip="http://simplyblock-webappapi.${NS_C1}:5000" \
+            --set prometheus.server.persistentVolume.storageClass=local-hostpath \
+            --set controlplane.observability.enabled=true \
+            --set opensearch.persistence.storageClass=local-hostpath \
+            --set controlplane.observability.minio.storageClass=local-hostpath \
+            $TLS_FLAGS $CSI_FLAGS
+
+      # ── Install Helm Chart (operator) in C2 namespace ───────────────────
+
+      - name: Install Helm Chart for simplyblock-operator (C2 namespace)
+        run: |
+          set -euxo pipefail
+          cd $GITHUB_WORKSPACE/simplyblock-operator/helm-charts/charts/simplyblock-operator/
+
+          TLS_FLAGS=""
+          if [ "${{ github.event.inputs.tls_enabled }}" = "true" ]; then
+            TLS_FLAGS="--set tls.enabled=true --set tls.mutual_enabled=true"
+          fi
+
+          CSI_FLAGS=""
+          if [ -n "${{ github.event.inputs.csi_repository }}" ]; then
+            CSI_FLAGS="$CSI_FLAGS --set image.csi.repository=${{ github.event.inputs.csi_repository }}"
+          fi
+          if [ -n "${{ github.event.inputs.csi_tag }}" ]; then
+            CSI_FLAGS="$CSI_FLAGS --set image.csi.tag=${{ github.event.inputs.csi_tag }}"
+          fi
+
+          helm upgrade --install spdk-csi-c2 ./ \
+            --namespace ${NS_C2} \
+            --create-namespace \
+            --debug \
+            --timeout 10m \
+            --set controlplane.enabled=true \
+            --set operator.enabled=true \
+            --set controlplane.csiHostpathDriver.enabled=true \
+            --set controlplane.storageclass.name=local-hostpath-c2 \
+            --set image.simplyblock.repository="${{ github.event.inputs.simplyblock_repository || 'public.ecr.aws/simply-block/simplyblock' }}" \
+            --set image.simplyblock.tag="${{ github.event.inputs.simplyblock_image }}" \
+            --set image.operator.repository="${{ github.event.inputs.operator_repository || 'simplyblock/simplyblock-operator' }}" \
+            --set image.operator.tag="${{ github.event.inputs.operator_tag || 'main' }}" \
+            --set csiConfig.simplybk.ip="http://simplyblock-webappapi.${NS_C2}:5000" \
+            --set prometheus.server.persistentVolume.storageClass=local-hostpath \
+            --set controlplane.observability.enabled=true \
+            --set opensearch.persistence.storageClass=local-hostpath \
+            --set controlplane.observability.minio.storageClass=local-hostpath \
+            $TLS_FLAGS $CSI_FLAGS
+
+      # ── Patch service accounts + imagePullSecrets in BOTH namespaces ────
+
+      - name: Patch service accounts with imagePullSecrets (both namespaces)
+        run: |
+          for NS in ${NS_C1} ${NS_C2}; do
+            echo "=== Patching SAs in ${NS} ==="
+            for sa in $(kubectl get serviceaccounts -n ${NS} --no-headers 2>/dev/null | awk '{print $1}'); do
+              kubectl patch serviceaccount "$sa" -n ${NS} \
+                --patch '{"imagePullSecrets": [{"name": "regcred"}]}' || true
+            done
+            for deploy in $(kubectl get deployments -n ${NS} --no-headers -o custom-columns=:metadata.name 2>/dev/null); do
+              kubectl patch deployment "$deploy" -n ${NS} \
+                --type=merge -p '{"spec":{"template":{"spec":{"imagePullSecrets":[{"name":"regcred"}]}}}}' || true
+            done
+          done
+
+      # ── Wait for operator pods in BOTH namespaces ───────────────────────
+
+      - name: Wait for operator pods to be ready
+        run: |
+          for NS in ${NS_C1} ${NS_C2}; do
+            echo "=== Waiting for operator in ${NS} ==="
+            for i in $(seq 1 60); do
+              POD=$(kubectl -n ${NS} get pods \
+                -l app=simplyblock-admin-control \
+                -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) || true
+              if [ -n "$POD" ]; then
+                PHASE=$(kubectl -n ${NS} get pod "$POD" \
+                  -o jsonpath='{.status.phase}' 2>/dev/null) || true
+                if [ "$PHASE" = "Running" ]; then
+                  echo "Operator pod $POD is Running in ${NS}"
+                  break
+                fi
+              fi
+              echo "Waiting ($i/60)..."
+              sleep 10
+            done
+          done
+
+      # ── Apply StorageCluster + Pool + StorageNodeSet CRDs ───────────────
+
+      - name: Apply CRDs for Cluster-1 (C1)
+        run: |
+          IFC_NAMES="${{ github.event.inputs.ifc_names || 'br-ex:enp2s0f0' }}"
+          MGMT_IFC="${IFC_NAMES%%:*}"
+          DATA_NICS="${IFC_NAMES#*:}"
+          MAX_LVOL="${{ github.event.inputs.max_lvol || '30' }}"
+          SB_REPO="${{ github.event.inputs.simplyblock_repository || 'public.ecr.aws/simply-block/simplyblock' }}"
+          SB_TAG="${{ github.event.inputs.simplyblock_image }}"
+          SPDK_IMAGE="${{ github.event.inputs.spdk_image }}"
+          OPENSHIFT_CLUSTER="${{ (github.event.inputs.cluster_environment == 'aws-openshift' || github.event.inputs.cluster_environment == 'openshift-local' || github.event.inputs.cluster_environment == 'openshift-baremetal') && 'true' || 'false' }}"
+          CORE_PERCENTAGE="${{ github.event.inputs.cluster_environment == 'openshift-baremetal' && '50' || github.event.inputs.cluster_environment == 'local' && '35' || '65' }}"
+          SKIP_KUBELET_CONFIG="${{ (github.event.inputs.cluster_environment == 'aws-openshift' || github.event.inputs.cluster_environment == 'openshift-local' || github.event.inputs.cluster_environment == 'openshift-baremetal') && 'false' || 'true' }}"
+          FORCE_FORMAT_4K="${{ (github.event.inputs.cluster_environment == 'aws-openshift' || github.event.inputs.cluster_environment == 'openshift-local' || github.event.inputs.cluster_environment == 'openshift-baremetal') && 'true' || 'false' }}"
+          DRIVE_SIZE_RANGE="${{ github.event.inputs.cluster_environment == 'openshift-baremetal' && '1500G-2000G' || '1.7T-2T' }}"
+
+          # Build C1 worker nodes YAML
+          WORKER_YAML=""
+          IFS=',' read -ra C1_NODES <<< "${C1_WORKERS}"
+          for NODE in "${C1_NODES[@]}"; do
+            WORKER_YAML="${WORKER_YAML}    - ${NODE}"$'\n'
+          done
+
+          BACKUP_SPEC="  backup:
+              credentialsSecretRef:
+                name: backup-credentials
+              localEndpoint: http://minio.minio.svc.cluster.local:9000
+              localTesting: true
+              secondaryTarget: 0
+              snapshotBackups: true
+              withCompression: false"
+
+          echo "=== Applying C1 CRDs in ${NS_C1} ==="
+          cat <<EOF | kubectl apply -f -
+          apiVersion: storage.simplyblock.io/v1alpha1
+          kind: StorageCluster
+          metadata:
+            name: simplyblock-cluster
+            namespace: ${NS_C1}
+          spec:
+            fabricType: tcp
+            isSingleNode: false
+            enableNodeAffinity: true
+            strictNodeAntiAffinity: false
+            stripe:
+              dataChunks: ${NDCS}
+              parityChunks: ${NPCS}
+            warningThreshold:
+              capacity: 95
+              provisionedCapacity: 97
+            criticalThreshold:
+              capacity: 96
+              provisionedCapacity: 98
+          ${BACKUP_SPEC}
+          ---
+          apiVersion: storage.simplyblock.io/v1alpha1
+          kind: StoragePool
+          metadata:
+            name: simplyblock-pool
+            namespace: ${NS_C1}
+          spec:
+            clusterName: simplyblock-cluster
+          ---
+          apiVersion: storage.simplyblock.io/v1alpha1
+          kind: StorageNodeSet
+          metadata:
+            name: simplyblock-node
+            namespace: ${NS_C1}
+          spec:
+            clusterName: simplyblock-cluster
+            clusterImage: "${SB_REPO}:${SB_TAG}"
+            spdkImage: "${SPDK_IMAGE}"
+            spdkProxyImage: "${SB_REPO}:${SB_TAG}"
+            driveSizeRange: "${DRIVE_SIZE_RANGE}"
+            mgmtIfname: ${MGMT_IFC}
+            dataIfname:
+              - ${DATA_NICS}
+            maxSubsystemCount: ${MAX_LVOL}
+            partitions: ${PARTITIONS}
+            corePercentage: ${CORE_PERCENTAGE}
+            journalManager:
+              count: ${JM_COUNT}
+              percentPerDevice: 3
+            skipKubeletConfiguration: ${SKIP_KUBELET_CONFIG}
+            enableCpuTopology: true
+            openShiftCluster: ${OPENSHIFT_CLUSTER}
+            ubuntuHost: false
+            forceFormat4K: ${FORCE_FORMAT_4K}
+            workerNodes:
+          ${WORKER_YAML}
+          EOF
+          sleep 10
+        env:
+          NDCS: ${{ env.NDCS }}
+          NPCS: ${{ env.NPCS }}
+
+      - name: Apply CRDs for Cluster-2 (C2)
+        run: |
+          IFC_NAMES="${{ github.event.inputs.ifc_names || 'br-ex:enp2s0f0' }}"
+          MGMT_IFC="${IFC_NAMES%%:*}"
+          DATA_NICS="${IFC_NAMES#*:}"
+          MAX_LVOL="${{ github.event.inputs.max_lvol || '30' }}"
+          SB_REPO="${{ github.event.inputs.simplyblock_repository || 'public.ecr.aws/simply-block/simplyblock' }}"
+          SB_TAG="${{ github.event.inputs.simplyblock_image }}"
+          SPDK_IMAGE="${{ github.event.inputs.spdk_image }}"
+          OPENSHIFT_CLUSTER="${{ (github.event.inputs.cluster_environment == 'aws-openshift' || github.event.inputs.cluster_environment == 'openshift-local' || github.event.inputs.cluster_environment == 'openshift-baremetal') && 'true' || 'false' }}"
+          CORE_PERCENTAGE="${{ github.event.inputs.cluster_environment == 'openshift-baremetal' && '50' || github.event.inputs.cluster_environment == 'local' && '35' || '65' }}"
+          SKIP_KUBELET_CONFIG="${{ (github.event.inputs.cluster_environment == 'aws-openshift' || github.event.inputs.cluster_environment == 'openshift-local' || github.event.inputs.cluster_environment == 'openshift-baremetal') && 'false' || 'true' }}"
+          FORCE_FORMAT_4K="${{ (github.event.inputs.cluster_environment == 'aws-openshift' || github.event.inputs.cluster_environment == 'openshift-local' || github.event.inputs.cluster_environment == 'openshift-baremetal') && 'true' || 'false' }}"
+          DRIVE_SIZE_RANGE="${{ github.event.inputs.cluster_environment == 'openshift-baremetal' && '1500G-2000G' || '1.7T-2T' }}"
+
+          # Build C2 worker nodes YAML
+          WORKER_YAML=""
+          IFS=',' read -ra C2_NODES <<< "${C2_WORKERS}"
+          for NODE in "${C2_NODES[@]}"; do
+            WORKER_YAML="${WORKER_YAML}    - ${NODE}"$'\n'
+          done
+
+          BACKUP_SPEC="  backup:
+              credentialsSecretRef:
+                name: backup-credentials
+              localEndpoint: http://minio.minio.svc.cluster.local:9000
+              localTesting: true
+              secondaryTarget: 0
+              snapshotBackups: true
+              withCompression: false"
+
+          echo "=== Applying C2 CRDs in ${NS_C2} ==="
+          cat <<EOF | kubectl apply -f -
+          apiVersion: storage.simplyblock.io/v1alpha1
+          kind: StorageCluster
+          metadata:
+            name: simplyblock-cluster
+            namespace: ${NS_C2}
+          spec:
+            fabricType: tcp
+            isSingleNode: false
+            enableNodeAffinity: true
+            strictNodeAntiAffinity: false
+            stripe:
+              dataChunks: ${NDCS}
+              parityChunks: ${NPCS}
+            warningThreshold:
+              capacity: 95
+              provisionedCapacity: 97
+            criticalThreshold:
+              capacity: 96
+              provisionedCapacity: 98
+          ${BACKUP_SPEC}
+          ---
+          apiVersion: storage.simplyblock.io/v1alpha1
+          kind: StoragePool
+          metadata:
+            name: simplyblock-pool
+            namespace: ${NS_C2}
+          spec:
+            clusterName: simplyblock-cluster
+          ---
+          apiVersion: storage.simplyblock.io/v1alpha1
+          kind: StorageNodeSet
+          metadata:
+            name: simplyblock-node
+            namespace: ${NS_C2}
+          spec:
+            clusterName: simplyblock-cluster
+            clusterImage: "${SB_REPO}:${SB_TAG}"
+            spdkImage: "${SPDK_IMAGE}"
+            spdkProxyImage: "${SB_REPO}:${SB_TAG}"
+            driveSizeRange: "${DRIVE_SIZE_RANGE}"
+            mgmtIfname: ${MGMT_IFC}
+            dataIfname:
+              - ${DATA_NICS}
+            maxSubsystemCount: ${MAX_LVOL}
+            partitions: ${PARTITIONS}
+            corePercentage: ${CORE_PERCENTAGE}
+            journalManager:
+              count: ${JM_COUNT}
+              percentPerDevice: 3
+            skipKubeletConfiguration: ${SKIP_KUBELET_CONFIG}
+            enableCpuTopology: true
+            openShiftCluster: ${OPENSHIFT_CLUSTER}
+            ubuntuHost: false
+            forceFormat4K: ${FORCE_FORMAT_4K}
+            workerNodes:
+          ${WORKER_YAML}
+          EOF
+          sleep 10
+        env:
+          NDCS: ${{ env.NDCS }}
+          NPCS: ${{ env.NPCS }}
+
+      # ── Patch SAs again after CRDs create new SAs ───────────────────────
+
+      - name: Patch service accounts (post-CRD)
+        run: |
+          for NS in ${NS_C1} ${NS_C2}; do
+            for sa in $(kubectl get serviceaccounts -n ${NS} --no-headers 2>/dev/null | awk '{print $1}'); do
+              kubectl patch serviceaccount "$sa" -n ${NS} \
+                --patch '{"imagePullSecrets": [{"name": "regcred"}]}' || true
+            done
+            for deploy in $(kubectl get deployments -n ${NS} --no-headers -o custom-columns=:metadata.name 2>/dev/null); do
+              kubectl patch deployment "$deploy" -n ${NS} \
+                --type=merge -p '{"spec":{"template":{"spec":{"imagePullSecrets":[{"name":"regcred"}]}}}}' || true
+            done
+          done
+
+      # ── Wait for storage daemonsets + patch ─────────────────────────────
+
+      - name: Wait for storage daemonsets and restart (both namespaces)
+        run: |
+          for NS in ${NS_C1} ${NS_C2}; do
+            echo "=== Waiting for storage daemonset in ${NS} ==="
+            DS_NAME="simplyblock-storage-node-ds-simplyblock-cluster"
+            for i in $(seq 1 60); do
+              if kubectl get daemonset ${DS_NAME} -n ${NS} &>/dev/null; then
+                echo "Daemonset found in ${NS}, waiting for rollout..."
+                kubectl rollout status daemonset ${DS_NAME} -n ${NS} --timeout=300s || true
+                kubectl rollout restart -n ${NS} ds ${DS_NAME}
+                break
+              fi
+              echo "DS not found in ${NS} ($i/60)..."
+              sleep 10
+            done
+
+            # Patch SAs for storage node SA
+            for sa in $(kubectl get serviceaccounts -n ${NS} --no-headers 2>/dev/null | awk '{print $1}'); do
+              kubectl patch serviceaccount "$sa" -n ${NS} \
+                --patch '{"imagePullSecrets": [{"name": "regcred"}]}' || true
+            done
+          done
+
+      # ── Wait for BOTH clusters to become active ─────────────────────────
+
+      - name: Wait for Cluster-1 to become active
+        timeout-minutes: 80
+        run: |
+          NAMESPACE=${NS_C1}
+          MAX_POLL=300
+          echo "=== Waiting for C1 cluster active in ${NAMESPACE} ==="
+
+          ADMIN_POD=""
+          for i in $(seq 1 60); do
+            ADMIN_POD=$(kubectl -n $NAMESPACE get pods \
+              -l app=simplyblock-admin-control \
+              -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) || true
+            if [ -n "$ADMIN_POD" ]; then
+              PHASE=$(kubectl -n $NAMESPACE get pod "$ADMIN_POD" -o jsonpath='{.status.phase}' 2>/dev/null) || true
+              if [ "$PHASE" = "Running" ]; then break; fi
+            fi
+            sleep 10
+          done
+
+          IFS=',' read -ra C1_NODES <<< "${C1_WORKERS}"
+          EXPECTED_SNODES=${#C1_NODES[@]}
+          for i in $(seq 1 $MAX_POLL); do
+            READY=$(kubectl -n $NAMESPACE get pods -l role=simplyblock-storage-node --no-headers 2>/dev/null | grep -c "Running" || true)
+            if [ "$READY" -ge "$EXPECTED_SNODES" ]; then break; fi
+            echo "snode-spdk: $READY/$EXPECTED_SNODES ($i/$MAX_POLL)"
+            sleep 10
+          done
+
+          for i in $(seq 1 $MAX_POLL); do
+            ADMIN_POD=$(kubectl -n $NAMESPACE get pods \
+              -l app=simplyblock-admin-control \
+              -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) || true
+            OUTPUT=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- sbctl cluster list 2>&1) || true
+            if echo "$OUTPUT" | grep -qi "active"; then
+              echo "C1 cluster is active!"
+              CLUSTER_ID=$(echo "$OUTPUT" | awk 'NR==4{print $2}')
+              CLUSTER_SECRET=$(echo "$OUTPUT" | awk 'NR==4{print $NF}')
+              if [ -z "$CLUSTER_ID" ] || [ "$CLUSTER_ID" = "+" ]; then
+                JSON_OUT=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- sbctl cluster list --json 2>&1) || true
+                CLUSTER_ID=$(echo "$JSON_OUT" | jq -r '.[0].id // .[0].uuid // empty')
+                CLUSTER_SECRET=$(echo "$JSON_OUT" | jq -r '.[0].secret // empty')
+              fi
+              echo "C1_CLUSTER_ID=${CLUSTER_ID}" >> $GITHUB_ENV
+              echo "C1_CLUSTER_SECRET=${CLUSTER_SECRET}" >> $GITHUB_ENV
+              echo "CLUSTER_ID=${CLUSTER_ID}" >> $GITHUB_ENV
+              echo "CLUSTER_SECRET=${CLUSTER_SECRET}" >> $GITHUB_ENV
+              exit 0
+            fi
+            echo "C1 not active ($i/$MAX_POLL)..."
+            sleep 10
+          done
+          echo "ERROR: C1 cluster did not become active"
+          exit 1
+
+      - name: Wait for Cluster-2 to become active
+        timeout-minutes: 80
+        run: |
+          NAMESPACE=${NS_C2}
+          MAX_POLL=300
+          echo "=== Waiting for C2 cluster active in ${NAMESPACE} ==="
+
+          ADMIN_POD=""
+          for i in $(seq 1 60); do
+            ADMIN_POD=$(kubectl -n $NAMESPACE get pods \
+              -l app=simplyblock-admin-control \
+              -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) || true
+            if [ -n "$ADMIN_POD" ]; then
+              PHASE=$(kubectl -n $NAMESPACE get pod "$ADMIN_POD" -o jsonpath='{.status.phase}' 2>/dev/null) || true
+              if [ "$PHASE" = "Running" ]; then break; fi
+            fi
+            sleep 10
+          done
+
+          IFS=',' read -ra C2_NODES <<< "${C2_WORKERS}"
+          EXPECTED_SNODES=${#C2_NODES[@]}
+          for i in $(seq 1 $MAX_POLL); do
+            READY=$(kubectl -n $NAMESPACE get pods -l role=simplyblock-storage-node --no-headers 2>/dev/null | grep -c "Running" || true)
+            if [ "$READY" -ge "$EXPECTED_SNODES" ]; then break; fi
+            echo "snode-spdk: $READY/$EXPECTED_SNODES ($i/$MAX_POLL)"
+            sleep 10
+          done
+
+          for i in $(seq 1 $MAX_POLL); do
+            ADMIN_POD=$(kubectl -n $NAMESPACE get pods \
+              -l app=simplyblock-admin-control \
+              -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) || true
+            OUTPUT=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- sbctl cluster list 2>&1) || true
+            if echo "$OUTPUT" | grep -qi "active"; then
+              echo "C2 cluster is active!"
+              C2_ID=$(echo "$OUTPUT" | awk 'NR==4{print $2}')
+              C2_SECRET=$(echo "$OUTPUT" | awk 'NR==4{print $NF}')
+              if [ -z "$C2_ID" ] || [ "$C2_ID" = "+" ]; then
+                JSON_OUT=$(kubectl -n $NAMESPACE exec "$ADMIN_POD" -- sbctl cluster list --json 2>&1) || true
+                C2_ID=$(echo "$JSON_OUT" | jq -r '.[0].id // .[0].uuid // empty')
+                C2_SECRET=$(echo "$JSON_OUT" | jq -r '.[0].secret // empty')
+              fi
+              echo "C2_CLUSTER_ID=${C2_ID}" >> $GITHUB_ENV
+              echo "C2_CLUSTER_SECRET=${C2_SECRET}" >> $GITHUB_ENV
+              echo "CLUSTER2_ID=${C2_ID}" >> $GITHUB_ENV
+              echo "CLUSTER2_SECRET=${C2_SECRET}" >> $GITHUB_ENV
+              exit 0
+            fi
+            echo "C2 not active ($i/$MAX_POLL)..."
+            sleep 10
+          done
+          echo "ERROR: C2 cluster did not become active"
+          exit 1
+
+      # ── Patch fluent-bit + CSI daemonsets ───────────────────────────────
+
+      - name: Patch fluent-bit and CSI daemonsets (both namespaces)
+        run: |
+          for NS in ${NS_C1} ${NS_C2}; do
+            if kubectl get daemonset simplyblock-fluent-bit -n ${NS} &>/dev/null; then
+              kubectl patch daemonset simplyblock-fluent-bit -n ${NS} \
+                --type=merge -p '{"spec":{"template":{"spec":{"affinity":null}}}}' || true
+            fi
+            if kubectl get daemonset simplyblock-csi-node -n ${NS} &>/dev/null; then
+              kubectl patch daemonset simplyblock-csi-node -n ${NS} \
+                --type=merge -p '{"spec":{"template":{"spec":{"tolerations":[{"key":"node-role","operator":"Equal","value":"client","effect":"NoSchedule"}]}}}}' || true
+            fi
+          done
+
+      # ── Run tests ──────────────────────────────────────────────────────
+
+      - name: Set RUN_DIR_FILE
+        run: echo "RUN_DIR_FILE=/tmp/sb_k8s_run_dir_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}.txt" >> "$GITHUB_ENV"
+
+      - name: Record Test Start Time
+        run: echo "TEST_START_TIME=$(date +%s)" >> $GITHUB_ENV
+
+      - name: Setup and Run Cross-Cluster Restore Test
+        run: |
+          set -o pipefail
+          cd $GITHUB_WORKSPACE/e2e
+          python3 -m venv myenv
+          source myenv/bin/activate
+          python3 -m pip install -r requirements.txt
+
+          export CLUSTER_ID="${{ env.C1_CLUSTER_ID }}"
+          export CLUSTER_SECRET="${{ env.C1_CLUSTER_SECRET }}"
+          export CLUSTER2_ID="${{ env.C2_CLUSTER_ID }}"
+          export CLUSTER2_SECRET="${{ env.C2_CLUSTER_SECRET }}"
+          export CLUSTER2_NAMESPACE="${NS_C2}"
+          export K8S_LOCAL_KUBECTL=1
+          export SBCLI_CMD=sbctl
+
+          python3 -u e2e.py \
+            --testname TestBackupCrossClusterRestore \
+            --ndcs $NDCS --npcs $NPCS --bs $BS --chunk_bs $CHUNK_BS \
+            --run_k8s True --run_ha true 2>&1 | tee output.log
+        env:
+          NDCS: ${{ env.NDCS }}
+          NPCS: ${{ env.NPCS }}
+          BS: ${{ env.BS }}
+          CHUNK_BS: ${{ env.CHUNK_BS }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          CLIENT_IP: ${{ github.event.inputs.client_ips }}
+          SKIP_NFS: ${{ github.event.inputs.skip_nfs || 'false' }}
+          RUN_DIR_FILE: ${{ env.RUN_DIR_FILE }}
+
+      # ── Post-test: logs, summary, notifications ─────────────────────────
+
+      - name: Export RUN_BASE_DIR
+        if: always()
+        run: |
+          test -f "${RUN_DIR_FILE}" || exit 0
+          RUN_BASE_DIR="$(cat "${RUN_DIR_FILE}" | tr -d '\r\n')"
+          [[ -n "${RUN_BASE_DIR}" ]] && echo "RUN_BASE_DIR=${RUN_BASE_DIR}" >> "$GITHUB_ENV" || true
+
+      - name: Copy raw output.log to NFS
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          out_log="$GITHUB_WORKSPACE/e2e/output.log"
+          [ -f "${out_log}" ] || exit 0
+          if [ -n "${RUN_BASE_DIR:-}" ] && [ -d "${RUN_BASE_DIR}" ]; then
+            cp "${out_log}" "${RUN_BASE_DIR}/github_raw_output.log" || true
+          fi
+
+      - name: Record Test End Time
+        if: always()
+        run: echo "TEST_END_TIME=$(date +%s)" >> $GITHUB_ENV
+
+      - name: Calculate Total Time Taken
+        if: always()
+        run: |
+          TEST_TIME=$(($TEST_END_TIME - $TEST_START_TIME))
+          echo "TEST_TIME_HOURS=$(($TEST_TIME / 3600))" >> $GITHUB_ENV
+          echo "TEST_TIME_MINS=$((($TEST_TIME % 3600) / 60))" >> $GITHUB_ENV
+          echo "TEST_TIME_SECS=$(($TEST_TIME % 60))" >> $GITHUB_ENV
+
+      - name: Upload test output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cross-cluster-restore-output
+          path: |
+            e2e/output.log
+          if-no-files-found: warn
+
+      - name: Write Job Summary
+        if: always()
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          out_log="$GITHUB_WORKSPACE/e2e/output.log"
+          dur_fmt="${TEST_TIME_HOURS:-0}h ${TEST_TIME_MINS:-0}m ${TEST_TIME_SECS:-0}s"
+
+          # --- Parse test counts ---
+          total_cases=0; passed_cases=0; failed_cases=0; skipped_cases=0
+          if [[ -f "${out_log}" ]]; then
+            v="$(grep -m1 'Number of Total Cases:'  "${out_log}" | grep -oE '[0-9]+$' 2>/dev/null || true)"; [[ "${v}" =~ ^[0-9]+$ ]] && total_cases="${v}"
+            v="$(grep -m1 'Number of Passed Cases:'  "${out_log}" | grep -oE '[0-9]+$' 2>/dev/null || true)"; [[ "${v}" =~ ^[0-9]+$ ]] && passed_cases="${v}"
+            v="$(grep -m1 'Number of Failed Cases:'  "${out_log}" | grep -oE '[0-9]+$' 2>/dev/null || true)"; [[ "${v}" =~ ^[0-9]+$ ]] && failed_cases="${v}"
+            v="$(grep -m1 'Number of Skipped Cases:' "${out_log}" | grep -oE '[0-9]+$' 2>/dev/null || true)"; [[ "${v}" =~ ^[0-9]+$ ]] && skipped_cases="${v}"
+          fi
+
+          pass_pct=0; fail_pct=0; skip_pct=0
+          if [[ "${total_cases}" -gt 0 ]]; then
+            pass_pct=$(( (passed_cases  * 100) / total_cases ))
+            fail_pct=$(( (failed_cases  * 100) / total_cases ))
+            skip_pct=$(( (skipped_cases * 100) / total_cases ))
+          fi
+
+          # --- Parse per-test status ---
+          test_details_table=""
+          if [[ -f "${out_log}" ]]; then
+            while IFS= read -r line; do
+              clean="$(printf '%s' "${line}" | sed 's/\x1b\[[0-9;]*m//g')"
+              test_name="$(printf '%s' "${clean}" | grep -oE 'Test[A-Za-z0-9_]+' | head -n1 || true)"
+              [[ -z "${test_name}" ]] && continue
+              if   printf '%s' "${clean}" | grep -qi 'PASSED';  then icon="✅"; status="PASSED"
+              elif printf '%s' "${clean}" | grep -qi 'FAILED';  then icon="❌"; status="FAILED"
+              elif printf '%s' "${clean}" | grep -qi 'SKIPPED'; then icon="⏭"; status="SKIPPED"
+              else continue
+              fi
+              test_details_table+="| \`${test_name}\` | ${icon} ${status} |"$'\n'
+            done < <(grep -iE 'PASSED CASE|FAILED CASE|SKIPPED CASE' "${out_log}" 2>/dev/null || true)
+          fi
+
+          # --- Failure reason ---
+          failure_reason=""
+          if [[ -f "${out_log}" ]]; then
+            multi="$(grep 'MultipleExceptions:' "${out_log}" | sed 's/\x1b\[[0-9;]*m//g' || true)"
+            if [[ -n "${multi}" ]]; then
+              failure_reason="${multi}"
+            elif grep -Eqi 'Traceback \(most recent call last\)|Exception:|AssertionError|Input/output error' "${out_log}"; then
+              failure_reason="$(grep -Ei 'Traceback \(most recent call last\)|Exception:|AssertionError|Input/output error' "${out_log}" | tail -n 3 | sed 's/\x1b\[[0-9;]*m//g' || true)"
+            fi
+          fi
+
+          # --- Overall result ---
+          conclusion="✅ SUCCESS"
+          if [[ "${{ job.status }}" != "success" ]]; then
+            conclusion="❌ FAILED"
+          fi
+
+          {
+            echo "## SimplyBlock K8s Cross-Cluster Restore Test Summary"
+            echo ""
+            echo "**Result:** ${conclusion} &nbsp;|&nbsp; **Duration:** ${dur_fmt}"
+            echo ""
+
+            echo "### Test Results"
+            echo "| | Count | % |"
+            echo "|---|---|---|"
+            echo "| ✅ Passed  | ${passed_cases}  | ${pass_pct}% |"
+            echo "| ❌ Failed  | ${failed_cases}  | ${fail_pct}% |"
+            echo "| ⏭ Skipped | ${skipped_cases} | ${skip_pct}% |"
+            echo "| **Total**  | **${total_cases}** | |"
+            echo ""
+
+            if [[ -n "${test_details_table}" ]]; then
+              echo "### Test Case Details"
+              echo "| Test | Result |"
+              echo "|---|---|"
+              printf '%s' "${test_details_table}"
+              echo ""
+            fi
+
+            echo "### Run Info"
+            echo "- **Cluster-1 ID:** \`${C1_CLUSTER_ID}\` (namespace: \`${NS_C1}\`)"
+            echo "- **Cluster-2 ID:** \`${C2_CLUSTER_ID}\` (namespace: \`${NS_C2}\`)"
+            echo "- **C1 workers:** \`${C1_WORKERS}\`"
+            echo "- **C2 workers:** \`${C2_WORKERS}\`"
+            echo "- **NDCS/NPCS:** \`${NDCS}/${NPCS}\`"
+            echo "- **Branch:** \`${{ github.ref_name }}\`"
+            echo ""
+
+            if [[ -n "${failure_reason}" ]]; then
+              echo "### Failure Reason"
+              echo '```'
+              printf '%s\n' "${failure_reason}"
+              echo '```'
+              echo ""
+            fi
+
+            if [[ -f "${out_log}" ]]; then
+              echo "<details><summary>Last 30 lines of output.log</summary>"
+              echo ""
+              echo '```'
+              tail -n 30 "${out_log}" | sed 's/\x1b\[[0-9;]*m//g' || true
+              echo '```'
+              echo "</details>"
+            fi
+
+            if [[ -n "${RUN_BASE_DIR:-}" ]]; then
+              echo ""
+              echo "**Logs:** \`${RUN_BASE_DIR}\`"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Stop MinIO trace
+        if: always()
+        run: |
+          set +e
+          [ -n "${MC_TRACE_PID:-}" ] && kill "${MC_TRACE_PID}" 2>/dev/null || true
+          [ -n "${MC_PORT_FWD_PID:-}" ] && kill "${MC_PORT_FWD_PID}" 2>/dev/null || true
+          if [ -f "${MINIO_TRACE_LOG:-}" ]; then
+            cp "${MINIO_TRACE_LOG}" $GITHUB_WORKSPACE/e2e/minio-trace.log 2>/dev/null || true
+          fi
+          # Cleanup: delete trace logs and kill any orphaned mc trace processes
+          rm -f /tmp/minio-trace-*.log 2>/dev/null || true
+          pkill -f "mc admin trace" 2>/dev/null || true
+
+      - name: Upload MinIO trace log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minio-trace-log
+          path: e2e/minio-trace.log
+          if-no-files-found: ignore
+
+      - name: Cleanup MinIO namespace
+        if: always()
+        run: kubectl delete namespace minio --wait=false 2>/dev/null || true
+
+      - name: Send Slack Notification
+        if: always() && (github.event.inputs.send_slack_notification || 'true') == 'true'
+        shell: bash
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
+          JOB_STATUS: ${{ job.status }}
+          SLACK_RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          SLACK_WF_NAME: "K8s Cross-Cluster Restore"
+          C1_CLUSTER_ID: ${{ env.C1_CLUSTER_ID }}
+          C2_CLUSTER_ID: ${{ env.C2_CLUSTER_ID }}
+          RUN_BASE_DIR: ${{ env.RUN_BASE_DIR }}
+          NDCS: ${{ env.NDCS }}
+          NPCS: ${{ env.NPCS }}
+          TEST_START_TIME: ${{ env.TEST_START_TIME }}
+          TEST_END_TIME: ${{ env.TEST_END_TIME }}
+        run: |
+          python3 - <<'PYEOF'
+          import json, os, re, sys, urllib.request, urllib.error
+
+          bot_token = os.environ.get("SLACK_BOT_TOKEN", "")
+          channel   = os.environ.get("SLACK_CHANNEL_ID", "")
+          webhook   = os.environ.get("SLACK_WEBHOOK_URL", "")
+          if not bot_token and not webhook:
+              print("No SLACK_BOT_TOKEN or SLACK_WEBHOOK_URL set, skipping.")
+              sys.exit(0)
+
+          out_log = os.path.join(os.environ.get("GITHUB_WORKSPACE", "."), "e2e", "output.log")
+          content = open(out_log).read() if os.path.isfile(out_log) else ""
+
+          # --- Counts ---
+          def px(pat):
+              m = re.search(pat, content)
+              return int(m.group(1)) if m else 0
+          total   = px(r'Number of Total Cases:\s*(\d+)')
+          passed  = px(r'Number of Passed Cases:\s*(\d+)')
+          failed  = px(r'Number of Failed Cases:\s*(\d+)')
+          skipped = px(r'Number of Skipped Cases:\s*(\d+)')
+          pass_pct = (passed * 100 // total) if total > 0 else 0
+
+          # --- Per-test results ---
+          ansi = re.compile(r'\x1b\[[0-9;]*m')
+          test_results = []
+          for line in content.splitlines():
+              clean = ansi.sub('', line)
+              if not re.search(r'(PASSED|FAILED|SKIPPED) CASE', clean):
+                  continue
+              m = re.search(r'Test[A-Za-z0-9_]+', clean)
+              if not m:
+                  continue
+              name = m.group(0)
+              if   'PASSED CASE'  in clean: test_results.append(('PASSED',  name))
+              elif 'FAILED CASE'  in clean: test_results.append(('FAILED',  name))
+              elif 'SKIPPED CASE' in clean: test_results.append(('SKIPPED', name))
+
+          # --- Failure reason ---
+          failure_reason = ""
+          multi = [ansi.sub('', l) for l in content.splitlines() if 'MultipleExceptions:' in l]
+          if multi:
+              failure_reason = multi[0][:2000]
+          elif content:
+              exc_lines = [ansi.sub('', l) for l in content.splitlines()
+                           if re.search(r'(Exception:|AssertionError|Input/output error)', l)]
+              if exc_lines:
+                  failure_reason = '\n'.join(exc_lines[-5:])[:2000]
+
+          # --- Env ---
+          s    = int(os.environ.get("TEST_START_TIME", "0") or "0")
+          e    = int(os.environ.get("TEST_END_TIME",   "0") or "0")
+          secs = max(0, e - s) if e >= s > 0 else 0
+          dur  = f"{secs//3600}h {(secs%3600)//60}m {secs%60}s"
+          run_url  = os.environ.get("SLACK_RUN_URL",   "")
+          log_dir  = os.environ.get("RUN_BASE_DIR",    "N/A")
+          c1_id    = os.environ.get("C1_CLUSTER_ID",   "?")
+          c2_id    = os.environ.get("C2_CLUSTER_ID",   "?")
+          ndcs     = os.environ.get("NDCS",            "?")
+          npcs     = os.environ.get("NPCS",            "?")
+          branch   = os.environ.get("GITHUB_REF_NAME", "?")
+          wf_name  = os.environ.get("SLACK_WF_NAME",   "Run")
+          ok       = os.environ.get("JOB_STATUS",      "") == "success"
+
+          icon    = ":white_check_mark:" if ok else ":x:"
+          status  = "SUCCESS" if ok else "FAILURE"
+          mention = "" if ok else " <!channel>"
+
+          lines = [
+              f"{icon} *SimplyBlock {wf_name}*{mention}",
+              f"*Status:* {status}  |  *Duration:* {dur}",
+              f"*Branch:* `{branch}`  |  *NDCS/NPCS:* `{ndcs}/{npcs}`",
+              f"*C1:* `{c1_id}`  |  *C2:* `{c2_id}`",
+              "",
+          ]
+
+          if total > 0:
+              lines += [
+                  f":white_check_mark: *Passed:*  {passed}/{total}  ({pass_pct}%)",
+                  f":x: *Failed:*  {failed}",
+                  f":fast_forward: *Skipped:*  {skipped}",
+              ]
+          else:
+              lines.append("_(test counts not found in log)_")
+
+          if test_results:
+              lines.append("")
+              lines.append("*Test Results:*")
+              icons = {'PASSED': ':white_check_mark:', 'FAILED': ':x:', 'SKIPPED': ':fast_forward:'}
+              for st, nm in test_results:
+                  lines.append(f"{icons.get(st, ':grey_question:')} `{nm}`")
+
+          if failure_reason:
+              lines += ["", "*Failure:*", f"```{failure_reason}```"]
+
+          lines += [
+              "",
+              f":file_folder: *Final Logs:* `{log_dir}`",
+              f":link: *Run:* <{run_url}|View on GitHub>",
+          ]
+
+          # --- Send ---
+          gh_env = os.environ.get("GITHUB_ENV", "")
+          text   = "\n".join(lines)
+
+          if bot_token and channel:
+              api_payload = json.dumps({"channel": channel, "text": text}).encode()
+              req = urllib.request.Request(
+                  "https://slack.com/api/chat.postMessage",
+                  data=api_payload,
+                  headers={
+                      "Content-Type": "application/json; charset=utf-8",
+                      "Authorization": f"Bearer {bot_token}",
+                  },
+              )
+              try:
+                  resp = urllib.request.urlopen(req, timeout=15)
+                  body = json.loads(resp.read().decode())
+                  if body.get("ok"):
+                      ts = body.get("ts", "")
+                      print(f"Slack notification sent via Bot API (ts={ts}).")
+                      if gh_env and ts:
+                          with open(gh_env, "a") as f:
+                              f.write(f"SLACK_MSG_TS={ts}\n")
+                  else:
+                      print(f"WARN: Slack API error: {body.get('error')}", file=sys.stderr)
+              except Exception as exc:
+                  print(f"WARN: Slack Bot API failed: {exc}", file=sys.stderr)
+          elif webhook:
+              req = urllib.request.Request(
+                  webhook,
+                  data=json.dumps({"text": text}).encode(),
+                  headers={"Content-Type": "application/json"},
+              )
+              try:
+                  urllib.request.urlopen(req, timeout=15)
+                  print("Slack notification sent via webhook (no thread support).")
+              except Exception as exc:
+                  print(f"WARN: Slack webhook failed: {exc}", file=sys.stderr)
+          else:
+              print("No SLACK_BOT_TOKEN or SLACK_WEBHOOK_URL set, skipping.")
+          PYEOF
+
+      - name: Calculate log collection timeout
+        if: always()
+        run: |
+          TEST_TIME=$((${TEST_END_TIME:-0} - ${TEST_START_TIME:-0}))
+          LOG_COLLECT_TIMEOUT_MINS=$(( (TEST_TIME + 119) / 120 ))
+          [ "$LOG_COLLECT_TIMEOUT_MINS" -lt 30 ] && LOG_COLLECT_TIMEOUT_MINS=30
+          echo "LOG_COLLECT_TIMEOUT_MINS=$LOG_COLLECT_TIMEOUT_MINS" >> $GITHUB_ENV
+
+      - name: Collect Graylog/OpenSearch logs
+        if: '!cancelled()'
+        timeout-minutes: ${{ fromJSON(env.LOG_COLLECT_TIMEOUT_MINS || '60') }}
+        run: |
+          set +e
+          echo "=== Collecting Graylog/OpenSearch logs ==="
+          NAMESPACE=${NS_C1}
+
+          if [ -z "${TEST_START_TIME}" ] || [ -z "${TEST_END_TIME}" ]; then
+            echo "WARN: TEST_START_TIME or TEST_END_TIME not set, skipping"
+            exit 0
+          fi
+
+          ELAPSED=$((TEST_END_TIME - TEST_START_TIME))
+          if [ "${ELAPSED}" -le 0 ]; then
+            echo "WARN: Elapsed time is zero or negative, skipping"
+            exit 0
+          fi
+
+          WINDOW_START=$((TEST_START_TIME - 3600))
+          WINDOW_END=$((TEST_END_TIME + 3600))
+          TOTAL_SECONDS=$((WINDOW_END - WINDOW_START))
+          TOTAL_HOURS=$(( (TOTAL_SECONDS + 3599) / 3600 ))
+          echo "  Total window: ${TOTAL_HOURS} hour(s) to collect"
+
+          ADMIN_POD=""
+          for i in $(seq 1 12); do
+            ADMIN_POD=$(kubectl -n ${NAMESPACE} get pods \
+              -l app=simplyblock-admin-control \
+              -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) || true
+            if [ -n "${ADMIN_POD}" ]; then
+              PHASE=$(kubectl -n ${NAMESPACE} get pod "${ADMIN_POD}" \
+                -o jsonpath='{.status.phase}' 2>/dev/null) || true
+              [ "${PHASE}" = "Running" ] && break
+              ADMIN_POD=""
+            fi
+            sleep 10
+          done
+          if [ -z "${ADMIN_POD}" ]; then
+            echo "ERROR: No running admin pod found, skipping"
+            exit 0
+          fi
+
+          BUILTIN_SCRIPT="/usr/local/lib/python3.12/site-packages/simplyblock_core/scripts/collect_logs.py"
+          DEPLOYED_SCRIPT="/tmp/collect_logs.py"
+          SCRIPT_SRC="${GITHUB_WORKSPACE}/scripts/collect_logs.py"
+          if [ -f "${SCRIPT_SRC}" ]; then
+            kubectl -n ${NAMESPACE} cp "${SCRIPT_SRC}" "${ADMIN_POD}:${DEPLOYED_SCRIPT}" 2>/dev/null || \
+              echo "WARN: failed to deploy updated collect_logs.py, using built-in version"
+          fi
+          COLLECT_SCRIPT="${BUILTIN_SCRIPT}"
+          if kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- test -f "${DEPLOYED_SCRIPT}" 2>/dev/null; then
+            COLLECT_SCRIPT="${DEPLOYED_SCRIPT}"
+            echo "  Using deployed script: ${COLLECT_SCRIPT}"
+          else
+            echo "  Using built-in script: ${COLLECT_SCRIPT}"
+          fi
+
+          MGMT_IP=$(kubectl get svc -n ${NAMESPACE} | grep graylog | awk '{print $3}')
+          OPENSEARCH_IP=$(kubectl get svc opensearch-cluster-master -n ${NAMESPACE} -o jsonpath='{.spec.clusterIP}' 2>/dev/null || echo "")
+
+          OUTPUT_DIR=""
+          if [ -n "${RUN_BASE_DIR:-}" ] && [ -d "${RUN_BASE_DIR}" ]; then
+            OUTPUT_DIR="${RUN_BASE_DIR}/graylog_collected"
+          else
+            NFS_BASE="${NFS_MOUNTPOINT:-/mnt/nfs_share}"
+            TIMESTAMP=$(date -u "+%Y%m%d-%H%M%S")
+            OUTPUT_DIR="${NFS_BASE}/graylog_collected-${TIMESTAMP}"
+          fi
+          mkdir -p "${OUTPUT_DIR}" 2>/dev/null || true
+
+          epoch_to_iso() {
+            local ep=$1
+            local iso
+            iso=$(date -u -d "@${ep}" "+%Y-%m-%dT%H:%M:%S" 2>/dev/null)
+            if [ -z "${iso}" ]; then
+              iso=$(python3 -c "from datetime import datetime,timezone; print(datetime.fromtimestamp(${ep},tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%S'))")
+            fi
+            echo "${iso}"
+          }
+
+          _CHUNK_STARTS=()
+          _C=${WINDOW_START}
+          while [ ${_C} -lt ${WINDOW_END} ]; do
+            _CHUNK_STARTS+=(${_C})
+            _C=$((_C + 3600))
+          done
+          NUM_CHUNKS=${#_CHUNK_STARTS[@]}
+
+          run_collect() {
+            local iso=$1 mins=$2 outdir=$3 extra_flag=${4:-}
+            local mgmt_ip_to_use="${MGMT_IP}"
+            if [[ "${extra_flag}" == *"--use-opensearch"* ]] && [ -n "${OPENSEARCH_IP}" ]; then
+              mgmt_ip_to_use="${OPENSEARCH_IP}"
+            fi
+            kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- \
+              python3 "${COLLECT_SCRIPT}" \
+                "${iso}" "${mins}" \
+                --mode kubernetes \
+                --namespace "${NAMESPACE}" \
+                --monitoring-secret "${MON_SECRET}" \
+                --output-dir "${outdir}" \
+                ${extra_flag} \
+                ${mgmt_ip_to_use:+--mgmt-ip "${mgmt_ip_to_use}"} \
+                ${C1_CLUSTER_ID:+--cluster-id "${C1_CLUSTER_ID}"} \
+            2>&1
+            local rc=$?
+            [ $rc -ne 0 ] && return $rc
+            local has_content
+            has_content=$(kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- \
+              find "${outdir}" -name "*.tar.gz" -size +0 2>/dev/null | head -1)
+            if [ -z "${has_content}" ]; then
+              echo "  WARN: collect_logs.py succeeded but no .tar.gz output found"
+              return 1
+            fi
+          }
+
+          collect_adaptive() {
+            local start_epoch=$1 end_epoch=$2 outdir=$3 extra_flag=${4:-}
+            local duration=$((end_epoch - start_epoch))
+            local mins=$(( (duration + 59) / 60 ))
+            local iso=$(epoch_to_iso ${start_epoch})
+            if run_collect "${iso}" "${mins}" "${outdir}" "${extra_flag}"; then
+              return 0
+            fi
+            echo "  WARN: ${mins}m window failed, retrying with 5-min sub-windows..."
+            local sub_start=${start_epoch}
+            while [ ${sub_start} -lt ${end_epoch} ]; do
+              local sub_end=$((sub_start + 300))
+              [ ${sub_end} -gt ${end_epoch} ] && sub_end=${end_epoch}
+              local sub_mins=$(( ((sub_end - sub_start) + 59) / 60 ))
+              local sub_iso=$(epoch_to_iso ${sub_start})
+              if ! run_collect "${sub_iso}" "${sub_mins}" "${outdir}" "${extra_flag}"; then
+                echo "  WARN: 5-min window at ${sub_iso} failed, retrying with 1-min windows..."
+                local micro_start=${sub_start}
+                while [ ${micro_start} -lt ${sub_end} ]; do
+                  local micro_end=$((micro_start + 60))
+                  [ ${micro_end} -gt ${sub_end} ] && micro_end=${sub_end}
+                  local micro_mins=$(( ((micro_end - micro_start) + 59) / 60 ))
+                  local micro_iso=$(epoch_to_iso ${micro_start})
+                  run_collect "${micro_iso}" "${micro_mins}" "${outdir}" "${extra_flag}" || \
+                    echo "  WARN: 1-min window at ${micro_iso} also failed"
+                  micro_start=${micro_end}
+                done
+              fi
+              sub_start=${sub_end}
+            done
+          }
+
+          PREFER_OPENSEARCH=""
+          CHUNK=0
+
+          for (( _IDX=NUM_CHUNKS-1; _IDX>=0; _IDX-- )); do
+            CHUNK=$((CHUNK + 1))
+            CHUNK_START=${_CHUNK_STARTS[$_IDX]}
+            CHUNK_END=$((CHUNK_START + 3600))
+            [ ${CHUNK_END} -gt ${WINDOW_END} ] && CHUNK_END=${WINDOW_END}
+            CHUNK_MINUTES=$(( ((CHUNK_END - CHUNK_START) + 59) / 60 ))
+            CHUNK_ISO=$(epoch_to_iso ${CHUNK_START})
+
+            echo ""
+            echo "--- Chunk ${CHUNK}/${NUM_CHUNKS}: ${CHUNK_ISO} for ${CHUNK_MINUTES}m (newest-first) ---"
+
+            POD_OUTPUT_DIR="/tmp/graylog_collect_chunk${CHUNK}"
+            kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- mkdir -p "${POD_OUTPUT_DIR}" 2>/dev/null || true
+
+            if [ -z "${PREFER_OPENSEARCH}" ]; then
+              echo "  Probing OpenSearch availability..."
+              if run_collect "${CHUNK_ISO}" "${CHUNK_MINUTES}" "${POD_OUTPUT_DIR}" "--use-opensearch"; then
+                PREFER_OPENSEARCH=true
+                echo "  OpenSearch works — using it for all chunks"
+              else
+                PREFER_OPENSEARCH=false
+                echo "  OpenSearch unavailable — using Graylog for all chunks"
+                kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- rm -rf "${POD_OUTPUT_DIR}" 2>/dev/null || true
+                kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- mkdir -p "${POD_OUTPUT_DIR}" 2>/dev/null || true
+                collect_adaptive ${CHUNK_START} ${CHUNK_END} "${POD_OUTPUT_DIR}" || \
+                  echo "WARN: Graylog also failed for chunk ${CHUNK}"
+              fi
+            elif [ "${PREFER_OPENSEARCH}" = "true" ]; then
+              collect_adaptive ${CHUNK_START} ${CHUNK_END} "${POD_OUTPUT_DIR}" "--use-opensearch" || {
+                echo "WARN: OpenSearch failed for chunk ${CHUNK}, falling back to Graylog..."
+                collect_adaptive ${CHUNK_START} ${CHUNK_END} "${POD_OUTPUT_DIR}" || \
+                  echo "WARN: Graylog fallback also failed for chunk ${CHUNK}"
+              }
+            else
+              collect_adaptive ${CHUNK_START} ${CHUNK_END} "${POD_OUTPUT_DIR}" || {
+                echo "WARN: Graylog failed for chunk ${CHUNK}, falling back to OpenSearch..."
+                collect_adaptive ${CHUNK_START} ${CHUNK_END} "${POD_OUTPUT_DIR}" "--use-opensearch" || \
+                  echo "WARN: OpenSearch fallback also failed for chunk ${CHUNK}"
+              }
+            fi
+
+            TARBALLS=$(kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- \
+              find "${POD_OUTPUT_DIR}" -name "*.tar.gz" -type f 2>/dev/null) || true
+            if [ -n "${TARBALLS}" ]; then
+              for TB in ${TARBALLS}; do
+                TB_NAME=$(basename "${TB}")
+                echo "  Copying ${TB_NAME}..."
+                kubectl -n ${NAMESPACE} cp "${ADMIN_POD}:${TB}" "${OUTPUT_DIR}/${TB_NAME}" 2>&1 || true
+              done
+              for TB_FILE in "${OUTPUT_DIR}"/*.tar.gz; do
+                [ -f "${TB_FILE}" ] && tar -xzf "${TB_FILE}" -C "${OUTPUT_DIR}/" 2>/dev/null || true
+              done
+            else
+              echo "WARN: No tarballs found for chunk ${CHUNK}"
+            fi
+
+            kubectl -n ${NAMESPACE} exec "${ADMIN_POD}" -- rm -rf "${POD_OUTPUT_DIR}" 2>/dev/null || true
+          done
+
+          echo ""
+          echo "=== Log collection complete (${CHUNK} chunks, newest-first): ${OUTPUT_DIR} ==="
+          ls -la "${OUTPUT_DIR}/" 2>/dev/null || true
+        env:
+          C1_CLUSTER_ID: ${{ env.C1_CLUSTER_ID }}
+          MON_SECRET: ${{ secrets.MON_SECRET }}
+
+      - name: Notify Slack log collection complete
+        if: always() && (github.event.inputs.send_slack_notification || 'true') == 'true'
+        shell: bash
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
+          SLACK_MSG_TS: ${{ env.SLACK_MSG_TS }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          RUN_BASE_DIR: ${{ env.RUN_BASE_DIR }}
+        run: |
+          MSG=":white_check_mark: *Log collection complete* for *SimplyBlock K8s Cross-Cluster Restore*\n:file_folder: \`${RUN_BASE_DIR:-N/A}/graylog_collected/\`\n:link: <${SLACK_RUN_URL}|View Run>"
+          if [ -n "${SLACK_BOT_TOKEN:-}" ] && [ -n "${SLACK_CHANNEL_ID:-}" ] && [ -n "${SLACK_MSG_TS:-}" ]; then
+            curl -s -X POST "https://slack.com/api/chat.postMessage" \
+              -H "Authorization: Bearer ${SLACK_BOT_TOKEN}" \
+              -H "Content-Type: application/json; charset=utf-8" \
+              -d "{\"channel\":\"${SLACK_CHANNEL_ID}\",\"thread_ts\":\"${SLACK_MSG_TS}\",\"text\":\"${MSG}\"}" || true
+          elif [ -n "${SLACK_WEBHOOK_URL:-}" ]; then
+            curl -s -X POST "${SLACK_WEBHOOK_URL}" \
+              -H "Content-Type: application/json" \
+              -d "{\"text\":\"${MSG}\"}" || true
+          fi

@@ -1,14 +1,10 @@
 # coding=utf-8
 """Unit tests for the snapshot/clone delete-race fixes.
 
-Three fixes covered:
-
-1. ``get_random_vuid`` and ``get_random_snapshot_vuid`` dedupe against
-   existing ``CLN_``/``LVOL_``/``SNAP_`` bdev-name numeric suffixes
-   so SPDK won't reject a new clone/snapshot with
-   ``lvol with name X already exists``. The legacy 10k random space
-   on ``get_random_vuid`` had ~50% birthday-collision probability with
-   ~10k lvols/snaps in a soak; bumped to 1M plus the explicit dedupe.
+Fixes covered, numbered to match the section banners below. Fix 1 was the
+``get_random_vuid`` bdev-name dedupe; it no longer exists — vuids are now
+allocated monotonically via ``DBController.next_vuid``, which cannot collide,
+so the tests for it were removed.
 
 2. ``snapshot_controller.add`` rejects creating a snapshot from an lvol
    in ``STATUS_IN_DELETION``, and ``snapshot_controller.clone`` rejects
@@ -119,81 +115,6 @@ def _snapshot(uuid, lvol, snap_bdev=None,
     s.cluster_id = "cluster-1"
     s.vuid = 100
     return s
-
-
-# ---------------------------------------------------------------------------
-# Fix 1: random vuid dedupe against existing bdev-name numeric suffixes
-# ---------------------------------------------------------------------------
-
-class TestRandomVuidDedupesAgainstBdevNames(unittest.TestCase):
-
-    @patch("simplyblock_core.db_controller.DBController")
-    def test_get_random_vuid_skips_existing_lvol_bdev_number(self, mock_db_cls):
-        """``get_random_vuid`` must not return a number already used as
-        the numeric suffix of an existing ``CLN_``/``LVOL_`` bdev name —
-        SPDK would reject the resulting create with "lvol with name
-        already exists" and trigger the snapshot-delete-in-flight bug.
-        """
-        from simplyblock_core import utils
-
-        existing_lvol = _lvol("ex", lvol_bdev="CLN_42")
-        existing_lvol.top_bdev = "LVS_100/CLN_42"
-
-        db = MagicMock()
-        db.get_storage_nodes.return_value = []
-        db.get_lvols.return_value = [existing_lvol]
-        db.get_snapshots.return_value = []
-        mock_db_cls.return_value = db
-
-        # Force random to first return 42 (which IS in use), then 99.
-        # The dedupe loop must skip 42 and return a different number.
-        with patch("simplyblock_core.utils.random.random",
-                   side_effect=[42 / 1000000.0, 99 / 1000000.0]):
-            result = utils.get_random_vuid()
-        # The crucial property: the result is NOT 42, even though
-        # random.random() handed us 42 on the first try.
-        self.assertNotEqual(result, 42)
-
-    @patch("simplyblock_core.db_controller.DBController")
-    def test_get_random_vuid_skips_existing_snap_bdev_number(self, mock_db_cls):
-        """Same dedupe applies to existing ``SNAP_`` bdev names. The
-        clone-create path uses ``CLN_<vuid>``; if a fresh ``CLN_77047``
-        request lands while a ``SNAP_77047`` (different bdev type but
-        same numeric suffix) exists, SPDK still treats them as a name
-        collision because the bdev name space is flat."""
-        from simplyblock_core import utils
-
-        snap_lvol = _lvol("ex", lvol_bdev="LVOL_1")
-        existing_snap = _snapshot("snap-1", snap_lvol, snap_bdev="SNAP_77047")
-
-        db = MagicMock()
-        db.get_storage_nodes.return_value = []
-        db.get_lvols.return_value = [snap_lvol]
-        db.get_snapshots.return_value = [existing_snap]
-        mock_db_cls.return_value = db
-
-        with patch("simplyblock_core.utils.random.random",
-                   side_effect=[77047 / 1000000.0, 250 / 1000000.0]):
-            result = utils.get_random_vuid()
-        self.assertNotEqual(result, 77047)
-
-    @patch("simplyblock_core.db_controller.DBController")
-    def test_get_random_snapshot_vuid_skips_existing_bdev_names(self, mock_db_cls):
-        """``get_random_snapshot_vuid`` must also dedupe against existing
-        ``CLN_``/``LVOL_``/``SNAP_`` bdev numbers."""
-        from simplyblock_core import utils
-
-        clone_lvol = _lvol("c1", lvol_bdev="CLN_867796")
-        db = MagicMock()
-        db.get_storage_nodes.return_value = []
-        db.get_lvols.return_value = [clone_lvol]
-        db.get_snapshots.return_value = []
-        mock_db_cls.return_value = db
-
-        with patch("simplyblock_core.utils.random.random",
-                   side_effect=[867796 / 1000000.0, 555 / 1000000.0]):
-            result = utils.get_random_snapshot_vuid()
-        self.assertNotEqual(result, 867796)
 
 
 # ---------------------------------------------------------------------------

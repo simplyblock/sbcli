@@ -8,7 +8,7 @@ LVolMigration record references it via migration_group_id.
 
 Phase state-machine
 -------------------
-PRECREATE
+PRE_CREATED
     Main orchestrator creates the target subsystem and all N migration bdevs.
 SNAP_COPY
     N worker tasks copy their owned snapshot chains in parallel.
@@ -37,7 +37,7 @@ from simplyblock_core.models.base_model import BaseModel
 
 class LVolMigrationGroup(BaseModel):
 
-    PHASE_PRECREATE      = 'precreate'
+    PHASE_PRE_CREATED    = 'pre_created'
     PHASE_SNAP_COPY      = 'snap_copy'
     PHASE_INTERMEDIATE   = 'intermediate'
     PHASE_BATCH_MIGRATE  = 'batch_migrate'
@@ -92,7 +92,7 @@ class LVolMigrationGroup(BaseModel):
     batch_result: Optional[bool] = None
 
     # Current orchestration phase — drives worker state transitions.
-    phase: str = PHASE_PRECREATE
+    phase: str = PHASE_PRE_CREATED
 
     error_message: str = ""
 

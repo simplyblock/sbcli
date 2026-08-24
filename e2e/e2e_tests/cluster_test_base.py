@@ -267,6 +267,9 @@ class TestClusterBase:
                 sleep_n_sec(2)
             self.disconnect_lvols()
             sleep_n_sec(2)
+        # Order: clones → snapshots → parent lvols → pools
+        self.sbcli_utils.delete_all_clones()
+        sleep_n_sec(2)
         if self.k8s_test:
             self.sbcli_utils.delete_all_snapshots()
         elif self.mgmt_nodes:
@@ -277,7 +280,7 @@ class TestClusterBase:
         if not self.k8s_test:
             self.sbcli_utils.delete_all_storage_pools()
         else:
-            # In K8s mode, avoid deleting pools during setup — the Pool CRD
+            # In K8s mode, avoid deleting pools during setup — the StoragePool CRD
             # reconciliation is async and deleting+recreating pools between
             # tests causes long waits or failures.  Tests create pools via
             # _add_pool_dual() which reuses existing pools.
@@ -411,13 +414,13 @@ class TestClusterBase:
         return self.pool_name
 
     def _verify_pool_exists_dual(self, pool_name=None):
-        """Assert that a pool exists. In K8s mode checks the Pool CRD;
+        """Assert that a pool exists. In K8s mode checks the StoragePool CRD;
         in Docker mode checks sbcli pool list."""
         pool_name = pool_name or self.pool_name
         if self.k8s_test:
             exists = self.sbcli_utils.pool_crd_exists(pool_name)
             assert exists, (
-                f"Pool CRD for '{pool_name}' not found in K8s"
+                f"StoragePool CRD for '{pool_name}' not found in K8s"
             )
         else:
             pools = self.sbcli_utils.list_storage_pools()
@@ -425,7 +428,7 @@ class TestClusterBase:
                 f"Pool {pool_name} not present in list of pools: {pools}"
 
     def _delete_pool_dual(self, pool_name=None):
-        """Delete a storage pool. In K8s mode, deletes the Pool CRD.
+        """Delete a storage pool. In K8s mode, deletes the StoragePool CRD.
 
         Skipped entirely when pool_name doesn't match any existing pool
         (avoids errors from trying to delete a pool that was already
@@ -439,7 +442,7 @@ class TestClusterBase:
                 k8s_name = f"simplyblock-{pool_name.lower().replace('_', '-')}"
                 ns = self._ensure_k8s_utils().namespace
                 self._ensure_k8s_utils()._exec_kubectl(
-                    f"kubectl delete pools {k8s_name} -n {ns} "
+                    f"kubectl delete storagepools {k8s_name} -n {ns} "
                     f"--timeout=60s 2>/dev/null || true"
                 )
                 return
@@ -897,7 +900,7 @@ class TestClusterBase:
                     files = k8s.find_files_in_pvc(pod_name)
                 return k8s.generate_checksums_in_pvc(pod_name, files)
             finally:
-                k8s.delete_pod(pod_name)
+                k8s.delete_pod(pod_name, wait=True)
                 if pod_name in self._k8s_utility_pods:
                     self._k8s_utility_pods.remove(pod_name)
         else:
@@ -973,10 +976,23 @@ class TestClusterBase:
         self._k8s_configmaps.clear()
         for snap_name in list(self._k8s_volume_snapshots):
             try:
-                k8s.delete_volume_snapshot(snap_name)
+                k8s.delete_volume_snapshot(snap_name, wait=True)
             except Exception as e:
                 self.logger.warning(f"[k8s-teardown] VolumeSnapshot error {snap_name}: {e}")
         self._k8s_volume_snapshots.clear()
+        # Catch-all: delete any remaining test VolumeSnapshots that may not
+        # have been tracked (e.g. snapshot-1, snapshot-2 naming pattern).
+        try:
+            ns = k8s.namespace
+            k8s._exec_kubectl(
+                f"kubectl get volumesnapshot -n {ns} --no-headers "
+                f"-o custom-columns=NAME:.metadata.name 2>/dev/null "
+                f"| grep -E '^(snap-|snapshot-)' "
+                f"| xargs -r kubectl delete volumesnapshot -n {ns} "
+                f"--ignore-not-found --wait=true --timeout=120s"
+            )
+        except Exception as e:
+            self.logger.warning(f"[k8s-teardown] catch-all snapshot cleanup error: {e}")
         for pvc_name in list(self._k8s_pvcs):
             try:
                 k8s.delete_pvc(pvc_name)
@@ -1794,11 +1810,14 @@ class TestClusterBase:
                                 sleep_n_sec(2)
                         self.disconnect_lvols()
                         sleep_n_sec(2)
-                self.sbcli_utils.delete_all_lvols()
+                # Order: clones → snapshots → parent lvols → pools
+                self.sbcli_utils.delete_all_clones()
                 sleep_n_sec(2)
                 if not self.k8s_test:
                     self.ssh_obj.delete_all_snapshots(node=self.mgmt_nodes[0])
                     sleep_n_sec(2)
+                self.sbcli_utils.delete_all_lvols()
+                sleep_n_sec(2)
                 self.sbcli_utils.delete_all_storage_pools()
                 sleep_n_sec(2)
                 latest_util = self.get_latest_cluster_util()
@@ -3719,18 +3738,34 @@ class TestClusterBase:
     
     def check_core_dump(self):
         if self.k8s_test:
-            # Core dumps in K8s live inside the spdk-container at /etc/simplyblock/
             k8s_obj = getattr(self.sbcli_utils, 'k8s', None)
             if not k8s_obj:
                 self.logger.info("check_core_dump: k8s_utils not available, skipping.")
                 return
+
             for node_ip in self.storage_nodes:
                 files = k8s_obj.list_files_in_spdk_pod(node_ip, "/etc/simplyblock/")
                 self.logger.info(f"Files in /etc/simplyblock (spdk pod for {node_ip}): {files}")
                 if any("core" in f for f in files) and not any("tmp_cores" in f for f in files):
                     cur_date = datetime.now().strftime("%Y-%m-%d")
                     self.logger.info(f"Core dump found in SPDK pod for node {node_ip} at {cur_date}")
+
+                    # Copy core dumps from inside the SPDK pod to the log dir
+                    if self.docker_logs_path:
+                        try:
+                            k8s_obj.copy_core_dumps_from_spdk_pod(
+                                node_ip, self.docker_logs_path
+                            )
+                        except Exception as exc:
+                            self.logger.warning(
+                                f"[coredump] Failed to copy in-pod core dumps "
+                                f"for {node_ip}: {exc}"
+                            )
+
+            # Collect host-level core dumps from K8s node hosts
+            self._check_host_core_dumps_k8s(k8s_obj)
             return
+
         for node in self.storage_nodes:
             files = self.ssh_obj.list_files(node, "/etc/simplyblock/")
             self.logger.info(f"Files in /etc/simplyblock: {files}")
@@ -3744,6 +3779,33 @@ class TestClusterBase:
             if "core" in files and "tmp_cores" not in files:
                 cur_date = datetime.now().strftime("%Y-%m-%d")
                 self.logger.info(f"Core file found on management node {node} at {cur_date}")
+
+    def _check_host_core_dumps_k8s(self, k8s_obj):
+        """Collect host-level core dumps from all storage node K8s hosts.
+
+        Saves coredumpctl output and core dump files to
+        ``<docker_logs_path>/host_core_dumps/``.
+        """
+        if not self.docker_logs_path:
+            self.logger.info(
+                "[coredump] docker_logs_path not set, skipping host core dump check"
+            )
+            return
+
+        coredump_dir = os.path.join(self.docker_logs_path, "host_core_dumps")
+        os.makedirs(coredump_dir, exist_ok=True)
+        max_size_mb = int(os.environ.get("CORE_DUMP_MAX_SIZE_MB", "500"))
+
+        for node_ip in self.storage_nodes:
+            try:
+                k8s_obj.collect_host_core_dumps(
+                    node_ip, coredump_dir, max_size_mb=max_size_mb
+                )
+            except Exception as exc:
+                self.logger.warning(
+                    f"[coredump] Host core dump collection failed for "
+                    f"{node_ip}: {exc}"
+                )
 
     def get_latest_cluster_util(self):
         result = self.sbcli_utils.get_cluster_capacity()

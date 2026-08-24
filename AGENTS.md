@@ -39,8 +39,39 @@ Data flows: **CLI → Web API → Core controllers → FoundationDB**. Storage n
 ## Coding Conventions
 
 - **Error handling**: Raise specific exceptions — never return `None`/booleans for errors, never bare `except Exception`. See `CONTRIBUTING.md`.
+- **Retries**: Use `tenacity` (`@retry` decorator, or `Retrying`/`AsyncRetrying` for a single call site) instead of hand-written attempt loops with `time.sleep()`. Always set an explicit `stop=` and `wait=`, and log attempts via `before_sleep=before_sleep_log(logger, logging.WARNING)`. Refactor hand-rolled retry loops you touch.
+- **Pydantic fields**: Use the [annotated pattern](https://pydantic.dev/docs/validation/latest/concepts/fields/#the-annotated-pattern) for field metadata, not the assignment form. See below.
 - **Ruff** and **mypy** are enforced in CI. `simplyblock_cli/cli.py` is excluded from ruff (auto-generated).
 - `tests/perf/` is excluded from pytest discovery.
+
+### Pydantic Fields
+
+Applies to every Pydantic model: v2 DTOs and request bodies, internal-API payloads, and `pydantic-settings` classes. It does **not** apply to `simplyblock_core.models.base_model.BaseModel`, which is hand-rolled — its fields stay plain annotations with plain defaults.
+
+Constraints and metadata belong inside `Annotated[...]`. The default stays on the right-hand side of the assignment; a field with no default is required.
+
+```python
+# Good
+size: Annotated[int, Field(ge=0)]                                   # required
+jm_percent: Annotated[int, Field(ge=0, le=100)] = 3                 # optional, default 3
+host_nqn: Annotated[Optional[str], Field(pattern=NQN_PATTERN)] = None
+name: Annotated[str, Field(description="Key name (used as filename)")]
+
+# Bad
+size: int = Field(ge=0)
+jm_percent: int = Field(3, ge=0, le=100)
+host_nqn: Optional[str] = Field(default=None, pattern=NQN_PATTERN)
+name: str = Field(..., description="Key name (used as filename)")
+```
+
+Rules:
+
+- `default`, `default_factory` and `alias` are the exception — static type checkers only understand them in assignment form, so never pass them inside `Annotated`. `Annotated[Optional[int], Field(None, ge=0)] = None` declares the default twice; drop it from `Field()`.
+- A field carrying no metadata needs no `Field()` at all: write `spdk_debug: bool = False`, not `spdk_debug: Optional[bool] = Field(False)`.
+- Required fields need no `Field(...)` sentinel. Omitting the assignment already says "required".
+- Put `Optional` inside `Annotated` (`Annotated[Optional[str], Field(...)]`), so the metadata attaches to the field rather than to an inner type. Both forms validate, but only one is the house style.
+- Prefer an existing reusable alias over repeating a constraint: `simplyblock_web/api/v2/util.py` defines `Unsigned`, `Size`, `Percent`, `Port` and `UrlPath`; `simplyblock_core/utils/pci.py` defines `PCIAddress`. A constraint you are writing for the third time belongs beside them as a named alias — reusability is the main payoff of the annotated pattern.
+- Existing assignment-form declarations are legacy. Convert the ones in a model you are already editing; do not sweep the codebase in an otherwise unrelated change.
 
 ### Secret Handling
 
@@ -56,6 +87,30 @@ Key rules:
 - **Logging**: Never log unwrapped secret values. Response-body logging is gated by `Settings().log_response_bodies` (env `SB_LOG_RESPONSE_BODIES`, default `False`). External libraries that log HTTP bodies (`urllib3`, `kubernetes.client.rest`) are silenced to WARNING. The web access log records only `request.url.path`, never the query string.
 - **Comparison**: Use `hmac.compare_digest(secret.get_secret_value(), other)` for timing-safe comparison.
 - **Testing**: New secret-bearing code needs masking, wire-delivery, and FDB round-trip tests. See `tests/AGENTS.md` § Secret-handling tests for the required assertions and canonical examples.
+
+## Fixing Issues
+
+A reported fault is a symptom. Fix the symptom as asked — but a fix is only complete once you have also answered **why this class of fault was possible here**, and reported that answer.
+
+Always report the systemic cause, even when you are not asked to fix it and even when the fix itself is a one-liner. Silence implies the code was fine apart from one typo, which is usually false.
+
+### What to look for
+
+While tracing the fault, ask:
+
+- **Is an abstraction missing, or is the wrong one in place?** A concept the domain has but the code does not (so it lives as scattered tuples, dicts, or parallel lists), logic that belongs to one owner but is re-implemented at each caller, or a leaky boundary that forces callers to know a lower layer's details — CLI code reaching into FDB shapes, a controller hand-assembling JSON-RPC payloads. Equally, an abstraction that no longer fits: a base class or helper stretched by special-cases and flags until each caller needs different behaviour from it. If the correct fix reads as "remember to do X here too", the missing thing is a place where X happens once.
+- **Could the invalid state have been made unrepresentable?** A field that must never be empty, a status that must never be reached from another status, two fields that must agree — if an invariant is enforced by convention rather than by the type or a single guarded accessor, that is the real defect.
+- **Does the same latent bug exist elsewhere?** Copy-pasted call sites, sibling controllers, the other half of a create/delete pair, v1 vs. v2 of an endpoint. Grep for the pattern, not just the line.
+- **Did an error-handling pattern hide it?** A swallowed exception, a `None`/boolean return standing in for an error, a bare `except`, a retry loop that masks a permanent failure as a transient one. See `CONTRIBUTING.md` and the retry conventions above.
+- **Why did no test catch it?** A missing tier (unit vs. integration), a fixture that mocks away the failing layer, an assertion on the happy path only. A regression test for this bug is the minimum; a gap that would let the *next* bug through is a finding.
+- **Was the failure observable?** If reproducing it required adding logging, or if the logs pointed at the wrong component, the missing signal is part of the fault.
+- **Did an interface invite the mistake?** Positional arguments that are easy to swap, a parameter whose meaning depends on another, a helper that is correct only when called in a specific order.
+
+### How to report it
+
+End the work with a short **Systemic causes** section separate from the description of the fix. For each cause: state it in one or two sentences, point at the code (`file_path:line`), and say what a durable fix would be and roughly what it costs.
+
+Do not silently widen the change to include those fixes. Fix the reported fault plus anything genuinely inseparable from it; propose the rest and let the user decide. The exceptions — apply these without asking — are a regression test covering the fault, and identical instances of the same bug found by grep, which are part of the fix rather than an expansion of it.
 
 ## Verification
 

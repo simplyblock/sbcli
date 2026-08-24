@@ -64,6 +64,30 @@ DATA2_SG        = "sg-069a5f96309b8dbdd"      # allow only from 172.31.97.0/24
 SUBNET_ID      = MGMT_SUBNET_ID
 STORAGE_SG     = MGMT_SG
 BRANCH       = "main"
+#: SPDK/ultra image for the storage nodes. Empty string = let sbcli use its
+#: default (``ultra:main-latest``).
+#:
+#: PINNED BY PER-COMMIT ARCH TAG. Never point this at ``main-latest``: that is
+#: a manifest list, and on 2026-08-17 its amd64 entry still referenced the
+#: PREVIOUS commit's image (main-b1b0d3e2-amd64, pushed Aug 13) while arm64 had
+#: moved on, so every x86 node silently ran five-day-old code for three runs.
+#:
+#: Two separate races feed that. (1) build_image_spdk_ultra_amd.yml re-resolves
+#: the floating ``$TAG-latest-amd64`` tag seconds after pushing it and can embed
+#: a pre-push digest in ``docker manifest create``. (2) The amd job is chained
+#: off the arm job by ``workflow_run`` and checks out ``head_branch`` — the
+#: branch head when *it* starts, not the SHA that triggered the arm run — so a
+#: push landing between the two builds yields a manifest whose halves were
+#: compiled from different commits (observed 2026-08-20: core amd64 refreshed at
+#: 12:45 while its arm64 partner still dated from 12:37, one commit earlier).
+#:
+#: A ``$TAG-$SHORT_SHA-amd64`` tag names one image built from one commit for the
+#: arch these nodes actually run, so it sidesteps both. Update it per build; the
+#: gate in deploy_gate_and_soak.py then verifies the commit from the image
+#: itself, so a stale pin fails loudly instead of running old code quietly.
+#: 8d2e5215 = ultra main "Build main on the R26.3 spdk-core base", built on
+#: spdk-core R26.3 a311a6852 which carries upstream d528e1a67 (spdk/spdk#3686).
+SPDK_IMAGE   = "public.ecr.aws/simply-block/ultra:main-8d2e5215-amd64"
 USER         = "ec2-user"
 MGMT_IFACE   = "eth0"
 DATA_NICS    = ["eth1", "eth2"]          # Names the OS assigns to ENI index 1, 2
@@ -87,6 +111,22 @@ ec2_client   = boto3.client("ec2", region_name="us-east-1")
 
 # ──────────────────── SSH helpers ────────────────────────────────────────────
 
+def _keepalive(client, interval=30):
+    """Keep long silent SSH channels alive.
+
+    Several deploy steps (cluster create, sn deploy, cluster activate) run for
+    minutes without writing a byte. With no keepalive the TCP connection is
+    idle for that whole window and gets reaped somewhere on the path; paramiko
+    then blocks in channel.recv() until its own timeout and the deploy dies
+    with a bare socket.timeout even though the remote command SUCCEEDED
+    (2026-08-19 14:21: cluster create completed, all CP services 1/1, deploy
+    reported rc=1). The soak's RemoteHost has always done this.
+    """
+    transport = client.get_transport()
+    if transport is not None:
+        transport.set_keepalive(interval)
+
+
 def _ssh_connect(ip, jump_ip=None, timeout=None, banner_timeout=None):
     """Open a paramiko SSHClient to ``ip``. When ``jump_ip`` is given,
     tunnel through it via ``direct-tcpip`` (ProxyJump): the jump host
@@ -107,6 +147,7 @@ def _ssh_connect(ip, jump_ip=None, timeout=None, banner_timeout=None):
         if banner_timeout is not None:
             kwargs["banner_timeout"] = banner_timeout
         ssh.connect(ip, **kwargs)
+        _keepalive(ssh)
         return ssh
     jump = paramiko.SSHClient()
     jump.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -131,6 +172,8 @@ def _ssh_connect(ip, jump_ip=None, timeout=None, banner_timeout=None):
     if banner_timeout is not None:
         target_kwargs["banner_timeout"] = banner_timeout
     ssh.connect(ip, **target_kwargs)
+    _keepalive(jump)
+    _keepalive(ssh)
     # Stash the jump client on the target client so we can close both.
     ssh._jump_client = jump
     return ssh
@@ -476,11 +519,20 @@ def verify_multipath(mgmt_ip, expected_nics=2):
 # ──────────────────── Main deployment ────────────────────────────────────────
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="AWS multipath cluster deployment")
+    parser.add_argument(
+        "--mgmt-boot-gb", type=int, default=80,
+        help="Boot disk size of the mgmt node in GB (default 80). Pass 100 "
+             "for runs that accumulate placement dumps / long soak logs on "
+             "the mgmt node.")
+    cli_args = parser.parse_args()
+
     print("=" * 60)
     print("AWS Multipath Cluster Deployment")
     print(f"  Storage nodes: {SN_COUNT}× {SN_TYPE}")
     print(f"  NICs per host: 1 mgmt ({MGMT_IFACE}) + {len(DATA_NICS)} data ({', '.join(DATA_NICS)})")
-    print(f"  FT={MAX_FT}, branch={BRANCH}")
+    print(f"  FT={MAX_FT}, branch={BRANCH}, mgmt boot disk={cli_args.mgmt_boot_gb}G")
     print("=" * 60)
 
     # ── Phase 1: Launch instances ────────────────────────────────────────
@@ -489,7 +541,7 @@ def main():
     # paramiko ProxyJump through mgmt (jump_ip=mgmt_ip on every SSH).
     print("\n--- Phase 1: Launch instances ---")
     mgmt_instances = launch_instances(1, MGMT_TYPE, num_nics=1, tag_name="SB-Mgmt-MP",
-                                      root_gb=80, public_ip=True)
+                                      root_gb=cli_args.mgmt_boot_gb, public_ip=True)
     sn_instances   = launch_instances(SN_COUNT, SN_TYPE, num_nics=3, tag_name="SB-SN-MP",
                                       public_ip=False)
     client_instances = launch_instances(CLIENT_COUNT, CLIENT_TYPE, num_nics=3,
@@ -568,7 +620,7 @@ def main():
     # ── Phase 4: Create cluster ──────────────────────────────────────────
     print("\n--- Phase 4: Create cluster ---")
     ssh_exec(mgmt_ip, [
-        "sudo /usr/local/bin/sbctl -d cluster create --enable-node-affinity"
+        f"sudo /usr/local/bin/sbctl -d cluster create --enable-node-affinity --max-subsys {MAX_LVOL}"
         f" --data-chunks-per-stripe {DATA_CHUNKS}"
         f" --parity-chunks-per-stripe {PARITY_CHUNKS}"
     ], check=True)
@@ -586,7 +638,7 @@ def main():
     print("\n--- Phase 5: Configure + deploy storage nodes ---")
     with ThreadPoolExecutor(max_workers=len(sn_priv_ips)) as pool:
         futures = [pool.submit(ssh_exec, ip, [
-            f"sudo /usr/local/bin/sbctl -d sn configure --max-subsys {MAX_LVOL}"
+            "sudo /usr/local/bin/sbctl -d sn configure"
         ], check=True, jump_ip=mgmt_ip) for ip in sn_priv_ips]
         for f in futures:
             f.result()
@@ -627,14 +679,20 @@ def main():
     # NIC names. Space-separating spills extra NICs into argv as
     # positional args which sbctl rejects with "unrecognized arguments".
     data_nics_arg = ",".join(DATA_NICS)
+    spdk_image_arg = f" --spdk-image {SPDK_IMAGE}" if SPDK_IMAGE else ""
+    if SPDK_IMAGE:
+        print(f"  Pinning SPDK image: {SPDK_IMAGE}")
     for priv_ip in sn_priv_ips:
         for attempt in range(5):
             try:
                 ssh_exec(mgmt_ip, [
-                    f"sudo /usr/local/bin/sbctl -d sn add-node {cluster_uuid}"
+                    # --dev (not -d) is what sets developer_mode in cli.py:16, and
+                    # --spdk-image is registered only under it.
+                    f"sudo /usr/local/bin/sbctl -d --dev sn add-node {cluster_uuid}"
                     f" {priv_ip}:5000 {MGMT_IFACE}"
                     f" --data-nics {data_nics_arg}"
                     f" --ha-jm-count {HA_JM_COUNT}"
+                    f"{spdk_image_arg}"
                 ], check=True)
                 break
             except RuntimeError:

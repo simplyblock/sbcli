@@ -50,12 +50,18 @@ def _node(uuid, lvstore="", status=StorageNode.STATUS_ONLINE,
     return n
 
 
-def _cluster(ftt=2, expand_state=None):
+def _cluster(ftt=2, expand_state=None, status=Cluster.STATUS_ACTIVE):
     c = Cluster()
     c.uuid = "cluster-1"
     c.ha_type = "ha"
     c.max_fault_tolerance = ftt
     c.expand_state = expand_state or {}
+    # These tests integrate a node into a RUNNING cluster, and
+    # check_expansion_preconditions refuses anything but a steady ACTIVE
+    # (DEGRADED/SUSPENDED mean an outage is in flight, IN_EXPANSION means
+    # another expansion owns the layout). Leaving the model default ""
+    # made every case abort in the precondition sweep.
+    c.status = status
     c.write_to_db = MagicMock()
     return c
 
@@ -106,7 +112,16 @@ class TestIntegrateFreshPlan(unittest.TestCase):
         expected = compute_role_diff(["n1", "n2", "n3"], "n4", ftt=2)
         self.assertEqual(executor.executed, expected)
 
-    def test_skips_offline_nodes_from_existing_rotation(self):
+    def test_offline_node_refuses_expansion(self):
+        """An offline node blocks the whole expansion — it is not planned around.
+
+        The planner does still exclude non-ONLINE nodes when building the
+        rotation, but that no longer decides the outcome: check_expansion_
+        preconditions requires EVERY non-removed node to be ONLINE before any
+        move runs, because the sec/tert teardown a rebalance performs would
+        drop redundancy below the FTT contract while a peer is already out.
+        So the expansion is refused up front and nothing is executed.
+        """
         cluster = _cluster(ftt=2)
         snodes = [
             _node("n1", lvstore="LVS_1"),
@@ -121,12 +136,14 @@ class TestIntegrateFreshPlan(unittest.TestCase):
         db.get_storage_nodes_by_cluster_id.return_value = snodes
 
         executor = NoopMoveExecutor()
-        # n4 is offline → the planner sees only 3 existing primaries; FTT2
-        # minimum is 3, so this should still succeed (3 → 4 plan).
-        integrate_new_node_into_cluster(
-            cluster, new_node, executor=executor, db_controller=db)
-        expected = compute_role_diff(["n1", "n2", "n3"], "n5", ftt=2)
-        self.assertEqual(executor.executed, expected)
+        with self.assertRaises(RuntimeError) as ctx:
+            integrate_new_node_into_cluster(
+                cluster, new_node, executor=executor, db_controller=db)
+
+        self.assertIn("n4", str(ctx.exception))
+        self.assertIn("all nodes must be online", str(ctx.exception))
+        self.assertEqual(executor.executed, [],
+                         "no move may run once the preconditions refuse")
 
 
 # ---------------------------------------------------------------------------

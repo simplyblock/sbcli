@@ -36,7 +36,9 @@ from e2e_tests.test_multi_node_outage import (
 
 from e2e_tests.add_node_fio_run import (
     TestAddNodesDuringFioRun,
-    TestAddK8sNodesDuringFioRun
+    TestAddK8sNodesDuringFioRun,
+    TestAddNodesDualNodePerHost,
+    TestAddK8sNodesDualNodePerHost,
 )
 from e2e_tests.k8s_native_add_node import K8sNativeAddNodeTest
 from e2e_tests.k8s_native_node_migration import K8sNativeNodeMigrationTest
@@ -108,13 +110,24 @@ from stress_test.mass_create_delete_stress import (
     MassCreateDeletePersistent_30x100_Docker,
     MassCreateDeletePersistent_300x10_Docker,
     MassCreateDeletePersistent_300x10_6Snap_Docker,
+    MassCreateDeletePersistent_300x10_10Snap_Docker,
     MassCreateDeletePersistent_500x1_Docker,
     MassCreateDeletePersistent_3000x1_Docker,
     MassCreateDeletePersistent_1x500_K8s,
     MassCreateDeletePersistent_30x100_K8s,
     MassCreateDeletePersistent_300x10_K8s,
+    MassCreateDeletePersistent_300x10_6Snap_K8s,
+    MassCreateDeletePersistent_300x10_10Snap_K8s,
     MassCreateDeletePersistent_500x1_K8s,
     MassCreateDeletePersistent_3000x1_K8s,
+    MassCreateDeleteRestart_300x10_Docker,
+    MassCreateDeleteRestart_300x10_6Snap_Docker,
+    MassCreateDeleteRestart_300x10_10Snap_Docker,
+    MassCreateDeleteRestart_300x10_K8s,
+    MassCreateDeleteRestart_300x10_6Snap_K8s,
+    MassCreateDeleteRestart_300x10_10Snap_K8s,
+    MassCreateRapidRestart_6k_3Snap_Docker,
+    MassCreateRapidRestart_6k_3Snap_K8s,
 )
 from stress_test.device_failure_migration import (
     DeviceFailureMigrationNoLoadDocker,
@@ -164,8 +177,15 @@ from e2e_tests.security.test_lvol_security import (
     TestLvolSecurityMultiClientConcurrent,
 )
 
-from e2e_tests.upgrade_tests.major_upgrade import TestMajorUpgrade, TestMajorUpgradeSingleNode
-from e2e_tests.upgrade_tests.k8s_major_upgrade import K8sNativeMajorUpgrade
+from e2e_tests.upgrade_tests.major_upgrade import (
+    TestMajorUpgrade,
+    TestMajorUpgradeSingleNode,
+    TestMajorUpgradeDualNode,
+)
+from e2e_tests.upgrade_tests.k8s_major_upgrade import (
+    K8sNativeMajorUpgrade,
+    K8sNativeMajorUpgradeDualNode,
+)
 
 # ── Phase 1 functional E2E tests ─────────────────────────────────────
 from e2e_tests.test_lvol_basic import TestLvolBasicCRUD
@@ -175,7 +195,6 @@ from e2e_tests.test_snapshot_negative import TestSnapshotNegativeCases
 # from e2e_tests.test_pool_attributes import TestPoolAttributes  # DISABLED: QoS crash
 from e2e_tests.test_pool_enable_disable import TestPoolEnableDisable
 from e2e_tests.test_pool_negative import TestPoolNegativeCases
-from e2e_tests.test_node_suspend_resume import TestNodeSuspendResume          # DEPRECATED: sn suspend/resume are no-ops
 from e2e_tests.test_pool_disable_io import TestPoolDisableIO
 from e2e_tests.test_negative_cases import TestCrossResourceNegative
 from e2e_tests.test_namespace_placement import TestNamespacePlacement
@@ -229,8 +248,9 @@ from e2e_tests.backup.test_backup_restore import (
     TestBackupNegative,
     TestBackupCryptoLvol,
     TestBackupCustomGeometry,
-    TestBackupRetentionMergeAfterDelete,
-    TestBackupDeleteAndRestore,
+    # DISABLED: lvol-level backup delete not supported (SFAM-2792)
+    # TestBackupRetentionMergeAfterDelete,
+    # TestBackupDeleteAndRestore,
     TestBackupCrossClusterRestore,  # NOT in get_backup_tests(); run explicitly only
     # Extra coverage tests (TC-BCK-100..148)
     TestBackupConcurrentIO,
@@ -242,7 +262,8 @@ from e2e_tests.backup.test_backup_restore import (
     TestBackupSnapshotClone,
     TestBackupFilesystemXFS,
     TestBackupLargeLvol,
-    TestBackupDeleteInProgress,
+    # DISABLED: lvol-level backup delete not supported (SFAM-2792)
+    # TestBackupDeleteInProgress,
     TestBackupPolicyMultipleLvols,
     # Extended backup tests (TC-BCK-150..190)
     TestBackupSecurityLvol,
@@ -253,7 +274,7 @@ from e2e_tests.backup.test_backup_restore import (
     TestBackupListFields,
     TestBackupUpgradeCompatibility,
     TestBackupRestoreEdgeCases,
-    TestBackupSourceSwitch,
+    # TestBackupSourceSwitch,  # COMMENTED OUT: source-switch no longer required
     # Interrupted backup/restore E2E tests (TC-BCK-080..097)
     TestBackupInterruptedBackup,
     TestBackupInterruptedRestore,
@@ -278,11 +299,13 @@ from stress_test.continuous_backup_stress import (
     BackupStressMarathon,
     BackupStressLargeScale,
     BackupStressFilesystemSecurityMix,
-    BackupStressRetentionMergeCycles,
+    # DISABLED: backup delete not supported (SFAM-2792)
+    # BackupStressRetentionMergeCycles,
 )
 
 
 from load_tests.lvol_outage_load import TestLvolOutageLoadTest
+from e2e_tests.test_api_parity_audit import TestAPIParityAudit
 
 
 ALL_TESTS = [
@@ -293,6 +316,7 @@ ALL_TESTS = [
     TestSingleNodeOutage,
     TestSingleNodeFailure,
     TestAddNodesDuringFioRun,
+    TestAddNodesDualNodePerHost,
     TestRestartNodeOnAnotherHost,
     TestRebootNodeHost,
     TestMgmtNodeReboot,
@@ -310,11 +334,13 @@ ALL_TESTS = [
     TestHASingleNodeOutage,
     TestSingleNodeResizeLvolCone,
     TestAddK8sNodesDuringFioRun,
+    TestAddK8sNodesDualNodePerHost,
     K8sNativeAddNodeTest,
     K8sNativeNodeMigrationTest,
     TestSequentialNodeAdd,
     TestAddNodeSnapshotCloneOnNewNode,
     K8sNativeMajorUpgrade,
+    K8sNativeMajorUpgradeDualNode,
     # Security E2E tests
     TestLvolSecurityCombinations,
     TestLvolDynamicHostManagement,
@@ -343,14 +369,16 @@ ALL_TESTS = [
     RandomRDMAFailoverTest,
     RandomRDMAMultiFailoverTest,
     # Backup E2E tests
-    TestBackupRetentionMergeAfterDelete,
+    # DISABLED: lvol-level backup delete not supported (SFAM-2792)
+    # TestBackupRetentionMergeAfterDelete,
     TestBackupBasicPositive,
     TestBackupRestoreDataIntegrity,
     TestBackupPolicy,
     TestBackupNegative,
     TestBackupCryptoLvol,
     TestBackupCustomGeometry,
-    TestBackupDeleteAndRestore,
+    # DISABLED: lvol-level backup delete not supported (SFAM-2792)
+    # TestBackupDeleteAndRestore,
     TestBackupInterruptedBackup,
     TestBackupInterruptedRestore,
     # Backup extra E2E tests (TC-BCK-100..148)
@@ -363,7 +391,8 @@ ALL_TESTS = [
     TestBackupSnapshotClone,
     TestBackupFilesystemXFS,
     TestBackupLargeLvol,
-    TestBackupDeleteInProgress,
+    # DISABLED: lvol-level backup delete not supported (SFAM-2792)
+    # TestBackupDeleteInProgress,
     TestBackupPolicyMultipleLvols,
     # Extended backup E2E tests (TC-BCK-150..190)
     TestBackupSecurityLvol,
@@ -374,7 +403,7 @@ ALL_TESTS = [
     TestBackupListFields,
     TestBackupUpgradeCompatibility,
     TestBackupRestoreEdgeCases,
-    TestBackupSourceSwitch,
+    # TestBackupSourceSwitch,  # COMMENTED OUT: source-switch no longer required
     # Backup node-add / node-migration edge cases
     TestBackupAfterNodeAdd,
     TestBackupWithFioOnNewNode,
@@ -421,13 +450,24 @@ ALL_TESTS = [
     MassCreateDeletePersistent_30x100_Docker,
     MassCreateDeletePersistent_300x10_Docker,
     MassCreateDeletePersistent_300x10_6Snap_Docker,
+    MassCreateDeletePersistent_300x10_10Snap_Docker,
     MassCreateDeletePersistent_500x1_Docker,
     MassCreateDeletePersistent_3000x1_Docker,
     MassCreateDeletePersistent_1x500_K8s,
     MassCreateDeletePersistent_30x100_K8s,
     MassCreateDeletePersistent_300x10_K8s,
+    MassCreateDeletePersistent_300x10_6Snap_K8s,
+    MassCreateDeletePersistent_300x10_10Snap_K8s,
     MassCreateDeletePersistent_500x1_K8s,
     MassCreateDeletePersistent_3000x1_K8s,
+    MassCreateDeleteRestart_300x10_Docker,
+    MassCreateDeleteRestart_300x10_6Snap_Docker,
+    MassCreateDeleteRestart_300x10_10Snap_Docker,
+    MassCreateDeleteRestart_300x10_K8s,
+    MassCreateDeleteRestart_300x10_6Snap_K8s,
+    MassCreateDeleteRestart_300x10_10Snap_K8s,
+    MassCreateRapidRestart_6k_3Snap_Docker,
+    MassCreateRapidRestart_6k_3Snap_K8s,
     DeviceFailureMigrationNoLoadDocker,
     DeviceFailureMigrationUnderLoadDocker,
     DeviceFailureMigrationPCIeNoLoadDocker,
@@ -455,7 +495,6 @@ ALL_TESTS = [
     # TestPoolAttributes,  # DISABLED: QoS causes SPDK crash (corrupted double-linked list in bdev_set_qos_limit_done)
     TestPoolEnableDisable,
     TestPoolNegativeCases,
-    TestNodeSuspendResume,
     TestPoolDisableIO,
     TestCrossResourceNegative,
     TestNamespacePlacement,
@@ -499,6 +538,8 @@ ALL_TESTS = [
     TestPoolHostManagement,
     TestLvolPlacement,
     TestNodeShutdownRestart,
+    # API parity audit
+    TestAPIParityAudit,
 ]
 
 def get_all_tests(custom=True, ha_test=False):
@@ -539,7 +580,6 @@ def get_all_tests(custom=True, ha_test=False):
         # # TestPoolAttributes,  # DISABLED: QoS causes SPDK crash (corrupted double-linked list in bdev_set_qos_limit_done)
         # TestPoolEnableDisable,
         # TestPoolNegativeCases,
-        # # TestNodeSuspendResume,          # DEPRECATED: sn suspend/resume are no-ops in CLI
         # TestPoolDisableIO,
         # TestCrossResourceNegative,
         # TestNamespacePlacement,
@@ -691,13 +731,24 @@ def get_stress_tests():
         MassCreateDeletePersistent_30x100_Docker,
         MassCreateDeletePersistent_300x10_Docker,
         MassCreateDeletePersistent_300x10_6Snap_Docker,
+        MassCreateDeletePersistent_300x10_10Snap_Docker,
         MassCreateDeletePersistent_500x1_Docker,
         MassCreateDeletePersistent_3000x1_Docker,
         MassCreateDeletePersistent_1x500_K8s,
         MassCreateDeletePersistent_30x100_K8s,
         MassCreateDeletePersistent_300x10_K8s,
+        MassCreateDeletePersistent_300x10_6Snap_K8s,
+        MassCreateDeletePersistent_300x10_10Snap_K8s,
         MassCreateDeletePersistent_500x1_K8s,
         MassCreateDeletePersistent_3000x1_K8s,
+        MassCreateDeleteRestart_300x10_Docker,
+        MassCreateDeleteRestart_300x10_6Snap_Docker,
+        MassCreateDeleteRestart_300x10_10Snap_Docker,
+        MassCreateDeleteRestart_300x10_K8s,
+        MassCreateDeleteRestart_300x10_6Snap_K8s,
+        MassCreateDeleteRestart_300x10_10Snap_K8s,
+        MassCreateRapidRestart_6k_3Snap_Docker,
+        MassCreateRapidRestart_6k_3Snap_K8s,
         DeviceFailureMigrationNoLoadDocker,
         DeviceFailureMigrationUnderLoadDocker,
         DeviceFailureMigrationPCIeNoLoadDocker,
@@ -741,13 +792,24 @@ def get_monitoring_tests():
         MassCreateDeletePersistent_30x100_Docker,
         MassCreateDeletePersistent_300x10_Docker,
         MassCreateDeletePersistent_300x10_6Snap_Docker,
+        MassCreateDeletePersistent_300x10_10Snap_Docker,
         MassCreateDeletePersistent_500x1_Docker,
         MassCreateDeletePersistent_3000x1_Docker,
         MassCreateDeletePersistent_1x500_K8s,
         MassCreateDeletePersistent_30x100_K8s,
         MassCreateDeletePersistent_300x10_K8s,
+        MassCreateDeletePersistent_300x10_6Snap_K8s,
+        MassCreateDeletePersistent_300x10_10Snap_K8s,
         MassCreateDeletePersistent_500x1_K8s,
         MassCreateDeletePersistent_3000x1_K8s,
+        MassCreateDeleteRestart_300x10_Docker,
+        MassCreateDeleteRestart_300x10_6Snap_Docker,
+        MassCreateDeleteRestart_300x10_10Snap_Docker,
+        MassCreateDeleteRestart_300x10_K8s,
+        MassCreateDeleteRestart_300x10_6Snap_K8s,
+        MassCreateDeleteRestart_300x10_10Snap_K8s,
+        MassCreateRapidRestart_6k_3Snap_Docker,
+        MassCreateRapidRestart_6k_3Snap_K8s,
         DeviceFailureMigrationNoLoadDocker,
         DeviceFailureMigrationUnderLoadDocker,
         DeviceFailureMigrationPCIeNoLoadDocker,
@@ -768,8 +830,8 @@ def get_monitoring_tests():
 
 def get_backup_tests():
     return [
-        # Regression: retention merge after delete must run first (clean S3 bucket)
-        TestBackupRetentionMergeAfterDelete,
+        # DISABLED: lvol-level backup delete not supported (SFAM-2792)
+        # TestBackupRetentionMergeAfterDelete,
         # E2E backup tests
         TestBackupBasicPositive,
         TestBackupRestoreDataIntegrity,
@@ -777,7 +839,8 @@ def get_backup_tests():
         TestBackupNegative,
         TestBackupCryptoLvol,
         # TestBackupCustomGeometry, # Will re-enable when we have a way to reliably test it in CI (currently requires manual setup of custom geometry pool)
-        TestBackupDeleteAndRestore,
+        # DISABLED: lvol-level backup delete not supported (SFAM-2792)
+        # TestBackupDeleteAndRestore,
         # Extra coverage tests (TC-BCK-100..148)
         TestBackupMultipleRestores,
         TestBackupDeltaChainPointInTime,
@@ -787,7 +850,8 @@ def get_backup_tests():
         TestBackupSnapshotClone,
         TestBackupFilesystemXFS,
         TestBackupLargeLvol,
-        TestBackupDeleteInProgress,
+        # DISABLED: lvol-level backup delete not supported (SFAM-2792)
+        # TestBackupDeleteInProgress,
         TestBackupPolicyMultipleLvols,
         # Extended backup tests (TC-BCK-150..190)
         TestBackupSecurityLvol,
@@ -797,13 +861,22 @@ def get_backup_tests():
         TestBackupResizedLvol,
         TestBackupListFields,
         TestBackupRestoreEdgeCases,
-        TestBackupSourceSwitch,
+        # TestBackupSourceSwitch,  # COMMENTED OUT: source-switch no longer required
         # Outage tests — run last (involves node shutdown/restart)
         TestBackupUpgradeCompatibility,
         TestBackupInterruptedBackup,
         TestBackupInterruptedRestore,
         TestBackupConcurrentIO,
-        # Backup node-add / node-migration edge cases
+    ]
+
+
+def get_backup_topology_tests():
+    """Backup tests that modify cluster topology (add-node / migration).
+
+    These require extra infrastructure (NEW_NODE_IPS, migrate_to_worker)
+    and must run in dedicated topology pipelines, not the regular backup suite.
+    """
+    return [
         TestBackupAfterNodeAdd,
         TestBackupWithFioOnNewNode,
         TestBackupAfterNodeMigration,
@@ -822,7 +895,8 @@ def get_backup_stress_tests():
         BackupStressMarathon,
         BackupStressLargeScale,
         BackupStressFilesystemSecurityMix,
-        BackupStressRetentionMergeCycles,
+        # DISABLED: backup delete not supported (SFAM-2792)
+        # BackupStressRetentionMergeCycles,
     ]
 
 
@@ -830,7 +904,9 @@ def get_upgrade_tests():
     tests = [
         TestMajorUpgrade,
         TestMajorUpgradeSingleNode,
+        TestMajorUpgradeDualNode,
         K8sNativeMajorUpgrade,
+        # K8sNativeMajorUpgradeDualNode,  # disabled: focus on single-node upgrade first
     ]
     return tests
 
@@ -844,8 +920,4 @@ def get_load_tests():
 
 def get_parity_tests():
     """API parity audit — CLI vs v1 vs v2 three-way comparison."""
-    try:
-        from e2e_tests.test_api_parity_audit import TestAPIParityAudit
-        return [TestAPIParityAudit]
-    except ImportError:
-        return []
+    return [TestAPIParityAudit]

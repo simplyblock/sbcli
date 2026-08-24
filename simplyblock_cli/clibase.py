@@ -13,7 +13,8 @@ from simplyblock_core.exceptions import MigrationConflictError, PreconditionErro
 from simplyblock_core import storage_node_ops as storage_ops
 from simplyblock_core import mgmt_node_ops as mgmt_ops
 from simplyblock_core.controllers import pool_controller, lvol_controller, snapshot_controller, device_controller, \
-    tasks_controller, qos_controller, migration_controller, backup_controller, fdb_backup_controller
+    tasks_controller, qos_controller, migration_controller, backup_controller, fdb_backup_controller, \
+    replication_policy_controller
 from simplyblock_core.controllers import health_controller
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.cluster import Cluster, HashicorpVaultSettings
@@ -102,9 +103,15 @@ class CLIWrapperBase:
         storage_ops.upgrade_automated_deployment_config()
 
     def storage_node__configure(self, sub_command, args):
-        if not args.max_lvol:
-            self.parser.error(f"Mandatory argument '--max-subsys' not provided for {sub_command}")
-        max_size = getattr(args, "max_prov") or 0
+        # max-subsys, the huge-page floor and the vCPU count are cluster-level
+        # settings now, and this command runs on the host before it belongs to
+        # any cluster, so it cannot read them. It therefore sizes the host for
+        # the product ceiling (MAX_SUBSYSTEMS_PER_NODE): any cluster value then
+        # fits, and add-node/restart push the cluster's actual numbers into the
+        # host config. Sizing for a smaller default instead would leave a node
+        # unable to honour a larger cluster setting.
+        max_lvol = constants.MAX_SUBSYSTEMS_PER_NODE
+        max_size = 0
         number_of_devices = getattr(args, "number_of_devices") or 0
         sockets_to_use = [0]
         if args.sockets_to_use:
@@ -118,7 +125,7 @@ class CLIWrapperBase:
             self.parser.error(f"nodes_per_socket {args.nodes_per_socket}must be either 1 or 2")
         if args.pci_allowed and args.pci_blocked:
             self.parser.error("pci-allowed and pci-blocked cannot be both specified")
-        max_prov = utils.parse_size(max_size, assume_unit='G')
+        max_prov = utils.parse_size(max_size, assume_unit='G') if max_size else 0
         pci_allowed = []
         pci_blocked = []
         nvme_names = []
@@ -137,7 +144,10 @@ class CLIWrapperBase:
                 "--device-model/--size-range (--device-model and --size-range may be combined "
                 "with each other, but not with --pci-allowed or --pci-blocked)."
             )
-        cores_percentage = int(args.cores_percentage)
+        # The core split is decided by the cluster's vcpu-count when the node
+        # is added or restarted; here the default heuristic lays out a usable
+        # baseline for a host that does not belong to a cluster yet.
+        vcpu_count = 0
         if args.calculate_hp_only:
             if not args.number_of_devices:
                 self.parser.error("For calculating huge pages memory, you must provide the --number-of-devices")
@@ -145,9 +155,9 @@ class CLIWrapperBase:
                 number_of_devices = args.number_of_devices
 
         return storage_ops.generate_automated_deployment_config(
-            args.max_lvol, max_prov, sockets_to_use,args.nodes_per_socket,
+            max_lvol, max_prov, sockets_to_use, args.nodes_per_socket,
             pci_allowed, pci_blocked, force=args.force, device_model=args.device_model,
-            size_range=args.size_range, cores_percentage=cores_percentage, nvme_names=nvme_names,
+            size_range=args.size_range, vcpu_count=vcpu_count, nvme_names=nvme_names,
             calculate_hp_only=args.calculate_hp_only, number_of_devices=number_of_devices)
 
     def storage_node__deploy_cleaner(self, sub_command, args):
@@ -274,9 +284,12 @@ class CLIWrapperBase:
         spdk_debug = args.spdk_debug
         reattach_volume = args.reattach_volume
 
-        max_lvol = args.max_lvol
+        # max-subsys and the huge-page floor are cluster-level settings; the
+        # restart reads them from the cluster itself. Zero here means "take the
+        # cluster's value", which is what restart_storage_node does with it.
+        max_lvol = 0
         max_snap = args.max_snap
-        max_prov = utils.parse_size(args.max_prov)
+        max_prov = 0
 
         small_bufsize = args.small_bufsize
         large_bufsize = args.large_bufsize
@@ -309,9 +322,6 @@ class CLIWrapperBase:
                 print(f"Error: {reason}")
             return ok
         return ret
-
-    def storage_node__resume(self, sub_command, args):
-        return storage_ops.resume_storage_node(args.node_id)
 
     def storage_node__get_io_stats(self, sub_command, args):
         node_id = args.node_id
@@ -463,6 +473,12 @@ class CLIWrapperBase:
             return False
         return True
 
+    def cluster__op_stop(self, sub_command, args):
+        return cluster_ops.set_object_ops(args.cluster_id, True)
+
+    def cluster__op_start(self, sub_command, args):
+        return cluster_ops.set_object_ops(args.cluster_id, False)
+
     def cluster__list(self, sub_command, args):
         data = cluster_ops.list()
 
@@ -539,7 +555,19 @@ class CLIWrapperBase:
         return health_controller.check_cluster(cluster_id)
 
     def cluster__update(self, sub_command, args):
-        cluster_ops.update_cluster(**args.__dict__)
+        try:
+            cluster_ops.update_cluster(**args.__dict__)
+        except Exception as e:
+            print(f"Error updating cluster: {e}")
+            return False
+        return True
+
+    def cluster__upgrade_complete(self, sub_command, args):
+        try:
+            cluster_ops.upgrade_complete(args.cluster_id)
+        except Exception as e:
+            print(f"Error completing cluster upgrade: {e}")
+            return False
         return True
 
     def cluster__graceful_shutdown(self, sub_command, args):
@@ -582,7 +610,7 @@ class CLIWrapperBase:
         return cluster_ops.get_ssh_pass(cluster_id)
 
     def cluster__set(self, sub_command, args):
-        cluster_ops.set(args.cluster_id, args.attr_name, args.attr_value)
+        cluster_ops.set_(args.cluster_id, args.attr_name, args.attr_value)
         return True
 
     def cluster__set_shared_placement(self, sub_command, args):
@@ -605,6 +633,93 @@ class CLIWrapperBase:
 
     def cluster__add_replication(self, sub_command, args):
         return cluster_ops.add_replication(args.cluster_id, args.target_cluster_id, args.timeout, args.target_pool)
+
+    def cluster__replication_target_add(self, sub_command, args):
+        return replication_policy_controller.add_target(
+            args.cluster_id, args.name, args.target_cluster_id,
+            target_pool=args.target_pool, timeout_sec=args.timeout)
+
+    def cluster__replication_target_list(self, sub_command, args):
+        data = [{
+            "ID": t.get_id(),
+            "Name": t.target_name,
+            "Target Cluster": t.target_cluster_id,
+            "Target Pool": t.target_pool_uuid or "-",
+            "Timeout": t.timeout_sec,
+            "Status": t.status,
+        } for t in replication_policy_controller.list_targets(args.cluster_id)]
+        return _format_result(data, json=args.json)
+
+    def cluster__replication_target_remove(self, sub_command, args):
+        return replication_policy_controller.remove_target(args.target_id)
+
+    def cluster__replication_target_failover(self, sub_command, args):
+        return self._format_failover_results(
+            replication_policy_controller.failover_target(args.target_id), args)
+
+    def cluster__replication_policy_add(self, sub_command, args):
+        return replication_policy_controller.add_policy(
+            args.cluster_id, args.name, args.target,
+            interval_min=args.interval_min, mode=args.mode,
+            keep_replicated=args.keep_replicated)
+
+    def cluster__replication_policy_list(self, sub_command, args):
+        data = [{
+            "ID": p.get_id(),
+            "Name": p.policy_name,
+            "Target": p.target_id,
+            "Interval (min)": p.interval_min,
+            "Mode": p.mode,
+            "Keep": p.keep_replicated,
+            "Status": p.status,
+        } for p in replication_policy_controller.list_policies(args.cluster_id)]
+        return _format_result(data, json=args.json)
+
+    def cluster__replication_policy_remove(self, sub_command, args):
+        return replication_policy_controller.remove_policy(args.policy_id)
+
+    def cluster__replication_policy_failover(self, sub_command, args):
+        return self._format_failover_results(
+            replication_policy_controller.failover_policy(args.policy_id), args)
+
+    def _format_failover_results(self, results, args):
+        """One row per volume: a partial failure has to be visible, not silent."""
+        if args.json:
+            return _format_json(results)
+        if not results:
+            return "No volumes to fail over"
+        return utils.print_table([{
+            "Volume": r.get("lvol_id", ""),
+            "Status": r.get("status", ""),
+            "Target Volume": r.get("target_lvol_id", "") or "-",
+            "Detail": r.get("detail", "") or "",
+        } for r in results])
+
+    def volume__replication_policy_set(self, sub_command, args):
+        return replication_policy_controller.attach_policy(args.volume_id, args.policy)
+
+    def volume__replication_policy_clear(self, sub_command, args):
+        return replication_policy_controller.detach_policy(args.volume_id)
+
+    def volume__replication_relationship(self, sub_command, args):
+        rel = replication_policy_controller.get_relationship(args.volume_id)
+        if not rel:
+            return "Volume has no replication relationship"
+        if args.json:
+            return _format_json(rel)
+        return utils.print_table([{
+            "Source Volume": rel["source_lvol_id"],
+            "Target Volume": rel["target_lvol_id"],
+            "Source Cluster": rel["source_cluster_id"],
+            "Target Cluster": rel["target_cluster_id"],
+            "State": rel["state"],
+            "Direction": rel["direction"],
+            "Mode": rel["mode"],
+            # Which side serves the client right now; resolvable by the SOURCE
+            # uuid even after the source volume was deleted.
+            "Active": rel.get("active", ""),
+            "Active Volume": rel.get("active_lvol_id", ""),
+        }])
 
     def volume__add(self, sub_command, args):
         import json as _json
@@ -644,7 +759,8 @@ class CLIWrapperBase:
             uid=args.uid, pvc_name=args.pvc_name, namespaced=args.namespaced,
             max_namespace_per_subsys=args.max_namespace_per_subsys, ndcs=ndcs, npcs=npcs, fabric=args.fabric,
             allowed_hosts=allowed_hosts,
-            do_replicate=args.replicate)
+            do_replicate=args.replicate,
+            replication_policy=args.replication_policy)
         if results:
             return results
         else:
@@ -741,7 +857,8 @@ class CLIWrapperBase:
             mode=getattr(args, 'mode', None), interval_min=getattr(args, 'interval_min', None))
 
     def volume__replication_commit(self, sub_command, args):
-        return lvol_controller.replication_commit(args.lvol_id)
+        return lvol_controller.replication_commit(
+            args.lvol_id, delete_source=getattr(args, "delete_source", False))
 
     def volume__replication_failback(self, sub_command, args):
         return lvol_controller.replication_failback(
@@ -758,13 +875,22 @@ class CLIWrapperBase:
         if not info:
             return False
         return utils.print_table([
-            {"Last Snapshot": info["last_snapshot_id"],
+            {"State": info.get("state", "-"),
+             "Healthy": info.get("healthy", False),
+             "Last Snapshot": info["last_snapshot_id"],
              "Last Replication": info["last_replication_time"],
              "Last Duration": info["last_replication_duration"],
              "Replicated Count": info["replicated_count"],
              "Time Lag": info["lag"] or "-",
              "Outstanding": info["outstanding"],
-             "Outstanding Count": info["outstanding_count"]},
+             "Outstanding Count": info["outstanding_count"],
+             # The backlog: how long the oldest queued snapshot has been
+             # waiting, against the interval that was asked for. The interval
+             # is a target, so "behind" is a fact to show, not an error.
+             "Backlog Age": info.get("oldest_outstanding") or "-",
+             "Cadence": ("on target" if info.get("cadence_met", True) else "behind"),
+             "Retrying": info.get("failing_count", 0),
+             "Last Error": (info.get("last_error") or "-")[:60]},
         ])
 
     def volume__replication_trigger(self, sub_command, args):
@@ -1029,14 +1155,14 @@ class CLIWrapperBase:
         return True
 
     def backup__restore(self, sub_command, args):
-        result, error = backup_controller.restore_backup(
-            args.backup_id, args.lvol_name, args.pool,
-            cluster_id=args.cluster_id,
-            target_node_id=getattr(args, 'node', None))
-        if error:
-            print(f"Error: {error}")
+        try:
+            lvol_id = backup_controller.restore_backup(
+                args.backup_id, args.lvol_name, args.pool,
+                target_node_id=getattr(args, 'node', None))
+        except (PreconditionError, RuntimeError) as e:
+            print(f"Error: {e}")
             return False
-        print(f"Restoring backup {args.backup_id} into new volume {result}")
+        print(f"Restoring backup {args.backup_id} into new volume {lvol_id}")
         return True
 
     def backup__export(self, sub_command, args):
@@ -1266,6 +1392,9 @@ class CLIWrapperBase:
             hashicorp_vault_settings=HashicorpVaultSettings({"base_url": args.hashicorp_vault_url}) if args.hashicorp_vault_url else None,
             enable_failure_domain=enable_failure_domain,
             enable_hang_device=enable_hang_device,
+            max_subsys=args.max_subsys or 0,
+            hugepages_mem=utils.parse_size(args.hugepages_mem) if args.hugepages_mem else 0,
+            spdk_vcpu_count=args.vcpu_count or 0,
         )
 
     def query_yes_no(self, question, default="yes"):

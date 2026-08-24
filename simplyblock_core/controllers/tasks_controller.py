@@ -456,6 +456,22 @@ def add_node_to_auto_restart(node):
         return False
 
     cluster = db.get_cluster_by_id(node.cluster_id)
+    # A k8s-managed node that hasn't been CR-linked yet (cr_namespace unset)
+    # is mid-adoption: its DB record exists but the operator hasn't finished
+    # wiring it up. Queuing an auto-restart here builds the data-nic health
+    # check's k8s-service hostname from an empty cr_namespace (".."), which
+    # fails DNS resolution every time and leaves the node in a
+    # permanently-unreachable retry loop that also blocks any manual
+    # `sn restart`/`sn shutdown` on the node (2026-08-10 helm-to-operator
+    # upgrade test). Docker deployments are unaffected: cr_namespace is
+    # legitimately always empty there, so gate on cluster.mode as well.
+    if cluster.mode == "kubernetes" and not node.cr_namespace:
+        logger.info(
+            "Node %s is k8s-managed but not yet CR-linked (cr_namespace unset); "
+            "skipping auto-restart until adoption completes",
+            node.get_id(),
+        )
+        return False
     # Suspended cluster: hold every auto-restart until the suspend-recovery
     # auto-shutdown has drained the whole cluster offline. Restarting nodes
     # one-by-one before the drain completes is exactly what wedged the cluster
@@ -467,8 +483,11 @@ def add_node_to_auto_restart(node):
             "for node %s until all nodes are offline",
             node.cluster_id, node.get_id())
         return False
+    # IN_SHRINK: a PEER failing mid-removal must still get an auto-restart —
+    # the removal itself requires every other node online to make progress.
     if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED,
-                              Cluster.STATUS_READONLY, Cluster.STATUS_UNREADY, Cluster.STATUS_SUSPENDED]:
+                              Cluster.STATUS_READONLY, Cluster.STATUS_UNREADY,
+                              Cluster.STATUS_SUSPENDED, Cluster.STATUS_IN_SHRINK]:
         logger.warning(f"Cluster is not active, skip node auto restart, status: {cluster.status}")
         return False
     # Past-fault-tolerance guard: don't auto-restart nodes one-by-one when
@@ -722,6 +741,21 @@ def get_active_node_removal_task(cluster_id, node_id):
     return False
 
 
+def get_active_node_removal_task_for_cluster(cluster_id):
+    """Return the UUID of any active node-removal task in the cluster, or False.
+
+    Cluster-scoped counterpart to ``get_active_node_removal_task``: the
+    ``IN_SHRINK`` watchdog needs "is a removal in flight anywhere" rather than
+    "for this node", because the node whose removal set the status may already
+    be REMOVED (or gone) by the time the status is found held."""
+    for task in db.get_job_tasks(cluster_id):
+        if task.function_name == JobSchedule.FN_NODE_REMOVAL \
+                and task.canceled is False \
+                and task.status != JobSchedule.STATUS_DONE:
+            return task.uuid
+    return False
+
+
 def add_cluster_expand_task(cluster_id, new_node_id):
     """Queue a single-node cluster-expansion task. The runner drives the
     planner/orchestrator/executor to integrate ``new_node_id`` into the
@@ -872,13 +906,18 @@ def get_active_lvol_mig_task_on_node(cluster_id, node_id):
 
 
 def add_lvol_mig_task(migration):
-    """Create the JobSchedule task that drives a live volume migration."""
+    """Create the JobSchedule task that drives a live volume migration.
+
+    max_retry=-1 disables the backup runner's retry-count kill switch.
+    The migration runner has its own internal ceiling via migration.retry_count;
+    the backup runner's time-based timeout is the only external backstop.
+    """
     return _add_task(
         JobSchedule.FN_LVOL_MIG,
         migration.cluster_id,
         migration.source_node_id,
         "",
-        max_retry=migration.max_retries,
+        max_retry=-1,
         function_params={
             "migration_id": migration.uuid,
             "lvol_id": migration.lvol_id,
@@ -888,12 +927,19 @@ def add_lvol_mig_task(migration):
 
 
 def add_batch_mig_task(group):
-    """Create the JobSchedule task that drives a batch (shared-namespace) migration."""
+    """Create the JobSchedule task that drives a batch (shared-namespace) migration.
+
+    max_retry=-1 disables the backup runner's retry-count kill switch.
+    The batch orchestrator uses its own internal ceiling via task.retry vs
+    constants.LVOL_MIG_MAX_RETRIES; the backup runner's time-based timeout
+    is the only external backstop.
+    """
     return _add_task(
         JobSchedule.FN_LVOL_BATCH_MIG,
         group.cluster_id,
         group.source_node_id,
         "",
+        max_retry=-1,
         function_params={
             "group_id": group.uuid,
             "target_node_id": group.target_node_id,
@@ -1105,15 +1151,25 @@ def _check_snap_instance_on_node(snapshot_id: str , node_id: str):
               send_to_cluster_log=False)
 
 
-def add_snapshot_replication_task(cluster_id, node_id, snapshot_id, replicate_to_source=False):
+def add_snapshot_replication_task(cluster_id, node_id, snapshot_id, replicate_to_source=False,
+                                  dest_lvol_id=None):
+    """``dest_lvol_id`` carries the replication destination for a snapshot
+    whose own lvol has none: a chain-ancestor transfer (a fail-over base, a
+    user snapshot from before the policy) resolves its target node and pool
+    from the policy-managed DESCENDANT volume it is being replicated for.
+    The param is propagated when that task enqueues ITS ancestor, so a whole
+    base chain replicates bottom-up against one destination."""
     if not replicate_to_source:
         snapshot = db.get_snapshot_by_id(snapshot_id)
         if snapshot.snap_ref_id:
             prev_snap = db.get_snapshot_by_id(snapshot.snap_ref_id)
             _check_snap_instance_on_node(prev_snap.get_id(), node_id)
 
+    function_params = {"snapshot_id": snapshot_id, "replicate_to_source": replicate_to_source}
+    if dest_lvol_id:
+        function_params["dest_lvol_id"] = dest_lvol_id
     return _add_task(JobSchedule.FN_SNAPSHOT_REPLICATION, cluster_id, node_id, "",
-                     function_params={"snapshot_id": snapshot_id, "replicate_to_source": replicate_to_source},
+                     function_params=function_params,
                      send_to_cluster_log=False)
 
 

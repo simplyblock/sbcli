@@ -17,7 +17,6 @@ If this logic drifts, the soak silently stops honouring its 2500-volume /
 
 import importlib.util
 import os
-import random
 import threading
 import types
 import unittest
@@ -105,7 +104,6 @@ class TestSizeSteering(unittest.TestCase):
     def test_running_average_converges_to_target(self):
         """Feeding picked sizes back into the live set should steer the
         cumulative average toward --avg-size (5 GiB)."""
-        random.seed(1234)
         runner = _fake_runner()
         seq = 0
         for _ in range(2500):

@@ -79,8 +79,10 @@ class StorageNode(BaseNodeObject):
     lvols: int = 0
     lvstore: str = ""
     lvstore_stack: List[dict] = []
-    lvstore_stack_secondary: List[dict] = []
-    lvstore_stack_tertiary: List[dict] = []
+    # Despite the names, these hold the UUID of the primary whose LVS this node
+    # serves as a peer for — not a bdev stack.
+    lvstore_stack_secondary: str = ""
+    lvstore_stack_tertiary: str = ""
     lvol_subsys_port: int = 9090
     lvstore_ports: dict = {}  # {lvs_name: {"lvol_subsys_port": N, "hublvol_port": M}}
     max_lvol: int = 0
@@ -112,6 +114,14 @@ class StorageNode(BaseNodeObject):
     pollers_mask: str = ""
     primary_ip: str = ""
     raid: str = ""
+    # Per-node restart claim: owner token + ISO timestamp of the actor
+    # currently driving this node's restart. Written atomically by
+    # try_set_node_restarting, heartbeated by the restart_storage_node
+    # wrapper, released on exit. A claim older than
+    # constants.RESTART_CLAIM_TTL_SEC is stale (driver died) and may be
+    # taken over. Only meaningful while status is RESTARTING/IN_SHUTDOWN.
+    restart_claim_owner: str = ""
+    restart_claim_ts: str = ""
     remote_devices: List[RemoteDevice] = []
     remote_jm_devices: List[RemoteJMDevice] = []
     rpc_password: SecretStr = SecretStr("")
@@ -155,6 +165,8 @@ class StorageNode(BaseNodeObject):
     lvol_poller_mask: str = ""
     spdk_proxy_image: str = ""
     transfer_hublvol: HubLVol = None  # type: ignore[assignment]
+    # spdk image tag
+    spdk_version: str = ""
 
     def get_lvol_subsys_port(self, lvs_name=None):
         """Get the client-facing NVMeoF port for a specific lvstore.
@@ -185,7 +197,7 @@ class StorageNode(BaseNodeObject):
             host = f"{self._k8s_node_label()}.simplyblock-storage-node-api.{self.cr_namespace}.svc.cluster.local:{port}"
         return SNodeClient(host, **kwargs)
 
-    def rpc_client(self, **kwargs):
+    def rpc_client(self, **kwargs) -> RPCClient:
         """Return rpc client to this node
         """
         host = self.mgmt_ip
@@ -593,7 +605,7 @@ class StorageNode(BaseNodeObject):
                 self.create_hublvol()
                 return True
             except RPCException as e:
-                logger.error("Error establishing hublvol: %s", e.message)
+                logger.error("Error establishing hublvol: %s", e)
                 return False
 
     def connect_to_hublvol(self, primary_node, failover_node=None, *, role,
@@ -750,6 +762,21 @@ class StorageNode(BaseNodeObject):
                          lvs_node.lvstore, self.get_id())
             return False
 
+        # Assert the hublvol multipath policy on the way out. The coordinator
+        # already does this, but it is skipped entirely when the remote bdev
+        # already exists (the guard at the top of this method), which leaves a
+        # window where a re-attached hublvol runs at SPDK's ACTIVE_PASSIVE
+        # default and one NIC of the leader carries all hub IO. Observed on a
+        # non-outaged peer during soak 2026-08-11 (LVS_14 at active_passive
+        # until a later reconcile re-asserted it). wait=False: this is the last
+        # step of the in-freeze / port-block path, so it must not poll.
+        from simplyblock_core.utils.hublvol_reconnect import (
+            ensure_hublvol_active_active,
+        )
+        ensure_hublvol_active_active(
+            rpc_client, lvs_node.hublvol.bdev_name, self.get_id(), role,
+            wait=False, request_timeout=rpc_timeout)
+
         return True
 
     def add_hublvol_failover_path(self, primary_node, failover_node):
@@ -800,27 +827,85 @@ class StorageNode(BaseNodeObject):
             **kwargs,
         )
 
-    def wait_for_jm_rep_tasks_to_finish(self, jm_vuid):
-        if not self.rpc_client().bdev_lvol_get_lvstores(self.lvstore):
-            return True # no lvstore means no need to wait
-        retry = 10
+    def wait_for_jm_rep_tasks_to_finish(self, jm_vuid, retry=10, delay=20):
+        """Wait until this node reports no in-flight JM replication for jm_vuid.
+
+        Every exit from this loop must be bounded. The RPC target is a *peer*
+        that the caller is waiting on, and that peer can die while we wait —
+        so an RPC failure has to consume budget exactly like a "still busy"
+        answer does.
+
+        Incident 2026-08-17 22:03, multipath soak iteration 1: a container_kill
+        on node A started JM history replication on peer B; A's restart then
+        entered this wait, B answered once ("replication task found"), and B was
+        host-rebooted ~1 s later. From then on every jc_get_jm_status raised,
+        the old ``except`` branch neither decremented ``retry`` nor slept, and
+        this loop spun for 50 minutes (only urllib3's connect-retries paced it).
+        A stayed RESTARTING forever, which in turn deferred B's own restart
+        (tasks_runner_restart's strict one-restart-at-a-time) and made
+        StorageNodeMonitor stand down ("has an active restart task"), so B's
+        SPDK was never brought back: a three-way deadlock where each party
+        behaved as designed. Note the pre-check below is deliberately inside
+        the guarded section too — when the peer is already gone it used to
+        raise straight out of this method.
+        """
+        deadline = time.time() + retry * delay
         while retry > 0:
             try:
+                if not self.rpc_client().bdev_lvol_get_lvstores(self.lvstore):
+                    return True  # no lvstore means no need to wait
                 jm_replication_tasks = False
                 ret = self.rpc_client().jc_get_jm_status(jm_vuid)
                 for jm in ret:
                     if ret[jm] is False:  # jm is not ready (has active replication task)
                         jm_replication_tasks = True
                         break
-                if jm_replication_tasks:
-                    logger.warning(f"Replication task found on node: {self.get_id()}, jm_vuid: {jm_vuid}, retry...")
-                    retry -= 1
-                    time.sleep(20)
-                else:
+                if not jm_replication_tasks:
                     return True
-            except Exception:
-                logger.warning("Failed to get replication task!")
+                logger.warning(
+                    f"Replication task found on node: {self.get_id()}, "
+                    f"jm_vuid: {jm_vuid}, retry...")
+            except Exception as e:
+                # Unreachable peer: consume budget and pace the loop, and stop
+                # early once the control plane agrees the peer is gone — the
+                # caller has usually already seen it fail (e.g. "hublvol ...
+                # no path attached") and waiting out the full budget only
+                # widens the window in which our own node blocks a peer.
+                logger.warning(
+                    f"Failed to get replication task from {self.get_id()} "
+                    f"(jm_vuid {jm_vuid}): {e}")
+                if not self._is_peer_reachable_for_jm_wait():
+                    logger.warning(
+                        f"Node {self.get_id()} is not usable (status="
+                        f"{self.status}); abandoning the JM replication wait "
+                        f"for jm_vuid {jm_vuid}")
+                    return False
+            retry -= 1
+            if retry <= 0 or time.time() >= deadline:
+                break
+            time.sleep(delay)
+        logger.error(
+            f"Gave up waiting for JM replication on {self.get_id()} "
+            f"(jm_vuid {jm_vuid}) after {retry * delay if retry > 0 else 0}s budget")
         return False
+
+    def _is_peer_reachable_for_jm_wait(self):
+        """True unless the control plane already considers this node dead.
+
+        Read fresh: the record this object was built from predates the outage
+        that is making the RPCs fail.
+        """
+        from simplyblock_core.db_controller import DBController
+        try:
+            fresh = DBController().get_storage_node_by_id(self.get_id())
+        except Exception:
+            return True  # can't tell — keep the bounded retries
+        return fresh.status not in (
+            StorageNode.STATUS_OFFLINE,
+            StorageNode.STATUS_REMOVED,
+            StorageNode.STATUS_IN_SHUTDOWN,
+            StorageNode.STATUS_SCHEDULABLE,
+        )
 
     def lvol_sync_del(self) -> bool:
         from simplyblock_core.db_controller import DBController

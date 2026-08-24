@@ -6,7 +6,7 @@ import shutil
 import subprocess
 import time
 import traceback
-from __init__ import get_all_tests, get_security_tests, get_backup_tests, get_backup_stress_tests, ALL_TESTS
+from __init__ import get_all_tests, get_security_tests, get_backup_tests, get_backup_topology_tests, get_backup_stress_tests, get_parity_tests, ALL_TESTS
 from logger_config import setup_logger
 from exceptions.custom_exception import (
     TestNotFoundException,
@@ -36,15 +36,18 @@ COMPLETION_COMMENT = "E2E run"
 # starts with a fresh cluster and clean spare nodes.
 TOPOLOGY_MODIFYING_TESTS = {
     "TestAddNodesDuringFioRun",
+    "TestAddNodesDualNodePerHost",
     "TestSequentialNodeAdd",
     "TestAddNodeSnapshotCloneOnNewNode",
     "TestBackupAfterNodeAdd",
     "TestBackupWithFioOnNewNode",
     "TestAddK8sNodesDuringFioRun",
+    "TestAddK8sNodesDualNodePerHost",
     "K8sNativeAddNodeTest",
     "K8sNativeNodeMigrationTest",
     "TestBackupAfterNodeMigration",
     "TestBackupDuringMigration",
+    "TestBackupCrossClusterRestore",
 }
 
 def main():
@@ -94,8 +97,8 @@ def main():
                         help="Journal partition count for bootstrap.",
                         default=int(os.environ.get("BOOTSTRAP_JOURNAL_PARTITION", "0")))
     parser.add_argument('--max_subsys', type=int,
-                        help="Max subsystems per storage node.",
-                        default=int(os.environ.get("BOOTSTRAP_MAX_SUBSYS", "1024")))
+                        help="Max subsystems per storage node (max 75).",
+                        default=int(os.environ.get("BOOTSTRAP_MAX_SUBSYS", "75")))
     parser.add_argument('--data_nic', type=str,
                         help="Data NIC interface name.",
                         default=os.environ.get("BOOTSTRAP_DATA_NIC", "eth1"))
@@ -137,13 +140,22 @@ def main():
         test_class_run = get_security_tests()
     elif args.testname and args.testname.strip().lower() == "backup":
         test_class_run = get_backup_tests()
+    elif args.testname and args.testname.strip().lower() == "backup-topology":
+        test_class_run = get_backup_topology_tests()
     elif args.testname and args.testname.strip().lower() == "backup-stress":
         test_class_run = get_backup_stress_tests()
+    elif args.testname and args.testname.strip().lower() == "parity":
+        test_class_run = get_parity_tests()
     elif args.testname is None or len(args.testname.strip()) == 0:
         for cls in tests:
             if cls.__name__ == "TestAddNodesDuringFioRun":
                 if len(new_nodes) == 0:
                     logger.warning("Skipping TestAddNodesDuringFioRun: requires --new-nodes with at least 1 IP.")
+                    skipped_cases += 1
+                    continue
+            if cls.__name__ == "TestAddNodesDualNodePerHost":
+                if len(new_nodes) == 0:
+                    logger.warning("Skipping TestAddNodesDualNodePerHost: requires --new-nodes with at least 1 IP.")
                     skipped_cases += 1
                     continue
             if cls.__name__ == "TestRestartNodeOnAnotherHost":
@@ -156,6 +168,13 @@ def main():
                     continue
                 if len(new_nodes) == 0:
                     logger.warning("Skipping TestAddK8sNodesDuringFioRun: requires --new-nodes with at least 1 IP.")
+                    skipped_cases += 1
+                    continue
+            if cls.__name__ == "TestAddK8sNodesDualNodePerHost":
+                if not args.run_k8s:
+                    continue
+                if len(new_nodes) == 0:
+                    logger.warning("Skipping TestAddK8sNodesDualNodePerHost: requires --new-nodes with at least 1 IP.")
                     skipped_cases += 1
                     continue
             if cls.__name__ == "K8sNativeAddNodeTest":
@@ -199,15 +218,22 @@ def main():
         seen = set()
         for needle in needles:
             for cls in ALL_TESTS:
-                if needle in cls.__name__.lower().replace("_", "") and cls not in seen:
+                if needle == cls.__name__.lower().replace("_", "") and cls not in seen:
                     if cls.__name__ == "TestAddNodesDuringFioRun" and len(new_nodes) == 0:
                         raise ValueError("TestAddNodesDuringFioRun requires --new-nodes with at least 1 IP.")
+                    if cls.__name__ == "TestAddNodesDualNodePerHost" and len(new_nodes) == 0:
+                        raise ValueError("TestAddNodesDualNodePerHost requires --new-nodes with at least 1 IP.")
                     if cls.__name__ == "TestRestartNodeOnAnotherHost" and len(new_nodes) == 0:
                         raise ValueError("TestRestartNodeOnAnotherHost requires --new-nodes with atleast 1 new IP.")
                     if cls.__name__ == "TestAddK8sNodesDuringFioRun" and len(new_nodes) == 0:
                         if not args.run_k8s:
                             continue
                         raise ValueError("TestAddK8sNodesDuringFioRun requires --new-nodes with at least 1 IP.")
+                    if cls.__name__ == "TestAddK8sNodesDualNodePerHost":
+                        if not args.run_k8s:
+                            continue
+                        if len(new_nodes) == 0:
+                            raise ValueError("TestAddK8sNodesDualNodePerHost requires --new-nodes with at least 1 IP.")
                     if cls.__name__ == "K8sNativeAddNodeTest":
                         if not args.run_k8s:
                             continue
@@ -339,6 +365,11 @@ def main():
             logger.error(f"Error During Teardown for test: {test.__name__}")
             logger.error(traceback.format_exc())
         finally:
+            # Print log path FIRST — before any file copies or core dump
+            # checks that might break/hang.  The workflow summary parses
+            # "Logs Path:" from output.log to build the per-test table.
+            test_obj.get_logs_path()
+
             # Copy e2e/logs/ folder to NFS so automation logs are accessible post-run
             log_path = getattr(test_obj, "docker_logs_path", "")
             if log_path:
@@ -394,7 +425,6 @@ def main():
                         "Cannot execute more tests as cluster is not stable. Exiting"
                     )
                     break
-            test_obj.get_logs_path()
 
             # ── Inter-test cluster reset ──────────────────────────────
             # When two consecutive topology-modifying tests are queued,
@@ -655,7 +685,7 @@ def _docker_cluster_reset(args, new_nodes, logger):
         logger.info(f"[reset]   Installing sbcli + configuring {node}...")
         _ssh_exec(ssh_obj, node, install_cmd, logger, ignore_errors=False)
         time.sleep(5)
-        configure_cmd = f"{sbcli_cmd} --dev -d sn configure --max-subsys {args.max_subsys}"
+        configure_cmd = f"{sbcli_cmd} --dev -d sn configure"
         _ssh_exec(ssh_obj, node, configure_cmd, logger, ignore_errors=False)
         deploy_cmd = f"{sbcli_cmd} sn deploy --ifname {args.ifname}"
         _ssh_exec(ssh_obj, node, deploy_cmd, logger, ignore_errors=False)
@@ -669,6 +699,7 @@ def _docker_cluster_reset(args, new_nodes, logger):
     create_cmd = (
         f"{sbcli_cmd} sn deploy-cleaner ; "
         f"{sbcli_cmd} --dev -d cluster create"
+        f" --max-subsys {args.max_subsys}"
         f" --ha-type {args.ha_type}"
         f" --data-chunks-per-stripe {args.ndcs}"
         f" --parity-chunks-per-stripe {args.npcs}"

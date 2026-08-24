@@ -8,6 +8,7 @@ from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.release_upgrades import jc_compression_upgrade
 
 logger = utils.get_logger(__name__)
 
@@ -87,7 +88,7 @@ def task_runner(task):
         return False
 
     cluster = db.get_cluster_by_id(task.cluster_id)
-    if cluster.status not in [Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
+    if cluster.status not in Cluster.OPERABLE_STATUSES:
         task.function_result = "cluster is not active, retrying"
         task.status = JobSchedule.STATUS_SUSPENDED
         task.retry += 1
@@ -311,7 +312,12 @@ def main():
                         update_master_task(task, cl)
                         if res:
                             node_task = tasks_controller.get_active_node_tasks(task.cluster_id, task.node_id)
-                            if not node_task:
+                            # Release-upgrade guard (remove with the
+                            # jc_compression_upgrade plugin): resumes are
+                            # held until `cluster upgrade-complete`.
+                            if not node_task and jc_compression_upgrade.resume_is_held(cl):
+                                logger.info("JC compression resume held: cluster upgrade in progress")
+                            elif not node_task:
                                 logger.info("no task found on same node, resuming compression")
                                 node = db.get_storage_node_by_id(task.node_id)
                                 for n in db.get_storage_nodes_by_cluster_id(node.cluster_id):

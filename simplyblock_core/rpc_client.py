@@ -9,7 +9,7 @@ import requests
 from jsonschema.exceptions import ValidationError
 from pydantic import SecretStr
 from requests.adapters import HTTPAdapter
-from requests.exceptions import ConnectionError, HTTPError, Timeout, TooManyRedirects
+from requests.exceptions import ConnectionError, HTTPError, ReadTimeout
 from urllib3 import Retry
 
 from simplyblock_core import utils, constants
@@ -18,6 +18,42 @@ from simplyblock_core.utils.helpers import single_or_none
 from simplyblock_core.utils.secrets import unwrap_secrets_for_send
 
 logger = utils.get_logger()
+
+
+def namespace_matches(ns, dev_name=None, nsid=None, uuid=None):
+    """True iff a namespace dict from ``nvmf_get_subsystems`` is the namespace
+    identified by ``(dev_name, nsid, uuid)``.
+
+    Identity matches on EITHER the namespace UUID or the bdev name, because
+    SPDK reports ``bdev_name`` as whichever name the bdev was registered
+    under. For an lvol that is its **raw UUID**, not the ``<lvs>/<lvol>``
+    alias carried in ``lvol.top_bdev`` — so comparing bdev_name alone reports
+    "no namespace" for a namespace that is plainly present.
+
+    That false negative is not cosmetic. Soak 2026-08-11, first outage pair:
+    on both recovered nodes every lvol subsystem ended up with its namespace
+    attached and **zero listeners**, because ``add_lvol_thread``'s
+    post-condition ("refusing to add a listener for an empty subsystem", the
+    guard added for the 2026-08-09 listener-without-namespace incident) read
+    the namespace as absent and skipped listener creation. 4 of 6 volumes
+    silently lost a path, the control plane still reported every lvol ``ha``,
+    and fio never errored because the primary path still served IO. The
+    lvol-monitor repair loop detected it correctly and then re-refused it on
+    every cycle for the same reason, so the state was permanent.
+
+    A contradicting UUID still disqualifies a bdev_name match: the same bdev
+    name carrying a different volume UUID is a real conflict, not a match.
+    """
+    if nsid is not None and ns.get("nsid") != nsid:
+        return False
+    ns_uuid = str(ns.get("uuid") or "").lower()
+    want_uuid = str(uuid or "").lower()
+    if want_uuid and ns_uuid:
+        # Both sides know the UUID: it is authoritative in both directions.
+        return ns_uuid == want_uuid
+    if dev_name is not None:
+        return ns.get("bdev_name") == dev_name
+    return True
 
 
 _response_schema = {
@@ -86,14 +122,40 @@ class RPCErrorCode(IntEnum):
 
 
 class RPCException(Exception):
-    def __init__(self, message: str, code: Optional[int] = None, data: Any = None):
-        super().__init__(message, code, data)
+    """Base class for all client-raised operational errors."""
+
+
+class RPCConnectionError(RPCException):
+    """Network/connection-level failure (couldn't reach the server)."""
+
+
+class RPCHTTPError(RPCException):
+    """Non-2xx HTTP status (raise_for_status failure)."""
+    def __init__(self, message, status_code, response_text=None):
+        super().__init__(message)
+        self.status_code = status_code
+        self.response_text = response_text
+
+
+class RPCProtocolError(RPCException):
+    """Response wasn't valid/well-formed JSON-RPC."""
+
+
+class RPCRemoteError(RPCException):
+    def __init__(self, message: str, code: int, data: Any = None):
+        super().__init__(message)
         self.code = code
-        self.message = message
         self.data = data
 
 
 _response_validator = jsonschema.validators.validator_for(_response_schema)(_response_schema)  # type: ignore[call-arg]
+
+
+#: JSON-RPC's "method not found". Used to tell "this build is older than the
+#: RPC" apart from "the call failed", which callers must treat differently.
+RPC_METHOD_NOT_FOUND = -32601
+#: Returned instead of a result when the target does not implement the method.
+RPC_UNSUPPORTED = "__rpc_unsupported__"
 
 
 class RPCClient:
@@ -189,27 +251,33 @@ class RPCClient:
 
     def _request3(self, method: str, **kwargs):
         logger.debug("Requesting method: %s, params: %s", method, kwargs)
+        wire_payload = unwrap_secrets_for_send({
+            'id': 1,
+            'method': method,
+            'params': kwargs,
+        })
         try:
-            wire_payload = unwrap_secrets_for_send({
-                'id': 1,
-                'method': method,
-                'params': kwargs,
-            })
             response = self.session.post(
                 self.url, data=json.dumps(wire_payload), timeout=self.timeout,
                 headers={"X-RPC-Timeout": str(self.timeout)})
             response.raise_for_status()
             data = response.json()
             _response_validator.validate(data)
-        except (
-                ConnectionError, Timeout, TooManyRedirects, HTTPError,  # requests
-                JSONDecodeError,  # json
-                ValidationError,  # jsonschema
-        ) as e:
-            raise RPCException('Request failed') from e
+        except ConnectionError as e:
+            raise RPCConnectionError("Could not reach remote") from e
+        except ReadTimeout as e:
+            raise RPCConnectionError("Did not get a response from remote within timeout") from e
+        except HTTPError as e:
+            raise RPCHTTPError(
+                f"HTTP {response.status_code} from remote",
+                status_code=response.status_code,
+                response_text=response.text,
+            ) from e
+        except (JSONDecodeError, ValidationError) as e:
+            raise RPCProtocolError("Invalid result payload") from e
 
         if (error := data.get('error')) is not None:
-            raise RPCException(**error)
+            raise RPCRemoteError(**error)
 
         return data['result']
 
@@ -223,7 +291,7 @@ class RPCClient:
     def subsystem_get(self, nqn: str) -> Optional[dict]:
         try:
             return single_or_none(self._request3("nvmf_get_subsystems", nqn=nqn))
-        except RPCException as e:
+        except RPCRemoteError as e:
             if e.code == -errno.ENODEV:
                 return None
             raise
@@ -254,7 +322,7 @@ class RPCClient:
         """
         try:
             return self._request3("keyring_file_add_key", name=name, path=path)
-        except RPCException as e:
+        except RPCRemoteError as e:
             if allow_existing and e.code == -17:
                 logger.debug("Key %s already in SPDK keyring, reusing", name)
                 return None
@@ -465,14 +533,8 @@ class RPCClient:
         if err and idempotent:
             try:
                 for ns in (self.subsystem_get(nqn) or {}).get("namespaces", []):
-                    if ns.get("bdev_name") != dev_name:
-                        continue
-                    if nsid is not None and ns.get("nsid") != nsid:
-                        continue
-                    if uuid is not None and ns.get("uuid") and ns.get("uuid") != uuid:
-                        # Same bdev at a different nsid is fine to no-op,
-                        # but a mismatched uuid on the same bdev is a real
-                        # conflict — keep the original error.
+                    if not namespace_matches(ns, dev_name=dev_name, nsid=nsid,
+                                             uuid=uuid):
                         continue
                     existing_nsid = ns.get("nsid")
                     logger.info(
@@ -514,7 +576,20 @@ class RPCClient:
             logger.debug("nvmf_subsystem_ns_update not available or failed: %s", e)
             return None
 
-    def nvmf_subsystem_listener_set_ana_state(self, nqn, ip, port, trtype="TCP", is_optimized=True, ana=None):
+    def nvmf_subsystem_listener_set_ana_state(self, nqn, ip, port, trtype="TCP", is_optimized=True,
+                                              ana=None, anagrpid=None):
+        """Set a listener's ANA state, optionally for a SINGLE ANA group.
+
+        Without ``anagrpid`` the state applies to the whole subsystem, which is
+        wrong once a subsystem carries several namespaces: volumes sharing one
+        subsystem (and therefore one controller on the client) can be migrated,
+        suspended or failed over independently, and a subsystem-wide flip would
+        drag the others with it. In SPDK every namespace gets its own ANA group
+        whose id equals the namespace id, so pass ``anagrpid=lvol.ns_id`` to
+        confine the change to that volume. The parameter is optional in the SPDK
+        RPC decoder, so omitting it keeps the old subsystem-wide behaviour for
+        single-namespace subsystems such as the hublvols.
+        """
         params = {
             "nqn": nqn,
             "listen_address": {
@@ -532,6 +607,9 @@ class RPCClient:
 
         if ana:
             params['ana_state'] = ana
+
+        if anagrpid is not None:
+            params['anagrpid'] = int(anagrpid)
 
         return self._request("nvmf_subsystem_listener_set_ana_state", params)
 
@@ -944,8 +1022,36 @@ class RPCClient:
             params["reconnect_delay_sec"] = int(reconnect_delay_sec)
         if fast_io_fail_timeout_sec is not None:
             params["fast_io_fail_timeout_sec"] = int(fast_io_fail_timeout_sec)
-        return self._request("bdev_nvme_attach_controller", params,
-                             request_timeout=request_timeout)
+        # Two SPDK success shapes are falsy, and callers gate on truthiness:
+        #
+        #  * adding a path to an EXISTING multipath controller creates no new
+        #    bdev, so the RPC succeeds and returns an empty name list;
+        #  * re-adding a path that is already present fails with -EALREADY
+        #    ("A controller named X already exists with the specified network
+        #    path", bdev_nvme_rpc.c) — which means the path is there, i.e. the
+        #    strongest possible success signal.
+        #
+        # Returning those as falsy made hublvol reconcile report "no path
+        # attached" for a controller whose paths were both enabled, so
+        # recreate_lvstore failed and the node oscillated offline <-> in_restart
+        # indefinitely (multipath soak 2026-08-19 iteration 4). Report success
+        # as True and keep the name list when SPDK actually created bdevs.
+        result, error = self._request2("bdev_nvme_attach_controller", params,
+                                       request_timeout=request_timeout)
+        if error:
+            code = error.get("code") if isinstance(error, dict) else None
+            message = str(error.get("message", "")) if isinstance(error, dict) else str(error)
+            if code == -errno.EALREADY or "already exists with the specified network path" in message:
+                logger.info(
+                    "bdev_nvme_attach_controller: %s already has path %s:%s — "
+                    "treating as attached", name, traddr, trsvcid)
+                return True
+            logger.error(
+                "bdev_nvme_attach_controller failed for %s %s:%s: %s",
+                name, traddr, trsvcid, error)
+            return None
+        # Empty list == path added to an existing controller (no new bdev).
+        return result if result else True
 
     def bdev_split(self, base_bdev, split_count):
         params = {
@@ -1159,10 +1265,9 @@ class RPCClient:
             params["shared_placement"] = True
         if jm_cpu_mask:
             params["bdb_lcpu_mask"] = int(jm_cpu_mask, 16)
-        # Compression thread: enabled per-branch (constants.JM_COMPRESSION_THREAD_ENABLED).
-        # compression_cpu_mask is a hex mask string co-located with jc-singleton on
-        # nodes <32 vCPU, or a dedicated core on >=32 vCPU; the data plane wants it as
-        # an int, matching bdb_lcpu_mask above.
+        # Compression thread: currently always off (no caller passes True).
+        # compression_cpu_mask is a hex mask string; the data plane wants it
+        # as an int, matching bdb_lcpu_mask above.
         if compression_thread:
             params["compression_thread"] = True
             if compression_cpu_mask:
@@ -1397,6 +1502,17 @@ class RPCClient:
             "bs_nonleadership": bs_nonleadership,
         })
 
+    def bdev_lvol_update_lvstore(self, lvs):
+        """Reload the lvstore's blob metadata from disk (spdk_lvs_update_live).
+
+        Pure md refresh — does NOT change leadership. Must be called on a
+        non-leader LVS (the SPDK side asserts leader == false). Used before a
+        control-plane leadership grant so the grant never serves stale blob
+        metadata (the 2026-07-06 LVS_13 hazard of a bare set_leader)."""
+        return self._request("bdev_lvol_update_lvstore", {
+            "uuid" if utils.UUID_PATTERN.match(lvs) else "lvs_name": lvs,
+        })
+
     def bdev_lvol_set_lvs_signal(self, lvs):
         """Send a fabric-level signal to an LVS to drop leadership.
 
@@ -1545,12 +1661,46 @@ class RPCClient:
             params["ana_state"] = ana_state
         return self._request2("nvmf_subsystem_add_listener", params)
 
-    def bdev_nvme_set_multipath_policy(self, name, policy):  # policy: active_active or active_passive
+    def bdev_nvme_set_multipath_policy(self, name, policy, selector=None,
+                                       rr_min_io=None, request_timeout=None):
+        """Set the multipath policy on an NVMe bdev.
+
+        ``policy``: ``active_active`` or ``active_passive``.
+
+        ``selector`` (``active_active`` only): ``round_robin`` or
+        ``queue_depth``. Omitting it lets SPDK default to ``round_robin``
+        with ``rr_min_io`` coerced to 1 (bdev_nvme.c:5626), i.e. the path
+        alternates on every IO.
+
+        Note that ``active_active`` load-balances only WITHIN an ANA state:
+        ``_bdev_nvme_find_io_path`` (bdev_nvme.c:1150) returns the first
+        available ``optimized`` path and reaches ``non_optimized`` only when
+        no optimized path exists. Setting it therefore never overrides an
+        ANA-expressed primary/failover preference.
+        """
         params = {
             "name": name,
             "policy": policy,
         }
-        return self._request("bdev_nvme_set_multipath_policy", params)
+        if selector:
+            params["selector"] = selector
+        if rr_min_io is not None:
+            params["rr_min_io"] = rr_min_io
+        return self._request("bdev_nvme_set_multipath_policy", params,
+                             request_timeout=request_timeout)
+
+    def bdev_jm_get_status(self, jm_vuid):
+        """Journal status for one JM group.
+
+        Returns (on res > 0) a dict with jm_vuid, generation_id,
+        total_records, total_bytes, uncompressed_bytes, compression_threshold
+        and compression_status -- total_records is the record count the
+        compression-backlog alert keys on.
+        """
+        params = {
+            "jm_vuid": jm_vuid,
+        }
+        return self._request("bdev_jm_get_status", params)
 
     def jc_get_jm_status(self, jm_vuid):
         """
@@ -1575,7 +1725,7 @@ class RPCClient:
         params = {
             "jm_vuid": jm_vuid,
         }
-        return self._request("jc_disable_replication", params)
+        return self._request3("jc_disable_replication", **params)
 
     def bdev_distrib_check_inflight_io(self, jm_vuid):
         params = {
@@ -1596,6 +1746,31 @@ class RPCClient:
             "qos_weights": qos_weights,
         }
         return self._request("bdev_distrib_set_qos_weights", params)
+
+    def jm_get_events(self):
+        """Fetch every event the JM currently holds.
+
+        Each entry looks like::
+
+            {"timestamp": "2026-08-19T18:59:59.010000Z",
+             "event_type": "jm_compression", "jm_vuid": "1",
+             "status": "compression_started", "error_code": 0}
+
+        ``status`` is one of compression_started / compression_finished /
+        compression_failed, and a non-zero ``error_code`` means failure.
+
+        Returns the list ([] when the JM holds nothing), ``RPC_UNSUPPORTED``
+        when the target build has no such RPC, or None when the call failed.
+        The sentinel matters: without it, a cluster running an SPDK build from
+        before this RPC existed would log a JSON-RPC error every poll forever.
+        """
+        result, error = self._request2("jm_get_events")
+        if error:
+            if error.get("code") == RPC_METHOD_NOT_FOUND:
+                return RPC_UNSUPPORTED
+            logger.error(f"jm_get_events failed: {error}")
+            return None
+        return result or []
 
     def jc_compression_get_status(self, jm_vuid):
         """
@@ -1618,10 +1793,10 @@ class RPCClient:
         return self._request2("jc_compression", params)
 
     def nvmf_port_block(self, port, is_reject=False):
-        return self._request3("nvmf_port_block",
-            port=port,
-            reject=is_reject,
-        )
+        params = {"port": port}
+        if is_reject:
+            params["reject"] = is_reject
+        return self._request3("nvmf_port_block", **params)
 
     def nvmf_port_unblock(self, port):
         return self._request3("nvmf_port_unblock", port=port)
@@ -1838,7 +2013,7 @@ class RPCClient:
                 name=name,
                 bucket_name=bucket_name,
             )
-        except RPCException as e:
+        except RPCRemoteError as e:
             if allow_existing and e.code == -17:
                 logger.debug("Bucket %s already registered with %s", name, bucket_name)
                 return None

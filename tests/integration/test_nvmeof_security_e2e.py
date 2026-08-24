@@ -13,7 +13,6 @@ Tests cover:
 """
 
 import json
-import random
 import unittest
 import uuid as _uuid_mod
 
@@ -368,7 +367,6 @@ class TestErrorInjection(unittest.TestCase):
         })
         _server.set_failure_rate(0.5, timeout_seconds=0.5)
 
-        random.seed(42)
         successes = 0
         errors = 0
         for i in range(20):

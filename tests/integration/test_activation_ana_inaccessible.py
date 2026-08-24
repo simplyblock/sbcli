@@ -66,6 +66,19 @@ class TestActivationAnaStateSelection(unittest.TestCase):
 # Property B: cluster_activate Pass 4 sets correct ANA before STATUS_ACTIVE
 # ---------------------------------------------------------------------------
 
+def _remote_of(owner, dev):
+    """A connected remote-device record on a peer for ``owner``'s ``dev``. The
+    uuid must match the owning device's — the pre-activation connectivity mesh
+    is keyed on device id."""
+    from simplyblock_core.models.nvme_device import RemoteDevice
+
+    rd = RemoteDevice()
+    rd.uuid = dev.get_id()
+    rd.remote_bdev = f"remote_{dev.get_id()}"
+    rd.node_id = owner.get_id()
+    return rd
+
+
 def _node(uuid, status=StorageNode.STATUS_ONLINE, lvstore="LVS_A",
           jm_vuid=1, primary_secondary="", primary_tertiary="",
           mgmt_ip="10.0.0.1", rpc_port=8080, is_secondary_node=False):
@@ -141,6 +154,14 @@ class TestClusterActivatePass4(unittest.TestCase):
 
         events = []  # ordered record of ("ana", node_id, ana_state) / ("status", value)
 
+        # cluster_activate gates on _wait_for_full_device_connectivity, which
+        # needs every online primary to hold a connected remote-device record
+        # for the other's devices. Without the mesh, activation aborts at that
+        # gate and Pass 4 (the ANA writes under test) never runs.
+        for node, peer in ((primary, secondary), (secondary, primary)):
+            node.remote_devices = [_remote_of(peer, dev)
+                                   for dev in peer.nvme_devices]
+
         db = MagicMock()
         db.get_cluster_by_id.return_value = cluster
         db.get_storage_nodes_by_cluster_id.return_value = [primary, secondary]
@@ -171,7 +192,7 @@ class TestClusterActivatePass4(unittest.TestCase):
         patches = [
             patch.object(cluster_ops, "db_controller", db),
             patch.object(cluster_ops, "DBController", return_value=db),
-            patch("simplyblock_core.port_block.set_port", lambda *a, **k: None),
+            patch("simplyblock_core.utils.port_block.set_port", lambda *a, **k: None),
             patch.object(cluster_ops.tcp_ports_events, "port_deny", lambda *a, **k: None),
             patch.object(cluster_ops.tcp_ports_events, "port_allowed", lambda *a, **k: None),
             patch.object(cluster_ops.tasks_controller, "add_port_allow_task", lambda *a, **k: None),
@@ -187,7 +208,10 @@ class TestClusterActivatePass4(unittest.TestCase):
             patch.object(cluster_ops.storage_node_ops, "get_secondary_nodes_2",
                          lambda *a, **kw: []),
             patch.object(cluster_ops, "set_cluster_status", _set_status),
-            patch.object(cluster_ops, "time", MagicMock()),
+            # Only sleep. Replacing the whole module makes time.time() return
+            # a MagicMock, so the activation path's `time.time() >= deadline`
+            # comparisons raise TypeError instead of running.
+            patch.object(cluster_ops.time, "sleep", MagicMock()),
             patch.object(cluster_ops.qos_controller, "get_qos_weights_list",
                          lambda *a, **kw: []),
         ]

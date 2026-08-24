@@ -52,6 +52,12 @@ class LVol(BaseModel):
     ns_id: int = 1
     max_namespace_per_subsys: int = 1
     subsys_port: int = 9090
+    # Node ids whose sync delete already completed inline in the API delete
+    # call (lvol_controller._delete_lvol_from_all_nodes). lvol_monitor skips
+    # these when it finalises the record, so a node never receives a second
+    # sync delete — a repeat walks the replica blob tree again and errors on
+    # every entry the first pass cleaned.
+    sync_deleted_nodes: List[str] = []
     pool_uuid: str = ""
     pool_name: str = ""
     pvc_name: str = ""
@@ -71,13 +77,27 @@ class LVol(BaseModel):
     do_replicate: bool = False
     replication_node_id: str = ""
     from_source: bool = True
-    # "failover": async DR — target volume is materialised only on fail-over.
-    # "migration": target subsystem is pre-created (ANA inaccessible) up front
-    # and the volume is cut over to it on an explicit commit.
+    # Declared intent, NOT a behaviour switch: this field is only ever copied
+    # onto the LVolReplication record (lvol_controller, tasks_runner_replication
+    # _final) and nothing branches on it, so both modes share one identical
+    # replication stream and differ purely in which ending is invoked.
+    #   "failover":  async DR — the target volume is materialised by
+    #                replicate_lvol_on_target_cluster, cloned from the last
+    #                replicated snapshot, with IO already interrupted.
+    #   "migration": planned move — the target volume is materialised by
+    #                replication_commit, which shrinks the delta first and flips
+    #                ANA, so the client is not interrupted.
+    # An earlier comment claimed migration mode pre-creates the target subsystem
+    # up front; it does not. The clone is built at the ending in both paths.
     replication_mode: str = "failover"
     # Interval in minutes for automatic internal snapshots that drive
     # replication. 0 disables interval snapshots (only user snaps replicate).
     replication_interval_min: int = 0
+    # ReplicationPolicy.get_id() this volume follows, "" when it is not managed
+    # by a policy. The fields above stay as the RESOLVED effective values so the
+    # replication service keeps reading exactly what it reads today; attaching a
+    # policy derives them from policy + target.
+    replication_policy_id: str = ""
 
     def has_qos(self):
         return (self.rw_ios_per_sec > 0 or self.rw_mbytes_per_sec > 0 or self.r_mbytes_per_sec > 0 or self.w_mbytes_per_sec > 0)

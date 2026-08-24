@@ -99,7 +99,7 @@ spec:
   clusterName: simplyblock-cluster
   clusterImage: simplyblock/simplyblock:main
   mgmtIfname: eth0
-  maxLogicalVolumeCount: 10
+  maxSubsystemCount: 10
   partitions: 0
   corePercentage: 65
   coreIsolation: false
@@ -116,7 +116,7 @@ create storage pool
 ```
 kubectl apply -f - <<'EOF'
 apiVersion: storage.simplyblock.io/v1alpha1
-kind: Pool
+kind: StoragePool
 metadata:
   name: pool3
   namespace: cluster1

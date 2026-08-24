@@ -1,4 +1,5 @@
 # coding=utf-8
+import concurrent.futures
 import threading
 import time
 from datetime import datetime
@@ -108,6 +109,31 @@ def _remote_sweep_due(snode, cluster_nodes):
     return True
 
 
+#: Repairs of independent objects have no reason to wait for each other. A
+#: cycle used to dial every degraded controller in series, so a node with a
+#: dozen degraded remote devices spent that many round-trips before its
+#: hublvol was even looked at.
+REPAIR_FANOUT = 8
+
+
+def _run_repairs_in_parallel(jobs, what):
+    """Run ``(ctrl_name, device, node)`` multipath repairs concurrently."""
+    if not jobs:
+        return
+    workers = min(REPAIR_FANOUT, len(jobs))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {
+            pool.submit(storage_node_ops.repair_multipath_controller, ctrl, dev, node): ctrl
+            for ctrl, dev, node in jobs
+        }
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                future.result()
+            except Exception as e:
+                logger.warning("Multipath repair failed for %s %s: %s",
+                               what, futures[future], e)
+
+
 def check_node(snode):
 
     try:
@@ -141,275 +167,341 @@ def check_node(snode):
     # never true/false.
     report_health = snode.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN, StorageNode.STATUS_SUSPENDED]
 
-    # 1- check node ping
-    ping_check = health_controller._check_node_ping(snode.mgmt_ip)
+    # Three independent probes (ping, API, RPC), each a network round-trip to a
+    # node that may be timing out. Run together: in series, a node slow on all
+    # three delays every repair behind it by the sum of the three.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+        f_ping = pool.submit(health_controller._check_node_ping, snode.mgmt_ip)
+        f_api = pool.submit(health_controller._check_node_api, snode)
+        f_rpc = pool.submit(health_controller.check_node_rpc, snode)
+
+        def _probe(future, label):
+            try:
+                return future.result()
+            except Exception as e:
+                logger.error("Probe %s failed for %s: %s", label, snode.mgmt_ip, e)
+                return False
+
+        ping_check = _probe(f_ping, "ping")
+        node_api_check = _probe(f_api, "api")
+        node_rpc_check = _probe(f_rpc, "rpc")
     logger.info(f"Check: ping mgmt ip {snode.mgmt_ip} ... {ping_check}")
-
-    # 2- check node API
-    node_api_check = health_controller._check_node_api(snode)
     logger.info(f"Check: node API {snode.mgmt_ip}:5000 ... {node_api_check}")
-
-    # 3- check node RPC
-    node_rpc_check = health_controller.check_node_rpc(snode)
     logger.info(f"Check: node RPC {snode.mgmt_ip}:{snode.rpc_port} ... {node_rpc_check}")
 
     is_node_online = ping_check and node_api_check and node_rpc_check
 
     health_check_status = is_node_online
     if node_rpc_check:
-        logger.info(f"Node device count: {len(snode.nvme_devices)}")
-        node_devices_check = True
-        node_remote_devices_check = True
+        # The two object classes are independent: local devices, remote devices
+        # and remote JMs on one side; the lvstore chain (hublvols) and its
+        # subsystem ports on the other. They inspect disjoint objects and each
+        # only contributes its own verdict, so they run concurrently. In series,
+        # a hublvol missing a path waited behind every degraded device
+        # controller on the node before anyone even looked at it.
+        #
+        # snode is rebound as a default argument so each group re-reads the
+        # node into its own local, rather than racing on the enclosing name.
+        def _group_devices(snode=snode):
+            logger.info(f"Node device count: {len(snode.nvme_devices)}")
+            node_devices_check = True
+            node_remote_devices_check = True
 
-        rpc_client = snode.rpc_client(timeout=3, retry=2)
-        connected_devices = []
+            rpc_client = snode.rpc_client(timeout=3, retry=2)
+            connected_devices = []
+            # Dial-outs are collected while the cheap read-only inspection runs and
+            # then executed as one group, rather than one at a time inside the loop.
+            device_repair_jobs = []
+            jm_repair_jobs = []
 
-        for device in snode.nvme_devices:
-            if device.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_UNAVAILABLE]:
-                logger.info(f"Device skipped: {device.get_id()} status: {device.status}")
-                continue
-
-            passed = True
-
-            if device.io_error:
-                logger.info(f"Device io_error {device.get_id()}")
-                passed = False
-
-            if device.status != NVMeDevice.STATUS_ONLINE:
-                logger.info(f"Device status {device.status}")
-                passed = False
-
-            if snode.enable_test_device:
-                bdevs_stack = [device.nvme_bdev, device.testing_bdev, device.alceml_bdev, device.pt_bdev]
-            else:
-                bdevs_stack = [device.nvme_bdev, device.alceml_bdev, device.pt_bdev]
-
-            logger.info(f"Checking Device: {device.get_id()}, status:{device.status}")
-            problems = 0
-            for bdev in bdevs_stack:
-                if not bdev:
+            for device in snode.nvme_devices:
+                if device.status not in [NVMeDevice.STATUS_ONLINE, NVMeDevice.STATUS_UNAVAILABLE]:
+                    logger.info(f"Device skipped: {device.get_id()} status: {device.status}")
                     continue
 
-                if not health_controller.check_bdev(bdev, rpc_client=rpc_client):
-                    problems += 1
+                passed = True
+
+                if device.io_error:
+                    logger.info(f"Device io_error {device.get_id()}")
                     passed = False
 
-            logger.info(f"Checking Device's BDevs ... ({(len(bdevs_stack) - problems)}/{len(bdevs_stack)})")
+                if device.status != NVMeDevice.STATUS_ONLINE:
+                    logger.info(f"Device status {device.status}")
+                    passed = False
 
-            passed &= health_controller.check_subsystem(device.nvmf_nqn, rpc_client=rpc_client)
+                if snode.enable_test_device:
+                    bdevs_stack = [device.nvme_bdev, device.testing_bdev, device.alceml_bdev, device.pt_bdev]
+                else:
+                    bdevs_stack = [device.nvme_bdev, device.alceml_bdev, device.pt_bdev]
 
-            set_device_health_check(snode.cluster_id, device, passed if report_health else None)
-            if device.status == NVMeDevice.STATUS_ONLINE:
-                node_devices_check &= passed
+                logger.info(f"Checking Device: {device.get_id()}, status:{device.status}")
+                problems = 0
+                for bdev in bdevs_stack:
+                    if not bdev:
+                        continue
 
-        # Topology-gated: the sweep pays an SPDK inventory RPC; skip it while
-        # peer topology is unchanged (forced floor keeps drift bounded).
-        if _remote_sweep_due(snode, db.get_storage_nodes_by_cluster_id(snode.cluster_id)):
-            if storage_node_ops.sync_remote_devices_from_spdk(snode):
-                snode = db.get_storage_node_by_id(snode.get_id())
+                    if not health_controller.check_bdev(bdev, rpc_client=rpc_client):
+                        problems += 1
+                        passed = False
 
-        # Reconcile against cluster topology. node.remote_devices is rebuilt
-        # as "whatever was reachable at that moment" by the restart /
-        # port-allow paths, so a peer that was unreachable while this node
-        # restarted (e.g. network outage) gets silently dropped from the
-        # list — and the list-driven loop below can then never see, check,
-        # or repair the missing connection. Gate on cluster status like the
-        # remote-JM rebuild below, to stay out of activation's way.
-        if cluster is not None and cluster.status in [
-                Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
-            reconnected, reconcile_ok = storage_node_ops.reconnect_dropped_remote_devs(snode)
-            if reconnected:
-                snode = db.get_storage_node_by_id(snode.get_id())
-            node_remote_devices_check &= reconcile_ok
+                logger.info(f"Checking Device's BDevs ... ({(len(bdevs_stack) - problems)}/{len(bdevs_stack)})")
 
-        logger.info(f"Node remote device: {len(snode.remote_devices)}")
+                passed &= health_controller.check_subsystem(device.nvmf_nqn, rpc_client=rpc_client)
 
-        for remote_device in snode.remote_devices:
-            org_dev = db.get_storage_device_by_id(remote_device.get_id())
-            org_node = db.get_storage_node_by_id(remote_device.node_id)
-            # Only treat a missing remote device as a fault when the owning node
-            # is ONLINE/DOWN/UNREACHABLE. If the owner is mid-transition (restart,
-            # shutdown, ...) the connection is expected to be gone — skip it.
-            if org_dev.status == NVMeDevice.STATUS_ONLINE and health_controller._peer_connections_relevant(org_node):
-                if health_controller.check_bdev(remote_device.remote_bdev, rpc_client=rpc_client):
-                    # Bdev exists but multipath may be degraded — repair missing paths
-                    if org_dev.nvmf_multipath:
-                        ctrl_name = f"remote_{org_dev.alceml_bdev}" if org_dev.alceml_bdev else None
-                        if ctrl_name:
-                            try:
-                                storage_node_ops.repair_multipath_controller(ctrl_name, org_dev, snode)
-                            except Exception as e:
-                                logger.warning("Multipath repair failed for %s: %s", ctrl_name, e)
-                    connected_devices.append(remote_device.get_id())
-                    continue
+                set_device_health_check(snode.cluster_id, device, passed if report_health else None)
+                if device.status == NVMeDevice.STATUS_ONLINE:
+                    node_devices_check &= passed
 
-                if not org_dev.alceml_bdev:
-                    logger.error(f"device alceml bdev not found!, {org_dev.get_id()}")
-                    continue
+            # Topology-gated: the sweep pays an SPDK inventory RPC; skip it while
+            # peer topology is unchanged (forced floor keeps drift bounded).
+            if _remote_sweep_due(snode, db.get_storage_nodes_by_cluster_id(snode.cluster_id)):
+                if storage_node_ops.sync_remote_devices_from_spdk(snode):
+                    snode = db.get_storage_node_by_id(snode.get_id())
 
-                try:
-                    storage_node_ops.connect_device(
-                        f"remote_{org_dev.alceml_bdev}", org_dev, snode)
-                    connected_devices.append(org_dev.get_id())
-                except RuntimeError:
-                    logger.error(f"Failed to connect to device: {org_dev.get_id()}")
-                    node_remote_devices_check = False
+            # Reconcile against cluster topology. node.remote_devices is rebuilt
+            # as "whatever was reachable at that moment" by the restart /
+            # port-allow paths, so a peer that was unreachable while this node
+            # restarted (e.g. network outage) gets silently dropped from the
+            # list — and the list-driven loop below can then never see, check,
+            # or repair the missing connection. Gate on cluster status like the
+            # remote-JM rebuild below, to stay out of activation's way.
+            if cluster is not None and cluster.status in [
+                    Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
+                reconnected, reconcile_ok = storage_node_ops.reconnect_dropped_remote_devs(snode)
+                if reconnected:
+                    snode = db.get_storage_node_by_id(snode.get_id())
+                node_remote_devices_check &= reconcile_ok
 
-        connected_jms = []
-        if snode.jm_device and snode.jm_device.get_id():
-            jm_device = snode.jm_device
-            logger.info(f"Node JM: {jm_device.get_id()}")
-            if rpc_client.get_bdevs(jm_device.jm_bdev):
-                logger.info(f"Checking jm bdev: {jm_device.jm_bdev} ... ok")
-                connected_jms.append(jm_device.get_id())
-            else:
-                logger.info(f"Checking jm bdev: {jm_device.jm_bdev} ... not found")
+            logger.info(f"Node remote device: {len(snode.remote_devices)}")
 
-        if snode.enable_ha_jm:
-            logger.info(f"Node remote JMs: {len(snode.remote_jm_devices)}")
-            for remote_device in snode.remote_jm_devices:
-                if remote_device.remote_bdev:
-                    check = health_controller.check_bdev(remote_device.remote_bdev, rpc_client=rpc_client)
-                    if check:
-                        # JM bdev exists but multipath may be degraded — repair missing paths.
-                        # repair_multipath_controller needs nvmf_ip / nvmf_nqn / nvmf_port
-                        # which RemoteJMDevice strips. Resolve the source JMDevice on the
-                        # owning node before calling — otherwise the repair raises
-                        # AttributeError("'RemoteJMDevice' object has no attribute 'nvmf_ip'")
-                        # every cycle and JM controllers that lose a path during NIC chaos
-                        # are NEVER repaired by the health service.
-                        if remote_device.nvmf_multipath:
-                            ctrl_name = remote_device.remote_bdev.replace("n1", "")
-                            try:
-                                src_node = db.get_storage_node_by_id(remote_device.node_id)
-                                src_jm = src_node.jm_device if src_node else None
-                                if src_jm and getattr(src_jm, 'nvmf_ip', None):
-                                    storage_node_ops.repair_multipath_controller(ctrl_name, src_jm, snode)
-                                else:
-                                    logger.warning(
-                                        "Multipath repair skipped for JM %s: source JMDevice unavailable",
-                                        ctrl_name)
-                            except Exception as e:
-                                logger.warning("Multipath repair failed for JM %s: %s", ctrl_name, e)
-                        connected_jms.append(remote_device.get_id())
-                    else:
-                        # Only fail health when the JM's owning node is
-                        # ONLINE/DOWN/UNREACHABLE. If it's mid-transition the
-                        # remote JM bdev is expected to be missing.
-                        try:
-                            jm_owner = db.get_storage_node_by_id(remote_device.node_id)
-                        except KeyError:
-                            jm_owner = None
-                        if health_controller._peer_connections_relevant(jm_owner):
-                            node_remote_devices_check = False
+            for remote_device in snode.remote_devices:
+                org_dev = db.get_storage_device_by_id(remote_device.get_id())
+                org_node = db.get_storage_node_by_id(remote_device.node_id)
+                # Only treat a missing remote device as a fault when the owning node
+                # is ONLINE/DOWN/UNREACHABLE. If the owner is mid-transition (restart,
+                # shutdown, ...) the connection is expected to be gone — skip it.
+                if org_dev.status == NVMeDevice.STATUS_ONLINE and health_controller._peer_connections_relevant(org_node):
+                    if health_controller.check_bdev(remote_device.remote_bdev, rpc_client=rpc_client):
+                        # Bdev exists but multipath may be degraded — repair missing
+                        # paths, but only while the owner can actually answer a
+                        # connect. _peer_connections_relevant also admits
+                        # UNREACHABLE, which is fine for judging whether a missing
+                        # connection is a fault and wrong for deciding to dial out.
+                        if org_dev.nvmf_multipath and health_controller.repairs_allowed(org_node):
+                            ctrl_name = f"remote_{org_dev.alceml_bdev}" if org_dev.alceml_bdev else None
+                            if ctrl_name:
+                                device_repair_jobs.append((ctrl_name, org_dev, snode))
+                        connected_devices.append(remote_device.get_id())
+                        continue
+
+                    if not org_dev.alceml_bdev:
+                        logger.error(f"device alceml bdev not found!, {org_dev.get_id()}")
+                        continue
+
+                    if not health_controller.repairs_allowed(org_node):
+                        # Judged a fault above (that uses the wider relevance
+                        # test), but dialling out to a node that cannot answer is
+                        # pointless; the next cycle retries once it is ONLINE/DOWN.
+                        logger.info(
+                            "Device connect skipped for %s: owner %s is %s",
+                            org_dev.get_id(), remote_device.node_id, org_node.status)
+                        continue
+
+                    try:
+                        storage_node_ops.connect_device(
+                            f"remote_{org_dev.alceml_bdev}", org_dev, snode)
+                        connected_devices.append(org_dev.get_id())
+                    except RuntimeError:
+                        logger.error(f"Failed to connect to device: {org_dev.get_id()}")
+                        node_remote_devices_check = False
+
+            connected_jms = []
+            if snode.jm_device and snode.jm_device.get_id():
+                jm_device = snode.jm_device
+                logger.info(f"Node JM: {jm_device.get_id()}")
+                if rpc_client.get_bdevs(jm_device.jm_bdev):
+                    logger.info(f"Checking jm bdev: {jm_device.jm_bdev} ... ok")
+                    connected_jms.append(jm_device.get_id())
+                else:
+                    logger.info(f"Checking jm bdev: {jm_device.jm_bdev} ... not found")
+
+            if snode.enable_ha_jm:
+                logger.info(f"Node remote JMs: {len(snode.remote_jm_devices)}")
+                for remote_device in snode.remote_jm_devices:
+                    if remote_device.remote_bdev:
+                        check = health_controller.check_bdev(remote_device.remote_bdev, rpc_client=rpc_client)
+                        if check:
+                            # JM bdev exists but multipath may be degraded — repair missing paths.
+                            # repair_multipath_controller needs nvmf_ip / nvmf_nqn / nvmf_port
+                            # which RemoteJMDevice strips. Resolve the source JMDevice on the
+                            # owning node before calling — otherwise the repair raises
+                            # AttributeError("'RemoteJMDevice' object has no attribute 'nvmf_ip'")
+                            # every cycle and JM controllers that lose a path during NIC chaos
+                            # are NEVER repaired by the health service.
+                            if remote_device.nvmf_multipath:
+                                ctrl_name = remote_device.remote_bdev.replace("n1", "")
+                                try:
+                                    src_node = db.get_storage_node_by_id(remote_device.node_id)
+                                    src_jm = src_node.jm_device if src_node else None
+                                    if not health_controller.repairs_allowed(src_node):
+                                        logger.info(
+                                            "Multipath repair skipped for JM %s: owner %s is %s",
+                                            ctrl_name, remote_device.node_id,
+                                            getattr(src_node, "status", "unknown"))
+                                    elif src_jm and getattr(src_jm, 'nvmf_ip', None):
+                                        jm_repair_jobs.append((ctrl_name, src_jm, snode))
+                                    else:
+                                        logger.warning(
+                                            "Multipath repair skipped for JM %s: source JMDevice unavailable",
+                                            ctrl_name)
+                                except Exception as e:
+                                    logger.warning("Multipath repair failed for JM %s: %s", ctrl_name, e)
+                            connected_jms.append(remote_device.get_id())
                         else:
-                            logger.info(
-                                "Remote JM %s missing, but owning node %s is %s — expected",
-                                remote_device.remote_bdev, remote_device.node_id,
-                                jm_owner.status if jm_owner else "not-found")
-
-            # The expected remote-JM set is topology-derived: the node's own
-            # JM quorum (jm_ids) plus the JMs of every primary this node is
-            # secondary/tertiary for — the same sources _connect_to_remote_
-            # jm_devs rebuilds from. Detecting only jm_ids left secondary->
-            # primary JM connections that were dropped during a restart-
-            # while-outage unnoticed forever.
-            expected_jm_ids = {jm_id for jm_id in snode.jm_ids if jm_id}
-            for sec_attr in ('lvstore_stack_secondary', 'lvstore_stack_tertiary'):
-                sec_primary_id = getattr(snode, sec_attr, None)
-                if not sec_primary_id:
-                    continue
-                try:
-                    org_node = db.get_storage_node_by_id(sec_primary_id)
-                except KeyError:
-                    continue
-                if org_node.jm_device and org_node.jm_device.get_id():
-                    expected_jm_ids.add(org_node.jm_device.get_id())
-                expected_jm_ids.update(jm_id for jm_id in org_node.jm_ids if jm_id)
-
-            for jm_id in expected_jm_ids:
-                if jm_id not in connected_jms:
-                    for nd in db.get_storage_nodes():
-                        if nd.jm_device and nd.jm_device.get_id() == jm_id:
-                            if health_controller._peer_connections_relevant(nd):
+                            # Only fail health when the JM's owning node is
+                            # ONLINE/DOWN/UNREACHABLE. If it's mid-transition the
+                            # remote JM bdev is expected to be missing.
+                            try:
+                                jm_owner = db.get_storage_node_by_id(remote_device.node_id)
+                            except KeyError:
+                                jm_owner = None
+                            if health_controller._peer_connections_relevant(jm_owner):
                                 node_remote_devices_check = False
                             else:
                                 logger.info(
-                                    "JM device %s not connected, but owning node %s is %s — expected",
-                                    jm_id, nd.get_id(), nd.status)
-                            break
+                                    "Remote JM %s missing, but owning node %s is %s — expected",
+                                    remote_device.remote_bdev, remote_device.node_id,
+                                    jm_owner.status if jm_owner else "not-found")
 
-            if not node_remote_devices_check and cluster is not None and cluster.status in [
-                Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
-                remote_jm_devices = storage_node_ops._connect_to_remote_jm_devs(snode)
-                snode = db.atomic_update(
-                    db.get_storage_node_by_id(snode.get_id()),
-                    lambda n, rd=remote_jm_devices: setattr(n, "remote_jm_devices", rd))
-
-        lvstore_check = True
-        snode = db.get_storage_node_by_id(snode.get_id())
-        if snode.lvstore_status == "ready" or snode.status == StorageNode.STATUS_ONLINE or \
-                snode.lvstore_status == "failed":
-
-            lvstore_stack = snode.lvstore_stack
-            lvstore_check &= health_controller._check_node_lvstore(
-                lvstore_stack, snode, auto_fix=True)
-
-            sec_ids_to_check = []
-            if snode.secondary_node_id:
-                sec_ids_to_check.append(snode.secondary_node_id)
-            if snode.tertiary_node_id:
-                sec_ids_to_check.append(snode.tertiary_node_id)
-
-            if sec_ids_to_check:
-
-                lvstore_check &= health_controller._check_node_hublvol(snode)
-
-                for sec_id in sec_ids_to_check:
-                    sec_node = db.get_storage_node_by_id(sec_id)
-                    if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
-                        lvstore_check &= health_controller._check_node_lvstore(
-                            lvstore_stack, sec_node, auto_fix=True, stack_src_node=snode)
-                        sec_node_check = health_controller._check_sec_node_hublvol(
-                            sec_node, primary_node_id=snode.get_id())
-                        if not sec_node_check:
-                            if snode.status == StorageNode.STATUS_ONLINE:
-                                ret = sec_node.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
-                                if ret:
-                                    lvs_info = ret[0]
-                                    if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
-                                        jc_compression_is_active = sec_node.rpc_client().jc_compression_get_status(
-                                            snode.jm_vuid)
-                                        if not jc_compression_is_active:
-                                            lvstore_check &= health_controller._check_sec_node_hublvol(
-                                                sec_node, auto_fix=True, primary_node_id=snode.get_id())
-
-            lvol_port_check = False
-            # if node_api_check:
-            ports = [snode.get_lvol_subsys_port(snode.lvstore)]
-
-            for sec_stack_ref in [snode.lvstore_stack_secondary, snode.lvstore_stack_tertiary]:
-                if sec_stack_ref:
+                # The expected remote-JM set is topology-derived: the node's own
+                # JM quorum (jm_ids) plus the JMs of every primary this node is
+                # secondary/tertiary for — the same sources _connect_to_remote_
+                # jm_devs rebuilds from. Detecting only jm_ids left secondary->
+                # primary JM connections that were dropped during a restart-
+                # while-outage unnoticed forever.
+                expected_jm_ids = {jm_id for jm_id in snode.jm_ids if jm_id}
+                for sec_attr in ('lvstore_stack_secondary', 'lvstore_stack_tertiary'):
+                    sec_primary_id = getattr(snode, sec_attr, None)
+                    if not sec_primary_id:
+                        continue
                     try:
-                        sec_ref_node = db.get_storage_node_by_id(sec_stack_ref)
-                        if sec_ref_node and sec_ref_node.status == StorageNode.STATUS_ONLINE:
-                            ports.append(sec_ref_node.get_lvol_subsys_port(sec_ref_node.lvstore))
+                        org_node = db.get_storage_node_by_id(sec_primary_id)
                     except KeyError:
-                        pass
+                        continue
+                    if org_node.jm_device and org_node.jm_device.get_id():
+                        expected_jm_ids.add(org_node.jm_device.get_id())
+                    expected_jm_ids.update(jm_id for jm_id in org_node.jm_ids if jm_id)
 
-            # Batched: one nvmf_get_blocked_ports fetch answers every port
-            # (was one identical full-list fetch PER port — 528/min
-            # cluster-wide at idle, 2026-07-21 baseline audit).
+                for jm_id in expected_jm_ids:
+                    if jm_id not in connected_jms:
+                        for nd in db.get_storage_nodes():
+                            if nd.jm_device and nd.jm_device.get_id() == jm_id:
+                                if health_controller._peer_connections_relevant(nd):
+                                    node_remote_devices_check = False
+                                else:
+                                    logger.info(
+                                        "JM device %s not connected, but owning node %s is %s — expected",
+                                        jm_id, nd.get_id(), nd.status)
+                                break
+
+                if not node_remote_devices_check and cluster is not None and cluster.status in [
+                    Cluster.STATUS_ACTIVE, Cluster.STATUS_DEGRADED, Cluster.STATUS_READONLY]:
+                    remote_jm_devices = storage_node_ops._connect_to_remote_jm_devs(snode)
+                    snode = db.atomic_update(
+                        db.get_storage_node_by_id(snode.get_id()),
+                        lambda n, rd=remote_jm_devices: setattr(n, "remote_jm_devices", rd))
+
+            _run_repairs_in_parallel(device_repair_jobs, "device")
+            _run_repairs_in_parallel(jm_repair_jobs, "JM")
+
+            return node_devices_check, node_remote_devices_check
+
+        def _group_lvstore(snode=snode):
+            lvstore_check = True
+            snode = db.get_storage_node_by_id(snode.get_id())
+            if snode.lvstore_status == "ready" or snode.status == StorageNode.STATUS_ONLINE or \
+                    snode.lvstore_status == "failed":
+
+                lvstore_stack = snode.lvstore_stack
+                lvstore_check &= health_controller._check_node_lvstore(
+                    lvstore_stack, snode, auto_fix=True)
+
+                sec_ids_to_check = []
+                if snode.secondary_node_id:
+                    sec_ids_to_check.append(snode.secondary_node_id)
+                if snode.tertiary_node_id:
+                    sec_ids_to_check.append(snode.tertiary_node_id)
+
+                if sec_ids_to_check:
+
+                    lvstore_check &= health_controller._check_node_hublvol(snode)
+
+                    for sec_id in sec_ids_to_check:
+                        sec_node = db.get_storage_node_by_id(sec_id)
+                        if sec_node and sec_node.status == StorageNode.STATUS_ONLINE:
+                            lvstore_check &= health_controller._check_node_lvstore(
+                                lvstore_stack, sec_node, auto_fix=True, stack_src_node=snode)
+                            # repair_paths=True on the first pass: a hublvol
+                            # missing one of its two paths passes the existence
+                            # check below, so nesting path repair inside the
+                            # failure branch meant it never ran.
+                            sec_node_check = health_controller._check_sec_node_hublvol(
+                                sec_node, primary_node_id=snode.get_id(),
+                                repair_paths=True)
+                            if not sec_node_check:
+                                if snode.status == StorageNode.STATUS_ONLINE:
+                                    ret = sec_node.rpc_client().bdev_lvol_get_lvstores(snode.lvstore)
+                                    if ret:
+                                        lvs_info = ret[0]
+                                        if "lvs leadership" in lvs_info and lvs_info['lvs leadership']:
+                                            jc_compression_is_active = sec_node.rpc_client().jc_compression_get_status(
+                                                snode.jm_vuid)
+                                            if not jc_compression_is_active:
+                                                lvstore_check &= health_controller._check_sec_node_hublvol(
+                                                    sec_node, auto_fix=True, primary_node_id=snode.get_id())
+
+                lvol_port_check = False
+                # if node_api_check:
+                ports = [snode.get_lvol_subsys_port(snode.lvstore)]
+
+                for sec_stack_ref in [snode.lvstore_stack_secondary, snode.lvstore_stack_tertiary]:
+                    if sec_stack_ref:
+                        try:
+                            sec_ref_node = db.get_storage_node_by_id(sec_stack_ref)
+                            if sec_ref_node and sec_ref_node.status == StorageNode.STATUS_ONLINE:
+                                ports.append(sec_ref_node.get_lvol_subsys_port(sec_ref_node.lvstore))
+                        except KeyError:
+                            pass
+
+                # Batched: one nvmf_get_blocked_ports fetch answers every port
+                # (was one identical full-list fetch PER port — 528/min
+                # cluster-wide at idle, 2026-07-21 baseline audit).
+                try:
+                    _port_results = health_controller.check_ports_on_node(snode, ports)
+                    for port, lvol_port_check in _port_results.items():
+                        logger.info(
+                            f"Check: node {snode.mgmt_ip}, port: {port} ... {lvol_port_check}")
+                        if not lvol_port_check and snode.status != StorageNode.STATUS_SUSPENDED:
+                            tasks_controller.add_port_allow_task(snode.cluster_id, snode.get_id(), port)
+                except Exception as e:
+                    for port in ports:
+                        health_controller._log_port_check_failure(db, snode, port, e)
+
+            return lvstore_check
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            future_devices = pool.submit(_group_devices)
+            future_lvstore = pool.submit(_group_lvstore)
             try:
-                _port_results = health_controller.check_ports_on_node(snode, ports)
-                for port, lvol_port_check in _port_results.items():
-                    logger.info(
-                        f"Check: node {snode.mgmt_ip}, port: {port} ... {lvol_port_check}")
-                    if not lvol_port_check and snode.status != StorageNode.STATUS_SUSPENDED:
-                        tasks_controller.add_port_allow_task(snode.cluster_id, snode.get_id(), port)
+                node_devices_check, node_remote_devices_check = future_devices.result()
             except Exception as e:
-                for port in ports:
-                    health_controller._log_port_check_failure(db, snode, port, e)
+                logger.error("Device checks failed on %s: %s", snode.get_id(), e)
+                node_devices_check = node_remote_devices_check = False
+            try:
+                lvstore_check = future_lvstore.result()
+            except Exception as e:
+                logger.error("Lvstore checks failed on %s: %s", snode.get_id(), e)
+                lvstore_check = False
 
         health_check_status = is_node_online and node_devices_check and node_remote_devices_check and lvstore_check
     # Report true/false only for ONLINE/DOWN; UNREACHABLE/SUSPENDED ran the

@@ -10,6 +10,7 @@ import time
 import uuid
 from datetime import datetime
 
+from simplyblock_core.controllers import ops_gate
 from simplyblock_core.controllers import lvol_controller, snapshot_events, pool_controller, tasks_controller, \
     migration_controller
 
@@ -17,7 +18,7 @@ from simplyblock_core import constants, utils
 from simplyblock_core.exceptions import PreconditionError
 from simplyblock_core.kms import create_kms_connection, lvol_dek_path, pool_kek_name
 from simplyblock_core.kms._exceptions import KMSException
-from simplyblock_core.db_controller import DBController
+from simplyblock_core.db_controller import DBController, SubsystemCapacityError
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.pool import Pool
 from simplyblock_core.models.snapshot import SnapShot
@@ -223,20 +224,170 @@ def _find_lvs_leader(cluster_id, lvs_name, all_nodes):
 _OBJECT_LOCK_PREFIX = "__obj__"
 
 
+# A peer that is not running owes nothing: its in-memory registration dies with
+# the process and is never rebuilt, because the object's record is already gone
+# from the DB by the time phase-2 runs. Only a LIVE peer (serving, or suspended
+# but still up) has state that a sync delete must clear.
+_PEER_ALIVE_STATUSES = (StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED)
+
+
+def _successor_mid_replication(snap):
+    """Whether *snap*'s chain successor is being replicated right now.
+
+    Deleting a snapshot swap-merges its segments into the SUCCESSOR, i.e. it
+    mutates the successor's cluster map. While the successor is replicating,
+    bdev_lvol_transfer is iterating exactly that map, so the merge would tear
+    the copy mid-flight — silently: the transfer completes and the remote image
+    is simply missing the merged clusters. Callers run under the chain-root
+    lock (delete holds object_mutation_lock; the transfer path flips the
+    successor to IN_REPLICATION under the same lock), so there is no window
+    between this check and the merge.
+    """
+    if not snap.next_snap_uuid:
+        return False
+    try:
+        successor = db_controller.get_snapshot_by_id(snap.next_snap_uuid)
+    except KeyError:
+        return False
+    return successor.status == SnapShot.STATUS_IN_REPLICATION
+
+
+def delete_bdev_absent_ok(node, bdev_name, sync=False, special_delete=False):
+    """``delete_lvol`` that treats "already gone" as done. Returns True on success.
+
+    A delete is a statement about the desired end state, and ``-19 / No such
+    device`` says that state already holds — the bdev is not there. Reading it
+    as a failure makes the delete non-idempotent, and every caller that retries
+    then retries for ever: the record stays ``in_deletion``, the monitor picks
+    it up again next cycle, and nothing ever converges.
+
+    Lab 2026-08-20: ~10,300 "Failed to delete snap from node" in 2.5 hours,
+    every one of them a ``-19`` for a bdev the async phase had already removed
+    (the poll one line earlier had returned status 0, "deleted successfully").
+    ``sync_delete_on_peer`` already tolerated this on the peer path; the
+    leader/primary paths did not, so the two halves of the same delete
+    disagreed about what had happened.
+    """
+    try:
+        ret, err = node.rpc_client().delete_lvol(
+            bdev_name, sync=sync, special_delete=special_delete)
+    except Exception as e:
+        ret, err = False, {"message": str(e)}
+    if ret:
+        return True
+    if isinstance(err, dict) and err.get("code") == -19:
+        logger.info(f"Delete of {bdev_name} on {node.get_id()[:8]}: already absent")
+        return True
+    return False
+
+
+def sync_delete_on_peer(peer_node, bdev_name, primary_node_id, special_delete=False):
+    """Phase-2 sync delete on one peer. Returns True when nothing is owed.
+
+    Attempt first, classify afterwards. Pre-judging by node status queues a
+    durable task for every peer that is merely suspended, and those tasks then
+    refuse to run *because* the node is suspended — a pile that also blocks the
+    node's own shutdown (lab run 15 case 6: 46 queued sync-deletes, node stuck
+    in `suspended`). A failure is only worth a retry task when the peer is
+    still alive; when it is gone, the delete is already satisfied.
+    """
+    try:
+        ret, err = peer_node.rpc_client().delete_lvol(
+            bdev_name, sync=True, special_delete=special_delete)
+    except Exception as e:
+        ret, err = False, {"message": str(e)}
+    if ret:
+        return True
+    if isinstance(err, dict) and err.get("code") == -19:
+        logger.info(f"Sync delete of {bdev_name} on {peer_node.get_id()[:8]}: "
+                    f"already absent")
+        return True
+
+    try:
+        fresh = db_controller.get_storage_node_by_id(peer_node.get_id())
+        status = fresh.status
+    except Exception:
+        status = peer_node.status
+    if status not in _PEER_ALIVE_STATUSES:
+        logger.info(
+            f"Ignoring sync-delete failure for {bdev_name} on "
+            f"{peer_node.get_id()[:8]}: node is {status}, its registration is "
+            f"gone with the process and is not rebuilt")
+        return True
+
+    logger.error(f"Failed to sync delete bdev: {bdev_name} from node: "
+                 f"{peer_node.get_id()} ({err}), adding task...")
+    tasks_controller.add_lvol_sync_del_task(
+        peer_node.cluster_id, peer_node.get_id(), bdev_name, primary_node_id)
+    return False
+
+
+_CHAIN_WALK_MAX_HOPS = 256
+
+
+def resolve_chain_root(object_uuid):
+    """Return ``(chain_root_uuid, lvs_name)`` for any lvol/snapshot uuid.
+
+    A blob chain is the transitive closure of "is derived from": a volume, all
+    snapshots taken of it, every clone made from those snapshots, that clone's
+    snapshots, and so on. Deleting inside a chain rewrites its links (a delete
+    swap-merges the snapshot's segments into its successor), so operations on
+    ANY member mutate the same structure and must not interleave — while
+    different chains are independent and may run fully in parallel.
+
+    Walking upwards: a clone points at the snapshot it came from
+    (``LVol.cloned_from_snap``), a snapshot points at the volume it was taken
+    from (``SnapShot.lvol``). The walk ends at the base volume, whose uuid
+    names the chain. Unknown uuids and broken links resolve to the uuid itself
+    (its own one-member chain — never a shared key, so a corrupt record can
+    only under-share the lock, never wrongly alias two real chains).
+    """
+    current = object_uuid
+    lvs_name = ""
+    for _ in range(_CHAIN_WALK_MAX_HOPS):
+        obj = None
+        try:
+            obj = db_controller.get_lvol_by_id(current)
+        except Exception:
+            obj = None
+        if obj is not None:
+            lvs_name = getattr(obj, "lvs_name", "") or lvs_name
+            parent = getattr(obj, "cloned_from_snap", "")
+            if not parent:
+                return current, lvs_name
+            current = parent
+            continue
+        try:
+            snap = db_controller.get_snapshot_by_id(current)
+        except Exception:
+            return current, lvs_name
+        snap_lvol = getattr(snap, "lvol", None)
+        lvs_name = getattr(snap_lvol, "lvs_name", "") or lvs_name
+        parent_lvol_id = snap_lvol.get_id() if snap_lvol is not None else ""
+        if not parent_lvol_id or parent_lvol_id == current:
+            return current, lvs_name
+        current = parent_lvol_id
+    logger.warning("Chain walk for %s exceeded %d hops; using %s as chain root",
+                   object_uuid, _CHAIN_WALK_MAX_HOPS, current)
+    return current, lvs_name
+
+
 @contextlib.contextmanager
 def object_mutation_lock(cluster_id, object_uuid, *, enabled=True):
     """OUTER lock — serialize the WHOLE multi-node sequence of one operation on
-    a single object (lvol / snapshot / clone) and exclude any other operation
-    (create / delete / resize / clone) on that SAME object while it runs.
+    a CHAIN (a volume, its snapshots, their clones, recursively) and exclude
+    any other operation (create / delete / resize / clone) on that same chain
+    while it runs.
 
     Held across the entire controller action; the inner per-lvstore lock
     (``lvstore_op_lock``) is taken and released around each single-node RPC
-    inside it. Because same-object operations serialize here, the per-object
-    blob chain (snapshots of one lvol, clones of one snapshot) is always
-    created and registered in order — which is the only place blobid order
-    matters; distinct objects live in distinct chains.
+    inside it. The scope is the chain, not the single object: a delete
+    swap-merges segments into the neighbouring snapshot and re-links parents,
+    so a concurrent create/clone/delete anywhere in the same chain mutates the
+    structure the first operation is walking. Distinct chains never share blob
+    links, so they proceed concurrently.
 
-    Reuses the lvstore-lock primitive keyed on the object uuid (namespaced via
+    Reuses the lvstore-lock primitive keyed on the CHAIN ROOT (namespaced via
     ``_OBJECT_LOCK_PREFIX`` so it never collides with a real lvs_name). The
     outer key and the inner lvs_name are different keys in the same lock table,
     always acquired outer-then-inner, so the two never deadlock.
@@ -244,11 +395,13 @@ def object_mutation_lock(cluster_id, object_uuid, *, enabled=True):
     if not enabled or not cluster_id or not object_uuid:
         yield
         return
-    key = f"{_OBJECT_LOCK_PREFIX}/{object_uuid}"
+    chain_root, chain_lvs = resolve_chain_root(object_uuid)
+    key = f"{_OBJECT_LOCK_PREFIX}/{chain_lvs}:{chain_root}"
     owner = _new_lvstore_lock_owner()
     if not _acquire_lvstore_lock_blocking(db_controller, cluster_id, key, owner):
         raise PreconditionError(
-            f"Timed out acquiring object lock on {object_uuid}")
+            f"Timed out acquiring chain lock on {chain_root} "
+            f"(for {object_uuid})")
     stop = threading.Event()
     threading.Thread(
         target=_lvstore_lock_heartbeat,
@@ -275,18 +428,20 @@ def _rollback_snapshot_bdev(cluster_id, lvs_name, primary_node, snap_bdev_name,
     created on the leader but must be rolled back after a replica-registration
     failure.
 
-    Invariant (revised 2026-07-27, run 20260725): an async delete must ALWAYS
-    be followed by sync deletes on EVERY non-leader HA member of the LVS —
-    unconditionally, never on the leader. The async delete on the leader
-    removes the blob (and carries the deletion through the journal); what it
-    cannot remove is the peers' lvol REGISTRATIONS, and a failed register RPC
-    never proves a peer holds no registration: the peer may have registered
-    before the failure, a timed-out register may have landed anyway, and
-    journal replay on a restart-gated peer can materialize the blob with no
-    registration at all. The previous "registered + restart-gated only" set
-    left SNAP_3299 (register answered -19) with an async-only delete — the
-    exact async-without-sync the delete protocol forbids. A needless sync
-    delete is tolerated by design: -19 answers "already clean".
+    Invariant (revised 2026-08-13, upgrade run 20260812): an async delete must
+    ALWAYS be followed by a sync delete on the LEADER plus sync deletes on
+    EVERY non-leader HA member of the LVS. The async delete on the leader only
+    clears the data clusters — the blob metadata stays on disk and the bdev
+    stays registered until the leader's sync delete removes them (SPDK admits
+    it once the async pass reports done). The peers' sync deletes clear their
+    lvol REGISTRATIONS, and a failed register RPC never proves a peer holds no
+    registration: the peer may have registered before the failure, a timed-out
+    register may have landed anyway, and journal replay on a restart-gated
+    peer can materialize the blob with no registration at all. The previous
+    "registered + restart-gated only" set left SNAP_3299 (register answered
+    -19) with an async-only delete — the exact async-without-sync the delete
+    protocol forbids. A needless sync delete is tolerated by design: -19
+    answers "already clean".
 
     The primary's lvstore lock is held across the async delete AND its
     completion poll, so no other object create/delete interleaves with the
@@ -322,6 +477,15 @@ def _rollback_snapshot_bdev(cluster_id, lvs_name, primary_node, snap_bdev_name,
                 logger.error(f"Rollback: async delete of {bdev_name} did not "
                              f"complete within 15s on {primary_node.get_id()}; "
                              f"peers still get their sync deletes")
+            else:
+                # The async pass only cleared data clusters; this sync delete
+                # removes the leader's blob metadata and bdev registration
+                # (see invariant above). -19 answers "already clean".
+                ret2, err2 = rpc_client.delete_lvol(bdev_name, sync=True)
+                if not ret2 and not (err2 and err2.get("code") == -19):
+                    logger.error(f"Rollback: leader sync delete of {bdev_name} "
+                                 f"on {primary_node.get_id()[:8]} failed "
+                                 f"({err2})")
 
     # Every non-leader LVS member owes a sync delete (see invariant above).
     # Everyone reachable gets it now (under their own lvstore lock); everyone
@@ -352,6 +516,8 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
     except KeyError:
         logger.exception("Volume lookup failed for snapshot request: %s", lvol_id)
         return False, "Volume not found"
+
+    ops_gate.assert_object_ops_allowed("snapshot create", pool_uuid=lvol.pool_uuid)
 
     # Reject snapshot creation on an lvol that is being deleted. SPDK's
     # blobstore reuses the lvol's metadata for the snapshot's parent
@@ -423,10 +589,10 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
         logger.error(msg)
         return False, msg
 
-    # Per-core object cap (lvols + clones + snapshots per SPDK instance).
+    # Hard per-lvstore object cap (lvols + clones + snapshots).
     from simplyblock_core.controllers import lvol_controller as _lvol_ctrl
     from simplyblock_core.utils.ttl_cache import cached_mini_lvols, cached_mini_snapshots
-    limit_error = _lvol_ctrl.check_node_object_limit(
+    limit_error = _lvol_ctrl.check_lvstore_object_limit(
         snode, cached_mini_lvols(db_controller),
         cached_mini_snapshots(db_controller))
     if limit_error:
@@ -467,7 +633,7 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
             return False, msg
 
     cluster = db_controller.get_cluster_by_id(pool.cluster_id)
-    if cluster.status not in [cluster.STATUS_ACTIVE, cluster.STATUS_DEGRADED]:
+    if cluster.status not in cluster.MUTABLE_STATUSES:
         return False, f"Cluster is not active, status: {cluster.status}"
 
     snap_vuid = utils.get_random_snapshot_vuid()
@@ -673,7 +839,15 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
         task = tasks_controller.add_snapshot_replication_task(snap.cluster_id, snap.lvol.node_id, snap.get_id())
         if task:
             snapshot_events.replication_task_created(snap)
-    if lvol.cloned_from_snap:
+    # Keep-the-recovered-source-in-sync: a FAIL-OVER clone's snapshots are
+    # shipped back to the original cluster so a later fail-back is a delta.
+    # ONLY when nothing else owns the volume's replication: once a forward
+    # policy is attached (migration onward, case-4 style), this to-source task
+    # runs CONCURRENTLY with the policy's forward transfers on the same
+    # snapshots — 2026-08-21: two volumes' shrink snapshots kept landing on
+    # the (emptied!) original cluster, the target-side copies the cutover was
+    # gated on never appeared, and both cutovers died on max retry.
+    if lvol.cloned_from_snap and not getattr(lvol, "replication_policy_id", ""):
         lvol_snap = _parent_snap  # reuse fetch from above — same ID, no second DB read
         if lvol_snap and lvol_snap.source_replicated_snap_uuid:
             try:
@@ -707,9 +881,7 @@ def list_snapshots(cluster_id=None, node_id=None, lvol_id=None,pool_id_or_name=N
             return False
     elif pool_id_or_name:
         try:
-            pool = (db_controller.get_pool_by_id(pool_id_or_name)
-                    if utils.UUID_PATTERN.match(pool_id_or_name) is not None
-                    else db_controller.get_pool_by_name(pool_id_or_name))
+            pool = db_controller.get_pool_by_id_or_name(pool_id_or_name)
             snaps = db_controller.get_snapshots_by_pool_id(pool.get_id())
         except KeyError:
             logger.error("Can not find pool with provided pool_id_or_name: %s", pool_id_or_name)
@@ -783,6 +955,9 @@ def delete(snapshot_uuid, force_delete=False, lock=True):
         logger.error(f"Snapshot not found {snapshot_uuid}")
         return False
 
+    ops_gate.assert_object_ops_allowed("snapshot delete",
+                                       cluster_id=snap.cluster_id)
+
     # OUTER per-object lock: make the clone-count check and the data-plane
     # delete atomic against a concurrent clone-create of this same snapshot
     # (which holds the same lock for its whole sequence). Without it a clone
@@ -855,6 +1030,14 @@ def _delete_locked(snap, snapshot_uuid, force_delete=False, lock=True):
         logger.error("Snapshot is in replication")
         return False
 
+    if not force_delete and _successor_mid_replication(snap):
+        logger.error(
+            f"Cannot delete snapshot {snapshot_uuid}: its successor "
+            f"{snap.next_snap_uuid} is replicating right now, and the "
+            f"delete's swap-merge would change the cluster map that "
+            f"transfer is reading. Retry after the transfer finishes.")
+        return False
+
     try:
         if snode is None:
             snode = db_controller.get_storage_node_by_id(snap.lvol.node_id)
@@ -918,11 +1101,9 @@ def _delete_locked(snap, snapshot_uuid, force_delete=False, lock=True):
 
     if snap.lvol.ha_type == "single":
         if snode.status == StorageNode.STATUS_ONLINE:
-            rpc_client = snode.rpc_client()
-
             with lvstore_op_lock(snap.cluster_id, snap.lvol.lvs_name,
                                  node_id=snode.get_id(), enabled=lock and not force_delete):
-                ret, _ = rpc_client.delete_lvol(snap.snap_bdev)
+                ret = delete_bdev_absent_ok(snode, snap.snap_bdev)
             if not ret:
                 logger.error(f"Failed to delete snap from node: {snode.get_id()}")
                 if not force_delete:
@@ -976,8 +1157,6 @@ def _delete_locked(snap, snapshot_uuid, force_delete=False, lock=True):
             snap.write_to_db(db_controller.kv_store)
             return True
 
-        rpc_client = primary_node.rpc_client()
-
         # special_delete (SPDK migration_flag) must be set ONLY when the SAME
         # snapshot exists on more than one node — i.e. lvol migration placed a
         # copy on another node. snap.instances holds exactly those extra
@@ -991,7 +1170,8 @@ def _delete_locked(snap, snapshot_uuid, force_delete=False, lock=True):
 
         with lvstore_op_lock(snap.cluster_id, snap.lvol.lvs_name,
                              node_id=primary_node.get_id(), enabled=lock and not force_delete):
-            ret, _ = rpc_client.delete_lvol(snap.snap_bdev, sync=False, special_delete=special_delete)
+            ret = delete_bdev_absent_ok(primary_node, snap.snap_bdev, sync=False,
+                                        special_delete=special_delete)
         if not ret:
             logger.error(f"Failed to delete snap from node: {snode.get_id()}")
             if not force_delete:
@@ -1025,6 +1205,8 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     except KeyError:
         logger.exception("Snapshot lookup failed for clone request: %s", snapshot_id)
         return False, "Snapshot not found"
+
+    ops_gate.assert_object_ops_allowed("clone create", cluster_id=snap.cluster_id)
 
     # Reject cloning a snapshot that is in pending deletion. If a prior
     # clone-create failed (e.g. an SPDK duplicate-name collision on the
@@ -1089,13 +1271,13 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
         return False, msg
 
     cluster = db_controller.get_cluster_by_id(pool.cluster_id)
-    if cluster.status not in [cluster.STATUS_ACTIVE, cluster.STATUS_DEGRADED]:
+    if cluster.status not in cluster.MUTABLE_STATUSES:
         return False, f"Cluster is not active, status: {cluster.status}"
 
-    # Per-core object cap (lvols + clones + snapshots per SPDK instance).
+    # Hard per-lvstore object cap (lvols + clones + snapshots).
     from simplyblock_core.controllers import lvol_controller as _lvol_ctrl
     from simplyblock_core.utils.ttl_cache import cached_mini_lvols, cached_mini_snapshots
-    limit_error = _lvol_ctrl.check_node_object_limit(
+    limit_error = _lvol_ctrl.check_lvstore_object_limit(
         snode, cached_mini_lvols(db_controller),
         cached_mini_snapshots(db_controller))
     if limit_error:
@@ -1151,9 +1333,9 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
             logger.warning(f"Cluster provisioned cap warning, util: {cluster_size_prov_util}% of cluster util: {cluster.prov_cap_warn}")
 
 
-    # Resolve the namespace slot early so we can (a) skip the subsystem limit
-    # check when the clone fits into an existing subsystem, and (b) reuse the
-    # result below instead of calling get_next_available_subsystem_on_node twice.
+    # ADVISORY early capacity check only — the authoritative namespace-slot
+    # pick happens transactionally in claim_lvol_ns_slot at record-write time
+    # (two concurrent clones/creates otherwise race for the same last slot).
     _available_subsys = lvol_controller.get_next_available_subsystem_on_node(snode.get_id(), all_lvols=all_lvols) if namespaced else None
 
     if not _available_subsys:
@@ -1196,17 +1378,8 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
     lvol.nqn = cluster.nqn + ":lvol:" + lvol.uuid
     lvol.max_namespace_per_subsys = snap.lvol.max_namespace_per_subsys
 
-    if namespaced:
-        # reuse the slot resolved above — avoids a second DB read
-        if _available_subsys:
-            lvol.nqn = _available_subsys.nqn
-            lvol.namespace = _available_subsys.uuid
-            lvol.max_namespace_per_subsys = _available_subsys.max_namespace_per_subsys
-
     if pvc_name:
         lvol.pvc_name = pvc_name
-    if pvc_namespace and not lvol.namespace:
-        lvol.namespace = pvc_namespace
 
     lvol.status = LVol.STATUS_IN_CREATION
     lvol.bdev_stack = [
@@ -1269,7 +1442,18 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
                 logger.exception(msg)
                 return False, msg
 
-    lvol.write_to_db(db_controller.kv_store)
+    # ONE FDB transaction: pick the namespace slot and persist the record
+    # (STATUS_IN_CREATION) together — the record is the slot claim, so
+    # concurrent clones/creates conflict-retry instead of double-booking the
+    # subsystem's last free namespace slot.
+    try:
+        db_controller.claim_lvol_ns_slot(
+            lvol, snode, bool(namespaced),
+            standalone_nqn=cluster.nqn + ":lvol:" + lvol.uuid,
+            standalone_namespace=pvc_namespace or "")
+    except SubsystemCapacityError as e:
+        logger.error(str(e))
+        return False, str(e)
 
     if lvol.ha_type == "single":
         lvol_bdev, error = lvol_controller.add_lvol_on_node(lvol, snode)
@@ -1305,7 +1489,7 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
             msg = (f"No leader available for LVS {lvol.lvs_name} — "
                    f"rejecting clone until leadership is re-established")
             logger.error(msg)
-            lvol.remove(db_controller.kv_store)
+            db_controller.release_lvol_ns_slot(lvol)
             return False, msg
 
         # Assign each non-leader a stable index so its subsystem is created
@@ -1331,7 +1515,7 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
             if action == "reject":
                 msg = f"Cannot clone: non-leader {candidate.get_id()[:8]} unreachable but fabric healthy"
                 logger.error(msg)
-                lvol.remove(db_controller.kv_store)
+                db_controller.release_lvol_ns_slot(lvol)
                 return False, msg
             elif action == "proceed":
                 secondary_nodes.append(candidate)
@@ -1359,7 +1543,7 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
                     if error:
                         logger.error(error)
                         if lvol.status != LVol.STATUS_IN_DELETION:
-                            lvol.remove(db_controller.kv_store)
+                            db_controller.release_lvol_ns_slot(lvol)
                         return False, error
                     lvol.lvol_uuid = lvol_bdev['uuid']
                     lvol.blobid = lvol_bdev['driver_specific']['lvol']['blobid']
@@ -1373,11 +1557,11 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
                     if error:
                         logger.error(error)
                         if lvol.status != LVol.STATUS_IN_DELETION:
-                            lvol.remove(db_controller.kv_store)
+                            db_controller.release_lvol_ns_slot(lvol)
                         return False, error
         except PreconditionError as e:
             if lvol.status != LVol.STATUS_IN_DELETION:
-                lvol.remove(db_controller.kv_store)
+                db_controller.release_lvol_ns_slot(lvol)
             return False, str(e)
 
     lvol.status = LVol.STATUS_ONLINE
