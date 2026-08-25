@@ -14,6 +14,7 @@ from .._dtos import (
     FailoverResultDTO,
     ReplicationMode,
     ReplicationPolicyDTO,
+    ReplicationRelationshipDTO,
     ReplicationTargetDTO,
 )
 
@@ -38,6 +39,17 @@ class PolicyParams(BaseModel):
 
 def _config_error(e: ReplicationConfigError):
     return HTTPException(status_code=400, detail=str(e))
+
+
+@api.get('/relationships/{lvol_id}', name='clusters:replication:relationships:detail')
+def get_relationship_by_lvol(cluster: Cluster, lvol_id: UUID) -> ReplicationRelationshipDTO:
+    """Replication relationship for a volume, resolvable even when the source volume
+    has been deleted (e.g. after replication-commit --delete-source). The CSI driver
+    uses this to redirect NodeStageVolume to the active volume on the target cluster."""
+    rel = replication_policy_controller.get_relationship(str(lvol_id))
+    if rel is None:
+        raise HTTPException(404, f"No replication relationship found for volume {lvol_id}")
+    return ReplicationRelationshipDTO(**rel)
 
 
 targets_api = APIRouter()
