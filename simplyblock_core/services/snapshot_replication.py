@@ -605,10 +605,9 @@ def _retention_schedule_for(source_lvol):
     """
     try:
         policy = db.get_replication_policy_for_lvol(source_lvol)
-    except Exception:
+    except KeyError:
         return []
-    spec = getattr(policy, "retention_schedule", "") if policy else ""
-    if not spec:
+    if (policy is None) or (spec := getattr(policy, "retention_schedule", None)) is None:
         return []
     try:
         return snapshot_retention.parse_schedule(spec)

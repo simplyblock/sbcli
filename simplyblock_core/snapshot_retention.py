@@ -108,7 +108,7 @@ def select_retained(created_ats: Iterable[float], tiers: Sequence[RetentionTier]
     for tier in tiers:
         range_end = range_start + tier.span_sec
         # Bucket by absolute age so bucket edges do not drift between calls.
-        best_per_bucket = {}
+        best_per_bucket: dict[int, float] = {}
         for t in times:
             age = now - t
             if age < range_start or age >= range_end:
