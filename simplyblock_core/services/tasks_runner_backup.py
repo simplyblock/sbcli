@@ -347,23 +347,62 @@ def _run_merge(task):
 
         task.function_params["merge_started"] = True
         task.write_to_db(db.kv_store)
-        # Give the data plane time to complete the merge before finalizing
         return
 
-    # The merge RPC is synchronous on the data plane — once it returned
-    # successfully, the S3 data has been merged.  Finalize: update the
-    # chain links, remove the old backup, and mark the task done.
-    keep_backup.prev_backup_id = old_backup.prev_backup_id
-    keep_backup.status = Backup.STATUS_COMPLETED
-    keep_backup.write_to_db()
+    # The merge RPC only queues the merge on the data plane; the actual work
+    # runs asynchronously afterward. Poll bdev_lvol_s3_merge_stat (keyed by
+    # the same s3_id/old_s3_id pair, since a merge task has no lvol) instead
+    # of assuming success.
+    try:
+        stat = rpc_client.bdev_lvol_s3_merge_stat(keep_backup.s3_id, old_backup.s3_id)
+    except RPCException:
+        task.retry += 1
+        task.status = JobSchedule.STATUS_SUSPENDED
+        task.write_to_db(db.kv_store)
+        return
 
-    old_backup.status = Backup.STATUS_MERGED
-    old_backup.write_to_db()
+    if not stat or not isinstance(stat, dict):
+        task.retry += 1
+        task.status = JobSchedule.STATUS_SUSPENDED
+        task.write_to_db(db.kv_store)
+        return
 
-    task.function_result = "Merge completed"
-    task.status = JobSchedule.STATUS_DONE
-    task.write_to_db(db.kv_store)
-    logger.info(f"Merge completed: {old_backup_id} merged into {keep_backup_id}")
+    state = stat.get("transfer_state", "")
+    if state == "Done":
+        # Finalize: update the chain links, retire the old backup, and mark
+        # the task done.
+        keep_backup.prev_backup_id = old_backup.prev_backup_id
+        keep_backup.status = Backup.STATUS_COMPLETED
+        keep_backup.write_to_db()
+
+        old_backup.status = Backup.STATUS_MERGED
+        old_backup.write_to_db()
+
+        task.function_result = "Merge completed"
+        task.status = JobSchedule.STATUS_DONE
+        task.write_to_db(db.kv_store)
+        logger.info(f"Merge completed: {old_backup_id} merged into {keep_backup_id}")
+    elif state == "Failed":
+        # Terminal, not retried: XFER_STATE_FAILED can be reached after the
+        # data plane has already started deleting old_backup's S3 objects
+        # (its DELETE state runs near the end of the merge), so retrying the
+        # identical merge isn't known to be safe from here.
+        if old_backup.status == Backup.STATUS_MERGING:
+            old_backup.status = Backup.STATUS_COMPLETED
+            old_backup.write_to_db()
+        task.function_result = "Merge failed on data plane"
+        task.status = JobSchedule.STATUS_DONE
+        task.write_to_db(db.kv_store)
+    elif state == "No process":
+        # Never started, or its result was already swept — re-issue.
+        task.function_params["merge_started"] = False
+        task.retry += 1
+        task.status = JobSchedule.STATUS_SUSPENDED
+        task.write_to_db(db.kv_store)
+    else:
+        # "In progress" — still running, retry later
+        task.status = JobSchedule.STATUS_SUSPENDED
+        task.write_to_db(db.kv_store)
 
 
 def _terminate_task(task, reason):

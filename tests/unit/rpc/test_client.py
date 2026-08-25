@@ -89,5 +89,55 @@ class TestSubsystem(unittest.TestCase):
             client.subsystem_get("nqn.b")
 
 
+class TestBdevLvolS3Merge(unittest.TestCase):
+
+    @patch.object(RPCClient, "_request3")
+    def test_merge_eexist_treated_as_success_by_default(self, mock_req):
+        # A prior call whose RPC connection dropped before the response
+        # arrived can leave a matching merge already queued on the data
+        # plane; retrying that call must not be treated as a hard failure.
+        mock_req.side_effect = RPCRemoteError("The same transfer task already exists.", code=-errno.EEXIST)
+        client = _make_client()
+
+        self.assertTrue(client.bdev_lvol_s3_merge(1, 2, cluster_batch=16))
+
+    @patch.object(RPCClient, "_request3")
+    def test_merge_eexist_propagates_when_disallowed(self, mock_req):
+        mock_req.side_effect = RPCRemoteError("The same transfer task already exists.", code=-errno.EEXIST)
+        client = _make_client()
+
+        with self.assertRaises(RPCRemoteError):
+            client.bdev_lvol_s3_merge(1, 2, cluster_batch=16, allow_exist=False)
+
+    @patch.object(RPCClient, "_request3")
+    def test_merge_other_rpc_error_propagates_regardless_of_allow_exist(self, mock_req):
+        mock_req.side_effect = RPCRemoteError("Cannot find S3 transfer device.", code=-errno.EINVAL)
+        client = _make_client()
+
+        with self.assertRaises(RPCRemoteError):
+            client.bdev_lvol_s3_merge(1, 2, cluster_batch=16)
+
+    @patch.object(RPCClient, "_request3")
+    def test_merge_success_passes_through(self, mock_req):
+        mock_req.return_value = True
+        client = _make_client()
+
+        self.assertTrue(client.bdev_lvol_s3_merge(1, 2, cluster_batch=16, lvs_name="lvs0"))
+        mock_req.assert_called_once_with("bdev_lvol_s3_merge", s3_id=1, old_s3_id=2, cluster_batch=16, lvs_name="lvs0")
+
+
+class TestBdevLvolS3MergeStat(unittest.TestCase):
+
+    @patch.object(RPCClient, "_request")
+    def test_merge_stat_calls_request_with_ids(self, mock_req):
+        mock_req.return_value = {"transfer_state": "In progress"}
+        client = _make_client()
+
+        result = client.bdev_lvol_s3_merge_stat(1, 2)
+
+        self.assertEqual(result["transfer_state"], "In progress")
+        mock_req.assert_called_once_with("bdev_lvol_s3_merge_stat", {"s3_id": 1, "old_s3_id": 2})
+
+
 if __name__ == "__main__":
     unittest.main()

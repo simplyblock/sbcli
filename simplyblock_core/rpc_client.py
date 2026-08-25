@@ -2034,14 +2034,23 @@ class RPCClient:
         }
         return self._request("bdev_lvol_s3_backup", params)
 
-    # Backup/recovery/merge polling: use bdev_lvol_transfer_stat(lvol_name)
-    # which reads lvol->transfer_status on the data plane. Works for backup
-    # (pass snapshot bdev name) and recovery (pass target lvol name).
-    # Merge has lvol=NULL on data plane so transfer_stat cannot poll it.
+    # Backup/recovery polling: use bdev_lvol_transfer_stat(lvol_name) which
+    # reads lvol->transfer_status on the data plane. Works for backup (pass
+    # snapshot bdev name) and recovery (pass target lvol name). Merge has
+    # lvol=NULL on data plane, so it's polled separately via
+    # bdev_lvol_s3_merge_stat(s3_id, old_s3_id) below.
 
-    def bdev_lvol_s3_merge(self, s3_id, old_s3_id, cluster_batch, lvs_name=None):
+    def bdev_lvol_s3_merge(self, s3_id, old_s3_id, cluster_batch, lvs_name=None, allow_exist: bool = True):
         """Merge two backups: keep s3_id and merge old_s3_id into it.
-        This shortens the backup chain."""
+        This shortens the backup chain.
+
+        allow_exist: if True (default), an EEXIST response -- a matching
+        merge already queued/running on the data plane, e.g. from a prior
+        call whose RPC connection dropped before the response arrived -- is
+        treated the same as a fresh success (returns True) rather than
+        raised. A caller that needs to distinguish "started this call" from
+        "already running" can pass allow_exist=False.
+        """
         params = {
             "s3_id": s3_id,
             "old_s3_id": old_s3_id,
@@ -2049,7 +2058,21 @@ class RPCClient:
         }
         if lvs_name:
             params["lvs_name"] = lvs_name
-        return self._request("bdev_lvol_s3_merge", params)
+        try:
+            return self._request3("bdev_lvol_s3_merge", **params)
+        except RPCRemoteError as e:
+            if allow_exist and e.code == -17:
+                logger.debug("Merge %s -> %s already in progress", old_s3_id, s3_id)
+                return True
+            raise
+
+    def bdev_lvol_s3_merge_stat(self, s3_id, old_s3_id):
+        """Return merge status for the (s3_id, old_s3_id) pair.
+
+        Result dict keys:
+          ``transfer_state``: "No process" | "In progress" | "Failed" | "Done"
+        """
+        return self._request("bdev_lvol_s3_merge_stat", {"s3_id": s3_id, "old_s3_id": old_s3_id})
 
     def bdev_lvol_s3_recovery(self, lvol_name, s3_ids, cluster_batch):
         """Restore a chain of S3 backups into a new lvol.

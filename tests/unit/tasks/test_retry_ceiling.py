@@ -149,6 +149,127 @@ def test_no_process_poll_counts_as_a_retry(runner, monkeypatch):
 
 
 # --------------------------------------------------------------------------
+# Backup runner: _run_merge polls bdev_lvol_s3_merge_stat instead of
+# assuming success. Merge has no lvol, so it can't use bdev_lvol_transfer_stat
+# like backup/restore above -- these cover its own stat RPC's four states.
+# --------------------------------------------------------------------------
+
+def _merge_task(retry=0, max_retry=10, merge_started=True):
+    task = JobSchedule()
+    task.uuid = "task-1"
+    task.function_name = JobSchedule.FN_BACKUP_MERGE
+    task.function_params = {
+        "keep_backup_id": "keep-1",
+        "old_backup_id": "old-1",
+        "merge_started": merge_started,
+    }
+    task.retry = retry
+    task.max_retry = max_retry
+    task.canceled = False
+    task.date = int(__import__("time").time())
+    return task
+
+
+def _merge_backups(old_status=Backup.STATUS_MERGING):
+    keep_backup = Backup()
+    keep_backup.uuid = "keep-1"
+    keep_backup.s3_id = 10
+    keep_backup.node_id = "node-1"
+    keep_backup.prev_backup_id = "old-1"
+
+    old_backup = Backup()
+    old_backup.uuid = "old-1"
+    old_backup.s3_id = 20
+    old_backup.prev_backup_id = "older-0"
+    old_backup.status = old_status
+
+    return keep_backup, old_backup
+
+
+def _merge_db(keep_backup, old_backup, snode, rpc):
+    snode.rpc_client.return_value = rpc
+    fake_db = MagicMock()
+    fake_db.get_backup_by_id.side_effect = lambda bid: {
+        "keep-1": keep_backup, "old-1": old_backup,
+    }[bid]
+    fake_db.get_storage_node_by_id.return_value = snode
+    return fake_db
+
+
+def _online_snode():
+    snode = MagicMock()
+    snode.status = StorageNode.STATUS_ONLINE
+    return snode
+
+
+def test_merge_done_finalizes(runner, monkeypatch):
+    keep_backup, old_backup = _merge_backups()
+    rpc = MagicMock()
+    rpc.bdev_lvol_s3_merge_stat.return_value = {"transfer_state": "Done"}
+    monkeypatch.setattr(runner, "db", _merge_db(keep_backup, old_backup, _online_snode(), rpc))
+
+    task = _merge_task()
+    runner._run_merge(task)
+
+    rpc.bdev_lvol_s3_merge_stat.assert_called_once_with(10, 20)
+    assert keep_backup.status == Backup.STATUS_COMPLETED
+    assert keep_backup.prev_backup_id == "older-0"
+    assert old_backup.status == Backup.STATUS_MERGED
+    assert task.status == JobSchedule.STATUS_DONE
+
+
+def test_merge_failed_reverts_old_backup_and_terminates(runner, monkeypatch):
+    """A 'Failed' merge must not be silently recorded as a success (the bug
+    this whole runner rewrite exists to fix), and must not be blindly
+    retried -- XFER_STATE_FAILED can be reached after the data plane has
+    already started deleting old_backup's S3 objects."""
+    keep_backup, old_backup = _merge_backups(old_status=Backup.STATUS_MERGING)
+    rpc = MagicMock()
+    rpc.bdev_lvol_s3_merge_stat.return_value = {"transfer_state": "Failed"}
+    monkeypatch.setattr(runner, "db", _merge_db(keep_backup, old_backup, _online_snode(), rpc))
+
+    task = _merge_task(retry=0)
+    runner._run_merge(task)
+
+    assert old_backup.status == Backup.STATUS_COMPLETED, "must revert MERGING, not leave it stuck"
+    assert keep_backup.status != Backup.STATUS_COMPLETED, "keep_backup must not be finalized on failure"
+    assert task.status == JobSchedule.STATUS_DONE
+    assert task.retry == 0, "terminal failure is not a retry"
+
+
+def test_merge_in_progress_stays_suspended(runner, monkeypatch):
+    keep_backup, old_backup = _merge_backups()
+    rpc = MagicMock()
+    rpc.bdev_lvol_s3_merge_stat.return_value = {"transfer_state": "In progress"}
+    monkeypatch.setattr(runner, "db", _merge_db(keep_backup, old_backup, _online_snode(), rpc))
+
+    task = _merge_task()
+    runner._run_merge(task)
+
+    assert task.status == JobSchedule.STATUS_SUSPENDED
+    assert task.function_params["merge_started"] is True
+    assert old_backup.status == Backup.STATUS_MERGING, "unchanged while still running"
+
+
+def test_merge_no_process_resets_and_counts_as_a_retry(runner, monkeypatch):
+    """Mirrors test_no_process_poll_counts_as_a_retry above: the re-issue
+    branch must advance task.retry, otherwise the ceiling never binds here
+    and a merge that keeps reporting 'No process' loops forever."""
+    keep_backup, old_backup = _merge_backups()
+    rpc = MagicMock()
+    rpc.bdev_lvol_s3_merge_stat.return_value = {"transfer_state": "No process"}
+    monkeypatch.setattr(runner, "db", _merge_db(keep_backup, old_backup, _online_snode(), rpc))
+
+    task = _merge_task(retry=3)
+    runner._run_merge(task)
+
+    assert task.retry == 4, "No-process re-issue must count toward the ceiling"
+    assert task.function_params["merge_started"] is False
+    assert task.status == JobSchedule.STATUS_SUSPENDED
+    rpc.bdev_lvol_s3_merge.assert_not_called()  # this poll only resets state
+
+
+# --------------------------------------------------------------------------
 # Drive-main harness: exercise each runner's real retry loop end-to-end.
 # --------------------------------------------------------------------------
 

@@ -1125,6 +1125,12 @@ class TestRPCClientBackupMethods(unittest.TestCase):
         from simplyblock_core.rpc_client import RPCClient
         self.assertTrue(hasattr(RPCClient, 'bdev_lvol_s3_merge'))
 
+    def test_bdev_lvol_s3_merge_stat_exists(self):
+        """bdev_lvol_s3_merge_stat is used to poll merge progress -- a merge
+        task has no lvol, so it can't use bdev_lvol_transfer_stat."""
+        from simplyblock_core.rpc_client import RPCClient
+        self.assertTrue(hasattr(RPCClient, 'bdev_lvol_s3_merge_stat'))
+
     def test_bdev_lvol_s3_recovery_exists(self):
         from simplyblock_core.rpc_client import RPCClient
         self.assertTrue(hasattr(RPCClient, 'bdev_lvol_s3_recovery'))
