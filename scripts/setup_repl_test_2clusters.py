@@ -60,15 +60,18 @@ MAX_LVOL = "75"
 # The FIRST cluster (bootstrap=True) is created with `cluster create`; every
 # other cluster is attached to the same CP with `cluster add`.
 CLUSTERS = [
+    # THREE nodes per cluster, everywhere. Two-node clusters are not a
+    # supported configuration (product minimum is 3), and the 2026-08-24/25
+    # campaign showed exactly why: with one node down the survivor holds 1 of
+    # 2 journal members and the JC aborts it, and the restart rebalance has no
+    # third failure domain to place into, so its device_migration loops on
+    # "no allowed placement" forever and pins the cluster in REBALANCING.
     {
-        "name": "src",            # 1+1 HA pair
-        "nodes": 2,
+        "name": "src",
+        "nodes": 3,
         "ndcs": 1,                # data-chunks-per-stripe
         "npcs": 1,                # parity-chunks-per-stripe (FT=1)
-        # None => let the CP resolve the required count (3 for FT=1). An explicit
-        # 2 is now rejected by resolve_ha_jm_count(); a 2-node cluster simply
-        # ends up with the 2 host-disjoint journals it can place.
-        "ha_jm_count": None,
+        "ha_jm_count": 3,
         "bootstrap": True,        # `cluster create`
         "pool": "pool_src",
     },
@@ -87,10 +90,10 @@ CLUSTERS = [
     # only run cases 1-3/5/6.
     {
         "name": "fresh",
-        "nodes": 2,
+        "nodes": 3,
         "ndcs": 1,
         "npcs": 1,
-        "ha_jm_count": None,
+        "ha_jm_count": 3,
         "bootstrap": False,
         "pool": "pool_fresh",
     },
