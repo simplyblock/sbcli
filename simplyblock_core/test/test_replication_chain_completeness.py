@@ -471,3 +471,20 @@ def test_namespaced_siblings_replicate_to_the_same_target_node():
     check = src.index("sibling_node_id")
     assert check < pick, "the sibling lookup must precede the capacity-based pick"
     assert "lv.nqn == lvol.nqn" in src, "siblings are identified by shared NQN"
+
+
+def test_clone_register_confirms_the_bdev_before_add_ns():
+    """Run 20260825_122423: bdev_lvol_clone_register acknowledges before the
+    bdev is examinable, and the peer's nvmf_subsystem_add_ns raced it and lost
+    (-32602 with the subsystem EMPTY; the bdev existed moments later). Third
+    member of the acknowledge-before-complete family, after remove_ns
+    (PVC-expand) and the case-3 eviction. The stack build must poll the bdev
+    into existence before the namespace add runs."""
+    import inspect
+    from simplyblock_core.controllers import lvol_controller as lc
+    src = inspect.getsource(lc._create_bdev_stack)
+    reg = src.index("bdev_lvol_clone_register")
+    assert "not appear within 20s" in src[reg:], \
+        "clone_register must be followed by a bdev confirmation poll"
+    poll = src.index("not appear within 20s", reg)
+    assert "get_bdevs" in src[reg:poll], "the poll must probe get_bdevs"

@@ -1032,6 +1032,26 @@ def _create_bdev_stack(lvol, snode, is_primary=True):
             else:
                 ret = rpc_client.bdev_lvol_clone_register(
                     lvol.lvol_bdev, lvol.snapshot_name, lvol.lvol_uuid, lvol.blobid)
+                if ret:
+                    # clone_register ACKNOWLEDGES before the bdev is
+                    # examinable (the same async false-success family as
+                    # remove_ns in the PVC-expand and case-3 incidents). The
+                    # very next step adds this bdev to the nvmf subsystem, and
+                    # racing the registration lost every time on the fail-over
+                    # of namespaced volumes: peer add_ns -32602 with the
+                    # subsystem EMPTY, while the bdev existed moments later
+                    # (run 20260825_122423, LVS_13/LVOL_121). Poll until the
+                    # bdev is really there before letting add_ns proceed.
+                    bdev_name = f"{lvol.lvs_name}/{lvol.lvol_bdev}"
+                    for _ in range(40):
+                        if rpc_client.get_bdevs(bdev_name):
+                            break
+                        time.sleep(0.5)
+                    else:
+                        logger.error(
+                            f"clone_register acknowledged but {bdev_name} did "
+                            f"not appear within 20s on the peer")
+                        ret = None
 
         else:
             logger.debug(f"Unknown BDev type: {type}")
