@@ -1389,6 +1389,30 @@ class K8sNativeMajorUpgrade(TestClusterBase):
         )
 
         # 4.3 — New snapshots + clones on old PVCs
+        #
+        # The CSI controller pod was (re)created during Step 6 of the
+        # maintenance window.  By the time we reach Phase 4.3 the
+        # external-provisioner sidecar's Kubernetes watches may have gone
+        # stale (observed as "Watch close" events followed by zero
+        # provisioning activity).  Bouncing the pod gives it fresh watches
+        # so clone PVC provisioning actually triggers.
+        self.logger.info(
+            "Phase 4.3 prep: Restarting CSI controller pod to refresh "
+            "provisioner watches"
+        )
+        try:
+            self.k8s_utils.delete_pod(
+                "simplyblock-csi-controller-0", wait=True,
+            )
+            self.k8s_utils.wait_pod_ready(
+                "simplyblock-csi-controller", timeout=300,
+            )
+            sleep_n_sec(15)  # let provisioner establish new watches
+        except Exception as exc:
+            self.logger.warning(
+                f"CSI controller restart failed (continuing): {exc}"
+            )
+
         self.logger.info(
             "Post-upgrade Phase 4.3: New snapshots and clones on old PVCs"
         )
