@@ -766,6 +766,63 @@ class TestRelocateOneReplica(unittest.TestCase):
         self.assertEqual(lvol.nodes, ["p1", "n1"])
 
 
+class TestRecreateOnNonLeaderReconnectsRegardlessOfActivationMode(unittest.TestCase):
+    """2026-08-25 regression: _relocate_one_replica's call into
+    recreate_lvstore_on_non_leader always passes activation_mode=False (the
+    primary is online and stays leader during a live relocation, so the
+    peer-quiescing steps activation_mode skips are still needed) -- but the
+    soft-reconnect prelude (remote devices + remote JMs) is a SEPARATE,
+    documented-idempotent concern that must run every time, not just during
+    cluster_activate(). Gating it behind activation_mode left a node newly
+    taking over a relocated secondary/tertiary replica silently missing
+    connections to redundancy-set peers it had no other prior reason to
+    already be connected to (found live 2026-08-25 via a node-removal
+    ripple: a relocated host's JM stayed unreachable because this prelude
+    never ran for it).
+    """
+
+    def test_soft_reconnect_prelude_runs_with_activation_mode_false(self):
+        snode = MagicMock(spec=StorageNode)
+        snode.get_id = MagicMock(return_value="snode-1")
+        snode.lvstore = ""
+        snode.lvstore_stack_secondary = ""
+        snode.lvstore_stack_tertiary = ""
+        snode.raid = "raid_1"
+        snode.rpc_client = MagicMock(return_value=MagicMock())
+        snode.write_to_db = MagicMock()
+
+        db = MagicMock()
+        db.get_storage_node_by_id = MagicMock(return_value=snode)
+        db.get_lvols_by_node_id = MagicMock(return_value=[])
+
+        primary_node = MagicMock()
+        primary_node.get_id = MagicMock(return_value="primary-1")
+        primary_node.raid = "raid_1"
+        primary_node.lvstore = "LVS_1"
+        primary_node.lvstore_stack = []
+
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "_connect_to_remote_devs",
+                          return_value=["dev-sentinel"]) as devs_mock, \
+             patch.object(storage_node_ops, "_connect_to_remote_jm_devs",
+                          return_value=["jm-sentinel"]) as jms_mock, \
+             patch.object(storage_node_ops, "_set_restart_phase"), \
+             patch.object(storage_node_ops, "_create_bdev_stack",
+                          return_value=(False, "boom")):
+            ret = storage_node_ops._recreate_lvstore_on_non_leader_impl(
+                snode, leader_node=primary_node, primary_node=primary_node,
+                activation_mode=False)
+
+        # _create_bdev_stack was made to fail so the function returns early,
+        # right after the prelude -- proving the prelude itself ran (not
+        # that the whole rebuild happened to succeed).
+        self.assertFalse(ret)
+        devs_mock.assert_called_once_with(snode, reattach=False)
+        jms_mock.assert_called_once_with(snode)
+        self.assertEqual(snode.remote_devices, ["dev-sentinel"])
+        self.assertEqual(snode.remote_jm_devices, ["jm-sentinel"])
+
+
 # ---------------------------------------------------------------------------
 # Case B, splice fallback — _pick_replica_relocation_node returned a BUSY
 # node (a splice candidate, per _find_splice_target_for_relocation) instead
@@ -1533,6 +1590,72 @@ class TestDecommissionDevices(unittest.TestCase):
         # ONE detach per node, even though host's call covered TWO jm_vuid
         # targets -- both targets shared the same name_old (one physical
         # bdev can back multiple local jm_vuids at once).
+        host.rpc_client().bdev_nvme_detach_controller.assert_called_once_with("remote_jm_n1")
+
+    def test_replacement_is_hosts_own_local_jm_uses_local_name_no_remote_connect(self):
+        # 2026-08-25 incident: _pick_replacement can legitimately land on
+        # the HOST's own local JM as the replacement candidate for a
+        # primary it hosts as secondary/tertiary (get_sorted_ha_jms has no
+        # notion of "this candidate is the very node doing the patching").
+        # _connect_to_remote_jm_devs deliberately skips self-connections --
+        # a node never remote-attaches its own JM -- so routing this
+        # candidate through it always raised "failed to connect" and left
+        # the slot permanently short. The fix references it the same way
+        # get_node_jm_names does for a local member: the plain jm_bdev
+        # name, with no connect call at all.
+        #
+        # hosted_primary is a live node in its own right too, so it
+        # independently applies the SAME decision to its OWN local JC copy
+        # -- and from ITS perspective host's JM genuinely IS remote, so
+        # that call must go through the normal connect path unaffected by
+        # this fix. Both cases are exercised here to keep them distinct.
+        cl = _cluster()
+        removed = _node("n1", n_devices=0, with_jm=True)
+        removed.jm_ids = []
+        hosted_primary = _node("hosted-primary", n_devices=0, with_jm=True, jm_vuid=20)
+        hosted_primary.jm_ids = [removed.jm_device.get_id()]
+        host = _node("host", n_devices=0, with_jm=True, jm_vuid=10,
+                     stack_secondary="hosted-primary")
+        host.jm_ids = []  # host's OWN group never referenced the dead JM
+        host.jm_device.jm_bdev = "jm_host"
+        live_old = RemoteJMDevice()
+        live_old.uuid = removed.jm_device.get_id()
+        live_old.remote_bdev = "remote_jm_n1n1"
+        hosted_primary.remote_jm_devices = [live_old]
+        host.remote_jm_devices = [live_old]
+        db = FakeDB(cl, [removed, hosted_primary, host])
+        db.get_jm_device_by_id = MagicMock(side_effect=lambda jid: {
+            removed.jm_device.get_id(): removed.jm_device,
+            host.jm_device.get_id(): host.jm_device,
+        }[jid])
+        dc = MagicMock()
+        connected_remote = RemoteJMDevice()
+        connected_remote.uuid = host.jm_device.get_id()
+        connected_remote.remote_bdev = "remote_jm_hostn1"
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "device_controller", dc), \
+             patch.object(storage_node_ops, "get_sorted_ha_jms",
+                          return_value=[host.jm_device.get_id()]), \
+             patch.object(storage_node_ops, "_connect_to_remote_jm_devs",
+                          return_value=[connected_remote]) as connect_mock:
+            ret = storage_node_ops._decommission_node_devices(removed)
+
+        self.assertTrue(ret)
+        # Only ONE real connect call -- hosted_primary patching its OWN
+        # local JC copy, for which host's JM is genuinely remote.
+        connect_mock.assert_called_once_with(
+            hosted_primary, jm_ids=[host.jm_device.get_id()],
+            only_node_id=host.get_id())
+        # host's copy (the self-candidate case) skips the connect entirely
+        # and references its own device by its plain local name.
+        host.rpc_client().jc_replace_jm.assert_called_once_with(
+            name_old="remote_jm_n1n1",
+            replacements=[{"jm_vuid": 20, "name_new": "jm_host"}])
+        # hosted_primary's own copy goes through the normal remote path.
+        hosted_primary.rpc_client().jc_replace_jm.assert_called_once_with(
+            name_old="remote_jm_n1n1",
+            replacements=[{"jm_vuid": 20, "name_new": "remote_jm_hostn1"}])
+        self.assertIn(host.jm_device.get_id(), hosted_primary.jm_ids)
         host.rpc_client().bdev_nvme_detach_controller.assert_called_once_with("remote_jm_n1")
 
     def test_no_candidate_leaves_slot_honestly_short(self):

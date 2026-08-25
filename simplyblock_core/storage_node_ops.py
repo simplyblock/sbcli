@@ -4658,6 +4658,23 @@ def _decommission_node_devices(removed_node: StorageNode):
                 connect_ok = True
                 for jm_vuid, _owner, new_jm_id in targets:
                     d = db_controller.get_jm_device_by_id(new_jm_id)
+
+                    if d.node_id == node.get_id():
+                        # The picked candidate is node's OWN local JM --
+                        # nothing to connect, it's already live under its
+                        # natural (non-"remote_") name. _connect_to_remote_
+                        # jm_devs deliberately skips self-connections (see
+                        # its "org_dev_node.get_id() == this_node.get_id()"
+                        # guard), so routing this case through it always
+                        # raised "failed to connect" and left the slot
+                        # permanently short (found live 2026-08-25: a node
+                        # picked as its own hosted-primary's replacement
+                        # could never actually be installed). Reference it
+                        # the same way get_node_jm_names does for a local
+                        # member: the plain jm_bdev name.
+                        replacements.append({"jm_vuid": jm_vuid, "name_new": d.jm_bdev})
+                        continue
+
                     controller_name = f"remote_{d.jm_bdev}"
                     expected_bdev = f"{controller_name}n1"
                     # Recorded BEFORE our own connect call below, so a
@@ -8473,26 +8490,34 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
     db_controller = DBController()
     snode_rpc_client = snode.rpc_client()
 
-    if activation_mode:
-        # Soft prelude: reconnect any missing remote devices + remote JMs
-        # before touching the LVS stack. Both helpers iterate existing bdevs
-        # internally and no-op on controllers that are already attached.
-        try:
-            fresh_remote_devs = _connect_to_remote_devs(snode, reattach=False)
-            snode = db_controller.get_storage_node_by_id(snode.get_id())
-            snode.remote_devices = fresh_remote_devs or snode.remote_devices
-            snode.write_to_db()
-        except Exception as e:
-            logger.warning("Soft reconnect of remote devices failed on %s: %s",
-                           snode.get_id(), e)
-        try:
-            fresh_remote_jms = _connect_to_remote_jm_devs(snode)
-            snode = db_controller.get_storage_node_by_id(snode.get_id())
-            snode.remote_jm_devices = fresh_remote_jms or snode.remote_jm_devices
-            snode.write_to_db()
-        except Exception as e:
-            logger.warning("Soft reconnect of remote JMs failed on %s: %s",
-                           snode.get_id(), e)
+    # Soft prelude: reconnect any missing remote devices + remote JMs before
+    # touching the LVS stack. Both helpers iterate existing bdevs internally
+    # and no-op on controllers that are already attached, so this is safe to
+    # run every time -- unconditionally, not just in activation_mode.
+    # Previously gated behind activation_mode (only cluster_activate() paid
+    # this cost); _relocate_one_replica's call into this function always
+    # passes activation_mode=False, so a node freshly taking over a
+    # relocated secondary/tertiary replica never got its connections to the
+    # primary's redundancy-set peers established here, leaving it silently
+    # missing whichever peer it had no other prior reason to already be
+    # connected to (found live 2026-08-25: a replaced node's JM stayed
+    # unreachable on the new host because of exactly this gap).
+    try:
+        fresh_remote_devs = _connect_to_remote_devs(snode, reattach=False)
+        snode = db_controller.get_storage_node_by_id(snode.get_id())
+        snode.remote_devices = fresh_remote_devs or snode.remote_devices
+        snode.write_to_db()
+    except Exception as e:
+        logger.warning("Soft reconnect of remote devices failed on %s: %s",
+                       snode.get_id(), e)
+    try:
+        fresh_remote_jms = _connect_to_remote_jm_devs(snode)
+        snode = db_controller.get_storage_node_by_id(snode.get_id())
+        snode.remote_jm_devices = fresh_remote_jms or snode.remote_jm_devices
+        snode.write_to_db()
+    except Exception as e:
+        logger.warning("Soft reconnect of remote JMs failed on %s: %s",
+                       snode.get_id(), e)
 
     # Ensure snode has per-lvstore ports from primary
     lvstore_ports = {}
