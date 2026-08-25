@@ -1965,18 +1965,28 @@ class K8sNativeMajorUpgrade(TestClusterBase):
             self.logger.warning(f"Failed to inject keep annotations via helm upgrade: {e}")
             return False
 
-    def _patch_helm_release_keep_annotations(self, release_name: str):
+    def _patch_helm_release_keep_annotations(
+        self, release_name: str, resource_names: set[str] | None = None,
+    ):
         """Patch the Helm release secret to inject resource-policy: keep.
 
         Helm stores release data in secrets named sh.helm.release.v1.<name>.v<N>.
         The data is: base64 → base64 → gzip → JSON. We decode, inject the keep
-        annotation into matching FDB resource manifests, and re-encode.
+        annotation into matching resource manifests, and re-encode.
+
+        *resource_names* overrides the default FDB resource list when provided,
+        allowing this method to be reused for other charts (e.g. spdk-csi
+        StorageClasses).
         """
         if not release_name:
             self.logger.warning("No Helm release name provided, skipping secret patch")
             return
 
-        fdb_resource_names = {name for _, name in _get_keep_resources(release_name)}
+        fdb_resource_names = (
+            resource_names
+            if resource_names is not None
+            else {name for _, name in _get_keep_resources(release_name)}
+        )
 
         # Find the latest Helm release secret
         cmd = (
@@ -2102,6 +2112,29 @@ class K8sNativeMajorUpgrade(TestClusterBase):
     def _uninstall_helm_releases(self):
         """Steps 3-4: Uninstall old Helm charts."""
         if self.helm_release_spdk_csi:
+            # Preserve StorageClasses across helm uninstall so existing
+            # SC references (in PVCs, snapshots, clones) remain valid
+            # after the upgrade.  The new operator chart may create its
+            # own SCs, but we keep the old ones for backward compat.
+            self.logger.info(
+                "Preserving StorageClasses: patching spdk-csi Helm release "
+                "manifest + annotating live resources"
+            )
+            self._patch_helm_release_keep_annotations(
+                self.helm_release_spdk_csi,
+                resource_names={self.STORAGE_CLASS_NAME},
+            )
+            # Belt-and-suspenders: also annotate live resources directly
+            self.k8s_utils._exec_kubectl(
+                f"kubectl annotate storageclass "
+                f"--selector=app.kubernetes.io/instance={self.helm_release_spdk_csi} "
+                f"helm.sh/resource-policy=keep --overwrite 2>/dev/null || true"
+            )
+            self.k8s_utils._exec_kubectl(
+                f"kubectl annotate storageclass {self.STORAGE_CLASS_NAME} "
+                f"helm.sh/resource-policy=keep --overwrite 2>/dev/null || true"
+            )
+
             self.logger.info(
                 f"Migration Step 3: Uninstalling helm release '{self.helm_release_spdk_csi}'"
             )
