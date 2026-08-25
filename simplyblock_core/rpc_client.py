@@ -1640,6 +1640,21 @@ class RPCClient:
             "remote_bdev": bdev,
         })
 
+    def jc_set_dual_node(self, enable):
+        """Tell the journal component whether this is a DUAL-NODE cluster.
+
+        The JC aborts its whole SPDK application when the number of reachable
+        journal members drops below jc_ha_nmin_jms(), which is 2 unless the
+        dual-node flag is set, and 1 when it is. On a 2-node cluster losing
+        the peer leaves exactly 1 of 2 JMs, so without this flag the SURVIVING
+        node aborts itself the moment its partner stops -- a single graceful
+        `sn shutdown` takes the entire cluster down (soak case 6: "JC detected
+        a network outage nd=1 njms=2" / "JC aborts the node due to network
+        outage" / core dump, every client path gone, XFS shut down).
+        The fork implements the tolerance; nothing ever switched it on.
+        """
+        return self._request2("jc_set_dual_node", {"enable": bool(enable)})
+
     def jc_suspend_compression(self, jm_vuid, suspend=False):
         params = {
             "jm_vuid": jm_vuid,

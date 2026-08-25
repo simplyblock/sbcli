@@ -910,6 +910,40 @@ def _search_for_partitions(rpc_client, nvme_device):
     return partitioned_devices
 
 
+def apply_jc_dual_node(cluster_id):
+    """Keep every node's JC dual-node flag in step with the cluster size.
+
+    The journal component ABORTS its whole SPDK application when reachable
+    journal members drop below jc_ha_nmin_jms(), which is 2 normally and 1
+    when the dual-node flag is set. A 2-node cluster that loses its peer is
+    left with 1 of 2 JMs, so without the flag the SURVIVING node aborts
+    itself the instant its partner stops: one graceful `sn shutdown` takes
+    the entire cluster down, every client path disappears at once and
+    filesystems shut down (soak case 6, 2026-08-24 -- "JC detected a network
+    outage nd=1 njms=2", "JC aborts the node due to network outage", core
+    dumped). The fork implements the tolerance and exposes jc_set_dual_node;
+    nothing in the control plane ever called it.
+
+    Keyed on MEMBERSHIP, not on how many nodes are online: a 3-node cluster
+    with one node down must keep requiring 2 journals. Only a cluster whose
+    whole membership is 2 is a dual-node cluster.
+    """
+    db_controller = DBController()
+    members = [n for n in db_controller.get_storage_nodes_by_cluster_id(cluster_id)
+               if n.status != StorageNode.STATUS_REMOVED]
+    enable = len(members) == 2
+    for node in members:
+        if node.status != StorageNode.STATUS_ONLINE:
+            continue
+        try:
+            node.rpc_client().jc_set_dual_node(enable)
+            logger.info("JC dual-node=%s applied on %s (cluster membership %d)",
+                        enable, node.get_id(), len(members))
+        except Exception as e:                  # noqa: BLE001 - best effort
+            logger.warning("Could not set JC dual-node=%s on %s: %s",
+                           enable, node.get_id(), e)
+
+
 def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode: StorageNode, after_restart):
     # RAID 0+1 journal layout (see simplyblock_core/jm_raid.py):
     #   1 device   -> no raid (bare device)
@@ -1312,6 +1346,11 @@ def _prepare_cluster_devices_partitions(snode: StorageNode, devices):
 
         snode.jm_device = jm_device
 
+    # Applied cluster-wide, not just to this node: a cluster growing 2 -> 3
+    # must also CLEAR the flag on the two nodes that already have it, and one
+    # shrinking 3 -> 2 must set it on the survivors.
+    apply_jc_dual_node(snode.cluster_id)
+
     snode.nvme_devices = new_devices
     return True
 
@@ -1490,6 +1529,10 @@ def _prepare_cluster_devices_on_restart(snode: StorageNode, clear_data=False):
         jm_device.status = JMDevice.STATUS_ONLINE
         snode.jm_device = jm_device
         snode.write_to_db()
+
+    # A restarted node comes up with the JC default (dual-node off), so the
+    # flag has to be re-applied on every bring-up, not only at node-add.
+    apply_jc_dual_node(snode.cluster_id)
 
     return True
 
