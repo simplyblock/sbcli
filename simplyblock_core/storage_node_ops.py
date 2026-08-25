@@ -4988,26 +4988,27 @@ def _restart_storage_node_impl(
     cores, _ = snode_api.read_allowed_list()
     logger.info(f"read_allowed list is {cores}")
 
+    # alceml_cpu_cores/distrib_cpu_cores/poller_cpu_cores and every mask below
+    # are l-core INDICES (0..req_cpu_count-1), not physical core ids -- SPDK
+    # addresses reactors by their position in -l, and that role-to-index split
+    # was decided once, at add time (see apply_cluster_vcpu_count/add_node),
+    # using whatever allocation policy existed then. Restart must not
+    # re-derive it: calling recalculate_cores_distribution here re-ran
+    # calculate_core_allocations fresh on every restart, so upgrading the
+    # node agent to a build with a changed allocation policy silently
+    # re-pinned an already-provisioned node's roles the next time it merely
+    # restarted -- not a deliberate re-provisioning action.
+    #
+    # What legitimately can go stale across a restart is which *physical*
+    # core sits at each index -- the OS/k8s CPU manager can hand back a
+    # different specific set (same count) than before. That's all this
+    # refreshes: the index@physical_core pairing in l_cores, nothing else.
     if len(cores) == req_cpu_count:
-        new_distribution, _ = snode_api.recalculate_cores_distribution(cores, snode.number_of_alceml_devices)
-        poller_cpu_cores = new_distribution.get("poller_cpu_cores")
-        snode.alceml_cpu_cores = new_distribution.get("alceml_cpu_cores")
-        snode.distrib_cpu_cores = new_distribution.get("distrib_cpu_cores")
-        snode.alceml_worker_cpu_cores = new_distribution.get("alceml_worker_cpu_cores")
-        jc_singleton_core = new_distribution.get("jc_singleton_core")
-        app_thread_core = new_distribution.get("app_thread_core")
-        jm_cpu_core = new_distribution.get("jm_cpu_core")
-        snode.pollers_mask = utils.generate_mask(poller_cpu_cores)
-        snode.app_thread_mask = utils.generate_mask(app_thread_core)
-        lvol_poller_core = new_distribution.get("lvol_poller_core")
-        snode.lvol_poller_mask = utils.generate_mask(lvol_poller_core)
-
-        if jc_singleton_core:
-            snode.jc_singleton_mask = utils.decimal_to_hex_power_of_2(jc_singleton_core[0])
-        compression_core = new_distribution.get("compression_core")
-        if compression_core:
-            snode.compression_cpu_mask = utils.generate_mask(compression_core)
-        snode.jm_cpu_mask = utils.generate_mask(jm_cpu_core)
+        snode.l_cores = utils.generate_l_cores(sorted(cores))
+    else:
+        logger.warning(
+            "Node %s: read_allowed_list returned %d core(s), expected %d -- "
+            "leaving l_cores as-is", node_id, len(cores), req_cpu_count)
 
     if not results:
         logger.error(f"Failed to start spdk: {err}")

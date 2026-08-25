@@ -618,6 +618,15 @@ def generate_mask(cores):
     return f'0x{mask:X}'
 
 
+def generate_l_cores(cores):
+    """The SPDK -l argument: "<l-core index>@<physical core id>" pairs, one
+    per reactor. Every role (app_thread/jm/jc_singleton/alceml/distrib/
+    poller/...) is addressed by its l-core INDEX afterwards, never by the
+    physical id directly -- this is the one place that pairing is made.
+    """
+    return ",".join(f"{i}@{core}" for i, core in enumerate(cores))
+
+
 def calculate_pool_count(alceml_count, number_of_distribs, cpu_count, poller_count, max_lvol=0):
     '''
     				        Small pool count				            Large pool count
@@ -1846,7 +1855,7 @@ def generate_core_allocation(cores_by_numa, sockets_to_use, nodes_per_socket, vc
         if nodes_per_socket == 1:
             # If there's only one node, assign all available cores to it
             node_cores = available_cores
-            l_cores = ",".join([f"{i}@{core}" for i, core in enumerate(node_cores)])
+            l_cores = generate_l_cores(node_cores)
             core_to_index = {core: idx for idx, core in enumerate(node_cores)}
             node_distribution[numa_node].append({
                 "cpu_mask": hex(sum([1 << c for c in node_cores])),
@@ -1867,7 +1876,7 @@ def generate_core_allocation(cores_by_numa, sockets_to_use, nodes_per_socket, vc
             min_isolated_cores = min(len(node_0_cores), len(node_1_cores))
 
             # Generate l-cores for node 0
-            l_cores_0 = ",".join([f"{i}@{core}" for i, core in enumerate(node_0_cores[:min_isolated_cores])])
+            l_cores_0 = generate_l_cores(node_0_cores[:min_isolated_cores])
             core_to_index = {core: idx for idx, core in enumerate(node_0_cores)}
             isolated_cores = node_0_cores[:min_isolated_cores]
             node_distribution[numa_node].append({
@@ -1879,7 +1888,7 @@ def generate_core_allocation(cores_by_numa, sockets_to_use, nodes_per_socket, vc
             })
 
             # Generate l-cores for node 1
-            l_cores_1 = ",".join([f"{i}@{core}" for i, core in enumerate(node_1_cores[:min_isolated_cores])])
+            l_cores_1 = generate_l_cores(node_1_cores[:min_isolated_cores])
             core_to_index = {core: idx for idx, core in enumerate(node_1_cores)}
             isolated_cores = node_1_cores[:min_isolated_cores]
             node_distribution[numa_node].append({
@@ -1913,7 +1922,7 @@ def regenerate_config(new_config, old_config, force=False):
                 return False
             old_config["nodes"][i]["number_of_alcemls"] = number_of_alcemls
             old_config["nodes"][i]["cpu_mask"] = new_config["nodes"][i]["cpu_mask"]
-            old_config["nodes"][i]["l-cores"] = ",".join([f"{i}@{core}" for i, core in enumerate(isolated_cores)])
+            old_config["nodes"][i]["l-cores"] = generate_l_cores(isolated_cores)
             old_config["nodes"][i]["isolated"] = isolated_cores
             distribution = calculate_core_allocations(isolated_cores, number_of_alcemls + 1)
             core_to_index = {core: idx for idx, core in enumerate(isolated_cores)}
@@ -2078,7 +2087,7 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
                 "socket": nid,
                 "cpu_mask": core_group["cpu_mask"],
                 "isolated": core_group["isolated"],
-                "l-cores": ",".join([f"{i}@{core}" for i, core in enumerate(core_group["isolated"])]),
+                "l-cores": generate_l_cores(core_group["isolated"]),
                 "number_of_alcemls": 0,
                 "distribution": {
                     "app_thread_core": get_core_indexes(core_group["core_to_index"], core_group["distribution"][0]),
