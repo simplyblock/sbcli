@@ -97,7 +97,7 @@ def harness(monkeypatch):
 
     monkeypatch.setattr(lvol_controller, "_last_replicated_target_snapshot", _fake_select)
 
-    def _fake_clone(db, lvol, target_node, pool_uuid, snapshot):
+    def _fake_clone(db, lvol, target_node, pool_uuid, snapshot, for_migration=False):
         state["cloned_from"].append(snapshot.get_id())
         return object(), None
 
