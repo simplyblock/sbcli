@@ -3391,6 +3391,29 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
     # reconnect to the SAME NQN/NS on the target cluster — only the IP/port
     # differ. new_lvol is a deep copy of lvol, so nqn/ns_id are already
     # identical; do NOT rewrite the NQN with the target cluster's prefix.
+    #
+    # Determine the namespace pointer for the target clone.
+    # _resolve_namespaced_subsystem returns (not lvol.namespace): non-empty
+    # → skip subsystem_create (attach to pre-existing subsystem); empty →
+    # create subsystem. The deepcopy carries the source cluster's namespace
+    # UUID, which means nothing on the target and causes subsystem_create to
+    # be skipped even though the shared NQN has never been registered there
+    # (nvmf_subsystem_add_ns2 then fails -32602, Case B fires, clone left as
+    # unreachable bdev — Health: False).
+    #
+    # For namespaced volumes (lvol.namespace non-empty on source), mirror
+    # what _claim_lvol_ns_slot_tx does on the regular create path: if a
+    # sibling clone already owns the shared NQN subsystem on the target,
+    # attach to it; otherwise this clone creates the subsystem.
+    # For standalone volumes (lvol.namespace empty), just clear it.
+    if lvol.namespace:
+        new_lvol.namespace = ""  # default: this clone creates the subsystem
+        for lv in db_controller.get_lvols(target_node.cluster_id):
+            if lv.nqn == new_lvol.nqn and lv.get_id() != new_lvol.get_id():
+                new_lvol.namespace = lv.uuid  # sibling exists: attach instead
+                break
+    else:
+        new_lvol.namespace = ""
 
     new_lvol.bdev_stack = [
         {
@@ -3673,6 +3696,11 @@ def replicate_lvol_on_target_cluster(lvol_id):
 
     for lv in db_controller.get_lvols(target_cluster.get_id()):
         if lv.nqn == lvol.nqn:
+            # Namespaced volumes share one NQN but have distinct NS IDs.
+            # A match on NQN alone would return the first sibling's clone
+            # for every PVC in the group, so also verify NS ID.
+            if lvol.namespace and lv.ns_id != lvol.ns_id:
+                continue
             logger.info(f"LVol with same nqn already exists on target cluster: {lv.get_id()}")
             return lv.get_id()
 
