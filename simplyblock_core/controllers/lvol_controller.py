@@ -3873,6 +3873,28 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
     # local to a subsystem's own HA set, clients resolve their paths through
     # connect_lvol, and the source's number may already be taken on the
     # target — so it is re-claimed below rather than carried over.
+    #
+    # Determine the namespace pointer for the target clone. A non-empty
+    # namespace makes add_lvol_on_node skip subsystem_create (attach to a
+    # pre-existing subsystem); empty means "create the subsystem". The
+    # deepcopy carries the source cluster's namespace UUID, which means
+    # nothing on the target and causes subsystem_create to be skipped even
+    # though the shared NQN has never been registered there
+    # (nvmf_subsystem_add_ns2 then fails -32602, Case B fires, clone left as
+    # unreachable bdev — Health: False).
+    #
+    # For namespaced volumes (lvol.namespace non-empty on source), mirror
+    # what the regular create path does: if a sibling clone already owns the
+    # shared NQN subsystem on the target, attach to it; otherwise this clone
+    # creates the subsystem. For standalone volumes, just clear it.
+    if lvol.namespace:
+        new_lvol.namespace = ""  # default: this clone creates the subsystem
+        for lv in db_controller.get_lvols(target_node.cluster_id):
+            if lv.nqn == new_lvol.nqn and lv.get_id() != new_lvol.get_id():
+                new_lvol.namespace = lv.uuid  # sibling exists: attach instead
+                break
+    else:
+        new_lvol.namespace = ""
 
     new_lvol.bdev_stack = [
         {
