@@ -49,7 +49,7 @@ class _NewLvol:
     nqn = ""
     namespace = ""
     max_namespace_per_subsys = 1
-    allowed_hosts = []
+    allowed_hosts: list[dict] = []
 
     def get_id(self):
         return "NEW"

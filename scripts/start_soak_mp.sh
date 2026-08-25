@@ -5,6 +5,9 @@
 # repeating the ones already covered: pair distance rotation and the NIC-phase
 # schedule both key off the iteration number. The loop still ends at
 # --iterations, so START_ITERATION=21 runs pairs 21..75.
+#
+# PLACEMENT_DUMPS=1 turns on per-outage placement-map dumps (gzipped, stored
+# on each storage node under ~/placement_dumps/<run>/).
 set -u
 cd "$HOME"
 TS=$(date +%Y%m%d_%H%M%S)
@@ -16,7 +19,7 @@ setsid nohup python3 "$HOME/aws_dual_node_outage_soak_multipath.py" \
     --metadata "$HOME/cluster_metadata_mp.json" \
     --ssh-key "$HOME/.ssh/mtes01.pem" \
     --iterations 75 \
-    --start-iteration "${START_ITERATION:-1}" \
+    --start-iteration "${START_ITERATION:-1}"     ${PLACEMENT_DUMPS:+--placement-dumps} \
     --runtime 52000 \
     --log-file "$LOG" \
     > "$OUT" 2>&1 < /dev/null &

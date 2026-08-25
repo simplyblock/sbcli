@@ -661,7 +661,8 @@ class CLIWrapperBase:
         return replication_policy_controller.add_policy(
             args.cluster_id, args.name, args.target,
             interval_min=args.interval_min, mode=args.mode,
-            keep_replicated=args.keep_replicated)
+            keep_replicated=args.keep_replicated,
+            retention_schedule=args.retention_schedule)
 
     def cluster__replication_policy_list(self, sub_command, args):
         data = [{
@@ -671,6 +672,7 @@ class CLIWrapperBase:
             "Interval (min)": p.interval_min,
             "Mode": p.mode,
             "Keep": p.keep_replicated,
+            "Retention": p.retention_schedule or "-",
             "Status": p.status,
         } for p in replication_policy_controller.list_policies(args.cluster_id)]
         return _format_result(data, json=args.json)
@@ -715,6 +717,10 @@ class CLIWrapperBase:
             "State": rel["state"],
             "Direction": rel["direction"],
             "Mode": rel["mode"],
+            # Which side serves the client right now; resolvable by the SOURCE
+            # uuid even after the source volume was deleted.
+            "Active": rel.get("active", ""),
+            "Active Volume": rel.get("active_lvol_id", ""),
         }])
 
     def volume__add(self, sub_command, args):
@@ -853,7 +859,8 @@ class CLIWrapperBase:
             mode=getattr(args, 'mode', None), interval_min=getattr(args, 'interval_min', None))
 
     def volume__replication_commit(self, sub_command, args):
-        return lvol_controller.replication_commit(args.lvol_id)
+        return lvol_controller.replication_commit(
+            args.lvol_id, delete_source=getattr(args, "delete_source", False))
 
     def volume__replication_failback(self, sub_command, args):
         return lvol_controller.replication_failback(

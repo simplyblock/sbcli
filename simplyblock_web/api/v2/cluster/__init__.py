@@ -86,6 +86,18 @@ class ClusterParams(BaseModel):
     backup_config: Optional[BackupConfigParams] = None
     hashicorp_vault_settings: Optional[HashicorpVaultSettings] = None
     enable_failure_domain: bool = False
+    # max_subsys and spdk_vcpu_count are capacity decisions with real
+    # consequences if silently defaulted (max_subsys=0 means the product
+    # ceiling; spdk_vcpu_count=0 means no cluster-wide core requirement at
+    # all) -- callers must state them explicitly. hugepages_mem=0 is safe to
+    # default: it is only ever a floor add_node applies on top of the figure
+    # calculate_minimum_hp_memory computes from max_subsys/spdk_vcpu_count
+    # themselves, per validate_spdk_sizing/cluster_ops ("0 = computed") --
+    # never a replacement for that computation, so there is nothing to
+    # silently under-specify by leaving it unstated.
+    max_subsys: util.Unsigned
+    hugepages_mem: util.Size = 0
+    spdk_vcpu_count: util.Unsigned
 
     @model_validator(mode="after")
     def validate_erasure_coding_scheme(self):
@@ -263,5 +275,5 @@ instance_api.include_router(task_api, prefix='/tasks')
 instance_api.include_router(pool_api, prefix='/storage-pools')
 instance_api.include_router(backup_api, prefix='/backups')
 instance_api.include_router(subsystem_api, prefix='/subsystems')
-instance_api.include_router(replication_api)
+instance_api.include_router(replication_api, prefix='/replication')
 api.include_router(instance_api)

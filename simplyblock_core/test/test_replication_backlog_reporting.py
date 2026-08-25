@@ -26,7 +26,6 @@ from simplyblock_core.controllers import lvol_controller
 from simplyblock_core.models.job_schedule import JobSchedule
 
 
-NOW = int(time.time())
 LVOL_ID = "LV1"
 
 
@@ -38,7 +37,10 @@ class _LvolRef:
 class _Snap:
     def __init__(self, uuid, age_sec, target="", source="", used=1024):
         self.uuid = uuid
-        self.created_at = NOW - age_sec
+        # Ages are relative to the clock the controller reads, not to import
+        # time: the suite takes over a minute, so a fixture stamped at import
+        # drifted a whole cadence interval before the test ran.
+        self.created_at = int(time.time()) - age_sec
         self.target_replicated_snap_uuid = target
         self.source_replicated_snap_uuid = source
         self.used_size = used
@@ -55,8 +57,7 @@ class _Task:
     function_name = JobSchedule.FN_SNAPSHOT_REPLICATION
 
     def __init__(self, snap_uuid, status=JobSchedule.STATUS_RUNNING, result=""):
-        self.date = NOW
-        self.updated_at = NOW
+        self.date = self.updated_at = int(time.time())
         self.status = status
         self.canceled = False
         self.function_result = result
@@ -126,10 +127,8 @@ def test_failback_direction_counts_as_replicated(patch_db):
 def test_backlog_age_is_reported(patch_db):
     snaps = [_Snap("S_OLD", 900), _Snap("S_NEW", 20)]
     info = patch_db(snaps, [_Task("S_OLD"), _Task("S_NEW")])
-    # NOW is stamped at import, the controller reads the clock when called, so
-    # the gap grows with however long the rest of the suite takes to get here.
-    # Only the age ORDER matters: the oldest outstanding one, not the newest.
-    assert 900 <= info["oldest_outstanding_seconds"] < 900 + 3600
+    # The oldest outstanding one is reported, not the newest.
+    assert 900 <= info["oldest_outstanding_seconds"] < 905
     assert info["oldest_outstanding"]
     assert info["cadence_target_seconds"] == 60
 

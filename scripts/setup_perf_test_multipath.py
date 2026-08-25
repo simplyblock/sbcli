@@ -87,7 +87,7 @@ BRANCH       = "main"
 #: itself, so a stale pin fails loudly instead of running old code quietly.
 #: 8d2e5215 = ultra main "Build main on the R26.3 spdk-core base", built on
 #: spdk-core R26.3 a311a6852 which carries upstream d528e1a67 (spdk/spdk#3686).
-SPDK_IMAGE   = "public.ecr.aws/simply-block/ultra:main-8d2e5215-amd64"
+SPDK_IMAGE   = "public.ecr.aws/simply-block/ultra:main-b44de698-amd64"
 USER         = "ec2-user"
 MGMT_IFACE   = "eth0"
 DATA_NICS    = ["eth1", "eth2"]          # Names the OS assigns to ENI index 1, 2
@@ -519,11 +519,20 @@ def verify_multipath(mgmt_ip, expected_nics=2):
 # ──────────────────── Main deployment ────────────────────────────────────────
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="AWS multipath cluster deployment")
+    parser.add_argument(
+        "--mgmt-boot-gb", type=int, default=80,
+        help="Boot disk size of the mgmt node in GB (default 80). Pass 100 "
+             "for runs that accumulate placement dumps / long soak logs on "
+             "the mgmt node.")
+    cli_args = parser.parse_args()
+
     print("=" * 60)
     print("AWS Multipath Cluster Deployment")
     print(f"  Storage nodes: {SN_COUNT}× {SN_TYPE}")
     print(f"  NICs per host: 1 mgmt ({MGMT_IFACE}) + {len(DATA_NICS)} data ({', '.join(DATA_NICS)})")
-    print(f"  FT={MAX_FT}, branch={BRANCH}")
+    print(f"  FT={MAX_FT}, branch={BRANCH}, mgmt boot disk={cli_args.mgmt_boot_gb}G")
     print("=" * 60)
 
     # ── Phase 1: Launch instances ────────────────────────────────────────
@@ -532,7 +541,7 @@ def main():
     # paramiko ProxyJump through mgmt (jump_ip=mgmt_ip on every SSH).
     print("\n--- Phase 1: Launch instances ---")
     mgmt_instances = launch_instances(1, MGMT_TYPE, num_nics=1, tag_name="SB-Mgmt-MP",
-                                      root_gb=80, public_ip=True)
+                                      root_gb=cli_args.mgmt_boot_gb, public_ip=True)
     sn_instances   = launch_instances(SN_COUNT, SN_TYPE, num_nics=3, tag_name="SB-SN-MP",
                                       public_ip=False)
     client_instances = launch_instances(CLIENT_COUNT, CLIENT_TYPE, num_nics=3,
@@ -629,7 +638,7 @@ def main():
     print("\n--- Phase 5: Configure + deploy storage nodes ---")
     with ThreadPoolExecutor(max_workers=len(sn_priv_ips)) as pool:
         futures = [pool.submit(ssh_exec, ip, [
-            f"sudo /usr/local/bin/sbctl -d sn configure"
+            "sudo /usr/local/bin/sbctl -d sn configure"
         ], check=True, jump_ip=mgmt_ip) for ip in sn_priv_ips]
         for f in futures:
             f.result()

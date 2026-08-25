@@ -12,6 +12,8 @@ already been deleted. Lab 2026-08-20: 104 snapshots frozen for 40+ minutes with
 no errors logged at all (869 "Snapshot has instances" per 2 minutes), while the
 104 that had no instances drained normally.
 """
+from typing import Any
+
 import pytest
 
 from simplyblock_core.services import snapshot_monitor as sm
@@ -73,7 +75,7 @@ class _Node:
 @pytest.fixture
 def harness(monkeypatch):
     """Stub everything phase-2 does to the cluster; keep the record bookkeeping."""
-    state = {"handed_off": [], "unindexed": [], "events": []}
+    state: dict[str, Any] = {"handed_off": [], "unindexed": [], "events": []}
 
     successor = _Snap("SUCCESSOR", node_id="NODE_B")
 

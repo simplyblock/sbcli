@@ -563,7 +563,7 @@ def main():
     print("Phase 2b: Configuring storage nodes...")
     with ThreadPoolExecutor(max_workers=len(sn_ips)) as executor:
         tasks = [executor.submit(ssh_exec, ip, [
-            f"sudo /usr/local/bin/sbctl -d sn configure"
+            "sudo /usr/local/bin/sbctl -d sn configure"
         ], check=True, cmd_timeout=1200) for ip in sn_ips]
         for t in tasks:
             t.result()

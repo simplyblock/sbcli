@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 from simplyblock_core.db_controller import DBController
 from simplyblock_core.controllers import pool_controller
 from simplyblock_core import utils as core_utils
+from simplyblock_core.utils.helpers import single_or_none
 from simplyblock_core.models.pool import Pool as PoolModel
 
 from ... import util as util
@@ -22,7 +23,10 @@ db = DBController()
 
 @api.get('/', name='clusters:storage-pools:list')
 def list(cluster: Cluster) -> List[StoragePoolDTO]:
-    return [StoragePoolDTO.from_model(pool, None) for pool in db.get_pools(cluster.get_id())]
+    return [
+        StoragePoolDTO.from_model(pool, single_or_none(db.get_pool_stats(pool, limit=1)))
+        for pool in db.get_pools(cluster.get_id())
+    ]
 
 
 class StoragePoolParams(BaseModel):
@@ -70,8 +74,7 @@ instance_api = APIRouter(prefix='/{pool_id}')
 
 @instance_api.get('/', name='clusters:storage-pools:detail')
 def get(cluster: Cluster, pool: StoragePool) -> StoragePoolDTO:
-    stat_obj = None
-    return StoragePoolDTO.from_model(pool, stat_obj)
+    return StoragePoolDTO.from_model(pool, single_or_none(db.get_pool_stats(pool, limit=1)))
 
 
 @instance_api.delete('/', name='clusters:storage-pools:delete', status_code=204, responses={204: {"content": None}})

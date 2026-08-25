@@ -2,7 +2,7 @@
 import time
 import uuid
 
-from simplyblock_core import constants, db_controller, utils
+from simplyblock_core import constants, db_controller, snapshot_retention, utils
 from simplyblock_core.controllers import lvol_controller, snapshot_events, snapshot_controller
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
@@ -252,6 +252,47 @@ def process_snap_replicate_start(task, snapshot):
                 logger.error(f"Unable to find pool on remote cluster: {remote_node_uuid.cluster_id}")
                 return
 
+        # An earlier attempt of THIS task may have created the landing volume
+        # and died before storing its id (a node outage mid-create): add_lvol_ha
+        # then fails "LVol name must be unique" on EVERY retry and the task
+        # loops forever, stalling the volume's whole chain behind it (case 6,
+        # run 20260824_144226: three volumes stuck on their first cadence
+        # snapshot, retrying every ~31s for the rest of the run). The name is
+        # derived from the snapshot, so a record wearing it IS this transfer's
+        # landing volume: adopt it when it is usable, clear it when it is not.
+        rep_name = f"REP_{snapshot.snap_name}"
+        existing = None
+        try:
+            existing = db.get_lvol_by_name(rep_name)
+        except KeyError:
+            pass
+        if existing is not None:
+            if existing.status == LVol.STATUS_ONLINE:
+                logger.info(f"Adopting landing volume {existing.get_id()} "
+                            f"({rep_name}) left by an interrupted attempt")
+                task.function_params["remote_lvol_id"] = existing.get_id()
+                task.write_to_db()
+            elif existing.status == LVol.STATUS_IN_DELETION:
+                task.function_result = f"stale landing volume {rep_name} still deleting, retrying"
+                task.status = JobSchedule.STATUS_SUSPENDED
+                task.retry += 1
+                task.write_to_db()
+                return
+            else:
+                logger.warning(f"Deleting half-created landing volume "
+                               f"{existing.get_id()} ({rep_name}, status "
+                               f"{existing.status}) from an interrupted attempt")
+                try:
+                    lvol_controller.delete_lvol(existing, force_delete=True)
+                except Exception as e:
+                    logger.error(f"Failed to clear stale landing volume {rep_name}: {e}")
+                task.function_result = "cleared stale landing volume, retrying"
+                task.status = JobSchedule.STATUS_SUSPENDED
+                task.retry += 1
+                task.write_to_db()
+                return
+
+    if "remote_lvol_id" not in task.function_params or not task.function_params["remote_lvol_id"]:
         # internal=True: this REP_* volume is the landing copy for a transfer,
         # created by the system and never handed to a client. The per-node
         # subsystem cap is a user-admission limit; enforcing it here only stops
@@ -362,6 +403,11 @@ def process_snap_replicate_start(task, snapshot):
     snode.rpc_client().bdev_lvol_transfer(
         name=snapshot.snap_bdev,
         offset=offset,
+        # 16 in-flight clusters (32 MiB window). With the dispatch fix keeping
+        # the window genuinely full AND reads fragmented like writes (32x64KiB
+        # per cluster), 16 clusters already put up to 512 concurrent 64 KiB
+        # IOs per phase on the wire -- a 64-window quadruples the DMA buffer
+        # (128 MiB per transfer task) for little more overlap.
         batch_size=16,
         bdev_name=hub_bdev,
         operation="replicate",
@@ -550,6 +596,28 @@ def _keep_replicated_for(source_lvol):
     from simplyblock_core.models.replication import ReplicationPolicy
     return max(policy.keep_replicated, ReplicationPolicy.MIN_KEEP_REPLICATED)
 
+def _retention_schedule_for(source_lvol):
+    """Parsed retention tiers from the volume's policy, or [] when it has none.
+
+    A malformed schedule must not silently disable retention or crash the
+    replication runner: it is reported and treated as "no schedule", which
+    falls back to the flat keep-count.
+    """
+    try:
+        policy = db.get_replication_policy_for_lvol(source_lvol)
+    except Exception:
+        return []
+    spec = getattr(policy, "retention_schedule", "") if policy else ""
+    if not spec:
+        return []
+    try:
+        return snapshot_retention.parse_schedule(spec)
+    except snapshot_retention.RetentionScheduleError as e:
+        logger.error("Ignoring invalid retention_schedule %r on policy %s: %s",
+                     spec, policy.get_id(), e)
+        return []
+
+
 def _prune_internal_snapshots(source_lvol):
     """Retention for replication-driven internal snapshots.
 
@@ -573,10 +641,25 @@ def _prune_internal_snapshots(source_lvol):
         and s.target_replicated_snap_uuid
     ]
     keep = _keep_replicated_for(source_lvol)
-    if len(replicated_internal) <= keep:
-        return
-
     replicated_internal.sort(key=lambda s: s.created_at)
+
+    # A retention SCHEDULE, when the policy defines one, decides which older
+    # snapshots survive; without it retention stays the flat "newest N".
+    # Either way the newest `keep` are protected, because deleting a snapshot
+    # swap-merges its segments into the successor chained to it.
+    schedule = _retention_schedule_for(source_lvol)
+    if schedule:
+        retained_ts = snapshot_retention.select_retained(
+            [s.created_at for s in replicated_internal], schedule,
+            now=time.time(), always_keep_newest=keep)
+        candidates = [(i, s) for i, s in enumerate(replicated_internal)
+                      if s.created_at not in retained_ts]
+        if not candidates:
+            return
+    else:
+        if len(replicated_internal) <= keep:
+            return
+        candidates = list(enumerate(replicated_internal))[:-keep]
     # Keep the newest TWO replicated internal snapshots, not just one.
     #
     # A replicated snapshot holds only its own clusters; the rest of the data
@@ -593,7 +676,7 @@ def _prune_internal_snapshots(source_lvol):
     # for one snapshot while newer ones kept arriving, the predecessor was still
     # pruned and its segments were dropped instead of merged. So the chain is
     # verified per candidate below, and an unchained successor defers the prune.
-    for index, snap in enumerate(replicated_internal[:-keep]):
+    for index, snap in candidates:
         target_uuid = snap.target_replicated_snap_uuid
         try:
             db.get_snapshot_by_id(target_uuid)
@@ -868,10 +951,21 @@ def process_snap_replicate_finish(task, snapshot):
 
     snapshot.write_to_db()
 
-    # delete lvol object
+    # Tear down the landing volume's plumbing (subsystem/namespace); its BLOB
+    # deliberately lives on -- it was just converted into the chained snapshot.
+    # The record removal must not depend on the teardown succeeding: delete_lvol
+    # can raise (SPDK refuses to delete a bdev that is now a cloned snapshot),
+    # and a record left in_deletion never converges -- the monitor re-issues
+    # its delete forever (297 warnings/10min, run 20260821_205111) and every
+    # later cleanup that waits for lvols to drain times out on it.
     remote_lv.bdev_stack = []
     remote_lv.write_to_db()
-    lvol_controller.delete_lvol(remote_lv, force_delete=True)
+    try:
+        lvol_controller.delete_lvol(remote_lv, force_delete=True)
+    except Exception as e:
+        logger.error(f"Landing volume {remote_lv.get_id()} teardown raised: {e}; "
+                     f"retiring its record anyway (its bdev lives on as the "
+                     f"converted snapshot)")
     remote_lv.remove(db.kv_store)
     snapshot_events.replication_task_finished(snapshot)
     _prune_internal_snapshots(snapshot.lvol)
