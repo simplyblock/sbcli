@@ -407,7 +407,7 @@ def get_relationship(lvol_id):
             "target_cluster_id": rep.target_cluster_id,
             # Pool where the target volume lives — needed by the CSI driver to
             # build the /connect URL when redirecting after delete_source.
-            "target_pool_id": rep.target_lvol.pool_uuid if rep.target_lvol else "",
+            "target_pool_id": getattr(rep.target_lvol, "pool_uuid", "") if rep.target_lvol else "",
             "mode": rep.mode,
             "state": rep.state,
             "direction": rep.direction,
