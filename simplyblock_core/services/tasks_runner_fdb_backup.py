@@ -4,6 +4,7 @@ import time
 
 from simplyblock_core import db_controller, utils, constants
 from simplyblock_core.controllers import fdb_backup_controller
+from simplyblock_core.controllers import fdb_backup_events
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.cluster import Cluster
 
@@ -25,6 +26,7 @@ def process_fdb_backup_task(task):
         task.function_result = "max retry reached, stopping task"
         task.status = JobSchedule.STATUS_DONE
         task.write_to_db(db.kv_store)
+        fdb_backup_events.fdb_backup_failed(task.cluster_id, task.uuid)
         return
 
     if task.status != JobSchedule.STATUS_RUNNING:
@@ -35,6 +37,10 @@ def process_fdb_backup_task(task):
     if ret:
         task.function_result = "Backup created"
         task.status = JobSchedule.STATUS_DONE
+        task.write_to_db(db.kv_store)
+    else:
+        task.retry += 1
+        task.status = JobSchedule.STATUS_SUSPENDED
         task.write_to_db(db.kv_store)
 
 
