@@ -302,6 +302,70 @@ def spdk_process_kill(query: utils.RPCPortParams):
     return utils.get_response(True)
 
 
+@api.get('/spdk_process_cleanup', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean'
+    })}}},
+})
+def spdk_process_cleanup(query: utils.RPCPortParams):
+    """Synchronous, resurrection-proof teardown of ``spdk_<port>`` and its
+    proxy, VERIFIED at the container level.
+
+    spdk_process_kill is deliberately fast (detached remove) for the peer-
+    termination paths — but that leaves two gaps for the add-node/restart
+    FAILURE cleanup: the containers run with a restart policy that can
+    resurrect them after the SIGKILL if the detached remove loses the race
+    against a loaded dockerd, and spdk_process_is_up probes the RPC Unix
+    socket, so an SPDK that never brought its RPC up reads as "down" while
+    its container lives on holding all hugepages (2026-08-05 incident: the
+    zombie starved every add-node retry on the host). This endpoint is the
+    slow, authoritative sibling: disable the restart policy first, remove
+    synchronously, and only report success when the containers are GONE.
+    """
+    from docker.errors import NotFound
+
+    client = get_docker_client()
+    names = [f"/spdk_{query.rpc_port}", f"/spdk_proxy_{query.rpc_port}"]
+    ok = True
+    for name in names:
+        try:
+            container = client.containers.get(name)
+        except NotFound:
+            continue
+        except Exception as exc:
+            logger.error("cleanup: resolving %s failed: %s", name, exc)
+            ok = False
+            continue
+        try:
+            # No restart policy => dockerd cannot resurrect it between the
+            # kill and the (synchronous) remove below.
+            client.api.update_container(container.id,
+                                        restart_policy={"Name": "no"})
+        except Exception as exc:
+            logger.warning("cleanup: clearing restart policy on %s failed: %s",
+                           container.id[:12], exc)
+        try:
+            container.remove(force=True)
+        except NotFound:
+            pass
+        except Exception as exc:
+            logger.error("cleanup: remove(%s) failed: %s", container.id[:12], exc)
+            ok = False
+    # Verification: success means the names resolve to nothing.
+    for name in names:
+        try:
+            client.containers.get(name)
+            ok = False
+            logger.error("cleanup: %s still present after remove", name)
+        except NotFound:
+            pass
+        except Exception:
+            ok = False
+    if not ok:
+        return utils.get_response(None, "spdk container cleanup incomplete")
+    return utils.get_response(True)
+
+
 # Tight client timeout for the dockerd fall-through in spdk_process_is_up.
 # The docker-py default is 60s, which under post-outage Swarm reconciliation
 # (incident 2026-04-24, vm205) caused this endpoint to take 76-80s. The
@@ -470,6 +534,36 @@ def get_node_lsblk():
     data = json.loads(out)
     logger.debug("function:get_node_lsblk end")
     return data
+
+
+@api.get('/blockdevices', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'array',
+        'items': {'type': 'object', 'additionalProperties': True},
+    })}}},
+})
+def get_blockdevices():
+    """Whole-disk inventory for the lblk cluster mode (eligibility fields,
+    serial/WWN identity, by-id path, NUMA)."""
+    return utils.get_response(node_utils.get_block_devices_info())
+
+
+class _WipeBlockDeviceParams(BaseModel):
+    device_name: str
+
+
+@api.post('/wipe_block_device', responses={
+    200: {'content': {'application/json': {'schema': utils.response_schema({
+        'type': 'boolean'
+    })}}},
+})
+def wipe_block_device(body: _WipeBlockDeviceParams):
+    """--force-format for lblk add-node: wipe partition/FS signatures from a
+    whole disk. Refuses busy devices (mounts/holders/root disk)."""
+    ok, reason = node_utils.wipe_block_device_signatures(body.device_name)
+    if not ok:
+        return utils.get_response(None, reason)
+    return utils.get_response(True)
 
 
 def get_nodes_config():

@@ -398,7 +398,13 @@ def get_next_cluster_status(cluster_id):
             return fd_status
 
     # if number of devices in the cluster unavailable on DIFFERENT nodes > k --> I cannot read and in some cases cannot write (suspended)
-    if affected_nodes == k and (not cluster.strict_node_anti_affinity or online_nodes >= (n + k)):
+    #
+    # affected_nodes > 0 guard: "we are exactly at the parity limit" only
+    # means degraded when something is actually affected. Without it a
+    # no-parity cluster (npcs=0, k=0 — the natural single-node schema)
+    # reports DEGRADED while perfectly healthy, because 0 == 0.
+    if affected_nodes > 0 and affected_nodes == k and (
+            not cluster.strict_node_anti_affinity or online_nodes >= (n + k)):
         return Cluster.STATUS_DEGRADED
     elif jm_replication_tasks:
         return Cluster.STATUS_DEGRADED

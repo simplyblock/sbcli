@@ -668,10 +668,8 @@ def add(lvol_id, snapshot_name, backup=False, lock=True, all_snaps=None, all_lvo
 
         host_node = db_controller.get_storage_node_by_id(snode.get_id())
 
-        # Build nodes list with all secondaries
-        secondary_ids = [host_node.secondary_node_id]
-        if host_node.tertiary_node_id:
-            secondary_ids.append(host_node.tertiary_node_id)
+        # Build nodes list with all secondaries (skip empty role ids)
+        secondary_ids = lvol_controller.role_secondary_ids(host_node)
         lvol.nodes = [host_node.get_id()] + secondary_ids
 
         # Detect leader via RPC (no status checks)
@@ -1467,9 +1465,8 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
         from simplyblock_core.storage_node_ops import check_non_leader_for_operation, queue_for_restart_drain
 
         host_node = snode
-        secondary_ids = [host_node.secondary_node_id]
-        if host_node.tertiary_node_id:
-            secondary_ids.append(host_node.tertiary_node_id)
+        # skip empty role ids — non-HA topologies
+        secondary_ids = lvol_controller.role_secondary_ids(host_node)
         lvol.nodes = [host_node.get_id()] + secondary_ids
 
         # Detect leader via RPC (no status checks)

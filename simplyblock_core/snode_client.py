@@ -187,6 +187,15 @@ class SNodeClient:
     def spdk_process_kill(self, rpc_port, cluster_id=None):
         return self._request("GET", "spdk_process_kill", {"rpc_port": rpc_port, "cluster_id": cluster_id})
 
+    def spdk_process_cleanup(self, rpc_port, cluster_id=None):
+        """Slow, authoritative SPDK teardown: restart policy cleared, remove
+        synchronous, success only when the containers/pod are verifiably
+        GONE. Use on failure-cleanup paths (spdk_process_kill is the fast
+        peer-termination sibling whose detached remove can lose against a
+        restart policy)."""
+        return self._request("GET", "spdk_process_cleanup",
+                             {"rpc_port": rpc_port, "cluster_id": cluster_id})
+
     def leave_swarm(self):
         return True
         # return self._request("GET", "leave_swarm")
@@ -215,6 +224,16 @@ class SNodeClient:
     def bind_device_to_spdk(self, device_pci):
         params = {"device_pci": device_pci}
         return self._request("POST", "bind_device_to_spdk", params)
+
+    def get_blockdevices(self):
+        """Whole-disk inventory for the lblk cluster mode."""
+        return self._request("GET", "blockdevices")
+
+    def wipe_block_device(self, device_name):
+        """--force-format for lblk add-node: wipe partition/FS signatures
+        from a whole disk (refused when busy)."""
+        return self._request("POST", "wipe_block_device",
+                             {"device_name": device_name})
 
     def spdk_process_is_up(self, rpc_port, cluster_id):
         params = {"rpc_port": rpc_port, "cluster_id": cluster_id}

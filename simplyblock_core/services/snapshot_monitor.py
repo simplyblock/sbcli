@@ -39,6 +39,26 @@ def _await_delete_completion(node, bdev_name, wait_sec):
     return ret
 
 
+def sync_delete_peer_ids(lvol_ha_type, snode, primary_node_id):
+    """Node ids owing a phase-2 sync delete: every LVS member other than the
+    phase-1 node. ha_type=single snapshots were never registered on peers —
+    deriving the sync-delete set from node topology would send peers deletes
+    for registrations they never had, so their peer set is empty."""
+    secondary_ids = []
+    if lvol_ha_type != "single":
+        if snode.secondary_node_id:
+            secondary_ids.append(snode.secondary_node_id)
+        if snode.tertiary_node_id:
+            secondary_ids.append(snode.tertiary_node_id)
+    peer_ids = []
+    if snode.get_id() != primary_node_id:
+        peer_ids.append(snode.get_id())
+    for sec_id in secondary_ids:
+        if sec_id != primary_node_id:
+            peer_ids.append(sec_id)
+    return peer_ids
+
+
 def process_snap_delete_finish(snap, completed_node):
     """Phase-2 of the delete protocol (sync deletes + DB finalize).
 
@@ -68,17 +88,8 @@ def process_snap_delete_finish(snap, completed_node):
     # Every LVS member other than the phase-1 node owes a sync delete (the
     # sync pass clears the peers' lvol registrations; it is per-node and
     # needs no leadership).
-    non_leaders = []
-    secondary_ids = []
-    if snode.secondary_node_id:
-        secondary_ids.append(snode.secondary_node_id)
-    if snode.tertiary_node_id:
-        secondary_ids.append(snode.tertiary_node_id)
-    if snode.get_id() != primary_node.get_id():
-        non_leaders.append(db.get_storage_node_by_id(snode.get_id()))
-    for sec_id in secondary_ids:
-        if sec_id != primary_node.get_id():
-            non_leaders.append(db.get_storage_node_by_id(sec_id))
+    non_leaders = [db.get_storage_node_by_id(peer_id) for peer_id in
+                   sync_delete_peer_ids(snap.lvol.ha_type, snode, primary_node.get_id())]
 
     if primary_node.status in [StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
         any_sec_down = any(

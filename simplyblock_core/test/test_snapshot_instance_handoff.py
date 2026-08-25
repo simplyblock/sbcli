@@ -25,6 +25,7 @@ class _LvolRef:
         self.node_id = node_id
         self.lvs_name = "LVS_1"
         self.uuid = "LV1"
+        self.ha_type = "ha"
 
     def get_id(self):
         return self.uuid

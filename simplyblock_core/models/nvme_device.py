@@ -74,6 +74,19 @@ class NVMeDevice(BaseModel):
     # Passthrough bdev UUID for cross-node nvme bdev identification,
     # meaning that remote bdev to this bdev would share the same uuid.
     pt_bdev_uuid: str = ""
+    # Base-bdev type discriminator: "nvme" (SPDK nvme bdev over a PCIe
+    # controller) or "aio" (SPDK AIO bdev over a Linux block device, lblk
+    # cluster mode). For "aio" devices, pcie_address and nvme_controller stay
+    # empty and nvme_bdev holds the AIO bdev name; identity is serial_number
+    # (lsblk SERIAL/WWN or a synthetic stable id), with device_path /
+    # by_id_path re-resolved from the live host on every restart.
+    bdev_type: str = "nvme"
+    # Current kernel device path (e.g. /dev/sdb) — informational; re-learned
+    # each restart, never used as identity when a serial is available.
+    device_path: str = ""
+    # Stable /dev/disk/by-id/... symlink when the device has one; preferred
+    # as the AIO bdev filename so udev renames cannot bite mid-flight.
+    by_id_path: str = ""
 
     def __change_dev_connection_to(self, connecting_from_node):
         # Targeted single-record write. The previous implementation scanned

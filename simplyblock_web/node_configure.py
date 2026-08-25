@@ -149,6 +149,48 @@ def parse_arguments() -> argparse.Namespace:
         dest='nvme_names',
         required=False
     )
+    parser.add_argument(
+        '--lblk',
+        help='Configure the node with Linux block devices (lblk cluster mode) instead of '
+             'NVMe PCIe devices: eligible unmounted, unheld, unpartitioned whole disks are '
+             'wrapped in SPDK AIO bdevs',
+        action='store_true',
+        dest='lblk',
+        required=False
+    )
+    parser.add_argument(
+        '--blk-names',
+        help='Comma separated list of block device names to use, like sdb,sdc (requires --lblk)',
+        type=str,
+        default='',
+        dest='blk_names',
+        required=False
+    )
+    parser.add_argument(
+        '--blk-names-exclude',
+        help='Comma separated list of block device names to exclude, like sda (requires --lblk)',
+        type=str,
+        default='',
+        dest='blk_names_exclude',
+        required=False
+    )
+    parser.add_argument(
+        '--blk-serials',
+        help='Comma separated list of block device serial numbers (or WWNs) to use (requires --lblk)',
+        type=str,
+        default='',
+        dest='blk_serials',
+        required=False
+    )
+    parser.add_argument(
+        '--jm-percent',
+        help='Journal size in percent of the node\'s total selected capacity when the '
+             'journal is carved by splitting a selected partition (requires --lblk with partitions)',
+        type=int,
+        default=3,
+        dest='jm_percent',
+        required=False
+    )
 
     return parser.parse_args()
 
@@ -188,6 +230,26 @@ def validate_arguments(args: argparse.Namespace) -> None:
                 None,
                 "pci-allowed and pci-blocked cannot be both specified"
             )
+
+        # getattr defaults: validate_arguments is also driven with minimal
+        # namespaces (tests, callers predating the lblk selectors).
+        lblk = getattr(args, 'lblk', False)
+        blk_names = getattr(args, 'blk_names', '')
+        blk_names_exclude = getattr(args, 'blk_names_exclude', '')
+        blk_serials = getattr(args, 'blk_serials', '')
+        use_lblk = bool(lblk or blk_names or blk_names_exclude or blk_serials)
+        if use_lblk and not lblk:
+            raise argparse.ArgumentError(
+                None, "--blk-names/--blk-names-exclude/--blk-serials require --lblk")
+        if use_lblk and (args.pci_allowed or args.pci_blocked
+                         or getattr(args, 'device_model', '')
+                         or getattr(args, 'size_range', '')
+                         or getattr(args, 'nvme_names', '')):
+            raise argparse.ArgumentError(
+                None, "--lblk cannot be combined with NVMe device selection options")
+        if sum([bool(blk_names), bool(blk_names_exclude), bool(blk_serials)]) > 1:
+            raise argparse.ArgumentError(
+                None, "Choose only one of --blk-names, --blk-names-exclude, --blk-serials")
 
         max_prov = utils.parse_size(args.max_prov, assume_unit='G')
         if max_prov < 0:
@@ -249,6 +311,14 @@ def main() -> None:
         if args.nvme_names:
             nvme_names = [nvme_name.strip() for nvme_name in args.nvme_names.split(',') if nvme_name.strip()]
 
+        lblk_selection = None
+        if args.lblk:
+            lblk_selection = {
+                "names": [x.strip() for x in args.blk_names.split(',') if x.strip()] or None,
+                "names_exclude": [x.strip() for x in args.blk_names_exclude.split(',') if x.strip()] or None,
+                "serials": [x.strip() for x in args.blk_serials.split(',') if x.strip()] or None,
+            }
+
         # Generate the deployment configuration
         generate_automated_deployment_config(
             max_lvol=int(args.max_lvol),
@@ -261,7 +331,9 @@ def main() -> None:
             device_model=args.device_model,
             size_range=args.size_range,
             nvme_names=nvme_names,
-            k8s=True
+            k8s=True,
+            lblk_selection=lblk_selection,
+            jm_percent=int(args.jm_percent or 3)
         )
 
     except argparse.ArgumentError as e:

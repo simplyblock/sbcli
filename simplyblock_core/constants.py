@@ -86,6 +86,40 @@ SSD_VENDOR_WHITE_LIST = ["1d0f:cd01", "1d0f:cd00"]
 CACHED_LVOL_STAT_COLLECTOR_INTERVAL_SEC = 15
 DEV_DISCOVERY_INTERVAL_SEC = 60
 
+# --- lblk cluster mode (Linux block devices via SPDK AIO bdevs) ---
+DEVICE_MODE_NVME = "nvme"
+DEVICE_MODE_LBLK = "lblk"
+# DPDK PCI allowlist placeholder used when starting SPDK in lblk mode: an
+# empty allowlist means "allow all" to DPDK (the k8s launch path passes an
+# empty PCI_ALLOWED today), which would let SPDK's nvme driver claim
+# kernel-owned NVMe disks. 0000:00:00.0 is the host bridge — syntactically a
+# valid BDF, never a storage device, no DPDK driver binds it.
+LBLK_PCI_ALLOWED_PLACEHOLDER = "0000:00:00.0"
+# Queue-depth sampling period enabled on every AIO base bdev so
+# bdev_get_iostat reports queue_depth (feeds the hung-IO watchdog).
+AIO_QD_SAMPLING_PERIOD_US = 100000  # 100 ms
+# Hung-IO watchdog: consecutive device_monitor polls (DEV_MONITOR_INTERVAL_SEC
+# apart) with queue_depth > 0 and zero completion progress before the device
+# is declared stalled (3 x 10s = 30s — deliberately above kernel SCSI/NVMe
+# timeouts, which convert most stalls into EIO for us via the distrib
+# error_* events; the watchdog only catches what the kernel never times out).
+AIO_HUNG_IO_STALL_POLLS = 3
+# Consecutive polls a configured block device may be absent from the host's
+# lsblk before it is treated as hot-removed (REMOVAL semantics).
+AIO_DEVICE_ABSENT_POLLS = 2
+# Kernel block devices never eligible for lblk data placement.
+LBLK_EXCLUDED_NAME_PREFIXES = ("ram", "loop", "sr", "fd", "zram", "nbd",
+                               "md", "dm-", "drbd")
+# Minimum storage units (whole SSDs or partitions) per lblk node: one journal
+# home plus at least one data device.
+LBLK_MIN_DEVICES_PER_NODE = 2
+# Journal sizing when the journal is carved out of a selected unit by
+# splitting it in two (partition-backed lblk nodes): jm_percent of the node's
+# total selected capacity, floored here, and never more than
+# LBLK_JM_SPLIT_MAX_FRACTION of the unit being split.
+LBLK_JM_MIN_SIZE = 2 * 1024 * 1024 * 1024
+LBLK_JM_SPLIT_MAX_FRACTION = 0.5
+
 PMEM_DIR = '/tmp/pmem'
 
 NVME_PROGRAM_FAIL_COUNT = 50

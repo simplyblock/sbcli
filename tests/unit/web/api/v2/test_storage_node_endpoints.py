@@ -56,6 +56,7 @@ class TestCreateStorageNode:
             'spdk_sys_mem': None,
             'failure_domain': None,
             'expansion': False,
+            'force_format': False,
         })
         # Default response format is 'identifier': body is the task id
         assert response.json() == TASK_ID

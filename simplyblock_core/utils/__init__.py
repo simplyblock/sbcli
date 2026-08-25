@@ -1,5 +1,6 @@
 # coding=utf-8
 import glob
+import hashlib
 import json
 import logging
 import math
@@ -1409,6 +1410,121 @@ def addNvmeDevices(rpc_client, snode, devs):
     return devices
 
 
+def aio_bdev_name_for_serial(serial: str) -> str:
+    """Stable AIO bdev name derived from the device's serial identity — the
+    lblk analogue of the PCI-derived nvme controller name. Survives kernel
+    device renames across reboots. Whenever sanitization loses information
+    (special chars replaced, or truncation), a short hash of the ORIGINAL
+    serial is appended so distinct serials can never collide."""
+    sanitized = re.sub(r"[^A-Za-z0-9_]", "_", serial)
+    if sanitized != serial or len(sanitized) > 40:
+        digest = hashlib.sha1(serial.encode()).hexdigest()[:6]
+        sanitized = f"{sanitized[:40]}_{digest}"
+    return f"aio_{sanitized}"
+
+
+def resolve_lblk_entries(configured_entries, host_devices):
+    """Match the node's configured lblk devices against the live host
+    inventory, SERIAL-FIRST: kernel names shift across reboots, so the stored
+    name is only a fallback for devices without a resolvable serial. Partition
+    entries additionally resolve by PARTUUID — it survives a parent-disk
+    serial change (e.g. a hypervisor re-exposing the volume) while the
+    derived partition serial would not. Returns ``(resolved, missing)``
+    where resolved entries carry the CURRENT name/path/by-id."""
+    by_serial = {d["serial"]: d for d in host_devices}
+    by_name = {d["name"]: d for d in host_devices}
+    by_partuuid = {d["partuuid"].lower(): d for d in host_devices
+                   if d.get("partuuid")}
+    resolved, missing = [], []
+    for entry in configured_entries:
+        live = by_serial.get(entry.get("serial"))
+        if live is None and entry.get("partuuid"):
+            live = by_partuuid.get(entry["partuuid"].lower())
+        if live is None:
+            live = by_name.get(entry.get("name"))
+        if live is None:
+            missing.append(entry)
+            continue
+        resolved_entry = {
+            "name": live["name"],
+            "current_path": live["device_path"],
+            "serial": entry.get("serial") or live["serial"],
+            "by_id": live.get("by_id_path") or entry.get("by_id", ""),
+            "size": int(live.get("size") or entry.get("size") or 0),
+            "numa": int(live.get("numa_node", entry.get("numa", -1))),
+            "model": live.get("model", ""),
+            "has_partitions": bool(live.get("has_partitions")),
+        }
+        if entry.get("type") == "part" or live.get("type") == "part":
+            resolved_entry["type"] = "part"
+            resolved_entry["partuuid"] = live.get("partuuid") or entry.get("partuuid", "")
+        if entry.get("journal"):
+            resolved_entry["journal"] = True
+        resolved.append(resolved_entry)
+    return resolved, missing
+
+
+def addAioDevices(rpc_client, snode, blk_entries):
+    """lblk-mode sibling of addNvmeDevices: create one SPDK AIO bdev per
+    resolved block device and model it as an NVMeDevice with
+    bdev_type="aio". Idempotent — an already-present bdev (restart path) is
+    reused. Everything above the base bdev (alceml, PT, subsystems) is
+    built by the same code as for nvme devices."""
+    devices = []
+    next_physical_label = snode.physical_label
+    for entry in blk_entries:
+        bdev_name = aio_bdev_name_for_serial(entry["serial"])
+        ret = rpc_client.get_bdevs(bdev_name)
+        if not ret:
+            # Prefer the by-id path as the filename so a udev rename between
+            # resolution and create cannot swap devices under us.
+            filename = entry.get("by_id") or entry["current_path"]
+            ret = rpc_client.bdev_aio_create(bdev_name, filename)
+            if not ret:
+                raise Exception(
+                    f"bdev_aio_create failed for {bdev_name} ({filename}) "
+                    f"on {rpc_client.host}")
+        rpc_client.bdev_examine(bdev_name)
+        rpc_client.bdev_wait_for_examine()
+
+        ret = rpc_client.get_bdevs(bdev_name)
+        if not ret:
+            raise Exception(f"AIO bdev {bdev_name} not found after create on {rpc_client.host}")
+        bdev = ret[0]
+        total_size = bdev['block_size'] * bdev['num_blocks']
+        if total_size == 0:
+            logger.warning(f"Skipping zero-size block device {entry['name']} ({bdev_name})")
+            continue
+
+        # Queue-depth sampling feeds the control-plane hung-IO watchdog
+        # (AIO has no bdev_nvme-style timeout/action_on_timeout).
+        try:
+            rpc_client.bdev_set_qd_sampling_period(
+                bdev_name, constants.AIO_QD_SAMPLING_PERIOD_US)
+        except Exception as e:
+            logger.warning(f"qd-sampling enable failed on {bdev_name}: {e}")
+
+        devices.append(
+            NVMeDevice({
+                'uuid': str(uuid.uuid4()),
+                'device_name': entry["name"],
+                'size': total_size,
+                'physical_label': next_physical_label,
+                'pcie_address': "",
+                'model_id': entry.get("model", ""),
+                'serial_number': entry["serial"],
+                'nvme_bdev': bdev_name,
+                'nvme_controller': "",
+                'bdev_type': "aio",
+                'device_path': entry["current_path"],
+                'by_id_path': entry.get("by_id", ""),
+                'node_id': snode.get_id(),
+                'cluster_id': snode.cluster_id,
+                'status': NVMeDevice.STATUS_ONLINE
+            }))
+    return devices
+
+
 def get_random_snapshot_vuid(all_lvols=None, all_snapshots=None):
     # Monotonic allocation via DBController.next_vuid — shares the single vuid
     # sequence with lvols/clones (one numeric space, so no cross-collision).
@@ -1578,6 +1694,237 @@ def detect_nvmes(pci_allowed, pci_blocked, device_model, size_range, nvme_names)
         except Exception:
             continue
     return nvmes
+
+
+def filter_eligible_block_devices(devices, include_names=None, exclude_names=None,
+                                  include_serials=None, force_format=False):
+    """Eligibility filter for the lblk cluster mode (pure — unit-testable).
+
+    ``devices`` is the list produced by node_utils.get_block_devices_info().
+    Both whole disks and partitions are eligible storage units. Common
+    requirements: not a special device (LBLK_EXCLUDED_NAME_PREFIXES), no
+    mountpoint anywhere in the subtree (a partition must be unmounted — not
+    busy — to be used), no holders (LVM/md/dm-crypt), does not back the root
+    filesystem, not read-only, non-zero size. A whole disk must additionally
+    be unpartitioned unless ``force_format`` (the actual wipe happens at
+    add-node); a partition only needs to be idle — its siblings may be in
+    use by the OS or other software.
+
+    Selection is one of: ``include_names`` (explicitly requested names must
+    exist AND be eligible — a busy requested device is a hard error),
+    ``exclude_names`` (all eligible minus these), ``include_serials``
+    (matched against the serial/WWN identity). Without a selection, every
+    eligible whole disk is taken (partitions are never auto-selected — they
+    must be requested explicitly by name or serial).
+
+    Returns ``(eligible_devices, rejected)`` where rejected is a list of
+    ``(device_dict, reason)``. Raises ValueError on a requested-but-
+    ineligible name/serial, on duplicate serials among the selection, or on
+    a selection containing both a disk and one of its own partitions.
+    """
+    include_names = set(include_names or [])
+    exclude_names = set(exclude_names or [])
+    include_serials = set(include_serials or [])
+
+    def _ineligible_reason(dev):
+        if dev.get("type") not in ("disk", "part"):
+            return "not a disk or partition"
+        if dev["name"].startswith(constants.LBLK_EXCLUDED_NAME_PREFIXES):
+            return "special device type"
+        if dev.get("mounted_in_subtree"):
+            return "mounted (busy)"
+        if dev.get("holders"):
+            return f"held by {dev['holders']} (busy)"
+        if dev.get("is_root_disk"):
+            return "backs the root filesystem"
+        if dev.get("ro"):
+            return "read-only"
+        if not dev.get("size"):
+            return "zero size"
+        if dev.get("type") == "disk" and dev.get("has_partitions") and not force_format:
+            return "partitioned (pass --force to format at add-node)"
+        return None
+
+    eligible, rejected = [], []
+    for dev in devices:
+        reason = _ineligible_reason(dev)
+        if reason:
+            rejected.append((dev, reason))
+        else:
+            eligible.append(dev)
+
+    by_name = {d["name"]: d for d in eligible}
+    rejected_by_name = {d["name"]: r for d, r in rejected}
+    if include_names:
+        missing = include_names - set(by_name)
+        if missing:
+            details = {n: rejected_by_name.get(n, "not present") for n in sorted(missing)}
+            raise ValueError(f"requested block devices are not eligible: {details}")
+        selected = [by_name[n] for n in sorted(include_names)]
+    elif include_serials:
+        by_serial = {d["serial"]: d for d in eligible}
+        missing_serials = include_serials - set(by_serial)
+        if missing_serials:
+            raise ValueError(
+                f"no eligible block device found for serial(s): {sorted(missing_serials)}")
+        selected = [by_serial[s] for s in sorted(include_serials)]
+    else:
+        # Auto-selection takes whole disks only: silently absorbing idle
+        # partitions of otherwise-used disks would be a data-loss trap.
+        selected = [d for d in eligible
+                    if d["name"] not in exclude_names and d.get("type") == "disk"]
+
+    serials = [d["serial"] for d in selected]
+    dupes = {s for s in serials if serials.count(s) > 1}
+    if dupes:
+        raise ValueError(
+            f"duplicate serial number(s) among selected block devices: {sorted(dupes)}; "
+            f"device identity requires unique serials per node")
+
+    # A whole disk selected for format and one of its own partitions selected
+    # as a unit cannot coexist — the disk wipe would destroy the partition.
+    selected_disk_names = {d["name"] for d in selected if d.get("type") == "disk"}
+    conflicting = sorted(d["name"] for d in selected
+                         if d.get("type") == "part"
+                         and d.get("parent_name") in selected_disk_names)
+    if conflicting:
+        raise ValueError(
+            f"selection contains partition(s) {conflicting} of a disk that is "
+            f"itself selected; select either the whole disk or its partitions")
+    return selected, rejected
+
+
+def detect_lblk_devices(include_names=None, exclude_names=None,
+                        include_serials=None, force_format=False):
+    """Local-host block-device detection for `sn configure --lblk`.
+    Returns ``{name: config_entry}`` where config_entry is the shape stored
+    in the node config file's ``lblk_devices`` list."""
+    devices = node_utils.get_block_devices_info()
+    selected, rejected = filter_eligible_block_devices(
+        devices, include_names=include_names, exclude_names=exclude_names,
+        include_serials=include_serials, force_format=force_format)
+    for dev, reason in rejected:
+        logger.debug(f"block device {dev['name']} skipped: {reason}")
+    result = {}
+    for dev in selected:
+        if dev.get("serial_synthetic"):
+            logger.warning(
+                f"block device {dev['name']} has no hardware serial/WWN; using "
+                f"synthetic identity {dev['serial']} (stable across reboots "
+                f"only while size and by-id path are unchanged)")
+        entry = {
+            "name": dev["name"],
+            "serial": dev["serial"],
+            "by_id": dev.get("by_id_path", ""),
+            "size": int(dev["size"]),
+            "numa": int(dev.get("numa_node", -1)),
+        }
+        if dev.get("type") == "part":
+            entry["type"] = "part"
+            entry["partuuid"] = dev.get("partuuid", "")
+            entry["parent_serial"] = dev.get("parent_serial", "")
+        result[dev["name"]] = entry
+    if len(result) < constants.LBLK_MIN_DEVICES_PER_NODE:
+        raise ValueError(
+            f"lblk mode requires at least {constants.LBLK_MIN_DEVICES_PER_NODE} "
+            f"partitions or SSDs per node; only {len(result)} eligible unit(s) "
+            f"selected: {sorted(result)}")
+    return result
+
+
+def _lblk_entry_from_inventory(dev) -> dict:
+    """Config-entry shape (detect_lblk_devices) from an inventory dict."""
+    entry = {
+        "name": dev["name"],
+        "serial": dev["serial"],
+        "by_id": dev.get("by_id_path", ""),
+        "size": int(dev["size"]),
+        "numa": int(dev.get("numa_node", -1)),
+    }
+    if dev.get("type") == "part":
+        entry["type"] = "part"
+        entry["partuuid"] = dev.get("partuuid", "")
+        entry["parent_serial"] = dev.get("parent_serial", "")
+    return entry
+
+
+def split_lblk_journal_partition(lblk_entries, jm_percent=3):
+    """Carve the journal for a partition-backed lblk node.
+
+    When the selection contains partitions, the journal can neither dedicate
+    a whole drive (journal-on-device) nor relabel one (the rest of the disk
+    is not ours) — instead the SMALLEST selected partition is split in two:
+    a journal partition and a data partition covering the remainder. The
+    journal is sized at ``jm_percent`` of the node's total selected capacity,
+    floored at LBLK_JM_MIN_SIZE and capped at LBLK_JM_SPLIT_MAX_FRACTION of
+    the partition being split.
+
+    Whole-disk-only selections are returned unchanged (they keep the
+    journal-on-device layout: the smallest disk becomes the journal at
+    add-node). Idempotent: a selection already carrying a journal-flagged
+    entry is returned unchanged.
+
+    Runs on the storage node during `sn configure`. Returns the updated
+    ``{name: entry}`` dict with the journal entry flagged ``journal: True``.
+    """
+    partitions = {n: e for n, e in lblk_entries.items() if e.get("type") == "part"}
+    if not partitions:
+        return lblk_entries
+    if any(e.get("journal") for e in lblk_entries.values()):
+        return lblk_entries
+
+    target_name = min(partitions, key=lambda n: partitions[n]["size"])
+    target = partitions[target_name]
+    total_size = sum(e["size"] for e in lblk_entries.values())
+    jm_bytes = max(total_size * int(jm_percent) // 100, constants.LBLK_JM_MIN_SIZE)
+    max_jm = int(target["size"] * constants.LBLK_JM_SPLIT_MAX_FRACTION)
+    if jm_bytes > max_jm:
+        raise ValueError(
+            f"journal needs {jm_bytes} bytes ({jm_percent}% of {total_size}, "
+            f"min {constants.LBLK_JM_MIN_SIZE}) but the smallest selected "
+            f"partition {target_name} ({target['size']} bytes) may contribute "
+            f"at most {max_jm}; provide a larger partition")
+
+    logger.info(f"Splitting partition {target_name} into a {jm_bytes}-byte "
+                f"journal partition and a data partition")
+    jm_dev, data_dev = node_utils.split_partition_for_journal(target_name, jm_bytes)
+
+    result = {n: e for n, e in lblk_entries.items() if n != target_name}
+    jm_entry = _lblk_entry_from_inventory(jm_dev)
+    jm_entry["journal"] = True
+    result[jm_entry["name"]] = jm_entry
+    data_entry = _lblk_entry_from_inventory(data_dev)
+    result[data_entry["name"]] = data_entry
+    return result
+
+
+def node_config_device_count(node) -> int:
+    """Number of storage devices a node-config entry carries — ssd_pcis for
+    nvme mode, lblk_devices for lblk mode."""
+    return len(node.get("lblk_devices") or []) or len(node.get("ssd_pcis") or [])
+
+
+# Sys-memory sizing intent (see generate_automated_deployment_config):
+# "RAM 4GB min. Plus 0.2% of the storage." The nvme path nominally adds the
+# FULL device capacity but in practice always measures 0 — capacity is read
+# via `nvme list` AFTER the devices were unbound from the kernel driver. The
+# lblk path knows the real sizes, so it applies the documented 0.2% factor
+# (2026-08-05 AWS run: summing full capacity demanded 102 GiB sys memory for
+# 2x50G EBS volumes on 32 GiB hosts and failed every `sn configure --lblk`).
+SYS_MEMORY_STORAGE_FACTOR = 0.002
+
+
+def node_config_min_sys_memory(node) -> int:
+    """Minimum system memory for a node-config entry: 2 GiB + 0.2% of total
+    device capacity. lblk entries carry their sizes; nvme goes through
+    nvme-cli."""
+    lblk = node.get("lblk_devices") or []
+    if lblk:
+        capacity = sum(int(e.get("size") or 0) for e in lblk)
+        total = 2147483648 + int(capacity * SYS_MEMORY_STORAGE_FACTOR)
+        logger.debug(f"Minimum system memory is {humanbytes(total)}")
+        return int(total)
+    return calculate_minimum_sys_memory(node.get("ssd_pcis") or [])
 
 
 def get_total_capacity_of_nvme_devices(pci_lst):
@@ -1847,9 +2194,9 @@ def regenerate_config(new_config, old_config, force=False):
         if old_config["nodes"][i]["socket"] != new_config["nodes"][i]["socket"]:
             logger.error("The socket is changed, please rerun sbcli configure without upgrade firstly")
             return False
-        number_of_alcemls = len(new_config["nodes"][i]["ssd_pcis"])
+        number_of_alcemls = node_config_device_count(new_config["nodes"][i])
         if (old_config["nodes"][i]["cpu_mask"] != new_config["nodes"][i]["cpu_mask"] or
-                len(old_config["nodes"][i]["ssd_pcis"]) != len(new_config["nodes"][i]["ssd_pcis"]) or force):
+                node_config_device_count(old_config["nodes"][i]) != number_of_alcemls or force):
             try:
                 isolated_cores = hexa_to_cpu_list(new_config["nodes"][i]["cpu_mask"])
             except ValueError:
@@ -1882,6 +2229,8 @@ def regenerate_config(new_config, old_config, force=False):
             number_of_distribs = 12
         old_config["nodes"][i]["number_of_distribs"] = number_of_distribs
         old_config["nodes"][i]["ssd_pcis"] = new_config["nodes"][i]["ssd_pcis"]
+        if new_config["nodes"][i].get("lblk_devices") is not None:
+            old_config["nodes"][i]["lblk_devices"] = new_config["nodes"][i]["lblk_devices"]
         old_config["nodes"][i]["nic_ports"] = new_config["nodes"][i]["nic_ports"]
         for nic in old_config["nodes"][i]["nic_ports"]:
             if nic not in all_nics:
@@ -1899,7 +2248,7 @@ def regenerate_config(new_config, old_config, force=False):
         old_config["nodes"][i]["small_pool_count"] = small_pool_count
         old_config["nodes"][i]["large_pool_count"] = large_pool_count
         old_config["nodes"][i]["huge_page_memory"] = minimum_hp_memory
-        minimum_sys_memory = calculate_minimum_sys_memory(old_config["nodes"][i]["ssd_pcis"])
+        minimum_sys_memory = node_config_min_sys_memory(old_config["nodes"][i])
         old_config["nodes"][i]["sys_memory"] = minimum_sys_memory
 
     memory_details = node_utils.get_memory_details()
@@ -1909,7 +2258,7 @@ def regenerate_config(new_config, old_config, force=False):
     total_required_memory = 0
     all_isolated_cores = set()
     for node in old_config["nodes"]:
-        if len(node["ssd_pcis"]) == 0:
+        if node_config_device_count(node) == 0:
             logger.error(f"There are no enough SSD devices on numa node {node['socket']}")
             return False
         total_required_memory += node["huge_page_memory"] + node["sys_memory"]
@@ -1932,7 +2281,8 @@ def regenerate_config(new_config, old_config, force=False):
 
 
 def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_allowed, pci_blocked,
-                     vcpu_count=0, force=False, device_model="", size_range="", nvme_names=None):
+                     vcpu_count=0, force=False, device_model="", size_range="", nvme_names=None,
+                     lblk_selection=None, jm_percent=3):
     system_info = {}
     nodes_config: dict = {"nodes": []}
 
@@ -1940,12 +2290,39 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
     validate_sockets(sockets_to_use, cores_by_numa)
     logger.debug(f"Cores by numa {cores_by_numa}")
     nics = detect_nics()
-    nvmes = detect_nvmes(pci_allowed, pci_blocked, device_model, size_range, nvme_names)
-    if not nvmes:
-        logger.error(
-            "There are no enough SSD devices on system, you may run 'sbctl sn clean-devices', to clean devices stored in /etc/simplyblock/sn_config_file")
-        return False, False
-    if force:
+    lblk_mode = lblk_selection is not None
+    lblk_entries: dict = {}
+    if lblk_mode:
+        # lblk cluster mode: eligible Linux block devices instead of NVMe
+        # PCIe controllers. No driver unbind, no formatting here (--force
+        # only marks partitioned disks eligible; the wipe happens at
+        # add-node). Reuse the NVMe NUMA-distribution scaffolding by
+        # presenting the same {name: {"numa_node": ...}} shape.
+        try:
+            lblk_entries = detect_lblk_devices(
+                include_names=lblk_selection.get("names"),
+                exclude_names=lblk_selection.get("names_exclude"),
+                include_serials=lblk_selection.get("serials"),
+                force_format=force)
+            # Partition-backed nodes: carve the journal by splitting the
+            # smallest selected partition in two (journal + data remainder).
+            lblk_entries = split_lblk_journal_partition(lblk_entries, jm_percent=jm_percent)
+        except ValueError as e:
+            logger.error(str(e))
+            return False, False
+        nvmes = {name: {"pci_address": "", "numa_node": entry["numa"]}
+                 for name, entry in lblk_entries.items()}
+        if not nvmes:
+            logger.error("No eligible Linux block devices found on this system "
+                         "(devices must be unmounted, unheld, unpartitioned whole disks)")
+            return False, False
+    else:
+        nvmes = detect_nvmes(pci_allowed, pci_blocked, device_model, size_range, nvme_names)
+        if not nvmes:
+            logger.error(
+                "There are no enough SSD devices on system, you may run 'sbctl sn clean-devices', to clean devices stored in /etc/simplyblock/sn_config_file")
+            return False, False
+    if force and not lblk_mode:
         nvme_devices = " ".join([f"/dev/{d}n1" for d in nvmes.keys()])
         logger.warning(f"Formating Nvme devices {nvme_devices}")
         answer = input("Type YES/Y to continue: ").strip().lower()
@@ -1977,11 +2354,15 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
     for nvme, val in nvmes.items():
         pci = val["pci_address"]
         numa = int(val["numa_node"])
-        pci_utils.unbind_driver(pci)
+        if not lblk_mode:
+            # lblk keeps the kernel driver — the AIO bdev needs the block
+            # device usable by the kernel, the exact opposite of DPDK claim.
+            pci_utils.unbind_driver(pci)
+        dev_ref = pci if not lblk_mode else nvme
         if numa in sockets_to_use:
-            system_info[numa]["nvmes"].append(pci)
+            system_info[numa]["nvmes"].append(dev_ref)
         else:
-            system_info.setdefault(numa, {"cores": [], "nics": [], "nvmes": []})["nvmes"].append(pci)
+            system_info.setdefault(numa, {"cores": [], "nics": [], "nvmes": []})["nvmes"].append(dev_ref)
 
     nvme_by_numa: dict = {nid: [] for nid in sockets_to_use}
     nvme_numa_neg1 = []
@@ -2048,11 +2429,18 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
             node_info["number_of_distribs"] = number_of_distribs
 
             nvme_neg1_list = all_nvmes_neg1_per_node[node_index]
-            for nvme_name in nvme_neg1_list:
-                node_info["ssd_pcis"].append(nvmes[nvme_name]["pci_address"])
-            for nvme_name in nvme_per_core_group[idx]:
-                node_info["ssd_pcis"].append(nvmes[nvme_name]["pci_address"])
-            number_of_alcemls = len(node_info["ssd_pcis"])
+            if lblk_mode:
+                node_info["lblk_devices"] = []
+                for dev_name in nvme_neg1_list:
+                    node_info["lblk_devices"].append(lblk_entries[dev_name])
+                for dev_name in nvme_per_core_group[idx]:
+                    node_info["lblk_devices"].append(lblk_entries[dev_name])
+            else:
+                for nvme_name in nvme_neg1_list:
+                    node_info["ssd_pcis"].append(nvmes[nvme_name]["pci_address"])
+                for nvme_name in nvme_per_core_group[idx]:
+                    node_info["ssd_pcis"].append(nvmes[nvme_name]["pci_address"])
+            number_of_alcemls = node_config_device_count(node_info)
             node_info["number_of_alcemls"] = number_of_alcemls
             small_pool_count, large_pool_count = calculate_pool_count(number_of_alcemls, 2 * number_of_distribs,
                                                                       len(core_group["isolated"]),
@@ -2066,7 +2454,7 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
             node_info["max_lvol"] = max_lvol
             node_info["max_size"] = max_prov
             node_info["huge_page_memory"] = max(minimum_hp_memory, max_prov)
-            minimum_sys_memory = calculate_minimum_sys_memory(node_info["ssd_pcis"])
+            minimum_sys_memory = node_config_min_sys_memory(node_info)
             node_info["sys_memory"] = minimum_sys_memory
             all_nodes.append(node_info)
             node_index += 1
@@ -2077,7 +2465,7 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
     total_required_memory = 0
     all_isolated_cores = set()
     for node in all_nodes:
-        if len(node["ssd_pcis"]) == 0:
+        if node_config_device_count(node) == 0:
             logger.error(f"There are no enough SSD devices on numa node {node['socket']}")
             return False, False
         total_required_memory += node["huge_page_memory"] + node["sys_memory"]
@@ -2325,10 +2713,42 @@ def validate_node_config(node):
             logger.error(f"Missing required distribution field '{field}' in node: {node.get('socket')}")
             return False
 
+    # Exactly one device source: PCIe SSDs (nvme mode) or Linux block
+    # devices (lblk mode). Both empty, or both populated, is a broken config.
+    lblk_devices = node.get("lblk_devices") or []
+    if bool(node["ssd_pcis"]) == bool(lblk_devices):
+        logger.error(
+            f"Node config must carry exactly one non-empty device list of "
+            f"'ssd_pcis' / 'lblk_devices' in node: {node.get('socket')}")
+        return False
+
     # Check ssd_pcis fields
     for ssd in node["ssd_pcis"]:
         if not is_valid_pci_address(ssd):
             logger.error(f"Missing required SSD field '{ssd}' in node: {node.get('socket')}")
+            return False
+
+    # Check lblk_devices entries (manually editable — validate shape).
+    for entry in lblk_devices:
+        if not isinstance(entry, dict) or not entry.get("name") or not entry.get("serial"):
+            logger.error(f"lblk_devices entry missing 'name'/'serial' in node: {node.get('socket')}")
+            return False
+        if not isinstance(entry.get("size"), int) or entry["size"] <= 0:
+            logger.error(f"lblk_devices entry '{entry.get('name')}' needs a positive integer "
+                         f"'size' in node: {node.get('socket')}")
+            return False
+    if lblk_devices:
+        if len(lblk_devices) < constants.LBLK_MIN_DEVICES_PER_NODE:
+            logger.error(
+                f"lblk mode requires at least {constants.LBLK_MIN_DEVICES_PER_NODE} "
+                f"partitions or SSDs per node; node {node.get('socket')} carries "
+                f"{len(lblk_devices)}")
+            return False
+        journal_entries = [e.get("name") for e in lblk_devices if e.get("journal")]
+        if len(journal_entries) > 1:
+            logger.error(
+                f"lblk_devices carries more than one journal-flagged entry "
+                f"{journal_entries} in node: {node.get('socket')}")
             return False
 
     if not node["isolated"]:
