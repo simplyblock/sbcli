@@ -15,8 +15,12 @@ restarted, not as a deliberate re-provisioning action.
 What legitimately can go stale across a restart is which *physical* core
 sits at each index -- the OS/k8s CPU manager can hand back a different
 specific set (same count) than before. That's all restart may still
-refresh: the index@physical_core pairing in l_cores, via the same
-generate_l_cores() helper add_node/sn configure already use, nothing else.
+refresh: the index@physical_core pairing in l_cores, via
+reassign_l_cores_for_restart() -- which keeps every role's index set (its
+size, and any sharing with another role at the same index) exactly as
+decided at add time, only choosing which fresh physical core fills each
+index, preferring to keep distrib/poller/alceml's own cores mutual
+hyperthread siblings -- and generate_l_cores(), nothing else.
 """
 import inspect
 
@@ -36,6 +40,19 @@ class TestRestartDoesNotRederiveCoreRoles:
         src = inspect.getsource(storage_node_ops._restart_storage_node_impl)
         assert "read_allowed_list" in src
         assert "snode.l_cores = utils.generate_l_cores(" in src
+
+    def test_restart_places_physical_cores_via_the_sibling_aware_helper(self):
+        """Not a plain sort -- distrib/poller/alceml's saved index sets are
+        handed to reassign_l_cores_for_restart so it can prefer keeping
+        each role's own cores real hyperthread siblings."""
+        src = inspect.getsource(storage_node_ops._restart_storage_node_impl)
+        assert "utils.reassign_l_cores_for_restart(" in src
+
+    def test_restart_skips_reassignment_on_an_unchanged_cpuset(self):
+        """A no-op restart (identical cpuset) must not churn which physical
+        core each role lands on for no operational reason."""
+        src = inspect.getsource(storage_node_ops._restart_storage_node_impl)
+        assert "prior_physical_cores" in src
 
     def test_restart_warns_rather_than_silently_stales_on_a_core_count_mismatch(self):
         """A genuine mismatch (host lost cores) must be visible, not

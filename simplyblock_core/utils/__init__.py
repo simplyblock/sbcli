@@ -3808,6 +3808,77 @@ def recalculate_cores_distribution(cores, number_of_alcemls):
         "compression_core": get_core_indexes(core_to_index, distribution[8])}
 
 
+def _take_sibling_aware(cores_remaining, count, siblings):
+    """Pull up to `count` cores out of the `cores_remaining` set, preferring
+    to grab a real hyperthread sibling alongside whenever at least 2 more
+    are still needed -- mirrors calculate_core_allocations' own reserve_n,
+    but driven by real sysfs sibling data instead of pair_hyperthreads()'
+    os.cpu_count()-wide guess, since here the pool is already scoped to one
+    node's own fresh core list."""
+    chosen: List[int] = []
+    for core in sorted(cores_remaining):
+        if len(chosen) >= count:
+            break
+        if core not in cores_remaining:
+            continue  # already claimed as someone else's sibling this pass
+        if count - len(chosen) >= 2:
+            sibling = next((s for s in siblings.get(core, [core]) if s != core), None)
+            if sibling is not None and sibling in cores_remaining:
+                cores_remaining.discard(core)
+                cores_remaining.discard(sibling)
+                chosen += [core, sibling]
+                continue
+        cores_remaining.discard(core)
+        chosen.append(core)
+    return chosen[:count]
+
+
+def reassign_l_cores_for_restart(cores, distrib_indices, poller_indices, alceml_indices):
+    """Rebuild the l-core index -> physical-core mapping at restart, when the
+    OS/k8s CPU manager may have handed back a different (same-count) cpuset
+    than the node was added with.
+
+    Every role's INDEX SET -- hence its core count, and any sharing between
+    roles that already point at the same index -- was decided once, at add
+    time, and must not change here (see _restart_storage_node_impl); this
+    only chooses which of the fresh physical cores fills which index.
+    Unlike a plain numeric sort, it tries to keep each sibling-sensitive
+    role's own cores mutual hyperthread pairs -- using the real sysfs
+    topology (parse_thread_siblings), not calculate_core_allocations'
+    machine-wide pair_hyperthreads() guess -- so distrib/poller/alceml, in
+    that priority order, get first claim on intact sibling pairs from
+    whatever the fresh cpuset actually contains. Falls back to unpaired
+    singles when pairs run out rather than failing: a restart must not
+    block on an imperfect cpuset.
+
+    Returns the physical-core list to pass to generate_l_cores(), ordered by
+    index (result[i] is the physical core for l-core index i).
+    """
+    n = len(cores)
+    remaining = set(cores)
+    siblings = parse_thread_siblings()
+    placement: List[Optional[int]] = [None] * n
+
+    for role, indices in (("distrib", distrib_indices), ("poller", poller_indices),
+                         ("alceml", alceml_indices)):
+        if not indices:
+            continue
+        picked = _take_sibling_aware(remaining, len(indices), siblings)
+        if len(picked) < len(indices):
+            logger.warning(
+                "restart core placement: only found %d/%d core(s) for %s "
+                "in the fresh cpuset; the rest will be unpaired",
+                len(picked), len(indices), role)
+        for idx, core in zip(sorted(indices), picked):
+            placement[idx] = core
+
+    leftover_indices = [i for i in range(n) if placement[i] is None]
+    for idx, core in zip(leftover_indices, sorted(remaining)):
+        placement[idx] = core
+
+    return placement
+
+
 def resolve_address(host_port: str) -> str:
     """Resolves an host:port string to its IP address
 

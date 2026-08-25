@@ -5002,9 +5002,23 @@ def _restart_storage_node_impl(
     # What legitimately can go stale across a restart is which *physical*
     # core sits at each index -- the OS/k8s CPU manager can hand back a
     # different specific set (same count) than before. That's all this
-    # refreshes: the index@physical_core pairing in l_cores, nothing else.
+    # refreshes: the index@physical_core pairing in l_cores, nothing else --
+    # reassign_l_cores_for_restart keeps every role's index set (hence its
+    # size and any sharing with other roles) exactly as decided at add time,
+    # only choosing which fresh physical core fills each index, preferring
+    # to keep distrib/poller/alceml's own cores mutual hyperthread siblings.
     if len(cores) == req_cpu_count:
-        snode.l_cores = utils.generate_l_cores(sorted(cores))
+        prior_physical_cores = {int(pair.split("@")[1]) for pair in snode.l_cores.split(",") if pair}
+        if set(cores) == prior_physical_cores:
+            # Identical cpuset -- nothing to reassign; leave l_cores exactly
+            # as it was rather than have reassign_l_cores_for_restart pick an
+            # arbitrary (if equally valid) sibling pairing that only churns
+            # which physical core each role lands on for no operational gain.
+            logger.info(f"Node {node_id}: cpuset unchanged, keeping existing l_cores")
+        else:
+            placement = utils.reassign_l_cores_for_restart(
+                cores, snode.distrib_cpu_cores, snode.poller_cpu_cores, snode.alceml_cpu_cores)
+            snode.l_cores = utils.generate_l_cores(placement)
     else:
         logger.warning(
             "Node %s: read_allowed_list returned %d core(s), expected %d -- "
