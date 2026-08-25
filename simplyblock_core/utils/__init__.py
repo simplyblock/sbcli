@@ -445,6 +445,8 @@ def calculate_core_allocations(vcpu_list, alceml_count=2):
     is_hyperthreaded = is_hyperthreading_enabled_via_siblings()
     pairs = pair_hyperthreads() if is_hyperthreaded else {}
     remaining = set(vcpu_list)
+    cores = sorted(vcpu_list)
+    v = len(vcpu_list)
 
     def reserve(vcpu, get_sibling=False):
         if vcpu in remaining:
@@ -460,85 +462,139 @@ def calculate_core_allocations(vcpu_list, alceml_count=2):
     def reserve_n(count):
         vcpus: list = []
         if count > 0:
-            for v in sorted(remaining):
+            for c in sorted(remaining):
                 if (count - len(vcpus)) >= 2:
-                    vcpus += reserve(v, True)
+                    vcpus += reserve(c, True)
                 else:
-                    vcpus += reserve(v)
+                    vcpus += reserve(c)
                 if len(vcpus) >= count:
                     break
         return vcpus[:count]
 
+    def finalize(assigned):
+        # Return the individual threads as separate values
+        return (
+            assigned.get("app_thread_core", []),
+            assigned.get("jm_cpu_core", []),
+            assigned.get("poller_cpu_cores", []),
+            assigned.get("alceml_cpu_cores", []),
+            assigned.get("alceml_worker_cpu_cores", []),
+            assigned.get("distrib_cpu_cores", []),
+            assigned.get("jc_singleton_core", []),
+            assigned.get("lvol_poller_core", []),
+            # Reserved: always empty now that the compression-thread feature
+            # this slot backed is gone. Kept for shape/backport compatibility
+            # with positional consumers (e.g. distribution[8] callers) elsewhere.
+            assigned.get("compression_core", []),
+        )
+
+    def split_distrib_and_poller():
+        """distrib/poller split the cores left after the base roles (and, on
+        this path, after alceml -- see the v<22 tiers below where alceml is
+        reserved first). Only used where alceml still comes first; the v>=22
+        tier below reorders that and does its own split."""
+        dp = int(len(remaining) / 2)
+        if 17 > dp >= 12:
+            poller_n = len(remaining) - 12
+            distrib = reserve_n(12)
+            poller = reserve_n(poller_n)
+        elif dp >= 17:
+            poller_n = len(remaining) - 24
+            distrib = reserve_n(24)
+            poller = reserve_n(poller_n)
+        else:
+            distrib = reserve_n(dp)
+            poller = reserve_n(dp)
+        if len(remaining) > 0:
+            if len(poller) == 0:
+                distrib = poller = reserve_n(1)
+            else:
+                poller = poller + reserve_n(1)
+        return distrib, poller
+
+    # Too few cores for the general formula's role co-location to make sense
+    # -- every role has to double up somewhere, so these tiny counts are
+    # hand-specified rather than derived.
+    if v <= 1:
+        only = cores[:1]
+        return finalize({
+            "app_thread_core": only, "jm_cpu_core": only, "jc_singleton_core": only,
+            "lvol_poller_core": only, "alceml_cpu_cores": only,
+            "distrib_cpu_cores": only, "poller_cpu_cores": only,
+        })
+    if v == 2:
+        return finalize({
+            "app_thread_core": cores[0:1], "jc_singleton_core": cores[0:1],
+            "jm_cpu_core": cores[0:1], "lvol_poller_core": cores[0:1],
+            "alceml_cpu_cores": cores[0:2], "distrib_cpu_cores": cores[1:2],
+        })
+    if v == 3:
+        return finalize({
+            "app_thread_core": cores[0:1], "jc_singleton_core": cores[0:1],
+            "jm_cpu_core": cores[0:1], "alceml_cpu_cores": cores[0:1],
+            "lvol_poller_core": cores[1:2], "poller_cpu_cores": cores[1:2],
+            "distrib_cpu_cores": cores[2:3],
+        })
+    if v == 4:
+        return finalize({
+            "app_thread_core": cores[0:1], "jc_singleton_core": cores[0:1],
+            "jm_cpu_core": cores[1:2], "alceml_cpu_cores": cores[1:2],
+            "lvol_poller_core": cores[2:3], "poller_cpu_cores": cores[2:3],
+            "distrib_cpu_cores": cores[3:4],
+        })
+    if v == 5:
+        return finalize({
+            "app_thread_core": cores[0:1], "jc_singleton_core": cores[0:1],
+            "jm_cpu_core": cores[1:2], "lvol_poller_core": cores[1:2],
+            "poller_cpu_cores": cores[2:3], "distrib_cpu_cores": cores[3:4],
+            "alceml_cpu_cores": cores[4:5],
+        })
+
     assigned = {}
     # lvol_poller co-locates with jc_singleton's core below 32 vCPU to save a
     # core; at/above 32 vCPU it gets its own dedicated core.
-    colocate_lvs = len(vcpu_list) < 32
-    if (len(vcpu_list) < 12):
+    colocate_lvs = v < 32
+    if v < 12:
         vcpu = reserve_n(4 if colocate_lvs else 5)
         assigned["app_thread_core"] = vcpu[0:1]
         assigned["jm_cpu_core"] = vcpu[1:2]
         assigned["jc_singleton_core"] = vcpu[2:3]
         assigned["alceml_cpu_cores"] = vcpu[3:4]
         assigned["lvol_poller_core"] = vcpu[2:3] if colocate_lvs else vcpu[4:5]
-    elif (len(vcpu_list) < 22):
+        assigned["distrib_cpu_cores"], assigned["poller_cpu_cores"] = split_distrib_and_poller()
+    elif v < 22:
         vcpu = reserve_n(5 if colocate_lvs else 6)
         assigned["app_thread_core"] = vcpu[0:1]
         assigned["jm_cpu_core"] = vcpu[1:2]
         assigned["jc_singleton_core"] = vcpu[2:3]
         assigned["alceml_cpu_cores"] = vcpu[3:5]
         assigned["lvol_poller_core"] = vcpu[2:3] if colocate_lvs else vcpu[5:6]
+        assigned["distrib_cpu_cores"], assigned["poller_cpu_cores"] = split_distrib_and_poller()
     else:
-        # base threads: app, jm, jc (+ own lvol_poller unless co-located)
+        # Reordered: distrib claims its share first, as a pure function of
+        # what's left after the base roles -- no longer reduced by however
+        # many devices this node happens to have. alceml then takes its real
+        # device-scaled count from what's left (clipped if there genuinely
+        # isn't room), and poller -- already the "whatever's left" role --
+        # absorbs the true remainder.
         base = 3 if colocate_lvs else 4
-        vcpus = reserve_n(base + alceml_count)
+        vcpus = reserve_n(base)
         assigned["app_thread_core"] = vcpus[0:1]
         assigned["jm_cpu_core"] = vcpus[1:2]
         assigned["jc_singleton_core"] = vcpus[2:3]
-        idx = 3
-        if colocate_lvs:
-            assigned["lvol_poller_core"] = vcpus[2:3]
+        assigned["lvol_poller_core"] = vcpus[2:3] if colocate_lvs else vcpus[3:4]
+
+        dp = int(len(remaining) / 2)
+        if 17 > dp >= 12:
+            distrib_n = 12
+        elif dp >= 17:
+            distrib_n = 24
         else:
-            assigned["lvol_poller_core"] = vcpus[idx:idx + 1]
-            idx += 1
-        assigned["alceml_cpu_cores"] = vcpus[idx:idx + alceml_count]
-    dp = int(len(remaining) / 2)
-    if 17 > dp >= 12:
-        poller_n = len(remaining) - 12
-        vcpus = reserve_n(12)
-        assigned["distrib_cpu_cores"] = vcpus
-        vcpus = reserve_n(poller_n)
-        assigned["poller_cpu_cores"] = vcpus
-    elif dp >= 17:
-        poller_n = len(remaining) - 24
-        vcpus = reserve_n(24)
-        assigned["distrib_cpu_cores"] = vcpus
-        vcpus = reserve_n(poller_n)
-        assigned["poller_cpu_cores"] = vcpus
-    else:
-        vcpus = reserve_n(dp)
-        assigned["distrib_cpu_cores"] = vcpus
-        vcpus = reserve_n(dp)
-        assigned["poller_cpu_cores"] = vcpus
-    if len(remaining) > 0:
-        if len(assigned["poller_cpu_cores"]) == 0:
-            assigned["distrib_cpu_cores"] = assigned["poller_cpu_cores"] = reserve_n(1)
-        else:
-            assigned["poller_cpu_cores"] = assigned["poller_cpu_cores"] + reserve_n(1)
-    # Return the individual threads as separate values
-    return (
-        assigned.get("app_thread_core", []),
-        assigned.get("jm_cpu_core", []),
-        assigned.get("poller_cpu_cores", []),
-        assigned.get("alceml_cpu_cores", []),
-        assigned.get("alceml_worker_cpu_cores", []),
-        assigned.get("distrib_cpu_cores", []),
-        assigned.get("jc_singleton_core", []),
-        assigned.get("lvol_poller_core", []),
-        # Reserved: always empty now that the compression-thread feature this
-        # slot backed is gone. Kept for shape/backport compatibility with
-        # positional consumers (e.g. distribution[8] callers) elsewhere.
-        assigned.get("compression_core", []),
-    )
+            distrib_n = dp
+        assigned["distrib_cpu_cores"] = reserve_n(distrib_n)
+        assigned["alceml_cpu_cores"] = reserve_n(min(alceml_count, len(remaining)))
+        assigned["poller_cpu_cores"] = reserve_n(len(remaining))
+    return finalize(assigned)
 
 
 def isolate_cores(spdk_cpu_mask):
