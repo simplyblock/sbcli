@@ -3600,7 +3600,9 @@ def _evict_stale_namespace(new_lvol, target_node):
         subsystems = rpc.subsystem_get(new_lvol.nqn)
         if not subsystems:
             return
-        for ns in (subsystems.get("namespaces") or []):
+        # subsystem_get returns a list of subsystem dicts; take the first entry.
+        subsystem = subsystems[0] if isinstance(subsystems, list) else subsystems
+        for ns in (subsystem.get("namespaces") or []):
             if ns.get("nsid") != new_lvol.ns_id:
                 continue
             if ns.get("bdev_name") == new_lvol.top_bdev:

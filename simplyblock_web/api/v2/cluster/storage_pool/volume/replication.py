@@ -122,11 +122,22 @@ def failover(cluster: Cluster, pool: StoragePool, volume: Volume) -> Response:
     return Response(status_code=204)
 
 
+class CommitParams(BaseModel):
+    delete_source: bool = False
+
+
 @api.post('/commit', name='clusters:storage-pools:volumes:replication:commit',
           status_code=202, responses={202: {"content": None}})
-def commit(request: Request, cluster: Cluster, pool: StoragePool, volume: Volume) -> Response:
-    """Queue the planned cutover. Progress is the returned task."""
-    result = lvol_controller.replication_commit(volume.get_id())
+def commit(request: Request, cluster: Cluster, pool: StoragePool, volume: Volume,
+           body: Optional[CommitParams] = None) -> Response:
+    """Queue the planned cutover. Progress is the returned task.
+
+    delete_source=True instructs the task runner to delete the source volume
+    after the cutover succeeds.
+    """
+    params = body or CommitParams()
+    result = lvol_controller.replication_commit(volume.get_id(),
+                                                delete_source=params.delete_source)
     if isinstance(result, tuple):  # (False, error)
         raise HTTPException(500, str(result[1]))
     if not result:
