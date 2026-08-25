@@ -1892,15 +1892,29 @@ class TestNodeRemovalOrchestrateResumesPhase5(unittest.TestCase):
             "n1", StorageNode.STATUS_REMOVED, caused_by="remove")
         mocks["_decommission_node_devices"].assert_called_once()
 
-    def test_jm_decommission_runs_before_replica_relocation(self):
-        # 2026-08-25 incident: phase 3b (relocate hosted replicas) builds
-        # the new host's JC group construct from the hosted primary's
-        # CURRENT jm_ids via get_node_jm_names(), baking in whatever it
-        # finds by name regardless of whether the connection succeeds. If
-        # this node's dying JM were still listed there when 3b ran, the
-        # new host would permanently reference an unreachable member with
-        # no live connection to ever hand jc_replace_jm afterwards. Phase 2
-        # must therefore run, and complete, before phase 3a/3b.
+    def test_replica_teardown_then_jm_decommission_then_relocation(self):
+        # 2026-08-25 incidents (two, found back to back):
+        #
+        # 1. Phase 3b (relocate hosted replicas) builds the new host's JC
+        #    group construct from the hosted primary's CURRENT jm_ids via
+        #    get_node_jm_names(), baking in whatever it finds by name
+        #    regardless of whether the connection succeeds. If this node's
+        #    dying JM were still listed there when 3b ran, the new host
+        #    would permanently reference an unreachable member with no live
+        #    connection to ever hand jc_replace_jm afterwards. JM
+        #    decommission must therefore run, and complete, before 3b.
+        #
+        # 2. A peer hosting THIS node's own secondary/tertiary replica (Case
+        #    A, torn down in 3a) runs a local JC instance for that replica
+        #    too, and get_node_jm_names() bakes this node's own JM into that
+        #    instance's construct too -- a second local jm_vuid on that peer
+        #    sharing the same name_old, invisible to JM decommission's own
+        #    target-gathering. Left standing, jc_replace_jm's own multi-
+        #    target safety check rejects the whole batched call (-17). 3a
+        #    must therefore run, and complete, BEFORE JM decommission --
+        #    tearing the replica down removes the second instance entirely.
+        #
+        # Net required order: 3a, then JM decommission, then 3b.
         cl = _cluster()
         node = _node("n1", status=StorageNode.STATUS_ONLINE)
         db = FakeDB(cl, [node])
@@ -1918,7 +1932,7 @@ class TestNodeRemovalOrchestrateResumesPhase5(unittest.TestCase):
             ret = storage_node_ops.node_removal_orchestrate("n1")
 
         self.assertTrue(ret)
-        self.assertEqual(order, ["jm", "3a", "3b"])
+        self.assertEqual(order, ["3a", "jm", "3b"])
 
 
 # ---------------------------------------------------------------------------

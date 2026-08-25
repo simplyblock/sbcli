@@ -4041,13 +4041,13 @@ def node_removal_orchestrate(node_id, force_remove=False):
 
     # Phase 4 (below) flips status to REMOVED *before* phase 5 (device
     # remove/fail/migrate; also re-runs the JM patch defensively) runs --
-    # so "status == REMOVED" means phases 1/2/3a/3b/4 committed, NOT that
+    # so "status == REMOVED" means phases 1/3a/2/3b/4 committed, NOT that
     # removal is fully done. A bare `return True` here would let a
     # transient failure inside phase 5 (e.g. an RPC error against a peer)
     # get permanently masked: the retry re-enters, hits this guard, and
     # reports "done" forever without phase 5 ever completing (2026-08-10
     # incident: a mid-phase-5 RPC error left a peer's lvstore un-rebuilt
-    # while the task reported "Node removed"). Only phases 1/2/3a/3b/4 are
+    # while the task reported "Node removed"). Only phases 1/3a/2/3b/4 are
     # skipped below when already_removed; phase 5 always runs and is
     # itself idempotent (skips devices/JM already migrated), so resuming
     # it here is a no-op once it has genuinely finished.
@@ -4079,6 +4079,28 @@ def node_removal_orchestrate(node_id, force_remove=False):
                     return False
                 snode = db_controller.get_storage_node_by_id(node_id)
 
+            # Phase 3a — tear down the (empty) secondary/tertiary replicas of THIS
+            # node's own primary LVS, on the peers that host them (Case A).
+            # Runs BEFORE phase 2: a peer hosting THIS node's own replica runs a
+            # local JC instance for it too, and that instance also references
+            # this node's OWN JM by name (get_node_jm_names always includes the
+            # replica's owning primary's JM, even from a secondary's local
+            # construct) -- a second, independent local jm_vuid on that peer
+            # using the exact same name_old that _decommission_node_jm's
+            # target-gathering has no way to see (it only tracks OTHER
+            # primaries via `decisions`, never this node's own hosted replica).
+            # Left in place, jc_replace_jm's own multi-target safety check
+            # rejects the batched call outright (-17: "does not cover all
+            # jm_vuids that use name_old") because it still finds that second
+            # instance live. Tearing the replica down first removes it
+            # entirely, so phase 2 never has to account for it (found live
+            # 2026-08-25: this node's own hosted-replica peer failed the very
+            # next removal after the phase 2/3b reorder that fixed the
+            # relocation-timing gap).
+            logger.info(f"[REMOVAL] {node_id}: phase 3a — tear down own replicas")
+            if not _teardown_replicas_of_primary(snode):
+                return False
+
             # Phase 2 — patch this node's JM out of every live JC redundancy
             # set BEFORE phase 3b can relocate any replica onto a new host.
             # See _decommission_node_jm's docstring for why the ordering
@@ -4088,12 +4110,6 @@ def node_removal_orchestrate(node_id, force_remove=False):
             logger.info(f"[REMOVAL] {node_id}: phase 2 — decommission JM")
             _decommission_node_jm(snode)
             snode = db_controller.get_storage_node_by_id(node_id)
-
-            # Phase 3a — tear down the (empty) secondary/tertiary replicas of THIS
-            # node's own primary LVS, on the peers that host them (Case A).
-            logger.info(f"[REMOVAL] {node_id}: phase 3a — tear down own replicas")
-            if not _teardown_replicas_of_primary(snode):
-                return False
 
             # Phase 3b — relocate replicas this node hosts for OTHER primaries (Case B).
             logger.info(f"[REMOVAL] {node_id}: phase 3b — relocate hosted replicas")
@@ -4563,10 +4579,10 @@ def _decommission_node_jm(removed_node: StorageNode) -> None:
 
     Called TWICE by design, both idempotent (guarded by the JM device's own
     status, set below): early, as node_removal_orchestrate's own phase 2 --
-    BEFORE phase 3b relocates any replica hosted on removed_node -- and
-    again from _decommission_node_devices's phase 5, as a defensive no-op
-    for tasks resuming from before this function existed as a separate
-    phase.
+    AFTER phase 3a tears down removed_node's own hosted replicas but BEFORE
+    phase 3b relocates any replica hosted ON removed_node -- and again from
+    _decommission_node_devices's phase 5, as a defensive no-op for tasks
+    resuming from before this function existed as a separate phase.
 
     Running this before phase 3b matters: relocating a hosted primary's
     replica onto a new host builds that host's JC group construct fresh via
@@ -4582,6 +4598,22 @@ def _decommission_node_jm(removed_node: StorageNode) -> None:
     patched, no matter how many times phase 5 retried). Patching jm_ids
     first means every relocation that follows already sees the corrected
     membership from its very first build.
+
+    Running this AFTER phase 3a matters too, the other direction: any peer
+    hosting removed_node's OWN secondary/tertiary replica runs a local JC
+    instance for THAT replica as well, and get_node_jm_names() always
+    includes the replica's owning primary's (removed_node's) own JM by name
+    in that instance's construct too -- a second, independent local jm_vuid
+    on that peer sharing the exact same name_old as whatever THIS function
+    is trying to patch there, one this function's target-gathering has no
+    way to see (it only tracks OTHER primaries via `decisions`, never
+    removed_node's own hosted replica). Left in place, jc_replace_jm's own
+    multi-target safety check rejects the batched call outright (-17: "does
+    not cover all jm_vuids that use name_old"), because it still finds that
+    second instance live. Phase 3a tearing the replica down first removes it
+    entirely, so this function never has to account for it (found live
+    2026-08-25, the very next removal after the phase-2/3b fix above:
+    removed_node's own hosted-replica peer failed this way).
     """
     db_controller = DBController()
     removed_node = db_controller.get_storage_node_by_id(removed_node.get_id())
