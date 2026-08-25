@@ -105,11 +105,12 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--size-range', help='NVMe SSD device size range separated by -, can be X(m,g,t) or bytes as integer, example: --size-range 50G-1T or --size-range 1232345-67823987. Can be used alone to filter by size, or combined with --device-model to further filter by model.', type=str, default='', dest='size_range', required=False)
         subcommand.add_argument('--nvme-names', help='Comma separated list of nvme namespace names like nvme0n1,nvme1n1.', type=str, default='', dest='nvme_names', required=False)
         subcommand.add_argument('--lblk', help='Configure the node with Linux block devices (lblk cluster mode) instead of NVMe PCIe devices: eligible whole disks or partitions (unmounted, unheld; disks additionally unpartitioned) are wrapped in SPDK AIO bdevs. Select devices with --blk-names, --blk-names-exclude or --blk-serials; without a selector, every eligible whole disk is used (partitions must be selected explicitly). Minimum 2 partitions or SSDs per node. When the selection contains partitions, the smallest one is split in two at configure time: a journal partition (--jm-percent of total capacity) and a data partition.', dest='lblk', action='store_true')
-        subcommand.add_argument('--blk-names', help='Comma separated list of block device names to use, like sdb,sdc or nvme0n1p3 (requires --lblk). Requested devices must be eligible; a busy device is an error.', type=str, default='', dest='blk_names', required=False)
+        subcommand.add_argument('--blk-names', help='Comma separated list of block device names to use, like sdb,sdc (requires --lblk). Requested devices must be eligible; a busy device is an error.', type=str, default='', dest='blk_names', required=False)
         subcommand.add_argument('--blk-names-exclude', help='Comma separated list of block device names to exclude, like sda (requires --lblk). All other eligible disks are used.', type=str, default='', dest='blk_names_exclude', required=False)
         subcommand.add_argument('--blk-serials', help='Comma separated list of block device serial numbers (or WWNs) to use (requires --lblk).', type=str, default='', dest='blk_serials', required=False)
         subcommand.add_argument('--jm-percent', help='Journal size in percent of the node\'s total selected capacity when the journal is carved by splitting a selected partition (requires --lblk with partitions). Default: `3`.', type=int, default=3, dest='jm_percent', required=False)
         subcommand.add_argument('--force', help='Force format detected or passed nvme pci address to 4K and clean partitions. With --lblk: mark partitioned disks eligible; the partition wipe happens at add-node with --force-format.', dest='force', action='store_true')
+        subcommand.add_argument('--enable-inline-checksum', help='When formatting (with --force), prefer an LBAF that supports >=8 bytes of NVMe metadata per block, so alceml can run inline checksum validation in md-on-device mode. Drives with no md-capable LBAF still format to plain 4K and will use the fallback layout.', dest='inline_checksum', action='store_true')
         subcommand.add_argument('--calculate-hp-only', help='Calculate the minimum required huge pages, it depends on the following params: --sockets-to-use, --nodes-per-socket, --number-of-devices. Subsystem count and the vCPU budget are cluster-level settings.', dest='calculate_hp_only', action='store_true')
         subcommand.add_argument('--number-of-devices', help='Number of devices that will be used on this host. For calculating huge pages memory only.', type=int, dest='number_of_devices')
 
@@ -405,7 +406,6 @@ class CLIWrapper(CLIWrapperBase):
         self.init_cluster__replication_policy_list(subparser)
         self.init_cluster__replication_policy_remove(subparser)
         self.init_cluster__replication_policy_failover(subparser)
-        self.init_cluster__replication_policy_snapshot(subparser)
 
 
     def init_cluster__create(self, subparser):
@@ -449,6 +449,8 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--strict-node-anti-affinity', help='Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node. This requires a minimum of _data-chunks-in-stripe + parity-chunks-in-stripe + 1_ nodes in the cluster.', dest='strict_node_anti_affinity', action='store_true')
         subcommand.add_argument('--enable-failure-domain', help='Enable failure-domain anti-affinity. Each storage node must then be added with a --failure-domain tag (rack/cabinet/DC); data, journal and secondary/tertiary copies are spread across distinct failure domains (best-effort). Deploy-time only: a cluster cannot be upgraded into this feature, it must be redeployed.', dest='enable_failure_domain', action='store_true')
         subcommand.add_argument('--device-mode', help='Storage-device mode for the whole cluster. \'nvme\' (default): NVMe PCIe devices auto-detected and attached via the SPDK nvme driver. \'lblk\': arbitrary Linux block devices wrapped in SPDK AIO bdevs; devices are selected at \'sn configure\' by name or serial number. Deploy-time only; inter-node fabric (nvme-tcp/rdma) is unaffected.', type=str, default='nvme', dest='device_mode', choices=['nvme','lblk',])
+        subcommand.add_argument('--enable-inline-checksum', help='Enable inline CRC checksum validation on every IO for silent-data-error protection. Cannot be enabled or disabled after cluster creation. Per-device alceml mode (md-on-device vs fallback) is auto-detected at add-node.', dest='inline_checksum', action='store_true')
+        subcommand.add_argument('--4k_atomic', help='Declare that devices guarantee 4K write atomicity even with a <4K logical block size (e.g. AWS NVMe is 512B but atomic at 4K). Allows fallback-mode inline checksum on such devices by skipping the data-plane 4K block-size requirement. Only meaningful with --enable-inline-checksum. Cannot be changed after cluster creation.', dest='atomic_4k', action='store_true')
         subcommand.add_argument('--name', '-n', help='Assigns a name to the newly created cluster.', type=str, dest='name')
         subcommand.add_argument('--qpair-count', help='The NVMe/TCP transport qpair count per logical volume. Default: `32`.', type=range_type(0, 128), default=32, dest='qpair_count')
         subcommand.add_argument('--client-qpair-count', help='The default NVMe/TCP transport qpair count per logical volume for client. Default: `3`.', type=range_type(0, 128), default=3, dest='client_qpair_count')
@@ -490,6 +492,8 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--strict-node-anti-affinity', help='Enable strict node anti affinity for storage nodes. Never more than one chunk is placed on a node. This requires a minimum of _data-chunks-in-stripe + parity-chunks-in-stripe + 1_ nodes in the cluster."', dest='strict_node_anti_affinity', action='store_true')
         subcommand.add_argument('--enable-failure-domain', help='Enable failure-domain anti-affinity. Each storage node must then be added with a --failure-domain tag (rack/cabinet/DC); data, journal and secondary/tertiary copies are spread across distinct failure domains (best-effort). Deploy-time only: a cluster cannot be upgraded into this feature, it must be redeployed.', dest='enable_failure_domain', action='store_true')
         subcommand.add_argument('--device-mode', help='Storage-device mode for the whole cluster. \'nvme\' (default): NVMe PCIe devices auto-detected and attached via the SPDK nvme driver. \'lblk\': arbitrary Linux block devices wrapped in SPDK AIO bdevs; devices are selected at \'sn configure\' by name or serial number. Deploy-time only; inter-node fabric (nvme-tcp/rdma) is unaffected.', type=str, default='nvme', dest='device_mode', choices=['nvme','lblk',])
+        subcommand.add_argument('--enable-inline-checksum', help='Enable inline CRC checksum validation on every IO for silent-data-error protection. Cannot be enabled or disabled after cluster creation.', dest='inline_checksum', action='store_true')
+        subcommand.add_argument('--4k_atomic', help='Declare that devices guarantee 4K write atomicity even with a <4K logical block size (e.g. AWS NVMe is 512B but atomic at 4K). Allows fallback-mode inline checksum on such devices by skipping the data-plane 4K block-size requirement. Only meaningful with --enable-inline-checksum. Cannot be changed after cluster creation.', dest='atomic_4k', action='store_true')
         subcommand.add_argument('--name', '-n', help='Assigns a name to the newly created cluster.', type=str, dest='name')
         subcommand.add_argument('--client-data-nic', help='Network interface name from client to use for logical volume connection.', type=str, dest='client_data_nic')
         subcommand.add_argument('--use-backup', help='The path to JSON file with S3/MinIO backup configuration.', type=str, dest='use_backup')
@@ -687,8 +691,6 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--interval-min', help='Cadence: minutes between internal replication snapshots. 0 replicates user snapshots only. Default: `1`.', type=int, dest='interval_min')
         subcommand.add_argument('--mode', help='Replication mode. Default: `failover`.', type=str, dest='mode', choices=['failover','migration',])
         subcommand.add_argument('--keep', help='Replicated internal snapshots to retain on each side. Minimum (and default): `2`.', type=int, dest='keep_replicated')
-        subcommand.add_argument('--retention-schedule', help='Tiered retention, e.g. `15m:2h,1h:11h,1d:7d` - one snapshot every 15 minutes for the last 2 hours, then hourly for 11 hours, then daily for 7 days. Snapshots older than the total span are pruned. Empty (default) keeps the flat --keep behaviour.', type=str, dest='retention_schedule')
-        subcommand.add_argument('--consistency-group', help='All volumes attached to this policy form ONE consistency group: they must share an LVS (creation pins them to it), cadence snapshots are taken as one frozen group, and fail-over generations resolve group-wide.', dest='consistency_group', action='store_true')
 
     def init_cluster__replication_policy_list(self, subparser):
         subcommand = self.add_sub_command(subparser, 'replication-policy-list', 'Lists the replication policies of a cluster')
@@ -698,10 +700,6 @@ class CLIWrapper(CLIWrapperBase):
     def init_cluster__replication_policy_remove(self, subparser):
         subcommand = self.add_sub_command(subparser, 'replication-policy-remove', 'Removes a replication policy. Refused while a volume still follows it.')
         subcommand.add_argument('policy_id', help='Replication policy id', type=str)
-
-    def init_cluster__replication_policy_snapshot(self, subparser):
-        subcommand = self.add_sub_command(subparser, 'replication-policy-snapshot', "Takes ONE crash-consistent snapshot of every volume in the policy's consistency group, as a new group generation")
-        subcommand.add_argument('policy_id', help='Replication policy id (must be a consistency-group policy)', type=str)
 
     def init_cluster__replication_policy_failover(self, subparser):
         subcommand = self.add_sub_command(subparser, 'replication-policy-failover', 'Fails over EVERY volume following this policy')
