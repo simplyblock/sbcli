@@ -2,7 +2,7 @@
 import time
 import uuid
 
-from simplyblock_core import constants, db_controller, utils
+from simplyblock_core import constants, db_controller, snapshot_retention, utils
 from simplyblock_core.controllers import lvol_controller, snapshot_events, snapshot_controller
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
@@ -596,6 +596,28 @@ def _keep_replicated_for(source_lvol):
     from simplyblock_core.models.replication import ReplicationPolicy
     return max(policy.keep_replicated, ReplicationPolicy.MIN_KEEP_REPLICATED)
 
+def _retention_schedule_for(source_lvol):
+    """Parsed retention tiers from the volume's policy, or [] when it has none.
+
+    A malformed schedule must not silently disable retention or crash the
+    replication runner: it is reported and treated as "no schedule", which
+    falls back to the flat keep-count.
+    """
+    try:
+        policy = db.get_replication_policy_for_lvol(source_lvol)
+    except Exception:
+        return []
+    spec = getattr(policy, "retention_schedule", "") if policy else ""
+    if not spec:
+        return []
+    try:
+        return snapshot_retention.parse_schedule(spec)
+    except snapshot_retention.RetentionScheduleError as e:
+        logger.error("Ignoring invalid retention_schedule %r on policy %s: %s",
+                     spec, policy.get_id(), e)
+        return []
+
+
 def _prune_internal_snapshots(source_lvol):
     """Retention for replication-driven internal snapshots.
 
@@ -619,10 +641,25 @@ def _prune_internal_snapshots(source_lvol):
         and s.target_replicated_snap_uuid
     ]
     keep = _keep_replicated_for(source_lvol)
-    if len(replicated_internal) <= keep:
-        return
-
     replicated_internal.sort(key=lambda s: s.created_at)
+
+    # A retention SCHEDULE, when the policy defines one, decides which older
+    # snapshots survive; without it retention stays the flat "newest N".
+    # Either way the newest `keep` are protected, because deleting a snapshot
+    # swap-merges its segments into the successor chained to it.
+    schedule = _retention_schedule_for(source_lvol)
+    if schedule:
+        retained_ts = snapshot_retention.select_retained(
+            [s.created_at for s in replicated_internal], schedule,
+            now=time.time(), always_keep_newest=keep)
+        candidates = [(i, s) for i, s in enumerate(replicated_internal)
+                      if s.created_at not in retained_ts]
+        if not candidates:
+            return
+    else:
+        if len(replicated_internal) <= keep:
+            return
+        candidates = list(enumerate(replicated_internal))[:-keep]
     # Keep the newest TWO replicated internal snapshots, not just one.
     #
     # A replicated snapshot holds only its own clusters; the rest of the data
@@ -639,7 +676,7 @@ def _prune_internal_snapshots(source_lvol):
     # for one snapshot while newer ones kept arriving, the predecessor was still
     # pruned and its segments were dropped instead of merged. So the chain is
     # verified per candidate below, and an unchained successor defers the prune.
-    for index, snap in enumerate(replicated_internal[:-keep]):
+    for index, snap in candidates:
         target_uuid = snap.target_replicated_snap_uuid
         try:
             db.get_snapshot_by_id(target_uuid)

@@ -661,7 +661,8 @@ class CLIWrapperBase:
         return replication_policy_controller.add_policy(
             args.cluster_id, args.name, args.target,
             interval_min=args.interval_min, mode=args.mode,
-            keep_replicated=args.keep_replicated)
+            keep_replicated=args.keep_replicated,
+            retention_schedule=args.retention_schedule)
 
     def cluster__replication_policy_list(self, sub_command, args):
         data = [{
@@ -671,6 +672,7 @@ class CLIWrapperBase:
             "Interval (min)": p.interval_min,
             "Mode": p.mode,
             "Keep": p.keep_replicated,
+            "Retention": p.retention_schedule or "-",
             "Status": p.status,
         } for p in replication_policy_controller.list_policies(args.cluster_id)]
         return _format_result(data, json=args.json)

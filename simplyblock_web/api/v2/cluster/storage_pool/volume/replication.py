@@ -107,13 +107,23 @@ def trigger(cluster: Cluster, pool: StoragePool, volume: Volume) -> Response:
 
 @api.post('/failover', name='clusters:storage-pools:volumes:replication:failover',
           status_code=204, responses={204: {"content": None}})
-def failover(cluster: Cluster, pool: StoragePool, volume: Volume) -> Response:
+def failover(cluster: Cluster, pool: StoragePool, volume: Volume,
+             generation: int = 0) -> Response:
     """Bring the volume up on the target cluster.
 
     The counterpart's id is read back from this volume's replication
     relationship, its connection paths from the target volume's `connect`.
+
+    ``generation`` selects WHICH retained point-in-time to come up on: 0 (the
+    default) is the newest, 1 the one before it, and so on through the
+    history a retention schedule keeps. Failing over to an older generation
+    is the recovery path for a logical corruption, which the newest copy has
+    faithfully replicated.
     """
-    result = lvol_controller.replicate_lvol_on_target_cluster(volume.get_id())
+    if generation < 0:
+        raise HTTPException(400, 'generation cannot be negative')
+    result = lvol_controller.replicate_lvol_on_target_cluster(
+        volume.get_id(), generation=generation)
     if isinstance(result, tuple):  # (False, error)
         raise HTTPException(500, str(result[1]))
     if not result:

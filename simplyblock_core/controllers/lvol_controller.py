@@ -3428,7 +3428,7 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
     return new_lvol, None
 
 
-def _last_replicated_target_snapshot(db_controller, lvol_id, cluster_id):
+def _last_replicated_target_snapshot(db_controller, lvol_id, cluster_id, generation=0):
     """Return the target-cluster copy of the most recent FULLY replicated
     snapshot of *lvol_id*, or None.
 
@@ -3461,6 +3461,18 @@ def _last_replicated_target_snapshot(db_controller, lvol_id, cluster_id):
         snaps.append(snap)
 
     snaps.sort(key=lambda x: x.created_at, reverse=True)
+    # generation 0 = newest replicated point-in-time (the default and the only
+    # behaviour before tiered retention existed). A higher generation walks
+    # BACK through the retained history, which is what a retention schedule is
+    # for: recovering to a point before a logical corruption that a
+    # minute-old copy would have replicated faithfully.
+    if generation:
+        if generation >= len(snaps):
+            logger.error(
+                f"Fail-over generation {generation} requested for {lvol_id} but only "
+                f"{len(snaps)} replicated point(s)-in-time exist")
+            return None
+        snaps = snaps[generation:]
     for snap in snaps:
         try:
             target_snap = db_controller.get_snapshot_by_id(snap.target_replicated_snap_uuid)
@@ -3540,7 +3552,7 @@ def _evict_stale_namespace(new_lvol, target_node):
 
 
 def _clone_from_last_replicated(db_controller, lvol_id, lvol, target_node, pool_uuid,
-                                cluster_id, attempts=3):
+                                cluster_id, attempts=3, generation=0):
     """Pick the last fully replicated target snapshot and clone from it ATOMICALLY.
 
     Selecting and then cloning as two unsynchronised steps loses the data: the
@@ -3561,9 +3573,12 @@ def _clone_from_last_replicated(db_controller, lvol_id, lvol, target_node, pool_
     Returns (new_lvol, snapshot_used, error).
     """
     for _ in range(attempts):
-        snapshot = _last_replicated_target_snapshot(db_controller, lvol_id, cluster_id)
+        snapshot = _last_replicated_target_snapshot(db_controller, lvol_id, cluster_id,
+                                                    generation=generation)
         if not snapshot:
-            return None, None, "No replicated snapshot on target yet"
+            return None, None, (
+                f"No replicated snapshot on target for generation {generation}"
+                if generation else "No replicated snapshot on target yet")
 
         with snapshot_controller.object_mutation_lock(snapshot.cluster_id, snapshot.uuid):
             # Re-read INSIDE the lock: retention may have removed or started
@@ -3624,7 +3639,7 @@ def resolve_replication_destination(db_controller, lvol, target_node, source_nod
     return target_cluster, ""
 
 
-def replicate_lvol_on_target_cluster(lvol_id):
+def replicate_lvol_on_target_cluster(lvol_id, generation=0):
     db_controller = DBController()
     try:
         lvol = db_controller.get_lvol_by_id(lvol_id)
@@ -3663,7 +3678,7 @@ def replicate_lvol_on_target_cluster(lvol_id):
 
     new_lvol, _snapshot, error = _clone_from_last_replicated(
         db_controller, lvol_id, lvol, target_node,
-        target_pool_uuid, source_node.cluster_id)
+        target_pool_uuid, source_node.cluster_id, generation=generation)
     if error:
         logger.error(f"Fail-over clone failed for lvol {lvol_id}: {error}")
         return False, error

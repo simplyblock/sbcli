@@ -16,6 +16,7 @@ from simplyblock_core import db_controller as db_module, utils
 from simplyblock_core.controllers import lvol_controller, snapshot_controller
 from simplyblock_core.models.lvol_model import LVolReplication
 from simplyblock_core.models.pool import Pool
+from simplyblock_core import snapshot_retention
 from simplyblock_core.models.replication import ReplicationPolicy, ReplicationTarget
 from simplyblock_core.models.snapshot import SnapShot
 
@@ -92,7 +93,8 @@ def remove_target(target_id):
 # Policies
 # --------------------------------------------------------------------------- #
 
-def add_policy(cluster_id, policy_name, target, interval_min=1, mode=None, keep_replicated=None):
+def add_policy(cluster_id, policy_name, target, interval_min=1, mode=None, keep_replicated=None,
+               retention_schedule=None):
     """Create a policy on *target* (id or name)."""
     db.get_cluster_by_id(cluster_id)
     try:
@@ -118,6 +120,15 @@ def add_policy(cluster_id, policy_name, target, interval_min=1, mode=None, keep_
         raise ReplicationConfigError(
             f"keep_replicated must be at least {ReplicationPolicy.MIN_KEEP_REPLICATED}")
 
+    if retention_schedule:
+        # Validate at ingress: an unparseable schedule silently falling back to
+        # flat retention would quietly discard the history the operator asked
+        # for, and they would only find out at fail-over.
+        try:
+            snapshot_retention.parse_schedule(retention_schedule)
+        except snapshot_retention.RetentionScheduleError as e:
+            raise ReplicationConfigError(f"invalid retention schedule: {e}")
+
     policy = ReplicationPolicy()
     policy.uuid = str(uuid_module.uuid4())
     policy.cluster_id = cluster_id
@@ -129,6 +140,8 @@ def add_policy(cluster_id, policy_name, target, interval_min=1, mode=None, keep_
         policy.mode = mode
     if keep_replicated is not None:
         policy.keep_replicated = keep_replicated
+    if retention_schedule is not None:
+        policy.retention_schedule = retention_schedule
     policy.status = ReplicationPolicy.STATUS_ACTIVE
     policy.write_to_db(db.kv_store)
     logger.info("Created replication policy %s on target %s (%s)",
