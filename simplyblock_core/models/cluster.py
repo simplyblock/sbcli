@@ -209,6 +209,14 @@ class Cluster(BaseModel):
     # Deploy-time only — set at cluster create/add, never toggled at runtime;
     # an existing cluster must be redeployed to gain the feature.
     enable_failure_domain: bool = False
+    # Inline CRC checksum validation for silent-data-error protection.
+    # Frozen at cluster create time; no upgrade path for existing clusters.
+    inline_checksum: bool = False
+    # Device guarantees 4K write atomicity despite a <4K logical block size
+    # (e.g. AWS NVMe, which is 512B but atomic at 4K). When set, alceml creation
+    # sends force_4k_atomic so the data plane skips its >=4K block-size gate for
+    # fallback-mode inline checksum. Frozen at cluster create time.
+    atomic_4k: bool = False
     snapshot_replication_target_cluster: str = ""
     snapshot_replication_target_pool: str = ""
     snapshot_replication_timeout: int = 60*10
