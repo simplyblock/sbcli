@@ -1317,6 +1317,13 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0, min_cntlid
                     "(cross-LVS namespaced lvol %s); skipping namespace add.",
                     "Primary" if is_primary else "Secondary",
                     snode.get_id(), lvol.nqn, lvol.get_id())
+                # The lvol is a deepcopy of the source: lvol_uuid/blobid still
+                # carry the source cluster's values. The bdev_lvol_clone just
+                # created has its own uuid/blobid — read them back so the caller
+                # can pass correct values to bdev_lvol_clone_register on HA peers.
+                actual = rpc_client.get_bdevs(f"{lvol.lvs_name}/{lvol.lvol_bdev}")
+                if actual:
+                    return actual[0], None
                 return {'uuid': lvol.lvol_uuid,
                         'driver_specific': {'lvol': {'blobid': lvol.blobid}}}, None
 
@@ -3120,13 +3127,40 @@ def replication_start(lvol_id, replication_cluster_id=None, mode=None, interval_
         if not replication_cluster_id:
             logger.error(f"Cluster: {snode.cluster_id} not replicated")
             return False
-        random_nodes = _get_next_3_nodes(replication_cluster_id, lvol.size)
-        for r_node in random_nodes:
-            if r_node.get_id() not in excluded_nodes:
-                logger.info(f"Replicating on node: {r_node.get_id()}")
-                lvol.replication_node_id = r_node.get_id()
-                lvol.write_to_db()
-                break
+
+        # Namespaced volumes sharing a subsystem must replicate to the SAME
+        # target node so their failover clones land on the same LVS. With
+        # separate nodes each PVC's snapshot ends up on a different LVStore;
+        # bdev_lvol_clone_register then fails cross-LVS and the whole group
+        # can't share a subsystem on the target. If any sibling already has a
+        # replication node, inherit it (verified online below).
+        if lvol.namespace:
+            for sibling in db_controller.get_lvols(snode.cluster_id):
+                if (sibling.nqn == lvol.nqn
+                        and sibling.get_id() != lvol.get_id()
+                        and sibling.replication_node_id):
+                    try:
+                        sib_node = db_controller.get_storage_node_by_id(
+                            sibling.replication_node_id)
+                        if sib_node.status == StorageNode.STATUS_ONLINE:
+                            logger.info(
+                                "Namespaced lvol %s: inheriting replication node %s "
+                                "from sibling %s to co-locate snapshots on the same LVS",
+                                lvol.get_id(), sib_node.get_id(), sibling.get_id())
+                            lvol.replication_node_id = sib_node.get_id()
+                            lvol.write_to_db()
+                    except KeyError:
+                        pass
+                    break
+
+        if not lvol.replication_node_id:
+            random_nodes = _get_next_3_nodes(replication_cluster_id, lvol.size)
+            for r_node in random_nodes:
+                if r_node.get_id() not in excluded_nodes:
+                    logger.info(f"Replicating on node: {r_node.get_id()}")
+                    lvol.replication_node_id = r_node.get_id()
+                    lvol.write_to_db()
+                    break
         if not lvol.replication_node_id:
             logger.error(f"Replication node not found for lvol: {lvol.get_id()}")
             return False
@@ -3488,10 +3522,7 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
                                              min_cntlid=_peer_cntlid, ns_uuid=_src_ns_uuid)
         if error:
             logger.error(error)
-            # remove lvol from primary
-            ret = delete_lvol_from_node(new_lvol, target_node)
-            if not ret:
-                logger.error("")
+            delete_lvol_from_node(new_lvol, target_node)
             db_controller.release_lvol_ns_slot(new_lvol)
             return None, error
 
