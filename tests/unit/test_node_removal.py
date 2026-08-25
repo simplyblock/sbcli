@@ -1321,6 +1321,11 @@ class TestDecommissionDevices(unittest.TestCase):
         self.assertIn(replacement.jm_device.get_id(), consumer.jm_ids)
         self.assertNotIn(removed.jm_device.get_id(), consumer.jm_ids)
         self.assertEqual(consumer.remote_jm_devices, [connected_new])
+        # The now-superseded connection to the removed node is torn down --
+        # jc_replace_jm only swaps the live JC membership, it doesn't detach
+        # the bdev/controller it swapped away from.
+        consumer.rpc_client().bdev_nvme_detach_controller.assert_called_once_with("remote_jm_n1")
+        self.assertFalse(any(rd.uuid == removed.jm_device.get_id() for rd in consumer.remote_jm_devices))
         consumer.write_to_db.assert_called()
 
     def test_name_old_is_whatever_the_consumer_currently_has_live_not_removeds_own_name(self):
@@ -1363,6 +1368,11 @@ class TestDecommissionDevices(unittest.TestCase):
         consumer.rpc_client().jc_replace_jm.assert_called_once_with(
             name_old="jm_A",
             replacements=[{"jm_vuid": 7, "name_new": "remote_jm_replacementn1"}])
+        # "jm_A" doesn't follow the normal {controller}n1 bdev-name convention
+        # (it's a legacy override-style name) -- the cleanup falls back to
+        # using it as-is rather than mis-stripping a trailing "n1" that isn't
+        # there.
+        consumer.rpc_client().bdev_nvme_detach_controller.assert_called_once_with("jm_A")
 
     def test_prefers_a_replacement_from_the_removed_nodes_own_failure_domain(self):
         # get_sorted_ha_jms ranks candidates by the CONSUMER's own domain
@@ -1413,6 +1423,7 @@ class TestDecommissionDevices(unittest.TestCase):
             consumer, jm_ids=[same_fd.jm_device.get_id()], only_node_id=same_fd.get_id())
         self.assertIn(same_fd.jm_device.get_id(), consumer.jm_ids)
         self.assertNotIn(other_fd.jm_device.get_id(), consumer.jm_ids)
+        consumer.rpc_client().bdev_nvme_detach_controller.assert_called_once_with("remote_jm_n1")
 
     def test_reusing_a_candidate_across_different_jm_vuids_is_not_avoided(self):
         # The new RPC explicitly allows the SAME name_new to cover multiple
@@ -1465,6 +1476,8 @@ class TestDecommissionDevices(unittest.TestCase):
             replacements=[{"jm_vuid": 2, "name_new": "remote_jm_replacementn1"}])
         self.assertIn(replacement.jm_device.get_id(), primary_a.jm_ids)
         self.assertIn(replacement.jm_device.get_id(), primary_b.jm_ids)
+        primary_a.rpc_client().bdev_nvme_detach_controller.assert_called_once_with("remote_jm_n1")
+        primary_b.rpc_client().bdev_nvme_detach_controller.assert_called_once_with("remote_jm_n1")
 
     def test_batches_own_and_hosted_jm_vuid_replacements_into_one_call(self):
         # A node that is BOTH a primary needing repair AND hosts another
@@ -1517,6 +1530,10 @@ class TestDecommissionDevices(unittest.TestCase):
         # through the loop (it's a live node in its own right), not by
         # host's call.
         self.assertIn(replacement.jm_device.get_id(), hosted_primary.jm_ids)
+        # ONE detach per node, even though host's call covered TWO jm_vuid
+        # targets -- both targets shared the same name_old (one physical
+        # bdev can back multiple local jm_vuids at once).
+        host.rpc_client().bdev_nvme_detach_controller.assert_called_once_with("remote_jm_n1")
 
     def test_no_candidate_leaves_slot_honestly_short(self):
         # get_sorted_ha_jms comes back empty (or every ranked candidate is
