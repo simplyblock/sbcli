@@ -262,7 +262,8 @@ def _prepare_cutover(task, lvol, src_node, tgt_node):
         db, lvol, tgt_node, src_node)
 
     new_lvol, snapshot, error = lvol_controller._clone_from_last_replicated(
-        db, lvol.get_id(), lvol, tgt_node, target_pool_uuid, src_node.cluster_id)
+        db, lvol.get_id(), lvol, tgt_node, target_pool_uuid, src_node.cluster_id,
+        for_migration=True)
     if error:
         return f"cutover clone failed: {error}"
 

@@ -3388,7 +3388,8 @@ def replication_stop(lvol_id, delete=False, from_policy=False):
     return True
 
 
-def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snapshot):
+def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snapshot,
+                              for_migration=False):
     """Create a writable clone of *lvol* on *target_node* (primary + online HA
     peers) from *snapshot*, preserving the original NQN/ns_id.
 
@@ -3478,10 +3479,12 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
         random.randint(6001, 6500),  # tertiary
     ]
 
-    # Preserve the source lvol's UUID as the NVMe namespace UUID so the kernel
-    # can recognise target paths as belonging to the same multipath namespace.
-    # new_lvol.uuid is a fresh DB key and must NOT be used as the namespace UUID.
-    _src_ns_uuid = lvol.uuid
+    # Migration: preserve the source UUID as the NVMe namespace UUID so the kernel
+    # can merge source and target paths into the same multipath namespace during
+    # the preconnect phase (ANA flip requires matching NSUUID on both paths).
+    # Failover: the source is gone — use the clone's own UUID so it appears as
+    # nvme-uuid.<clone-uuid> in /dev/disk/by-id, consistent with standalone volumes.
+    _src_ns_uuid = lvol.uuid if for_migration else new_lvol.uuid
 
     # For migration/failover, preserve the source nsid so the kernel can
     # match target paths to source paths under the same NQN. new_lvol is a
@@ -3616,7 +3619,7 @@ def _evict_stale_namespace(new_lvol, target_node):
 
 
 def _clone_from_last_replicated(db_controller, lvol_id, lvol, target_node, pool_uuid,
-                                cluster_id, attempts=3):
+                                cluster_id, attempts=3, for_migration=False):
     """Pick the last fully replicated target snapshot and clone from it ATOMICALLY.
 
     Selecting and then cloning as two unsynchronised steps loses the data: the
@@ -3657,7 +3660,8 @@ def _clone_from_last_replicated(db_controller, lvol_id, lvol, target_node, pool_
                     f"could take its lock; re-selecting")
                 continue
             new_lvol, error = _create_target_lvol_clone(
-                db_controller, lvol, target_node, pool_uuid, snap)
+                db_controller, lvol, target_node, pool_uuid, snap,
+                for_migration=for_migration)
             return new_lvol, snap, error
 
     return None, None, "No stable replicated snapshot to clone from"
