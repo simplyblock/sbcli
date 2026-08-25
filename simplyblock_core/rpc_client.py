@@ -1655,6 +1655,21 @@ class RPCClient:
         """
         return self._request2("jc_set_dual_node", {"enable": bool(enable)})
 
+    def bdev_lvol_snapshot_group(self, lvs_name, snapshots):
+        """One crash-consistent snapshot per consistency-group member.
+
+        ``snapshots`` is a list of {"lvol_name": "LVS_1/LVOL_5",
+        "snapshot_name": "SNAP_123"}; all members must be in ``lvs_name``.
+        IO on every member is frozen before the first snapshot and released
+        after the last; a mid-sequence failure unfreezes first and then
+        garbage-collects the snapshots already taken (SPDK side).
+        Returns [{"lvol_name", "snapshot_name", "uuid"}, ...] or False.
+        """
+        return self._request2("bdev_lvol_snapshot_group", {
+            "lvs_name": lvs_name,
+            "snapshots": snapshots,
+        })
+
     def jc_suspend_compression(self, jm_vuid, suspend=False):
         params = {
             "jm_vuid": jm_vuid,

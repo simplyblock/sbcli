@@ -94,7 +94,7 @@ def remove_target(target_id):
 # --------------------------------------------------------------------------- #
 
 def add_policy(cluster_id, policy_name, target, interval_min=1, mode=None, keep_replicated=None,
-               retention_schedule=None):
+               retention_schedule=None, consistency_group=False):
     """Create a policy on *target* (id or name)."""
     db.get_cluster_by_id(cluster_id)
     try:
@@ -142,8 +142,13 @@ def add_policy(cluster_id, policy_name, target, interval_min=1, mode=None, keep_
         policy.keep_replicated = keep_replicated
     if retention_schedule is not None:
         policy.retention_schedule = retention_schedule
+    policy.consistency_group = bool(consistency_group)
     policy.status = ReplicationPolicy.STATUS_ACTIVE
     policy.write_to_db(db.kv_store)
+    if policy.consistency_group:
+        # Auto-created with the policy, auto-deleted with it (requirement 2).
+        from simplyblock_core.controllers import consistency_group_controller
+        consistency_group_controller.create_group_for_policy(policy)
     logger.info("Created replication policy %s on target %s (%s)",
                 policy_name, tgt.target_name, policy.get_id())
     return policy.get_id()
@@ -161,6 +166,9 @@ def remove_policy(policy_id):
         raise ReplicationConfigError(
             f"Replication policy {policy.policy_name} is followed by "
             f"{len(users)} volume(s); detach them first")
+    if getattr(policy, "consistency_group", False):
+        from simplyblock_core.controllers import consistency_group_controller
+        consistency_group_controller.delete_group_for_policy(policy.get_id())
     policy.remove(db.kv_store)
     logger.info("Removed replication policy %s", policy_id)
     return True
@@ -218,6 +226,12 @@ def attach_policy(lvol_id, policy):
         detach_policy(lvol_id)
         lvol = db.get_lvol_by_id(lvol_id)
 
+    if getattr(pol, "consistency_group", False):
+        # Requirement 1: all members share one LVS. Checked BEFORE any state
+        # is written, so a failed attachment leaves the volume untouched.
+        from simplyblock_core.controllers import consistency_group_controller
+        consistency_group_controller.add_member(pol, lvol)
+
     lvol.replication_policy_id = pol.get_id()
     lvol.write_to_db()
     ret = lvol_controller.replication_start(
@@ -232,6 +246,9 @@ def attach_policy(lvol_id, policy):
         lvol = db.get_lvol_by_id(lvol_id)
         lvol.replication_policy_id = ""
         lvol.write_to_db()
+        if getattr(pol, "consistency_group", False):
+            from simplyblock_core.controllers import consistency_group_controller
+            consistency_group_controller.remove_member(pol.get_id(), lvol_id)
         raise ReplicationConfigError(
             f"Could not start replication of {lvol_id} to target {target.target_name}")
     logger.info("Volume %s now follows policy %s (target %s)",
@@ -257,8 +274,18 @@ def detach_policy(lvol_id):
             f"Volume {lvol_id} has a cutover in flight; wait for it to finish "
             f"before detaching the replication policy")
 
+    detached_policy_id = lvol.replication_policy_id
     lvol.replication_policy_id = ""
     lvol.write_to_db()
+
+    if detached_policy_id:
+        try:
+            pol = db.get_replication_policy_by_id(detached_policy_id)
+        except KeyError:
+            pol = None
+        if pol is not None and getattr(pol, "consistency_group", False):
+            from simplyblock_core.controllers import consistency_group_controller
+            consistency_group_controller.remove_member(pol.get_id(), lvol_id)
 
     # Stops streaming and cancels the non-DONE FN_SNAPSHOT_REPLICATION tasks.
     lvol_controller.replication_stop(lvol_id, from_policy=True)
@@ -366,7 +393,8 @@ def _failover_volumes(volumes, what):
         elif isinstance(ret, dict):
             results.append({"lvol_id": lvol_id, "status": "failed_over",
                             "target_lvol_id": ret.get("lvol_id", ""),
-                            "connection_strings": ret.get("connection_strings", [])})
+                            "connection_strings": ret.get("connection_strings", []),
+                            "warnings": ret.get("warnings", [])})
         else:
             results.append({"lvol_id": lvol_id, "status": "failed_over", "target_lvol_id": str(ret)})
     return results

@@ -20,7 +20,7 @@ from simplyblock_core.models.port_stat import PortStat
 from simplyblock_core.models.backup import Backup, BackupChainLock, BackupPolicy, BackupPolicyAttachment
 from simplyblock_core.models.lvol_migration import LVolMigration
 from simplyblock_core.models.lvol_migration_group import LVolMigrationGroup
-from simplyblock_core.models.replication import ReplicationPolicy, ReplicationTarget
+from simplyblock_core.models.replication import ConsistencyGroup, ReplicationPolicy, ReplicationTarget
 from simplyblock_core.models.qos import QOSClass
 from simplyblock_core.models.snapshot import SnapShot, SnapShotMini
 from simplyblock_core.models.stats import DeviceStatObject, NodeStatObject, ClusterStatObject, LVolStatObject, \
@@ -1460,6 +1460,27 @@ class DBController(metaclass=Singleton):
             return self.get_replication_policy_by_id(lvol.replication_policy_id)
         except KeyError:
             return None
+
+    def get_consistency_groups(self, cluster_id: Optional[str] = None) -> List[ConsistencyGroup]:
+        prefix = cluster_id if cluster_id else " "
+        return ConsistencyGroup().read_from_db(self.kv_store, id=prefix)
+
+    def get_consistency_group_by_id(self, group_id: str) -> ConsistencyGroup:
+        if not group_id:
+            raise KeyError('ConsistencyGroup lookup with a blank id')
+        wanted = group_id.split('/')[-1]
+        group = single_or_none(g for g in self.get_consistency_groups() if g.uuid == wanted)
+        if group is None:
+            raise KeyError(f'ConsistencyGroup {group_id} not found')
+        return group
+
+    def get_consistency_group_for_policy(self, policy_id: str) -> Optional[ConsistencyGroup]:
+        wanted = policy_id.split('/')[-1] if policy_id else ""
+        if not wanted:
+            return None
+        return single_or_none(
+            g for g in self.get_consistency_groups()
+            if g.policy_id.split('/')[-1] == wanted)
 
     def get_lvols_by_replication_policy(self, policy_id: str) -> List[LVol]:
         wanted = policy_id.split('/')[-1] if policy_id else ""

@@ -427,6 +427,28 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
             f"max_namespace_per_subsys={max_namespace_per_subsys} exceeds the "
             f"hard limit of {constants.MAX_NAMESPACES_PER_SUBSYSTEM} "
             f"namespaces per subsystem")
+    if replication_policy:
+        # A consistency-group policy pins placement: every member must live in
+        # ONE LVS, so a volume created under such a policy is forced onto the
+        # group's node BEFORE placement runs (requirement: pin to host before
+        # creation). An explicit conflicting --host is an error, not a
+        # preference fight.
+        from simplyblock_core.controllers import replication_policy_controller as _rpc
+        from simplyblock_core.controllers import consistency_group_controller as _cgc
+        try:
+            _policy = _rpc._resolve_policy(replication_policy)
+        except KeyError:
+            return False, f"Replication policy not found: {replication_policy}"
+        if getattr(_policy, "consistency_group", False):
+            pinned = _cgc.pinned_node_for_policy(_policy)
+            if pinned:
+                if host_id_or_name and host_id_or_name != pinned:
+                    return False, (
+                        f"Volume must be created on node {pinned} — its "
+                        f"replication policy {_policy.policy_name} is a "
+                        f"consistency group pinned to that node's LVS")
+                host_id_or_name = pinned
+
     host_node = None
     if host_id_or_name:
         try:
@@ -3735,11 +3757,30 @@ def replicate_lvol_on_target_cluster(lvol_id, generation=0):
     else:
         connection_strings = [c.model_dump(by_alias=True) for c in conn]
 
+    # Requirement 4 (consistency groups): a generation older than the current
+    # membership must SAY so — which current members the chosen point-in-time
+    # does not contain (late joiners), and which contained volumes are no
+    # longer members. Logged AND returned, so CLI and API callers surface it.
+    warnings = []
+    if _snapshot is not None:
+        try:
+            from simplyblock_core.controllers import consistency_group_controller
+            # The clone was made from the TARGET copy; group provenance lives
+            # on the SOURCE snapshot record it replicated from. Both carry it,
+            # so read whichever the selector handed us.
+            warnings = consistency_group_controller.warnings_for_snapshot(
+                lvol, _snapshot)
+        except Exception as e:
+            logger.warning("Group-membership warning computation failed: %s", e)
+        for w in warnings:
+            logger.warning("Fail-over of %s: %s", lvol_id, w)
+
     return {
         "lvol_id": new_lvol.uuid,
         "nqn": new_lvol.nqn,
         "ns_id": new_lvol.ns_id,
         "connection_strings": connection_strings,
+        "warnings": warnings,
     }
 
 

@@ -918,6 +918,11 @@ def process_snap_replicate_finish(task, snapshot):
     new_snapshot.blobid = remote_lv.blobid
     new_snapshot.created_at = int(time.time())
     new_snapshot.status = SnapShot.STATUS_ONLINE
+    # Consistency-group provenance travels with the copy: the fail-over
+    # generation selector returns the TARGET record, and requirement 4's
+    # membership warnings are computed from (group_id, group_seq) on it.
+    new_snapshot.group_id = getattr(snapshot, "group_id", "")
+    new_snapshot.group_seq = getattr(snapshot, "group_seq", 0)
     snapshot.instances.append(new_snapshot)
     if not replicate_as_snap_instance:
         if replicate_to_source:

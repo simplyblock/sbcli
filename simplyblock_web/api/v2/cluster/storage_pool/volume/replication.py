@@ -2,6 +2,7 @@ from typing import List, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from simplyblock_core.controllers import lvol_controller, replication_policy_controller
@@ -128,6 +129,13 @@ def failover(cluster: Cluster, pool: StoragePool, volume: Volume,
         raise HTTPException(500, str(result[1]))
     if not result:
         raise HTTPException(500, 'Failed to fail the volume over to the target cluster')
+
+    # Consistency groups: an older generation may not match current
+    # membership; the operator must SEE that, so warnings turn the empty 204
+    # into a 200 with a body (requirement: API response, not only a log).
+    if isinstance(result, dict) and result.get("warnings"):
+        return JSONResponse(status_code=200,
+                            content={"warnings": result["warnings"]})
 
     return Response(status_code=204)
 
