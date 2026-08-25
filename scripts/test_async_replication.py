@@ -1557,17 +1557,17 @@ def test_case_5(meta):
 
     print("Bringing the target node back...")
     sn_bring_back(mgmt_ip, key_path, victim)
+    recovery_ts = time.time()
     wait_replication_caught_up(mgmt_ip, key_path, lvols)
+    # See case 6: replicated_count is a retained count, not a progress
+    # counter. Require a post-recovery point-in-time on the target instead.
+    wait_data_replicated(mgmt_ip, key_path, lvols, recovery_ts)
     after = _replication_progress(mgmt_ip, key_path, lvols)
-    print(f"  replicated_count after recovery={after}")
+    print(f"  replicated_count after recovery={after} (retained, not cumulative)")
 
     stop_fio(client_ip, key_path)
     errors = fio_error_count(client_ip, key_path)
     cleanup_client(client_ip, key_path, mounts)
-    if after <= during:
-        raise RuntimeError(
-            f"FAIL: replication did not resume after the target node returned "
-            f"(during={during}, after={after})")
     if errors:
         raise RuntimeError(f"FAIL: fio reported {errors} errors during the target-node outage")
     print("CASE 5 PASSED: target-node outage survived, replication resumed.")
@@ -1615,16 +1615,21 @@ def test_case_6(meta):
 
     print("Bringing the primary back...")
     sn_bring_back(mgmt_ip, key_path, primary)
+    recovery_ts = time.time()
     wait_replication_caught_up(mgmt_ip, key_path, lvols)
+    # Resumption is proven by a point-in-time created AFTER the primary
+    # returned reaching the target -- not by replicated_count growing.
+    # That counter tracks RETAINED replicated snapshots, and retention keeps
+    # only the newest generations, so it is bounded and routinely falls after
+    # a burst: run 20260825_105453 read during=13 / after=10 while
+    # replication was working perfectly.
+    wait_data_replicated(mgmt_ip, key_path, lvols, recovery_ts)
     after = _replication_progress(mgmt_ip, key_path, lvols)
-    print(f"  replicated_count after recovery={after}")
+    print(f"  replicated_count after recovery={after} (retained, not cumulative)")
 
     stop_fio(client_ip, key_path)
     errors = fio_error_count(client_ip, key_path)
     cleanup_client(client_ip, key_path, mounts)
-    if after <= during:
-        raise RuntimeError(f"FAIL: replication did not resume after the primary returned "
-                           f"(during={during}, after={after})")
     if errors:
         raise RuntimeError(f"FAIL: fio reported {errors} errors during the primary outage")
     print("CASE 6 PASSED: source-primary outage survived, replication continued and resumed.")

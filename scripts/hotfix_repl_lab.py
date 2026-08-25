@@ -61,6 +61,12 @@ SHARED = {
     # dependency alongside the file that needs it.
     "simplyblock_core/controllers/ops_gate.py": "controllers/ops_gate.py",
     "simplyblock_core/controllers/tasks_controller.py": "controllers/tasks_controller.py",
+    # The JC dual-node flag lives here: apply_jc_dual_node() is called on
+    # node add AND on every bring-up, and case 6 restarts a node mid-run --
+    # a restarted node comes back with the flag off unless the CP re-applies
+    # it, which is exactly when the survivor would abort.
+    "simplyblock_core/storage_node_ops.py": "storage_node_ops.py",
+    "simplyblock_core/rpc_client.py": "rpc_client.py",
 }
 #: service -> its own module (mounted on top of the shared set)
 SERVICES = {
