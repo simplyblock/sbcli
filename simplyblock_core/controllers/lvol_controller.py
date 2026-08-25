@@ -1692,6 +1692,24 @@ def _remove_lvol_subsys_from_node(lvol, rpc_client):
             break
 
     if not subsystem or len(subsystem["namespaces"]) == 0:
+        # SHARED subsystems: delete-on-empty is only safe when no other live
+        # volume claims this NQN. With namespaced volumes the subsystem is
+        # legitimately empty in the WINDOW between one member's teardown and
+        # the next member's add -- and a stuck in_deletion member's retry
+        # loop observes that window sooner or later. Run 20260825_224221:
+        # 8 of 20 namespaced fail-overs landed, then a looping rollback
+        # record deleted the shared subsystem on the HA peer and every
+        # following member's add_ns died -32602 on a missing subsystem.
+        db_controller = DBController()
+        others = [x for x in db_controller.get_lvols_by_node_id(lvol.node_id)
+                  if x.nqn == lvol.nqn and x.get_id() != lvol.get_id()
+                  and x.status not in (LVol.STATUS_DELETED,)
+                  and not getattr(x, "deleted", False)]
+        if others:
+            logger.info(
+                f"Leaving subsystem {lvol.nqn} in place: {len(others)} other "
+                f"volume(s) still claim it (shared/namespaced subsystem)")
+            return True
         logger.info(f"Removing subsystem {lvol.nqn}")
         return bool(rpc_client.subsystem_delete(lvol.nqn))
 

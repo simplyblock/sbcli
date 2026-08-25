@@ -107,12 +107,14 @@ REPLICATION = {"source": "src", "target": "tgt", "timeout": 3600}
 # parallel reads, spdk R26.3 bdd97c1d8/ce876a169) exist only from the
 # 2026-08-22 build onward, and ultra:main-latest's manifest list has a live
 # race that leaves its amd64 entry pointing at the PREVIOUS build (observed
-# 2026-08-17, -21 and -22). This digest = main-2a03661a-amd64, 2026-08-24 --
+# 2026-08-17, -21 and -22). This digest = main-d91ff03a-amd64, 2026-08-25:
+# the first ultra build FROM spdk-core:master-latest (spdk master = R26.3
+# merged + the ANA-transition change reverted). Previous pin --
 # the first build carrying the promotion-window ANA-transition fix
 # (spdk R26.3 554c80f11), verified built FROM spdk-core:R26.3-latest
 # whose manifest was created 18:41:57, before this ultra build started.
 SPDK_IMAGE = ("public.ecr.aws/simply-block/ultra@"
-              "sha256:961410aefddaa615d4d1dfe1b8cc7ce27922d9a06ff924296f669c953e742bef")
+              "sha256:a3854cd445a6c356db26cb51f30b21e33880ce085f6f04a27715fc21165aeed1")
 
 SN_COUNT = sum(c["nodes"] for c in CLUSTERS)
 SBCTL = "sudo /usr/local/bin/sbctl"
