@@ -421,6 +421,18 @@ def _check_sec_node_hublvol(node: StorageNode, auto_fix=False, primary_node_id=N
                 if (primary_node.active_rdma and iface.trtype == "RDMA") or                    (not primary_node.active_rdma and primary_node.active_tcp
                         and iface.trtype == "TCP"):
                     expected_ips.add(iface.ip4_address)
+            # Tertiary nodes connect to both primary AND secondary; include
+            # secondary NIPs so a missing secondary path is detected.
+            if is_sec2 and primary_node.secondary_node_id:
+                try:
+                    _sec1 = db_controller.get_storage_node_by_id(
+                        primary_node.secondary_node_id)
+                    for iface in _sec1.data_nics:
+                        if (_sec1.active_rdma and iface.trtype == "RDMA") or                            (not _sec1.active_rdma and _sec1.active_tcp
+                                and iface.trtype == "TCP"):
+                            expected_ips.add(iface.ip4_address)
+                except Exception:
+                    pass
             missing_ips = expected_ips - attached_ips
             if missing_ips:
                 logger.info(

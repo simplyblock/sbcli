@@ -166,6 +166,31 @@ def task_runner(task: JobSchedule):
                 return _finalize(task, False, err)
             params = task.function_params
 
+        # Wait for the operator to signal that target NVMe paths are connected
+        # (operator calls POST .../replication/cutover-proceed after its preconnect
+        # Job succeeds). REPL_CUTOVER_PROCEED_TIMEOUT_SEC is the safety fallback
+        # so cutover proceeds even if the operator is unavailable.
+        replication_id = params.get("replication_id")
+        if replication_id:
+            try:
+                rep = db.get_lvol_replication_by_id(replication_id)
+                if not rep.cutover_proceed:
+                    if "cutover_proceed_timeout" not in params:
+                        params["cutover_proceed_timeout"] = (
+                            int(time.time()) + constants.REPL_CUTOVER_PROCEED_TIMEOUT_SEC)
+                        task.write_to_db(db.kv_store)
+                    if int(time.time()) < params["cutover_proceed_timeout"]:
+                        task.function_result = "cutover_pending: waiting for preconnect signal"
+                        task.status = JobSchedule.STATUS_SUSPENDED
+                        task.write_to_db(db.kv_store)
+                        return False
+                    logger.warning(
+                        "cutover proceed timeout for replication %s; proceeding without signal",
+                        replication_id)
+            except KeyError:
+                logger.warning(
+                    "replication record %s not found; proceeding with cutover", replication_id)
+
         try:
             ok, err = replication_final_step.run_cutover(
                 src_node, tgt_node, lvol,
@@ -237,7 +262,8 @@ def _prepare_cutover(task, lvol, src_node, tgt_node):
         db, lvol, tgt_node, src_node)
 
     new_lvol, snapshot, error = lvol_controller._clone_from_last_replicated(
-        db, lvol.get_id(), lvol, tgt_node, target_pool_uuid, src_node.cluster_id)
+        db, lvol.get_id(), lvol, tgt_node, target_pool_uuid, src_node.cluster_id,
+        for_migration=True)
     if error:
         return f"cutover clone failed: {error}"
 

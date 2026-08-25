@@ -626,12 +626,15 @@ class ReplicationRelationshipDTO(BaseModel):
     target_lvol_id: util.OptionalUUID
     source_cluster_id: util.OptionalUUID
     target_cluster_id: util.OptionalUUID
+    target_pool_id: util.OptionalUUID = None
     mode: ReplicationMode
     state: ReplicationState
     direction: ReplicationDirection
     target_nqn: str
     target_ns_id: int
     is_source: bool
+    active: Optional[str] = None
+    active_lvol_id: util.OptionalUUID = None
 
 
 class FailoverResultDTO(BaseModel):

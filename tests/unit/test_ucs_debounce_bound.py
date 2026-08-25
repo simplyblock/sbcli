@@ -17,7 +17,7 @@ passes slow in the first place.
 
 import threading
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from simplyblock_core.services import storage_node_monitor as monitor
 

@@ -359,6 +359,24 @@ def _failover_volumes(volumes, what):
     return results
 
 
+def set_cutover_proceed(lvol_id):
+    """Signal that the operator has connected the target NVMe paths.
+
+    Finds the cutover_pending LVolReplication for *lvol_id* (source side) and
+    sets cutover_proceed = True so the task runner advances past the wait.
+
+    Returns the replication ID on success, raises KeyError when no matching
+    cutover_pending record is found.
+    """
+    rep = _active_relationship(lvol_id)
+    if rep is None or rep.state != LVolReplication.STATE_CUTOVER_PENDING:
+        raise KeyError(
+            f"No cutover_pending replication found for volume {lvol_id}")
+    rep.cutover_proceed = True
+    rep.write_to_db(db.kv_store)
+    return rep.get_id()
+
+
 def get_relationship(lvol_id):
     """The replication relationship of *lvol_id*, source or target side.
 
@@ -387,6 +405,9 @@ def get_relationship(lvol_id):
             "target_lvol_id": target_id,
             "source_cluster_id": rep.source_cluster_id,
             "target_cluster_id": rep.target_cluster_id,
+            # Pool where the target volume lives — needed by the CSI driver to
+            # build the /connect URL when redirecting after delete_source.
+            "target_pool_id": getattr(rep.target_lvol, "pool_uuid", "") if rep.target_lvol else "",
             "mode": rep.mode,
             "state": rep.state,
             "direction": rep.direction,

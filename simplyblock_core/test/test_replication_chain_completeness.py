@@ -263,3 +263,71 @@ def test_no_backward_task_for_a_policy_managed_clone():
     assert gate in src, "the to-source enqueue must be gated on no forward policy"
     assert src.index(gate) < src.index("replicate_to_source=True"), \
         "the gate must guard the to-source enqueue"
+
+
+# --- fail-back cutover: the preserved identity must evict the stale ns ------
+
+
+class _EvictRPC:
+    def __init__(self, namespaces):
+        self.removed = []
+        self._ns = namespaces
+
+    def subsystem_get(self, nqn):
+        return [{"nqn": nqn, "namespaces": self._ns}]
+
+    def nvmf_subsystem_remove_ns(self, nqn, nsid):
+        self.removed.append((nqn, nsid))
+        return True
+
+
+class _EvictNode:
+    def __init__(self, rpc):
+        self._rpc = rpc
+
+    def get_id(self):
+        return "NODE_R"
+
+    def rpc_client(self):
+        return self._rpc
+
+
+class _CloneLvol:
+    nqn = "nqn.test:lvol:ORIG"
+    ns_id = 7
+    top_bdev = "LVS_1/LVOL_CLONE"
+
+
+def test_failback_evicts_the_recovered_sources_stale_namespace():
+    """2026-08-24: on a recovered source the preserved-NQN subsystem still held
+    the ORIGINAL volume's namespace at the clone's nsid; add_ns failed -32602
+    on every retry and 5/5 fail-back cutovers died on max retry."""
+    from simplyblock_core.controllers import lvol_controller as lc
+    rpc = _EvictRPC([{"nsid": 7, "bdev_name": "LVS_1/LVOL_ORIG"}])
+    lc._evict_stale_namespace(_CloneLvol(), _EvictNode(rpc))
+    assert rpc.removed == [("nqn.test:lvol:ORIG", 7)]
+
+
+def test_failback_eviction_is_idempotent_for_its_own_namespace():
+    from simplyblock_core.controllers import lvol_controller as lc
+    rpc = _EvictRPC([{"nsid": 7, "bdev_name": "LVS_1/LVOL_CLONE"}])
+    lc._evict_stale_namespace(_CloneLvol(), _EvictNode(rpc))
+    assert rpc.removed == []
+
+
+def test_failback_eviction_leaves_other_namespaces_alone():
+    from simplyblock_core.controllers import lvol_controller as lc
+    rpc = _EvictRPC([{"nsid": 3, "bdev_name": "LVS_1/OTHER"}])
+    lc._evict_stale_namespace(_CloneLvol(), _EvictNode(rpc))
+    assert rpc.removed == []
+
+
+def test_failback_eviction_tolerates_a_missing_subsystem():
+    from simplyblock_core.controllers import lvol_controller as lc
+
+    class _NoSubsysRPC(_EvictRPC):
+        def subsystem_get(self, nqn):
+            return None
+    rpc = _NoSubsysRPC([])
+    lc._evict_stale_namespace(_CloneLvol(), _EvictNode(rpc))   # must not raise
+    assert rpc.removed == []
