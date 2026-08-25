@@ -4706,6 +4706,30 @@ def _decommission_node_devices(removed_node: StorageNode):
                             f"[REMOVAL] {node.get_id()}: jc_replace_jm failed replacing "
                             f"{name_old} ({replacements}): {e}")
 
+                if replaced:
+                    # name_old is now unused by any local JC instance -- but
+                    # jc_replace_jm only swaps the live membership pointer, it
+                    # never tears down the bdev/controller it swapped AWAY
+                    # from, and _connect_to_remote_jm_devs' delta mode above
+                    # only ever carries a different-owner entry over
+                    # untouched, never drops it. Left alone this dangles
+                    # forever, pointing at a node that no longer exists:
+                    # sbctl cluster check walks remote_jm_devices and flags
+                    # it as a failed bdev probe, and the underlying NVMe-oF
+                    # session itself was observed staying connected for
+                    # ~15+ minutes until some unrelated SPDK-side dead-peer
+                    # timeout eventually noticed (found live 2026-08-25).
+                    # Clean up both sides here instead of waiting for that.
+                    old_controller_name = name_old[:-2] if name_old.endswith("n1") else name_old
+                    try:
+                        node.rpc_client().bdev_nvme_detach_controller(old_controller_name)
+                    except Exception as de:
+                        logger.warning(
+                            f"Failed to detach superseded controller "
+                            f"{old_controller_name} on {node.get_id()}: {de}")
+                    node.remote_jm_devices = [
+                        rd for rd in (node.remote_jm_devices or []) if rd.uuid != removed_jm_id]
+
                 if not replaced:
                     for controller_name, pre_existing in connected_controllers:
                         if not pre_existing:
