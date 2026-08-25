@@ -48,13 +48,14 @@ def _cluster(ha_type="ha", npcs=1, ndcs=2, ft=1, mode="docker",
 def _node(node_id, status=StorageNode.STATUS_ONLINE, lvstore="",
           secondary_id="", tertiary_id="",
           stack_secondary="", stack_tertiary="", n_devices=0, with_jm=False,
-          failure_domain=-1, mgmt_ip=None):
+          failure_domain=-1, mgmt_ip=None, jm_vuid=0):
     n = MagicMock(spec=StorageNode)
     n.uuid = node_id
     n.get_id = MagicMock(return_value=node_id)
     n.status = status
     n.cluster_id = "cluster-1"
     n.lvstore = lvstore
+    n.jm_vuid = jm_vuid
     n.lvstore_stack = [{"type": "bdev_distr", "name": "distrib_1"},
                        {"type": "bdev_raid", "name": "raid_1"},
                        {"type": "bdev_lvstore", "name": lvstore or "LVS"}]
@@ -1276,59 +1277,12 @@ class TestDecommissionDevices(unittest.TestCase):
         # Baseline: the replacement is connected under its OWN natural name
         # (no override), and jc_replace_jm is told to swap consumer's live
         # JC member from whatever it currently is (name_old, taken from
-        # consumer's own remote_jm_devices record) to that new name.
+        # consumer's own remote_jm_devices record) to that new name, via a
+        # single-entry replacements list keyed by consumer's own jm_vuid.
         cl = _cluster()
         removed = _node("n1", n_devices=0, with_jm=True)
         removed.jm_ids = []
-        consumer = _node("consumer", n_devices=0, with_jm=True)
-        consumer.jm_ids = [removed.jm_device.get_id()]
-        live_old = RemoteJMDevice()
-        live_old.uuid = removed.jm_device.get_id()
-        live_old.remote_bdev = "remote_jm_n1n1"
-        consumer.remote_jm_devices = [live_old]
-        replacement = _node("replacement", n_devices=0, with_jm=True)
-        replacement.jm_ids = []
-        replacement.jm_device.jm_bdev = "jm_replacement"
-        db = FakeDB(cl, [removed, consumer, replacement])
-        db.get_jm_device_by_id = MagicMock(side_effect=lambda jid: {
-            removed.jm_device.get_id(): removed.jm_device,
-            replacement.jm_device.get_id(): replacement.jm_device,
-        }[jid])
-        dc = MagicMock()
-        connected_new = RemoteJMDevice()
-        connected_new.uuid = replacement.jm_device.get_id()
-        connected_new.remote_bdev = "remote_jm_replacementn1"
-        with patch.object(storage_node_ops, "DBController", return_value=db), \
-             patch.object(storage_node_ops, "device_controller", dc), \
-             patch.object(storage_node_ops, "get_sorted_ha_jms",
-                          return_value=[replacement.jm_device.get_id()]), \
-             patch.object(storage_node_ops, "_connect_to_remote_jm_devs",
-                          return_value=[connected_new]) as connect_mock:
-            ret = storage_node_ops._decommission_node_devices(removed)
-
-        self.assertTrue(ret)
-        connect_mock.assert_called_once_with(
-            consumer, jm_ids=[replacement.jm_device.get_id()],
-            only_node_id=replacement.get_id())
-        consumer.rpc_client().jc_replace_jm.assert_called_once_with(
-            name_old="remote_jm_n1n1", name_new="remote_jm_replacementn1")
-        self.assertIn(replacement.jm_device.get_id(), consumer.jm_ids)
-        self.assertNotIn(removed.jm_device.get_id(), consumer.jm_ids)
-        self.assertEqual(consumer.remote_jm_devices, [connected_new])
-        consumer.write_to_db.assert_called()
-
-    def test_requests_the_expanded_candidate_pool_from_get_sorted_ha_jms(self):
-        # TEMPORARY (see _JC_REPLACE_CANDIDATE_POOL_LIMIT): this retry loop is
-        # replacing one already-selected member, not building the redundancy
-        # set from scratch, so it must ask get_sorted_ha_jms for more than
-        # the normal-sized target -- otherwise a candidate the node already
-        # holds wastes one of the few slots get_sorted_ha_jms would otherwise
-        # return, starving the retry loop of real alternatives (found live
-        # 2026-08-24: only 2 of ~5 available candidates were ever offered).
-        cl = _cluster()
-        removed = _node("n1", n_devices=0, with_jm=True)
-        removed.jm_ids = []
-        consumer = _node("consumer", n_devices=0, with_jm=True)
+        consumer = _node("consumer", n_devices=0, with_jm=True, jm_vuid=7)
         consumer.jm_ids = [removed.jm_device.get_id()]
         live_old = RemoteJMDevice()
         live_old.uuid = removed.jm_device.get_id()
@@ -1351,11 +1305,23 @@ class TestDecommissionDevices(unittest.TestCase):
              patch.object(storage_node_ops, "get_sorted_ha_jms",
                           return_value=[replacement.jm_device.get_id()]) as sorted_jms_mock, \
              patch.object(storage_node_ops, "_connect_to_remote_jm_devs",
-                          return_value=[connected_new]):
-            storage_node_ops._decommission_node_devices(removed)
+                          return_value=[connected_new]) as connect_mock:
+            ret = storage_node_ops._decommission_node_devices(removed)
 
-        sorted_jms_mock.assert_called_once_with(
-            consumer, limit=storage_node_ops._JC_REPLACE_CANDIDATE_POOL_LIMIT)
+        self.assertTrue(ret)
+        # No more `limit=` -- the batched-replacements RPC no longer needs
+        # a caller-side retry pool (see rpc_client.jc_replace_jm).
+        sorted_jms_mock.assert_called_once_with(consumer)
+        connect_mock.assert_called_once_with(
+            consumer, jm_ids=[replacement.jm_device.get_id()],
+            only_node_id=replacement.get_id())
+        consumer.rpc_client().jc_replace_jm.assert_called_once_with(
+            name_old="remote_jm_n1n1",
+            replacements=[{"jm_vuid": 7, "name_new": "remote_jm_replacementn1"}])
+        self.assertIn(replacement.jm_device.get_id(), consumer.jm_ids)
+        self.assertNotIn(removed.jm_device.get_id(), consumer.jm_ids)
+        self.assertEqual(consumer.remote_jm_devices, [connected_new])
+        consumer.write_to_db.assert_called()
 
     def test_name_old_is_whatever_the_consumer_currently_has_live_not_removeds_own_name(self):
         # A prior replacement (back when this used the retired
@@ -1368,7 +1334,7 @@ class TestDecommissionDevices(unittest.TestCase):
         removed = _node("n1", n_devices=0, with_jm=True)
         removed.jm_ids = []
         removed.jm_device.jm_bdev = "jm_n1"  # consumer's JC never actually used this name
-        consumer = _node("consumer", n_devices=0, with_jm=True)
+        consumer = _node("consumer", n_devices=0, with_jm=True, jm_vuid=7)
         consumer.jm_ids = [removed.jm_device.get_id()]
         live_old = RemoteJMDevice()
         live_old.uuid = removed.jm_device.get_id()
@@ -1395,7 +1361,8 @@ class TestDecommissionDevices(unittest.TestCase):
 
         self.assertTrue(ret)
         consumer.rpc_client().jc_replace_jm.assert_called_once_with(
-            name_old="jm_A", name_new="remote_jm_replacementn1")
+            name_old="jm_A",
+            replacements=[{"jm_vuid": 7, "name_new": "remote_jm_replacementn1"}])
 
     def test_prefers_a_replacement_from_the_removed_nodes_own_failure_domain(self):
         # get_sorted_ha_jms ranks candidates by the CONSUMER's own domain
@@ -1407,7 +1374,7 @@ class TestDecommissionDevices(unittest.TestCase):
         # candidate goes first keeps the distribution identical to what it
         # was before the removal -- the least-disruptive choice. Here
         # get_sorted_ha_jms is mocked to rank the DIFFERENT-domain candidate
-        # first; the removal path must still try "same-fd" ahead of it.
+        # first; the removal path must still pick "same-fd" ahead of it.
         cl = _cluster()
         removed = _node("n1", n_devices=0, with_jm=True, failure_domain=2)
         removed.jm_ids = []
@@ -1447,16 +1414,115 @@ class TestDecommissionDevices(unittest.TestCase):
         self.assertIn(same_fd.jm_device.get_id(), consumer.jm_ids)
         self.assertNotIn(other_fd.jm_device.get_id(), consumer.jm_ids)
 
-    def test_retries_the_next_candidate_after_a_jc_collision(self):
-        # No more pre-filtering by a DB snapshot: get_sorted_ha_jms already
-        # ranks by host-disjoint + FD-balance, and connect_device's own
-        # fast path already reuses an existing bdev instead of double-
-        # attaching -- so every ranked candidate gets a real jc_replace_jm
-        # attempt. "colliding" is offered first and rejected with -14
-        # (already claimed by some OTHER JC on the consumer, e.g. a hosted
-        # replica's own journal group -- something no DB snapshot could
-        # have predicted, found live 2026-08-24); the retry loop falls
-        # through to "clean", the next ranked candidate, which succeeds.
+    def test_reusing_a_candidate_across_different_jm_vuids_is_not_avoided(self):
+        # The new RPC explicitly allows the SAME name_new to cover multiple
+        # jm_vuids in one call -- only reuse WITHIN one jm_vuid's own member
+        # list is invalid. Two unrelated primaries, each missing the same
+        # dead JM from their own redundancy set, independently land on the
+        # SAME replacement candidate (get_sorted_ha_jms filtering is scoped
+        # to each primary's own jm_ids, not a cluster-wide "already claimed
+        # elsewhere" check) -- and neither call needs to avoid the other.
+        cl = _cluster()
+        removed = _node("n1", n_devices=0, with_jm=True)
+        removed.jm_ids = []
+        primary_a = _node("primary-a", n_devices=0, with_jm=True, jm_vuid=1)
+        primary_a.jm_ids = [removed.jm_device.get_id()]
+        live_old_a = RemoteJMDevice()
+        live_old_a.uuid = removed.jm_device.get_id()
+        live_old_a.remote_bdev = "remote_jm_n1n1"
+        primary_a.remote_jm_devices = [live_old_a]
+        primary_b = _node("primary-b", n_devices=0, with_jm=True, jm_vuid=2)
+        primary_b.jm_ids = [removed.jm_device.get_id()]
+        live_old_b = RemoteJMDevice()
+        live_old_b.uuid = removed.jm_device.get_id()
+        live_old_b.remote_bdev = "remote_jm_n1n1"
+        primary_b.remote_jm_devices = [live_old_b]
+        replacement = _node("replacement", n_devices=0, with_jm=True)
+        replacement.jm_ids = []
+        db = FakeDB(cl, [removed, primary_a, primary_b, replacement])
+        db.get_jm_device_by_id = MagicMock(side_effect=lambda jid: {
+            removed.jm_device.get_id(): removed.jm_device,
+            replacement.jm_device.get_id(): replacement.jm_device,
+        }[jid])
+        dc = MagicMock()
+        connected_new = RemoteJMDevice()
+        connected_new.uuid = replacement.jm_device.get_id()
+        connected_new.remote_bdev = "remote_jm_replacementn1"
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "device_controller", dc), \
+             patch.object(storage_node_ops, "get_sorted_ha_jms",
+                          return_value=[replacement.jm_device.get_id()]), \
+             patch.object(storage_node_ops, "_connect_to_remote_jm_devs",
+                          return_value=[connected_new]):
+            ret = storage_node_ops._decommission_node_devices(removed)
+
+        self.assertTrue(ret)
+        primary_a.rpc_client().jc_replace_jm.assert_called_once_with(
+            name_old="remote_jm_n1n1",
+            replacements=[{"jm_vuid": 1, "name_new": "remote_jm_replacementn1"}])
+        primary_b.rpc_client().jc_replace_jm.assert_called_once_with(
+            name_old="remote_jm_n1n1",
+            replacements=[{"jm_vuid": 2, "name_new": "remote_jm_replacementn1"}])
+        self.assertIn(replacement.jm_device.get_id(), primary_a.jm_ids)
+        self.assertIn(replacement.jm_device.get_id(), primary_b.jm_ids)
+
+    def test_batches_own_and_hosted_jm_vuid_replacements_into_one_call(self):
+        # A node that is BOTH a primary needing repair AND hosts another
+        # primary's replica also referencing the dead JM must cover both
+        # jm_vuids in a SINGLE jc_replace_jm call -- the RPC rejects a call
+        # that leaves any local jm_vuid using name_old uncovered (-17).
+        cl = _cluster()
+        removed = _node("n1", n_devices=0, with_jm=True)
+        removed.jm_ids = []
+        hosted_primary = _node("hosted-primary", n_devices=0, with_jm=True, jm_vuid=20)
+        hosted_primary.jm_ids = [removed.jm_device.get_id()]
+        host = _node("host", n_devices=0, with_jm=True, jm_vuid=10,
+                     stack_secondary="hosted-primary")
+        host.jm_ids = [removed.jm_device.get_id()]
+        live_old = RemoteJMDevice()
+        live_old.uuid = removed.jm_device.get_id()
+        live_old.remote_bdev = "remote_jm_n1n1"
+        host.remote_jm_devices = [live_old]
+        hosted_primary.remote_jm_devices = [live_old]
+        replacement = _node("replacement", n_devices=0, with_jm=True)
+        replacement.jm_ids = []
+        db = FakeDB(cl, [removed, hosted_primary, host, replacement])
+        db.get_jm_device_by_id = MagicMock(side_effect=lambda jid: {
+            removed.jm_device.get_id(): removed.jm_device,
+            replacement.jm_device.get_id(): replacement.jm_device,
+        }[jid])
+        dc = MagicMock()
+        connected_new = RemoteJMDevice()
+        connected_new.uuid = replacement.jm_device.get_id()
+        connected_new.remote_bdev = "remote_jm_replacementn1"
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "device_controller", dc), \
+             patch.object(storage_node_ops, "get_sorted_ha_jms",
+                          return_value=[replacement.jm_device.get_id()]), \
+             patch.object(storage_node_ops, "_connect_to_remote_jm_devs",
+                          return_value=[connected_new]):
+            ret = storage_node_ops._decommission_node_devices(removed)
+
+        self.assertTrue(ret)
+        # host's own jm_vuid (10) is appended before the hosted primary's
+        # jm_vuid (20) -- own case first, then secondary/tertiary in order.
+        host.rpc_client().jc_replace_jm.assert_called_once_with(
+            name_old="remote_jm_n1n1",
+            replacements=[
+                {"jm_vuid": 10, "name_new": "remote_jm_replacementn1"},
+                {"jm_vuid": 20, "name_new": "remote_jm_replacementn1"},
+            ])
+        self.assertIn(replacement.jm_device.get_id(), host.jm_ids)
+        # hosted_primary's OWN jm_ids is updated by ITS OWN separate pass
+        # through the loop (it's a live node in its own right), not by
+        # host's call.
+        self.assertIn(replacement.jm_device.get_id(), hosted_primary.jm_ids)
+
+    def test_no_candidate_leaves_slot_honestly_short(self):
+        # get_sorted_ha_jms comes back empty (or every ranked candidate is
+        # already in consumer's own jm_ids) -- no candidate at all, so
+        # nothing is even attempted; leave the redundancy slot honestly
+        # short rather than claim a phantom repair.
         cl = _cluster()
         removed = _node("n1", n_devices=0, with_jm=True)
         removed.jm_ids = []
@@ -1466,96 +1532,16 @@ class TestDecommissionDevices(unittest.TestCase):
         live_old.uuid = removed.jm_device.get_id()
         live_old.remote_bdev = "remote_jm_n1n1"
         consumer.remote_jm_devices = [live_old]
-        colliding = _node("colliding", n_devices=0, with_jm=True)
-        colliding.jm_ids = []
-        colliding.jm_device.jm_bdev = "jm_colliding"
-        clean = _node("clean", n_devices=0, with_jm=True)
-        clean.jm_ids = []
-        clean.jm_device.jm_bdev = "jm_clean"
-        db = FakeDB(cl, [removed, consumer, colliding, clean])
-        db.get_jm_device_by_id = MagicMock(side_effect=lambda jid: {
-            removed.jm_device.get_id(): removed.jm_device,
-            colliding.jm_device.get_id(): colliding.jm_device,
-            clean.jm_device.get_id(): clean.jm_device,
-        }[jid])
+        db = FakeDB(cl, [removed, consumer])
         dc = MagicMock()
-        connected_colliding = RemoteJMDevice()
-        connected_colliding.uuid = colliding.jm_device.get_id()
-        connected_colliding.remote_bdev = "remote_jm_collidingn1"
-        connected_clean = RemoteJMDevice()
-        connected_clean.uuid = clean.jm_device.get_id()
-        connected_clean.remote_bdev = "remote_jm_cleann1"
-
-        def _connect_side_effect(node, jm_ids, only_node_id=None):
-            if jm_ids == [colliding.jm_device.get_id()]:
-                return [connected_colliding]
-            return [connected_clean]
-
-        def _jc_replace_side_effect(name_old, name_new):
-            if name_new == "remote_jm_collidingn1":
-                raise RPCRemoteError("name_new is already used by JC", code=-14)
-            return True
-
-        consumer.rpc_client.return_value.jc_replace_jm.side_effect = _jc_replace_side_effect
-        # Neither candidate's bdev pre-exists -- both attempts create a
-        # fresh connection, so a failed one is eligible for detach cleanup.
-        consumer.rpc_client.return_value.get_bdevs.return_value = None
         with patch.object(storage_node_ops, "DBController", return_value=db), \
              patch.object(storage_node_ops, "device_controller", dc), \
-             patch.object(storage_node_ops, "get_sorted_ha_jms",
-                          return_value=[colliding.jm_device.get_id(), clean.jm_device.get_id()]), \
-             patch.object(storage_node_ops, "_connect_to_remote_jm_devs",
-                          side_effect=_connect_side_effect) as connect_mock:
+             patch.object(storage_node_ops, "get_sorted_ha_jms", return_value=[]), \
+             patch.object(storage_node_ops, "_connect_to_remote_jm_devs") as connect_mock:
             ret = storage_node_ops._decommission_node_devices(removed)
 
         self.assertTrue(ret)
-        self.assertEqual(connect_mock.call_count, 2)
-        self.assertIn(clean.jm_device.get_id(), consumer.jm_ids)
-        self.assertNotIn(colliding.jm_device.get_id(), consumer.jm_ids)
-        # The failed candidate's fresh (non-pre-existing) connection is
-        # cleaned up before moving on.
-        consumer.rpc_client.return_value.bdev_nvme_detach_controller.assert_called_once_with(
-            "remote_jm_colliding")
-
-    def test_all_candidates_fail_leaves_slot_honestly_short(self):
-        # Every ranked candidate is tried in turn (no more pre-filtering);
-        # if jc_replace_jm rejects all of them, leave the redundancy slot
-        # honestly short rather than claim a phantom repair.
-        cl = _cluster()
-        removed = _node("n1", n_devices=0, with_jm=True)
-        removed.jm_ids = []
-        consumer = _node("consumer", n_devices=0, with_jm=True)
-        consumer.jm_ids = [removed.jm_device.get_id()]
-        live_old = RemoteJMDevice()
-        live_old.uuid = removed.jm_device.get_id()
-        live_old.remote_bdev = "remote_jm_n1n1"
-        consumer.remote_jm_devices = [live_old]
-        only_candidate = _node("only-candidate", n_devices=0, with_jm=True)
-        only_candidate.jm_ids = []
-        only_candidate.jm_device.jm_bdev = "jm_only_candidate"
-        db = FakeDB(cl, [removed, consumer, only_candidate])
-        db.get_jm_device_by_id = MagicMock(side_effect=lambda jid: {
-            removed.jm_device.get_id(): removed.jm_device,
-            only_candidate.jm_device.get_id(): only_candidate.jm_device,
-        }[jid])
-        dc = MagicMock()
-        connected = RemoteJMDevice()
-        connected.uuid = only_candidate.jm_device.get_id()
-        connected.remote_bdev = "remote_jm_only_candidaten1"
-        consumer.rpc_client.return_value.jc_replace_jm.side_effect = RPCRemoteError(
-            "name_new is already used by JC", code=-14)
-        consumer.rpc_client.return_value.get_bdevs.return_value = None
-        with patch.object(storage_node_ops, "DBController", return_value=db), \
-             patch.object(storage_node_ops, "device_controller", dc), \
-             patch.object(storage_node_ops, "get_sorted_ha_jms",
-                          return_value=[only_candidate.jm_device.get_id()]), \
-             patch.object(storage_node_ops, "_connect_to_remote_jm_devs",
-                          return_value=[connected]) as connect_mock:
-            ret = storage_node_ops._decommission_node_devices(removed)
-
-        self.assertTrue(ret)
-        connect_mock.assert_called_once()
-        self.assertNotIn(only_candidate.jm_device.get_id(), consumer.jm_ids)
+        connect_mock.assert_not_called()
         self.assertNotIn(removed.jm_device.get_id(), consumer.jm_ids)
         consumer.write_to_db.assert_called()
 
@@ -1601,6 +1587,9 @@ class TestDecommissionDevices(unittest.TestCase):
         self.assertTrue(ret)
         self.assertNotIn(replacement.jm_device.get_id(), consumer.jm_ids)
         self.assertNotIn(removed.jm_device.get_id(), consumer.jm_ids)
+        # Restored to its pre-attempt state -- the freshly-connected
+        # candidate was just detached by the cleanup above, so bookkeeping
+        # must not go on claiming that connection still exists.
         self.assertEqual(consumer.remote_jm_devices, [live_old])
         consumer.rpc_client.return_value.bdev_nvme_detach_controller.assert_called_once_with(
             "remote_jm_replacement")
@@ -1611,9 +1600,6 @@ class TestDecommissionDevices(unittest.TestCase):
         # legitimately serving some other JC membership, like a hosted
         # replica's own journal group), the cleanup on failure must not
         # detach it -- that connection isn't this call's to tear down.
-        # (This is the case that produces -14, "name_new is already used by
-        # JC", in practice -- but the cleanup decision is driven by
-        # pre-existence, not by the specific error code.)
         cl = _cluster()
         removed = _node("n1", n_devices=0, with_jm=True)
         removed.jm_ids = []
@@ -1636,7 +1622,7 @@ class TestDecommissionDevices(unittest.TestCase):
         connected_new.uuid = replacement.jm_device.get_id()
         connected_new.remote_bdev = "remote_jm_replacementn1"
         consumer.rpc_client.return_value.jc_replace_jm.side_effect = RPCRemoteError(
-            "name_new is already used by JC", code=-14)
+            "this jm_vuid uses name_new already", code=-14)
         consumer.rpc_client.return_value.get_bdevs.return_value = {"name": "remote_jm_replacementn1"}
         with patch.object(storage_node_ops, "DBController", return_value=db), \
              patch.object(storage_node_ops, "device_controller", dc), \

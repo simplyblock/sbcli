@@ -4546,18 +4546,6 @@ def _clear_replica_backref(removed_node: StorageNode, backref):
         removed_node.write_to_db()
 
 
-# TEMPORARY: how many ranked JM candidates the phase-5 replace-JM retry loop
-# below is allowed to see from get_sorted_ha_jms, rather than the function's
-# normal-sized redundancy-set target (ha_jm_count - 1). Needed because that
-# retry loop is replacing one already-selected member, not building the set
-# from scratch, so a candidate the node already holds wastes one of the
-# normal-sized slots -- verified live 2026-08-24 (only 2 of ~5 available
-# candidates were ever offered). Remove this constant and its one call site
-# below once SPDK's group-id-aware jc_replace_jm ships (see get_sorted_ha_jms
-# docstring for the matching note).
-_JC_REPLACE_CANDIDATE_POOL_LIMIT = 20
-
-
 def _decommission_node_devices(removed_node: StorageNode):
     """Remove, fail and migrate every data device on ``removed_node``.
 
@@ -4572,168 +4560,186 @@ def _decommission_node_devices(removed_node: StorageNode):
             and removed_node.jm_device.status in (JMDevice.STATUS_ONLINE, JMDevice.STATUS_UNAVAILABLE)):
         logger.info(f"[REMOVAL] {removed_node.get_id()}: removing JM device")
         device_controller.remove_jm_device(removed_node.jm_device.get_id(), force=True)
-        # look for other nodes who use this JM and replace it
-        for node in db_controller.get_storage_nodes_by_cluster_id(removed_node.cluster_id):
-            # get_storage_nodes_by_cluster_id returns every node regardless of
-            # status, including ones already REMOVED. An already-removed node
-            # can still carry the just-removed node's JM id in its own stale
-            # jm_ids (never cleared on ITS removal) -- without this guard we'd
-            # try to "fix" that dead node's JM connections using its own
-            # rpc_client, which points at a pod that no longer exists and can
-            # never resolve/connect (2026-08-11 incident: a prior removal's
-            # leftover jm_ids on 7b8hf sent a later removal's phase 5 chasing
-            # a permanently-dead hostname).
-            if node.status == StorageNode.STATUS_REMOVED:
-                continue
-            if node.jm_ids and removed_node.jm_device.get_id() in node.jm_ids:
-                removed_jm_id = removed_node.jm_device.get_id()
-                # Capture the exact bdev name node's JC currently has live
-                # for this slot BEFORE any bookkeeping changes below -- this
-                # is jc_replace_jm's ``name_old``. It's already the resolved
-                # name whatever it is (this node's own natural connect, or a
-                # leftover override name from before this RPC existed), so
-                # there's no need to separately consult the removed device's
-                # own naming the way the old override-chaining logic did.
-                old_remote_dev = next(
-                    (rd for rd in (node.remote_jm_devices or []) if rd.uuid == removed_jm_id), None)
-                name_old = old_remote_dev.remote_bdev if old_remote_dev else None
+        removed_jm_id = removed_node.jm_device.get_id()
+        removed_fd = removed_node.failure_domain
 
-                node.jm_ids.remove(removed_jm_id)
-                jm_ids = get_sorted_ha_jms(node, limit=_JC_REPLACE_CANDIDATE_POOL_LIMIT)
-                removed_fd = removed_node.failure_domain
-                if removed_fd >= 0 and jm_ids:
-                    # Prefer a replacement from the SAME failure domain the
-                    # removed node was in -- keeps this consumer's domain
-                    # distribution identical to what it was before the
-                    # removal (the least-disruptive choice) instead of
-                    # reshuffling it. Stable sort: within the "matches" and
-                    # "doesn't match" groups, get_sorted_ha_jms' own ranking
-                    # (host-disjoint / FD-balance / label) is preserved.
-                    def _owner_fd(jid):
-                        owner_jm = db_controller.get_jm_device_by_id(jid)
-                        owner = (db_controller.get_storage_node_by_id(owner_jm.node_id)
-                                 if owner_jm else None)
-                        return owner.failure_domain if owner else -1
-                    jm_ids = sorted(jm_ids, key=lambda jid: _owner_fd(jid) != removed_fd)
-                logger.debug(f"online_jms: {str(jm_ids)}")
-                # get_sorted_ha_jms already ranks candidates by host-disjoint
-                # (hard) + failure-domain balance (best-effort) -- no extra
-                # filtering needed here for placement quality.
-                #
-                # No proactive "is node already connected to this candidate"
-                # skip either. That used to matter because the retired
-                # override_name_on_node trick could make the SAME target
-                # live under TWO different local names, which SPDK's attach
-                # can't do -- but every connect now always uses the owner's
-                # own natural name (get_node_jm_names' hosted-primary path
-                # and _connect_to_remote_jm_devs agree on it), so a candidate
-                # node already reaches via hosting some OTHER primary's
-                # secondary/tertiary copy resolves to the exact same bdev
-                # name either way. connect_device's fast path (get_bdevs
-                # before attaching) already returns that existing bdev
-                # as-is instead of re-attaching -- "if connected, use it;
-                # if not, connect and use it" comes for free.
-                #
-                # The one thing that snapshot-based skip could never see
-                # reliably: whether that bdev is already a member of a
-                # DIFFERENT JC instance (e.g. the hosted replica's own
-                # journal-consistency group, wired in directly by
-                # _create_bdev_stack's jm_names -- never recorded in
-                # remote_jm_devices at all, so no DB snapshot could catch
-                # it -- found live 2026-08-24). jc_replace_jm itself is the
-                # one authoritative, live answer to that (-14, "name_new is
-                # already used by JC"), so try each ranked candidate in turn
-                # and let jc_replace_jm's own verdict decide, instead of
-                # trying to predict it.
-                replaced = False
-                any_attempted = False
-                if name_old:
-                    for jm_id in jm_ids:
-                        if jm_id in node.jm_ids:
-                            continue
-                        any_attempted = True
-                        d = db_controller.get_jm_device_by_id(jm_id)
-                        controller_name = f"remote_{d.jm_bdev}"
-                        expected_bdev = f"{controller_name}n1"
-                        # Recorded BEFORE our own connect call below, so a
-                        # failure's cleanup only ever detaches a connection
-                        # THIS call made -- never one already serving some
-                        # other legitimate purpose (e.g. that hosted-replica
-                        # JC membership above).
-                        try:
-                            pre_existing = bool(node.rpc_client().get_bdevs(expected_bdev))
-                        except Exception:
-                            pre_existing = False
-                        try:
-                            # Connect the candidate under its own name first --
-                            # jc_replace_jm hands off to an already-live bdev,
-                            # it doesn't create the connection itself.
-                            connected = _connect_to_remote_jm_devs(
-                                node, jm_ids=[jm_id], only_node_id=d.node_id)
-                            new_remote_dev = next(
-                                (rd for rd in connected if rd.uuid == jm_id), None)
-                            if not new_remote_dev or not new_remote_dev.remote_bdev:
-                                raise RPCException(
-                                    f"failed to connect replacement JM device {jm_id}")
-                            name_new = new_remote_dev.remote_bdev
-                            node.rpc_client(timeout=30, retry=2).jc_replace_jm(
-                                name_old=name_old, name_new=name_new)
-                            logger.info(
-                                f"[REMOVAL] {node.get_id()}: jc_replace_jm {name_old} -> "
-                                f"{name_new} ({jm_id}) replacing removed JM {removed_jm_id}")
-                            node.jm_ids.append(jm_id)
-                            node.remote_jm_devices = connected
-                            replaced = True
-                            break
-                        except Exception as e:
-                            logger.error(
-                                f"[REMOVAL] {node.get_id()}: jc_replace_jm failed replacing "
-                                f"{name_old} with candidate {jm_id} ({controller_name}): "
-                                f"{e}; trying next candidate")
-                            if not pre_existing:
-                                try:
-                                    node.rpc_client().bdev_nvme_detach_controller(controller_name)
-                                except Exception as de:
-                                    logger.warning(
-                                        f"Failed to detach unused controller "
-                                        f"{controller_name} on {node.get_id()}: {de}")
-                if not replaced:
-                    # Every candidate either collided at the JC level or
-                    # failed outright, or there was no candidate at all --
-                    # leave the redundancy slot honestly short (jm_ids
-                    # already has the dead id removed above) rather than
-                    # claim a replacement that isn't actually live in JC.
-                    # Nothing currently revisits this automatically; it
-                    # stays a visible gap until a future removal/reconnect
-                    # cycle retries it.
-                    if not name_old:
+        # get_storage_nodes_by_cluster_id returns every node regardless of
+        # status, including ones already REMOVED. An already-removed node
+        # can still carry the just-removed node's JM id in its own stale
+        # jm_ids (never cleared on ITS removal) -- without this guard we'd
+        # try to "fix" that dead node's JM connections using its own
+        # rpc_client, which points at a pod that no longer exists and can
+        # never resolve/connect (2026-08-11 incident: a prior removal's
+        # leftover jm_ids on 7b8hf sent a later removal's phase 5 chasing
+        # a permanently-dead hostname).
+        live_nodes = [n for n in db_controller.get_storage_nodes_by_cluster_id(removed_node.cluster_id)
+                      if n.status != StorageNode.STATUS_REMOVED]
+
+        def _pick_replacement(primary):
+            # get_sorted_ha_jms ranks candidates by host-disjoint (hard) +
+            # failure-domain balance (best-effort) -- it has no notion of
+            # "primary already holds this candidate", so filter that here.
+            candidates = get_sorted_ha_jms(primary)
+            if removed_fd >= 0 and candidates:
+                # Prefer a replacement from the SAME failure domain the
+                # removed node was in -- keeps primary's domain distribution
+                # identical to what it was before the removal (the least-
+                # disruptive choice) instead of reshuffling it. Stable sort:
+                # within the "matches" and "doesn't match" groups,
+                # get_sorted_ha_jms' own ranking is preserved.
+                def _owner_fd(jid):
+                    owner_jm = db_controller.get_jm_device_by_id(jid)
+                    owner = (db_controller.get_storage_node_by_id(owner_jm.node_id)
+                             if owner_jm else None)
+                    return owner.failure_domain if owner else -1
+                candidates = sorted(candidates, key=lambda jid: _owner_fd(jid) != removed_fd)
+            return next((c for c in candidates if c not in primary.jm_ids), None)
+
+        # Pass 1: one authoritative replacement decision per PRIMARY whose
+        # OWN redundancy set (jm_ids) references the dead JM. The redundancy
+        # set is shared identically across every host that runs a local JC
+        # instance for this jm_vuid (the primary itself, plus any secondary/
+        # tertiary hosting it) -- see get_node_jm_names -- so every one of
+        # them must apply this SAME decision, not pick independently.
+        decisions = {}   # primary_node_id -> replacement jm_id, or None
+        for primary in live_nodes:
+            if primary.jm_ids and removed_jm_id in primary.jm_ids:
+                decisions[primary.get_id()] = _pick_replacement(primary)
+
+        # Pass 2: a single storage node can run more than one local JC
+        # instance against the removed JM's bdev at once -- its own
+        # redundancy set, plus one instance per primary it hosts as
+        # secondary/tertiary (found live 2026-08-24: a consumer's jc_replace_jm
+        # collided with a bdev already claimed by exactly this kind of
+        # hosted-replica JC membership). jc_replace_jm now requires every
+        # local jm_vuid using name_old to be covered in ONE call (-17
+        # otherwise), so for each node, gather every jm_vuid it needs to
+        # patch and issue exactly one call.
+        for node in live_nodes:
+            targets = []  # (jm_vuid, owner_primary, replacement_jm_id)
+            if node.get_id() in decisions:
+                targets.append((node.jm_vuid, node, decisions[node.get_id()]))
+            for backref in (node.lvstore_stack_secondary, node.lvstore_stack_tertiary):
+                if backref and backref in decisions:
+                    hosted_primary = db_controller.get_storage_node_by_id(backref)
+                    targets.append((hosted_primary.jm_vuid, hosted_primary, decisions[backref]))
+
+            if not targets:
+                if any(d.uuid == removed_jm_id for d in (node.remote_jm_devices or [])):
+                    # Stale reference with no corresponding jm_vuid decision
+                    # (e.g. neither this node's own redundancy set nor any
+                    # primary it hosts actually referenced the dead JM) --
+                    # a plain refresh naturally excludes it since it can no
+                    # longer be reached through either source.
+                    node.remote_jm_devices = _connect_to_remote_jm_devs(node, node.jm_ids)
+                    node.write_to_db()
+                continue
+
+            # Capture the exact bdev name node's JC currently has live for
+            # this slot BEFORE any bookkeeping changes below -- this is
+            # jc_replace_jm's ``name_old``. One physical bdev serves every
+            # jm_vuid target on this node, so one lookup covers them all.
+            old_remote_dev = next(
+                (rd for rd in (node.remote_jm_devices or []) if rd.uuid == removed_jm_id), None)
+            name_old = old_remote_dev.remote_bdev if old_remote_dev else None
+
+            replaced = False
+            if name_old and all(new_jm_id is not None for _, _, new_jm_id in targets):
+                # Snapshotted so it can be restored below on failure --
+                # _connect_to_remote_jm_devs' delta mode needs node.remote_
+                # jm_devices updated as we go (each subsequent candidate's
+                # connect call carries over the previous one's untouched
+                # entries), but if the batched call ultimately fails and we
+                # detach whatever we just connected, that bookkeeping must
+                # not keep claiming a connection that no longer exists.
+                original_remote_jm_devices = list(node.remote_jm_devices or [])
+                replacements = []
+                connected_controllers = []  # (controller_name, pre_existing)
+                connect_ok = True
+                for jm_vuid, _owner, new_jm_id in targets:
+                    d = db_controller.get_jm_device_by_id(new_jm_id)
+                    controller_name = f"remote_{d.jm_bdev}"
+                    expected_bdev = f"{controller_name}n1"
+                    # Recorded BEFORE our own connect call below, so a
+                    # failure's cleanup only ever detaches a connection THIS
+                    # call made -- never one already serving some other
+                    # legitimate purpose (e.g. a hosted-replica JC membership).
+                    try:
+                        pre_existing = bool(node.rpc_client().get_bdevs(expected_bdev))
+                    except Exception:
+                        pre_existing = False
+                    try:
+                        # Connect the candidate under its own name first --
+                        # jc_replace_jm hands off to an already-live bdev,
+                        # it doesn't create the connection itself.
+                        connected = _connect_to_remote_jm_devs(
+                            node, jm_ids=[new_jm_id], only_node_id=d.node_id)
+                        new_remote_dev = next(
+                            (rd for rd in connected if rd.uuid == new_jm_id), None)
+                        if not new_remote_dev or not new_remote_dev.remote_bdev:
+                            raise RPCException(
+                                f"failed to connect replacement JM device {new_jm_id}")
+                        node.remote_jm_devices = connected
+                    except Exception as e:
                         logger.error(
-                            f"[REMOVAL] {node.get_id()}: no recorded bdev name for removed "
-                            f"JM {removed_jm_id}; cannot call jc_replace_jm")
-                    elif not any_attempted:
-                        logger.error(f"no jm_id found for {node.get_id()}")
-                node.write_to_db()
-            elif any(d.uuid == removed_node.jm_device.get_id() for d in (node.remote_jm_devices or [])):
-                # node.jm_ids is this node's OWN redundancy set for its OWN JM
-                # -- but _connect_to_remote_jm_devs also connects to a SECOND
-                # source: whichever primary this node hosts as secondary/
-                # tertiary pulls in THAT primary's jm_ids too (so the hublvol
-                # journal stays consistent with the primary it's replicating).
-                # A node reachable only via that second path never touches
-                # node.jm_ids at all, so the branch above never even looks at
-                # it, and its remote_jm_devices entry for the dead JM is left
-                # stale forever (2026-08-14 incident: exposed by a splice
-                # reshuffling who hosts whom -- a plain removal that never
-                # changes any hosting relationship never surfaces this gap,
-                # which is why the FIRST of two removals in the same test
-                # showed no symptom and the second, spliced one did). No
-                # "replacement" pick needed here, unlike the jm_ids branch --
-                # this isn't a fixed-size redundancy slot, just a stale
-                # connection to drop; a plain refresh naturally excludes the
-                # now-removed JM since it can no longer be reached through
-                # either source.
-                node.remote_jm_devices = _connect_to_remote_jm_devs(node, node.jm_ids)
-                node.write_to_db()
+                            f"[REMOVAL] {node.get_id()}: failed to connect replacement "
+                            f"candidate {new_jm_id} for jm_vuid {jm_vuid}: {e}")
+                        connect_ok = False
+                        break
+                    replacements.append({"jm_vuid": jm_vuid, "name_new": new_remote_dev.remote_bdev})
+                    connected_controllers.append((controller_name, pre_existing))
+
+                if connect_ok:
+                    try:
+                        node.rpc_client(timeout=30, retry=2).jc_replace_jm(
+                            name_old=name_old, replacements=replacements)
+                        logger.info(
+                            f"[REMOVAL] {node.get_id()}: jc_replace_jm {name_old} replaced for "
+                            f"{replacements} replacing removed JM {removed_jm_id}")
+                        for _jm_vuid, owner_primary, new_jm_id in targets:
+                            if owner_primary.get_id() == node.get_id():
+                                node.jm_ids.remove(removed_jm_id)
+                                node.jm_ids.append(new_jm_id)
+                        replaced = True
+                    except Exception as e:
+                        logger.error(
+                            f"[REMOVAL] {node.get_id()}: jc_replace_jm failed replacing "
+                            f"{name_old} ({replacements}): {e}")
+
+                if not replaced:
+                    for controller_name, pre_existing in connected_controllers:
+                        if not pre_existing:
+                            try:
+                                node.rpc_client().bdev_nvme_detach_controller(controller_name)
+                            except Exception as de:
+                                logger.warning(
+                                    f"Failed to detach unused controller "
+                                    f"{controller_name} on {node.get_id()}: {de}")
+                    # Whatever got connected along the way is either
+                    # unwound above (fresh, now detached) or was already
+                    # legitimately live before this attempt -- either way
+                    # node.remote_jm_devices must not end up claiming a
+                    # connection that this failed attempt just tore down.
+                    node.remote_jm_devices = original_remote_jm_devices
+
+            if not replaced:
+                # Every jm_vuid target on this node either had no candidate,
+                # or the connect/replace itself failed -- leave the
+                # redundancy slot honestly short rather than claim a
+                # replacement that isn't actually live in JC. Nothing
+                # currently revisits this automatically; it stays a visible
+                # gap until a future removal/reconnect cycle retries it.
+                if not name_old:
+                    logger.error(
+                        f"[REMOVAL] {node.get_id()}: no recorded bdev name for removed "
+                        f"JM {removed_jm_id}; cannot call jc_replace_jm")
+                elif any(new_jm_id is None for _, _, new_jm_id in targets):
+                    logger.error(
+                        f"[REMOVAL] {node.get_id()}: no replacement candidate for jm_vuid(s) "
+                        f"{[jm_vuid for jm_vuid, _, new_jm_id in targets if new_jm_id is None]}")
+                if node.get_id() in decisions:
+                    node.jm_ids.remove(removed_jm_id)
+            node.write_to_db()
 
     removed_node = db_controller.get_storage_node_by_id(removed_node.get_id())
     for dev in removed_node.nvme_devices:
@@ -10682,23 +10688,12 @@ def repair_lvol_registration_on_non_leader(lvol, sec_node: StorageNode, secondar
     return add_lvol_thread(lvol, sec_node, lvol_ana_state="non_optimized")
 
 
-def get_sorted_ha_jms(current_node: StorageNode, limit=None):
+def get_sorted_ha_jms(current_node: StorageNode):
     """Select the remote HA journal members for ``current_node``.
 
     The full HA journal set is ``ha_jm_count`` members: the node's own local JM
     plus ``ha_jm_count - 1`` remote JMs returned here. Selection honors these
     dimensions, in priority order:
-
-    ``limit``, when given, overrides how many candidates are returned (the
-    default is ``ha_jm_count - 1``). This is a TEMPORARY escape hatch for
-    callers such as ``_decommission_node_devices`` that need to see the full
-    ranked candidate pool — not just enough to fill the redundancy set from
-    scratch — because they are replacing one already-selected member rather
-    than building the set fresh, and today's ``jc_replace_jm`` RPC has no
-    concept of "this candidate is a duplicate of a slot already filled" for
-    this function to exclude on their behalf. Remove ``limit`` and this note
-    once SPDK's group-id-aware ``jc_replace_jm`` ships and the removal code
-    path no longer needs to iterate past the normal-sized candidate set.
 
       0. Locality (best-effort) — reserve ONE remote copy in the current
          node's OWN failure domain, when the FD-balance cap (below) allows a
@@ -10751,10 +10746,7 @@ def get_sorted_ha_jms(current_node: StorageNode, limit=None):
     # Least-used JMs first (load balancing); ties broken in the greedy pick.
     jm_count = dict(sorted(jm_count.items(), key=lambda x: x[1]))
     total_jms = current_node.ha_jm_count
-    # `per_fd_cap` below must stay derived from the real redundancy-set size
-    # (`total_jms`), not from `limit` — an expanded candidate pool must not
-    # relax the domain-quorum safety ceiling.
-    target = limit if limit is not None else total_jms - 1
+    target = total_jms - 1
     fd_enabled = cluster.enable_failure_domain
 
     # Per-domain cap so that losing any single domain keeps >= 2 journals.
@@ -10843,19 +10835,12 @@ def get_sorted_ha_jms(current_node: StorageNode, limit=None):
         _pick_same_fd_as_local(enforce_label=False)
         _pick(enforce_fd_cap=True, enforce_label=True)
         _pick(enforce_fd_cap=True, enforce_label=False)   # relax label, keep domain cap
-        # The warning below is about the TRUE redundancy-set size
-        # (ha_jm_count - 1), never about an inflated `limit` -- a caller
-        # asking for a bigger pool than the cluster can quorum-safely
-        # satisfy isn't a placement anomaly, it's the whole point of
-        # `limit`. Falling short of the real target still is.
-        real_target = total_jms - 1
-        if len(selected) < real_target:
+        if len(selected) < target:
             logger.warning(
                 "Could only place %d/%d HA journal copies within the failure-"
                 "domain quorum cap for node %s; relaxing to host-disjoint "
-                "placement for the remaining copies.", len(selected), real_target,
+                "placement for the remaining copies.", len(selected), target,
                 current_node.get_id())
-        if len(selected) < target:
             _pick(enforce_fd_cap=False, enforce_label=False)  # last resort
     else:
         _pick(enforce_fd_cap=False, enforce_label=True)       # still honor labels
