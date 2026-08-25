@@ -1822,6 +1822,7 @@ class TestNodeRemovalOrchestrateResumesPhase5(unittest.TestCase):
             DBController=DEFAULT,
             cluster_ops=DEFAULT,
             shutdown_storage_node=DEFAULT,
+            _decommission_node_jm=DEFAULT,
             _teardown_replicas_of_primary=DEFAULT,
             _relocate_replicas_hosted_on=DEFAULT,
             _finalize_node_removal=DEFAULT,
@@ -1840,6 +1841,7 @@ class TestNodeRemovalOrchestrateResumesPhase5(unittest.TestCase):
 
         self.assertTrue(ret)
         mocks["shutdown_storage_node"].assert_not_called()
+        mocks["_decommission_node_jm"].assert_not_called()
         mocks["_teardown_replicas_of_primary"].assert_not_called()
         mocks["_relocate_replicas_hosted_on"].assert_not_called()
         mocks["_finalize_node_removal"].assert_not_called()
@@ -1860,6 +1862,7 @@ class TestNodeRemovalOrchestrateResumesPhase5(unittest.TestCase):
             ret = storage_node_ops.node_removal_orchestrate("n1")
 
         self.assertFalse(ret)
+        mocks["_decommission_node_jm"].assert_not_called()
         mocks["_decommission_node_devices"].assert_called_once_with(node)
 
     def test_fresh_removal_still_runs_all_phases_then_phase5(self):
@@ -1878,12 +1881,44 @@ class TestNodeRemovalOrchestrateResumesPhase5(unittest.TestCase):
 
         self.assertTrue(ret)
         mocks["shutdown_storage_node"].assert_called_once()
+        # Phase 2 runs BEFORE phase 3a/3b -- see _decommission_node_jm's
+        # docstring for why relocation must never see a not-yet-patched
+        # jm_ids.
+        mocks["_decommission_node_jm"].assert_called_once()
         mocks["_teardown_replicas_of_primary"].assert_called_once()
         mocks["_relocate_replicas_hosted_on"].assert_called_once()
         mocks["_finalize_node_removal"].assert_called_once()
         mocks["set_node_status"].assert_called_once_with(
             "n1", StorageNode.STATUS_REMOVED, caused_by="remove")
         mocks["_decommission_node_devices"].assert_called_once()
+
+    def test_jm_decommission_runs_before_replica_relocation(self):
+        # 2026-08-25 incident: phase 3b (relocate hosted replicas) builds
+        # the new host's JC group construct from the hosted primary's
+        # CURRENT jm_ids via get_node_jm_names(), baking in whatever it
+        # finds by name regardless of whether the connection succeeds. If
+        # this node's dying JM were still listed there when 3b ran, the
+        # new host would permanently reference an unreachable member with
+        # no live connection to ever hand jc_replace_jm afterwards. Phase 2
+        # must therefore run, and complete, before phase 3a/3b.
+        cl = _cluster()
+        node = _node("n1", status=StorageNode.STATUS_ONLINE)
+        db = FakeDB(cl, [node])
+        order = []
+        with self._patch_all() as mocks:
+            mocks["DBController"].return_value = db
+            mocks["shutdown_storage_node"].return_value = True
+            mocks["_decommission_node_jm"].side_effect = \
+                lambda *a, **k: order.append("jm")
+            mocks["_teardown_replicas_of_primary"].side_effect = \
+                lambda *a, **k: order.append("3a") or True
+            mocks["_relocate_replicas_hosted_on"].side_effect = \
+                lambda *a, **k: order.append("3b") or True
+            mocks["_decommission_node_devices"].return_value = True
+            ret = storage_node_ops.node_removal_orchestrate("n1")
+
+        self.assertTrue(ret)
+        self.assertEqual(order, ["jm", "3a", "3b"])
 
 
 # ---------------------------------------------------------------------------

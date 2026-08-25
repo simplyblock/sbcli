@@ -4039,17 +4039,18 @@ def node_removal_orchestrate(node_id, force_remove=False):
         logger.error(f"node_removal_orchestrate: node {node_id} not found")
         return False
 
-    # Phase 4 (below) flips status to REMOVED *before* phase 5 (device/JM
-    # decommission) runs -- so "status == REMOVED" means phases 1/3a/3b/4
-    # committed, NOT that removal is fully done. A bare `return True` here
-    # would let a transient failure inside phase 5 (e.g. an RPC error
-    # against a peer) get permanently masked: the retry re-enters, hits this
-    # guard, and reports "done" forever without phase 5 ever completing
-    # (2026-08-10 incident: a mid-phase-5 RPC error left a peer's lvstore
-    # un-rebuilt while the task reported "Node removed"). Only phases
-    # 1/3a/3b/4 are skipped below when already_removed; phase 5 always
-    # runs and is itself idempotent (skips devices/JM already migrated), so
-    # resuming it here is a no-op once it has genuinely finished.
+    # Phase 4 (below) flips status to REMOVED *before* phase 5 (device
+    # remove/fail/migrate; also re-runs the JM patch defensively) runs --
+    # so "status == REMOVED" means phases 1/2/3a/3b/4 committed, NOT that
+    # removal is fully done. A bare `return True` here would let a
+    # transient failure inside phase 5 (e.g. an RPC error against a peer)
+    # get permanently masked: the retry re-enters, hits this guard, and
+    # reports "done" forever without phase 5 ever completing (2026-08-10
+    # incident: a mid-phase-5 RPC error left a peer's lvstore un-rebuilt
+    # while the task reported "Node removed"). Only phases 1/2/3a/3b/4 are
+    # skipped below when already_removed; phase 5 always runs and is
+    # itself idempotent (skips devices/JM already migrated), so resuming
+    # it here is a no-op once it has genuinely finished.
     already_removed = snode.status == StorageNode.STATUS_REMOVED
 
     # Node removal is a recognised restart-phase owner: phase 3b relocates
@@ -4077,6 +4078,16 @@ def node_removal_orchestrate(node_id, force_remove=False):
                     logger.error(f"[REMOVAL] {node_id}: shutdown failed")
                     return False
                 snode = db_controller.get_storage_node_by_id(node_id)
+
+            # Phase 2 — patch this node's JM out of every live JC redundancy
+            # set BEFORE phase 3b can relocate any replica onto a new host.
+            # See _decommission_node_jm's docstring for why the ordering
+            # matters: a replica relocated while a dying JM is still listed
+            # in its primary's jm_ids bakes that unreachable member into the
+            # new host's construct permanently.
+            logger.info(f"[REMOVAL] {node_id}: phase 2 — decommission JM")
+            _decommission_node_jm(snode)
+            snode = db_controller.get_storage_node_by_id(node_id)
 
             # Phase 3a — tear down the (empty) secondary/tertiary replicas of THIS
             # node's own primary LVS, on the peers that host them (Case A).
@@ -4546,13 +4557,32 @@ def _clear_replica_backref(removed_node: StorageNode, backref):
         removed_node.write_to_db()
 
 
-def _decommission_node_devices(removed_node: StorageNode):
-    """Remove, fail and migrate every data device on ``removed_node``.
+def _decommission_node_jm(removed_node: StorageNode) -> None:
+    """Patch every live JC group that referenced ``removed_node``'s JM out of
+    its redundancy set, replacing it with a freshly picked candidate.
 
-    Drives each device ONLINE/UNAVAILABLE -> REMOVED -> FAILED (which queues the
-    failure-migration tasks on the surviving online nodes), then waits for them
-    all to reach FAILED_AND_MIGRATED. Returns True only once every data device
-    is migrated; False means "still migrating, retry later"."""
+    Called TWICE by design, both idempotent (guarded by the JM device's own
+    status, set below): early, as node_removal_orchestrate's own phase 2 --
+    BEFORE phase 3b relocates any replica hosted on removed_node -- and
+    again from _decommission_node_devices's phase 5, as a defensive no-op
+    for tasks resuming from before this function existed as a separate
+    phase.
+
+    Running this before phase 3b matters: relocating a hosted primary's
+    replica onto a new host builds that host's JC group construct fresh via
+    get_node_jm_names(), which bakes in whatever the primary's CURRENT
+    jm_ids says -- unconditionally, by name, regardless of whether the
+    underlying connection ever succeeds. If jm_ids still listed
+    removed_node's JM at that moment (because this hadn't patched it out
+    yet), the new host's construct permanently references a member it can
+    never reach (removed_node is already shut down by phase 1) -- and there
+    is no live connection to hand jc_replace_jm as name_old afterwards to
+    fix it (found live 2026-08-25: a node relocated onto during the SAME
+    removal that killed one of its new group's members could never be
+    patched, no matter how many times phase 5 retried). Patching jm_ids
+    first means every relocation that follows already sees the corrected
+    membership from its very first build.
+    """
     db_controller = DBController()
     removed_node = db_controller.get_storage_node_by_id(removed_node.get_id())
 
@@ -4781,6 +4811,20 @@ def _decommission_node_devices(removed_node: StorageNode):
                 if node.get_id() in decisions:
                     node.jm_ids.remove(removed_jm_id)
             node.write_to_db()
+
+
+def _decommission_node_devices(removed_node: StorageNode):
+    """Remove, fail and migrate every data device on ``removed_node``.
+
+    Drives each device ONLINE/UNAVAILABLE -> REMOVED -> FAILED (which queues the
+    failure-migration tasks on the surviving online nodes), then waits for them
+    all to reach FAILED_AND_MIGRATED. Returns True only once every data device
+    is migrated; False means "still migrating, retry later".
+
+    Also (re)runs _decommission_node_jm -- see its own docstring for why this
+    is a defensive no-op here on any task that already ran it as phase 2."""
+    db_controller = DBController()
+    _decommission_node_jm(removed_node)
 
     removed_node = db_controller.get_storage_node_by_id(removed_node.get_id())
     for dev in removed_node.nvme_devices:
