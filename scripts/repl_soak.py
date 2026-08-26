@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """One-liner for the async-replication soak: deploy a lab from a branch, run cases, report.
 
     python scripts/repl_soak.py --cases case6,case7 --branch main
