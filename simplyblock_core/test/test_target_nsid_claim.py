@@ -258,3 +258,96 @@ class TestSubsystemHomeNode(unittest.TestCase):
             [self._node("N1", "CL_tgt")])
         self.assertEqual(
             lvol_controller._subsystem_home_node(db, NQN, "CL_tgt"), "")
+
+
+class TestRetireSupersededOriginal(unittest.TestCase):
+    """A fail-back must free the slot the original still holds."""
+
+    def setUp(self):
+        from simplyblock_core.models.lvol_model import LVol
+        self.LVol = LVol
+        patcher = patch.object(lvol_controller, "delete_lvol")
+        self.delete = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _rep(self, source, target):
+        r = MagicMock()
+        r.source_lvol = source
+        r.target_lvol = target
+        return r
+
+    def _vol(self, uuid, node_id="N1", status="online"):
+        lv = MagicMock()
+        lv.uuid = uuid
+        lv.get_id.return_value = uuid
+        lv.node_id = node_id
+        lv.status = status
+        lv.nqn = NQN
+        lv.ns_id = 3
+        return lv
+
+    def _db(self, reps, lvols, node_cluster):
+        db = MagicMock()
+        db.get_lvol_replication_objects.return_value = reps
+        by_id = {lv.get_id.return_value: lv for lv in lvols}
+
+        def _get_lvol(uid):
+            if uid not in by_id:
+                raise KeyError(uid)
+            return by_id[uid]
+
+        def _get_node(nid):
+            if nid not in node_cluster:
+                raise KeyError(nid)
+            n = MagicMock()
+            n.cluster_id = node_cluster[nid]
+            return n
+
+        db.get_lvol_by_id.side_effect = _get_lvol
+        db.get_storage_node_by_id.side_effect = _get_node
+        return db
+
+    def test_first_failover_deletes_nothing(self):
+        """No record names this volume as a copy, so it IS the original."""
+        lvol = self._vol("orig")
+        db = self._db([], [lvol], {"N1": "CL_src"})
+        ok, err = lvol_controller._retire_superseded_original(db, lvol, "CL_tgt")
+        self.assertTrue(ok)
+        self.assertEqual(err, "")
+        self.delete.assert_not_called()
+
+    def test_failback_deletes_the_original_on_the_destination(self):
+        original, copy = self._vol("orig"), self._vol("copy", node_id="N2")
+        db = self._db([self._rep(original, copy)], [original, copy],
+                      {"N1": "CL_src", "N2": "CL_tgt"})
+        ok, err = lvol_controller._retire_superseded_original(db, copy, "CL_src")
+        self.assertTrue(ok, err)
+        self.delete.assert_called_once_with(original)
+
+    def test_an_original_on_another_cluster_is_not_in_the_way(self):
+        original, copy = self._vol("orig"), self._vol("copy", node_id="N2")
+        db = self._db([self._rep(original, copy)], [original, copy],
+                      {"N1": "CL_src", "N2": "CL_tgt"})
+        ok, _ = lvol_controller._retire_superseded_original(db, copy, "CL_third")
+        self.assertTrue(ok)
+        self.delete.assert_not_called()
+
+    def test_already_deleting_original_is_left_alone(self):
+        original = self._vol("orig", status=self.LVol.STATUS_IN_DELETION)
+        copy = self._vol("copy", node_id="N2")
+        db = self._db([self._rep(original, copy)], [original, copy],
+                      {"N1": "CL_src", "N2": "CL_tgt"})
+        ok, _ = lvol_controller._retire_superseded_original(db, copy, "CL_src")
+        self.assertTrue(ok)
+        self.delete.assert_not_called()
+
+    def test_a_failed_delete_aborts_the_failback_with_a_clear_reason(self):
+        original, copy = self._vol("orig"), self._vol("copy", node_id="N2")
+        db = self._db([self._rep(original, copy)], [original, copy],
+                      {"N1": "CL_src", "N2": "CL_tgt"})
+        self.delete.side_effect = RuntimeError("lvstore restart in progress")
+        ok, err = lvol_controller._retire_superseded_original(db, copy, "CL_src")
+        self.assertFalse(ok)
+        self.assertIn("lvstore restart in progress", err)
+        self.assertIn("namespace", err,
+                      "the message must say WHY the fail-back cannot proceed")
