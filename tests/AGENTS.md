@@ -8,7 +8,6 @@ Two-tier test suite for the Simplyblock control plane. Unit tests run as pure lo
 tests/
 ├── conftest.py          # Clears DBController/RPC caches before each test. Does NOT stub `fdb`.
 ├── _mocks.py            # Shared mock factories (e.g. `make_mock_cluster`).
-├── conftest_proxy.py    # `import_proxy_module()` helper that neutralizes spdk_http_proxy_server's module-level run_server side-effect; used by both proxy unit + e2e tests.
 ├── unit/                # Pure-logic tests; single module under test, no model state, no flows.
 │   ├── conftest.py      # Stubs the native `fdb` module so unit tests run without libfdb_c / a live cluster.
 │   ├── models/          # Every `BaseModel` test: field defaults, secrets, chunked reads, serialization.
