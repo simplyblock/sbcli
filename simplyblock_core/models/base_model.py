@@ -39,6 +39,29 @@ def default_factory(factory: Callable[[], _T]) -> _T:
     return cast(_T, _DefaultFactory(factory))
 
 
+def _detached(value: _T) -> _T:
+    """A copy of ``value`` that shares no mutable structure with it.
+
+    ``from_dict`` is handed a payload it does not own — an FDB record, a
+    request body, another model's ``to_dict()`` — and several of its branches
+    store the payload's own list or dict on the model. Source and model then
+    alias each other, so an ``append`` on either side is visible on the other
+    and on every further model built from the same payload.
+
+    ``BaseModel`` children are already built fresh by ``from_dict`` and are
+    handed back as they are.
+    """
+    if isinstance(value, dict):
+        return cast(_T, {k: _detached(v) for k, v in value.items()})
+    if isinstance(value, list):
+        return cast(_T, [_detached(item) for item in value])
+    if isinstance(value, set):
+        return cast(_T, set(value))
+    if isinstance(value, bytearray):
+        return cast(_T, bytearray(value))
+    return value
+
+
 class BaseModel(object):
 
     _STATUS_CODE_MAP: ClassVar[dict] = {}
@@ -193,6 +216,8 @@ class BaseModel(object):
                                 value = inner(data[attr])
                 else:
                     value = value_dict['type'](data[attr])
+
+                value = _detached(value)
             setattr(self, attr, value)
         self.id = self.uuid
         return self
