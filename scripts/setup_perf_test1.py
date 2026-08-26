@@ -44,6 +44,15 @@ SN_TYPE = "i3en.2xlarge"
 #: hold the build constant. Empty string = control-plane default.
 SPDK_IMAGE = "public.ecr.aws/simply-block/ultra:main-747c42da-amd64"
 
+
+#: Dedicated client disk for fio --write_iolog history. 300 GB holds ~3h at
+#: the observed ~95 GB/h across six volumes; the soak trims to
+#: --iolog-keep-hours regardless. Kept off the root filesystem because
+#: filling that stops fio and the client itself.
+IOLOG_DISK_GB = 300
+IOLOG_DEVICE = '/dev/sdf'
+IOLOG_MOUNT = '/iolog'
+
 SN_COUNT = 6
 MGMT_TYPE = "m6i.2xlarge"
 # --- Selectable Client Specification ---
@@ -315,6 +324,20 @@ def create_aws_clients(count, instance_type):
         MinCount=count,
         MaxCount=count,
         KeyName=KEY_NAME,
+
+        # A dedicated disk for fio's write history. On 2026-08-26 the iologs
+        # filled the client's 8.8G root in about four minutes (6.3 GiB,
+        # ~95 GB/hour across six volumes), and a full root while fio is
+        # running can itself manufacture I/O errors. One hour of history needs
+        # ~100 GB, so this is sized for it and kept off the root entirely.
+        BlockDeviceMappings=[
+            {'DeviceName': '/dev/sda1',
+             'Ebs': {'VolumeSize': 30, 'VolumeType': 'gp3',
+                     'DeleteOnTermination': True}},
+            {'DeviceName': IOLOG_DEVICE,
+             'Ebs': {'VolumeSize': IOLOG_DISK_GB, 'VolumeType': 'gp3',
+                     'DeleteOnTermination': True}},
+        ],
 
         NetworkInterfaces=[{
             'DeviceIndex': 0,
@@ -608,10 +631,26 @@ def main():
     print("Pool created.")
 
     # Commands for Performance Clients
+    # The iolog disk is attached as IOLOG_DEVICE but surfaces under a nitro
+    # name (/dev/nvme?n1), so find it by size and by having no filesystem
+    # rather than by device path. Mounted before fio starts, because fio's
+    # --write_iolog target directory must exist up front.
+    iolog_mount_cmd = (
+        "set -e; "
+        "dev=$(lsblk -dpno NAME,SIZE,FSTYPE | awk '$2 ~ /^" + str(IOLOG_DISK_GB) + "G/ && $3 == \"\" {print $1; exit}'); "
+        "if [ -z \"$dev\" ]; then echo 'iolog disk NOT found -- history will be disabled'; exit 0; fi; "
+        "echo \"iolog disk: $dev\"; "
+        "sudo blkid \"$dev\" >/dev/null 2>&1 || sudo mkfs.xfs -f \"$dev\"; "
+        "sudo mkdir -p " + IOLOG_MOUNT + "; "
+        "mountpoint -q " + IOLOG_MOUNT + " || sudo mount \"$dev\" " + IOLOG_MOUNT + "; "
+        "sudo chown ec2-user:ec2-user " + IOLOG_MOUNT + "; "
+        "df -h " + IOLOG_MOUNT + " | tail -1"
+    )
     client_prep_cmds = [
         "sudo dnf install nvme-cli fio -y",
         "sudo modprobe nvme-tcp",
-        "echo 'nvme-tcp' | sudo tee /etc/modules-load.d/nvme-tcp.conf"
+        "echo 'nvme-tcp' | sudo tee /etc/modules-load.d/nvme-tcp.conf",
+        iolog_mount_cmd,
     ]
 
 

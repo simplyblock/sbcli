@@ -212,6 +212,15 @@ def parse_args():
                           "to the writes that touched that offset. Bounded by "
                           "--iolog-keep-hours; unbounded is gigabytes per volume "
                           "per hour at this workload.")
+    fio.add_argument("--iolog-volumes", default="all",
+                     help="Which volumes record write history: 'all' (default), or "
+                          "a comma-separated list of indexes such as '1' or '1,4'. "
+                          "One volume cuts the rate six-fold; ~16 GB/h per volume.")
+    fio.add_argument("--iolog-dir", default="/iolog",
+                     help="Where write history goes (default /iolog, the dedicated "
+                          "client disk). Falls back to the run directory if that is "
+                          "not a mountpoint -- that is the root filesystem, which "
+                          "filled in four minutes on 2026-08-26.")
     fio.add_argument("--iolog-keep-hours", type=float, default=1.0,
                      help="Hours of iolog history to keep (default 1). A trimmer "
                           "hole-punches the head of each log, freeing those blocks "
@@ -1248,6 +1257,8 @@ class SoakRunner:
             f"size={args.fio_size_per_job}/job "
             f"({args.fio_total_size} total) runtime={args.runtime}s "
             f"ioengine={args.fio_ioengine}")
+        self.iolog_dir = (self._resolve_iolog_dir()
+                          if args.write_iolog else "")
         fio_jobs = []
         for volume in volumes:
             fio_name = f"soak_mp_{volume['index']}"
@@ -1272,12 +1283,12 @@ class SoakRunner:
                 # The dumps are 4 KiB each and only appear on failure.
                 fio_cmd += (f"--verify={args.fio_verify} --verify_fatal=1 "
                             f"--verify_backlog=1024 --verify_dump=1 ")
-            if args.write_iolog:
-                # On the client's own disk, never inside the volume under test:
-                # the iolog must not become part of the data being verified.
+            if args.write_iolog and self._iolog_wanted(volume["index"]):
+                # On a dedicated client disk, never inside the volume under
+                # test: the iolog must not become part of the data verified,
+                # and on the root filesystem it fills the client in minutes.
                 iolog = posixpath.join(
-                    "/home", self.user, f"soak_mp_{self.run_id}",
-                    f"iolog_vol{volume['index']}.log")
+                    self.iolog_dir, f"iolog_vol{volume['index']}.log")
                 fio_cmd += f"--write_iolog={shlex.quote(iolog)} "
             fio_cmd += f"--output={shlex.quote(volume['fio_log'])}"
 
@@ -1349,6 +1360,37 @@ class SoakRunner:
             label=f"grep {job.volume_name}")
         return (stdout_text or "").strip()
 
+    def _iolog_wanted(self, index):
+        """Whether volume ``index`` records write history (--iolog-volumes)."""
+        sel = (self.args.iolog_volumes or "all").strip().lower()
+        if sel in ("all", "*"):
+            return True
+        wanted = {p.strip() for p in sel.split(",") if p.strip()}
+        return str(index) in wanted
+
+    def _resolve_iolog_dir(self):
+        """Use --iolog-dir when it is a real mountpoint, else fall back loudly.
+
+        Falling back means writing to the root filesystem, which on 2026-08-26
+        took 6.3 GiB in four minutes and filled an 8.8G disk while fio was
+        running -- and a full root under fio manufactures I/O errors that look
+        like storage faults. So the fallback is a warning, not a silent detour.
+        """
+        d = self.args.iolog_dir
+        rc, _, _ = self.client.run(f"mountpoint -q {shlex.quote(d)}",
+                                   timeout=60, check=False,
+                                   label="check iolog mount")
+        if rc == 0:
+            self.client.run(f"mkdir -p {shlex.quote(d)}/{self.run_id}",
+                            timeout=60, check=False, label="mkdir iolog")
+            return posixpath.join(d, self.run_id)
+        fallback = posixpath.join("/home", self.user, f"soak_mp_{self.run_id}")
+        self.logger.log(
+            f"WARNING: {d} is not a mountpoint; writing write-history to "
+            f"{fallback} on the ROOT filesystem. Expect ~16 GB/h per volume; "
+            f"consider --iolog-volumes to narrow it or disable --write-iolog.")
+        return fallback
+
     def start_iolog_trimmer(self):
         """Stage and launch the iolog trimmer on the client.
 
@@ -1366,7 +1408,7 @@ class SoakRunner:
             return
         with open(local, "rb") as fh:
             payload = base64.b64encode(fh.read()).decode()
-        run_dir = posixpath.join("/home", self.user, f"soak_mp_{self.run_id}")
+        run_dir = self.iolog_dir
         keep = int(max(60.0, self.args.iolog_keep_hours * 3600.0))
         stage = (f"echo {payload} | base64 -d > ~/iolog_trimmer.sh && "
                  f"chmod +x ~/iolog_trimmer.sh")
