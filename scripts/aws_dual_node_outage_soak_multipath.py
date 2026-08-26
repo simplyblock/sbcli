@@ -218,6 +218,14 @@ def parse_args():
                      help="Seconds the NIC stays down on all nodes (default 30).")
     nic.add_argument("--nic-phase-settle", type=int, default=30,
                      help="Seconds to wait after NIC restore before verifying (default 30).")
+    nic.add_argument("--no-nic-phase", action="store_true",
+                     help="Disable phase 1 (the all-nodes single-NIC outage) "
+                          "entirely. REQUIRED on a single-data-NIC, non-multipath "
+                          "cluster: with one data NIC per node, phase 1 takes that "
+                          "NIC down on every node at once and isolates the whole "
+                          "cluster instead of exercising path redundancy. Note that "
+                          "--nic-phase-every 0 does NOT disable phase 1 -- it means "
+                          "'once, on iteration 1'.")
     nic.add_argument("--nic-phase-every", type=int, default=1,
                      help="Run the NIC phase every N iterations. 0 = once, before the "
                           "first pair only (default 1).")
@@ -1621,6 +1629,12 @@ class SoakRunner:
         # node passive. active_passive means one NIC carries all hub IO.
         to_check = [(b, "hublvol") for b in hublvol_bdevs]
         to_check += [(b, "remote") for b in remote_bdevs[:max(0, self.args.policy_sample)]]
+        # Only meaningful with more than one path: on a single-data-NIC
+        # (non-multipath) cluster a bdev legitimately reports active_passive,
+        # and asserting active_active there would make every bdev a "problem",
+        # so the heal gate could never converge.
+        if len(self.args.data_nics) < 2:
+            to_check = []
         for bdev_name, kind in to_check:
             try:
                 bdevs = _rpc_json(f"bdev_get_bdevs -b {shlex.quote(bdev_name)}",
@@ -2171,8 +2185,13 @@ print(json.dumps(out))
                     + ", ".join(f"{n['uuid'][:12]}:{n['status']}" for n in current))
             uuids = [n["uuid"] for n in current]
 
-            nic_due = (iteration == 1 if args.nic_phase_every == 0
-                       else (iteration - 1) % args.nic_phase_every == 0)
+            # --nic-phase-every 0 means "once, on iteration 1"; only
+            # --no-nic-phase disables phase 1 outright, which is required on a
+            # single-data-NIC cluster where taking "one" NIC down on every node
+            # isolates the whole cluster instead of testing path redundancy.
+            nic_due = ((not args.no_nic_phase)
+                       and (iteration == 1 if args.nic_phase_every == 0
+                            else (iteration - 1) % args.nic_phase_every == 0))
             if nic_due:
                 nic = args.data_nics[(iteration - 1) % len(args.data_nics)]
                 if self.run_nic_phase(iteration, nic, uuids):
