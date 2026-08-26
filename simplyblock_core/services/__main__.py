@@ -7,9 +7,7 @@ form keeps working; this module adds a name-based entry point that does not
 depend on a file layout, so consumers can migrate off the paths.
 
 ``runpy`` rather than importing and calling ``main()``: it reproduces the
-semantics of running the file directly, including for the modules whose body
-is at import time (see ``spdk_http_proxy_server``), so both invocations behave
-identically.
+semantics of running the file directly, so both invocations behave identically.
 """
 import argparse
 import importlib
