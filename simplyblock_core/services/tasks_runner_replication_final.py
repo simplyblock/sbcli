@@ -134,9 +134,14 @@ def _swap_failback_lvol_uuid(rep, failback_source_id):
 
     stale_uuid = new_lvol.get_id()
 
-    # Remove the old source lvol record so its DB key is free.
+    # Copy replication config from the original source before removing its record.
     try:
         old_lvol = db.get_lvol_by_id(failback_source_id)
+        new_lvol.do_replicate = old_lvol.do_replicate
+        new_lvol.replication_node_id = old_lvol.replication_node_id
+        new_lvol.replication_mode = old_lvol.replication_mode
+        new_lvol.replication_interval_min = old_lvol.replication_interval_min
+        new_lvol.replication_policy_id = old_lvol.replication_policy_id
         old_lvol.remove(db.kv_store)
     except KeyError:
         logger.warning(
