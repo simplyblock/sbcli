@@ -41,6 +41,7 @@ def _finalize(task, ok, err):
     if ok:
         replication_id = task.function_params.get("replication_id")
         final_state = task.function_params.get("final_state", LVolReplication.STATE_CUTOVER_DONE)
+        rep = None
         if replication_id:
             try:
                 rep = db.get_lvol_replication_by_id(replication_id)
@@ -48,6 +49,10 @@ def _finalize(task, ok, err):
                 rep.write_to_db(db.kv_store)
             except Exception as e:
                 logger.error(f"Failed to update replication state: {e}")
+
+        failback_source_id = task.function_params.get("failback_source_lvol_id")
+        if failback_source_id and rep is not None:
+            _swap_failback_lvol_uuid(rep, failback_source_id)
         task.function_result = "cutover done"
         task.status = JobSchedule.STATUS_DONE
         task.function_params["end_time"] = int(time.time())
@@ -104,6 +109,56 @@ def _finalize(task, ok, err):
     task.retry += 1
     task.write_to_db(db.kv_store)
     return False
+
+
+def _swap_failback_lvol_uuid(rep, failback_source_id):
+    """After a successful failback cutover, reassign the new clone's UUID to
+    the original source lvol's UUID.
+
+    The operator stores the original source lvolID in the ReplicationSlot's
+    Spec.VolumeID. Preserving that UUID through the failback means the slot
+    stays valid with no update required.
+
+    The old source lvol DB record is removed first (its NVMf subsystem was
+    already evicted by _evict_stale_namespace during _create_target_lvol_clone).
+    The stale clone record at the old UUID is cleared last so there is never a
+    window with two records under the same UUID.
+    """
+    try:
+        new_lvol = db.get_lvol_by_id(rep.target_lvol.get_id())
+    except KeyError:
+        logger.error(
+            "failback UUID swap: new clone %s not found in DB; skipping",
+            rep.target_lvol.get_id())
+        return
+
+    stale_uuid = new_lvol.get_id()
+
+    # Remove the old source lvol record so its DB key is free.
+    try:
+        old_lvol = db.get_lvol_by_id(failback_source_id)
+        old_lvol.remove(db.kv_store)
+    except KeyError:
+        logger.warning(
+            "failback UUID swap: original source lvol %s already absent from DB",
+            failback_source_id)
+
+    # Write the clone under the original source UUID.
+    new_lvol.uuid = failback_source_id
+    new_lvol.write_to_db(db.kv_store)
+
+    # Clear the stale record at the old clone UUID.
+    stale = LVol()
+    stale.uuid = stale_uuid
+    stale.remove(db.kv_store)
+
+    # Keep the relationship's target reference consistent.
+    rep.target_lvol.uuid = failback_source_id
+    rep.write_to_db(db.kv_store)
+
+    logger.info(
+        "failback UUID swap complete: clone %s reassigned to original source UUID %s",
+        stale_uuid, failback_source_id)
 
 
 def task_runner(task: JobSchedule):
@@ -291,6 +346,21 @@ def _prepare_cutover(task, lvol, src_node, tgt_node):
     rep.target_nqn = new_lvol.nqn
     rep.target_ns_id = new_lvol.ns_id
     rep.write_to_db(db.kv_store)
+
+    # Detect failback: if the current replication source (lvol) was previously
+    # the TARGET in a completed relationship whose source cluster is now tgt_node,
+    # this is a failback cutover. Store the original source UUID so _finalize can
+    # reassign it to the new clone, keeping the operator's VolumeID valid.
+    for prior in db.get_lvol_replication_objects():
+        if (prior.target_lvol and prior.target_lvol.get_id() == lvol.get_id()
+                and prior.source_cluster_id == tgt_node.cluster_id
+                and prior.source_lvol):
+            task.function_params["failback_source_lvol_id"] = prior.source_lvol.get_id()
+            logger.info(
+                "failback cutover detected: original source UUID %s will be "
+                "preserved on new clone %s after cutover",
+                prior.source_lvol.get_id(), new_lvol.get_id())
+            break
 
     task.function_params.update({
         "tgt_lvol_composite": new_lvol.top_bdev,
