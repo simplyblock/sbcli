@@ -471,11 +471,22 @@ def test_namespaced_siblings_replicate_to_the_same_target_node():
     import inspect
     from simplyblock_core.controllers import lvol_controller as lc
     src = inspect.getsource(lc.add_lvol_ha)
-    assert "sibling_node_id" in src, "namespaced siblings must share a replication node"
+    assert "_sibling_replication_node" in src,         "namespaced siblings must share a replication node"
     pick = src.index("_get_next_3_nodes(replication_cluster_id")
-    check = src.index("sibling_node_id")
+    check = src.index("_sibling_replication_node")
     assert check < pick, "the sibling lookup must precede the capacity-based pick"
-    assert "lv.nqn == lvol.nqn" in src, "siblings are identified by shared NQN"
+
+    # ...and it must run AGAIN after claim_lvol_ns_slot. That transaction is
+    # what authoritatively decides the subsystem: the earlier lookup only saw
+    # the ADVISORY pick from _resolve_lvol_subsystem, so a volume the
+    # transaction rehomed into an existing shared subsystem would otherwise
+    # keep a target node chosen for a subsystem it is no longer in -- which is
+    # how the group was still split in run 20260826_230358 (peer held nsids
+    # 1..7, the split-off primary asked for 1).
+    claim = src.index("claim_lvol_ns_slot")
+    realign = src.index("_realign_replication_node_after_claim")
+    assert claim < realign,         "the target node must be re-derived from the subsystem the CLAIM chose"
+    assert "lv.nqn == lvol.nqn" in inspect.getsource(lc._sibling_replication_node),         "siblings are identified by shared NQN"
 
 
 def test_clone_register_confirms_the_bdev_before_add_ns():

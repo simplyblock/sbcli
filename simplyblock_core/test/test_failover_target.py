@@ -124,6 +124,11 @@ def patched(monkeypatch):
 
     def _add_lvol_on_node(new_lvol, node, is_primary=True, **kw):
         add_calls.append((node.get_id(), is_primary))
+        if is_primary:
+            # Faithful to the real primary add, which persists the nsid the
+            # target actually used: the control plane's claim when there was
+            # one, the target's own pick (lowest free) otherwise.
+            new_lvol.ns_id = new_lvol.ns_id or 1
         return ({"uuid": "BDEV-UUID", "driver_specific": {"lvol": {"blobid": 123}}}, None)
     monkeypatch.setattr(lvol_controller, "add_lvol_on_node", _add_lvol_on_node)
 
@@ -159,16 +164,21 @@ def test_failover_preserves_nqn_ns_and_returns_paths(monkeypatch, patched):
 
     result = lvol_controller.replicate_lvol_on_target_cluster("LV1")
 
-    # Same NQN + namespace as the original volume.
+    # Same NQN as the original volume -- the client reconnects to the SAME
+    # subsystem, only the IP/port differ. The nsid is NOT carried over: it is
+    # claimed on the target HA set (nothing there yet here, so the target
+    # picks 1). Cross-cluster nsid equality is not required -- clients resolve
+    # their paths through connect_lvol -- and insisting on the source's number
+    # is what collided with a sibling already holding it (soak case 7).
     assert result["nqn"] == "nqn.orig:lvol:LV1"
-    assert result["ns_id"] == 7
+    assert result["ns_id"] == 1
     assert len(result["connection_strings"]) == 1
 
     rep = patched["rep"]
     assert rep.state == LVolReplication.STATE_FAILED_OVER
     assert rep.direction == LVolReplication.DIRECTION_TO_TARGET
     assert rep.target_nqn == "nqn.orig:lvol:LV1"
-    assert rep.target_ns_id == 7
+    assert rep.target_ns_id == 1
     assert rep.source_cluster_id == "CL_src"
     assert rep.target_cluster_id == "CL_tgt"
     # Source volume flipped to non-source after fail-over.

@@ -334,6 +334,51 @@ def validate_aes_xts_keys(key1: str, key2: str) -> Tuple[bool, str]:
     return True, ""
 
 
+def _sibling_replication_node(lvol, cl, all_lvols=None):
+    """Target node an already-replicating sibling of ``lvol``'s subsystem uses.
+
+    Namespaced siblings MUST replicate to the same target node. A fail-over
+    copy keeps the volume's NQN, so every volume of one shared subsystem lands
+    in the SAME subsystem on the target. When the group is split across two
+    target primaries, each primary auto-assigns nsids from only its own subset
+    and the HA peers -- which hold the whole group -- reject the collision
+    (soak case 7: peer held nsids 1..7 while a split-off primary asked for 1).
+
+    Returns "" when no sibling has a target node yet.
+    """
+    if not (getattr(lvol, "namespaced", False) or lvol.max_namespace_per_subsys > 1):
+        return ""
+    for lv in (all_lvols or DBController().get_lvols(cl.get_id())):
+        if (lv.nqn == lvol.nqn and lv.get_id() != lvol.get_id()
+                and getattr(lv, "replication_node_id", "")):
+            return lv.replication_node_id
+    return ""
+
+
+def _realign_replication_node_after_claim(lvol, cl):
+    """Re-derive the target node once the AUTHORITATIVE subsystem is known.
+
+    ``_resolve_lvol_subsystem`` is advisory: it may hand out a fresh standalone
+    nqn while ``claim_lvol_ns_slot``'s transaction -- recounting occupancy with
+    concurrent creates visible -- then joins the lvol to an EXISTING shared
+    subsystem instead. The target node was picked against the advisory nqn, so
+    such an lvol joins a group whose other members replicate elsewhere, and it
+    is exactly that member whose fail-over copy collides on the peer. Recheck
+    against the nqn that was actually persisted.
+    """
+    if not getattr(lvol, "replication_node_id", ""):
+        return
+    sibling_node_id = _sibling_replication_node(lvol, cl)
+    if sibling_node_id and sibling_node_id != lvol.replication_node_id:
+        logger.info(
+            "LVol %s was placed in subsystem %s by the claim transaction "
+            "(not the advisory pick); moving its replication node from %s to "
+            "%s to match the siblings already in that subsystem",
+            lvol.lvol_name, lvol.nqn, lvol.replication_node_id, sibling_node_id)
+        lvol.replication_node_id = sibling_node_id
+        lvol.write_to_db()
+
+
 def _resolve_lvol_subsystem(lvol, host_node, cl, namespaced, all_lvols,
                             internal=False):
     """ADVISORY pre-check of the subsystem pick for a new lvol — fails the
@@ -690,13 +735,7 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         # collide when a sibling's nsid is already taken there (soak case 7,
         # run 20260824_215758: 14 of 20 namespaces failed over, the 15th
         # died in add_ns).
-        sibling_node_id = ""
-        if getattr(lvol, "namespaced", False) or lvol.max_namespace_per_subsys > 1:
-            for lv in (all_lvols or db_controller.get_lvols(cl.get_id())):
-                if (lv.nqn == lvol.nqn and lv.get_id() != lvol.get_id()
-                        and getattr(lv, "replication_node_id", "")):
-                    sibling_node_id = lv.replication_node_id
-                    break
+        sibling_node_id = _sibling_replication_node(lvol, cl, all_lvols)
         if sibling_node_id:
             logger.info(
                 f"LVol {lvol.lvol_name} shares subsystem {lvol.nqn} with an "
@@ -800,6 +839,8 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
     except SubsystemCapacityError as e:
         logger.error(str(e))
         return False, str(e)
+
+    _realign_replication_node_after_claim(lvol, cl)
 
     if ha_type == "single":
         if host_node.status == StorageNode.STATUS_ONLINE:
@@ -1385,7 +1426,11 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
     # nsid (ns_id == 0, e.g. a drain-queued registration firing early)
     # must fail loudly instead of guessing.
     if is_primary:
-        requested_nsid = None
+        # 0/unset means "let SPDK auto-assign", which is what an ordinary
+        # create wants. A fail-over copy instead arrives with an nsid the
+        # CONTROL PLANE claimed across the whole target HA set, and the
+        # primary must use exactly that one (see _claim_target_nsid).
+        requested_nsid = lvol.ns_id or None
     else:
         if not lvol.ns_id:
             return _fail_after_bdev(
@@ -1445,6 +1490,14 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
         # Persist the target-assigned nsid; replicas re-add with exactly
         # this value, so it must never be overwritten by a replica's
         # (identical) response.
+        if requested_nsid and int(ret) != int(requested_nsid):
+            # The node accepted the add but at a DIFFERENT number than the
+            # control plane claimed. The replicas would then be told the
+            # claimed one and collide. Trust what the node actually did.
+            logger.warning(
+                "Node %s placed %s at nsid %s, not the claimed %s; the "
+                "replicas will follow the node",
+                snode.get_id(), lvol.get_id(), ret, requested_nsid)
         lvol.ns_id = int(ret)
 
     if not is_primary:
@@ -3464,9 +3517,81 @@ def replication_stop(lvol_id, delete=False, from_policy=False):
     return True
 
 
+def _claim_target_nsid(db_controller, new_lvol, target_node):
+    """Pick the nsid a fail-over copy takes on the target HA set, or 0.
+
+    The primary used to auto-assign, which is only safe when the primary sees
+    the whole shared subsystem. It does not when the group is split across two
+    target primaries: each counts only its own subset, hands out an nsid the
+    HA PEER already gave to a sibling, and the peer's add_ns is rejected
+    ("wanted nsid=1 ... holds=[(1, <other volume>) ... (7, ...)]", soak case 7).
+    Splitting is prevented at create time now, but a node that was down when
+    the group was placed can still reintroduce it, so do not depend on it:
+    claim the nsid from the UNION of what every node of the target HA set
+    actually holds, and give the same number to the primary and the replicas.
+
+    The nsid does NOT have to match the source cluster's -- clients resolve
+    their paths through connect_lvol -- it only has to be consistent across
+    the paths of THIS subsystem.
+
+    Returns 0 when the subsystem exists nowhere yet (nothing to collide with,
+    so ordinary auto-assignment is correct).
+    """
+    node_ids = [target_node.get_id()]
+    for peer_id in [target_node.secondary_node_id, target_node.tertiary_node_id]:
+        if peer_id and peer_id not in node_ids:
+            node_ids.append(peer_id)
+
+    occupied, seen_subsystem, max_ns = set(), False, 0
+    for node_id in node_ids:
+        try:
+            node = db_controller.get_storage_node_by_id(node_id)
+        except KeyError:
+            continue
+        if node.status != StorageNode.STATUS_ONLINE:
+            continue
+        try:
+            subsystem = node.rpc_client().subsystem_get(new_lvol.nqn)
+        except Exception as e:
+            # Unreadable node: claiming against a partial view is exactly the
+            # bug being fixed, so fall back to auto-assignment rather than
+            # inventing a number that may already be taken there.
+            logger.warning("Cannot read subsystem %s on node %s (%s); leaving "
+                           "the nsid to auto-assignment", new_lvol.nqn, node_id, e)
+            return 0
+        if not subsystem:
+            continue
+        seen_subsystem = True
+        max_ns = max(max_ns, subsystem.get("max_namespaces") or 0)
+        for ns in (subsystem.get("namespaces") or []):
+            # A namespace belonging to THIS copy is evicted right before the
+            # add, so its slot is free to reuse.
+            if ns.get("uuid") == new_lvol.uuid:
+                continue
+            if ns.get("nsid"):
+                occupied.add(int(ns["nsid"]))
+
+    if not seen_subsystem:
+        return 0
+
+    limit = max_ns or (new_lvol.max_namespace_per_subsys or 0) or (max(occupied) + 1)
+    for nsid in range(1, limit + 1):
+        if nsid not in occupied:
+            logger.info("Claimed nsid %d for fail-over copy %s in subsystem %s "
+                        "(occupied on the target HA set: %s)",
+                        nsid, new_lvol.get_id(), new_lvol.nqn, sorted(occupied))
+            return nsid
+    # Full: let the add fail with the node's own diagnostic rather than
+    # silently picking a colliding number here.
+    logger.error("Subsystem %s is full on the target HA set (%d namespaces); "
+                 "no nsid to claim for %s",
+                 new_lvol.nqn, len(occupied), new_lvol.get_id())
+    return 0
+
+
 def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snapshot):
     """Create a writable clone of *lvol* on *target_node* (primary + online HA
-    peers) from *snapshot*, preserving the original NQN/ns_id.
+    peers) from *snapshot*, preserving the original NQN.
 
     Shared by fail-over (replicate_lvol_on_target_cluster) and migration-commit
     (replication_commit). Returns (new_lvol, error). The new lvol is left in
@@ -3493,10 +3618,13 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
     new_lvol.top_bdev = f"{new_lvol.lvs_name}/{new_lvol.lvol_bdev}"
     new_lvol.snapshot_name = snapshot.snap_bdev
     new_lvol.status = LVol.STATUS_IN_CREATION
-    # Preserve the ORIGINAL subsystem NQN and namespace id: the client must
-    # reconnect to the SAME NQN/NS on the target cluster — only the IP/port
-    # differ. new_lvol is a deep copy of lvol, so nqn/ns_id are already
-    # identical; do NOT rewrite the NQN with the target cluster's prefix.
+    # Preserve the ORIGINAL subsystem NQN: the client must reconnect to the
+    # SAME NQN on the target cluster — only the IP/port differ. new_lvol is a
+    # deep copy of lvol, so the nqn is already identical; do NOT rewrite it
+    # with the target cluster's prefix. The NSID is a different matter: it is
+    # local to a subsystem's own HA set, clients resolve their paths through
+    # connect_lvol, and the source's number may already be taken on the
+    # target — so it is re-claimed below rather than carried over.
 
     new_lvol.bdev_stack = [
         {
@@ -3511,6 +3639,12 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
 
     if new_lvol.crypto_bdev:
         new_lvol.bdev_stack.append({"type": "crypto"})
+
+    # The deep copy carries the SOURCE cluster's nsid, which means nothing on
+    # the target. Replace it with one claimed across the whole target HA set
+    # (0 = nothing there yet, auto-assign) BEFORE the record is written, so the
+    # primary and every replica add the namespace at the same number.
+    new_lvol.ns_id = _claim_target_nsid(db_controller, new_lvol, target_node)
 
     new_lvol.write_to_db(db_controller.kv_store)
 
