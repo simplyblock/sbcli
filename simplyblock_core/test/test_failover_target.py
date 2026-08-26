@@ -79,6 +79,12 @@ class _FakeDB:
     def get_lvol_by_id(self, lid):
         return _src_lvol()
 
+    def get_lvol_replication_objects(self):
+        # Real DBController exposes this; the fail-back retirement asks it
+        # whether this volume is a copy of something. In these fail-OVER
+        # tests it is not, so there is nothing to retire.
+        return []
+
     def get_storage_node_by_id(self, nid):
         return self._nodes[nid]
 

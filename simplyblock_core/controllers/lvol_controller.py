@@ -3613,6 +3613,61 @@ def _claim_target_nsid(db_controller, new_lvol, target_node):
     return 0
 
 
+def _retire_superseded_original(db_controller, lvol, dest_cluster_id):
+    """Delete the volume a fail-back replaces. Returns (ok, error).
+
+    After a fail-over the ORIGINAL volume stays on its cluster, still holding
+    its namespace. Failing back builds the returning volume in the SAME
+    subsystem, so unless the original goes first there is no slot for it: a
+    shared subsystem is sized to its group (max_namespaces=10 for ten
+    volumes) and the add fails outright -- "Subsystem ... is full on the
+    target HA set", which suspended all 20 cutover tasks in soak case 7 run
+    20260826_235940. Dedicated subsystems hid this: sized 1 they were equally
+    full, but each fail-back minted a fresh per-volume NQN and so never came
+    back to an occupied one.
+
+    The original's SNAPSHOTS are deliberately left alone. The newest one still
+    present on that cluster is the common base the fail-back clones and
+    transfers a delta against -- that is what makes a fail-back an online
+    migration rather than a full copy.
+
+    A no-op unless *lvol* is itself a fail-over copy whose original still
+    lives on the destination cluster, so a first fail-over deletes nothing.
+    """
+    original = None
+    for rep in db_controller.get_lvol_replication_objects():
+        target = getattr(rep, "target_lvol", None)
+        if target and target.get_id() == lvol.get_id() and rep.source_lvol:
+            original = rep.source_lvol          # keep the LAST match: the
+                                                # most recent fail-over wins
+    if not original:
+        return True, ""
+    try:
+        current = db_controller.get_lvol_by_id(original.get_id())
+    except KeyError:
+        return True, ""                          # already gone
+    if current.status in (LVol.STATUS_DELETED, LVol.STATUS_IN_DELETION):
+        return True, ""
+    try:
+        node = db_controller.get_storage_node_by_id(current.node_id)
+    except KeyError:
+        return True, ""
+    if node.cluster_id != dest_cluster_id:
+        return True, ""                          # not in our way
+
+    logger.info(
+        "Fail-back: deleting the superseded original %s (nsid %s of subsystem "
+        "%s) on node %s so the returning volume has a namespace slot",
+        current.get_id(), current.ns_id, current.nqn, current.node_id[:8])
+    try:
+        delete_lvol(current)
+    except Exception as e:
+        return False, (
+            f"Fail-back cannot free the namespace of the superseded original "
+            f"{current.get_id()} in subsystem {current.nqn}: {e}")
+    return True, ""
+
+
 def _subsystem_home_node(db_controller, nqn, cluster_id):
     """Node in *cluster_id* that already hosts copies of subsystem *nqn*, or "".
 
@@ -3643,6 +3698,14 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
     STATUS_IN_CREATION with lvol_uuid/blobid populated; the caller is
     responsible for setting STATUS_ONLINE and any replication bookkeeping.
     """
+    # A fail-back returns into the subsystem the original still occupies, so
+    # the original has to go first (its snapshots stay: they are the delta
+    # base). A first fail-over has no original here and this does nothing.
+    ok, err = _retire_superseded_original(db_controller, lvol,
+                                          target_node.cluster_id)
+    if not ok:
+        return None, err
+
     # Last line of defence for the one-subsystem-one-primary invariant. The
     # target node was chosen when the policy was attached, long before this
     # copy is created; if anything put a sibling somewhere else in the

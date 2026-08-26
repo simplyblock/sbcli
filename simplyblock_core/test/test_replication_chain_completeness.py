@@ -411,6 +411,10 @@ def test_failback_evicts_on_every_ha_node_not_just_the_primary(monkeypatch):
             # No copy of this subsystem exists on the target yet, so the
             # one-subsystem-one-primary guard has nothing to redirect to.
             return []
+        def get_lvol_replication_objects(self):
+            # This volume is not a fail-over copy, so no original is
+            # superseded and nothing gets retired.
+            return []
 
     class _Lvol:
         uuid = "ORIG"; nqn = "nqn.test:lvol:ORIG"; ns_id = 7
