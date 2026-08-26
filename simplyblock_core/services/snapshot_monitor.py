@@ -585,6 +585,55 @@ def take_due_internal_snapshots(cluster_id, now_ts):
     if not repl_lvols:
         return
     all_snaps = db.get_mini_snapshots()
+
+    # Consistency-group policies snapshot as a GROUP (requirement 3): one
+    # frozen point-in-time across every member, via ONE group-snapshot call
+    # per tick — never per-volume snapshots. Members of such policies are
+    # removed from the per-volume loop below.
+    cg_policies = {p.get_id(): p for p in db.get_replication_policies(cluster_id)
+                   if getattr(p, "consistency_group", False)}
+    if cg_policies:
+        from simplyblock_core.controllers import consistency_group_controller
+        grouped_ids = set()
+        for policy_id, policy in cg_policies.items():
+            members = [lv for lv in repl_lvols
+                       if getattr(lv, "replication_policy_id", "") == policy_id]
+            if not members:
+                continue
+            grouped_ids.update(lv.get_id() for lv in members)
+            try:
+                # Due when ANY member's interval elapsed (they tick together,
+                # so member timestamps agree except right after a join).
+                if not any(_due_for_internal_snapshot(lv, all_snaps, now_ts)
+                           for lv in members):
+                    continue
+                # Group-wide back-pressure: one member's unfinished transfer
+                # holds the WHOLE group's next generation, otherwise the
+                # generations stop being aligned points in time.
+                blocked = None
+                for lv in members:
+                    outstanding = _outstanding_internal_snapshot(lv, all_snaps)
+                    if outstanding is not None:
+                        blocked = (lv, outstanding)
+                        break
+                if blocked:
+                    logger.warning(
+                        "Skipping group snapshot for policy %s: member %s "
+                        "has an unreplicated internal snapshot (%s)",
+                        policy.policy_name, blocked[0].get_id(),
+                        blocked[1].get_id())
+                    continue
+                logger.info("Taking consistency-group snapshot for policy %s "
+                            "(%d members)", policy.policy_name, len(members))
+                _ids, err = consistency_group_controller.create_group_snapshot(policy_id)
+                if err:
+                    logger.warning("Group snapshot for policy %s failed: %s",
+                                   policy.policy_name, err)
+            except Exception as e:
+                logger.error("Group snapshot scheduling failed for policy %s: %s",
+                             policy_id, e)
+        repl_lvols = [lv for lv in repl_lvols if lv.get_id() not in grouped_ids]
+
     for lvol in repl_lvols:
         try:
             if not _due_for_internal_snapshot(lvol, all_snaps, now_ts):
