@@ -1,8 +1,8 @@
 # coding=utf-8
 
-from typing import List
+from typing import ClassVar, List
 
-from simplyblock_core.models.base_model import BaseModel
+from simplyblock_core.models.base_model import BaseModel, default_factory
 
 
 class LVol(BaseModel):
@@ -15,7 +15,7 @@ class LVol(BaseModel):
     STATUS_DELETED = 'deleted'
     STATUS_RESTORE_FAILED = 'restore_failed'
 
-    _STATUS_CODE_MAP = {
+    _STATUS_CODE_MAP: ClassVar[dict] = {
         STATUS_ONLINE: 1,
         STATUS_OFFLINE: 2,
         STATUS_IN_DELETION: 3,
@@ -26,7 +26,7 @@ class LVol(BaseModel):
     }
 
     base_bdev: str = ""
-    bdev_stack: List = []
+    bdev_stack: List = default_factory(list)
     blobid: int = 0
     cloned_from_snap: str = ""
     comp_bdev: str = ""
@@ -47,7 +47,7 @@ class LVol(BaseModel):
     max_size: int = 0
     namespace: str = ""
     node_id: str = ""
-    nodes: List[str] = []
+    nodes: List[str] = default_factory(list)
     nqn: str = ""
     ns_id: int = 1
     max_namespace_per_subsys: int = 1
@@ -57,7 +57,7 @@ class LVol(BaseModel):
     # these when it finalises the record, so a node never receives a second
     # sync delete — a repeat walks the replica blob tree again and errors on
     # every entry the first pass cleaned.
-    sync_deleted_nodes: List[str] = []
+    sync_deleted_nodes: List[str] = default_factory(list)
     pool_uuid: str = ""
     pool_name: str = ""
     pvc_name: str = ""
@@ -72,7 +72,7 @@ class LVol(BaseModel):
     fabric: str = "tcp"
     ndcs: int = 0
     npcs: int = 0
-    allowed_hosts: List[dict] = []
+    allowed_hosts: List[dict] = default_factory(list)
     delete_snap_on_lvol_delete: bool = False
     do_replicate: bool = False
     replication_node_id: str = ""

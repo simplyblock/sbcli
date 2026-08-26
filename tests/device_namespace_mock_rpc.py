@@ -1,5 +1,6 @@
 # coding=utf-8
 import json
+from typing import ClassVar
 import logging
 import random
 import threading
@@ -66,7 +67,7 @@ class NamespaceNodeState:
 
 
 class _Registry:
-    servers = {}
+    servers: ClassVar[dict] = {}
 
     @classmethod
     def register(cls, host, port, server):
