@@ -6,7 +6,7 @@ import os.path
 import time
 
 import fdb
-from typing import Any, List, Optional
+from typing import Any, ClassVar, List, Optional
 
 from simplyblock_core import constants, utils
 from simplyblock_core.models.cluster import Cluster, ClusterAddNodeLock, ClusterCreateLock, PortReservation, DeployConfig
@@ -61,7 +61,7 @@ def restart_claim_active(node, claim_owner=""):
 
 
 class Singleton(type):
-    _instances = {}  # type: ignore
+    _instances: ClassVar[dict] = {}
     def __call__(cls, *args, **kwargs):
         if cls in cls._instances:
             return cls._instances[cls]

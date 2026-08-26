@@ -68,7 +68,7 @@ Data flows: **CLI → Web API → Core controllers → FoundationDB**. Storage n
 
 ### Pydantic Fields
 
-Applies to every Pydantic model: v2 DTOs and request bodies, internal-API payloads, and `pydantic-settings` classes. It does **not** apply to `simplyblock_core.models.base_model.BaseModel`, which is hand-rolled — its fields stay plain annotations with plain defaults.
+Applies to every Pydantic model: v2 DTOs and request bodies, internal-API payloads, and `pydantic-settings` classes. It does **not** apply to `simplyblock_core.models.base_model.BaseModel`, which is hand-rolled — its fields stay plain annotations with plain defaults, except that a mutable default is declared as `default_factory(list)` / `default_factory(dict)` (see `simplyblock_core/AGENTS.md` § Data Model Pattern).
 
 Constraints and metadata belong inside `Annotated[...]`. The default stays on the right-hand side of the assignment; a field with no default is required.
 

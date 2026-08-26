@@ -16,6 +16,7 @@ Core business logic, data models, and background services for the Simplyblock co
 All models extend `BaseModel` (`models/base_model.py`). Key conventions:
 
 - `BaseModel` is hand-rolled, **not** a Pydantic model. Models define fields as **class-level type annotations with defaults**; `BaseModel.from_dict()` / `to_dict()` handle serialization automatically via introspection of annotations.
+- **Mutable defaults** (`list`, `dict`, `set`) must be declared with `default_factory` from `models/base_model.py`: `nodes: List[str] = default_factory(list)`. A literal `= []` stores one object on the class that every instance without a value for the field would share and mutate — `ruff`'s RUF012 rejects it, and `tests/unit/models/test_mutable_defaults.py` fails on any model field that reintroduces one. A genuine class constant shared on purpose (`_STATUS_CODE_MAP`) is annotated `ClassVar[...]` instead.
 - Identity: `uuid` field; `get_id()` returns it. `get_db_id()` returns the FDB key as `<object_type>/<class_name>/<uuid>`.
 - Persistence: `write_to_db(kv_store)` and `read_from_db(kv_store)` serialize to/from JSON in FDB.
 - `BaseNodeObject` extends `BaseModel` with standard node status constants (`STATUS_ONLINE`, `STATUS_OFFLINE`, etc.) and a status code map.
@@ -52,5 +53,6 @@ Response-body logging is gated by `Settings().log_response_bodies` (default `Fal
 ## Tests
 
 ```bash
-pytest simplyblock_core/test/
+pytest simplyblock_core/test/    # controller / service logic
+pytest tests/unit/models/       # every BaseModel test lives here
 ```

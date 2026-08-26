@@ -5,7 +5,7 @@ import threading
 from collections import OrderedDict
 from enum import IntEnum
 from json import JSONDecodeError
-from typing import Any, Optional
+from typing import Any, ClassVar, Optional
 
 import jsonschema
 import requests
@@ -264,8 +264,8 @@ class RPCClient:
     # Connection-error retries (`connect=`) are independent of this set and
     # still apply, since a failed *connect* means the request never reached the
     # node and is safe to resend.
-    DEFAULT_ALLOWED_METHODS = ["HEAD", "GET", "PUT", "DELETE", "OPTIONS", "TRACE"]
-    RPC_NO_PRINT_OUTPUT = ["bdev_get_bdevs", "nvmf_get_subsystems", "bdev_get_iostat", "bdev_get_histogram"]
+    DEFAULT_ALLOWED_METHODS: ClassVar[list] = ["HEAD", "GET", "PUT", "DELETE", "OPTIONS", "TRACE"]
+    RPC_NO_PRINT_OUTPUT: ClassVar[list] = ["bdev_get_bdevs", "nvmf_get_subsystems", "bdev_get_iostat", "bdev_get_histogram"]
 
     def __init__(self, host, port, username, password: SecretStr, timeout=180, retry=3):
         self.host = host

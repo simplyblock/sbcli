@@ -1,4 +1,5 @@
 import base64
+from typing import ClassVar
 import json
 import logging
 import os
@@ -6,7 +7,7 @@ import socket
 import sys
 import threading
 import time
-from typing import ClassVar, Optional
+from typing import Optional
 
 from http.server import HTTPServer
 from http.server import ThreadingHTTPServer
@@ -204,7 +205,7 @@ def _rpc_call_inner(req, req_data, req_time, sock_timeout):
 
 
 class ServerHandler(BaseHTTPRequestHandler):
-    server_session: list[int] = []
+    server_session: ClassVar[list[int]] = []
     key = ""
 
     # The base class defaults to "HTTP/1.0", under which parse_request()
