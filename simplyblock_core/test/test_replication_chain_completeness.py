@@ -282,6 +282,9 @@ class _EvictRPC:
 
 
 class _EvictNode:
+    secondary_node_id = None
+    tertiary_node_id = None
+
     def __init__(self, rpc):
         self._rpc = rpc
 
