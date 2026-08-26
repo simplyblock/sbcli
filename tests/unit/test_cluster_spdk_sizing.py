@@ -191,6 +191,35 @@ class TestApplyClusterVcpuCount(unittest.TestCase):
         persisted_kwargs = snode_api.persist_node_config.call_args.kwargs
         self.assertIsInstance(persisted_kwargs["distribution"], dict)
 
+    def test_number_of_distribs_is_rederived_from_the_resized_layout(self):
+        """number_of_distribs is sized off distrib_cpu_cores at configure time,
+        against the host's full core count -- before the host belongs to any
+        cluster. Resizing the layout down to the cluster's vcpu_count must
+        rederive it too, or add_node persists a distrib count sized for the
+        pre-resize (much larger) layout instead of the one actually running.
+
+        Configured against isolated_len=18 (no cluster yet) gives
+        distrib_cpu_cores=6 (table: V=17-18 -> 6 distribs). Resized to the
+        cluster's vcpu_count=8, distrib_cpu_cores drops to 2 (table: V=8-9 ->
+        2 distribs); number_of_distribs must follow it down to 2, not stay 6.
+        """
+        snode_api = MagicMock()
+        snode_api.persist_node_config.return_value = (True, None)
+        node_info = self._node_info({0: list(range(32))})
+        node = self._node_config(0, isolated_len=18)
+        node["number_of_distribs"] = 6  # stale, from configure-time sizing
+        nodes = [node]
+
+        ok = storage_node_ops.apply_cluster_vcpu_count(snode_api, node_info, nodes, 8)
+
+        self.assertTrue(ok)
+        self.assertEqual(len(nodes[0]["distribution"]["distrib_cpu_cores"]), 2)
+        self.assertEqual(nodes[0]["number_of_distribs"], 2,
+                         "must be rederived from the resized layout, not left at the stale 6")
+        persisted_kwargs = snode_api.persist_node_config.call_args.kwargs
+        self.assertEqual(persisted_kwargs["number_of_distribs"], 2,
+                         "the rederived count must also be persisted to the node's config file")
+
     def test_already_correct_is_a_no_op(self):
         """A retried add_node re-fetches the file its own earlier attempt
         already resized; it must not refetch topology or rewrite it again."""
