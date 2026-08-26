@@ -1,6 +1,6 @@
 # coding=utf-8
 """
-test_basemodel_chunked_read.py — completeness contract for the chunked
+test_chunked_read.py — completeness contract for the chunked
 read_from_db pagination (review of d6dfcd73).
 
 The review concern: "_READ_CHUNK_SIZE = 2000 implicitly reads only the

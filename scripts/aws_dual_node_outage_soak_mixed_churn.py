@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+from typing import ClassVar
 import itertools
 import json
 import logging
@@ -2114,7 +2115,7 @@ class SoakRunner:
     # issues `sn restart` later in the iteration — so the unavailability
     # window is effectively unbounded from the gap's perspective. Use a
     # very large sentinel.
-    _METHOD_MIN_UNAVAIL_S = {
+    _METHOD_MIN_UNAVAIL_S: ClassVar[dict] = {
         "graceful": 10_000,
         "forced": 10_000,
         # CP detection + auto-restart takes at least this long in practice.

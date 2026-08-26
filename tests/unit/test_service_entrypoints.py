@@ -24,6 +24,7 @@ import ast
 import importlib
 import pathlib
 import unittest
+from typing import ClassVar
 
 from simplyblock_core.services import __main__ as dispatcher
 
@@ -122,7 +123,7 @@ class TestServicesHaveMain(unittest.TestCase):
     runs it through ``runpy``, which needs no ``main()``.
     """
 
-    EXEMPT = {"spdk_http_proxy_server"}
+    EXEMPT: ClassVar[str] = {"spdk_http_proxy_server"}
 
     def test_every_service_defines_main(self):
         for name in dispatcher._service_names():

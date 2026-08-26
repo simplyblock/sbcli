@@ -1,8 +1,8 @@
 # coding=utf-8
 import datetime
-from typing import List
+from typing import ClassVar, List
 
-from simplyblock_core.models.base_model import BaseModel
+from simplyblock_core.models.base_model import BaseModel, default_factory
 
 
 class Backup(BaseModel):
@@ -15,7 +15,7 @@ class Backup(BaseModel):
     STATUS_MERGED = 'merged'
     STATUS_DELETING = 'deleting'
 
-    _STATUS_CODE_MAP = {
+    _STATUS_CODE_MAP: ClassVar[dict] = {
         STATUS_PENDING: 0,
         STATUS_IN_PROGRESS: 1,
         STATUS_COMPLETED: 2,
@@ -40,9 +40,9 @@ class Backup(BaseModel):
     completed_at: int = 0
     error_message: str = ""
     # Security params from the source lvol (for cross-cluster restore)
-    allowed_hosts: List[dict] = []
+    allowed_hosts: List[dict] = default_factory(list)
     # S3 metadata written to metadata bucket
-    s3_metadata: dict = {}
+    s3_metadata: dict = default_factory(dict)
     encrypted: bool = False
 
     def get_id(self):
@@ -70,7 +70,7 @@ class BackupPolicy(BaseModel):
     STATUS_ACTIVE = 'active'
     STATUS_INACTIVE = 'inactive'
 
-    _STATUS_CODE_MAP = {
+    _STATUS_CODE_MAP: ClassVar[dict] = {
         STATUS_ACTIVE: 0,
         STATUS_INACTIVE: 1,
     }

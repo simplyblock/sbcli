@@ -19,6 +19,7 @@ co-location choices to make sense at all, so 2-5 vCPU hosts get literal,
 hand-specified layouts instead of a derived split.
 """
 
+from typing import ClassVar
 from unittest.mock import patch
 
 from simplyblock_core import utils
@@ -112,7 +113,7 @@ class TestDistribPriorityAt22PlusVcpus:
     count and eat into distrib/poller's budget before they saw it."""
 
     # V, expected distrib-core count -- independent of alceml_count.
-    DISTRIB_CORES_BY_VCPU = {
+    DISTRIB_CORES_BY_VCPU: ClassVar[dict] = {
         22: 9, 23: 10, 24: 10, 25: 11, 26: 11,
         27: 12, 30: 12, 37: 12,  # capped at 12 through this range
         38: 24, 40: 24,          # jumps straight to 24, no ramp
