@@ -3527,6 +3527,7 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
 
     # Expose the volume on the secondary and tertiary target nodes too (HA),
     # so connect_lvol returns all client paths.
+    placed_nodes = [target_node]
     for peer_id in [target_node.secondary_node_id, target_node.tertiary_node_id]:
         if not peer_id:
             continue
@@ -3546,12 +3547,31 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
         lvol_bdev, error = add_lvol_on_node(new_lvol, peer_node, is_primary=False)
         if error:
             logger.error(error)
-            # remove lvol from primary
-            ret = delete_lvol_from_node(new_lvol, target_node)
-            if not ret:
-                logger.error("")
+            # Roll back EVERY node that already carries this copy, not just the
+            # primary. With three target nodes a failure on the tertiary used
+            # to leave the SECONDARY holding the namespace while the primary
+            # was cleaned, so the next sibling's primary auto-assigned an nsid
+            # the peer had already given to someone else -- and its replica add
+            # was rejected with "wanted nsid=2 ... holds=[(2, <other volume>)]"
+            # (case 7, run 20260826_223631).
+            #
+            # The ids also matter: this used to pass the LVol and StorageNode
+            # OBJECTS to delete_lvol_from_node(lvol_id, node_id), whose
+            # `except KeyError: return True` swallowed the mismatch -- so the
+            # rollback reported success while deleting nothing at all.
+            for node in placed_nodes:
+                try:
+                    if not delete_lvol_from_node(
+                            new_lvol.get_id(), node.get_id(),
+                            sync=node.get_id() != target_node.get_id()):
+                        logger.error("rollback: could not remove %s from %s",
+                                     new_lvol.get_id(), node.get_id()[:8])
+                except Exception:
+                    logger.exception("rollback: removing %s from %s raised",
+                                     new_lvol.get_id(), node.get_id()[:8])
             db_controller.release_lvol_ns_slot(new_lvol)
             return None, error
+        placed_nodes.append(peer_node)
 
     return new_lvol, None
 
@@ -4274,10 +4294,19 @@ def replicate_lvol_on_source_cluster(lvol_id, cluster_id=None, pool_uuid=None):
         lvol_bdev, error = add_lvol_on_node(new_lvol, secondary_node, is_primary=False)
         if error:
             logger.error(error)
-            # remove lvol from primary
-            ret = delete_lvol_from_node(new_lvol, source_node)
+            # IDs, not objects: delete_lvol_from_node(lvol_id, node_id) hits
+            # `except KeyError: return True` when handed the records, so this
+            # rollback reported success while deleting nothing -- leaving the
+            # primary's namespace behind to collide with the next attempt.
+            try:
+                ret = delete_lvol_from_node(new_lvol.get_id(), source_node.get_id())
+            except Exception:
+                logger.exception("rollback: removing %s from %s raised",
+                                 new_lvol.get_id(), source_node.get_id()[:8])
+                ret = False
             if not ret:
-                logger.error("")
+                logger.error("rollback: could not remove %s from %s",
+                             new_lvol.get_id(), source_node.get_id()[:8])
             db_controller.release_lvol_ns_slot(new_lvol)
             return False, error
 

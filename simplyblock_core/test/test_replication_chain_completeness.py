@@ -688,3 +688,26 @@ def test_replica_rollback_clears_its_namespace_and_syncs_the_delete():
     assert rpc.removed_ns == [5], "must drop only THIS attempt's namespace"
     assert rpc.deletes and all(sync for _n, sync in rpc.deletes), \
         "a replica rollback must use the SYNC delete a non-leader accepts"
+
+
+def test_failover_rollback_covers_every_placed_node_with_ids():
+    """Case 7, run 20260826_223631: a peer add failure rolled back only the
+    PRIMARY, so a third target node's failure left the SECONDARY holding the
+    namespace. The next sibling's primary then auto-assigned an nsid the peer
+    had already given away, and its replica add was rejected with
+    'wanted nsid=2 ... holds=[(2, <other volume>)]'. Worse, the rollback
+    passed the LVol/StorageNode OBJECTS to delete_lvol_from_node(lvol_id,
+    node_id), whose 'except KeyError: return True' swallowed the mismatch --
+    so it reported success while deleting nothing."""
+    import inspect
+    from simplyblock_core.controllers import lvol_controller as lc
+    src = inspect.getsource(lc._create_target_lvol_clone)
+    assert "placed_nodes" in src, "rollback must track every node that got the copy"
+    assert "for node in placed_nodes:" in src
+    assert "new_lvol.get_id(), node.get_id()" in src, "must pass ids, not records"
+    assert "delete_lvol_from_node(new_lvol, target_node)" not in src
+
+    # the fail-back clone had the same object-vs-id bug
+    whole = inspect.getsource(lc)
+    assert "delete_lvol_from_node(new_lvol," not in whole, \
+        "no rollback may hand records to an id-taking function"
