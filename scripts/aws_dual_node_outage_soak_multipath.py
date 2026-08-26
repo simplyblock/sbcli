@@ -130,6 +130,18 @@ FIO_HARD_ERROR_MARKERS = (
     "fio: pid=",
     "Killed",
     "Terminated",
+    # fio prints verify failures WITHOUT the "fio: " prefix -- the line reads
+    # "verify: bad magic header a8a4, wanted acca at file ...". Neither
+    # "fio: verify" nor "verify failed" matches that, so run 20260825_155730
+    # corrupted vol6 at 18:53 and vol2 at 19:43 and the soak kept applying
+    # outages for another two hours, reporting PASS each time, until vol4's
+    # fio *process* died at 20:49 and the rc-file branch finally caught it.
+    # A data verification failure is the single most important thing this
+    # harness can find; it must never again depend on fio also crashing.
+    "verify: bad",
+    "bad magic header",
+    "bad header offset",
+    "verify: got",
 )
 #: fio stderr markers for a --max_latency violation. Fatal in phase 1 (a
 #: single-NIC outage must be transparent), counted in phase 2 (promotion
@@ -1220,8 +1232,15 @@ class SoakRunner:
             if args.fio_max_latency > 0:
                 fio_cmd += f"--max_latency={args.fio_max_latency}s "
             if args.fio_verify:
+                # verify_dump writes <file>.<offset>.received / .expected on a
+                # mismatch. Without it a verify failure gives only fio's one
+                # line, and every corruption so far has died with the returned
+                # bytes unidentified -- we could not tell stale data from
+                # parity noise from a neighbouring block, and the volumes are
+                # on instance store so they vanish when the fleet is stopped.
+                # The dumps are 4 KiB each and only appear on failure.
                 fio_cmd += (f"--verify={args.fio_verify} --verify_fatal=1 "
-                            f"--verify_backlog=1024 ")
+                            f"--verify_backlog=1024 --verify_dump=1 ")
             fio_cmd += f"--output={shlex.quote(volume['fio_log'])}"
 
             start_script = (
