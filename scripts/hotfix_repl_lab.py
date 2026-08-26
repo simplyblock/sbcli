@@ -77,7 +77,8 @@ SERVICES = {
     "app_TasksRunnerReplicationFinal": {
         "simplyblock_core/services/tasks_runner_replication_final.py":
             "services/tasks_runner_replication_final.py"},
-    "app_LVolMonitor": {},
+    "app_LVolMonitor": {
+        "simplyblock_core/services/lvol_monitor.py": "services/lvol_monitor.py"},
 }
 #: also refreshed on the mgmt HOST: the harness runs `sudo python3 -c
 #: "...lvol_controller.get_replication_info..."` there, and sbctl imports it.

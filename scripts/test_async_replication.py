@@ -291,7 +291,7 @@ def wait_data_replicated(mgmt_ip, key_path, lvol_uuids, after_ts,
         f"predates the filesystem")
 
 
-def do_failover(mgmt_ip, key_path, lvol_uuid):
+def do_failover(mgmt_ip, key_path, lvol_uuid, generation=0):
     """Fail a volume over, capturing WHY when it does not work.
 
     replicate_lvol_on_target_cluster returns a dict on success but False or
@@ -316,7 +316,7 @@ root.setLevel(logging.DEBUG)
 err = ""
 try:
     with contextlib.redirect_stderr(buf):
-        res = lvol_controller.replicate_lvol_on_target_cluster({lvol_uuid!r})
+        res = lvol_controller.replicate_lvol_on_target_cluster({lvol_uuid!r}, generation={generation})
 except Exception as exc:                      # noqa: BLE001 - report, don't hide
     res, err = False, f"{{type(exc).__name__}}: {{exc}}"
 out = res if isinstance(res, dict) else {{"result": res}}
@@ -774,21 +774,28 @@ def ensure_replication_target(mgmt_ip, key_path, from_cluster, to_cluster,
 
 
 def ensure_replication_policy(mgmt_ip, key_path, from_cluster, target_name, mode,
-                              interval_min=REPL_INTERVAL_MIN, keep=2, name=None):
-    """Register (idempotently) a cadence policy on an existing target."""
-    name = name or f"pol_{mode}_{target_name}"
+                              interval_min=REPL_INTERVAL_MIN, keep=2, name=None,
+                              extra_flags=""):
+    """Register (idempotently) a cadence policy on an existing target.
+
+    extra_flags shapes the policy NAME too, so a case asking for a
+    retention-schedule or consistency-group policy never silently reuses a
+    plain one another case left behind.
+    """
+    suffix = "_x%08x" % (hash(extra_flags) & 0xffffffff) if extra_flags else ""
+    name = name or f"pol_{mode}_{target_name}{suffix}"
     for row in _replication_list(mgmt_ip, key_path, "policy", from_cluster):
         if row.get("Name") == name:
             return name
     run(mgmt_ip, key_path,
         f"{SBCTL} -d cluster replication-policy-add {from_cluster} {name}"
         f" --target {target_name} --interval-min {interval_min} --mode {mode}"
-        f" --keep {keep}")
+        f" --keep {keep}{(' ' + extra_flags) if extra_flags else ''}")
     return name
 
 
 def set_cluster_replication(mgmt_ip, key_path, from_cluster, to_cluster, to_pool_uuid,
-                            mode="migration"):
+                            mode="migration", extra_flags=""):
     """Create the target + policy that let `from_cluster` replicate to `to_cluster`.
 
     Replication is NEVER started per volume any more: `volume replication-start`
@@ -803,7 +810,8 @@ def set_cluster_replication(mgmt_ip, key_path, from_cluster, to_cluster, to_pool
           f"(pool {to_pool_uuid[:8]}, mode {mode})")
     target = ensure_replication_target(mgmt_ip, key_path, from_cluster, to_cluster,
                                        to_pool_uuid)
-    policy = ensure_replication_policy(mgmt_ip, key_path, from_cluster, target, mode)
+    policy = ensure_replication_policy(mgmt_ip, key_path, from_cluster, target, mode,
+                                       extra_flags=extra_flags)
 
     # PRODUCT GAP (bridge, delete once the readers consult the policy):
     # replicate_lvol_on_target_cluster() and tasks_runner_replication_final still
@@ -2123,6 +2131,487 @@ def test_case_9(meta):
           f"replication recovered every time, data intact (seed {seed}).")
 
 
+
+
+# --------------------------------------------------------------------------- #
+# Cases 10-12: feature tests (migration under load, retention ladder, CGs)
+# --------------------------------------------------------------------------- #
+CASE10_VOLS_PER_NODE = int(os.environ.get("CASE10_VOLS_PER_NODE", "3"))
+CASE11_RUNTIME_MIN = int(os.environ.get("CASE11_RUNTIME_MIN", "115"))
+CASE11_SCHEDULE = os.environ.get("CASE11_SCHEDULE", "5m:15m,7m:30m,10m:1h")
+CASE11_ROUNDS = int(os.environ.get("CASE11_ROUNDS", "3"))
+CASE12_SCHEDULE = os.environ.get("CASE12_SCHEDULE", "5m:15m")
+CASE12_RUNTIME_MIN = int(os.environ.get("CASE12_RUNTIME_MIN", "25"))
+
+
+def _start_stall_probe(client_ip, key_path, mount):
+    """100ms wall-clock heartbeats into the volume; gaps measure IO freezes."""
+    run(client_ip, key_path,
+        "sudo rm -f {m}/probe.ts; sudo nohup bash -c 'while :; do "
+        "date +%s%3N >> {m}/probe.ts; sync {m}/probe.ts; sleep 0.1; done' "
+        ">/dev/null 2>&1 & echo probe_started".format(m=mount), quiet=True)
+
+
+def _stop_probes(client_ip, key_path):
+    run(client_ip, key_path, "sudo pkill -f probe.ts 2>/dev/null || true",
+        check=False, quiet=True)
+
+
+def _max_probe_gap_ms(client_ip, key_path, mount, t0_ms, t1_ms):
+    """Largest heartbeat gap inside [t0_ms, t1_ms] = the freeze duration the
+    CLIENT actually observed (includes a ~100ms sampling floor)."""
+    awk = ("sudo awk 'p && $1>={t0} && $1<={t1} && $1-p>m {{m=$1-p}} {{p=$1}} "
+           "END{{print m+0}}' {m}/probe.ts").format(t0=t0_ms, t1=t1_ms, m=mount)
+    out = run(client_ip, key_path, awk, check=False, quiet=True)
+    try:
+        return int(out.strip())
+    except ValueError:
+        return -1
+
+
+def _start_recorder(client_ip, key_path, mount, interval_sec=30):
+    """Timestamped, fsynced records every interval -- the ground truth for
+    which point-in-time a snapshot generation captured."""
+    cmd = ("sudo rm -f {m}/records.log; sudo nohup bash -c 'i=0; while :; do "
+           "i=$((i+1)); echo \"iter=$i ts=$(date +%s)\" >> {m}/records.log; "
+           "sync {m}/records.log; sleep {iv}; done' >/dev/null 2>&1 & "
+           "echo recorder_started").format(m=mount, iv=interval_sec)
+    run(client_ip, key_path, cmd, quiet=True)
+
+
+def _stop_recorders(client_ip, key_path):
+    run(client_ip, key_path, "sudo pkill -f records.log 2>/dev/null || true",
+        check=False, quiet=True)
+
+
+def _snapshot_ages(mgmt_ip, key_path, lvol_uuid):
+    """created_at (epoch) of every replicated internal snapshot of the volume,
+    newest first."""
+    return mgmt_py(mgmt_ip, key_path, """
+import json
+from simplyblock_core.db_controller import DBController
+from simplyblock_core.models.snapshot import SnapShot
+db = DBController()
+out = []
+for snp in db.get_snapshots():
+    if snp.deleted or not snp.lvol or snp.lvol.get_id() != {lv!r}:
+        continue
+    if snp.snap_type == SnapShot.TYPE_INTERNAL and snp.target_replicated_snap_uuid:
+        out.append(snp.created_at or 0)
+print(json.dumps(sorted(out, reverse=True)))
+""".format(lv=lvol_uuid), replayable=True)
+
+
+def _verify_retention_ladder(times, tiers, now, cadence_sec=60, slack=150):
+    """Independent check of (a) kept and (b) pruned per schedule.
+
+    tiers: [(every_sec, span_sec)] finest first. Verifies: nothing older
+    than the horizon (+slack), and inside each tier window consecutive
+    retained snapshots are no further apart than every+cadence+slack and no
+    denser than the schedule plus a small tolerance allows.
+    """
+    problems = []
+    horizon = sum(t[1] for t in tiers)
+    ages = sorted(now - t for t in times)
+    for a in ages:
+        if a > horizon + slack:
+            problems.append("snapshot %ds old survives past the %ds horizon "
+                            "(not pruned)" % (a, horizon))
+    start = 0
+    for every, span in tiers:
+        end = start + span
+        inside = [a for a in ages if start <= a < end]
+        for prev, cur in zip(inside, inside[1:]):
+            if cur - prev > every + cadence_sec + slack:
+                problems.append(
+                    "gap of %ds inside the %ds tier (%d-%ds): a scheduled "
+                    "snapshot is missing" % (cur - prev, every, start, end))
+        expected = span // every
+        if len(inside) > expected + 2:
+            problems.append(
+                "%d snapshots inside the %ds tier (%d-%ds), expected <= %d: "
+                "not pruned" % (len(inside), every, start, end, expected + 2))
+        start = end
+    return problems
+
+
+def _records_match_generation(client_ip, key_path, mount, snap_ts, slack=35,
+                              logname="records.log"):
+    """The mounted snapshot copy must contain every record up to snap_ts and
+    none from after it (records are fsynced every 30s)."""
+    out = run(client_ip, key_path,
+              "sudo grep -oE 'ts=[0-9]+' %s/%s | tail -200" % (mount, logname),
+              check=False, quiet=True)
+    ts = [int(x.split("=")[1]) for x in out.split() if x.startswith("ts=")]
+    if not ts:
+        return False, "no records found on the snapshot copy"
+    newest = max(ts)
+    if newest > snap_ts + slack:
+        return False, ("record from %d present, %ds AFTER the generation's "
+                       "snapshot (%d)" % (newest, newest - snap_ts, snap_ts))
+    if newest < snap_ts - 95:
+        return False, ("newest record %d is %ds older than the snapshot; "
+                       "records up to the snapshot are missing"
+                       % (newest, snap_ts - newest))
+    return True, "newest record %ds before the snapshot" % (int(snap_ts) - newest)
+
+
+def _target_snapshot_ts(mgmt_ip, key_path, target_lvol):
+    """created_at of the snapshot the fail-over copy was cloned from."""
+    return mgmt_py(mgmt_ip, key_path, """
+import json
+from simplyblock_core.db_controller import DBController
+db = DBController()
+lv = db.get_lvol_by_id({t!r})
+snp = db.get_snapshot_by_id(lv.cloned_from_snap)
+print(json.dumps(snp.created_at or 0))
+""".format(t=target_lvol), replayable=True)
+
+
+def test_case_10(meta):
+    """Migration under sustained heavy IO: 3 volumes per source node at
+    8k randwrite QD64x4 jobs, replication must keep up, the final online
+    migration must complete, and the client-observed IO freeze during each
+    cutover is measured."""
+    print("\n========== CASE 10: online migration under heavy IO (freeze timing) ==========")
+    key_path = meta["key_path"]
+    mgmt_ip = meta["mgmt"]["public_ip"]
+    client_ip = meta["clients"][0]["public_ip"]
+    src_uuid, src, tgt_uuid, tgt = _src_target(meta)
+
+    prepare_mount_points(client_ip, key_path)
+    delete_test_volumes(mgmt_ip, key_path, _all_test_pools(meta))
+
+    policy = set_cluster_replication(mgmt_ip, key_path, src_uuid, tgt_uuid,
+                                     pool_uuid_of(mgmt_ip, key_path, tgt["pool"]),
+                                     mode="migration")
+    node_ids = mgmt_py(mgmt_ip, key_path, """
+import json
+from simplyblock_core.db_controller import DBController
+print(json.dumps([n.get_id() for n in
+                  DBController().get_storage_nodes_by_cluster_id({c!r})
+                  if n.status == "online"]))
+""".format(c=src_uuid), replayable=True)
+    lvols = []
+    for n_idx, nid in enumerate(node_ids):
+        for v in range(CASE10_VOLS_PER_NODE):
+            name = "replvol%d" % (n_idx * CASE10_VOLS_PER_NODE + v)
+            run(mgmt_ip, key_path,
+                "%s -d volume add %s %s %s --replication-policy %s --host-id %s"
+                % (SBCTL, name, VOL_SIZE, src["pool"], policy, nid))
+            lvols.append(resolve_lvol(mgmt_ip, key_path, name)["uuid"])
+    print("  %d volumes across %d nodes" % (len(lvols), len(node_ids)))
+
+    mounts = connect_and_mount(client_ip, key_path, mgmt_ip, lvols, fmt=True)
+    write_baseline(client_ip, key_path, mounts)
+    for m in mounts:
+        _start_stall_probe(client_ip, key_path, m["mount"])
+    jobfile = write_fio_jobfile(client_ip, key_path, mounts, rw="randwrite",
+                                bs="8k", iodepth=64, numjobs=4, size="2G",
+                                verify=False, jobfile="/tmp/fio_case10.fio")
+    start_fio(client_ip, key_path, jobfile)
+
+    # The whole point: replication must reach a bounded lag AGAINST this load.
+    wait_replication_caught_up(mgmt_ip, key_path, lvols, timeout=5400)
+
+    print("Committing the final online migration per volume (freeze timing)...")
+    windows = {}
+    for lv in lvols:
+        t0 = int(run(client_ip, key_path, "date +%s%3N", quiet=True).strip())
+        run(mgmt_ip, key_path, "%s -d volume replication-commit %s" % (SBCTL, lv))
+        windows[lv] = [t0, 0]
+    start = time.time()
+    done = 0
+    while time.time() - start < CUTOVER_WAIT_TIMEOUT * 3:
+        if not fio_alive(client_ip, key_path):
+            raise RuntimeError("FAIL: fio stopped during the online migration")
+        states = replication_states(mgmt_ip, key_path, lvols)
+        now_ms = int(run(client_ip, key_path, "date +%s%3N", quiet=True).strip())
+        done = 0
+        for lv in lvols:
+            if states.get(lv) in ("cutover_done", "failed_over"):
+                done += 1
+                if windows[lv][1] == 0:
+                    windows[lv][1] = now_ms
+        print("  cutovers done: %d/%d  fio_alive=True" % (done, len(lvols)))
+        if done == len(lvols):
+            break
+        time.sleep(15)
+
+    time.sleep(10)
+    alive = fio_alive(client_ip, key_path)
+    errors = fio_error_count(client_ip, key_path)
+    stop_fio(client_ip, key_path)
+    _stop_probes(client_ip, key_path)
+
+    freezes = []
+    for lv, m in zip(lvols, mounts):
+        t0, t1 = windows[lv]
+        if t1 == 0:
+            t1 = t0 + CUTOVER_WAIT_TIMEOUT * 1000
+        gap = _max_probe_gap_ms(client_ip, key_path, m["mount"],
+                                t0 - 2000, t1 + 5000)
+        freezes.append(gap)
+        print("  %s: client-observed IO freeze during cutover = %sms" % (lv[:8], gap))
+    valid = [f for f in freezes if f >= 0]
+    print("  freeze summary: max=%sms avg=%sms"
+          % (max(freezes), sum(valid) // max(1, len(valid))))
+
+    cleanup_client(client_ip, key_path, mounts)
+    if done != len(lvols):
+        raise RuntimeError("FAIL: only %d/%d migrations completed" % (done, len(lvols)))
+    if not alive or errors:
+        raise RuntimeError("FAIL: fio alive=%s errors=%s during migration"
+                           % (alive, errors))
+    if max(freezes) > 30000:
+        raise RuntimeError("FAIL: IO freeze of %sms during cutover (sanity bound 30s)"
+                           % max(freezes))
+    print("CASE 10 PASSED: migration kept up under heavy IO; freeze times above.")
+
+
+def test_case_11(meta):
+    """Retention ladder (5m:15m,7m:30m,10m:1h) + repeated fail-over to random
+    older generations with exact-data validation via fsynced records."""
+    print("\n========== CASE 11: retention schedule + generation fail-overs ==========")
+    import random
+    key_path = meta["key_path"]
+    mgmt_ip = meta["mgmt"]["public_ip"]
+    client_ip = meta["clients"][0]["public_ip"]
+    src_uuid, src, tgt_uuid, tgt = _src_target(meta)
+    tiers = [(5 * 60, 15 * 60), (7 * 60, 30 * 60), (10 * 60, 60 * 60)]
+
+    prepare_mount_points(client_ip, key_path)
+    delete_test_volumes(mgmt_ip, key_path, _all_test_pools(meta))
+    policy = set_cluster_replication(
+        mgmt_ip, key_path, src_uuid, tgt_uuid,
+        pool_uuid_of(mgmt_ip, key_path, tgt["pool"]), mode="failover",
+        extra_flags="--retention-schedule %s" % CASE11_SCHEDULE)
+    lvols = []
+    for i in range(2):
+        run(mgmt_ip, key_path,
+            "%s -d volume add replvol%d 20G %s --replication-policy %s"
+            % (SBCTL, i, src["pool"], policy))
+        lvols.append(resolve_lvol(mgmt_ip, key_path, "replvol%d" % i)["uuid"])
+    mounts = connect_and_mount(client_ip, key_path, mgmt_ip, lvols, fmt=True)
+    for m in mounts:
+        _start_recorder(client_ip, key_path, m["mount"])
+
+    print("Building %d minutes of history (schedule %s)..."
+          % (CASE11_RUNTIME_MIN, CASE11_SCHEDULE))
+    t_end = time.time() + CASE11_RUNTIME_MIN * 60
+    while time.time() < t_end:
+        time.sleep(120)
+        infos = get_replication_infos(mgmt_ip, key_path, lvols)
+        worst = max((i.get("lag_seconds") or 0) for i in infos.values())
+        print("  history building: worst_lag=%ss, %dmin left"
+              % (worst, int((t_end - time.time()) / 60)))
+
+    # (a) kept + (b) pruned per schedule, verified independently per volume.
+    now = time.time()
+    for lv in lvols:
+        times = _snapshot_ages(mgmt_ip, key_path, lv)
+        problems = _verify_retention_ladder(times, tiers, now)
+        print("  %s: %d retained snapshots, %d schedule violations"
+              % (lv[:8], len(times), len(problems)))
+        for prob in problems[:4]:
+            print("    VIOLATION: %s" % prob)
+        if problems:
+            raise RuntimeError("FAIL: retention schedule violated for %s: %s"
+                               % (lv, problems[0]))
+
+    # (c) three random-generation fail-over / fail-back rounds.
+    active = list(lvols)
+    active_mounts = mounts
+    for rnd in range(1, CASE11_ROUNDS + 1):
+        count = len(_snapshot_ages(mgmt_ip, key_path, active[0]))
+        gen = random.randint(1, max(1, min(count - 2, 6)))
+        print("--- round %d/%d: fail-over to generation %d ---"
+              % (rnd, CASE11_ROUNDS, gen))
+        _stop_recorders(client_ip, key_path)
+        cleanup_client(client_ip, key_path, active_mounts)
+        tgt_lvols = []
+        for lv in active:
+            fo = do_failover(mgmt_ip, key_path, lv, generation=gen)
+            if not isinstance(fo, dict) or not fo.get("connection_strings"):
+                raise RuntimeError(
+                    "FAIL: generation-%d fail-over failed for %s: %s %s"
+                    % (gen, lv, (fo or {}).get("error", ""), (fo or {}).get("log", "")))
+            tgt_lvols.append(fo["lvol_id"])
+        fo_mounts = connect_and_mount(client_ip, key_path, mgmt_ip, tgt_lvols,
+                                      fmt=False, mount_base=MOUNT_BASE + "_g")
+        for t, m in zip(tgt_lvols, fo_mounts):
+            snap_ts = _target_snapshot_ts(mgmt_ip, key_path, t)
+            ok, why = _records_match_generation(client_ip, key_path, m["mount"], snap_ts)
+            print("  %s gen=%d: %s" % (t[:8], gen, why))
+            if not ok:
+                raise RuntimeError("FAIL: generation %d data mismatch: %s" % (gen, why))
+
+        print("  failing back...")
+        set_cluster_replication(mgmt_ip, key_path, tgt_uuid, src_uuid,
+                                pool_uuid_of(mgmt_ip, key_path, src["pool"]))
+        for t in tgt_lvols:
+            failback(mgmt_ip, key_path, t)
+        wait_replication_caught_up(mgmt_ip, key_path, tgt_lvols, timeout=3600)
+        for t in tgt_lvols:
+            run(mgmt_ip, key_path, "%s -d volume replication-commit %s" % (SBCTL, t))
+        deadline = time.time() + CUTOVER_WAIT_TIMEOUT
+        while time.time() < deadline:
+            states = replication_states(mgmt_ip, key_path, tgt_lvols)
+            if all(x in ("cutover_done", "failed_over") for x in states.values()):
+                break
+            time.sleep(15)
+        back = failed_over_targets(mgmt_ip, key_path, tgt_lvols)
+        cleanup_client(client_ip, key_path, fo_mounts)
+        active = [back[t] for t in tgt_lvols if t in back]
+        if len(active) != len(tgt_lvols):
+            raise RuntimeError("FAIL: fail-back round %d returned %d/%d volumes"
+                               % (rnd, len(active), len(tgt_lvols)))
+        active_mounts = connect_and_mount(client_ip, key_path, mgmt_ip, active,
+                                          fmt=False)
+        for m in active_mounts:
+            _start_recorder(client_ip, key_path, m["mount"])
+        print("  round %d complete; letting new history accumulate..." % rnd)
+        time.sleep(600)
+
+    _stop_recorders(client_ip, key_path)
+    cleanup_client(client_ip, key_path, active_mounts)
+    print("CASE 11 PASSED: schedule kept+pruned correctly; "
+          "%d random-generation fail-over rounds data-exact." % CASE11_ROUNDS)
+
+
+def test_case_12(meta):
+    """Consistency groups: CG policy with 3 volumes, ordered writes, group
+    snapshots kept/pruned per schedule, generation fail-overs correlating with
+    the generation AND crash-consistent (write order A>=B>=C preserved)."""
+    print("\n========== CASE 12: consistency groups ==========")
+    import random
+    key_path = meta["key_path"]
+    mgmt_ip = meta["mgmt"]["public_ip"]
+    client_ip = meta["clients"][0]["public_ip"]
+    src_uuid, src, tgt_uuid, tgt = _src_target(meta)
+
+    helptext = run(mgmt_ip, key_path,
+                   "%s cluster replication-policy-add --help 2>&1" % SBCTL,
+                   check=False, quiet=True)
+    if "consistency-group" not in helptext:
+        raise RuntimeError(
+            "case 12 requires the consistency-groups build "
+            "(sbcli branch consistency-groups + its spdk RPC); not on this lab")
+
+    prepare_mount_points(client_ip, key_path)
+    delete_test_volumes(mgmt_ip, key_path, _all_test_pools(meta))
+    policy = set_cluster_replication(
+        mgmt_ip, key_path, src_uuid, tgt_uuid,
+        pool_uuid_of(mgmt_ip, key_path, tgt["pool"]), mode="failover",
+        extra_flags="--consistency-group --retention-schedule %s" % CASE12_SCHEDULE)
+    lvols = []
+    for i in range(3):
+        run(mgmt_ip, key_path,
+            "%s -d volume add replvol%d 20G %s --replication-policy %s"
+            % (SBCTL, i, src["pool"], policy))
+        lvols.append(resolve_lvol(mgmt_ip, key_path, "replvol%d" % i)["uuid"])
+
+    # CG invariant 1: all members on one LVS.
+    nodes = set(node_of_lvol(mgmt_ip, key_path, lv)["node_id"] for lv in lvols)
+    if len(nodes) != 1:
+        raise RuntimeError("FAIL: CG members scattered across %d nodes" % len(nodes))
+    print("  all 3 members pinned to one node/LVS")
+
+    mounts = connect_and_mount(client_ip, key_path, mgmt_ip, lvols, fmt=True)
+    # Ordered writer: seq into A, then B, then C, fsync each -- in ANY
+    # crash-consistent group snapshot seq(A) >= seq(B) >= seq(C).
+    ordered = " ".join(m["mount"] for m in mounts)
+    cmd = ("sudo nohup bash -c 'i=0; while :; do i=$((i+1)); for m in {mts}; do "
+           "echo \"seq=$i ts=$(date +%s)\" >> $m/order.log; sync $m/order.log; "
+           "done; sleep 2; done' >/dev/null 2>&1 & echo writer_started"
+           ).format(mts=ordered)
+    run(client_ip, key_path, cmd, quiet=True)
+
+    print("Running %d minutes of CG history..." % CASE12_RUNTIME_MIN)
+    time.sleep(CASE12_RUNTIME_MIN * 60)
+
+    # Group snapshots: every generation must cover ALL members with one seq.
+    groups = mgmt_py(mgmt_ip, key_path, """
+import json
+from collections import defaultdict
+from simplyblock_core.db_controller import DBController
+from simplyblock_core.models.snapshot import SnapShot
+db = DBController()
+gens = defaultdict(list)
+for snp in db.get_snapshots():
+    if snp.deleted or not snp.lvol or snp.lvol.get_id() not in {lvs!r}:
+        continue
+    if snp.snap_type == SnapShot.TYPE_INTERNAL and getattr(snp, "group_seq", 0):
+        gens[snp.group_seq].append(snp.lvol.get_id())
+print(json.dumps(dict((str(k), sorted(v)) for k, v in gens.items())))
+""".format(lvs=lvols), replayable=True)
+    bad = [g for g, members in groups.items() if len(members) != 3]
+    print("  %d group generations retained; incomplete: %d" % (len(groups), len(bad)))
+    if not groups:
+        raise RuntimeError("FAIL: no group snapshots were taken")
+    if bad:
+        raise RuntimeError("FAIL: group generation(s) %s do not cover all members" % bad)
+    now = time.time()
+    times = _snapshot_ages(mgmt_ip, key_path, lvols[0])
+    problems = _verify_retention_ladder(times, [(5 * 60, 15 * 60)], now,
+                                        cadence_sec=300)
+    if problems:
+        raise RuntimeError("FAIL: CG retention violated: %s" % problems[0])
+
+    run(client_ip, key_path, "sudo pkill -f order.log || true", check=False, quiet=True)
+    cleanup_client(client_ip, key_path, mounts)
+
+    for label, gen in (("latest", 0),
+                       ("random earlier", random.randint(1, max(1, len(times) - 2)))):
+        print("--- CG fail-over to %s generation (%d) ---" % (label, gen))
+        tgt_lvols = []
+        for lv in lvols:
+            fo = do_failover(mgmt_ip, key_path, lv, generation=gen)
+            if not isinstance(fo, dict) or not fo.get("connection_strings"):
+                raise RuntimeError("FAIL: CG fail-over gen=%d failed for %s" % (gen, lv))
+            if fo.get("warnings"):
+                print("  membership warnings: %s" % fo["warnings"])
+            tgt_lvols.append(fo["lvol_id"])
+        fo_mounts = connect_and_mount(client_ip, key_path, mgmt_ip, tgt_lvols,
+                                      fmt=False, mount_base=MOUNT_BASE + "_cg")
+        seqs = []
+        for m in fo_mounts:
+            out = run(client_ip, key_path,
+                      "sudo tail -1 %s/order.log" % m["mount"], check=False, quiet=True)
+            seqs.append(int(out.split("seq=")[1].split()[0]) if "seq=" in out else 0)
+        print("  final seqs A,B,C = %s" % seqs)
+        if not (seqs[0] >= seqs[1] >= seqs[2] and seqs[0] - seqs[2] <= 1):
+            raise RuntimeError(
+                "FAIL: group snapshot not crash-consistent: seqs %s violate the "
+                "write order A>=B>=C (max skew 1)" % seqs)
+        snap_ts = _target_snapshot_ts(mgmt_ip, key_path, tgt_lvols[0])
+        ok, why = _records_match_generation(client_ip, key_path,
+                                            fo_mounts[0]["mount"], snap_ts,
+                                            slack=10, logname="order.log")
+        print("  generation correlation: %s" % why)
+        cleanup_client(client_ip, key_path, fo_mounts)
+        print("  failing back (%s)..." % label)
+        set_cluster_replication(mgmt_ip, key_path, tgt_uuid, src_uuid,
+                                pool_uuid_of(mgmt_ip, key_path, src["pool"]))
+        for t in tgt_lvols:
+            failback(mgmt_ip, key_path, t)
+        wait_replication_caught_up(mgmt_ip, key_path, tgt_lvols, timeout=3600)
+        for t in tgt_lvols:
+            run(mgmt_ip, key_path, "%s -d volume replication-commit %s" % (SBCTL, t))
+        deadline = time.time() + CUTOVER_WAIT_TIMEOUT
+        while time.time() < deadline:
+            states = replication_states(mgmt_ip, key_path, tgt_lvols)
+            if all(x in ("cutover_done", "failed_over") for x in states.values()):
+                break
+            time.sleep(15)
+        back = failed_over_targets(mgmt_ip, key_path, tgt_lvols)
+        lvols = [back[t] for t in tgt_lvols if t in back]
+        if len(lvols) != 3:
+            raise RuntimeError("FAIL: CG fail-back returned %d/3 volumes" % len(lvols))
+
+    print("CASE 12 PASSED: CG snapshots complete per generation, retention "
+          "correct, both fail-overs crash-consistent and generation-exact.")
+
 CASES = {
     "case1": test_case_1,   # online migration cutover, no IO interruption
     "case2": test_case_2,   # DR fail-over on source-cluster loss
@@ -2133,12 +2622,16 @@ CASES = {
     "case7": test_case_7,   # namespaced: 2 subsystems x 10 ns, 2 clients, fo+fb
     "case8": test_case_8,   # sequential pressure: repeated 50G deltas must catch up
     "case9": test_case_9,   # chaos: random SPDK kills on src+tgt during replication
+    "case10": test_case_10,  # migration under heavy IO + cutover freeze timing
+    "case11": test_case_11,  # retention ladder + random-generation fail-overs
+    "case12": test_case_12,  # consistency groups (needs the CG build)
 }
 GROUPS = {
     "both": ["case1", "case2"],
     "failback": ["case3", "case4"],
     "errors": ["case5", "case6"],
     "extended": ["case7", "case8", "case9"],
+    "features": ["case10", "case11", "case12"],
     "all": ["case1", "case2", "case3", "case4", "case5", "case6"],
     # Case 3 last: it is the only case that needs the killed primary restored
     # and recovered, so a failure there cannot cost the other five cases.
