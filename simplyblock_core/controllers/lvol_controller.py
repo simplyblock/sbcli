@@ -680,7 +680,8 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
         else:
             replication_cluster_id = cl.snapshot_replication_target_cluster
         # Namespaced siblings MUST replicate to the same target node.
-        # A fail-over copy preserves the volume's NQN and nsid, so all
+        # A fail-over copy preserves the volume's NQN (its nsid is assigned
+        # afresh by the destination), so all
         # volumes sharing a subsystem land in the SAME subsystem on the
         # target. Picking the destination purely by capacity scattered
         # siblings across the target cluster's nodes, which splits one
@@ -2608,7 +2609,8 @@ def _connect_path_volumes(db_controller, lvol):
       cutover_done        -> ONLY the post-move volume; the pre-migration paths
                              are not handed out any more
 
-    The clone preserves the source NQN and ns_id, so every path returned here
+    The clone preserves the source NQN -- its nsid is assigned by the
+    destination primary and may differ -- so every path returned here
     aggregates into one multipath device on the client.
     """
     from simplyblock_core.models.lvol_model import LVolReplication
@@ -3595,11 +3597,26 @@ def _evict_stale_namespace(new_lvol, target_node):
         subsystem = rpc.subsystem_get(new_lvol.nqn)
         if not subsystem:
             return
-        # Match by nsid OR by uuid: the stale namespace carries the volume's
-        # preserved identity on both axes, and either collides with add_ns.
-        stale = [ns for ns in (subsystem.get("namespaces") or [])
-                 if (ns.get("nsid") == new_lvol.ns_id
-                     or ns.get("uuid") == new_lvol.uuid)
+        # Match on the volume's UUID -- that is what identifies THIS volume's
+        # own stale namespace. An nsid match is only safe when the subsystem
+        # cannot hold anyone else's namespace.
+        #
+        # nsid is NOT identity on a SHARED (namespaced) subsystem: siblings
+        # occupy the other slots, and new_lvol.ns_id here is still the SOURCE
+        # cluster's number (the destination primary auto-assigns and only then
+        # overwrites the record). Matching on it could evict a sibling's live,
+        # already-failed-over namespace -- taking a healthy volume's device
+        # away from its client. Cross-cluster nsid equality is not required
+        # anyway: the client looks its paths up through connect_lvol.
+        namespaces = subsystem.get("namespaces") or []
+        single_namespace_subsystem = len(namespaces) <= 1
+        own_uuid = getattr(new_lvol, "uuid", None)
+        own_nsid = getattr(new_lvol, "ns_id", None)
+        stale = [ns for ns in namespaces
+                 if ((own_uuid is not None and ns.get("uuid") == own_uuid)
+                     or (single_namespace_subsystem
+                         and own_nsid is not None
+                         and ns.get("nsid") == own_nsid))
                  and ns.get("bdev_name") != new_lvol.top_bdev]
         if not stale:
             return

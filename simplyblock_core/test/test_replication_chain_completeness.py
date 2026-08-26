@@ -304,6 +304,11 @@ class _EvictNode:
 class _CloneLvol:
     nqn = "nqn.test:lvol:ORIG"
     ns_id = 7
+    # A real LVol always carries a uuid, and the eviction matches on it --
+    # a fake without one made the matcher raise into the best-effort except
+    # and silently evict nothing, the exact failure mode this suite exists
+    # to catch.
+    uuid = "11111111-1111-1111-1111-111111111111"
     top_bdev = "LVS_1/LVOL_CLONE"
 
 
@@ -536,3 +541,32 @@ def test_shared_subsystem_survives_one_members_teardown():
     assert guard < delete, "the other-claimants check must precede subsystem_delete"
     assert "x.nqn == lvol.nqn" in src, "claimants are identified by shared NQN"
     assert "Leaving subsystem" in src
+
+
+def test_eviction_never_removes_a_siblings_namespace():
+    """On a SHARED subsystem the nsid is not this volume's identity: siblings
+    hold the other slots, and new_lvol.ns_id is still the SOURCE cluster's
+    number (the destination primary auto-assigns and only then overwrites the
+    record). Matching on nsid would evict a sibling's live, already-failed-over
+    namespace -- taking a healthy volume's device away from its client."""
+    from simplyblock_core.controllers import lvol_controller as lc
+    rpc = _EvictRPC([
+        {"nsid": 7, "bdev_name": "LVS_1/LVOL_SIBLING",
+         "uuid": "22222222-2222-2222-2222-222222222222"},   # same nsid, other volume
+        {"nsid": 3, "bdev_name": "LVS_1/LVOL_MINE_OLD",
+         "uuid": "11111111-1111-1111-1111-111111111111"},   # THIS volume, stale
+    ])
+    lc._evict_stale_namespace(_CloneLvol(), _EvictNode(rpc))
+    assert rpc.removed == [("nqn.test:lvol:ORIG", 3)], \
+        "must evict only this volume's own namespace, never the sibling at nsid 7"
+
+
+def test_eviction_still_uses_nsid_on_a_single_namespace_subsystem():
+    """A dedicated subsystem cannot hold anyone else's namespace, so nsid stays
+    a safe match there -- which is the fail-back-to-a-recovered-source case the
+    eviction was written for, where the old record may carry a different uuid."""
+    from simplyblock_core.controllers import lvol_controller as lc
+    rpc = _EvictRPC([{"nsid": 7, "bdev_name": "LVS_1/LVOL_ORIG",
+                      "uuid": "99999999-9999-9999-9999-999999999999"}])
+    lc._evict_stale_namespace(_CloneLvol(), _EvictNode(rpc))
+    assert rpc.removed == [("nqn.test:lvol:ORIG", 7)]
