@@ -3601,8 +3601,9 @@ def _evict_stale_namespace(new_lvol, target_node):
     and blocks the entire cutover.
     """
     peer_ids = [target_node.secondary_node_id, target_node.tertiary_node_id]
+    db = DBController()
     nodes_to_evict = [target_node] + [
-        db_controller.get_storage_node_by_id(pid)
+        db.get_storage_node_by_id(pid)
         for pid in peer_ids if pid
     ]
     for node in nodes_to_evict:
