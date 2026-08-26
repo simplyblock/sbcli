@@ -37,6 +37,25 @@ def _peer_connections_relevant(peer_node) -> bool:
     )
 
 
+def repairs_allowed(node) -> bool:
+    """Whether repairs may be attempted against ``node`` at all.
+
+    Only ONLINE and DOWN qualify. A node that is unreachable or mid-transition
+    cannot answer a fabric connect, so attempting one produces a guaranteed
+    failure and nothing else: during the multipath soak on 2026-08-20 the
+    device repair fired 1372 times in four hours, 478 of them returning
+    "-5 Input/output error", every burst falling inside a NIC-down window
+    (100 failures in the minute of the 16:33 outage alone).
+
+    Note this cannot suppress every futile attempt. A node whose *data* NIC is
+    down still answers on the management NIC and so remains ONLINE, which is
+    precisely the soak's phase-1 scenario; that case needs a per-address
+    backoff rather than a status gate.
+    """
+    return node is not None and node.status in (
+        StorageNode.STATUS_ONLINE, StorageNode.STATUS_DOWN)
+
+
 def _restart_owns_lvs(primary_node) -> bool:
     """True if the restart task currently owns ``primary_node.lvstore``.
 
@@ -287,7 +306,8 @@ def _check_node_hublvol(node: StorageNode) -> bool:
     return passed
 
 
-def _check_sec_node_hublvol(node: StorageNode, auto_fix=False, primary_node_id=None) -> bool:
+def _check_sec_node_hublvol(node: StorageNode, auto_fix=False, primary_node_id=None,
+                            repair_paths=False) -> bool:
     db_controller = DBController()
     # If a specific primary is given, use it; otherwise resolve from back-references
     if not primary_node_id:
@@ -359,53 +379,117 @@ def _check_sec_node_hublvol(node: StorageNode, auto_fix=False, primary_node_id=N
         # owns this LVS — the restart flow is the exclusive author of hublvol
         # (re)attaches during its phases, and running a concurrent repair
         # here is what created the attach-during-destroy race in the past.
-        if passed and auto_fix and ret and not _restart_owns_lvs(primary_node):
-            ctrlrs = ret[0].get("ctrlrs", [])
-            for ct in ctrlrs:
-                if ct.get("state") != "enabled":
-                    continue
-                attached_ips = {ct["trid"]["traddr"]}
-                for alt in ct.get("alternate_trids", []):
-                    attached_ips.add(alt["traddr"])
-                # Check primary node's data NIC IPs
-                expected_ips = set()
-                for iface in primary_node.data_nics:
-                    if (primary_node.active_rdma and iface.trtype == "RDMA") or \
-                       (not primary_node.active_rdma and primary_node.active_tcp and iface.trtype == "TCP"):
-                        expected_ips.add(iface.ip4_address)
-                missing_ips = expected_ips - attached_ips
-                if missing_ips:
-                    logger.info("Hublvol %s on %s missing paths: %s, reconciling via coordinator",
-                                primary_node.hublvol.bdev_name, node.get_id(), missing_ips)
-                    try:
-                        # All hublvol (re)attach goes through the single
-                        # cross-process coordinator. Even though we just
-                        # guarded on _restart_owns_lvs above, the coordinator
-                        # still serializes against any other non-restart
-                        # caller and enforces the attach cooldown, which
-                        # removes the "cntlid N are duplicated" race window.
-                        from simplyblock_core.utils.hublvol_reconnect import (
-                            HublvolReconnectCoordinator,
-                        )
-                        coordinator = HublvolReconnectCoordinator(db_controller)
-                        peers = [primary_node]
-                        if is_sec2 and primary_node.secondary_node_id:
-                            try:
-                                sec1 = db_controller.get_storage_node_by_id(
-                                    primary_node.secondary_node_id)
-                                if sec1.status in (
-                                        StorageNode.STATUS_ONLINE,
+        # repair_paths is deliberately separate from auto_fix. auto_fix also
+        # authorises a FULL reconnect, which the caller gates behind
+        # secondary-holds-leadership and JC-compression-inactive; completing a
+        # missing path on an existing enabled controller carries none of that
+        # risk and must run on its own cadence. Kept behind auto_fix alone,
+        # this block was unreachable for the case it exists to fix: the caller
+        # only escalated to auto_fix when the coarse existence check FAILED,
+        # and a hublvol holding 1 of 2 paths passes that check. It fired 0
+        # times in 4 hours of the 2026-08-20 soak while hublvols sat
+        # single-pathed for 5-11 minutes at a stretch.
+        # Repair degraded multipath on the hublvol controller: each data NIC of
+        # the primary should contribute one path. If a NIC dropped and came
+        # back, the path may not have been re-established.
+        #
+        # repair_paths is separate from auto_fix on purpose. auto_fix also
+        # authorises a FULL reconnect, which the caller gates behind
+        # secondary-holds-leadership and JC-compression-inactive; completing a
+        # missing path on an existing enabled controller carries none of that
+        # risk and has to run on its own cadence. Gated on auto_fix alone it was
+        # unreachable for the very case it exists for -- the caller escalated to
+        # auto_fix only once the coarse existence check FAILED, and a hublvol
+        # holding 1 of 2 paths passes that check. It fired 0 times in 4 hours of
+        # the 2026-08-20 soak while hublvols sat single-pathed for 5-11 minutes.
+        #
+        # Skipped entirely while the restart task owns this LVS: the restart
+        # flow is the exclusive author of hublvol (re)attaches during its
+        # phases, and a concurrent repair here is what produced the
+        # attach-during-destroy race before.
+        if passed and (auto_fix or repair_paths) and ret                 and not _restart_owns_lvs(primary_node)                 and repairs_allowed(node) and repairs_allowed(primary_node):
+            # SPDK multipath reports one ctrlrs entry PER PATH, so the attached
+            # set must be unioned across entries before comparing. Built per
+            # entry (as this was), a healthy two-path controller looks like each
+            # entry is missing the other path -- every cycle would have become a
+            # reconcile the moment this block became reachable.
+            # _collect_attached_ips holds the same rule for device controllers,
+            # including the older single-entry/alternate_trids shape.
+            attached_ips = storage_node_ops._collect_attached_ips(ret)
+
+            def _data_ips(peer):
+                ips = set()
+                for iface in peer.data_nics:
+                    if (peer.active_rdma and iface.trtype == "RDMA") or                        (not peer.active_rdma and peer.active_tcp
+                            and iface.trtype == "TCP"):
+                        ips.add(iface.ip4_address)
+                return ips
+
+            # Expected paths depend on the ROLE of this node, not just on the
+            # primary. A secondary connects to the primary (2 paths); a
+            # tertiary connects to the primary AND the secondary (4 paths).
+            # Built from the primary alone, a tertiary that came up with only
+            # one of the secondary's two paths looked complete here — the
+            # primary's paths were all present, missing_ips was empty, and the
+            # 3-path controller sat unrepaired forever (both tertiaries on the
+            # fresh 2026-08-24 deploy, always missing the secondary's second
+            # NIC; the len(ctrlrs) < 2 branch above cannot see it either).
+            expected_ips = _data_ips(primary_node)
+            if is_sec2 and primary_node.secondary_node_id:
+                try:
+                    _sec1 = db_controller.get_storage_node_by_id(
+                        primary_node.secondary_node_id)
+                    if _sec1.status in (StorageNode.STATUS_ONLINE,
                                         StorageNode.STATUS_DOWN):
-                                    peers.append(sec1)
-                            except Exception:
-                                pass
-                        coordinator.reconcile(
-                            node, primary_node, peers,
-                            role="tertiary" if is_sec2 else "secondary")
-                    except Exception as e:
-                        logger.error(
-                            "Failed to reconcile hublvol on %s: %s",
-                            node.get_id(), e)
+                        expected_ips |= _data_ips(_sec1)
+                except KeyError:
+                    pass
+            # A duplicated address is invisible to the set comparison below --
+            # (96.179, 97.9, 97.9) reads as 2-of-2 -- so it must be checked
+            # separately or the node is reported healthy while carrying a
+            # surplus path. That is exactly what happened on 2026-08-25: the
+            # control plane saw nothing wrong for hours while the soak's path
+            # verifier counted 3-of-2 and eventually gave up. Two controllers
+            # on one address also give the bdev two unordered qpairs to the
+            # same target, so this is a fault to surface, not cosmetics.
+            duplicate_ips = storage_node_ops.duplicate_attached_paths(ret)
+            if duplicate_ips:
+                logger.error(
+                    "Hublvol %s on %s has duplicate path(s) %s -- node is NOT "
+                    "healthy; repair_multipath_controller will prune them",
+                    primary_node.hublvol.bdev_name, node.get_id(), duplicate_ips)
+                passed = False
+
+            missing_ips = expected_ips - attached_ips
+            if missing_ips:
+                logger.info(
+                    "Hublvol %s on %s missing paths: %s, reconciling via coordinator",
+                    primary_node.hublvol.bdev_name, node.get_id(), missing_ips)
+                try:
+                    # All hublvol (re)attach goes through the single
+                    # cross-process coordinator, which serializes against any
+                    # other non-restart caller and enforces the attach cooldown
+                    # that closes the "cntlid N are duplicated" race.
+                    from simplyblock_core.utils.hublvol_reconnect import (
+                        HublvolReconnectCoordinator,
+                    )
+                    coordinator = HublvolReconnectCoordinator(db_controller)
+                    peers = [primary_node]
+                    if is_sec2 and primary_node.secondary_node_id:
+                        try:
+                            sec1 = db_controller.get_storage_node_by_id(
+                                primary_node.secondary_node_id)
+                            if repairs_allowed(sec1):
+                                peers.append(sec1)
+                        except Exception:
+                            pass
+                    coordinator.reconcile(
+                        node, primary_node, peers,
+                        role="tertiary" if is_sec2 else "secondary")
+                except Exception as e:
+                    logger.error(
+                        "Failed to reconcile hublvol on %s: %s",
+                        node.get_id(), e)
 
         passed &= check_bdev(primary_node.hublvol.get_remote_bdev_name(), rpc_client=rpc_client)
         if not passed:

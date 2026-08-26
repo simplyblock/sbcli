@@ -554,7 +554,7 @@ def main():
     print(f"Phase 2a: Creating cluster on management node (failure-domain enabled, "
           f"{NDCS}+{NPCS})...")
     ssh_exec(mgmt_ip, [
-        "sudo /usr/local/bin/sbctl -d cluster create --enable-node-affinity --enable-failure-domain"
+        f"sudo /usr/local/bin/sbctl -d cluster create --enable-node-affinity --enable-failure-domain --max-subsys {MAX_LVOL}"
         f" --data-chunks-per-stripe {NDCS} --parity-chunks-per-stripe {NPCS}"
     ], check=True)
     print("Phase 2a: DONE - cluster created.")
@@ -563,7 +563,7 @@ def main():
     print("Phase 2b: Configuring storage nodes...")
     with ThreadPoolExecutor(max_workers=len(sn_ips)) as executor:
         tasks = [executor.submit(ssh_exec, ip, [
-            f"sudo /usr/local/bin/sbctl -d sn configure --max-subsys {MAX_LVOL}"
+            "sudo /usr/local/bin/sbctl -d sn configure"
         ], check=True, cmd_timeout=1200) for ip in sn_ips]
         for t in tasks:
             t.result()

@@ -130,6 +130,18 @@ FIO_HARD_ERROR_MARKERS = (
     "fio: pid=",
     "Killed",
     "Terminated",
+    # fio prints verify failures WITHOUT the "fio: " prefix -- the line reads
+    # "verify: bad magic header a8a4, wanted acca at file ...". Neither
+    # "fio: verify" nor "verify failed" matches that, so run 20260825_155730
+    # corrupted vol6 at 18:53 and vol2 at 19:43 and the soak kept applying
+    # outages for another two hours, reporting PASS each time, until vol4's
+    # fio *process* died at 20:49 and the rc-file branch finally caught it.
+    # A data verification failure is the single most important thing this
+    # harness can find; it must never again depend on fio also crashing.
+    "verify: bad",
+    "bad magic header",
+    "bad header offset",
+    "verify: got",
 )
 #: fio stderr markers for a --max_latency violation. Fatal in phase 1 (a
 #: single-NIC outage must be transparent), counted in phase 2 (promotion
@@ -279,6 +291,25 @@ def parse_args():
                         help="Remote device bdevs per node to sample for multipath "
                              "policy. Hublvol bdevs are always all checked. Keep small: "
                              "unfiltered bdev dumps have wedged app threads before.")
+    verify.add_argument("--placement-dumps", action="store_true",
+                        help="Take a placement-map dump (RPC "
+                             "distr_debug_placement_map_dump) from every "
+                             "distrib on every reachable node IMMEDIATELY "
+                             "before and after each outage, gzip it, and store "
+                             "it on the node under ~/placement_dumps/<run>/. "
+                             "Off by default: a dump pair per outage phase "
+                             "adds RPC load and disk, so it is opt-in for "
+                             "placement investigations.")
+    verify.add_argument("--start-iteration", type=int, default=1,
+                        help="Number the first outage pair with this instead of "
+                             "1. Pair distance rotation and NIC-phase "
+                             "scheduling both key off the iteration number, so "
+                             "resuming an interrupted run at the iteration it "
+                             "died on continues the same sequence rather than "
+                             "repeating the pairs already covered. The loop "
+                             "still ends at --iterations, so "
+                             "--start-iteration 21 --iterations 75 runs 55 "
+                             "pairs.")
     verify.add_argument("--iterations", type=int, default=75,
                         help="Number of outage pairs to run (default 75). 0 = run "
                              "until fio's runtime expires. --runtime must outlast the "
@@ -578,6 +609,8 @@ class SoakRunner:
         self._forbidden_pairs = set()
         #: Cumulative count of tolerated (phase-2) max_latency violations.
         self.latency_violations = 0
+        #: volume_id -> path count observed at baseline (see _verify_client_paths)
+        self._baseline_client_paths = {}
 
     # ----- hosts / plumbing -------------------------------------------------
 
@@ -1199,8 +1232,15 @@ class SoakRunner:
             if args.fio_max_latency > 0:
                 fio_cmd += f"--max_latency={args.fio_max_latency}s "
             if args.fio_verify:
+                # verify_dump writes <file>.<offset>.received / .expected on a
+                # mismatch. Without it a verify failure gives only fio's one
+                # line, and every corruption so far has died with the returned
+                # bytes unidentified -- we could not tell stale data from
+                # parity noise from a neighbouring block, and the volumes are
+                # on instance store so they vanish when the fleet is stopped.
+                # The dumps are 4 KiB each and only appear on failure.
                 fio_cmd += (f"--verify={args.fio_verify} --verify_fatal=1 "
-                            f"--verify_backlog=1024 ")
+                            f"--verify_backlog=1024 --verify_dump=1 ")
             fio_cmd += f"--output={shlex.quote(volume['fio_log'])}"
 
             start_script = (
@@ -1396,6 +1436,10 @@ class SoakRunner:
                     problems.extend(self._verify_node_spdk(uuid))
                 except Exception as exc:
                     problems.append(f"{uuid[:12]}: verification error: {exc}")
+            try:
+                problems.extend(self._verify_client_paths())
+            except Exception as exc:
+                problems.append(f"client: path verification error: {exc}")
             elapsed = time.time() - started
             if not problems:
                 if attempt == 1:
@@ -1424,6 +1468,85 @@ class SoakRunner:
         self.logger.log(
             f"{label}: {len(problems)} problem(s) unhealed after {timeout}s, "
             f"continuing (non-strict)")
+
+    def _verify_client_paths(self):
+        """Verify the CLIENT's view of every volume's paths.
+
+        Target-side state being perfect is not sufficient, and assuming it was
+        cost a whole run: soak 2026-08-12 iteration 7 lost all IO on a volume
+        whose paths were TCP-live and whose target had subsystem, namespace and
+        both listeners verified present, while the client's multipath head
+        reported "no usable path" and EIO'd the application.
+
+        Scope note: this checks what the client actually exposes on this kernel
+        — per-subsystem path count and per-path State from ``nvme list-subsys``,
+        plus the head namespace block device. It deliberately does NOT try to
+        read per-path namespace nodes or ANA state: with nvme_core multipath
+        this kernel publishes only the head namespace (``nvme1n1``) and the
+        controllers, no ``nvmeXcYnZ`` per-path nodes, and this nvme-cli reports
+        no ANAState field. An earlier version of this check globbed for those
+        and reported 5-of-6 paths dead on every healthy volume.
+
+        The expected path count per volume is learned at baseline rather than
+        hardcoded, so a path that vanishes entirely is caught as well as one
+        that goes non-live.
+        """
+        _, stdout_text, _ = self.client.run(
+            "sudo nvme list-subsys -o json", timeout=120, check=False,
+            label="verify client paths")
+        text = (stdout_text or "").strip()
+        if not text:
+            return ["client: nvme list-subsys returned nothing"]
+        try:
+            doc = json.loads(text)
+        except json.JSONDecodeError as exc:
+            return [f"client: cannot parse nvme list-subsys output: {exc}"]
+
+        subsystems = []
+        for entry in (doc if isinstance(doc, list) else [doc]):
+            if isinstance(entry, dict):
+                subsystems.extend(entry.get("Subsystems") or [])
+        problems = []
+        seen = {}
+        for subsystem in subsystems:
+            nqn = subsystem.get("NQN", "")
+            if ":lvol:" not in nqn:
+                continue
+            volume = nqn.split(":lvol:")[-1]
+            paths = subsystem.get("Paths") or []
+            not_live = [
+                f"{p.get('Name')}={p.get('State')}" for p in paths
+                if p.get("State") != "live"
+            ]
+            # ANAState is absent on this nvme-cli; honour it when present.
+            bad_ana = [
+                f"{p.get('Name')}:ana={p.get('ANAState')}" for p in paths
+                if p.get("ANAState") not in (None, "optimized", "non-optimized",
+                                             "non_optimized")
+            ]
+            seen[volume] = len(paths)
+            expected = self._baseline_client_paths.get(volume)
+            if expected is None:
+                self._baseline_client_paths[volume] = len(paths)
+            elif len(paths) < expected:
+                problems.append(
+                    f"client: {volume[:12]} has {len(paths)} path(s), "
+                    f"expected {expected} — a path disappeared from the "
+                    f"multipath head")
+            if not_live:
+                problems.append(
+                    f"client: {volume[:12]} path(s) not live: "
+                    f"{', '.join(not_live)}")
+            if bad_ana:
+                problems.append(
+                    f"client: {volume[:12]} unusable ANA state: "
+                    f"{', '.join(bad_ana)}")
+
+        tracked = {job.volume_id for job in self.fio_jobs}
+        for volume_id in tracked - set(seen):
+            problems.append(
+                f"client: {volume_id[:12]} has no nvme-subsystem entry at all")
+        return problems
 
     def _verify_node_spdk(self, uuid):
         host = self._node_host(uuid)
@@ -1573,15 +1696,40 @@ class SoakRunner:
             self.logger.log(f"host_reboot {node_id[:12]}: SSH terminated as expected: {exc}")
         self._drop_node_host(node_id)
 
+    #: Refusals meaning "another node in this cluster is mid-transition". The CP
+    #: allows one graceful transition at a time (see
+    #: check_node_shutdown_preconditions), with --force as its documented escape
+    #: hatch. This case exists to overlap two outages deliberately, so such a
+    #: refusal is escalated to --force rather than waited out: waiting lets the
+    #: partner finish recovering and removes the overlap that is the whole point.
+    #: Iteration 21 of the 2026-08-20 run died on exactly this -- a container_kill
+    #: partner entered restart 8s before the shutdown was issued. "is restart" is
+    #: how "is restarting in this cluster" reaches us after truncation.
+    PEER_TRANSITION_MARKERS = (
+        "is restarting in this cluster",
+        "is already shutting down in this cluster",
+        "is restart",
+    )
+
     def _shutdown(self, node_id, force, host, deadline):
         """sbctl sn shutdown, retrying while migration/tasks block it."""
         flag = " --force" if force else ""
+        escalated = bool(force)
         while True:
             rc, stdout_text, stderr_text = self.sbctl_allow_failure(
                 f"sn shutdown {node_id}{flag}", timeout=300, host=host)
             if rc == 0:
                 return
             output = f"{stdout_text}\n{stderr_text}".lower()
+            if not escalated and any(
+                    m in output for m in self.PEER_TRANSITION_MARKERS):
+                self.logger.log(
+                    f"Shutdown of {node_id[:12]} refused because a peer is "
+                    f"mid-transition; escalating to --force (the overlap is "
+                    f"the point of this case)")
+                flag = " --force"
+                escalated = True
+                continue
             blocked = any(marker in output for marker in (
                 "migration", "migrat", "rebalanc", "active task", "running task",
                 "in_progress", "in progress"))
@@ -1633,6 +1781,101 @@ class SoakRunner:
 
     # ----- phase 1: all-node single-NIC outage -------------------------------
 
+    #: In-container helper for the placement dump. rpc.py has no subcommand
+    #: for the custom distr_* RPCs, so this goes through the generic
+    #: JSONRPCClient: list bdevs, keep the distribs, ask each to dump its
+    #: in-memory placement map (the RPC writes a file in the container and
+    #: returns its path).
+    _PLACEMENT_DUMP_PY = """
+import json, sys
+sys.path.insert(0, '/root/spdk/python')
+from spdk.rpc.client import JSONRPCClient
+client = JSONRPCClient('/mnt/ramdisk/{container}/spdk.sock', timeout=60.0)
+out = {{}}
+for bdev in client.call('bdev_get_bdevs'):
+    name = bdev.get('name', '')
+    product = str(bdev.get('product_name', '')).lower()
+    if 'distrib' not in product and not name.startswith('distrib'):
+        continue
+    try:
+        out[name] = client.call('distr_debug_placement_map_dump', {{'name': name}})
+    except Exception as exc:
+        out[name] = 'ERROR: %s' % exc
+print(json.dumps(out))
+"""
+
+    def take_placement_dumps(self, tag, node_uuids=None):
+        """Dump every distrib's in-memory placement map on every reachable
+        node, gzip the dump files, and stash them on the node.
+
+        Non-fatal by design: this brackets outages, so some nodes are expected
+        to be dead for the post-outage dump -- they are logged and skipped,
+        never failed on. Files land on each storage node under
+        ~/placement_dumps/<run_id>/<tag>_<node>_<bdev>.txt.gz so the run's
+        dumps can be fetched with one scp -r per node afterwards.
+        """
+        if not self.args.placement_dumps:
+            return
+        uuids = list(node_uuids) if node_uuids else list(self.node_ip_map)
+        results = {}
+        results_lock = threading.Lock()
+
+        def _dump_one(uuid):
+            short = uuid[:12]
+            host = self._node_host(uuid)
+            _, containers, _ = host.run(
+                "sudo docker ps --format '{{.Names}}' | grep -E '^spdk_[0-9]+$' || true",
+                timeout=30, check=False, label=f"pd find container {short}")
+            names = [n for n in containers.strip().splitlines() if n.strip()]
+            if not names:
+                raise TestRunError("no SPDK container")
+            container = names[0]
+            script = self._PLACEMENT_DUMP_PY.format(container=container)
+            _, out, err = host.run(
+                f"sudo docker exec -u root {container} python3 -c {shlex.quote(script)}",
+                timeout=120, check=False, label=f"pd dump {short}")
+            try:
+                dumped = json.loads((out or "").strip())
+            except (ValueError, TypeError):
+                raise TestRunError(f"dump RPC returned no JSON ({(err or '')[:150]})")
+            dest = f"/home/{self.user}/placement_dumps/{self.run_id}"
+            host.run(f"mkdir -p {dest}", timeout=30, check=False,
+                     label=f"pd mkdir {short}")
+            saved = 0
+            for bdev, path in dumped.items():
+                if not isinstance(path, str) or path.startswith("ERROR"):
+                    self.logger.log(
+                        f"placement dump {tag} {short}/{bdev}: {path}")
+                    continue
+                path = path.strip().strip('"')
+                target = f"{dest}/{tag}_{short}_{bdev}.txt.gz"
+                # gzip in-container, copy out via docker cp, drop the original
+                # so repeated dumps cannot fill the container tmpfs.
+                rc, _, gerr = host.run(
+                    f"sudo docker exec -u root {container} gzip -f {shlex.quote(path)} && "
+                    f"sudo docker cp {container}:{shlex.quote(path)}.gz {shlex.quote(target)} && "
+                    f"sudo docker exec -u root {container} rm -f {shlex.quote(path)}.gz",
+                    timeout=120, check=False, label=f"pd save {short}/{bdev}")
+                if rc == 0:
+                    saved += 1
+                else:
+                    self.logger.log(
+                        f"placement dump {tag} {short}/{bdev}: save failed "
+                        f"({(gerr or '')[:120]})")
+            with results_lock:
+                results[short] = saved
+
+        errors = self._fan_out(_dump_one, uuids, f"placement-dump {tag}",
+                               join_timeout=240)
+        for uuid, exc in errors:
+            self.logger.log(
+                f"placement dump {tag}: {uuid[:12]} skipped ({exc})")
+        if results:
+            self.logger.log(
+                f"placement dumps [{tag}]: "
+                + ", ".join(f"{k}={v}" for k, v in sorted(results.items()))
+                + f" file(s) -> ~/placement_dumps/{self.run_id}/ on each node")
+
     def run_nic_phase(self, iteration, nic, node_uuids):
         hold = self.args.nic_phase_hold
         settle = self.args.nic_phase_settle
@@ -1642,6 +1885,7 @@ class SoakRunner:
             f"{hold}s (fio must not be interrupted) ===")
 
         self.prewarm_node_hosts(node_uuids)
+        self.take_placement_dumps(f"iter{iteration}_p1_pre", node_uuids)
         started = time.time()
         errors = self._fan_out(
             lambda uuid: self._nic_outage(uuid, [nic], hold, "nic_phase"),
@@ -1663,7 +1907,11 @@ class SoakRunner:
         self.check_fio(strict_latency=True, context=f"{label} mid-outage")
 
         remaining = max(0, hold - (time.time() - started))
-        time.sleep(remaining + settle)
+        time.sleep(remaining)
+        # The host timers have restored the NIC at this point: dump the
+        # placement maps IMMEDIATELY after the outage, before the settle.
+        self.take_placement_dumps(f"iter{iteration}_p1_post", node_uuids)
+        time.sleep(settle)
         self.logger.log(f"{label}: {nic} restored + {settle}s settle elapsed")
 
         self.verify_spdk_state(label, strict=True)
@@ -1755,6 +2003,7 @@ class SoakRunner:
             OutageRecord(node_a, method_a, 0.0),
             OutageRecord(node_b, method_b, float(delay)),
         ]
+        self.take_placement_dumps(f"iter{iteration}_p2_pre")
         deadline = time.time() + self.args.restart_timeout
         threads = [
             threading.Thread(target=self._outage_worker, args=(record, hold, deadline),
@@ -1792,6 +2041,11 @@ class SoakRunner:
         self.logger.log(
             f"{label}: outages issued in {time.time() - t0:.0f}s; waiting up to "
             f"{wait_timeout}s for both nodes online")
+        # IMMEDIATELY after the outage windows: the two target nodes are
+        # typically still down/rebooting here -- the dump helper logs and
+        # skips unreachable nodes, capturing the survivors' view of
+        # placement as the outage ends.
+        self.take_placement_dumps(f"iter{iteration}_p2_post")
 
         self.wait_for_all_online(target_nodes={node_a, node_b}, timeout=wait_timeout)
         done = self.check_fio(strict_latency=False, context=f"{label} post-pair")
@@ -1865,9 +2119,11 @@ class SoakRunner:
                         if args.nic_phase_every else 0)
             pair_cost = ((args.pair_delay_min + args.pair_delay_max) / 2
                          + args.outage_hold + 240 + args.iteration_settle + 60)
-            estimate = args.iterations * (nic_cost + pair_cost)
+            remaining = max(0, args.iterations - max(1, args.start_iteration) + 1)
+            estimate = remaining * (nic_cost + pair_cost)
             self.logger.log(
-                f"loop: {args.iterations} outage pairs, rough estimate "
+                f"loop: {remaining} outage pairs "
+                f"({max(1, args.start_iteration)}..{args.iterations}), rough estimate "
                 f"{estimate / 3600:.1f}h ({(nic_cost + pair_cost) / 60:.1f} min/pair)")
             if estimate > args.runtime:
                 self.logger.log(
@@ -1890,7 +2146,11 @@ class SoakRunner:
         self.start_fio(volumes)
         self.refresh_topology()
 
-        iteration = 0
+        iteration = max(1, args.start_iteration) - 1
+        if iteration:
+            self.logger.log(
+                f"resuming the outage loop at iteration {iteration + 1} "
+                f"(pair rotation and NIC-phase schedule continue from there)")
         while True:
             iteration += 1
             if args.iterations and iteration > args.iterations:

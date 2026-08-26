@@ -18,7 +18,7 @@ from simplyblock_web import utils, node_utils, node_utils_k8s
 from simplyblock_web.node_utils_k8s import namespace_id_file
 
 from . import docker as snode_ops
-from ._node_info import get_static_node_info
+from .._node_info import get_static_node_info
 
 
 logger = logging.getLogger(__name__)
@@ -120,6 +120,11 @@ def get_info():
 
         "cpu_count": node_info["cpu_info"]['count'],
         "cpu_hz": node_info["cpu_info"]['hz_advertised'][0] if 'hz_advertised' in node_info["cpu_info"] else 1,
+        # Per-NUMA-node core ids, keyed by socket id as a string (JSON has no
+        # int keys). Read-only topology -- add_node uses it to resize a
+        # node's isolated-core set to the cluster's spdk_vcpu_count; nothing
+        # here is persisted.
+        "cpu_topology": {str(k): v for k, v in core_utils.get_numa_cores().items()},
 
         "memory": node_utils.get_memory(),
         "hugepages": node_utils.get_huge_memory(),

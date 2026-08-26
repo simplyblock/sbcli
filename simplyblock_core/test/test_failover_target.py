@@ -101,6 +101,14 @@ class _FakeDB:
     def get_snapshot_by_id(self, sid):
         return self._snaps[sid]
 
+    # These volumes predate replication policies: the destination is resolved
+    # from the target node's cluster and the source cluster's configured pool.
+    def get_replication_policy_for_lvol(self, lvol):
+        return None
+
+    def get_pools(self, cluster_id=None):
+        return []
+
 
 @pytest.fixture
 def patched(monkeypatch):
@@ -195,6 +203,9 @@ def test_failover_idempotent_when_target_exists(monkeypatch, patched):
     existing = LVol()
     existing.uuid = "EXISTING"
     existing.nqn = "nqn.orig:lvol:LV1"
+    # A fail-over copy preserves the source's nsid, so the already-failed-over
+    # volume this guard recognises carries nsid 7 too -- not the model default.
+    existing.ns_id = 7
     nodes = {
         "N_src": _node("N_src", "CL_src"),
         "N_tgt": _node("N_tgt", "CL_tgt", secondary="N_sec", lvstore="lvs_tgt"),
@@ -210,3 +221,30 @@ def test_failover_idempotent_when_target_exists(monkeypatch, patched):
     # Returns the existing target lvol id; no new volume created.
     assert result == "EXISTING"
     assert patched["add_calls"] == []
+
+
+def test_failover_does_not_mistake_a_sibling_namespace_for_this_volume(monkeypatch, patched):
+    """Soak case 7 (run 20260824_174611): with namespaced volumes, up to
+    max-namespace-per-subsys volumes SHARE one nqn. The existing-copy guard
+    matched on nqn alone, so once namespace 1 had failed over, namespaces
+    2..N returned ITS target id and were never failed over -- 9 of 10 volumes
+    silently absent after a DR fail-over, every call reporting success."""
+    sibling = LVol()
+    sibling.uuid = "SIBLING_NS1"
+    sibling.nqn = "nqn.orig:lvol:LV1"      # same shared subsystem
+    sibling.ns_id = 1                       # DIFFERENT namespace
+    nodes = {
+        "N_src": _node("N_src", "CL_src"),
+        "N_tgt": _node("N_tgt", "CL_tgt", secondary="N_sec", lvstore="lvs_tgt"),
+    }
+    clusters = {
+        "CL_src": _cluster("CL_src", target_cluster="CL_tgt", target_pool="POOL_tgt"),
+        "CL_tgt": _cluster("CL_tgt"),
+    }
+    _install_db(monkeypatch, _FakeDB(nodes, clusters, existing_lvols=[sibling]))
+
+    result = lvol_controller.replicate_lvol_on_target_cluster("LV1")
+
+    # LV1 (nsid 7) must actually fail over, NOT return the nsid-1 sibling.
+    assert result != "SIBLING_NS1"
+    assert patched["add_calls"], "the volume must really be failed over"

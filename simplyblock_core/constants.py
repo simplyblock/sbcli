@@ -44,6 +44,14 @@ LVOL_MONITOR_INTERVAL_SEC = 30
 # -> parent snapshot), so the idle 30s interval alone added minutes per
 # chain (run 20260730).
 LVOL_MONITOR_DELETION_INTERVAL_SEC = 2
+# How long a monitor waits for an async delete to finish while holding the
+# chain lock, so async + the following sync deletes stay one atomic sequence.
+SNAP_DELETE_COMPLETION_WAIT_SEC = 15
+# Chains deleted concurrently by a monitor. Members of one chain always run on
+# one worker (and the chain lock enforces it across processes).
+CHAIN_DELETE_WORKERS = 16
+# Storage nodes swept concurrently by the lvol monitor.
+LVOL_MONITOR_NODE_WORKERS = 16
 DEV_MONITOR_INTERVAL_SEC = 10
 # Collector cadence (#5, 2026-07-21): the idle-cluster baseline measured
 # 4,290 RPCs/min cluster-wide (get_iostat 16k / alceml_get_pages_usage 15k /
@@ -57,6 +65,22 @@ PROT_STAT_COLLECTOR_INTERVAL_SEC = 10
 SPDK_STAT_COLLECTOR_INTERVAL_SEC = 30
 DISTR_EVENT_COLLECTOR_INTERVAL_SEC = 5
 DISTR_EVENT_COLLECTOR_NUM_OF_EVENTS = 10
+#: JM events are polled on their own cadence. Unlike the distrib source there
+#: is no discard counterpart -- jm_get_events returns every event it holds on
+#: every call -- so the collector filters what it has already logged and the
+#: poll can afford to be less frequent than the distrib one.
+JM_EVENT_COLLECTOR_INTERVAL_SEC = 10
+#: How many recently-logged JM event keys to remember per node for that filter.
+JM_EVENT_DEDUPE_MAX = 10000
+
+#: Journal records accumulated for compression above which an lvs is flagged in
+#: the cluster event log. A backlog this size means compression is not keeping
+#: up with the write rate (or is stuck/suspended), and the journal replay
+#: needed by the next restart or failover grows with every record.
+JM_COMPRESSION_BACKLOG_ALERT_RECORDS = 500_000_000
+#: Re-arm the alert only after the backlog falls below this fraction of the
+#: threshold, so a count oscillating around the line does not flap events.
+JM_COMPRESSION_BACKLOG_REARM_FRACTION = 0.9
 CAP_MONITOR_INTERVAL_SEC = 30
 SSD_VENDOR_WHITE_LIST = ["1d0f:cd01", "1d0f:cd00"]
 CACHED_LVOL_STAT_COLLECTOR_INTERVAL_SEC = 15
@@ -316,8 +340,11 @@ MAX_SNAP_COUNT = 100
 # and journal, not the host. Replaces the earlier per-core cap
 # (cores x 2000); object-count overload precedent: run 20260712-231123,
 # ~68k objects on one 12-core instance drove swap thrash and a JC-quartet
-# abort.
-MAX_OBJECTS_PER_LVSTORE = 6000
+# abort -- which is an order of magnitude above this cap, so the headroom
+# below it is real.
+#
+# Raised 6000 -> 12000 on 2026-08-20.
+MAX_OBJECTS_PER_LVSTORE = 12000
 
 # Hard cap on namespaces (lvols) sharing one nvmf subsystem. The DEFAULT for
 # namespaced creates stays LVO_MAX_NAMESPACES_PER_SUBSYS; this is the ceiling

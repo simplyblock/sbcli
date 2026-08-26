@@ -87,7 +87,7 @@
 - Backup: policy retention with expiry
 - Multi-fabric (TCP vs RDMA switching)
 - Large volume sizes (TB range)
-- Async replication / DR: replication-start, stop, trigger, status, commit, failback (zero coverage)
+- Async replication / DR: replication-target-add, replication-policy-add, replication-policy-set/clear, trigger, status, commit, failback (zero coverage)
 - Cluster update-fabric (TCP ↔ RDMA switching)
 - Failure domain placement (`--enable-failure-domain` + anti-affinity enforcement)
 - Snapshot replication (`snapshot replication-status`, `delete-replication-only`)
@@ -481,13 +481,16 @@ This section gives a one-stop view of every planned test, its platform support, 
 
 ### 3.9 Async Replication / DR
 
-#### TC-REPL-001 — Replication start / stop `[Both]` `[Partial]` ❌ NEW
-- Configure replication target cluster (`cluster add-replication`)
+#### TC-REPL-001 — Replication policy attach / clear `[Both]` `[Partial]` ❌ NEW
+- Configure the destination (`cluster replication-target-add`) and a cadence
+  (`cluster replication-policy-add --mode failover`)
 - Create lvol, write data
-- `volume replication-start` (failover mode) → verify replication begins
+- `volume add --replication-policy` / `volume replication-policy-set` → verify
+  replication begins (attaching the policy is what starts it; the direct
+  `volume replication-start` is refused for a policy-following volume)
 - `volume replication-status` → verify source/target, state=replicating
 - `volume replication-info` → verify time lag decreasing, outstanding data
-- `volume replication-stop` → verify replication stops cleanly
+- `volume replication-policy-clear` → verify replication stops cleanly
 - **Requires**: dual cluster setup (source + target)
 - **Automate in**: `test_replication_basic.py`
 

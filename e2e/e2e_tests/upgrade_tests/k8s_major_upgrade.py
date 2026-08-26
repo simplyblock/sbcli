@@ -32,6 +32,7 @@ import json
 import os
 import random
 import string
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
 from e2e_tests.cluster_test_base import TestClusterBase
@@ -91,7 +92,11 @@ for snap in db_controller.get_snapshots():
 print("done")
 """
 
-# FDB resources that need the keep annotation (Step 1 of migration guide)
+# Resources that need the keep annotation so they survive helm uninstall
+# (Step 1 of migration guide: FDB + prometheus config)
+# NOTE: FDB resources are NOT prefixed with the Helm release name.
+# The prometheus configmap IS prefixed (e.g. "sbcli-simplyblock-prometheus-config").
+# Use _get_keep_resources(release_name) to get the full list with correct names.
 _FDB_KEEP_RESOURCES = [
     ("deployment", "simplyblock-fdb-controller-manager"),
     ("serviceaccount", "simplyblock-fdb-controller-manager"),
@@ -102,6 +107,24 @@ _FDB_KEEP_RESOURCES = [
     ("foundationdbcluster", "simplyblock-fdb-cluster"),
     ("configmap", "simplyblock-fdb-cluster-config"),
 ]
+
+# Base name for the prometheus configmap (gets prefixed with helm release name)
+_PROMETHEUS_CM_BASE = "simplyblock-prometheus-config"
+
+
+def _get_keep_resources(helm_release: str = "") -> list:
+    """Return the full keep-resources list with correctly prefixed names.
+
+    The prometheus configmap is created by Helm with the release prefix
+    (e.g. 'sbcli-simplyblock-prometheus-config'), unlike FDB resources
+    which use fixed names.
+    """
+    resources = list(_FDB_KEEP_RESOURCES)
+    if helm_release:
+        resources.append(("configmap", f"{helm_release}-{_PROMETHEUS_CM_BASE}"))
+    else:
+        resources.append(("configmap", _PROMETHEUS_CM_BASE))
+    return resources
 
 # Default CR names matching the k8s-native-e2e.yaml workflow
 _DEFAULT_CLUSTER_CR = "simplyblock-cluster"
@@ -184,7 +207,7 @@ class K8sNativeMajorUpgrade(TestClusterBase):
         self.pvc_details: dict[str, dict] = {}
         self.snapshot_details: dict[str, dict] = {}
         self.clone_details: dict[str, dict] = {}
-        self.pre_upgrade_checksums: dict[str, dict] = {}
+
 
         self.logger.info(
             f"K8s native upgrade: {self.base_version} -> {self.target_version} "
@@ -324,19 +347,24 @@ class K8sNativeMajorUpgrade(TestClusterBase):
             f"[job1]\n"
         )
 
+        # Warmup: sequential write with verify=md5 at the same bs/seed as
+        # the main config.  This pre-fills every block in the file with valid
+        # FIO verify headers so that a later verify_only pass (rw=read) can
+        # verify the ENTIRE file, not just the ~3-4 % of blocks that randrw
+        # happened to overwrite.
         warmup_config = (
             f"[global]\n"
             f"name={name}-warmup\n"
             f"filename_format=/spdkvol/fio-{run_id}.$jobnum\n"
             f"rw=write\n"
-            f"bs=1m\n"
+            f"bs={bs}\n"
             f"iodepth=32\n"
             f"direct=1\n"
             f"ioengine=libaio\n"
             f"size={self.fio_size}\n"
             f"numjobs={self.fio_num_jobs}\n"
-            f"group_reporting\n"
-            f"zero_buffers\n"
+            f"verify=md5\n"
+            f"randseed={randseed}\n"
             f"\n"
             f"[job1]\n"
         )
@@ -414,10 +442,14 @@ class K8sNativeMajorUpgrade(TestClusterBase):
             pvc_name = f"upgrade-pvc-{_rand_seq(4)}-{i}"
             job_name = f"fio-{pvc_name}"
             cm_name = f"fio-cfg-{pvc_name}"
-            sc_name = random.choice(
+            # Pick a random SC; deduplicate when both names are identical.
+            sc_choices = list(dict.fromkeys(
                 [self.STORAGE_CLASS_NAME, self.XFS_STORAGE_CLASS_NAME]
+            ))
+            sc_name = random.choice(sc_choices)
+            fs_type = (
+                "xfs" if sc_name == self.XFS_STORAGE_CLASS_NAME else "ext4"
             )
-            fs_type = "xfs" if sc_name == self.XFS_STORAGE_CLASS_NAME else "ext4"
 
             self.k8s_utils.create_pvc(
                 name=pvc_name, size=self.pvc_size, storage_class=sc_name,
@@ -492,6 +524,7 @@ class K8sNativeMajorUpgrade(TestClusterBase):
                 "snap_name": snap_name, "job_name": clone_job,
                 "configmap_name": clone_cm, "storage_class": clone_sc,
                 "fs_type": clone_fs_type,
+                **({"fio_meta": _clone_meta} if not skip_clone_fio else {}),
             }
             sleep_n_sec(5)
 
@@ -509,12 +542,17 @@ class K8sNativeMajorUpgrade(TestClusterBase):
             self._save_fio_pod_logs(detail["job_name"], clone_name)
             self.k8s_utils.validate_fio_job(detail["job_name"], timeout=timeout)
 
-    def _cleanup_fio_jobs_only(self):
+    def _cleanup_fio_jobs_only(self, wait_for_termination: bool = True,
+                               termination_timeout: int = 300):
         """Delete FIO jobs and configmaps but leave PVCs/snapshots/clones intact.
 
         Unlike ``k8s_utils.cleanup_stale_fio_resources()`` which also removes
         clone PVCs, snapshots, and test PVCs, this only removes the FIO
         workload resources so PVCs are freed for utility pod mounting.
+
+        When *wait_for_termination* is True (default), waits for all FIO
+        pods to fully terminate and gives CSI time to finish unmounting
+        before returning.  This ensures no stale mounts remain.
         """
         ns = self.k8s_utils.namespace
         cmds = [
@@ -533,12 +571,404 @@ class K8sNativeMajorUpgrade(TestClusterBase):
                 self.k8s_utils._exec_kubectl(cmd)
             except Exception as exc:
                 self.logger.warning(f"FIO job cleanup step failed: {exc}")
-        self.logger.info("FIO jobs and configmaps cleaned up (PVCs preserved)")
+        self.logger.info("FIO jobs and configmaps deleted")
+
+        if not wait_for_termination:
+            return
+
+        # Wait for all FIO pods to fully terminate
+        import time
+        deadline = time.time() + termination_timeout
+        self.logger.info(
+            f"Waiting up to {termination_timeout}s for FIO pods to terminate..."
+        )
+        while time.time() < deadline:
+            out, _ = self.k8s_utils._exec_kubectl(
+                f"kubectl get pods -n {ns} -l app=fio-benchmark "
+                f"--no-headers 2>/dev/null || true",
+                supress_logs=True,
+            )
+            pods = [line for line in out.strip().splitlines() if line.strip()]
+            if not pods:
+                self.logger.info("All FIO pods terminated")
+                break
+            self.logger.info(f"  {len(pods)} FIO pod(s) still terminating...")
+            time.sleep(5)
+        else:
+            self.logger.warning(
+                f"FIO pods did not fully terminate within {termination_timeout}s"
+            )
+
+        # Give CSI NodeUnstageVolume / NodeUnpublishVolume time to complete
+        # after pods are gone — ensures no stale mounts remain on worker nodes
+        self.logger.info("Waiting 60s for CSI unmount to complete...")
+        time.sleep(60)
+
+        self.logger.info("FIO jobs and pods cleaned up (PVCs preserved)")
+
+    def _cleanup_worker_connections(self):
+        """Unmount stale CSI volumes and disconnect NVMe-oF on every worker.
+
+        After FIO pods are deleted and CSI has had time to unmount, there
+        may still be stale mount-points or NVMe-oF connections left on
+        worker nodes (especially if CSI cleanup didn't fully succeed).
+        This method runs host-level cleanup on each worker via
+        ``oc debug node/`` (OpenShift) or ``kubectl debug node/`` (K8s).
+
+        Also deletes any lingering VolumeAttachment objects for upgrade
+        PVCs so Kubernetes doesn't think the volumes are still attached.
+        """
+        import time
+
+        # --- 1. Get worker node names ---
+        worker_nodes_env = os.environ.get("WORKER_NODES", "")
+        worker_names = []
+        if worker_nodes_env:
+            worker_names = [n.strip() for n in worker_nodes_env.split(",")
+                           if n.strip()]
+        else:
+            out, _ = self.k8s_utils._exec_kubectl(
+                "kubectl get nodes -l node-role.kubernetes.io/worker "
+                "-o jsonpath='{.items[*].metadata.name}' 2>/dev/null || "
+                "kubectl get nodes --no-headers "
+                "-o custom-columns=NAME:.metadata.name",
+                supress_logs=True,
+            )
+            worker_names = [n.strip() for n in (out or "").replace("'", "").split()
+                            if n.strip()]
+
+        if not worker_names:
+            self.logger.warning("No worker nodes found, skipping connection cleanup")
+            return
+
+        self.logger.info(
+            f"Cleaning stale mounts and NVMe connections on {len(worker_names)} "
+            f"worker(s): {worker_names}"
+        )
+
+        is_openshift = self.k8s_utils.detect_openshift()
+
+        # Host-level cleanup script:
+        # 1) Find and unmount any simplyblock CSI volume mounts
+        # 2) Disconnect all NVMe-oF subsystems
+        # 3) Print nvme list to confirm all connections are gone
+        # Try without sudo first; fall back to sudo if the command fails.
+        # NOTE: The script is passed via shlex.quote() to avoid nested
+        # quoting issues with oc debug / kubectl debug.
+        import shlex
+        cleanup_script = (
+            'echo "=== CSI mounts before cleanup ==="; '
+            "mount | grep kubernetes.io~csi || echo '(none)'; "
+            'echo "=== NVMe devices before cleanup ==="; '
+            "nvme list 2>/dev/null || sudo nvme list 2>/dev/null || echo '(nvme list failed)'; "
+            'for mp in $(mount | grep kubernetes.io~csi | awk "{print \\$3}"); do '
+            '  umount -f "$mp" 2>/dev/null || sudo umount -f "$mp" 2>/dev/null || true; '
+            "done; "
+            "nvme disconnect-all 2>/dev/null || sudo nvme disconnect-all 2>/dev/null || true; "
+            'echo "=== NVMe devices after cleanup ==="; '
+            "nvme list 2>/dev/null || sudo nvme list 2>/dev/null || echo '(nvme list failed)'; "
+            "echo CLEANUP_DONE"
+        )
+
+        for node_name in worker_names:
+            self.logger.info(f"  Cleaning worker: {node_name}")
+            try:
+                quoted = shlex.quote(cleanup_script)
+                if is_openshift:
+                    cmd = (
+                        f"oc debug node/{node_name} "
+                        f"-- chroot /host bash -c {quoted}"
+                    )
+                else:
+                    cmd = (
+                        f"kubectl debug node/{node_name} -q "
+                        f"--image=busybox:latest -- chroot /host sh -c {quoted}"
+                    )
+                out, _ = self.k8s_utils._exec_kubectl(cmd, timeout=120)
+                if "CLEANUP_DONE" in (out or ""):
+                    self.logger.info(f"  Worker {node_name}: cleanup completed")
+                else:
+                    self.logger.warning(
+                        f"  Worker {node_name}: cleanup may not have completed "
+                        f"(output: {(out or '')[:200]})"
+                    )
+            except Exception as exc:
+                self.logger.warning(
+                    f"  Worker {node_name}: cleanup failed: {exc}"
+                )
+
+        # --- 2. Delete stale VolumeAttachments for upgrade PVCs ---
+        pvc_names = list(self.pvc_details.keys()) + list(self.clone_details.keys())
+        if pvc_names:
+            self.logger.info("Checking for stale VolumeAttachments...")
+            try:
+                out, _ = self.k8s_utils._exec_kubectl(
+                    "kubectl get volumeattachments -o json 2>/dev/null || true",
+                    supress_logs=True,
+                )
+                if out and out.strip():
+                    va_data = json.loads(out)
+                    for va in va_data.get("items", []):
+                        pv_name = va.get("spec", {}).get("source", {}).get(
+                            "persistentVolumeName", ""
+                        )
+                        va_name = va.get("metadata", {}).get("name", "")
+                        # Check if this VA references one of our PVs
+                        # PV names match PVC names in CSI provisioner
+                        for pvc in pvc_names:
+                            if pvc in pv_name:
+                                self.logger.info(
+                                    f"  Deleting stale VolumeAttachment: {va_name} "
+                                    f"(PV: {pv_name})"
+                                )
+                                self.k8s_utils._exec_kubectl(
+                                    f"kubectl delete volumeattachment {va_name} "
+                                    f"--ignore-not-found",
+                                )
+                                break
+            except Exception as exc:
+                self.logger.warning(f"VolumeAttachment cleanup failed: {exc}")
+
+        self.logger.info("Worker connection cleanup complete")
+        # Brief pause for cleanup to propagate
+        time.sleep(10)
+
+    def _log_configmaps(self, label: str):
+        """Log configmap names and save prometheus config YAML to NFS share."""
+        try:
+            out, _ = self.k8s_utils._exec_kubectl(
+                f"kubectl get configmap -n {_NAMESPACE} -o name 2>/dev/null || true"
+            )
+            self.logger.info(f"Configmaps ({label}):\n{out}")
+
+            out_dir = os.path.join(self.docker_logs_path, "configmaps")
+            os.makedirs(out_dir, exist_ok=True)
+
+            # Save full list
+            list_file = os.path.join(out_dir, f"{label}_configmap_list.txt")
+            with open(list_file, "w") as f:
+                f.write(out or "")
+
+            # Save prometheus configmap YAML (try prefixed then unprefixed name)
+            for cm_name in [
+                f"{self.helm_release_sbcli}-simplyblock-prometheus-config",
+                "simplyblock-prometheus-config",
+            ]:
+                yaml_out, _ = self.k8s_utils._exec_kubectl(
+                    f"kubectl get configmap {cm_name} -n {_NAMESPACE} "
+                    f"-o yaml 2>/dev/null || true"
+                )
+                if yaml_out and "apiVersion" in yaml_out:
+                    yaml_file = os.path.join(
+                        out_dir, f"{label}_prometheus_config.yaml"
+                    )
+                    with open(yaml_file, "w") as f:
+                        f.write(yaml_out)
+                    self.logger.info(
+                        f"Saved {cm_name} YAML to {yaml_file}"
+                    )
+                    break
+        except Exception as e:
+            self.logger.warning(f"Failed to log configmaps ({label}): {e}")
+
+    def _migrate_prometheus_credentials(self):
+        """Copy basic_auth credentials from old prometheus configmap to new one.
+
+        After R25→R2x upgrade the old configmap (e.g. sbcli-simplyblock-prometheus-config)
+        has the cluster credentials, but the new chart creates a fresh configmap
+        (simplyblock-prometheus-config) with empty username/password.  The new chart
+        also switches to https with mTLS, so we can't just swap configmaps — we
+        need to inject the old credentials into the new configmap.
+        """
+        old_cm = f"{self.helm_release_sbcli}-{_PROMETHEUS_CM_BASE}"
+        new_cm = _PROMETHEUS_CM_BASE
+        self.logger.info(
+            f"Migrating prometheus credentials: {old_cm} → {new_cm}"
+        )
+
+        try:
+            # Read old configmap
+            old_out, _ = self.k8s_utils._exec_kubectl(
+                f"kubectl get configmap {old_cm} -n {_NAMESPACE} "
+                f"-o jsonpath='{{.data.prometheus\\.yml}}' 2>/dev/null || true"
+            )
+            if not old_out or "basic_auth" not in old_out:
+                self.logger.warning(
+                    f"Old configmap {old_cm} not found or has no basic_auth, "
+                    f"skipping credential migration"
+                )
+                return
+
+            # Extract username and password from old config
+            import re
+            user_match = re.search(
+                r"basic_auth:\s*\n\s*username:\s*['\"]?([^'\"\n]+)", old_out
+            )
+            pass_match = re.search(
+                r"basic_auth:\s*\n\s*username:\s*[^\n]*\n\s*password:\s*['\"]?([^'\"\n]+)",
+                old_out,
+            )
+            if not user_match or not pass_match:
+                self.logger.warning(
+                    "Could not parse username/password from old prometheus config"
+                )
+                return
+
+            username = user_match.group(1).strip()
+            password = pass_match.group(1).strip()
+            self.logger.info(
+                f"Extracted credentials from {old_cm}: "
+                f"username={username[:8]}..."
+            )
+
+            # Read new configmap
+            new_json, _ = self.k8s_utils._exec_kubectl(
+                f"kubectl get configmap {new_cm} -n {_NAMESPACE} "
+                f"-o json 2>/dev/null || true"
+            )
+            if not new_json or "apiVersion" not in new_json:
+                self.logger.warning(
+                    f"New configmap {new_cm} not found, skipping credential migration"
+                )
+                return
+
+            import json as json_mod
+            cm_obj = json_mod.loads(new_json)
+            prom_yml = cm_obj.get("data", {}).get("prometheus.yml", "")
+
+            if not prom_yml:
+                self.logger.warning(f"New configmap {new_cm} has no prometheus.yml")
+                return
+
+            # Replace empty username/password with old values
+            # Handle both empty and quoted-empty forms
+            prom_yml = re.sub(
+                r"(username:)\s*['\"]?['\"]?\s*$",
+                rf"\1 '{username}'",
+                prom_yml,
+                count=1,
+                flags=re.MULTILINE,
+            )
+            prom_yml = re.sub(
+                r"(password:)\s*['\"]?['\"]?\s*$",
+                rf"\1 '{password}'",
+                prom_yml,
+                count=1,
+                flags=re.MULTILINE,
+            )
+
+            cm_obj["data"]["prometheus.yml"] = prom_yml
+
+            # Remove resourceVersion/uid to avoid conflicts, keep name/namespace
+            cm_obj.get("metadata", {}).pop("resourceVersion", None)
+            cm_obj.get("metadata", {}).pop("uid", None)
+            cm_obj.get("metadata", {}).pop("creationTimestamp", None)
+            cm_obj.get("metadata", {}).pop("managedFields", None)
+
+            # Apply the updated configmap
+            patched_json = json_mod.dumps(cm_obj)
+            self.k8s_utils._exec_kubectl(
+                f"echo '{patched_json}' | kubectl replace -f - -n {_NAMESPACE}"
+            )
+            self.logger.info(
+                f"Injected credentials into {new_cm}, "
+                f"restarting prometheus pod"
+            )
+
+            # Restart prometheus to pick up the new config
+            self.k8s_utils._exec_kubectl(
+                f"kubectl delete pod simplyblock-prometheus-0 -n {_NAMESPACE} "
+                f"--ignore-not-found"
+            )
+            sleep_n_sec(30)
+
+        except Exception as e:
+            self.logger.warning(f"Failed to migrate prometheus credentials: {e}")
+
+    def _collect_worker_dmesg(self, label: str = ""):
+        """Collect dmesg and journalctl from every worker node.
+
+        Saves output to ``<docker_logs_path>/worker_dmesg/`` so that kernel-
+        level NVMe connect/disconnect, filesystem mount, and I/O error events
+        are captured even when the node reboots (journalctl persists).
+        """
+        import shlex
+
+        worker_nodes_env = os.environ.get("WORKER_NODES", "")
+        if worker_nodes_env:
+            worker_names = [n.strip() for n in worker_nodes_env.split(",")
+                           if n.strip()]
+        else:
+            out, _ = self.k8s_utils._exec_kubectl(
+                "kubectl get nodes -l node-role.kubernetes.io/worker "
+                "-o jsonpath='{.items[*].metadata.name}' 2>/dev/null || "
+                "kubectl get nodes --no-headers "
+                "-o custom-columns=NAME:.metadata.name",
+                supress_logs=True,
+            )
+            worker_names = [n.strip() for n in (out or "").replace("'", "").split()
+                            if n.strip()]
+
+        if not worker_names:
+            self.logger.warning("No worker nodes found, skipping dmesg collection")
+            return
+
+        suffix = f"_{label}" if label else ""
+        out_dir = os.path.join(self.docker_logs_path, "worker_dmesg")
+        os.makedirs(out_dir, exist_ok=True)
+
+        is_openshift = self.k8s_utils.detect_openshift()
+
+        collect_script = (
+            'echo "=== dmesg (NVMe/ext4/xfs/IO) ==="; '
+            "dmesg -T 2>/dev/null | "
+            'grep -iE "nvme|ext4|xfs|Buffer I/O|no available path|'
+            'shut down requested|mounted filesystem|unmounting|'
+            'Removing ctrl|new ctrl|I/O error" || echo "(no matches)"; '
+            'echo "=== journalctl -k (NVMe/IO, last 2h) ==="; '
+            "journalctl -k --since '2 hours ago' --no-pager 2>/dev/null | "
+            'grep -iE "nvme|ext4|xfs|Buffer I/O|no available path|'
+            'shut down requested|mounted|I/O error" || echo "(no matches)"'
+        )
+
+        self.logger.info(
+            f"Collecting dmesg/journalctl from {len(worker_names)} workers "
+            f"(label={label or 'none'})"
+        )
+
+        for node_name in worker_names:
+            try:
+                quoted = shlex.quote(collect_script)
+                if is_openshift:
+                    cmd = (
+                        f"oc debug node/{node_name} "
+                        f"-- chroot /host bash -c {quoted}"
+                    )
+                else:
+                    cmd = (
+                        f"kubectl debug node/{node_name} -q "
+                        f"--image=busybox:latest -- chroot /host sh -c {quoted}"
+                    )
+                out, _ = self.k8s_utils._exec_kubectl(cmd, timeout=120)
+                fname = os.path.join(
+                    out_dir, f"{node_name}{suffix}.log"
+                )
+                with open(fname, "w") as f:
+                    f.write(out or "(empty)")
+                self.logger.info(f"  {node_name}: dmesg saved ({len(out or '')} bytes)")
+            except Exception as exc:
+                self.logger.warning(
+                    f"  {node_name}: dmesg collection failed: {exc}"
+                )
 
     def _capture_pvc_checksums(self, pvc_names: list[str]) -> dict[str, dict]:
         """Capture MD5 checksums for all files on the given PVCs.
 
         Returns ``{pvc_name: {filepath: md5hash, ...}, ...}``.
+
+        NOTE: Currently unused in the upgrade flow — FIO's built-in
+        ``verify=md5`` + ``verify_only`` mode (Phase 4.1) is used instead.
+        Kept for future use when unmount/remount verification is needed.
         """
         all_checksums = {}
         for pvc_name in pvc_names:
@@ -577,6 +1007,10 @@ class K8sNativeMajorUpgrade(TestClusterBase):
         """Verify that current PVC data matches previously captured checksums.
 
         Raises ``AssertionError`` if any checksum mismatch is found.
+
+        NOTE: Currently unused in the upgrade flow — FIO's built-in
+        ``verify=md5`` + ``verify_only`` mode (Phase 4.1) is used instead.
+        Kept for future use when unmount/remount verification is needed.
         """
         mismatches = []
         for pvc_name, expected in pre_checksums.items():
@@ -643,6 +1077,8 @@ class K8sNativeMajorUpgrade(TestClusterBase):
                 image=self.FIO_IMAGE, avoid_node=avoid,
                 warmup_config=warmup_config,
             )
+            # Store FIO metadata so Phase 4.1 can build verify-only jobs
+            detail["fio_meta"] = _meta
             clone_jobs.append((clone_job, clone_name))
             sleep_n_sec(5)
 
@@ -823,8 +1259,12 @@ class K8sNativeMajorUpgrade(TestClusterBase):
             "Post-upgrade Phase 4.1: Verify old data integrity (FIO verify-only)"
         )
 
-        # 4.1 — Verify-only FIO on each pre-upgrade PVC
-        verify_jobs: list[tuple[str, str]] = []
+        # 4.1 — Verify-only FIO on each pre-upgrade PVC AND clone PVC
+        # We verify both originals and clones, collecting all failures
+        # instead of stopping on the first error.
+        verify_jobs: list[tuple[str, str, str]] = []  # (job, pvc, type)
+
+        # Original PVCs
         for pvc_name, detail in self.pvc_details.items():
             fio_meta = detail.get("fio_meta")
             if not fio_meta:
@@ -837,24 +1277,82 @@ class K8sNativeMajorUpgrade(TestClusterBase):
             verify_cm = f"fio-verify-cfg-{pvc_name}"
 
             verify_config = self._build_verify_only_fio_config(pvc_name, fio_meta)
-            avoid = self.k8s_utils.get_pvc_primary_k8s_node(
-                pvc_name, self.sbcli_utils,
-            )
             self.k8s_utils.create_fio_job(
                 job_name=verify_job, pvc_name=pvc_name,
                 configmap_name=verify_cm, fio_config=verify_config,
-                image=self.FIO_IMAGE, avoid_node=avoid,
+                image=self.FIO_IMAGE,
             )
-            verify_jobs.append((verify_job, pvc_name))
+            verify_jobs.append((verify_job, pvc_name, "original"))
             sleep_n_sec(5)
 
-        for job_name, pvc_name in verify_jobs:
-            self.logger.info(f"Validating verify-only FIO for PVC: {pvc_name}")
+        # Clone PVCs
+        for clone_name, detail in self.clone_details.items():
+            fio_meta = detail.get("fio_meta")
+            if not fio_meta:
+                self.logger.warning(
+                    f"No FIO metadata for clone {clone_name}, skipping verify-only"
+                )
+                continue
+
+            verify_job = f"verify-{clone_name}"
+            verify_cm = f"fio-verify-cfg-{clone_name}"
+
+            verify_config = self._build_verify_only_fio_config(
+                clone_name, fio_meta,
+            )
+            self.k8s_utils.create_fio_job(
+                job_name=verify_job, pvc_name=clone_name,
+                configmap_name=verify_cm, fio_config=verify_config,
+                image=self.FIO_IMAGE,
+            )
+            verify_jobs.append((verify_job, clone_name, "clone"))
+            sleep_n_sec(5)
+
+        # Validate ALL verify jobs in parallel to avoid sequential timeouts
+        verify_failures: list[str] = []
+
+        def _validate_one(job_name, pvc_name, pvc_type):
+            self.logger.info(
+                f"Validating verify-only FIO for {pvc_type} PVC: {pvc_name}"
+            )
             self._save_fio_pod_logs(job_name, f"{pvc_name}-verify")
-            self.k8s_utils.validate_fio_job(job_name, timeout=600)
+            try:
+                self.k8s_utils.validate_fio_job(job_name, timeout=600)
+                self.logger.info(
+                    f"  PASSED: {pvc_type} PVC {pvc_name} data verified"
+                )
+                return None
+            except Exception as exc:
+                self.logger.error(
+                    f"  FAILED: {pvc_type} PVC {pvc_name} verification "
+                    f"failed: {exc}"
+                )
+                return f"{pvc_type} PVC '{pvc_name}': {exc}"
+
+        with ThreadPoolExecutor(max_workers=len(verify_jobs)) as pool:
+            futures = {
+                pool.submit(_validate_one, job, pvc, ptype): (job, pvc, ptype)
+                for job, pvc, ptype in verify_jobs
+            }
+            for future in as_completed(futures):
+                result = future.result()
+                if result is not None:
+                    verify_failures.append(result)
+
+        if verify_failures:
+            summary = "\n  ".join(verify_failures)
+            self.logger.error(
+                f"Phase 4.1: {len(verify_failures)}/{len(verify_jobs)} "
+                f"PVC verifications failed:\n  {summary}"
+            )
+            raise RuntimeError(
+                f"Phase 4.1: {len(verify_failures)}/{len(verify_jobs)} "
+                f"PVC verifications failed:\n  {summary}"
+            )
 
         self.logger.info(
-            "Post-upgrade Phase 4.1 PASSED: All old PVC data verified intact"
+            f"Post-upgrade Phase 4.1 PASSED: All {len(verify_jobs)} PVC "
+            f"data verified intact (originals + clones)"
         )
 
         # 4.2 — Fresh randrw FIO on old PVCs
@@ -1073,9 +1571,10 @@ class K8sNativeMajorUpgrade(TestClusterBase):
         self.logger.info("  All storage nodes online ✓")
 
         # All PVCs bound
+        ns = self.k8s_utils.namespace
         for pvc_name in self.pvc_details:
             out, _ = self.k8s_utils._exec_kubectl(
-                f"kubectl get pvc {pvc_name} -o jsonpath='{{.status.phase}}'"
+                f"kubectl get pvc {pvc_name} -n {ns} -o jsonpath='{{.status.phase}}'"
             )
             phase = (out or "").strip().replace("'", "")
             assert phase == "Bound", (
@@ -1086,7 +1585,7 @@ class K8sNativeMajorUpgrade(TestClusterBase):
         # Snapshots ready
         for snap_name in self.snapshot_details:
             out, _ = self.k8s_utils._exec_kubectl(
-                f"kubectl get volumesnapshot {snap_name} "
+                f"kubectl get volumesnapshot {snap_name} -n {ns} "
                 f"-o jsonpath='{{.status.readyToUse}}'"
             )
             ready = (out or "").strip().replace("'", "")
@@ -1152,6 +1651,10 @@ class K8sNativeMajorUpgrade(TestClusterBase):
             f"--set controlplane.csiHostpathDriver.enabled=true "
             f"--set controlplane.storageclass.name=local-hostpath "
             f"--set csiConfig.simplybk.ip=http://simplyblock-webappapi.simplyblock:5000 "
+            f"--set controlplane.observability.enabled=true "
+            f"--set opensearch.persistence.storageClass=local-hostpath "
+            f"--set controlplane.observability.minio.storageClass=local-hostpath "
+
             f"{tls_flags} {csi_flags}"
         ).strip()
 
@@ -1237,7 +1740,7 @@ class K8sNativeMajorUpgrade(TestClusterBase):
 
             sleep_n_sec(30)
             self.validate_migration_for_node(
-                restart_ts, 1200, node_id, 60, no_task_ok=True
+                restart_ts, 1200, None, 60, no_task_ok=True
             )
             if idx < len(storage_node_list) - 1:
                 sleep_n_sec(30)
@@ -1310,7 +1813,8 @@ class K8sNativeMajorUpgrade(TestClusterBase):
             self._patch_helm_release_keep_annotations(self.helm_release_sbcli)
 
         # Also annotate live resources (belt-and-suspenders, not sufficient alone)
-        for kind, name in _FDB_KEEP_RESOURCES:
+        keep_resources = _get_keep_resources(self.helm_release_sbcli)
+        for kind, name in keep_resources:
             ns_flag = f"-n {_NAMESPACE}" if kind not in ("clusterrole", "clusterrolebinding") else ""
             cmd = (
                 f"kubectl annotate {kind} {name} {ns_flag} "
@@ -1320,49 +1824,94 @@ class K8sNativeMajorUpgrade(TestClusterBase):
         self.logger.info("FDB keep annotation step complete")
 
     def _inject_keep_annotations_via_helm_upgrade(self, chart_path: str) -> bool:
-        """Edit FDB template files on disk and run helm upgrade --reuse-values.
+        """Edit chart template files on disk and run helm upgrade --reuse-values.
 
         This is the correct way to add keep annotations: modify the chart
         templates so Helm stores the annotation in its release manifest,
         then ``helm uninstall`` will see it and skip deletion.
 
+        Scans ALL template files in the chart for matching resource names
+        (FDB resources, prometheus config, etc.) rather than just a single
+        template, since resources may live in different template files.
+
         Returns True if successful, False otherwise.
         """
-        fdb_template = os.path.join(chart_path, "templates", "foundationdb.yaml")
-        if not os.path.isfile(fdb_template):
-            self.logger.warning(f"FDB template not found at {fdb_template}")
+        import glob
+        templates_dir = os.path.join(chart_path, "templates")
+        if not os.path.isdir(templates_dir):
+            self.logger.warning(f"Templates directory not found at {templates_dir}")
             return False
 
-        self.logger.info(f"Editing FDB template: {fdb_template}")
+        template_files = sorted(glob.glob(os.path.join(templates_dir, "*.yaml")))
+        if not template_files:
+            self.logger.warning(f"No YAML templates found in {templates_dir}")
+            return False
+
+        self.logger.info(f"Scanning {len(template_files)} template files in {templates_dir}")
 
         try:
-            with open(fdb_template, "r") as f:
-                content = f.read()
+            import re
+            # For template matching, use unprefixed names (Helm templates
+            # contain the base name, the release prefix is added at render time)
+            keep_names = {name for _, name in _FDB_KEEP_RESOURCES}
+            keep_names.add(_PROMETHEUS_CM_BASE)
+            remaining_names = set(keep_names)
 
-            if "helm.sh/resource-policy" in content:
-                self.logger.info("FDB template already has resource-policy annotations")
-            else:
-                # Inject "helm.sh/resource-policy: keep" annotation after each
-                # "metadata:" block. The template has multiple YAML documents
-                # separated by "---". Each resource has a "metadata:" line
-                # followed by "  name: ...". We add an annotations block.
-                import re
-                # Match "metadata:\n  name: <fdb-resource-name>" and inject annotation
-                fdb_names = {name for _, name in _FDB_KEEP_RESOURCES}
-                for name in fdb_names:
-                    # Pattern: metadata:\n  name: <name> (with optional labels after)
+            for template_file in template_files:
+                with open(template_file, "r") as f:
+                    content = f.read()
+
+                # Check which keep-resources exist in this template
+                # Match literal "name: <exact>" OR name appearing anywhere
+                # in file (e.g. Helm variable defs like printf "%s-<name>")
+                names_in_file = set()
+                for n in remaining_names:
+                    if f"name: {n}" in content or n in content:
+                        names_in_file.add(n)
+                if not names_in_file:
+                    continue
+
+                self.logger.info(f"Editing template: {template_file}")
+                modified = False
+
+                for name in names_in_file:
+                    # Try literal name first
                     pattern = rf'(metadata:\n)(  name: {re.escape(name)}\n)'
-                    replacement = (
+                    content, count = re.subn(pattern, (
                         r'\1  annotations:\n'
                         r'    "helm.sh/resource-policy": keep\n'
                         r'\2'
-                    )
-                    content, count = re.subn(pattern, replacement, content)
+                    ), content)
                     if count > 0:
                         self.logger.info(f"  Injected keep annotation for: {name}")
+                        modified = True
+                        remaining_names.discard(name)
+                        continue
 
-                with open(fdb_template, "w") as f:
-                    f.write(content)
+                    # Fallback: match metadata + name with Helm template expression
+                    # e.g. "metadata:\n  name: {{ $name }}"
+                    pattern = r'(metadata:\n)(  name: \{{.*\}}\n)'
+                    content, count = re.subn(pattern, (
+                        r'\1  annotations:\n'
+                        r'    "helm.sh/resource-policy": keep\n'
+                        r'\2'
+                    ), content, count=1)
+                    if count > 0:
+                        self.logger.info(
+                            f"  Injected keep annotation for: {name} "
+                            f"(Helm template variable)"
+                        )
+                        modified = True
+                        remaining_names.discard(name)
+
+                if modified:
+                    with open(template_file, "w") as f:
+                        f.write(content)
+
+            if remaining_names:
+                self.logger.warning(
+                    f"Could not find templates for: {remaining_names}"
+                )
 
             # Run helm upgrade --reuse-values to persist annotations
             self.logger.info(
@@ -1403,7 +1952,7 @@ class K8sNativeMajorUpgrade(TestClusterBase):
             self.logger.warning("No Helm release name provided, skipping secret patch")
             return
 
-        fdb_resource_names = {name for _, name in _FDB_KEEP_RESOURCES}
+        fdb_resource_names = {name for _, name in _get_keep_resources(release_name)}
 
         # Find the latest Helm release secret
         cmd = (
@@ -1808,6 +2357,10 @@ class K8sNativeMajorUpgrade(TestClusterBase):
             f"--set controlplane.csiHostpathDriver.enabled=true "
             f"--set controlplane.storageclass.name=local-hostpath "
             f"--set csiConfig.simplybk.ip=http://simplyblock-webappapi.simplyblock:5000 "
+            f"--set controlplane.observability.enabled=true "
+            f"--set opensearch.persistence.storageClass=local-hostpath "
+            f"--set controlplane.observability.minio.storageClass=local-hostpath "
+
             f"{tls_flags} {csi_flags}"
         ).strip()
 
@@ -1868,6 +2421,22 @@ class K8sNativeMajorUpgrade(TestClusterBase):
     def _apply_custom_resources(self, storage_node_list: list[dict]):
         """Step 7: Apply StorageCluster, Pool, StorageNode CRs."""
         self.logger.info("Migration Step 7: Applying custom resources")
+
+        # Remove stale StoragePool CRDs from previous runs.  Their finalizers
+        # block the operator reconciler with 404 errors because the backend
+        # pools no longer exist after the re-install.
+        self.logger.info("Cleaning up stale StoragePool CRDs")
+        self.k8s_utils._exec_kubectl(
+            f"kubectl get storagepool -n {_NAMESPACE} --no-headers "
+            f"-o custom-columns=NAME:.metadata.name 2>/dev/null "
+            f"| xargs -r -I{{}} kubectl patch storagepool {{}} -n {_NAMESPACE} "
+            f"--type=merge -p '{{\"metadata\":{{\"finalizers\":[]}}}}' 2>/dev/null || true"
+        )
+        self.k8s_utils._exec_kubectl(
+            f"kubectl delete storagepool --all -n {_NAMESPACE} "
+            f"--wait=false 2>/dev/null || true"
+        )
+        sleep_n_sec(5)
 
         # Build worker nodes YAML from the known storage nodes
         worker_yaml = ""
@@ -1945,7 +2514,25 @@ spec:
 
         apply_cmd = f"cat <<'CREOF' | kubectl apply -f -\n{cr_yaml}\nCREOF"
         out, err = self.k8s_utils._exec_kubectl(apply_cmd)
-        self.logger.info(f"CRs applied: {out}")
+        self.logger.info(f"CRs applied (stdout): {out}")
+        if err and err.strip():
+            self.logger.warning(f"CRs apply stderr: {err.strip()}")
+        # Verify critical CRs were actually created — fail early instead
+        # of discovering a missing CR much later during node restart.
+        for cr_kind, cr_name in [
+            ("storagecluster", self.cluster_cr_name),
+            ("storagenodeset", self.node_cr_name),
+        ]:
+            chk_out, _ = self.k8s_utils._exec_kubectl(
+                f"kubectl get {cr_kind} {cr_name} -n {_NAMESPACE} "
+                f"-o jsonpath='{{.metadata.name}}' 2>&1"
+            )
+            if cr_name not in (chk_out or ""):
+                raise RuntimeError(
+                    f"Critical CR {cr_kind}/{cr_name} was not created. "
+                    f"kubectl apply stderr: {err}"
+                )
+            self.logger.info(f"  Verified {cr_kind}/{cr_name} exists")
         sleep_n_sec(10)
 
     def _run_r25_to_r26_migration(self):
@@ -2156,13 +2743,27 @@ spec:
         sleep_n_sec(10)
 
         # R25: StorageClass "simplyblock-csi-sc" was auto-created by the
-        # spdk-csi chart's logicalVolume config during helm install.
-        # Do NOT create StorageClasses here — use the chart-created one.
-        # Map XFS SC to the same chart-created SC (R25 chart has no XFS variant).
-        self.XFS_STORAGE_CLASS_NAME = self.STORAGE_CLASS_NAME
+        # spdk-csi chart's logicalVolume config during helm install (ext4).
+        # Create a separate XFS SC on the same pool to avoid the ext4
+        # FEATURE_C12 incompatibility where R25's newer mkfs.ext4 creates
+        # features that the host's e2fsck/tune2fs (v1.46.5) cannot handle
+        # after upgrade.
         self.logger.info(
-            f"Using chart-created StorageClass '{self.STORAGE_CLASS_NAME}' "
-            f"(from logicalVolume config, pool_name={pool_name})"
+            "Creating XFS StorageClass on same pool to avoid ext4 "
+            "FEATURE_C12 incompatibility during upgrade"
+        )
+        self.k8s_utils.create_storage_class(
+            name=self.XFS_STORAGE_CLASS_NAME,
+            cluster_id=self.cluster_id,
+            pool_name=pool_name,
+            ndcs=self.ndcs,
+            npcs=self.npcs,
+            fs_type="xfs",
+        )
+        self.logger.info(
+            f"Using chart ext4 SC '{self.STORAGE_CLASS_NAME}' + "
+            f"new XFS SC '{self.XFS_STORAGE_CLASS_NAME}' "
+            f"(same pool={pool_name})"
         )
 
         pre_fio_runtime = 60  # 1 minute — just write data before upgrade
@@ -2171,27 +2772,19 @@ spec:
         self.logger.info("Pre-upgrade Step 3: Creating PVCs and running short FIO")
         self._create_pvcs_with_fio(len(storage_node_list), runtime=pre_fio_runtime)
 
-        # Wait for pre-upgrade FIO to complete (max 5 mins).
-        # FIO failure is non-fatal — the goal is to test the upgrade itself,
-        # not the old version's IO path.
+        # Wait for pre-upgrade FIO to complete on ALL PVCs.
+        # This is mandatory — every lvol must have data written before we
+        # create snapshots/clones and proceed with the upgrade.
         self.logger.info(
-            "Pre-upgrade: Waiting up to 5 mins for FIO to complete "
-            "(non-fatal if it fails)"
+            "Pre-upgrade: Waiting for FIO to complete on all PVCs"
         )
-        fio_timeout = 300  # 5 minutes max wait
-        try:
-            self._validate_all_fio(fio_timeout)
-            self.logger.info("Pre-upgrade FIO completed and validated")
-        except Exception as fio_err:
-            self.logger.warning(
-                f"Pre-upgrade FIO did not complete successfully: {fio_err}. "
-                "Continuing with upgrade — this is non-fatal."
-            )
+        fio_timeout = 600  # 10 minutes — enough for 6 PVCs on a busy cluster
+        self._validate_all_fio(fio_timeout)
+        self.logger.info("Pre-upgrade FIO completed and validated on all PVCs")
 
-        # Clean up FIO jobs/pods (preserve PVCs for snapshots + checksums)
-        self.logger.info("Pre-upgrade: Cleaning up FIO jobs")
-        self._cleanup_fio_jobs_only()
-        sleep_n_sec(10)
+        # Clean up FIO jobs/pods and wait for full termination + volume detach
+        self.logger.info("Pre-upgrade: Cleaning up FIO jobs and waiting for clean unmount")
+        self._cleanup_fio_jobs_only(wait_for_termination=True)
 
         self.logger.info("Pre-upgrade Step 4: Creating snapshots and clones")
         self._create_snapshots_and_clones(skip_clone_fio=True)
@@ -2200,19 +2793,34 @@ spec:
         self.logger.info("Pre-upgrade Step 4.1: Running FIO on clones")
         self._run_fio_on_clones(runtime=60)
 
-        # Capture MD5 checksums on all PVCs and clones before upgrade
-        self.logger.info("Pre-upgrade Step 5: Capturing MD5 checksums before upgrade")
-        all_volume_names = list(self.pvc_details.keys()) + list(self.clone_details.keys())
-        self.pre_upgrade_checksums = self._capture_pvc_checksums(all_volume_names)
-
         # Phase 2.7: Capture pre-upgrade state
         self._capture_pre_upgrade_state()
+
+        # Phase 2.8: Clean stale mounts and NVMe connections on worker nodes
+        # After all FIO pods are gone and CSI has unmounted, force-clean any
+        # leftover mount-points and NVMe-oF connections on every worker node.
+        # This prevents stale device references from causing I/O errors when
+        # storage nodes are shut down and restarted during the upgrade.
+        self.logger.info(
+            "Pre-upgrade: Cleaning worker node connections "
+            "(unmount + NVMe disconnect)"
+        )
+        self._cleanup_worker_connections()
+
+        # Capture worker dmesg BEFORE upgrade for comparison
+        try:
+            self._collect_worker_dmesg(label="pre_upgrade")
+        except Exception as exc:
+            self.logger.warning(f"Pre-upgrade dmesg collection failed: {exc}")
 
         # ── Begin maintenance window ──
         self.logger.info("=" * 40 + " MAINTENANCE WINDOW START " + "=" * 40)
 
         # Step 1: Annotate FDB resources
         self._annotate_fdb_keep()
+
+        # Log configmaps before helm uninstall (for debugging)
+        self._log_configmaps("pre_uninstall")
 
         # Step 2: Shut down all storage nodes
         self.logger.info("Migration Step 2: Shutting down all storage nodes")
@@ -2232,6 +2840,12 @@ spec:
 
         # Step 6: Install new operator chart (FDB disabled)
         self._install_operator_chart()
+
+        # Log configmaps after operator install (for debugging)
+        self._log_configmaps("post_operator_install")
+
+        # Step 6.0.1: Migrate prometheus credentials from old configmap to new
+        self._migrate_prometheus_credentials()
 
         # Step 6.1: Shut down nodes again (prevent auto-restart)
         self.logger.info("Migration Step 6.1: Shutting down nodes again (prevent auto-restart)")
@@ -2280,16 +2894,11 @@ spec:
         )
         self._assert_all_nodes_healthy()
 
-        # Verify MD5 checksums match post-upgrade
-        if hasattr(self, "pre_upgrade_checksums") and self.pre_upgrade_checksums:
-            self.logger.info(
-                "Post-upgrade: Verifying MD5 checksums match pre-upgrade data"
-            )
-            self._verify_pvc_checksums(self.pre_upgrade_checksums, "post-upgrade")
-        else:
-            self.logger.warning(
-                "No pre-upgrade checksums available — skipping MD5 verification"
-            )
+        # Capture worker dmesg AFTER upgrade for NVMe/IO error analysis
+        try:
+            self._collect_worker_dmesg(label="post_upgrade")
+        except Exception as exc:
+            self.logger.warning(f"Post-upgrade dmesg collection failed: {exc}")
 
         # Phase 4.1–4.3: Verify old data survives the upgrade
         self.logger.info("Post-upgrade: Verifying old data integrity")
@@ -2475,7 +3084,23 @@ spec:
 
         apply_cmd = f"cat <<'CREOF' | kubectl apply -f -\n{cr_yaml}\nCREOF"
         out, err = self.k8s_utils._exec_kubectl(apply_cmd)
-        self.logger.info(f"CRs applied: {out}")
+        self.logger.info(f"CRs applied (stdout): {out}")
+        if err and err.strip():
+            self.logger.warning(f"CRs apply stderr: {err.strip()}")
+        for cr_kind, cr_name in [
+            ("storagecluster", self.cluster_cr_name),
+            ("storagenodeset", self.node_cr_name),
+        ]:
+            chk_out, _ = self.k8s_utils._exec_kubectl(
+                f"kubectl get {cr_kind} {cr_name} -n {_NAMESPACE} "
+                f"-o jsonpath='{{.metadata.name}}' 2>&1"
+            )
+            if cr_name not in (chk_out or ""):
+                raise RuntimeError(
+                    f"Critical CR {cr_kind}/{cr_name} was not created. "
+                    f"kubectl apply stderr: {err}"
+                )
+            self.logger.info(f"  Verified {cr_kind}/{cr_name} exists")
         sleep_n_sec(10)
 
     def _restart_nodes_sequentially(self, storage_node_list):
@@ -2613,7 +3238,7 @@ spec:
             sleep_n_sec(30)
             for node_id in nids:
                 self.validate_migration_for_node(
-                    restart_ts, 1200, node_id, 60, no_task_ok=True
+                    restart_ts, 1200, None, 60, no_task_ok=True
                 )
 
             if worker_idx < len(unique_ips):

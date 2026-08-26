@@ -827,27 +827,85 @@ class StorageNode(BaseNodeObject):
             **kwargs,
         )
 
-    def wait_for_jm_rep_tasks_to_finish(self, jm_vuid):
-        if not self.rpc_client().bdev_lvol_get_lvstores(self.lvstore):
-            return True # no lvstore means no need to wait
-        retry = 10
+    def wait_for_jm_rep_tasks_to_finish(self, jm_vuid, retry=10, delay=20):
+        """Wait until this node reports no in-flight JM replication for jm_vuid.
+
+        Every exit from this loop must be bounded. The RPC target is a *peer*
+        that the caller is waiting on, and that peer can die while we wait —
+        so an RPC failure has to consume budget exactly like a "still busy"
+        answer does.
+
+        Incident 2026-08-17 22:03, multipath soak iteration 1: a container_kill
+        on node A started JM history replication on peer B; A's restart then
+        entered this wait, B answered once ("replication task found"), and B was
+        host-rebooted ~1 s later. From then on every jc_get_jm_status raised,
+        the old ``except`` branch neither decremented ``retry`` nor slept, and
+        this loop spun for 50 minutes (only urllib3's connect-retries paced it).
+        A stayed RESTARTING forever, which in turn deferred B's own restart
+        (tasks_runner_restart's strict one-restart-at-a-time) and made
+        StorageNodeMonitor stand down ("has an active restart task"), so B's
+        SPDK was never brought back: a three-way deadlock where each party
+        behaved as designed. Note the pre-check below is deliberately inside
+        the guarded section too — when the peer is already gone it used to
+        raise straight out of this method.
+        """
+        deadline = time.time() + retry * delay
         while retry > 0:
             try:
+                if not self.rpc_client().bdev_lvol_get_lvstores(self.lvstore):
+                    return True  # no lvstore means no need to wait
                 jm_replication_tasks = False
                 ret = self.rpc_client().jc_get_jm_status(jm_vuid)
                 for jm in ret:
                     if ret[jm] is False:  # jm is not ready (has active replication task)
                         jm_replication_tasks = True
                         break
-                if jm_replication_tasks:
-                    logger.warning(f"Replication task found on node: {self.get_id()}, jm_vuid: {jm_vuid}, retry...")
-                    retry -= 1
-                    time.sleep(20)
-                else:
+                if not jm_replication_tasks:
                     return True
-            except Exception:
-                logger.warning("Failed to get replication task!")
+                logger.warning(
+                    f"Replication task found on node: {self.get_id()}, "
+                    f"jm_vuid: {jm_vuid}, retry...")
+            except Exception as e:
+                # Unreachable peer: consume budget and pace the loop, and stop
+                # early once the control plane agrees the peer is gone — the
+                # caller has usually already seen it fail (e.g. "hublvol ...
+                # no path attached") and waiting out the full budget only
+                # widens the window in which our own node blocks a peer.
+                logger.warning(
+                    f"Failed to get replication task from {self.get_id()} "
+                    f"(jm_vuid {jm_vuid}): {e}")
+                if not self._is_peer_reachable_for_jm_wait():
+                    logger.warning(
+                        f"Node {self.get_id()} is not usable (status="
+                        f"{self.status}); abandoning the JM replication wait "
+                        f"for jm_vuid {jm_vuid}")
+                    return False
+            retry -= 1
+            if retry <= 0 or time.time() >= deadline:
+                break
+            time.sleep(delay)
+        logger.error(
+            f"Gave up waiting for JM replication on {self.get_id()} "
+            f"(jm_vuid {jm_vuid}) after {retry * delay if retry > 0 else 0}s budget")
         return False
+
+    def _is_peer_reachable_for_jm_wait(self):
+        """True unless the control plane already considers this node dead.
+
+        Read fresh: the record this object was built from predates the outage
+        that is making the RPCs fail.
+        """
+        from simplyblock_core.db_controller import DBController
+        try:
+            fresh = DBController().get_storage_node_by_id(self.get_id())
+        except Exception:
+            return True  # can't tell — keep the bounded retries
+        return fresh.status not in (
+            StorageNode.STATUS_OFFLINE,
+            StorageNode.STATUS_REMOVED,
+            StorageNode.STATUS_IN_SHUTDOWN,
+            StorageNode.STATUS_SCHEDULABLE,
+        )
 
     def lvol_sync_del(self) -> bool:
         from simplyblock_core.db_controller import DBController

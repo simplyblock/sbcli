@@ -36,10 +36,12 @@ from simplyblock_core.models.lvol_model import LVol
 from simplyblock_core.models.nvme_device import NVMeDevice, JMDevice, RemoteDevice, RemoteJMDevice
 from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
+from simplyblock_core.release_upgrades import jc_compression_upgrade
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.prom_client import PromClient
 from simplyblock_core.rpc_client import RPCClient, RPCErrorCode, RPCRemoteError, RPCException, namespace_matches  # noqa: F401  (RPCClient kept as a patch target for tests)
 from simplyblock_core.snode_client import SNodeClient, SNodeClientException
+from simplyblock_core.utils import dial_backoff
 from simplyblock_web import node_utils
 from simplyblock_core.utils import addNvmeDevices
 from simplyblock_core.utils import pull_docker_image_with_retry
@@ -221,12 +223,17 @@ def _set_lvol_ana_on_node(lvol: LVol, node: StorageNode, ana_state):
     for iface in node.data_nics:
         if iface.ip4_address and (lvol.fabric == iface.trtype.lower() or (lvol.fabric == "tcp" and node.active_tcp)):
             trtype = iface.trtype if lvol.fabric == iface.trtype.lower() else "TCP"
+            # Scope the flip to this volume's ANA group (group id == namespace
+            # id): a subsystem can carry several namespaces whose volumes are
+            # migrated, suspended or failed over independently.
             ret = rpc_client.nvmf_subsystem_listener_set_ana_state(
-                lvol.nqn, iface.ip4_address, listener_port, trtype=trtype, ana=ana_state)
+                lvol.nqn, iface.ip4_address, listener_port, trtype=trtype, ana=ana_state,
+                anagrpid=lvol.ns_id)
             if not ret:
                 logger.warning("Failed to set ANA state %s for %s on %s", ana_state, lvol.nqn, node.get_id())
             else:
-                logger.info("ANA: %s on %s (%s) → %s", lvol.nqn, node.get_id(), iface.ip4_address, ana_state)
+                logger.info("ANA: %s ns %s on %s (%s) → %s", lvol.nqn, lvol.ns_id,
+                            node.get_id(), iface.ip4_address, ana_state)
 
 
 def _failover_primary_ana(primary_node: StorageNode):
@@ -242,15 +249,17 @@ def _failover_primary_ana(primary_node: StorageNode):
     if primary_node.secondary_node_id:
         first_sec = db_ctrl.get_storage_node_by_id(primary_node.secondary_node_id)
 
-    # Namespaces share subsystems (one NQN hosts many lvols) and the listener
-    # RPC is per-subsystem — repeating it per lvol multiplies the ANA calls
-    # (and, for stale records whose subsystem is gone, the error spam) by the
-    # namespace count. One call per (nqn, lvs) covers every lvol in it.
-    seen_subsystems = set()
+    # Dedupe per NAMESPACE, not per subsystem. The old per-(nqn, lvs) dedupe was
+    # correct only while the flip was subsystem-wide: now that each volume's
+    # state is confined to its own ANA group, skipping the other namespaces of a
+    # shared subsystem would leave every volume but the first one unpromoted.
+    # Records that share (nqn, lvs, ns_id) are genuine duplicates and still cost
+    # only one call.
+    seen_namespaces = set()
     for lvol in lvol_list:
-        if (lvol.nqn, lvol.lvs_name) in seen_subsystems:
+        if (lvol.nqn, lvol.lvs_name, lvol.ns_id) in seen_namespaces:
             continue
-        seen_subsystems.add((lvol.nqn, lvol.lvs_name))
+        seen_namespaces.add((lvol.nqn, lvol.lvs_name, lvol.ns_id))
         if first_sec and first_sec.status == StorageNode.STATUS_ONLINE:
             _set_lvol_ana_on_node(lvol, first_sec, "optimized")
 
@@ -268,12 +277,12 @@ def _failback_primary_ana(primary_node: StorageNode):
     if primary_node.secondary_node_id:
         first_sec = db_ctrl.get_storage_node_by_id(primary_node.secondary_node_id)
 
-    # Same per-subsystem dedupe as _failover_primary_ana.
-    seen_subsystems = set()
+    # Same per-namespace dedupe as _failover_primary_ana.
+    seen_namespaces = set()
     for lvol in lvol_list:
-        if (lvol.nqn, lvol.lvs_name) in seen_subsystems:
+        if (lvol.nqn, lvol.lvs_name, lvol.ns_id) in seen_namespaces:
             continue
-        seen_subsystems.add((lvol.nqn, lvol.lvs_name))
+        seen_namespaces.add((lvol.nqn, lvol.lvs_name, lvol.ns_id))
         if first_sec and first_sec.status == StorageNode.STATUS_ONLINE:
             _set_lvol_ana_on_node(lvol, first_sec, "non_optimized")
 
@@ -508,6 +517,61 @@ def _bounded_thread(target, args=(), name=None, sem=None):
     return threading.Thread(target=_run, args=args, name=name)
 
 
+#: One repair at a time per (node, controller). health_check_service fans
+#: repair_multipath_controller out over a ThreadPoolExecutor, so two workers
+#: could read the same missing={ip} and both attach it -- which is how the
+#: 2026-08-25 duplicate path was created. SPDK cannot catch that for us: its
+#: -EEXIST guard runs before the async probe and only compares the active
+#: path, so both attaches are admitted and the target issues two cntlids.
+_repair_locks_guard = threading.Lock()
+_repair_locks: dict = {}
+
+
+def _repair_lock(key):
+    with _repair_locks_guard:
+        lk = _repair_locks.get(key)
+        if lk is None:
+            lk = threading.Lock()
+            _repair_locks[key] = lk
+        return lk
+
+
+def _collect_attached_paths(ctrlr_list):
+    """Every enabled path as an (traddr, trsvcid) tuple, REPEATS PRESERVED.
+
+    _collect_attached_ips() returns a set, which is right for answering "what
+    is missing" but blind to the opposite fault: the same address attached
+    twice. On 2026-08-25 a node carried remote_jm_1e7ff71e with paths
+    (96.179, 97.9, 97.9) and the set comparison read 2-of-2, so the control
+    plane reported it healthy and never repaired it while the soak's path
+    verifier failed on it for 900s. Duplicate detection needs the list.
+    """
+    paths: list[tuple[str, str]] = []
+    if not ctrlr_list:
+        return paths
+    for entry in ctrlr_list:
+        for ct in entry.get("ctrlrs", []):
+            if ct.get("state") != "enabled":
+                continue
+            trid = ct.get("trid") or {}
+            ip = trid.get("traddr")
+            if ip:
+                paths.append((ip, str(trid.get("trsvcid") or "")))
+            for alt in ct.get("alternate_trids", []) or []:
+                alt_ip = (alt or {}).get("traddr")
+                if alt_ip:
+                    paths.append((alt_ip, str((alt or {}).get("trsvcid") or "")))
+    return paths
+
+
+def duplicate_attached_paths(ctrlr_list):
+    """Addresses attached more than once on one controller."""
+    seen: dict[str, int] = {}
+    for ip, _port in _collect_attached_paths(ctrlr_list):
+        seen[ip] = seen.get(ip, 0) + 1
+    return {ip for ip, n in seen.items() if n > 1}
+
+
 def _collect_attached_ips(ctrlr_list):
     """Aggregate the set of currently-attached traddrs across every ctrlr entry.
 
@@ -658,13 +722,24 @@ def _connect_device_attach(name, device, node: StorageNode, rpc_client, attach_r
         # Controller is fully gone — do a full multi-path attach.
         bdev_name = ""
         for ip in (expected_ips or [device.nvmf_ip]):
+            # Circuit breaker per target address: dialling a peer that has
+            # refused the last N connects burns this node's app-thread time
+            # on connect polling for nothing -- see utils/dial_backoff.
+            if not dial_backoff.allowed(ip):
+                logger.debug(f"Attach to {ip} for {name} held by dial backoff")
+                continue
             try:
                 resp = attach_rpc_client.bdev_nvme_attach_controller(
                     name, device.nvmf_nqn, ip, device.nvmf_port, tr_type,
                     multipath=attach_mode)
+                if resp:
+                    dial_backoff.record_success(ip)
+                else:
+                    dial_backoff.record_failure(ip)
                 if not bdev_name and resp and isinstance(resp, list):
                     bdev_name = resp[0]
             except Exception as e:
+                dial_backoff.record_failure(ip)
                 logger.warning(f"Failed to attach controller {name} via {ip}: {e}")
 
             if device.nvmf_multipath and bdev_name:
@@ -704,11 +779,19 @@ def _connect_device_attach(name, device, node: StorageNode, rpc_client, attach_r
                 "Controller %s has %d/%d paths attached, attaching missing: %s",
                 name, len(attached_ips), len(expected_ips), missing_ips)
             for ip in missing_ips:
+                if not dial_backoff.allowed(ip):
+                    logger.debug(
+                        f"Re-attach of {ip} on {name} held by dial backoff")
+                    continue
                 try:
-                    attach_rpc_client.bdev_nvme_attach_controller(
-                        name, device.nvmf_nqn, ip, device.nvmf_port, tr_type,
-                        multipath=attach_mode)
+                    if attach_rpc_client.bdev_nvme_attach_controller(
+                            name, device.nvmf_nqn, ip, device.nvmf_port, tr_type,
+                            multipath=attach_mode):
+                        dial_backoff.record_success(ip)
+                    else:
+                        dial_backoff.record_failure(ip)
                 except Exception as e:
+                    dial_backoff.record_failure(ip)
                     logger.warning(
                         "Failed to re-attach path %s on controller %s: %s",
                         ip, name, e)
@@ -779,7 +862,64 @@ def repair_multipath_controller(name: str, device, node: StorageNode):
     else:
         return False
 
+    # Serialize per controller. A concurrent repair reading the same
+    # missing set is how a duplicate path gets created, and the loser of the
+    # race has nothing useful to add -- skip rather than queue behind it.
+    lock = _repair_lock(f"{node.get_id()}:{name}")
+    if not lock.acquire(blocking=False):
+        logger.debug("Repair of %s already in flight; skipping this cycle", name)
+        return True
+    try:
+        return _repair_multipath_controller_locked(
+            node, name, device, rpc_client, ret, expected_ips, tr_type)
+    finally:
+        lock.release()
+
+
+def _repair_multipath_controller_locked(node, name, device, rpc_client, ret,
+                                        expected_ips, tr_type):
+    # A duplicated address is a fault in its own right, and the set-based
+    # comparison below cannot see it: (96.179, 97.9, 97.9) reads as 2-of-2.
+    # Prune first, because the missing-path logic would otherwise report the
+    # controller complete and return while it still carries the surplus path.
+    duplicates = duplicate_attached_paths(ret)
+    if duplicates:
+        logger.error(
+            "Controller %s has duplicate path(s) %s -- pruning. Two "
+            "controllers on one address serve no purpose and give the bdev "
+            "two unordered qpairs to the same target.", name, duplicates)
+        for dup_ip in sorted(duplicates):
+            # Keep at least one other address alive: detaching by trid drops
+            # EVERY controller on that address, so pruning the only address
+            # would tear the bdev down instead of repairing it.
+            others = {ip for ip, _p in _collect_attached_paths(ret)} - {dup_ip}
+            if not others:
+                logger.warning(
+                    "Not pruning duplicate %s on %s: it is the only attached "
+                    "address, so a detach would remove the last path", dup_ip, name)
+                continue
+            try:
+                rpc_client.bdev_nvme_detach_controller(
+                    name, traddr=dup_ip, trsvcid=device.nvmf_port, trtype=tr_type)
+            except Exception as e:
+                logger.error("Failed to prune duplicate path %s on %s: %s",
+                             dup_ip, name, e)
+                continue
+        # Re-read: the detach removed every copy of each duplicated address,
+        # so those addresses are now missing and the loop below re-attaches
+        # each exactly once.
+        ret = rpc_client.bdev_nvme_controller_list(name) or []
+
     attached_ips = _collect_attached_ips(ret)
+    # An address with a live enabled path on this very controller is reachable,
+    # so any dial hold on it is stale evidence and must not delay the repair of
+    # a sibling path. This is the only kind of clear() the breaker accepts --
+    # observed traffic, not the peer's DB status.
+    for live_ip in attached_ips:
+        if dial_backoff.clear(live_ip):
+            logger.info(
+                "Cleared stale dial hold on %s: it has a live path on %s",
+                live_ip, name)
     missing_ips = expected_ips - attached_ips
     if not missing_ips:
         return True
@@ -788,11 +928,31 @@ def repair_multipath_controller(name: str, device, node: StorageNode):
         "Controller %s has %d/%d paths attached, re-attaching missing: %s",
         name, len(attached_ips), len(expected_ips), missing_ips)
     for ip in missing_ips:
+        # Circuit breaker per target address: repeated refusals earn the
+        # address a hold (utils/dial_backoff). Status gates cannot cover a
+        # peer whose DB record is wrong (SPDK dead, record ONLINE -- run
+        # mass_create_delete_docker-20260821), and hammering a refusing
+        # address wedged a healthy node's app thread there.
+        if not dial_backoff.allowed(ip):
+            logger.debug("Repair of path %s on %s held by dial backoff", ip, name)
+            continue
         try:
-            rpc_client.bdev_nvme_attach_controller(
-                name, device.nvmf_nqn, ip, device.nvmf_port,
-                tr_type, multipath="multipath")
+            # The return value matters: a fabric connect that cannot reach the
+            # address answers with an error result rather than raising, so
+            # discarding it made every such failure silent apart from the
+            # "still missing" line below. 478 of these went unattributed during
+            # the 2026-08-20 soak, all of them "-5 Input/output error".
+            if not rpc_client.bdev_nvme_attach_controller(
+                    name, device.nvmf_nqn, ip, device.nvmf_port,
+                    tr_type, multipath="multipath"):
+                dial_backoff.record_failure(ip)
+                logger.warning(
+                    "Re-attach of path %s on controller %s was rejected by the "
+                    "target", ip, name)
+            else:
+                dial_backoff.record_success(ip)
         except Exception as e:
+            dial_backoff.record_failure(ip)
             logger.error("Failed to re-attach path %s on controller %s: %s", ip, name, e)
 
     # Re-read and recognize partial success: a 1/2 outcome is still
@@ -860,6 +1020,40 @@ def _search_for_partitions(rpc_client, nvme_device):
             new_dev.size = bdev['block_size'] * bdev['num_blocks']
             partitioned_devices.append(new_dev)
     return partitioned_devices
+
+
+def apply_jc_dual_node(cluster_id):
+    """Keep every node's JC dual-node flag in step with the cluster size.
+
+    The journal component ABORTS its whole SPDK application when reachable
+    journal members drop below jc_ha_nmin_jms(), which is 2 normally and 1
+    when the dual-node flag is set. A 2-node cluster that loses its peer is
+    left with 1 of 2 JMs, so without the flag the SURVIVING node aborts
+    itself the instant its partner stops: one graceful `sn shutdown` takes
+    the entire cluster down, every client path disappears at once and
+    filesystems shut down (soak case 6, 2026-08-24 -- "JC detected a network
+    outage nd=1 njms=2", "JC aborts the node due to network outage", core
+    dumped). The fork implements the tolerance and exposes jc_set_dual_node;
+    nothing in the control plane ever called it.
+
+    Keyed on MEMBERSHIP, not on how many nodes are online: a 3-node cluster
+    with one node down must keep requiring 2 journals. Only a cluster whose
+    whole membership is 2 is a dual-node cluster.
+    """
+    db_controller = DBController()
+    members = [n for n in db_controller.get_storage_nodes_by_cluster_id(cluster_id)
+               if n.status != StorageNode.STATUS_REMOVED]
+    enable = len(members) == 2
+    for node in members:
+        if node.status != StorageNode.STATUS_ONLINE:
+            continue
+        try:
+            node.rpc_client().jc_set_dual_node(enable)
+            logger.info("JC dual-node=%s applied on %s (cluster membership %d)",
+                        enable, node.get_id(), len(members))
+        except Exception as e:                  # noqa: BLE001 - best effort
+            logger.warning("Could not set JC dual-node=%s on %s: %s",
+                           enable, node.get_id(), e)
 
 
 def _create_jm_stack_on_raid(rpc_client, jm_nvme_bdevs, snode: StorageNode, after_restart):
@@ -1264,6 +1458,11 @@ def _prepare_cluster_devices_partitions(snode: StorageNode, devices):
 
         snode.jm_device = jm_device
 
+    # Applied cluster-wide, not just to this node: a cluster growing 2 -> 3
+    # must also CLEAR the flag on the two nodes that already have it, and one
+    # shrinking 3 -> 2 must set it on the survivors.
+    apply_jc_dual_node(snode.cluster_id)
+
     snode.nvme_devices = new_devices
     return True
 
@@ -1442,6 +1641,10 @@ def _prepare_cluster_devices_on_restart(snode: StorageNode, clear_data=False):
         jm_device.status = JMDevice.STATUS_ONLINE
         snode.jm_device = jm_device
         snode.write_to_db()
+
+    # A restarted node comes up with the JC default (dual-node off), so the
+    # flag has to be re-applied on every bring-up, not only at node-add.
+    apply_jc_dual_node(snode.cluster_id)
 
     return True
 
@@ -2416,6 +2619,166 @@ def _classify_existing_endpoint_record(db_controller, cluster_id, node_addr, ssd
     return None, None
 
 
+def _resolve_core_distribution(distribution, core_to_index):
+    """utils.calculate_core_allocations returns a positional 9-tuple of core
+    lists, not the {"app_thread_core": [...], ...} dict every consumer
+    (add_node, persist_node_config's schema) actually reads -- regenerate_config
+    resolves it this exact way (get_core_indexes against core_to_index) before
+    it ever reaches a node_config; do the same here.
+    """
+    keys = (
+        "app_thread_core", "jm_cpu_core", "poller_cpu_cores", "alceml_cpu_cores",
+        "alceml_worker_cpu_cores", "distrib_cpu_cores", "jc_singleton_core",
+        "lvol_poller_core", "compression_core",
+    )
+    return {
+        key: utils.get_core_indexes(core_to_index, group)
+        for key, group in zip(keys, distribution)
+    }
+
+
+def apply_cluster_vcpu_count(snode_api, node_info, nodes, vcpu_count):
+    """Resize this host's isolated-core layout to the cluster's vcpu_count, in
+    place on ``nodes`` and persisted to the host's on-disk config, exactly the
+    way huge-page memory is persisted via persist_node_config.
+
+    A node's CPU layout is decided once, here, at add time; nothing else ever
+    touches it afterwards -- restart_storage_node only ever re-adopts
+    max_subsys/hugepages_mem. add_node itself can be retried though (a prior
+    attempt may have already resized and persisted this host's layout), so
+    this must be a no-op when it has: skip re-fetching topology and rewriting
+    the file whenever the host's current isolated-core totals, summed per
+    socket, already match what vcpu_count implies for that socket.
+
+    Returns True on success (including the no-op case) and False if the
+    layout could not be resized -- add_node must then refuse the add rather
+    than run SPDK on a stale, cluster-mismatched core count.
+    """
+    sockets_to_use = sorted({node["socket"] for node in nodes})
+    if not sockets_to_use:
+        return True
+
+    # Same split as generate_core_allocation: the budget divides evenly
+    # across the sockets in use, remainder to the earlier ones.
+    base, remainder = divmod(vcpu_count, len(sockets_to_use))
+    per_socket_budget = {
+        numa_socket: base + (1 if index < remainder else 0)
+        for index, numa_socket in enumerate(sockets_to_use)
+    }
+
+    changed_sockets = [
+        numa_socket for numa_socket in sockets_to_use
+        if sum(len(n.get("isolated") or []) for n in nodes if n["socket"] == numa_socket)
+           != per_socket_budget[numa_socket]
+    ]
+    if not changed_sockets:
+        return True
+
+    cpu_topology = node_info.get("cpu_topology")
+    if not cpu_topology:
+        logger.error(
+            "This cluster requires %d SPDK vCPU(s) per host, but the node did "
+            "not report its CPU topology (upgrade the node agent, or re-run "
+            "'sbcli sn configure'); cannot resize its core layout.", vcpu_count)
+        return False
+    cores_by_numa = {int(numa): cores for numa, cores in cpu_topology.items()}
+
+    # nodes_per_socket is not passed in from anywhere -- it is however many
+    # slots already share the busiest socket in this host's persisted config.
+    nodes_per_socket = max(
+        sum(1 for n in nodes if n["socket"] == numa_socket)
+        for numa_socket in sockets_to_use
+    )
+
+    new_layout = utils.generate_core_allocation(
+        cores_by_numa, sockets_to_use, nodes_per_socket, vcpu_count)
+
+    for numa_socket in changed_sockets:
+        entries = [n for n in nodes if n["socket"] == numa_socket]
+        replacements = new_layout.get(numa_socket, [])
+        if len(replacements) != len(entries):
+            logger.error(
+                "Cannot resize storage node CPUs on socket %s: expected %d "
+                "node slot(s) there, computed %d for a vcpu-count of %d -- "
+                "leaving its current CPU layout in place.",
+                numa_socket, len(entries), len(replacements), vcpu_count)
+            return False
+        # Both lists follow the same order convention (generate_configs walks
+        # sockets_to_use, then each socket's slots in generate_core_allocation
+        # order) so position-by-position pairing is the entries' identity.
+        for entry, replacement in zip(entries, replacements):
+            entry["cpu_mask"] = replacement["cpu_mask"]
+            entry["isolated"] = replacement["isolated"]
+            entry["l-cores"] = replacement["l-cores"]
+            entry["distribution"] = _resolve_core_distribution(
+                replacement["distribution"], replacement["core_to_index"])
+            entry["core_to_index"] = replacement["core_to_index"]
+            ok, err = snode_api.persist_node_config(
+                max_lvol=None, huge_page_memory=None, numa_node=numa_socket,
+                ssd_list=entry.get("ssd_pcis"),
+                cpu_mask=entry["cpu_mask"], isolated=entry["isolated"],
+                l_cores=entry["l-cores"], distribution=entry["distribution"],
+                core_to_index={str(k): v for k, v in entry["core_to_index"].items()})
+            if not ok:
+                logger.error(
+                    "Failed to persist the resized CPU layout for socket %s: %s",
+                    numa_socket, err)
+                return False
+    return True
+
+
+def apply_cluster_hugepages(snode_api, node_config, req_cpu_count, max_prov):
+    """Recalculate this node_config entry's huge-page memory -- and the
+    small/large pool counts it is derived from -- against the real numbers
+    now known, and persist the change, the same way the CPU layout resize
+    in apply_cluster_vcpu_count does.
+
+    sn configure priced this entry for the worst case: max_lvol capped at
+    the product ceiling and its own default core-count heuristic, since it
+    ran before the node belonged to any cluster. By the time this runs,
+    node_config["max_lvol"] is already the cluster's real max_subsys (set
+    above in add_node) and req_cpu_count is already the cluster's real
+    vcpu_count (via apply_cluster_vcpu_count, before the per-entry loop) --
+    so recomputing here against the same formula sn configure used, just fed
+    the real numbers, is the accurate figure. A no-op when it already
+    matches what's on file: in particular when the cluster set neither
+    max_subsys nor vcpu_count, nothing about this entry's sizing has
+    actually changed since configure time.
+
+    Returns the correct huge_page_memory (already floored to max_prov) on
+    success, or None if persisting a change failed.
+    """
+    max_lvol = int(node_config.get("max_lvol") or 0)
+    number_of_alcemls = int(node_config.get("number_of_alcemls") or 0)
+    number_of_distribs = int(node_config.get("number_of_distribs") or 0)
+    poller_cores = (node_config.get("distribution") or {}).get("poller_cpu_cores") or []
+    poller_count = len(poller_cores) or req_cpu_count
+
+    small_pool_count, large_pool_count = utils.calculate_pool_count(
+        number_of_alcemls, 2 * number_of_distribs, req_cpu_count, poller_count, max_lvol)
+    huge_page_memory = max(
+        utils.calculate_minimum_hp_memory(
+            small_pool_count, large_pool_count, max_lvol, max_prov, req_cpu_count),
+        max_prov)
+
+    if (huge_page_memory == node_config.get("huge_page_memory")
+            and small_pool_count == node_config.get("small_pool_count")
+            and large_pool_count == node_config.get("large_pool_count")):
+        return huge_page_memory
+
+    node_config["huge_page_memory"] = huge_page_memory
+    node_config["small_pool_count"] = small_pool_count
+    node_config["large_pool_count"] = large_pool_count
+    ok, err = snode_api.persist_node_config(
+        max_lvol=None, huge_page_memory=huge_page_memory, numa_node=node_config.get("socket"),
+        ssd_list=node_config.get("ssd_pcis"),
+        small_pool_count=small_pool_count, large_pool_count=large_pool_count)
+    if not ok:
+        logger.error("Failed to persist the recalculated huge-page sizing: %s", err)
+        return None
+    return huge_page_memory
+
+
 def add_node(cluster_id, node_addr, iface_name, data_nics_list,
              max_snap, spdk_image=None, spdk_debug=False,
              small_bufsize=0, large_bufsize=0,
@@ -2439,7 +2802,37 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             logger.error(msg)
             return False
 
+    # An activated cluster only grows through the expansion flow: a plain add
+    # leaves the node outside the role rotation and the rebalance. This also
+    # closes the loophole of activate -> suspend -> add-node -> activate, which
+    # re-activation used to accept because a suspended cluster is not ACTIVE.
+    try:
+        _cluster = db_controller.get_cluster_by_id(cluster_id)
+    except KeyError:
+        logger.error("Cluster not found: %s", cluster_id)
+        return False
+    if not expansion and (_cluster.status == Cluster.STATUS_ACTIVE
+                          or _cluster.activated_node_ids):
+        logger.error(
+            "Cluster %s has already been activated; add nodes with --expansion "
+            "while the cluster is ACTIVE so roles are rotated and data is "
+            "rebalanced", cluster_id)
+        return False
+
     snode_api.set_hugepages()
+
+    # Resize this host's core layout to the cluster's vcpu_count once, before
+    # any node_config entry is consumed below, so every entry in the loop
+    # already reflects it. A no-op when the host's layout already matches
+    # (see apply_cluster_vcpu_count) -- in particular on a retried add_node,
+    # where a prior attempt already resized and persisted it.
+    cluster_vcpu_count = int(getattr(_cluster, "spdk_vcpu_count", 0) or 0)
+    if cluster_vcpu_count and not apply_cluster_vcpu_count(
+            snode_api, node_info, nodes, cluster_vcpu_count):
+        logger.error("Refusing the add -- could not resize node %s's CPU "
+                     "layout to the cluster's vcpu-count", node_addr)
+        return False
+
     for node_config in nodes:
         logger.debug(node_config)
         kv_store = db_controller.kv_store
@@ -2451,6 +2844,28 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
             return False
 
         ha_jm_count = resolve_ha_jm_count(cluster, ha_jm_count)
+
+        # Cluster-level SPDK sizing. These live on the cluster so every node is
+        # sized alike; a node adopts them when it is added and on each restart.
+        cluster_max_subsys = int(getattr(cluster, "max_subsys", 0) or 0)
+        cluster_hp_mem = int(getattr(cluster, "hugepages_mem", 0) or 0)
+        cluster_vcpu_count = int(getattr(cluster, "spdk_vcpu_count", 0) or 0)
+
+        if cluster_vcpu_count:
+            total_cores = int(node_info.get("cpu_count") or 0)
+            # Refuse rather than quietly running SPDK on fewer cores than the
+            # cluster asks for. The rule (one core beyond the SPDK budget) lives
+            # in utils.vcpu_requirement_met so add and restart cannot drift.
+            if not utils.vcpu_requirement_met(total_cores, cluster_vcpu_count):
+                logger.error(
+                    "Node reports %d vCPU(s); this cluster requires %d for SPDK "
+                    "plus at least one for the system (%d total). Refusing the "
+                    "node -- lower the cluster vcpu-count or use a larger host.",
+                    total_cores, cluster_vcpu_count, cluster_vcpu_count + 1)
+                return False
+
+        if cluster_max_subsys:
+            node_config["max_lvol"] = cluster_max_subsys
 
         # Failure-domain id is mandatory exactly when the cluster has the
         # feature enabled (deploy-time only — clusters cannot be upgraded into
@@ -2539,17 +2954,23 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 f"ERROR: The provided cpu mask {req_cpu_count} has values greater than 63, which is not allowed")
             return False
 
-        # Calculate pool count
-        max_prov = 0
-        if node_config.get("max_size"):
+        # Calculate pool count. The huge-page floor is the cluster's
+        # hugepages_mem; a max_size left in an older host config is still
+        # honoured so a node configured before this change keeps working.
+        max_prov = cluster_hp_mem
+        if not max_prov and node_config.get("max_size"):
             max_prov = int(utils.parse_size(node_config.get("max_size")))
         if max_prov < 0:
-            logger.error(f"Incorrect max-prov value {max_prov}")
+            logger.error(f"Incorrect huge-page floor value {max_prov}")
             return False
 
-        minimum_hp_memory = node_config.get("huge_page_memory")
-
-        minimum_hp_memory = max(minimum_hp_memory, max_prov)
+        # sn configure sized huge_page_memory for the worst case (product-
+        # ceiling max_lvol, its own default core-count heuristic); recompute
+        # it against the real max_lvol/req_cpu_count now that both reflect
+        # the cluster, and persist only if that actually changes anything.
+        minimum_hp_memory = apply_cluster_hugepages(snode_api, node_config, req_cpu_count, max_prov)
+        if minimum_hp_memory is None:
+            return False
 
         # check for memory
         if "memory_details" in node_info and node_info['memory_details']:
@@ -2580,6 +3001,24 @@ def add_node(cluster_id, node_addr, iface_name, data_nics_list,
                 f"{constants.MAX_SUBSYSTEMS_PER_NODE} subsystems per storage node; "
                 f"using {constants.MAX_SUBSYSTEMS_PER_NODE}")
             max_lvol = constants.MAX_SUBSYSTEMS_PER_NODE
+
+        # minimum_hp_memory is the real, cluster-aware figure now (via
+        # apply_cluster_hugepages above), not sn configure's worst-case
+        # estimate -- so unlike that estimate, a shortfall against it is a
+        # genuine one and belongs here, not a warning.
+        satisfied, _ = utils.calculate_spdk_memory(
+            minimum_hp_memory, minimum_sys_memory,
+            memory_details['free'], memory_details['huge_total'])
+        if not satisfied:
+            logger.error(
+                "Not enough memory on %s for max_lvol=%s, %s SPDK vCPU(s): need %s "
+                "huge-page + %s system memory, have %s free + %s huge-page. Lower "
+                "the cluster's max-subsys/vcpu-count or use a host with more memory.",
+                node_addr, max_lvol, req_cpu_count,
+                utils.humanbytes(minimum_hp_memory), utils.humanbytes(minimum_sys_memory),
+                utils.humanbytes(memory_details['free']), utils.humanbytes(memory_details['huge_total']))
+            return False
+
         ssd_pcie = node_config.get("ssd_pcis")
 
         if ssd_pcie:
@@ -4413,6 +4852,26 @@ def _restart_storage_node_impl(
 
     logger.info("Restarting SPDK")
 
+    # Cluster-level SPDK sizing is adopted here: a restart is exactly when a
+    # node is meant to pick up a changed cluster setting. An explicit argument
+    # (internal callers only -- the CLI no longer offers one) still wins.
+    cluster_max_subsys = int(getattr(cluster, "max_subsys", 0) or 0)
+    cluster_hp_mem = int(getattr(cluster, "hugepages_mem", 0) or 0)
+    cluster_vcpu_count = int(getattr(cluster, "spdk_vcpu_count", 0) or 0)
+    if not max_lvol and cluster_max_subsys:
+        max_lvol = cluster_max_subsys
+    if not max_prov and cluster_hp_mem:
+        max_prov = cluster_hp_mem
+
+    if not utils.vcpu_requirement_met(snode.cpu, cluster_vcpu_count):
+        # Same rule as add-node: refuse rather than run SPDK on fewer cores
+        # than the cluster asks for, and keep one core for the system.
+        logger.error(
+            "Node %s has %s vCPU(s); this cluster requires %d for SPDK plus at "
+            "least one for the system. Refusing the restart.",
+            node_id, snode.cpu, cluster_vcpu_count)
+        return False
+
     lvol_changed = bool(max_lvol) and max_lvol != snode.max_lvol
     if lvol_changed:
         snode.max_lvol = max_lvol
@@ -5547,20 +6006,38 @@ def check_node_shutdown_preconditions(node_id, force=False, current_restart_task
             return False, reason
         logger.warning("%s — proceeding with force", reason)
 
-    tasks = tasks_controller.get_active_node_tasks(snode.cluster_id, snode.get_id())
+    # Only DATA-MOVEMENT tasks may block a shutdown, which is what this check
+    # has always claimed to be about. get_active_node_tasks returns every
+    # non-done task on the node, so any durable, re-drivable work counted too:
+    # a replicating cluster has a snapshot_replication task in flight almost
+    # every minute, which made graceful shutdown impossible (lab run 18 —
+    # "Migration task found: 2" was one running replication task). Replication
+    # and sync-delete work survives the outage and resumes on return; a
+    # migration in progress does not.
+    migration_fns = {
+        JobSchedule.FN_DEV_MIG,
+        JobSchedule.FN_FAILED_DEV_MIG,
+        JobSchedule.FN_NEW_DEV_MIG,
+        JobSchedule.FN_LVOL_MIG,
+        JobSchedule.FN_LVOL_BATCH_MIG,
+    }
+    tasks = [t for t in tasks_controller.get_active_node_tasks(
+        snode.cluster_id, snode.get_id()) if t.function_name in migration_fns]
     if tasks:
+        blocking = ", ".join(sorted({t.function_name for t in tasks}))
         if not force and _allow_shutdown_with_migration_tasks(snode, db_controller):
             logger.warning(
-                "Migration task found: %s, proceeding with shutdown because FTT=2 allows node outage",
-                len(tasks),
+                "Migration task found: %s (%s), proceeding with shutdown because FTT=2 allows node outage",
+                len(tasks), blocking,
             )
         elif force:
             logger.warning(
-                "Migration task found: %s, proceeding with forced shutdown",
-                len(tasks),
+                "Migration task found: %s (%s), proceeding with forced shutdown",
+                len(tasks), blocking,
             )
         else:
-            reason = f"Migration task found: {len(tasks)}, can not shutdown storage node or use --force"
+            reason = (f"Migration task found: {len(tasks)} ({blocking}), "
+                      f"can not shutdown storage node or use --force")
             logger.error(reason)
             return False, reason
 
@@ -6075,7 +6552,7 @@ def upgrade_automated_deployment_config():
 
 
 def generate_automated_deployment_config(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_allowed, pci_blocked,
-                                         cores_percentage=0, force=False, device_model="", size_range="", nvme_names=None, k8s=False,
+                                         vcpu_count=0, force=False, device_model="", size_range="", nvme_names=None, k8s=False,
                                          calculate_hp_only=False, number_of_devices=0):
     # Reject an over-cap max_lvol here rather than only in the CLI: this is the
     # single entry point shared by `sn configure` and the k8s node-configure
@@ -6088,7 +6565,7 @@ def generate_automated_deployment_config(max_lvol, max_prov, sockets_to_use, nod
                      f"{constants.MAX_SUBSYSTEMS_PER_NODE} subsystems per storage node")
         return False
     if calculate_hp_only:
-        minimum_hp_memory = utils.calculate_hp_only(max_lvol, number_of_devices, sockets_to_use, nodes_per_socket, cores_percentage)
+        minimum_hp_memory = utils.calculate_hp_only(max_lvol, number_of_devices, sockets_to_use, nodes_per_socket, vcpu_count)
         hp_number = math.ceil(minimum_hp_memory / 2)
         logger.info(f"The required number of huge pages on this host is: {hp_number} ({minimum_hp_memory} MB)")
         return True
@@ -6103,7 +6580,7 @@ def generate_automated_deployment_config(max_lvol, max_prov, sockets_to_use, nod
         utils.load_kernel_module("uio_pci_generic")
 
         nodes_config, system_info = utils.generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket,
-                                                           pci_allowed, pci_blocked, cores_percentage, force=force,
+                                                           pci_allowed, pci_blocked, vcpu_count, force=force,
                                                            device_model=device_model, size_range=size_range, nvme_names=nvme_names)
         if not nodes_config or not nodes_config.get("nodes"):
             return False
@@ -7555,12 +8032,18 @@ def _recreate_lvstore_on_non_leader_impl(snode: StorageNode, leader_node, primar
             logger.error("Error establishing hublvol: %s", e)
             # return False
 
-    # Resume JC compression for this LVS group on the restarting node
-    ret, err = snode.rpc_client().jc_suspend_compression(jm_vuid=primary_node.jm_vuid, suspend=False)
-    if not ret:
-        logger.info("Failed to resume JC compression adding task...")
-        tasks_controller.add_jc_comp_resume_task(
-            snode.cluster_id, snode.get_id(), jm_vuid=primary_node.jm_vuid)
+    # Resume JC compression for this LVS group on the restarting node —
+    # unless a release upgrade holds all resumes until `cluster
+    # upgrade-complete` (release-upgrade guard, remove with the
+    # jc_compression_upgrade plugin).
+    if jc_compression_upgrade.resume_is_held(DBController().get_cluster_by_id(snode.cluster_id)):
+        logger.info("JC compression resume held: cluster upgrade in progress")
+    else:
+        ret, err = snode.rpc_client().jc_suspend_compression(jm_vuid=primary_node.jm_vuid, suspend=False)
+        if not ret:
+            logger.info("Failed to resume JC compression adding task...")
+            tasks_controller.add_jc_comp_resume_task(
+                snode.cluster_id, snode.get_id(), jm_vuid=primary_node.jm_vuid)
 
     ### 2- create lvols nvmf subsystems (idempotent: skip existing)
     is_tertiary = (primary_node.tertiary_node_id == snode.get_id())
@@ -10125,10 +10608,15 @@ def create_lvstore(snode: StorageNode, ndcs, npcs, distr_bs, distr_chunk_bs, pag
             return False
 
         # sending to the other node (sec_node) with the primary group jm_vuid (snode.jm_vuid)
-        ret, err = sec_node.rpc_client().jc_suspend_compression(jm_vuid=snode.jm_vuid, suspend=False)
-        if not ret:
-            logger.info("Failed to resume JC compression adding task...")
-            tasks_controller.add_jc_comp_resume_task(sec_node.cluster_id, sec_node.get_id(), jm_vuid=snode.jm_vuid)
+        # (release-upgrade guard: held until `cluster upgrade-complete`,
+        # remove with the jc_compression_upgrade plugin)
+        if jc_compression_upgrade.resume_is_held(DBController().get_cluster_by_id(sec_node.cluster_id)):
+            logger.info("JC compression resume held: cluster upgrade in progress")
+        else:
+            ret, err = sec_node.rpc_client().jc_suspend_compression(jm_vuid=snode.jm_vuid, suspend=False)
+            if not ret:
+                logger.info("Failed to resume JC compression adding task...")
+                tasks_controller.add_jc_comp_resume_task(sec_node.cluster_id, sec_node.get_id(), jm_vuid=snode.jm_vuid)
 
         sec_rpc_client = sec_node.rpc_client()
         sec_rpc_client.bdev_examine(snode.raid)

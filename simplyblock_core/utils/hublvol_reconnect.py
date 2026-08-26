@@ -796,6 +796,29 @@ class HublvolReconnectCoordinator:
         logger.error(
             "hublvol %s on %s: no path attached (expected=%s)",
             ctrl_name, node.get_id(), [p[0] for p in paths_list])
+
+        # Believe the controller, not the attach return values. A path that is
+        # already present makes its attach fail with -EALREADY, and a path
+        # added to an existing controller returns no bdev name at all; either
+        # can make every attempt in the loop above look like a failure while
+        # the controller is in fact enabled with the paths we wanted. Declaring
+        # failure then is fatal out of all proportion: the caller aborts
+        # recreate_lvstore and the node oscillates offline <-> in_restart for
+        # ever (multipath soak 2026-08-19 iteration 4, where LVS_1/hublvol had
+        # BOTH paths enabled while reconcile insisted none were attached).
+        # rpc_client.bdev_nvme_attach_controller now reports those shapes as
+        # success; this is the belt-and-braces check for anything else that
+        # returns falsy on an attach that actually landed.
+        ctrlrs = _ctrlrs_from_list(rpc, ctrl_name)
+        if ctrlrs and any(c.get("state") == "enabled" for c in ctrlrs):
+            attached = _attached_ips(ctrlrs)
+            landed = [ip for ip, _ in paths_list if ip in attached]
+            if landed:
+                logger.warning(
+                    "hublvol %s on %s: attach calls reported failure but the "
+                    "controller is enabled with %s — treating as attached",
+                    ctrl_name, node.get_id(), landed)
+                return True
         return False
 
     def _defer_remaining_attaches(self, rpc, ctrl_name, nqn, port,

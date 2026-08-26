@@ -195,7 +195,6 @@ from e2e_tests.test_snapshot_negative import TestSnapshotNegativeCases
 # from e2e_tests.test_pool_attributes import TestPoolAttributes  # DISABLED: QoS crash
 from e2e_tests.test_pool_enable_disable import TestPoolEnableDisable
 from e2e_tests.test_pool_negative import TestPoolNegativeCases
-from e2e_tests.test_node_suspend_resume import TestNodeSuspendResume          # DEPRECATED: sn suspend/resume are no-ops
 from e2e_tests.test_pool_disable_io import TestPoolDisableIO
 from e2e_tests.test_negative_cases import TestCrossResourceNegative
 from e2e_tests.test_namespace_placement import TestNamespacePlacement
@@ -275,7 +274,7 @@ from e2e_tests.backup.test_backup_restore import (
     TestBackupListFields,
     TestBackupUpgradeCompatibility,
     TestBackupRestoreEdgeCases,
-    TestBackupSourceSwitch,
+    # TestBackupSourceSwitch,  # COMMENTED OUT: source-switch no longer required
     # Interrupted backup/restore E2E tests (TC-BCK-080..097)
     TestBackupInterruptedBackup,
     TestBackupInterruptedRestore,
@@ -404,7 +403,7 @@ ALL_TESTS = [
     TestBackupListFields,
     TestBackupUpgradeCompatibility,
     TestBackupRestoreEdgeCases,
-    TestBackupSourceSwitch,
+    # TestBackupSourceSwitch,  # COMMENTED OUT: source-switch no longer required
     # Backup node-add / node-migration edge cases
     TestBackupAfterNodeAdd,
     TestBackupWithFioOnNewNode,
@@ -496,7 +495,6 @@ ALL_TESTS = [
     # TestPoolAttributes,  # DISABLED: QoS causes SPDK crash (corrupted double-linked list in bdev_set_qos_limit_done)
     TestPoolEnableDisable,
     TestPoolNegativeCases,
-    TestNodeSuspendResume,
     TestPoolDisableIO,
     TestCrossResourceNegative,
     TestNamespacePlacement,
@@ -582,7 +580,6 @@ def get_all_tests(custom=True, ha_test=False):
         # # TestPoolAttributes,  # DISABLED: QoS causes SPDK crash (corrupted double-linked list in bdev_set_qos_limit_done)
         # TestPoolEnableDisable,
         # TestPoolNegativeCases,
-        # # TestNodeSuspendResume,          # DEPRECATED: sn suspend/resume are no-ops in CLI
         # TestPoolDisableIO,
         # TestCrossResourceNegative,
         # TestNamespacePlacement,
@@ -864,7 +861,7 @@ def get_backup_tests():
         TestBackupResizedLvol,
         TestBackupListFields,
         TestBackupRestoreEdgeCases,
-        TestBackupSourceSwitch,
+        # TestBackupSourceSwitch,  # COMMENTED OUT: source-switch no longer required
         # Outage tests — run last (involves node shutdown/restart)
         TestBackupUpgradeCompatibility,
         TestBackupInterruptedBackup,

@@ -1004,18 +1004,34 @@ class TestImportBackups(unittest.TestCase):
 
     @patch.object(Backup, 'write_to_db')
     @patch("simplyblock_core.controllers.backup_controller.db_controller")
-    def test_skip_existing(self, mock_db, _mock_write):
+    def test_existing_fails(self, mock_db, mock_write):
         existing = _backup(uuid="b-1")
         mock_db.get_backup_by_id.side_effect = lambda bid: existing if bid == "b-1" else (_ for _ in ()).throw(KeyError())
         mock_db.get_backups.return_value = [existing]
 
         from simplyblock_core.controllers.backup_controller import import_backups
-        count = import_backups([
-            {"backup_id": "b-1", "lvol_id": "l-1", "cluster_id": "cluster-1"},
-            {"backup_id": "b-2", "lvol_id": "l-1", "cluster_id": "cluster-1"},
-        ])
+        with self.assertRaises(PreconditionError):
+            import_backups([
+                {"backup_id": "b-2", "lvol_id": "l-1", "cluster_id": "cluster-1"},
+                {"backup_id": "b-1", "lvol_id": "l-1", "cluster_id": "cluster-1"},
+            ])
 
-        self.assertEqual(count, 1)
+        mock_write.assert_not_called()
+
+    @patch.object(Backup, 'write_to_db')
+    @patch("simplyblock_core.controllers.backup_controller.db_controller")
+    def test_duplicate_in_metadata_fails(self, mock_db, mock_write):
+        mock_db.get_backup_by_id.side_effect = KeyError("not found")
+        mock_db.get_backups.return_value = []
+
+        from simplyblock_core.controllers.backup_controller import import_backups
+        with self.assertRaises(PreconditionError):
+            import_backups([
+                {"backup_id": "b-1", "lvol_id": "l-1", "cluster_id": "cluster-1"},
+                {"backup_id": "b-1", "lvol_id": "l-1", "cluster_id": "cluster-1"},
+            ])
+
+        mock_write.assert_not_called()
 
     @patch("simplyblock_core.controllers.backup_controller.db_controller")
     def test_skip_no_backup_id(self, mock_db):

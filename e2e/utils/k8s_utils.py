@@ -1661,12 +1661,12 @@ class K8sUtils:
                 pod on (typically the primary storage node for the lvol).
                 When set, a nodeAffinity rule excludes that node so the FIO
                 pod runs on a secondary / non-primary node instead.
-            warmup_config: Optional FIO config for a write-only warmup pass.
+            warmup_config: Optional FIO config for a sequential write pass.
                 When provided, an init container runs FIO with this config
-                to pre-fill all data files with valid verify headers (same
-                randseed, filenames, size) before the main randrw test.
-                This prevents false err=84 from stale FIO headers on
-                thin-provisioned storage.
+                to pre-fill every block with valid MD5 verify headers (same
+                bs, randseed, filenames, size as the main config) before the
+                main randrw test.  This ensures a later verify_only pass can
+                verify the entire file, not just the blocks randrw touched.
         """
         ns = namespace or self.namespace
         # Indent fio_config for YAML embedding (each line indented by 8 spaces)
@@ -2488,16 +2488,14 @@ class K8sUtils:
         """
         ns = namespace or self.namespace
 
-        # Quick pre-check: if the pod is stuck in PodInitializing or similar,
-        # report that immediately instead of waiting the full timeout.
+        # Quick pre-check: fail fast on image pull errors (unrecoverable).
+        # PodInitializing and ContainerCreating are normal transient states
+        # (e.g. init container running fio-warmup) — let them proceed.
         pod_name_pre = self.get_job_pod_name(job_name, namespace=ns)
         if pod_name_pre:
             detail = self.get_pod_status_detail(pod_name_pre, namespace=ns)
             reason = detail.get("reason", "")
-            if reason in (
-                "PodInitializing", "ContainerCreating",
-                "ErrImagePull", "ImagePullBackOff",
-            ):
+            if reason in ("ErrImagePull", "ImagePullBackOff"):
                 raise RuntimeError(
                     f"FIO Job '{job_name}' pod '{pod_name_pre}' never "
                     f"started: {reason} — {detail.get('message', '')}"
@@ -3372,9 +3370,6 @@ class K8sSbcliUtils:
 
     def suspend_node(self, node_uuid, expected_error_code=None):
         self.k8s.exec_sbcli(f"{self.sbcli_cmd} -d sn suspend {node_uuid}")
-
-    def resume_node(self, node_uuid):
-        self.k8s.exec_sbcli(f"{self.sbcli_cmd} -d sn resume {node_uuid}")
 
     def restart_node(self, node_uuid, expected_error_code=None, force=False):
         force_flag = " --force" if force else ""

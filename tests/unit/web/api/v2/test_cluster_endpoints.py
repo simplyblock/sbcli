@@ -6,6 +6,16 @@ import pytest
 from tests.unit.web.api.v2._factories import CLUSTER_ID
 
 
+# max_subsys and spdk_vcpu_count are capacity decisions with real
+# consequences if silently defaulted, so every create body has to state
+# them. hugepages_mem defaults to 0 -- "compute it" (calculate_minimum_hp_
+# memory's own figure, from max_subsys/spdk_vcpu_count themselves); a
+# nonzero value is only ever a floor add_node applies on top of that, never
+# a replacement for it, so there's nothing to silently under-specify by
+# leaving it unstated.
+SIZING = {'max_subsys': 40, 'hugepages_mem': '4Gi', 'spdk_vcpu_count': 4}
+
+
 class TestListClusters:
 
     def test_returns_clusters_from_db(self, client, db, cluster):
@@ -30,7 +40,9 @@ class TestCreateCluster:
     def test_calls_add_cluster_with_parameters(self, client, db, cluster, cluster_ops):
         cluster_ops.add_cluster.return_value = CLUSTER_ID
 
-        response = client.post('/api/v2/clusters/', json={'name': 'cluster-1', 'distr_ndcs': 1, 'distr_npcs': 2})
+        response = client.post(
+            '/api/v2/clusters/',
+            json={'name': 'cluster-1', 'distr_ndcs': 1, 'distr_npcs': 2, **SIZING})
         response.raise_for_status()
         assert response.status_code == 201
 
@@ -40,6 +52,9 @@ class TestCreateCluster:
         assert kwargs['distr_npcs'] == 2
         assert kwargs['blk_size'] == 512
         assert kwargs['ha_type'] == 'ha'
+        assert kwargs['max_subsys'] == 40
+        assert kwargs['hugepages_mem'] == 4 * 1024 ** 3
+        assert kwargs['spdk_vcpu_count'] == 4
         assert response.json()['id'] == CLUSTER_ID
         assert response.headers['Location'].endswith(f'/clusters/{CLUSTER_ID}/')
         db.get_cluster_by_id.assert_called_once_with(CLUSTER_ID)
@@ -47,17 +62,43 @@ class TestCreateCluster:
     def test_conflict_maps_to_409(self, client, db, cluster_ops):
         cluster_ops.add_cluster.side_effect = ValueError('cluster exists')
 
-        response = client.post('/api/v2/clusters/', json={'name': 'cluster-1', 'distr_ndcs': 1, 'distr_npcs': 2})
+        response = client.post(
+            '/api/v2/clusters/',
+            json={'name': 'cluster-1', 'distr_ndcs': 1, 'distr_npcs': 2, **SIZING})
 
         assert response.status_code == 409
 
-    def test_invalid_erasure_coding_scheme_caught(self, client, db, cluster_ops):
-        response = client.post('/api/v2/clusters/', json={'name': 'cluster-1', 'distr_ndcs': 3, 'distr_npcs': 2})
+    @pytest.mark.parametrize('ndcs,npcs', [(3, 2), (1, 5), (-1, 2)])
+    def test_invalid_erasure_coding_scheme_caught(self, client, db, cluster_ops, ndcs, npcs):
+        response = client.post(
+            '/api/v2/clusters/',
+            json={'name': 'cluster-1', 'distr_ndcs': ndcs, 'distr_npcs': npcs, **SIZING})
         assert response.status_code == 422
-        response = client.post('/api/v2/clusters/', json={'name': 'cluster-1', 'distr_ndcs': 1, 'distr_npcs': 5})
+
+    @pytest.mark.parametrize('field', ['max_subsys', 'spdk_vcpu_count'])
+    def test_capacity_sizing_is_required(self, client, db, cluster_ops, field):
+        """max_subsys/spdk_vcpu_count have real consequences if silently
+        defaulted, so omitting either must be rejected outright."""
+        body = {'name': 'cluster-1', 'distr_ndcs': 1, 'distr_npcs': 2, **SIZING}
+        del body[field]
+
+        response = client.post('/api/v2/clusters/', json=body)
+
         assert response.status_code == 422
-        response = client.post('/api/v2/clusters/', json={'name': 'cluster-1', 'distr_ndcs': -1, 'distr_npcs': 2})
-        assert response.status_code == 422
+        cluster_ops.add_cluster.assert_not_called()
+
+    def test_omitted_hugepages_mem_defaults_to_computed(self, client, db, cluster, cluster_ops):
+        """Unlike max_subsys/spdk_vcpu_count, hugepages_mem is only ever a
+        floor on top of a figure computed from the other two -- 0 means
+        "compute it", not "invalid"."""
+        cluster_ops.add_cluster.return_value = CLUSTER_ID
+        body = {'name': 'cluster-1', 'distr_ndcs': 1, 'distr_npcs': 2, **SIZING}
+        del body['hugepages_mem']
+
+        response = client.post('/api/v2/clusters/', json=body)
+
+        assert response.status_code == 201
+        assert cluster_ops.add_cluster.call_args.kwargs['hugepages_mem'] == 0
 
 
 class TestGetCluster:

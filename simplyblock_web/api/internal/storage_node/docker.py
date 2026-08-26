@@ -5,7 +5,7 @@ import os
 import subprocess
 import time
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import List, Optional, Set, Union
 
 import docker
 import psutil
@@ -19,7 +19,7 @@ import simplyblock_core.utils.pci as pci_utils
 import simplyblock_core.utils as init_utils
 from simplyblock_web import utils, node_utils
 
-from ._node_info import get_static_node_info
+from .._node_info import get_static_node_info
 
 logger = core_utils.get_logger(__name__)
 
@@ -342,7 +342,7 @@ def _spdk_unix_socket_alive(rpc_port, timeout=1.0):
     if not os.path.exists(sock_path):
         return False
     try:
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:  # type: ignore[attr-defined]  # AF_UNIX: Linux-only, absent on Windows
             s.settimeout(timeout)
             s.connect(sock_path)
             return True
@@ -518,6 +518,11 @@ def get_info():
 
         "cpu_count": node_info["cpu_info"]['count'],
         "cpu_hz": node_info["cpu_info"]['hz_advertised'][0] if 'hz_advertised' in node_info["cpu_info"] else 1,
+        # Per-NUMA-node core ids, keyed by socket id as a string (JSON has no
+        # int keys). Read-only topology -- add_node uses it to resize a
+        # node's isolated-core set to the cluster's spdk_vcpu_count; nothing
+        # here is persisted.
+        "cpu_topology": {str(k): v for k, v in init_utils.get_numa_cores().items()},
 
         "memory": node_utils.get_memory(),
         "hugepages": node_utils.get_huge_memory(),
@@ -696,8 +701,23 @@ def bind_device_to_spdk(body: utils.DeviceParams):
 class PersistNodeConfigParams(BaseModel):
     max_lvol: Optional[int] = Field(None, ge=0, le=constants.MAX_SUBSYSTEMS_PER_NODE)
     huge_page_memory: Optional[int] = Field(None, ge=0)
+    # small/large_pool_count are written alongside huge_page_memory whenever
+    # add_node recalculates it against the cluster's real max_lvol/core count
+    # -- they are what that memory figure was derived from (calculate_pool_count
+    # -> calculate_minimum_hp_memory), so they must never drift from it.
+    small_pool_count: Optional[int] = Field(None, ge=0)
+    large_pool_count: Optional[int] = Field(None, ge=0)
     numa_node: Optional[int] = Field(None, ge=0)
     ssd_list: Optional[List[str]] = Field(None)
+    # CPU layout, resized to the cluster's spdk_vcpu_count at add time (see
+    # storage_node_ops.apply_cluster_vcpu_count). Written together, once, by
+    # the same caller -- never partially, so the file never holds a mask from
+    # one layout next to a distribution from another.
+    cpu_mask: Optional[str] = None
+    isolated: Optional[List[int]] = None
+    l_cores: Optional[str] = None
+    distribution: Optional[dict] = None
+    core_to_index: Optional[dict] = None
 
 
 @api.post('/persist_node_config', responses={
@@ -721,13 +741,47 @@ def persist_node_config(body: PersistNodeConfigParams):
             node_config["max_lvol"] = body.max_lvol
         if body.huge_page_memory is not None:
             node_config["huge_page_memory"] = body.huge_page_memory
+        if body.small_pool_count is not None:
+            node_config["small_pool_count"] = body.small_pool_count
+        if body.large_pool_count is not None:
+            node_config["large_pool_count"] = body.large_pool_count
+        if body.cpu_mask is not None:
+            node_config["cpu_mask"] = body.cpu_mask
+        if body.isolated is not None:
+            node_config["isolated"] = body.isolated
+        if body.l_cores is not None:
+            node_config["l-cores"] = body.l_cores
+        if body.distribution is not None:
+            node_config["distribution"] = body.distribution
+        if body.core_to_index is not None:
+            node_config["core_to_index"] = body.core_to_index
         matched = True
         break
 
     if not matched:
         return utils.get_response(False, "No matching node found for given numa_node and ssd_list")
 
-    core_utils.store_config_file(node_info, constants.NODES_CONFIG_FILE)
+    # isolated_cores/host_cpu_mask are the union of every node's "isolated"
+    # list, computed once at configure time (generate_configs/regenerate_
+    # config) -- nothing reads them back today (the one consumer,
+    # validate_config, always recomputes the union fresh from the nodes
+    # themselves), but leaving them silently stale after a per-node isolated
+    # list changes here is exactly the kind of drift that bites whoever
+    # trusts them next. Recompute unconditionally; cheap, and correct
+    # regardless of which field this call actually changed.
+    all_isolated_cores: Set[int] = set()
+    for n in node_info["nodes"]:
+        all_isolated_cores.update(n.get("isolated") or [])
+    node_info["isolated_cores"] = sorted(all_isolated_cores)
+    node_info["host_cpu_mask"] = core_utils.generate_mask(all_isolated_cores)
+
+    # get_nodes_config() refuses (both here and on k8s) whenever the live file
+    # differs from its "_read_only" sibling -- that is the drift check meant
+    # to catch a hand-edited config. This write is sanctioned, not drift, so
+    # it must refresh the read-only baseline too, or the very next /info call
+    # (this same add_node's own idempotent retry included) sees a mismatch
+    # and refuses with "run sbcli sn configure-upgrade".
+    core_utils.store_config_file(node_info, constants.NODES_CONFIG_FILE, create_read_only_file=True)
     return utils.get_response(True)
 
 

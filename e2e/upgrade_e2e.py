@@ -35,7 +35,7 @@ def main():
     else:
         for cls in upgrade_tests:
             needle = args.testname.lower().replace("_", "")
-            if needle in cls.__name__.lower().replace("_", ""):
+            if needle == cls.__name__.lower().replace("_", ""):
                 test_class_run.append(cls)
     passed_cases = []
     errors = {}
@@ -82,7 +82,10 @@ def main():
                     f"[cleanup] Test {test.__name__} failed — preserving K8s "
                     "resources for debugging (--preserve_resources_on_failure)"
                 )
-            test_obj.teardown(skip_k8s_cleanup=_skip_k8s)
+            test_obj.teardown(
+                delete_lvols=not _skip_k8s,
+                skip_k8s_cleanup=_skip_k8s,
+            )
         except Exception as _:
             logger.error(f"Error During Teardown for test: {test.__name__}")
             logger.error(traceback.format_exc())
@@ -137,12 +140,15 @@ def main():
 
 def check_for_dumps():
     """Validates whether core dumps present on machines
-    
+
     Returns:
         bool: If there are core dumps or not
     """
     logger.info("Checking for core dumps!!")
     cluster_base = TestClusterBase()
+    if not cluster_base.api_base_url:
+        logger.info("No cluster API URL configured (K8s-native); skipping core dump check")
+        return False
     ssh_obj = SshUtils(bastion_server=cluster_base.bastion_server)
     sbcli_utils = SbcliUtils(
         cluster_api_url=cluster_base.api_base_url,

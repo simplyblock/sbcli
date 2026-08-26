@@ -240,6 +240,14 @@ def _base_db(task):
     cluster.status = Cluster.STATUS_ACTIVE
     cluster.suspend_drain_complete = False
     cluster.expand_state = {}
+    # Dict-ish cluster state must be stubbed explicitly: an unstubbed MagicMock
+    # attribute auto-creates, so `cluster.<field>.get(key)` returns a truthy
+    # mock and any guard reading it silently flips on. That is what happened
+    # when the JC-compression upgrade hold landed -- resume_is_held() saw a
+    # phantom in-progress upgrade, the runner suspended the task every cycle
+    # and never reached its retry ceiling. These clusters are deliberately
+    # "not mid-upgrade", which is the state the ceiling contract is about.
+    cluster.release_upgrade_state = {}
 
     node = db.get_storage_node_by_id.return_value
     node.status = StorageNode.STATUS_ONLINE

@@ -14,7 +14,6 @@ from simplyblock_core.storage_node_ops import (
     generate_automated_deployment_config,
     upgrade_automated_deployment_config,
 )
-from simplyblock_cli.clibase import range_type
 from simplyblock_web import node_utils_k8s
 
 logger = logging.getLogger(__name__)
@@ -118,14 +117,6 @@ def parse_arguments() -> argparse.Namespace:
         action='store_true',
         dest='upgrade',
         required=False
-    )
-    parser.add_argument(
-        '--cores-percentage',
-        help='The percentage of cores to be used for spdk (0-99)',
-        type=range_type(0, 99),
-        dest='cores_percentage',
-        required=False,
-        default=0
     )
     parser.add_argument(
         '--force',
@@ -266,7 +257,6 @@ def main() -> None:
             sockets_to_use=sockets_to_use,
             pci_allowed=pci_allowed,
             pci_blocked=pci_blocked,
-            cores_percentage=args.cores_percentage,
             force=args.force,
             device_model=args.device_model,
             size_range=args.size_range,

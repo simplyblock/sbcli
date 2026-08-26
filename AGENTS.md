@@ -40,8 +40,38 @@ Data flows: **CLI → Web API → Core controllers → FoundationDB**. Storage n
 
 - **Error handling**: Raise specific exceptions — never return `None`/booleans for errors, never bare `except Exception`. See `CONTRIBUTING.md`.
 - **Retries**: Use `tenacity` (`@retry` decorator, or `Retrying`/`AsyncRetrying` for a single call site) instead of hand-written attempt loops with `time.sleep()`. Always set an explicit `stop=` and `wait=`, and log attempts via `before_sleep=before_sleep_log(logger, logging.WARNING)`. Refactor hand-rolled retry loops you touch.
+- **Pydantic fields**: Use the [annotated pattern](https://pydantic.dev/docs/validation/latest/concepts/fields/#the-annotated-pattern) for field metadata, not the assignment form. See below.
 - **Ruff** and **mypy** are enforced in CI. `simplyblock_cli/cli.py` is excluded from ruff (auto-generated).
 - `tests/perf/` is excluded from pytest discovery.
+
+### Pydantic Fields
+
+Applies to every Pydantic model: v2 DTOs and request bodies, internal-API payloads, and `pydantic-settings` classes. It does **not** apply to `simplyblock_core.models.base_model.BaseModel`, which is hand-rolled — its fields stay plain annotations with plain defaults.
+
+Constraints and metadata belong inside `Annotated[...]`. The default stays on the right-hand side of the assignment; a field with no default is required.
+
+```python
+# Good
+size: Annotated[int, Field(ge=0)]                                   # required
+jm_percent: Annotated[int, Field(ge=0, le=100)] = 3                 # optional, default 3
+host_nqn: Annotated[Optional[str], Field(pattern=NQN_PATTERN)] = None
+name: Annotated[str, Field(description="Key name (used as filename)")]
+
+# Bad
+size: int = Field(ge=0)
+jm_percent: int = Field(3, ge=0, le=100)
+host_nqn: Optional[str] = Field(default=None, pattern=NQN_PATTERN)
+name: str = Field(..., description="Key name (used as filename)")
+```
+
+Rules:
+
+- `default`, `default_factory` and `alias` are the exception — static type checkers only understand them in assignment form, so never pass them inside `Annotated`. `Annotated[Optional[int], Field(None, ge=0)] = None` declares the default twice; drop it from `Field()`.
+- A field carrying no metadata needs no `Field()` at all: write `spdk_debug: bool = False`, not `spdk_debug: Optional[bool] = Field(False)`.
+- Required fields need no `Field(...)` sentinel. Omitting the assignment already says "required".
+- Put `Optional` inside `Annotated` (`Annotated[Optional[str], Field(...)]`), so the metadata attaches to the field rather than to an inner type. Both forms validate, but only one is the house style.
+- Prefer an existing reusable alias over repeating a constraint: `simplyblock_web/api/v2/util.py` defines `Unsigned`, `Size`, `Percent`, `Port` and `UrlPath`; `simplyblock_core/utils/pci.py` defines `PCIAddress`. A constraint you are writing for the third time belongs beside them as a named alias — reusability is the main payoff of the annotated pattern.
+- Existing assignment-form declarations are legacy. Convert the ones in a model you are already editing; do not sweep the codebase in an otherwise unrelated change.
 
 ### Secret Handling
 

@@ -14,7 +14,7 @@ from pydantic import ValidationError
 
 from simplyblock_cli import cli as cli_module
 from simplyblock_cli import clibase
-from simplyblock_core import constants, storage_node_ops
+from simplyblock_core import cluster_ops, constants, storage_node_ops
 from simplyblock_web import node_configure
 from simplyblock_web.api.internal.storage_node.docker import PersistNodeConfigParams
 
@@ -27,9 +27,11 @@ def _wrapper():
     return w
 
 
-def _restart_args(max_lvol):
+def _restart_args():
+    """The restart namespace no longer carries max_lvol / max_prov: those are
+    cluster settings and the restart reads them from the cluster."""
     return argparse.Namespace(
-        node_id="node-1", max_lvol=max_lvol, max_snap=5000, max_prov="0",
+        node_id="node-1", max_snap=5000,
         spdk_image=None, spdk_debug=False, reattach_volume=False,
         small_bufsize=0, large_bufsize=0, ssd_pcie=[], node_ip=None,
         force=False, force_lvol_recreate=False, spdk_proxy_image=None,
@@ -42,48 +44,72 @@ def test_cap_is_the_documented_product_limit():
     assert CAP == 75
 
 
-# --- CLI: sn configure ------------------------------------------------------
+# --- CLI: the node-level knobs are gone -------------------------------------
+#
+# max-subsys, the huge-page floor and the vCPU count are cluster settings now.
+# A per-node value let a cluster drift into nodes with different subsystem
+# ceilings and different core budgets.
 
-def test_configure_rejects_above_cap():
+def test_configure_no_longer_takes_max_subsys():
     w = _wrapper()
-    args = w.parser.parse_args(["storage-node", "configure", "--max-subsys", str(CAP + 1)])
-    with patch.object(clibase.storage_ops, "generate_automated_deployment_config") as gen:
-        with pytest.raises(SystemExit):
-            w.storage_node__configure("configure", args)
-    gen.assert_not_called()
+    with pytest.raises(SystemExit):
+        w.parser.parse_args(["storage-node", "configure", "--max-subsys", str(CAP)])
 
 
-def test_configure_accepts_the_cap():
+def test_configure_no_longer_takes_cores_percentage():
     w = _wrapper()
-    args = w.parser.parse_args(["storage-node", "configure", "--max-subsys", str(CAP)])
+    with pytest.raises(SystemExit):
+        w.parser.parse_args(["storage-node", "configure", "--cores-percentage", "50"])
+
+
+def test_configure_sizes_for_the_product_ceiling():
+    """configure runs on the host before it belongs to a cluster, so it cannot
+    read the cluster's value. Sizing for the ceiling keeps every cluster
+    setting usable; sizing smaller would leave the node unable to honour one."""
+    w = _wrapper()
+    args = w.parser.parse_args(["storage-node", "configure"])
     with patch.object(clibase.storage_ops, "generate_automated_deployment_config",
                       return_value=True) as gen:
         assert w.storage_node__configure("configure", args) is True
     assert gen.call_args.args[0] == CAP
 
 
-# --- CLI: sn restart -------------------------------------------------------
-
-def test_restart_rejects_above_cap():
+def test_restart_no_longer_takes_max_subsys():
     w = _wrapper()
-    with patch.object(clibase.storage_ops, "restart_storage_node") as restart:
-        with pytest.raises(SystemExit):
-            w.storage_node__restart("restart", _restart_args(CAP + 1))
-    restart.assert_not_called()
+    with pytest.raises(SystemExit):
+        w.parser.parse_args(["storage-node", "restart", "node-1",
+                             "--max-subsys", str(CAP)])
 
 
-def test_restart_accepts_the_cap():
+def test_restart_defers_to_the_cluster_value():
     w = _wrapper()
-    with patch.object(clibase.storage_ops, "restart_storage_node", return_value=True) as restart:
-        assert w.storage_node__restart("restart", _restart_args(CAP)) is True
-    assert restart.call_args.args[1] == CAP
+    with patch.object(clibase.storage_ops, "restart_storage_node",
+                      return_value=True) as restart:
+        assert w.storage_node__restart("restart", _restart_args()) is True
+    assert restart.call_args.args[1] == 0, "0 means: adopt the cluster's max_subsys"
 
 
-def test_restart_accepts_zero_meaning_unchanged():
-    w = _wrapper()
-    with patch.object(clibase.storage_ops, "restart_storage_node", return_value=True) as restart:
-        assert w.storage_node__restart("restart", _restart_args(0)) is True
-    assert restart.call_args.args[1] == 0
+# --- cluster level: where the cap is enforced now ---------------------------
+
+def test_cluster_sizing_rejects_above_cap():
+    with pytest.raises(ValueError, match=str(CAP)):
+        cluster_ops.validate_spdk_sizing(max_subsys=CAP + 1)
+
+
+def test_cluster_sizing_accepts_the_cap():
+    cluster_ops.validate_spdk_sizing(max_subsys=CAP)
+
+
+def test_cluster_sizing_treats_zero_as_the_product_default():
+    cluster_ops.validate_spdk_sizing(max_subsys=0, hugepages_mem=0,
+                                     spdk_vcpu_count=0)
+
+
+def test_cluster_sizing_refuses_negative_values():
+    with pytest.raises(ValueError):
+        cluster_ops.validate_spdk_sizing(hugepages_mem=-1)
+    with pytest.raises(ValueError):
+        cluster_ops.validate_spdk_sizing(spdk_vcpu_count=-1)
 
 
 # --- core: the CLI is not the only caller ----------------------------------

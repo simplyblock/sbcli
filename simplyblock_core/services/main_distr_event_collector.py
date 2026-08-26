@@ -1,10 +1,13 @@
 # coding=utf-8
+import collections
 import threading
 import time
 from datetime import datetime
+from typing import Any
 
-from simplyblock_core import constants, db_controller, utils, distr_controller
+from simplyblock_core import constants, db_controller, rpc_client, utils, distr_controller
 from simplyblock_core.controllers import events_controller, device_controller
+from simplyblock_core.models.events import EventObj
 from simplyblock_core.models.nvme_device import NVMeDevice
 from simplyblock_core.models.storage_node import StorageNode
 
@@ -451,7 +454,7 @@ def start_event_collector_on_node(node_id):
     try:
         while True:
             page = 1
-            events_groups = {}
+            events_groups: dict[Any, dict[Any, dict[Any, EventObj]]] = {}
             events_list = []
             while True:
                 try:
@@ -475,20 +478,32 @@ def start_event_collector_on_node(node_id):
                             # Ignore type errors, this can be simplified to avoid them
                             et = event_dict['event_type']
                             msg = event_dict['status']
-                            if sid not in events_groups:
-                                events_groups[sid] = {et:{msg: 1}}
-                            elif et not in events_groups[sid]:
-                                events_groups[sid][et]: {msg: 1}  # type: ignore
-                            elif msg not in events_groups[sid][et]:
-                                events_groups[sid][et][msg]: 1  # type: ignore
-                            else:
-                                events_groups[sid][et][msg].count += 1  # type: ignore
+                            # Repeats of the same (storage_id, event_type,
+                            # status) inside one batch are aggregated onto a
+                            # single event with a count instead of each being
+                            # logged separately.
+                            #
+                            # The previous form of this used annotation
+                            # statements -- "events_groups[sid][et]: {msg: 1}"
+                            # -- which are evaluated and discarded and create
+                            # nothing. So the first time a node reported a
+                            # SECOND event_type for one storage_id in a batch,
+                            # the assignment below raised KeyError, the
+                            # enclosing except aborted the batch, and the rest
+                            # of it was neither logged nor discarded: the next
+                            # poll re-read the same events and hit the same
+                            # wall. Events could therefore go missing from the
+                            # cluster event log indefinitely.
+                            group = events_groups.setdefault(sid, {}).setdefault(et, {})
+                            seen_event = group.get(msg)
+                            if seen_event is not None:
+                                seen_event.count += 1
                                 continue
 
                             event = events_controller.log_distr_event(snode.cluster_id, snode.get_id(), event_dict)
                             logger.info(f"Processing event: {event.get_id()}")
                             process_event(event, logger)
-                            events_groups[sid][et][msg] = event
+                            group[msg] = event
                             events_list.append(event)
 
                         for ev in events_list:
@@ -512,7 +527,191 @@ def start_event_collector_on_node(node_id):
     logger.info(f"Stopping Distr event collector on node: {node_id}")
 
 
+def _jm_event_key(event_dict):
+    """Identity of a JM event, for "have I logged this already?".
+
+    jm_get_events has no discard counterpart: it returns everything the JM
+    holds on every call. Nothing but the event's own content distinguishes a
+    re-read from a new occurrence, so identity is the whole tuple -- two
+    genuinely distinct events would have to share a microsecond timestamp,
+    vuid, type, status and error code to collide.
+    """
+    return (
+        str(event_dict.get("timestamp", "")),
+        str(event_dict.get("event_type", "")),
+        str(event_dict.get("jm_vuid", "")),
+        str(event_dict.get("status", "")),
+        str(event_dict.get("error_code", "")),
+    )
+
+
+#: Nodes whose SPDK build predates jm_get_events. Kept so main() does not
+#: respawn a collector every few seconds for a node that can never serve one.
+jm_unsupported_nodes: set[str] = set()
+
+
+def check_jm_compression_backlog(client, snode, alerted):
+    """Alert once when an lvs journal accumulates too many records for compression.
+
+    ``alerted`` is the per-node latch: alert on the upward crossing of
+    JM_COMPRESSION_BACKLOG_ALERT_RECORDS, then stay quiet until the backlog
+    falls back below the re-arm fraction, so a count oscillating around the
+    threshold cannot flap events every poll. Returns the new latch state.
+
+    Non-fatal by design: this rides the JM event collector thread, and a node
+    that cannot answer bdev_jm_get_status must not take event collection down
+    with it.
+    """
+    if not snode.jm_vuid:
+        return alerted
+    try:
+        status = client.bdev_jm_get_status(snode.jm_vuid)
+        if not status or not isinstance(status, dict):
+            return alerted
+        total_records = int(status.get("total_records") or 0)
+    except Exception as e:
+        logger.debug(f"bdev_jm_get_status failed on {snode.get_id()}: {e}")
+        return alerted
+
+    threshold = constants.JM_COMPRESSION_BACKLOG_ALERT_RECORDS
+    rearm_below = threshold * constants.JM_COMPRESSION_BACKLOG_REARM_FRACTION
+
+    if alerted:
+        if total_records < rearm_below:
+            logger.info(
+                f"JM compression backlog on {snode.get_id()} (lvs "
+                f"{snode.lvstore}, jm_vuid={snode.jm_vuid}) back under "
+                f"{rearm_below:.0f} records ({total_records}); alert re-armed")
+            return False
+        return True
+
+    if total_records > threshold:
+        try:
+            events_controller.log_event_cluster(
+                cluster_id=snode.cluster_id,
+                domain=events_controller.DOMAIN_STORAGE,
+                event="JM_COMPRESSION_BACKLOG",
+                db_object=snode,
+                caused_by=events_controller.CAUSED_BY_MONITOR,
+                message=(f"LVS {snode.lvstore} (jm_vuid={snode.jm_vuid}) on "
+                         f"node {snode.get_id()} has accumulated "
+                         f"{total_records} journal records for compression "
+                         f"(threshold {threshold}). Compression is not keeping "
+                         f"up; journal replay on the next restart or failover "
+                         f"grows with every record."),
+                node_id=snode.get_id(),
+                event_level="Error")
+        except Exception as event_error:
+            logger.warning(
+                f"Could not log JM compression backlog event: {event_error}")
+            return False
+        return True
+    return alerted
+
+
+def start_jm_event_collector_on_node(node_id):
+    """Poll jm_get_events on one node and mirror every event to the cluster log.
+
+    Runs in its own thread, separate from the distrib collector for the same
+    node: the two sources are independent, and a slow or wedged poll of one
+    must not hold up the other. Combined with one thread per node in main(),
+    that gives (nodes x sources) collectors in parallel.
+
+    Events are only read here, never acted upon -- unlike distrib events, which
+    can force a device unavailable. Every event received is written to the
+    cluster event log, including successful ones, so the log carries the whole
+    compression history rather than only its failures.
+    """
+    try:
+        snode = db.get_storage_node_by_id(node_id)
+    except KeyError:
+        return
+
+    logger.info(f"Starting JM event collector on node: {node_id}")
+    client = snode.rpc_client(timeout=5, retry=1)
+
+    seen = set()
+    seen_order: collections.deque[tuple[str, ...]] = collections.deque()
+
+    backlog_alerted = False
+    try:
+        while True:
+            try:
+                try:
+                    snode = db.get_storage_node_by_id(node_id)
+                except KeyError:
+                    logger.info(f"Node {node_id} removed; stopping JM collector")
+                    return
+                backlog_alerted = check_jm_compression_backlog(
+                    client, snode, backlog_alerted)
+                events = client.jm_get_events()
+
+                if events == rpc_client.RPC_UNSUPPORTED:
+                    logger.info(
+                        f"Node {node_id} does not implement jm_get_events; "
+                        f"JM event collection disabled for it")
+                    jm_unsupported_nodes.add(node_id)
+                    return
+
+                if events is None:
+                    logger.warning(f"Failed to read JM events from node {node_id}")
+                elif events:
+                    fresh = 0
+                    for event_dict in events:
+                        key = _jm_event_key(event_dict)
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        seen_order.append(key)
+                        if len(seen_order) > constants.JM_EVENT_DEDUPE_MAX:
+                            seen.discard(seen_order.popleft())
+
+                        event = events_controller.log_jm_event(
+                            snode.cluster_id, node_id, event_dict)
+                        fresh += 1
+                        logger.info(
+                            f"Logged JM event {event.get_id()}: "
+                            f"{event_dict.get('event_type')} "
+                            f"{event_dict.get('status')} "
+                            f"jm_vuid={event_dict.get('jm_vuid')} "
+                            f"error_code={event_dict.get('error_code')}")
+                    if fresh:
+                        logger.info(
+                            f"Node {node_id}: {fresh} new JM event(s) of "
+                            f"{len(events)} reported")
+            except Exception as e:
+                logger.error(f"Failed to process JM events on {node_id}: {e}")
+
+            time.sleep(constants.JM_EVENT_COLLECTOR_INTERVAL_SEC)
+    except Exception as e:
+        logger.error(e)
+
+    logger.info(f"Stopping JM event collector on node: {node_id}")
+
+
 threads_maps: dict[str, threading.Thread] = {}
+
+def ensure_collectors(nodes):
+    """Start a collector per (node, event source), restarting any that died.
+
+    One thread per source rather than one per node: distrib and JM events are
+    independent, and a slow or wedged poll of one source must not delay the
+    other. Keys carry the source so the two are tracked -- and restarted --
+    independently.
+    """
+    for snode in nodes:
+        node_id = snode.get_id()
+        sources = [("distr", start_event_collector_on_node)]
+        if node_id not in jm_unsupported_nodes:
+            sources.append(("jm", start_jm_event_collector_on_node))
+        for source, target in sources:
+            key = f"{node_id}:{source}"
+            thread = threads_maps.get(key)
+            if thread is None or thread.is_alive() is False:
+                t = threading.Thread(target=target, args=(node_id,))
+                t.start()
+                threads_maps[key] = t
+
 
 def main():
     while True:
@@ -527,13 +726,7 @@ def main():
             cluster_id = cluster.get_id()
 
             nodes = db.get_storage_nodes_by_cluster_id(cluster_id)
-            for snode in nodes:
-                node_id = snode.get_id()
-                # logger.info(f"Checking node {snode.hostname}")
-                if node_id not in threads_maps or threads_maps[node_id].is_alive() is False:
-                    t = threading.Thread(target=start_event_collector_on_node, args=(node_id,))
-                    t.start()
-                    threads_maps[node_id] = t
+            ensure_collectors(nodes)
 
         time.sleep(5)
 

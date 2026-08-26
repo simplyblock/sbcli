@@ -151,6 +151,13 @@ class RPCRemoteError(RPCException):
 _response_validator = jsonschema.validators.validator_for(_response_schema)(_response_schema)  # type: ignore[call-arg]
 
 
+#: JSON-RPC's "method not found". Used to tell "this build is older than the
+#: RPC" apart from "the call failed", which callers must treat differently.
+RPC_METHOD_NOT_FOUND = -32601
+#: Returned instead of a result when the target does not implement the method.
+RPC_UNSUPPORTED = "__rpc_unsupported__"
+
+
 class RPCClient:
 
     # ref: https://spdk.io/doc/jsonrpc.html
@@ -451,8 +458,24 @@ class RPCClient:
         params = {"traddr": pci_addr, "ns_id": 1, "label": name}
         return self._request2("ultra21_alloc_ns_mount", params)
 
-    def bdev_nvme_detach_controller(self, name):
+    def bdev_nvme_detach_controller(self, name, traddr=None, trsvcid=None,
+                                    trtype="TCP", adrfam="ipv4"):
+        """Detach a controller, or -- with a trid -- only the paths on that
+        address.
+
+        Note the SPDK semantics before using this to prune: bdev_nvme_delete()
+        walks EVERY nvme_ctrlr under the bdev and removes each one whose
+        path matches, so a trid detach removes *all* controllers on that
+        address, not one of them. There is deliberately no way to single out
+        one of two identical trids -- the duplicate-path repair in
+        storage_node_ops therefore detaches the address and re-attaches it
+        once, rather than trying to drop a single copy.
+        """
         params = {"name": name}
+        if traddr:
+            params.update({"traddr": traddr, "trtype": trtype, "adrfam": adrfam})
+            if trsvcid:
+                params["trsvcid"] = str(trsvcid)
         return self._request2("bdev_nvme_detach_controller", params)
 
     def bdev_nvme_remove_trid(self, name, traddr, trsvcid, trtype="TCP"):
@@ -569,7 +592,20 @@ class RPCClient:
             logger.debug("nvmf_subsystem_ns_update not available or failed: %s", e)
             return None
 
-    def nvmf_subsystem_listener_set_ana_state(self, nqn, ip, port, trtype="TCP", is_optimized=True, ana=None):
+    def nvmf_subsystem_listener_set_ana_state(self, nqn, ip, port, trtype="TCP", is_optimized=True,
+                                              ana=None, anagrpid=None):
+        """Set a listener's ANA state, optionally for a SINGLE ANA group.
+
+        Without ``anagrpid`` the state applies to the whole subsystem, which is
+        wrong once a subsystem carries several namespaces: volumes sharing one
+        subsystem (and therefore one controller on the client) can be migrated,
+        suspended or failed over independently, and a subsystem-wide flip would
+        drag the others with it. In SPDK every namespace gets its own ANA group
+        whose id equals the namespace id, so pass ``anagrpid=lvol.ns_id`` to
+        confine the change to that volume. The parameter is optional in the SPDK
+        RPC decoder, so omitting it keeps the old subsystem-wide behaviour for
+        single-namespace subsystems such as the hublvols.
+        """
         params = {
             "nqn": nqn,
             "listen_address": {
@@ -587,6 +623,9 @@ class RPCClient:
 
         if ana:
             params['ana_state'] = ana
+
+        if anagrpid is not None:
+            params['anagrpid'] = int(anagrpid)
 
         return self._request("nvmf_subsystem_listener_set_ana_state", params)
 
@@ -999,8 +1038,36 @@ class RPCClient:
             params["reconnect_delay_sec"] = int(reconnect_delay_sec)
         if fast_io_fail_timeout_sec is not None:
             params["fast_io_fail_timeout_sec"] = int(fast_io_fail_timeout_sec)
-        return self._request("bdev_nvme_attach_controller", params,
-                             request_timeout=request_timeout)
+        # Two SPDK success shapes are falsy, and callers gate on truthiness:
+        #
+        #  * adding a path to an EXISTING multipath controller creates no new
+        #    bdev, so the RPC succeeds and returns an empty name list;
+        #  * re-adding a path that is already present fails with -EALREADY
+        #    ("A controller named X already exists with the specified network
+        #    path", bdev_nvme_rpc.c) — which means the path is there, i.e. the
+        #    strongest possible success signal.
+        #
+        # Returning those as falsy made hublvol reconcile report "no path
+        # attached" for a controller whose paths were both enabled, so
+        # recreate_lvstore failed and the node oscillated offline <-> in_restart
+        # indefinitely (multipath soak 2026-08-19 iteration 4). Report success
+        # as True and keep the name list when SPDK actually created bdevs.
+        result, error = self._request2("bdev_nvme_attach_controller", params,
+                                       request_timeout=request_timeout)
+        if error:
+            code = error.get("code") if isinstance(error, dict) else None
+            message = str(error.get("message", "")) if isinstance(error, dict) else str(error)
+            if code == -errno.EALREADY or "already exists with the specified network path" in message:
+                logger.info(
+                    "bdev_nvme_attach_controller: %s already has path %s:%s — "
+                    "treating as attached", name, traddr, trsvcid)
+                return True
+            logger.error(
+                "bdev_nvme_attach_controller failed for %s %s:%s: %s",
+                name, traddr, trsvcid, error)
+            return None
+        # Empty list == path added to an existing controller (no new bdev).
+        return result if result else True
 
     def bdev_split(self, base_bdev, split_count):
         params = {
@@ -1589,6 +1656,21 @@ class RPCClient:
             "remote_bdev": bdev,
         })
 
+    def jc_set_dual_node(self, enable):
+        """Tell the journal component whether this is a DUAL-NODE cluster.
+
+        The JC aborts its whole SPDK application when the number of reachable
+        journal members drops below jc_ha_nmin_jms(), which is 2 unless the
+        dual-node flag is set, and 1 when it is. On a 2-node cluster losing
+        the peer leaves exactly 1 of 2 JMs, so without this flag the SURVIVING
+        node aborts itself the moment its partner stops -- a single graceful
+        `sn shutdown` takes the entire cluster down (soak case 6: "JC detected
+        a network outage nd=1 njms=2" / "JC aborts the node due to network
+        outage" / core dump, every client path gone, XFS shut down).
+        The fork implements the tolerance; nothing ever switched it on.
+        """
+        return self._request2("jc_set_dual_node", {"enable": bool(enable)})
+
     def jc_suspend_compression(self, jm_vuid, suspend=False):
         params = {
             "jm_vuid": jm_vuid,
@@ -1638,6 +1720,19 @@ class RPCClient:
         return self._request("bdev_nvme_set_multipath_policy", params,
                              request_timeout=request_timeout)
 
+    def bdev_jm_get_status(self, jm_vuid):
+        """Journal status for one JM group.
+
+        Returns (on res > 0) a dict with jm_vuid, generation_id,
+        total_records, total_bytes, uncompressed_bytes, compression_threshold
+        and compression_status -- total_records is the record count the
+        compression-backlog alert keys on.
+        """
+        params = {
+            "jm_vuid": jm_vuid,
+        }
+        return self._request("bdev_jm_get_status", params)
+
     def jc_get_jm_status(self, jm_vuid):
         """
         Returns :-
@@ -1682,6 +1777,31 @@ class RPCClient:
             "qos_weights": qos_weights,
         }
         return self._request("bdev_distrib_set_qos_weights", params)
+
+    def jm_get_events(self):
+        """Fetch every event the JM currently holds.
+
+        Each entry looks like::
+
+            {"timestamp": "2026-08-19T18:59:59.010000Z",
+             "event_type": "jm_compression", "jm_vuid": "1",
+             "status": "compression_started", "error_code": 0}
+
+        ``status`` is one of compression_started / compression_finished /
+        compression_failed, and a non-zero ``error_code`` means failure.
+
+        Returns the list ([] when the JM holds nothing), ``RPC_UNSUPPORTED``
+        when the target build has no such RPC, or None when the call failed.
+        The sentinel matters: without it, a cluster running an SPDK build from
+        before this RPC existed would log a JSON-RPC error every poll forever.
+        """
+        result, error = self._request2("jm_get_events")
+        if error:
+            if error.get("code") == RPC_METHOD_NOT_FOUND:
+                return RPC_UNSUPPORTED
+            logger.error(f"jm_get_events failed: {error}")
+            return None
+        return result or []
 
     def jc_compression_get_status(self, jm_vuid):
         """

@@ -70,17 +70,24 @@ def _node_paths(primary_node, lvstore):
     return paths
 
 
-def _flip(path, state, nqn, label):
-    """Set the ANA state of *nqn*'s listener on a single path (non-fatal)."""
+def _flip(path, state, nqn, label, ns_id=None):
+    """Set the ANA state of *nqn*'s listener on a single path (non-fatal).
+
+    ``ns_id`` confines the change to that namespace's ANA group. Without it the
+    whole subsystem moves, which is wrong when the subsystem carries other
+    namespaces that are not part of this cutover — they share the client's
+    controller, so their IO would follow this volume to the other cluster.
+    """
     try:
         path['rpc'].nvmf_subsystem_listener_set_ana_state(
-            nqn, path['ip'], path['port'], trtype=path['trtype'], ana=state)
-        logger.info(f"ANA {nqn} {label} {path['ip']}:{path['port']} → {state}")
+            nqn, path['ip'], path['port'], trtype=path['trtype'], ana=state,
+            anagrpid=ns_id)
+        logger.info(f"ANA {nqn} ns {ns_id} {label} {path['ip']}:{path['port']} → {state}")
     except Exception as e:
         logger.error(f"ANA flip {label} failed (non-fatal): {e}")
 
 
-def fence_source_paths(src_node, src_lvstore, nqn):
+def fence_source_paths(src_node, src_lvstore, nqn, ns_id=None):
     """Make EVERY source path inaccessible BEFORE the freeze/final transfer.
 
     Once the final delta is taken, the source must not receive IO by any means:
@@ -98,10 +105,10 @@ def fence_source_paths(src_node, src_lvstore, nqn):
             StorageNode.STATUS_ONLINE, StorageNode.STATUS_SUSPENDED, StorageNode.STATUS_DOWN]:
         paths = _node_paths(src_node, src_lvstore)
         for src in paths[1:] + paths[:1]:      # peers first, primary last
-            _flip(src, "inaccessible", nqn, f"SRC-{src['node_id'][:8]}")
+            _flip(src, "inaccessible", nqn, f"SRC-{src['node_id'][:8]}", ns_id)
 
 
-def restore_source_paths(src_node, src_lvstore, nqn):
+def restore_source_paths(src_node, src_lvstore, nqn, ns_id=None):
     """Failure path: re-enable the fenced source (primary optimized, peers
     non_optimized) — the cutover did not happen, the source remains the
     authoritative copy and must serve again."""
@@ -110,16 +117,45 @@ def restore_source_paths(src_node, src_lvstore, nqn):
     paths = _node_paths(src_node, src_lvstore)
     for i, src in enumerate(paths):
         _flip(src, "optimized" if i == 0 else "non_optimized", nqn,
-              f"SRC-{src['node_id'][:8]}(restore)")
+              f"SRC-{src['node_id'][:8]}(restore)", ns_id)
 
 
-def enable_target_paths(tgt_node, tgt_lvstore, nqn):
+def enable_target_paths(tgt_node, tgt_lvstore, nqn, ns_id=None):
     """Bring the target paths live AFTER the final transfer: primary optimized,
     peers non_optimized. Queued client IO drains here."""
     tgt_paths = _node_paths(tgt_node, tgt_lvstore)
     for i, tgt in enumerate(tgt_paths):
         _flip(tgt, "optimized" if i == 0 else "non_optimized", nqn,
-              f"TGT-{tgt['node_id'][:8]}")
+              f"TGT-{tgt['node_id'][:8]}", ns_id)
+
+
+def _transfer_hub_live(tgt_node):
+    """True when the target's transfer hublvol exists in SPDK, not just in the DB.
+
+    Both halves matter: the bdev carries the data and the subsystem is what the
+    source connects to, and a restart removes both while leaving the DB record
+    behind.
+    """
+    hub = tgt_node.transfer_hublvol
+    if hub is None or not hub.bdev_name:
+        return False
+    try:
+        rpc_client = tgt_node.rpc_client()
+        if not rpc_client.get_bdevs(hub.bdev_name):
+            logger.info("Transfer hublvol bdev %s missing on %s (restart wipes SPDK "
+                        "state); recreating", hub.bdev_name, tgt_node.get_id())
+            return False
+        if not rpc_client.subsystem_get(hub.nqn):
+            logger.info("Transfer hublvol subsystem %s missing on %s; recreating",
+                        hub.nqn, tgt_node.get_id())
+            return False
+    except Exception as e:
+        # Unreachable target: let the caller's attach fail and retry rather than
+        # recreating blindly against a node we cannot talk to.
+        logger.warning("Could not verify the transfer hublvol on %s: %s",
+                       tgt_node.get_id(), e)
+        return True
+    return True
 
 
 def ensure_hub_attached(src_rpc, tgt_node):
@@ -128,8 +164,24 @@ def ensure_hub_attached(src_rpc, tgt_node):
     The hub lvol is the gateway the source pushes the final delta through.
     Returns (hub_bdev_name, remote_bdev_name, error_string|None).
     """
-    if tgt_node.transfer_hublvol is None or not tgt_node.transfer_hublvol.bdev_name:
-        tgt_node.create_transfer_hublvol()
+    # Trusting the DB record here is what broke every fail-back into a restarted
+    # node (215 attach failures, labs 2026-08-17/18): a restart wipes SPDK's
+    # bdevs and subsystems while ``transfer_hublvol`` survives in the DB, so this
+    # branch was skipped and the source attached to a subsystem that no longer
+    # existed -- bdev_nvme_attach_controller returned -5 (EIO) and afterwards
+    # "Controller ... does not exist". The HA hublvol is recreated by the restart
+    # flow (recreate_hublvol); the transfer hublvol is not recreated anywhere, so
+    # verify it on the TARGET and heal it here. create_transfer_hublvol is
+    # idempotent: it reuses the record, recreates the bdev only when SPDK lacks
+    # it, and re-exposes the subsystem.
+    if not _transfer_hub_live(tgt_node):
+        try:
+            tgt_node.create_transfer_hublvol()
+        except Exception as e:
+            return None, None, f"Failed to (re)create the transfer hublvol on {tgt_node.get_id()}: {e}"
+        if not _transfer_hub_live(tgt_node):
+            return None, None, (f"Transfer hublvol still absent on {tgt_node.get_id()} "
+                                f"after recreation")
 
     hub = tgt_node.transfer_hublvol
     # Already attached (prior iteration or crash recovery).
@@ -194,7 +246,7 @@ def run_cutover(src_node, tgt_node, lvol, tgt_lvol_composite, tgt_map_id,
 
     # Fence the source FIRST: from here on the source cannot take IO by any
     # means; the delta the freeze copies is definitively final.
-    fence_source_paths(src_node, src_node.lvstore, lvol.nqn)
+    fence_source_paths(src_node, src_node.lvstore, lvol.nqn, lvol.ns_id)
 
     logger.info(
         f"[IO-FREEZE] bdev_lvol_transfer_final_step starting: lvol={lvol.uuid} "
@@ -207,7 +259,7 @@ def run_cutover(src_node, tgt_node, lvol, tgt_lvol_composite, tgt_map_id,
         # The freeze failed with the source fenced: restore the source paths so
         # the client resumes there (nothing moved; source is still authoritative)
         # rather than leaving the volume dark until a retry succeeds.
-        restore_source_paths(src_node, src_node.lvstore, lvol.nqn)
+        restore_source_paths(src_node, src_node.lvstore, lvol.nqn, lvol.ns_id)
         return False, "bdev_lvol_transfer_final_step failed"
     logger.info(f"[IO-RESUME] final step Done: lvol={lvol.uuid} io now live on target")
 
@@ -220,5 +272,5 @@ def run_cutover(src_node, tgt_node, lvol, tgt_lvol_composite, tgt_map_id,
                 f"add_clone on peer {peer.get_id()[:8]} failed for final lvol (non-fatal)")
 
     # Light the target: queued client IO drains here.
-    enable_target_paths(tgt_node, tgt_node.lvstore, lvol.nqn)
+    enable_target_paths(tgt_node, tgt_node.lvstore, lvol.nqn, lvol.ns_id)
     return True, None

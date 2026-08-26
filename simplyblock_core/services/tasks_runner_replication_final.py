@@ -52,6 +52,51 @@ def _finalize(task, ok, err):
         task.status = JobSchedule.STATUS_DONE
         task.function_params["end_time"] = int(time.time())
         task.write_to_db(db.kv_store)
+
+        # The hand-off is complete: the target serves the data from here on,
+        # so the SOURCE must stop replicating. Nothing else clears its cadence
+        # config, and a retired source otherwise keeps taking internal
+        # snapshots and shipping them to the very target it handed off to
+        # (observed 2026-08-21: replication_final done "cutover done" while
+        # the source volumes kept replicating). In-flight transfers drain
+        # naturally; this stops NEW cadence snapshots at the gate the monitor
+        # reads (do_replicate / replication_interval_min).
+        try:
+            src_lvol = db.get_lvol_by_id(task.function_params.get("lvol_id"))
+            if src_lvol.do_replicate:
+                src_lvol.do_replicate = False
+                src_lvol.replication_interval_min = 0
+                src_lvol.replication_policy_id = ""
+                src_lvol.write_to_db()
+                logger.info(f"Cutover done: stopped replication on source "
+                            f"volume {src_lvol.get_id()}")
+        except KeyError:
+            pass          # source already gone (e.g. deleted out of band)
+        except Exception as e:
+            logger.error(f"Could not stop replication on the source after "
+                         f"cutover: {e}")
+
+        # Optional migration semantics: the source volume has served its
+        # purpose once the client runs on the target, so `replication-commit
+        # --delete-source` retires it here — strictly AFTER the cutover state
+        # is durable, so a crash in between leaves a completed cutover with
+        # the source still present (retryable by hand), never a deleted
+        # source with an uncommitted cutover. The relationship record is what
+        # later look-ups (target-by-source, active side) resolve through, and
+        # it survives the volume's deletion.
+        if task.function_params.get("delete_source"):
+            src_lvol_id = task.function_params.get("lvol_id")
+            try:
+                from simplyblock_core.controllers import lvol_controller
+                src_lvol = db.get_lvol_by_id(src_lvol_id)
+                logger.info(f"Cutover committed with --delete-source: deleting "
+                            f"source volume {src_lvol_id}")
+                lvol_controller.delete_lvol(src_lvol)
+            except Exception as e:
+                # The cutover itself succeeded; a failed source delete is
+                # reported loudly but does not un-succeed the task.
+                logger.error(f"Source volume {src_lvol_id} could not be "
+                             f"deleted after the cutover: {e}")
         return True
 
     task.function_result = err or "cutover failed, retrying"
@@ -183,12 +228,16 @@ def _prepare_cutover(task, lvol, src_node, tgt_node):
     guaranteed to be the freshly replicated shrink snapshot."""
     from simplyblock_core.controllers import lvol_controller
 
-    source_cluster = db.get_cluster_by_id(src_node.cluster_id)
-    target_cluster = db.get_cluster_by_id(tgt_node.cluster_id)
+    # Same resolution as fail-over: the destination is the cluster the volume
+    # replicates INTO, and the pool comes from its policy's target. The source
+    # cluster's outgoing config is only a fallback -- on a fail-back cutover it
+    # describes the wrong direction, or is not set at all for a policy-driven
+    # volume.
+    target_cluster, target_pool_uuid = lvol_controller.resolve_replication_destination(
+        db, lvol, tgt_node, src_node)
 
     new_lvol, snapshot, error = lvol_controller._clone_from_last_replicated(
-        db, lvol.get_id(), lvol, tgt_node,
-        source_cluster.snapshot_replication_target_pool, src_node.cluster_id)
+        db, lvol.get_id(), lvol, tgt_node, target_pool_uuid, src_node.cluster_id)
     if error:
         return f"cutover clone failed: {error}"
 
@@ -208,7 +257,7 @@ def _prepare_cutover(task, lvol, src_node, tgt_node):
     rep.create_dt = str(datetime.now())
     rep.source_lvol = lvol
     rep.target_lvol = new_lvol
-    rep.source_cluster_id = source_cluster.get_id()
+    rep.source_cluster_id = src_node.cluster_id
     rep.target_cluster_id = target_cluster.get_id()
     rep.mode = lvol.replication_mode
     rep.state = LVolReplication.STATE_CUTOVER_PENDING

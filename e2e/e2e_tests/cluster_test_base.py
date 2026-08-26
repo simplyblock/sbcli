@@ -267,6 +267,9 @@ class TestClusterBase:
                 sleep_n_sec(2)
             self.disconnect_lvols()
             sleep_n_sec(2)
+        # Order: clones → snapshots → parent lvols → pools
+        self.sbcli_utils.delete_all_clones()
+        sleep_n_sec(2)
         if self.k8s_test:
             self.sbcli_utils.delete_all_snapshots()
         elif self.mgmt_nodes:
@@ -1807,11 +1810,14 @@ class TestClusterBase:
                                 sleep_n_sec(2)
                         self.disconnect_lvols()
                         sleep_n_sec(2)
-                self.sbcli_utils.delete_all_lvols()
+                # Order: clones → snapshots → parent lvols → pools
+                self.sbcli_utils.delete_all_clones()
                 sleep_n_sec(2)
                 if not self.k8s_test:
                     self.ssh_obj.delete_all_snapshots(node=self.mgmt_nodes[0])
                     sleep_n_sec(2)
+                self.sbcli_utils.delete_all_lvols()
+                sleep_n_sec(2)
                 self.sbcli_utils.delete_all_storage_pools()
                 sleep_n_sec(2)
                 latest_util = self.get_latest_cluster_util()

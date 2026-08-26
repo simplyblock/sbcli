@@ -154,6 +154,7 @@ class _MassCreateDeleteMixin:
         self._fio_lvol_threads = []
         self._fio_clone_threads = []
         self._soft_failures = []      # accumulate phase-level validation warnings
+        self._terminal_warnings = []  # terminal errors (object limit, max subsys) that caused early phase exit
         self._metrics = {
             "lvols_created": 0,
             "snapshots_created": 0,
@@ -265,10 +266,26 @@ class _MassCreateDeleteMixin:
         RuntimeError to stop the test immediately — proceeding with too
         few resources wastes compute and masks real failures.
 
+        However, if terminal warnings have been recorded (object limit,
+        max subsystems, etc.) the hard minimum is downgraded to a soft
+        warning — the test continues with whatever was created and
+        reports the shortfall at the end.
+
         If actual < 90% of expected (but above hard min), logs a warning
         and appends to _soft_failures for end-of-test reporting.
         """
         if expected > 0 and actual < expected * hard_min_pct:
+            if self._terminal_warnings:
+                # Terminal error already recorded — don't abort, just warn
+                msg = (
+                    f"[{label}] only {actual}/{expected} created "
+                    f"({actual / expected:.1%}) — below "
+                    f"{hard_min_pct:.0%} threshold due to terminal error, "
+                    f"continuing with available resources"
+                )
+                self.logger.warning(msg)
+                self._soft_failures.append(msg)
+                return
             raise RuntimeError(
                 f"[{label}] only {actual}/{expected} created "
                 f"({actual / expected:.1%}) — below "
@@ -539,7 +556,7 @@ class _MassCreateDeleteMixin:
                 f"after {round_num} round(s)"
             )
 
-        return total_ok, len(remaining)
+        return total_ok, len(remaining), terminal_hit
 
     # ── 8-phase orchestrator ───────────────────────────────────────────────
 
@@ -1383,6 +1400,12 @@ class _MassCreateDeleteMixin:
                     f"SUM: {sum(times):.1f}s"
                 )
 
+        if self._terminal_warnings:
+            self.logger.info("")
+            self.logger.info("  --- Terminal warnings ---")
+            for tw in self._terminal_warnings:
+                self.logger.warning(f"  WARNING: {tw}")
+
         total_dur = sum(self._phase_durations.values())
         self.logger.info("")
         self.logger.info(f"  Total test duration: {total_dur:.1f}s")
@@ -1390,10 +1413,11 @@ class _MassCreateDeleteMixin:
 
     def _write_rapid_restart_json(self):
         total_dur = sum(self._phase_durations.values())
+        status = "passed_with_warnings" if self._terminal_warnings else "passed"
         report = {
             "test_class": self.__class__.__name__,
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "status": "passed",
+            "status": status,
             "config": {
                 "num_subsystems": self.NUM_SUBSYSTEMS,
                 "ns_per_subsystem": self.NS_PER_SUBSYSTEM,
@@ -1417,6 +1441,8 @@ class _MassCreateDeleteMixin:
                 "total_duration_sec": round(total_dur, 2),
             },
         }
+        if self._terminal_warnings:
+            report["terminal_warnings"] = list(self._terminal_warnings)
         out_dir = Path("logs")
         out_dir.mkdir(parents=True, exist_ok=True)
         out_path = out_dir / "mass_create_rapid_restart_timing.json"
@@ -1451,6 +1477,10 @@ class _MassCreateDeleteMixin:
             self.logger.info("  --- Retry rounds ---")
             for phase, rounds in self._retry_round_counts.items():
                 self.logger.info(f"    {phase:25s}: {rounds} round(s)")
+        if self._terminal_warnings:
+            self.logger.info("  --- Terminal warnings ---")
+            for tw in self._terminal_warnings:
+                self.logger.warning(f"  WARNING: {tw}")
         total_dur = sum(self._phase_durations.values())
         self.logger.info(f"  Total duration:  {total_dur:.1f}s")
         self.logger.info("=" * 65)
@@ -1461,10 +1491,11 @@ class _MassCreateDeleteMixin:
             phases.append({"name": name, "duration_sec": dur, "status": "ok"})
 
         total_dur = sum(self._phase_durations.values())
+        status = "passed_with_warnings" if self._terminal_warnings else "passed"
         report = {
             "test_class": self.__class__.__name__,
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "status": "passed",
+            "status": status,
             "config": {
                 "num_subsystems": self.NUM_SUBSYSTEMS,
                 "ns_per_subsystem": self.NS_PER_SUBSYSTEM,
@@ -1480,6 +1511,8 @@ class _MassCreateDeleteMixin:
         if self.PERSISTENT_RETRY:
             report["persistent_retry"] = True
             report["retry_rounds"] = dict(self._retry_round_counts)
+        if self._terminal_warnings:
+            report["terminal_warnings"] = list(self._terminal_warnings)
 
         out_dir = Path("logs")
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -1842,9 +1875,14 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
         ]
         items = [{"name": n, "idx": i} for i, n in enumerate(names)]
         if self.PERSISTENT_RETRY:
-            ok, fail = self._batch_exec_persistent(
+            ok, fail, terminal = self._batch_exec_persistent(
                 items, self._fire_create_standalone, "create_lvols",
             )
+            if terminal:
+                self._terminal_warnings.append(
+                    f"[Phase 1] Terminal error during standalone lvol creation: "
+                    f"{ok}/{len(items)} created, {fail} failed"
+                )
         else:
             ok, fail = self._batch_exec(
                 items, self._fire_create_standalone, "create_lvols",
@@ -1930,9 +1968,14 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
         )
         parent_items = [{"name": n} for n in parent_names]
         if self.PERSISTENT_RETRY:
-            ok, fail = self._batch_exec_persistent(
+            ok, fail, terminal = self._batch_exec_persistent(
                 parent_items, self._create_parent, "create_parents",
             )
+            if terminal:
+                self._terminal_warnings.append(
+                    f"[Phase 1a] Terminal error during parent lvol creation: "
+                    f"{ok}/{len(parent_items)} created, {fail} failed"
+                )
         else:
             ok, fail = self._batch_exec(
                 parent_items, self._create_parent, "create_parents",
@@ -1988,9 +2031,14 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
             f"across {len(parent_names)} parents"
         )
         if self.PERSISTENT_RETRY:
-            ok, fail = self._batch_exec_persistent(
+            ok, fail, terminal = self._batch_exec_persistent(
                 child_tasks, self._fire_create_child, "create_children",
             )
+            if terminal:
+                self._terminal_warnings.append(
+                    f"[Phase 1b] Terminal error during child lvol creation: "
+                    f"{ok}/{len(child_tasks)} created, {fail} failed"
+                )
         else:
             ok, fail = self._batch_exec(
                 child_tasks, self._fire_create_child, "create_children",
@@ -2481,11 +2529,16 @@ class _MassCreateDeleteDocker(_MassCreateDeleteMixin, TestLvolHACluster):
                 f"[Phase 3] Persistent retry mode: will retry until "
                 f"all {expected_snaps} snapshots created or terminal error"
             )
-            ok, fail = self._batch_exec_persistent(
+            ok, fail, terminal = self._batch_exec_persistent(
                 snap_items, self._fire_create_snapshot, "create_snapshots",
                 batch_size=self.SNAPSHOT_BATCH_SIZE,
                 phase_timeout=self.SNAPSHOT_PHASE_TIMEOUT,
             )
+            if terminal:
+                self._terminal_warnings.append(
+                    f"[Phase 3] Terminal error during snapshot creation: "
+                    f"{ok}/{len(snap_items)} created, {fail} failed"
+                )
         else:
             # Scale max_failures to item count — with 50 snaps/lvol, the
             # default MAX_FAILURES=500 is exhausted by just 10 bad lvols.
@@ -3905,11 +3958,16 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
                 f"[Phase 3] Persistent retry mode: will retry until "
                 f"all {expected_snaps} snapshots created or terminal error"
             )
-            ok, fail = self._batch_exec_persistent(
+            ok, fail, terminal = self._batch_exec_persistent(
                 snap_items, self._create_single_vs, "create_snapshots",
                 batch_size=self.SNAPSHOT_BATCH_SIZE,
                 phase_timeout=self.SNAPSHOT_PHASE_TIMEOUT,
             )
+            if terminal:
+                self._terminal_warnings.append(
+                    f"[Phase 3] Terminal error during snapshot creation: "
+                    f"{ok}/{len(snap_items)} created, {fail} failed"
+                )
         else:
             snap_max_failures = max(self.MAX_FAILURES, expected_snaps // 10)
             ok, fail = self._batch_exec(
@@ -5083,12 +5141,12 @@ class MassCreateDeleteRestart_300x10_10Snap_K8s(_MassCreateDeleteK8s):
 
 
 class MassCreateRapidRestart_6k_3Snap_Docker(_MassCreateDeleteDocker):
-    """6000 entity cap, 1:3 ratio (3 snaps/lvol → 1500 lvols + 4500 snaps),
+    """12000 entity cap, 1:3 ratio (3 snaps/lvol → 3000 lvols + 9000 snaps),
     30 rapid container stop/restart cycles per phase."""
     PERSISTENT_RETRY = True
-    MAX_ENTITY_COUNT = 6000
-    NUM_SUBSYSTEMS = 30
-    NS_PER_SUBSYSTEM = 50
+    MAX_ENTITY_COUNT = 12000
+    NUM_SUBSYSTEMS = 40
+    NS_PER_SUBSYSTEM = 75
     SNAPSHOTS_PER_LVOL = 3
     RAPID_RESTART_ITERATIONS = 30
     RAPID_RESTART_COOLDOWN = 60
@@ -5109,12 +5167,12 @@ class MassCreateRapidRestart_6k_3Snap_Docker(_MassCreateDeleteDocker):
 
 
 class MassCreateRapidRestart_6k_3Snap_K8s(_MassCreateDeleteK8s):
-    """6000 entity cap, 1:3 ratio (3 snaps/lvol → 1500 PVCs + 4500 snaps),
+    """12000 entity cap, 1:3 ratio (3 snaps/lvol → 3000 PVCs + 9000 snaps),
     30 rapid pod delete/restart cycles per phase."""
     PERSISTENT_RETRY = True
-    MAX_ENTITY_COUNT = 6000
-    NUM_SUBSYSTEMS = 30
-    NS_PER_SUBSYSTEM = 50
+    MAX_ENTITY_COUNT = 12000
+    NUM_SUBSYSTEMS = 40
+    NS_PER_SUBSYSTEM = 75
     SNAPSHOTS_PER_LVOL = 3
     RAPID_RESTART_ITERATIONS = 30
     RAPID_RESTART_COOLDOWN = 60

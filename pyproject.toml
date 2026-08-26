@@ -50,6 +50,7 @@ ignore = [
     "PLW1508",
     "PLW1510",
     "RET501",
+    "RUF007",  # Remove when dropping Python 3.9 
     "RUF010",
     "RUF012",
     "RUF013",

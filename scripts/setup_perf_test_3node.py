@@ -11,7 +11,9 @@ import select
 # --- INPUT PARAMETERS ---
 # 3 x i3en.12xlarge storage nodes (48 vCPU / 2 NUMA sockets each), single mgmt,
 # NO client. Branch: main. FTT 1+1 (ndcs=1, npcs=1). simplyblock deployed on
-# NUMA socket 0 only, using 50% of that socket's cores (--cores-percentage is
+# NUMA socket 0 only. The SPDK core budget is a cluster setting now
+# (cluster create --vcpu-count, an absolute count); this script leaves it
+# unset so the default heuristic applies (--cores-percentage is
 # per-socket -> 12 of 24 socket-0 cores to SPDK; the rest of socket 0 plus
 # socket 1's 24 cores left for the OS/rest).
 AMI_ID = "ami-0dfc569a8686b9320"  # Rocky 9 us-east-1
@@ -329,7 +331,7 @@ def main():
     # --- Phase 2a: Create cluster (FTT 1+1) ---
     print("Phase 2a: Creating cluster on management node...")
     ssh_exec(mgmt_ip, [
-        "sudo /usr/local/bin/sbctl -d cluster create --enable-node-affinity"
+        f"sudo /usr/local/bin/sbctl -d cluster create --enable-node-affinity --max-subsys {MAX_LVOL}"
         f" --data-chunks-per-stripe {NDCS} --parity-chunks-per-stripe {NPCS}"
     ], check=True)
     print("Phase 2a: DONE - cluster created.")
@@ -337,10 +339,9 @@ def main():
     # --- Phase 2b: Configure storage nodes (socket 0 only, 50% of its cores) ---
     print("Phase 2b: Configuring storage nodes...")
     configure_cmd = (
-        f"sudo /usr/local/bin/sbctl -d sn configure --max-subsys {MAX_LVOL}"
+        f"sudo /usr/local/bin/sbctl -d sn configure"
         f" --sockets-to-use {SOCKETS_TO_USE}"
         f" --nodes-per-socket {NODES_PER_SOCKET}"
-        f" --cores-percentage {CORES_PERCENTAGE}"
     )
     with ThreadPoolExecutor(max_workers=len(sn_ips)) as executor:
         tasks = [executor.submit(ssh_exec, ip, [configure_cmd], check=True) for ip in sn_ips]

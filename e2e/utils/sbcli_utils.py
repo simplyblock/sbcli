@@ -46,8 +46,12 @@ class SbcliUtils:
                     data = resp.json()
                     return data
                 else:
-                    self.logger.error(f"request failed. status_code: {resp.status_code}, text: {resp.text}")
-                    resp.raise_for_status()
+                    body_text = resp.text or ""
+                    self.logger.error(f"request failed. status_code: {resp.status_code}, text: {body_text}")
+                    raise requests.exceptions.HTTPError(
+                        f"{resp.status_code} {resp.reason}: {body_text}",
+                        response=resp,
+                    )
             except requests.exceptions.HTTPError as e:
                 self.logger.debug(f"API call {api_url} failed with error:{e}")
                 if expected_error_code:
@@ -93,8 +97,12 @@ class SbcliUtils:
                     data = resp.json()
                     return data
                 else:
-                    self.logger.error(f"request failed. status_code: {resp.status_code}, text: {resp.text}")
-                    resp.raise_for_status()
+                    body_text = resp.text or ""
+                    self.logger.error(f"request failed. status_code: {resp.status_code}, text: {body_text}")
+                    raise requests.exceptions.HTTPError(
+                        f"{resp.status_code} {resp.reason}: {body_text}",
+                        response=resp,
+                    )
             except requests.exceptions.HTTPError as e:
                 self.logger.debug(f"API call {api_url} failed with error:{e}")
                 if expected_error_code:
@@ -142,8 +150,12 @@ class SbcliUtils:
                     self.logger.info(f"DELETE {api_url} returned 404 — resource already deleted, treating as success")
                     return {"status": True, "results": [], "error": None}
                 else:
-                    self.logger.error(f"request failed. status_code: {resp.status_code}, text: {resp.text}")
-                    resp.raise_for_status()
+                    body_text = resp.text or ""
+                    self.logger.error(f"request failed. status_code: {resp.status_code}, text: {body_text}")
+                    raise requests.exceptions.HTTPError(
+                        f"{resp.status_code} {resp.reason}: {body_text}",
+                        response=resp,
+                    )
 
             except requests.exceptions.HTTPError as e:
                 self.logger.debug(f"API call {api_url} failed with error:{e}")
@@ -189,8 +201,12 @@ class SbcliUtils:
                     data = resp.json()
                     return data
                 else:
-                    self.logger.error(f"request failed. status_code: {resp.status_code}, text: {resp.text}")
-                    resp.raise_for_status()
+                    body_text = resp.text or ""
+                    self.logger.error(f"request failed. status_code: {resp.status_code}, text: {body_text}")
+                    raise requests.exceptions.HTTPError(
+                        f"{resp.status_code} {resp.reason}: {body_text}",
+                        response=resp,
+                    )
             except requests.exceptions.HTTPError as e:
                 self.logger.debug(f"API call {api_url} failed with error:{e}")
                 if expected_error_code:

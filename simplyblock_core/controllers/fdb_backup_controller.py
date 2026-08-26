@@ -180,6 +180,10 @@ def add_backup_task(cluster_id):
         logger.error(f"Failed to get cluster {cluster_id}: {e}")
         return False
 
+    if cluster.mode == "kubernetes":
+        logger.error("FDB Backups are handled by the operator")
+        return False
+
     tasks = get_backup_tasks(cluster_id)
     for task in tasks:
         if task.status != JobSchedule.STATUS_DONE:
