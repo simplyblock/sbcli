@@ -3594,30 +3594,40 @@ def _evict_stale_namespace(new_lvol, target_node):
     retry: 2026-08-24, 5/5 fail-back cutovers, 40x "Failed to add bdev to
     subsystem". Evict a namespace occupying the clone's nsid unless it is
     already the clone's own bdev (idempotent re-run).
+
+    The eviction must cover all HA peer nodes (secondary, tertiary) as well as
+    the primary. add_lvol_on_node registers the new namespace on every peer, so
+    any peer that still holds the old namespace at nsid also fails with -32602
+    and blocks the entire cutover.
     """
-    try:
-        rpc = target_node.rpc_client()
-        subsystems = rpc.subsystem_get(new_lvol.nqn)
-        if not subsystems:
-            return
-        # subsystem_get returns a list of subsystem dicts; take the first entry.
-        subsystem = subsystems[0] if isinstance(subsystems, list) else subsystems
-        for ns in (subsystem.get("namespaces") or []):
-            if ns.get("nsid") != new_lvol.ns_id:
+    peer_ids = [target_node.secondary_node_id, target_node.tertiary_node_id]
+    nodes_to_evict = [target_node] + [
+        db_controller.get_storage_node_by_id(pid)
+        for pid in peer_ids if pid
+    ]
+    for node in nodes_to_evict:
+        try:
+            rpc = node.rpc_client()
+            subsystems = rpc.subsystem_get(new_lvol.nqn)
+            if not subsystems:
                 continue
-            if ns.get("bdev_name") == new_lvol.top_bdev:
-                return                         # already ours (re-run)
-            logger.info(
-                f"Fail-back cutover: evicting stale namespace nsid={ns.get('nsid')} "
-                f"(bdev {ns.get('bdev_name')}) from {new_lvol.nqn} on "
-                f"{target_node.get_id()} -- superseded by the failed-over data")
-            rpc.nvmf_subsystem_remove_ns(new_lvol.nqn, ns.get("nsid"))
-            return
-    except Exception as e:
-        # Best effort: if the subsystem is not there, add_lvol_on_node creates
-        # it; if the eviction genuinely failed, add_ns will say so loudly.
-        logger.warning(f"Stale-namespace check on {target_node.get_id()} for "
-                       f"{new_lvol.nqn} raised: {e}")
+            subsystem = subsystems[0] if isinstance(subsystems, list) else subsystems
+            for ns in (subsystem.get("namespaces") or []):
+                if ns.get("nsid") != new_lvol.ns_id:
+                    continue
+                if ns.get("bdev_name") == new_lvol.top_bdev:
+                    break                      # already ours on this node (re-run)
+                logger.info(
+                    f"Fail-back cutover: evicting stale namespace nsid={ns.get('nsid')} "
+                    f"(bdev {ns.get('bdev_name')}) from {new_lvol.nqn} on "
+                    f"{node.get_id()} -- superseded by the failed-over data")
+                rpc.nvmf_subsystem_remove_ns(new_lvol.nqn, ns.get("nsid"))
+                break
+        except Exception as e:
+            # Best effort: if the subsystem is not there, add_lvol_on_node creates
+            # it; if the eviction genuinely failed, add_ns will say so loudly.
+            logger.warning(f"Stale-namespace check on {node.get_id()} for "
+                           f"{new_lvol.nqn} raised: {e}")
 
 
 def _clone_from_last_replicated(db_controller, lvol_id, lvol, target_node, pool_uuid,
