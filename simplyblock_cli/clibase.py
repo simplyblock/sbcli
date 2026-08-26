@@ -112,7 +112,7 @@ class CLIWrapperBase:
         # unable to honour a larger cluster setting.
         max_lvol = constants.MAX_SUBSYSTEMS_PER_NODE
         max_size = 0
-        number_of_devices = getattr(args, "number_of_devices") or 0
+        number_of_devices = args.number_of_devices or 0
         sockets_to_use = [0]
         if args.sockets_to_use:
             try:
