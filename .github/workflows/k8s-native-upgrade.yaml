@@ -1037,6 +1037,11 @@ jobs:
               echo "All storage nodes registered"
               break
             fi
+            if [ "$i" -eq 60 ]; then
+              echo "ERROR: Only $SN_COUNT/$EXPECTED_SNODES storage nodes registered after 10 min"
+              kubectl -n $NAMESPACE exec "$ADMIN_POD" -- sbcli-dev sn list 2>&1 || true
+              exit 1
+            fi
             sleep 10
           done
 
@@ -1049,6 +1054,11 @@ jobs:
             if [ "$ONLINE_COUNT" -ge "$EXPECTED_SNODES" ]; then
               echo "All storage nodes are online"
               break
+            fi
+            if [ "$i" -eq 60 ]; then
+              echo "ERROR: Only $ONLINE_COUNT/$EXPECTED_SNODES storage nodes online after 10 min"
+              kubectl -n $NAMESPACE exec "$ADMIN_POD" -- sbcli-dev sn list 2>&1 || true
+              exit 1
             fi
             sleep 10
           done
