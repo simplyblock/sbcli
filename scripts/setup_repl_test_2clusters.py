@@ -43,7 +43,7 @@ STORAGE_SG_ID = "sg-02e89a1372e9f39e9"
 # Overridable for the repl_soak.py one-liner: SBCLI_BRANCH selects the sbcli
 # checkout installed on every node (and the hotfix source), SPDK_IMAGE the
 # pinned ultra image, SIMPLYBLOCK_DOCKER_IMAGE the control-plane image.
-BRANCH = os.environ.get("SBCLI_BRANCH", "main")
+BRANCH = os.environ.get("SBCLI_BRANCH", "replication-features")
 
 SN_TYPE = "i3en.2xlarge"
 MGMT_TYPE = "m6i.2xlarge"
@@ -120,7 +120,7 @@ REPLICATION = {"source": "src", "target": "tgt", "timeout": 3600}
 # whose manifest was created 18:41:57, before this ultra build started.
 SPDK_IMAGE = os.environ.get(
     "SPDK_IMAGE",
-    "public.ecr.aws/simply-block/ultra@sha256:0d631068e3add220d9198f212cf78d1e732ad9f0f92061dbebc413a9a6550e3b")
+    "public.ecr.aws/simply-block/ultra@sha256:d929b4d7ececee0fa0e1ad5973f87fa4e4cf79f7079cdf454bfbb27e2df51cb6")
 
 SN_COUNT = sum(c["nodes"] for c in CLUSTERS)
 SBCTL = "sudo /usr/local/bin/sbctl"
