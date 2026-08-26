@@ -1,9 +1,26 @@
 # coding=utf-8
 """Unit tests for /api/v2/clusters/{id}/storage-nodes endpoints (storage_node_ops mocked)."""
 
+import pytest
+
+from simplyblock_core.models.storage_node import StorageNode
 from tests.unit.web.api.v2._factories import CLUSTER_ID, STORAGE_NODE_ID, TASK_ID
 
 BASE = f'/api/v2/clusters/{CLUSTER_ID}/storage-nodes'
+
+# Every status a StorageNode can actually be persisted with (BaseNodeObject's
+# STATUS_* constants, inherited). StorageNodeDTO.status is a Pydantic Literal
+# hand-listing the subset it accepts -- nothing keeps the two in sync, so a
+# core status added without updating the DTO passes silently until a node
+# actually reaches it, at which point every v2 storage-nodes list/get 500s
+# for as long as that node stays in it (caught live: STATUS_IN_REMOVAL and
+# STATUS_PENDING_REMOVAL existed and were actively set by node removal, but
+# were missing from the DTO's Literal, breaking /storage-nodes/ for the
+# entire removal window -- 2026-08-26).
+ALL_STORAGE_NODE_STATUSES = [
+    getattr(StorageNode, name) for name in dir(StorageNode)
+    if name.startswith('STATUS_') and isinstance(getattr(StorageNode, name), str)
+]
 
 
 class TestListStorageNodes:
@@ -90,6 +107,18 @@ class TestGetStorageNode:
         response = client.get(f'{BASE}/{STORAGE_NODE_ID}/')
 
         assert response.status_code == 404
+
+    @pytest.mark.parametrize('status', ALL_STORAGE_NODE_STATUSES)
+    def test_every_core_status_serializes(self, client, db, storage_node, status):
+        """StorageNodeDTO.status must accept every status the core model can
+        actually set -- a status missing from its Literal 500s the endpoint
+        for as long as any node holds it (see ALL_STORAGE_NODE_STATUSES)."""
+        storage_node.status = status
+
+        response = client.get(f'{BASE}/{STORAGE_NODE_ID}/')
+
+        assert response.status_code == 200
+        assert response.json()['status'] == status
 
 
 class TestDeleteStorageNode:
