@@ -173,8 +173,9 @@ def teardown(meta):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--cases", required=True,
-                    help="comma list or group name for test_async_replication.py (e.g. case6,case7 | all9 | features)")
+    ap.add_argument("--cases", required=True, nargs="+", metavar="CASE",
+                    help="cases or a group name: 'case6,case7', 'case6 case7', "
+                         "'case6, case7' and 'all9' all work")
     ap.add_argument("--branch", default="replication-features",
                     help="sbcli branch to deploy/hotfix/stage (default replication-features)")
     ap.add_argument("--spdk-image", default="", help="ultra image ref; default = digest pinned in the deployer")
@@ -185,6 +186,11 @@ def main():
     ap.add_argument("--no-hotfix", action="store_true", help="skip mounting the branch's python over the CP services")
     ap.add_argument("--teardown", choices=["never", "on-pass", "always"], default="never")
     args = ap.parse_args()
+    # Accept every shape a shell hands us: "a,b", "a, b" (the space makes the
+    # shell pass two argv entries) and "a b" all mean the same list.
+    args.cases = ",".join(c for tok in args.cases for c in tok.split(",") if c)
+    if not args.cases:
+        ap.error("--cases got no case names")
     for kv in args.env:
         if "=" not in kv:
             ap.error(f"--env expects KEY=VAL, got {kv!r}")
