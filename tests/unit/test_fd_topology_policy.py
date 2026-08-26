@@ -19,6 +19,7 @@ Policy under test (2026-08-04 design decision):
 """
 
 import unittest
+from typing import ClassVar
 from unittest.mock import MagicMock
 
 from simplyblock_core.controllers.cluster_expansion import planner
@@ -96,7 +97,7 @@ class TestInterleavedOrder(unittest.TestCase):
 
 class TestFdLayoutInvariant(unittest.TestCase):
 
-    FDS_2x2 = {"a1": 0, "b1": 1, "a2": 0, "b2": 1}
+    FDS_2x2: ClassVar[dict] = {"a1": 0, "b1": 1, "a2": 0, "b2": 1}
 
     def test_balanced_interleaved_ftt2_valid(self):
         topo = [["a1"], ["b1"], ["a2"], ["b2"]]

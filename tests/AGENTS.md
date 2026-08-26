@@ -11,6 +11,7 @@ tests/
 ├── conftest_proxy.py    # `import_proxy_module()` helper that neutralizes spdk_http_proxy_server's module-level run_server side-effect; used by both proxy unit + e2e tests.
 ├── unit/                # Pure-logic tests; single module under test, no model state, no flows.
 │   ├── conftest.py      # Stubs the native `fdb` module so unit tests run without libfdb_c / a live cluster.
+│   ├── models/          # Every `BaseModel` test: field defaults, secrets, chunked reads, serialization.
 │   └── web/             # Unit tests for simplyblock_web (settings, v2 auth).
 ├── integration/         # Flow/controller tests — ALL run against real FDB.
 │   ├── conftest.py      # `pytest_configure` provisions FDB (testcontainers) before collection; autouse per-test keyspace wipe.
@@ -168,7 +169,7 @@ tox run -e integration   # pytest_configure detects the env var and skips its ow
 **Targeted runs** use `{posargs}` passthrough:
 
 ```bash
-tox run -e unit -- tests/unit/test_secrets.py -v
+tox run -e unit -- tests/unit/models/test_secrets.py -v
 tox run -e integration -- tests/integration/migration/test_migration_flow.py -v
 ```
 
@@ -193,7 +194,7 @@ Canonical patterns:
 
 - `tests/unit/test_secret_redaction.py` — `repr`/`str`/`pprint`/log formatter masking.
 - `tests/unit/test_client_secret_logging.py` — log-then-unwrap pattern for RPC + SNode clients.
-- `tests/unit/test_basemodel_secrets.py` — FDB round-trip.
+- `tests/unit/models/test_secrets.py` — FDB round-trip.
 - `tests/unit/test_display_helpers.py` — `utils.dump_json` / `utils.print_table` masking + unwrap.
 
 ## Verification

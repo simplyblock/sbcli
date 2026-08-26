@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import json as _json
 import math
+from typing import ClassVar
 import os
 import random
 import string
@@ -3478,7 +3479,7 @@ class _MassCreateDeleteK8s(_MassCreateDeleteMixin, K8sNativeFailoverTest):
 
     # ── Overflow / capacity error verification ────────────────────────────
 
-    _CAPACITY_PATTERNS = [
+    _CAPACITY_PATTERNS: ClassVar[list] = [
         "max subsystems reached",
         "too many subsystems",
         "pool max size has reached",

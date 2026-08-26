@@ -3,12 +3,12 @@ import json
 import uuid
 from typing import List, TypedDict
 
-from simplyblock_core.models.base_model import BaseModel
+from simplyblock_core.models.base_model import BaseModel, default_factory
 
 
 class StatsObject(BaseModel):
 
-    capacity_dict: dict = {}
+    capacity_dict: dict = default_factory(dict)
     cluster_id: str = ""
     connected_clients: int = 0
     date: int = 0
@@ -123,7 +123,7 @@ class CpuStats(TypedDict, total=False):
 
 
 class NodeStatObject(StatsObject):
-    cpu_dict: CpuStats = {}
+    cpu_dict: CpuStats = default_factory(CpuStats)
 
 
 class ClusterStatObject(StatsObject):

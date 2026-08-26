@@ -18,6 +18,7 @@ firing at the wrong time rather than doing the wrong thing.
 """
 
 import unittest
+from typing import ClassVar
 from unittest.mock import MagicMock, patch
 
 from simplyblock_core.controllers import health_controller
@@ -55,10 +56,10 @@ class TestRepairsAllowed(unittest.TestCase):
 class TestHublvolPathRepairReachable(unittest.TestCase):
     """One path present, one missing: the coordinator must be asked to fix it."""
 
-    ONE_PATH = [{"ctrlrs": [
+    ONE_PATH: ClassVar[list] = [{"ctrlrs": [
         {"state": "enabled",
          "trid": {"traddr": "172.31.96.10"}}]}]
-    BOTH_PATHS = [{"ctrlrs": [
+    BOTH_PATHS: ClassVar[list] = [{"ctrlrs": [
         {"state": "enabled", "trid": {"traddr": "172.31.96.10"}},
         {"state": "enabled", "trid": {"traddr": "172.31.97.10"}}]}]
 

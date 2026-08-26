@@ -1,7 +1,7 @@
 # coding=utf-8
 from datetime import datetime
 
-from simplyblock_core.models.base_model import BaseModel
+from simplyblock_core.models.base_model import BaseModel, default_factory
 
 
 class EventObj(BaseModel):
@@ -22,7 +22,7 @@ class EventObj(BaseModel):
     message: str = ""
     meta_data: str = ""
     node_id: str = ""
-    object_dict: dict = {}
+    object_dict: dict = default_factory(dict)
     object_name: str = ""
     storage_id: int = -1
     vuid: int = -1
