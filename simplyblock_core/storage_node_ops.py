@@ -564,6 +564,61 @@ def _bounded_thread(target, args=(), name=None, sem=None):
     return threading.Thread(target=_run, args=args, name=name)
 
 
+#: One repair at a time per (node, controller). health_check_service fans
+#: repair_multipath_controller out over a ThreadPoolExecutor, so two workers
+#: could read the same missing={ip} and both attach it -- which is how the
+#: 2026-08-25 duplicate path was created. SPDK cannot catch that for us: its
+#: -EEXIST guard runs before the async probe and only compares the active
+#: path, so both attaches are admitted and the target issues two cntlids.
+_repair_locks_guard = threading.Lock()
+_repair_locks: dict = {}
+
+
+def _repair_lock(key):
+    with _repair_locks_guard:
+        lk = _repair_locks.get(key)
+        if lk is None:
+            lk = threading.Lock()
+            _repair_locks[key] = lk
+        return lk
+
+
+def _collect_attached_paths(ctrlr_list):
+    """Every enabled path as an (traddr, trsvcid) tuple, REPEATS PRESERVED.
+
+    _collect_attached_ips() returns a set, which is right for answering "what
+    is missing" but blind to the opposite fault: the same address attached
+    twice. On 2026-08-25 a node carried remote_jm_1e7ff71e with paths
+    (96.179, 97.9, 97.9) and the set comparison read 2-of-2, so the control
+    plane reported it healthy and never repaired it while the soak's path
+    verifier failed on it for 900s. Duplicate detection needs the list.
+    """
+    paths: list[tuple[str, str]] = []
+    if not ctrlr_list:
+        return paths
+    for entry in ctrlr_list:
+        for ct in entry.get("ctrlrs", []):
+            if ct.get("state") != "enabled":
+                continue
+            trid = ct.get("trid") or {}
+            ip = trid.get("traddr")
+            if ip:
+                paths.append((ip, str(trid.get("trsvcid") or "")))
+            for alt in ct.get("alternate_trids", []) or []:
+                alt_ip = (alt or {}).get("traddr")
+                if alt_ip:
+                    paths.append((alt_ip, str((alt or {}).get("trsvcid") or "")))
+    return paths
+
+
+def duplicate_attached_paths(ctrlr_list):
+    """Addresses attached more than once on one controller."""
+    seen: dict[str, int] = {}
+    for ip, _port in _collect_attached_paths(ctrlr_list):
+        seen[ip] = seen.get(ip, 0) + 1
+    return {ip for ip, n in seen.items() if n > 1}
+
+
 def _collect_attached_ips(ctrlr_list):
     """Aggregate the set of currently-attached traddrs across every ctrlr entry.
 
@@ -854,7 +909,64 @@ def repair_multipath_controller(name: str, device, node: StorageNode):
     else:
         return False
 
+    # Serialize per controller. A concurrent repair reading the same
+    # missing set is how a duplicate path gets created, and the loser of the
+    # race has nothing useful to add -- skip rather than queue behind it.
+    lock = _repair_lock(f"{node.get_id()}:{name}")
+    if not lock.acquire(blocking=False):
+        logger.debug("Repair of %s already in flight; skipping this cycle", name)
+        return True
+    try:
+        return _repair_multipath_controller_locked(
+            node, name, device, rpc_client, ret, expected_ips, tr_type)
+    finally:
+        lock.release()
+
+
+def _repair_multipath_controller_locked(node, name, device, rpc_client, ret,
+                                        expected_ips, tr_type):
+    # A duplicated address is a fault in its own right, and the set-based
+    # comparison below cannot see it: (96.179, 97.9, 97.9) reads as 2-of-2.
+    # Prune first, because the missing-path logic would otherwise report the
+    # controller complete and return while it still carries the surplus path.
+    duplicates = duplicate_attached_paths(ret)
+    if duplicates:
+        logger.error(
+            "Controller %s has duplicate path(s) %s -- pruning. Two "
+            "controllers on one address serve no purpose and give the bdev "
+            "two unordered qpairs to the same target.", name, duplicates)
+        for dup_ip in sorted(duplicates):
+            # Keep at least one other address alive: detaching by trid drops
+            # EVERY controller on that address, so pruning the only address
+            # would tear the bdev down instead of repairing it.
+            others = {ip for ip, _p in _collect_attached_paths(ret)} - {dup_ip}
+            if not others:
+                logger.warning(
+                    "Not pruning duplicate %s on %s: it is the only attached "
+                    "address, so a detach would remove the last path", dup_ip, name)
+                continue
+            try:
+                rpc_client.bdev_nvme_detach_controller(
+                    name, traddr=dup_ip, trsvcid=device.nvmf_port, trtype=tr_type)
+            except Exception as e:
+                logger.error("Failed to prune duplicate path %s on %s: %s",
+                             dup_ip, name, e)
+                continue
+        # Re-read: the detach removed every copy of each duplicated address,
+        # so those addresses are now missing and the loop below re-attaches
+        # each exactly once.
+        ret = rpc_client.bdev_nvme_controller_list(name) or []
+
     attached_ips = _collect_attached_ips(ret)
+    # An address with a live enabled path on this very controller is reachable,
+    # so any dial hold on it is stale evidence and must not delay the repair of
+    # a sibling path. This is the only kind of clear() the breaker accepts --
+    # observed traffic, not the peer's DB status.
+    for live_ip in attached_ips:
+        if dial_backoff.clear(live_ip):
+            logger.info(
+                "Cleared stale dial hold on %s: it has a live path on %s",
+                live_ip, name)
     missing_ips = expected_ips - attached_ips
     if not missing_ips:
         return True

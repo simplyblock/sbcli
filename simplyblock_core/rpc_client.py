@@ -458,8 +458,24 @@ class RPCClient:
         params = {"traddr": pci_addr, "ns_id": 1, "label": name}
         return self._request2("ultra21_alloc_ns_mount", params)
 
-    def bdev_nvme_detach_controller(self, name):
+    def bdev_nvme_detach_controller(self, name, traddr=None, trsvcid=None,
+                                    trtype="TCP", adrfam="ipv4"):
+        """Detach a controller, or -- with a trid -- only the paths on that
+        address.
+
+        Note the SPDK semantics before using this to prune: bdev_nvme_delete()
+        walks EVERY nvme_ctrlr under the bdev and removes each one whose
+        path matches, so a trid detach removes *all* controllers on that
+        address, not one of them. There is deliberately no way to single out
+        one of two identical trids -- the duplicate-path repair in
+        storage_node_ops therefore detaches the address and re-attaches it
+        once, rather than trying to drop a single copy.
+        """
         params = {"name": name}
+        if traddr:
+            params.update({"traddr": traddr, "trtype": trtype, "adrfam": adrfam})
+            if trsvcid:
+                params["trsvcid"] = str(trsvcid)
         return self._request2("bdev_nvme_detach_controller", params)
 
     def bdev_nvme_remove_trid(self, name, traddr, trsvcid, trtype="TCP"):
