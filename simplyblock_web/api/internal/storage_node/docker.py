@@ -718,6 +718,7 @@ class PersistNodeConfigParams(BaseModel):
     l_cores: Optional[str] = None
     distribution: Optional[dict] = None
     core_to_index: Optional[dict] = None
+    number_of_distribs: Optional[int] = Field(None, ge=0)
 
 
 @api.post('/persist_node_config', responses={
@@ -755,6 +756,8 @@ def persist_node_config(body: PersistNodeConfigParams):
             node_config["distribution"] = body.distribution
         if body.core_to_index is not None:
             node_config["core_to_index"] = body.core_to_index
+        if body.number_of_distribs is not None:
+            node_config["number_of_distribs"] = body.number_of_distribs
         matched = True
         break
 

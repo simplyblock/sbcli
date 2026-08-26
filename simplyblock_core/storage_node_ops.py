@@ -2713,12 +2713,28 @@ def apply_cluster_vcpu_count(snode_api, node_info, nodes, vcpu_count):
             entry["distribution"] = _resolve_core_distribution(
                 replacement["distribution"], replacement["core_to_index"])
             entry["core_to_index"] = replacement["core_to_index"]
+
+            # number_of_distribs is sized off distrib_cpu_cores at configure
+            # time (generate_configs), before the host belongs to any cluster
+            # -- so it reflects the host's full core count, not the budget
+            # vcpu_count just clamped distrib_cpu_cores down to above. Rederive
+            # it the same way regenerate_config does, or add_node persists a
+            # distrib count sized for the pre-resize layout.
+            number_of_distribs = 2
+            number_of_distribs_cores = len(entry["distribution"]["distrib_cpu_cores"])
+            if 12 >= number_of_distribs_cores > 2:
+                number_of_distribs = number_of_distribs_cores
+            elif number_of_distribs_cores > 12:
+                number_of_distribs = 12
+            entry["number_of_distribs"] = number_of_distribs
+
             ok, err = snode_api.persist_node_config(
                 max_lvol=None, huge_page_memory=None, numa_node=numa_socket,
                 ssd_list=entry.get("ssd_pcis"),
                 cpu_mask=entry["cpu_mask"], isolated=entry["isolated"],
                 l_cores=entry["l-cores"], distribution=entry["distribution"],
-                core_to_index={str(k): v for k, v in entry["core_to_index"].items()})
+                core_to_index={str(k): v for k, v in entry["core_to_index"].items()},
+                number_of_distribs=number_of_distribs)
             if not ok:
                 logger.error(
                     "Failed to persist the resized CPU layout for socket %s: %s",
