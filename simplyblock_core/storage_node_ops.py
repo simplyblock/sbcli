@@ -2713,12 +2713,28 @@ def apply_cluster_vcpu_count(snode_api, node_info, nodes, vcpu_count):
             entry["distribution"] = _resolve_core_distribution(
                 replacement["distribution"], replacement["core_to_index"])
             entry["core_to_index"] = replacement["core_to_index"]
+
+            # number_of_distribs is sized off distrib_cpu_cores at configure
+            # time (generate_configs), before the host belongs to any cluster
+            # -- so it reflects the host's full core count, not the budget
+            # vcpu_count just clamped distrib_cpu_cores down to above. Rederive
+            # it the same way regenerate_config does, or add_node persists a
+            # distrib count sized for the pre-resize layout.
+            number_of_distribs = 2
+            number_of_distribs_cores = len(entry["distribution"]["distrib_cpu_cores"])
+            if 12 >= number_of_distribs_cores > 2:
+                number_of_distribs = number_of_distribs_cores
+            elif number_of_distribs_cores > 12:
+                number_of_distribs = 12
+            entry["number_of_distribs"] = number_of_distribs
+
             ok, err = snode_api.persist_node_config(
                 max_lvol=None, huge_page_memory=None, numa_node=numa_socket,
                 ssd_list=entry.get("ssd_pcis"),
                 cpu_mask=entry["cpu_mask"], isolated=entry["isolated"],
                 l_cores=entry["l-cores"], distribution=entry["distribution"],
-                core_to_index={str(k): v for k, v in entry["core_to_index"].items()})
+                core_to_index={str(k): v for k, v in entry["core_to_index"].items()},
+                number_of_distribs=number_of_distribs)
             if not ok:
                 logger.error(
                     "Failed to persist the resized CPU layout for socket %s: %s",
@@ -4988,26 +5004,41 @@ def _restart_storage_node_impl(
     cores, _ = snode_api.read_allowed_list()
     logger.info(f"read_allowed list is {cores}")
 
+    # alceml_cpu_cores/distrib_cpu_cores/poller_cpu_cores and every mask below
+    # are l-core INDICES (0..req_cpu_count-1), not physical core ids -- SPDK
+    # addresses reactors by their position in -l, and that role-to-index split
+    # was decided once, at add time (see apply_cluster_vcpu_count/add_node),
+    # using whatever allocation policy existed then. Restart must not
+    # re-derive it: calling recalculate_cores_distribution here re-ran
+    # calculate_core_allocations fresh on every restart, so upgrading the
+    # node agent to a build with a changed allocation policy silently
+    # re-pinned an already-provisioned node's roles the next time it merely
+    # restarted -- not a deliberate re-provisioning action.
+    #
+    # What legitimately can go stale across a restart is which *physical*
+    # core sits at each index -- the OS/k8s CPU manager can hand back a
+    # different specific set (same count) than before. That's all this
+    # refreshes: the index@physical_core pairing in l_cores, nothing else --
+    # reassign_l_cores_for_restart keeps every role's index set (hence its
+    # size and any sharing with other roles) exactly as decided at add time,
+    # only choosing which fresh physical core fills each index, preferring
+    # to keep distrib/poller/alceml's own cores mutual hyperthread siblings.
     if len(cores) == req_cpu_count:
-        new_distribution, _ = snode_api.recalculate_cores_distribution(cores, snode.number_of_alceml_devices)
-        poller_cpu_cores = new_distribution.get("poller_cpu_cores")
-        snode.alceml_cpu_cores = new_distribution.get("alceml_cpu_cores")
-        snode.distrib_cpu_cores = new_distribution.get("distrib_cpu_cores")
-        snode.alceml_worker_cpu_cores = new_distribution.get("alceml_worker_cpu_cores")
-        jc_singleton_core = new_distribution.get("jc_singleton_core")
-        app_thread_core = new_distribution.get("app_thread_core")
-        jm_cpu_core = new_distribution.get("jm_cpu_core")
-        snode.pollers_mask = utils.generate_mask(poller_cpu_cores)
-        snode.app_thread_mask = utils.generate_mask(app_thread_core)
-        lvol_poller_core = new_distribution.get("lvol_poller_core")
-        snode.lvol_poller_mask = utils.generate_mask(lvol_poller_core)
-
-        if jc_singleton_core:
-            snode.jc_singleton_mask = utils.decimal_to_hex_power_of_2(jc_singleton_core[0])
-        compression_core = new_distribution.get("compression_core")
-        if compression_core:
-            snode.compression_cpu_mask = utils.generate_mask(compression_core)
-        snode.jm_cpu_mask = utils.generate_mask(jm_cpu_core)
+        prior_physical_cores = {int(pair.split("@")[1]) for pair in snode.l_cores.split(",") if pair}
+        if set(cores) == prior_physical_cores:
+            # Identical cpuset -- nothing to reassign; leave l_cores exactly
+            # as it was rather than have reassign_l_cores_for_restart pick an
+            # arbitrary (if equally valid) sibling pairing that only churns
+            # which physical core each role lands on for no operational gain.
+            logger.info(f"Node {node_id}: cpuset unchanged, keeping existing l_cores")
+        else:
+            placement = utils.reassign_l_cores_for_restart(
+                cores, snode.distrib_cpu_cores, snode.poller_cpu_cores, snode.alceml_cpu_cores)
+            snode.l_cores = utils.generate_l_cores(placement)
+    else:
+        logger.warning(
+            "Node %s: read_allowed_list returned %d core(s), expected %d -- "
+            "leaving l_cores as-is", node_id, len(cores), req_cpu_count)
 
     if not results:
         logger.error(f"Failed to start spdk: {err}")

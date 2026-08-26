@@ -445,6 +445,8 @@ def calculate_core_allocations(vcpu_list, alceml_count=2):
     is_hyperthreaded = is_hyperthreading_enabled_via_siblings()
     pairs = pair_hyperthreads() if is_hyperthreaded else {}
     remaining = set(vcpu_list)
+    cores = sorted(vcpu_list)
+    v = len(vcpu_list)
 
     def reserve(vcpu, get_sibling=False):
         if vcpu in remaining:
@@ -460,85 +462,139 @@ def calculate_core_allocations(vcpu_list, alceml_count=2):
     def reserve_n(count):
         vcpus: list = []
         if count > 0:
-            for v in sorted(remaining):
+            for c in sorted(remaining):
                 if (count - len(vcpus)) >= 2:
-                    vcpus += reserve(v, True)
+                    vcpus += reserve(c, True)
                 else:
-                    vcpus += reserve(v)
+                    vcpus += reserve(c)
                 if len(vcpus) >= count:
                     break
         return vcpus[:count]
 
+    def finalize(assigned):
+        # Return the individual threads as separate values
+        return (
+            assigned.get("app_thread_core", []),
+            assigned.get("jm_cpu_core", []),
+            assigned.get("poller_cpu_cores", []),
+            assigned.get("alceml_cpu_cores", []),
+            assigned.get("alceml_worker_cpu_cores", []),
+            assigned.get("distrib_cpu_cores", []),
+            assigned.get("jc_singleton_core", []),
+            assigned.get("lvol_poller_core", []),
+            # Reserved: always empty now that the compression-thread feature
+            # this slot backed is gone. Kept for shape/backport compatibility
+            # with positional consumers (e.g. distribution[8] callers) elsewhere.
+            assigned.get("compression_core", []),
+        )
+
+    def split_distrib_and_poller():
+        """distrib/poller split the cores left after the base roles (and, on
+        this path, after alceml -- see the v<22 tiers below where alceml is
+        reserved first). Only used where alceml still comes first; the v>=22
+        tier below reorders that and does its own split."""
+        dp = int(len(remaining) / 2)
+        if 17 > dp >= 12:
+            poller_n = len(remaining) - 12
+            distrib = reserve_n(12)
+            poller = reserve_n(poller_n)
+        elif dp >= 17:
+            poller_n = len(remaining) - 24
+            distrib = reserve_n(24)
+            poller = reserve_n(poller_n)
+        else:
+            distrib = reserve_n(dp)
+            poller = reserve_n(dp)
+        if len(remaining) > 0:
+            if len(poller) == 0:
+                distrib = poller = reserve_n(1)
+            else:
+                poller = poller + reserve_n(1)
+        return distrib, poller
+
+    # Too few cores for the general formula's role co-location to make sense
+    # -- every role has to double up somewhere, so these tiny counts are
+    # hand-specified rather than derived.
+    if v <= 1:
+        only = cores[:1]
+        return finalize({
+            "app_thread_core": only, "jm_cpu_core": only, "jc_singleton_core": only,
+            "lvol_poller_core": only, "alceml_cpu_cores": only,
+            "distrib_cpu_cores": only, "poller_cpu_cores": only,
+        })
+    if v == 2:
+        return finalize({
+            "app_thread_core": cores[0:1], "jc_singleton_core": cores[0:1],
+            "jm_cpu_core": cores[0:1], "lvol_poller_core": cores[0:1],
+            "alceml_cpu_cores": cores[0:2], "distrib_cpu_cores": cores[1:2],
+        })
+    if v == 3:
+        return finalize({
+            "app_thread_core": cores[0:1], "jc_singleton_core": cores[0:1],
+            "jm_cpu_core": cores[0:1], "alceml_cpu_cores": cores[0:1],
+            "lvol_poller_core": cores[1:2], "poller_cpu_cores": cores[1:2],
+            "distrib_cpu_cores": cores[2:3],
+        })
+    if v == 4:
+        return finalize({
+            "app_thread_core": cores[0:1], "jc_singleton_core": cores[0:1],
+            "jm_cpu_core": cores[1:2], "alceml_cpu_cores": cores[1:2],
+            "lvol_poller_core": cores[2:3], "poller_cpu_cores": cores[2:3],
+            "distrib_cpu_cores": cores[3:4],
+        })
+    if v == 5:
+        return finalize({
+            "app_thread_core": cores[0:1], "jc_singleton_core": cores[0:1],
+            "jm_cpu_core": cores[1:2], "lvol_poller_core": cores[1:2],
+            "poller_cpu_cores": cores[2:3], "distrib_cpu_cores": cores[3:4],
+            "alceml_cpu_cores": cores[4:5],
+        })
+
     assigned = {}
     # lvol_poller co-locates with jc_singleton's core below 32 vCPU to save a
     # core; at/above 32 vCPU it gets its own dedicated core.
-    colocate_lvs = len(vcpu_list) < 32
-    if (len(vcpu_list) < 12):
+    colocate_lvs = v < 32
+    if v < 12:
         vcpu = reserve_n(4 if colocate_lvs else 5)
         assigned["app_thread_core"] = vcpu[0:1]
         assigned["jm_cpu_core"] = vcpu[1:2]
         assigned["jc_singleton_core"] = vcpu[2:3]
         assigned["alceml_cpu_cores"] = vcpu[3:4]
         assigned["lvol_poller_core"] = vcpu[2:3] if colocate_lvs else vcpu[4:5]
-    elif (len(vcpu_list) < 22):
+        assigned["distrib_cpu_cores"], assigned["poller_cpu_cores"] = split_distrib_and_poller()
+    elif v < 22:
         vcpu = reserve_n(5 if colocate_lvs else 6)
         assigned["app_thread_core"] = vcpu[0:1]
         assigned["jm_cpu_core"] = vcpu[1:2]
         assigned["jc_singleton_core"] = vcpu[2:3]
         assigned["alceml_cpu_cores"] = vcpu[3:5]
         assigned["lvol_poller_core"] = vcpu[2:3] if colocate_lvs else vcpu[5:6]
+        assigned["distrib_cpu_cores"], assigned["poller_cpu_cores"] = split_distrib_and_poller()
     else:
-        # base threads: app, jm, jc (+ own lvol_poller unless co-located)
+        # Reordered: distrib claims its share first, as a pure function of
+        # what's left after the base roles -- no longer reduced by however
+        # many devices this node happens to have. alceml then takes its real
+        # device-scaled count from what's left (clipped if there genuinely
+        # isn't room), and poller -- already the "whatever's left" role --
+        # absorbs the true remainder.
         base = 3 if colocate_lvs else 4
-        vcpus = reserve_n(base + alceml_count)
+        vcpus = reserve_n(base)
         assigned["app_thread_core"] = vcpus[0:1]
         assigned["jm_cpu_core"] = vcpus[1:2]
         assigned["jc_singleton_core"] = vcpus[2:3]
-        idx = 3
-        if colocate_lvs:
-            assigned["lvol_poller_core"] = vcpus[2:3]
+        assigned["lvol_poller_core"] = vcpus[2:3] if colocate_lvs else vcpus[3:4]
+
+        dp = int(len(remaining) / 2)
+        if 17 > dp >= 12:
+            distrib_n = 12
+        elif dp >= 17:
+            distrib_n = 24
         else:
-            assigned["lvol_poller_core"] = vcpus[idx:idx + 1]
-            idx += 1
-        assigned["alceml_cpu_cores"] = vcpus[idx:idx + alceml_count]
-    dp = int(len(remaining) / 2)
-    if 17 > dp >= 12:
-        poller_n = len(remaining) - 12
-        vcpus = reserve_n(12)
-        assigned["distrib_cpu_cores"] = vcpus
-        vcpus = reserve_n(poller_n)
-        assigned["poller_cpu_cores"] = vcpus
-    elif dp >= 17:
-        poller_n = len(remaining) - 24
-        vcpus = reserve_n(24)
-        assigned["distrib_cpu_cores"] = vcpus
-        vcpus = reserve_n(poller_n)
-        assigned["poller_cpu_cores"] = vcpus
-    else:
-        vcpus = reserve_n(dp)
-        assigned["distrib_cpu_cores"] = vcpus
-        vcpus = reserve_n(dp)
-        assigned["poller_cpu_cores"] = vcpus
-    if len(remaining) > 0:
-        if len(assigned["poller_cpu_cores"]) == 0:
-            assigned["distrib_cpu_cores"] = assigned["poller_cpu_cores"] = reserve_n(1)
-        else:
-            assigned["poller_cpu_cores"] = assigned["poller_cpu_cores"] + reserve_n(1)
-    # Return the individual threads as separate values
-    return (
-        assigned.get("app_thread_core", []),
-        assigned.get("jm_cpu_core", []),
-        assigned.get("poller_cpu_cores", []),
-        assigned.get("alceml_cpu_cores", []),
-        assigned.get("alceml_worker_cpu_cores", []),
-        assigned.get("distrib_cpu_cores", []),
-        assigned.get("jc_singleton_core", []),
-        assigned.get("lvol_poller_core", []),
-        # Reserved: always empty now that the compression-thread feature this
-        # slot backed is gone. Kept for shape/backport compatibility with
-        # positional consumers (e.g. distribution[8] callers) elsewhere.
-        assigned.get("compression_core", []),
-    )
+            distrib_n = dp
+        assigned["distrib_cpu_cores"] = reserve_n(distrib_n)
+        assigned["alceml_cpu_cores"] = reserve_n(min(alceml_count, len(remaining)))
+        assigned["poller_cpu_cores"] = reserve_n(len(remaining))
+    return finalize(assigned)
 
 
 def isolate_cores(spdk_cpu_mask):
@@ -560,6 +616,15 @@ def generate_mask(cores):
     for core in cores:
         mask |= (1 << core)
     return f'0x{mask:X}'
+
+
+def generate_l_cores(cores):
+    """The SPDK -l argument: "<l-core index>@<physical core id>" pairs, one
+    per reactor. Every role (app_thread/jm/jc_singleton/alceml/distrib/
+    poller/...) is addressed by its l-core INDEX afterwards, never by the
+    physical id directly -- this is the one place that pairing is made.
+    """
+    return ",".join(f"{i}@{core}" for i, core in enumerate(cores))
 
 
 def calculate_pool_count(alceml_count, number_of_distribs, cpu_count, poller_count, max_lvol=0):
@@ -1790,7 +1855,7 @@ def generate_core_allocation(cores_by_numa, sockets_to_use, nodes_per_socket, vc
         if nodes_per_socket == 1:
             # If there's only one node, assign all available cores to it
             node_cores = available_cores
-            l_cores = ",".join([f"{i}@{core}" for i, core in enumerate(node_cores)])
+            l_cores = generate_l_cores(node_cores)
             core_to_index = {core: idx for idx, core in enumerate(node_cores)}
             node_distribution[numa_node].append({
                 "cpu_mask": hex(sum([1 << c for c in node_cores])),
@@ -1811,7 +1876,7 @@ def generate_core_allocation(cores_by_numa, sockets_to_use, nodes_per_socket, vc
             min_isolated_cores = min(len(node_0_cores), len(node_1_cores))
 
             # Generate l-cores for node 0
-            l_cores_0 = ",".join([f"{i}@{core}" for i, core in enumerate(node_0_cores[:min_isolated_cores])])
+            l_cores_0 = generate_l_cores(node_0_cores[:min_isolated_cores])
             core_to_index = {core: idx for idx, core in enumerate(node_0_cores)}
             isolated_cores = node_0_cores[:min_isolated_cores]
             node_distribution[numa_node].append({
@@ -1823,7 +1888,7 @@ def generate_core_allocation(cores_by_numa, sockets_to_use, nodes_per_socket, vc
             })
 
             # Generate l-cores for node 1
-            l_cores_1 = ",".join([f"{i}@{core}" for i, core in enumerate(node_1_cores[:min_isolated_cores])])
+            l_cores_1 = generate_l_cores(node_1_cores[:min_isolated_cores])
             core_to_index = {core: idx for idx, core in enumerate(node_1_cores)}
             isolated_cores = node_1_cores[:min_isolated_cores]
             node_distribution[numa_node].append({
@@ -1857,7 +1922,7 @@ def regenerate_config(new_config, old_config, force=False):
                 return False
             old_config["nodes"][i]["number_of_alcemls"] = number_of_alcemls
             old_config["nodes"][i]["cpu_mask"] = new_config["nodes"][i]["cpu_mask"]
-            old_config["nodes"][i]["l-cores"] = ",".join([f"{i}@{core}" for i, core in enumerate(isolated_cores)])
+            old_config["nodes"][i]["l-cores"] = generate_l_cores(isolated_cores)
             old_config["nodes"][i]["isolated"] = isolated_cores
             distribution = calculate_core_allocations(isolated_cores, number_of_alcemls + 1)
             core_to_index = {core: idx for idx, core in enumerate(isolated_cores)}
@@ -2022,7 +2087,7 @@ def generate_configs(max_lvol, max_prov, sockets_to_use, nodes_per_socket, pci_a
                 "socket": nid,
                 "cpu_mask": core_group["cpu_mask"],
                 "isolated": core_group["isolated"],
-                "l-cores": ",".join([f"{i}@{core}" for i, core in enumerate(core_group["isolated"])]),
+                "l-cores": generate_l_cores(core_group["isolated"]),
                 "number_of_alcemls": 0,
                 "distribution": {
                     "app_thread_core": get_core_indexes(core_group["core_to_index"], core_group["distribution"][0]),
@@ -3741,6 +3806,77 @@ def recalculate_cores_distribution(cores, number_of_alcemls):
         "jc_singleton_core": get_core_indexes(core_to_index, distribution[6]),
         "lvol_poller_core": get_core_indexes(core_to_index, distribution[7]),
         "compression_core": get_core_indexes(core_to_index, distribution[8])}
+
+
+def _take_sibling_aware(cores_remaining, count, siblings):
+    """Pull up to `count` cores out of the `cores_remaining` set, preferring
+    to grab a real hyperthread sibling alongside whenever at least 2 more
+    are still needed -- mirrors calculate_core_allocations' own reserve_n,
+    but driven by real sysfs sibling data instead of pair_hyperthreads()'
+    os.cpu_count()-wide guess, since here the pool is already scoped to one
+    node's own fresh core list."""
+    chosen: List[int] = []
+    for core in sorted(cores_remaining):
+        if len(chosen) >= count:
+            break
+        if core not in cores_remaining:
+            continue  # already claimed as someone else's sibling this pass
+        if count - len(chosen) >= 2:
+            sibling = next((s for s in siblings.get(core, [core]) if s != core), None)
+            if sibling is not None and sibling in cores_remaining:
+                cores_remaining.discard(core)
+                cores_remaining.discard(sibling)
+                chosen += [core, sibling]
+                continue
+        cores_remaining.discard(core)
+        chosen.append(core)
+    return chosen[:count]
+
+
+def reassign_l_cores_for_restart(cores, distrib_indices, poller_indices, alceml_indices):
+    """Rebuild the l-core index -> physical-core mapping at restart, when the
+    OS/k8s CPU manager may have handed back a different (same-count) cpuset
+    than the node was added with.
+
+    Every role's INDEX SET -- hence its core count, and any sharing between
+    roles that already point at the same index -- was decided once, at add
+    time, and must not change here (see _restart_storage_node_impl); this
+    only chooses which of the fresh physical cores fills which index.
+    Unlike a plain numeric sort, it tries to keep each sibling-sensitive
+    role's own cores mutual hyperthread pairs -- using the real sysfs
+    topology (parse_thread_siblings), not calculate_core_allocations'
+    machine-wide pair_hyperthreads() guess -- so distrib/poller/alceml, in
+    that priority order, get first claim on intact sibling pairs from
+    whatever the fresh cpuset actually contains. Falls back to unpaired
+    singles when pairs run out rather than failing: a restart must not
+    block on an imperfect cpuset.
+
+    Returns the physical-core list to pass to generate_l_cores(), ordered by
+    index (result[i] is the physical core for l-core index i).
+    """
+    n = len(cores)
+    remaining = set(cores)
+    siblings = parse_thread_siblings()
+    placement: List[Optional[int]] = [None] * n
+
+    for role, indices in (("distrib", distrib_indices), ("poller", poller_indices),
+                         ("alceml", alceml_indices)):
+        if not indices:
+            continue
+        picked = _take_sibling_aware(remaining, len(indices), siblings)
+        if len(picked) < len(indices):
+            logger.warning(
+                "restart core placement: only found %d/%d core(s) for %s "
+                "in the fresh cpuset; the rest will be unpaired",
+                len(picked), len(indices), role)
+        for idx, core in zip(sorted(indices), picked):
+            placement[idx] = core
+
+    leftover_indices = [i for i in range(n) if placement[i] is None]
+    for idx, core in zip(leftover_indices, sorted(remaining)):
+        placement[idx] = core
+
+    return placement
 
 
 def resolve_address(host_port: str) -> str:
