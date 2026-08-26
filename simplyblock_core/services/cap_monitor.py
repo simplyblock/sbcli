@@ -7,6 +7,7 @@ from simplyblock_core import db_controller, constants, cluster_ops, utils
 from simplyblock_core.controllers import cluster_events, fdb_backup_controller
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
+from simplyblock_core.prom_client import PromClient
 
 logger = utils.get_logger(__name__)
 
@@ -24,6 +25,12 @@ def create_fdb_backup_if_needed(cluster):
     if last_backup_task and last_backup_task.status == JobSchedule.STATUS_DONE:
         if last_backup_task.date + cluster.backup_frequency_seconds < time.time():
             fdb_backup_controller.add_backup_task(cluster.get_id())
+
+def check_mgmt_disk_util_docker(cluster):
+    prom_client = PromClient(cluster.get_id())
+    records = prom_client.get_node_filesystem_metrics(history="5m")
+    # 100 - ((node_filesystem_avail_bytes{instance="$node",job="$job",mountpoint="/",fstype!="rootfs"} * 100) /
+    #         node_filesystem_size_bytes{instance="$node",job="$job",mountpoint="/",fstype!="rootfs"})
 
 
 def main():
@@ -81,6 +88,9 @@ def main():
                 if cl.prov_cap_warn < size_prov < cl.prov_cap_crit:
                     logger.warning(f"Cluster provisioned cap warning, util: {size_prov}% of cluster util: {cl.prov_cap_warn}")
                     cluster_events.cluster_prov_cap_warn(cl, size_prov)
+
+            if cl.mode == "docker":
+                check_mgmt_disk_util_docker(cl)
 
         time.sleep(constants.CAP_MONITOR_INTERVAL_SEC)
 

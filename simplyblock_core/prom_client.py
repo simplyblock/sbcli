@@ -71,6 +71,7 @@ class PromClient:
         history_in_hours = history_in_hours % 24
         return history_in_days, history_in_hours, history_in_minutes
 
+
     def get_metrics(self, key_prefix, metrics_lst, params, history=None):
         start_time = datetime.now() - timedelta(minutes=10)
         if history:
@@ -131,3 +132,12 @@ class PromClient:
             "pool": pool_uuid
         }
         return self.get_metrics("pool", metrics_lst, params, history)
+
+    def get_node_filesystem_metrics(self, history=None):
+        params = {
+            "mountpoint": "/",
+             "job": "node",
+             "fstype!": "rootfs",
+        }
+        metrics_lst = ["avail_bytes", "size_bytes"]
+        return self.get_metrics("node_filesystem", metrics_lst, params, history)
