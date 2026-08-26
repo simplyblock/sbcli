@@ -24,8 +24,9 @@ Three interlocking bugs were fixed in
    never accepted -> no auto-recovery. ``set_node_offline`` only queues
    once (it guards on the OFFLINE no-op), so no path retries the queue
    after the first refusal. Fix: ``update_cluster_status`` now scans for
-   OFFLINE/SCHEDULABLE nodes without an active restart task and
-   re-queues them every monitor tick.
+   OFFLINE nodes without an active restart task and re-queues them every
+   monitor tick. (SCHEDULABLE is deliberately excluded from this scan --
+   auto-restart must never run for a node in that status.)
 
 3. ``_check_data_plane_and_escalate`` used to require all peers to vote
    "disconnected" to escalate UNREACHABLE -> OFFLINE. In a severe
@@ -319,7 +320,8 @@ class TestDownNeverCounts(unittest.TestCase):
 
 
 # ===========================================================================
-# Fix 2: update_cluster_status re-queues stuck OFFLINE/SCHEDULABLE nodes
+# Fix 2: update_cluster_status re-queues stuck OFFLINE nodes
+# (SCHEDULABLE is deliberately excluded -- see test_schedulable_node_not_requeued)
 # ===========================================================================
 
 
@@ -327,8 +329,12 @@ class TestUpdateClusterStatusRequeuesOffline(unittest.TestCase):
     """When set_node_offline's auto-restart queue was refused (because the
     cluster was DEGRADED at the moment with too many peers offline), no
     code path retries the queue afterwards. The monitor's
-    update_cluster_status now scans for OFFLINE/SCHEDULABLE nodes with
-    no active restart task and re-queues them.
+    update_cluster_status now scans for OFFLINE nodes with no active
+    restart task and re-queues them.
+
+    SCHEDULABLE nodes are deliberately excluded from this scan (and from
+    set_node_schedulable's own queue call) -- auto-restart must not run for
+    a node in that status; see test_schedulable_node_not_requeued.
     """
 
     def _patched_mod(self, cluster, nodes, active_restart_tasks=None):
@@ -421,7 +427,10 @@ class TestUpdateClusterStatusRequeuesOffline(unittest.TestCase):
         mod.update_cluster_status("cluster-1")
         mocks["tc"].add_node_to_auto_restart.assert_not_called()
 
-    def test_schedulable_node_requeued(self):
+    def test_schedulable_node_not_requeued(self):
+        # A SCHEDULABLE node must never be auto-restarted (see
+        # storage_node_monitor's set_node_schedulable and
+        # _requeue_stuck_auto_restarts, which both deliberately skip it).
         nodes = [
             _node("sched-1", status=StorageNode.STATUS_SCHEDULABLE),
             _node("on-1", status=StorageNode.STATUS_ONLINE),
@@ -429,11 +438,7 @@ class TestUpdateClusterStatusRequeuesOffline(unittest.TestCase):
         c = _cluster(status=Cluster.STATUS_DEGRADED, distr_ndcs=1, distr_npcs=2)
         mod, mocks = self._patched_mod(c, nodes)
         mod.update_cluster_status("cluster-1")
-        called_for = [
-            call.args[0].get_id()
-            for call in mocks["tc"].add_node_to_auto_restart.call_args_list
-        ]
-        self.assertEqual(called_for, ["sched-1"])
+        mocks["tc"].add_node_to_auto_restart.assert_not_called()
 
     def test_deliberately_shut_down_offline_node_not_requeued(self):
         # An OFFLINE node carrying auto_restart_disabled=True was stopped on

@@ -1485,6 +1485,54 @@ class RPCClient:
         }
         return self._request("jc_explicit_synchronization", params)
 
+    def jc_replace_jm(self, name_old: str, replacements: list):
+        """Swap the JM bdev backing one or more live JC members from
+        ``name_old`` to a per-member ``name_new`` in place -- JC re-syncs
+        each new JM's journal in the background and, from then on, treats
+        it as the member for that slot. Replaces the old
+        override_name_on_node naming trick (which faked the replacement
+        under the removed peer's old name so JC wouldn't need touching):
+        this RPC updates JC's live state directly, so the caller can
+        connect the replacement(s) under their own natural name.
+
+        A single storage node can run more than one local JC instance
+        against the SAME ``name_old`` bdev at once -- its own redundancy
+        set, plus one instance per primary it hosts as secondary/tertiary
+        (each such role uses a distinct ``jm_vuid``, up to 3 total per
+        node). This call covers ALL of them in one shot:
+
+        ``replacements``: 1..3 dicts, each ``{"jm_vuid": int, "name_new":
+        str}`` -- ``jm_vuid`` identifies which local JC instance to patch
+        (must currently use ``name_old``), ``name_new`` is the bdev to use
+        instead (must already exist as a bdev; the caller connects it
+        first). The SAME ``name_new`` may cover multiple ``jm_vuid``
+        entries -- reusing a bdev already in use by a DIFFERENT jm_vuid on
+        this node is fine, only reusing one already in THIS jm_vuid's own
+        member list is rejected. Must cover every jm_vuid on this node
+        that currently uses ``name_old``, or the whole call is rejected.
+
+        Raises RPCRemoteError with one of the documented codes on
+        rejection/failure:
+            -10 JC is closing
+            -11 invalid JM names (empty, or name_new == name_old)
+            -12 another JM replacement is already in progress
+            -13 name_old is not used by JC
+            -14 this jm_vuid uses name_new already
+            -15 the JM of name_old is being removed
+            -16 invalid number of replacements (0, or more than 3)
+            -17 the replacements do not cover all jm_vuids that use name_old
+            -18 the same jm_vuid is given twice
+            -19 unknown jm_vuid
+            -20 this jm_vuid does not use name_old
+            -3  JC started closing during the operation
+            -4  the JM context has disappeared during the operation
+            -5  failed to prepare or substitute the JM contexts (OOM)
+            -6  timed out connecting to the new JM bdev(s)
+                (c_jc_tmo_ms_replace_jm_open) -- NOT undone in this case:
+                JC keeps retrying to connect. Check the JM bdevs and log.
+        """
+        return self._request3("jc_replace_jm", name_old=name_old, replacements=replacements)
+
     def listeners_del(self, nqn, trtype, traddr, trsvcid):
         """"
             nqn: Subsystem NQN.
