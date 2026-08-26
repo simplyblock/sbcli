@@ -2361,7 +2361,12 @@ def _connect_to_remote_jm_devs(this_node: StorageNode, jm_ids=None, only_node_id
         # 5s for one that can never appear. During whole-cluster recovery the
         # 10x0.5s wait ran per dead peer JM (~30 of them), adding minutes to
         # every restart attempt (2026-07-13).
-        def _poll_for_remote_jm_bdev():
+        def _poll_for_remote_jm_bdev(remote_device=remote_device, expected_bdev=expected_bdev,
+                                      org_dev=org_dev, connect_failed=connect_failed):
+            # Loop variables are bound as defaults (evaluated at def-time, not
+            # call-time) so each closure captures THIS iteration's values --
+            # otherwise every closure would share the loop's final values by
+            # the time Retrying actually invokes it (ruff B023).
             for _ in range(1 if connect_failed else 10):
                 if remote_device.remote_bdev and rpc_client.get_bdevs(remote_device.remote_bdev):
                     return
