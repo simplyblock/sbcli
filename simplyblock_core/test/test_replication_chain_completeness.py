@@ -570,3 +570,69 @@ def test_eviction_still_uses_nsid_on_a_single_namespace_subsystem():
                       "uuid": "99999999-9999-9999-9999-999999999999"}])
     lc._evict_stale_namespace(_CloneLvol(), _EvictNode(rpc))
     assert rpc.removed == [("nqn.test:lvol:ORIG", 7)]
+
+
+class _SubsysProbeRPC:
+    def __init__(self, existing_nqns):
+        self._existing = set(existing_nqns)
+        self.probed = []
+
+    def subsystem_get(self, nqn):
+        self.probed.append(nqn)
+        return {"nqn": nqn, "namespaces": []} if nqn in self._existing else None
+
+
+class _ProbeNode:
+    def get_id(self):
+        return "NODE_PEER"
+
+
+class _NsLvol:
+    nqn = "nqn.test:lvol:SHARED"
+    namespace = "SHARED"          # truthy => shared/namespaced subsystem
+
+
+class _DedicatedLvol:
+    nqn = "nqn.test:lvol:OWN"
+    namespace = ""                # dedicated subsystem
+
+
+def test_shared_subsystem_is_created_on_a_node_that_lacks_it():
+    """Case 7, run 20260826_214011: the very first namespaced fail-over died
+    with 'subsystem does not exist on <peer>'. The create-vs-attach decision
+    was read from the DB alone -- which says the volume SHARES a subsystem,
+    not whether THIS node has one. The primary self-heals through the -32602
+    fallback; a replica cannot (its nsid is fixed by the primary), so it must
+    create the subsystem when the node genuinely lacks it."""
+    from simplyblock_core.controllers import lvol_controller as lc
+    rpc = _SubsysProbeRPC(existing_nqns=[])           # peer has nothing
+    assert lc._resolve_namespaced_subsystem(_NsLvol(), rpc, _ProbeNode()) is True
+    assert rpc.probed == ["nqn.test:lvol:SHARED"]
+
+
+def test_shared_subsystem_is_reused_where_it_already_exists():
+    from simplyblock_core.controllers import lvol_controller as lc
+    rpc = _SubsysProbeRPC(existing_nqns=["nqn.test:lvol:SHARED"])
+    assert lc._resolve_namespaced_subsystem(_NsLvol(), rpc, _ProbeNode()) is False
+
+
+def test_dedicated_subsystem_needs_no_probe():
+    """A non-namespaced volume always creates its own -- do not spend an RPC."""
+    from simplyblock_core.controllers import lvol_controller as lc
+    rpc = _SubsysProbeRPC(existing_nqns=[])
+    assert lc._resolve_namespaced_subsystem(_DedicatedLvol(), rpc, _ProbeNode()) is True
+    assert rpc.probed == []
+
+
+def test_probe_failure_falls_back_to_the_record():
+    """A probe that raises must not decide: assume the record is right
+    (attach), which is the pre-existing behaviour."""
+    from simplyblock_core.controllers import lvol_controller as lc
+
+    class _Boom:
+        def subsystem_get(self, nqn):
+            raise RuntimeError("rpc down")
+
+    from simplyblock_core.controllers import lvol_controller
+    assert lvol_controller._resolve_namespaced_subsystem(
+        _NsLvol(), _Boom(), _ProbeNode()) is False

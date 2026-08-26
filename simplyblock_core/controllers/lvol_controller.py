@@ -1123,8 +1123,27 @@ def _resolve_namespaced_subsystem(lvol, rpc_client, snode):
     whose response grows with total lvol count, paid on EVERY create to catch
     a race that occurs at most once per max_namespaces creates. Trust the CP's
     own record and let the error path pay the dump only when it actually fires.
+
+    EXCEPT that "someone else already created it" is only true PER NODE. The
+    record says the volume shares a subsystem; it says nothing about whether
+    THIS node has that subsystem yet. On the primary a wrong guess self-heals
+    (the -32602 fallback re-resolves and retries), but a REPLICA has no such
+    fallback -- its nsid is dictated by the primary -- so it fails the whole
+    create/fail-over with "subsystem does not exist on <node>" (case 7,
+    run 20260826_214011: the very first namespaced fail-over died this way,
+    on a peer whose subsystem had never been created). So for a shared
+    subsystem, ask the node itself. The probe is the nqn-FILTERED
+    nvmf_get_subsystems, not the full dump this docstring warns about.
     """
-    return not lvol.namespace
+    if not lvol.namespace:
+        return True                     # dedicated subsystem: always create
+    try:
+        return not rpc_client.subsystem_get(lvol.nqn)
+    except Exception as e:              # noqa: BLE001 - probe must not decide
+        logger.warning("Could not probe subsystem %s on %s (%s); assuming it "
+                       "exists, as the record implies", lvol.nqn,
+                       snode.get_id()[:8], e)
+        return False
 
 
 def _fail_after_bdev(lvol, rpc_client, msg):
