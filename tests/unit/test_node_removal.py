@@ -17,7 +17,7 @@ pure control-flow + bookkeeping tests.
 """
 
 import unittest
-from unittest.mock import DEFAULT, MagicMock, patch
+from unittest.mock import DEFAULT, MagicMock, call, patch
 
 from simplyblock_core import storage_node_ops
 from simplyblock_core.models.storage_node import StorageNode
@@ -1879,8 +1879,13 @@ class TestNodeRemovalOrchestrateResumesPhase5(unittest.TestCase):
         mocks["_teardown_replicas_of_primary"].assert_called_once()
         mocks["_relocate_replicas_hosted_on"].assert_called_once()
         mocks["_finalize_node_removal"].assert_called_once()
-        mocks["set_node_status"].assert_called_once_with(
-            "n1", StorageNode.STATUS_REMOVED, caused_by="remove")
+        # Two transitions: IN_REMOVAL right after shutdown (so other code /
+        # monitors can see the node is mid-removal, not still ONLINE), then
+        # REMOVED once phase 4 finalizes.
+        self.assertEqual(mocks["set_node_status"].call_args_list, [
+            call("n1", StorageNode.STATUS_IN_REMOVAL, caused_by="remove"),
+            call("n1", StorageNode.STATUS_REMOVED, caused_by="remove"),
+        ])
         mocks["_decommission_node_devices"].assert_called_once()
 
     def test_replica_teardown_then_jm_decommission_then_relocation(self):
