@@ -1371,8 +1371,31 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
                 return _fail_after_bdev(lvol, rpc_client, str(e))
             return add_lvol_on_node(lvol, snode, is_primary=is_primary, secondary_index=secondary_index)
         else:
+            # A REPLICA add cannot re-claim a slot (its nsid is dictated by the
+            # primary), so -32602 here ends the whole create/fail-over. Say WHY:
+            # dump what the node actually has for this subsystem, because the
+            # bare message costs a full lab run to diagnose and the cause is
+            # always in this table -- nsid already taken by another bdev, or a
+            # max_namespaces smaller than the requested nsid.
+            detail = ""
+            try:
+                subsys = rpc_client.subsystem_get(lvol.nqn)
+                if subsys:
+                    existing = sorted(
+                        (n.get("nsid"), n.get("bdev_name"))
+                        for n in (subsys.get("namespaces") or []))
+                    detail = (f" [node {snode.get_id()[:8]} wanted nsid="
+                              f"{requested_nsid} max_namespaces="
+                              f"{subsys.get('max_namespaces')} holds={existing}]")
+                else:
+                    detail = (f" [subsystem {lvol.nqn} does not exist on "
+                              f"{snode.get_id()[:8]}]")
+            except Exception as diag_exc:              # noqa: BLE001
+                detail = f" [could not read the subsystem: {diag_exc}]"
+            logger.error("Namespace add rejected on %s for %s:%s",
+                         snode.get_id()[:8], lvol.get_id(), detail)
             return _fail_after_bdev(
-                lvol, rpc_client, "Failed to add bdev to subsystem")
+                lvol, rpc_client, "Failed to add bdev to subsystem" + detail)
 
     if is_primary:
         # Persist the target-assigned nsid; replicas re-add with exactly
