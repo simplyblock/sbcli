@@ -636,3 +636,55 @@ def test_probe_failure_falls_back_to_the_record():
     from simplyblock_core.controllers import lvol_controller
     assert lvol_controller._resolve_namespaced_subsystem(
         _NsLvol(), _Boom(), _ProbeNode()) is False
+
+
+class _RollbackRPC:
+    def __init__(self, ns):
+        self.ns = list(ns)
+        self.removed_ns, self.deletes = [], []
+
+    def subsystem_get(self, nqn):
+        return {"nqn": nqn, "namespaces": self.ns}
+
+    def nvmf_subsystem_remove_ns(self, nqn, nsid):
+        self.removed_ns.append(nsid)
+        self.ns = [n for n in self.ns if n.get("nsid") != nsid]
+        return True
+
+    def get_bdevs(self, name):
+        return [{"name": name}]
+
+    def delete_lvol(self, name, sync=False):
+        self.deletes.append((name, sync))
+        return True, None
+
+
+def test_replica_rollback_clears_its_namespace_and_syncs_the_delete():
+    """Case 7, run 20260826_221806: a failed replica leg left BOTH its bdev
+    and its namespace on the peer, because the rollback issued the
+    leader-gated async delete a non-leader refuses ("Deleting async lvol on
+    non-leader lvs"). Four such leftovers accumulated on the peer's shared
+    subsystem, so the primary -- starting clean -- handed nsid 1 to a
+    different volume and every later fail-over was rejected. The rollback
+    must remove the namespace it added and delete the bdev synchronously."""
+    from simplyblock_core.controllers import lvol_controller as lc
+
+    class _Lvol:
+        nqn = "nqn.test:lvol:SHARED"
+        top_bdev = "LVS_1/LVOL_NEW"
+        bdev_stack = [{"type": "bdev_lvol_clone", "name": "LVS_1/LVOL_NEW"}]
+        status = ""
+        def get_id(self):
+            return "LV_NEW"
+        def write_to_db(self, *a, **kw):
+            pass
+
+    rpc = _RollbackRPC([
+        {"nsid": 1, "bdev_name": "LVS_1/LVOL_OTHER"},   # someone else's
+        {"nsid": 5, "bdev_name": "LVS_1/LVOL_NEW"},     # this attempt's
+    ])
+    ok, _msg = lc._fail_after_bdev(_Lvol(), rpc, "boom", is_primary=False)
+    assert ok is False
+    assert rpc.removed_ns == [5], "must drop only THIS attempt's namespace"
+    assert rpc.deletes and all(sync for _n, sync in rpc.deletes), \
+        "a replica rollback must use the SYNC delete a non-leader accepts"

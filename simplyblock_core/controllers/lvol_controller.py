@@ -1146,15 +1146,39 @@ def _resolve_namespaced_subsystem(lvol, rpc_client, snode):
         return False
 
 
-def _fail_after_bdev(lvol, rpc_client, msg):
+def _fail_after_bdev(lvol, rpc_client, msg, is_primary=True):
     """Rollback an in-progress add_lvol_on_node after _create_bdev_stack has
     already produced a bdev/blob. Without this, a post-bdev-stack failure (a
     missing namespaced subsystem, a listener add error, an add_ns error) leaves
     the SPDK clone-blob in place, which then blocks the parent snapshot delete
     with "vbdev_lvol_destroy: ... has N clones". Logs but does not raise on
-    rollback failure so the caller still sees the original error."""
+    rollback failure so the caller still sees the original error.
+
+    ``is_primary`` decides HOW the bdev goes away. A REPLICA's blob is a
+    registration, not the leader's copy, and the leader-gated async delete is
+    refused there -- "Deleting async lvol on non-leader lvs" -- so the
+    rollback silently left the bdev AND its namespace behind. Those leftovers
+    poison the next attempt: the peer's shared subsystem keeps namespaces at
+    nsids the primary (starting clean) later hands to OTHER volumes, and every
+    subsequent fail-over is rejected with "wanted nsid=1 ... holds=[(1, <other
+    volume>), ...]" -- 4 stale namespaces on the peer in case 7 run
+    20260826_221806. Replicas therefore roll back with a SYNC delete, and the
+    namespace is dropped first so nothing of this attempt survives in the
+    subsystem.
+    """
     try:
-        _remove_bdev_stack(lvol.bdev_stack[::-1], rpc_client)
+        try:
+            subsystem = rpc_client.subsystem_get(lvol.nqn)
+            for ns in ((subsystem or {}).get("namespaces") or []):
+                if ns.get("bdev_name") == lvol.top_bdev:
+                    logger.info("rollback: removing namespace nsid=%s (%s) left "
+                                "by the failed attempt",
+                                ns.get("nsid"), lvol.top_bdev)
+                    rpc_client.nvmf_subsystem_remove_ns(lvol.nqn, ns.get("nsid"))
+        except Exception:                       # noqa: BLE001 - best effort
+            logger.exception("rollback: could not clear the namespace for %s",
+                             lvol.get_id())
+        _remove_bdev_stack(lvol.bdev_stack[::-1], rpc_client, sync=not is_primary)
         lvol.status = LVol.STATUS_IN_DELETION
         lvol.write_to_db(DBController().kv_store)
     except Exception:
@@ -1238,7 +1262,7 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
 
     ret, msg = _create_bdev_stack(lvol, snode, is_primary=is_primary)
     if not ret:
-        return _fail_after_bdev(lvol, rpc_client, msg)
+        return _fail_after_bdev(lvol, rpc_client, msg, is_primary=is_primary)
 
     db_controller = DBController()
     pool = db_controller.get_pool_by_id(lvol.pool_uuid)
@@ -1248,7 +1272,7 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
     try:
         resolve_subsys = _resolve_namespaced_subsystem(lvol, rpc_client, snode)
     except Exception as e:
-        return _fail_after_bdev(lvol, rpc_client, str(e))
+        return _fail_after_bdev(lvol, rpc_client, str(e), is_primary=is_primary)
 
     if resolve_subsys:
         min_cntlid = lvol_min_cntlid(0 if is_primary else secondary_index + 1)
@@ -1334,7 +1358,7 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
                     else:
                         return _fail_after_bdev(
                             lvol, rpc_client,
-                            f"Failed to create listener for {lvol.get_id()}")
+                            f"Failed to create listener for {lvol.get_id()}", is_primary=is_primary)
             elif iface.ip4_address and lvol.fabric == "tcp" and snode.active_tcp:
                 logger.info("adding listener for %s on IP %s, fabric TCP port %s" % (lvol.nqn, iface.ip4_address, listener_port))
                 ret, err = rpc_client.nvmf_subsystem_add_listener(
@@ -1345,7 +1369,7 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
                     else:
                         return _fail_after_bdev(
                             lvol, rpc_client,
-                            f"Failed to create listener for {lvol.get_id()}")
+                            f"Failed to create listener for {lvol.get_id()}", is_primary=is_primary)
 
     logger.info("Add BDev to subsystem")
     # Cluster-consistent namespace IDs: the PRIMARY add lets the target
@@ -1368,7 +1392,7 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
                 lvol, rpc_client,
                 f"Replica namespace add for {lvol.get_id()} has no primary-"
                 f"assigned ns_id; refusing auto-assignment (divergent nsid "
-                f"maps across the shared subsystem's paths)")
+                f"maps across the shared subsystem's paths)", is_primary=is_primary)
         requested_nsid = lvol.ns_id
     ret, err = rpc_client.nvmf_subsystem_add_ns2(
         lvol.nqn, lvol.top_bdev, lvol.uuid, lvol.guid, nsid=requested_nsid)
@@ -1388,7 +1412,7 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
                     exclude_nqns={lvol.nqn})
             except SubsystemCapacityError as e:
                 logger.error(str(e))
-                return _fail_after_bdev(lvol, rpc_client, str(e))
+                return _fail_after_bdev(lvol, rpc_client, str(e), is_primary=is_primary)
             return add_lvol_on_node(lvol, snode, is_primary=is_primary, secondary_index=secondary_index)
         else:
             # A REPLICA add cannot re-claim a slot (its nsid is dictated by the
@@ -1415,7 +1439,7 @@ def add_lvol_on_node(lvol, snode, is_primary=True, secondary_index=0):
             logger.error("Namespace add rejected on %s for %s:%s",
                          snode.get_id()[:8], lvol.get_id(), detail)
             return _fail_after_bdev(
-                lvol, rpc_client, "Failed to add bdev to subsystem" + detail)
+                lvol, rpc_client, "Failed to add bdev to subsystem" + detail, is_primary=is_primary)
 
     if is_primary:
         # Persist the target-assigned nsid; replicas re-add with exactly
