@@ -69,7 +69,13 @@ jobs:
         cache: 'pip'
 
     - name: Install linter
-      run: pip install ruff
+      # Pinned deliberately. ruff's default rule set grows with each release,
+      # so an unpinned install re-lints a frozen release branch against rules
+      # that did not exist when it was cut: this job reported 3 errors on
+      # 2026-06-08 with ruff 0.15.16 and 3620 on 2026-08-26 with 0.16.3,
+      # against essentially the same code. Bump this on purpose, with the
+      # resulting findings fixed in the same change -- never implicitly.
+      run: pip install ruff==0.15.16
 
     - name: Execute linter
       run: ruff check
