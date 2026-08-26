@@ -2126,10 +2126,20 @@ print(json.dumps(out))
             f"fio: {args.fio_rw} bs={args.fio_bs} numjobs={args.fio_numjobs} "
             f"iodepth={args.fio_iodepth} total={args.fio_total_size} "
             f"runtime={args.runtime}s ({args.runtime / 3600:.1f}h)")
-        self.logger.log(
-            f"phase 1: {args.data_nics} single-NIC on all nodes, "
-            f"{args.nic_phase_hold}s down + {args.nic_phase_settle}s settle, "
-            f"every {args.nic_phase_every or 'once'} iteration(s)")
+        if args.no_nic_phase:
+            self.logger.log(
+                "phase 1: DISABLED (--no-nic-phase); no NIC outages will be "
+                "applied. Only phase 2 pair outages run.")
+        else:
+            self.logger.log(
+                f"phase 1: {args.data_nics} single-NIC on all nodes, "
+                f"{args.nic_phase_hold}s down + {args.nic_phase_settle}s settle, "
+                f"every {args.nic_phase_every or 'once'} iteration(s)")
+        if len(args.data_nics) < 2:
+            self.logger.log(
+                f"single-path mode: one data NIC ({args.data_nics}); path and "
+                f"listener expectations follow that, and the active_active "
+                f"policy assertions are skipped as meaningless with one path")
         self.logger.log(
             f"phase 2: methods={args.methods}, hold={args.outage_hold}s, "
             f"offset {args.pair_delay_min}-{args.pair_delay_max}s"
