@@ -42,7 +42,7 @@ SN_TYPE = "i3en.2xlarge"
 #: another run. Without it, sn add-node takes the control-plane default, which
 #: drifts as main is rebuilt -- useless when the whole point of a run is to
 #: hold the build constant. Empty string = control-plane default.
-SPDK_IMAGE = "public.ecr.aws/simply-block/ultra:main-d91ff03a-amd64"
+SPDK_IMAGE = "public.ecr.aws/simply-block/ultra:main-747c42da-amd64"
 
 SN_COUNT = 6
 MGMT_TYPE = "m6i.2xlarge"
@@ -396,7 +396,7 @@ class PersistentSSH:
 #: the metadata this script writes, and its own source there.
 SOAK_SCRIPT = "aws_dual_node_outage_soak_multipath.py"
 SOAK_LAUNCHER = "start_soak_base.sh"
-SOAK_EXTRA_FILES = ("collect_logs.py",)
+SOAK_EXTRA_FILES = ("collect_logs.py", "iolog_trimmer.sh")
 METADATA_FILE = "cluster_metadata_base.json"
 
 
