@@ -627,10 +627,12 @@ def _check_node_lvstore(
                                                     # Atomic: rebuild remote_devices on the freshly-read node
                                                     # inside the FDB tx so a concurrent node.status change is
                                                     # not clobbered (incident 2026-06-18).
-                                                    def _mut(nn, did=dev.get_id(), rd=remote_device):
+                                                    did = dev.get_id()
+
+                                                    def _mut(nn):
                                                         nn.remote_devices = [
                                                             r for r in nn.remote_devices if r.get_id() != did]
-                                                        nn.remote_devices.append(rd)
+                                                        nn.remote_devices.append(remote_device)
                                                         return True
 
                                                     db_controller.atomic_update(

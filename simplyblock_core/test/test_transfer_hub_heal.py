@@ -26,6 +26,9 @@ class _Hub:
         return "LVS_1/transferhubn1"
 
 
+_DEFAULT_HUB = _Hub()
+
+
 class _Nic:
     ip4_address = "10.0.0.1"
     trtype = "TCP"
@@ -73,7 +76,7 @@ class _SourceRPC:
 
 
 class _TargetNode:
-    def __init__(self, rpc, hub=_Hub()):
+    def __init__(self, rpc, hub=_DEFAULT_HUB):
         self._rpc = rpc
         self.transfer_hublvol = hub
         self.active_rdma = False

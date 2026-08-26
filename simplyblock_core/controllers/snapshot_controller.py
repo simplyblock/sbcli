@@ -1522,8 +1522,9 @@ def clone(snapshot_id, clone_name, new_size=0, pvc_name=None, pvc_namespace=None
             elif action == "queue":
                 queue_for_restart_drain(
                     candidate.get_id(), lvol.lvs_name,
-                    lambda c=candidate, si=secondary_index_map[candidate.get_id()]:
-                        lvol_controller.add_lvol_on_node(lvol, c, is_primary=False, secondary_index=si),
+                    lambda c=candidate: lvol_controller.add_lvol_on_node(
+                        lvol, c, is_primary=False,
+                        secondary_index=secondary_index_map[c.get_id()]),
                     f"register clone {lvol.uuid} on {candidate.get_id()[:8]}")
             # "skip" — disconnected or pre_block, skip
 
