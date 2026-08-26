@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """One-liner for the async-replication soak: deploy a lab from a branch, run cases, report.
 
-    python scripts/repl_soak.py --cases case6,case7 --branch main
+    python scripts/repl_soak.py --cases case7,case9 --env CHAOS_EVENTS=100
     python scripts/repl_soak.py --cases case9 --env CHAOS_EVENTS=100 --teardown on-pass
     python scripts/repl_soak.py --cases case10,case11 --branch main --spdk-image public.ecr.aws/simply-block/ultra:main-latest-amd64
     python scripts/repl_soak.py --cases case3 --reuse-lab          # existing lab, no redeploy
@@ -175,7 +175,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--cases", required=True,
                     help="comma list or group name for test_async_replication.py (e.g. case6,case7 | all9 | features)")
-    ap.add_argument("--branch", default="main", help="sbcli branch to deploy/hotfix/stage (default main)")
+    ap.add_argument("--branch", default="replication-features",
+                    help="sbcli branch to deploy/hotfix/stage (default replication-features)")
     ap.add_argument("--spdk-image", default="", help="ultra image ref; default = digest pinned in the deployer")
     ap.add_argument("--cp-image", default="", help="control-plane docker image (SIMPLYBLOCK_DOCKER_IMAGE)")
     ap.add_argument("--env", action="append", default=[], metavar="KEY=VAL",
