@@ -394,6 +394,7 @@ def test_failback_evicts_on_every_ha_node_not_just_the_primary(monkeypatch):
             self._id, self.secondary_node_id, self.tertiary_node_id = nid, secondary, tertiary
             self.lvstore = "LVS_1"
             self.status = lc.StorageNode.STATUS_ONLINE
+            self.cluster_id = "CL_tgt"
         def get_id(self):
             return self._id
 
@@ -406,6 +407,10 @@ def test_failback_evicts_on_every_ha_node_not_just_the_primary(monkeypatch):
             return {"P": primary, "S": peer}[nid]
         def release_lvol_ns_slot(self, lvol):
             pass
+        def get_lvols(self):
+            # No copy of this subsystem exists on the target yet, so the
+            # one-subsystem-one-primary guard has nothing to redirect to.
+            return []
 
     class _Lvol:
         uuid = "ORIG"; nqn = "nqn.test:lvol:ORIG"; ns_id = 7
@@ -722,3 +727,23 @@ def test_failover_rollback_covers_every_placed_node_with_ids():
     whole = inspect.getsource(lc)
     assert "delete_lvol_from_node(new_lvol," not in whole, \
         "no rollback may hand records to an id-taking function"
+
+
+def test_policy_attach_also_keeps_a_subsystem_on_one_target_node():
+    """Run 20260826_233417: add_lvol_ha had the sibling rule but
+    replication_start -- the path a `volume add --replication-policy` takes --
+    picked the target node purely by capacity. One 10-namespace subsystem
+    ended up on THREE target primaries (nsids 1,2,3,6 / 1,2,4,5,7-10 /
+    3-10); no node advertised the whole set and a client saw 0 of the 10.
+
+    Both entry points must consult the sibling rule, and _create_target_lvol_clone
+    re-checks it at creation time as the last line of defence."""
+    import inspect
+    from simplyblock_core.controllers import lvol_controller as lc
+
+    src = inspect.getsource(lc.replication_start)
+    assert "_sibling_replication_node" in src,         "attaching a policy must honour the shared-subsystem rule too"
+    assert src.index("_sibling_replication_node") < src.index("_get_next_3_nodes"),         "the sibling lookup must precede the capacity-based pick"
+
+    clone = inspect.getsource(lc._create_target_lvol_clone)
+    assert "_subsystem_home_node" in clone,         "the copy must not be built on a node that splits the subsystem"

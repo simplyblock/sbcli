@@ -3283,13 +3283,37 @@ def replication_start(lvol_id, replication_cluster_id=None, mode=None, interval_
         if not replication_cluster_id:
             logger.error(f"Cluster: {snode.cluster_id} not replicated")
             return False
-        random_nodes = _get_next_3_nodes(replication_cluster_id, lvol.size)
-        for r_node in random_nodes:
-            if r_node.get_id() not in excluded_nodes:
-                logger.info(f"Replicating on node: {r_node.get_id()}")
-                lvol.replication_node_id = r_node.get_id()
-                lvol.write_to_db()
-                break
+        # Volumes sharing a subsystem MUST replicate to the same target node
+        # (see _sibling_replication_node). add_lvol_ha enforces that for a
+        # volume created with a replication cluster; this is the OTHER entry
+        # point -- attaching a policy -- and it used to pick purely by
+        # capacity, which is how soak case 7 kept splitting one 10-namespace
+        # subsystem across three target primaries (run 20260826_233417: nsids
+        # 1,2,3,6 on one node, 1,2,4,5,7..10 on a second, 3..10 on a third).
+        # No node then advertised the whole subsystem, and the client's kernel
+        # showed 0 of the 10 namespaces on one of its paths.
+        sibling_node_id = _sibling_replication_node(lvol, cluster)
+        if sibling_node_id and sibling_node_id in excluded_nodes:
+            # Keeping a subsystem whole outranks the clone/origin placement
+            # preference, which is only an optimisation.
+            logger.warning(
+                "LVol %s must replicate to %s to keep subsystem %s whole, "
+                "though that node is the origin of its snapshot",
+                lvol.get_id(), sibling_node_id, lvol.nqn)
+        if sibling_node_id:
+            logger.info(
+                "Replicating on node %s: it is where subsystem %s already "
+                "replicates", sibling_node_id, lvol.nqn)
+            lvol.replication_node_id = sibling_node_id
+            lvol.write_to_db()
+        else:
+            random_nodes = _get_next_3_nodes(replication_cluster_id, lvol.size)
+            for r_node in random_nodes:
+                if r_node.get_id() not in excluded_nodes:
+                    logger.info(f"Replicating on node: {r_node.get_id()}")
+                    lvol.replication_node_id = r_node.get_id()
+                    lvol.write_to_db()
+                    break
         if not lvol.replication_node_id:
             logger.error(f"Replication node not found for lvol: {lvol.get_id()}")
             return False
@@ -3589,6 +3613,27 @@ def _claim_target_nsid(db_controller, new_lvol, target_node):
     return 0
 
 
+def _subsystem_home_node(db_controller, nqn, cluster_id):
+    """Node in *cluster_id* that already hosts copies of subsystem *nqn*, or "".
+
+    Every path of one shared subsystem must advertise the SAME namespaces, so
+    all of its volumes have to live on one primary and its HA peers. Whichever
+    node got there first owns the subsystem for that cluster.
+    """
+    for lv in db_controller.get_lvols():
+        if lv.nqn != nqn or lv.status == LVol.STATUS_IN_DELETION:
+            continue
+        if getattr(lv, "deleted", False) or not lv.node_id:
+            continue
+        try:
+            node = db_controller.get_storage_node_by_id(lv.node_id)
+        except KeyError:
+            continue
+        if node.cluster_id == cluster_id:
+            return lv.node_id
+    return ""
+
+
 def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snapshot):
     """Create a writable clone of *lvol* on *target_node* (primary + online HA
     peers) from *snapshot*, preserving the original NQN.
@@ -3598,6 +3643,32 @@ def _create_target_lvol_clone(db_controller, lvol, target_node, pool_uuid, snaps
     STATUS_IN_CREATION with lvol_uuid/blobid populated; the caller is
     responsible for setting STATUS_ONLINE and any replication bookkeeping.
     """
+    # Last line of defence for the one-subsystem-one-primary invariant. The
+    # target node was chosen when the policy was attached, long before this
+    # copy is created; if anything put a sibling somewhere else in the
+    # meantime, following the stale pick would build a subsystem whose paths
+    # expose different namespace sets -- which clients resolve by showing
+    # NONE of them. Placement is negotiable, a coherent subsystem is not.
+    home = _subsystem_home_node(db_controller, lvol.nqn, target_node.cluster_id)
+    if home and home != target_node.get_id():
+        try:
+            home_node = db_controller.get_storage_node_by_id(home)
+        except KeyError:
+            home_node = None
+        if home_node and home_node.status == StorageNode.STATUS_ONLINE:
+            logger.warning(
+                "Subsystem %s already lives on node %s in cluster %s; placing "
+                "the copy of %s there instead of %s to keep it whole",
+                lvol.nqn, home, target_node.cluster_id, lvol.get_id(),
+                target_node.get_id())
+            target_node = home_node
+        else:
+            return None, (
+                f"Subsystem {lvol.nqn} already has copies on node {home}, "
+                f"which is not online; placing this copy on "
+                f"{target_node.get_id()} would split the subsystem across "
+                f"primaries and hide its namespaces from clients")
+
     new_lvol = copy.deepcopy(lvol)
     new_lvol.uuid = str(uuid.uuid4())
     new_lvol.create_dt = str(datetime.now())
