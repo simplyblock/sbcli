@@ -88,6 +88,27 @@ def load_meta(scripts_dir):
     return json.loads(p.read_text())
 
 
+def lab_is_reachable(mgmt, timeout=20):
+    r = subprocess.run(["ssh", "-o", "StrictHostKeyChecking=no", "-o", "LogLevel=ERROR",
+                        "-o", f"ConnectTimeout={timeout}", "-i", KEY,
+                        f"ec2-user@{mgmt}", "true"], capture_output=True, text=True)
+    return r.returncode == 0
+
+
+def require_reachable(mgmt, reused):
+    """A stale metadata file is the normal case, not the exception: the repo
+    TRACKS scripts/cluster_metadata_repl.json, so every fresh clone arrives
+    carrying whichever lab was alive when it was last committed. Probe before
+    doing anything that would otherwise fail deep inside the hotfix."""
+    if lab_is_reachable(mgmt):
+        return
+    hint = ("that metadata is the copy committed in the repo, pointing at a lab "
+            "that no longer exists -- drop --reuse-lab to deploy a fresh one"
+            if reused else
+            "the deploy reported success but the management node is unreachable")
+    raise SystemExit(f"management node {mgmt} is not reachable: {hint}")
+
+
 def deploy(scripts_dir, branch, spdk_image, cp_image):
     env = dict(os.environ, SBCLI_BRANCH=branch)
     if spdk_image:
@@ -174,7 +195,10 @@ def main():
         deploy(scripts_dir, args.branch, args.spdk_image, args.cp_image)
     meta = load_meta(scripts_dir)
     mgmt = meta["mgmt"]["public_ip"]
-    log(f"lab mgmt {mgmt}: {', '.join(f'{k}={v['cluster_uuid'][:8]}({v['nodes']}n)' for k, v in meta['clusters'].items())}")
+    shape = ", ".join("{}={}({}n)".format(k, v["cluster_uuid"][:8], v["nodes"])
+                      for k, v in meta["clusters"].items())
+    log(f"lab mgmt {mgmt}: {shape}")
+    require_reachable(mgmt, args.reuse_lab)
 
     if not args.no_hotfix:
         hotfix(scripts_dir)

@@ -561,7 +561,7 @@ def main():
         for attempt in range(5):
             try:
                 ssh_exec(mgmt_ip, [
-                    f"sudo /usr/local/bin/sbctl -d sn add-node {cluster_uuid} {priv_ip}:5000 {IFACE} --ha-jm-count 4"
+                    f"sudo /usr/local/bin/sbctl -d --dev sn add-node {cluster_uuid} {priv_ip}:5000 {IFACE} --ha-jm-count 4"
                     + (f" --spdk-image {SPDK_IMAGE}" if SPDK_IMAGE else "")
                 ], check=True)
                 return
