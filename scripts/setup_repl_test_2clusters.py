@@ -40,7 +40,10 @@ STORAGE_SG_ID = "sg-02e89a1372e9f39e9"
 # tasks_runner_replication_final, replication_final_step, cluster
 # add-replication), so main is what we test; the default
 # SIMPLY_BLOCK_DOCKER_IMAGE (simplyblock/simplyblock:main) matches it.
-BRANCH = "main"
+# Overridable for the repl_soak.py one-liner: SBCLI_BRANCH selects the sbcli
+# checkout installed on every node (and the hotfix source), SPDK_IMAGE the
+# pinned ultra image, SIMPLYBLOCK_DOCKER_IMAGE the control-plane image.
+BRANCH = os.environ.get("SBCLI_BRANCH", "main")
 
 SN_TYPE = "i3en.2xlarge"
 MGMT_TYPE = "m6i.2xlarge"
@@ -115,8 +118,9 @@ REPLICATION = {"source": "src", "target": "tgt", "timeout": 3600}
 # the first build carrying the promotion-window ANA-transition fix
 # (spdk R26.3 554c80f11), verified built FROM spdk-core:R26.3-latest
 # whose manifest was created 18:41:57, before this ultra build started.
-SPDK_IMAGE = ("public.ecr.aws/simply-block/ultra@"
-              "sha256:0d631068e3add220d9198f212cf78d1e732ad9f0f92061dbebc413a9a6550e3b")
+SPDK_IMAGE = os.environ.get(
+    "SPDK_IMAGE",
+    "public.ecr.aws/simply-block/ultra@sha256:0d631068e3add220d9198f212cf78d1e732ad9f0f92061dbebc413a9a6550e3b")
 
 SN_COUNT = sum(c["nodes"] for c in CLUSTERS)
 SBCTL = "sudo /usr/local/bin/sbctl"
