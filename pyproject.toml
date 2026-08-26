@@ -8,7 +8,6 @@ extend-exclude = ['simplyblock_cli/cli.py']
 [tool.ruff.lint]
 extend-select = ["TID251"]
 ignore = [
-    "B018",
     "B023",
     "BLE001",
     "C401",
