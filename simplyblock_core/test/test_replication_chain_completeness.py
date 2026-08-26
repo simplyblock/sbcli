@@ -374,14 +374,13 @@ def test_failback_evicts_on_every_ha_node_not_just_the_primary(monkeypatch):
     cutover back: 0/5. The clone path must evict per node."""
     from simplyblock_core.controllers import lvol_controller as lc
 
-    evicted, added = [], []
-    monkeypatch.setattr(lc, "_evict_stale_namespace",
-                        lambda lvol, node: evicted.append(node.get_id()))
-
     def _fake_add_lvol_on_node(lvol, node, is_primary=True):
         added.append((node.get_id(), is_primary))
         return {"uuid": "U", "driver_specific": {"lvol": {"blobid": 9}}}, None
 
+    evicted, added = [], []
+    monkeypatch.setattr(lc, "_evict_stale_namespace",
+                        lambda lvol, node: evicted.append(node.get_id()))
     monkeypatch.setattr(lc, "add_lvol_on_node", _fake_add_lvol_on_node)
 
     class _N:
