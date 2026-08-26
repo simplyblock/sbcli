@@ -196,3 +196,65 @@ class TestRealignAfterClaim(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSubsystemHomeNode(unittest.TestCase):
+    """One shared subsystem lives on exactly one primary per cluster."""
+
+    def _db_with(self, lvols, nodes):
+        db = MagicMock()
+        db.get_lvols.return_value = lvols
+        by_id = {n.get_id.return_value: n for n in nodes}
+
+        def _get(node_id):
+            if node_id not in by_id:
+                raise KeyError(node_id)
+            return by_id[node_id]
+
+        db.get_storage_node_by_id.side_effect = _get
+        return db
+
+    def _copy(self, uuid, node_id, nqn=NQN, status="online", deleted=False):
+        lv = MagicMock()
+        lv.uuid = uuid
+        lv.get_id.return_value = uuid
+        lv.nqn = nqn
+        lv.node_id = node_id
+        lv.status = status
+        lv.deleted = deleted
+        return lv
+
+    def _node(self, node_id, cluster_id):
+        n = MagicMock()
+        n.get_id.return_value = node_id
+        n.cluster_id = cluster_id
+        return n
+
+    def test_finds_the_node_already_hosting_the_subsystem(self):
+        db = self._db_with(
+            [self._copy("c1", "N1")],
+            [self._node("N1", "CL_tgt")])
+        self.assertEqual(
+            lvol_controller._subsystem_home_node(db, NQN, "CL_tgt"), "N1")
+
+    def test_ignores_copies_in_a_different_cluster(self):
+        db = self._db_with(
+            [self._copy("c1", "N_src")],
+            [self._node("N_src", "CL_src")])
+        self.assertEqual(
+            lvol_controller._subsystem_home_node(db, NQN, "CL_tgt"), "")
+
+    def test_ignores_other_subsystems(self):
+        db = self._db_with(
+            [self._copy("c1", "N1", nqn="nqn:other")],
+            [self._node("N1", "CL_tgt")])
+        self.assertEqual(
+            lvol_controller._subsystem_home_node(db, NQN, "CL_tgt"), "")
+
+    def test_a_volume_being_deleted_does_not_own_the_subsystem(self):
+        from simplyblock_core.models.lvol_model import LVol
+        db = self._db_with(
+            [self._copy("c1", "N1", status=LVol.STATUS_IN_DELETION)],
+            [self._node("N1", "CL_tgt")])
+        self.assertEqual(
+            lvol_controller._subsystem_home_node(db, NQN, "CL_tgt"), "")
