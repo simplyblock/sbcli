@@ -50,65 +50,60 @@ io_stats_keys = [
     "write_latency_ticks",
 ]
 
-ng: dict[str, Gauge] = {}
-cg: dict[str, Gauge] = {}
-dg: dict[str, Gauge] = {}
-lg: dict[str, Gauge] = {}
-pg: dict[str, Gauge] = {}
-
 def get_device_metrics():
-    global dg
-    if not dg:
-        labels = ['cluster', "cluster_name", "snode", "device"]
-        for k in io_stats_keys + ["status_code", "health_check"]:
-            dg["device_" + k] = Gauge("device_" + k, "device_" + k, labelnames=labels, registry=registry)
-    return dg
+    labels = ['cluster', "cluster_name", "snode", "device"]
+    return {
+        "device_" + k: Gauge("device_" + k, "device_" + k, labelnames=labels, registry=registry)
+        for k in
+        io_stats_keys + ["status_code", "health_check"]
+    }
+
 
 def get_snode_metrics():
-    global ng
-    if not ng:
-        labels = ['cluster', "cluster_name", "snode", "hostname"]
-        for k in io_stats_keys + ["status_code", "health_check"]:
-            ng["snode_" + k] = Gauge("snode_" + k, "snode_" + k, labelnames=labels, registry=registry)
-
-        # Additional SPDK-specific metrics
-        ng["snode_cpu_busy_percentage"] = Gauge(
+    labels = ['cluster', "cluster_name", "snode", "hostname"]
+    return {
+        **{
+            "snode_" + k: Gauge("snode_" + k, "snode_" + k, labelnames=labels, registry=registry)
+            for k in
+            io_stats_keys + ["status_code", "health_check"]
+        },
+        "snode_cpu_busy_percentage": Gauge(
             "snode_cpu_busy_percentage",
             "Per-thread CPU Busy %",
             labelnames=['cluster', "cluster_name", 'snode', 'hostname', 'thread_name'],
             registry=registry
-        )
-        ng["snode_cpu_core_utilization"] = Gauge(
+        ),
+        "snode_cpu_core_utilization": Gauge(
             "snode_cpu_core_utilization",
             "Per-core CPU Utilization %",
             labelnames=['cluster', "cluster_name", 'snode', 'hostname', 'core_id', 'thread_names'],
             registry=registry
-        )
-    return ng
+        ),
+    }
+
 
 def get_cluster_metrics():
-    global cg
-    if not cg:
-        labels = ['cluster', "cluster_name"]
-        for k in io_stats_keys + ["status_code", "prov_cap_crit", "cap_crit"]:
-            cg["cluster_" + k] = Gauge("cluster_" + k, "cluster_" + k, labelnames=labels, registry=registry)
-    return cg
+    labels = ['cluster', "cluster_name"]
+    return {
+        "cluster_" + k: Gauge("cluster_" + k, "cluster_" + k, labelnames=labels, registry=registry)
+        for k in io_stats_keys + ["status_code", "prov_cap_crit", "cap_crit"]
+    }
+
 
 def get_lvol_metrics():
-    global lg
-    if not lg:
-        labels = ['cluster', "cluster_name", "pool", "lvol", "lvol_name", "pvc_name"]
-        for k in io_stats_keys + ["status_code", "health_check"]:
-            lg["lvol_" + k] = Gauge("lvol_" + k, "lvol_" + k, labelnames=labels, registry=registry)
-    return lg
+    labels = ['cluster', "cluster_name", "pool", "lvol", "lvol_name", "pvc_name"]
+    return {
+        "lvol_" + k: Gauge("lvol_" + k, "lvol_" + k, labelnames=labels, registry=registry)
+        for k in io_stats_keys + ["status_code", "health_check"]
+    }
+
 
 def get_pool_metrics():
-    global pg
-    if not pg:
-        labels = ['cluster', "cluster_name", "pool", "name"]
-        for k in io_stats_keys + ["status_code"]:
-            pg["pool_" + k] = Gauge("pool_" + k, "pool_" + k, labelnames=labels, registry=registry)
-    return pg
+    labels = ['cluster', "cluster_name", "pool", "name"]
+    return {
+        "pool_" + k: Gauge("pool_" + k, "pool_" + k, labelnames=labels, registry=registry)
+        for k in io_stats_keys + ["status_code"]
+    }
 
 
 @bp.route('/cluster/metrics', methods=['GET'])
