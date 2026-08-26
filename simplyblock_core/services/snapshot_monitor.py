@@ -657,7 +657,9 @@ def main():
                     root = mini.get_id()
                 chains.setdefault(root, []).append(mini)
 
-            def _process_chain(minis):
+            def _process_chain(minis, cluster=cluster, snodes=snodes,
+                               all_mini_lvols=all_mini_lvols, leader_cache=leader_cache,
+                               leader_cache_guard=leader_cache_guard):
                 for mini in minis:
                     try:
                         snap = db.get_snapshot_by_id(mini.get_id())

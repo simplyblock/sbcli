@@ -629,7 +629,7 @@ def _check_node_lvstore(
                                                     # not clobbered (incident 2026-06-18).
                                                     did = dev.get_id()
 
-                                                    def _mut(nn):
+                                                    def _mut(nn, did=did, remote_device=remote_device):
                                                         nn.remote_devices = [
                                                             r for r in nn.remote_devices if r.get_id() != did]
                                                         nn.remote_devices.append(remote_device)

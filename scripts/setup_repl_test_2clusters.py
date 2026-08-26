@@ -206,7 +206,7 @@ def ssh_exec(ip, cmds, get_output=False, check=False, timeout=LONG_CMD_TIMEOUT):
         # Printing each line as it lands is what makes a hang locatable.
         pending = {"out": "", "err": ""}
 
-        def _emit(stream, text):
+        def _emit(stream, text, pending=pending):
             pending[stream] += text
             while "\n" in pending[stream]:
                 line, pending[stream] = pending[stream].split("\n", 1)
@@ -221,7 +221,7 @@ def ssh_exec(ip, cmds, get_output=False, check=False, timeout=LONG_CMD_TIMEOUT):
                     except UnicodeEncodeError:
                         print(out.encode("ascii", "replace").decode("ascii"), flush=True)
 
-        def _drain():
+        def _drain(chan=chan, out_parts=out_parts, err_parts=err_parts):
             while chan.recv_ready():
                 chunk = chan.recv(65536).decode("utf-8", "replace")
                 out_parts.append(chunk)
