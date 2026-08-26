@@ -2612,6 +2612,270 @@ print(json.dumps(dict((str(k), sorted(v)) for k, v in gens.items())))
     print("CASE 12 PASSED: CG snapshots complete per generation, retention "
           "correct, both fail-overs crash-consistent and generation-exact.")
 
+
+
+# --------------------------------------------------------------------------- #
+# Cases 13-15: a single node dies DURING fail-over / fail-back / cutover
+# --------------------------------------------------------------------------- #
+# One node is killed at a RANDOM instant inside the phase under test, repeated
+# so the kills land at many different points of it. Chaos is allowed to make
+# the operation fail -- what is NOT allowed is losing data, wedging the
+# cluster, or leaving a state a retry cannot get out of. Each round therefore
+# ends in one of two accepted verdicts (completed despite the kill / failed
+# then succeeded on retry after recovery) and any third outcome fails the case.
+CHAOS_PHASE_ROUNDS = int(os.environ.get("CHAOS_PHASE_ROUNDS", "20"))
+CHAOS_PHASE_VOLS = int(os.environ.get("CHAOS_PHASE_VOLS", "3"))
+#: cap for the randomized kill delay when a phase turns out to be slow
+CHAOS_PHASE_MAX_DELAY = float(os.environ.get("CHAOS_PHASE_MAX_DELAY", "45"))
+
+
+def _kill_after(delay_s, ip, key_path, sink):
+    """Kill SPDK on *ip* after *delay_s*, off the main thread."""
+    import threading
+
+    def _run():
+        time.sleep(delay_s)
+        try:
+            kill_spdk(ip, key_path)
+            sink.append(("killed", ip, time.time()))
+        except Exception as exc:                      # noqa: BLE001 - recorded
+            sink.append(("kill-failed", ip, str(exc)))
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    return t
+
+
+def _await_cluster_healthy(mgmt_ip, key_path, timeout=NODE_STATE_TIMEOUT):
+    """Every node online AND healthy, every cluster active/degraded."""
+    deadline = time.time() + timeout
+    last = {}
+    while time.time() < deadline:
+        last = _all_nodes_online(mgmt_ip, key_path)
+        if last.get("all_online"):
+            return True, last
+        time.sleep(20)
+    return False, last
+
+
+def _phase_victims(meta, phase):
+    """Nodes worth killing for the phase under test, as (label, public_ip).
+
+    Fail-over and fail-back BUILD the copy on the destination, so the
+    destination cluster is where a kill bites; the cutover freezes and flips
+    the source, so both sides matter there.
+    """
+    _src_uuid, src, _tgt_uuid, tgt = _src_target(meta)
+    if phase == "failover":
+        pool = [("tgt", ip) for ip in tgt["storage_public_ips"]]
+    elif phase == "failback":
+        pool = [("src", ip) for ip in src["storage_public_ips"]]
+    else:
+        pool = ([("src", ip) for ip in src["storage_public_ips"]]
+                + [("tgt", ip) for ip in tgt["storage_public_ips"]])
+    return pool
+
+
+def _failover_all(mgmt_ip, key_path, lvols):
+    """Returns (ok, target_lvols, error). Never raises on a chaos failure."""
+    out = []
+    for lv in lvols:
+        fo = do_failover(mgmt_ip, key_path, lv)
+        if not isinstance(fo, dict) or not fo.get("connection_strings"):
+            return False, out, (f"{lv[:8]}: "
+                                f"{(fo or {}).get('error', '')} "
+                                f"{(fo or {}).get('log', '')}".strip()[:300])
+        out.append(fo["lvol_id"])
+    return True, out, ""
+
+
+def _commit_all(mgmt_ip, key_path, lvols, timeout=None):
+    """Drive replication-commit for every volume and wait for the cutovers."""
+    timeout = timeout or CUTOVER_WAIT_TIMEOUT
+    for lv in lvols:
+        run(mgmt_ip, key_path, "%s -d volume replication-commit %s" % (SBCTL, lv),
+            check=False)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        states = replication_states(mgmt_ip, key_path, lvols)
+        done = sum(1 for x in states.values() if x in ("cutover_done", "failed_over"))
+        if done == len(lvols):
+            return True, ""
+        time.sleep(15)
+    return False, "only %d/%d cutovers completed in %ds" % (done, len(lvols), timeout)
+
+
+def _failback_all(mgmt_ip, key_path, meta, tgt_lvols):
+    """Point replication home, fail back, commit, and return the new lvol ids."""
+    src_uuid, src, tgt_uuid, _tgt = _src_target(meta)
+    set_cluster_replication(mgmt_ip, key_path, tgt_uuid, src_uuid,
+                            pool_uuid_of(mgmt_ip, key_path, src["pool"]))
+    for t in tgt_lvols:
+        failback(mgmt_ip, key_path, t)
+    wait_replication_caught_up(mgmt_ip, key_path, tgt_lvols, timeout=3600)
+    ok, why = _commit_all(mgmt_ip, key_path, tgt_lvols)
+    if not ok:
+        return False, [], why
+    back = failed_over_targets(mgmt_ip, key_path, tgt_lvols)
+    new = [back[t] for t in tgt_lvols if t in back]
+    if len(new) != len(tgt_lvols):
+        return False, new, "fail-back returned %d/%d volumes" % (len(new), len(tgt_lvols))
+    return True, new, ""
+
+
+def _chaos_phase_case(meta, phase, title):
+    """Kill ONE node at a random instant inside *phase*, CHAOS_PHASE_ROUNDS times."""
+    import random
+    print("\n========== %s ==========" % title)
+    key_path = meta["key_path"]
+    mgmt_ip = meta["mgmt"]["public_ip"]
+    client_ip = meta["clients"][0]["public_ip"]
+    src_uuid, src, tgt_uuid, tgt = _src_target(meta)
+    seed = int(os.environ.get("CHAOS_PHASE_SEED") or time.time())
+    rng = random.Random(seed)
+    print("  seed: %d, rounds: %d, phase: %s" % (seed, CHAOS_PHASE_ROUNDS, phase))
+
+    prepare_mount_points(client_ip, key_path)
+    delete_test_volumes(mgmt_ip, key_path, _all_test_pools(meta))
+    # The cutover under test in case 15 is the FINAL MIGRATION STEP -- that is
+    # a migration-mode policy committed on the SOURCE volumes while IO runs.
+    mode = "migration" if phase == "commit" else "failover"
+    lvols = create_volumes(mgmt_ip, key_path, src_uuid, src["pool"], tgt_uuid,
+                           tgt["pool"], mode=mode, count=CHAOS_PHASE_VOLS)
+    mounts = connect_and_mount(client_ip, key_path, mgmt_ip, lvols, fmt=True)
+    baseline = write_baseline(client_ip, key_path, mounts)
+    baseline_ts = time.time()
+    wait_replication_caught_up(mgmt_ip, key_path, lvols)
+    wait_data_replicated(mgmt_ip, key_path, lvols, baseline_ts)
+    cleanup_client(client_ip, key_path, mounts)
+
+    victims = _phase_victims(meta, phase)
+    phase_secs = 20.0          # replaced by the first round's measurement
+    verdicts, retries, kills = [], 0, []
+    home = list(lvols)         # volumes currently on the SOURCE side
+    #: md5 per volume, positionally aligned with `home` -- every hop below
+    #: preserves order, so the baseline follows a volume across fail-overs
+    #: without depending on dict iteration order.
+    base_list = [baseline[lv] for lv in lvols]
+
+    for rnd in range(1, CHAOS_PHASE_ROUNDS + 1):
+        delay = round(rng.uniform(0.0, min(phase_secs * 1.2, CHAOS_PHASE_MAX_DELAY)), 1)
+        label, victim = rng.choice(victims)
+        print("--- round %d/%d: kill %s node %s at T+%.1fs of the %s phase ---"
+              % (rnd, CHAOS_PHASE_ROUNDS, label, victim, delay, phase))
+        sink = []
+        started = time.time()
+
+        if phase == "failover":
+            _kill_after(delay, victim, key_path, sink)
+            ok, tgt_lvols, why = _failover_all(mgmt_ip, key_path, home)
+        elif phase == "failback":
+            ok, tgt_lvols, why = _failover_all(mgmt_ip, key_path, home)
+            if not ok:
+                raise RuntimeError("FAIL: setup fail-over failed before the "
+                                   "fail-back under test: %s" % why)
+            _kill_after(delay, victim, key_path, sink)
+            ok, back, why = _failback_all(mgmt_ip, key_path, meta, tgt_lvols)
+        else:                                     # commit / online cutover
+            # No fail-over first: the volumes are live on the source under a
+            # migration policy, and replication-commit IS the online cutover.
+            _kill_after(delay, victim, key_path, sink)
+            ok, why = _commit_all(mgmt_ip, key_path, home)
+            tgt_lvols = home
+        measured = time.time() - started
+        if rnd == 1:
+            phase_secs = max(5.0, measured)
+            print("  measured %s phase: %.1fs (kill delays randomize over it)"
+                  % (phase, phase_secs))
+        kills.extend(sink)
+
+        healthy, state = _await_cluster_healthy(mgmt_ip, key_path)
+        if not healthy:
+            raise RuntimeError(
+                "FAIL: round %d -- cluster did not recover %ds after killing %s: "
+                "unhealthy=%s clusters=%s"
+                % (rnd, NODE_STATE_TIMEOUT, victim, state.get("offline"),
+                   state.get("clusters")))
+
+        if ok:
+            verdicts.append("completed")
+        else:
+            # Chaos may legitimately fail the operation -- a RETRY after the
+            # cluster is healthy again must then succeed. Anything else is a
+            # wedged state, which is the bug this case hunts.
+            print("  operation failed under chaos (%s); retrying after recovery"
+                  % why[:160])
+            retries += 1
+            if phase == "failover":
+                ok, tgt_lvols, why = _failover_all(mgmt_ip, key_path, home)
+            elif phase == "failback":
+                ok, back, why = _failback_all(mgmt_ip, key_path, meta, tgt_lvols)
+            else:
+                ok, why = _commit_all(mgmt_ip, key_path, tgt_lvols)
+            if not ok:
+                raise RuntimeError("FAIL: round %d -- %s did not succeed even on "
+                                   "retry after recovery: %s" % (rnd, phase, why))
+            verdicts.append("retry")
+
+        # Verify the data that arrived, then put the volumes back HOME so the
+        # next round starts from the same shape.
+        if phase == "failover":
+            check_lvols = tgt_lvols
+        elif phase == "failback":
+            check_lvols = back
+        else:
+            after = failed_over_targets(mgmt_ip, key_path, home)
+            check_lvols = [after[h] for h in home if h in after]
+            if len(check_lvols) != len(home):
+                raise RuntimeError("FAIL: round %d -- cutover produced %d/%d "
+                                   "target volumes" % (rnd, len(check_lvols), len(home)))
+        check_base = dict(zip(check_lvols, base_list))
+        vmounts = connect_and_mount(client_ip, key_path, mgmt_ip, check_lvols,
+                                    fmt=False, mount_base=MOUNT_BASE + "_ph")
+        good, _ = verify_baseline(client_ip, key_path, vmounts, check_base)
+        cleanup_client(client_ip, key_path, vmounts)
+        if not good:
+            raise RuntimeError("FAIL: round %d -- data not intact after %s with a "
+                               "node killed at T+%.1fs" % (rnd, phase, delay))
+
+        if phase in ("failover", "commit"):
+            # The volumes now live on the TARGET side; bring them home so the
+            # next round attacks the same phase from the same shape.
+            okb, back, whyb = _failback_all(mgmt_ip, key_path, meta, check_lvols)
+            if not okb:
+                raise RuntimeError("FAIL: round %d -- could not restore the home "
+                                   "side after the %s under test: %s"
+                                   % (rnd, phase, whyb))
+            home = back
+        else:
+            home = check_lvols
+        set_cluster_replication(mgmt_ip, key_path, src_uuid, tgt_uuid,
+                                pool_uuid_of(mgmt_ip, key_path, tgt["pool"]),
+                                mode=mode)
+        wait_replication_caught_up(mgmt_ip, key_path, home, timeout=3600)
+
+    completed = verdicts.count("completed")
+    print("  %d rounds: %d completed under the kill, %d needed a retry after "
+          "recovery, %d kills delivered" % (CHAOS_PHASE_ROUNDS, completed, retries,
+                                            sum(1 for k in kills if k[0] == "killed")))
+    print("%s PASSED: every round ended intact and unwedged (seed %d)."
+          % (title.split(":")[0], seed))
+
+
+def test_case_13(meta):
+    _chaos_phase_case(meta, "failover",
+                      "CASE 13: single node dies DURING fail-over")
+
+
+def test_case_14(meta):
+    _chaos_phase_case(meta, "failback",
+                      "CASE 14: single node dies DURING fail-back")
+
+
+def test_case_15(meta):
+    _chaos_phase_case(meta, "commit",
+                      "CASE 15: single node dies DURING the online cutover")
+
 CASES = {
     "case1": test_case_1,   # online migration cutover, no IO interruption
     "case2": test_case_2,   # DR fail-over on source-cluster loss
@@ -2625,6 +2889,9 @@ CASES = {
     "case10": test_case_10,  # migration under heavy IO + cutover freeze timing
     "case11": test_case_11,  # retention ladder + random-generation fail-overs
     "case12": test_case_12,  # consistency groups (needs the CG build)
+    "case13": test_case_13,  # node dies during fail-over, x20 random instants
+    "case14": test_case_14,  # node dies during fail-back, x20 random instants
+    "case15": test_case_15,  # node dies during the online cutover, x20
 }
 GROUPS = {
     "both": ["case1", "case2"],
@@ -2632,6 +2899,7 @@ GROUPS = {
     "errors": ["case5", "case6"],
     "extended": ["case7", "case8", "case9"],
     "features": ["case10", "case11", "case12"],
+    "phase-chaos": ["case13", "case14", "case15"],
     "all": ["case1", "case2", "case3", "case4", "case5", "case6"],
     # Case 3 last: it is the only case that needs the killed primary restored
     # and recovered, so a failure there cannot cost the other five cases.
