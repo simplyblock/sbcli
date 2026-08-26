@@ -100,6 +100,37 @@ def test_class_var_constants_are_not_model_fields():
     assert '_STATUS_CODE_MAP' not in Cluster().to_dict()
 
 
+def test_model_does_not_alias_the_payload_it_was_built_from():
+    payload = {'items': ['a'], 'mapping': {'k': 'v'}, 'seeded': [{'a': 1}]}
+
+    obj = Sample(payload)
+    obj.items.append('b')
+    obj.mapping['k'] = 'mutated'
+    obj.seeded[0]['a'] = 99
+
+    assert payload == {'items': ['a'], 'mapping': {'k': 'v'}, 'seeded': [{'a': 1}]}
+
+
+def test_payload_mutated_after_construction_does_not_reach_the_model():
+    payload = {'items': ['a'], 'mapping': {'k': 'v'}}
+
+    obj = Sample(payload)
+    payload['items'].append('b')
+    payload['mapping']['k'] = 'mutated'
+
+    assert obj.items == ['a']
+    assert obj.mapping == {'k': 'v'}
+
+
+def test_two_models_built_from_one_payload_are_independent():
+    payload = {'items': ['a']}
+
+    first, second = Sample(payload), Sample(payload)
+    first.items.append('b')
+
+    assert second.items == ['a']
+
+
 def _model_classes():
     for module_info in pkgutil.iter_modules(simplyblock_core.models.__path__):
         module = importlib.import_module(f'simplyblock_core.models.{module_info.name}')
