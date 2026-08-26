@@ -74,6 +74,7 @@ data-plane-isolated storage nodes and client):
         --metadata cluster_metadata_mp.json
 """
 import argparse
+import base64
 import json
 import os
 import posixpath
@@ -205,6 +206,16 @@ def parse_args():
                      help="--max_latency in seconds; 0 omits the flag (default 20).")
     fio.add_argument("--fio-verify", default="crc32c",
                      help="fio verify algorithm; empty string disables verification.")
+    fio.add_argument("--write-iolog", action="store_true",
+                     help="Record every IO (type, offset, length) per volume via "
+                          "fio --write_iolog, so a verify failure can be traced back "
+                          "to the writes that touched that offset. Bounded by "
+                          "--iolog-keep-hours; unbounded is gigabytes per volume "
+                          "per hour at this workload.")
+    fio.add_argument("--iolog-keep-hours", type=float, default=1.0,
+                     help="Hours of iolog history to keep (default 1). A trimmer "
+                          "hole-punches the head of each log, freeing those blocks "
+                          "without disturbing fio write offsets.")
     fio.add_argument("--fio-completion-grace", type=int, default=180,
                      help="Seconds before the projected fio end time at which a clean "
                           "rc=0 exit counts as completion rather than a mid-run fault.")
@@ -1261,6 +1272,13 @@ class SoakRunner:
                 # The dumps are 4 KiB each and only appear on failure.
                 fio_cmd += (f"--verify={args.fio_verify} --verify_fatal=1 "
                             f"--verify_backlog=1024 --verify_dump=1 ")
+            if args.write_iolog:
+                # On the client's own disk, never inside the volume under test:
+                # the iolog must not become part of the data being verified.
+                iolog = posixpath.join(
+                    "/home", self.user, f"soak_mp_{self.run_id}",
+                    f"iolog_vol{volume['index']}.log")
+                fio_cmd += f"--write_iolog={shlex.quote(iolog)} "
             fio_cmd += f"--output={shlex.quote(volume['fio_log'])}"
 
             start_script = (
@@ -1286,6 +1304,8 @@ class SoakRunner:
                 pid=pid,
             ))
             self.logger.log(f"Started fio for {volume['volume_name']} pid {pid}")
+        if args.write_iolog:
+            self.start_iolog_trimmer()
         self.fio_jobs = fio_jobs
         self.fio_started_at = time.time()
         time.sleep(10)
@@ -1328,6 +1348,38 @@ class SoakRunner:
             f"bash -lc {shlex.quote(cmd)}", timeout=30, check=False,
             label=f"grep {job.volume_name}")
         return (stdout_text or "").strip()
+
+    def start_iolog_trimmer(self):
+        """Stage and launch the iolog trimmer on the client.
+
+        The script is pushed base64-encoded rather than heredoc'd: the trimmer
+        is full of quotes and ${} that do not survive nesting through
+        ssh -> bash -> bash, and a mangled trimmer would silently fail to bound
+        the logs. base64 has no characters any shell layer will touch.
+        """
+        local = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "iolog_trimmer.sh")
+        if not os.path.isfile(local):
+            self.logger.log(
+                f"WARNING: {local} not found; iologs will grow UNBOUNDED "
+                f"(no trimmer staged)")
+            return
+        with open(local, "rb") as fh:
+            payload = base64.b64encode(fh.read()).decode()
+        run_dir = posixpath.join("/home", self.user, f"soak_mp_{self.run_id}")
+        keep = int(max(60.0, self.args.iolog_keep_hours * 3600.0))
+        stage = (f"echo {payload} | base64 -d > ~/iolog_trimmer.sh && "
+                 f"chmod +x ~/iolog_trimmer.sh")
+        self.client.run("bash -lc " + shlex.quote(stage), timeout=120,
+                        check=True, label="stage iolog trimmer")
+        launch = (f"setsid nohup ~/iolog_trimmer.sh {shlex.quote(run_dir)} {keep} 300 "
+                  f"> {shlex.quote(run_dir)}/iolog_trimmer.log 2>&1 < /dev/null & echo $!")
+        self.client.run("bash -lc " + shlex.quote(launch), timeout=60,
+                        check=False, label="start iolog trimmer")
+        self.logger.log(
+            f"iolog trimmer started: keeping ~{self.args.iolog_keep_hours}h of write "
+            f"history per volume in {run_dir}")
+
 
     def _dump_fio_streams(self, job, context):
         for label, path, lines in [
