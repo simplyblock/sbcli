@@ -536,20 +536,3 @@ def test_shared_subsystem_survives_one_members_teardown():
     assert guard < delete, "the other-claimants check must precede subsystem_delete"
     assert "x.nqn == lvol.nqn" in src, "claimants are identified by shared NQN"
     assert "Leaving subsystem" in src
-
-
-def test_shared_subsystem_survives_one_members_teardown():
-    """Run 20260825_224221: a stuck in_deletion member's teardown loop saw the
-    SHARED subsystem transiently empty on the HA peer (between one member's
-    teardown and the next member's add) and deleted it -- every following
-    namespaced fail-over then died in add_ns on a missing subsystem (8/20
-    landed). Delete-on-empty must first prove no other live volume claims
-    the NQN."""
-    import inspect
-    from simplyblock_core.controllers import lvol_controller as lc
-    src = inspect.getsource(lc._remove_lvol_subsys_from_node)
-    guard = src.index("other")
-    delete = src.index("subsystem_delete")
-    assert guard < delete, "the other-claimants check must precede subsystem_delete"
-    assert "x.nqn == lvol.nqn" in src, "claimants are identified by shared NQN"
-    assert "Leaving subsystem" in src
