@@ -1,415 +1,452 @@
+# coding=utf-8
+"""HTTP front-end for SPDK's JSON-RPC unix socket.
+
+Storage nodes run one instance of this next to every SPDK process. It accepts
+basic-auth'd JSON-RPC POSTs (see ``simplyblock_core.rpc_client.RPCClient``) and
+forwards the raw body to ``/mnt/ramdisk/spdk_<port>/spdk.sock``.
+
+Importing this module has no side effects: configuration is read by
+``ProxySettings``, the application is built by ``create_app`` and only ``main``
+(the ``__main__`` entry point used by the deployment manifests) binds a port.
+"""
+
+import asyncio
 import base64
-from typing import ClassVar
+import hmac
 import json
 import logging
-import os
-import socket
+import ssl
 import sys
-import threading
 import time
-from typing import Optional
+from contextlib import asynccontextmanager
+from typing import Annotated, Any, AsyncGenerator, Dict, Optional
 
-from http.server import HTTPServer
-from http.server import ThreadingHTTPServer
-from http.server import BaseHTTPRequestHandler
+import uvicorn
+from fastapi import FastAPI, Request, Response
+from pydantic import BeforeValidator, Field, SecretStr
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from starlette.requests import ClientDisconnect
 
 from simplyblock_core.settings import Settings
 
 
-logger_handler = logging.StreamHandler(stream=sys.stdout)
-logger_handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
-logger = logging.getLogger()
-logger.addHandler(logger_handler)
-logger.setLevel(logging.INFO)
+logger = logging.getLogger(__name__)
 
-read_line_time_diff: dict = {}
-recv_from_spdk_time_diff: dict = {}
-def print_stats():
-    # Paced by monotonic elapsed time, not just the sleep call: several
-    # integration tests patch a bare-imported `time.sleep` on some other
-    # module (e.g. storage_node_ops), which mutates the same shared stdlib
-    # `time` module and turns THIS sleep into a no-op for the duration of
-    # that patch. Without this guard the loop degenerates into a hot spin
-    # that floods stdout with duplicate stats and burns CPU other threads
-    # need — see tests/AGENTS.md's note on deadline loops paced by sleep().
-    last_log = time.monotonic()
-    while True:
+#: How often the periodic timing report is emitted, and the window the
+#: ``last_Ns_avg`` figure covers.
+STATS_INTERVAL_SEC = 3
+#: Samples are dropped wholesale once a series grows past this.
+STATS_MAX_SAMPLES = 10000
+#: Per-attempt bound on the readiness probe, and the pause between attempts.
+SPDK_READY_PROBE_TIMEOUT_SEC = 5
+SPDK_READY_POLL_INTERVAL_SEC = 1
+#: SPDK responses are read in one shot; matches the pre-FastAPI recv() size.
+SPDK_RECV_SIZE = 1024 * 1024 * 1024
+#: Idle keep-alive window. The server this replaced spoke HTTP/1.0 and closed
+#: after every response, so a connection could never be dropped underneath a
+#: client that was about to reuse it. RPCClient deliberately keeps POST out of
+#: its urllib3 retry set, so such a drop surfaces as a failed RPC rather than a
+#: retry — hence an idle window far longer than the gap between RPCs to a node.
+KEEP_ALIVE_TIMEOUT_SEC = 300
+
+
+def _rpc_port_or_default(value: Any) -> Any:
+    """Fall back to 8080 for an unparsable ``RPC_PORT``.
+
+    Legacy behaviour, kept deliberately: deployments that pass a non-numeric
+    port have always silently landed on 8080 rather than failing to start.
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 8080
+
+
+class ProxySettings(BaseSettings):
+    """Environment configuration of the proxy.
+
+    The variable names carry no ``SB_`` prefix — they are baked into the
+    deployed manifests (``simplyblock_web/templates/storage_deploy_spdk.yaml.j2``)
+    and into the docker launch path
+    (``simplyblock_web/api/internal/storage_node/docker.py``).
+    """
+
+    model_config = SettingsConfigDict(case_sensitive=False)
+
+    server_ip: Annotated[str, Field(description="Address the HTTP server binds to")]
+    rpc_port: Annotated[
+        int,
+        Field(description="Port the HTTP server binds to; also selects the SPDK unix socket"),
+        BeforeValidator(_rpc_port_or_default),
+    ]
+    rpc_username: str
+    rpc_password: SecretStr
+    timeout: Annotated[
+        float,
+        Field(gt=0, description="Upper bound on how long a single SPDK round-trip may take"),
+    ] = 5 * 60
+    max_concurrent_spdk: Annotated[
+        int,
+        Field(gt=0, description="Number of RPCs allowed to be in flight against SPDK at once"),
+    ] = 16
+    spdk_timeout_margin: Annotated[
+        float,
+        Field(
+            gt=0,
+            description=(
+                "Multiplier applied to the caller-supplied HTTP timeout (X-RPC-Timeout header) "
+                "to derive how long the proxy waits on SPDK while holding a concurrency slot. "
+                ">1 so a request that completes just after the caller's deadline still returns "
+                "instead of being aborted; small enough that abandoned/stuck RPCs free their "
+                "slot quickly."
+            ),
+        ),
+    ] = 2.0
+    multi_threading_enabled: Annotated[
+        bool,
+        Field(
+            description=(
+                "Serve RPCs concurrently. When false the proxy forwards one RPC at a time, "
+                "matching the single-threaded HTTPServer this used to run on."
+            )
+        ),
+    ] = False
+
+    rpc_sock_path: Annotated[
+        Optional[str],
+        Field(description=(
+            "Path of SPDK's JSON-RPC unix socket. Defaults to the location SPDK "
+            "binds for this RPC_PORT, which is what every deployment uses."
+        )),
+    ] = None
+
+    @property
+    def rpc_sock(self) -> str:
+        return self.rpc_sock_path or f"/mnt/ramdisk/spdk_{self.rpc_port}/spdk.sock"
+
+    @property
+    def authorization(self) -> str:
+        """The ``Authorization`` header value clients have to present."""
+        credentials = f"{self.rpc_username}:{self.rpc_password.get_secret_value()}"
+        return 'Basic ' + base64.b64encode(credentials.encode('ascii')).decode('ascii')
+
+
+class TimingStats:
+    """Rolling record of operation durations, reported periodically."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.samples: Dict[int, int] = {}
+
+    def record(self, start_ns: int, duration_ns: int) -> None:
+        self.samples[start_ns] = duration_ns
+
+    def report(self, now_ns: int) -> Optional[str]:
+        """Summarize the collected samples, clearing them once they pile up."""
+        if not self.samples:
+            return None
+
+        durations = list(self.samples.values())
+        window = [
+            duration
+            for start, duration in self.samples.items()
+            if start > now_ns - STATS_INTERVAL_SEC * 1000 * 1000 * 1000
+        ]
+        summary = (
+            f"{self.name}: max={max(durations)} ns,"
+            f" avg={int(sum(durations) / len(durations))} ns,"
+            f" last_{STATS_INTERVAL_SEC}s_avg={int(sum(window) / len(window)) if window else 0} ns"
+        )
+
+        if len(self.samples) > STATS_MAX_SAMPLES:
+            self.samples.clear()
+
+        return summary
+
+
+class SpdkProxy:
+    """Forwards JSON-RPC requests to SPDK's unix socket."""
+
+    def __init__(self, settings: ProxySettings) -> None:
+        self.settings = settings
+        self.spdk_ready = False
+        #: Requests currently being served, and unix sockets currently open
+        #: towards SPDK. Both are logged per request and asserted on by tests.
+        self.active_requests = 0
+        self.open_connections = 0
+        self.read_body_stats = TimingStats('read_body_time')
+        self.recv_from_spdk_stats = TimingStats('recv_from_spdk_time')
+        # Without MULTI_THREADING_ENABLED the proxy used to run on a
+        # non-threading HTTPServer, i.e. one request at a time.
+        self.concurrency_limit = (
+            settings.max_concurrent_spdk if settings.multi_threading_enabled else 1)
+        self._slots: Optional[asyncio.Semaphore] = None
+        logger.info("SPDK concurrency limit: %s", self.concurrency_limit)
+
+    @property
+    def slots(self) -> asyncio.Semaphore:
+        """Gate on the number of RPCs in flight against SPDK.
+
+        Built on first use: up to Python 3.9 a Semaphore binds to whichever
+        event loop is running when it is constructed, and the proxy is
+        constructed before the server's loop exists.
+        """
+        if self._slots is None:
+            self._slots = asyncio.Semaphore(self.concurrency_limit)
+        return self._slots
+
+    def authenticate(self, authorization: Optional[str]) -> bool:
+        # Compared as bytes: compare_digest rejects non-ASCII str outright, and
+        # the header is attacker-controlled.
+        return authorization is not None and hmac.compare_digest(
+            authorization.encode('utf-8'),
+            self.settings.authorization.encode('utf-8'),
+        )
+
+    async def report_stats(self) -> None:
+        """Log the collected timings every ``STATS_INTERVAL_SEC`` seconds."""
+        while True:
+            await asyncio.sleep(STATS_INTERVAL_SEC)
+            try:
+                now = time.time_ns()
+                for stats in (self.read_body_stats, self.recv_from_spdk_stats):
+                    if (summary := stats.report(now)) is not None:
+                        logger.info("Periodic stats: %s: %s", now, summary)
+            except Exception as e:
+                logger.error(e)
+
+    async def wait_for_spdk_ready(self) -> None:
+        """Block until SPDK responds to spdk_get_version on the unix socket."""
+        payload = json.dumps({'id': 1, 'method': 'spdk_get_version'}).encode('ascii')
+        while not self.spdk_ready:
+            try:
+                self.spdk_ready = await asyncio.wait_for(
+                    self._probe(payload), SPDK_READY_PROBE_TIMEOUT_SEC)
+            except (OSError, asyncio.TimeoutError) as e:
+                logger.info(f"Waiting for SPDK to be ready: {e}")
+
+            if self.spdk_ready:
+                logger.info("SPDK is ready (spdk_get_version responded)")
+                return
+
+            await asyncio.sleep(SPDK_READY_POLL_INTERVAL_SEC)
+
+    async def _probe(self, payload: bytes) -> bool:
+        reader, writer = await asyncio.open_unix_connection(self.settings.rpc_sock)
         try:
-            time.sleep(3)
-            if time.monotonic() - last_log < 2.5:
-                continue
-            last_log = time.monotonic()
-            t = time.time_ns()
-            if len(read_line_time_diff) > 0:
-                read_line_time_diff_max = max(list(read_line_time_diff.values()))
-                read_line_time_diff_avg = int(sum(list(read_line_time_diff.values()))/len(read_line_time_diff))
-                last_3_sec = []
-                for k,v in read_line_time_diff.items():
-                    if k > t - 3*1000*1000*1000:
-                        last_3_sec.append(v)
-                if len(last_3_sec) > 0:
-                    read_line_time_diff_avg_last_3_sec = int(sum(last_3_sec)/len(last_3_sec))
-                else:
-                    read_line_time_diff_avg_last_3_sec = 0
-                logger.info(f"Periodic stats: {t}: read_line_time: max={read_line_time_diff_max} ns, avg={read_line_time_diff_avg} ns, last_3s_avg={read_line_time_diff_avg_last_3_sec} ns")
-                if len(read_line_time_diff) > 10000:
-                    read_line_time_diff.clear()
+            writer.write(payload)
+            await writer.drain()
 
-            if len(recv_from_spdk_time_diff) > 0:
-                recv_from_spdk_time_max = max(list(recv_from_spdk_time_diff.values()))
-                recv_from_spdk_time_avg = int(sum(list(recv_from_spdk_time_diff.values()))/len(recv_from_spdk_time_diff))
-                last_3_sec = []
-                for k,v in recv_from_spdk_time_diff.items():
-                    if k > t - 3*1000*1000*1000:
-                        last_3_sec.append(v)
-                if len(last_3_sec) > 0:
-                    recv_from_spdk_time_avg_last_3_sec = int(sum(last_3_sec)/len(last_3_sec))
-                else:
-                    recv_from_spdk_time_avg_last_3_sec = 0
-                logger.info(f"Periodic stats: {t}: recv_from_spdk_time: max={recv_from_spdk_time_max} ns, avg={recv_from_spdk_time_avg} ns, last_3s_avg={recv_from_spdk_time_avg_last_3_sec} ns")
-                if len(recv_from_spdk_time_diff) > 10000:
-                    recv_from_spdk_time_diff.clear()
-        except Exception as e:
-            logger.error(e)
-
-
-def get_env_var(name, default=None, is_required=False):
-    if not name:
-        logger.warning("Invalid env var name %s", name)
-        return False
-    if name not in os.environ and is_required:
-        logger.error("env value is required: %s" % name)
-        raise Exception("env value is required: %s" % name)
-    return os.environ.get(name, default)
-
-unix_sockets: list[socket] = []  # type: ignore[valid-type]
-spdk_semaphore: threading.Semaphore = None  # type: ignore[assignment]  # initialized after env vars are read
-spdk_ready = False
-
-
-def wait_for_spdk_ready():
-    """Block until SPDK responds to spdk_get_version on the unix socket."""
-    global spdk_ready
-    payload = json.dumps({'id': 1, 'method': 'spdk_get_version'}).encode('ascii')
-    while not spdk_ready:
-        sock = None
-        try:
-            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)  # type: ignore[attr-defined]  # AF_UNIX: Linux-only, absent on Windows
-            sock.settimeout(5)
-            sock.connect(rpc_sock)
-            sock.sendall(payload)
             buf = b''
-            while True:
-                data = sock.recv(4096)
-                if data == b'':
-                    break
+            while (data := await reader.read(4096)) != b'':
                 buf += data
                 try:
                     json.loads(buf.decode('ascii'))
-                    spdk_ready = True
-                    logger.info("SPDK is ready (spdk_get_version responded)")
-                    return
                 except ValueError:
                     continue
-        except (socket.error, OSError) as e:
-            logger.info(f"Waiting for SPDK to be ready: {e}")
+                return True
+            return False
         finally:
-            if sock:
-                try:
-                    sock.close()
-                except OSError:
-                    pass
-        time.sleep(1)
+            _close(writer)
 
+    def _resolve_sock_timeout(self, client_timeout: Optional[str]) -> float:
+        """Bound the SPDK unix-socket wait (and hence the concurrency-slot hold)
+        to a value tied to the CALLER's HTTP timeout, rather than the global
+        ``timeout``.
 
-def _resolve_sock_timeout(client_timeout):
-    """Bound the SPDK unix-socket wait (and hence the spdk_semaphore-slot hold)
-    to a value tied to the CALLER's HTTP timeout, rather than the global
-    ``TIMEOUT``.
-
-    Each in-flight RPC holds one of ``MAX_CONCURRENT_SPDK`` semaphore slots for
-    the entire SPDK round-trip. If a slot were always held for the full global
-    ``TIMEOUT`` (default 300s) while the caller abandons the request after its
-    own (often 1-5s) timeout, a handful of never-completing RPCs (e.g. a
-    ``distr_status_events_update`` that the distrib can't finish applying) would
-    squat every slot for minutes and starve all other RPCs to this node —
-    unrelated calls (port_block, bdev_get_bdevs) then never even reach SPDK and
-    time out at the caller. Holding the slot only ~SPDK_TIMEOUT_MARGIN× longer
-    than the caller waits lets slots recycle promptly. Capped at the global
-    ``TIMEOUT`` so genuinely long operations keep today's budget; falls back to
-    ``TIMEOUT`` when the caller sends no hint (backward compatible).
-    """
-    if client_timeout is None:
-        return TIMEOUT
-    try:
-        ct = float(client_timeout)
-    except (TypeError, ValueError):
-        return TIMEOUT
-    if ct <= 0:
-        return TIMEOUT
-    return min(ct * SPDK_TIMEOUT_MARGIN, TIMEOUT)
-
-def rpc_call(req, client_timeout=None):
-    logger.info(f"active threads: {threading.active_count()}")
-    logger.info(f"active unix sockets: {len(unix_sockets)}")
-    req_data = json.loads(req.decode('ascii'))
-    req_time = time.time_ns()
-    params = ""
-    if "params" in req_data:
-        params = str(req_data['params'])
-    logger.info(f"Request:{req_time} function: {str(req_data['method'])}, params: {params}")
-    sock_timeout = _resolve_sock_timeout(client_timeout)
-    spdk_semaphore.acquire()
-    try:
-        return _rpc_call_inner(req, req_data, req_time, sock_timeout)
-    finally:
-        spdk_semaphore.release()
-
-def _rpc_call_inner(req, req_data, req_time, sock_timeout):
-    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)  # type: ignore[attr-defined]  # AF_UNIX: Linux-only, absent on Windows
-    unix_sockets.append(sock)
-    try:
-        sock.settimeout(sock_timeout)
-        sock.connect(rpc_sock)
-        sock.sendall(req)
-
-        if 'id' not in req_data:
-            return None
-
-        buf = ''
-        closed = False
-        response = None
-        recv_from_spdk_time_start = time.time_ns()
-        while not closed:
-            newdata = sock.recv(1024*1024*1024)
-            if newdata == b'':
-                closed = True
-            buf += newdata.decode('ascii')
-            try:
-                response = json.loads(buf)
-            except ValueError:
-                continue  # incomplete response; keep buffering
-            break
-        recv_from_spdk_time_end = time.time_ns()
-        time_diff = recv_from_spdk_time_end - recv_from_spdk_time_start
-        logger.info(f"recv_from_spdk_time_diff: {time_diff}")
-        recv_from_spdk_time_diff[recv_from_spdk_time_start] = time_diff
-
-        if not response and len(buf) > 0:
-            raise ValueError('Invalid response')
-
-        logger.info(f"Response:{req_time}")
-
-        return buf
-    except socket.timeout:
-        logger.error(f"Socket timeout waiting for SPDK response (request {req_time}, function: {req_data.get('method', 'unknown')})")
-        raise ValueError('SPDK response timeout')
-    finally:
+        Each in-flight RPC holds one of ``max_concurrent_spdk`` slots for the
+        entire SPDK round-trip. If a slot were always held for the full global
+        ``timeout`` (default 300s) while the caller abandons the request after
+        its own (often 1-5s) timeout, a handful of never-completing RPCs (e.g. a
+        ``distr_status_events_update`` that the distrib can't finish applying)
+        would squat every slot for minutes and starve all other RPCs to this
+        node — unrelated calls (port_block, bdev_get_bdevs) then never even
+        reach SPDK and time out at the caller. Holding the slot only
+        ~``spdk_timeout_margin``x longer than the caller waits lets slots
+        recycle promptly. Capped at the global ``timeout`` so genuinely long
+        operations keep today's budget; falls back to ``timeout`` when the
+        caller sends no hint (backward compatible).
+        """
+        if client_timeout is None:
+            return self.settings.timeout
         try:
-            sock.close()
-        except OSError:
-            pass
-        try:
-            unix_sockets.remove(sock)
-        except ValueError:
-            pass
+            ct = float(client_timeout)
+        except (TypeError, ValueError):
+            return self.settings.timeout
+        if ct <= 0:
+            return self.settings.timeout
+        return min(ct * self.settings.spdk_timeout_margin, self.settings.timeout)
 
+    async def rpc_call(self, req: bytes, client_timeout: Optional[str] = None) -> Optional[str]:
+        """Forward one JSON-RPC request, returning SPDK's raw response.
 
-class ServerHandler(BaseHTTPRequestHandler):
-    server_session: ClassVar[list[int]] = []
-    key = ""
-
-    # The base class defaults to "HTTP/1.0", under which parse_request()
-    # forces close_connection=True unconditionally regardless of what the
-    # client sends — i.e. keep-alive never actually engages without this.
-    # Every response below sends an explicit Content-Length because HTTP/1.1
-    # framing requires it (no more relying on connection-close as EOF).
-    protocol_version = "HTTP/1.1"
-
-    # Idle-connection reclaim timeout — NOT the same thing as the server's
-    # own `httpd.timeout` (set in run_server(), only bounds serve_forever()'s
-    # accept loop). Assigned in run_server() once KEEPALIVE_TIMEOUT exists,
-    # same as `key` below.
-    timeout: ClassVar[Optional[float]] = None
-
-    def do_HEAD(self, content_length=0):
-        self.send_response(200)
-        self.send_header('Content-type', 'text/html')
-        self.send_header('Content-Length', str(content_length))
-        self.end_headers()
-
-    def do_HEAD_no_content(self):
-        self.send_response(204)
-        self.send_header('Content-type', 'text/html')
-        self.send_header('Content-Length', '0')
-        self.end_headers()
-
-    def do_AUTHHEAD(self):
-        self.send_response(401)
-        self.send_header('WWW-Authenticate', 'text/html')
-        self.send_header('Content-type', 'text/html')
-        self.send_header('Content-Length', '0')
-        self.end_headers()
-
-    def do_INTERNALERROR(self):
-        self.send_response(500)
-        self.send_header('Content-type', 'text/html')
-        self.send_header('Content-Length', '0')
-        self.end_headers()
-
-    def do_POST(self):
+        Returns ``None`` for a request without an ``id`` (a notification, which
+        SPDK does not answer).
+        """
+        logger.info(f"active requests: {self.active_requests}")
+        logger.info(f"active unix sockets: {self.open_connections}")
+        req_data = json.loads(req.decode('ascii'))
         req_time = time.time_ns()
-        self.server_session.append(req_time)
+        params = str(req_data['params']) if 'params' in req_data else ""
+        logger.info(f"Request:{req_time} function: {str(req_data['method'])}, params: {params}")
+        sock_timeout = self._resolve_sock_timeout(client_timeout)
+        async with self.slots:
+            return await self._rpc_call_inner(req, req_data, req_time, sock_timeout)
+
+    async def _rpc_call_inner(
+        self,
+        req: bytes,
+        req_data: dict,
+        req_time: int,
+        sock_timeout: float,
+    ) -> Optional[str]:
         try:
-            self._do_POST_inner(req_time)
-        finally:
-            # Cleanup must run for ANY exception the body below can raise
-            # (e.g. ConnectionResetError / socket timeout writing the
-            # response under load), not only the two kinds it explicitly
-            # handles — otherwise the entry is orphaned in server_session
-            # for the rest of the process.
-            self.server_session.remove(req_time)
+            return await asyncio.wait_for(self._exchange(req, req_data, req_time), sock_timeout)
+        except asyncio.TimeoutError as e:
+            logger.error(
+                f"Socket timeout waiting for SPDK response (request {req_time}, "
+                f"function: {req_data.get('method', 'unknown')})")
+            raise ValueError('SPDK response timeout') from e
 
-    def _do_POST_inner(self, req_time):
-        logger.info(f"incoming request at: {req_time}")
-        logger.info(f"active server session: {len(self.server_session)}")
-        # Body must be drained before branching on auth, not only on the
-        # success path: on a kept-alive connection, an unread body from a
-        # rejected (401) request gets read as the START of the next request,
-        # which then fails to parse ("Bad request version").
-        read_line_time_start = time.time_ns()
-        if "Content-Length" in self.headers:
-            data_string = self.rfile.read(int(self.headers['Content-Length']))
-        elif "chunked" in self.headers.get("Transfer-Encoding", ""):
-            data_string = b''
-            while True:
-                line = self.rfile.readline().strip()
-                chunk_length = int(line, 16)
-
-                if chunk_length != 0:
-                    chunk = self.rfile.read(chunk_length)
-                    data_string += chunk
-
-                # Each chunk is followed by an additional empty newline
-                # that we have to consume.
-                self.rfile.readline()
-
-                # Finally, a chunk size of 0 is an end indication
-                if chunk_length == 0:
-                    break
-        else:
-            data_string = b''
-        read_line_time_end = time.time_ns()
-        time_diff = read_line_time_end - read_line_time_start
-        logger.info(f"read_line_time_diff: {time_diff}")
-        read_line_time_diff[read_line_time_start] = time_diff
-
-        if self.headers['Authorization'] != 'Basic ' + self.key:
-            self.do_AUTHHEAD()
-        else:
+    async def _exchange(self, req: bytes, req_data: dict, req_time: int) -> Optional[str]:
+        self.open_connections += 1
+        try:
+            reader, writer = await asyncio.open_unix_connection(self.settings.rpc_sock)
             try:
-                response = rpc_call(data_string, self.headers.get('X-RPC-Timeout'))
-                if response is not None:
-                    body = response.encode(encoding='ascii')
-                    self.do_HEAD(len(body))
-                    self.wfile.write(body)
-                else:
-                    self.do_HEAD_no_content()
+                writer.write(req)
+                await writer.drain()
 
-            except BrokenPipeError:
-                logger.warning(f"BrokenPipeError: client disconnected before response could be sent (request {req_time})")
-            except ValueError:
-                self.do_INTERNALERROR()
+                if 'id' not in req_data:
+                    return None
 
+                buf = b''
+                response = None
+                recv_start = time.time_ns()
+                while True:
+                    newdata = await reader.read(SPDK_RECV_SIZE)
+                    closed = newdata == b''
+                    buf += newdata
+                    try:
+                        response = json.loads(buf.decode('ascii'))
+                    except ValueError:
+                        if closed:
+                            break
+                        continue
+                    break
+                time_diff = time.time_ns() - recv_start
+                self.recv_from_spdk_stats.record(recv_start, time_diff)
+                logger.info(f"recv_from_spdk_time_diff: {time_diff}")
 
-def _bound_connection_concurrency(httpd, max_connections):
-    """Cap concurrent connections on a ThreadingHTTPServer instance.
+                if not response and len(buf) > 0:
+                    raise ValueError('Invalid response')
 
-    ThreadingMixIn spawns one thread per accepted connection with no limit.
-    Under keep-alive a connection's thread can now sit alive for the whole
-    idle window between requests rather than exiting after one request, so
-    this bounds it — same pattern as the existing ``spdk_semaphore``.
+                logger.info(f"Response:{req_time}")
 
-    Implemented as an instance-level monkeypatch, not a ThreadingHTTPServer
-    subclass: tests/conftest_proxy.py patches ``http.server.ThreadingHTTPServer``
-    to a MagicMock before importing this module, and a subclass statement at
-    module scope would evaluate against that mock and fail on import.
-    """
-    semaphore = threading.Semaphore(max_connections)
-    base_process_request = httpd.process_request
-    base_process_request_thread = httpd.process_request_thread
-
-    def process_request(request, client_address):
-        # Acquire before spawning the thread (not inside it), so the accept
-        # loop itself blocks at the cap instead of spawning unboundedly.
-        semaphore.acquire()
-        base_process_request(request, client_address)
-
-    def process_request_thread(request, client_address):
-        try:
-            base_process_request_thread(request, client_address)
+                return buf.decode('ascii')
+            finally:
+                _close(writer)
         finally:
-            semaphore.release()
-
-    httpd.process_request = process_request
-    httpd.process_request_thread = process_request_thread
+            self.open_connections -= 1
 
 
-def run_server(host, port, user, password, is_threading_enabled=False):
-    # encoding user and password
-    key = base64.b64encode((user+':'+password).encode(encoding='ascii')).decode('ascii')
-    print_stats_thread = threading.Thread(target=print_stats, daemon=True)
-    print_stats_thread.start()
-    wait_for_spdk_ready()
+def _close(writer: asyncio.StreamWriter) -> None:
     try:
-        ServerHandler.key = key
-        ServerHandler.timeout = KEEPALIVE_TIMEOUT
-        httpd: HTTPServer
-        if is_threading_enabled:
-            httpd = ThreadingHTTPServer((host, port), ServerHandler)
-            _bound_connection_concurrency(httpd, MAX_CONCURRENT_CONNECTIONS)
-        else:
-            httpd = HTTPServer((host, port), ServerHandler)
-        settings = Settings()
-        context = settings.make_server_ssl_context()
-        if context is not None:
-            httpd.socket = context.wrap_socket(httpd.socket, server_side=True)
-        httpd.timeout = TIMEOUT
-        logger.info('Started RPC http proxy server')
-        httpd.serve_forever()
-    except KeyboardInterrupt:
-        logger.info('Shutting down server')
-        httpd.socket.close()
+        writer.close()
+    except OSError:
+        pass
 
 
-TIMEOUT = int(get_env_var("TIMEOUT", is_required=False, default=60*5))
-MAX_CONCURRENT_SPDK = int(get_env_var("MAX_CONCURRENT_SPDK", is_required=False, default=16))
-# Multiplier applied to the caller-supplied HTTP timeout (X-RPC-Timeout header)
-# to derive how long the proxy waits on SPDK while holding a semaphore slot.
-# >1 so a request that completes just after the caller's deadline still returns
-# instead of being aborted; small enough that abandoned/stuck RPCs free their
-# slot quickly. See _resolve_sock_timeout.
-SPDK_TIMEOUT_MARGIN = float(get_env_var("SPDK_TIMEOUT_MARGIN", is_required=False, default=2))
-# Idle-connection reclaim timeout; 60s comfortably spans the 3-30s polling
-# cadences of the background services that are this proxy's main callers.
-KEEPALIVE_TIMEOUT = int(get_env_var("KEEPALIVE_TIMEOUT", is_required=False, default=60))
-# Cap on concurrent HTTP connections/threads. Above MAX_CONCURRENT_SPDK since
-# a kept-alive connection can sit idle, not doing SPDK work, most of the time.
-MAX_CONCURRENT_CONNECTIONS = int(get_env_var("MAX_CONCURRENT_CONNECTIONS", is_required=False, default=64))
-is_threading_enabled = get_env_var("MULTI_THREADING_ENABLED", is_required=False, default=False)
-server_ip = get_env_var("SERVER_IP", is_required=True, default="")
-rpc_port = get_env_var("RPC_PORT", is_required=True)
-rpc_username = get_env_var("RPC_USERNAME", is_required=True)
-rpc_password = get_env_var("RPC_PASSWORD", is_required=True)
+def create_app(settings: ProxySettings) -> FastAPI:
+    """Build the proxy application.
 
-try:
-    rpc_port = int(rpc_port)
-except Exception:
-    rpc_port = 8080
-rpc_sock = f"/mnt/ramdisk/spdk_{rpc_port}/spdk.sock"
+    Startup blocks until SPDK answers on its unix socket. uvicorn runs the
+    lifespan before it binds the listening socket, so — as with the
+    ``HTTPServer`` this replaced — the port stays closed until SPDK is up,
+    rather than accepting requests that could only fail.
+    """
+    proxy = SpdkProxy(settings)
 
-spdk_semaphore = threading.Semaphore(MAX_CONCURRENT_SPDK)
-logger.info(f"SPDK concurrency limit: {MAX_CONCURRENT_SPDK}")
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+        stats_task = asyncio.create_task(proxy.report_stats())
+        try:
+            await proxy.wait_for_spdk_ready()
+            logger.info('Started RPC http proxy server')
+            yield
+        finally:
+            stats_task.cancel()
 
-is_threading_enabled = bool(is_threading_enabled)
-run_server(server_ip, rpc_port, rpc_username, rpc_password, is_threading_enabled=is_threading_enabled)
+    app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+    app.state.proxy = proxy
+
+    @app.post('/{path:path}')
+    async def rpc(request: Request) -> Response:
+        req_time = time.time_ns()
+        proxy.active_requests += 1
+        logger.info(f"incoming request at: {req_time}")
+        logger.info(f"active server session: {proxy.active_requests}")
+        try:
+            if not proxy.authenticate(request.headers.get('Authorization')):
+                return Response(status_code=401, headers={'WWW-Authenticate': 'Basic'})
+
+            read_start = time.time_ns()
+            try:
+                body = await request.body()
+            except ClientDisconnect:
+                logger.warning(
+                    f"client disconnected before the request body arrived (request {req_time})")
+                return Response(status_code=400)
+            time_diff = time.time_ns() - read_start
+            proxy.read_body_stats.record(read_start, time_diff)
+            logger.info(f"read_body_time_diff: {time_diff}")
+
+            try:
+                response = await proxy.rpc_call(body, request.headers.get('X-RPC-Timeout'))
+            except ValueError:
+                return Response(status_code=500)
+            except OSError as e:
+                # SPDK is gone (crashed, or never came back after a restart).
+                # The pre-FastAPI server let this escape the handler and dropped
+                # the connection; a 500 says the same thing legibly.
+                logger.error(f"Could not reach SPDK on {proxy.settings.rpc_sock}: {e}")
+                return Response(status_code=500)
+
+            if response is None:
+                return Response(status_code=204)
+
+            return Response(content=response, media_type='application/json')
+        finally:
+            proxy.active_requests -= 1
+
+    return app
+
+
+def _configure_logging() -> None:
+    handler = logging.StreamHandler(stream=sys.stdout)
+    handler.setFormatter(logging.Formatter('%(asctime)s: %(levelname)s: %(message)s'))
+    root = logging.getLogger()
+    root.addHandler(handler)
+    root.setLevel(logging.INFO)
+
+
+def main() -> None:
+    _configure_logging()
+    # Required fields come from the environment, which mypy can't see without
+    # the pydantic plugin.
+    settings = ProxySettings()  # type: ignore[call-arg]
+    tls = Settings()
+    uvicorn.Server(uvicorn.Config(
+        app=create_app(settings),
+        host=settings.server_ip,
+        port=settings.rpc_port,
+        log_level='info',
+        timeout_keep_alive=KEEP_ALIVE_TIMEOUT_SEC,
+        ssl_certfile=tls.tls_certificate if tls.tls_serve else None,
+        ssl_keyfile=tls.tls_key if tls.tls_serve else None,
+        ssl_ca_certs=tls.tls_certificate_authority if tls.tls_client_auth != ssl.CERT_NONE else None,
+        ssl_cert_reqs=tls.tls_client_auth,
+    )).run()
+
+
+if __name__ == '__main__':
+    main()

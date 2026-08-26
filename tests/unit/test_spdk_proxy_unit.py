@@ -1,267 +1,458 @@
 # coding=utf-8
-"""
-test_spdk_proxy_unit.py – unit tests for spdk_http_proxy_server changes.
+"""Unit tests for the SPDK HTTP proxy.
+
+The module under test is imported plainly: building the app is an explicit
+``create_app()`` call, so nothing here has to neutralize import-time side
+effects.
 """
 
+import asyncio
 import json
-import socket
-import threading
-import time
+import os
 import unittest
-from unittest.mock import patch, MagicMock
+from unittest.mock import AsyncMock, patch
 
-from tests.conftest_proxy import import_proxy_module
+from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
-proxy_mod = import_proxy_module()
-
-
-class TestWaitForSpdkReady(unittest.TestCase):
-
-    def setUp(self):
-        proxy_mod.spdk_ready = False
-
-    def tearDown(self):
-        proxy_mod.spdk_ready = True
-
-    def test_retries_until_spdk_responds(self):
-        call_count = {"n": 0}
-
-        def mock_socket_factory(*args, **kwargs):
-            call_count["n"] += 1
-            s = MagicMock()
-            if call_count["n"] < 3:
-                s.connect = MagicMock(side_effect=ConnectionRefusedError("not ready"))
-            else:
-                response = json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"version": "24.01"}}).encode()
-                s.connect = MagicMock()
-                s.sendall = MagicMock()
-                s.recv = MagicMock(side_effect=[response, b''])
-            s.close = MagicMock()
-            return s
-
-        with patch("simplyblock_core.services.spdk_http_proxy_server.socket.socket", side_effect=mock_socket_factory):
-            with patch("simplyblock_core.services.spdk_http_proxy_server.time.sleep"):
-                proxy_mod.wait_for_spdk_ready()
-
-        self.assertTrue(proxy_mod.spdk_ready)
-        self.assertEqual(call_count["n"], 3)
-
-    def test_already_ready_returns_immediately(self):
-        proxy_mod.spdk_ready = True
-        proxy_mod.wait_for_spdk_ready()
-        self.assertTrue(proxy_mod.spdk_ready)
-
-    def test_socket_closed_on_connection_error(self):
-        attempt = {"n": 0}
-        socks = []
-
-        def mock_socket_factory(*args, **kwargs):
-            attempt["n"] += 1
-            s = MagicMock()
-            socks.append(s)
-            if attempt["n"] == 1:
-                s.connect = MagicMock(side_effect=OSError("no socket"))
-            else:
-                response = json.dumps({"jsonrpc": "2.0", "id": 1, "result": {}}).encode()
-                s.connect = MagicMock()
-                s.sendall = MagicMock()
-                s.recv = MagicMock(side_effect=[response, b''])
-            s.close = MagicMock()
-            return s
-
-        with patch("simplyblock_core.services.spdk_http_proxy_server.socket.socket", side_effect=mock_socket_factory):
-            with patch("simplyblock_core.services.spdk_http_proxy_server.time.sleep"):
-                proxy_mod.wait_for_spdk_ready()
-
-        socks[0].close.assert_called()
+from simplyblock_core.services import spdk_http_proxy_server as proxy_mod
 
 
-class TestRpcCallInnerSocketCleanup(unittest.TestCase):
+REQUIRED_ENV = {
+    "SERVER_IP": "127.0.0.1",
+    "RPC_PORT": "19999",
+    "RPC_USERNAME": "test",
+    "RPC_PASSWORD": "secret",
+}
 
-    def setUp(self):
-        proxy_mod.unix_sockets.clear()
+# Every optional variable is pinned so an ambient value can't change a test.
+OPTIONAL_ENV = {
+    "TIMEOUT": "5",
+    "MAX_CONCURRENT_SPDK": "4",
+    "SPDK_TIMEOUT_MARGIN": "2",
+    "MULTI_THREADING_ENABLED": "True",
+}
 
-    def test_socket_closed_on_success(self):
-        req_data = {"id": 1, "method": "test"}
-        req = json.dumps(req_data).encode("ascii")
-        response = json.dumps({"jsonrpc": "2.0", "id": 1, "result": True}).encode("ascii")
 
-        mock_sock = MagicMock()
-        mock_sock.recv = MagicMock(side_effect=[response, b''])
+def make_settings(**overrides) -> proxy_mod.ProxySettings:
+    params = dict(
+        server_ip="127.0.0.1",
+        rpc_port=19999,
+        rpc_username="test",
+        rpc_password="secret",
+        timeout=5,
+        max_concurrent_spdk=4,
+        spdk_timeout_margin=2,
+        multi_threading_enabled=True,
+    )
+    params.update(overrides)
+    return proxy_mod.ProxySettings(**params)
 
-        with patch("simplyblock_core.services.spdk_http_proxy_server.socket.socket", return_value=mock_sock):
-            result = proxy_mod._rpc_call_inner(req, req_data, time.time_ns(), proxy_mod.TIMEOUT)
 
-        self.assertIsNotNone(result)
-        mock_sock.close.assert_called_once()
-        self.assertEqual(len(proxy_mod.unix_sockets), 0)
+def make_proxy(**overrides) -> proxy_mod.SpdkProxy:
+    return proxy_mod.SpdkProxy(make_settings(**overrides))
 
-    def test_socket_closed_on_timeout(self):
-        req_data = {"id": 1, "method": "test"}
-        req = json.dumps(req_data).encode("ascii")
 
-        mock_sock = MagicMock()
-        mock_sock.recv = MagicMock(side_effect=socket.timeout("timed out"))
+class FakeReader:
+    def __init__(self, chunks):
+        self._chunks = list(chunks)
 
-        with patch("simplyblock_core.services.spdk_http_proxy_server.socket.socket", return_value=mock_sock):
-            with self.assertRaises(ValueError) as ctx:
-                proxy_mod._rpc_call_inner(req, req_data, time.time_ns(), proxy_mod.TIMEOUT)
+    async def read(self, n=-1):
+        return self._chunks.pop(0) if self._chunks else b''
 
-        self.assertIn("timeout", str(ctx.exception))
-        mock_sock.close.assert_called_once()
-        self.assertEqual(len(proxy_mod.unix_sockets), 0)
 
-    def test_socket_closed_on_connect_error(self):
-        req_data = {"id": 1, "method": "test"}
-        req = json.dumps(req_data).encode("ascii")
+class FakeWriter:
+    def __init__(self):
+        self.buffer = b''
+        self.closed = False
 
-        mock_sock = MagicMock()
-        mock_sock.connect = MagicMock(side_effect=ConnectionRefusedError("refused"))
+    def write(self, data):
+        self.buffer += data
 
-        with patch("simplyblock_core.services.spdk_http_proxy_server.socket.socket", return_value=mock_sock):
-            with self.assertRaises(ConnectionRefusedError):
-                proxy_mod._rpc_call_inner(req, req_data, time.time_ns(), proxy_mod.TIMEOUT)
+    async def drain(self):
+        pass
 
-        mock_sock.close.assert_called_once()
-        self.assertEqual(len(proxy_mod.unix_sockets), 0)
+    def close(self):
+        self.closed = True
 
-    def test_no_id_request_closes_socket(self):
-        req_data = {"method": "notification_only"}
-        req = json.dumps(req_data).encode("ascii")
-        mock_sock = MagicMock()
 
-        with patch("simplyblock_core.services.spdk_http_proxy_server.socket.socket", return_value=mock_sock):
-            result = proxy_mod._rpc_call_inner(req, req_data, time.time_ns(), proxy_mod.TIMEOUT)
+class FakeSpdkSocket:
+    """Stands in for ``asyncio.open_unix_connection``.
 
-        self.assertIsNone(result)
-        mock_sock.close.assert_called_once()
-        self.assertEqual(len(proxy_mod.unix_sockets), 0)
+    Each entry of ``attempts`` is either an exception to raise on connect or a
+    list of chunks the reader hands out. The last entry repeats once exhausted,
+    so a retry loop settles on a steady state.
+    """
+
+    def __init__(self, *attempts):
+        self.attempts = list(attempts)
+        self.paths = []
+        self.writers = []
+
+    async def __call__(self, path):
+        self.paths.append(path)
+        attempt = self.attempts.pop(0) if len(self.attempts) > 1 else self.attempts[0]
+        writer = FakeWriter()
+        self.writers.append(writer)
+        if isinstance(attempt, BaseException):
+            raise attempt
+        return FakeReader(attempt), writer
+
+    @property
+    def attempt_count(self):
+        return len(self.paths)
+
+
+def patch_connect(fake):
+    return patch.object(proxy_mod.asyncio, 'open_unix_connection', new=fake)
+
+
+def rpc_response(**kwargs):
+    return json.dumps({"jsonrpc": "2.0", "id": 1, **kwargs}).encode('ascii')
+
+
+class TestProxySettings(unittest.TestCase):
+    """The proxy is configured exclusively through unprefixed environment
+    variables that deployed manifests already set — defaults included."""
+
+    def test_defaults_match_the_documented_environment(self):
+        with patch.dict(os.environ, REQUIRED_ENV, clear=True):
+            settings = proxy_mod.ProxySettings()
+
+        self.assertEqual(settings.server_ip, "127.0.0.1")
+        self.assertEqual(settings.rpc_port, 19999)
+        self.assertEqual(settings.rpc_username, "test")
+        self.assertEqual(settings.rpc_password.get_secret_value(), "secret")
+        self.assertEqual(settings.timeout, 5 * 60)
+        self.assertEqual(settings.max_concurrent_spdk, 16)
+        self.assertEqual(settings.spdk_timeout_margin, 2.0)
+        self.assertFalse(settings.multi_threading_enabled)
+
+    def test_optional_environment_is_read(self):
+        with patch.dict(os.environ, {**REQUIRED_ENV, **OPTIONAL_ENV}, clear=True):
+            settings = proxy_mod.ProxySettings()
+
+        self.assertEqual(settings.timeout, 5)
+        self.assertEqual(settings.max_concurrent_spdk, 4)
+        self.assertEqual(settings.spdk_timeout_margin, 2.0)
+        self.assertTrue(settings.multi_threading_enabled)
+
+    def test_lowercase_environment_is_accepted(self):
+        with patch.dict(os.environ, {k.lower(): v for k, v in REQUIRED_ENV.items()}, clear=True):
+            self.assertEqual(proxy_mod.ProxySettings().rpc_port, 19999)
+
+    def test_missing_required_variable_is_rejected(self):
+        for name in REQUIRED_ENV:
+            env = {k: v for k, v in REQUIRED_ENV.items() if k != name}
+            with self.subTest(missing=name), patch.dict(os.environ, env, clear=True):
+                with self.assertRaises(ValidationError):
+                    proxy_mod.ProxySettings()
+
+    def test_unparsable_rpc_port_falls_back_to_8080(self):
+        with patch.dict(os.environ, {**REQUIRED_ENV, "RPC_PORT": "not-a-port"}, clear=True):
+            settings = proxy_mod.ProxySettings()
+
+        self.assertEqual(settings.rpc_port, 8080)
+        self.assertEqual(settings.rpc_sock, "/mnt/ramdisk/spdk_8080/spdk.sock")
+
+    def test_rpc_sock_follows_the_rpc_port(self):
+        self.assertEqual(
+            make_settings(rpc_port=9060).rpc_sock, "/mnt/ramdisk/spdk_9060/spdk.sock")
+
+    def test_authorization_header_is_basic_auth(self):
+        # 'test:secret' base64-encoded — what RPCClient's requests session sends.
+        self.assertEqual(make_settings().authorization, "Basic dGVzdDpzZWNyZXQ=")
+
+    def test_password_is_masked_in_representations(self):
+        settings = make_settings()
+        self.assertNotIn("secret", repr(settings))
+        self.assertNotIn("secret", str(settings))
+        self.assertNotIn("secret", str(settings.model_dump()))
 
 
 class TestResolveSockTimeout(unittest.TestCase):
-    """The proxy must bound its SPDK wait (and hence the semaphore-slot hold)
+    """The proxy must bound its SPDK wait (and hence the concurrency-slot hold)
     to the caller's HTTP timeout, so an abandoned/stuck RPC frees its slot
-    quickly instead of squatting it for the full global TIMEOUT and starving
+    quickly instead of squatting it for the full global timeout and starving
     other RPCs to the node."""
 
+    def setUp(self):
+        self.proxy = make_proxy(timeout=300, spdk_timeout_margin=2)
+
     def test_missing_hint_falls_back_to_global(self):
-        self.assertEqual(proxy_mod._resolve_sock_timeout(None), proxy_mod.TIMEOUT)
+        self.assertEqual(self.proxy._resolve_sock_timeout(None), 300)
 
     def test_invalid_hint_falls_back_to_global(self):
-        self.assertEqual(proxy_mod._resolve_sock_timeout("not-a-number"), proxy_mod.TIMEOUT)
-        self.assertEqual(proxy_mod._resolve_sock_timeout("0"), proxy_mod.TIMEOUT)
-        self.assertEqual(proxy_mod._resolve_sock_timeout("-5"), proxy_mod.TIMEOUT)
+        self.assertEqual(self.proxy._resolve_sock_timeout("not-a-number"), 300)
+        self.assertEqual(self.proxy._resolve_sock_timeout("0"), 300)
+        self.assertEqual(self.proxy._resolve_sock_timeout("-5"), 300)
 
     def test_short_caller_timeout_yields_short_hold(self):
         # A 1s caller (e.g. distr_status_events_update) must not pin a slot for
-        # the global TIMEOUT; it gets margin x 1s, well under the global cap.
-        with patch.object(proxy_mod, "SPDK_TIMEOUT_MARGIN", 2), \
-                patch.object(proxy_mod, "TIMEOUT", 300):
-            self.assertEqual(proxy_mod._resolve_sock_timeout("1"), 2)
-            self.assertEqual(proxy_mod._resolve_sock_timeout("3"), 6)
+        # the global timeout; it gets margin x 1s, well under the global cap.
+        self.assertEqual(self.proxy._resolve_sock_timeout("1"), 2)
+        self.assertEqual(self.proxy._resolve_sock_timeout("3"), 6)
 
     def test_long_caller_timeout_capped_at_global(self):
-        with patch.object(proxy_mod, "SPDK_TIMEOUT_MARGIN", 2), \
-                patch.object(proxy_mod, "TIMEOUT", 300):
-            self.assertEqual(proxy_mod._resolve_sock_timeout("180"), 300)
+        self.assertEqual(self.proxy._resolve_sock_timeout("180"), 300)
 
 
-class TestSemaphoreConcurrency(unittest.TestCase):
+class TestWaitForSpdkReady(unittest.IsolatedAsyncioTestCase):
 
-    def test_semaphore_limits_concurrency(self):
-        max_concurrent = {"seen": 0, "current": 0}
-        lock = threading.Lock()
+    async def test_retries_until_spdk_responds(self):
+        fake = FakeSpdkSocket(
+            ConnectionRefusedError("not ready"),
+            ConnectionRefusedError("not ready"),
+            [rpc_response(result={"version": "24.01"})],
+        )
+        proxy = make_proxy()
 
-        def mock_inner(req, req_data, req_time, sock_timeout=None):
-            with lock:
-                max_concurrent["current"] += 1
-                if max_concurrent["current"] > max_concurrent["seen"]:
-                    max_concurrent["seen"] = max_concurrent["current"]
-            time.sleep(0.05)
-            with lock:
-                max_concurrent["current"] -= 1
-            return json.dumps({"jsonrpc": "2.0", "id": 1, "result": True})
+        with patch_connect(fake), patch.object(proxy_mod.asyncio, 'sleep', new=AsyncMock()):
+            await proxy.wait_for_spdk_ready()
+
+        self.assertTrue(proxy.spdk_ready)
+        self.assertEqual(fake.attempt_count, 3)
+        self.assertEqual(fake.paths[0], "/mnt/ramdisk/spdk_19999/spdk.sock")
+
+    async def test_already_ready_returns_immediately(self):
+        fake = FakeSpdkSocket(ConnectionRefusedError("not ready"))
+        proxy = make_proxy()
+        proxy.spdk_ready = True
+
+        with patch_connect(fake):
+            await proxy.wait_for_spdk_ready()
+
+        self.assertEqual(fake.attempt_count, 0)
+
+    async def test_probe_sends_spdk_get_version(self):
+        fake = FakeSpdkSocket([rpc_response(result={})])
+        proxy = make_proxy()
+
+        with patch_connect(fake):
+            await proxy.wait_for_spdk_ready()
+
+        self.assertEqual(json.loads(fake.writers[0].buffer)["method"], "spdk_get_version")
+
+    async def test_socket_closed_when_probe_gets_no_answer(self):
+        fake = FakeSpdkSocket([], [rpc_response(result={})])  # EOF, then a real answer
+        proxy = make_proxy()
+
+        with patch_connect(fake), patch.object(proxy_mod.asyncio, 'sleep', new=AsyncMock()):
+            await proxy.wait_for_spdk_ready()
+
+        self.assertTrue(all(writer.closed for writer in fake.writers))
+        self.assertEqual(fake.attempt_count, 2)
+
+
+class TestRpcCall(unittest.IsolatedAsyncioTestCase):
+    """Every RPC must give its unix socket back, whichever way it ends."""
+
+    def setUp(self):
+        self.proxy = make_proxy()
+        self.req = json.dumps({"id": 1, "method": "test"}).encode("ascii")
+
+    async def test_response_is_returned_verbatim(self):
+        payload = rpc_response(result=True)
+        fake = FakeSpdkSocket([payload])
+
+        with patch_connect(fake):
+            result = await self.proxy.rpc_call(self.req)
+
+        self.assertEqual(result, payload.decode("ascii"))
+        self.assertEqual(fake.writers[0].buffer, self.req)
+        self.assertTrue(fake.writers[0].closed)
+        self.assertEqual(self.proxy.open_connections, 0)
+
+    async def test_chunked_response_is_reassembled(self):
+        payload = rpc_response(result={"a": 1, "b": 2})
+        fake = FakeSpdkSocket([payload[:10], payload[10:]])
+
+        with patch_connect(fake):
+            result = await self.proxy.rpc_call(self.req)
+
+        self.assertEqual(json.loads(result)["result"], {"a": 1, "b": 2})
+
+    async def test_socket_closed_on_timeout(self):
+        async def never_answers(*args, **kwargs):
+            await asyncio.sleep(3600)
+
+        fake = FakeSpdkSocket([])
+
+        with patch_connect(fake), patch.object(FakeReader, 'read', never_answers):
+            with self.assertRaises(ValueError) as ctx:
+                await self.proxy.rpc_call(self.req, client_timeout="0.01")
+
+        self.assertIn("timeout", str(ctx.exception))
+        self.assertTrue(fake.writers[0].closed)
+        self.assertEqual(self.proxy.open_connections, 0)
+
+    async def test_socket_released_on_connect_error(self):
+        fake = FakeSpdkSocket(ConnectionRefusedError("refused"))
+
+        with patch_connect(fake):
+            with self.assertRaises(ConnectionRefusedError):
+                await self.proxy.rpc_call(self.req)
+
+        self.assertEqual(self.proxy.open_connections, 0)
+
+    async def test_request_without_id_gets_no_response(self):
+        req = json.dumps({"method": "notification_only"}).encode("ascii")
+        fake = FakeSpdkSocket([rpc_response(result=True)])
+
+        with patch_connect(fake):
+            result = await self.proxy.rpc_call(req)
+
+        self.assertIsNone(result)
+        self.assertTrue(fake.writers[0].closed)
+        self.assertEqual(self.proxy.open_connections, 0)
+
+    async def test_truncated_response_is_rejected(self):
+        fake = FakeSpdkSocket([b'{"jsonrpc": "2.0", "id"'])
+
+        with patch_connect(fake):
+            with self.assertRaises(ValueError):
+                await self.proxy.rpc_call(self.req)
+
+        self.assertEqual(self.proxy.open_connections, 0)
+
+    async def test_caller_timeout_bounds_the_socket_wait(self):
+        fake = FakeSpdkSocket([rpc_response(result=True)])
+        proxy = make_proxy(timeout=300, spdk_timeout_margin=2)
+
+        with patch_connect(fake), patch.object(
+                proxy_mod.asyncio, 'wait_for', wraps=asyncio.wait_for) as wait_for:
+            await proxy.rpc_call(self.req, client_timeout="3")
+
+        self.assertEqual(wait_for.call_args.args[1], 6)
+
+
+class TestConcurrencyLimit(unittest.IsolatedAsyncioTestCase):
+
+    async def _run_concurrently(self, proxy, count):
+        peak = {"seen": 0, "current": 0}
+
+        async def inner(*args, **kwargs):
+            peak["current"] += 1
+            peak["seen"] = max(peak["seen"], peak["current"])
+            await asyncio.sleep(0.01)
+            peak["current"] -= 1
+            return rpc_response(result=True).decode()
 
         req = json.dumps({"id": 1, "method": "test"}).encode("ascii")
+        with patch.object(proxy, '_rpc_call_inner', side_effect=inner):
+            await asyncio.gather(*(proxy.rpc_call(req) for _ in range(count)))
 
-        with patch.object(proxy_mod, "_rpc_call_inner", side_effect=mock_inner):
-            threads = []
-            for _ in range(12):
-                t = threading.Thread(target=proxy_mod.rpc_call, args=(req,))
-                threads.append(t)
-                t.start()
-            for t in threads:
-                t.join()
+        return peak["seen"]
 
-        self.assertLessEqual(max_concurrent["seen"], 4)
+    async def test_concurrency_is_capped_at_max_concurrent_spdk(self):
+        proxy = make_proxy(max_concurrent_spdk=4, multi_threading_enabled=True)
+        self.assertEqual(await self._run_concurrently(proxy, 12), 4)
 
-    def test_semaphore_released_on_exception(self):
+    async def test_without_multi_threading_rpcs_are_serialized(self):
+        # The pre-FastAPI server ran on a non-threading HTTPServer in this mode.
+        proxy = make_proxy(max_concurrent_spdk=4, multi_threading_enabled=False)
+        self.assertEqual(await self._run_concurrently(proxy, 12), 1)
+
+    async def test_slot_released_on_exception(self):
+        proxy = make_proxy(max_concurrent_spdk=1)
         req = json.dumps({"id": 1, "method": "test"}).encode("ascii")
 
-        with patch.object(proxy_mod, "_rpc_call_inner", side_effect=RuntimeError("boom")):
+        with patch.object(proxy, '_rpc_call_inner', side_effect=RuntimeError("boom")):
             with self.assertRaises(RuntimeError):
-                proxy_mod.rpc_call(req)
+                await proxy.rpc_call(req)
 
-        acquired = proxy_mod.spdk_semaphore.acquire(timeout=1)
-        self.assertTrue(acquired)
-        proxy_mod.spdk_semaphore.release()
+        self.assertFalse(proxy.slots.locked())
 
 
-class TestDoPostBrokenPipe(unittest.TestCase):
+class TestEndpoint(unittest.TestCase):
+    """HTTP contract seen by ``simplyblock_core.rpc_client.RPCClient``."""
 
-    def _make_handler(self):
-        handler = proxy_mod.ServerHandler.__new__(proxy_mod.ServerHandler)
-        proxy_mod.ServerHandler.server_session = []
-        handler.key = "dGVzdDp0ZXN0"
+    def setUp(self):
+        self.app = proxy_mod.create_app(make_settings())
+        self.proxy = self.app.state.proxy
+        self.proxy.spdk_ready = True
+        # Lifespan (and with it the readiness gate) is deliberately not run:
+        # TestClient only starts it when used as a context manager.
+        self.client = TestClient(self.app)
+        self.body = json.dumps({"id": 1, "method": "spdk_get_version"})
 
-        body = json.dumps({"id": 1, "method": "test"}).encode()
-        header_map = {
-            "Authorization": "Basic dGVzdDp0ZXN0",
-            "Content-Length": str(len(body)),
-        }
-        handler.headers = MagicMock()
-        handler.headers.__getitem__ = MagicMock(side_effect=lambda k: header_map.get(k, ""))
-        handler.headers.__contains__ = MagicMock(side_effect=lambda k: k in header_map)
-        handler.headers.get = MagicMock(side_effect=lambda k, d="": header_map.get(k, d))
+    def _post(self, auth=("test", "secret"), **kwargs):
+        return self.client.post("/", content=self.body, auth=auth, **kwargs)
 
-        handler.rfile = MagicMock()
-        handler.rfile.read = MagicMock(return_value=body)
+    def test_response_is_passed_through(self):
+        payload = rpc_response(result={"version": "24.01"}).decode()
+        with patch.object(self.proxy, 'rpc_call', new=AsyncMock(return_value=payload)):
+            response = self._post()
 
-        handler.wfile = MagicMock()
-        handler.send_response = MagicMock()
-        handler.send_header = MagicMock()
-        handler.end_headers = MagicMock()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["result"], {"version": "24.01"})
 
-        return handler
+    def test_notification_gets_204(self):
+        with patch.object(self.proxy, 'rpc_call', new=AsyncMock(return_value=None)):
+            response = self._post()
 
-    @patch.object(proxy_mod, "rpc_call")
-    def test_broken_pipe_is_caught(self, mock_rpc):
-        mock_rpc.return_value = '{"jsonrpc":"2.0","id":1,"result":true}'
-        handler = self._make_handler()
-        handler.wfile.write = MagicMock(side_effect=BrokenPipeError("client gone"))
+        self.assertEqual(response.status_code, 204)
+        self.assertEqual(response.content, b'')
 
-        handler.do_POST()
+    def test_wrong_credentials_get_401(self):
+        with patch.object(self.proxy, 'rpc_call', new=AsyncMock()) as rpc_call:
+            response = self._post(auth=("wrong", "creds"))
 
-        self.assertEqual(len(proxy_mod.ServerHandler.server_session), 0)
+        self.assertEqual(response.status_code, 401)
+        rpc_call.assert_not_called()
 
-    @patch.object(proxy_mod, "rpc_call")
-    def test_value_error_returns_500(self, mock_rpc):
-        mock_rpc.side_effect = ValueError("bad response")
-        handler = self._make_handler()
+    def test_missing_credentials_get_401(self):
+        with patch.object(self.proxy, 'rpc_call', new=AsyncMock()) as rpc_call:
+            response = self.client.post("/", content=self.body)
 
-        handler.do_POST()
+        self.assertEqual(response.status_code, 401)
+        rpc_call.assert_not_called()
 
-        handler.send_response.assert_any_call(500)
-        self.assertEqual(len(proxy_mod.ServerHandler.server_session), 0)
+    def test_non_ascii_credentials_get_401(self):
+        # A header hmac.compare_digest would refuse to compare as str.
+        response = self.client.post(
+            "/", content=self.body, headers={"Authorization": b"Basic \xe9"})
 
-    @patch.object(proxy_mod, "rpc_call")
-    def test_session_always_cleaned_up(self, mock_rpc):
-        mock_rpc.return_value = '{"jsonrpc":"2.0","id":1,"result":true}'
-        handler = self._make_handler()
+        self.assertEqual(response.status_code, 401)
 
-        handler.do_POST()
+    def test_bad_spdk_response_gets_500(self):
+        with patch.object(self.proxy, 'rpc_call', new=AsyncMock(side_effect=ValueError("bad"))):
+            response = self._post()
 
-        self.assertEqual(len(proxy_mod.ServerHandler.server_session), 0)
+        self.assertEqual(response.status_code, 500)
+
+    def test_unreachable_spdk_gets_500(self):
+        error = ConnectionRefusedError("spdk is gone")
+        with patch.object(self.proxy, 'rpc_call', new=AsyncMock(side_effect=error)):
+            response = self._post()
+
+        self.assertEqual(response.status_code, 500)
+
+    def test_malformed_request_body_gets_500(self):
+        response = self.client.post("/", content="not json", auth=("test", "secret"))
+
+        self.assertEqual(response.status_code, 500)
+
+    def test_caller_timeout_header_is_forwarded(self):
+        payload = rpc_response(result=True).decode()
+        with patch.object(self.proxy, 'rpc_call', new=AsyncMock(return_value=payload)) as rpc_call:
+            self._post(headers={"X-RPC-Timeout": "7"})
+
+        self.assertEqual(rpc_call.call_args.args[1], "7")
+
+    def test_in_flight_count_returns_to_zero(self):
+        payload = rpc_response(result=True).decode()
+        with patch.object(self.proxy, 'rpc_call', new=AsyncMock(return_value=payload)):
+            for _ in range(3):
+                self._post()
+
+        self.assertEqual(self.proxy.active_requests, 0)
+
+    def test_in_flight_count_returns_to_zero_after_failure(self):
+        with patch.object(self.proxy, 'rpc_call', new=AsyncMock(side_effect=ValueError("bad"))):
+            self._post()
+
+        self.assertEqual(self.proxy.active_requests, 0)
 
 
 if __name__ == "__main__":
