@@ -334,8 +334,20 @@ def parse_args():
     args.methods = methods
 
     args.data_nics = [n.strip() for n in args.data_nics.split(",") if n.strip()]
+    if not args.data_nics:
+        parser.error("At least one data NIC is required")
     if len(args.data_nics) < 2:
-        parser.error("At least 2 data NICs are required for a multipath soak")
+        # Single-path (non-multipath) cluster. Everything that depended on
+        # two NICs now derives from this list -- path counts, listener
+        # counts, and the active_active policy assertions, which are
+        # skipped below two. Only phase 1 is genuinely unsafe here, since
+        # taking the single data NIC down on every node isolates the whole
+        # cluster, so it must be disabled explicitly rather than silently.
+        if not args.no_nic_phase:
+            parser.error(
+                "a single data NIC requires --no-nic-phase: phase 1 takes one "
+                "data NIC down on every node at once, which with one NIC per "
+                "node isolates the cluster instead of testing path redundancy")
     if args.pair_delay_min < 0 or args.pair_delay_max < args.pair_delay_min:
         parser.error("--pair-delay-min/--pair-delay-max must satisfy 0 <= min <= max")
 
