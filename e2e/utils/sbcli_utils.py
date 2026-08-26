@@ -19,6 +19,63 @@ class SbcliUtils:
             "Authorization": f"{cluster_id} {cluster_secret}"
         }
         self.logger = setup_logger(__name__)
+        # Extended API recovery: when > 0, wait up to this many seconds
+        # for the API to come back after quick retries exhaust on 503 or
+        # connection errors.  Callers (e.g. stress tests) opt-in by
+        # setting this to a positive value (e.g. 1800).
+        self.api_recovery_timeout = 0
+
+    @staticmethod
+    def _is_transient_error(exc):
+        """Return True if *exc* looks like a transient API outage (503,
+        502, connection refused, etc.) rather than a permanent failure."""
+        if isinstance(exc, requests.exceptions.ConnectionError):
+            return True
+        if isinstance(exc, requests.exceptions.HTTPError):
+            code = getattr(getattr(exc, "response", None), "status_code", 0)
+            return code in (502, 503, 504)
+        return False
+
+    def _wait_for_api_recovery(self, interval=15):
+        """Ping GET /storagenode every *interval* seconds until the API
+        responds with 200 or *api_recovery_timeout* is exceeded.
+
+        Returns True if API recovered, False if timeout expired.
+        """
+        timeout = self.api_recovery_timeout
+        if timeout <= 0:
+            return False
+        self.logger.warning(
+            f"API appears down — entering recovery wait "
+            f"(ping every {interval}s, max {timeout}s)"
+        )
+        deadline = time.time() + timeout
+        attempt = 0
+        while time.time() < deadline:
+            attempt += 1
+            time.sleep(interval)
+            try:
+                resp = requests.get(
+                    self.cluster_api_url + "/storagenode",
+                    headers=self.headers,
+                    timeout=10,
+                )
+                if resp.status_code == 200:
+                    self.logger.info(
+                        f"API recovered after {attempt * interval}s — resuming"
+                    )
+                    return True
+                self.logger.info(
+                    f"API recovery ping {attempt}: HTTP {resp.status_code}"
+                )
+            except Exception as ping_exc:
+                self.logger.info(
+                    f"API recovery ping {attempt}: {ping_exc}"
+                )
+        self.logger.error(
+            f"API did not recover within {timeout}s — giving up"
+        )
+        return False
 
     def get_request(self, api_url, headers=None, expected_error_code=None):
         """Performs get request on the given API URL
@@ -61,6 +118,9 @@ class SbcliUtils:
                 else:
                     retry -= 1
                     if retry == 0:
+                        if self._is_transient_error(e) and self._wait_for_api_recovery():
+                            retry = 1  # one more attempt after recovery
+                            continue
                         self.logger.info(f"Retry attempt exhausted. API {api_url} failed with: {e}.")
                         raise e
                     self.logger.info(f"Retrying API {api_url}. Attempt: {10 - retry + 1}")
@@ -69,6 +129,9 @@ class SbcliUtils:
                 self.logger.debug(f"API call {api_url} failed with error:{e}")
                 retry -= 1
                 if retry == 0:
+                    if self._is_transient_error(e) and self._wait_for_api_recovery():
+                        retry = 1
+                        continue
                     self.logger.info(f"Retry attempt exhausted. API {api_url} failed with: {e}.")
                     raise e
                 self.logger.info(f"Retrying API {api_url}. Attempt: {10 - retry + 1}")
@@ -111,6 +174,9 @@ class SbcliUtils:
                 else:
                     retry -= 1
                     if retry == 0:
+                        if self._is_transient_error(e) and self._wait_for_api_recovery():
+                            retry = 1
+                            continue
                         self.logger.info(f"Retry attempt exhausted. API {api_url} failed with: {e}.")
                         raise e
                     self.logger.info(f"Retrying API {api_url}. Attempt: {10 - retry + 1}")
@@ -119,6 +185,9 @@ class SbcliUtils:
                 self.logger.debug(f"API call {api_url} failed with error:{e}")
                 retry -= 1
                 if retry == 0:
+                    if self._is_transient_error(e) and self._wait_for_api_recovery():
+                        retry = 1
+                        continue
                     self.logger.info(f"Retry attempt exhausted. API {api_url} failed with: {e}.")
                     raise e
                 self.logger.info(f"Retrying API {api_url}. Attempt: {10 - retry + 1}")
@@ -165,6 +234,9 @@ class SbcliUtils:
                 else:
                     retry -= 1
                     if retry == 0:
+                        if self._is_transient_error(e) and self._wait_for_api_recovery():
+                            retry = 1
+                            continue
                         self.logger.info(f"Retry attempt exhausted. API {api_url} failed with: {e}.")
                         raise e
                     self.logger.info(f"Retrying API {api_url}. Attempt: {10 - retry + 1}")
@@ -173,6 +245,9 @@ class SbcliUtils:
                 self.logger.debug(f"API call {api_url} failed with error:{e}")
                 retry -= 1
                 if retry == 0:
+                    if self._is_transient_error(e) and self._wait_for_api_recovery():
+                        retry = 1
+                        continue
                     self.logger.info(f"Retry attempt exhausted. API {api_url} failed with: {e}.")
                     raise e
                 self.logger.info(f"Retrying API {api_url}. Attempt: {5 - retry + 1}")
@@ -215,6 +290,9 @@ class SbcliUtils:
                 else:
                     retry -= 1
                     if retry == 0:
+                        if self._is_transient_error(e) and self._wait_for_api_recovery():
+                            retry = 1
+                            continue
                         self.logger.info(f"Retry attempt exhausted. API {api_url} failed with: {e}.")
                         raise e
                     self.logger.info(f"Retrying API {api_url}. Attempt: {10 - retry + 1}")
@@ -223,6 +301,9 @@ class SbcliUtils:
                 self.logger.debug(f"API call {api_url} failed with error:{e}")
                 retry -= 1
                 if retry == 0:
+                    if self._is_transient_error(e) and self._wait_for_api_recovery():
+                        retry = 1
+                        continue
                     self.logger.info(f"Retry attempt exhausted. API {api_url} failed with: {e}.")
                     raise e
                 self.logger.info(f"Retrying API {api_url}. Attempt: {10 - retry + 1}")

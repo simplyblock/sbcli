@@ -562,6 +562,9 @@ class _MassCreateDeleteMixin:
 
     def _run_mass_create_delete_test(self):
         self._init_mixin_state()
+        # Enable extended API recovery: wait up to 30 min for transient
+        # API outages (e.g. Docker Swarm restarts) instead of failing fast.
+        self.sbcli_utils.api_recovery_timeout = 1800
 
         # Apply entity cap: reduce NUM_SUBSYSTEMS / NS_PER_SUBSYSTEM on the
         # instance so all phase methods automatically use the capped values.
@@ -1145,6 +1148,9 @@ class _MassCreateDeleteMixin:
         for both phases (60 entries total).
         """
         self._init_mixin_state()
+        # Enable extended API recovery: wait up to 30 min for transient
+        # API outages (e.g. Docker Swarm restarts) instead of failing fast.
+        self.sbcli_utils.api_recovery_timeout = 1800
         self._rapid_restart_results = {
             "lvol_snapshot": [],
             "snapshot_clone": [],
@@ -5181,7 +5187,23 @@ class MassCreateRapidRestart_6k_3Snap_Docker(_MassCreateDeleteDocker):
     RAPID_RESTART_ITERATIONS = 30
     RAPID_RESTART_COOLDOWN = 60
 
+    # Redundant WebAppAPI replicas to remove before test to free memory.
+    _REMOVE_API_SERVICES = ["app_WebAppAPI2", "app_WebAppAPI3", "app_WebAppAPI4"]
+
     def run(self):
+        # Free memory on mgmt node by removing redundant API replicas.
+        mgmt_ip = self.mgmt_nodes[0]
+        for svc in self._REMOVE_API_SERVICES:
+            try:
+                self.ssh_obj.exec_command(
+                    node=mgmt_ip,
+                    command=f"docker service rm {svc}",
+                    timeout=30,
+                )
+                self.logger.info(f"Removed Docker service {svc} to free memory")
+            except Exception as exc:
+                self.logger.warning(f"Could not remove {svc} (may not exist): {exc}")
+
         actual_pool = self.sbcli_utils.add_storage_pool(
             pool_name=self.pool_name
         )
