@@ -701,7 +701,7 @@ def main():
             # on a single node stalled the whole cluster's monitoring.
             snodes = db.get_storage_nodes_by_cluster_id(cluster.get_id())
 
-            def _sweep(snode):
+            def _sweep(snode, cluster=cluster, all_lvols=all_lvols, subsys_check=subsys_check):
                 try:
                     return check_node(cluster, snode, all_lvols,
                                       subsys_check=subsys_check) or 0

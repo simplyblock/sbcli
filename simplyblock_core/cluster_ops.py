@@ -820,10 +820,10 @@ def _wait_for_full_device_connectivity(cl_id, timeout_sec=300, poll_sec=10):
                     if node.enable_ha_jm:
                         remote_jm_devices = storage_node_ops._connect_to_remote_jm_devs(node)
 
-                    def _apply(n, rd=remote_devices, rjd=remote_jm_devices):
-                        n.remote_devices = rd
-                        if rjd is not None:
-                            n.remote_jm_devices = rjd
+                    def _apply(snode, devices=remote_devices, jm_devices=remote_jm_devices):
+                        snode.remote_devices = devices
+                        if jm_devices is not None:
+                            snode.remote_jm_devices = jm_devices
                     db_controller.atomic_update(node, _apply)
                 except Exception as e:
                     logger.warning(
@@ -841,10 +841,10 @@ def _wait_for_full_device_connectivity(cl_id, timeout_sec=300, poll_sec=10):
                         remote_jm_devices = storage_node_ops._connect_to_remote_jm_devs(
                             node, only_node_id=owner_id)
 
-                    def _apply(n, rd=remote_devices, rjd=remote_jm_devices):
-                        n.remote_devices = rd
-                        if rjd is not None:
-                            n.remote_jm_devices = rjd
+                    def _apply(snode, devices=remote_devices, jm_devices=remote_jm_devices):
+                        snode.remote_devices = devices
+                        if jm_devices is not None:
+                            snode.remote_jm_devices = jm_devices
                     db_controller.atomic_update(node, _apply)
                 except Exception as e:
                     logger.warning(

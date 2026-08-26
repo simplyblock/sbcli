@@ -318,7 +318,7 @@ class TestAddPoolKeyGeneration(unittest.TestCase):
     def test_no_keys_when_dhchap_false(self):
         pool_obj = self._run_add(dhchap=False)
         # dhchap_key should not have been set
-        pool_obj.dhchap_key  # just access – the mock will track it
+        _ = pool_obj.dhchap_key  # just access – the mock will track it
         # The important thing: dhchap=False path must NOT call generate_dhchap_key
         # We verify indirectly: the assignment was never triggered
         assign_calls = [c for c in pool_obj.mock_calls if 'dhchap_key' in str(c) and '__setattr__' in str(c)]

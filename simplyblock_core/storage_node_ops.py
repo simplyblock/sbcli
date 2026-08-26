@@ -4384,7 +4384,7 @@ def restart_storage_node(
         node_id, max_lvol=0, max_snap=0, max_prov=0,
         spdk_image=None, set_spdk_debug=None,
         small_bufsize=0, large_bufsize=0,
-        force=False, node_address=None, reattach_volume=False, clear_data=False, new_ssd_pcie=[],
+        force=False, node_address=None, reattach_volume=False, clear_data=False, new_ssd_pcie=None,
         force_lvol_recreate=False, spdk_proxy_image=None, current_restart_task_id=None):
     """Wrapper that guarantees the node is reset to OFFLINE if the restart
     fails after THIS call set the RESTARTING status. Without this, any
@@ -4700,7 +4700,7 @@ def _restart_storage_node_impl(
         node_id, max_lvol=0, max_snap=0, max_prov=0,
         spdk_image=None, set_spdk_debug=None,
         small_bufsize=0, large_bufsize=0,
-        force=False, node_address=None, reattach_volume=False, clear_data=False, new_ssd_pcie=[],
+        force=False, node_address=None, reattach_volume=False, clear_data=False, new_ssd_pcie=None,
         force_lvol_recreate=False, spdk_proxy_image=None, current_restart_task_id=None,
         restart_claim_token=""):
     db_controller = DBController()

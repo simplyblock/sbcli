@@ -617,7 +617,8 @@ class _ParallelNamespaceLvolBase(TestClusterBase):
                 self._flush_timing_data()
             except Exception:
                 pass
-            return dur  # used for iteration timing
+
+        return dur  # used for iteration timing
 
     def _flush_timing_data(self):
         """Write intermediate timing JSON to disk (fast, no graphs).

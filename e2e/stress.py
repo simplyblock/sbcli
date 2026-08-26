@@ -182,11 +182,12 @@ def main():
                         )
                     except Exception:
                         pass
-            if check_for_dumps():
-                logger.info("Found a core dump during test execution. "
-                            "Cannot execute more tests as cluster is not stable. Exiting")
-                test_obj.collect_management_details()
-                break
+
+        if check_for_dumps():
+            logger.info("Found a core dump during test execution. "
+                        "Cannot execute more tests as cluster is not stable. Exiting")
+            test_obj.collect_management_details()
+            break
 
     failed_cases = list(errors.keys())
     skipped_cases = len(test_class_run) - (len(passed_cases) + len(failed_cases))
