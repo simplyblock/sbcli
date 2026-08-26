@@ -193,7 +193,12 @@ class K8sUtils:
         return [n.strip() for n in out.strip().splitlines() if n.strip()]
 
     def detect_openshift(self) -> bool:
-        """Return True if the cluster is OpenShift (``oc`` CLI available).
+        """Return True if the cluster is OpenShift.
+
+        Checks for the ``openshift-apiserver`` namespace which only
+        exists on OpenShift clusters.  This avoids false positives on
+        machines where the ``oc`` CLI is installed but the target
+        cluster is not OpenShift (e.g. Talos).
 
         The result is cached after the first call.
         """
@@ -201,10 +206,11 @@ class K8sUtils:
             return self._is_openshift
         try:
             out, _ = self._exec_kubectl(
-                "oc version --client 2>/dev/null && echo OC_OK || echo OC_NO",
+                "kubectl get namespace openshift-apiserver "
+                "--no-headers 2>/dev/null && echo OCP_YES || echo OCP_NO",
                 supress_logs=True,
             )
-            self._is_openshift = "OC_OK" in out
+            self._is_openshift = "OCP_YES" in out
         except Exception:
             self._is_openshift = False
         self.logger.info(

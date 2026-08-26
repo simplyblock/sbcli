@@ -2500,18 +2500,12 @@ class K8sNativeMajorUpgrade(TestClusterBase):
                 first_worker = (out or "").replace("'", "").strip()
 
             if first_worker:
-                if self.k8s_utils.detect_openshift():
-                    out, _ = self.k8s_utils._exec_kubectl(
-                        f"oc debug node/{first_worker} "
-                        f"-- chroot /host nproc 2>/dev/null"
-                    )
-                else:
-                    out, _ = self.k8s_utils._exec_kubectl(
-                        f"kubectl get node {first_worker} "
-                        f"-o jsonpath='{{.status.capacity.cpu}}'"
-                    )
+                out, _ = self.k8s_utils._exec_kubectl(
+                    f"kubectl get node {first_worker} "
+                    f"-o jsonpath='{{.status.capacity.cpu}}'"
+                )
                 total_cpus = int((out or "").replace("'", "").strip())
-                vcpu = max(1, total_cpus * core_pct // 100)
+                vcpu = max(6, total_cpus * core_pct // 100)
                 self.logger.info(
                     f"Computed vcpuCount={vcpu} "
                     f"({total_cpus} CPUs * {core_pct}%)"
@@ -2520,8 +2514,8 @@ class K8sNativeMajorUpgrade(TestClusterBase):
         except Exception as e:
             self.logger.warning(f"Failed to detect CPU count: {e}")
 
-        self.logger.warning("Could not determine CPU count, defaulting vcpuCount to 4")
-        return 4
+        self.logger.warning("Could not determine CPU count, defaulting vcpuCount to 6")
+        return 6
 
     def _apply_custom_resources(self, storage_node_list: list[dict]):
         """Step 7: Apply StorageCluster, Pool, StorageNode CRs."""
