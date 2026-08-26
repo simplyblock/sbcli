@@ -350,7 +350,8 @@ print(json.dumps(states))
 """, replayable=True)
 
 
-def wait_replication_caught_up(mgmt_ip, key_path, lvol_uuids, timeout=REPL_WAIT_TIMEOUT):
+def wait_replication_caught_up(mgmt_ip, key_path, lvol_uuids, timeout=REPL_WAIT_TIMEOUT,
+                               max_lag=None):
     """Wait until every volume is replicating steadily with a bounded lag.
 
     NOT outstanding_count == 0. `outstanding_count` counts internal snapshots
@@ -364,7 +365,7 @@ def wait_replication_caught_up(mgmt_ip, key_path, lvol_uuids, timeout=REPL_WAIT_
     keeping up; the residual delta is `replication-commit`'s job, which is
     documented to "minimize delta then fail the client over".
     """
-    max_lag = MAX_LAG_SECONDS
+    max_lag = max_lag or MAX_LAG_SECONDS
     print(f"Waiting for replication to reach a steady state (lag <= {max_lag}s) on all volumes...")
     start = time.time()
     stable = 0
@@ -783,6 +784,8 @@ def ensure_replication_policy(mgmt_ip, key_path, from_cluster, target_name, mode
     plain one another case left behind.
     """
     suffix = "_x%08x" % (hash(extra_flags) & 0xffffffff) if extra_flags else ""
+    if interval_min != REPL_INTERVAL_MIN:
+        suffix += f"_i{interval_min}"
     name = name or f"pol_{mode}_{target_name}{suffix}"
     for row in _replication_list(mgmt_ip, key_path, "policy", from_cluster):
         if row.get("Name") == name:
@@ -795,7 +798,8 @@ def ensure_replication_policy(mgmt_ip, key_path, from_cluster, target_name, mode
 
 
 def set_cluster_replication(mgmt_ip, key_path, from_cluster, to_cluster, to_pool_uuid,
-                            mode="migration", extra_flags="", policy_name=None):
+                            mode="migration", extra_flags="", policy_name=None,
+                            interval_min=REPL_INTERVAL_MIN):
     """Create the target + policy that let `from_cluster` replicate to `to_cluster`.
 
     Replication is NEVER started per volume any more: `volume replication-start`
@@ -811,6 +815,7 @@ def set_cluster_replication(mgmt_ip, key_path, from_cluster, to_cluster, to_pool
     target = ensure_replication_target(mgmt_ip, key_path, from_cluster, to_cluster,
                                        to_pool_uuid)
     policy = ensure_replication_policy(mgmt_ip, key_path, from_cluster, target, mode,
+                                       interval_min=interval_min,
                                        name=policy_name, extra_flags=extra_flags)
 
     # PRODUCT GAP (bridge, delete once the readers consult the policy):
@@ -1008,9 +1013,14 @@ def delete_test_volumes(mgmt_ip, key_path, pools):
         f"after {drain_polls * 10}s")
 
 
+def lag_gate_for(interval_min):
+    """The steady-state lag a cadence can actually hold: 3 cadence periods."""
+    return max(1, int(interval_min)) * 60 * 3
+
+
 def create_volumes(mgmt_ip, key_path, src_uuid, pool, tgt_uuid, tgt_pool, mode,
                    count=NUM_VOLUMES, prefix="replvol", size=VOL_SIZE,
-                   extra_flags=""):
+                   extra_flags="", interval_min=REPL_INTERVAL_MIN):
     """Create the test volumes already following a replication policy.
 
     The policy IS the start: `volume add --replication-policy` attaches it, and
@@ -1019,7 +1029,7 @@ def create_volumes(mgmt_ip, key_path, src_uuid, pool, tgt_uuid, tgt_pool, mode,
     """
     policy = set_cluster_replication(mgmt_ip, key_path, src_uuid, tgt_uuid,
                                      pool_uuid_of(mgmt_ip, key_path, tgt_pool),
-                                     mode=mode)
+                                     mode=mode, interval_min=interval_min)
     lvols = []
     for i in range(count):
         name = f"{prefix}{i}"
@@ -1649,6 +1659,13 @@ def test_case_6(meta):
 NS_VOLUMES = int(os.environ.get("NS_VOLUMES", "20"))
 NS_PER_SUBSYS = int(os.environ.get("NS_PER_SUBSYS", "10"))
 NS_VOL_SIZE = os.environ.get("NS_VOL_SIZE", "20G")
+#: 20 volumes on a one-minute cadence means 20 transfers a minute
+#: competing for the same hub: the lag settles at ~240s, above the
+#: 180s gate, and the case times out in setup without ever reaching
+#: the fail-over it exists to test (run 20260826_205051, lag
+#: oscillating 216-285s for 35 minutes). Five minutes gives the same
+#: coverage with a backlog the cluster can actually hold.
+NS_INTERVAL_MIN = int(os.environ.get("NS_INTERVAL_MIN", "5"))
 
 PRESSURE_VOLUMES = int(os.environ.get("PRESSURE_VOLUMES", "2"))
 PRESSURE_VOL_SIZE = os.environ.get("PRESSURE_VOL_SIZE", "120G")
@@ -1766,6 +1783,7 @@ def test_case_7(meta):
     lvols = create_volumes(
         mgmt_ip, key_path, src_uuid, src["pool"], tgt_uuid, tgt["pool"],
         mode="failover", count=NS_VOLUMES, prefix="nsvol", size=NS_VOL_SIZE,
+        interval_min=NS_INTERVAL_MIN,
         extra_flags=f"--namespaced True --max-namespace-per-subsys {NS_PER_SUBSYS}")
 
     idents = lvol_identities(mgmt_ip, key_path, lvols)
@@ -1798,7 +1816,8 @@ def test_case_7(meta):
     for ip in assign:
         start_fio(ip, key_path, write_fio_jobfile(ip, key_path, mounts_by_client[ip],
                                                   size="1G"))
-    wait_replication_caught_up(mgmt_ip, key_path, lvols, timeout=3600)
+    ns_gate = lag_gate_for(NS_INTERVAL_MIN)
+    wait_replication_caught_up(mgmt_ip, key_path, lvols, timeout=3600, max_lag=ns_gate)
     wait_data_replicated(mgmt_ip, key_path, lvols, baseline_ts, timeout=3600)
 
     print("Killing the source cluster (both nodes)...")
@@ -1855,7 +1874,8 @@ def test_case_7(meta):
                             pool_uuid_of(mgmt_ip, key_path, src["pool"]))
     for lv in tgt_lvols:
         failback(mgmt_ip, key_path, lv)
-    wait_replication_caught_up(mgmt_ip, key_path, tgt_lvols, timeout=3600)
+    wait_replication_caught_up(mgmt_ip, key_path, tgt_lvols, timeout=3600,
+                               max_lag=ns_gate)
     for lv in tgt_lvols:
         run(mgmt_ip, key_path, f"{SBCTL} -d volume replication-commit {lv}")
 
