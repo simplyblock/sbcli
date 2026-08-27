@@ -2564,7 +2564,9 @@ class K8sNativeMajorUpgrade(TestClusterBase):
         data_nics = os.environ.get("DATA_NICS", "enp1s0")
         max_lvol = os.environ.get("MAX_LVOL", "30")
         vcpu_count = self._get_vcpu_count()
-        enable_cpu_topo = "false" if self.k8s_utils.detect_talos() else "true"
+        is_talos = self.k8s_utils.detect_talos()
+        enable_cpu_topo = "false" if is_talos else "true"
+        enable_cpu_topo_skip = "true" if is_talos else "false"
 
         cr_yaml = f"""
 apiVersion: storage.simplyblock.io/v1alpha1
@@ -2608,6 +2610,7 @@ spec:
   mgmtIfname: {mgmt_ifc}
   dataIfname:
     - {data_nics}
+  skipKubeletConfiguration: {enable_cpu_topo_skip}
   enableCpuTopology: {enable_cpu_topo}
   workerNodes:
 {worker_yaml}"""
@@ -3148,7 +3151,9 @@ class K8sNativeMajorUpgradeDualNode(K8sNativeMajorUpgrade):
         data_nics = os.environ.get("DATA_NICS", "enp1s0")
         max_lvol = os.environ.get("MAX_LVOL", "30")
         vcpu_count = self._get_vcpu_count()
-        enable_cpu_topo = "false" if self.k8s_utils.detect_talos() else "true"
+        is_talos = self.k8s_utils.detect_talos()
+        enable_cpu_topo = "false" if is_talos else "true"
+        enable_cpu_topo_skip = "true" if is_talos else "false"
 
         cr_yaml = f"""
 apiVersion: storage.simplyblock.io/v1alpha1
@@ -3192,6 +3197,7 @@ spec:
   mgmtIfname: {mgmt_ifc}
   dataIfname:
     - {data_nics}
+  skipKubeletConfiguration: {enable_cpu_topo_skip}
   enableCpuTopology: {enable_cpu_topo}
   nodesPerSocket: {self.nodes_per_socket}
   workerNodes:
