@@ -21,6 +21,7 @@ task.function_params:
      the cutover phase has prepared them)
 """
 import time
+import threading
 import uuid as uuid_lib
 from datetime import datetime
 
@@ -399,6 +400,13 @@ def _prepare_cutover(task, lvol, src_node, tgt_node):
     return None
 
 
+def _run_task_safe(task):
+    try:
+        task_runner(task)
+    except Exception as e:
+        logger.error(f"replication-final task {task.uuid} failed: {e}", exc_info=True)
+
+
 def main():
     logger.info("Starting replication-final tasks runner...")
     while True:
@@ -408,6 +416,7 @@ def main():
             logger.error(f"Failed to get clusters: {e}")
             time.sleep(3)
             continue
+        threads = []
         for cl in clusters:
             for task in db.get_job_tasks(cl.get_id(), reverse=False):
                 if task.function_name != JobSchedule.FN_REPLICATION_FINAL:
@@ -415,13 +424,11 @@ def main():
                 if task.status == JobSchedule.STATUS_DONE:
                     continue
                 task = db.get_task_by_id(task.uuid)
-                try:
-                    res = task_runner(task)
-                except Exception as e:
-                    logger.error(f"replication-final task {task.uuid} failed: {e}", exc_info=True)
-                    res = False
-                if not res:
-                    time.sleep(3)
+                t = threading.Thread(target=_run_task_safe, args=(task,), daemon=True)
+                threads.append(t)
+                t.start()
+        for t in threads:
+            t.join()
         time.sleep(constants.TASK_EXEC_INTERVAL_SEC)
 
 
