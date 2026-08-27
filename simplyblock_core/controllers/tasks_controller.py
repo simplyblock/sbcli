@@ -1192,16 +1192,16 @@ def add_backup_task(backup):
 
 
 def add_backup_restore_task(cluster_id, node_id, backup_id, lvol_name, chain_ids,
-                            lvol_id="", s3_bdev="", s3_config=None):
+                            lvol_id="", s3_config=None):
     """Create the task that restores an S3 backup chain into a new lvol.
 
     Args:
-        s3_bdev: which S3 device on the node to read from.
-        s3_config: when set, the device named above does not exist yet and the
-            runner creates it from this configuration -- the case where the
-            backup lives in a bucket that is not the cluster's own. The runner
-            owns that device and deletes it, and scrubs this field, when the
-            restore reaches a terminal state.
+        s3_config: set when the backup lives in a bucket that is not the
+            cluster's own, so the runner has to attach a device of its own to
+            read it. The runner names that device after the backup, owns it,
+            and deletes it -- scrubbing this field -- once the restore reaches
+            a terminal state. Unset, the restore reads through the device the
+            node already has for the cluster's own bucket.
     """
     return _add_task(
         JobSchedule.FN_BACKUP_RESTORE,
@@ -1214,7 +1214,6 @@ def add_backup_restore_task(cluster_id, node_id, backup_id, lvol_name, chain_ids
             "lvol_name": lvol_name,
             "lvol_id": lvol_id,
             "chain_ids": chain_ids,
-            "s3_bdev": s3_bdev,
             "s3_config": s3_config,
         },
     )
