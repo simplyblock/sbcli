@@ -360,16 +360,30 @@ def _failover_volumes(volumes, what):
 
 
 def set_cutover_proceed(lvol_id):
-    """Signal that the operator has connected the target NVMe paths.
+    """Signal that the operator has connected the NVMe paths.
 
-    Finds the cutover_pending LVolReplication for *lvol_id* (source side) and
+    Finds the cutover_pending LVolReplication for *lvol_id* — either as the
+    source (migration direction) or as the target (failback direction) — and
     sets cutover_proceed = True so the task runner advances past the wait.
+
+    During failback the replication direction is reversed: the original source
+    volume becomes the TARGET of the reverse replication, so _active_relationship
+    (which searches by source) would miss it. The fallback search by target_lvol
+    handles this case without changing the API surface.
 
     Returns the replication ID on success, raises KeyError when no matching
     cutover_pending record is found.
     """
     rep = _active_relationship(lvol_id)
     if rep is None or rep.state != LVolReplication.STATE_CUTOVER_PENDING:
+        # Failback path: lvol_id is the target of the reverse replication.
+        rep = None
+        for r in reversed(db.get_lvol_replication_objects()):
+            if (r.target_lvol and r.target_lvol.get_id() == lvol_id
+                    and r.state == LVolReplication.STATE_CUTOVER_PENDING):
+                rep = r
+                break
+    if rep is None:
         raise KeyError(
             f"No cutover_pending replication found for volume {lvol_id}")
     rep.cutover_proceed = True
