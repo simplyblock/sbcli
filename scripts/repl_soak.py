@@ -37,8 +37,19 @@ SSH_OPTS = ["-o", "StrictHostKeyChecking=no", "-o", "LogLevel=ERROR",
             "-o", "ConnectTimeout=30", "-i", KEY]
 
 
+# Any credential that reaches a log line is leaked: these logs are pasted into
+# tickets and chat, and the lab copies keep them on disk for the life of the
+# instance. The fetch URL carries a GitHub token, so redact before printing
+# rather than trusting each call site to remember.
+_SECRET_RE = re.compile(r"(x-access-token:)[^@\s]+(@)")
+
+
+def redact(msg):
+    return _SECRET_RE.sub(r"\1***\2", str(msg))
+
+
 def log(msg):
-    print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
+    print(f"[{time.strftime('%H:%M:%S')}] {redact(msg)}", flush=True)
 
 
 def sh(cmd, cwd=None, env=None, check=True, capture=False):
@@ -47,8 +58,8 @@ def sh(cmd, cwd=None, env=None, check=True, capture=False):
                        text=True, capture_output=capture)
     if check and r.returncode != 0:
         if capture:
-            print(r.stdout[-2000:], r.stderr[-2000:])
-        raise SystemExit(f"step failed (rc={r.returncode}): {cmd}")
+            print(redact(r.stdout[-2000:]), redact(r.stderr[-2000:]))
+        raise SystemExit(f"step failed (rc={r.returncode}): {redact(cmd)}")
     return r
 
 
