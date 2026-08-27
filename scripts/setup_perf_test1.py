@@ -31,7 +31,11 @@ KEY_NAME = "mtes01"
 KEY_PATH = os.path.expanduser("~/.ssh/mtes01.pem")
 AZ = "us-east-1a"
 SG_NAME = "default"
-BRANCH = "main"
+#: sbcli branch installed on mgmt and every storage node. This branch
+#: disables distrib data migration (constants.DATA_MIGRATION_ENABLED), which
+#: is the whole point of the run -- deploying "main" here would silently
+#: re-enable the rebalance and invalidate the experiment.
+BRANCH = "no-data-migration"
 MAX_LVOL = "75"  # capped by constants.MAX_SUBSYSTEMS_PER_NODE (75): above it, values were silently clamped at placement time, so a node reserved huge pages for subsystems it could never serve. cluster create rejects it since 8bcedce79.
 # --- Manual Network Config ---
 # Replace this with your actual Subnet ID (e.g., "subnet-0593459d6b931ee4c")
@@ -509,7 +513,7 @@ def main():
         "sudo dnf install git python3-pip nvme-cli -y",
         "sudo /usr/bin/python3 -m pip install --upgrade pip setuptools wheel",
         "sudo /usr/bin/python3 -m pip install ruamel.yaml",
-        "sudo pip install git+https://github.com/simplyblock-io/sbcli@main --upgrade --force --ignore-installed requests",
+        f"sudo pip install git+https://github.com/simplyblock-io/sbcli@{BRANCH} --upgrade --force --ignore-installed requests",
         "echo 'export PATH=/usr/local/bin:$PATH' >> ~/.bashrc"
     ]
 
