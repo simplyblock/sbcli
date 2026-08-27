@@ -507,6 +507,57 @@ def write_fio_jobfile(client_ip, key_path, mounts,
     return jobfile
 
 
+def fio_bandwidth(client_ip, key_path, label=""):
+    """Print fio's own aggregate bandwidth, and return (read_mbps, write_mbps).
+
+    fio has been writing this all along under --status-interval=15; nothing
+    read it, so every earlier analysis inferred the client rate from round
+    durations instead (and was 5x out).
+    """
+    out = run(client_ip, key_path,
+              "grep -aE '^ *(READ|WRITE): bw=' %s 2>/dev/null | tail -4 || true"
+              % FIO_LOG, check=False, quiet=True)
+    rd = wr = None
+    for line in (out or "").splitlines():
+        m = re.search(r"\((\d+(?:\.\d+)?)([kMG]?B)/s\)", line)
+        if not m:
+            continue
+        val = float(m.group(1))
+        unit = m.group(2)
+        mbps = val / 1000.0 if unit == "kB" else (val * 1000.0 if unit == "GB" else val)
+        if line.strip().startswith("READ"):
+            rd = mbps
+        elif line.strip().startswith("WRITE"):
+            wr = mbps
+    if rd is not None or wr is not None:
+        print("  [fio %s] %s read %s MB/s, write %s MB/s"
+              % (label, client_ip,
+                 "%.0f" % rd if rd is not None else "?",
+                 "%.0f" % wr if wr is not None else "?"))
+    else:
+        print("  [fio %s] %s no aggregate lines yet" % (label, client_ip))
+    return rd, wr
+
+
+def collect_xfer_timing(mgmt_ip, key_path, label):
+    """Pull XFER-TIMING lines off the CP services into one file on the mgmt node.
+
+    Container clocks are skewed from the host's, so every line carries its own
+    epoch stamp and we sort on that rather than on docker's timestamps.
+    """
+    dest = "~/xfer_timing_%s.log" % label
+    services = ("app_TasksRunnerReplicationFinal app_SnapshotReplication "
+                "app_SnapshotMonitor app_LVolMonitor")
+    cmd = ("rm -f %s; for S in %s; do "
+           "sudo docker service logs $S 2>&1 | grep -a XFER-TIMING >> %s || true; "
+           "done; sort -t= -k2 -n %s -o %s 2>/dev/null || true; wc -l < %s"
+           % (dest, services, dest, dest, dest, dest))
+    out = run(mgmt_ip, key_path, cmd, check=False, quiet=True, timeout=600)
+    count = (out or "").strip().splitlines()[-1] if (out or "").strip() else "0"
+    print("  [timing %s] collected %s XFER-TIMING lines -> %s" % (label, count, dest))
+    return dest
+
+
 def start_fio(client_ip, key_path, jobfile):
     print("Starting continuous fio load...")
     run(client_ip, key_path,
@@ -1910,8 +1961,13 @@ def test_case_7(meta):
         start_fio(ip, key_path, write_fio_jobfile(ip, key_path, mounts_by_client[ip],
                                                   size="1G"))
     ns_gate = lag_gate_for(NS_INTERVAL_MIN)
+    for ip in assign:
+        fio_bandwidth(ip, key_path, "steady-state")
     wait_replication_caught_up(mgmt_ip, key_path, lvols, timeout=3600, max_lag=ns_gate)
     wait_data_replicated(mgmt_ip, key_path, lvols, baseline_ts, timeout=3600)
+    for ip in assign:
+        fio_bandwidth(ip, key_path, "pre-failover")
+    collect_xfer_timing(mgmt_ip, key_path, "case7_pre_failover")
 
     print("Killing the source cluster (both nodes)...")
     for ip in src["storage_public_ips"][:2]:
@@ -1981,7 +2037,10 @@ def test_case_7(meta):
         if done == len(tgt_lvols):
             break
         time.sleep(15)
+    collect_xfer_timing(mgmt_ip, key_path, "case7_failback")
     if done != len(tgt_lvols):
+        # The breakdown matters MOST here: a stalled fail-back is the case we
+        # have failed to explain seven times.
         raise RuntimeError(f"FAIL: only {done}/{len(tgt_lvols)} fail-back cutovers completed")
 
     back = failed_over_targets(mgmt_ip, key_path, tgt_lvols)
