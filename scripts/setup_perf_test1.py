@@ -42,7 +42,10 @@ SN_TYPE = "i3en.2xlarge"
 #: another run. Without it, sn add-node takes the control-plane default, which
 #: drifts as main is rebuilt -- useless when the whole point of a run is to
 #: hold the build constant. Empty string = control-plane default.
-SPDK_IMAGE = "public.ecr.aws/simply-block/ultra:main-747c42da-amd64"
+#: NOTE ultra publishes per-arch "<branch>-<sha>-amd64" tags for main, but the
+#: dbg-main branch has only the plain "<branch>-<sha>" tag -- appending -amd64
+#: gives a 404. dbg-main-84cece66 is itself a single linux/amd64 manifest.
+SPDK_IMAGE = "public.ecr.aws/simply-block/ultra:dbg-main-84cece66"
 
 
 #: Dedicated client disk for fio --write_iolog history. 300 GB holds ~3h at
