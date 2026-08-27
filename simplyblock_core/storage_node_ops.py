@@ -4254,6 +4254,24 @@ def _find_splice_target_for_relocation(stranded_primary, role, db_controller, ex
     below only ever knows about diversity from ``stranded_primary`` itself,
     which isn't enough to keep two independently-placed roles apart.
 
+    P's OWN other role (its tertiary if ``role`` is "secondary", or vice
+    versa, untouched by this splice) is also considered: repointing P's
+    ``field`` from X onto ``stranded_primary`` must not put P in the exact
+    state this diversity fix exists to prevent -- two of P's own roles
+    sharing a domain. This is a *preference*, not a hard filter -- among
+    all valid edges, one whose P stays fully diverse afterwards is always
+    picked over one that doesn't (ties broken by the existing domain-
+    mismatch score below), but a colliding edge is still accepted, with a
+    warning, when it's the only one available. In a real multi-domain
+    cluster there are usually several candidate edges, so this alone
+    resolves the common case without ever refusing a repair that a less
+    picky search would have found (2026-08-27 finding: splicing kc25l into
+    56mg5's secondary slot collided with 56mg5's pre-existing, untouched
+    tertiary in the same domain, when another edge elsewhere in the ring
+    -- t74sg's -- was collision-free the whole time; the old avoid_domains-
+    only check had no way to prefer it, since avoid_domains only ever
+    looked at X's domain, never P's).
+
     Returns ``(p_id, x_id)`` or ``None`` if no valid edge exists.
     """
     field = "secondary_node_id" if role == "secondary" else "tertiary_node_id"
@@ -4284,8 +4302,9 @@ def _find_splice_target_for_relocation(stranded_primary, role, db_controller, ex
         return sum(1 for n in nodes if n.failure_domain != stranded_primary.failure_domain)
 
     edges = [n for n in all_nodes if getattr(n, field) and n.get_id() not in exclude]
+    other_field = "tertiary_node_id" if field == "secondary_node_id" else "secondary_node_id"
 
-    best, best_score = None, -1
+    best, best_key, best_collides = None, None, False
     for p in edges:
         x_id = getattr(p, field)
         if x_id in exclude:
@@ -4304,10 +4323,37 @@ def _find_splice_target_for_relocation(stranded_primary, role, db_controller, ex
                 continue
             if not _valid_tertiary(stranded_primary, stranded_sec, x):
                 continue
-        score = _domain_mismatch_score(p, x)
-        if score > best_score:
-            best_score, best = score, (p.get_id(), x.get_id())
 
+        # Prefer an edge that leaves P's OWN other role (its tertiary if
+        # `role` is "secondary", or vice versa -- untouched by this splice)
+        # diverse from stranded_primary once P.<field> is repointed onto
+        # it. A collision here degrades a node that was never part of this
+        # removal at all, so it's ranked below every non-colliding edge --
+        # but still accepted as a last resort rather than refused outright
+        # (2026-08-27 finding: with several candidate edges usually
+        # available in a real cluster, one of them is typically collision-
+        # free; the old code had no way to prefer it, so an outright reject
+        # here would have been more restrictive than useful).
+        p_other_id = getattr(p, other_field)
+        collides = False
+        if p_other_id and p_other_id != stranded_primary.get_id():
+            p_other = by_id.get(p_other_id)
+            if (p_other and stranded_primary.failure_domain >= 0
+                    and p_other.failure_domain == stranded_primary.failure_domain):
+                collides = True
+
+        score = _domain_mismatch_score(p, x)
+        key = (not collides, score)
+        if best_key is None or key > best_key:
+            best_key, best, best_collides = key, (p.get_id(), x.get_id()), collides
+
+    if best and best_collides:
+        logger.warning(
+            f"[REMOVAL] splice {best[0]} -> {stranded_primary.get_id()} -> {best[1]}: "
+            f"no candidate edge leaves {best[0]}'s other role diverse from "
+            f"{stranded_primary.get_id()}'s domain {stranded_primary.failure_domain}; "
+            f"using it anyway as the least-bad option -- {best[0]} is now degraded "
+            f"by a removal it wasn't otherwise part of")
     return best
 
 

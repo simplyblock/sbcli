@@ -337,6 +337,85 @@ class TestFindSpliceTargetForRelocation(unittest.TestCase):
         got = storage_node_ops._find_splice_target_for_relocation(stranded, "tertiary", db)
         self.assertEqual(got, ("p", "x"))
 
+    # -----------------------------------------------------------------
+    # P's OWN other role is PREFERRED to stay diverse from stranded once
+    # P's `field` is repointed onto it, but this is a soft preference, not
+    # a hard filter -- regression coverage for the 2026-08-27 live finding:
+    # splicing kc25l into 56mg5's secondary slot collided with 56mg5's
+    # pre-existing, untouched tertiary in the same domain, when another
+    # edge elsewhere in the ring was collision-free the whole time. The old
+    # avoid_domains-only check had no way to prefer it (it only ever looked
+    # at X's domain, never P's) -- but an outright reject would have been
+    # more restrictive than useful, since a real cluster usually has
+    # several candidate edges and one of them is typically clean.
+    # -----------------------------------------------------------------
+
+    def test_prefers_edge_whose_p_stays_diverse_over_one_that_collides(self):
+        cl = _cluster(enable_failure_domain=True)
+        stranded = _node("s", failure_domain=3, tertiary_id="s_ter", mgmt_ip="10.0.0.9")
+        s_ter = _node("s_ter", failure_domain=4, mgmt_ip="10.0.0.10")
+        # bad_p's own tertiary shares stranded's domain (3) -- splicing
+        # stranded into bad_p's secondary slot would collide with bad_p's
+        # own untouched tertiary. bad_p/bad_x score higher on the plain
+        # domain-mismatch metric (both ends fully unlike stranded's own
+        # domain), so the old code picked this edge unconditionally.
+        bad_p = _node("bad_p", secondary_id="bad_x", tertiary_id="bad_p_ter",
+                       failure_domain=1, mgmt_ip="10.0.0.1")
+        bad_p_ter = _node("bad_p_ter", failure_domain=3, mgmt_ip="10.0.0.11")
+        bad_x = _node("bad_x", failure_domain=2, mgmt_ip="10.0.0.2")
+        # good_p's own tertiary does NOT collide -- lower domain-mismatch
+        # score (good_p shares stranded's domain), but must still win since
+        # it leaves nothing degraded.
+        good_p = _node("good_p", secondary_id="good_x", tertiary_id="good_p_ter",
+                        failure_domain=3, mgmt_ip="10.0.0.3")
+        good_p_ter = _node("good_p_ter", failure_domain=2, mgmt_ip="10.0.0.13")
+        good_x = _node("good_x", failure_domain=4, mgmt_ip="10.0.0.4")
+        db = FakeDB(cl, [stranded, s_ter, bad_p, bad_p_ter, bad_x, good_p, good_p_ter, good_x])
+        got = storage_node_ops._find_splice_target_for_relocation(stranded, "secondary", db)
+        self.assertEqual(got, ("good_p", "good_x"))
+
+    def test_falls_back_to_colliding_edge_with_warning_when_its_the_only_one(self):
+        cl = _cluster(enable_failure_domain=True)
+        stranded = _node("s", failure_domain=3, tertiary_id="s_ter", mgmt_ip="10.0.0.9")
+        s_ter = _node("s_ter", failure_domain=4, mgmt_ip="10.0.0.10")
+        p = _node("p", secondary_id="x", tertiary_id="p_ter", failure_domain=1, mgmt_ip="10.0.0.1")
+        p_ter = _node("p_ter", failure_domain=3, mgmt_ip="10.0.0.20")
+        x = _node("x", failure_domain=2, mgmt_ip="10.0.0.2")
+        db = FakeDB(cl, [stranded, s_ter, p, p_ter, x])
+        with patch.object(storage_node_ops, "logger") as log:
+            got = storage_node_ops._find_splice_target_for_relocation(stranded, "secondary", db)
+        self.assertEqual(got, ("p", "x"))
+        log.warning.assert_called_once()
+
+    def test_uses_edge_when_ps_other_role_does_not_collide(self):
+        cl = _cluster(enable_failure_domain=True)
+        stranded = _node("s", failure_domain=3, tertiary_id="s_ter", mgmt_ip="10.0.0.9")
+        s_ter = _node("s_ter", failure_domain=4, mgmt_ip="10.0.0.10")
+        p = _node("p", secondary_id="x", tertiary_id="p_ter", failure_domain=1, mgmt_ip="10.0.0.1")
+        p_ter = _node("p_ter", failure_domain=2, mgmt_ip="10.0.0.20")  # no collision
+        x = _node("x", failure_domain=2, mgmt_ip="10.0.0.2")
+        db = FakeDB(cl, [stranded, s_ter, p, p_ter, x])
+        with patch.object(storage_node_ops, "logger") as log:
+            got = storage_node_ops._find_splice_target_for_relocation(stranded, "secondary", db)
+        self.assertEqual(got, ("p", "x"))
+        log.warning.assert_not_called()
+
+    def test_falls_back_to_colliding_tertiary_edge_when_its_the_only_one(self):
+        cl = _cluster(enable_failure_domain=True)
+        stranded = _node("s", failure_domain=3, secondary_id="s_sec", mgmt_ip="10.0.0.9")
+        s_sec = _node("s_sec", failure_domain=4, mgmt_ip="10.0.0.10")
+        # p's OWN secondary shares stranded's domain (3) -- splicing stranded
+        # into p's tertiary slot collides with p's own untouched secondary,
+        # but it's the only edge available, so it's used anyway.
+        p = _node("p", tertiary_id="x", secondary_id="p_sec", failure_domain=1, mgmt_ip="10.0.0.60")
+        p_sec = _node("p_sec", failure_domain=3, mgmt_ip="10.0.0.70")
+        x = _node("x", failure_domain=2, mgmt_ip="10.0.0.61")
+        db = FakeDB(cl, [stranded, s_sec, p, p_sec, x])
+        with patch.object(storage_node_ops, "logger") as log:
+            got = storage_node_ops._find_splice_target_for_relocation(stranded, "tertiary", db)
+        self.assertEqual(got, ("p", "x"))
+        log.warning.assert_called_once()
+
 
 # ---------------------------------------------------------------------------
 # _pick_replica_relocation_node — falls back to the splice finder above when
