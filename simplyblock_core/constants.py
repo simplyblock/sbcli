@@ -374,6 +374,36 @@ REPL_CUTOVER_SHRINK_TIMEOUT_SEC = 900
 # if the operator is unavailable. Cutover proceeds regardless after this many seconds.
 REPL_CUTOVER_PROCEED_TIMEOUT_SEC = 120
 
+# --- cutover delta convergence -------------------------------------------
+# The IO freeze copies everything written since the last replicated snapshot,
+# so the cutover converges the delta FIRST: take a snapshot, transfer it, and
+# immediately take the next, until a round transfers in "low seconds". A fixed
+# two rounds (the previous behaviour) does not converge under load -- it just
+# stops.
+REPL_CUTOVER_CONVERGE_TARGET_SEC = 2.0
+# Safety bound: a volume written faster than it replicates never converges, so
+# stop and freeze rather than looping forever.
+REPL_CUTOVER_MAX_SHRINK_ROUNDS = 12
+# Rounds must follow each other within MILLISECONDS. Returning to the task
+# scheduler between them costs TASK_EXEC_INTERVAL_SEC (10s) of fresh writes
+# each time, which puts a floor under the delta no number of rounds can beat.
+REPL_CUTOVER_POLL_INTERVAL_SEC = 0.2
+# How long a single runner pass may stay inside the convergence loop.
+REPL_CUTOVER_CONVERGE_BUDGET_SEC = 60
+# Always worth polling inline for at least this long: a round that finishes
+# just after the pass is handed back costs a full TASK_EXEC_INTERVAL_SEC of
+# writes in the next round.
+REPL_CUTOVER_MIN_INLINE_SEC = 5
+
+# Whether to block the cutover on the operator's preconnect signal. The wait
+# sits BETWEEN the cutover clone's base snapshot and the freeze, so every
+# second of it is a second of writes the frozen final step must copy: with no
+# operator present the 120s fallback timeout fired 34 times in one soak run and
+# fed the 25-72s freezes. Deployments whose operator posts
+# .../replication/cutover-proceed set this True and accept that cost until the
+# clone's base can be advanced after the signal.
+REPL_CUTOVER_PROCEED_REQUIRED = False
+
 SPDK_PROXY_MULTI_THREADING_ENABLED=True
 SPDK_PROXY_TIMEOUT=60*5
 LVOL_NVME_CONNECT_RECONNECT_DELAY=2

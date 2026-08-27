@@ -37,6 +37,32 @@ utils.init_sentry_sdk(__name__)
 db = db_controller.DBController()
 
 
+def _group_id_for_lvol(lvol):
+    """The consistency group *lvol* belongs to, or "".
+
+    A group is owned by a replication policy and pinned to one node/LVS, so a
+    volume's group is the group of its policy.
+    """
+    policy_id = getattr(lvol, "replication_policy_id", "")
+    if not policy_id:
+        return ""
+    try:
+        group = db.get_consistency_group_for_policy(policy_id)
+    except Exception as e:                              # noqa: BLE001
+        logger.warning("Could not resolve the consistency group of %s: %s",
+                       lvol.get_id(), e)
+        return ""
+    return group.get_id() if group else ""
+
+
+def _release_lvs_claim(task):
+    """Let other volumes on this LVS replicate again."""
+    released = task.function_params.pop("cutover_lvs", None) is not None
+    task.function_params.pop("cutover_group", None)
+    if released:
+        task.write_to_db(db.kv_store)
+
+
 def _finalize(task, ok, err):
     if ok:
         replication_id = task.function_params.get("replication_id")
@@ -97,11 +123,15 @@ def _finalize(task, ok, err):
                 # reported loudly but does not un-succeed the task.
                 logger.error(f"Source volume {src_lvol_id} could not be "
                              f"deleted after the cutover: {e}")
+        _release_lvs_claim(task)
         return True
 
     task.function_result = err or "cutover failed, retrying"
     task.status = JobSchedule.STATUS_SUSPENDED
     task.retry += 1
+    # A retry re-claims the LVS on its next pass; holding the claim across the
+    # wait would stall every other volume's replication for nothing.
+    _release_lvs_claim(task)
     task.write_to_db(db.kv_store)
     return False
 
@@ -145,6 +175,18 @@ def task_runner(task: JobSchedule):
     if task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED, JobSchedule.STATUS_RUNNING]:
         task.status = JobSchedule.STATUS_RUNNING
         task.function_params.setdefault("start_time", int(time.time()))
+        # Claim the source LVS for the whole cutover -- the convergence rounds
+        # AND the freeze. Other volumes' snapshot transfers on this LVS queue
+        # behind it (see snapshot_replication._lvs_locked_by_cutover): they
+        # compete for the same lvstore and hub bandwidth, and every second they
+        # steal from a convergence round is a second of writes that lands in
+        # the freeze.
+        task.function_params["cutover_lvs"] = getattr(lvol, "lvs_name", "")
+        # A consistency group cuts over AS A GROUP: its members' transfers and
+        # cutovers run alongside each other, and only volumes outside the group
+        # are held. Recording the group on the claim is what lets the
+        # replication side tell a sibling member from an unrelated volume.
+        task.function_params["cutover_group"] = _group_id_for_lvol(lvol)
         task.write_to_db(db.kv_store)
 
         # ---- SHRINK PHASE ----------------------------------------------- #
@@ -170,8 +212,13 @@ def task_runner(task: JobSchedule):
         # (operator calls POST .../replication/cutover-proceed after its preconnect
         # Job succeeds). REPL_CUTOVER_PROCEED_TIMEOUT_SEC is the safety fallback
         # so cutover proceeds even if the operator is unavailable.
+        # Every second spent here is a second of writes the FROZEN final step
+        # must copy, because the cutover clone's base snapshot was taken before
+        # it. With no operator to signal, the 120s fallback fired 34 times in
+        # soak run 20260827_110415 and produced 25-72s freezes. Only wait when
+        # the deployment actually has an operator posting cutover-proceed.
         replication_id = params.get("replication_id")
-        if replication_id:
+        if replication_id and constants.REPL_CUTOVER_PROCEED_REQUIRED:
             try:
                 rep = db.get_lvol_replication_by_id(replication_id)
                 if not rep.cutover_proceed:
@@ -203,48 +250,138 @@ def task_runner(task: JobSchedule):
     return True
 
 
-SHRINK_ROUNDS = 2
 
 
-def _shrink_step(task, lvol):
-    """Advance the delta-shrink state machine one step.
-
-    Returns (done, error): done=True when all rounds are replicated and the
-    cutover may start IMMEDIATELY; error aborts the task.
-    """
-    params = task.function_params
-    if int(time.time()) > params.get("shrink_deadline", 0):
-        return False, "shrink phase timed out waiting for replication"
-
-    snap_id = params["shrink_snap_id"]
-    try:
-        snap = db.get_snapshot_by_id(snap_id)
-    except KeyError:
-        return False, f"shrink snapshot {snap_id} disappeared"
-
-    # target_replicated_snap_uuid is set at replicate-finish AFTER the target
-    # copy is chained and converted — replicated AND converted in one signal.
-    if not snap.target_replicated_snap_uuid:
-        task.function_result = (f"shrink round {params['shrink_round']}: waiting "
-                                f"for {snap_id[:8]} to replicate")
-        return False, None
-
-    if params["shrink_round"] >= SHRINK_ROUNDS:
-        return True, None
-
-    # Round replicated — IMMEDIATELY take the next snapshot: its delta covers
-    # only the wait window of the previous round.
+def _take_shrink_snapshot(task, lvol):
+    """Snapshot the source and record it as the round in flight."""
     from simplyblock_core.controllers import snapshot_controller
+    params = task.function_params
     new_snap, err = snapshot_controller.add(
         lvol.get_id(), f"repl_commit_{uuid_lib.uuid4()}",
         snap_type=SnapShot.TYPE_INTERNAL)
     if err:
-        return False, f"shrink round {params['shrink_round'] + 1} snapshot failed: {err}"
-    params["shrink_round"] += 1
+        return None, f"shrink round {params.get('shrink_round', 0) + 1} snapshot failed: {err}"
+    params["shrink_round"] = params.get("shrink_round", 0) + 1
     params["shrink_snap_id"] = new_snap
-    task.function_result = f"shrink round {params['shrink_round']}: snapshot taken"
-    task.write_to_db(db.kv_store)
-    return False, None
+    params["shrink_started_at"] = time.time()
+    return new_snap, None
+
+
+def _shrink_round_done(snap_id):
+    """True once the round's snapshot is replicated AND chained on the target.
+
+    target_replicated_snap_uuid is set at replicate-finish, after the target
+    copy is chained and converted -- replicated and usable in one signal.
+    """
+    try:
+        return bool(db.get_snapshot_by_id(snap_id).target_replicated_snap_uuid)
+    except KeyError:
+        return None                                  # disappeared
+
+
+def _inline_window(last_round_secs):
+    """How long a pass may poll inline, given the last round's transfer time.
+
+    The runner is single-threaded, so a flat multi-minute budget would stall
+    every other volume's cutover behind this one. Scaling to the last round
+    keeps the loop inline exactly where it matters -- near convergence, where
+    the next snapshot must follow within milliseconds -- and yields early when
+    rounds are still long, which is where yielding costs nothing because the
+    freeze is far away regardless.
+    """
+    return min(constants.REPL_CUTOVER_CONVERGE_BUDGET_SEC,
+               max(constants.REPL_CUTOVER_MIN_INLINE_SEC, last_round_secs * 3))
+
+
+def _shrink_step(task, lvol):
+    """Converge the delta, then hand straight over to the cutover.
+
+    Returns (done, error). done=True means the delta is as small as it is going
+    to get and the freeze may start IMMEDIATELY.
+
+    This loop deliberately does NOT return to the task scheduler between
+    rounds. Each return costs TASK_EXEC_INTERVAL_SEC (10s) before the next
+    pass, and every one of those seconds is written by the client and lands in
+    the next round -- a floor on the delta that more rounds cannot lower. Here
+    a round ends and the next snapshot is taken within
+    REPL_CUTOVER_POLL_INTERVAL_SEC, so a round only carries the writes made
+    during the previous round's transfer.
+    """
+    params = task.function_params
+    deadline = params.get("shrink_deadline", 0)
+    # How long this pass may poll inline before handing the runner back. The
+    # runner is single-threaded, so a flat multi-minute budget would stall
+    # every OTHER volume's cutover behind this one. Scale it to how long the
+    # last round actually took: near convergence the rounds are seconds and we
+    # stay inline (which is the whole point -- the next snapshot must follow
+    # within milliseconds), while a slow early round yields quickly, and
+    # yielding costs nothing there because we are far from the freeze anyway.
+    budget_end = time.time() + _inline_window(
+        (params.get("shrink_round_times") or [0])[-1])
+
+    while True:
+        if int(time.time()) > deadline:
+            return False, "shrink phase timed out waiting for replication"
+
+        snap_id = params["shrink_snap_id"]
+        done = _shrink_round_done(snap_id)
+        if done is None:
+            return False, f"shrink snapshot {snap_id} disappeared"
+
+        if not done:
+            if time.time() >= budget_end:
+                # Give the pass back so the runner can service other tasks;
+                # the round is still in flight and resumes on the next pass.
+                task.function_result = (f"shrink round {params['shrink_round']}: waiting "
+                                        f"for {snap_id[:8]} to replicate")
+                return False, None
+            time.sleep(constants.REPL_CUTOVER_POLL_INTERVAL_SEC)
+            continue
+
+        elapsed = time.time() - params.get("shrink_started_at", time.time())
+        params.setdefault("shrink_round_times", []).append(round(elapsed, 2))
+        logger.info("cutover convergence: lvol=%s round %d transferred in %.2fs",
+                    lvol.get_id(), params["shrink_round"], elapsed)
+
+        # Converged: this round's delta -- the writes made during the previous
+        # round -- moved in low seconds, so the freeze that copies the next
+        # such window will be about as short.
+        if elapsed <= constants.REPL_CUTOVER_CONVERGE_TARGET_SEC:
+            task.function_result = (f"converged in {params['shrink_round']} rounds "
+                                    f"(last {elapsed:.2f}s)")
+            return True, None
+
+        if params["shrink_round"] >= constants.REPL_CUTOVER_MAX_SHRINK_ROUNDS:
+            # Written faster than it replicates. Freezing now is still the best
+            # move -- the freeze at least stops the writes -- but say so.
+            logger.warning(
+                "cutover convergence: lvol=%s did not converge in %d rounds "
+                "(last round %.2fs > %.2fs target); freezing anyway",
+                lvol.get_id(), params["shrink_round"], elapsed,
+                constants.REPL_CUTOVER_CONVERGE_TARGET_SEC)
+            task.function_result = (f"not converged after {params['shrink_round']} "
+                                    f"rounds (last {elapsed:.2f}s)")
+            return True, None
+
+        # IMMEDIATELY take the next snapshot. This is the whole mechanism: the
+        # next round carries only what was written while this one transferred,
+        # so waiting here -- for the scheduler or for anything else -- puts
+        # those seconds straight into the freeze. It happens before any
+        # yielding decision for exactly that reason.
+        _, err = _take_shrink_snapshot(task, lvol)
+        if err:
+            return False, err
+        task.write_to_db(db.kv_store)
+
+        # Re-arm the inline window from what this round just measured: rounds
+        # near convergence are short and stay inline, a slow one hands the
+        # runner back so other volumes' cutovers are not stuck behind it.
+        budget_end = time.time() + _inline_window(elapsed)
+        if time.time() >= budget_end:
+            task.function_result = (f"shrink round {params['shrink_round'] - 1} done "
+                                    f"({elapsed:.2f}s); continuing next pass")
+            task.write_to_db(db.kv_store)
+            return False, None
 
 
 def _prepare_cutover(task, lvol, src_node, tgt_node):

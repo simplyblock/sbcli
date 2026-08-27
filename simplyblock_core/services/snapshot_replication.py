@@ -127,9 +127,100 @@ def _unreplicated_local_ancestor(snode, snapshot, replicate_to_source):
     return ("blocked", None, "chain deeper than 64 blobs")
 
 
+def _group_id_for_lvol(lvol):
+    """The consistency group *lvol* belongs to, or "".
+
+    A group is owned by a replication policy and pinned to one node/LVS.
+    """
+    policy_id = getattr(lvol, "replication_policy_id", "")
+    if not policy_id:
+        return ""
+    try:
+        group = db.get_consistency_group_for_policy(policy_id)
+    except Exception as e:                              # noqa: BLE001
+        logger.warning("Could not resolve the consistency group of %s: %s",
+                       lvol.get_id(), e)
+        return ""
+    return group.get_id() if group else ""
+
+
+def _lvs_transfer_hold(task, snapshot):
+    """Why this transfer must wait, or "" when it may start now.
+
+    Two priorities share one lvstore's bandwidth:
+
+    1. A volume in its FINAL CUTOVER owns the lvstore. Its convergence rounds
+       decide how long client IO freezes -- every second another volume steals
+       from a round is a second of writes the frozen final step must copy --
+       so nothing else on that lvstore transfers meanwhile. Members of the same
+       consistency group are exempt: the group cuts over together.
+
+    2. Consistency groups outrank loose volumes. A group's members transfer in
+       PARALLEL with each other (their snapshots belong to one generation and
+       are only useful together), and everything else on the lvstore waits, so
+       groups are effectively serialized against each other rather than
+       interleaved.
+    """
+    own_lvol = getattr(snapshot, "lvol", None)
+    lvs_name = getattr(own_lvol, "lvs_name", "") if own_lvol else ""
+    if not lvs_name:
+        return ""
+    own_id = own_lvol.get_id()
+    own_group = _group_id_for_lvol(own_lvol)
+
+    tasks = db.get_job_tasks(task.cluster_id)
+
+    # --- priority 1: a cutover in progress on this lvstore -----------------
+    for t in tasks:
+        if t.function_name != JobSchedule.FN_REPLICATION_FINAL:
+            continue
+        if t.status == JobSchedule.STATUS_DONE or t.canceled:
+            continue
+        params = t.function_params or {}
+        if params.get("cutover_lvs") != lvs_name:
+            continue
+        holder = params.get("lvol_id")
+        if not holder or holder == own_id:
+            return ""                       # our own cutover: keep moving
+        holder_group = params.get("cutover_group") or ""
+        if holder_group and holder_group == own_group:
+            return ""                       # same group: cut over together
+        return (f"lvol {holder[:8]} is in final cutover on lvstore {lvs_name}")
+
+    # --- priority 2: a consistency group is transferring on this lvstore ---
+    for t in tasks:
+        if t.function_name != JobSchedule.FN_SNAPSHOT_REPLICATION:
+            continue
+        if t.status != JobSchedule.STATUS_RUNNING or t.get_id() == task.get_id():
+            continue
+        other_snap_id = (t.function_params or {}).get("snapshot_id")
+        if not other_snap_id:
+            continue
+        try:
+            other_lvol = db.get_snapshot_by_id(other_snap_id).lvol
+        except KeyError:
+            continue
+        if getattr(other_lvol, "lvs_name", "") != lvs_name:
+            continue
+        other_group = _group_id_for_lvol(other_lvol)
+        if other_group and other_group != own_group:
+            return (f"consistency group {other_group.split('/')[-1][:8]} is "
+                    f"transferring on lvstore {lvs_name}")
+
+    return ""
+
+
 def process_snap_replicate_start(task, snapshot):
     # 1 create lvol on remote node
     logger.info("Starting snapshot replication task")
+
+    hold = _lvs_transfer_hold(task, snapshot)
+    if hold:
+        # Not a failure and not a retry: come back when the lvstore frees up.
+        task.function_result = f"held: {hold}"
+        task.write_to_db()
+        logger.info("Holding replication of %s: %s", snapshot.get_id(), hold)
+        return False
     # Drive the transfer from whichever member of the SOURCE lvstore leads it
     # now — the snapshot exists on every member, so an outage of the recorded
     # primary must not stop replication (see _source_leader_node).
