@@ -140,11 +140,22 @@ def failover(cluster: Cluster, pool: StoragePool, volume: Volume,
     return Response(status_code=204)
 
 
+class CommitParams(BaseModel):
+    delete_source: bool = False
+
+
 @api.post('/commit', name='clusters:storage-pools:volumes:replication:commit',
           status_code=202, responses={202: {"content": None}})
-def commit(request: Request, cluster: Cluster, pool: StoragePool, volume: Volume) -> Response:
-    """Queue the planned cutover. Progress is the returned task."""
-    result = lvol_controller.replication_commit(volume.get_id())
+def commit(request: Request, cluster: Cluster, pool: StoragePool, volume: Volume,
+           body: Optional[CommitParams] = None) -> Response:
+    """Queue the planned cutover. Progress is the returned task.
+
+    delete_source=True instructs the task runner to delete the source volume
+    after the cutover succeeds.
+    """
+    params = body or CommitParams()
+    result = lvol_controller.replication_commit(volume.get_id(),
+                                                delete_source=params.delete_source)
     if isinstance(result, tuple):  # (False, error)
         raise HTTPException(500, str(result[1]))
     if not result:
@@ -174,6 +185,21 @@ def failback(cluster: Cluster, pool: StoragePool, volume: Volume, body: Failback
     if not result:
         raise HTTPException(500, 'Failed to configure fail-back of the volume')
 
+    return Response(status_code=204)
+
+
+@api.post('/cutover-proceed', name='clusters:storage-pools:volumes:replication:cutover-proceed',
+          status_code=204, responses={204: {"content": None}})
+def cutover_proceed(cluster: Cluster, pool: StoragePool, volume: Volume) -> Response:
+    """Signal that target NVMe paths are connected and cutover may proceed.
+
+    Called by the operator after its preconnect Job succeeds. The task runner
+    is suspended waiting for this signal; once set, it advances to the ANA flip.
+    """
+    try:
+        replication_policy_controller.set_cutover_proceed(volume.get_id())
+    except KeyError as exc:
+        raise HTTPException(404, str(exc))
     return Response(status_code=204)
 
 

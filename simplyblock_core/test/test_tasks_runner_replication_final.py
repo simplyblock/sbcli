@@ -79,6 +79,7 @@ def _install(monkeypatch, nodes, rep, cutover_ret):
 def test_happy_path_marks_done_and_updates_state(monkeypatch):
     rep = LVolReplication()
     rep.state = LVolReplication.STATE_CUTOVER_PENDING
+    rep.cutover_proceed = True
     nodes = {"S1": _node("S1"), "T1": _node("T1")}
     calls = _install(monkeypatch, nodes, rep, (True, None))
 
@@ -92,6 +93,7 @@ def test_happy_path_marks_done_and_updates_state(monkeypatch):
 
 def test_failure_suspends_and_retries(monkeypatch):
     rep = LVolReplication()
+    rep.cutover_proceed = True
     nodes = {"S1": _node("S1"), "T1": _node("T1")}
     _install(monkeypatch, nodes, rep, (False, "boom"))
 

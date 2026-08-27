@@ -383,7 +383,9 @@ def test_failback_evicts_on_every_ha_node_not_just_the_primary(monkeypatch):
     monkeypatch.setattr(lc, "_evict_stale_namespace",
                         lambda lvol, node: evicted.append(node.get_id()))
 
-    def _fake_add_lvol_on_node(lvol, node, is_primary=True):
+    def _fake_add_lvol_on_node(lvol, node, is_primary=True, **kw):
+        # The real signature also takes min_cntlid / ns_uuid / primary_nsid;
+        # accept them so this fake cannot drift out of call-compatibility.
         added.append((node.get_id(), is_primary))
         return {"uuid": "U", "driver_specific": {"lvol": {"blobid": 9}}}, None
 
@@ -395,6 +397,22 @@ def test_failback_evicts_on_every_ha_node_not_just_the_primary(monkeypatch):
             self.lvstore = "LVS_1"
             self.status = lc.StorageNode.STATUS_ONLINE
             self.cluster_id = "CL_tgt"
+            self.lvol_subsys_port = 4420
+
+        def rpc_client(self):
+            # Real StorageNode hands out an RPC client; the nsid claim asks it
+            # what this subsystem already holds. Nothing here yet.
+            class _R:
+                @staticmethod
+                def subsystem_get(nqn):
+                    return None
+            return _R()
+
+        def get_lvol_subsys_port(self, lvstore):
+            # Real StorageNode resolves a per-lvstore listener port; the clone
+            # copies it onto the new volume so suspend_lvol addresses the right
+            # listener.
+            return self.lvol_subsys_port
         def get_id(self):
             return self._id
 
@@ -418,6 +436,10 @@ def test_failback_evicts_on_every_ha_node_not_just_the_primary(monkeypatch):
 
     class _Lvol:
         uuid = "ORIG"; nqn = "nqn.test:lvol:ORIG"; ns_id = 7
+        # Real LVol carries these; the clone reads namespace to decide whether
+        # it attaches to a sibling's subsystem or creates its own.
+        namespace = ""
+        max_namespace_per_subsys = 1
         lvol_bdev = "LVOL_C"; crypto_bdev = ""
         def __deepcopy__(self, memo):
             c = _Lvol(); c.__dict__.update(self.__dict__); return c
@@ -466,8 +488,16 @@ def test_failover_guard_matches_nqn_and_nsid_not_nqn_alone():
     import inspect
     from simplyblock_core.controllers import lvol_controller as lc
     src = inspect.getsource(lc.replicate_lvol_on_target_cluster)
-    assert "lv.nqn == lvol.nqn and lv.ns_id == lvol.ns_id" in src, \
-        "the fail-over existing-copy guard must match nqn AND nsid"
+    # The guard now resolves the copy through the replication record, because
+    # merging R26.3 made BOTH string matches unreliable: siblings share the
+    # NQN, and a fail-over claims a target-local nsid so the numbers need not
+    # match. nqn+nsid remains the fallback when no record exists yet.
+    assert "own_copies" in src, \
+        "the fail-over existing-copy guard must identify the copy explicitly"
+    assert "rep.source_lvol.get_id() == lvol.get_id()" in src, \
+        "the copy is the target of THIS volume's replication record"
+    assert "lv.ns_id != lvol.ns_id" in src, \
+        "nqn+nsid must remain the fallback when there is no record"
 
 
 def test_namespaced_siblings_replicate_to_the_same_target_node():
