@@ -411,6 +411,112 @@ class TestPickReplicaRelocationSpliceFallback(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# _pick_replica_relocation_node — full pairwise diversity across
+# {primary, secondary, tertiary}.
+#
+# Regression coverage for the 2026-08-27 finding: the old logic only ever
+# enforced ">=1 cross-domain role" -- once the OTHER already-assigned role
+# happened to be cross-domain, the role actually being relocated was placed
+# on cands[0] with zero domain check, so it could land in the primary's own
+# domain or in the other role's domain. These tests cover the tiered
+# replacement: (1) prefer a direct candidate diverse from BOTH the primary
+# and the other role, (2) splice for the same full diversity, (3) relax to
+# the old weaker floor (diverse from the primary alone) only when full
+# diversity is unreachable anywhere, logging the degraded outcome.
+# ---------------------------------------------------------------------------
+
+class TestPickReplicaRelocationFullDiversity(unittest.TestCase):
+
+    def test_prefers_direct_candidate_diverse_from_both_primary_and_other_role(self):
+        cl = _cluster(enable_failure_domain=True)
+        primary = _node("p1", secondary_id="n1", tertiary_id="t1",
+                         failure_domain=0, mgmt_ip="10.0.0.9")
+        removed = _node("n1", failure_domain=1, mgmt_ip="10.0.0.99")
+        other = _node("t1", failure_domain=1, mgmt_ip="10.0.0.50")
+        same_as_other = _node("bad", failure_domain=1, mgmt_ip="10.0.0.2")
+        fully_diverse = _node("good", failure_domain=2, mgmt_ip="10.0.0.3")
+        db = FakeDB(cl, [primary, removed, other, same_as_other, fully_diverse])
+        with patch.object(storage_node_ops, "get_secondary_nodes",
+                          return_value=["bad", "good"]):
+            got = storage_node_ops._pick_replica_relocation_node(
+                primary, removed, "secondary", db)
+        self.assertEqual(got, "good")
+
+    def test_falls_back_to_splice_for_full_diversity_when_direct_only_matches_other_role(self):
+        cl = _cluster(enable_failure_domain=True)
+        primary = _node("p1", secondary_id="n1", tertiary_id="t1",
+                         failure_domain=0, mgmt_ip="10.0.0.9")
+        removed = _node("n1", failure_domain=1, mgmt_ip="10.0.0.99")
+        other = _node("t1", failure_domain=1, mgmt_ip="10.0.0.50")
+        same_as_other = _node("bad", failure_domain=1, mgmt_ip="10.0.0.2")
+        edge_p = _node("edge_p", secondary_id="edge_x", failure_domain=3, mgmt_ip="10.0.0.10")
+        edge_x = _node("edge_x", failure_domain=2, mgmt_ip="10.0.0.11")
+        db = FakeDB(cl, [primary, removed, other, same_as_other, edge_p, edge_x])
+        with patch.object(storage_node_ops, "get_secondary_nodes",
+                          return_value=["bad"]):
+            got = storage_node_ops._pick_replica_relocation_node(
+                primary, removed, "secondary", db)
+        self.assertEqual(got, "edge_x")
+
+    def test_relaxes_to_weaker_floor_with_warning_when_full_diversity_unreachable(self):
+        # Only domains 0 (primary) and 1 (other role + every candidate)
+        # exist -- no direct candidate or splice target can be diverse from
+        # BOTH roles, so this must relax to "diverse from the primary alone"
+        # rather than refuse the relocation outright.
+        cl = _cluster(enable_failure_domain=True)
+        primary = _node("p1", secondary_id="n1", tertiary_id="t1",
+                         failure_domain=0, mgmt_ip="10.0.0.9")
+        removed = _node("n1", failure_domain=1, mgmt_ip="10.0.0.99")
+        other = _node("t1", failure_domain=1, mgmt_ip="10.0.0.50")
+        weak_cand = _node("weak_cand", failure_domain=1, mgmt_ip="10.0.0.2")
+        db = FakeDB(cl, [primary, removed, other, weak_cand])
+        with patch.object(storage_node_ops, "get_secondary_nodes",
+                          return_value=["weak_cand"]), \
+             patch.object(storage_node_ops, "logger") as log:
+            got = storage_node_ops._pick_replica_relocation_node(
+                primary, removed, "secondary", db)
+        self.assertEqual(got, "weak_cand")
+        log.warning.assert_called_once()
+
+    def test_relaxes_to_weaker_splice_with_warning_when_full_diversity_unreachable(self):
+        # No direct candidate at all; the only splice target's far end sits
+        # in the other role's domain, so full diversity is unreachable --
+        # must relax to the weaker splice (diverse from the primary alone)
+        # instead of returning None.
+        cl = _cluster(enable_failure_domain=True)
+        primary = _node("p1", secondary_id="n1", tertiary_id="t1",
+                         failure_domain=0, mgmt_ip="10.0.0.9")
+        removed = _node("n1", failure_domain=1, mgmt_ip="10.0.0.99")
+        other = _node("t1", failure_domain=1, mgmt_ip="10.0.0.50")
+        edge_p = _node("edge_p", secondary_id="edge_x", failure_domain=3, mgmt_ip="10.0.0.10")
+        edge_x = _node("edge_x", failure_domain=1, mgmt_ip="10.0.0.11")
+        db = FakeDB(cl, [primary, removed, other, edge_p, edge_x])
+        with patch.object(storage_node_ops, "get_secondary_nodes", return_value=[]), \
+             patch.object(storage_node_ops, "logger") as log:
+            got = storage_node_ops._pick_replica_relocation_node(
+                primary, removed, "secondary", db)
+        self.assertEqual(got, "edge_x")
+        log.warning.assert_called_once()
+
+    def test_no_relaxation_warning_when_no_other_role_is_assigned(self):
+        # With no other role placed yet, full_avoid == weak_avoid already --
+        # this is the ordinary single-constraint case, not a degraded
+        # fallback, so no warning should fire.
+        cl = _cluster(enable_failure_domain=True)
+        primary = _node("p1", secondary_id="n1", failure_domain=0, mgmt_ip="10.0.0.9")
+        removed = _node("n1", failure_domain=1, mgmt_ip="10.0.0.99")
+        cand = _node("cand", failure_domain=1, mgmt_ip="10.0.0.2")
+        db = FakeDB(cl, [primary, removed, cand])
+        with patch.object(storage_node_ops, "get_secondary_nodes",
+                          return_value=["cand"]), \
+             patch.object(storage_node_ops, "logger") as log:
+            got = storage_node_ops._pick_replica_relocation_node(
+                primary, removed, "secondary", db)
+        self.assertEqual(got, "cand")
+        log.warning.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # Case A — teardown of own primary's replicas
 # ---------------------------------------------------------------------------
 
