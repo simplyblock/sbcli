@@ -4421,6 +4421,12 @@ def replication_commit(lvol_id, delete_source=False):
             "final_state": LVolReplication.STATE_CUTOVER_DONE,
             "shrink_round": 1,
             "shrink_snap_id": snap_uuid,
+            # When this round started transferring. The convergence loop
+            # measures each round against it to decide whether the delta is
+            # small enough to freeze; without it round 1 measures as 0.00s and
+            # "converges" instantly, which is how the freeze stayed at 9-55s
+            # with the loop deployed (run 20260827_172734).
+            "shrink_started_at": time.time(),
             "shrink_deadline": int(time.time()) + constants.REPL_CUTOVER_SHRINK_TIMEOUT_SEC,
             # Migration semantics on request: retire the source volume once
             # the cutover state is durable (see _finalize in the final runner).

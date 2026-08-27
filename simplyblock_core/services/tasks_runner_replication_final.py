@@ -338,10 +338,22 @@ def _shrink_step(task, lvol):
             time.sleep(constants.REPL_CUTOVER_POLL_INTERVAL_SEC)
             continue
 
-        elapsed = time.time() - params.get("shrink_started_at", time.time())
-        params.setdefault("shrink_round_times", []).append(round(elapsed, 2))
-        logger.info("cutover convergence: lvol=%s round %d transferred in %.2fs",
-                    lvol.get_id(), params["shrink_round"], elapsed)
+        started_at = params.get("shrink_started_at")
+        if started_at is None:
+            # Unmeasurable round (an older task, or one enqueued without the
+            # stamp). Treat it as NOT converged rather than as instant: a
+            # missing measurement must never be read as "the delta is small",
+            # which is precisely the mistake that kept the freeze at 9-55s.
+            elapsed = float("inf")
+            logger.warning(
+                "cutover convergence: lvol=%s round %d has no start stamp; "
+                "taking another round rather than assuming it was fast",
+                lvol.get_id(), params["shrink_round"])
+        else:
+            elapsed = time.time() - started_at
+            params.setdefault("shrink_round_times", []).append(round(elapsed, 2))
+            logger.info("cutover convergence: lvol=%s round %d transferred in %.2fs",
+                        lvol.get_id(), params["shrink_round"], elapsed)
 
         # Converged: this round's delta -- the writes made during the previous
         # round -- moved in low seconds, so the freeze that copies the next
@@ -376,7 +388,8 @@ def _shrink_step(task, lvol):
         # Re-arm the inline window from what this round just measured: rounds
         # near convergence are short and stay inline, a slow one hands the
         # runner back so other volumes' cutovers are not stuck behind it.
-        budget_end = time.time() + _inline_window(elapsed)
+        budget_end = time.time() + _inline_window(
+            elapsed if elapsed != float("inf") else 0)
         if time.time() >= budget_end:
             task.function_result = (f"shrink round {params['shrink_round'] - 1} done "
                                     f"({elapsed:.2f}s); continuing next pass")

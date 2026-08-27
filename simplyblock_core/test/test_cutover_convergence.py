@@ -343,3 +343,52 @@ class TestLvsAdmission(unittest.TestCase):
         self.assertEqual(
             self.sr._lvs_transfer_hold(self._task(), self._snapshot(lvol_id="LV_b")),
             "")
+
+
+class TestRoundOneIsMeasured(unittest.TestCase):
+    """The regression that let the freeze survive the convergence loop.
+
+    replicate/commit creates the cutover task itself, and its params are the
+    ONLY ones the loop ever sees for round 1. Every earlier test supplied
+    shrink_started_at by hand, so none of them noticed the controller did not:
+    the round then measured as 0.00s, counted as converged, and the freeze
+    copied the whole delta (run 20260827_172734, 9-55s server-side).
+    """
+
+    def test_the_controller_stamps_the_start_of_round_one(self):
+        import inspect
+        from simplyblock_core.controllers import lvol_controller as lc
+        src = inspect.getsource(lc.replication_commit)
+        self.assertIn('"shrink_started_at"', src,
+                      "round 1 must carry the stamp the loop measures against")
+        self.assertLess(src.index('"shrink_round": 1'),
+                        src.index('"shrink_deadline"'),
+                        "sanity: this is the cutover task's param block")
+
+    def test_an_unmeasured_round_is_not_treated_as_converged(self):
+        """Belt and braces for tasks enqueued without the stamp."""
+        clock = _Clock()
+        task = _Task(shrink_snap_id="S0", shrink_round=1,
+                     shrink_deadline=10 ** 9, lvol_id="LV1")
+        # deliberately NO shrink_started_at
+        taken = []
+
+        def _take(task_, lvol_):
+            taken.append(task_.function_params["shrink_round"])
+            task_.function_params["shrink_round"] += 1
+            task_.function_params["shrink_snap_id"] = "S1"
+            task_.function_params["shrink_started_at"] = clock.now
+            return "S1", None
+
+        with patch.object(runner.time, "time", clock), \
+             patch.object(runner.time, "sleep", clock.sleep), \
+             patch.object(runner, "_shrink_round_done", return_value=True), \
+             patch.object(runner, "_take_shrink_snapshot", side_effect=_take), \
+             patch.object(constants, "REPL_CUTOVER_MIN_INLINE_SEC", 0), \
+             patch.object(constants, "REPL_CUTOVER_CONVERGE_BUDGET_SEC", 0):
+            done, err = runner._shrink_step(task, _lvol())
+
+        self.assertFalse(done, "an unmeasured round must not end the shrink phase")
+        self.assertIsNone(err)
+        self.assertEqual(taken, [1],
+                         "it must take another round instead of freezing")
