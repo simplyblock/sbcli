@@ -121,11 +121,48 @@ def wait_for_ssh(ip, timeout=300):
     return False
 
 
+#: A single transient SSH connect failure used to abort the whole deploy:
+#: 2026-08-27 phase 2b died on WinError 10060 to a node that had completed
+#: phase 1 minutes earlier, after the cluster was already created -- so the
+#: run was unrecoverable and the fleet had to be rebuilt. wait_for_ssh()
+#: already retries, but the per-command connects did not, and they had no
+#: timeout either, so a black-holed SYN blocked on the OS default.
+#: Retrying here is safe: no command has been sent yet, so nothing can be
+#: executed twice.
+SSH_CONNECT_ATTEMPTS = 6
+SSH_CONNECT_BACKOFF_SEC = 5
+
+
+def _ssh_connect(ip, attempts=SSH_CONNECT_ATTEMPTS):
+    """Return a connected SSHClient, retrying transient failures."""
+    last_exc = None
+    for attempt in range(1, attempts + 1):
+        ssh = paramiko.SSHClient()
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        try:
+            ssh.connect(ip, username="ec2-user", key_filename=KEY_PATH,
+                        timeout=15, banner_timeout=30, auth_timeout=30,
+                        allow_agent=False, look_for_keys=False)
+            if attempt > 1:
+                print(f"  [{ip}] SSH connected on attempt {attempt}")
+            return ssh
+        except Exception as exc:  # noqa: BLE001 - any connect failure is retryable
+            last_exc = exc
+            try:
+                ssh.close()
+            except Exception:
+                pass
+            if attempt < attempts:
+                delay = SSH_CONNECT_BACKOFF_SEC * attempt
+                print(f"  [{ip}] SSH connect failed "
+                      f"({type(exc).__name__}: {exc}); retry "
+                      f"{attempt}/{attempts - 1} in {delay}s")
+                time.sleep(delay)
+    raise RuntimeError(
+        f"SSH connect to {ip} failed after {attempts} attempts: {last_exc}")
+
 def ssh_exec(ip, cmds, get_output=False, check=False, timeout=600):
-    ssh = paramiko.SSHClient()
-    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    ssh.connect(ip, username='ec2-user', key_filename=KEY_PATH,
-                allow_agent=False, look_for_keys=False)
+    ssh = _ssh_connect(ip)
     results = []
     for cmd in cmds:
         print(f"  [{ip}] $ {cmd}")
@@ -159,10 +196,7 @@ def ssh_exec(ip, cmds, get_output=False, check=False, timeout=600):
 
 
 def ssh_exec_stream(ip, cmd, check=False):
-    ssh = paramiko.SSHClient()
-    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    ssh.connect(ip, username='ec2-user', key_filename=KEY_PATH,
-                allow_agent=False, look_for_keys=False)
+    ssh = _ssh_connect(ip)
     print(f"  [{ip}] $ {cmd}")
 
     stdin, stdout, stderr = ssh.exec_command(cmd, timeout=600)
