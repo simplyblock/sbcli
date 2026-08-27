@@ -54,6 +54,20 @@ def _finalize(task, ok, err):
         failback_source_id = task.function_params.get("failback_source_lvol_id")
         if failback_source_id and rep is not None:
             _swap_failback_lvol_uuid(rep, failback_source_id)
+            # Remove the stale failed_over LVolReplication that predates the
+            # failback. Without this the operator's get_relationship query keeps
+            # finding the old record and reports failed_over indefinitely even
+            # though IO has already returned to the original source cluster.
+            prior_replication_id = task.function_params.get("failback_prior_replication_id")
+            if prior_replication_id:
+                try:
+                    prior_rep = db.get_lvol_replication_by_id(prior_replication_id)
+                    prior_rep.remove(db.kv_store)
+                    logger.info(
+                        "failback: removed stale failed_over replication record %s",
+                        prior_replication_id)
+                except KeyError:
+                    pass
         task.function_result = "cutover done"
         task.status = JobSchedule.STATUS_DONE
         task.function_params["end_time"] = int(time.time())
@@ -384,6 +398,7 @@ def _prepare_cutover(task, lvol, src_node, tgt_node):
                 and prior.source_cluster_id == tgt_node.cluster_id
                 and prior.source_lvol):
             task.function_params["failback_source_lvol_id"] = prior.source_lvol.get_id()
+            task.function_params["failback_prior_replication_id"] = prior.get_id()
             logger.info(
                 "failback cutover detected: original source UUID %s will be "
                 "preserved on new clone %s after cutover",
