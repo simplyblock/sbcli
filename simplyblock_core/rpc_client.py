@@ -1391,6 +1391,10 @@ class RPCClient:
         return self._request("thread_set_cpumask", params)
 
     def distr_migration_to_primary_start(self, storage_ID, name, qos_high_priority=False):
+        if not constants.DATA_MIGRATION_ENABLED:
+            logger.warning("data migration disabled: refusing %s for %s",
+                           "distr_migration_to_primary_start", name)
+            return False
         params = {
             "name": name,
             "storage_ID": storage_ID,
@@ -1404,6 +1408,10 @@ class RPCClient:
         return self._request("distr_migration_status", params)
 
     def distr_migration_failure_start(self, name, storage_ID, qos_high_priority=False, job_size=constants.MIG_JOB_SIZE, jobs=constants.MIG_PARALLEL_JOBS):
+        if not constants.DATA_MIGRATION_ENABLED:
+            logger.warning("data migration disabled: refusing %s for %s",
+                           "distr_migration_failure_start", name)
+            return False
         params = {
             "name": name,
             "storage_ID": storage_ID,
@@ -1417,6 +1425,10 @@ class RPCClient:
         return self._request("distr_migration_failure_start", params)
 
     def distr_migration_expansion_start(self, name, qos_high_priority=False, job_size=constants.MIG_JOB_SIZE, jobs=constants.MIG_PARALLEL_JOBS):
+        if not constants.DATA_MIGRATION_ENABLED:
+            logger.warning("data migration disabled: refusing %s for %s",
+                           "distr_migration_expansion_start", name)
+            return False
         params = {
             "name": name,
         }

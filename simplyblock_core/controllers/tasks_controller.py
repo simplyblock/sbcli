@@ -14,6 +14,18 @@ from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.storage_node import StorageNode
 
 logger = logging.getLogger()
+
+#: Task functions that move distrib data. Gated by
+#: constants.DATA_MIGRATION_ENABLED so a disabled build cannot even queue
+#: them -- a queued task would otherwise run the moment the switch flips.
+_DATA_MIGRATION_FUNCTIONS = frozenset({
+    JobSchedule.FN_DEV_MIG,
+    JobSchedule.FN_NEW_DEV_MIG,
+    JobSchedule.FN_FAILED_DEV_MIG,
+    JobSchedule.FN_BALANCING_AFTER_NODE_RESTART,
+    JobSchedule.FN_BALANCING_AFTER_DEV_REMOVE,
+    JobSchedule.FN_BALANCING_AFTER_DEV_EXPANSION,
+})
 db = db_controller.DBController()
 
 # Identity used for task leases. Hostname (not pid) so a runner that crashes
@@ -215,6 +227,13 @@ def _add_task(function_name, cluster_id, node_id, device_id,
     # an expansion: expansion completes -> outage device migration drains ->
     # expansion (new-device) migration runs (see tasks_runner_new_dev_migration).
 
+    if (not constants.DATA_MIGRATION_ENABLED
+            and function_name in _DATA_MIGRATION_FUNCTIONS):
+        logger.warning(
+            "data migration disabled: refusing to create task %s "
+            "(cluster %s node %s device %s)",
+            function_name, cluster_id, node_id, device_id)
+        return False
     if function_name in [JobSchedule.FN_DEV_RESTART, JobSchedule.FN_FAILED_DEV_MIG]:
         if not _validate_new_task_dev_restart(cluster_id, node_id, device_id):
             return False

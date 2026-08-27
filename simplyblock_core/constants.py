@@ -588,6 +588,20 @@ qos_class_meta_and_migration_weight_percent = 25
 MIG_PARALLEL_JOBS = 64
 MIG_JOB_SIZE = 64
 
+#: Kill switch for distrib DATA migration: device / new-device /
+#: failed-device migration and every balancing_* rebalance. False means the
+#: data plane is never asked to move a stripe:
+#:   - no migration-family task is created  (tasks_controller._add_task)
+#:   - the distr_migration_*_start RPCs refuse (rpc_client)
+#:   - the migration runner services are absent from the swarm stack
+#: Set False on this branch to isolate the 2026-08-27 silent corruption,
+#: which was traced to a concurrent rebalance relocating single stripes
+#: ([267,268) spans) while writes were in flight, with primary and
+#: secondary disagreeing on which device held the stripe.
+#: NOTE lvol_migration / lvol_batch_migration (whole-lvol moves used by
+#: replication and edge) are deliberately NOT gated here.
+DATA_MIGRATION_ENABLED = False
+
 # Live volume migration constants
 LVOL_MIG_MAX_RETRIES = 5          # max retries before entering cleanup_target
 LVOL_MIG_DEADLINE_SEC = 3600  # 1-hour deadline (0 = no deadline)

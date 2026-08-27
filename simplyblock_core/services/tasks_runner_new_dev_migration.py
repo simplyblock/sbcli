@@ -167,6 +167,12 @@ db = db_controller.DBController()
 
 def main():
     logger.info("Starting Tasks runner...")
+    if not constants.DATA_MIGRATION_ENABLED:
+        logger.warning(
+            "data migration is permanently disabled on this build "
+            "(constants.DATA_MIGRATION_ENABLED=False): this runner exits "
+            "without processing any task")
+        return
     while True:
         try:
             db.get_clusters()

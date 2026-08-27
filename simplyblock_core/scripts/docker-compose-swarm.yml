@@ -400,19 +400,12 @@ services:
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
 
-  TasksRunnerMigration:
-    <<: *service-base
-    image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "python3 simplyblock_core/services/tasks_runner_migration.py"
-    deploy:
-      placement:
-        constraints: [node.role == manager]
-    volumes:
-      - "/etc/foundationdb:/etc/foundationdb"
-    networks:
-      - hostnet
-    environment:
-      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
+  # Data-migration runners removed on the no-data-migration branch:
+  #   TasksRunnerMigration, TasksRunnerFailedMigration,
+  #   TasksRunnerNewDeviceMigration.
+  # See constants.DATA_MIGRATION_ENABLED. Removing the services is the
+  # outer guard; task creation and the distr_migration_* RPCs are gated
+  # too, so migration cannot run even if a runner is started by hand.
 
   TasksRunnerLVolMigration:
     <<: *service-base
@@ -442,38 +435,10 @@ services:
     environment:
       SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
 
-  TasksRunnerFailedMigration:
-    <<: *service-base
-    image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "python3 simplyblock_core/services/tasks_runner_failed_migration.py"
-    deploy:
-      placement:
-        constraints: [node.role == manager]
-    volumes:
-      - "/etc/foundationdb:/etc/foundationdb"
-    networks:
-      - hostnet
-    environment:
-      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
-
   TasksRunnerClusterStatus:
     <<: *service-base
     image: $SIMPLYBLOCK_DOCKER_IMAGE
     command: "python3 simplyblock_core/services/tasks_cluster_status.py"
-    deploy:
-      placement:
-        constraints: [node.role == manager]
-    volumes:
-      - "/etc/foundationdb:/etc/foundationdb"
-    networks:
-      - hostnet
-    environment:
-      SIMPLYBLOCK_LOG_LEVEL: "$LOG_LEVEL"
-
-  TasksRunnerNewDeviceMigration:
-    <<: *service-base
-    image: $SIMPLYBLOCK_DOCKER_IMAGE
-    command: "python3 simplyblock_core/services/tasks_runner_new_dev_migration.py"
     deploy:
       placement:
         constraints: [node.role == manager]
