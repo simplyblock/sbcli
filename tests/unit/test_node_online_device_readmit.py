@@ -59,7 +59,10 @@ def _node(uuid, status):
     # Distinct per-node mgmt_ip: get_next_cluster_status dedups affected
     # nodes by physical host (mgmt_ip); leaving the model default ("") on
     # every node collapses all affected nodes into one and undercounts.
-    n.mgmt_ip = f"10.99.0.{abs(hash(uuid)) % 250 + 1}"
+    # Use sum-of-ordinals rather than hash() — Python randomizes hash() per
+    # process (PYTHONHASHSEED), so two UUIDs can collide under some seeds and
+    # make the dedup return a count of 1 instead of 2, flipping the verdict.
+    n.mgmt_ip = f"10.99.0.{(sum(ord(c) for c in uuid) % 250) + 1}"
     return n
 
 
