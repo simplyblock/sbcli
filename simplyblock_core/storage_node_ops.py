@@ -4087,11 +4087,31 @@ def _pick_replica_relocation_node(primary, removed_node: StorageNode, role, db_c
     replica, currently on ``removed_node``. Returns a node id or None.
     Reuses the existing anti-affinity-aware placement helpers.
 
-    With failure domains enabled, the >=1-cross-domain-role invariant is
-    enforced HARD here (not best-effort): if the primary's OTHER non-leader
-    role does not already live in a different domain than the primary, the
-    replacement must — otherwise a full-domain outage would leave the LVS
-    with zero surviving paths.
+    With failure domains enabled, prefers FULL pairwise domain diversity
+    across {primary, secondary, tertiary} — not just the weaker ">=1
+    cross-domain role" floor this used to settle for. That floor let the
+    role NOT being relocated stay wherever it already was and placed the
+    one being relocated in ANY domain at all (including the primary's own,
+    or the other role's) as long as one non-leader path stayed cross-domain
+    — a real, live-confirmed gap (2026-08-27: after two uneven removals
+    shrank two of four domains to 2 hosts, several nodes ended up with
+    secondary and tertiary sharing a domain, or a tertiary sharing the
+    primary's own domain, purely because the other role already happened
+    to be cross-domain when this ran). Tries, in order:
+      1. a direct candidate diverse from BOTH the primary and the other
+         already-assigned role;
+      2. splicing into an existing pairing whose far end is also diverse
+         from both (see ``_find_splice_target_for_relocation``'s
+         ``avoid_domains``);
+      3. the original ">=1 cross-domain" floor (direct candidate, then
+         splice) if neither of the above found anything — full diversity
+         genuinely isn't achievable right now (e.g. domains have shrunk
+         unevenly) and refusing the relocation outright would strand the
+         node-removal instead. Logged loudly so the degraded outcome is
+         visible rather than silently matching the old behavior;
+      4. same-domain-blind last resort (direct candidate, then splice)
+         when there's no other role to be diverse from at all, or FD data
+         is absent/invalid — unchanged from before.
 
     ``get_secondary_nodes``/``get_secondary_nodes_2`` only ever offer
     UNCLAIMED nodes (each node hosts at most one secondary/tertiary at a
@@ -4107,7 +4127,7 @@ def _pick_replica_relocation_node(primary, removed_node: StorageNode, role, db_c
     pairing (see ``_find_splice_target_for_relocation``) — exactly the fix
     ``splice_stranded_secondary``/``splice_stranded_tertiary`` already apply
     to the identical dead end at cluster-activation time. Only returning
-    None here (both searches exhausted) makes
+    None (every step above exhausted) makes
     ``_check_replica_relocation_feasible`` refuse the removal up front.
     """
     exclude_ids = [removed_node.get_id()]
@@ -4130,37 +4150,88 @@ def _pick_replica_relocation_node(primary, removed_node: StorageNode, role, db_c
             primary, exclude_ids=exclude_ids, exclude_mgmt_ips=exclude_mgmt_ips)
 
     cluster = db_controller.get_cluster_by_id(primary.cluster_id)
-    if cands and getattr(cluster, "enable_failure_domain", False) and primary.failure_domain >= 0:
-        other_cross = False
-        if other_id and other_id != removed_node.get_id():
-            try:
-                other = db_controller.get_storage_node_by_id(other_id)
-                other_cross = (other.failure_domain >= 0
-                               and other.failure_domain != primary.failure_domain)
-            except KeyError:
-                pass
-        if not other_cross:
-            # The replacement is the primary's only cross-domain role —
-            # same-domain candidates are not acceptable.
-            for cand_id in cands:
-                try:
-                    cand = db_controller.get_storage_node_by_id(cand_id)
-                except KeyError:
-                    continue
-                if (cand.failure_domain >= 0
-                        and cand.failure_domain != primary.failure_domain):
-                    return cand_id
-        else:
-            return cands[0]
-    elif cands:
-        return cands[0]
+    fd_enabled = bool(getattr(cluster, "enable_failure_domain", False) and primary.failure_domain >= 0)
 
+    def first_diverse(domains):
+        for cand_id in cands:
+            try:
+                cand = db_controller.get_storage_node_by_id(cand_id)
+            except KeyError:
+                continue
+            if cand.failure_domain >= 0 and cand.failure_domain not in domains:
+                return cand_id
+        return None
+
+    if not fd_enabled:
+        if cands:
+            return cands[0]
+        splice = _find_splice_target_for_relocation(
+            primary, role, db_controller, exclude_ids=exclude_ids + [primary.get_id()])
+        return splice[1] if splice else None
+
+    other_fd = None
+    if other_id and other_id != removed_node.get_id():
+        try:
+            other = db_controller.get_storage_node_by_id(other_id)
+            if other.failure_domain >= 0:
+                other_fd = other.failure_domain
+        except KeyError:
+            pass
+
+    full_avoid = {primary.failure_domain}
+    if other_fd is not None:
+        full_avoid.add(other_fd)
+
+    # 1. Direct candidate, fully diverse from both the primary and the
+    # other already-assigned role.
+    if cands:
+        found = first_diverse(full_avoid)
+        if found:
+            return found
+
+    # 2. Splice into an existing pairing whose far end is also fully diverse.
+    splice = _find_splice_target_for_relocation(
+        primary, role, db_controller, exclude_ids=exclude_ids + [primary.get_id()],
+        avoid_domains=full_avoid)
+    if splice:
+        return splice[1]
+
+    # 3. Full diversity isn't achievable anywhere in the cluster right now.
+    # Relax to the >=1-cross-domain floor (diverse from the primary alone)
+    # rather than refuse the relocation outright — only when there IS an
+    # other role to have been diverse from, i.e. this is a genuine relax,
+    # not silently skipping the check.
+    if other_fd is not None:
+        weak_avoid = {primary.failure_domain}
+        found = first_diverse(weak_avoid) if cands else None
+        if found:
+            logger.warning(
+                f"[REMOVAL] {primary.get_id()}: no candidate keeps {role} fully domain-diverse "
+                f"from both the primary (domain {primary.failure_domain}) and its other "
+                f"replica (domain {other_fd}); falling back to {found}, cross-domain from "
+                f"the primary only")
+            return found
+        splice = _find_splice_target_for_relocation(
+            primary, role, db_controller, exclude_ids=exclude_ids + [primary.get_id()],
+            avoid_domains=weak_avoid)
+        if splice:
+            logger.warning(
+                f"[REMOVAL] {primary.get_id()}: no fully domain-diverse splice target for "
+                f"{role} either; falling back to splicing {splice[0]} -> {splice[1]}, "
+                f"cross-domain from the primary only")
+            return splice[1]
+
+    # 4. Same-domain-blind last resort: no other role to be diverse from,
+    # or nothing satisfies even the weaker floor.
+    if cands:
+        return cands[0]
     splice = _find_splice_target_for_relocation(
         primary, role, db_controller, exclude_ids=exclude_ids + [primary.get_id()])
     return splice[1] if splice else None
 
 
-def _find_splice_target_for_relocation(stranded_primary, role, db_controller, exclude_ids=()):
+def _find_splice_target_for_relocation(stranded_primary, role, db_controller, exclude_ids=(),
+                                        avoid_domains=frozenset()):
     """Find an already-formed pairing ``P -> X`` (``P.<field> == X``)
     elsewhere in the cluster to splice ``stranded_primary`` into:
     ``P -> stranded_primary -> X``. Read-only — callers decide whether and
@@ -4174,6 +4245,14 @@ def _find_splice_target_for_relocation(stranded_primary, role, db_controller, ex
     which only ever run before any physical LVS exists — this can be asked
     to splice into a pairing that already has real data on both ends;
     executing that move (not just picking the edge) is the caller's job.
+
+    ``avoid_domains``: X (the node ``stranded_primary`` would actually end
+    up hosted on) is excluded outright, not just scored down, when its
+    domain is in this set. ``_pick_replica_relocation_node`` uses this to
+    keep a spliced-in replacement fully diverse from BOTH the primary and
+    its other already-assigned role — the plain domain-mismatch scoring
+    below only ever knows about diversity from ``stranded_primary`` itself,
+    which isn't enough to keep two independently-placed roles apart.
 
     Returns ``(p_id, x_id)`` or ``None`` if no valid edge exists.
     """
@@ -4213,6 +4292,8 @@ def _find_splice_target_for_relocation(stranded_primary, role, db_controller, ex
             continue
         x = by_id.get(x_id)
         if not x or not _online(p, x):
+            continue
+        if avoid_domains and x.failure_domain in avoid_domains:
             continue
         if role == "secondary":
             if p.mgmt_ip == stranded_primary.mgmt_ip or x.mgmt_ip == stranded_primary.mgmt_ip:
