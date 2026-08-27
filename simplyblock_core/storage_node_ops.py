@@ -5125,9 +5125,30 @@ def _decommission_node_jm(removed_node: StorageNode) -> None:
                 # currently revisits this automatically; it stays a visible
                 # gap until a future removal/reconnect cycle retries it.
                 if not name_old:
+                    # This single boolean (no entry in remote_jm_devices for
+                    # removed_jm_id) can't by itself distinguish WHY: the
+                    # physical connection may simply never have been made
+                    # for this node (e.g. it picked up this jm_vuid via a
+                    # relocation/splice whose soft-reconnect prelude never
+                    # ran for it -- see _recreate_lvstore_on_non_leader_impl,
+                    # 2026-08-25), or a connection existed and was dropped by
+                    # something else entirely. jm_ids (checked in Pass 1/2
+                    # above) already confirms this node's OWN redundancy
+                    # membership does reference removed_jm_id -- that part
+                    # is not in question. Log the actual remote_jm_devices
+                    # state so a live occurrence is diagnosable without
+                    # re-deriving it from scratch (2026-08-28 finding): an
+                    # entirely empty list points at "never connected in the
+                    # first place"; a non-empty list missing only this uuid
+                    # points at something explicitly removing/skipping it.
+                    current_remote_uuids = [rd.uuid for rd in (node.remote_jm_devices or [])]
                     logger.error(
                         f"[REMOVAL] {node.get_id()}: no recorded bdev name for removed "
-                        f"JM {removed_jm_id}; cannot call jc_replace_jm")
+                        f"JM {removed_jm_id}; cannot call jc_replace_jm -- "
+                        f"node.jm_ids={node.jm_ids}, "
+                        f"remote_jm_devices uuids={current_remote_uuids} "
+                        f"({'never connected to any remote JM' if not current_remote_uuids else 'connected to other JM(s) but not this one'}), "
+                        f"affected targets={[(jm_vuid, owner_primary.get_id()) for jm_vuid, owner_primary, _ in targets]}")
                 elif any(new_jm_id is None for _, _, new_jm_id in targets):
                     logger.error(
                         f"[REMOVAL] {node.get_id()}: no replacement candidate for jm_vuid(s) "
