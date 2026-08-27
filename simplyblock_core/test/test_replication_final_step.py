@@ -95,6 +95,11 @@ class _Lvol:
     # volume's ANA group (group id == namespace id).
     ns_id = 2
 
+    def get_id(self):
+        # Real LVol has this; the cutover's phase timing labels every line
+        # with it.
+        return self.uuid
+
 
 def _install_nodes(monkeypatch, nodes_by_id):
     monkeypatch.setattr(rfs, "db", type("DB", (), {

@@ -2,7 +2,8 @@
 import time
 import uuid
 
-from simplyblock_core import constants, db_controller, snapshot_retention, utils
+from simplyblock_core import (constants, db_controller, snapshot_retention,
+                              utils, xfer_timing)
 from simplyblock_core.controllers import lvol_controller, snapshot_events, snapshot_controller
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol
@@ -213,6 +214,7 @@ def _lvs_transfer_hold(task, snapshot):
 def process_snap_replicate_start(task, snapshot):
     # 1 create lvol on remote node
     logger.info("Starting snapshot replication task")
+    _t_landing = None          # set only if we create the landing volume below
 
     hold = _lvs_transfer_hold(task, snapshot)
     if hold:
@@ -389,6 +391,7 @@ def process_snap_replicate_start(task, snapshot):
         # subsystem cap is a user-admission limit; enforcing it here only stops
         # replication on a node that is already full, which is precisely when
         # the transfers that would let retention free those slots are needed.
+        _t_landing = xfer_timing.now()
         lv_id, err = lvol_controller.add_lvol_ha(
             f"REP_{snapshot.snap_name}", snapshot.size, remote_node_uuid.get_id(), snapshot.lvol.ha_type,
             remote_pool_uuid, internal=True)
@@ -420,7 +423,12 @@ def process_snap_replicate_start(task, snapshot):
     # is not a valid transfer gateway. This mirrors the (working) migration
     # runner, which has always sent bulk transfers hub+map_id.
     from simplyblock_core.services.replication_final_step import ensure_hub_attached
-    _hub_ctrl, hub_bdev, hub_err = ensure_hub_attached(snode.rpc_client(), remote_lv_node)
+    xfer_timing.gap("landing_volume_create", _t_landing,
+                    snap=snapshot.get_id(), lvol=snapshot.lvol.get_id())
+    with xfer_timing.phase("hub_attach", snap=snapshot.get_id(),
+                           lvol=snapshot.lvol.get_id(),
+                           tgt=remote_lv_node.get_id()):
+        _hub_ctrl, hub_bdev, hub_err = ensure_hub_attached(snode.rpc_client(), remote_lv_node)
     if hub_err:
         logger.error(f"Transfer hub attach failed: {hub_err}")
         task.function_result = "transfer hub attach failed, retrying"
@@ -491,6 +499,10 @@ def process_snap_replicate_start(task, snapshot):
             fresh.write_to_db()
 
     # 3 start replication
+    xfer_timing.stamp("transfer_submit", snap=snapshot.get_id(),
+                      lvol=snapshot.lvol.get_id(), size=snapshot.size)
+    task.function_params["xfer_submit_t"] = xfer_timing.now()
+    task.write_to_db()
     snode.rpc_client().bdev_lvol_transfer(
         name=snapshot.snap_bdev,
         offset=offset,
@@ -936,6 +948,8 @@ def process_snap_replicate_finish(task, snapshot):
                  or db.get_storage_node_by_id(snapshot.lvol.node_id))
     if remote_snode.transfer_hublvol and remote_snode.transfer_hublvol.bdev_name:
         if not _other_active_transfers_to_node(task, remote_snode.get_id()):
+            xfer_timing.stamp("hub_detach", snap=snapshot.get_id(),
+                              lvol=snapshot.lvol.get_id())
             _src_node.rpc_client().bdev_nvme_detach_controller(
                 remote_snode.transfer_hublvol.bdev_name)
     replicate_to_source = task.function_params["replicate_to_source"]
@@ -965,13 +979,17 @@ def process_snap_replicate_finish(task, snapshot):
     # chain snaps on primary
     if target_prev_snap:
         logger.info(f"Chaining replicated lvol: {remote_lv.top_bdev} to snap: {target_prev_snap['snap_bdev']}")
-        ret = remote_snode.rpc_client().bdev_lvol_add_clone( remote_lv.top_bdev, target_prev_snap['snap_bdev'])
+        with xfer_timing.phase("chain_add_clone", snap=snapshot.get_id(),
+                               lvol=snapshot.lvol.get_id(), node="primary"):
+            ret = remote_snode.rpc_client().bdev_lvol_add_clone( remote_lv.top_bdev, target_prev_snap['snap_bdev'])
         if not ret:
             logger.error("Failed to chain replicated snapshot on primary node")
             return False
 
     # convert to snapshot on primary
-    ret = remote_snode.rpc_client().bdev_lvol_convert(remote_lv.top_bdev)
+    with xfer_timing.phase("chain_convert", snap=snapshot.get_id(),
+                           lvol=snapshot.lvol.get_id(), node="primary"):
+        ret = remote_snode.rpc_client().bdev_lvol_convert(remote_lv.top_bdev)
     if not ret:
         logger.error("Failed to convert to snapshot on primary node")
         return False
@@ -981,13 +999,17 @@ def process_snap_replicate_finish(task, snapshot):
     if sec_node.status == StorageNode.STATUS_ONLINE:
         if target_prev_snap:
             logger.info(f"Chaining replicated lvol: {remote_lv.top_bdev} to snap: {target_prev_snap['snap_bdev']}")
-            ret = sec_node.rpc_client().bdev_lvol_add_clone(remote_lv.top_bdev, target_prev_snap['snap_bdev'])
+            with xfer_timing.phase("chain_add_clone", snap=snapshot.get_id(),
+                                   lvol=snapshot.lvol.get_id(), node="secondary"):
+                ret = sec_node.rpc_client().bdev_lvol_add_clone(remote_lv.top_bdev, target_prev_snap['snap_bdev'])
             if not ret:
                 logger.error("Failed to chain replicated snapshot on secondary node")
                 return False
 
         # convert to snapshot on secondary
-        ret = sec_node.rpc_client().bdev_lvol_convert(remote_lv.top_bdev)
+        with xfer_timing.phase("chain_convert", snap=snapshot.get_id(),
+                               lvol=snapshot.lvol.get_id(), node="secondary"):
+            ret = sec_node.rpc_client().bdev_lvol_convert(remote_lv.top_bdev)
         if not ret:
             logger.error("Failed to convert to snapshot on secondary node")
             return False
@@ -1154,6 +1176,13 @@ def task_runner(task: JobSchedule):
     elif task.status == JobSchedule.STATUS_RUNNING:
         snode = _source_leader_node(snapshot) or db.get_storage_node_by_id(snapshot.lvol.node_id)
         ret = snode.rpc_client().bdev_lvol_transfer_stat(snapshot.snap_bdev)
+        if ret:
+            # offset is the bytes moved so far: the ONLY direct read on actual
+            # transfer throughput, as distinct from round duration.
+            xfer_timing.stamp("transfer_running", snap=snapshot.get_id(),
+                              lvol=snapshot.lvol.get_id(),
+                              state=str(ret.get("transfer_state")).replace(" ", "_"),
+                              offset=ret.get("offset"))
         if not ret:
             logger.error("Failed to get transfer stat")
             return False
@@ -1177,7 +1206,17 @@ def task_runner(task: JobSchedule):
             task.write_to_db()
             return False
         if status == "Done":
-            new_snapshot_uuid = process_snap_replicate_finish(task, snapshot)
+            # The transfer proper is submit -> Done. This is the number every
+            # earlier analysis lacked: round duration includes the chain,
+            # convert, task-runner latency and DB writes, so it cannot be
+            # divided into bytes to get a throughput.
+            xfer_timing.gap("transfer_complete",
+                            task.function_params.get("xfer_submit_t"),
+                            snap=snapshot.get_id(), lvol=snapshot.lvol.get_id(),
+                            bytes=offset)
+            with xfer_timing.phase("replicate_finish", snap=snapshot.get_id(),
+                                   lvol=snapshot.lvol.get_id()):
+                new_snapshot_uuid = process_snap_replicate_finish(task, snapshot)
             if new_snapshot_uuid:
                 task.function_result = new_snapshot_uuid
                 task.status = JobSchedule.STATUS_DONE

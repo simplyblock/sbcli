@@ -24,7 +24,7 @@ import time
 import uuid as uuid_lib
 from datetime import datetime
 
-from simplyblock_core import constants, db_controller, utils
+from simplyblock_core import constants, db_controller, utils, xfer_timing
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.lvol_model import LVol, LVolReplication
 from simplyblock_core.models.snapshot import SnapShot
@@ -219,6 +219,11 @@ def task_runner(task: JobSchedule):
         return _finalize(task, False, "source node not found for cutover")
 
     if task.status in [JobSchedule.STATUS_NEW, JobSchedule.STATUS_SUSPENDED, JobSchedule.STATUS_RUNNING]:
+        # One line per runner pass: the spacing between these shows the task
+        # scheduler's contribution (TASK_EXEC_INTERVAL_SEC per state change),
+        # which is invisible in any per-phase number.
+        xfer_timing.stamp("task_pass", lvol=lvol_id, state=task.status,
+                          result=str(task.function_result)[:40].replace(" ", "_"))
         task.status = JobSchedule.STATUS_RUNNING
         task.function_params.setdefault("start_time", int(time.time()))
         # Claim the source LVS for the whole cutover -- the convergence rounds
@@ -275,7 +280,8 @@ def task_runner(task: JobSchedule):
 
         # ---- CUTOVER PHASE (immediately after the last shrink round) ---- #
         if "tgt_lvol_composite" not in params:
-            err = _prepare_cutover(task, lvol, src_node, tgt_node)
+            with xfer_timing.phase("prepare_cutover", lvol=lvol_id):
+                err = _prepare_cutover(task, lvol, src_node, tgt_node)
             if err:
                 return _finalize(task, False, err)
             params = task.function_params
@@ -299,6 +305,8 @@ def task_runner(task: JobSchedule):
                             int(time.time()) + constants.REPL_CUTOVER_PROCEED_TIMEOUT_SEC)
                         task.write_to_db(db.kv_store)
                     if int(time.time()) < params["cutover_proceed_timeout"]:
+                        xfer_timing.stamp("cutover_gate_wait", lvol=lvol_id,
+                                          deadline=params["cutover_proceed_timeout"])
                         task.function_result = "cutover_pending: waiting for preconnect signal"
                         task.status = JobSchedule.STATUS_SUSPENDED
                         task.write_to_db(db.kv_store)
@@ -311,10 +319,11 @@ def task_runner(task: JobSchedule):
                     "replication record %s not found; proceeding with cutover", replication_id)
 
         try:
-            ok, err = replication_final_step.run_cutover(
-                src_node, tgt_node, lvol,
-                params["tgt_lvol_composite"], params["tgt_map_id"],
-                params["tgt_snap_composite"], operation=params.get("operation", "replicate"))
+            with xfer_timing.phase("run_cutover", lvol=lvol_id):
+              ok, err = replication_final_step.run_cutover(
+                  src_node, tgt_node, lvol,
+                  params["tgt_lvol_composite"], params["tgt_map_id"],
+                  params["tgt_snap_composite"], operation=params.get("operation", "replicate"))
         except Exception as e:
             logger.error(f"Cutover raised: {e}", exc_info=True)
             return _finalize(task, False, str(e))
@@ -328,9 +337,16 @@ def _take_shrink_snapshot(task, lvol):
     """Snapshot the source and record it as the round in flight."""
     from simplyblock_core.controllers import snapshot_controller
     params = task.function_params
-    new_snap, err = snapshot_controller.add(
-        lvol.get_id(), f"repl_commit_{uuid_lib.uuid4()}",
-        snap_type=SnapShot.TYPE_INTERNAL)
+    # The gap since the previous round finished: dead time between a round
+    # completing and the next snapshot existing is pure added delta.
+    xfer_timing.gap("round_gap_to_next_snapshot",
+                    params.get("shrink_round_done_at"), lvol=lvol.get_id(),
+                    round=params.get("shrink_round", 0))
+    with xfer_timing.phase("take_shrink_snapshot", lvol=lvol.get_id(),
+                           round=params.get("shrink_round", 0) + 1):
+        new_snap, err = snapshot_controller.add(
+            lvol.get_id(), f"repl_commit_{uuid_lib.uuid4()}",
+            snap_type=SnapShot.TYPE_INTERNAL)
     if err:
         return None, f"shrink round {params.get('shrink_round', 0) + 1} snapshot failed: {err}"
     params["shrink_round"] = params.get("shrink_round", 0) + 1
@@ -426,6 +442,15 @@ def _shrink_step(task, lvol):
             params.setdefault("shrink_round_times", []).append(round(elapsed, 2))
             logger.info("cutover convergence: lvol=%s round %d transferred in %.2fs",
                         lvol.get_id(), params["shrink_round"], elapsed)
+            # Structured twin of the line above. round_total is snapshot-taken
+            # to replicated-and-chained, i.e. it INCLUDES all orchestration --
+            # compare it against the transfer phase from snapshot_replication
+            # to see how much is data movement.
+            xfer_timing.stamp("round_total", lvol=lvol.get_id(),
+                              snap=params.get("shrink_snap_id"),
+                              round=params["shrink_round"],
+                              ms=elapsed * 1000.0)
+            params["shrink_round_done_at"] = time.time()
 
         # Converged: this round's delta -- the writes made during the previous
         # round -- moved in low seconds, so the freeze that copies the next
