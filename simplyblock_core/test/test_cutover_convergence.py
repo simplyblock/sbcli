@@ -392,3 +392,162 @@ class TestRoundOneIsMeasured(unittest.TestCase):
         self.assertIsNone(err)
         self.assertEqual(taken, [1],
                          "it must take another round instead of freezing")
+
+
+class TestCutoverQueue(unittest.TestCase):
+    """One cutover per lvstore, and the losers queue instead of starving.
+
+    Run 20260827_185009: all 20 volumes entered their cutover together and each
+    wrote cutover_lvs, so the claim was a marker with no exclusion. The
+    replication side then held everyone but an arbitrary winner -- including
+    the other cutovers' own shrink snapshots -- and 9 of 10 volumes per
+    lvstore sat at "round 1: waiting to replicate" until their deadline killed
+    them (17 x "max retry reached").
+    """
+
+    def setUp(self):
+        patcher = patch.object(runner, "db")
+        self.db = patcher.start()
+        self.addCleanup(patcher.stop)
+        self.db.kv_store = "KV"
+        gp = patch.object(runner, "_group_id_for_lvol", return_value="")
+        self.group_of = gp.start()
+        self.addCleanup(gp.stop)
+
+    def _task(self, task_id, lvs=None, group="", status="running",
+              canceled=False, created="2026-01-01"):
+        from simplyblock_core.models.job_schedule import JobSchedule
+        t = MagicMock()
+        t.function_name = JobSchedule.FN_REPLICATION_FINAL
+        t.get_id.return_value = task_id
+        t.status = status
+        t.canceled = canceled
+        t.create_dt = created
+        t.function_params = {"lvol_id": "LV_" + task_id}
+        if lvs:
+            t.function_params["cutover_lvs"] = lvs
+            t.function_params["cutover_group"] = group
+        return t
+
+    def test_no_owner_means_the_lvstore_is_free(self):
+        me = self._task("T1")
+        self.db.get_job_tasks.return_value = [me]
+        self.assertIsNone(runner._lvs_cutover_owner(me, "LVS_1"))
+
+    def test_an_active_claim_owns_the_lvstore(self):
+        me, other = self._task("T1"), self._task("T2", lvs="LVS_1")
+        self.db.get_job_tasks.return_value = [me, other]
+        owner = runner._lvs_cutover_owner(me, "LVS_1")
+        self.assertIsNotNone(owner)
+        self.assertEqual(owner.get_id(), "T2")
+
+    def test_a_finished_or_cancelled_cutover_owns_nothing(self):
+        from simplyblock_core.models.job_schedule import JobSchedule
+        me = self._task("T1")
+        for dead in (self._task("T2", lvs="LVS_1",
+                                status=JobSchedule.STATUS_DONE),
+                     self._task("T3", lvs="LVS_1", canceled=True)):
+            self.db.get_job_tasks.return_value = [me, dead]
+            self.assertIsNone(runner._lvs_cutover_owner(me, "LVS_1"),
+                              "a dead task must not hold the lvstore forever")
+
+    def test_the_earliest_claim_wins_deterministically(self):
+        """Two tasks racing must agree on the winner, not each see the other."""
+        me = self._task("T1")
+        early = self._task("T2", lvs="LVS_1", created="2026-01-01")
+        late = self._task("T3", lvs="LVS_1", created="2026-06-01")
+        self.db.get_job_tasks.return_value = [me, late, early]
+        self.assertEqual(runner._lvs_cutover_owner(me, "LVS_1").get_id(), "T2")
+
+    def test_a_claim_on_another_lvstore_is_irrelevant(self):
+        me, other = self._task("T1"), self._task("T2", lvs="LVS_9")
+        self.db.get_job_tasks.return_value = [me, other]
+        self.assertIsNone(runner._lvs_cutover_owner(me, "LVS_1"))
+
+
+class TestQueuedCutoverDoesNotStarve(unittest.TestCase):
+    """A cutover that cannot have the lvstore waits without cost."""
+
+    def setUp(self):
+        from simplyblock_core.models.job_schedule import JobSchedule
+        from simplyblock_core.models.storage_node import StorageNode
+        self.JobSchedule = JobSchedule
+        patcher = patch.object(runner, "db")
+        self.db = patcher.start()
+        self.addCleanup(patcher.stop)
+        self.db.kv_store = "KV"
+
+        lvol = MagicMock()
+        lvol.get_id.return_value = "LV_me"
+        lvol.lvs_name = "LVS_1"
+        self.db.get_lvol_by_id.return_value = lvol
+
+        node = MagicMock()
+        node.status = StorageNode.STATUS_ONLINE
+        node.get_id.return_value = "N1"
+        node.cluster_id = "CL"
+        self.db.get_storage_node_by_id.return_value = node
+
+        gp = patch.object(runner, "_group_id_for_lvol", return_value="")
+        gp.start()
+        self.addCleanup(gp.stop)
+        # If the shrink phase ran, the test would see it here.
+        sp = patch.object(runner, "_shrink_step",
+                          side_effect=AssertionError(
+                              "a queued cutover must not start its shrink phase"))
+        sp.start()
+        self.addCleanup(sp.stop)
+
+    def _me(self):
+        t = MagicMock()
+        t.function_name = self.JobSchedule.FN_REPLICATION_FINAL
+        t.get_id.return_value = "T_me"
+        t.cluster_id = "CL"
+        t.status = self.JobSchedule.STATUS_NEW
+        t.canceled = False
+        t.retry = 0
+        t.max_retry = 8
+        t.create_dt = "2026-06-01"
+        t.function_params = {
+            "lvol_id": "LV_me", "src_node_id": "N1", "tgt_node_id": "N2",
+            "shrink_round": 1, "shrink_snap_id": "S1",
+            "shrink_deadline": 1,          # already expired
+        }
+        return t
+
+    def _owner(self):
+        t = MagicMock()
+        t.function_name = self.JobSchedule.FN_REPLICATION_FINAL
+        t.get_id.return_value = "T_owner"
+        t.status = self.JobSchedule.STATUS_RUNNING
+        t.canceled = False
+        t.create_dt = "2026-01-01"
+        t.function_params = {"lvol_id": "LV_owner", "cutover_lvs": "LVS_1",
+                             "cutover_group": ""}
+        return t
+
+    def test_it_queues_without_burning_a_retry_or_its_deadline(self):
+        me, owner = self._me(), self._owner()
+        self.db.get_job_tasks.return_value = [me, owner]
+
+        result = runner.task_runner(me)
+
+        self.assertFalse(result)
+        self.assertEqual(me.status, self.JobSchedule.STATUS_SUSPENDED)
+        self.assertEqual(me.retry, 0, "queueing is not a failure")
+        self.assertIn("queued for lvstore", me.function_result)
+        self.assertGreater(
+            me.function_params["shrink_deadline"], 10 ** 9,
+            "the deadline must be pushed out while queued, or the task dies of "
+            "max retries waiting for a lock it cannot win")
+        self.assertNotIn("cutover_lvs", me.function_params,
+                         "a queued task must not also claim the lvstore")
+
+    def test_a_group_sibling_joins_the_owner_instead_of_queueing(self):
+        me, owner = self._me(), self._owner()
+        owner.function_params["cutover_group"] = "CL/G1"
+        with patch.object(runner, "_group_id_for_lvol", return_value="CL/G1"):
+            self.db.get_job_tasks.return_value = [me, owner]
+            # It proceeds into the shrink phase, which this fixture makes raise.
+            with self.assertRaises(AssertionError):
+                runner.task_runner(me)
