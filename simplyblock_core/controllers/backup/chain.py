@@ -280,10 +280,11 @@ class BackupChain:
                 "disabled, which selects the secondary-tiering object layout. "
                 "Backups cannot be written there.")
 
-        # The bound is the control plane's own. The data plane's is higher and
-        # refuses rather than overruns, so this is where a too-long chain is
-        # reported usefully.
+        # Refused here rather than by the data plane, which would only find out
+        # mid-transfer, with objects already written.
         length = len(self.links) if length is None else length
+        if length < 1:
+            raise PreconditionError(f"{what} holds no backups")
         if length > constants.BACKUP_MAX_CHAIN_LENGTH:
             raise PreconditionError(
                 f"{what} is {length} backups long; the data plane accepts at most "
