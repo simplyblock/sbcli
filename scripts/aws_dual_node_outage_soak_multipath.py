@@ -741,11 +741,34 @@ class SoakRunner:
 
     # ----- sbctl ------------------------------------------------------------
 
-    def sbctl(self, args, timeout=600, json_output=False, host=None):
+    #: Pure reads, safe to re-issue. A single transient rc=1 from one of
+    #: these used to abort the whole run: 2026-08-27 a `cluster list --json`
+    #: poll failed once while a node was still in_restart and killed a soak
+    #: at iteration 5, on a cluster that was otherwise healthy (the same
+    #: command succeeded seconds later). Mutating commands -- lvol add,
+    #: lvol connect, sn shutdown/restart -- are never retried here.
+    _RETRYABLE_SBCTL_PREFIXES = ("cluster list", "sn list", "cluster get")
+
+    def sbctl(self, args, timeout=600, json_output=False, host=None,
+              retries=None, retry_delay=6):
         host = host or self.mgmt
         command = "sudo /usr/local/bin/sbctl -d " + args
-        _, stdout_text, stderr_text = host.run(
-            command, timeout=timeout, check=True, label=f"sbctl {args}")
+        if retries is None:
+            retries = 4 if args.startswith(self._RETRYABLE_SBCTL_PREFIXES) else 0
+        attempt = 0
+        while True:
+            try:
+                _, stdout_text, stderr_text = host.run(
+                    command, timeout=timeout, check=True, label=f"sbctl {args}")
+                break
+            except Exception as exc:  # noqa: BLE001 - retry any transient failure
+                if attempt >= retries:
+                    raise
+                attempt += 1
+                self.logger.log(
+                    f"sbctl {args}: transient failure ({type(exc).__name__}), "
+                    f"retry {attempt}/{retries} in {retry_delay}s")
+                time.sleep(retry_delay)
         if not json_output:
             return stdout_text
         return self._parse_json(stdout_text, stderr_text, f"sbctl {args}")
