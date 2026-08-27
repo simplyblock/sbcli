@@ -511,6 +511,46 @@ def start_soak(mgmt_ip, env_prefix=""):
     print(out)
     return out
 
+def verify_migration_disabled(mgmt_ip, attempts=10, delay=15):
+    """Abort unless the *deployed control plane* has migration disabled.
+
+    The control-plane services run from SIMPLY_BLOCK_DOCKER_IMAGE, not from
+    the pip-installed package on the host, so a branch that disables
+    migration is silently ignored unless env_var points the image at that
+    branch too. When that mismatch went unnoticed (2026-08-27) the runner
+    services were absent from the stack but the image still CREATED the
+    tasks: 14 device_migration tasks piled up as "new" and pinned the
+    cluster in ACTIVE - REBALANCING. Fail the deploy instead of running a
+    soak whose premise is false.
+    """
+    print("Verifying the deployed control plane has data migration disabled...")
+    probe = (
+        "c=$(sudo docker ps --format '{{.Names}}' | grep -m1 -i StorageNodeMonitor); "
+        "[ -n \"$c\" ] || { echo NO_CONTAINER; exit 0; }; "
+        "sudo docker exec $c python3 -c "
+        "'from simplyblock_core import constants; "
+        "print(getattr(constants, \"DATA_MIGRATION_ENABLED\", \"ABSENT\"))'"
+    )
+    for attempt in range(1, attempts + 1):
+        out = "".join(ssh_exec(mgmt_ip, [probe], get_output=True) or [])
+        verdict = out.strip().splitlines()[-1].strip() if out.strip() else ""
+        if verdict == "False":
+            print("  OK: control-plane image has DATA_MIGRATION_ENABLED = False")
+            return
+        if verdict in ("True", "ABSENT"):
+            raise RuntimeError(
+                "control-plane image does NOT disable data migration "
+                f"(DATA_MIGRATION_ENABLED={verdict}). The stack is running the "
+                "wrong image: check SIMPLY_BLOCK_DOCKER_IMAGE in "
+                "simplyblock_core/env_var.")
+        if attempt < attempts:
+            print(f"  control-plane container not up yet ({verdict or 'no output'}); "
+                  f"retry {attempt}/{attempts - 1} in {delay}s")
+            time.sleep(delay)
+    raise RuntimeError(
+        "could not verify the control-plane migration switch after "
+        f"{attempts} attempts")
+
 def main():
 
 
@@ -571,6 +611,7 @@ def main():
         # on the default 600 s channel timeout at "Deploying swarm stack").
     ], check=True, timeout=2400)
     print("Phase 2a: DONE - cluster created.")
+    verify_migration_disabled(mgmt_ip)
 
     # Step 5b: Configure and deploy storage nodes in parallel
     print("Phase 2b: Configuring storage nodes...")
