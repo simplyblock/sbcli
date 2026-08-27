@@ -195,11 +195,11 @@ def ssh_exec(ip, cmds, get_output=False, check=False, timeout=600):
     return results
 
 
-def ssh_exec_stream(ip, cmd, check=False):
+def ssh_exec_stream(ip, cmd, check=False, timeout=3600):
     ssh = _ssh_connect(ip)
     print(f"  [{ip}] $ {cmd}")
 
-    stdin, stdout, stderr = ssh.exec_command(cmd, timeout=600)
+    stdin, stdout, stderr = ssh.exec_command(cmd, timeout=timeout)
     channel = stdout.channel
     out_chunks = []
     err_chunks = []
@@ -625,9 +625,15 @@ def main():
 
     print("Phase 2c: Deploying storage nodes...")
     with ThreadPoolExecutor(max_workers=len(sn_ips)) as executor:
+        # ssh_exec's timeout is per channel read, not per command, so a step
+        # that prints nothing while it works trips it even though it is
+        # healthy. `sn deploy` pulls the SPDK/ultra image on all six nodes at
+        # once and is silent throughout: on the default 600 s it died mid-pull
+        # (2026-08-27), after cluster create, so the run was unrecoverable.
+        # Phase 2a already carries 2400 s for the same reason.
         tasks = [executor.submit(ssh_exec, ip, [
             f"sudo /usr/local/bin/sbctl -d sn deploy --isolate-cores --ifname {IFACE}"
-        ], check=True) for ip in sn_ips]
+        ], check=True, timeout=3600) for ip in sn_ips]
         for t in tasks:
             t.result()
     print("Phase 2c: DONE - all SNs deployed. Rebooting...")
@@ -665,10 +671,14 @@ def main():
     def add_one_node(priv_ip):
         for attempt in range(5):
             try:
+                # Same silent-pull problem as phase 2c. NOTE the retry below
+                # catches RuntimeError (the check=True path) only: a channel
+                # timeout is not retried, because a timed-out add-node may
+                # still be running on the node and retrying would double-add.
                 ssh_exec(mgmt_ip, [
                     f"sudo /usr/local/bin/sbctl -d --dev sn add-node {cluster_uuid} {priv_ip}:5000 {IFACE} --ha-jm-count 4"
                     + (f" --spdk-image {SPDK_IMAGE}" if SPDK_IMAGE else "")
-                ], check=True)
+                ], check=True, timeout=3600)
                 return
             except RuntimeError:
                 if attempt < 4:
