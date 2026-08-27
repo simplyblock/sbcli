@@ -551,3 +551,48 @@ class TestQueuedCutoverDoesNotStarve(unittest.TestCase):
             # It proceeds into the shrink phase, which this fixture makes raise.
             with self.assertRaises(AssertionError):
                 runner.task_runner(me)
+
+
+class TestCutoverFailuresAreVisible(unittest.TestCase):
+    """160 failed attempts must not produce zero log lines.
+
+    Run 20260827_194551: every fail-back cutover ended as "max retry reached
+    (8/8)" with nothing logged and the cause overwritten, so three separate
+    investigations could not name the failing branch.
+    """
+
+    def setUp(self):
+        patcher = patch.object(runner, "db")
+        self.db = patcher.start()
+        self.addCleanup(patcher.stop)
+        self.db.kv_store = "KV"
+
+    def _task(self, retry=0):
+        from simplyblock_core.models.job_schedule import JobSchedule
+        t = _Task(lvol_id="LV1")
+        t.status = JobSchedule.STATUS_RUNNING
+        t.retry = retry
+        t.max_retry = 8
+        t.canceled = False
+        return t
+
+    def test_a_failed_attempt_is_logged_and_remembered(self):
+        task = self._task()
+        with self.assertLogs(runner.logger, level="WARNING") as logs:
+            runner._finalize(task, False, "target subsystem is full")
+        self.assertIn("target subsystem is full", "\n".join(logs.output))
+        self.assertEqual(task.function_params["last_error"],
+                         "target subsystem is full")
+
+    def test_giving_up_reports_the_cause_not_just_the_symptom(self):
+        from simplyblock_core.models.job_schedule import JobSchedule
+        task = self._task(retry=8)
+        task.function_params["last_error"] = "target subsystem is full"
+        task.function_params.update({"src_node_id": "N1", "tgt_node_id": "N2"})
+        with self.assertLogs(runner.logger, level="ERROR") as logs:
+            runner.task_runner(task)
+        self.assertEqual(task.status, JobSchedule.STATUS_DONE)
+        self.assertIn("target subsystem is full", task.function_result,
+                      "'max retry reached' alone names a symptom and hides the "
+                      "cause")
+        self.assertIn("target subsystem is full", "\n".join(logs.output))

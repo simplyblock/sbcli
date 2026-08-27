@@ -152,6 +152,13 @@ def _finalize(task, ok, err):
         return True
 
     task.function_result = err or "cutover failed, retrying"
+    # Keep the reason where the max-retry branch cannot overwrite it, and say
+    # it out loud: a task that quietly retries to death costs a whole lab run
+    # to diagnose (run 20260827_194551 -- 20 tasks, 160 attempts, no log line).
+    task.function_params["last_error"] = task.function_result
+    logger.warning("cutover attempt %d/%d failed for lvol %s: %s",
+                   task.retry + 1, task.max_retry,
+                   task.function_params.get("lvol_id"), task.function_result)
     task.status = JobSchedule.STATUS_SUSPENDED
     task.retry += 1
     # A retry re-claims the LVS on its next pass; holding the claim across the
@@ -168,7 +175,17 @@ def task_runner(task: JobSchedule):
         return _finalize(task, False, "missing lvol_id in task params")
 
     if task.retry >= task.max_retry or task.canceled is True:
-        task.function_result = "task cancelled" if task.canceled else "max retry reached"
+        if task.canceled:
+            task.function_result = "task cancelled"
+        else:
+            # Carry the last real error: "max retry reached" on its own names
+            # a symptom and hides the cause.
+            last = task.function_params.get("last_error")
+            task.function_result = (f"max retry reached ({task.max_retry}) after: {last}"
+                                    if last else "max retry reached")
+            logger.error("cutover gave up on lvol %s after %d attempts: %s",
+                         task.function_params.get("lvol_id"), task.max_retry,
+                         last or "reason not recorded")
         task.status = JobSchedule.STATUS_DONE
         task.write_to_db(db.kv_store)
         return True
@@ -188,6 +205,10 @@ def task_runner(task: JobSchedule):
         pass
 
     if tgt_node.status != StorageNode.STATUS_ONLINE:
+        logger.warning("cutover for lvol %s waiting: target node %s is %s",
+                       params.get("lvol_id"), tgt_node.get_id(), tgt_node.status)
+        task.function_params["last_error"] = (
+            f"target node {tgt_node.get_id()[:8]} is {tgt_node.status}")
         task.function_result = "target node not online, retrying"
         task.status = JobSchedule.STATUS_SUSPENDED
         task.retry += 1
