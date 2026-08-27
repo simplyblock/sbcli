@@ -325,6 +325,12 @@ class TestAddPoolKeyGeneration(unittest.TestCase):
 # add_host_to_pool / remove_host_from_pool
 # ---------------------------------------------------------------------------
 
+# add_host_to_pool runs utils.NQN_PATTERN validation before the duplicate
+# check, so tests that exercise anything past that gate need a well-formed NQN.
+# (remove_host_from_pool has no such gate — its tests may use short strings.)
+VALID_HOST_NQN = "nqn.2014-08.org.nvmexpress:uuid:host-a"
+
+
 def _make_dhchap_pool(pool_id="pool-1", hosts=None):
     from simplyblock_core.models.pool import Pool
     p = Pool()
@@ -349,16 +355,24 @@ class TestAddHostToPool(unittest.TestCase):
 
     def test_success(self):
         pool = _make_dhchap_pool()
-        ok, err = self._run(pool, "nqn:host-a")
+        ok, err = self._run(pool, VALID_HOST_NQN)
         self.assertTrue(ok)
         self.assertIsNone(err)
-        self.assertIn("nqn:host-a", pool.allowed_hosts)
+        self.assertIn(VALID_HOST_NQN, pool.allowed_hosts)
 
     def test_duplicate_rejected(self):
-        pool = _make_dhchap_pool(hosts=["nqn:host-a"])
-        ok, err = self._run(pool, "nqn:host-a")
+        pool = _make_dhchap_pool(hosts=[VALID_HOST_NQN])
+        ok, err = self._run(pool, VALID_HOST_NQN)
         self.assertFalse(ok)
         self.assertIn("already in", err)
+
+    def test_malformed_nqn_rejected(self):
+        """add_host_to_pool validates the NQN format before anything else."""
+        pool = _make_dhchap_pool()
+        ok, err = self._run(pool, "nqn:host-a")
+        self.assertFalse(ok)
+        self.assertIn("Invalid host NQN format", err)
+        self.assertEqual(pool.allowed_hosts, [])
 
     def test_non_dhchap_pool_rejected(self):
         from simplyblock_core.models.pool import Pool
@@ -638,15 +652,27 @@ class TestAddHostToLvolDhchapPool(unittest.TestCase):
 # connect_lvol: DHCHAP secret & TLS flag handling in the nvme connect string
 # ---------------------------------------------------------------------------
 
-def _make_connect_ctx(lvol_allowed_hosts):
+def _make_connect_ctx(lvol_allowed_hosts, pool=None):
     """Build the mocked DBController context used by every connect_lvol test.
+
+    ``pool`` is the Pool that connect_lvol will look up for ``lvol.pool_uuid``;
+    it defaults to a plain (non-DHCHAP) pool. A real Pool instance is used
+    rather than a MagicMock on purpose: connect_lvol reads pool.dhchap_key /
+    pool.dhchap_ctrlr_key, and a MagicMock makes those unconditionally truthy,
+    which silently inverts the outcome of every DHCHAP assertion below.
 
     Returns (patchers, lvol) — patchers must be started/stopped by the test.
     """
     from simplyblock_core.models.cluster import Cluster
     from simplyblock_core.models.iface import IFace
     from simplyblock_core.models.lvol_model import LVol
+    from simplyblock_core.models.pool import Pool
     from simplyblock_core.models.storage_node import StorageNode
+
+    if pool is None:
+        pool = Pool()
+        pool.uuid = "pool-1"
+        pool.dhchap = False
 
     lvol = MagicMock(spec=LVol)
     lvol.get_id.return_value = "lvol-1"
@@ -658,6 +684,7 @@ def _make_connect_ctx(lvol_allowed_hosts):
     lvol.ns_id = 1
     lvol.fabric = "tcp"
     lvol.allowed_hosts = lvol_allowed_hosts
+    lvol.pool_uuid = pool.get_id()
 
     nic = IFace()
     nic.ip4_address = "10.0.0.1"
@@ -682,6 +709,7 @@ def _make_connect_ctx(lvol_allowed_hosts):
     mock_db.get_lvol_by_id.return_value = lvol
     mock_db.get_storage_node_by_id.return_value = node
     mock_db.get_cluster_by_id.return_value = cluster
+    mock_db.get_pool_by_id.return_value = pool
 
     return db_patch, lvol
 
@@ -698,6 +726,13 @@ class TestConnectLvolDhchap(unittest.TestCase):
             "dhchap_key": "DHHC-1:01:aGVsbG8=:",
             "dhchap_ctrlr_key": "DHHC-1:01:d29ybGQ=:",
         }
+        # Bind the expected values BEFORE the call: connect_lvol mutates the
+        # host_entry dict in place, so asserting against host_entry[...] after
+        # the call compares production output to production's own mutation and
+        # can never fail.
+        expected_key = host_entry["dhchap_key"]
+        expected_ctrlr_key = host_entry["dhchap_ctrlr_key"]
+
         patcher, _ = _make_connect_ctx([host_entry])
         try:
             result, _err = connect_lvol("lvol-1", host_nqn="nqn:host-a")
@@ -708,9 +743,8 @@ class TestConnectLvolDhchap(unittest.TestCase):
         self.assertEqual(len(result), 1)
         cmd = result[0]["connect"]
         self.assertIn("--hostnqn=nqn:host-a", cmd)
-        self.assertIn(f"--dhchap-secret={host_entry['dhchap_key']}", cmd)
-        self.assertIn(
-            f"--dhchap-ctrl-secret={host_entry['dhchap_ctrlr_key']}", cmd)
+        self.assertIn(f"--dhchap-secret={expected_key}", cmd)
+        self.assertIn(f"--dhchap-ctrl-secret={expected_ctrlr_key}", cmd)
         # No PSK/TLS was configured
         self.assertNotIn(" --tls", cmd)
         self.assertNotIn("tls", result[0])
@@ -781,15 +815,22 @@ class TestConnectLvolDhchap(unittest.TestCase):
         # No allowed_hosts → no allowed_hosts key in returned entry
         self.assertNotIn("allowed_hosts", result[0])
 
-    def test_pool_level_dhchap_lvol_has_no_secret_in_connect_cmd(self):
+    def test_pool_level_dhchap_lvol_gets_pool_keys_in_connect_cmd(self):
         """Lvols inheriting from a pool-level DHCHAP pool have nqn-only entries
-        in allowed_hosts (no key material stored on the lvol). connect_lvol
-        therefore emits --hostnqn but no --dhchap-secret — documents current
-        behavior (clients retrieve pool keys via a separate path)."""
+        in allowed_hosts (no key material stored on the lvol), so connect_lvol
+        fills the secrets in from the pool.
+
+        This test previously asserted the opposite (no --dhchap-secret at all,
+        on the theory that clients obtain pool keys via a separate path). That
+        was wrong: DH-HMAC-CHAP is a challenge/response the *host* has to
+        answer, so the host key must be present in the client's connect string
+        or the volume can never be mounted. The behaviour asserted here was
+        restored deliberately in PR #1074 (revert of 654b1e5f9)."""
         from simplyblock_core.controllers.lvol_controller import connect_lvol
 
         # Pool-level DHCHAP: lvol.allowed_hosts contains only nqn, no keys.
-        patcher, _ = _make_connect_ctx([{"nqn": "nqn:host-a"}])
+        pool = _make_dhchap_pool()
+        patcher, _ = _make_connect_ctx([{"nqn": "nqn:host-a"}], pool=pool)
         try:
             result, _err = connect_lvol("lvol-1", host_nqn="nqn:host-a")
         finally:
@@ -798,8 +839,8 @@ class TestConnectLvolDhchap(unittest.TestCase):
         self.assertIsInstance(result, list)
         cmd = result[0]["connect"]
         self.assertIn("--hostnqn=nqn:host-a", cmd)
-        self.assertNotIn("--dhchap-secret", cmd)
-        self.assertNotIn("--dhchap-ctrl-secret", cmd)
+        self.assertIn(f"--dhchap-secret={pool.dhchap_key}", cmd)
+        self.assertIn(f"--dhchap-ctrl-secret={pool.dhchap_ctrlr_key}", cmd)
         self.assertEqual(result[0]["allowed_hosts"], ["nqn:host-a"])
 
 

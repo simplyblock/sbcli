@@ -49,7 +49,12 @@ def _lvol(uuid, node_id, nqn=None):
 
 
 def _call_get_next_3_nodes(nodes, lvols_by_node, cluster_id="cluster-1"):
-    """Call _get_next_3_nodes with fully mocked DB and lvol_sync_del."""
+    """Call _get_next_3_nodes with fully mocked DB and lvol_sync_del.
+
+    ``_get_next_3_nodes`` reads every lvol in the cluster once through
+    ``get_mini_lvols()`` and buckets them by ``node_id`` itself, so the
+    per-node lists given here are flattened into that single read.
+    """
     with patch("simplyblock_core.controllers.lvol_controller.DBController") as mock_db_cls:
         from simplyblock_core.controllers.lvol_controller import _get_next_3_nodes
 
@@ -57,9 +62,10 @@ def _call_get_next_3_nodes(nodes, lvols_by_node, cluster_id="cluster-1"):
         db.get_storage_nodes_by_cluster_id.return_value = nodes
 
         if callable(lvols_by_node):
-            db.get_lvols_by_node_id.side_effect = lvols_by_node
+            all_lvols = [lv for node in nodes for lv in lvols_by_node(node.get_id())]
         else:
-            db.get_lvols_by_node_id.return_value = lvols_by_node
+            all_lvols = list(lvols_by_node)
+        db.get_mini_lvols.return_value = all_lvols
 
         mock_db_cls.return_value = db
 

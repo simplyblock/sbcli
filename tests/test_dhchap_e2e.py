@@ -16,6 +16,7 @@ Requires: SNodeAPI running on localhost:5000 (started by conftest or manually).
 
 import json
 import os
+import socket
 import subprocess
 import sys
 import tempfile
@@ -118,24 +119,49 @@ class MockSPDKHandler(BaseHTTPRequestHandler):
         return True  # default success for unknown methods
 
 
-def _start_mock_spdk(port):
-    server = HTTPServer(("127.0.0.1", port), MockSPDKHandler)
+def _start_mock_spdk():
+    """Start the mock SPDK server on an ephemeral port. Returns (server, port)."""
+    server = HTTPServer(("127.0.0.1", 0), MockSPDKHandler)
     t = Thread(target=server.serve_forever, daemon=True)
     t.start()
-    return server
+    return server, server.server_address[1]
 
 
 # ---------------------------------------------------------------------------
 # SNodeAPI management
 # ---------------------------------------------------------------------------
 
-SNODE_API_PORT = 15123  # use non-standard port to avoid conflicts
-MOCK_SPDK_PORT = 15124
+# Both ports are chosen at setUpClass time rather than hard-coded: a leftover
+# process, a second pytest run, or anything else already holding a fixed port
+# made _start_snode_api() raise and every test in the class error out.
+SNODE_API_PORT = None
+MOCK_SPDK_PORT = None
 
 
-def _wait_for_http(url, timeout=15):
+def _free_port():
+    """Reserve an ephemeral port and release it for the child to bind."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+    finally:
+        s.close()
+
+
+# Importing simplyblock_web.api.internal.storage_node.docker in the child
+# interpreter costs ~12s on its own (it pulls in the whole web + core import
+# graph), so a tight budget here makes setUpClass fail — and every test in the
+# class error — on a loaded machine or a cold filesystem cache. Budget
+# generously: the loop exits as soon as /snode/check answers, so a large
+# timeout costs nothing on the happy path.
+SNODE_API_START_TIMEOUT = 180
+
+
+def _wait_for_http(url, timeout=SNODE_API_START_TIMEOUT, proc=None):
     deadline = time.time() + timeout
     while time.time() < deadline:
+        if proc is not None and proc.poll() is not None:
+            return False  # child died — no point waiting for the deadline
         try:
             r = requests.get(url, timeout=2)
             if r.status_code == 200:
@@ -170,12 +196,15 @@ app.run(host='127.0.0.1', port={SNODE_API_PORT}, debug=False)
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
-    if not _wait_for_http(f"http://127.0.0.1:{SNODE_API_PORT}/snode/check"):
+    if not _wait_for_http(f"http://127.0.0.1:{SNODE_API_PORT}/snode/check", proc=proc):
+        exit_code = proc.poll()
         proc.kill()
-        stdout = proc.stdout.read().decode() if proc.stdout else ""
-        stderr = proc.stderr.read().decode() if proc.stderr else ""
+        stdout = proc.stdout.read().decode(errors="replace") if proc.stdout else ""
+        stderr = proc.stderr.read().decode(errors="replace") if proc.stderr else ""
+        reason = (f"child exited with code {exit_code}" if exit_code is not None
+                  else f"no 200 from /snode/check within {SNODE_API_START_TIMEOUT}s")
         raise RuntimeError(
-            f"SNodeAPI failed to start on port {SNODE_API_PORT}.\n"
+            f"SNodeAPI failed to start on port {SNODE_API_PORT} ({reason}).\n"
             f"stdout: {stdout}\nstderr: {stderr}")
     return proc
 
@@ -191,9 +220,11 @@ class TestDHCHAPE2E(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        global SNODE_API_PORT, MOCK_SPDK_PORT
         _keyring_keys.clear()
         _subsystem_hosts.clear()
-        cls.mock_spdk = _start_mock_spdk(MOCK_SPDK_PORT)
+        cls.mock_spdk, MOCK_SPDK_PORT = _start_mock_spdk()
+        SNODE_API_PORT = _free_port()
         cls.snode_proc = _start_snode_api()
 
     @classmethod
@@ -400,6 +431,7 @@ class TestDHCHAPE2E(unittest.TestCase):
         from simplyblock_core.models.lvol_model import LVol
         from simplyblock_core.models.storage_node import StorageNode
         from simplyblock_core.models.cluster import Cluster
+        from simplyblock_core.models.pool import Pool
 
         dhchap_key = generate_dhchap_key()
         dhchap_ctrlr_key = generate_dhchap_key()
@@ -433,11 +465,22 @@ class TestDHCHAPE2E(unittest.TestCase):
         lvol.ns_id = 1
         lvol.ha_type = "single"
         lvol.fabric = "tcp"
+        lvol.pool_uuid = "pool-1"
+
+        # Host-level DHCHAP: the keys live on the lvol's allowed_hosts entry
+        # (created from --sec-options dhchap_key), NOT on the pool. Use a real
+        # Pool so pool.dhchap_key is the production default ("") rather than a
+        # truthy MagicMock — otherwise this test would pass/fail for the wrong
+        # reason.
+        pool = Pool()
+        pool.uuid = "pool-1"
+        pool.dhchap = False
 
         mock_db = MagicMock()
         mock_db.get_lvol_by_id.return_value = lvol
         mock_db.get_storage_node_by_id.return_value = node
         mock_db.get_cluster_by_id.return_value = cl
+        mock_db.get_pool_by_id.return_value = pool
 
         with patch("simplyblock_core.controllers.lvol_controller.DBController",
                     return_value=mock_db):

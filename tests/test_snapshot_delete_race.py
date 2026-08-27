@@ -298,6 +298,8 @@ class TestSnapshotDeleteWaitsForCloneInFlight(unittest.TestCase):
         mock_db.get_pool_by_id.return_value = _pool()
         mock_db.get_storage_node_by_id.return_value = node
         mock_db.get_lvols.return_value = [clone]
+        # delete() scans clones via the lightweight projection, not get_lvols.
+        mock_db.get_mini_lvols.return_value = [clone]
         mock_db.get_cluster_by_id.return_value = _cluster()
         mock_db.kv_store = MagicMock()
         # No active migrations / backups

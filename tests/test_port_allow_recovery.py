@@ -589,8 +589,18 @@ class TestSourceShapeStrictGate(unittest.TestCase):
     def test_strict_verify_helper_present(self):
         self.assertIn("def _hublvol_verified_open", self.src)
         self.assertIn("bdev_nvme_controller_list", self.src)
-        # Two-condition strict check: enabled path AND namespace bdev.
-        self.assertIn('state") == "enabled"', self.src)
+        # Strict check conditions that must stay in the source:
+        #   1) a controller path has to be in state "enabled". The check is
+        #      written as an early-continue (`if ct.get("state") != "enabled":
+        #      continue`) rather than a positive `==` comparison, so accept
+        #      either polarity;
+        #   2) that enabled path must point at one of the primary's data-NIC
+        #      IPs (so a tertiary's enabled path to the *secondary* cannot
+        #      satisfy the gate);
+        #   3) the namespace bdev <hublvol.bdev_name>n1 must be registered.
+        self.assertRegex(self.src, r'get\("state"\)\s*[!=]=\s*"enabled"')
+        self.assertIn("primary_ips", self.src)
+        self.assertIn("has_enabled_primary_path", self.src)
         self.assertIn('+ "n1"', self.src)
 
     def test_abort_helper_present_and_used(self):

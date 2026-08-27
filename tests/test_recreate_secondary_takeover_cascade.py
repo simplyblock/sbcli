@@ -528,12 +528,17 @@ class TestRecreateLvstoreStep8bHublvolWiring(unittest.TestCase):
             return f"nqn-{primary_node.lvstore}"
 
         def fake_connect(self_node, primary_node, failover_node=None,
-                         role=None, timeout=None):
+                         role=None, timeout=None, lvs_node=None):
             captured["connect_calls"].append({
                 "self_id": self_node.get_id(),
                 "primary_node_id": primary_node.get_id(),
                 "failover_id": failover_node.get_id() if failover_node else None,
                 "role": role,
+                # ``lvs_node`` sources the LVS-side metadata (lvstore name,
+                # jm_vuid, ports, hublvol NQN/bdev). On takeover it must be
+                # the configured primary of the LVS being taken over, never
+                # the new leader (whose own primary LVS is a different one).
+                "lvs_node_id": lvs_node.get_id() if lvs_node else None,
             })
             return True
 
@@ -561,9 +566,10 @@ class TestRecreateLvstoreStep8bHublvolWiring(unittest.TestCase):
             n.create_secondary_hublvol = lambda primary_node, cluster_nqn, _self=n: \
                 fake_create_sec(_self, primary_node, cluster_nqn)
             n.connect_to_hublvol = lambda primary_node, failover_node=None, role=None, \
-                                          timeout=None, rpc_timeout=None, _self=n: \
+                                          timeout=None, rpc_timeout=None, \
+                                          lvs_node=None, _self=n: \
                 fake_connect(_self, primary_node, failover_node=failover_node,
-                             role=role, timeout=timeout)
+                             role=role, timeout=timeout, lvs_node=lvs_node)
             n.client = MagicMock(return_value=MagicMock())
 
         with patch("simplyblock_core.storage_node_ops._check_peer_disconnected",
@@ -650,6 +656,10 @@ class TestRecreateLvstoreStep8bHublvolWiring(unittest.TestCase):
         self.assertIsNone(c["failover_id"],
                           "The secondary peer connects only to the new "
                           "leader; no failover path applies")
+        self.assertEqual(c["lvs_node_id"], "lvs_owner",
+                         "lvs_node must be the configured primary of the LVS "
+                         "being taken over, so the peer is wired up for "
+                         "LVS_TAKEOVER and not for snode's own LVS")
 
     def test_connect_role_assignment_uses_topology_secondary_takeover(self):
         """LVS_9380 case: snode is the topological secondary taking
@@ -677,6 +687,10 @@ class TestRecreateLvstoreStep8bHublvolWiring(unittest.TestCase):
                          "even though the index-based logic would assign "
                          "'secondary' (since the offline primary was "
                          "filtered out)")
+        self.assertEqual(c["lvs_node_id"], "lvs_owner",
+                         "lvs_node must be the configured primary of the LVS "
+                         "being taken over, so the peer is wired up for "
+                         "LVS_TAKEOVER and not for snode's own LVS")
 
 
 if __name__ == "__main__":

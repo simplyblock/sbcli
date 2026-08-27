@@ -14,3 +14,13 @@ exclude = ['simplyblock_web/test']
 pythonpath = "."
 testpaths = ['simplyblock_core/test', 'simplyblock_web/test', 'tests']
 norecursedirs = ['tests/perf']
+# pytest-randomly is installed, so without this it reshuffles the order on
+# every run -- and this suite has real inter-test coupling (the DBController
+# singleton and the RPC client cache both need the autouse fixtures in
+# tests/conftest.py, and not every shared bit of module state is covered).
+# The result was a failure set that changed run to run: the same full suite
+# gave 5, then 7 failures, while every file passed in isolation. Keep the
+# plugin loaded (it still reseeds `random`) but stop it reordering, so a
+# failure means a failure. Enabling shuffling is its own change, and would
+# need the remaining leaks found first.
+addopts = "-p randomly --randomly-dont-reorganize"

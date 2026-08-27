@@ -372,9 +372,15 @@ class TestAttachControllerTimeoutCap(unittest.TestCase):
 
     @patch("simplyblock_core.storage_node_ops.time.sleep", return_value=None)
     @patch("simplyblock_core.models.storage_node.RPCClient")
+    # connect_device takes the per-device connection lock
+    # (NVMeDevice.lock_device_connection), which resolves its own
+    # DBController from simplyblock_core.db_controller at call time -- it does
+    # not go through storage_node_ops.DBController, so both have to be patched
+    # or the lock hits a real (unconfigured) FDB client.
+    @patch("simplyblock_core.db_controller.DBController")
     @patch("simplyblock_core.storage_node_ops.DBController")
     def test_connect_device_caps_attach_timeout_at_1s(
-            self, MockDBCtrl, MockRPC, _sleep):
+            self, MockDBCtrl, _MockCoreDBCtrl, MockRPC, _sleep):
         """connect_device must build its attach RPC client with timeout<=1."""
         import simplyblock_core.storage_node_ops as ops
 

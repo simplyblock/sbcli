@@ -209,37 +209,86 @@ class TestSourceCallSites(unittest.TestCase):
         with open(path, "r") as f:
             cls.src = f.read()
 
-    def test_recreate_on_non_leader_passes_lvs_node_for_tertiary_branch(self):
-        # The tertiary branch must pass lvs_node=primary_node when the
-        # sync_target may be a peer (acting leader for an LVS that
-        # primary_node owns but is offline for).
-        start = self.src.index("def recreate_lvstore_on_non_leader(")
+    def _function_body(self, signature):
+        start = self.src.index(signature)
         end = self.src.index("\ndef ", start + 1)
-        body = self.src[start:end]
-        # Find the tertiary branch (sync_target is not None)
-        tertiary_idx = body.index("if sync_target is not None:")
-        tertiary_window = body[tertiary_idx:tertiary_idx + 1500]
+        return self.src[start:end]
+
+    @staticmethod
+    def _connect_arglists(body):
+        """Paren-matched argument lists of every ``connect_to_hublvol(``
+        call in ``body`` (so a multi-line call is captured whole)."""
+        call_token = "connect_to_hublvol("
+        arglists = []
+        cursor = 0
+        while True:
+            i = body.find(call_token, cursor)
+            if i < 0:
+                return arglists
+            depth = 1
+            j = i + len(call_token)
+            while j < len(body) and depth:
+                if body[j] == "(":
+                    depth += 1
+                elif body[j] == ")":
+                    depth -= 1
+                j += 1
+            arglists.append(body[i + len(call_token):j - 1])
+            cursor = j
+
+    def test_recreate_on_non_leader_passes_lvs_node_for_tertiary_branch(self):
+        # The tertiary branch picks its hublvol peer into ``sync_target``
+        # (the still-quorate leader, or the secondary when the leader has
+        # no quorum) and funnels it into ``attach_target``. That peer may
+        # be an acting leader for an LVS that primary_node owns but is
+        # offline for, so the attach MUST still source LVS metadata from
+        # primary_node via lvs_node=primary_node.
+        body = self._function_body("def recreate_lvstore_on_non_leader(")
+        tertiary_idx = body.index("if is_tertiary:")
+        tertiary_window = body[tertiary_idx:tertiary_idx + 2200]
         self.assertIn(
-            "lvs_node=primary_node",
-            tertiary_window,
-            "tertiary branch in recreate_lvstore_on_non_leader must pass "
-            "lvs_node=primary_node so connect_to_hublvol uses the right "
-            "LVS metadata when sync_target is a peer",
-        )
+            "sync_target = leader_node", tertiary_window,
+            "tertiary branch must be able to attach to the leader")
+        self.assertIn(
+            "sync_target = secondary_node", tertiary_window,
+            "tertiary branch must be able to attach to the secondary when "
+            "the leader has no quorum")
+        self.assertIn(
+            "attach_target = sync_target", tertiary_window,
+            "the tertiary branch's sync_target must feed the shared "
+            "connect_to_hublvol attach site")
+        arglists = self._connect_arglists(body)
+        self.assertTrue(
+            arglists,
+            "recreate_lvstore_on_non_leader must call connect_to_hublvol")
+        for arglist in arglists:
+            self.assertIn(
+                "lvs_node=primary_node", arglist,
+                "the tertiary attach in recreate_lvstore_on_non_leader must "
+                "pass lvs_node=primary_node so connect_to_hublvol uses the "
+                "right LVS metadata when the attach target is a peer. "
+                f"Offending call args: {arglist!r}",
+            )
 
     def test_recreate_on_non_leader_passes_lvs_node_for_secondary_branch(self):
-        start = self.src.index("def recreate_lvstore_on_non_leader(")
-        end = self.src.index("\ndef ", start + 1)
-        body = self.src[start:end]
-        # Secondary branch: snode.connect_to_hublvol(leader_node, ...)
-        sec_idx = body.index("snode.connect_to_hublvol(leader_node")
-        sec_window = body[sec_idx:sec_idx + 800]
-        self.assertIn(
-            "lvs_node=primary_node",
-            sec_window,
-            "secondary branch must also pass lvs_node=primary_node "
-            "(leader_node may be a peer)",
-        )
+        # Secondary branch: the attach target is the leader (which may be a
+        # peer that took over leadership), reached through the same shared
+        # connect_to_hublvol site — which must pass lvs_node=primary_node.
+        body = self._function_body("def recreate_lvstore_on_non_leader(")
+        sec_idx = body.index("attach_target = leader_node")
+        self.assertGreater(
+            sec_idx, 0,
+            "secondary branch must resolve its attach target to leader_node")
+        arglists = self._connect_arglists(body)
+        self.assertTrue(
+            arglists,
+            "recreate_lvstore_on_non_leader must call connect_to_hublvol")
+        for arglist in arglists:
+            self.assertIn(
+                "lvs_node=primary_node", arglist,
+                "secondary branch must also pass lvs_node=primary_node "
+                f"(leader_node may be a peer). Offending call args: {arglist!r}",
+            )
 
     def test_recreate_lvstore_takeover_passes_lvs_node(self):
         # The takeover branch of recreate_lvstore (snode is taking over
@@ -254,9 +303,7 @@ class TestSourceCallSites(unittest.TestCase):
         # client write, producing a dual-leader writer conflict.
         # (incident 2026-05-21 05:38:14 k8s_native_resilient_failover-
         # 20260520-231822, LVS_270 takeover by worker-4.)
-        start = self.src.index("def recreate_lvstore(")
-        end = self.src.index("\ndef ", start + 1)
-        body = self.src[start:end]
+        body = self._function_body("def recreate_lvstore(")
         # The peer-loop connect call uses sec_node.connect_to_hublvol(snode, ...)
         idx = body.index("sec_node.connect_to_hublvol(snode")
         window = body[idx:idx + 800]
@@ -273,29 +320,12 @@ class TestSourceCallSites(unittest.TestCase):
         recreate_lvstore must pass lvs_node= explicitly. Guards against
         a regression that adds a new call site in the takeover path
         without re-applying the metadata-routing arg."""
-        start = self.src.index("def recreate_lvstore(")
-        end = self.src.index("\ndef ", start + 1)
-        body = self.src[start:end]
-        cursor = 0
-        call_token = "connect_to_hublvol("
-        offenders = []
-        while True:
-            i = body.find(call_token, cursor)
-            if i < 0:
-                break
-            depth = 1
-            j = i + len(call_token)
-            while j < len(body) and depth:
-                ch = body[j]
-                if ch == "(":
-                    depth += 1
-                elif ch == ")":
-                    depth -= 1
-                j += 1
-            arglist = body[i + len(call_token):j - 1]
-            if "lvs_node=" not in arglist:
-                offenders.append(body[i:i + 120].replace("\n", " "))
-            cursor = j
+        body = self._function_body("def recreate_lvstore(")
+        offenders = [
+            arglist.replace("\n", " ")
+            for arglist in self._connect_arglists(body)
+            if "lvs_node=" not in arglist
+        ]
         self.assertEqual(
             offenders, [],
             "Every connect_to_hublvol call inside recreate_lvstore must "
