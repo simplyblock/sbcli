@@ -441,6 +441,15 @@ def connect_and_mount(client_ip, key_path, mgmt_ip, lvols, fmt=True, mount_base=
         mnt = f"{mount_base}{idx}"
         if fmt:
             run(client_ip, key_path, f"sudo mkfs.xfs -f {dev}")
+        held = run(client_ip, key_path,
+                   f"grep -E '^{dev} ' /proc/mounts | head -1 || true",
+                   check=False, quiet=True, timeout=60).strip()
+        if held:
+            raise RuntimeError(
+                f"{dev} is already mounted ({held}) before mounting {lv} at "
+                f"{mnt}: a previous case's mount is still live on this device. "
+                f"mount would fail with a bare 'already mounted or mount point "
+                f"busy' (case 11, run 20260827_110415).")
         run(client_ip, key_path, f"sudo mkdir -p {mnt} && sudo mount {dev} {mnt}")
         mounts.append({"lvol": lv, "nqn": conn["nqn"], "dev": dev, "mount": mnt})
         print(f"  vol {lv} -> {dev} @ {mnt}")
@@ -532,6 +541,78 @@ def stop_fio(client_ip, key_path):
     time.sleep(3)
 
 
+def client_dirt(client_ip, key_path):
+    """What is still mounted or connected on the client. Empty dict = clean.
+
+    Reads /proc/mounts rather than trusting umount's exit code: a lazy unmount
+    reports success and leaves the mount live until its IO drains, which is
+    exactly how a finished case hands its devices to the next one.
+    """
+    mounts = run(client_ip, key_path,
+                 "grep -oE '/mnt/repl[^ ]*' /proc/mounts 2>/dev/null | sort -u || true",
+                 check=False, quiet=True, timeout=60)
+    subsys = run(client_ip, key_path,
+                 "sudo nvme list-subsys 2>/dev/null "
+                 "| grep -oE 'nqn\\.2023-02\\.io\\.simplyblock:[^ ,]+' | sort -u || true",
+                 check=False, quiet=True, timeout=90)
+    dirt = {}
+    if mounts.split():
+        dirt["mounts"] = mounts.split()
+    if subsys.split():
+        dirt["subsystems"] = subsys.split()
+    return dirt
+
+
+def force_client_clean(client_ip, key_path, rounds=3):
+    """Unmount and disconnect everything, and keep at it until it is gone.
+
+    Each round kills whatever holds the mount (hung fio keeps a lazy unmount
+    pinned forever), unmounts, disconnects every simplyblock subsystem, then
+    re-reads /proc/mounts. Returns the remaining dirt, empty when clean.
+    """
+    dirt = client_dirt(client_ip, key_path)
+    for attempt in range(rounds):
+        if not dirt:
+            return {}
+        if attempt:
+            print(f"  [{client_ip}] client still dirty ({dirt}); escalating "
+                  f"(round {attempt + 1}/{rounds})")
+        run(client_ip, key_path, "sudo pkill -x fio || true", check=False, timeout=60)
+        # Kill the holders first: umount -l on a mount someone still has open
+        # never completes, and the device stays mounted underneath.
+        run(client_ip, key_path,
+            "for m in $(grep -oE '/mnt/repl[^ ]*' /proc/mounts 2>/dev/null | sort -u); do "
+            "sudo timeout 20 fuser -km \"$m\" 2>/dev/null || true; "
+            "sudo timeout 15 umount \"$m\" 2>/dev/null "
+            "|| sudo timeout 15 umount -f \"$m\" 2>/dev/null "
+            "|| sudo timeout 15 umount -l \"$m\" 2>/dev/null || true; done",
+            check=False, timeout=300)
+        run(client_ip, key_path,
+            "for n in $(sudo nvme list-subsys 2>/dev/null "
+            "| grep -oE 'nqn\\.2023-02\\.io\\.simplyblock:[^ ,]+' | sort -u); do "
+            "sudo timeout 20 nvme disconnect -n \"$n\" >/dev/null 2>&1 || true; done",
+            check=False, timeout=300)
+        # A lazy unmount finishes asynchronously once its holders are gone.
+        for _ in range(10):
+            time.sleep(3)
+            dirt = client_dirt(client_ip, key_path)
+            if not dirt:
+                return {}
+    return dirt
+
+
+def assert_client_clean(client_ip, key_path, where):
+    """Refuse to run *where* on a client another case left dirty."""
+    dirt = force_client_clean(client_ip, key_path)
+    if dirt:
+        raise RuntimeError(
+            f"{where}: client {client_ip} could not be returned to a clean "
+            f"state -- still {dirt}. Whatever ran before it left mounts or "
+            f"controllers behind (a cutover freeze outlasting the 15s unmount "
+            f"timeout does exactly this), and starting here would test that "
+            f"debris instead of the case.")
+
+
 def cleanup_client(client_ip, key_path, mounts):
     # Unmount before disconnecting, with a lazy fallback: a plain (or forced)
     # unmount fails once the transport is dead, and disconnecting underneath a
@@ -548,6 +629,14 @@ def cleanup_client(client_ip, key_path, mounts):
             run(client_ip, key_path,
                 f"sudo timeout 30 nvme disconnect -n {m['nqn']} 2>/dev/null || true",
                 check=False, timeout=90)
+    # Verify, and escalate rather than hand the next case a live mount. Not
+    # fatal here -- the case that owns these mounts has already done its work
+    # and its verdict should stand -- but loud, because this is where the
+    # contamination starts and the NEXT case is where it gets blamed.
+    dirt = force_client_clean(client_ip, key_path)
+    if dirt:
+        print(f"  [{client_ip}] WARNING: cleanup left {dirt} behind; the next "
+              f"case will refuse to start until this clears")
 
 
 def prepare_mount_points(client_ip, key_path):
@@ -576,6 +665,10 @@ def prepare_mount_points(client_ip, key_path):
         "| grep -oE 'nqn\\.2023-02\\.io\\.simplyblock:[^ ,]+'); do "
         "sudo timeout 20 nvme disconnect -n \"$n\" >/dev/null 2>&1 || true; done",
         check=False, timeout=300)
+    # The commands above are best-effort by design; this is the part that
+    # decides whether we may proceed. A lazy unmount reports success while the
+    # mount is still live, so the only trustworthy check is /proc/mounts.
+    assert_client_clean(client_ip, key_path, "prepare_mount_points")
 
 
 # --------------------------------------------------------------------------- #
@@ -2644,6 +2737,12 @@ print(json.dumps(dict((str(k), sorted(v)) for k, v in gens.items())))
 # ends in one of two accepted verdicts (completed despite the kill / failed
 # then succeeded on retry after recovery) and any third outcome fails the case.
 CHAOS_PHASE_ROUNDS = int(os.environ.get("CHAOS_PHASE_ROUNDS", "20"))
+# 20 policies x 2 volumes = 40 volumes replicating at once. At the default
+# 1-minute cadence that is 40 transfers a minute and the cluster steady-states
+# at ~6 minutes of lag -- above the 3-period gate, so the setup phase never
+# completes (run 20260827_110415, killed after 50 minutes without a round).
+# The cadence has to be one this volume count can hold.
+CHAOS_PHASE_INTERVAL_MIN = int(os.environ.get("CHAOS_PHASE_INTERVAL_MIN", "10"))
 CHAOS_PHASE_VOLS_PER_POLICY = int(os.environ.get("CHAOS_PHASE_VOLS_PER_POLICY", "2"))
 CHAOS_PHASE_VOL_SIZE = os.environ.get("CHAOS_PHASE_VOL_SIZE", "10G")
 #: cap for the randomized kill delay when a phase turns out to be slow
@@ -2765,8 +2864,10 @@ def _chaos_phase_case(meta, phase, title):
     # The cutover under test in case 15 is the FINAL MIGRATION STEP: a
     # migration-mode policy committed on the SOURCE volumes.
     mode = "migration" if phase == "commit" else "failover"
-    print("  seed=%d rounds=%d vols/policy=%d mode=%s phase=%s"
-          % (seed, CHAOS_PHASE_ROUNDS, CHAOS_PHASE_VOLS_PER_POLICY, mode, phase))
+    print("  seed=%d rounds=%d vols/policy=%d mode=%s phase=%s cadence=%dmin "
+          "lag_gate=%ds"
+          % (seed, CHAOS_PHASE_ROUNDS, CHAOS_PHASE_VOLS_PER_POLICY, mode, phase,
+             CHAOS_PHASE_INTERVAL_MIN, lag_gate_for(CHAOS_PHASE_INTERVAL_MIN)))
 
     prepare_mount_points(client_ip, key_path)
     delete_test_volumes(mgmt_ip, key_path, _all_test_pools(meta))
@@ -2777,7 +2878,8 @@ def _chaos_phase_case(meta, phase, title):
         policy = set_cluster_replication(
             mgmt_ip, key_path, src_uuid, tgt_uuid,
             pool_uuid_of(mgmt_ip, key_path, tgt["pool"]), mode=mode,
-            policy_name="pol_chaos_%s_%02d" % (phase, r))
+            policy_name="pol_chaos_%s_%02d" % (phase, r),
+            interval_min=CHAOS_PHASE_INTERVAL_MIN)
         vols = []
         for v in range(CHAOS_PHASE_VOLS_PER_POLICY):
             name = "replvol%02d_%d" % (r, v)
@@ -2794,7 +2896,8 @@ def _chaos_phase_case(meta, phase, title):
     baseline = write_baseline(client_ip, key_path, mounts)
     baseline_ts = time.time()
     cleanup_client(client_ip, key_path, mounts)
-    wait_replication_caught_up(mgmt_ip, key_path, all_lvols, timeout=7200)
+    wait_replication_caught_up(mgmt_ip, key_path, all_lvols, timeout=7200,
+                               max_lag=lag_gate_for(CHAOS_PHASE_INTERVAL_MIN))
     wait_data_replicated(mgmt_ip, key_path, all_lvols, baseline_ts, timeout=7200)
     print("  all %d volumes replicated; starting the rounds" % len(all_lvols))
 
