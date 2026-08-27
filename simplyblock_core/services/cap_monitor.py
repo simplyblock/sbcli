@@ -4,7 +4,7 @@ import time
 from datetime import datetime, timezone
 
 from simplyblock_core import db_controller, constants, cluster_ops, utils
-from simplyblock_core.controllers import cluster_events, fdb_backup_controller
+from simplyblock_core.controllers import cluster_events, fdb_backup_controller, mgmt_events
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.prom_client import PromClient
@@ -28,9 +28,15 @@ def create_fdb_backup_if_needed(cluster):
 
 def check_mgmt_disk_util_docker(cluster):
     prom_client = PromClient(cluster.get_id())
-    records = prom_client.get_node_filesystem_metrics(history="5m")
-    # 100 - ((node_filesystem_avail_bytes{instance="$node",job="$job",mountpoint="/",fstype!="rootfs"} * 100) /
-    #         node_filesystem_size_bytes{instance="$node",job="$job",mountpoint="/",fstype!="rootfs"})
+    nodes_stats = prom_client.get_node_filesystem_metrics(history="5m")
+    if nodes_stats:
+        for node_name in nodes_stats:
+            avail_bytes = nodes_stats[node_name].get("avail_bytes")[0]
+            size_bytes = nodes_stats[node_name].get("size_bytes")[0]
+            dist_util = int( 100 - ((avail_bytes * 100) / size_bytes))
+            if dist_util > 90:
+                logger.warning(f"Node {node_name} disk util: {dist_util}%")
+                mgmt_events.dist_usage_warning(node_name, dist_util)
 
 
 def main():

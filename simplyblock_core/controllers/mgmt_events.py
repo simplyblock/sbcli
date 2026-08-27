@@ -38,3 +38,15 @@ def status_change(node, new_state, old_status, caused_by=ec.CAUSED_BY_CLI):
         caused_by=caused_by,
         message=f"Management node status changed from: {old_status} to: {new_state}",
         node_id=node.get_id())
+
+
+def dist_usage_warning(node, dist_usage, caused_by=ec.CAUSED_BY_MONITOR):
+    ec.log_event_cluster(
+        cluster_id=node.cluster_id,
+        domain=ec.DOMAIN_CLUSTER,
+        event=ec.EVENT_CAPACITY,
+        db_object=node,
+        caused_by=caused_by,
+        event_level=ec.EventObj.LEVEL_WARN,
+        message=f"Management node has high disk usage: {dist_usage}%",
+        node_id=node.get_id())
