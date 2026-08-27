@@ -1055,6 +1055,18 @@ commands:
             help: "Hashicorp vault URL for storing encryption keys for this cluster"
             dest: hashicorp_vault_url
             type: str
+          - name: "--alerting-config"
+            help: "Path to the YAML alerting configuration file. Takes precedence over --contact-point."
+            description: >
+              Configures the Grafana contact points from a file, so that a cluster can
+              notify Slack, Microsoft Teams, PagerDuty, Opsgenie and a generic webhook
+              at once. The file has the same shape as the
+              controlplane.observability.grafana.notifications block of the
+              simplyblock-operator Helm chart values; see
+              simplyblock_core/scripts/alerting/alerting.test.yaml for a commented
+              example. When given, --contact-point is ignored.
+            dest: alerting_config
+            type: str
       - name: add
         help: "Adds a new cluster."
         arguments:
@@ -2330,6 +2342,18 @@ commands:
               - docker
               - kubernetes
             default: docker
+          - name: "--alerting-config"
+            help: "Path to the YAML alerting configuration file. Takes precedence over --contact-point."
+            description: >
+              Configures the Grafana contact points from a file, so that a cluster can
+              notify Slack, Microsoft Teams, PagerDuty, Opsgenie and a generic webhook
+              at once. The file has the same shape as the
+              controlplane.observability.grafana.notifications block of the
+              simplyblock-operator Helm chart values; see
+              simplyblock_core/scripts/alerting/alerting.test.yaml for a commented
+              example. When given, --contact-point is ignored.
+            dest: alerting_config
+            type: str
       - name: list
         help: "Lists all control plane nodes."
         arguments:
