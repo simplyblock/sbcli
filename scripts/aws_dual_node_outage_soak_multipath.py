@@ -452,6 +452,22 @@ class RemoteCommandError(RuntimeError):
     pass
 
 
+def error_tail(text, limit=1500):
+    """Return the informative end of a command's output.
+
+    sbcli writes timestamped INFO lines before it fails, so the first N
+    characters are preamble and the actual error -- the exception message,
+    the last ERROR line -- is at the very end. Truncating from the front
+    (the old [:200]) therefore threw away the only part worth reading: a
+    2026-08-27 `sn restart` failure logged nothing but its own timestamp,
+    leaving the abort undiagnosable.
+    """
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return text
+    return "...[%d chars omitted]... " % (len(text) - limit) + text[-limit:]
+
+
 class TestRunError(RuntimeError):
     pass
 
@@ -524,7 +540,10 @@ class RemoteHost:
             self.logger.block(f"{self.name}: STDOUT for {label}", stdout_text)
             self.logger.block(f"{self.name}: STDERR for {label}", stderr_text)
         if check and rc != 0:
-            raise RemoteCommandError(f"{self.name}: command failed with rc={rc}: {label}")
+            raise RemoteCommandError(
+                f"{self.name}: command failed with rc={rc}: {label}: "
+                f"STDOUT: {error_tail(stdout_text)} "
+                f"STDERR: {error_tail(stderr_text)}")
         return rc, stdout_text, stderr_text
 
     def _run_via_ssh_cli(self, command, timeout=600, check=True, label=None):
@@ -1883,7 +1902,8 @@ class SoakRunner:
                 continue
             raise RemoteCommandError(
                 f"sbctl sn shutdown {node_id}{flag} failed rc={rc}: "
-                f"{stdout_text.strip()[:200]} {stderr_text.strip()[:200]}")
+                f"STDOUT: {error_tail(stdout_text)} "
+                f"STDERR: {error_tail(stderr_text)}")
 
     def _restart(self, node_id, host, deadline):
         """sbctl sn restart, retrying while the per-cluster guard rejects it.
@@ -1899,7 +1919,8 @@ class SoakRunner:
             if time.time() >= deadline:
                 raise RemoteCommandError(
                     f"sbctl sn restart {node_id} failed rc={rc}: "
-                    f"{stdout_text.strip()[:200]} {stderr_text.strip()[:200]}")
+                    f"STDOUT: {error_tail(stdout_text)} "
+                    f"STDERR: {error_tail(stderr_text)}")
             self.logger.log(
                 f"Restart of {node_id[:12]} rejected (peer likely still "
                 f"recovering); retry in 15s")
