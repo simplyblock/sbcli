@@ -1,0 +1,345 @@
+"""The cutover must converge the delta before it freezes client IO.
+
+Soak run 20260827_110415, case 10 (online migration under heavy IO) measured
+the client-observed freeze at avg 40.4s, max 71.9s, with fio logging 8 errors.
+The freeze is bdev_lvol_transfer_final_step, which copies everything written
+since the cutover clone's base snapshot -- so the freeze lasts as long as the
+write window that precedes it.
+
+The intended sequence is: snapshot -> transfer -> IMMEDIATELY (milliseconds)
+the next snapshot -> repeat until a round transfers in low seconds ->
+IMMEDIATELY the final lvol transfer. Three things broke it:
+
+  * SHRINK_ROUNDS was a fixed 2 -- a count, not a convergence criterion, so
+    under load it simply stopped while the delta was still large;
+  * each round returned to the task scheduler, costing TASK_EXEC_INTERVAL_SEC
+    (10s) of fresh writes per round -- a floor no number of rounds can beat;
+  * the operator preconnect gate sat BETWEEN the base snapshot and the freeze,
+    and with no operator its 120s fallback fired 34 times in that run.
+"""
+import unittest
+from unittest.mock import MagicMock, patch
+
+from simplyblock_core import constants
+from simplyblock_core.services import tasks_runner_replication_final as runner
+
+
+class _Task:
+    def __init__(self, **params):
+        self.function_params = dict(params)
+        self.function_result = ""
+        self.status = ""
+        self.retry = 0
+        self.cluster_id = "CL"
+
+    def write_to_db(self, *a, **kw):
+        pass
+
+
+def _lvol(uuid="LV1", lvs="LVS_1"):
+    lv = MagicMock()
+    lv.get_id.return_value = uuid
+    lv.uuid = uuid
+    lv.lvs_name = lvs
+    return lv
+
+
+class _Clock:
+    """A clock that only moves when the code under test waits.
+
+    The convergence loop measures a round as (now - shrink_started_at), so a
+    fake that returns the same instant for both makes every round look
+    instantaneous and the test proves nothing.
+    """
+
+    def __init__(self, now=1000.0):
+        self.now = now
+
+    def __call__(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+
+class TestConvergence(unittest.TestCase):
+    """_shrink_step loops until a round is fast, without leaving the pass."""
+
+    def _run(self, round_times, max_rounds=None):
+        """Drive _shrink_step with round i taking round_times[i] seconds."""
+        clock = _Clock()
+        task = _Task(shrink_snap_id="S0", shrink_round=1,
+                     shrink_deadline=10 ** 9, lvol_id="LV1")
+        task.function_params["shrink_started_at"] = clock.now
+        state = {"i": 0}
+        taken = []
+
+        def _done(snap_id):
+            # replicated once this round's transfer time has actually passed
+            started = task.function_params["shrink_started_at"]
+            idx = min(state["i"], len(round_times) - 1)
+            return (clock.now - started) >= round_times[idx]
+
+        def _take(task_, lvol_):
+            state["i"] += 1
+            taken.append(state["i"])
+            task_.function_params["shrink_round"] += 1
+            task_.function_params["shrink_snap_id"] = "S%d" % state["i"]
+            task_.function_params["shrink_started_at"] = clock.now
+            return "S%d" % state["i"], None
+
+        patches = [
+            patch.object(runner.time, "time", clock),
+            patch.object(runner.time, "sleep", clock.sleep),
+            patch.object(runner, "_shrink_round_done", side_effect=_done),
+            patch.object(runner, "_take_shrink_snapshot", side_effect=_take),
+        ]
+        if max_rounds is not None:
+            patches.append(
+                patch.object(constants, "REPL_CUTOVER_MAX_SHRINK_ROUNDS", max_rounds))
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+
+        done, err = runner._shrink_step(task, _lvol())
+        return done, err, task, taken, clock
+
+    def test_a_fast_round_converges_and_hands_over(self):
+        """Round transferred inside the target -> freeze immediately."""
+        done, err, task, taken, _ = self._run([0.5])
+        self.assertTrue(done)
+        self.assertIsNone(err)
+        self.assertIn("converged", task.function_result)
+        self.assertEqual(taken, [], "a fast first round needs no further rounds")
+
+    def test_a_slow_round_takes_another_snapshot_without_leaving_the_pass(self):
+        """The whole point: rounds follow each other in milliseconds."""
+        done, err, task, taken, clock = self._run([3.0, 3.0, 0.4])
+        self.assertTrue(done)
+        self.assertIsNone(err)
+        self.assertEqual(taken, [1, 2],
+                         "each slow round must be followed immediately by the next")
+        self.assertIn("converged", task.function_result)
+        # ~6.4s of transfers, not 6.4 + 3 x TASK_EXEC_INTERVAL_SEC of
+        # rescheduling: the delta a round carries is the previous round's
+        # transfer, nothing more.
+        self.assertLess(clock.now - 1000.0, 7.0)
+
+    def test_it_gives_up_after_the_round_cap_and_freezes_anyway(self):
+        """Written faster than it replicates: freeze rather than loop forever."""
+        done, err, task, taken, _ = self._run([3.0] * 20, max_rounds=3)
+        self.assertTrue(done, "the cap must hand over, not fail the cutover")
+        self.assertIsNone(err)
+        self.assertIn("not converged", task.function_result)
+
+    def test_a_vanished_snapshot_is_an_error(self):
+        # This one runs on the real clock, so the deadline has to be a real
+        # future epoch -- 10**9 is 2001 and would trip the timeout instead.
+        task = _Task(shrink_snap_id="S0", shrink_round=1,
+                     shrink_deadline=10 ** 12, lvol_id="LV1")
+        with patch.object(runner, "_shrink_round_done", return_value=None):
+            done, err = runner._shrink_step(task, _lvol())
+        self.assertFalse(done)
+        self.assertIn("disappeared", err)
+
+    def test_the_deadline_still_bounds_the_phase(self):
+        task = _Task(shrink_snap_id="S0", shrink_round=1,
+                     shrink_deadline=0, lvol_id="LV1")
+        with patch.object(runner, "_shrink_round_done", return_value=False):
+            done, err = runner._shrink_step(task, _lvol())
+        self.assertFalse(done)
+        self.assertIn("timed out", err)
+
+    def test_it_yields_the_pass_when_the_budget_runs_out(self):
+        """A very slow transfer must not hog the runner forever."""
+        clock = _Clock()
+        task = _Task(shrink_snap_id="S0", shrink_round=1,
+                     shrink_deadline=10 ** 9, lvol_id="LV1")
+        task.function_params["shrink_started_at"] = clock.now
+        with patch.object(runner.time, "time", clock), \
+             patch.object(runner.time, "sleep", clock.sleep), \
+             patch.object(runner, "_shrink_round_done", return_value=False), \
+             patch.object(constants, "REPL_CUTOVER_CONVERGE_BUDGET_SEC", 5):
+            done, err = runner._shrink_step(task, _lvol())
+        self.assertFalse(done)
+        self.assertIsNone(err, "yielding the pass is not a failure")
+        self.assertIn("waiting", task.function_result)
+
+
+class TestProceedGate(unittest.TestCase):
+    """The preconnect wait must be opt-in: it costs freeze time."""
+
+    def test_disabled_by_default(self):
+        self.assertFalse(
+            constants.REPL_CUTOVER_PROCEED_REQUIRED,
+            "waiting for a signal nobody sends put 120s of writes into the "
+            "frozen final step")
+
+    def test_the_wait_is_guarded_by_the_flag(self):
+        import inspect
+        src = inspect.getsource(runner.task_runner)
+        self.assertIn("constants.REPL_CUTOVER_PROCEED_REQUIRED", src)
+        self.assertLess(
+            src.index("REPL_CUTOVER_PROCEED_REQUIRED"),
+            src.index("run_cutover"),
+            "the gate must be evaluated before the freeze")
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+class TestLvsAdmission(unittest.TestCase):
+    """One lvstore's bandwidth, two priorities.
+
+    Case 10 ran 9 volumes over shared lvstores and every one kept replicating
+    while another was trying to converge, stretching each round -- and every
+    second a round is stretched is a second of writes that lands in the frozen
+    final step.
+    """
+
+    def setUp(self):
+        from simplyblock_core.services import snapshot_replication as sr
+        self.sr = sr
+        patcher = patch.object(sr, "db")
+        self.db = patcher.start()
+        self.addCleanup(patcher.stop)
+        self.groups = {}                     # lvol id -> group id
+        gp = patch.object(sr, "_group_id_for_lvol",
+                          side_effect=lambda lv: self.groups.get(lv.get_id(), ""))
+        gp.start()
+        self.addCleanup(gp.stop)
+
+    # -- fixtures ---------------------------------------------------------
+    def _cutover_task(self, lvol_id, lvs, group="", status="running",
+                      canceled=False):
+        from simplyblock_core.models.job_schedule import JobSchedule
+        t = MagicMock()
+        t.function_name = JobSchedule.FN_REPLICATION_FINAL
+        t.status = status
+        t.canceled = canceled
+        t.function_params = {"lvol_id": lvol_id, "cutover_lvs": lvs,
+                             "cutover_group": group}
+        return t
+
+    def _transfer_task(self, snap_id, task_id="T_other", status=None):
+        from simplyblock_core.models.job_schedule import JobSchedule
+        t = MagicMock()
+        t.function_name = JobSchedule.FN_SNAPSHOT_REPLICATION
+        t.status = status or JobSchedule.STATUS_RUNNING
+        t.canceled = False
+        t.get_id.return_value = task_id
+        t.function_params = {"snapshot_id": snap_id}
+        return t
+
+    def _lv(self, lvol_id, lvs="LVS_1"):
+        lv = MagicMock()
+        lv.get_id.return_value = lvol_id
+        lv.lvs_name = lvs
+        return lv
+
+    def _snapshot(self, lvol_id="LV_other", lvs="LVS_1"):
+        snap = MagicMock()
+        snap.lvol = self._lv(lvol_id, lvs)
+        return snap
+
+    def _task(self, task_id="T_me"):
+        t = MagicMock()
+        t.cluster_id = "CL"
+        t.get_id.return_value = task_id
+        return t
+
+    # -- priority 1: a cutover owns its lvstore ---------------------------
+    def test_another_volumes_cutover_holds_this_lvstore(self):
+        self.db.get_job_tasks.return_value = [
+            self._cutover_task("LV_cutting", "LVS_1")]
+        self.assertIn("final cutover",
+                      self.sr._lvs_transfer_hold(self._task(), self._snapshot()))
+
+    def test_the_volume_in_cutover_may_still_replicate(self):
+        """Its convergence snapshots are exactly what must keep moving."""
+        self.db.get_job_tasks.return_value = [
+            self._cutover_task("LV_cutting", "LVS_1")]
+        self.assertEqual(
+            self.sr._lvs_transfer_hold(
+                self._task(), self._snapshot(lvol_id="LV_cutting")), "")
+
+    def test_a_group_member_is_not_held_by_its_groups_cutover(self):
+        """A consistency group cuts over as a group, not one member at a time."""
+        self.groups = {"LV_cutting": "CL/G1", "LV_sibling": "CL/G1"}
+        self.db.get_job_tasks.return_value = [
+            self._cutover_task("LV_cutting", "LVS_1", group="CL/G1")]
+        self.assertEqual(
+            self.sr._lvs_transfer_hold(
+                self._task(), self._snapshot(lvol_id="LV_sibling")), "")
+
+    def test_a_volume_outside_the_group_is_still_held_by_its_cutover(self):
+        self.groups = {"LV_cutting": "CL/G1", "LV_loose": ""}
+        self.db.get_job_tasks.return_value = [
+            self._cutover_task("LV_cutting", "LVS_1", group="CL/G1")]
+        self.assertIn("final cutover", self.sr._lvs_transfer_hold(
+            self._task(), self._snapshot(lvol_id="LV_loose")))
+
+    def test_a_cutover_on_a_different_lvstore_does_not_hold_us(self):
+        self.db.get_job_tasks.return_value = [
+            self._cutover_task("LV_cutting", "LVS_9")]
+        self.assertEqual(
+            self.sr._lvs_transfer_hold(self._task(), self._snapshot()), "")
+
+    def test_a_finished_or_cancelled_cutover_holds_nothing(self):
+        from simplyblock_core.models.job_schedule import JobSchedule
+        for task in (self._cutover_task("LV_x", "LVS_1",
+                                        status=JobSchedule.STATUS_DONE),
+                     self._cutover_task("LV_x", "LVS_1", canceled=True)):
+            self.db.get_job_tasks.return_value = [task]
+            self.assertEqual(
+                self.sr._lvs_transfer_hold(self._task(), self._snapshot()), "")
+
+    def test_a_task_that_has_not_claimed_an_lvs_holds_nothing(self):
+        """Before the cutover starts its rounds there is nothing to protect."""
+        t = self._cutover_task("LV_cutting", "LVS_1")
+        del t.function_params["cutover_lvs"]
+        self.db.get_job_tasks.return_value = [t]
+        self.assertEqual(
+            self.sr._lvs_transfer_hold(self._task(), self._snapshot()), "")
+
+    # -- priority 2: groups outrank loose volumes, and serialize -----------
+    def test_a_transferring_group_holds_a_volume_from_another_group(self):
+        self.groups = {"LV_a": "CL/G1", "LV_b": "CL/G2"}
+        self.db.get_job_tasks.return_value = [self._transfer_task("S_a")]
+        self.db.get_snapshot_by_id.return_value = MagicMock(lvol=self._lv("LV_a"))
+        self.assertIn("consistency group", self.sr._lvs_transfer_hold(
+            self._task(), self._snapshot(lvol_id="LV_b")))
+
+    def test_members_of_the_same_group_transfer_in_parallel(self):
+        self.groups = {"LV_a": "CL/G1", "LV_b": "CL/G1"}
+        self.db.get_job_tasks.return_value = [self._transfer_task("S_a")]
+        self.db.get_snapshot_by_id.return_value = MagicMock(lvol=self._lv("LV_a"))
+        self.assertEqual(
+            self.sr._lvs_transfer_hold(self._task(), self._snapshot(lvol_id="LV_b")),
+            "")
+
+    def test_a_transferring_group_outranks_a_loose_volume(self):
+        self.groups = {"LV_a": "CL/G1", "LV_loose": ""}
+        self.db.get_job_tasks.return_value = [self._transfer_task("S_a")]
+        self.db.get_snapshot_by_id.return_value = MagicMock(lvol=self._lv("LV_a"))
+        self.assertIn("consistency group", self.sr._lvs_transfer_hold(
+            self._task(), self._snapshot(lvol_id="LV_loose")))
+
+    def test_loose_volumes_still_transfer_in_parallel_with_each_other(self):
+        """No group involved: unchanged behaviour, no new serialization."""
+        self.groups = {"LV_a": "", "LV_b": ""}
+        self.db.get_job_tasks.return_value = [self._transfer_task("S_a")]
+        self.db.get_snapshot_by_id.return_value = MagicMock(lvol=self._lv("LV_a"))
+        self.assertEqual(
+            self.sr._lvs_transfer_hold(self._task(), self._snapshot(lvol_id="LV_b")),
+            "")
+
+    def test_a_group_transferring_on_another_lvstore_does_not_hold_us(self):
+        self.groups = {"LV_a": "CL/G1", "LV_b": "CL/G2"}
+        self.db.get_job_tasks.return_value = [self._transfer_task("S_a")]
+        self.db.get_snapshot_by_id.return_value = MagicMock(
+            lvol=self._lv("LV_a", lvs="LVS_9"))
+        self.assertEqual(
+            self.sr._lvs_transfer_hold(self._task(), self._snapshot(lvol_id="LV_b")),
+            "")
