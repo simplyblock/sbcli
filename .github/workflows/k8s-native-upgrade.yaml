@@ -543,6 +543,7 @@ jobs:
           fi
           if [ "$CLUSTER_ENV" = "local" ]; then
             ENABLE_CPU_TOPOLOGY="false"
+            SKIP_KUBELET_CONFIG="true"
           fi
           if [ "$CLUSTER_ENV" = "openshift-baremetal" ]; then
             DRIVE_SIZE_RANGE="1500G-2000G"
