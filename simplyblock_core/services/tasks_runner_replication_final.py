@@ -134,19 +134,41 @@ def _swap_failback_lvol_uuid(rep, failback_source_id):
 
     stale_uuid = new_lvol.get_id()
 
-    # Copy replication config from the original source before removing its record.
+    # The failover's _finalize() cleared do_replicate / replication_interval_min /
+    # replication_policy_id on the original cluster-1 source to stop it replicating.
+    # Those cleared values must NOT be propagated here; instead restore them from
+    # the failback source (cluster-2 volume) whose DB record is still intact at
+    # this point — _finalize() clears its fields in a later step.
+    failback_src_interval = 0
+    failback_src_policy_id = ""
+    try:
+        failback_src = db.get_lvol_by_id(rep.source_lvol.get_id())
+        failback_src_interval = failback_src.replication_interval_min
+        failback_src_policy_id = failback_src.replication_policy_id
+    except Exception as exc:
+        logger.warning(
+            "failback UUID swap: could not read failback source %s for interval/policy: %s",
+            rep.source_lvol.get_id(), exc)
+
+    # Copy replication_node_id / replication_mode from the original source —
+    # these fields were NOT cleared by the failover's _finalize(), so they still
+    # point at the correct cluster-2 target node.
     try:
         old_lvol = db.get_lvol_by_id(failback_source_id)
-        new_lvol.do_replicate = old_lvol.do_replicate
         new_lvol.replication_node_id = old_lvol.replication_node_id
         new_lvol.replication_mode = old_lvol.replication_mode
-        new_lvol.replication_interval_min = old_lvol.replication_interval_min
-        new_lvol.replication_policy_id = old_lvol.replication_policy_id
         old_lvol.remove(db.kv_store)
     except KeyError:
         logger.warning(
             "failback UUID swap: original source lvol %s already absent from DB",
             failback_source_id)
+
+    # Explicitly re-enable replication on the restored volume.  The original
+    # source had do_replicate cleared during failover; failback means it is the
+    # active source again and should resume its cadence.
+    new_lvol.do_replicate = True
+    new_lvol.replication_interval_min = failback_src_interval
+    new_lvol.replication_policy_id = failback_src_policy_id
 
     # Write the clone under the original source UUID.
     new_lvol.uuid = failback_source_id
