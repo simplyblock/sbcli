@@ -894,6 +894,34 @@ def _resolve_namespaced_subsystem(lvol, rpc_client, snode):
 
     subsys = rpc_client.subsystem_list(lvol.nqn)
     if not subsys:
+        # The subsystem this lvol was grouped into is gone (a concurrent
+        # delete tore it down after get_next_available_subsystem_on_node
+        # picked it). Downgrade to our own subsystem, which is what the
+        # docstring above promises and what the "subsys full, no alternative"
+        # branch below already does.
+        #
+        # Returning True without clearing these leaves the lvol in a state
+        # that cannot be represented consistently: a non-empty ``namespace``
+        # means "I am a namespace inside the subsystem named by ``nqn``", yet
+        # the standalone path then creates a subsystem under the *deleted*
+        # owner's NQN. Such an lvol owns a subsystem but is filtered out of
+        # get_master_lvols_by_pool_uuid and never offered by
+        # get_next_available_subsystem_on_node, so it is invisible as its own
+        # master and carries a dangling namespace pointer. The downgrade was
+        # present when this race was first closed and was dropped by mistake
+        # when the subsys-full handling below was added.
+        logger.warning(
+            "namespace auto-grouping race: target subsystem %s missing on node "
+            "%s; downgrading lvol %s to its own subsystem",
+            lvol.nqn, snode.get_id(), lvol.get_id())
+        cluster = db_ctrl.get_cluster_by_id(snode.cluster_id)
+        lvol.nqn = cluster.nqn + ":lvol:" + lvol.uuid
+        lvol.namespace = ""
+        lvol.ns_id = 0
+        # Persist here: add_lvol_on_node does not write the lvol back after
+        # this call, so without it the downgrade is in-memory only and the
+        # next reader still sees the stale namespaced NQN.
+        lvol.write_to_db(db_ctrl.kv_store)
         return True
 
     if lvol.node_id == snode.get_id():

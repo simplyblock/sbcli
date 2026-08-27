@@ -400,8 +400,8 @@ class RPCClient:
         behavior (e.g. tests asserting on RPC traffic) can pass
         ``idempotent=False``.
 
-        Returns the nsid as the SPDK RPC would, or the existing nsid when
-        the no-op branch fires.
+        Returns ``(nsid, error)`` -- the SPDK RPC's own result, or
+        ``(existing_nsid, None)`` when the no-op branch fires.
         """
         if idempotent:
             try:
@@ -422,7 +422,14 @@ class RPCClient:
                             "nvmf_subsystem_add_ns: %s already has %s at nsid=%s, "
                             "skipping duplicate add",
                             nqn, dev_name, existing_nsid)
-                        return existing_nsid
+                        # Must match the (result, error) shape of the
+                        # _request2 return below: both callers unpack two
+                        # values (rpc_client.nvmf_subsystem_add_ns and
+                        # lvol_controller.add_lvol_on_node), so returning the
+                        # bare nsid raised TypeError precisely when this
+                        # idempotency short-circuit fired -- i.e. on the
+                        # re-entrant paths it exists to make safe.
+                        return existing_nsid, None
             except Exception as e:
                 # Don't let an idempotency probe block the legitimate add.
                 logger.debug(
