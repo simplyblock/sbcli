@@ -16,7 +16,6 @@ logger = logging.getLogger(__name__)
 
 bp = Blueprint("metrics", __name__)
 
-registry = CollectorRegistry()
 db = db_controller.DBController()
 
 io_stats_keys = [
@@ -50,7 +49,7 @@ io_stats_keys = [
     "write_latency_ticks",
 ]
 
-def get_device_metrics():
+def get_device_metrics(registry: CollectorRegistry):
     labels = ['cluster', "cluster_name", "snode", "device"]
     return {
         "device_" + k: Gauge("device_" + k, "device_" + k, labelnames=labels, registry=registry)
@@ -59,7 +58,7 @@ def get_device_metrics():
     }
 
 
-def get_snode_metrics():
+def get_snode_metrics(registry: CollectorRegistry):
     labels = ['cluster', "cluster_name", "snode", "hostname"]
     return {
         **{
@@ -82,7 +81,7 @@ def get_snode_metrics():
     }
 
 
-def get_cluster_metrics():
+def get_cluster_metrics(registry: CollectorRegistry):
     labels = ['cluster', "cluster_name"]
     return {
         "cluster_" + k: Gauge("cluster_" + k, "cluster_" + k, labelnames=labels, registry=registry)
@@ -90,7 +89,7 @@ def get_cluster_metrics():
     }
 
 
-def get_lvol_metrics():
+def get_lvol_metrics(registry: CollectorRegistry):
     labels = ['cluster', "cluster_name", "pool", "lvol", "lvol_name", "pvc_name"]
     return {
         "lvol_" + k: Gauge("lvol_" + k, "lvol_" + k, labelnames=labels, registry=registry)
@@ -98,7 +97,7 @@ def get_lvol_metrics():
     }
 
 
-def get_pool_metrics():
+def get_pool_metrics(registry: CollectorRegistry):
     labels = ['cluster', "cluster_name", "pool", "name"]
     return {
         "pool_" + k: Gauge("pool_" + k, "pool_" + k, labelnames=labels, registry=registry)
@@ -109,6 +108,13 @@ def get_pool_metrics():
 @bp.route('/cluster/metrics', methods=['GET'])
 def get_data():
 
+    registry = CollectorRegistry()
+    cluster_gauges = get_cluster_metrics(registry)
+    snode_gauges = get_snode_metrics(registry)
+    device_gauges = get_device_metrics(registry)
+    pool_gauges = get_pool_metrics(registry)
+    lvol_gauges = get_lvol_metrics(registry)
+
     clusters = db.get_clusters()
     for cl in clusters:
 
@@ -117,7 +123,7 @@ def get_data():
             data = records[0].get_clean_dict()
             object_data =  cl.get_clean_dict()
 
-            ng = get_cluster_metrics()
+            ng = cluster_gauges
             for g in ng:
                 v = g.replace("cluster_", "")
                 if v in data:
@@ -150,7 +156,7 @@ def get_data():
             node_records = db.get_node_stats(node, 1)
             if node_records:
                 data = node_records[0].get_clean_dict()
-                ng = get_snode_metrics()
+                ng = snode_gauges
                 for g in ng:
                     v = g.replace("snode_", "")
                     if v in data:
@@ -200,7 +206,7 @@ def get_data():
                 device_records = db.get_device_stats(device, 1)
                 if device_records:
                     data = device_records[0].get_clean_dict()
-                    ng = get_device_metrics()
+                    ng = device_gauges
                     for g in ng:
                         v = g.replace("device_", "")
                         if v in data:
@@ -219,7 +225,7 @@ def get_data():
             pool_records = db.get_pool_stats(pool, 1)
             if pool_records:
                 data = pool_records[0].get_clean_dict()
-                ng = get_pool_metrics()
+                ng = pool_gauges
                 for g in ng:
                     v = g.replace("pool_", "")
                     if v in data:
@@ -232,7 +238,7 @@ def get_data():
             lvol_records = db.get_lvol_stats(lvol, limit=1)
             if lvol_records:
                 data = lvol_records[0].get_clean_dict()
-                ng = get_lvol_metrics()
+                ng = lvol_gauges
                 for g in ng:
                     v = g.replace("lvol_", "")
                     if v in data:
