@@ -37,6 +37,31 @@ utils.init_sentry_sdk(__name__)
 db = db_controller.DBController()
 
 
+def _lvs_cutover_owner(task, lvs_name):
+    """The task that already owns *lvs_name* for a cutover, or None.
+
+    Deterministic: the earliest-created active claim wins, so two tasks racing
+    the same lvstore agree on who owns it instead of each seeing the other.
+    """
+    if not lvs_name:
+        return None
+    owners = []
+    for other in db.get_job_tasks(task.cluster_id):
+        if other.function_name != JobSchedule.FN_REPLICATION_FINAL:
+            continue
+        if other.get_id() == task.get_id():
+            continue
+        if other.status == JobSchedule.STATUS_DONE or other.canceled:
+            continue
+        if (other.function_params or {}).get("cutover_lvs") != lvs_name:
+            continue
+        owners.append(other)
+    if not owners:
+        return None
+    owners.sort(key=lambda t: (str(getattr(t, "create_dt", "")), t.get_id()))
+    return owners[0]
+
+
 def _group_id_for_lvol(lvol):
     """The consistency group *lvol* belongs to, or "".
 
@@ -181,12 +206,38 @@ def task_runner(task: JobSchedule):
         # compete for the same lvstore and hub bandwidth, and every second they
         # steal from a convergence round is a second of writes that lands in
         # the freeze.
-        task.function_params["cutover_lvs"] = getattr(lvol, "lvs_name", "")
-        # A consistency group cuts over AS A GROUP: its members' transfers and
-        # cutovers run alongside each other, and only volumes outside the group
-        # are held. Recording the group on the claim is what lets the
-        # replication side tell a sibling member from an unrelated volume.
-        task.function_params["cutover_group"] = _group_id_for_lvol(lvol)
+        lvs_name = getattr(lvol, "lvs_name", "")
+        own_group = _group_id_for_lvol(lvol)
+        owner = _lvs_cutover_owner(task, lvs_name)
+        if owner is not None:
+            owner_group = (owner.function_params or {}).get("cutover_group") or ""
+            owner_lvol = str((owner.function_params or {}).get("lvol_id"))
+            # A consistency group cuts over AS A GROUP, so a sibling member
+            # joins the owner rather than queueing behind it.
+            if not (own_group and own_group == owner_group):
+                # WAIT, do not start. Beginning the shrink phase here would
+                # take snapshots that cannot replicate (the owner holds the
+                # lvstore), and their deadline would run down until the task
+                # died of max retries -- which is exactly what happened to 17
+                # tasks in run 20260827_185009.
+                task.function_params["shrink_deadline"] = (
+                    int(time.time()) + constants.REPL_CUTOVER_SHRINK_TIMEOUT_SEC)
+                task.function_result = (
+                    f"queued for lvstore {lvs_name} behind {owner_lvol[:8]}")
+                task.status = JobSchedule.STATUS_SUSPENDED
+                task.write_to_db(db.kv_store)
+                return False            # no retry burned: this is a queue, not a failure
+
+        # Claim the source LVS for the whole cutover -- the convergence rounds
+        # AND the freeze. Other volumes' snapshot transfers on this LVS queue
+        # behind it (see snapshot_replication._lvs_transfer_hold): they compete
+        # for the same lvstore and hub bandwidth, and every second they steal
+        # from a convergence round is a second of writes that lands in the
+        # freeze.
+        task.function_params["cutover_lvs"] = lvs_name
+        # Recording the group is what lets the replication side tell a sibling
+        # member from an unrelated volume.
+        task.function_params["cutover_group"] = own_group
         task.write_to_db(db.kv_store)
 
         # ---- SHRINK PHASE ----------------------------------------------- #
