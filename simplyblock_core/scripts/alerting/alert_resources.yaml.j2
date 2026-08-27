@@ -8,7 +8,7 @@
   same file describes the receivers in both deployments — keep this template in
   sync with `templates/controlplane_configmap.yaml` in that chart.
 
-  Every key is guaranteed to be present by `utils.merge_alerting_config()`,
+  Every key is guaranteed to be present by `alerting_config_parser.parse_alerting_config()`,
   which layers the file on top of ALERTING_DEFAULTS.
 
   `{% raw %}...{% endraw %}` guards Grafana's own Go notification templates

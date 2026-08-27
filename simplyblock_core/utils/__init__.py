@@ -28,7 +28,6 @@ from prettytable import PrettyTable
 from docker.errors import APIError, DockerException, ImageNotFound, NotFound
 
 import tempfile
-import yaml
 from jinja2 import Environment, FileSystemLoader
 
 from simplyblock_core import constants
@@ -60,61 +59,8 @@ NQN_PATTERN = re.compile(
     r'(?::[a-zA-Z0-9.\-:_]+)?'  # optional unique name
 )
 
-ALERTS_TEMPLATE_FOLDER = "simplyblock_core/scripts/alerting/"
 ALERT_RESOURCES_FILE = "alert_resources.yaml"
-
-# Defaults of the alerting configuration file. Mirrors the
-# controlplane.observability.grafana.notifications block of the
-# simplyblock-operator Helm chart values, so that one file describes the
-# receivers for both the docker and the kubernetes deployment. Keep in sync
-# with alert_resources.yaml.j2, which relies on every key being present.
-ALERTING_DEFAULTS: Dict[str, Dict[str, Any]] = {
-    'slack': {
-        'enabled': False,
-        'url': '',
-    },
-    'teams': {
-        'enabled': False,
-        'url': '',
-    },
-    'pagerduty': {
-        'enabled': False,
-        'integrationKey': '',
-        'severity': 'critical',
-        'class': '',
-        'component': '',
-        'group': '',
-    },
-    'opsgenie': {
-        'enabled': False,
-        'apiKey': '',
-        'apiUrl': 'https://api.opsgenie.com/v2/alerts',
-        'autoClose': True,
-        'overridePriority': False,
-        'sendTagsAs': 'tags',
-    },
-    'webhook': {
-        'enabled': False,
-        'url': '',
-        'httpMethod': 'POST',
-        'username': '',
-        'password': '',
-        'authorizationScheme': '',
-        'authorizationCredentials': '',
-        'maxAlerts': 0,
-    },
-}
-
-# Keys without which an enabled receiver cannot deliver anything. Grafana
-# accepts such a contact point and then silently drops every notification, so
-# reject it while the operator is still watching.
-ALERTING_REQUIRED_KEYS: Dict[str, List[str]] = {
-    'slack': ['url'],
-    'teams': ['url'],
-    'pagerduty': ['integrationKey'],
-    'opsgenie': ['apiKey'],
-    'webhook': ['url'],
-}
+ALERTS_TEMPLATE_FOLDER = "simplyblock_core/scripts/alerting/"
 
 def get_env_var(name, default=None, is_required=False):
     if not name:
@@ -2625,62 +2571,6 @@ def _top_dir() -> str:
     return os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 
-def merge_alerting_config(alerting_config: str) -> Dict[str, Any]:
-    """Read the alerting configuration file and layer it onto ALERTING_DEFAULTS.
-
-    Returns the values dictionary consumed by alert_resources.yaml.j2: one
-    entry per receiver type, each carrying every key the template reads.
-    """
-    try:
-        with open(alerting_config, encoding="utf-8") as config_file:
-            config = yaml.safe_load(config_file)
-    except (OSError, yaml.YAMLError) as e:
-        raise ValueError(f"Failed to read alerting configuration {alerting_config}: {e}") from e
-
-    if config is None:
-        config = {}
-    if not isinstance(config, dict):
-        raise ValueError(f"Alerting configuration {alerting_config} must contain a YAML mapping")
-
-    unknown_receivers = sorted(set(config) - set(ALERTING_DEFAULTS))
-    if unknown_receivers:
-        raise ValueError(
-            f"Alerting configuration {alerting_config} has unknown receiver(s) "
-            f"{', '.join(unknown_receivers)}. Known receivers: {', '.join(ALERTING_DEFAULTS)}"
-        )
-
-    values: Dict[str, Any] = {}
-    for receiver, defaults in ALERTING_DEFAULTS.items():
-        overrides = config.get(receiver) or {}
-        if not isinstance(overrides, dict):
-            raise ValueError(
-                f"Alerting configuration {alerting_config}: receiver '{receiver}' must be a YAML mapping"
-            )
-
-        unknown_keys = sorted(set(overrides) - set(defaults))
-        if unknown_keys:
-            raise ValueError(
-                f"Alerting configuration {alerting_config}: receiver '{receiver}' has unknown "
-                f"key(s) {', '.join(unknown_keys)}. Known keys: {', '.join(defaults)}"
-            )
-
-        # An explicit null means "use the default", matching Helm's behaviour.
-        settings = dict(defaults)
-        settings.update({key: value for key, value in overrides.items() if value is not None})
-
-        if settings['enabled']:
-            missing = [key for key in ALERTING_REQUIRED_KEYS[receiver] if not settings[key]]
-            if missing:
-                raise ValueError(
-                    f"Alerting configuration {alerting_config}: receiver '{receiver}' is enabled "
-                    f"but {', '.join(missing)} is empty"
-                )
-
-        values[receiver] = settings
-
-    return values
-
-
 def render_legacy_alerting(contact_point: str, grafana_endpoint: str) -> str:
     """Render the single-contact-point alerting config kept for --contact-point."""
     env = Environment(loader=FileSystemLoader(_alerts_template_folder()), trim_blocks=True, lstrip_blocks=True)
@@ -2704,21 +2594,21 @@ def render_legacy_alerting(contact_point: str, grafana_endpoint: str) -> str:
     })
 
 
-def render_configfile_alerting(alerting_config: str) -> str:
+def render_configfile_alerting(alert_config: Dict[str, Any]) -> str:
     """Render the multi-receiver alerting config from an alerting config file."""
     env = Environment(loader=FileSystemLoader(_alerts_template_folder()), trim_blocks=True, lstrip_blocks=True)
     template = env.get_template(f'{ALERT_RESOURCES_FILE}.j2')
 
-    return template.render(merge_alerting_config(alerting_config))
+    return template.render(alert_config)
 
 
-def render_and_deploy_alerting_configs(alerting_config, contact_point, grafana_endpoint,
+def render_and_deploy_alerting_configs(alert_config: Optional[Dict[str, Any]], contact_point, grafana_endpoint,
                                        cluster_uuid, cluster_secret):
-    TOP_DIR = _top_dir()
+    top_dir = _top_dir()
     alerts_template_folder = _alerts_template_folder()
 
-    if alerting_config:
-        rendered = render_configfile_alerting(alerting_config)
+    if alert_config:
+        rendered = render_configfile_alerting(alert_config)
     else:
         rendered = render_legacy_alerting(contact_point, grafana_endpoint)
 
@@ -2732,7 +2622,7 @@ def render_and_deploy_alerting_configs(alerting_config, contact_point, grafana_e
         subprocess.check_call(['sudo', 'mv', temp_file_path, destination_file_path])
     print(f"File moved to {destination_file_path} successfully.")
 
-    scripts_folder = os.path.join(TOP_DIR, "simplyblock_core/scripts/")
+    scripts_folder = os.path.join(top_dir, "simplyblock_core/scripts/")
     prometheus_file = "prometheus.yml"
     env = Environment(loader=FileSystemLoader(scripts_folder), trim_blocks=True, lstrip_blocks=True)
     template = env.get_template(f'{prometheus_file}.j2')
