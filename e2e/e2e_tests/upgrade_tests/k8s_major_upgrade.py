@@ -2564,6 +2564,7 @@ class K8sNativeMajorUpgrade(TestClusterBase):
         data_nics = os.environ.get("DATA_NICS", "enp1s0")
         max_lvol = os.environ.get("MAX_LVOL", "30")
         vcpu_count = self._get_vcpu_count()
+        enable_cpu_topo = "false" if self.k8s_utils.detect_talos() else "true"
 
         cr_yaml = f"""
 apiVersion: storage.simplyblock.io/v1alpha1
@@ -2607,7 +2608,7 @@ spec:
   mgmtIfname: {mgmt_ifc}
   dataIfname:
     - {data_nics}
-  enableCpuTopology: true
+  enableCpuTopology: {enable_cpu_topo}
   workerNodes:
 {worker_yaml}"""
 
@@ -3147,6 +3148,7 @@ class K8sNativeMajorUpgradeDualNode(K8sNativeMajorUpgrade):
         data_nics = os.environ.get("DATA_NICS", "enp1s0")
         max_lvol = os.environ.get("MAX_LVOL", "30")
         vcpu_count = self._get_vcpu_count()
+        enable_cpu_topo = "false" if self.k8s_utils.detect_talos() else "true"
 
         cr_yaml = f"""
 apiVersion: storage.simplyblock.io/v1alpha1
@@ -3190,7 +3192,7 @@ spec:
   mgmtIfname: {mgmt_ifc}
   dataIfname:
     - {data_nics}
-  enableCpuTopology: true
+  enableCpuTopology: {enable_cpu_topo}
   nodesPerSocket: {self.nodes_per_socket}
   workerNodes:
 {worker_yaml}"""

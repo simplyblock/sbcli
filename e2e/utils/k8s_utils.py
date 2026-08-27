@@ -218,6 +218,27 @@ class K8sUtils:
         )
         return self._is_openshift
 
+    def detect_talos(self) -> bool:
+        """Return True if the cluster nodes run Talos Linux.
+
+        Checks the ``osImage`` field of the first node.  The result is
+        cached after the first call.
+        """
+        if hasattr(self, "_is_talos"):
+            return self._is_talos
+        try:
+            out, _ = self._exec_kubectl(
+                "kubectl get nodes -o jsonpath='{.items[0].status.nodeInfo.osImage}'",
+                supress_logs=True,
+            )
+            self._is_talos = "Talos" in (out or "")
+        except Exception:
+            self._is_talos = False
+        self.logger.info(
+            f"[K8sUtils] Platform detection: talos={self._is_talos}"
+        )
+        return self._is_talos
+
     # ── SPDK pod operations ──────────────────────────────────────────────────
 
     def get_spdk_pod_name(self, node_ip: str) -> str:

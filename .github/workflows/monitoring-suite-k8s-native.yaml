@@ -627,6 +627,11 @@ jobs:
           SKIP_KUBELET_CONFIG="${{ (github.event.inputs.cluster_environment == 'aws-openshift' || github.event.inputs.cluster_environment == 'openshift-local' || github.event.inputs.cluster_environment == 'openshift-baremetal') && 'false' || 'true' }}"
           FORCE_FORMAT_4K="${{ (github.event.inputs.cluster_environment == 'aws-openshift' || github.event.inputs.cluster_environment == 'openshift-local' || github.event.inputs.cluster_environment == 'openshift-baremetal') && 'true' || 'false' }}"
           DRIVE_SIZE_RANGE="${{ github.event.inputs.cluster_environment == 'openshift-baremetal' && '1500G-2000G' || '1.7T-2T' }}"
+          ENABLE_CPU_TOPOLOGY="true"
+          CLUSTER_ENV="${{ github.event.inputs.cluster_environment || 'local' }}"
+          if [ "$CLUSTER_ENV" = "local" ]; then
+            ENABLE_CPU_TOPOLOGY="false"
+          fi
 
           # Convert partitions to enableJournalDevice (inverted: 0→true, 1→false)
           if [ "${PARTITIONS}" = "0" ]; then
@@ -708,7 +713,7 @@ jobs:
           ${VAULT_SETTINGS}
             maxSubsystemCount: ${MAX_SUBSYS}
             vcpuCount: ${VCPU_COUNT}
-            maxHugePagesSize: "17G"
+
           ---
           apiVersion: storage.simplyblock.io/v1alpha1
           kind: StoragePool
@@ -740,7 +745,7 @@ jobs:
               count: ${JM_COUNT}
               percentPerDevice: 3
             skipKubeletConfiguration: ${SKIP_KUBELET_CONFIG}
-            enableCpuTopology: true
+            enableCpuTopology: ${ENABLE_CPU_TOPOLOGY}
             openShiftCluster: ${OPENSHIFT_CLUSTER}
             ubuntuHost: false
             forceFormat4K: ${FORCE_FORMAT_4K}

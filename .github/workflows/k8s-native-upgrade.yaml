@@ -534,11 +534,15 @@ jobs:
           CORE_PERCENTAGE="30"
           FORCE_FORMAT_4K="false"
           DRIVE_SIZE_RANGE="1.7T-2T"
+          ENABLE_CPU_TOPOLOGY="true"
           CLUSTER_ENV="${{ github.event.inputs.cluster_environment || 'local' }}"
           if [ "$CLUSTER_ENV" = "aws-openshift" ] || [ "$CLUSTER_ENV" = "openshift-local" ] || [ "$CLUSTER_ENV" = "openshift-baremetal" ]; then
             OPENSHIFT_CLUSTER="true"
             SKIP_KUBELET_CONFIG="true"
             CORE_PERCENTAGE="50"
+          fi
+          if [ "$CLUSTER_ENV" = "local" ]; then
+            ENABLE_CPU_TOPOLOGY="false"
           fi
           if [ "$CLUSTER_ENV" = "openshift-baremetal" ]; then
             DRIVE_SIZE_RANGE="1500G-2000G"
@@ -639,7 +643,7 @@ jobs:
               count: ${JM_COUNT}
               percentPerDevice: 3
             skipKubeletConfiguration: ${SKIP_KUBELET_CONFIG}
-            enableCpuTopology: true
+            enableCpuTopology: ${ENABLE_CPU_TOPOLOGY}
             openShiftCluster: ${OPENSHIFT_CLUSTER}
             ubuntuHost: false
             forceFormat4K: ${FORCE_FORMAT_4K}
