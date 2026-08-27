@@ -1018,7 +1018,8 @@ class CLIWrapperBase:
         ifname = args.ifname
         mgmt_ip = args.mgmt_ip
         mode = args.mode
-        return mgmt_ops.deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret, mode)
+        alerting_config = args.alerting_config
+        return mgmt_ops.deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret, mode, alerting_config)
 
     def control_plane__list(self, sub_command, args):
         return _format_result(mgmt_ops.list_mgmt_nodes(), json=args.json)
@@ -1397,6 +1398,7 @@ class CLIWrapperBase:
             max_subsys=args.max_subsys or 0,
             hugepages_mem=utils.parse_size(args.hugepages_mem) if args.hugepages_mem else 0,
             spdk_vcpu_count=args.vcpu_count or 0,
+            alerting_config=args.alerting_config,
         )
 
     def query_yes_no(self, question, default="yes"):

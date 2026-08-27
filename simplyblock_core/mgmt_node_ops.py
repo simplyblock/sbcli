@@ -4,6 +4,8 @@ import os
 import logging
 import uuid
 import time
+from typing import Optional
+
 import requests
 
 import docker
@@ -20,7 +22,7 @@ logger = logging.getLogger()
 
 
 
-def deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret: SecretStr, mode):
+def deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret: SecretStr, mode, alerting_config: Optional[str] = None):
 
     try:
         headers = {'Authorization': f'{cluster_id} {cluster_secret.get_secret_value()}'}
@@ -64,8 +66,9 @@ def deploy_mgmt_node(cluster_ip, cluster_id, ifname, mgmt_ip, cluster_secret: Se
                 return False
 
         if not cluster_data['disable_monitoring']:
-            utils.render_and_deploy_alerting_configs(cluster_data['contact_point'], cluster_data['grafana_endpoint'],
-                                                                        cluster_data['uuid'], cluster_data['secret'])
+            utils.render_and_deploy_alerting_configs(alerting_config, cluster_data['contact_point'],
+                                                     cluster_data['grafana_endpoint'],
+                                                     cluster_data['uuid'], cluster_data['secret'])
 
         logger.info("Joining docker swarm...")
         try:
