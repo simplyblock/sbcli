@@ -2631,8 +2631,11 @@ def merge_alerting_config(alerting_config: str) -> Dict[str, Any]:
     Returns the values dictionary consumed by alert_resources.yaml.j2: one
     entry per receiver type, each carrying every key the template reads.
     """
-    with open(alerting_config) as config_file:
-        config = yaml.safe_load(config_file)
+    try:
+        with open(alerting_config, encoding="utf-8") as config_file:
+            config = yaml.safe_load(config_file)
+    except (OSError, yaml.YAMLError) as e:
+        raise ValueError(f"Failed to read alerting configuration {alerting_config}: {e}") from e
 
     if config is None:
         config = {}
