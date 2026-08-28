@@ -4721,6 +4721,7 @@ def _relocate_one_replica(removed_node: StorageNode, primary_id, role):
                     f"[REMOVAL] failed to splice {primary_id} into the pairing "
                     f"occupying {new_id} (occupant {occupant_id})")
                 return False
+            _repair_occupants_other_role_after_splice(occupant_id, primary_id, role, db_controller)
 
         primary = db_controller.get_storage_node_by_id(primary_id)
         setattr(primary, field, new_id)
@@ -4750,6 +4751,75 @@ def _relocate_one_replica(removed_node: StorageNode, primary_id, role):
 
     _clear_replica_backref(removed_node, backref)
     return True
+
+
+def _repair_occupants_other_role_after_splice(occupant_id, primary_id, role, db_controller):
+    """After a splice repoints ``occupant``'s ``role`` replica onto
+    ``primary``, check whether ``occupant``'s OTHER, untouched role (its
+    tertiary if ``role`` is "secondary", or vice versa) now shares a domain
+    with ``primary`` -- and if so, relocate THAT role too, reusing the same
+    picker (``_pick_replica_relocation_node``) and mover
+    (``_relocate_replica_between``) already used for the splice itself.
+
+    A splice edge is chosen to protect the node actually being relocated
+    (``primary``) and, since the diversity fix, to prefer one where
+    ``occupant`` also stays diverse -- but a colliding edge is still
+    accepted as a last resort when no clean one exists (see
+    ``_find_splice_target_for_relocation``'s docstring). This closes that
+    gap ACTIVELY instead of just warning about it: by the time this runs,
+    ``occupant.<role>`` already points at ``primary``, so calling the same
+    picker for occupant's other role automatically avoids both occupant's
+    own domain and primary's domain -- no extra plumbing needed. Because
+    the picker itself tries a direct candidate before a further splice,
+    this one call transparently covers both "a free replacement exists"
+    and "occupant's other role itself needs splicing into a further
+    pairing" -- the same machinery, one hop further out.
+
+    Best-effort and never blocks the outer splice, which has already
+    succeeded by the time this runs: if no replacement is found, or the
+    relocation itself fails, occupant is left with the collision and a
+    warning is logged rather than the removal being failed over it.
+
+    Not itself recursive beyond this one hop -- if repairing occupant's
+    other role creates a NEW collision for some third node, that is not
+    chased further.
+    """
+    try:
+        primary = db_controller.get_storage_node_by_id(primary_id)
+        occupant = db_controller.get_storage_node_by_id(occupant_id)
+    except KeyError:
+        return
+    if primary.failure_domain < 0 or occupant.failure_domain < 0:
+        return
+    cluster = db_controller.get_cluster_by_id(primary.cluster_id)
+    if not getattr(cluster, "enable_failure_domain", False):
+        return
+
+    other_role = "tertiary" if role == "secondary" else "secondary"
+    other_field = "tertiary_node_id" if role == "secondary" else "secondary_node_id"
+    other_target_id = getattr(occupant, other_field)
+    if not other_target_id or other_target_id == primary_id:
+        return
+    try:
+        other_target = db_controller.get_storage_node_by_id(other_target_id)
+    except KeyError:
+        return
+    if other_target.failure_domain != primary.failure_domain:
+        return  # no collision -- occupant is already fine, nothing to do
+
+    replacement = _pick_replica_relocation_node(occupant, other_target, other_role, db_controller)
+    if not replacement or replacement == other_target_id:
+        logger.warning(
+            f"[REMOVAL] splice: no replacement found to move {occupant_id}'s "
+            f"{other_role} off {other_target_id} (domain {other_target.failure_domain}) "
+            f"after splicing it onto {primary_id}'s domain {primary.failure_domain}; "
+            f"{occupant_id} is left with a domain-diversity gap")
+        return
+    if not _relocate_replica_between(occupant_id, other_target_id, replacement, other_role, db_controller):
+        logger.warning(
+            f"[REMOVAL] splice: failed to move {occupant_id}'s {other_role} off "
+            f"{other_target_id} onto {replacement}; {occupant_id} is left with a "
+            f"domain-diversity gap")
 
 
 def _relocate_replica_between(occupant_primary_id, old_host_id, new_host_id, role, db_controller, _seen=None):
