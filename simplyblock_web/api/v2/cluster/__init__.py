@@ -23,7 +23,7 @@ from .storage_pool import api as pool_api
 from .storage_node import api as storage_node_api
 from .subsystem import api as subsystem_api
 from .task import api as task_api
-from .._dtos import BackupConfigDTO, ClusterDTO, ClusterLogEntryDTO
+from .._dtos import BackupConfigDTO, ClusterDTO, ClusterLogEntryDTO, UnresolvedBackupConfigDTO
 from .._sse import WATCH_RESPONSES, WatchParam, sse_response
 from .. import util as util
 
@@ -77,7 +77,7 @@ class ClusterParams(BaseModel):
     nvmf_base_port: int = 4420
     rpc_base_port: int = 8080
     snode_api_port: int = 50001
-    backup_config: BackupConfigDTO | None = None
+    backup_config: UnresolvedBackupConfigDTO | None = None
     hashicorp_vault_settings: HashicorpVaultSettings | None = None
     enable_failure_domain: bool = False
     # max_subsys and spdk_vcpu_count are capacity decisions with real
