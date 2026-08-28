@@ -119,18 +119,23 @@ class TestConvergence(unittest.TestCase):
         self.assertIn("converged", task.function_result)
         self.assertEqual(taken, [], "a fast first round needs no further rounds")
 
-    def test_a_fast_round_in_the_open_asks_for_the_lvstore(self):
-        """Nearly converged unexclusively -> take the lvstore for the endgame.
+    def test_no_round_ever_runs_outside_the_lvstore_claim(self):
+        """Rounds are the endgame, and the endgame is exclusive by definition.
 
-        Claiming it earlier serialised the bulk catch-up: run 20260828_124859
-        charged the queue wait to round 1 (340s, 1505s, 2073s, 2584s for
-        successive volumes) while the unqueued one finished in 12.4s.
+        There used to be "open" rounds converging before the claim, so that the
+        bulk catch-up was not serialised. That was the wrong instrument: the
+        volume is caught up by its ORDINARY replication cadence, which costs the
+        cutover nothing, and only then does it ask for the lvstore. The claim is
+        therefore taken before round 1, and the loop below need not consider a
+        round without it.
         """
-        done, err, task, taken, _ = self._run([0.5], exclusive=False)
-        self.assertFalse(done, "it must not freeze without holding the lvstore")
-        self.assertIsNone(err)
-        self.assertTrue(task.function_params.get("ready_for_exclusive"))
-        self.assertIn("endgame", task.function_result)
+        import inspect
+        src = inspect.getsource(runner.task_runner)
+        entry = src.index("_acquire_lvs_claim")
+        self.assertLess(entry, src.index("_take_shrink_snapshot"),
+                        "the lvstore is taken before the first round, not after")
+        self.assertNotIn("ready_for_exclusive", inspect.getsource(runner),
+                         "open rounds are gone")
 
     def test_a_slow_round_takes_another_snapshot_without_leaving_the_pass(self):
         """The whole point: rounds follow each other in milliseconds."""
@@ -152,12 +157,16 @@ class TestConvergence(unittest.TestCase):
         self.assertIsNone(err)
         self.assertIn("not converged", task.function_result)
 
-    def test_the_cap_takes_the_lvstore_before_freezing(self):
-        """Giving up converging still requires the lvstore for the freeze."""
-        done, err, task, taken, _ = self._run([3.0] * 20, max_rounds=3,
-                                              exclusive=False)
-        self.assertFalse(done)
-        self.assertTrue(task.function_params.get("ready_for_exclusive"))
+    def test_the_cap_freezes_under_the_claim_it_already_holds(self):
+        """Giving up converging goes straight to the freeze.
+
+        The claim was taken on entry to the endgame, so reaching the round cap
+        needs no further acquisition -- it just stops converging and freezes.
+        """
+        done, err, task, taken, _ = self._run([3.0] * 20, max_rounds=3)
+        self.assertTrue(done)
+        self.assertIsNone(err)
+        self.assertIn("not converged", task.function_result)
 
     def test_a_vanished_snapshot_is_an_error(self):
         # This one runs on the real clock, so the deadline has to be a real
@@ -375,22 +384,28 @@ class TestLvsAdmission(unittest.TestCase):
 class TestRoundOneIsMeasured(unittest.TestCase):
     """The regression that let the freeze survive the convergence loop.
 
-    replicate/commit creates the cutover task itself, and its params are the
-    ONLY ones the loop ever sees for round 1. Every earlier test supplied
-    shrink_started_at by hand, so none of them noticed the controller did not:
-    the round then measured as 0.00s, counted as converged, and the freeze
-    copied the whole delta (run 20260827_172734, 9-55s server-side).
+    Round 1 used to be created by replicate/commit without the stamp the loop
+    measures against, so it measured as 0.00s, counted as converged, and the
+    freeze copied the whole delta (run 20260827_172734, 9-55s server-side).
+
+    Every round is now born in one place -- _take_shrink_snapshot, in the
+    endgame -- so there is a single stamp to get right.
     """
 
-    def test_the_controller_stamps_the_start_of_round_one(self):
+    def test_every_round_is_stamped_where_it_is_taken(self):
+        import inspect
+        src = inspect.getsource(runner._take_shrink_snapshot)
+        self.assertIn('params["shrink_started_at"] = time.time()', src)
+        self.assertIn('params["shrink_round"] = params.get("shrink_round", 0) + 1',
+                      src, "the round number and its stamp must move together")
+
+    def test_the_controller_enqueues_no_round_of_its_own(self):
+        """Commit takes no snapshot, so it must not claim a round in flight."""
         import inspect
         from simplyblock_core.controllers import lvol_controller as lc
         src = inspect.getsource(lc.replication_commit)
-        self.assertIn('"shrink_started_at"', src,
-                      "round 1 must carry the stamp the loop measures against")
-        self.assertLess(src.index('"shrink_round": 1'),
-                        src.index('"shrink_deadline"'),
-                        "sanity: this is the cutover task's param block")
+        self.assertIn('"shrink_round": 0', src)
+        self.assertNotIn('"shrink_snap_id"', src)
 
     def test_an_unmeasured_round_is_not_treated_as_converged(self):
         """Belt and braces for tasks enqueued without the stamp."""
@@ -524,6 +539,16 @@ class TestQueuedCutoverDoesNotStarve(unittest.TestCase):
                               "a queued cutover must not run its endgame rounds"))
         sp.start()
         self.addCleanup(sp.stop)
+        # Caught up: the endgame is asked for at this point, and the answer is
+        # either the lvstore or a queue slot.
+        lp = patch.object(runner, "_replication_lag_sec", return_value=1.0)
+        lp.start()
+        self.addCleanup(lp.stop)
+        tp = patch.object(runner, "_take_shrink_snapshot",
+                          side_effect=AssertionError(
+                              "a queued cutover must not take a snapshot"))
+        tp.start()
+        self.addCleanup(tp.stop)
 
     def _me(self):
         t = MagicMock()
@@ -539,9 +564,6 @@ class TestQueuedCutoverDoesNotStarve(unittest.TestCase):
             "lvol_id": "LV_me", "src_node_id": "N1", "tgt_node_id": "N2",
             "shrink_round": 1, "shrink_snap_id": "S1",
             "shrink_deadline": 1,          # already expired
-            # asking for the endgame: the delta has converged in the open, so
-            # this is the point at which queueing happens
-            "ready_for_exclusive": True,
         }
         return t
 

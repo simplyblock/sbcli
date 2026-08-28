@@ -4402,14 +4402,14 @@ def replication_commit(lvol_id, delete_source=False):
 
     source_node = db_controller.get_storage_node_by_id(lvol.node_id)
 
-    # Shrink round 1: freeze the current top delta and let the normal
-    # replication pipeline carry it (snapshot_controller.add auto-enqueues the
-    # replication task for do_replicate volumes).
-    snap_uuid, snap_err = snapshot_controller.add(
-        lvol_id, f"repl_commit_{uuid.uuid4()}", snap_type=SnapShot.TYPE_INTERNAL)
-    if snap_err:
-        logger.error(f"Shrink snapshot failed: {snap_err}")
-        return False, f"Shrink snapshot failed: {snap_err}"
+    # NO snapshot here. The iterative snapshots ARE the endgame, and the
+    # endgame does not start until ordinary replication has the target within
+    # REPL_CUTOVER_ENDGAME_LAG_SEC. Taking one at commit time meant every
+    # volume held an ageing snapshot while it waited its turn, and the "round"
+    # that followed measured that wait rather than the transfer (run
+    # 20260828_124859: round 1 growing 341s -> 2584s across five volumes, while
+    # the one that never waited finished in 12.4s). The runner takes the first
+    # one when it enters the endgame, so its delta covers only the residual.
 
     task = tasks_controller.add_replication_final_task(
         source_node.cluster_id, source_node.get_id(),
@@ -4419,14 +4419,12 @@ def replication_commit(lvol_id, delete_source=False):
             "tgt_node_id": target_node.get_id(),
             "operation": "replicate",
             "final_state": LVolReplication.STATE_CUTOVER_DONE,
-            "shrink_round": 1,
-            "shrink_snap_id": snap_uuid,
-            # When this round started transferring. The convergence loop
-            # measures each round against it to decide whether the delta is
-            # small enough to freeze; without it round 1 measures as 0.00s and
-            # "converges" instantly, which is how the freeze stayed at 9-55s
-            # with the loop deployed (run 20260827_172734).
-            "shrink_started_at": time.time(),
+            # The runner takes the first iterative snapshot when it enters the
+            # endgame and stamps shrink_started_at then; a round measured
+            # without that stamp reads as 0.00s and "converges" instantly,
+            # which is how the freeze stayed at 9-55s with the convergence loop
+            # deployed (run 20260827_172734).
+            "shrink_round": 0,
             "shrink_deadline": int(time.time()) + constants.REPL_CUTOVER_SHRINK_TIMEOUT_SEC,
             # Migration semantics on request: retire the source volume once
             # the cutover state is durable (see _finalize in the final runner).

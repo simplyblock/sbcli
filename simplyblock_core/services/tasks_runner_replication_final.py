@@ -264,19 +264,42 @@ def task_runner(task: JobSchedule, tasks=None):
                           result=str(task.function_result)[:40].replace(" ", "_"))
         task.status = JobSchedule.STATUS_RUNNING
         task.function_params.setdefault("start_time", int(time.time()))
-        # Claim the source LVS for the whole cutover -- the convergence rounds
-        # AND the freeze. Other volumes' snapshot transfers on this LVS queue
-        # behind it (see snapshot_replication._lvs_locked_by_cutover): they
-        # compete for the same lvstore and hub bandwidth, and every second they
-        # steal from a convergence round is a second of writes that lands in
-        # the freeze.
-        # Exclusivity is the ENDGAME, not the whole cutover. The bulk catch-up
-        # converges in the open, concurrently with every other volume; only
-        # once a round is already fast is the lvstore taken, for the final
-        # tight rounds and the freeze (see _acquire_lvs_claim).
-        if params.get("ready_for_exclusive") and not params.get("cutover_lvs"):
+
+        # ---- WAIT FOR THE VOLUME TO CATCH UP ---------------------------- #
+        # The iterative snapshots ARE the endgame. Until then the volume just
+        # replicates on its ordinary cadence: the cutover takes no snapshots of
+        # its own and holds nothing, so it adds no load to a cluster that is
+        # still catching up -- exactly when it can least afford it.
+        if not params.get("cutover_lvs"):
+            lag = _replication_lag_sec(lvol)
+            if lag is None or lag > constants.REPL_CUTOVER_ENDGAME_LAG_SEC:
+                task.function_result = (
+                    "waiting for replication to catch up before the endgame "
+                    "(lag %s > %ds)"
+                    % ("unknown" if lag is None else "%.0fs" % lag,
+                       constants.REPL_CUTOVER_ENDGAME_LAG_SEC))
+                xfer_timing.stamp("await_catchup", lvol=lvol_id,
+                                  ms=(lag or 0) * 1000.0)
+                # Not a failure: no retry burned, and the deadline is pushed out
+                # because catching up is legitimate progress, not a stall.
+                params["shrink_deadline"] = (
+                    int(time.time()) + constants.REPL_CUTOVER_SHRINK_TIMEOUT_SEC)
+                task.status = JobSchedule.STATUS_SUSPENDED
+                task.write_to_db(db.kv_store)
+                return False
+
+            # Caught up: take the lvstore for the endgame. Queueing here is
+            # cheap -- nothing is held and no snapshot is ageing.
             if not _acquire_lvs_claim(task, lvol, tasks):
-                return False        # queued, holding nothing and ageing nothing
+                return False
+            xfer_timing.stamp("endgame_entered", lvol=lvol_id, ms=lag * 1000.0)
+
+        # The first iterative snapshot belongs to the endgame, not to task
+        # creation: taken here, its delta covers only the catch-up residual.
+        if not params.get("shrink_snap_id"):
+            _, snap_err = _take_shrink_snapshot(task, lvol)
+            if snap_err:
+                return _finalize(task, False, snap_err)
         task.write_to_db(db.kv_store)
 
         # ---- SHRINK PHASE ----------------------------------------------- #
@@ -349,6 +372,35 @@ def task_runner(task: JobSchedule, tasks=None):
     return True
 
 
+
+
+def _replication_lag_sec(lvol):
+    """How far the target is behind: age of the newest REPLICATED snapshot.
+
+    None when the volume has no replicated snapshot yet, which counts as "not
+    caught up" -- there is nothing for the endgame's first delta to chain onto.
+
+    This is the entry gate for the endgame. Measuring it from ordinary cadence
+    replication costs nothing: the alternative (taking rounds to find out how
+    fast a round is) adds snapshot and transfer load to a cluster that is still
+    catching up, which is precisely when it can least afford it.
+    """
+    newest = None
+    try:
+        snaps = db.get_snapshots_by_node_id(lvol.node_id)
+    except Exception as e:                                # noqa: BLE001
+        logger.warning("Cannot read snapshots of %s to measure replication lag: %s",
+                       lvol.get_id(), e)
+        return None
+    for s in snaps:
+        if (s.lvol.get_id() == lvol.get_id()
+                and s.snap_type == SnapShot.TYPE_INTERNAL
+                and getattr(s, "target_replicated_snap_uuid", "")
+                and (newest is None or s.created_at > newest.created_at)):
+            newest = s
+    if newest is None:
+        return None
+    return max(0.0, time.time() - float(newest.created_at))
 
 
 def _take_shrink_snapshot(task, lvol):
@@ -475,32 +527,12 @@ def _shrink_step(task, lvol):
                               ms=elapsed * 1000.0)
             params["shrink_round_done_at"] = time.time()
 
-        exclusive = bool(params.get("cutover_lvs"))
-
-        # Converged AND holding the lvstore: hand over to the freeze.
-        if exclusive and elapsed <= constants.REPL_CUTOVER_CONVERGE_TARGET_SEC:
+        # Every round is an endgame round now -- the lvstore is held before the
+        # first iterative snapshot is taken.
+        if elapsed <= constants.REPL_CUTOVER_CONVERGE_TARGET_SEC:
             task.function_result = (f"converged in {params['shrink_round']} rounds "
                                     f"(last {elapsed:.2f}s)")
             return True, None
-
-        # Nearly converged but still converging in the OPEN. Stop and go take
-        # the lvstore for the endgame. Claiming it any earlier serialises the
-        # bulk catch-up: in run 20260828_124859 the claim was taken on the
-        # task's first pass and held for its whole life, so volumes queued
-        # while holding an ageing round-1 snapshot and their "round" measured
-        # the queue -- 340s, 1505s, 2073s, 2584s for successive volumes, while
-        # the one that never queued finished its round in 12.4s.
-        if not exclusive and elapsed <= (
-                constants.REPL_CUTOVER_CONVERGE_TARGET_SEC
-                * constants.REPL_CUTOVER_EXCLUSIVE_ENTRY_FACTOR):
-            params["ready_for_exclusive"] = True
-            task.function_result = (f"delta converged in {params['shrink_round']} "
-                                    f"open rounds (last {elapsed:.2f}s); taking "
-                                    f"the lvstore for the endgame")
-            xfer_timing.stamp("ready_for_exclusive", lvol=lvol.get_id(),
-                              round=params["shrink_round"], ms=elapsed * 1000.0)
-            task.write_to_db(db.kv_store)
-            return False, None
 
         if params["shrink_round"] >= constants.REPL_CUTOVER_MAX_SHRINK_ROUNDS:
             # Written faster than it replicates. Freezing now is still the best
@@ -512,11 +544,6 @@ def _shrink_step(task, lvol):
                 constants.REPL_CUTOVER_CONVERGE_TARGET_SEC)
             task.function_result = (f"not converged after {params['shrink_round']} "
                                     f"rounds (last {elapsed:.2f}s)")
-            if not params.get("cutover_lvs"):
-                # Give up converging, but the freeze still wants the lvstore.
-                params["ready_for_exclusive"] = True
-                task.write_to_db(db.kv_store)
-                return False, None
             return True, None
 
         # IMMEDIATELY take the next snapshot. This is the whole mechanism: the

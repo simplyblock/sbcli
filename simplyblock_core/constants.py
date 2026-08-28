@@ -389,7 +389,10 @@ REPL_CUTOVER_MAX_SHRINK_ROUNDS = 12
 # nearly converged, so the exclusive window that follows will be short. Claiming
 # earlier serialises the bulk catch-up, which is what produced 0/20 cutovers in
 # run 20260828_124859 (round 1 growing 340s -> 2584s purely from queueing).
-REPL_CUTOVER_EXCLUSIVE_ENTRY_FACTOR = 3.0
+# The endgame starts once ordinary replication has the target within this many
+# seconds. Before that the cutover waits and takes NO snapshots of its own --
+# the iterative snapshots ARE the endgame.
+REPL_CUTOVER_ENDGAME_LAG_SEC = 50
 # Rounds must follow each other within MILLISECONDS. Returning to the task
 # scheduler between them costs TASK_EXEC_INTERVAL_SEC (10s) of fresh writes
 # each time, which puts a floor under the delta no number of rounds can beat.
