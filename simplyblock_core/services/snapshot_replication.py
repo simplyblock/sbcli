@@ -555,6 +555,15 @@ def process_snap_replicate_start(task, snapshot):
         task.write_to_db()
         return
 
+    allow_partial = _partial_transfer_decision(
+        task, snapshot, replicate_to_source, remote_lv, remote_lv_node)
+    logger.info("Transfer of %s into %s: %s", snapshot.get_id(),
+                remote_lv.top_bdev,
+                "PARTIAL allowed (landing volume is a clone of the previous "
+                "replicated snapshot on every online member)" if allow_partial
+                else "FULL (no delta basis on every online member; see above "
+                     "for which check declined)")
+
     offset = 0
     if "offset" in task.function_params and task.function_params["offset"]:
         offset = task.function_params["offset"]
@@ -602,7 +611,11 @@ def process_snap_replicate_start(task, snapshot):
         batch_size=16,
         bdev_name=hub_bdev,
         operation="replicate",
-        lvol_id=remote_map_id
+        lvol_id=remote_map_id,
+        # Safe only because the landing volume was chained onto the previous
+        # replicated snapshot above; the fork independently refuses the delta
+        # path unless the snapshot's dirty generation is complete.
+        allow_partial=allow_partial,
     )
     task.status = JobSchedule.STATUS_RUNNING
     task.function_params["start_time"] = int(time.time())
@@ -1038,6 +1051,154 @@ def _resolve_chain_target(snapshot, replicate_to_source, remote_snode):
     return {"snap_bdev": _snap_obj.snap_bdev}, _snap_obj, True
 
 
+def _prechain_landing_volume(task, snapshot, replicate_to_source, remote_lv,
+                             remote_lv_node):
+    """Chain the landing volume onto the destination's copy of the PREVIOUS
+    snapshot, before the transfer runs, so only the delta has to be sent.
+
+    Returns True when the landing volume (and every online member of its HA
+    pair) is chained, which is the precondition for asking for a PARTIAL
+    transfer. Returns False to mean "send a full transfer", which is always
+    correct and is what this pipeline did unconditionally until now.
+
+    Why chaining first is what makes a partial transfer correct
+    -----------------------------------------------------------
+    ``bdev_lvol_transfer`` sends a blob's OWN cluster map and nothing else, so a
+    partial transfer ships only the ranges written since the previous snapshot.
+    Everything OUTSIDE that delta therefore has to be on the destination
+    already, and a fresh empty landing volume does not have it -- that is
+    exactly why the delta path has never been switched on. Chaining the landing
+    volume onto the predecessor's remote copy supplies it: a cluster the new
+    snapshot does not own stays unallocated and reads through to the parent,
+    and the first write into a cluster the delta DOES touch makes the blobstore
+    copy-on-write the whole cluster from that same parent before applying the
+    incoming range. Both halves of the destination image thus come from the
+    same predecessor the source computed its delta against.
+
+    This is the very ``bdev_lvol_add_clone`` the finish step used to issue AFTER
+    the transfer; issuing it BEFORE is what turns the landing volume into a
+    valid delta target. Nodes chained here are recorded on the task so the
+    finish step does not add the same clone entry twice.
+
+    The bar for returning True is deliberately high:
+      * a predecessor copy must resolve cleanly on this node (``ok`` and a
+        non-empty ``target_prev_snap`` from :func:`_resolve_chain_target`);
+      * the LVS leader must accept the chain;
+      * the secondary must be ONLINE and accept it too. The transfer lands on
+        the leader and the lvstore mirrors it to the secondary; an unchained
+        secondary would read zeros wherever the delta did not write, so a
+        degraded pair gets a full transfer rather than a delta.
+    Anything short of that logs why and falls back to a full transfer.
+    """
+    target_prev_snap, _prev_snap_for_db, ok = _resolve_chain_target(
+        snapshot, replicate_to_source, remote_lv_node)
+    if not ok:
+        logger.info(
+            "Landing volume %s stays a full-transfer target: the predecessor's "
+            "copy on the destination could not be resolved", remote_lv.top_bdev)
+        return False
+    if not target_prev_snap:
+        logger.info(
+            "Landing volume %s stays a full-transfer target: %s starts the "
+            "chain, so there is no predecessor to clone from",
+            remote_lv.top_bdev, snapshot.get_id())
+        return False
+
+    sec_node = None
+    if remote_lv_node.secondary_node_id:
+        try:
+            sec_node = db.get_storage_node_by_id(remote_lv_node.secondary_node_id)
+        except KeyError:
+            sec_node = None
+    if sec_node is None or sec_node.status != StorageNode.STATUS_ONLINE:
+        logger.info(
+            "Landing volume %s stays a full-transfer target: the secondary of "
+            "%s is not online, and a delta would leave holes on it",
+            remote_lv.top_bdev, remote_lv_node.get_id())
+        return False
+
+    prechained = list(task.function_params.get("prechained_node_ids") or [])
+
+    def _chain_on(node, role):
+        if node.get_id() in prechained:
+            return True
+        logger.info("Pre-chaining landing volume %s onto %s on %s (%s) so the "
+                    "transfer can ship only the delta",
+                    remote_lv.top_bdev, target_prev_snap['snap_bdev'],
+                    node.get_id(), role)
+        try:
+            ret = node.rpc_client().bdev_lvol_add_clone(
+                remote_lv.top_bdev, target_prev_snap['snap_bdev'])
+        except Exception as e:
+            logger.warning("Pre-chain of %s on %s (%s) raised %s; falling back "
+                           "to a full transfer", remote_lv.top_bdev,
+                           node.get_id(), role, e)
+            return False
+        if not ret:
+            logger.warning("Pre-chain of %s onto %s failed on %s (%s); falling "
+                           "back to a full transfer", remote_lv.top_bdev,
+                           target_prev_snap['snap_bdev'], node.get_id(), role)
+            return False
+        prechained.append(node.get_id())
+        return True
+
+    primary_ok = _chain_on(remote_lv_node, "primary")
+    # Record whatever actually landed even on the failure path: the entry exists
+    # on that node now, and the finish step must not add it a second time.
+    secondary_ok = _chain_on(sec_node, "secondary") if primary_ok else False
+    if prechained != (task.function_params.get("prechained_node_ids") or []):
+        task.function_params["prechained_node_ids"] = prechained
+        task.write_to_db()
+
+    if not (primary_ok and secondary_ok):
+        # A full transfer into a partially chained volume is still correct: it
+        # writes every cluster the snapshot owns, and the chained node reads the
+        # remainder from the parent exactly as it should.
+        return False
+    return True
+
+
+def _partial_transfer_decision(task, snapshot, replicate_to_source, remote_lv,
+                               remote_lv_node):
+    """Whether this transfer may ship only the delta, chaining the landing
+    volume first if that has not happened yet.
+
+    The verdict is cached on the task so a resumed transfer (offset > 0) keeps
+    the mode its first attempt used -- but it is KEYED to the landing volume it
+    was made about. An interrupted attempt can delete a half-created landing
+    volume and build a fresh, unchained one (see the adoption block in
+    process_snap_replicate_start); carrying "partial is fine" onto that volume
+    would ship a delta into something that holds nothing, which is precisely
+    the silent data loss this design exists to avoid. A key mismatch throws
+    away the old verdict AND the old chain record and re-derives both.
+    """
+    landing_key = remote_lv.get_id()
+    if task.function_params.get("allow_partial_landing") == landing_key:
+        return bool(task.function_params.get("allow_partial"))
+
+    # Chain state recorded against a previous landing volume says nothing about
+    # this one.
+    task.function_params["prechained_node_ids"] = []
+    allow_partial = _prechain_landing_volume(
+        task, snapshot, replicate_to_source, remote_lv, remote_lv_node)
+    task.function_params["allow_partial"] = allow_partial
+    task.function_params["allow_partial_landing"] = landing_key
+    task.write_to_db()
+    return allow_partial
+
+
+def _prechained_nodes_for(task, remote_lv):
+    """Nodes already carrying the landing volume's clone entry.
+
+    Empty unless the record was made about THIS landing volume: adding the same
+    clone entry twice is not idempotent on the SPDK side, and trusting a stale
+    record would skip a chain the volume actually needs.
+    """
+    if task.function_params.get("allow_partial_landing") != remote_lv.get_id():
+        return set()
+    return set(task.function_params.get("prechained_node_ids") or [])
+
+
 def process_snap_replicate_finish(task, snapshot):
 
     # Close the transfer session — but ONLY when this was the last active
@@ -1085,8 +1246,13 @@ def process_snap_replicate_finish(task, snapshot):
     if not _require_lvs_leader(remote_snode, remote_lv.lvs_name, "add_clone/convert"):
         return False
 
+    # Nodes whose landing volume was already chained BEFORE the transfer, so it
+    # could receive a delta (see _prechain_landing_volume). Those must be
+    # skipped here: adding the same clone entry twice is not idempotent.
+    _prechained = _prechained_nodes_for(task, remote_lv)
+
     # chain snaps on primary
-    if target_prev_snap:
+    if target_prev_snap and remote_snode.get_id() not in _prechained:
         logger.info(f"Chaining replicated lvol: {remote_lv.top_bdev} to snap: {target_prev_snap['snap_bdev']}")
         with xfer_timing.phase("chain_add_clone", snap=snapshot.get_id(),
                                lvol=snapshot.lvol.get_id(), node="primary"):
@@ -1094,6 +1260,11 @@ def process_snap_replicate_finish(task, snapshot):
         if not ret:
             logger.error("Failed to chain replicated snapshot on primary node")
             return False
+    elif target_prev_snap:
+        logger.info("Landing volume %s was already chained to %s on %s before "
+                    "the transfer; skipping the redundant add_clone",
+                    remote_lv.top_bdev, target_prev_snap['snap_bdev'],
+                    remote_snode.get_id())
 
     # convert to snapshot on primary
     with xfer_timing.phase("chain_convert", snap=snapshot.get_id(),
@@ -1106,7 +1277,7 @@ def process_snap_replicate_finish(task, snapshot):
     # chain snaps on secondary
     sec_node = db.get_storage_node_by_id(remote_snode.secondary_node_id)
     if sec_node.status == StorageNode.STATUS_ONLINE:
-        if target_prev_snap:
+        if target_prev_snap and sec_node.get_id() not in _prechained:
             logger.info(f"Chaining replicated lvol: {remote_lv.top_bdev} to snap: {target_prev_snap['snap_bdev']}")
             with xfer_timing.phase("chain_add_clone", snap=snapshot.get_id(),
                                    lvol=snapshot.lvol.get_id(), node="secondary"):
@@ -1114,6 +1285,11 @@ def process_snap_replicate_finish(task, snapshot):
             if not ret:
                 logger.error("Failed to chain replicated snapshot on secondary node")
                 return False
+        elif target_prev_snap:
+            logger.info("Landing volume %s was already chained to %s on %s "
+                        "before the transfer; skipping the redundant add_clone",
+                        remote_lv.top_bdev, target_prev_snap['snap_bdev'],
+                        sec_node.get_id())
 
         # convert to snapshot on secondary
         with xfer_timing.phase("chain_convert", snap=snapshot.get_id(),
