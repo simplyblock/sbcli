@@ -38,7 +38,7 @@ utils.init_sentry_sdk(__name__)
 db = db_controller.DBController()
 
 
-def _lvs_cutover_owner(task, lvs_name):
+def _lvs_cutover_owner(task, lvs_name, tasks=None):
     """Return the task that should own *lvs_name*, or None if *task* itself wins.
 
     Deterministic: the earliest-created claimant wins (sorted by create_dt then
@@ -59,11 +59,14 @@ def _lvs_cutover_owner(task, lvs_name):
     permanent circular stall (e.g. 36418f5d queued behind 309d3aeb AND
     309d3aeb queued behind 36418f5d).  Including self in the sort eliminates
     the self-exclusion blindspot that made the cycle possible.
+
+    ``tasks`` may be a pre-fetched list from this pass. Re-reading per task is
+    O(N^2) DB reads, which the sub-second poll interval cannot afford.
     """
     if not lvs_name:
         return None
     claimants = []
-    for other in db.get_job_tasks(task.cluster_id):
+    for other in (tasks if tasks is not None else db.get_job_tasks(task.cluster_id)):
         if other.function_name != JobSchedule.FN_REPLICATION_FINAL:
             continue
         if other.status == JobSchedule.STATUS_DONE or other.canceled:
@@ -211,7 +214,6 @@ def _finalize(task, ok, err):
     task.write_to_db(db.kv_store)
     return False
 
-
 def _swap_failback_lvol_uuid(rep, failback_source_id):
     """After a successful failback cutover, reassign the new clone's UUID to
     the original source lvol's UUID.
@@ -289,7 +291,7 @@ def _swap_failback_lvol_uuid(rep, failback_source_id):
         stale_uuid, failback_source_id)
 
 
-def task_runner(task: JobSchedule):
+def task_runner(task: JobSchedule, tasks=None):
     params = task.function_params
     lvol_id = params.get("lvol_id")
     if not lvol_id:
@@ -371,7 +373,7 @@ def task_runner(task: JobSchedule):
         task.function_params["cutover_group"] = own_group
         task.write_to_db(db.kv_store)
 
-        owner = _lvs_cutover_owner(task, lvs_name)
+        owner = _lvs_cutover_owner(task, lvs_name, tasks)
         if owner is not None:
             owner_group = (owner.function_params or {}).get("cutover_group") or ""
             owner_lvol = str((owner.function_params or {}).get("lvol_id"))
@@ -507,6 +509,11 @@ def _inline_window(last_round_secs):
     the next snapshot must follow within milliseconds -- and yields early when
     rounds are still long, which is where yielding costs nothing because the
     freeze is far away regardless.
+
+    The floor is REPL_CUTOVER_MIN_INLINE_SEC rather than zero because yielding
+    hands the round back to the pass loop, and being picked up again costs far
+    more than the poll it replaces: the requirement is that NO time is lost
+    between a transfer completing and the next snapshot starting.
     """
     return min(constants.REPL_CUTOVER_CONVERGE_BUDGET_SEC,
                max(constants.REPL_CUTOVER_MIN_INLINE_SEC, last_round_secs * 3))
@@ -696,11 +703,22 @@ def _prepare_cutover(task, lvol, src_node, tgt_node):
     return None
 
 
-def _run_task_safe(task):
-    try:
-        task_runner(task)
-    except Exception as e:
-        logger.error(f"replication-final task {task.uuid} failed: {e}", exc_info=True)
+def _any_cutover_in_flight(tasks):
+    """True while some cutover is between its first snapshot and its freeze.
+
+    Only then is a sub-second pass interval worth paying for: that is the
+    window where a completed transfer must be picked up immediately.
+    """
+    for t in tasks:
+        if t.function_name != JobSchedule.FN_REPLICATION_FINAL:
+            continue
+        if t.status == JobSchedule.STATUS_DONE or t.canceled:
+            continue
+        params = t.function_params or {}
+        # claimed the lvstore, or already has a round in flight
+        if params.get("cutover_lvs") or params.get("shrink_snap_id"):
+            return True
+    return False
 
 
 def main():
@@ -712,20 +730,31 @@ def main():
             logger.error(f"Failed to get clusters: {e}")
             time.sleep(3)
             continue
-        threads = []
+        active = False
         for cl in clusters:
-            for task in db.get_job_tasks(cl.get_id(), reverse=False):
+            # Read once per cluster per pass and reuse: the owner lookup used to
+            # re-read this for every task.
+            cluster_tasks = db.get_job_tasks(cl.get_id(), reverse=False)
+            if _any_cutover_in_flight(cluster_tasks):
+                active = True
+            for task in cluster_tasks:
                 if task.function_name != JobSchedule.FN_REPLICATION_FINAL:
                     continue
                 if task.status == JobSchedule.STATUS_DONE:
                     continue
                 task = db.get_task_by_id(task.uuid)
-                t = threading.Thread(target=_run_task_safe, args=(task,), daemon=True)
-                threads.append(t)
-                t.start()
-        for t in threads:
-            t.join()
-        time.sleep(constants.TASK_EXEC_INTERVAL_SEC)
+                try:
+                    res = task_runner(task, cluster_tasks)
+                except Exception as e:
+                    logger.error(f"replication-final task {task.uuid} failed: {e}", exc_info=True)
+                    res = False
+                # No blanket backoff here. `res is False` is the NORMAL result
+                # for a task that is queued or mid-round, and sleeping 3s per
+                # such task cost ~70s per pass with 20 volumes -- which landed
+                # directly in the client's IO freeze.
+        # Poll fast only while it matters; an idle cluster keeps the old cadence.
+        time.sleep(constants.REPL_CUTOVER_ACTIVE_POLL_SEC if active
+                   else constants.TASK_EXEC_INTERVAL_SEC)
 
 
 if __name__ == "__main__":

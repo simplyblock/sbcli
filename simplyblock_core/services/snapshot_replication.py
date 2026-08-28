@@ -211,6 +211,94 @@ def _lvs_transfer_hold(task, snapshot):
     return ""
 
 
+def _finish_completed_transfer(task, snapshot, offset):
+    """Chain, convert and mark the snapshot replicated. Returns True.
+
+    This is what sets target_replicated_snap_uuid, which is the signal a
+    cutover's convergence loop waits on -- so it must run as soon as the
+    transfer is known to be finished, not on some later pass.
+    """
+    # submit -> Done, measured. NOT a throughput: see fix_xfer_latency notes.
+    xfer_timing.gap("transfer_complete",
+                    task.function_params.get("xfer_submit_t"),
+                    snap=snapshot.get_id(), lvol=snapshot.lvol.get_id(),
+                    bytes=offset)
+    with xfer_timing.phase("replicate_finish", snap=snapshot.get_id(),
+                           lvol=snapshot.lvol.get_id()):
+        new_snapshot_uuid = process_snap_replicate_finish(task, snapshot)
+    if new_snapshot_uuid:
+        task.function_result = new_snapshot_uuid
+        task.status = JobSchedule.STATUS_DONE
+        task.function_params["end_time"] = int(time.time())
+        task.write_to_db()
+    else:
+        task.function_result = "complete repl failed, retrying"
+        task.status = JobSchedule.STATUS_SUSPENDED
+        task.retry += 1
+        task.write_to_db()
+    return True
+
+
+def _cutover_owns(lvol_id, cluster_id):
+    """True while a final cutover is running for this volume.
+
+    Such a volume already holds its lvstore and every other transfer on it is
+    held, so waiting inline for its transfer starves nothing -- and this is the
+    window the client's IO freeze is paying for.
+    """
+    if not lvol_id:
+        return False
+    try:
+        tasks = db.get_job_tasks(cluster_id)
+    except Exception:                                     # noqa: BLE001
+        return False
+    for other in tasks:
+        if other.function_name != JobSchedule.FN_REPLICATION_FINAL:
+            continue
+        if other.status == JobSchedule.STATUS_DONE or other.canceled:
+            continue
+        if (other.function_params or {}).get("lvol_id") == lvol_id:
+            return True
+    return False
+
+
+def _await_transfer_completion(task, snapshot, snode):
+    """Poll the just-submitted transfer at 100ms and finish it in this pass.
+
+    Returns True when the transfer completed and was finished here; False to
+    leave it for the pass-based path (still in flight, or the budget ran out).
+
+    Before this, submit and the Done check happened on DIFFERENT passes of the
+    runner loop, so a transfer that finished in milliseconds was not acted on
+    for a median of 81 SECONDS (run 20260828_115307: every poll found state
+    already 'Done', never once 'In progress').
+    """
+    budget = (constants.REPL_XFER_INLINE_WAIT_CUTOVER_SEC
+              if _cutover_owns(snapshot.lvol.get_id(), task.cluster_id)
+              else constants.REPL_XFER_INLINE_WAIT_SEC)
+    deadline = time.time() + budget
+    rpc = snode.rpc_client()
+    while time.time() < deadline:
+        try:
+            ret = rpc.bdev_lvol_transfer_stat(snapshot.snap_bdev)
+        except Exception as e:                            # noqa: BLE001
+            logger.warning("transfer_stat for %s raised while waiting inline "
+                           "(%s); leaving it to the next pass",
+                           snapshot.get_id(), e)
+            return False
+        if not ret:
+            return False
+        state = ret.get("transfer_state")
+        if state == "Done":
+            return _finish_completed_transfer(task, snapshot, ret.get("offset"))
+        if state == "Failed":
+            return False              # the pass-based path records the retry
+        time.sleep(constants.REPL_XFER_POLL_INTERVAL_SEC)
+    xfer_timing.stamp("inline_wait_expired", snap=snapshot.get_id(),
+                      lvol=snapshot.lvol.get_id(), budget=budget)
+    return False
+
+
 def process_snap_replicate_start(task, snapshot):
     # 1 create lvol on remote node
     logger.info("Starting snapshot replication task")
@@ -520,6 +608,15 @@ def process_snap_replicate_start(task, snapshot):
     task.function_params["start_time"] = int(time.time())
     task.write_to_db()
 
+    # Do not hand the transfer back to the pass loop and forget about it: wait
+    # for it here, polling every 100ms, and finish it in this same pass. Before
+    # this, submit and the Done check happened on different passes and a
+    # transfer that finished in milliseconds went unnoticed for a median of 81
+    # SECONDS (run 20260828_115307). Returns False if it is still running when
+    # the budget expires, in which case the pass-based path picks it up as
+    # before.
+    _await_transfer_completion(task, snapshot, snode)
+
 
 def _receiving_leader_node(remote_lv):
     """The node that currently leads *remote_lv*'s lvstore, or None.
@@ -750,6 +847,18 @@ def _prune_internal_snapshots(source_lvol):
     # Either way the newest `keep` are protected, because deleting a snapshot
     # swap-merges its segments into the successor chained to it.
     schedule = _retention_schedule_for(source_lvol)
+    # Say which retention is in force, every time it prunes. Soak run
+    # 20260827_224741 ended with 2 snapshots at consecutive cadence ticks after
+    # 124 minutes under `5m:15m,7m:30m,10m:1h` -- which is exactly what the FLAT
+    # keep-N path produces, and nothing in the log said which path ran. The
+    # ladder itself is provably correct (test_case11_retention_ladder), so the
+    # open question is whether the schedule reaches this function at all.
+    logger.info(
+        "Retention for lvol %s: %s (replicated internal snapshots: %d, keep=%d)",
+        source_lvol.get_id(),
+        ("schedule %s" % snapshot_retention.describe(schedule)) if schedule
+        else "FLAT keep-newest (no schedule on the policy)",
+        len(replicated_internal), keep)
     if schedule:
         retained_ts = snapshot_retention.select_retained(
             [s.created_at for s in replicated_internal], schedule,
@@ -1206,28 +1315,7 @@ def task_runner(task: JobSchedule):
             task.write_to_db()
             return False
         if status == "Done":
-            # The transfer proper is submit -> Done. This is the number every
-            # earlier analysis lacked: round duration includes the chain,
-            # convert, task-runner latency and DB writes, so it cannot be
-            # divided into bytes to get a throughput.
-            xfer_timing.gap("transfer_complete",
-                            task.function_params.get("xfer_submit_t"),
-                            snap=snapshot.get_id(), lvol=snapshot.lvol.get_id(),
-                            bytes=offset)
-            with xfer_timing.phase("replicate_finish", snap=snapshot.get_id(),
-                                   lvol=snapshot.lvol.get_id()):
-                new_snapshot_uuid = process_snap_replicate_finish(task, snapshot)
-            if new_snapshot_uuid:
-                task.function_result = new_snapshot_uuid
-                task.status = JobSchedule.STATUS_DONE
-                task.function_params["end_time"] = int(time.time())
-                task.write_to_db()
-            else:
-                task.function_result = "complete repl failed, retrying"
-                task.status = JobSchedule.STATUS_SUSPENDED
-                task.retry += 1
-                task.write_to_db()
-            return True
+            return _finish_completed_transfer(task, snapshot, offset)
 
 
 def main():
