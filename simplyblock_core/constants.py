@@ -343,8 +343,8 @@ MAX_SNAP_COUNT = 100
 # abort -- which is an order of magnitude above this cap, so the headroom
 # below it is real.
 #
-# Raised 6000 -> 12000 on 2026-08-20.
-MAX_OBJECTS_PER_LVSTORE = 12000
+# Raised 6000 -> 12000 on 2026-08-20, lowered back to 6000 on 2026-08-28.
+MAX_OBJECTS_PER_LVSTORE = 6000
 
 # Hard cap on namespaces (lvols) sharing one nvmf subsystem. The DEFAULT for
 # namespaced creates stays LVO_MAX_NAMESPACES_PER_SUBSYS; this is the ceiling
