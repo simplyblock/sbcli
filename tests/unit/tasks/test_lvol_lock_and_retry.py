@@ -29,6 +29,7 @@ import pytest
 from simplyblock_core import constants
 from simplyblock_core.controllers import snapshot_controller, tasks_controller
 from simplyblock_core.models.job_schedule import JobSchedule
+from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.exceptions import PreconditionError
 
 
@@ -197,3 +198,55 @@ def test_enodev_is_never_counted_or_alerted():
     assert event.call_count == 0
     assert task.retry == constants.TASK_FAILURE_ALERT_THRESHOLD + 5, (
         "-19 must not advance the failure counter")
+
+
+# --- 5. a peer restart is waited out under the lock, but not forever ----
+
+def _phase_sequence(*phases):
+    """get_restart_phase stub returning each value in turn, then the last."""
+    seq = list(phases)
+
+    def _get(node_id, lvs_name):
+        return seq.pop(0) if len(seq) > 1 else seq[0]
+    return _get
+
+
+def _check(monkeypatch, phase_fn, wait):
+    from simplyblock_core import storage_node_ops
+    node = mock.MagicMock()
+    node.secondary_node_id = None
+    node.tertiary_node_id = None
+    node.cluster_id = "cl-1"
+    monkeypatch.setattr(storage_node_ops.DBController, "__new__",
+                        lambda cls, *a, **k: mock.MagicMock(
+                            get_storage_node_by_id=lambda _: node))
+    monkeypatch.setattr(storage_node_ops, "_check_peer_disconnected",
+                        lambda *a, **k: False)
+    monkeypatch.setattr(storage_node_ops, "get_restart_phase", phase_fn)
+    monkeypatch.setattr(storage_node_ops, "_is_node_rpc_responsive",
+                        lambda *a, **k: True)
+    monkeypatch.setattr(storage_node_ops.time, "sleep", lambda *_: None)
+    return storage_node_ops.check_non_leader_for_operation(
+        "node-2", "LVS_1", wait_for_restart=wait)
+
+
+def test_restart_is_queued_when_the_caller_does_not_wait(monkeypatch):
+    """Default behaviour is unchanged for the callers that hold no lock."""
+    phase = _phase_sequence(StorageNode.RESTART_PHASE_BLOCKED)
+    assert _check(monkeypatch, phase, wait=0) == "queue"
+
+
+def test_restart_that_clears_lets_the_leg_run_under_the_lock(monkeypatch):
+    phase = _phase_sequence(StorageNode.RESTART_PHASE_BLOCKED,
+                            StorageNode.RESTART_PHASE_BLOCKED, "")
+    assert _check(monkeypatch, phase, wait=30) == "proceed"
+
+
+def test_wedged_restart_still_defers_rather_than_pinning_the_chain(monkeypatch):
+    """RESTART_TASK_EXEC_INTERVAL_MAX_SEC is 3600; the lock must not be held that long."""
+    phase = _phase_sequence(StorageNode.RESTART_PHASE_BLOCKED)
+    assert _check(monkeypatch, phase, wait=1) == "queue"
+
+
+def test_restart_wait_is_bounded():
+    assert 0 < constants.DEFERRED_LEG_RESTART_WAIT_SEC <= 300
