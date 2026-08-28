@@ -503,6 +503,47 @@ def fd_balance_violation(
     return None
 
 
+def fd_activation_domain_count_violation(
+    npcs: int, distinct_domain_count: int,
+) -> Optional[str]:
+    """Validate the number of distinct failure domains for fresh activation.
+
+    A 2-FD layout can never absorb a second independent failure once one
+    domain is fully down (confirmed with the backend team), so it is not
+    supported at any npcs level.
+
+    The bare *correctness* minimum for the rotation layout itself is
+    npcs+1 (e.g. 2 domains for npcs=1, 3 for npcs=2 -- below that even the
+    initial static placement is wrong: at exactly 2 domains the tertiary
+    role mathematically always lands back in the primary's own domain,
+    since "2 steps ahead" in a period-2 round-robin wraps to where it
+    started; verified directly against rotation_layout()). But a
+    minimum-correct STATIC layout has zero spare hosts per domain, and the
+    moment a single node is added or removed, the relocation logic
+    (_pick_replica_relocation_node) has no spare candidate left to
+    reassign the stranded role to -- verified directly: removing one node
+    from a bare-minimum npcs=1/2-domain or npcs=2/3-domain layout strands
+    another node's secondary/tertiary with no replacement at all, blocking
+    the removal outright rather than just degrading placement quality.
+
+    Requiring npcs+2 domains (3 for npcs=1, 4 for npcs=2, which also rules
+    out exactly 2 for both) keeps one domain of spare capacity beyond the
+    bare correctness floor, so a single add/remove has somewhere to place
+    the relocated role instead of failing immediately. Returns a
+    human-readable reason on violation, ``None`` when the count is
+    acceptable.
+    """
+    min_domains = npcs + 2
+    if distinct_domain_count < min_domains:
+        return (
+            f"failure domains are enabled with npcs={npcs}, which requires at "
+            f"least {min_domains} distinct failure domains (2 domains is not "
+            f"supported at any npcs level); currently have "
+            f"{distinct_domain_count}. Add hosts in additional domains, or "
+            f"disable failure domains, then activate.")
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Persistence helpers for ``Cluster.expand_state``.
 #

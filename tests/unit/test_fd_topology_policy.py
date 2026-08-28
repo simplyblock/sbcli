@@ -179,6 +179,41 @@ class TestFdBalance(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# planner.fd_activation_domain_count_violation
+# ---------------------------------------------------------------------------
+
+class TestFdActivationDomainCount(unittest.TestCase):
+
+    def test_npcs1_two_domains_violates(self):
+        self.assertIsNotNone(
+            planner.fd_activation_domain_count_violation(1, 2))
+
+    def test_npcs1_three_domains_ok(self):
+        self.assertIsNone(
+            planner.fd_activation_domain_count_violation(1, 3))
+
+    def test_npcs1_one_domain_violates(self):
+        self.assertIsNotNone(
+            planner.fd_activation_domain_count_violation(1, 1))
+
+    def test_npcs2_two_domains_violates(self):
+        self.assertIsNotNone(
+            planner.fd_activation_domain_count_violation(2, 2))
+
+    def test_npcs2_three_domains_violates(self):
+        self.assertIsNotNone(
+            planner.fd_activation_domain_count_violation(2, 3))
+
+    def test_npcs2_four_domains_ok(self):
+        self.assertIsNone(
+            planner.fd_activation_domain_count_violation(2, 4))
+
+    def test_npcs2_more_than_four_domains_ok(self):
+        self.assertIsNone(
+            planner.fd_activation_domain_count_violation(2, 6))
+
+
+# ---------------------------------------------------------------------------
 # preconditions: add / remove / current admission
 # ---------------------------------------------------------------------------
 
