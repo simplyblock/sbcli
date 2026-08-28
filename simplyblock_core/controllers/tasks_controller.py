@@ -948,8 +948,25 @@ def add_batch_mig_task(group):
 
 
 def add_lvol_sync_del_task(cluster_id, node_id, lvol_bdev_name, primary_node):
+    """Deferred per-node sync delete. Retried until it succeeds.
+
+    max_retry=-1 is deliberate, and matches add_lvol_sync_op_task: by the
+    time this task exists the leader's async delete has already succeeded,
+    so the data is gone and the volume is pinned in_deletion until every
+    peer drops its replica bdev. Giving up would leak the volume in
+    in_deletion permanently, which is strictly worse than retrying.
+
+    It previously declared max_retry=10 while the runner never incremented
+    task.retry nor compared it -- the bound was documented in the record and
+    absent from the code. The behaviour here is unchanged; it is now
+    honest about being unbounded. Failures are surfaced through the
+    SYNC_DELETE_FAILED cluster event (emitted when the error CHANGES, not
+    every 3s), and the task completes on obsolescence: -19 from the node,
+    or the node record disappearing.
+    """
     return _add_task(JobSchedule.FN_LVOL_SYNC_DEL, cluster_id, node_id, "",
-                     function_params={"lvol_bdev_name": lvol_bdev_name, "primary_node": primary_node}, max_retry=10)
+                     function_params={"lvol_bdev_name": lvol_bdev_name, "primary_node": primary_node},
+                     max_retry=-1)
 
 
 def get_lvol_sync_op_task(cluster_id, node_id, lvol_id, op):
@@ -1009,7 +1026,25 @@ def run_lvol_sync_op_task(task):
         try:
             lvol = db.get_lvol_by_id(lvol_id)
         except KeyError:
-            _finish("lvol no longer exists")
+            # A missing record is normally obsolescence (the lvol was
+            # deleted) and completes the task. But add_lvol_ha queues these
+            # register tasks in its pre-check, BEFORE it writes the lvol
+            # record at the end of the create -- so this runner (3s poll)
+            # can see the task while the create is still running and
+            # permanently DROP the registration, leaving the replica
+            # missing and every later snapshot on that node failing
+            # (the LVOL_109 class). Inside the grace window, defer instead:
+            # once the record appears, the status check below takes over.
+            try:
+                age = time.time() - float(task.date or 0)
+            except (TypeError, ValueError):
+                # Unknown age: fall back to the previous behaviour and treat
+                # the record as genuinely gone, rather than deferring forever.
+                age = float("inf")
+            if age < constants.LVOL_SYNC_OP_RECORD_GRACE_SEC:
+                _defer("lvol record not written yet, retrying")
+            else:
+                _finish("lvol no longer exists")
             return
         if lvol.status == LVol.STATUS_IN_DELETION:
             _finish("lvol is being deleted")

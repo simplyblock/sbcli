@@ -595,6 +595,20 @@ LVOL_MIG_MAX_INTERMEDIATE_SNAPS = 3        # max recursive "shrink" snapshot rou
 LVOL_MIG_INTERMEDIATE_SNAP_THRESHOLD_BYTES = 500 * 1024 * 1024  # 500 MiB — skip if delta is smaller
 LVOL_MIG_BDEV_SUFFIX = 'm'  # appended to every migration bdev on the target to avoid collision with real bdevs
 
+#: How long a deferred lvol register task tolerates a missing lvol record
+#: before treating it as obsolete. add_lvol_ha queues the task in its
+#: pre-check but writes the lvol record only at the end of the create, so
+#: a task picked up inside that window must wait for the record rather
+#: than conclude the volume was deleted and drop the registration.
+LVOL_SYNC_OP_RECORD_GRACE_SEC = 600
+
+#: How long a force/recovery delete waits for the chain and lvstore locks
+#: before proceeding without them. It used to skip them outright, so a
+#: forced delete could interleave with any create/delete/resize on the same
+#: chain; it must still not block forever behind a holder that died on a
+#: node that is now gone.
+FORCE_DELETE_LOCK_WAIT_SEC = 30
+
 # NVMe-oF TLS / DH-HMAC-CHAP security
 VALID_DHCHAP_DIGESTS = ["sha256", "sha384", "sha512"]
 VALID_DHCHAP_DHGROUPS = ["null", "ffdhe2048", "ffdhe3072", "ffdhe4096", "ffdhe6144", "ffdhe8192"]

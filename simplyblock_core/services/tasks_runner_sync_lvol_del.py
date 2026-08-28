@@ -143,8 +143,37 @@ def main():
                                 primary_node.lvol_del_sync_lock_reset()
                                 continue
 
-                            if node.status not in [StorageNode.STATUS_DOWN, StorageNode.STATUS_ONLINE]:
+                            # The node must be ONLINE, not merely "not in a
+                            # transitional state". DOWN was accepted here, so
+                            # the runner fired the RPC at a node that cannot
+                            # answer; it failed and suspended, which works but
+                            # is pure noise. register (run_lvol_sync_op_task)
+                            # already requires ONLINE.
+                            if node.status != StorageNode.STATUS_ONLINE:
                                 msg = f"Node is {node.status}, retry task"
+                                logger.info(msg)
+                                task.function_result = msg
+                                task.status = JobSchedule.STATUS_SUSPENDED
+                                task.write_to_db(db.kv_store)
+                                continue
+
+                            # Re-check the restart phase. This leg was queued
+                            # BECAUSE a restart owned the LVS state
+                            # (check_non_leader_for_operation returns "queue"
+                            # for PRE_BLOCK/BLOCKED/POST_UNBLOCK); draining it
+                            # without re-testing that condition undoes the
+                            # deferral the inline path just made. register
+                            # already guards on this.
+                            # Imported here, not at module scope:
+                            # storage_node_ops pulls in the controllers that
+                            # import this module (tasks_controller does the
+                            # same for the identical reason).
+                            from simplyblock_core import storage_node_ops
+                            lvs_name_of_task = task.function_params[
+                                "lvol_bdev_name"].split("/")[0]
+                            if storage_node_ops.get_restart_phase(
+                                    node.get_id(), lvs_name_of_task):
+                                msg = "LVS owned by a restart, retry task"
                                 logger.info(msg)
                                 task.function_result = msg
                                 task.status = JobSchedule.STATUS_SUSPENDED
