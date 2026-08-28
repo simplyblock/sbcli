@@ -594,7 +594,7 @@ jobs:
 
       # ── Deploy MinIO for backup tests (conditional) ────────────────────────
 
-      - name: Deploy MinIO for backup tests
+      - name: Create backup credentials for external MinIO
         if: >-
           ${{
             inputs.use_existing_cluster != 'true' &&
@@ -606,57 +606,9 @@ jobs:
           set -euxo pipefail
           NAMESPACE=simplyblock
 
-          echo "=== Setting up MinIO for backup tests ==="
+          echo "=== Setting up backup credentials for external MinIO (192.168.10.164:9000) ==="
 
-          # 1. Create minio namespace + deployment + service
-          kubectl create ns minio --dry-run=client -o yaml | kubectl apply -f -
-
-          cat <<'MINIO_EOF' | kubectl apply -f -
-          apiVersion: apps/v1
-          kind: Deployment
-          metadata:
-            name: minio
-            namespace: minio
-          spec:
-            replicas: 1
-            selector:
-              matchLabels:
-                app: minio
-            template:
-              metadata:
-                labels:
-                  app: minio
-              spec:
-                containers:
-                - name: minio
-                  image: minio/minio
-                  command: ["/bin/sh", "-c", "minio server /data --console-address :9001"]
-                  env:
-                  - name: MINIO_ROOT_USER
-                    value: minioadmin
-                  - name: MINIO_ROOT_PASSWORD
-                    value: minioadmin123
-                  ports:
-                  - containerPort: 9000
-                  - containerPort: 9001
-          MINIO_EOF
-
-          kubectl -n minio expose deploy/minio --port 9000 \
-            --dry-run=client -o yaml | kubectl apply -f -
-
-          # 2. Wait for MinIO pod to be ready (up to 5 min)
-          echo "Waiting for MinIO pod to be ready..."
-          for i in $(seq 1 30); do
-            READY=$(kubectl -n minio get pods --no-headers 2>/dev/null | grep -c "Running" || true)
-            if [ "$READY" -ge 1 ]; then
-              echo "MinIO pod is running"
-              break
-            fi
-            echo "MinIO not ready yet ($i/30)..."
-            sleep 10
-          done
-
-          # 3. Create backup-credentials K8s Secret in cluster namespace
+          # Create backup-credentials K8s Secret in cluster namespace
           cat <<CREDEOF | kubectl apply -f -
           apiVersion: v1
           kind: Secret
@@ -666,10 +618,10 @@ jobs:
           type: Opaque
           stringData:
             access_key_id: minioadmin
-            secret_access_key: minioadmin123
+            secret_access_key: minioadmin
           CREDEOF
 
-          echo "=== MinIO and backup credentials setup complete ==="
+          echo "=== Backup credentials setup complete ==="
 
       - name: Start MinIO trace logging
         if: >-
@@ -687,13 +639,8 @@ jobs:
           chmod +x /tmp/mc
           export PATH="/tmp:$PATH"
 
-          # 2. Port-forward MinIO service to localhost
-          kubectl -n minio port-forward svc/minio 9000:9000 &
-          echo "MC_PORT_FWD_PID=$!" >> "$GITHUB_ENV"
-          sleep 3
-
-          # 3. Configure mc alias
-          mc alias set myminio http://localhost:9000 minioadmin minioadmin123
+          # 2. Configure mc alias to external MinIO
+          mc alias set myminio http://192.168.10.164:9000 minioadmin minioadmin
 
           # 4. Start admin trace in background
           MINIO_TRACE_LOG="/tmp/minio-trace-${GITHUB_RUN_ID}.log"
@@ -987,7 +934,7 @@ jobs:
             BACKUP_SPEC="  backup:
               credentialsSecretRef:
                 name: backup-credentials
-              localEndpoint: http://minio.minio.svc.cluster.local:9000
+              localEndpoint: http://192.168.10.164:9000
               localTesting: true
               secondaryTarget: 0
               snapshotBackups: true
