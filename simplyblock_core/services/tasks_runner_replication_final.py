@@ -39,28 +39,43 @@ db = db_controller.DBController()
 
 
 def _lvs_cutover_owner(task, lvs_name):
-    """The task that already owns *lvs_name* for a cutover, or None.
+    """Return the task that should own *lvs_name*, or None if *task* itself wins.
 
-    Deterministic: the earliest-created active claim wins, so two tasks racing
-    the same lvstore agree on who owns it instead of each seeing the other.
+    Deterministic: the earliest-created claimant wins (sorted by create_dt then
+    id), so concurrent threads that both wrote a claim agree on the same winner.
+
+    Callers MUST write their own ``cutover_lvs`` claim to DB **before** calling
+    this function so they appear in the scan and participate in the sort.
+
+    Returns None     → the caller is the rightful owner; proceed.
+    Returns <other>  → that other task is the rightful owner; the caller should
+                       remove its own claim and yield.
+
+    Note: the previous implementation excluded the calling task from the scan
+    (``if other.get_id() == task.get_id(): continue``).  When two threads both
+    raced past the guard before either wrote its claim, both ended up with
+    ``cutover_lvs`` set, and on every subsequent pass each task's candidate set
+    was exactly {the other} — so each always deferred to the other, creating a
+    permanent circular stall (e.g. 36418f5d queued behind 309d3aeb AND
+    309d3aeb queued behind 36418f5d).  Including self in the sort eliminates
+    the self-exclusion blindspot that made the cycle possible.
     """
     if not lvs_name:
         return None
-    owners = []
+    claimants = []
     for other in db.get_job_tasks(task.cluster_id):
         if other.function_name != JobSchedule.FN_REPLICATION_FINAL:
-            continue
-        if other.get_id() == task.get_id():
             continue
         if other.status == JobSchedule.STATUS_DONE or other.canceled:
             continue
         if (other.function_params or {}).get("cutover_lvs") != lvs_name:
             continue
-        owners.append(other)
-    if not owners:
+        claimants.append(other)
+    if not claimants:
         return None
-    owners.sort(key=lambda t: (str(getattr(t, "create_dt", "")), t.get_id()))
-    return owners[0]
+    claimants.sort(key=lambda t: (str(getattr(t, "create_dt", "")), t.get_id()))
+    winner = claimants[0]
+    return None if winner.get_id() == task.get_id() else winner
 
 
 def _group_id_for_lvol(lvol):
@@ -331,6 +346,22 @@ def task_runner(task: JobSchedule):
         # the freeze.
         lvs_name = getattr(lvol, "lvs_name", "")
         own_group = _group_id_for_lvol(lvol)
+
+        # Write our claim BEFORE arbitrating.  The scheduler starts one thread
+        # per active task, so two tasks for the same lvstore run concurrently.
+        # If we check first and write second, both threads can read "no owner"
+        # before either writes, then both write the claim, and on every
+        # subsequent pass each sees only the other as the claimant — a circular
+        # stall (e.g. 36418f5d queued behind 309d3aeb AND 309d3aeb queued
+        # behind 36418f5d) that never resolves.  Writing first means both
+        # claims are visible to the sort, which then elects a single deterministic
+        # winner regardless of interleaving.
+        task.function_params["cutover_lvs"] = lvs_name
+        # Recording the group is what lets the replication side tell a sibling
+        # member from an unrelated volume.
+        task.function_params["cutover_group"] = own_group
+        task.write_to_db(db.kv_store)
+
         owner = _lvs_cutover_owner(task, lvs_name)
         if owner is not None:
             owner_group = (owner.function_params or {}).get("cutover_group") or ""
@@ -343,6 +374,11 @@ def task_runner(task: JobSchedule):
                 # lvstore), and their deadline would run down until the task
                 # died of max retries -- which is exactly what happened to 17
                 # tasks in run 20260827_185009.
+                #
+                # Remove our (losing) claim so the winner's _lvs_cutover_owner
+                # scan does not keep finding two claimants on subsequent passes.
+                task.function_params.pop("cutover_lvs", None)
+                task.function_params.pop("cutover_group", None)
                 task.function_params["shrink_deadline"] = (
                     int(time.time()) + constants.REPL_CUTOVER_SHRINK_TIMEOUT_SEC)
                 task.function_result = (
@@ -350,18 +386,7 @@ def task_runner(task: JobSchedule):
                 task.status = JobSchedule.STATUS_SUSPENDED
                 task.write_to_db(db.kv_store)
                 return False            # no retry burned: this is a queue, not a failure
-
-        # Claim the source LVS for the whole cutover -- the convergence rounds
-        # AND the freeze. Other volumes' snapshot transfers on this LVS queue
-        # behind it (see snapshot_replication._lvs_transfer_hold): they compete
-        # for the same lvstore and hub bandwidth, and every second they steal
-        # from a convergence round is a second of writes that lands in the
-        # freeze.
-        task.function_params["cutover_lvs"] = lvs_name
-        # Recording the group is what lets the replication side tell a sibling
-        # member from an unrelated volume.
-        task.function_params["cutover_group"] = own_group
-        task.write_to_db(db.kv_store)
+        # We are the rightful owner — claim already written above; proceed.
 
         # ---- SHRINK PHASE ----------------------------------------------- #
         if "shrink_snap_id" in params and params.get("shrink_round", 0) > 0:

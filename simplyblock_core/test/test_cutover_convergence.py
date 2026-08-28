@@ -464,6 +464,38 @@ class TestCutoverQueue(unittest.TestCase):
         self.db.get_job_tasks.return_value = [me, other]
         self.assertIsNone(runner._lvs_cutover_owner(me, "LVS_1"))
 
+    def test_circular_stall_is_broken_when_both_tasks_hold_the_claim(self):
+        """Both tasks race and both write cutover_lvs — only one wins.
+
+        Regression for production stall:
+          36418f5d queued_for_lvstore_LVS_1_behind_309d3aeb
+          309d3aeb queued_for_lvstore_LVS_1_behind_36418f5d
+
+        Root cause: _lvs_cutover_owner excluded the calling task from the scan.
+        When two threads both raced through the check before either wrote its
+        claim, both stored cutover_lvs.  On every subsequent pass each task's
+        candidate set was exactly {the other}, so each always deferred to the
+        other — a permanent cycle.  The fix: include self in the sort, return
+        None iff the caller is the winner.
+        """
+        # Simulate the post-race DB state: both have cutover_lvs set.
+        early = self._task("T1", lvs="LVS_1", created="2026-01-01")
+        late = self._task("T2", lvs="LVS_1", created="2026-06-01")
+        self.db.get_job_tasks.return_value = [early, late]
+
+        # From T1's perspective: T1 is the earliest claimant → it is the owner.
+        self.assertIsNone(
+            runner._lvs_cutover_owner(early, "LVS_1"),
+            "the earliest claimant must see itself as the winner (None), "
+            "not defer to the only other claimant")
+
+        # From T2's perspective: T1 is the earliest claimant → T2 must yield.
+        owner_seen_by_late = runner._lvs_cutover_owner(late, "LVS_1")
+        self.assertIsNotNone(owner_seen_by_late,
+                             "the later claimant must see an owner")
+        self.assertEqual(owner_seen_by_late.get_id(), "T1",
+                         "the later claimant must defer to the earlier one")
+
 
 class TestQueuedCutoverDoesNotStarve(unittest.TestCase):
     """A cutover that cannot have the lvstore waits without cost."""
