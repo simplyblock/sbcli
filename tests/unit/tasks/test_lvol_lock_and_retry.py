@@ -20,6 +20,7 @@ Three defects, all found by reading the delete/create paths 2026-08-28:
      chain. It must still not block forever behind a holder that died on a
      node that is now gone, hence best-effort rather than plain enforcement.
 """
+import contextlib
 import time
 from unittest import mock
 
@@ -112,3 +113,87 @@ def test_lock_proceeds_when_best_effort(lock_factory, args):
 
 def test_force_delete_wait_is_bounded():
     assert 0 < constants.FORCE_DELETE_LOCK_WAIT_SEC <= 120
+
+
+# --- 4. a leg that keeps failing must raise an alert --------------------
+
+def _register_task(retry=0):
+    t = mock.MagicMock()
+    t.canceled = False
+    t.date = int(time.time())
+    t.retry = retry
+    t.node_id = "node-2"
+    t.cluster_id = "cl-1"
+    t.function_result = ""
+    t.function_params = {"lvol_id": "lvol-1", "op": "register",
+                         "secondary_index": 0}
+    t.status = JobSchedule.STATUS_NEW
+    return t
+
+
+def _run_register_failing(task, err="boom"):
+    """Drive run_lvol_sync_op_task to its genuine-failure branch."""
+    lvol = mock.MagicMock()
+    lvol.status = "online"
+    lvol.nodes = ["node-1", "node-2"]
+    lvol.lvs_name = "LVS_1"
+    node = mock.MagicMock()
+    node.get_id.return_value = "node-2"
+    node.status = "online"
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(mock.patch.object(
+            tasks_controller.db, "get_lvol_by_id", return_value=lvol))
+        stack.enter_context(mock.patch.object(
+            tasks_controller.db, "get_storage_node_by_id", return_value=node))
+        stack.enter_context(mock.patch(
+            "simplyblock_core.storage_node_ops.get_restart_phase",
+            return_value=None))
+        stack.enter_context(mock.patch(
+            "simplyblock_core.storage_node_ops."
+            "repair_lvol_registration_on_non_leader",
+            return_value=(False, err)))
+        event = stack.enter_context(mock.patch.object(
+            tasks_controller.events_controller, "log_event_cluster"))
+        tasks_controller.run_lvol_sync_op_task(task)
+    return event
+
+
+def test_first_failures_do_not_alert():
+    """Transient failures are normal; only persistence is abnormal."""
+    for retry in range(constants.TASK_FAILURE_ALERT_THRESHOLD):
+        task = _register_task(retry=retry)
+        event = _run_register_failing(task)
+        assert event.call_count == 0, f"alerted at retry={retry + 1}"
+        assert task.status == JobSchedule.STATUS_SUSPENDED
+
+
+def test_alert_once_past_the_threshold():
+    task = _register_task(retry=constants.TASK_FAILURE_ALERT_THRESHOLD)
+    event = _run_register_failing(task)
+    assert event.call_count == 1
+    assert event.call_args.kwargs["event_level"] == "Critical"
+    assert task.retry == constants.TASK_FAILURE_ALERT_THRESHOLD + 1
+
+
+def test_same_error_does_not_alert_every_cycle():
+    """A node that stays broken must not write an event every 3 seconds."""
+    task = _register_task(retry=constants.TASK_FAILURE_ALERT_THRESHOLD + 5)
+    task.function_result = "registration failed: boom"
+    event = _run_register_failing(task, err="boom")
+    assert event.call_count == 0
+
+
+def test_changed_error_alerts_again():
+    task = _register_task(retry=constants.TASK_FAILURE_ALERT_THRESHOLD + 5)
+    task.function_result = "registration failed: something else"
+    event = _run_register_failing(task, err="boom")
+    assert event.call_count == 1
+
+
+def test_enodev_is_never_counted_or_alerted():
+    """-19 means the object is already gone; not an actionable alert."""
+    task = _register_task(retry=constants.TASK_FAILURE_ALERT_THRESHOLD + 5)
+    event = _run_register_failing(task, err={"code": -19})
+    assert event.call_count == 0
+    assert task.retry == constants.TASK_FAILURE_ALERT_THRESHOLD + 5, (
+        "-19 must not advance the failure counter")
