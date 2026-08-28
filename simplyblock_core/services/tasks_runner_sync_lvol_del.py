@@ -3,7 +3,7 @@ import sys
 import time
 from typing import Optional
 
-from simplyblock_core import db_controller, utils
+from simplyblock_core import constants, db_controller, utils
 from simplyblock_core.controllers import events_controller, snapshot_controller, tasks_controller
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.cluster import Cluster
@@ -34,6 +34,41 @@ def get_primary_node(task) -> Optional[StorageNode]:
 # orchestrator restarts us with a clean FDB connection (~3 min at the 3s tick).
 _DB_FAILURE_RESTART_THRESHOLD = 60
 
+
+def _count_failure_and_maybe_alert(task, node, what, msg):
+    """Count one genuine failure of this leg and escalate past the threshold.
+
+    task.retry was never incremented by this runner (max_retry was declared
+    and never enforced), so it is free to use as what it actually is here: a
+    failure counter. It does not terminate anything -- these tasks are
+    unbounded by design, because giving up leaks the volume -- it only
+    decides when to raise an alert.
+
+    The event fires once on crossing the threshold and again whenever the
+    error CHANGES, so a node that stays broken does not write an event every
+    3 seconds.
+    """
+    previous = task.function_result
+    task.retry = (task.retry or 0) + 1
+    if task.retry <= constants.TASK_FAILURE_ALERT_THRESHOLD:
+        return
+    if task.retry > constants.TASK_FAILURE_ALERT_THRESHOLD + 1 and previous == msg:
+        return
+    try:
+        events_controller.log_event_cluster(
+            cluster_id=node.cluster_id,
+            domain=events_controller.DOMAIN_STORAGE,
+            event="LVOL_TASK_FAILING_REPEATEDLY",
+            db_object=task,
+            caused_by=events_controller.CAUSED_BY_MONITOR,
+            message=(f"{what} has failed {task.retry} times on node "
+                     f"{node.get_id()}; it will keep retrying, but this is "
+                     f"not a transient condition and needs attention. "
+                     f"Last error: {msg}"),
+            node_id=node.get_id(),
+            event_level="Critical")
+    except Exception as event_error:
+        logger.warning(f"Could not log repeated-failure event: {event_error}")
 
 def _log_sync_delete_failure(task, node, lvol_bdev_name, msg):
     """Record a failed sync delete in the cluster event log.
@@ -206,6 +241,9 @@ def main():
                                        f"failed: {e}; will retry")
                                 logger.error(msg)
                                 _log_sync_delete_failure(task, node, lvol_bdev_name, msg)
+                                _count_failure_and_maybe_alert(
+                                    task, node,
+                                    f"Sync delete of {lvol_bdev_name}", msg)
                                 task.function_result = msg
                                 task.status = JobSchedule.STATUS_SUSPENDED
                                 task.write_to_db(db.kv_store)
@@ -217,6 +255,12 @@ def main():
                                     msg =  f"Failed to sync delete bdev: {lvol_bdev_name} from node: {node.get_id()}"
                                     logger.error(msg)
                                     _log_sync_delete_failure(task, node, lvol_bdev_name, msg)
+                                    # -19 never reaches here: it is handled
+                                    # above as success (the peer is already
+                                    # clean), so it is never counted.
+                                    _count_failure_and_maybe_alert(
+                                        task, node,
+                                        f"Sync delete of {lvol_bdev_name}", msg)
                                     task.function_result = msg
                                     task.status = JobSchedule.STATUS_SUSPENDED
                                     task.write_to_db(db.kv_store)

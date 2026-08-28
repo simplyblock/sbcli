@@ -8,7 +8,8 @@ import time
 import uuid
 
 from simplyblock_core import db_controller, constants, utils
-from simplyblock_core.controllers import tasks_events, device_controller
+from simplyblock_core.controllers import (
+    tasks_events, device_controller, events_controller)
 from simplyblock_core.models.cluster import Cluster
 from simplyblock_core.models.job_schedule import JobSchedule
 from simplyblock_core.models.storage_node import StorageNode
@@ -947,6 +948,19 @@ def add_batch_mig_task(group):
     )
 
 
+def _is_already_gone(err):
+    """True when an RPC error means "the thing is not there" (-19/ENODEV).
+
+    For a delete that is success; for a register it is still a failure, but
+    it is not an actionable one to alert on repeatedly -- the object the
+    caller wanted registered has gone away underneath it.
+    """
+    if err is None:
+        return False
+    if isinstance(err, dict):
+        return err.get("code") == -19
+    return "-19" in str(err)
+
 def add_lvol_sync_del_task(cluster_id, node_id, lvol_bdev_name, primary_node):
     """Deferred per-node sync delete. Retried until it succeeds.
 
@@ -1016,6 +1030,46 @@ def run_lvol_sync_op_task(task):
         task.status = JobSchedule.STATUS_SUSPENDED
         task.write_to_db(db.kv_store)
 
+    def _defer_failure(result, err=None):
+        """Defer after a GENUINE failure, and escalate a persistent one.
+
+        Distinct from _defer, which also covers benign waiting (node not
+        ONLINE yet, LVS owned by a restart, lvol not yet settled) -- those
+        are not failures and must not raise an alert. These tasks retry
+        forever by design, so without this a permanently failing
+        registration is invisible except as a replica that is silently
+        missing and every later snapshot on that node failing.
+        """
+        previous = task.function_result
+        if _is_already_gone(err):
+            # -19 / ENODEV: nothing to act on, do not count it.
+            _defer(result)
+            return
+        task.retry = (task.retry or 0) + 1
+        threshold = constants.TASK_FAILURE_ALERT_THRESHOLD
+        should_alert = task.retry > threshold and (
+            task.retry == threshold + 1 or previous != result)
+        _defer(result)
+        if not should_alert:
+            return
+        try:
+            events_controller.log_event_cluster(
+                cluster_id=task.cluster_id,
+                domain=events_controller.DOMAIN_STORAGE,
+                event="LVOL_TASK_FAILING_REPEATEDLY",
+                db_object=task,
+                caused_by=events_controller.CAUSED_BY_MONITOR,
+                message=(f"Deferred lvol {task.function_params.get('op')} "
+                         f"for {task.function_params.get('lvol_id')} has "
+                         f"failed {task.retry} times on node {task.node_id}; "
+                         f"it will keep retrying, but this is not a "
+                         f"transient condition and needs attention. "
+                         f"Last error: {result}"),
+                node_id=task.node_id,
+                event_level="Critical")
+        except Exception as event_error:
+            logger.warning("Could not log repeated-failure event: %s", event_error)
+
     try:
         if task.canceled:
             _finish("canceled")
@@ -1080,7 +1134,7 @@ def run_lvol_sync_op_task(task):
             if ok:
                 _finish(f"registered lvol {lvol_id} on {task.node_id}")
             else:
-                _defer(f"registration failed: {err}")
+                _defer_failure(f"registration failed: {err}", err)
         elif op == "resize":
             # Converge to the CURRENT DB size — resize_lvol persists the new
             # size after the fan-out, so this always applies the latest

@@ -613,6 +613,16 @@ LVOL_SYNC_OP_RECORD_GRACE_SEC = 600
 #: node that is now gone.
 FORCE_DELETE_LOCK_WAIT_SEC = 30
 
+#: Consecutive genuine failures of a single deferred lvol sync-delete or
+#: registration before it is escalated to the cluster event log. Repeated
+#: failure of one object on one node is not a transient condition -- these
+#: tasks retry forever by design, so without an alert a permanently stuck
+#: leg is invisible except as a volume that never leaves in_deletion, or a
+#: replica that is silently missing. Deferrals for a node that is simply
+#: not ONLINE yet, or an LVS owned by a restart, are NOT failures and do
+#: not count.
+TASK_FAILURE_ALERT_THRESHOLD = 3
+
 # NVMe-oF TLS / DH-HMAC-CHAP security
 VALID_DHCHAP_DIGESTS = ["sha256", "sha384", "sha512"]
 VALID_DHCHAP_DHGROUPS = ["null", "ffdhe2048", "ffdhe3072", "ffdhe4096", "ffdhe6144", "ffdhe8192"]
