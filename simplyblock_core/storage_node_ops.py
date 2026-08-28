@@ -8329,7 +8329,8 @@ def _find_leader_with_failover_impl(all_nodes, lvs_name):
 
 
 def check_non_leader_for_operation(node_id, lvs_name, operation_type="create",
-                                    leader_op_completed=False, all_nodes=None):
+                                    leader_op_completed=False, all_nodes=None,
+                                    wait_for_restart=0):
     """Check a non-leader node's readiness for a sync operation.
 
     Args:
@@ -8364,10 +8365,31 @@ def check_non_leader_for_operation(node_id, lvs_name, operation_type="create",
     # (its mgmt RPC goes to port 8085, not 4436), so a pre_block skip can
     # lose a create/delete on the restarting node. See
     # _set_restart_phase for the drain timing.
+    _restart_phases = (StorageNode.RESTART_PHASE_PRE_BLOCK,
+                       StorageNode.RESTART_PHASE_BLOCKED,
+                       StorageNode.RESTART_PHASE_POST_UNBLOCK)
     phase = get_restart_phase(node_id, lvs_name)
-    if phase in (StorageNode.RESTART_PHASE_PRE_BLOCK,
-                 StorageNode.RESTART_PHASE_BLOCKED,
-                 StorageNode.RESTART_PHASE_POST_UNBLOCK):
+    if phase in _restart_phases and wait_for_restart > 0:
+        # Caller holds the chain lock and asked to wait this one out. A
+        # restart is bounded and self-clearing, so waiting keeps the whole
+        # multi-node sequence under one lock instead of handing the leg to
+        # a task runner that will execute it later, in another process,
+        # with no chain lock at all. Bounded: see
+        # DEFERRED_LEG_RESTART_WAIT_SEC -- a wedged restart must not pin
+        # the chain.
+        deadline = time.time() + wait_for_restart
+        while phase in _restart_phases and time.time() < deadline:
+            time.sleep(2)
+            phase = get_restart_phase(node_id, lvs_name)
+        if phase in _restart_phases:
+            logger.info(
+                "Non-leader %s still in restart phase %s after %ss; "
+                "deferring the leg durably", node_id[:8], phase,
+                wait_for_restart)
+            return "queue"
+        logger.info("Non-leader %s left its restart phase; proceeding "
+                    "under the held lock", node_id[:8])
+    elif phase in _restart_phases:
         return "queue"
 
     # 3. Fabric is connected — check RPC responsiveness

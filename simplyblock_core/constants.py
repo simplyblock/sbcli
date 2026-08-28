@@ -623,6 +623,17 @@ FORCE_DELETE_LOCK_WAIT_SEC = 30
 #: not count.
 TASK_FAILURE_ALERT_THRESHOLD = 3
 
+#: How long an operation holding the chain lock waits for a peer to leave
+#: its restart phase before giving up and deferring the leg durably.
+#: A restart is a bounded, self-clearing condition, so waiting keeps the
+#: whole [create + registers] / [async delete + sync deletes] sequence
+#: under one lock instead of fragmenting it across processes. The cap
+#: matters: RESTART_TASK_EXEC_INTERVAL_MAX_SEC is 3600 and a wedged
+#: restart really can sit for an hour (2026-08-27, a node stuck offline
+#: while three restart tasks reported success), and holding a chain lock
+#: that long would stall every create and delete on that chain.
+DEFERRED_LEG_RESTART_WAIT_SEC = 120
+
 # NVMe-oF TLS / DH-HMAC-CHAP security
 VALID_DHCHAP_DIGESTS = ["sha256", "sha384", "sha512"]
 VALID_DHCHAP_DHGROUPS = ["null", "ffdhe2048", "ffdhe3072", "ffdhe4096", "ffdhe6144", "ffdhe8192"]

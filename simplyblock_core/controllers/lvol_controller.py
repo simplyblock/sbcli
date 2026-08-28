@@ -819,9 +819,14 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
             precheck_started = time.time()
             secondary_nodes = []
             for nl in non_leaders:
+                # Under the chain lock: wait out a peer restart rather
+                # than fragmenting [create + registers] across
+                # processes. Bounded, so a wedged restart still falls
+                # back to durable deferral.
                 action = check_non_leader_for_operation(
                     nl.get_id(), lvol.lvs_name, operation_type="create",
-                    leader_op_completed=False, all_nodes=all_nodes)
+                    leader_op_completed=False, all_nodes=all_nodes,
+                    wait_for_restart=constants.DEFERRED_LEG_RESTART_WAIT_SEC)
                 if action == "reject":
                     msg = f"Cannot create lvol: non-leader {nl.get_id()[:8]} unreachable but fabric healthy"
                     logger.error(msg)
@@ -896,7 +901,8 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
                 reg_index = _lvol_secondary_index(lvol, sec)
                 action = "proceed" if not stale_precheck else check_non_leader_for_operation(
                     sec.get_id(), lvol.lvs_name, operation_type="create",
-                    leader_op_completed=True, all_nodes=all_nodes)
+                    leader_op_completed=True, all_nodes=all_nodes,
+                    wait_for_restart=constants.DEFERRED_LEG_RESTART_WAIT_SEC)
                 if action == "proceed":
                     try:
                         with snapshot_controller.lvstore_op_lock(
@@ -1936,9 +1942,13 @@ def _delete_lvol_from_all_nodes(lvol, snode, force_delete, lock=True) -> None:
         sync_done: List[str] = []
         non_leaders = [n for n in all_nodes if actual_leader and n.get_id() != actual_leader.get_id()]
         for nl in non_leaders:
+            # Under the chain lock: same reasoning as the create path --
+            # a sync leg handed to the task runner executes later, in
+            # another process, holding only the per-node lock.
             action = check_non_leader_for_operation(
                 nl.get_id(), lvol.lvs_name, operation_type="delete",
-                leader_op_completed=True, all_nodes=all_nodes)
+                leader_op_completed=True, all_nodes=all_nodes,
+                wait_for_restart=constants.DEFERRED_LEG_RESTART_WAIT_SEC)
             if action == "skip":
                 continue
             elif action in ("queue", "kill_and_wait"):
