@@ -25,6 +25,12 @@ def _task(**params):
         "operation": "replicate",
         "replication_id": "REP1",
         "final_state": LVolReplication.STATE_CUTOVER_DONE,
+        # These tests cover the FREEZE, so the task starts past the endgame
+        # entry: the lvstore is already claimed and the convergence rounds are
+        # behind it (round 0 = no round in flight).
+        "cutover_lvs": "lvs_src",
+        "shrink_snap_id": "S_endgame",
+        "shrink_round": 0,
     }
     t.function_params.update(params)
     return t
