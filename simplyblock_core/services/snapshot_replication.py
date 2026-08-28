@@ -223,6 +223,7 @@ def _finish_completed_transfer(task, snapshot, offset):
                     task.function_params.get("xfer_submit_t"),
                     snap=snapshot.get_id(), lvol=snapshot.lvol.get_id(),
                     bytes=offset)
+    snapshot.replication_bytes = offset or 0
     with xfer_timing.phase("replicate_finish", snap=snapshot.get_id(),
                            lvol=snapshot.lvol.get_id()):
         new_snapshot_uuid = process_snap_replicate_finish(task, snapshot)

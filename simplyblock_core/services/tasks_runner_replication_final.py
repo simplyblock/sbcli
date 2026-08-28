@@ -191,10 +191,46 @@ def _finalize(task, ok, err):
                    task.retry + 1, task.max_retry,
                    task.function_params.get("lvol_id"), task.function_result)
     task.status = JobSchedule.STATUS_SUSPENDED
-    task.retry += 1
     # A retry re-claims the LVS on its next pass; holding the claim across the
     # wait would stall every other volume's replication for nothing.
     _release_lvs_claim(task)
+
+    # When the failure happened inside run_cutover (tgt_lvol_composite already
+    # set), it is likely a connectivity issue: the target node restarted, or the
+    # control plane hasn't yet reflected the down state in DB.  Hammering at the
+    # 0.2s poll interval burns all retries in seconds — long before the node
+    # recovers.  Instead, re-read the node status and add a cooldown.
+    if task.function_params.get("tgt_lvol_composite"):
+        tgt_node_id = task.function_params.get("tgt_node_id")
+        node_offline = False
+        if tgt_node_id:
+            try:
+                current_tgt = db.get_storage_node_by_id(tgt_node_id)
+                node_offline = current_tgt.status != StorageNode.STATUS_ONLINE
+            except KeyError:
+                node_offline = True
+        hub_attempts = task.function_params.get("cutover_hub_attempts", 0) + 1
+        task.function_params["cutover_hub_attempts"] = hub_attempts
+        if node_offline or hub_attempts <= constants.REPL_CUTOVER_MAX_HUB_ATTEMPTS:
+            # Transient: add a cooldown, do NOT burn task.retry.
+            task.function_params["cutover_retry_after"] = (
+                int(time.time()) + constants.REPL_CUTOVER_HUB_RETRY_COOLDOWN_SEC)
+            logger.warning(
+                "cutover for lvol %s: connectivity failure (attempt %d, node_offline=%s); "
+                "waiting %ds before retry",
+                task.function_params.get("lvol_id"), hub_attempts, node_offline,
+                constants.REPL_CUTOVER_HUB_RETRY_COOLDOWN_SEC)
+            task.write_to_db(db.kv_store)
+            return False
+        # Exceeded transient cap with node appearing online — real failure.
+        logger.warning(
+            "cutover for lvol %s: hub attach failed %d times with node appearing "
+            "online; treating as real failure and burning a retry",
+            task.function_params.get("lvol_id"), hub_attempts)
+        task.function_params.pop("cutover_hub_attempts", None)
+        task.function_params.pop("cutover_retry_after", None)
+
+    task.retry += 1
     task.write_to_db(db.kv_store)
     return False
 
@@ -316,9 +352,19 @@ def task_runner(task: JobSchedule, tasks=None):
                        params.get("lvol_id"), tgt_node.get_id(), tgt_node.status)
         task.function_params["last_error"] = (
             f"target node {tgt_node.get_id()[:8]} is {tgt_node.status}")
-        task.function_result = "target node not online, retrying"
+        task.function_result = "target node not online, waiting"
         task.status = JobSchedule.STATUS_SUSPENDED
-        task.retry += 1
+        # Do NOT burn task.retry — node offline is transient; hammering at
+        # 0.2s would exhaust all retries before the node recovers.
+        task.write_to_db(db.kv_store)
+        return False
+
+    # Cooldown set after a hub-attach failure to give the target node time
+    # to recover and the control plane time to reflect a down state in DB.
+    retry_after = params.get("cutover_retry_after", 0)
+    if int(time.time()) < retry_after:
+        task.function_result = "waiting after connectivity failure"
+        task.status = JobSchedule.STATUS_SUSPENDED
         task.write_to_db(db.kv_store)
         return False
 
@@ -560,6 +606,23 @@ def _shrink_step(task, lvol):
                 return False, None
             time.sleep(constants.REPL_CUTOVER_POLL_INTERVAL_SEC)
             continue
+
+        # Zero-delta early exit: if this round transferred 0 bytes the volume
+        # had no new writes since the previous snapshot.  Another round would
+        # also transfer 0 bytes, so stop immediately rather than burning the
+        # remaining rounds (and their cross-cluster add_lvol_ha cost) for nothing.
+        try:
+            snap_rec = db.get_snapshot_by_id(snap_id)
+            if snap_rec.replication_bytes == 0:
+                logger.info(
+                    "cutover convergence: lvol=%s round %d transferred 0 bytes; "
+                    "no new writes — proceeding to cutover immediately",
+                    lvol.get_id(), params.get("shrink_round", 0))
+                task.function_result = (
+                    f"zero-delta after round {params.get('shrink_round', 0)}; converged")
+                return True, None
+        except KeyError:
+            pass
 
         started_at = params.get("shrink_started_at")
         if started_at is None:

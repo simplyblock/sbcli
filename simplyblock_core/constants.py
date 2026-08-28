@@ -425,6 +425,12 @@ REPL_XFER_INLINE_WAIT_CUTOVER_SEC = 300.0
 # freeze pays for every millisecond between a transfer completing and the next
 # snapshot starting, so this must stay well under a second.
 REPL_CUTOVER_ACTIVE_POLL_SEC = 0.2
+# Cooldown between hub-attach retry attempts when the target node is down or
+# recovering (covers control-plane lag before the DB reflects the down state).
+REPL_CUTOVER_HUB_RETRY_COOLDOWN_SEC = 30
+# Max consecutive hub-attach failures with the node still appearing online
+# before we give up and burn a task.retry.  30s × 20 = 10 min of coverage.
+REPL_CUTOVER_MAX_HUB_ATTEMPTS = 10
 
 SPDK_PROXY_MULTI_THREADING_ENABLED=True
 SPDK_PROXY_TIMEOUT=60*5
