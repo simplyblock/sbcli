@@ -7,6 +7,7 @@ from simplyblock_core.models.backup_config import (
     BackupLocation,
     S3Credentials,
     SecondaryTarget,
+    UnresolvedBackupConfig,
 )
 from simplyblock_core.models.cluster import Cluster
 
@@ -331,3 +332,65 @@ class TestClusterMutator:
         config["bucket_name"] = "somewhere-else"
 
         assert cluster.get_backup_config().bucket_name == "backups"
+
+
+class TestUnresolvedBackupConfig:
+    """The shape a cluster-create request arrives in, before a cluster exists."""
+
+    def test_a_bucket_name_is_optional(self):
+        """The one field a caller cannot supply: it is derived from a cluster id
+        that the request is still asking to bring into existence."""
+        config = UnresolvedBackupConfig.model_validate(
+            {k: v for k, v in MINIMAL.items() if k != "bucket_name"})
+
+        assert config.bucket_name is None
+
+    def test_an_absent_bucket_stays_absent_when_dumped(self):
+        """What the route hands on, and what keeps Cluster's derivation live."""
+        config = UnresolvedBackupConfig.model_validate(
+            {k: v for k, v in MINIMAL.items() if k != "bucket_name"})
+
+        assert "bucket_name" not in config.model_dump(exclude_none=True)
+
+    def test_a_named_bucket_is_kept(self):
+        assert UnresolvedBackupConfig.model_validate(MINIMAL).bucket_name == "backups"
+
+    def test_an_empty_bucket_name_is_still_refused(self):
+        """Absent is a bucket nobody named; "" is one named badly."""
+        with pytest.raises(ValidationError):
+            UnresolvedBackupConfig.model_validate({**MINIMAL, "bucket_name": ""})
+
+    def test_every_other_rule_still_bites(self):
+        with pytest.raises(ValidationError):
+            UnresolvedBackupConfig.model_validate({**MINIMAL, "buckt_name": "typo"})
+
+        with pytest.raises(ValidationError):
+            UnresolvedBackupConfig.model_validate({**MINIMAL, "s3_thread_pool_size": -1})
+
+    def test_legacy_keys_still_migrate(self):
+        """The shape the operator actually sends, which names no bucket."""
+        config = UnresolvedBackupConfig.model_validate({
+            "access_key_id": "minioadmin",
+            "secret_access_key": "minioadmin",
+            "local_endpoint": "http://minio:9000",
+            "local_testing": True,
+        })
+
+        assert config.bucket_name is None
+        assert config.endpoint_url == "http://minio:9000"
+        assert config.credentials is not None
+        assert config.verify_tls is False
+        assert config.use_path_style is True
+        assert config.region == "us-east-1"
+
+    def test_a_cluster_resolves_one(self):
+        """The handover this type exists for: the route dumps it back to a dict,
+        and the cluster it names supplies the bucket."""
+        cluster = Cluster()
+        cluster.uuid = "7f4c1b2e-0000-4000-8000-000000000001"
+        config = UnresolvedBackupConfig.model_validate(
+            {k: v for k, v in MINIMAL.items() if k != "bucket_name"})
+
+        cluster.set_backup_config(config.model_dump(exclude_none=True))
+
+        assert cluster.get_backup_config().bucket_name == cluster.default_backup_bucket_name()
