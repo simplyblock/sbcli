@@ -199,6 +199,15 @@ def _finalize(task, ok, err):
     # A retry re-claims the LVS on its next pass; holding the claim across the
     # wait would stall every other volume's replication for nothing.
     _release_lvs_claim(task)
+    # Give the next attempt a fresh shrink window. Without this, a
+    # deadline-timeout failure leaves the expired timestamp in place and every
+    # subsequent retry fails on the first deadline check, burning all retries
+    # within seconds without doing any useful work.
+    task.function_params["shrink_deadline"] = (
+        int(time.time()) + constants.REPL_CUTOVER_SHRINK_TIMEOUT_SEC)
+    for _k in ("shrink_snap_id", "shrink_started_at", "shrink_round",
+               "shrink_round_times", "shrink_round_done_at"):
+        task.function_params.pop(_k, None)
     task.write_to_db(db.kv_store)
     return False
 
