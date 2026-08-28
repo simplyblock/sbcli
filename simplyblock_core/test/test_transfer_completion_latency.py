@@ -95,10 +95,22 @@ class TestInlineCompletion(unittest.TestCase):
 class TestPassLatency(unittest.TestCase):
     """A round that yields must be picked up again in well under a second."""
 
-    def test_the_active_poll_interval_is_sub_second(self):
-        self.assertLess(constants.REPL_CUTOVER_ACTIVE_POLL_SEC, 1.0)
+    def test_sub_second_reaction_does_not_come_from_polling_the_database(self):
+        """The DB pass interval is deliberately NOT sub-second.
+
+        This loop reads the task table (and each task) per pass, so polling it
+        at 5Hz burns transactions proportional to clusters x tasks to learn
+        nothing almost every time -- the wrong shape for detecting an event.
+        Sub-second reaction comes from the RPC-based inline wait instead.
+        """
+        self.assertGreaterEqual(constants.REPL_CUTOVER_ACTIVE_POLL_SEC, 1.0,
+                                "do not poll a database sub-second")
         self.assertLess(constants.REPL_CUTOVER_ACTIVE_POLL_SEC,
-                        constants.TASK_EXEC_INTERVAL_SEC)
+                        constants.TASK_EXEC_INTERVAL_SEC,
+                        "but a mid-round cutover still deserves a tighter pass")
+        # This is the interval the guarantee actually rests on, and it polls
+        # SPDK over RPC, not the DB.
+        self.assertLess(constants.REPL_XFER_POLL_INTERVAL_SEC, 1.0)
 
     def test_a_claimed_or_mid_round_task_counts_as_in_flight(self):
         from simplyblock_core.models.job_schedule import JobSchedule

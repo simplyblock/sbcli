@@ -65,11 +65,18 @@ class _Clock:
 class TestConvergence(unittest.TestCase):
     """_shrink_step loops until a round is fast, without leaving the pass."""
 
-    def _run(self, round_times, max_rounds=None):
-        """Drive _shrink_step with round i taking round_times[i] seconds."""
+    def _run(self, round_times, max_rounds=None, exclusive=True):
+        """Drive _shrink_step with round i taking round_times[i] seconds.
+
+        exclusive=True means the task already holds its lvstore, which is the
+        endgame. Unexclusive rounds converge in the open and then ASK for the
+        lvstore instead of handing straight over to the freeze.
+        """
         clock = _Clock()
         task = _Task(shrink_snap_id="S0", shrink_round=1,
                      shrink_deadline=10 ** 9, lvol_id="LV1")
+        if exclusive:
+            task.function_params["cutover_lvs"] = "LVS_1"
         task.function_params["shrink_started_at"] = clock.now
         state = {"i": 0}
         taken = []
@@ -104,13 +111,26 @@ class TestConvergence(unittest.TestCase):
         done, err = runner._shrink_step(task, _lvol())
         return done, err, task, taken, clock
 
-    def test_a_fast_round_converges_and_hands_over(self):
-        """Round transferred inside the target -> freeze immediately."""
+    def test_a_fast_round_while_holding_the_lvstore_hands_over(self):
+        """Converged AND exclusive -> freeze immediately."""
         done, err, task, taken, _ = self._run([0.5])
         self.assertTrue(done)
         self.assertIsNone(err)
         self.assertIn("converged", task.function_result)
         self.assertEqual(taken, [], "a fast first round needs no further rounds")
+
+    def test_a_fast_round_in_the_open_asks_for_the_lvstore(self):
+        """Nearly converged unexclusively -> take the lvstore for the endgame.
+
+        Claiming it earlier serialised the bulk catch-up: run 20260828_124859
+        charged the queue wait to round 1 (340s, 1505s, 2073s, 2584s for
+        successive volumes) while the unqueued one finished in 12.4s.
+        """
+        done, err, task, taken, _ = self._run([0.5], exclusive=False)
+        self.assertFalse(done, "it must not freeze without holding the lvstore")
+        self.assertIsNone(err)
+        self.assertTrue(task.function_params.get("ready_for_exclusive"))
+        self.assertIn("endgame", task.function_result)
 
     def test_a_slow_round_takes_another_snapshot_without_leaving_the_pass(self):
         """The whole point: rounds follow each other in milliseconds."""
@@ -131,6 +151,13 @@ class TestConvergence(unittest.TestCase):
         self.assertTrue(done, "the cap must hand over, not fail the cutover")
         self.assertIsNone(err)
         self.assertIn("not converged", task.function_result)
+
+    def test_the_cap_takes_the_lvstore_before_freezing(self):
+        """Giving up converging still requires the lvstore for the freeze."""
+        done, err, task, taken, _ = self._run([3.0] * 20, max_rounds=3,
+                                              exclusive=False)
+        self.assertFalse(done)
+        self.assertTrue(task.function_params.get("ready_for_exclusive"))
 
     def test_a_vanished_snapshot_is_an_error(self):
         # This one runs on the real clock, so the deadline has to be a real
@@ -491,10 +518,10 @@ class TestQueuedCutoverDoesNotStarve(unittest.TestCase):
         gp = patch.object(runner, "_group_id_for_lvol", return_value="")
         gp.start()
         self.addCleanup(gp.stop)
-        # If the shrink phase ran, the test would see it here.
+        # A task waiting for the lvstore must not proceed into the endgame.
         sp = patch.object(runner, "_shrink_step",
                           side_effect=AssertionError(
-                              "a queued cutover must not start its shrink phase"))
+                              "a queued cutover must not run its endgame rounds"))
         sp.start()
         self.addCleanup(sp.stop)
 
@@ -512,6 +539,9 @@ class TestQueuedCutoverDoesNotStarve(unittest.TestCase):
             "lvol_id": "LV_me", "src_node_id": "N1", "tgt_node_id": "N2",
             "shrink_round": 1, "shrink_snap_id": "S1",
             "shrink_deadline": 1,          # already expired
+            # asking for the endgame: the delta has converged in the open, so
+            # this is the point at which queueing happens
+            "ready_for_exclusive": True,
         }
         return t
 

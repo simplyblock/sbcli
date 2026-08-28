@@ -171,6 +171,41 @@ def _finalize(task, ok, err):
     return False
 
 
+def _acquire_lvs_claim(task, lvol, tasks=None):
+    """Take the lvstore for this cutover's endgame. False means queued.
+
+    Queueing here is cheap: it happens with a nearly-converged delta and NO
+    snapshot in hand. The previous design claimed on the task's first pass and
+    held the lvstore through the entire catch-up, so queued volumes sat on an
+    ageing round-1 snapshot and their "round" measured the queue rather than
+    the transfer.
+    """
+    params = task.function_params
+    lvs_name = getattr(lvol, "lvs_name", "")
+    own_group = _group_id_for_lvol(lvol)
+    owner = _lvs_cutover_owner(task, lvs_name, tasks)
+    if owner is not None:
+        owner_group = (owner.function_params or {}).get("cutover_group") or ""
+        owner_lvol = str((owner.function_params or {}).get("lvol_id"))
+        # A consistency group cuts over AS A GROUP, so a sibling member joins
+        # the owner rather than queueing behind it.
+        if not (own_group and own_group == owner_group):
+            params["shrink_deadline"] = (
+                int(time.time()) + constants.REPL_CUTOVER_SHRINK_TIMEOUT_SEC)
+            task.function_result = (
+                f"queued for lvstore {lvs_name} behind {owner_lvol[:8]} "
+                f"(delta already converged)")
+            task.status = JobSchedule.STATUS_SUSPENDED
+            task.write_to_db(db.kv_store)
+            return False
+    params["cutover_lvs"] = lvs_name
+    params["cutover_group"] = own_group
+    xfer_timing.stamp("lvs_claim_acquired", lvol=lvol.get_id(), lvs=lvs_name,
+                      round=params.get("shrink_round"))
+    task.write_to_db(db.kv_store)
+    return True
+
+
 def task_runner(task: JobSchedule, tasks=None):
     params = task.function_params
     lvol_id = params.get("lvol_id")
@@ -235,38 +270,13 @@ def task_runner(task: JobSchedule, tasks=None):
         # compete for the same lvstore and hub bandwidth, and every second they
         # steal from a convergence round is a second of writes that lands in
         # the freeze.
-        lvs_name = getattr(lvol, "lvs_name", "")
-        own_group = _group_id_for_lvol(lvol)
-        owner = _lvs_cutover_owner(task, lvs_name, tasks)
-        if owner is not None:
-            owner_group = (owner.function_params or {}).get("cutover_group") or ""
-            owner_lvol = str((owner.function_params or {}).get("lvol_id"))
-            # A consistency group cuts over AS A GROUP, so a sibling member
-            # joins the owner rather than queueing behind it.
-            if not (own_group and own_group == owner_group):
-                # WAIT, do not start. Beginning the shrink phase here would
-                # take snapshots that cannot replicate (the owner holds the
-                # lvstore), and their deadline would run down until the task
-                # died of max retries -- which is exactly what happened to 17
-                # tasks in run 20260827_185009.
-                task.function_params["shrink_deadline"] = (
-                    int(time.time()) + constants.REPL_CUTOVER_SHRINK_TIMEOUT_SEC)
-                task.function_result = (
-                    f"queued for lvstore {lvs_name} behind {owner_lvol[:8]}")
-                task.status = JobSchedule.STATUS_SUSPENDED
-                task.write_to_db(db.kv_store)
-                return False            # no retry burned: this is a queue, not a failure
-
-        # Claim the source LVS for the whole cutover -- the convergence rounds
-        # AND the freeze. Other volumes' snapshot transfers on this LVS queue
-        # behind it (see snapshot_replication._lvs_transfer_hold): they compete
-        # for the same lvstore and hub bandwidth, and every second they steal
-        # from a convergence round is a second of writes that lands in the
-        # freeze.
-        task.function_params["cutover_lvs"] = lvs_name
-        # Recording the group is what lets the replication side tell a sibling
-        # member from an unrelated volume.
-        task.function_params["cutover_group"] = own_group
+        # Exclusivity is the ENDGAME, not the whole cutover. The bulk catch-up
+        # converges in the open, concurrently with every other volume; only
+        # once a round is already fast is the lvstore taken, for the final
+        # tight rounds and the freeze (see _acquire_lvs_claim).
+        if params.get("ready_for_exclusive") and not params.get("cutover_lvs"):
+            if not _acquire_lvs_claim(task, lvol, tasks):
+                return False        # queued, holding nothing and ageing nothing
         task.write_to_db(db.kv_store)
 
         # ---- SHRINK PHASE ----------------------------------------------- #
@@ -282,6 +292,11 @@ def task_runner(task: JobSchedule, tasks=None):
                 return False
 
         # ---- CUTOVER PHASE (immediately after the last shrink round) ---- #
+        # The freeze runs under the claim. A volume whose very first round was
+        # already fast enough reaches here without having taken it.
+        if not params.get("cutover_lvs"):
+            if not _acquire_lvs_claim(task, lvol, tasks):
+                return False
         if "tgt_lvol_composite" not in params:
             with xfer_timing.phase("prepare_cutover", lvol=lvol_id):
                 err = _prepare_cutover(task, lvol, src_node, tgt_node)
@@ -460,13 +475,32 @@ def _shrink_step(task, lvol):
                               ms=elapsed * 1000.0)
             params["shrink_round_done_at"] = time.time()
 
-        # Converged: this round's delta -- the writes made during the previous
-        # round -- moved in low seconds, so the freeze that copies the next
-        # such window will be about as short.
-        if elapsed <= constants.REPL_CUTOVER_CONVERGE_TARGET_SEC:
+        exclusive = bool(params.get("cutover_lvs"))
+
+        # Converged AND holding the lvstore: hand over to the freeze.
+        if exclusive and elapsed <= constants.REPL_CUTOVER_CONVERGE_TARGET_SEC:
             task.function_result = (f"converged in {params['shrink_round']} rounds "
                                     f"(last {elapsed:.2f}s)")
             return True, None
+
+        # Nearly converged but still converging in the OPEN. Stop and go take
+        # the lvstore for the endgame. Claiming it any earlier serialises the
+        # bulk catch-up: in run 20260828_124859 the claim was taken on the
+        # task's first pass and held for its whole life, so volumes queued
+        # while holding an ageing round-1 snapshot and their "round" measured
+        # the queue -- 340s, 1505s, 2073s, 2584s for successive volumes, while
+        # the one that never queued finished its round in 12.4s.
+        if not exclusive and elapsed <= (
+                constants.REPL_CUTOVER_CONVERGE_TARGET_SEC
+                * constants.REPL_CUTOVER_EXCLUSIVE_ENTRY_FACTOR):
+            params["ready_for_exclusive"] = True
+            task.function_result = (f"delta converged in {params['shrink_round']} "
+                                    f"open rounds (last {elapsed:.2f}s); taking "
+                                    f"the lvstore for the endgame")
+            xfer_timing.stamp("ready_for_exclusive", lvol=lvol.get_id(),
+                              round=params["shrink_round"], ms=elapsed * 1000.0)
+            task.write_to_db(db.kv_store)
+            return False, None
 
         if params["shrink_round"] >= constants.REPL_CUTOVER_MAX_SHRINK_ROUNDS:
             # Written faster than it replicates. Freezing now is still the best
@@ -478,6 +512,11 @@ def _shrink_step(task, lvol):
                 constants.REPL_CUTOVER_CONVERGE_TARGET_SEC)
             task.function_result = (f"not converged after {params['shrink_round']} "
                                     f"rounds (last {elapsed:.2f}s)")
+            if not params.get("cutover_lvs"):
+                # Give up converging, but the freeze still wants the lvstore.
+                params["ready_for_exclusive"] = True
+                task.write_to_db(db.kv_store)
+                return False, None
             return True, None
 
         # IMMEDIATELY take the next snapshot. This is the whole mechanism: the
@@ -606,7 +645,13 @@ def main():
                 # for a task that is queued or mid-round, and sleeping 3s per
                 # such task cost ~70s per pass with 20 volumes -- which landed
                 # directly in the client's IO freeze.
-        # Poll fast only while it matters; an idle cluster keeps the old cadence.
+        # Deliberately NOT a sub-second poll: this loop reads the task table
+        # (and each task) per pass, so polling it at 5Hz burns transactions
+        # proportional to clusters x tasks to learn nothing almost every time.
+        # The latency that mattered is gone from the hot path instead -- a
+        # transfer is now awaited and finished in the pass that submitted it
+        # (snapshot_replication._await_transfer_completion, an RPC poll), and a
+        # converging round stays inside its own inline loop.
         time.sleep(constants.REPL_CUTOVER_ACTIVE_POLL_SEC if active
                    else constants.TASK_EXEC_INTERVAL_SEC)
 
