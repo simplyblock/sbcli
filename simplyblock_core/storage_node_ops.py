@@ -4328,6 +4328,20 @@ def _find_splice_target_for_relocation(stranded_primary, role, db_controller, ex
             continue
         if avoid_domains and x.failure_domain in avoid_domains:
             continue
+        # Once spliced, P.<field> is repointed onto stranded_primary itself
+        # (see _relocate_replica_between) -- P's role-target BECOMES
+        # stranded_primary, exactly as fundamental an invariant as X's
+        # domain above: if P's own domain matches stranded_primary's, P now
+        # holds a role-target in its own domain, the most basic diversity
+        # violation there is. Hard-excluded like X's domain, not merely
+        # scored down -- unlike P's OTHER role below, there is no
+        # legitimate "nothing better exists" case here, since this is the
+        # exact same guarantee _pick_replica_relocation_node's own
+        # full_avoid already enforces for X (2026-08-28 finding: this stayed
+        # a soft preference from before today's diversity work and let a
+        # live splice give p59j8 a tertiary target in its own domain).
+        if stranded_primary.failure_domain >= 0 and p.failure_domain == stranded_primary.failure_domain:
+            continue
         if role == "secondary":
             if p.mgmt_ip == stranded_primary.mgmt_ip or x.mgmt_ip == stranded_primary.mgmt_ip:
                 continue

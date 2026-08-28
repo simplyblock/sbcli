@@ -345,11 +345,28 @@ class TestFindSpliceTargetForRelocation(unittest.TestCase):
         got = storage_node_ops._find_splice_target_for_relocation(stranded, "secondary", db)
         self.assertIsNone(got)
 
+    def test_hard_excludes_edge_where_p_shares_strandeds_domain(self):
+        # Once spliced, p.<field> is repointed onto stranded itself (see
+        # _relocate_replica_between) -- if p's own domain matches
+        # stranded's, p ends up with a role-target in its own domain, the
+        # same violation X's domain is already hard-excluded against. This
+        # must refuse (None) even when it's the ONLY candidate edge --
+        # degrading a node uninvolved in this removal is worse than
+        # refusing the relocation (2026-08-28 finding: this was only ever
+        # soft-scored before, and a live splice let it through).
+        cl = _cluster(enable_failure_domain=True)
+        stranded = _node("s", failure_domain=3, mgmt_ip="10.0.0.9")
+        p = _node("p", secondary_id="x", failure_domain=3, mgmt_ip="10.0.0.1")  # same domain as stranded
+        x = _node("x", failure_domain=2, mgmt_ip="10.0.0.2")
+        db = FakeDB(cl, [stranded, p, x])
+        got = storage_node_ops._find_splice_target_for_relocation(stranded, "secondary", db)
+        self.assertIsNone(got)
+
     def test_tertiary_edge_respects_secondary_host_disjointness(self):
         cl = _cluster(enable_failure_domain=True)
         stranded = _node("s", failure_domain=0, secondary_id="s_sec", mgmt_ip="10.0.0.9")
         s_sec = _node("s_sec", failure_domain=1, mgmt_ip="10.0.0.50")
-        p = _node("p", tertiary_id="x", failure_domain=0, mgmt_ip="10.0.0.60")
+        p = _node("p", tertiary_id="x", failure_domain=2, mgmt_ip="10.0.0.60")
         x = _node("x", failure_domain=1, mgmt_ip="10.0.0.61")
         db = FakeDB(cl, [stranded, s_sec, p, x])
         got = storage_node_ops._find_splice_target_for_relocation(stranded, "tertiary", db)
@@ -372,21 +389,20 @@ class TestFindSpliceTargetForRelocation(unittest.TestCase):
         cl = _cluster(enable_failure_domain=True)
         stranded = _node("s", failure_domain=3, tertiary_id="s_ter", mgmt_ip="10.0.0.9")
         s_ter = _node("s_ter", failure_domain=4, mgmt_ip="10.0.0.10")
-        # bad_p's own tertiary shares stranded's domain (3) -- splicing
-        # stranded into bad_p's secondary slot would collide with bad_p's
-        # own untouched tertiary. bad_p/bad_x score higher on the plain
-        # domain-mismatch metric (both ends fully unlike stranded's own
-        # domain), so the old code picked this edge unconditionally.
+        # bad_p's own domain differs from stranded's (so it isn't hard-
+        # excluded), but its OWN tertiary shares stranded's domain (3) --
+        # splicing stranded into bad_p's secondary slot would collide with
+        # bad_p's own untouched tertiary.
         bad_p = _node("bad_p", secondary_id="bad_x", tertiary_id="bad_p_ter",
                        failure_domain=1, mgmt_ip="10.0.0.1")
         bad_p_ter = _node("bad_p_ter", failure_domain=3, mgmt_ip="10.0.0.11")
         bad_x = _node("bad_x", failure_domain=2, mgmt_ip="10.0.0.2")
-        # good_p's own tertiary does NOT collide -- lower domain-mismatch
-        # score (good_p shares stranded's domain), but must still win since
-        # it leaves nothing degraded.
+        # good_p's own tertiary does NOT collide -- same domain-mismatch
+        # score as bad_p/bad_x (both ends unlike stranded's domain), tied
+        # only broken by the other-role preference, so it must still win.
         good_p = _node("good_p", secondary_id="good_x", tertiary_id="good_p_ter",
-                        failure_domain=3, mgmt_ip="10.0.0.3")
-        good_p_ter = _node("good_p_ter", failure_domain=2, mgmt_ip="10.0.0.13")
+                        failure_domain=2, mgmt_ip="10.0.0.3")
+        good_p_ter = _node("good_p_ter", failure_domain=1, mgmt_ip="10.0.0.13")
         good_x = _node("good_x", failure_domain=4, mgmt_ip="10.0.0.4")
         db = FakeDB(cl, [stranded, s_ter, bad_p, bad_p_ter, bad_x, good_p, good_p_ter, good_x])
         got = storage_node_ops._find_splice_target_for_relocation(stranded, "secondary", db)
