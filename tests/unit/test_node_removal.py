@@ -1035,6 +1035,31 @@ class TestRelocateOneReplicaSpliceExecution(unittest.TestCase):
         self.assertEqual(rec.call_count, 2)  # occupant's rebuild + stranded's own rebuild
         self.assertEqual(removed.lvstore_stack_secondary, "")
 
+    def test_relocate_via_splice_repairs_occupants_other_role_afterwards(self):
+        # Wiring check: after a successful splice, _relocate_one_replica must
+        # call _repair_occupants_other_role_after_splice so occupant's OTHER,
+        # untouched role gets a chance to be moved away from a collision with
+        # stranded's domain (see that function's own docstring/tests for the
+        # actual repair logic).
+        cl = _cluster()
+        removed = _node("n1", stack_secondary="stranded")
+        stranded = _node("stranded", secondary_id="n1", lvstore="LVS_stranded")
+        occupant = _node("occupant", secondary_id="x", lvstore="LVS_occupant")
+        x = _node("x", stack_secondary="occupant")
+        db = FakeDB(cl, [removed, stranded, occupant, x])
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "_pick_replica_relocation_node",
+                          return_value="x"), \
+             patch.object(storage_node_ops, "recreate_lvstore_on_non_leader",
+                          return_value=True), \
+             patch.object(storage_node_ops, "_delete_replica_on_peer"), \
+             patch.object(storage_node_ops,
+                          "_repair_occupants_other_role_after_splice") as repair:
+            ret = storage_node_ops._relocate_one_replica(removed, "stranded", "secondary")
+
+        self.assertTrue(ret)
+        repair.assert_called_once_with("occupant", "stranded", "secondary", db)
+
     def test_relocate_via_splice_repoints_lvol_nodes_for_both_moved_primaries(self):
         # Regression: BOTH moves this splice performs -- occupant's replica
         # x -> stranded, and stranded's own replica n1 -> x -- must repoint
@@ -1373,6 +1398,112 @@ class TestRelocateOneReplicaSpliceExecution(unittest.TestCase):
         rec.assert_called_once()
         self.assertEqual(primary.secondary_node_id, "n3")
         self.assertEqual(free_node.lvstore_stack_secondary, "p1")
+
+
+# ---------------------------------------------------------------------------
+# _repair_occupants_other_role_after_splice — a splice edge protects the node
+# actually being relocated (and, since the diversity fix, prefers one where
+# the occupant it repoints stays diverse too) but still accepts a colliding
+# edge as a last resort. This actively closes that gap: after the splice,
+# check whether occupant's OTHER, untouched role now shares a domain with
+# the node it was just repointed onto, and if so, relocate that role too via
+# the same picker + mover (2026-08-28 finding, following directly from the
+# "prefer, don't require" splice fix).
+# ---------------------------------------------------------------------------
+
+class TestRepairOccupantsOtherRoleAfterSplice(unittest.TestCase):
+
+    def test_no_op_when_occupants_other_role_does_not_collide(self):
+        cl = _cluster(enable_failure_domain=True)
+        primary = _node("primary", failure_domain=3)
+        ter = _node("ter", failure_domain=2)  # no collision with primary's domain(3)
+        occupant = _node("occupant", failure_domain=1, secondary_id="primary", tertiary_id="ter")
+        db = FakeDB(cl, [primary, ter, occupant])
+        with patch.object(storage_node_ops, "_pick_replica_relocation_node") as pick, \
+             patch.object(storage_node_ops, "_relocate_replica_between") as move:
+            storage_node_ops._repair_occupants_other_role_after_splice(
+                "occupant", "primary", "secondary", db)
+        pick.assert_not_called()
+        move.assert_not_called()
+
+    def test_relocates_occupants_other_role_when_it_collides(self):
+        cl = _cluster(enable_failure_domain=True)
+        primary = _node("primary", failure_domain=3)
+        old_ter = _node("old_ter", failure_domain=3)  # collides with primary's domain
+        occupant = _node("occupant", failure_domain=1, secondary_id="primary", tertiary_id="old_ter")
+        db = FakeDB(cl, [primary, old_ter, occupant])
+        with patch.object(storage_node_ops, "_pick_replica_relocation_node",
+                          return_value="replacement") as pick, \
+             patch.object(storage_node_ops, "_relocate_replica_between",
+                          return_value=True) as move:
+            storage_node_ops._repair_occupants_other_role_after_splice(
+                "occupant", "primary", "secondary", db)
+        pick.assert_called_once_with(occupant, old_ter, "tertiary", db)
+        move.assert_called_once_with("occupant", "old_ter", "replacement", "tertiary", db)
+
+    def test_tertiary_role_checks_secondary_as_the_other_role(self):
+        cl = _cluster(enable_failure_domain=True)
+        primary = _node("primary", failure_domain=3)
+        old_sec = _node("old_sec", failure_domain=3)
+        occupant = _node("occupant", failure_domain=1, tertiary_id="primary", secondary_id="old_sec")
+        db = FakeDB(cl, [primary, old_sec, occupant])
+        with patch.object(storage_node_ops, "_pick_replica_relocation_node",
+                          return_value="replacement") as pick, \
+             patch.object(storage_node_ops, "_relocate_replica_between",
+                          return_value=True) as move:
+            storage_node_ops._repair_occupants_other_role_after_splice(
+                "occupant", "primary", "tertiary", db)
+        pick.assert_called_once_with(occupant, old_sec, "secondary", db)
+        move.assert_called_once_with("occupant", "old_sec", "replacement", "secondary", db)
+
+    def test_logs_warning_when_no_replacement_found(self):
+        cl = _cluster(enable_failure_domain=True)
+        primary = _node("primary", failure_domain=3)
+        old_ter = _node("old_ter", failure_domain=3)
+        occupant = _node("occupant", failure_domain=1, secondary_id="primary", tertiary_id="old_ter")
+        db = FakeDB(cl, [primary, old_ter, occupant])
+        with patch.object(storage_node_ops, "_pick_replica_relocation_node", return_value=None), \
+             patch.object(storage_node_ops, "_relocate_replica_between") as move, \
+             patch.object(storage_node_ops, "logger") as log:
+            storage_node_ops._repair_occupants_other_role_after_splice(
+                "occupant", "primary", "secondary", db)
+        move.assert_not_called()
+        log.warning.assert_called_once()
+
+    def test_logs_warning_when_relocation_itself_fails(self):
+        cl = _cluster(enable_failure_domain=True)
+        primary = _node("primary", failure_domain=3)
+        old_ter = _node("old_ter", failure_domain=3)
+        occupant = _node("occupant", failure_domain=1, secondary_id="primary", tertiary_id="old_ter")
+        db = FakeDB(cl, [primary, old_ter, occupant])
+        with patch.object(storage_node_ops, "_pick_replica_relocation_node",
+                          return_value="replacement"), \
+             patch.object(storage_node_ops, "_relocate_replica_between", return_value=False), \
+             patch.object(storage_node_ops, "logger") as log:
+            storage_node_ops._repair_occupants_other_role_after_splice(
+                "occupant", "primary", "secondary", db)
+        log.warning.assert_called_once()
+
+    def test_no_op_when_fd_disabled(self):
+        cl = _cluster(enable_failure_domain=False)
+        primary = _node("primary", failure_domain=3)
+        old_ter = _node("old_ter", failure_domain=3)
+        occupant = _node("occupant", failure_domain=1, secondary_id="primary", tertiary_id="old_ter")
+        db = FakeDB(cl, [primary, old_ter, occupant])
+        with patch.object(storage_node_ops, "_pick_replica_relocation_node") as pick:
+            storage_node_ops._repair_occupants_other_role_after_splice(
+                "occupant", "primary", "secondary", db)
+        pick.assert_not_called()
+
+    def test_no_op_when_occupant_has_no_other_role_assigned(self):
+        cl = _cluster(enable_failure_domain=True)
+        primary = _node("primary", failure_domain=3)
+        occupant = _node("occupant", failure_domain=1, secondary_id="primary")  # no tertiary at all
+        db = FakeDB(cl, [primary, occupant])
+        with patch.object(storage_node_ops, "_pick_replica_relocation_node") as pick:
+            storage_node_ops._repair_occupants_other_role_after_splice(
+                "occupant", "primary", "secondary", db)
+        pick.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
