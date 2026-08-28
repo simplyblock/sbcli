@@ -193,7 +193,7 @@ tox run -e integration -- tests/integration/migration/test_migration_flow.py -v
 2. Place test files under `tests/unit/` or `tests/integration/` (mirroring the source layout is fine but not required). **Never drop a `test_*.py` directly in `tests/`** — it belongs to no tier, is selected by neither tox env, and gets no tier-specific conftest. `tests/conftest.py`'s `pytest_configure` enforces this: any top-level `tests/test_*.py` aborts collection (both `unit` and `integration`) with a `UsageError` telling you to move it.
 3. Reuse `from tests._mocks import make_mock_cluster` for mock `Cluster` objects rather than rebuilding the same fixture.
 4. For new FDB-backed scenarios, prefer extending `ftt2/`, `migration/`, or `expansion_sim/` over inventing another conftest — they already provide topology/cluster bootstrap on top of the tier-wide keyspace wipe. Persist real models to FDB; never mock the DB layer (see the integration-tier rules above).
-5. Never edit symlink targets — `tests/CLAUDE.md` is a symlink to this file.
+5. Never edit `tests/CLAUDE.md` — it is a stub that imports this file via `@AGENTS.md`.
 
 ## Secret-handling tests
 
