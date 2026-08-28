@@ -2571,17 +2571,23 @@ def _top_dir() -> str:
     return os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 
-def render_legacy_alerting(contact_point: str, grafana_endpoint: str) -> str:
-    """Render the single-contact-point alerting config kept for --contact-point."""
+def render_legacy_alerting(contact_point: Optional[str], grafana_endpoint: str) -> str:
+    """Render the single-contact-point alerting config kept for --contact-point.
+
+    `contact_point` is optional at every layer above (the CLI flag defaults to
+    None, and clusters created without it carry None/"" in the DB), so an absent
+    value has to fall through to the placeholder branch rather than reach the
+    regex matchers.
+    """
     env = Environment(loader=FileSystemLoader(_alerts_template_folder()), trim_blocks=True, lstrip_blocks=True)
     template = env.get_template(f'{ALERT_RESOURCES_FILE}.legacy.j2')
 
     slack_pattern = re.compile(r"https://hooks\.slack\.com/services/\S+")
     email_pattern = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
 
-    if slack_pattern.match(contact_point):
+    if contact_point and slack_pattern.match(contact_point):
         alert_type = "slack"
-    elif email_pattern.match(contact_point):
+    elif contact_point and email_pattern.match(contact_point):
         alert_type = "email"
     else:
         alert_type = "slack"
@@ -2602,8 +2608,8 @@ def render_configfile_alerting(alert_config: Dict[str, Any]) -> str:
     return template.render(alert_config)
 
 
-def render_and_deploy_alerting_configs(alert_config: Optional[Dict[str, Any]], contact_point, grafana_endpoint,
-                                       cluster_uuid, cluster_secret):
+def render_and_deploy_alerting_configs(alert_config: Optional[Dict[str, Any]], contact_point: Optional[str],
+                                       grafana_endpoint, cluster_uuid, cluster_secret):
     top_dir = _top_dir()
     alerts_template_folder = _alerts_template_folder()
 

@@ -331,3 +331,35 @@ def test_legacy_template_is_still_reachable():
     receiver = rendered["contactPoints"][0]["receivers"][0]
     assert receiver["type"] == "slack"
     assert receiver["settings"]["url"] == "https://hooks.slack.com/services/T/B/X"
+
+
+# --- legacy --contact-point rendering ----------------------------------------
+
+@pytest.mark.parametrize("contact_point", [None, ""])
+def test_legacy_rendering_without_a_contact_point_uses_the_placeholder(contact_point):
+    """`cluster create` without --contact-point must still render.
+
+    The flag has no argparse default, so an omitted --contact-point arrives as
+    None all the way down; feeding that to re.match() aborted cluster create
+    with "expected string or bytes-like object" after the cluster object had
+    already been written.
+    """
+    rendered = yaml.safe_load(
+        utils.render_legacy_alerting(contact_point, "http://grafana.example.com")
+    )
+
+    receiver = rendered["contactPoints"][0]["receivers"][0]
+    assert receiver["type"] == "slack"
+    assert receiver["settings"]["url"] == "https://hooks.slack.com/services/"
+
+
+@pytest.mark.parametrize("contact_point, alert_type", [
+    ("https://hooks.slack.com/services/T/B/X", "slack"),
+    ("ops@example.com", "email"),
+])
+def test_legacy_rendering_detects_the_contact_point_type(contact_point, alert_type):
+    rendered = yaml.safe_load(
+        utils.render_legacy_alerting(contact_point, "http://grafana.example.com")
+    )
+
+    assert rendered["contactPoints"][0]["receivers"][0]["type"] == alert_type

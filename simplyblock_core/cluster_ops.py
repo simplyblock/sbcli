@@ -416,7 +416,7 @@ def create_cluster(blk_size, page_size_in_blocks, cli_pass,
     cluster.max_subsys = max_subsys or 0
     cluster.hugepages_mem = hugepages_mem or 0
     cluster.spdk_vcpu_count = spdk_vcpu_count or 0
-    cluster.contact_point = contact_point
+    cluster.contact_point = contact_point or ""
     cluster.disable_monitoring = disable_monitoring
     cluster.mode = mode
     cluster.full_page_unmap = False
