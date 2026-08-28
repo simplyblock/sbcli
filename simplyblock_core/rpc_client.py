@@ -458,8 +458,24 @@ class RPCClient:
         params = {"traddr": pci_addr, "ns_id": 1, "label": name}
         return self._request2("ultra21_alloc_ns_mount", params)
 
-    def bdev_nvme_detach_controller(self, name):
+    def bdev_nvme_detach_controller(self, name, traddr=None, trsvcid=None,
+                                    trtype="TCP", adrfam="ipv4"):
+        """Detach a controller, or -- with a trid -- only the paths on that
+        address.
+
+        Note the SPDK semantics before using this to prune: bdev_nvme_delete()
+        walks EVERY nvme_ctrlr under the bdev and removes each one whose
+        path matches, so a trid detach removes *all* controllers on that
+        address, not one of them. There is deliberately no way to single out
+        one of two identical trids -- the duplicate-path repair in
+        storage_node_ops therefore detaches the address and re-attaches it
+        once, rather than trying to drop a single copy.
+        """
         params = {"name": name}
+        if traddr:
+            params.update({"traddr": traddr, "trtype": trtype, "adrfam": adrfam})
+            if trsvcid:
+                params["trsvcid"] = str(trsvcid)
         return self._request2("bdev_nvme_detach_controller", params)
 
     def bdev_nvme_remove_trid(self, name, traddr, trsvcid, trtype="TCP"):
@@ -1469,6 +1485,54 @@ class RPCClient:
         }
         return self._request("jc_explicit_synchronization", params)
 
+    def jc_replace_jm(self, name_old: str, replacements: list):
+        """Swap the JM bdev backing one or more live JC members from
+        ``name_old`` to a per-member ``name_new`` in place -- JC re-syncs
+        each new JM's journal in the background and, from then on, treats
+        it as the member for that slot. Replaces the old
+        override_name_on_node naming trick (which faked the replacement
+        under the removed peer's old name so JC wouldn't need touching):
+        this RPC updates JC's live state directly, so the caller can
+        connect the replacement(s) under their own natural name.
+
+        A single storage node can run more than one local JC instance
+        against the SAME ``name_old`` bdev at once -- its own redundancy
+        set, plus one instance per primary it hosts as secondary/tertiary
+        (each such role uses a distinct ``jm_vuid``, up to 3 total per
+        node). This call covers ALL of them in one shot:
+
+        ``replacements``: 1..3 dicts, each ``{"jm_vuid": int, "name_new":
+        str}`` -- ``jm_vuid`` identifies which local JC instance to patch
+        (must currently use ``name_old``), ``name_new`` is the bdev to use
+        instead (must already exist as a bdev; the caller connects it
+        first). The SAME ``name_new`` may cover multiple ``jm_vuid``
+        entries -- reusing a bdev already in use by a DIFFERENT jm_vuid on
+        this node is fine, only reusing one already in THIS jm_vuid's own
+        member list is rejected. Must cover every jm_vuid on this node
+        that currently uses ``name_old``, or the whole call is rejected.
+
+        Raises RPCRemoteError with one of the documented codes on
+        rejection/failure:
+            -10 JC is closing
+            -11 invalid JM names (empty, or name_new == name_old)
+            -12 another JM replacement is already in progress
+            -13 name_old is not used by JC
+            -14 this jm_vuid uses name_new already
+            -15 the JM of name_old is being removed
+            -16 invalid number of replacements (0, or more than 3)
+            -17 the replacements do not cover all jm_vuids that use name_old
+            -18 the same jm_vuid is given twice
+            -19 unknown jm_vuid
+            -20 this jm_vuid does not use name_old
+            -3  JC started closing during the operation
+            -4  the JM context has disappeared during the operation
+            -5  failed to prepare or substitute the JM contexts (OOM)
+            -6  timed out connecting to the new JM bdev(s)
+                (c_jc_tmo_ms_replace_jm_open) -- NOT undone in this case:
+                JC keeps retrying to connect. Check the JM bdevs and log.
+        """
+        return self._request3("jc_replace_jm", name_old=name_old, replacements=replacements)
+
     def listeners_del(self, nqn, trtype, traddr, trsvcid):
         """"
             nqn: Subsystem NQN.
@@ -1638,6 +1702,36 @@ class RPCClient:
         return self._request('bdev_lvol_connect_hublvol', {
             "uuid" if utils.UUID_PATTERN.match(lvs) else "lvs_name": lvs,
             "remote_bdev": bdev,
+        })
+
+    def jc_set_dual_node(self, enable):
+        """Tell the journal component whether this is a DUAL-NODE cluster.
+
+        The JC aborts its whole SPDK application when the number of reachable
+        journal members drops below jc_ha_nmin_jms(), which is 2 unless the
+        dual-node flag is set, and 1 when it is. On a 2-node cluster losing
+        the peer leaves exactly 1 of 2 JMs, so without this flag the SURVIVING
+        node aborts itself the moment its partner stops -- a single graceful
+        `sn shutdown` takes the entire cluster down (soak case 6: "JC detected
+        a network outage nd=1 njms=2" / "JC aborts the node due to network
+        outage" / core dump, every client path gone, XFS shut down).
+        The fork implements the tolerance; nothing ever switched it on.
+        """
+        return self._request2("jc_set_dual_node", {"enable": bool(enable)})
+
+    def bdev_lvol_snapshot_group(self, lvs_name, snapshots):
+        """One crash-consistent snapshot per consistency-group member.
+
+        ``snapshots`` is a list of {"lvol_name": "LVS_1/LVOL_5",
+        "snapshot_name": "SNAP_123"}; all members must be in ``lvs_name``.
+        IO on every member is frozen before the first snapshot and released
+        after the last; a mid-sequence failure unfreezes first and then
+        garbage-collects the snapshots already taken (SPDK side).
+        Returns [{"lvol_name", "snapshot_name", "uuid"}, ...] or False.
+        """
+        return self._request2("bdev_lvol_snapshot_group", {
+            "lvs_name": lvs_name,
+            "snapshots": snapshots,
         })
 
     def jc_suspend_compression(self, jm_vuid, suspend=False):

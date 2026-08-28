@@ -130,6 +130,18 @@ FIO_HARD_ERROR_MARKERS = (
     "fio: pid=",
     "Killed",
     "Terminated",
+    # fio prints verify failures WITHOUT the "fio: " prefix -- the line reads
+    # "verify: bad magic header a8a4, wanted acca at file ...". Neither
+    # "fio: verify" nor "verify failed" matches that, so run 20260825_155730
+    # corrupted vol6 at 18:53 and vol2 at 19:43 and the soak kept applying
+    # outages for another two hours, reporting PASS each time, until vol4's
+    # fio *process* died at 20:49 and the rc-file branch finally caught it.
+    # A data verification failure is the single most important thing this
+    # harness can find; it must never again depend on fio also crashing.
+    "verify: bad",
+    "bad magic header",
+    "bad header offset",
+    "verify: got",
 )
 #: fio stderr markers for a --max_latency violation. Fatal in phase 1 (a
 #: single-NIC outage must be transparent), counted in phase 2 (promotion
@@ -206,6 +218,14 @@ def parse_args():
                      help="Seconds the NIC stays down on all nodes (default 30).")
     nic.add_argument("--nic-phase-settle", type=int, default=30,
                      help="Seconds to wait after NIC restore before verifying (default 30).")
+    nic.add_argument("--no-nic-phase", action="store_true",
+                     help="Disable phase 1 (the all-nodes single-NIC outage) "
+                          "entirely. REQUIRED on a single-data-NIC, non-multipath "
+                          "cluster: with one data NIC per node, phase 1 takes that "
+                          "NIC down on every node at once and isolates the whole "
+                          "cluster instead of exercising path redundancy. Note that "
+                          "--nic-phase-every 0 does NOT disable phase 1 -- it means "
+                          "'once, on iteration 1'.")
     nic.add_argument("--nic-phase-every", type=int, default=1,
                      help="Run the NIC phase every N iterations. 0 = once, before the "
                           "first pair only (default 1).")
@@ -1220,8 +1240,15 @@ class SoakRunner:
             if args.fio_max_latency > 0:
                 fio_cmd += f"--max_latency={args.fio_max_latency}s "
             if args.fio_verify:
+                # verify_dump writes <file>.<offset>.received / .expected on a
+                # mismatch. Without it a verify failure gives only fio's one
+                # line, and every corruption so far has died with the returned
+                # bytes unidentified -- we could not tell stale data from
+                # parity noise from a neighbouring block, and the volumes are
+                # on instance store so they vanish when the fleet is stopped.
+                # The dumps are 4 KiB each and only appear on failure.
                 fio_cmd += (f"--verify={args.fio_verify} --verify_fatal=1 "
-                            f"--verify_backlog=1024 ")
+                            f"--verify_backlog=1024 --verify_dump=1 ")
             fio_cmd += f"--output={shlex.quote(volume['fio_log'])}"
 
             start_script = (
@@ -1602,6 +1629,12 @@ class SoakRunner:
         # node passive. active_passive means one NIC carries all hub IO.
         to_check = [(b, "hublvol") for b in hublvol_bdevs]
         to_check += [(b, "remote") for b in remote_bdevs[:max(0, self.args.policy_sample)]]
+        # Only meaningful with more than one path: on a single-data-NIC
+        # (non-multipath) cluster a bdev legitimately reports active_passive,
+        # and asserting active_active there would make every bdev a "problem",
+        # so the heal gate could never converge.
+        if len(self.args.data_nics) < 2:
+            to_check = []
         for bdev_name, kind in to_check:
             try:
                 bdevs = _rpc_json(f"bdev_get_bdevs -b {shlex.quote(bdev_name)}",
@@ -2152,8 +2185,13 @@ print(json.dumps(out))
                     + ", ".join(f"{n['uuid'][:12]}:{n['status']}" for n in current))
             uuids = [n["uuid"] for n in current]
 
-            nic_due = (iteration == 1 if args.nic_phase_every == 0
-                       else (iteration - 1) % args.nic_phase_every == 0)
+            # --nic-phase-every 0 means "once, on iteration 1"; only
+            # --no-nic-phase disables phase 1 outright, which is required on a
+            # single-data-NIC cluster where taking "one" NIC down on every node
+            # isolates the whole cluster instead of testing path redundancy.
+            nic_due = ((not args.no_nic_phase)
+                       and (iteration == 1 if args.nic_phase_every == 0
+                            else (iteration - 1) % args.nic_phase_every == 0))
             if nic_due:
                 nic = args.data_nics[(iteration - 1) % len(args.data_nics)]
                 if self.run_nic_phase(iteration, nic, uuids):

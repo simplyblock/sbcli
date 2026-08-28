@@ -21,6 +21,7 @@ docker cp does not survive task recreation; a bind mount does.
 Usage:  python hotfix_repl_lab.py [--verify-only]
 """
 import json
+import shlex
 import subprocess
 import sys
 import time
@@ -61,6 +62,12 @@ SHARED = {
     # dependency alongside the file that needs it.
     "simplyblock_core/controllers/ops_gate.py": "controllers/ops_gate.py",
     "simplyblock_core/controllers/tasks_controller.py": "controllers/tasks_controller.py",
+    # The JC dual-node flag lives here: apply_jc_dual_node() is called on
+    # node add AND on every bring-up, and case 6 restarts a node mid-run --
+    # a restarted node comes back with the flag off unless the CP re-applies
+    # it, which is exactly when the survivor would abort.
+    "simplyblock_core/storage_node_ops.py": "storage_node_ops.py",
+    "simplyblock_core/rpc_client.py": "rpc_client.py",
 }
 #: service -> its own module (mounted on top of the shared set)
 SERVICES = {
@@ -71,13 +78,64 @@ SERVICES = {
     "app_TasksRunnerReplicationFinal": {
         "simplyblock_core/services/tasks_runner_replication_final.py":
             "services/tasks_runner_replication_final.py"},
-    "app_LVolMonitor": {},
+    "app_LVolMonitor": {
+        "simplyblock_core/services/lvol_monitor.py": "services/lvol_monitor.py"},
 }
 #: also refreshed on the mgmt HOST: the harness runs `sudo python3 -c
 #: "...lvol_controller.get_replication_info..."` there, and sbctl imports it.
 HOST_FILES = dict(SHARED)
 HOST_FILES.update({p: v for s in SERVICES.values() for p, v in s.items()})
 HOST_CLI = "simplyblock_cli/clibase.py"
+
+CRLF, LF = bytes([13, 10]), bytes([10])
+
+#: filled in by discover_drift() at run time: repo path -> path under
+#: simplyblock_core, for every module that differs from the deployed image
+DRIFT = {}
+
+
+def discover_drift(mgmt):
+    """Every simplyblock_core module that differs from the one in the IMAGE.
+
+    A hand-maintained mount list is wrong by construction: it must be extended
+    for every new module a fix happens to touch. Forgetting one fails loudly
+    (ImportError: cannot import name 'ConsistencyGroup' -- the service
+    crash-looping, lab 2026-08-26) or, worse, quietly: the fix mounted while a
+    module it depends on stays at the image's version. Ask the image what it
+    has and mount everything that does not match.
+    """
+    import hashlib
+    ref = ssh(mgmt, "sudo docker ps --format '{{.Names}}' | grep -m1 "
+                    "TasksRunnerReplicationFinal", check=False).strip()
+    if not ref:
+        log("no reference container; falling back to the static mount list")
+        return {}
+    probe = ("cd /usr/local/lib/python3.12/site-packages && "
+             'find simplyblock_core -name "*.py" | sort | xargs md5sum')
+    listing = ssh(mgmt, f"sudo docker exec {ref} sh -c {shlex.quote(probe)}",
+                  check=False)
+    image = {}
+    for line in listing.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[1].endswith(".py"):
+            image[parts[1]] = parts[0]
+    if not image:
+        log("could not read the image's module hashes; using the static list")
+        return {}
+
+    drift, core = {}, REPO / "simplyblock_core"
+    for path in core.rglob("*.py"):
+        rel = path.relative_to(REPO).as_posix()
+        if "__pycache__" in rel or rel.startswith("simplyblock_core/test"):
+            continue
+        raw = path.read_bytes().replace(CRLF, LF)   # image files are LF
+        digest = hashlib.md5(raw).hexdigest()
+        if image.get(rel) != digest:
+            drift[rel] = path.relative_to(core).as_posix()
+    log(f"image drift: {len(drift)} module(s) differ from the deployed image")
+    for rel in sorted(drift):
+        log(f"    {rel}{'' if rel in image else '  (new)'}")
+    return drift
 
 
 def log(msg):
@@ -98,6 +156,11 @@ def ssh(host, cmd, timeout=600, check=True):
 
 def stage(mgmt):
     log(f"staging {len(HOST_FILES) + 1} files in {HOTFIX_DIR}")
+    names = [Path(x).name for x in HOST_FILES]
+    dupes = sorted({n for n in names if names.count(n) > 1})
+    if dupes:
+        raise RuntimeError(f"modules share a basename and would collide in the "
+                           f"flat staging dir: {dupes}")
     ssh(mgmt, f"sudo mkdir -p {HOTFIX_DIR}/backup && sudo chown ec2-user {HOTFIX_DIR}")
     locals_ = [str(REPO / p) for p in HOST_FILES] + [str(REPO / HOST_CLI)]
     run(["scp", *SSH_OPTS, *locals_, f"ec2-user@{mgmt}:{HOTFIX_DIR}/"], timeout=900)
@@ -168,10 +231,17 @@ def verify(mgmt):
 
 
 def main():
+    global DRIFT, HOST_FILES
     meta = json.loads((HERE / "cluster_metadata_repl.json").read_text())
     mgmt = meta["mgmt"]["public_ip"]
     log(f"mgmt={mgmt}")
     if "--verify-only" not in sys.argv:
+        # Mount everything that differs from the image, not a hand-kept list.
+        DRIFT = discover_drift(mgmt)
+        SHARED.update(DRIFT)
+        HOST_FILES = dict(SHARED)
+        HOST_FILES.update({p: v for sv in SERVICES.values()
+                           for p, v in sv.items()})
         stage(mgmt)
         mount_services(mgmt)
         patch_host(mgmt)

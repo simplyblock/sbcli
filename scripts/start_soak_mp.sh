@@ -8,6 +8,13 @@
 #
 # PLACEMENT_DUMPS=1 turns on per-outage placement-map dumps (gzipped, stored
 # on each storage node under ~/placement_dumps/<run>/).
+#
+# RESTART_TIMEOUT overrides the wait for nodes to return after a pair outage.
+# The 900s default aborted run 20260825_085018 at iteration 4: a JC abort on
+# one node plus a ~6min-per-lvstore restart crawl on the other meant both
+# nodes needed ~36min to come back -- and they did come back healthy, with no
+# fio error. Until that recovery time is fixed, a longer wait measures the
+# product rather than the harness's patience.
 set -u
 cd "$HOME"
 TS=$(date +%Y%m%d_%H%M%S)
@@ -20,6 +27,7 @@ setsid nohup python3 "$HOME/aws_dual_node_outage_soak_multipath.py" \
     --ssh-key "$HOME/.ssh/mtes01.pem" \
     --iterations 75 \
     --start-iteration "${START_ITERATION:-1}"     ${PLACEMENT_DUMPS:+--placement-dumps} \
+    ${RESTART_TIMEOUT:+--restart-timeout $RESTART_TIMEOUT} \
     --runtime 52000 \
     --log-file "$LOG" \
     > "$OUT" 2>&1 < /dev/null &

@@ -398,6 +398,7 @@ class CLIWrapper(CLIWrapperBase):
         self.init_cluster__replication_policy_list(subparser)
         self.init_cluster__replication_policy_remove(subparser)
         self.init_cluster__replication_policy_failover(subparser)
+        self.init_cluster__replication_policy_snapshot(subparser)
 
 
     def init_cluster__create(self, subparser):
@@ -662,6 +663,8 @@ class CLIWrapper(CLIWrapperBase):
         subcommand.add_argument('--interval-min', help='Cadence: minutes between internal replication snapshots. 0 replicates user snapshots only. Default: `1`.', type=int, dest='interval_min')
         subcommand.add_argument('--mode', help='Replication mode. Default: `failover`.', type=str, dest='mode', choices=['failover','migration',])
         subcommand.add_argument('--keep', help='Replicated internal snapshots to retain on each side. Minimum (and default): `2`.', type=int, dest='keep_replicated')
+        subcommand.add_argument('--retention-schedule', help='Tiered retention, e.g. `15m:2h,1h:11h,1d:7d` - one snapshot every 15 minutes for the last 2 hours, then hourly for 11 hours, then daily for 7 days. Snapshots older than the total span are pruned. Empty (default) keeps the flat --keep behaviour.', type=str, dest='retention_schedule')
+        subcommand.add_argument('--consistency-group', help='All volumes attached to this policy form ONE consistency group: they must share an LVS (creation pins them to it), cadence snapshots are taken as one frozen group, and fail-over generations resolve group-wide.', dest='consistency_group', action='store_true')
 
     def init_cluster__replication_policy_list(self, subparser):
         subcommand = self.add_sub_command(subparser, 'replication-policy-list', 'Lists the replication policies of a cluster')
@@ -671,6 +674,10 @@ class CLIWrapper(CLIWrapperBase):
     def init_cluster__replication_policy_remove(self, subparser):
         subcommand = self.add_sub_command(subparser, 'replication-policy-remove', 'Removes a replication policy. Refused while a volume still follows it.')
         subcommand.add_argument('policy_id', help='Replication policy id', type=str)
+
+    def init_cluster__replication_policy_snapshot(self, subparser):
+        subcommand = self.add_sub_command(subparser, 'replication-policy-snapshot', "Takes ONE crash-consistent snapshot of every volume in the policy's consistency group, as a new group generation")
+        subcommand.add_argument('policy_id', help='Replication policy id (must be a consistency-group policy)', type=str)
 
     def init_cluster__replication_policy_failover(self, subparser):
         subcommand = self.add_sub_command(subparser, 'replication-policy-failover', 'Fails over EVERY volume following this policy')
