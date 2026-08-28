@@ -173,5 +173,24 @@ class PromClient:
         except Exception as e:
             logger.error(f"Error getting node filesystem metrics: {e}")
             return []
-
         return node_stats
+
+    def get_api_metrics(self, history=None):
+        params = {
+             "handler!": "none",
+        }
+        metrics_lst = ["seconds_sum", "seconds_count"]
+        api_stats = {}
+        try:
+            for metric in metrics_lst:
+                params[metric] = ""
+                response_list= self.get_raw_metric(f"http_request_duration_{metric}", params, history)
+                for m, v in response_list:
+                    node_name = m["instance"]
+                    api_stats[node_name] = {metric: v}
+        except Exception as e:
+            logger.error(f"Error getting API metrics: {e}")
+            return []
+        return api_stats
+
+

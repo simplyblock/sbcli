@@ -38,6 +38,22 @@ def check_mgmt_disk_util_docker(cluster):
                 logger.warning(f"Node {node_name} disk util: {dist_util}%")
                 mgmt_events.dist_usage_warning(node_name, dist_util)
 
+def check_api_metrics(cluster):
+    prom_client = PromClient(cluster.get_id())
+    api_stats = prom_client.get_api_metrics(history="5m")
+    data = []
+    if api_stats:
+        for api_stat in api_stats:
+            for i in range(len(api_stat.get("seconds_count"))):
+                http_request_duration_seconds_count = api_stat.get("seconds_count")[i]
+                http_request_duration_seconds_sum = api_stats.get("seconds_sum")[i]
+                data.append(http_request_duration_seconds_sum/http_request_duration_seconds_count)
+
+        avg_api_req_duration = sum(data)/len(data)
+        logger.debug(f"avg_api_req_duration: {avg_api_req_duration}")
+        if avg_api_req_duration > 15:
+            logger.warning(f"API request duration is too high: {avg_api_req_duration}s")
+
 
 def main():
     logger.info("Starting capacity monitoring service...")
@@ -97,6 +113,8 @@ def main():
 
             if cl.mode == "docker":
                 check_mgmt_disk_util_docker(cl)
+
+            check_api_metrics(cl)
 
         time.sleep(constants.CAP_MONITOR_INTERVAL_SEC)
 
