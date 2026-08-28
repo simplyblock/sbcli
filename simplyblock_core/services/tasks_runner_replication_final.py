@@ -195,15 +195,6 @@ def _finalize(task, ok, err):
     # A retry re-claims the LVS on its next pass; holding the claim across the
     # wait would stall every other volume's replication for nothing.
     _release_lvs_claim(task)
-    # Give the next attempt a fresh shrink window. Without this, a
-    # deadline-timeout failure leaves the expired timestamp in place and every
-    # subsequent retry fails on the first deadline check, burning all retries
-    # within seconds without doing any useful work.
-    task.function_params["shrink_deadline"] = (
-        int(time.time()) + constants.REPL_CUTOVER_SHRINK_TIMEOUT_SEC)
-    for _k in ("shrink_snap_id", "shrink_started_at", "shrink_round",
-               "shrink_round_times", "shrink_round_done_at"):
-        task.function_params.pop(_k, None)
     task.write_to_db(db.kv_store)
     return False
 
@@ -393,16 +384,21 @@ def task_runner(task: JobSchedule, tasks=None):
         # We are the rightful owner — claim already written above; proceed.
 
         # ---- SHRINK PHASE ----------------------------------------------- #
-        if "shrink_snap_id" in params and params.get("shrink_round", 0) > 0:
-            done, err = _shrink_step(task, lvol)
-            if err:
-                return _finalize(task, False, err)
-            if not done:
-                # waiting on replication of the current shrink snapshot; come
-                # back next pass WITHOUT burning a retry (bounded by deadline)
-                task.status = JobSchedule.STATUS_SUSPENDED
-                task.write_to_db(db.kv_store)
-                return False
+        # Skip shrink entirely once the cutover clone is prepared: tgt_lvol_composite
+        # being set means shrink already completed on a prior pass and the clone was
+        # created from the resulting snapshot.  Every retry after a failed run_cutover
+        # should jump straight to run_cutover without redoing any shrink rounds.
+        if "tgt_lvol_composite" not in params:
+            if "shrink_snap_id" in params and params.get("shrink_round", 0) > 0:
+                done, err = _shrink_step(task, lvol)
+                if err:
+                    return _finalize(task, False, err)
+                if not done:
+                    # waiting on replication of the current shrink snapshot; come
+                    # back next pass WITHOUT burning a retry (bounded by deadline)
+                    task.status = JobSchedule.STATUS_SUSPENDED
+                    task.write_to_db(db.kv_store)
+                    return False
 
         # ---- CUTOVER PHASE (immediately after the last shrink round) ---- #
         if "tgt_lvol_composite" not in params:
@@ -540,7 +536,15 @@ def _shrink_step(task, lvol):
 
     while True:
         if int(time.time()) > deadline:
-            return False, "shrink phase timed out waiting for replication"
+            # Deadline expired: stop adding rounds and fall through to cutover
+            # rather than failing and burning a retry.  The freeze that follows
+            # is slightly larger than if we had converged, but proceeding is
+            # always better than another 900-second wait.
+            logger.warning(
+                "cutover convergence: lvol=%s shrink deadline expired after %d "
+                "rounds; proceeding to cutover", lvol.get_id(),
+                params.get("shrink_round", 0))
+            return True, None
 
         snap_id = params["shrink_snap_id"]
         done = _shrink_round_done(snap_id)
