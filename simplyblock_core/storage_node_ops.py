@@ -4082,10 +4082,24 @@ def _check_replica_relocation_feasible(removed_node: StorageNode, db_controller)
     return True, ""
 
 
-def _pick_replica_relocation_node(primary, removed_node: StorageNode, role, db_controller):
+def _pick_replica_relocation_node(primary, removed_node: StorageNode, role, db_controller,
+                                   extra_exclude_ids=()):
     """Choose a node to re-host ``primary``'s ``role`` (secondary|tertiary)
     replica, currently on ``removed_node``. Returns a node id or None.
     Reuses the existing anti-affinity-aware placement helpers.
+
+    ``extra_exclude_ids``: additional node ids to rule out beyond
+    ``removed_node`` itself -- used by ``_relocate_replica_between``'s
+    nested vacate-rotation to exclude the primary currently being spliced
+    in the ENCLOSING call. Without this, the only candidate this call finds
+    can be exactly that in-flight primary (structurally invalid: it can't
+    simultaneously be the thing being relocated onto a node AND the target
+    something else relocates onto), and the caller's own guard against that
+    just gives up rather than searching further (2026-08-28 finding: a
+    three-way chain -- primary A splices into an existing pairing,
+    displacing B onto A's target, but B's only free candidate for the role
+    being vacated turns out to be A itself, mid-relocation -- got stuck
+    retrying the identical failure forever instead of looking past A).
 
     With failure domains enabled, prefers FULL pairwise domain diversity
     across {primary, secondary, tertiary} — not just the weaker ">=1
@@ -4130,7 +4144,7 @@ def _pick_replica_relocation_node(primary, removed_node: StorageNode, role, db_c
     None (every step above exhausted) makes
     ``_check_replica_relocation_feasible`` refuse the removal up front.
     """
-    exclude_ids = [removed_node.get_id()]
+    exclude_ids = [removed_node.get_id(), *extra_exclude_ids]
     if role == "secondary":
         other_id = primary.tertiary_node_id
         if primary.tertiary_node_id and primary.tertiary_node_id != removed_node.get_id():
@@ -4900,7 +4914,16 @@ def _relocate_replica_between(occupant_primary_id, old_host_id, new_host_id, rol
             except KeyError:
                 existing_occupant = None
             vacate_target = (
-                _pick_replica_relocation_node(existing_occupant, new_host, role, db_controller)
+                _pick_replica_relocation_node(
+                    existing_occupant, new_host, role, db_controller,
+                    # occupant_primary_id is itself mid-relocation onto
+                    # new_host_id in THIS call -- it can't simultaneously be
+                    # the target existing_occupant vacates onto. Excluding
+                    # it upfront lets the picker search past it instead of
+                    # dead-ending on the one candidate that's structurally
+                    # invalid (see _pick_replica_relocation_node's
+                    # extra_exclude_ids docstring).
+                    extra_exclude_ids=(occupant_primary_id,))
                 if existing_occupant else None)
             if not vacate_target or vacate_target == occupant_primary_id:
                 logger.error(
