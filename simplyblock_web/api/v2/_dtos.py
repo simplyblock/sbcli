@@ -21,7 +21,9 @@ from simplyblock_core.models.snapshot import SnapShot
 from simplyblock_core.models.storage_node import StorageNode
 from simplyblock_core.models.backup import Backup, BackupPolicy
 from simplyblock_core.controllers.backup.manifest import BackupManifest
-from simplyblock_core.models.backup_config import BackupConfig, BackupLocation
+from simplyblock_core.models.backup_config import (
+    BackupConfig, BackupLocation, UnresolvedBackupConfig,
+)
 from simplyblock_core.models.stats import StatsObject
 from simplyblock_core.models.lvol_migration import LVolMigration
 from simplyblock_core.models.lvol_migration_group import LVolMigrationGroup
@@ -517,14 +519,22 @@ class VolumeDTO(BaseModel):
         )
 
 
-#: A cluster's backup configuration as the API exchanges it, in both
-#: directions: the request body of the PUT and the response body of the GET.
+#: A resolved backup configuration as the API exchanges it, in both directions:
+#: the response body of the backup-config GET, and the request body of discover.
+#: Both name a bucket -- one reads back what a cluster resolved, and the other
+#: points at somebody else's bucket, which only the caller can name.
 #:
 #: An alias rather than a hand-copied duplicate, because the two shapes are
 #: identical today and a copy would only drift. It is still a name of its own, so
 #: the wire format can diverge from ``BackupConfig`` later by turning this into a
 #: real class, without touching a single route signature.
 BackupConfigDTO = BackupConfig
+
+#: The same configuration as the cluster-create request body takes it, where the
+#: bucket is the one field a caller cannot supply: it is derived from the id of
+#: the cluster the request is asking to create. ``Cluster.set_backup_config``
+#: resolves it, so this shape reaches nothing beyond that call.
+UnresolvedBackupConfigDTO = UnresolvedBackupConfig
 
 #: Where a set of backups lives, without the credentials to reach it. What an
 #: inline import has to name, because the manifests it carries do not: they
