@@ -756,7 +756,17 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
 
     if ha_type == "single":
         if host_node.status == StorageNode.STATUS_ONLINE:
-            lvol_bdev, error = add_lvol_on_node(lvol, host_node)
+            # INNER per-node lock. The create path took no lock at all,
+            # although lvstore_op_lock documents that it "guarantees no two
+            # object operations (create/delete/resize of any
+            # lvol/snapshot/clone) mutate the lvstore on a node at the same
+            # time" -- delete and resize took it, create did not, so a
+            # create could interleave with another object's delete on the
+            # same node and race the replica blob-tree mutation.
+            with snapshot_controller.lvstore_op_lock(
+                    host_node.cluster_id, lvol.lvs_name,
+                    node_id=host_node.get_id()):
+                lvol_bdev, error = add_lvol_on_node(lvol, host_node)
             if error:
                 db_controller.release_lvol_ns_slot(lvol)
                 return False, error
@@ -771,150 +781,166 @@ def add_lvol_ha(name, size, host_id_or_name, ha_type, pool_id_or_name, use_comp=
             return False, msg
 
     if ha_type == "ha":
-        from simplyblock_core.storage_node_ops import (
-            find_leader_with_failover, check_non_leader_for_operation,
-            execute_on_leader_with_failover,
-        )
+        # OUTER chain lock: serialize this create + every replica
+        # registration against any other operation on the same chain.
+        # The create path took no chain lock, so a create/clone could
+        # interleave with a delete or resize elsewhere in the chain while
+        # it walked the same blob structure -- delete and resize have held
+        # this lock all along. Keyed on the chain root; for a brand new
+        # volume that is its own uuid (clones go through
+        # snapshot_controller, which already locks the parent chain).
+        with snapshot_controller.object_mutation_lock(cl.get_id(), lvol.uuid):
+            from simplyblock_core.storage_node_ops import (
+                find_leader_with_failover, check_non_leader_for_operation,
+                execute_on_leader_with_failover,
+            )
 
-        # Build nodes list
-        secondary_ids = [host_node.secondary_node_id]
-        if host_node.tertiary_node_id:
-            secondary_ids.append(host_node.tertiary_node_id)
-        lvol.nodes = [host_node.get_id()] + secondary_ids
+            # Build nodes list
+            secondary_ids = [host_node.secondary_node_id]
+            if host_node.tertiary_node_id:
+                secondary_ids.append(host_node.tertiary_node_id)
+            lvol.nodes = [host_node.get_id()] + secondary_ids
 
-        all_nodes = [host_node]
-        for sid in secondary_ids:
-            try:
-                all_nodes.append(db_controller.get_storage_node_by_id(sid))
-            except KeyError:
-                pass
+            all_nodes = [host_node]
+            for sid in secondary_ids:
+                try:
+                    all_nodes.append(db_controller.get_storage_node_by_id(sid))
+                except KeyError:
+                    pass
 
-        # Step 1: Pre-check all non-leaders BEFORE executing on leader
-        primary_node, non_leaders = find_leader_with_failover(all_nodes, lvol.lvs_name)
-        if primary_node is None:
-            msg = "No leader available for lvol create"
-            logger.error(msg)
-            db_controller.release_lvol_ns_slot(lvol)
-            return False, msg
-
-        precheck_started = time.time()
-        secondary_nodes = []
-        for nl in non_leaders:
-            action = check_non_leader_for_operation(
-                nl.get_id(), lvol.lvs_name, operation_type="create",
-                leader_op_completed=False, all_nodes=all_nodes)
-            if action == "reject":
-                msg = f"Cannot create lvol: non-leader {nl.get_id()[:8]} unreachable but fabric healthy"
+            # Step 1: Pre-check all non-leaders BEFORE executing on leader
+            primary_node, non_leaders = find_leader_with_failover(all_nodes, lvol.lvs_name)
+            if primary_node is None:
+                msg = "No leader available for lvol create"
                 logger.error(msg)
                 db_controller.release_lvol_ns_slot(lvol)
                 return False, msg
-            elif action == "proceed":
-                secondary_nodes.append(nl)
-            else:
-                # "queue", "skip", or any other non-proceed verdict: DB-backed
-                # deferral (NOT the in-memory drain queue: that is per-process
-                # and dies with it — incident 2026-07-10 lost a tertiary
-                # registration this way). "skip" used to drop the registration
-                # entirely on the assumption that node-restart recovery would
-                # rebuild it — but the verdict can be stale/wrong while the
-                # node is actually up (run 20260721-213609: LVOL_109's
-                # secondary answered add_ns 200ms later, yet was never
-                # registered; every later snapshot of it failed). The sync-op
-                # runner applies the registration once the node is
-                # serviceable; a registration the restart flow already
-                # replayed is idempotent.
-                tasks_controller.add_lvol_sync_op_task(
-                    host_node.cluster_id, nl.get_id(), lvol.get_id(),
-                    "register", secondary_index=_lvol_secondary_index(lvol, nl))
 
-        # Step 2: Execute on leader (with failover on failure)
-        def _create_on_leader(leader):
-            lvol_bdev, error = add_lvol_on_node(lvol, leader)
-            if error:
-                raise RuntimeError(error)
-            return lvol_bdev
+            precheck_started = time.time()
+            secondary_nodes = []
+            for nl in non_leaders:
+                action = check_non_leader_for_operation(
+                    nl.get_id(), lvol.lvs_name, operation_type="create",
+                    leader_op_completed=False, all_nodes=all_nodes)
+                if action == "reject":
+                    msg = f"Cannot create lvol: non-leader {nl.get_id()[:8]} unreachable but fabric healthy"
+                    logger.error(msg)
+                    db_controller.release_lvol_ns_slot(lvol)
+                    return False, msg
+                elif action == "proceed":
+                    secondary_nodes.append(nl)
+                else:
+                    # "queue", "skip", or any other non-proceed verdict: DB-backed
+                    # deferral (NOT the in-memory drain queue: that is per-process
+                    # and dies with it — incident 2026-07-10 lost a tertiary
+                    # registration this way). "skip" used to drop the registration
+                    # entirely on the assumption that node-restart recovery would
+                    # rebuild it — but the verdict can be stale/wrong while the
+                    # node is actually up (run 20260721-213609: LVOL_109's
+                    # secondary answered add_ns 200ms later, yet was never
+                    # registered; every later snapshot of it failed). The sync-op
+                    # runner applies the registration once the node is
+                    # serviceable; a registration the restart flow already
+                    # replayed is idempotent.
+                    tasks_controller.add_lvol_sync_op_task(
+                        host_node.cluster_id, nl.get_id(), lvol.get_id(),
+                        "register", secondary_index=_lvol_secondary_index(lvol, nl))
 
-        success, actual_leader, result = execute_on_leader_with_failover(
-            all_nodes, lvol.lvs_name, _create_on_leader, known_leader=primary_node)
-        if not success:
-            logger.error(f"Failed to create lvol on leader: {result}")
-            # If a leader attempt got far enough to create the blob, its
-            # rollback issued the ASYNC initial delete and flipped the record
-            # to in_deletion (_fail_after_bdev / _create_bdev_stack). Keep the
-            # record: the lvol monitor's delete state machine owns completing
-            # that delete (poll → finish → sync replicas). Erasing it here
-            # orphaned the async delete with no sync follow-up — 27 open
-            # delete windows in run 20260721-213609.
-            try:
-                fresh = db_controller.get_lvol_by_id(lvol.get_id())
-            except KeyError:
-                fresh = None
-            if fresh is not None and fresh.status == LVol.STATUS_IN_DELETION:
-                logger.warning(
-                    "LVol %s rollback left an in-flight async delete; keeping "
-                    "the record in in_deletion for the monitor to complete",
-                    lvol.get_id())
-            else:
-                db_controller.release_lvol_ns_slot(lvol)
-            return False, str(result)
-
-        lvol_bdev = result
-        lvol.lvol_uuid = lvol_bdev['uuid']
-        lvol.blobid = lvol_bdev['driver_specific']['lvol']['blobid']
-
-        # Step 3: Execute registration on non-leaders that passed pre-check.
-        # The Step-1 verdict is reused while fresh: re-sweeping the data-plane
-        # quorum seconds after the pre-check re-verifies unchanged state and
-        # doubled the probe cost of every create. Only when the leader op took
-        # long enough for connectivity to plausibly have moved do we re-check
-        # (and then with leader_op_completed=True, which unlocks the
-        # kill_and_wait handling the second pass exists for).
-        stale_precheck = (time.time() - precheck_started) > 30
-        for sec in secondary_nodes:
-            reg_index = _lvol_secondary_index(lvol, sec)
-            action = "proceed" if not stale_precheck else check_non_leader_for_operation(
-                sec.get_id(), lvol.lvs_name, operation_type="create",
-                leader_op_completed=True, all_nodes=all_nodes)
-            if action == "proceed":
-                try:
-                    lvol_bdev, error = add_lvol_on_node(
-                        lvol, sec, is_primary=False, secondary_index=reg_index)
-                except Exception as e:
-                    # e.g. PreconditionError from the per-node lvstore lock —
-                    # the node can die while this op WAITS for the lock (the
-                    # holder is stuck RPC-ing the same dead node).
-                    lvol_bdev, error = None, str(e)
+            # Step 2: Execute on leader (with failover on failure)
+            def _create_on_leader(leader):
+                with snapshot_controller.lvstore_op_lock(
+                        leader.cluster_id, lvol.lvs_name,
+                        node_id=leader.get_id()):
+                    lvol_bdev, error = add_lvol_on_node(lvol, leader)
                 if error:
-                    # Node-attributable failure between the pre-check and now
-                    # (died mid-registration or while waiting on its per-node
-                    # lock). Do NOT roll the whole create back: the leader op
-                    # succeeded and the remaining replicas (e.g. the tertiary)
-                    # must still be registered. Defer this node's registration
-                    # to the durable sync-op task and CONTINUE — the volume
-                    # converges to full redundancy when the node returns.
-                    # WARNING, not ERROR: the create still succeeds — an
-                    # ERROR line makes harnesses retry a committed create
-                    # (name-unique loop, 2026-07-10 soak).
+                    raise RuntimeError(error)
+                return lvol_bdev
+
+            success, actual_leader, result = execute_on_leader_with_failover(
+                all_nodes, lvol.lvs_name, _create_on_leader, known_leader=primary_node)
+            if not success:
+                logger.error(f"Failed to create lvol on leader: {result}")
+                # If a leader attempt got far enough to create the blob, its
+                # rollback issued the ASYNC initial delete and flipped the record
+                # to in_deletion (_fail_after_bdev / _create_bdev_stack). Keep the
+                # record: the lvol monitor's delete state machine owns completing
+                # that delete (poll → finish → sync replicas). Erasing it here
+                # orphaned the async delete with no sync follow-up — 27 open
+                # delete windows in run 20260721-213609.
+                try:
+                    fresh = db_controller.get_lvol_by_id(lvol.get_id())
+                except KeyError:
+                    fresh = None
+                if fresh is not None and fresh.status == LVol.STATUS_IN_DELETION:
                     logger.warning(
-                        "Registration of lvol %s on non-leader %s failed (%s); "
-                        "deferring to sync-op task and continuing with the "
-                        "remaining replicas", lvol.get_id(), sec.get_id()[:8], error)
+                        "LVol %s rollback left an in-flight async delete; keeping "
+                        "the record in in_deletion for the monitor to complete",
+                        lvol.get_id())
+                else:
+                    db_controller.release_lvol_ns_slot(lvol)
+                return False, str(result)
+
+            lvol_bdev = result
+            lvol.lvol_uuid = lvol_bdev['uuid']
+            lvol.blobid = lvol_bdev['driver_specific']['lvol']['blobid']
+
+            # Step 3: Execute registration on non-leaders that passed pre-check.
+            # The Step-1 verdict is reused while fresh: re-sweeping the data-plane
+            # quorum seconds after the pre-check re-verifies unchanged state and
+            # doubled the probe cost of every create. Only when the leader op took
+            # long enough for connectivity to plausibly have moved do we re-check
+            # (and then with leader_op_completed=True, which unlocks the
+            # kill_and_wait handling the second pass exists for).
+            stale_precheck = (time.time() - precheck_started) > 30
+            for sec in secondary_nodes:
+                reg_index = _lvol_secondary_index(lvol, sec)
+                action = "proceed" if not stale_precheck else check_non_leader_for_operation(
+                    sec.get_id(), lvol.lvs_name, operation_type="create",
+                    leader_op_completed=True, all_nodes=all_nodes)
+                if action == "proceed":
+                    try:
+                        with snapshot_controller.lvstore_op_lock(
+                                sec.cluster_id, lvol.lvs_name,
+                                node_id=sec.get_id()):
+                            lvol_bdev, error = add_lvol_on_node(
+                                lvol, sec, is_primary=False,
+                                secondary_index=reg_index)
+                    except Exception as e:
+                        # e.g. PreconditionError from the per-node lvstore lock —
+                        # the node can die while this op WAITS for the lock (the
+                        # holder is stuck RPC-ing the same dead node).
+                        lvol_bdev, error = None, str(e)
+                    if error:
+                        # Node-attributable failure between the pre-check and now
+                        # (died mid-registration or while waiting on its per-node
+                        # lock). Do NOT roll the whole create back: the leader op
+                        # succeeded and the remaining replicas (e.g. the tertiary)
+                        # must still be registered. Defer this node's registration
+                        # to the durable sync-op task and CONTINUE — the volume
+                        # converges to full redundancy when the node returns.
+                        # WARNING, not ERROR: the create still succeeds — an
+                        # ERROR line makes harnesses retry a committed create
+                        # (name-unique loop, 2026-07-10 soak).
+                        logger.warning(
+                            "Registration of lvol %s on non-leader %s failed (%s); "
+                            "deferring to sync-op task and continuing with the "
+                            "remaining replicas", lvol.get_id(), sec.get_id()[:8], error)
+                        tasks_controller.add_lvol_sync_op_task(
+                            host_node.cluster_id, sec.get_id(), lvol.get_id(),
+                            "register", secondary_index=reg_index)
+                else:
+                    # "kill_and_wait", "queue", "skip", "reject": the leader op is
+                    # already committed, so a registration that cannot run NOW must
+                    # never be dropped — defer every non-proceed verdict to the
+                    # durable sync-op task (a silently skipped registration leaves
+                    # the replica permanently missing and fails every later
+                    # snapshot of the volume on that node; run 20260721-213609,
+                    # LVOL_109).
+                    if action == "kill_and_wait":
+                        logger.warning("Non-leader %s needs kill+restart for lvol create", sec.get_id()[:8])
                     tasks_controller.add_lvol_sync_op_task(
                         host_node.cluster_id, sec.get_id(), lvol.get_id(),
                         "register", secondary_index=reg_index)
-            else:
-                # "kill_and_wait", "queue", "skip", "reject": the leader op is
-                # already committed, so a registration that cannot run NOW must
-                # never be dropped — defer every non-proceed verdict to the
-                # durable sync-op task (a silently skipped registration leaves
-                # the replica permanently missing and fails every later
-                # snapshot of the volume on that node; run 20260721-213609,
-                # LVOL_109).
-                if action == "kill_and_wait":
-                    logger.warning("Non-leader %s needs kill+restart for lvol create", sec.get_id()[:8])
-                tasks_controller.add_lvol_sync_op_task(
-                    host_node.cluster_id, sec.get_id(), lvol.get_id(),
-                    "register", secondary_index=reg_index)
 
     lvol.status = LVol.STATUS_ONLINE
     lvol.write_to_db(db_controller.kv_store)
@@ -1796,11 +1822,19 @@ def _delete_lvol_from_all_nodes(lvol, snode, force_delete, lock=True) -> None:
     Called under the OUTER per-object lock held by ``delete_lvol``.
     """
     db_controller = DBController()
-    _inner = lock and not force_delete
+    # force_delete no longer BYPASSES the locks (it used to disable both,
+    # so a recovery delete ran fully unlocked and could interleave with any
+    # create/delete/resize on the same chain/node). It now takes them
+    # best-effort: bounded wait, then proceed with a warning.
+    _inner = lock
+    _inner_kw = {
+        "best_effort": force_delete,
+        "timeout": constants.FORCE_DELETE_LOCK_WAIT_SEC if force_delete else None,
+    }
 
     if lvol.ha_type == 'single':
         with snapshot_controller.lvstore_op_lock(
-                snode.cluster_id, lvol.lvs_name, node_id=lvol.node_id, enabled=_inner):
+                snode.cluster_id, lvol.lvs_name, node_id=lvol.node_id, enabled=_inner, **_inner_kw):
             ret = delete_lvol_from_node(lvol.get_id(), lvol.node_id, force=force_delete)
         if not ret and not force_delete:
             raise RuntimeError("Failed to delete lvol from node")
@@ -1841,7 +1875,7 @@ def _delete_lvol_from_all_nodes(lvol, snode, force_delete, lock=True) -> None:
             try:
                 peer_rpc = peer.rpc_client(timeout=5, retry=2)
                 with snapshot_controller.lvstore_op_lock(
-                        snode.cluster_id, lvol.lvs_name, node_id=role_id, enabled=_inner):
+                        snode.cluster_id, lvol.lvs_name, node_id=role_id, enabled=_inner, **_inner_kw):
                     ok = _remove_lvol_subsys_from_node(lvol, peer_rpc)
                 if ok:
                     logger.info(
@@ -1879,7 +1913,7 @@ def _delete_lvol_from_all_nodes(lvol, snode, force_delete, lock=True) -> None:
 
         def _delete_on_leader(leader):
             with snapshot_controller.lvstore_op_lock(
-                    snode.cluster_id, lvol.lvs_name, node_id=leader.get_id(), enabled=_inner):
+                    snode.cluster_id, lvol.lvs_name, node_id=leader.get_id(), enabled=_inner, **_inner_kw):
                 ret = delete_lvol_from_node(lvol.get_id(), leader.get_id(), force=force_delete)
                 if ret:
                     async_completed["done"] = _wait_async_delete(
@@ -1918,7 +1952,7 @@ def _delete_lvol_from_all_nodes(lvol, snode, force_delete, lock=True) -> None:
                 synced = False
                 try:
                     with snapshot_controller.lvstore_op_lock(
-                            snode.cluster_id, lvol.lvs_name, node_id=nl.get_id(), enabled=_inner):
+                            snode.cluster_id, lvol.lvs_name, node_id=nl.get_id(), enabled=_inner, **_inner_kw):
                         ok = _remove_lvol_subsys_from_node(lvol, nl.rpc_client())
                         if ok and async_completed["done"]:
                             # The sync leg this non-leader owes: it clears the
@@ -2063,7 +2097,9 @@ def delete_lvol(lvol: LVol, *, force_delete: bool = False, lock: bool = True) ->
     # same node, which would corrupt the replica blob tree. force_delete
     # (recovery/cleanup) bypasses the lock and pushes through.
     with snapshot_controller.object_mutation_lock(
-            snode.cluster_id, lvol.uuid, enabled=lock and not force_delete):
+            snode.cluster_id, lvol.uuid, enabled=lock,
+            best_effort=force_delete,
+            timeout=constants.FORCE_DELETE_LOCK_WAIT_SEC if force_delete else None):
         _delete_lvol_from_all_nodes(lvol, snode, force_delete, lock=lock)
 
     # Status was already set to STATUS_IN_DELETION above, before the
