@@ -750,6 +750,18 @@ def _prune_internal_snapshots(source_lvol):
     # Either way the newest `keep` are protected, because deleting a snapshot
     # swap-merges its segments into the successor chained to it.
     schedule = _retention_schedule_for(source_lvol)
+    # Say which retention is in force, every time it prunes. Soak run
+    # 20260827_224741 ended with 2 snapshots at consecutive cadence ticks after
+    # 124 minutes under `5m:15m,7m:30m,10m:1h` -- which is exactly what the FLAT
+    # keep-N path produces, and nothing in the log said which path ran. The
+    # ladder itself is provably correct (test_case11_retention_ladder), so the
+    # open question is whether the schedule reaches this function at all.
+    logger.info(
+        "Retention for lvol %s: %s (replicated internal snapshots: %d, keep=%d)",
+        source_lvol.get_id(),
+        ("schedule %s" % snapshot_retention.describe(schedule)) if schedule
+        else "FLAT keep-newest (no schedule on the policy)",
+        len(replicated_internal), keep)
     if schedule:
         retained_ts = snapshot_retention.select_retained(
             [s.created_at for s in replicated_internal], schedule,
