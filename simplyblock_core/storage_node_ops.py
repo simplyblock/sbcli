@@ -53,6 +53,51 @@ import os
 logger = utils.get_logger(__name__)
 
 
+def kill_client_kwargs(force=False):
+    """SNodeClient kwargs for the spdk_process_kill RPC.
+
+    The kill goes to the agent ON the node being killed, so when that agent
+    is not serving, patience buys nothing. SNodeClient defaults to
+    Retry(total=retry, backoff_factor=1, connect=retry): with retry=10 the
+    backoff alone is 0+2+4+8+16+32+64+120+120+120 = 486s (urllib3 caps each
+    at 120s), so a --force shutdown against a dead agent blocked for ~9
+    minutes on 2026-08-27 -- the exact case --force exists to escape.
+
+    connect_retry=0 makes a refused connection fail at once (SNodeClient's
+    own documented rationale); read retries still cover a slow-but-alive
+    agent. The graceful path keeps its patience.
+    """
+    if force:
+        return {"timeout": 10, "retry": 2, "connect_retry": 0}
+    return {"timeout": 10, "retry": 10}
+
+
+def ensure_spdk_stopped(client_factory, rpc_port, cluster_id):
+    """Best-effort kill of an SPDK that is still running before a restart.
+
+    A node's status can read OFFLINE while its SPDK is very much alive: the
+    status write is lost when the DB is unavailable at shutdown time (FDB
+    filled its disk mid-shutdown, 2026-08-27). spdk_process_start against a
+    live process is a no-op, so three node_restart tasks and a --force
+    restart all reported success while the container kept its original ~1h
+    uptime, and the node could never recover without manual intervention.
+
+    Kill first so a restart always bounces the process. Fast-failing and
+    non-fatal: with nothing running this is a no-op, and it must never block
+    or fail the restart path.
+
+    Returns True if a kill was accepted, False otherwise.
+    """
+    try:
+        client_factory(**kill_client_kwargs(force=True)).spdk_process_kill(
+            rpc_port, cluster_id)
+        logger.info("Killed a pre-existing SPDK process before restart")
+        return True
+    except Exception as exc:  # noqa: BLE001 - nothing to kill is the normal case
+        logger.debug("No pre-existing SPDK process to kill: %s", exc)
+        return False
+
+
 class LVSRestartRequiredError(Exception):
     """Raised when an LVS fails to recover via ``bdev_examine`` during
     activation-mode recreate. The node's SPDK holds partial state that
@@ -5565,6 +5610,11 @@ def _restart_storage_node_impl(
         if lvol_changed:
             snode_api.persist_node_config(snode.max_lvol, minimum_hp_memory, snode.socket, snode.ssd_pcie)
         snode_api.set_hugepages()
+        # A restart must actually bounce SPDK: see ensure_spdk_stopped.
+        # snode.api_endpoint is already rewritten to node_address above when
+        # restarting onto a new host, so snode.client() targets the right one.
+        ensure_spdk_stopped(
+            snode.client, snode.rpc_port, snode.cluster_id)
         results, err = snode_api.spdk_process_start(
             snode.l_cores, snode.spdk_mem, snode.spdk_image, spdk_debug, cluster_ip, fdb_connection,
             snode.namespace, snode.mgmt_ip, snode.rpc_port, snode.rpc_username, snode.rpc_password,
@@ -6923,7 +6973,8 @@ def shutdown_storage_node(node_id, force=False, keep_auto_restart=False,
     # kill.
     logger.info("Stopping SPDK")
     try:
-        snode.client(timeout=10, retry=10).spdk_process_kill(snode.rpc_port, snode.cluster_id)
+        snode.client(**kill_client_kwargs(force)).spdk_process_kill(
+            snode.rpc_port, snode.cluster_id)
     except SNodeClientException:
         logger.error('Failed to kill SPDK')
         return False
