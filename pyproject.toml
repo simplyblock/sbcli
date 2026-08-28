@@ -105,9 +105,6 @@ extend-exclude = ['simplyblock_cli/cli.py']
 extend-select = ["TID251"]
 ignore = [
     "BLE001",
-    "C401",
-    "C408",
-    "C414",
     "DTZ005",
     "DTZ006",
     "DTZ007",
@@ -186,9 +183,13 @@ ignore = [
 # TID251 is flake8-tidy-imports.banned-api, configured below. Test code only —
 # production code may seed the global RNG.
 "!tests/**" = ["TID251"]
+"e2e/**" = ["C401", "C408", "C414"]
 
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
 "random.seed".msg = "Seeding the global RNG breaks seed replay for every later test — pytest-randomly seeds it per test. See tests/AGENTS.md § Randomness and seeds."
+
+[tool.ruff.lint.flake8-comprehensions]
+allow-dict-calls-with-keyword-arguments = true
 
 [tool.mypy]
 check_untyped_defs = true

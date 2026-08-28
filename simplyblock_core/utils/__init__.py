@@ -1589,10 +1589,10 @@ def detect_nvmes(pci_allowed, pci_blocked, device_model, size_range, nvme_names)
 
     # Normalize SSD PCI addresses and user PCI list
     if pci_allowed:
-        user_pci_set = set(
+        user_pci_set = {
             addr if len(addr.split(":")[0]) == 4 else f"0000:{addr}"
             for addr in pci_allowed
-        )
+        }
 
         # Check for unmatched addresses
         unmatched = user_pci_set - ssd_pci_set
@@ -1612,10 +1612,10 @@ def detect_nvmes(pci_allowed, pci_blocked, device_model, size_range, nvme_names)
         pci_addresses = query_nvme_ssd_by_namespace_names(nvme_names)
         pci_allowed = pci_addresses
     elif pci_blocked:
-        user_pci_set = set(
+        user_pci_set = {
             addr if len(addr.split(":")[0]) == 4 else f"0000:{addr}"
             for addr in pci_blocked
-        )
+        }
         rest = ssd_pci_set - user_pci_set
         pci_addresses = list(rest)
 
