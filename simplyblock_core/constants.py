@@ -393,7 +393,11 @@ REPL_CUTOVER_CONVERGE_BUDGET_SEC = 60
 # Always worth polling inline for at least this long: a round that finishes
 # just after the pass is handed back costs a full TASK_EXEC_INTERVAL_SEC of
 # writes in the next round.
-REPL_CUTOVER_MIN_INLINE_SEC = 5
+# The snapshot-replication runner now finishes a transfer in the pass that
+# submitted it, so a convergence round completes in about the transfer's own
+# duration. Staying inline across that is what makes "next snapshot within a
+# second of completion" true; yielding mid-round reintroduces pass latency.
+REPL_CUTOVER_MIN_INLINE_SEC = 30
 
 # Whether to block the cutover on the operator's preconnect signal. The wait
 # sits BETWEEN the cutover clone's base snapshot and the freeze, so every
@@ -403,6 +407,24 @@ REPL_CUTOVER_MIN_INLINE_SEC = 5
 # .../replication/cutover-proceed set this True and accept that cost until the
 # clone's base can be advanced after the signal.
 REPL_CUTOVER_PROCEED_REQUIRED = False
+
+# --- noticing a finished transfer ----------------------------------------
+# A transfer that has completed must be acted on within a second: the next
+# convergence snapshot cannot be taken until the previous one is marked
+# replicated, so observation latency lands directly in the IO freeze.
+REPL_XFER_POLL_INTERVAL_SEC = 0.1
+# How long the submitting pass may wait inline for the transfer. The runner is
+# single-threaded, so this is a starvation budget, not a timeout: exceeding it
+# just falls back to being noticed on a later pass.
+REPL_XFER_INLINE_WAIT_SEC = 5.0
+# A volume in its final cutover already owns its lvstore and every other
+# transfer on it is held, so there is nothing to starve -- wait as long as the
+# transfer needs, because this is exactly the window the client freeze pays for.
+REPL_XFER_INLINE_WAIT_CUTOVER_SEC = 300.0
+# Pass interval for the cutover runner while any cutover is mid-round. The
+# freeze pays for every millisecond between a transfer completing and the next
+# snapshot starting, so this must stay well under a second.
+REPL_CUTOVER_ACTIVE_POLL_SEC = 0.2
 
 SPDK_PROXY_MULTI_THREADING_ENABLED=True
 SPDK_PROXY_TIMEOUT=60*5

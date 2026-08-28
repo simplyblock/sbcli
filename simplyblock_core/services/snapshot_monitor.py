@@ -614,6 +614,14 @@ def take_due_internal_snapshots(cluster_id, now_ts):
                 for lv in members:
                     outstanding = _outstanding_internal_snapshot(lv, all_snaps)
                     if outstanding is not None:
+                        # Case 11 (run 20260827_224741) ended with 2 internal
+                        # snapshots after 124 minutes at a 1-minute cadence and
+                        # nothing said why. A skipped cadence tick must be
+                        # visible, or the next investigation needs another
+                        # two-hour repro to find out.
+                        logger.info(
+                            "Cadence snapshot for lvol %s deferred: %s has not "
+                            "replicated yet", lv.get_id(), outstanding.get_id())
                         blocked = (lv, outstanding)
                         break
                 if blocked:

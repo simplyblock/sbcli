@@ -37,16 +37,19 @@ utils.init_sentry_sdk(__name__)
 db = db_controller.DBController()
 
 
-def _lvs_cutover_owner(task, lvs_name):
+def _lvs_cutover_owner(task, lvs_name, tasks=None):
     """The task that already owns *lvs_name* for a cutover, or None.
 
     Deterministic: the earliest-created active claim wins, so two tasks racing
     the same lvstore agree on who owns it instead of each seeing the other.
+
+    ``tasks`` may be a list already read this pass. Re-reading it per task is
+    O(N^2) DB reads, which the sub-second poll interval cannot afford.
     """
     if not lvs_name:
         return None
     owners = []
-    for other in db.get_job_tasks(task.cluster_id):
+    for other in (tasks if tasks is not None else db.get_job_tasks(task.cluster_id)):
         if other.function_name != JobSchedule.FN_REPLICATION_FINAL:
             continue
         if other.get_id() == task.get_id():
@@ -168,7 +171,7 @@ def _finalize(task, ok, err):
     return False
 
 
-def task_runner(task: JobSchedule):
+def task_runner(task: JobSchedule, tasks=None):
     params = task.function_params
     lvol_id = params.get("lvol_id")
     if not lvol_id:
@@ -234,7 +237,7 @@ def task_runner(task: JobSchedule):
         # the freeze.
         lvs_name = getattr(lvol, "lvs_name", "")
         own_group = _group_id_for_lvol(lvol)
-        owner = _lvs_cutover_owner(task, lvs_name)
+        owner = _lvs_cutover_owner(task, lvs_name, tasks)
         if owner is not None:
             owner_group = (owner.function_params or {}).get("cutover_group") or ""
             owner_lvol = str((owner.function_params or {}).get("lvol_id"))
@@ -376,6 +379,11 @@ def _inline_window(last_round_secs):
     the next snapshot must follow within milliseconds -- and yields early when
     rounds are still long, which is where yielding costs nothing because the
     freeze is far away regardless.
+
+    The floor is REPL_CUTOVER_MIN_INLINE_SEC rather than zero because yielding
+    hands the round back to the pass loop, and being picked up again costs far
+    more than the poll it replaces: the requirement is that NO time is lost
+    between a transfer completing and the next snapshot starting.
     """
     return min(constants.REPL_CUTOVER_CONVERGE_BUDGET_SEC,
                max(constants.REPL_CUTOVER_MIN_INLINE_SEC, last_round_secs * 3))
@@ -549,6 +557,24 @@ def _prepare_cutover(task, lvol, src_node, tgt_node):
     return None
 
 
+def _any_cutover_in_flight(tasks):
+    """True while some cutover is between its first snapshot and its freeze.
+
+    Only then is a sub-second pass interval worth paying for: that is the
+    window where a completed transfer must be picked up immediately.
+    """
+    for t in tasks:
+        if t.function_name != JobSchedule.FN_REPLICATION_FINAL:
+            continue
+        if t.status == JobSchedule.STATUS_DONE or t.canceled:
+            continue
+        params = t.function_params or {}
+        # claimed the lvstore, or already has a round in flight
+        if params.get("cutover_lvs") or params.get("shrink_snap_id"):
+            return True
+    return False
+
+
 def main():
     logger.info("Starting replication-final tasks runner...")
     while True:
@@ -558,21 +584,31 @@ def main():
             logger.error(f"Failed to get clusters: {e}")
             time.sleep(3)
             continue
+        active = False
         for cl in clusters:
-            for task in db.get_job_tasks(cl.get_id(), reverse=False):
+            # Read once per cluster per pass and reuse: the owner lookup used to
+            # re-read this for every task.
+            cluster_tasks = db.get_job_tasks(cl.get_id(), reverse=False)
+            if _any_cutover_in_flight(cluster_tasks):
+                active = True
+            for task in cluster_tasks:
                 if task.function_name != JobSchedule.FN_REPLICATION_FINAL:
                     continue
                 if task.status == JobSchedule.STATUS_DONE:
                     continue
                 task = db.get_task_by_id(task.uuid)
                 try:
-                    res = task_runner(task)
+                    res = task_runner(task, cluster_tasks)
                 except Exception as e:
                     logger.error(f"replication-final task {task.uuid} failed: {e}", exc_info=True)
                     res = False
-                if not res:
-                    time.sleep(3)
-        time.sleep(constants.TASK_EXEC_INTERVAL_SEC)
+                # No blanket backoff here. `res is False` is the NORMAL result
+                # for a task that is queued or mid-round, and sleeping 3s per
+                # such task cost ~70s per pass with 20 volumes -- which landed
+                # directly in the client's IO freeze.
+        # Poll fast only while it matters; an idle cluster keeps the old cadence.
+        time.sleep(constants.REPL_CUTOVER_ACTIVE_POLL_SEC if active
+                   else constants.TASK_EXEC_INTERVAL_SEC)
 
 
 if __name__ == "__main__":
