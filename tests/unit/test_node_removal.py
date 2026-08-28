@@ -255,6 +255,24 @@ class TestRelocationFeasibility(unittest.TestCase):
         self.assertIn("n1", kwargs["exclude_ids"])
         self.assertIn("n9", kwargs["exclude_ids"])
 
+    def test_extra_exclude_ids_forwarded_to_candidate_search(self):
+        # Regression coverage for the 2026-08-28 finding: _relocate_replica_
+        # between's nested vacate must be able to rule out a node beyond
+        # just the one being removed (specifically, the primary mid-
+        # relocation in the enclosing call) -- see extra_exclude_ids'
+        # docstring.
+        cl = _cluster()
+        primary = _node("p1", secondary_id="n1", tertiary_id="n9")
+        removed = _node("n1")
+        db = FakeDB(cl, [primary, removed])
+        with patch.object(storage_node_ops, "get_secondary_nodes",
+                          return_value=["n5"]) as gsn:
+            got = storage_node_ops._pick_replica_relocation_node(
+                primary, removed, "secondary", db, extra_exclude_ids=("n7",))
+        self.assertEqual(got, "n5")
+        _, kwargs = gsn.call_args
+        self.assertIn("n7", kwargs["exclude_ids"])
+
 
 # ---------------------------------------------------------------------------
 # _find_splice_target_for_relocation — the removal-repair fallback used when
@@ -1238,7 +1256,7 @@ class TestRelocateOneReplicaSpliceExecution(unittest.TestCase):
         free_node = _node("free", lvstore="LVS_free")  # genuinely unclaimed
         db = FakeDB(cl, [removed, stranded, occupant, x, z, free_node])
 
-        def pick_side_effect(primary, exclude_node, role, db_controller):
+        def pick_side_effect(primary, exclude_node, role, db_controller, extra_exclude_ids=()):
             if primary.get_id() == "stranded":
                 self.assertEqual(exclude_node.get_id(), "n1")
                 return "x"
@@ -1271,6 +1289,47 @@ class TestRelocateOneReplicaSpliceExecution(unittest.TestCase):
         self.assertEqual(rec.call_count, 3)  # z's + occupant's + stranded's own rebuild
         self.assertEqual(drp.call_count, 2)  # old z copy off stranded, old occupant copy off x
 
+    def test_relocate_via_splice_vacate_excludes_the_in_flight_occupant(self):
+        # 2026-08-28 finding: occupant is being spliced onto stranded in
+        # THIS call, but stranded already hosts z. Picking z's new target
+        # must rule out occupant explicitly -- occupant can't simultaneously
+        # be the thing moving onto stranded AND the target z vacates onto.
+        # Without passing that exclusion through, the picker's one and only
+        # candidate can BE occupant, and the whole splice dead-ends
+        # retrying the identical failure forever instead of looking past it.
+        cl = _cluster()
+        removed = _node("n1", stack_secondary="stranded")
+        stranded = _node("stranded", secondary_id="n1", lvstore="LVS_stranded",
+                          stack_secondary="z")
+        occupant = _node("occupant", secondary_id="x", lvstore="LVS_occupant")
+        x = _node("x", stack_secondary="occupant")
+        z = _node("z", secondary_id="stranded", lvstore="LVS_z")
+        free_node = _node("free", lvstore="LVS_free")
+        db = FakeDB(cl, [removed, stranded, occupant, x, z, free_node])
+
+        def pick_side_effect(primary, exclude_node, role, db_controller, extra_exclude_ids=()):
+            if primary.get_id() == "stranded":
+                return "x"
+            if primary.get_id() == "z":
+                # The exclusion must be in place BEFORE the search runs, not
+                # discovered as a dead end after the fact.
+                self.assertIn("occupant", extra_exclude_ids)
+                return "free"
+            raise AssertionError(f"unexpected pick for {primary.get_id()}")
+
+        with patch.object(storage_node_ops, "DBController", return_value=db), \
+             patch.object(storage_node_ops, "_pick_replica_relocation_node",
+                          side_effect=pick_side_effect), \
+             patch.object(storage_node_ops, "recreate_lvstore_on_non_leader",
+                          return_value=True), \
+             patch.object(storage_node_ops, "_delete_replica_on_peer"):
+            ret = storage_node_ops._relocate_one_replica(removed, "stranded", "secondary")
+
+        self.assertTrue(ret)
+        self.assertEqual(z.secondary_node_id, "free")
+        self.assertEqual(stranded.secondary_node_id, "x")
+        self.assertEqual(occupant.secondary_node_id, "stranded")
+
     def test_relocate_via_splice_refuses_when_preexisting_occupant_has_no_target(self):
         # Same setup, but z has nowhere to go. Must fail closed -- refuse the
         # whole splice rather than overload stranded's single-value slot.
@@ -1283,7 +1342,7 @@ class TestRelocateOneReplicaSpliceExecution(unittest.TestCase):
         z = _node("z", secondary_id="stranded", lvstore="LVS_z")
         db = FakeDB(cl, [removed, stranded, occupant, x, z])
 
-        def pick_side_effect(primary, exclude_node, role, db_controller):
+        def pick_side_effect(primary, exclude_node, role, db_controller, extra_exclude_ids=()):
             if primary.get_id() == "stranded":
                 return "x"
             if primary.get_id() == "z":
@@ -1349,7 +1408,7 @@ class TestRelocateOneReplicaSpliceExecution(unittest.TestCase):
         free_node = _node("free", lvstore="LVS_free")
         db = FakeDB(cl, [removed, stranded, occupant, x, z, free_node])
 
-        def pick_side_effect(primary, exclude_node, role, db_controller):
+        def pick_side_effect(primary, exclude_node, role, db_controller, extra_exclude_ids=()):
             self.assertEqual(role, "tertiary")
             if primary.get_id() == "stranded":
                 return "x"
